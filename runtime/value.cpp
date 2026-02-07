@@ -104,19 +104,24 @@ Value Value::operator-() const {
 }
 
 bool Value::operator==(const Value& other) const {
+    // Allow numeric type coercion for equality
+    if ((type == Type::INTEGER || type == Type::FLOAT) && 
+        (other.type == Type::INTEGER || other.type == Type::FLOAT)) {
+        double a = (type == Type::FLOAT) ? floatValue : static_cast<double>(intValue);
+        double b = (other.type == Type::FLOAT) ? other.floatValue : static_cast<double>(other.intValue);
+        return a == b;
+    }
+    
     if (type != other.type) return false;
     
     switch (type) {
-        case Type::INTEGER:
-            return intValue == other.intValue;
-        case Type::FLOAT:
-            return floatValue == other.floatValue;
         case Type::STRING:
             return stringValue == other.stringValue;
         case Type::NONE:
             return true;
+        default:
+            return false;
     }
-    return false;
 }
 
 bool Value::operator!=(const Value& other) const {

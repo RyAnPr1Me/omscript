@@ -90,7 +90,6 @@ std::unique_ptr<Statement> Parser::parseStatement() {
     if (match(TokenType::WHILE)) return parseWhileStmt();
     if (match(TokenType::RETURN)) return parseReturnStmt();
     if (match(TokenType::VAR) || match(TokenType::CONST)) {
-        bool isConst = tokens[current - 1].type == TokenType::CONST;
         return parseVarDecl();
     }
     if (check(TokenType::LBRACE)) return parseBlock();

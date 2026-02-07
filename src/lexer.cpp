@@ -217,6 +217,8 @@ std::vector<Token> Lexer::tokenize() {
                 if (peek() == '&') {
                     advance();
                     tokens.push_back(makeToken(TokenType::AND, "&&"));
+                } else {
+                    tokens.push_back(makeToken(TokenType::INVALID, "&"));
                 }
                 break;
             
@@ -224,6 +226,8 @@ std::vector<Token> Lexer::tokenize() {
                 if (peek() == '|') {
                     advance();
                     tokens.push_back(makeToken(TokenType::OR, "||"));
+                } else {
+                    tokens.push_back(makeToken(TokenType::INVALID, "|"));
                 }
                 break;
             

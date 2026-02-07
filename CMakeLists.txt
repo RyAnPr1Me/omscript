@@ -7,6 +7,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Find LLVM
 find_package(LLVM REQUIRED CONFIG)
 
+if(NOT LLVM_FOUND)
+    message(FATAL_ERROR "LLVM not found. Please install LLVM development libraries.")
+endif()
+
 message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
 message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
 
