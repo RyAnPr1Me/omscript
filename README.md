@@ -1,14 +1,36 @@
 # OmScript
 
-A low-level, C-like programming language with dynamic typing, featuring an AOT compiler using LLVM and a bytecode interpreter runtime.
+A low-level, C-like programming language with dynamic typing, featuring a **heavily optimized AOT compiler** using LLVM and a bytecode interpreter runtime.
 
-## Features
+## Key Features
 
 - **C-like Syntax**: Familiar syntax for C programmers
 - **Dynamic Typing**: Variables are dynamically typed, no explicit type declarations needed
-- **AOT Compilation**: Ahead-of-time compilation using LLVM backend for performance
+- **Aggressive AOT Compilation**: Multi-level LLVM optimization (O0/O1/O2/O3) for maximum performance
+- **For Loops with Ranges**: Modern range-based iteration with `for (i in start...end...step)`
 - **Bytecode Runtime**: Interprets dynamically typed sections at runtime
 - **Hybrid Approach**: Compiles static code paths with LLVM, uses bytecode VM for dynamic behavior
+
+## Optimization Levels
+
+OmScript supports multiple optimization levels for maximum performance:
+
+- **O0**: No optimization (fastest compilation)
+- **O1**: Basic optimizations (instruction combining, reassociation, CFG simplification)
+- **O2**: Moderate optimizations (default)
+  - Memory-to-register promotion (mem2reg)
+  - Global Value Numbering (GVN)
+  - Dead Code Elimination (DCE)
+  - Instruction combining and reassociation
+  - CFG simplification
+- **O3**: Aggressive optimizations
+  - All O2 optimizations plus:
+  - Loop Invariant Code Motion (LICM)
+  - Loop simplification and canonicalization
+  - Loop unrolling
+  - Tail call elimination
+  - Early Common Subexpression Elimination (CSE)
+  - Scalar Replacement of Aggregates (SROA)
 
 ## Language Syntax
 
@@ -39,6 +61,19 @@ if (condition) {
 while (condition) {
     // code
 }
+
+// For loop with range
+for (i in 0...10) {          // 0 to 9
+    // code using i
+}
+
+for (i in 0...100...5) {     // 0, 5, 10, ..., 95
+    // step by 5
+}
+
+// Break and continue (coming soon)
+break;
+continue;
 ```
 
 ### Expressions
@@ -84,6 +119,40 @@ make
 ```
 
 ## Examples
+
+### Optimized For Loops
+```omscript
+fn sum_range(n) {
+    var total = 0;
+    for (i in 0...n) {
+        total = total + i;
+    }
+    return total;
+}
+
+fn main() {
+    return sum_range(100);  // Sum of 0..99 = 4950
+}
+```
+
+**Optimized LLVM IR Output** (with O2):
+```llvm
+forcond:
+  %total.0 = phi i64 [ 0, %entry ], [ %addtmp, %forbody ]
+  %i.0 = phi i64 [ 0, %entry ], [ %nextvar, %forbody ]
+  %forcond8 = icmp slt i64 %i.0, %n
+  br i1 %forcond8, label %forbody, label %forend
+
+forbody:
+  %addtmp = add i64 %i.0, %total.0
+  %nextvar = add i64 %i.0, 1
+  br label %forcond
+```
+
+Notice how the optimizer:
+- Converted memory allocations to SSA form (PHI nodes)
+- Eliminated redundant loads/stores
+- Created efficient loop structure
 
 ### Factorial (Recursion)
 ```omscript
