@@ -9,6 +9,10 @@ build/
 # Compiled binaries
 omsc
 a.out
+factorial
+fibonacci
+arithmetic
+test
 
 # IDE files
 .vscode/
