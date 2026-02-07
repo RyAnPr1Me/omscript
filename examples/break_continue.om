@@ -1,0 +1,28 @@
+fn main() {
+    var sum = 0;
+    var i = 0;
+
+    while (i < 10) {
+        i = i + 1;
+        if (i == 2) {
+            continue;
+        }
+        if (i == 5) {
+            break;
+        }
+        sum = sum + i;
+    }
+
+    var j = 0;
+    for (k in 0...5) {
+        if (k == 1) {
+            continue;
+        }
+        if (k == 3) {
+            break;
+        }
+        j = j + k;
+    }
+
+    return sum + j;
+}

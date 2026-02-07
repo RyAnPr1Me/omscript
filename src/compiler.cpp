@@ -6,7 +6,8 @@
 #include <sstream>
 #include <iostream>
 #include <stdexcept>
-#include <cstdlib>
+#include <llvm/ADT/SmallVector.h>
+#include <llvm/Support/Program.h>
 
 namespace omscript {
 
@@ -63,11 +64,19 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
     
     // Link to create executable
     std::cout << "  Linking..." << std::endl;
-    std::string linkCmd = "gcc " + objFile + " -o " + outputFile;
-    int result = std::system(linkCmd.c_str());
+    auto gccPath = llvm::sys::findProgramByName("gcc");
+    if (!gccPath) {
+        throw std::runtime_error("Failed to locate gcc for linking");
+    }
+    std::vector<std::string> linkArgs = {*gccPath, objFile, "-o", outputFile};
+    llvm::SmallVector<llvm::StringRef, 8> argRefs;
+    for (const auto& arg : linkArgs) {
+        argRefs.push_back(arg);
+    }
+    int result = llvm::sys::ExecuteAndWait(linkArgs.front(), argRefs);
     
     if (result != 0) {
-        throw std::runtime_error("Linking failed");
+        throw std::runtime_error("Linking failed with exit code " + std::to_string(result));
     }
     
     std::cout << "Compilation successful! Output: " << outputFile << std::endl;

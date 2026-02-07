@@ -9,6 +9,7 @@
 #include <llvm/IR/Value.h>
 #include <unordered_map>
 #include <memory>
+#include <vector>
 
 namespace omscript {
 
@@ -35,6 +36,13 @@ private:
     std::unique_ptr<llvm::Module> module;
     
     std::unordered_map<std::string, llvm::Value*> namedValues;
+    std::vector<std::unordered_map<std::string, llvm::Value*>> scopeStack;
+    
+    struct LoopContext {
+        llvm::BasicBlock* breakTarget;
+        llvm::BasicBlock* continueTarget;
+    };
+    std::vector<LoopContext> loopStack;
     std::unordered_map<std::string, llvm::Function*> functions;
     
     // Bytecode emitter for dynamic code
@@ -68,6 +76,9 @@ private:
     llvm::Type* getDefaultType();
     void setupPrintfDeclaration();
     llvm::Function* getPrintfFunction();
+    void beginScope();
+    void endScope();
+    void bindVariable(const std::string& name, llvm::Value* value);
     
     // Optimization methods
     void runOptimizationPasses();

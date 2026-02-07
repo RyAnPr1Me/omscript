@@ -61,6 +61,37 @@ llvm::Type* CodeGenerator::getDefaultType() {
     return llvm::Type::getInt64Ty(*context);
 }
 
+void CodeGenerator::beginScope() {
+    scopeStack.emplace_back();
+}
+
+void CodeGenerator::endScope() {
+    if (scopeStack.empty()) {
+        return;
+    }
+    
+    auto& scope = scopeStack.back();
+    for (const auto& entry : scope) {
+        if (entry.second) {
+            namedValues[entry.first] = entry.second;
+        } else {
+            namedValues.erase(entry.first);
+        }
+    }
+    scopeStack.pop_back();
+}
+
+void CodeGenerator::bindVariable(const std::string& name, llvm::Value* value) {
+    if (!scopeStack.empty()) {
+        auto& scope = scopeStack.back();
+        if (scope.find(name) == scope.end()) {
+            auto existing = namedValues.find(name);
+            scope[name] = existing == namedValues.end() ? nullptr : existing->second;
+        }
+    }
+    namedValues[name] = value;
+}
+
 void CodeGenerator::generate(Program* program) {
     // Generate all functions
     for (auto& func : program->functions) {
@@ -110,13 +141,15 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     
     // Set parameter names and create allocas
     namedValues.clear();
+    scopeStack.clear();
+    loopStack.clear();
     auto argIt = function->arg_begin();
     for (auto& param : func->parameters) {
         argIt->setName(param.name);
         
         llvm::AllocaInst* alloca = builder->CreateAlloca(getDefaultType(), nullptr, param.name);
         builder->CreateStore(&(*argIt), alloca);
-        namedValues[param.name] = alloca;
+        bindVariable(param.name, alloca);
         
         ++argIt;
     }
@@ -159,12 +192,16 @@ void CodeGenerator::generateStatement(Statement* stmt) {
             generateFor(static_cast<ForStmt*>(stmt));
             break;
         case ASTNodeType::BREAK_STMT:
-            // Will need loop context to implement properly
-            // For now, just create an unconditional branch to end block
+            if (loopStack.empty()) {
+                throw std::runtime_error("break used outside of a loop");
+            }
+            builder->CreateBr(loopStack.back().breakTarget);
             break;
         case ASTNodeType::CONTINUE_STMT:
-            // Will need loop context to implement properly
-            // For now, just create an unconditional branch to condition block
+            if (loopStack.empty()) {
+                throw std::runtime_error("continue used outside of a loop");
+            }
+            builder->CreateBr(loopStack.back().continueTarget);
             break;
         case ASTNodeType::BLOCK:
             generateBlock(static_cast<BlockStmt*>(stmt));
@@ -209,11 +246,11 @@ llvm::Value* CodeGenerator::generateLiteral(LiteralExpr* expr) {
 }
 
 llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
-    llvm::Value* value = namedValues[expr->name];
-    if (!value) {
+    auto it = namedValues.find(expr->name);
+    if (it == namedValues.end() || !it->second) {
         throw std::runtime_error("Unknown variable: " + expr->name);
     }
-    return builder->CreateLoad(getDefaultType(), value, expr->name.c_str());
+    return builder->CreateLoad(getDefaultType(), it->second, expr->name.c_str());
 }
 
 llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
@@ -321,19 +358,18 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
 llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
     llvm::Value* value = generateExpression(expr->value.get());
-    llvm::Value* variable = namedValues[expr->name];
-    
-    if (!variable) {
+    auto it = namedValues.find(expr->name);
+    if (it == namedValues.end() || !it->second) {
         throw std::runtime_error("Unknown variable: " + expr->name);
     }
     
-    builder->CreateStore(value, variable);
+    builder->CreateStore(value, it->second);
     return value;
 }
 
 void CodeGenerator::generateVarDecl(VarDecl* stmt) {
     llvm::AllocaInst* alloca = builder->CreateAlloca(getDefaultType(), nullptr, stmt->name);
-    namedValues[stmt->name] = alloca;
+    bindVariable(stmt->name, alloca);
     
     if (stmt->initializer) {
         llvm::Value* initValue = generateExpression(stmt->initializer.get());
@@ -413,7 +449,9 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
     
     // Body block
     builder->SetInsertPoint(bodyBB);
+    loopStack.push_back({endBB, condBB});
     generateStatement(stmt->body.get());
+    loopStack.pop_back();
     if (!builder->GetInsertBlock()->getTerminator()) {
         builder->CreateBr(condBB);
     }
@@ -427,8 +465,8 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     
     // Allocate iterator variable
     llvm::AllocaInst* iterAlloca = builder->CreateAlloca(getDefaultType(), nullptr, stmt->iteratorVar);
-    llvm::Value* oldValue = namedValues[stmt->iteratorVar];
-    namedValues[stmt->iteratorVar] = iterAlloca;
+    beginScope();
+    bindVariable(stmt->iteratorVar, iterAlloca);
     
     // Initialize iterator
     llvm::Value* startVal = generateExpression(stmt->start.get());
@@ -461,7 +499,9 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     
     // Body block
     builder->SetInsertPoint(bodyBB);
+    loopStack.push_back({endBB, incBB});
     generateStatement(stmt->body.get());
+    loopStack.pop_back();
     if (!builder->GetInsertBlock()->getTerminator()) {
         builder->CreateBr(incBB);
     }
@@ -476,21 +516,18 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     // End block
     builder->SetInsertPoint(endBB);
     
-    // Restore old value if it existed
-    if (oldValue) {
-        namedValues[stmt->iteratorVar] = oldValue;
-    } else {
-        namedValues.erase(stmt->iteratorVar);
-    }
+    endScope();
 }
 
 void CodeGenerator::generateBlock(BlockStmt* stmt) {
+    beginScope();
     for (auto& statement : stmt->statements) {
         if (builder->GetInsertBlock()->getTerminator()) {
             break;  // Don't generate unreachable code
         }
         generateStatement(statement.get());
     }
+    endScope();
 }
 
 void CodeGenerator::generateExprStmt(ExprStmt* stmt) {
