@@ -1,0 +1,23 @@
+// Test reference counting behavior
+fn string_operations() {
+    var s1 = "Hello";
+    var s2 = "World";
+    var s3 = s1;  // Should share reference with s1
+    var s4 = s1 + " " + s2;  // New string with "Hello World"
+    
+    return 42;  // Strings should be properly deallocated on return
+}
+
+fn string_loops() {
+    var result = "";
+    for (i in 0...10) {
+        result = result + "x";  // Creates new strings in each iteration
+    }
+    return 55;  // All intermediate strings should be freed
+}
+
+fn main() {
+    var test1 = string_operations();
+    var test2 = string_loops();
+    return test1 + test2;  // 42 + 55 = 97
+}

@@ -25,7 +25,7 @@ std::string Value::toString() const {
         case Type::FLOAT:
             return std::to_string(floatValue);
         case Type::STRING:
-            return stringValue;
+            return std::string(stringValue.c_str());
         case Type::NONE:
             return "none";
     }
@@ -42,7 +42,21 @@ Value Value::operator+(const Value& other) const {
         return Value(a + b);
     }
     if (type == Type::STRING || other.type == Type::STRING) {
-        return Value(toString() + other.toString());
+        // String concatenation using reference counted strings
+        RefCountedString result;
+        if (type == Type::STRING && other.type == Type::STRING) {
+            result = stringValue + other.stringValue;
+        } else if (type == Type::STRING) {
+            RefCountedString otherStr(other.toString().c_str());
+            result = stringValue + otherStr;
+        } else {
+            RefCountedString thisStr(toString().c_str());
+            result = thisStr + other.stringValue;
+        }
+        Value v;
+        v.type = Type::STRING;
+        new (&v.stringValue) RefCountedString(std::move(result));
+        return v;
     }
     throw std::runtime_error("Invalid operands for +");
 }
