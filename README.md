@@ -59,7 +59,9 @@ fn functionName(param1, param2) {
 ```omscript
 var x = 10;           // mutable variable
 const y = 20;         // constant (immutable)
+var z: int = 30;      // optional type annotation
 ```
+Type annotations are optional in general but required inside `OPTMAX` blocks.
 
 ### Control Flow
 ```omscript
@@ -87,6 +89,23 @@ for (i in 0...100...5) {     // 0, 5, 10, ..., 95
 // Break and continue (coming soon)
 break;
 continue;
+```
+
+### OPTMAX Blocks
+Use `OPTMAX=:` and `OPTMAX!:` to tag functions that require maximal optimization. Inside these functions:
+- Parameters, variables, and loop iterators must include type annotations.
+- Only other `OPTMAX` functions may be called.
+
+```omscript
+OPTMAX=:
+fn optmax_sum(n: int) {
+    var total: int = 0;
+    for (i: int in 0...n) {
+        total = total + i;
+    }
+    return total;
+}
+OPTMAX!:
 ```
 
 ### Expressions

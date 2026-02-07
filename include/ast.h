@@ -156,9 +156,10 @@ public:
     std::string name;
     std::unique_ptr<Expression> initializer;
     bool isConst;
+    std::string typeName;
     
-    VarDecl(const std::string& n, std::unique_ptr<Expression> init, bool cnst = false)
-        : Statement(ASTNodeType::VAR_DECL), name(n), initializer(std::move(init)), isConst(cnst) {}
+    VarDecl(const std::string& n, std::unique_ptr<Expression> init, bool cnst = false, const std::string& type = "")
+        : Statement(ASTNodeType::VAR_DECL), name(n), initializer(std::move(init)), isConst(cnst), typeName(type) {}
 };
 
 class ReturnStmt : public Statement {
@@ -191,14 +192,15 @@ public:
 class ForStmt : public Statement {
 public:
     std::string iteratorVar;
+    std::string iteratorType;
     std::unique_ptr<Expression> start;
     std::unique_ptr<Expression> end;
     std::unique_ptr<Expression> step;  // Optional, can be nullptr
     std::unique_ptr<Statement> body;
     
     ForStmt(const std::string& iter, std::unique_ptr<Expression> s, std::unique_ptr<Expression> e, 
-            std::unique_ptr<Expression> st, std::unique_ptr<Statement> b)
-        : Statement(ASTNodeType::FOR_STMT), iteratorVar(iter), start(std::move(s)), 
+            std::unique_ptr<Expression> st, std::unique_ptr<Statement> b, const std::string& iterType = "")
+        : Statement(ASTNodeType::FOR_STMT), iteratorVar(iter), iteratorType(iterType), start(std::move(s)), 
           end(std::move(e)), step(std::move(st)), body(std::move(b)) {}
 };
 
@@ -224,8 +226,9 @@ public:
 class Parameter {
 public:
     std::string name;
+    std::string typeName;
     
-    Parameter(const std::string& n) : name(n) {}
+    Parameter(const std::string& n, const std::string& t = "") : name(n), typeName(t) {}
 };
 
 class FunctionDecl : public ASTNode {
@@ -233,9 +236,10 @@ public:
     std::string name;
     std::vector<Parameter> parameters;
     std::unique_ptr<BlockStmt> body;
+    bool isOptMax;
     
-    FunctionDecl(const std::string& n, std::vector<Parameter> params, std::unique_ptr<BlockStmt> b)
-        : ASTNode(ASTNodeType::FUNCTION), name(n), parameters(std::move(params)), body(std::move(b)) {}
+    FunctionDecl(const std::string& n, std::vector<Parameter> params, std::unique_ptr<BlockStmt> b, bool optMax = false)
+        : ASTNode(ASTNodeType::FUNCTION), name(n), parameters(std::move(params)), body(std::move(b)), isOptMax(optMax) {}
 };
 
 class Program : public ASTNode {

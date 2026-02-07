@@ -16,6 +16,7 @@ public:
 private:
     std::vector<Token> tokens;
     size_t current;
+    bool inOptMaxFunction;
     
     Token peek(int offset = 0);
     Token advance();
@@ -25,7 +26,7 @@ private:
     Token consume(TokenType type, const std::string& message);
     
     // Parsing methods
-    std::unique_ptr<FunctionDecl> parseFunction();
+    std::unique_ptr<FunctionDecl> parseFunction(bool isOptMax);
     std::unique_ptr<Statement> parseStatement();
     std::unique_ptr<Statement> parseBlock();
     std::unique_ptr<Statement> parseVarDecl();

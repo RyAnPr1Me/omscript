@@ -8,6 +8,7 @@
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Value.h>
 #include <unordered_map>
+#include <unordered_set>
 #include <memory>
 #include <vector>
 
@@ -43,6 +44,9 @@ private:
         llvm::BasicBlock* continueTarget;
     };
     std::vector<LoopContext> loopStack;
+    bool inOptMaxFunction;
+    bool hasOptMaxFunctions;
+    std::unordered_set<std::string> optMaxFunctions;
     std::unordered_map<std::string, llvm::Function*> functions;
     
     // Bytecode emitter for dynamic code

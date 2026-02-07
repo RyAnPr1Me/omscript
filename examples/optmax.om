@@ -1,0 +1,13 @@
+OPTMAX=:
+fn optmax_sum(n: int) {
+    var total: int = 0;
+    for (i: int in 0...n) {
+        total = total + i;
+    }
+    return total;
+}
+OPTMAX!:
+
+fn main() {
+    return optmax_sum(5);
+}

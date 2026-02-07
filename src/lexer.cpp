@@ -154,6 +154,23 @@ std::vector<Token> Lexer::tokenize() {
         if (isAtEnd()) break;
         
         char c = peek();
+
+        if (c == 'O') {
+            if (source.compare(pos, 8, "OPTMAX=:") == 0) {
+                for (int i = 0; i < 8; i++) {
+                    advance();
+                }
+                tokens.push_back(makeToken(TokenType::OPTMAX_START, "OPTMAX=:"));
+                continue;
+            }
+            if (source.compare(pos, 8, "OPTMAX!:") == 0) {
+                for (int i = 0; i < 8; i++) {
+                    advance();
+                }
+                tokens.push_back(makeToken(TokenType::OPTMAX_END, "OPTMAX!:"));
+                continue;
+            }
+        }
         
         // Numbers
         if (isdigit(c)) {
@@ -217,6 +234,7 @@ std::vector<Token> Lexer::tokenize() {
             case ']': tokens.push_back(makeToken(TokenType::RBRACKET, "]")); break;
             case ';': tokens.push_back(makeToken(TokenType::SEMICOLON, ";")); break;
             case ',': tokens.push_back(makeToken(TokenType::COMMA, ",")); break;
+            case ':': tokens.push_back(makeToken(TokenType::COLON, ":")); break;
             case '.': tokens.push_back(makeToken(TokenType::DOT, ".")); break;
             
             case '=':

@@ -23,7 +23,10 @@
 namespace omscript {
 
 CodeGenerator::CodeGenerator(OptimizationLevel optLevel) 
-    : useDynamicCompilation(false), optimizationLevel(optLevel) {
+    : useDynamicCompilation(false),
+      optimizationLevel(optLevel),
+      inOptMaxFunction(false),
+      hasOptMaxFunctions(false) {
     context = std::make_unique<llvm::LLVMContext>();
     module = std::make_unique<llvm::Module>("omscript", *context);
     builder = std::make_unique<llvm::IRBuilder<>>(*context);
@@ -93,9 +96,21 @@ void CodeGenerator::bindVariable(const std::string& name, llvm::Value* value) {
 }
 
 void CodeGenerator::generate(Program* program) {
+    hasOptMaxFunctions = false;
+    optMaxFunctions.clear();
+    for (auto& func : program->functions) {
+        if (func->isOptMax) {
+            optMaxFunctions.insert(func->name);
+        }
+    }
+    
     // Generate all functions
     for (auto& func : program->functions) {
         generateFunction(func.get());
+    }
+
+    if (hasOptMaxFunctions && optimizationLevel != OptimizationLevel::O3) {
+        optimizationLevel = OptimizationLevel::O3;
     }
     
     // Run optimization passes
@@ -113,6 +128,9 @@ void CodeGenerator::generate(Program* program) {
 }
 
 llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
+    inOptMaxFunction = func->isOptMax;
+    hasOptMaxFunctions = hasOptMaxFunctions || func->isOptMax;
+
     // Create function type
     std::vector<llvm::Type*> paramTypes;
     for (size_t i = 0; i < func->parameters.size(); i++) {
@@ -170,6 +188,8 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         function->print(llvm::errs());
         throw std::runtime_error("Function verification failed");
     }
+    
+    inOptMaxFunction = false;
     
     return function;
 }
@@ -339,6 +359,11 @@ llvm::Value* CodeGenerator::generateUnary(UnaryExpr* expr) {
 }
 
 llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
+    if (inOptMaxFunction) {
+        if (optMaxFunctions.find(expr->callee) == optMaxFunctions.end()) {
+            throw std::runtime_error("OPTMAX blocks cannot invoke non-OPTMAX functions");
+        }
+    }
     llvm::Function* callee = functions[expr->callee];
     if (!callee) {
         throw std::runtime_error("Unknown function: " + expr->callee);

@@ -5,7 +5,7 @@
 namespace omscript {
 
 Parser::Parser(const std::vector<Token>& tokens)
-    : tokens(tokens), current(0) {}
+    : tokens(tokens), current(0), inOptMaxFunction(false) {}
 
 Token Parser::peek(int offset) {
     size_t index = current + offset;
@@ -56,15 +56,36 @@ void Parser::error(const std::string& message) {
 
 std::unique_ptr<Program> Parser::parse() {
     std::vector<std::unique_ptr<FunctionDecl>> functions;
+    bool optMaxTagActive = false;
     
     while (!isAtEnd()) {
-        functions.push_back(parseFunction());
+        if (match(TokenType::OPTMAX_START)) {
+            if (optMaxTagActive) {
+                error("Nested OPTMAX blocks are not allowed");
+            }
+            optMaxTagActive = true;
+            continue;
+        }
+        if (match(TokenType::OPTMAX_END)) {
+            if (!optMaxTagActive) {
+                error("OPTMAX end tag without matching start tag");
+            }
+            optMaxTagActive = false;
+            continue;
+        }
+        functions.push_back(parseFunction(optMaxTagActive));
+    }
+
+    if (optMaxTagActive) {
+        error("Unterminated OPTMAX block");
     }
     
     return std::make_unique<Program>(std::move(functions));
 }
 
-std::unique_ptr<FunctionDecl> Parser::parseFunction() {
+std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
+    bool previousOptMax = inOptMaxFunction;
+    inOptMaxFunction = isOptMax;
     consume(TokenType::FN, "Expected 'fn'");
     Token name = consume(TokenType::IDENTIFIER, "Expected function name");
     
@@ -74,7 +95,13 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction() {
     if (!check(TokenType::RPAREN)) {
         do {
             Token paramName = consume(TokenType::IDENTIFIER, "Expected parameter name");
-            parameters.push_back(Parameter(paramName.lexeme));
+            std::string typeName;
+            if (match(TokenType::COLON)) {
+                typeName = consume(TokenType::IDENTIFIER, "Expected type name after ':'").lexeme;
+            } else if (inOptMaxFunction) {
+                error("OPTMAX parameters must include type annotations");
+            }
+            parameters.push_back(Parameter(paramName.lexeme, typeName));
         } while (match(TokenType::COMMA));
     }
     
@@ -82,7 +109,9 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction() {
     
     auto body = std::unique_ptr<BlockStmt>(dynamic_cast<BlockStmt*>(parseBlock().release()));
     
-    return std::make_unique<FunctionDecl>(name.lexeme, std::move(parameters), std::move(body));
+    inOptMaxFunction = previousOptMax;
+    
+    return std::make_unique<FunctionDecl>(name.lexeme, std::move(parameters), std::move(body), isOptMax);
 }
 
 std::unique_ptr<Statement> Parser::parseStatement() {
@@ -116,6 +145,12 @@ std::unique_ptr<Statement> Parser::parseBlock() {
 std::unique_ptr<Statement> Parser::parseVarDecl() {
     bool isConst = tokens[current - 1].type == TokenType::CONST;
     Token name = consume(TokenType::IDENTIFIER, "Expected variable name");
+    std::string typeName;
+    if (match(TokenType::COLON)) {
+        typeName = consume(TokenType::IDENTIFIER, "Expected type name after ':'").lexeme;
+    } else if (inOptMaxFunction) {
+        error("OPTMAX variables must include type annotations");
+    }
     
     std::unique_ptr<Expression> initializer = nullptr;
     if (match(TokenType::ASSIGN)) {
@@ -124,7 +159,7 @@ std::unique_ptr<Statement> Parser::parseVarDecl() {
     
     consume(TokenType::SEMICOLON, "Expected ';' after variable declaration");
     
-    return std::make_unique<VarDecl>(name.lexeme, std::move(initializer), isConst);
+    return std::make_unique<VarDecl>(name.lexeme, std::move(initializer), isConst, typeName);
 }
 
 std::unique_ptr<Statement> Parser::parseIfStmt() {
@@ -157,6 +192,12 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
     
     // Parse: for (var in start...end) or for (var in start...end...step)
     Token varName = consume(TokenType::IDENTIFIER, "Expected iterator variable");
+    std::string iteratorType;
+    if (match(TokenType::COLON)) {
+        iteratorType = consume(TokenType::IDENTIFIER, "Expected type name after ':'").lexeme;
+    } else if (inOptMaxFunction) {
+        error("OPTMAX loop variables must include type annotations");
+    }
     consume(TokenType::IN, "Expected 'in' after iterator variable");
     
     auto start = parseExpression();
@@ -172,7 +213,7 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
     
     auto body = parseStatement();
     
-    return std::make_unique<ForStmt>(varName.lexeme, std::move(start), std::move(end), std::move(step), std::move(body));
+    return std::make_unique<ForStmt>(varName.lexeme, std::move(start), std::move(end), std::move(step), std::move(body), iteratorType);
 }
 
 std::unique_ptr<Statement> Parser::parseBreakStmt() {
