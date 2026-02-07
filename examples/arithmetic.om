@@ -1,0 +1,10 @@
+// Simple arithmetic and variables
+fn main() {
+    var x = 10;
+    var y = 20;
+    var sum = x + y;
+    var product = x * y;
+    var difference = y - x;
+    
+    return sum + product + difference;
+}
