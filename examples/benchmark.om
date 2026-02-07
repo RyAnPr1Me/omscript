@@ -1,0 +1,45 @@
+// Matrix multiplication benchmark - demonstrates optimization power
+// Computes C = A * B where matrices are represented as nested loops
+
+fn matrix_multiply(size) {
+    var result = 0;
+    
+    // Simulate matrix multiplication with triple nested loops
+    for (i in 0...size) {
+        for (j in 0...size) {
+            var sum = 0;
+            for (k in 0...size) {
+                // A[i][k] * B[k][j] - simplified to just k*j for demo
+                sum = sum + (k * j);
+            }
+            result = result + sum;
+        }
+    }
+    
+    return result;
+}
+
+fn power_of_two(n) {
+    var result = 1;
+    for (i in 0...n) {
+        result = result * 2;
+    }
+    return result;
+}
+
+fn compute_sum_of_squares(n) {
+    var sum = 0;
+    for (i in 1...n) {
+        sum = sum + (i * i);
+    }
+    return sum;
+}
+
+fn main() {
+    var mat_result = matrix_multiply(10);
+    var pow_result = power_of_two(10);
+    var squares = compute_sum_of_squares(20);
+    
+    // Return combination of results
+    return mat_result + pow_result + squares;
+}

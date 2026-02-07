@@ -1,0 +1,43 @@
+// Test basic expressions and control flow
+fn test_expressions() {
+    var a = 5;
+    var b = 3;
+    
+    var sum = a + b;
+    var diff = a - b;
+    var prod = a * b;
+    var quot = a / b;
+    var mod = a % b;
+    
+    return sum + diff + prod + quot + mod;
+}
+
+fn test_conditionals() {
+    var x = 10;
+    
+    if (x > 5) {
+        return 1;
+    } else {
+        return 0;
+    }
+}
+
+fn test_loops() {
+    var sum = 0;
+    var i = 1;
+    
+    while (i <= 10) {
+        sum = sum + i;
+        i = i + 1;
+    }
+    
+    return sum;
+}
+
+fn main() {
+    var expr_result = test_expressions();
+    var cond_result = test_conditionals();
+    var loop_result = test_loops();
+    
+    return expr_result + cond_result + loop_result;
+}

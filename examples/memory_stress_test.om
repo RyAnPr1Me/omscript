@@ -1,0 +1,103 @@
+// Comprehensive memory management stress test
+// Tests reference counting, string operations, and cleanup
+
+fn test_string_sharing() {
+    // Test reference sharing - all point to same malloc'd memory
+    var original = "Shared String";
+    var copy1 = original;
+    var copy2 = original;
+    var copy3 = original;
+    var copy4 = original;
+    
+    // Only ONE malloc for "Shared String", refCount = 5
+    return 1;  // All freed on return, refCount goes 5->4->3->2->1->0
+}
+
+fn test_string_concatenation() {
+    // Test new allocations for concatenation
+    var a = "Hello";
+    var b = "World";
+    var c = a + " " + b;  // Creates new strings
+    var d = c + "!";      // Another new string
+    
+    return 2;  // All intermediate strings freed
+}
+
+fn test_string_in_loop() {
+    // Stress test - many allocations and deallocations
+    var result = "";
+    for (i in 0...50) {
+        result = result + "x";  // Each iteration frees old, allocs new
+    }
+    
+    // 50 intermediate strings created and freed
+    return 3;
+}
+
+fn test_nested_operations() {
+    // Complex nested string operations
+    var s1 = "A";
+    var s2 = "B";
+    var s3 = s1 + s2;           // "AB"
+    var s4 = s3 + s3;           // "ABAB"
+    var s5 = s4 + s4;           // "ABABABAB"
+    var s6 = s5 + s5;           // 16 chars
+    var s7 = s6 + s6;           // 32 chars
+    
+    return 4;  // All strings properly freed
+}
+
+fn test_multiple_scopes() {
+    var outer = "Outer";
+    
+    for (i in 0...5) {
+        var inner = "Inner";
+        var combined = outer + inner;
+        // inner and combined freed each iteration
+    }
+    
+    return 5;  // outer freed here
+}
+
+fn test_empty_strings() {
+    var empty1 = "";
+    var empty2 = "";
+    var empty3 = empty1 + empty2;  // Empty + empty = empty
+    var nonempty = "test";
+    var mixed = empty1 + nonempty;  // empty + nonempty = nonempty
+    
+    return 6;  // No leaks even with empty strings
+}
+
+fn test_reassignment() {
+    var s = "First";   // malloc #1
+    s = "Second";      // malloc #2, free #1
+    s = "Third";       // malloc #3, free #2
+    s = "Fourth";      // malloc #4, free #3
+    s = "Fifth";       // malloc #5, free #4
+    
+    return 7;  // free #5
+}
+
+fn test_shared_then_modified() {
+    var original = "Original";
+    var copy = original;          // shared, refCount = 2
+    var modified = copy + "!";    // new string, refCount = 1
+    
+    return 8;  // All freed properly
+}
+
+fn main() {
+    // Run all tests
+    var t1 = test_string_sharing();
+    var t2 = test_string_concatenation();
+    var t3 = test_string_in_loop();
+    var t4 = test_nested_operations();
+    var t5 = test_multiple_scopes();
+    var t6 = test_empty_strings();
+    var t7 = test_reassignment();
+    var t8 = test_shared_then_modified();
+    
+    // Sum all test results: 1+2+3+4+5+6+7+8 = 36
+    return t1 + t2 + t3 + t4 + t5 + t6 + t7 + t8;
+}

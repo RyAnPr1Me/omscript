@@ -1,0 +1,30 @@
+// Demonstrates compile-time constant folding optimization
+fn compute_constants() {
+    // These will be computed at compile time!
+    var a = 10 + 20;        // Folded to 30
+    var b = 100 * 2;        // Folded to 200
+    var c = 50 - 25;        // Folded to 25
+    var d = 100 / 4;        // Folded to 25
+    var e = 17 % 5;         // Folded to 2
+    
+    // Complex constant expression
+    var f = (10 + 5) * 2 - 8;  // Folded to 22
+    
+    return a + b + c + d + e + f;  // 30 + 200 + 25 + 25 + 2 + 22 = 304
+}
+
+fn mixed_computation(n) {
+    // Mix of constant and variable expressions
+    var base = 100;           // Constant
+    var multiplier = n * 2;   // Variable dependent
+    var offset = 50 + 25;     // Constant, folded to 75
+    
+    return base + multiplier + offset;
+}
+
+fn main() {
+    var constants = compute_constants();  // All computed at compile time!
+    var dynamic = mixed_computation(10);  // Some runtime, some compile-time
+    
+    return constants + dynamic;  // 304 + (100 + 20 + 75) = 499
+}

@@ -1,0 +1,22 @@
+// Optimized sum example using for loop
+fn sum_range(n) {
+    var total = 0;
+    for (i in 0...n) {
+        total = total + i;
+    }
+    return total;
+}
+
+fn sum_with_step(start, end, step) {
+    var total = 0;
+    for (i in start...end...step) {
+        total = total + i;
+    }
+    return total;
+}
+
+fn main() {
+    var result1 = sum_range(100);      // Sum 0..99 = 4950
+    var result2 = sum_with_step(0, 20, 2);  // Sum evens 0,2,4...18 = 90
+    return result1 + result2;  // 4950 + 90 = 5040
+}

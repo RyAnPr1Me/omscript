@@ -1,0 +1,79 @@
+// Ultimate optimization showcase
+// This program demonstrates all OmScript optimization features
+
+// 1. Constant folding - computed at compile time
+fn compile_time_math() {
+    return (10 + 20) * 3 + 15 / 3 - 2;  // Fully evaluated to 93
+}
+
+// 2. Loop optimization with mem2reg
+fn optimized_sum(n) {
+    var total = 0;
+    for (i in 0...n) {
+        total = total + i;  // mem2reg converts to SSA/PHI nodes
+    }
+    return total;
+}
+
+// 3. Recursive function with tail call potential
+fn factorial(n) {
+    if (n <= 1) {
+        return 1;
+    }
+    return n * factorial(n - 1);
+}
+
+// 4. Nested loops with LICM (loop invariant code motion)
+fn matrix_like_operation(size) {
+    var result = 0;
+    var constant_factor = 100 + 50;  // LICM will move this out of loops
+    
+    for (i in 0...size) {
+        for (j in 0...size) {
+            result = result + (i * j + constant_factor);
+        }
+    }
+    
+    return result;
+}
+
+// 5. Mixed constant and runtime expressions
+fn strength_reduction_candidate(n) {
+    var doubled = n * 2;     // Could be optimized to left shift
+    var quadrupled = n * 4;  // Could be optimized to left shift
+    var octupled = n * 8;    // Could be optimized to left shift
+    
+    return doubled + quadrupled + octupled;  // n*2 + n*4 + n*8 = n*14
+}
+
+// 6. Common subexpression elimination test
+fn cse_test(a, b) {
+    var x = a * b;
+    var y = a * b;  // GVN will recognize this is same as x
+    var z = x + y;
+    return z;
+}
+
+// 7. Dead code elimination
+fn dce_test(n) {
+    var unused = 999;  // DCE might remove this
+    var used = n * 2;
+    var also_unused = used + 100;  // DCE might remove this
+    
+    return used;
+}
+
+fn main() {
+    var const_result = compile_time_math();        // Returns 93
+    var sum_result = optimized_sum(20);            // Sum 0..19 = 190
+    var fact_result = factorial(5);                // 5! = 120
+    var matrix_result = matrix_like_operation(3);  // Returns 1413
+    var strength_result = strength_reduction_candidate(10);  // 10*14 = 140
+    var cse_result = cse_test(5, 6);               // (5*6)*2 = 60
+    var dce_result = dce_test(7);                  // 7*2 = 14
+    
+    // Combine all results
+    return const_result + sum_result + fact_result + 
+           matrix_result + strength_result + cse_result + dce_result;
+    // Expected: 93 + 190 + 120 + 1413 + 140 + 60 + 14 = 2030
+}

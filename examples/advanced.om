@@ -1,0 +1,50 @@
+// Advanced example demonstrating multiple features
+// Computing greatest common divisor (GCD) using Euclidean algorithm
+
+fn gcd(a, b) {
+    while (b != 0) {
+        var temp = b;
+        b = a % b;
+        a = temp;
+    }
+    return a;
+}
+
+fn lcm(a, b) {
+    return (a * b) / gcd(a, b);
+}
+
+fn abs(x) {
+    if (x < 0) {
+        return -x;
+    }
+    return x;
+}
+
+fn max(a, b) {
+    if (a > b) {
+        return a;
+    }
+    return b;
+}
+
+fn min(a, b) {
+    if (a < b) {
+        return a;
+    }
+    return b;
+}
+
+fn main() {
+    var x = 48;
+    var y = 18;
+    
+    var g = gcd(x, y);      // Should be 6
+    var l = lcm(x, y);      // Should be 144
+    var m = max(g, l);      // Should be 144
+    var n = min(g, l);      // Should be 6
+    var a = abs(-10);       // Should be 10
+    
+    // Return sum of all results
+    return g + a;  // 6 + 10 = 16
+}
