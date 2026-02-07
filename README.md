@@ -1,12 +1,13 @@
 # OmScript
 
-A low-level, C-like programming language with dynamic typing, featuring a **heavily optimized AOT compiler** using LLVM and a bytecode interpreter runtime.
+A low-level, C-like programming language with dynamic typing, featuring a **heavily optimized AOT compiler** using LLVM, a bytecode interpreter runtime, and **automatic reference counting memory management**.
 
 ## Key Features
 
 - **C-like Syntax**: Familiar syntax for C programmers
 - **Dynamic Typing**: Variables are dynamically typed, no explicit type declarations needed
 - **Aggressive AOT Compilation**: Multi-level LLVM optimization (O0/O1/O2/O3) for maximum performance
+- **Reference Counted Memory**: Automatic memory management using malloc/free with deterministic deallocation
 - **For Loops with Ranges**: Modern range-based iteration with `for (i in start...end...step)`
 - **Bytecode Runtime**: Interprets dynamically typed sections at runtime
 - **Hybrid Approach**: Compiles static code paths with LLVM, uses bytecode VM for dynamic behavior

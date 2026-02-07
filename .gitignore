@@ -13,6 +13,7 @@ factorial
 fibonacci
 arithmetic
 test
+refcount_test
 
 # IDE files
 .vscode/
