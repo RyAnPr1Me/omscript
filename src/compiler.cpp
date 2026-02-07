@@ -68,12 +68,14 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
     if (!gccPath) {
         throw std::runtime_error("Failed to locate gcc for linking");
     }
-    std::vector<std::string> linkArgs = {*gccPath, objFile, "-o", outputFile};
+    std::string gccProgram = *gccPath;
+    std::vector<std::string> linkArgs = {objFile, "-o", outputFile};
     llvm::SmallVector<llvm::StringRef, 8> argRefs;
+    argRefs.push_back(gccProgram);
     for (const auto& arg : linkArgs) {
         argRefs.push_back(arg);
     }
-    int result = llvm::sys::ExecuteAndWait(linkArgs.front(), argRefs);
+    int result = llvm::sys::ExecuteAndWait(gccProgram, argRefs);
     
     if (result != 0) {
         throw std::runtime_error("Linking failed with exit code " + std::to_string(result));

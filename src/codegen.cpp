@@ -463,9 +463,10 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
 void CodeGenerator::generateFor(ForStmt* stmt) {
     llvm::Function* function = builder->GetInsertBlock()->getParent();
     
+    beginScope();
+    
     // Allocate iterator variable
     llvm::AllocaInst* iterAlloca = builder->CreateAlloca(getDefaultType(), nullptr, stmt->iteratorVar);
-    beginScope();
     bindVariable(stmt->iteratorVar, iterAlloca);
     
     // Initialize iterator
