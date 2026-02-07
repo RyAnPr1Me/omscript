@@ -9,13 +9,21 @@
 #include <llvm/Target/TargetMachine.h>
 #include <llvm/Target/TargetOptions.h>
 #include <llvm/MC/TargetRegistry.h>
+#include <llvm/Transforms/Scalar.h>
+#include <llvm/Transforms/Scalar/GVN.h>
+#include <llvm/Transforms/InstCombine/InstCombine.h>
+#include <llvm/Transforms/Utils.h>
+#include <llvm/Transforms/IPO.h>
+#include <llvm/Analysis/TargetTransformInfo.h>
+#include <llvm/Passes/PassBuilder.h>
 #include <stdexcept>
 #include <iostream>
 #include <optional>
 
 namespace omscript {
 
-CodeGenerator::CodeGenerator() : useDynamicCompilation(false) {
+CodeGenerator::CodeGenerator(OptimizationLevel optLevel) 
+    : useDynamicCompilation(false), optimizationLevel(optLevel) {
     context = std::make_unique<llvm::LLVMContext>();
     module = std::make_unique<llvm::Module>("omscript", *context);
     builder = std::make_unique<llvm::IRBuilder<>>(*context);
@@ -57,6 +65,11 @@ void CodeGenerator::generate(Program* program) {
     // Generate all functions
     for (auto& func : program->functions) {
         generateFunction(func.get());
+    }
+    
+    // Run optimization passes
+    if (optimizationLevel != OptimizationLevel::O0) {
+        runOptimizationPasses();
     }
     
     // Verify the module
@@ -141,6 +154,17 @@ void CodeGenerator::generateStatement(Statement* stmt) {
             break;
         case ASTNodeType::WHILE_STMT:
             generateWhile(static_cast<WhileStmt*>(stmt));
+            break;
+        case ASTNodeType::FOR_STMT:
+            generateFor(static_cast<ForStmt*>(stmt));
+            break;
+        case ASTNodeType::BREAK_STMT:
+            // Will need loop context to implement properly
+            // For now, just create an unconditional branch to end block
+            break;
+        case ASTNodeType::CONTINUE_STMT:
+            // Will need loop context to implement properly
+            // For now, just create an unconditional branch to condition block
             break;
         case ASTNodeType::BLOCK:
             generateBlock(static_cast<BlockStmt*>(stmt));
@@ -373,6 +397,68 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
     builder->SetInsertPoint(endBB);
 }
 
+void CodeGenerator::generateFor(ForStmt* stmt) {
+    llvm::Function* function = builder->GetInsertBlock()->getParent();
+    
+    // Allocate iterator variable
+    llvm::AllocaInst* iterAlloca = builder->CreateAlloca(getDefaultType(), nullptr, stmt->iteratorVar);
+    llvm::Value* oldValue = namedValues[stmt->iteratorVar];
+    namedValues[stmt->iteratorVar] = iterAlloca;
+    
+    // Initialize iterator
+    llvm::Value* startVal = generateExpression(stmt->start.get());
+    builder->CreateStore(startVal, iterAlloca);
+    
+    // Get end value
+    llvm::Value* endVal = generateExpression(stmt->end.get());
+    
+    // Get step value (default to 1 if not specified)
+    llvm::Value* stepVal;
+    if (stmt->step) {
+        stepVal = generateExpression(stmt->step.get());
+    } else {
+        stepVal = llvm::ConstantInt::get(*context, llvm::APInt(64, 1));
+    }
+    
+    // Create blocks
+    llvm::BasicBlock* condBB = llvm::BasicBlock::Create(*context, "forcond", function);
+    llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "forbody", function);
+    llvm::BasicBlock* incBB = llvm::BasicBlock::Create(*context, "forinc", function);
+    llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "forend", function);
+    
+    builder->CreateBr(condBB);
+    
+    // Condition block: check if iterator < end
+    builder->SetInsertPoint(condBB);
+    llvm::Value* curVal = builder->CreateLoad(getDefaultType(), iterAlloca, stmt->iteratorVar.c_str());
+    llvm::Value* condBool = builder->CreateICmpSLT(curVal, endVal, "forcond");
+    builder->CreateCondBr(condBool, bodyBB, endBB);
+    
+    // Body block
+    builder->SetInsertPoint(bodyBB);
+    generateStatement(stmt->body.get());
+    if (!builder->GetInsertBlock()->getTerminator()) {
+        builder->CreateBr(incBB);
+    }
+    
+    // Increment block
+    builder->SetInsertPoint(incBB);
+    llvm::Value* nextVal = builder->CreateLoad(getDefaultType(), iterAlloca, stmt->iteratorVar.c_str());
+    llvm::Value* incVal = builder->CreateAdd(nextVal, stepVal, "nextvar");
+    builder->CreateStore(incVal, iterAlloca);
+    builder->CreateBr(condBB);
+    
+    // End block
+    builder->SetInsertPoint(endBB);
+    
+    // Restore old value if it existed
+    if (oldValue) {
+        namedValues[stmt->iteratorVar] = oldValue;
+    } else {
+        namedValues.erase(stmt->iteratorVar);
+    }
+}
+
 void CodeGenerator::generateBlock(BlockStmt* stmt) {
     for (auto& statement : stmt->statements) {
         if (builder->GetInsertBlock()->getTerminator()) {
@@ -384,6 +470,93 @@ void CodeGenerator::generateBlock(BlockStmt* stmt) {
 
 void CodeGenerator::generateExprStmt(ExprStmt* stmt) {
     generateExpression(stmt->expression.get());
+}
+
+void CodeGenerator::runOptimizationPasses() {
+    // Create a function pass manager
+    llvm::legacy::FunctionPassManager fpm(module.get());
+    llvm::legacy::PassManager mpm;
+    
+    // Add target-specific data layout
+    auto targetTriple = llvm::sys::getDefaultTargetTriple();
+    module->setTargetTriple(targetTriple);
+    
+    std::string error;
+    auto target = llvm::TargetRegistry::lookupTarget(targetTriple, error);
+    if (target) {
+        llvm::TargetOptions opt;
+        std::optional<llvm::Reloc::Model> RM;
+        auto targetMachine = target->createTargetMachine(targetTriple, "generic", "", opt, RM);
+        if (targetMachine) {
+            module->setDataLayout(targetMachine->createDataLayout());
+        }
+    }
+    
+    // Configure optimization based on level
+    switch (optimizationLevel) {
+        case OptimizationLevel::O1:
+            // Basic optimizations
+            fpm.add(llvm::createInstructionCombiningPass());
+            fpm.add(llvm::createReassociatePass());
+            fpm.add(llvm::createCFGSimplificationPass());
+            break;
+            
+        case OptimizationLevel::O2:
+            // Moderate optimizations
+            fpm.add(llvm::createPromoteMemoryToRegisterPass());  // mem2reg
+            fpm.add(llvm::createInstructionCombiningPass());     // Instruction combining
+            fpm.add(llvm::createReassociatePass());              // Reassociate expressions
+            fpm.add(llvm::createGVNPass());                      // Global value numbering
+            fpm.add(llvm::createCFGSimplificationPass());        // Simplify CFG
+            fpm.add(llvm::createDeadCodeEliminationPass());      // Dead code elimination
+            break;
+            
+        case OptimizationLevel::O3:
+            // Aggressive optimizations
+            fpm.add(llvm::createPromoteMemoryToRegisterPass());
+            fpm.add(llvm::createInstructionCombiningPass());
+            fpm.add(llvm::createReassociatePass());
+            fpm.add(llvm::createGVNPass());
+            fpm.add(llvm::createCFGSimplificationPass());
+            fpm.add(llvm::createDeadCodeEliminationPass());
+            fpm.add(llvm::createLICMPass());                     // Loop invariant code motion
+            fpm.add(llvm::createLoopSimplifyPass());             // Canonicalize loops
+            fpm.add(llvm::createLoopUnrollPass());               // Unroll loops
+            fpm.add(llvm::createTailCallEliminationPass());      // Tail call elimination
+            fpm.add(llvm::createEarlyCSEPass());                 // Early common subexpression elimination
+            fpm.add(llvm::createSROAPass());                     // Scalar replacement of aggregates
+            break;
+            
+        case OptimizationLevel::O0:
+            // No optimization
+            return;
+    }
+    
+    // Run function passes on all functions
+    fpm.doInitialization();
+    for (auto& func : module->functions()) {
+        if (!func.isDeclaration()) {
+            fpm.run(func);
+        }
+    }
+    fpm.doFinalization();
+    
+    // Run module passes  
+    mpm.run(*module);
+}
+
+void CodeGenerator::optimizeFunction(llvm::Function* func) {
+    // Per-function optimization (if needed for specific cases)
+    llvm::legacy::FunctionPassManager fpm(module.get());
+    
+    fpm.add(llvm::createPromoteMemoryToRegisterPass());
+    fpm.add(llvm::createInstructionCombiningPass());
+    fpm.add(llvm::createReassociatePass());
+    fpm.add(llvm::createCFGSimplificationPass());
+    
+    fpm.doInitialization();
+    fpm.run(*func);
+    fpm.doFinalization();
 }
 
 void CodeGenerator::writeObjectFile(const std::string& filename) {

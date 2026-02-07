@@ -88,7 +88,10 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction() {
 std::unique_ptr<Statement> Parser::parseStatement() {
     if (match(TokenType::IF)) return parseIfStmt();
     if (match(TokenType::WHILE)) return parseWhileStmt();
+    if (match(TokenType::FOR)) return parseForStmt();
     if (match(TokenType::RETURN)) return parseReturnStmt();
+    if (match(TokenType::BREAK)) return parseBreakStmt();
+    if (match(TokenType::CONTINUE)) return parseContinueStmt();
     if (match(TokenType::VAR) || match(TokenType::CONST)) {
         return parseVarDecl();
     }
@@ -147,6 +150,39 @@ std::unique_ptr<Statement> Parser::parseWhileStmt() {
     auto body = parseStatement();
     
     return std::make_unique<WhileStmt>(std::move(condition), std::move(body));
+}
+
+std::unique_ptr<Statement> Parser::parseForStmt() {
+    consume(TokenType::LPAREN, "Expected '(' after 'for'");
+    
+    // Parse: for (var in start...end) or for (var in start...end...step)
+    Token varName = consume(TokenType::IDENTIFIER, "Expected iterator variable");
+    consume(TokenType::IN, "Expected 'in' after iterator variable");
+    
+    auto start = parseExpression();
+    consume(TokenType::RANGE, "Expected '...' in for range");
+    auto end = parseExpression();
+    
+    std::unique_ptr<Expression> step = nullptr;
+    if (match(TokenType::RANGE)) {
+        step = parseExpression();
+    }
+    
+    consume(TokenType::RPAREN, "Expected ')' after for range");
+    
+    auto body = parseStatement();
+    
+    return std::make_unique<ForStmt>(varName.lexeme, std::move(start), std::move(end), std::move(step), std::move(body));
+}
+
+std::unique_ptr<Statement> Parser::parseBreakStmt() {
+    consume(TokenType::SEMICOLON, "Expected ';' after 'break'");
+    return std::make_unique<BreakStmt>();
+}
+
+std::unique_ptr<Statement> Parser::parseContinueStmt() {
+    consume(TokenType::SEMICOLON, "Expected ';' after 'continue'");
+    return std::make_unique<ContinueStmt>();
 }
 
 std::unique_ptr<Statement> Parser::parseReturnStmt() {
@@ -269,7 +305,26 @@ std::unique_ptr<Expression> Parser::parseUnary() {
         return std::make_unique<UnaryExpr>(op, std::move(operand));
     }
     
-    return parseCall();
+    return parsePostfix();
+}
+
+std::unique_ptr<Expression> Parser::parsePostfix() {
+    auto expr = parseCall();
+    
+    // Handle postfix operators
+    if (match(TokenType::PLUSPLUS) || match(TokenType::MINUSMINUS)) {
+        std::string op = tokens[current - 1].lexeme;
+        return std::make_unique<PostfixExpr>(op, std::move(expr));
+    }
+    
+    // Handle array indexing
+    while (match(TokenType::LBRACKET)) {
+        auto index = parseExpression();
+        consume(TokenType::RBRACKET, "Expected ']' after array index");
+        expr = std::make_unique<IndexExpr>(std::move(expr), std::move(index));
+    }
+    
+    return expr;
 }
 
 std::unique_ptr<Expression> Parser::parseCall() {
@@ -325,8 +380,26 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
         return expr;
     }
     
+    if (match(TokenType::LBRACKET)) {
+        return parseArrayLiteral();
+    }
+    
     error("Expected expression");
     return nullptr;
+}
+
+std::unique_ptr<Expression> Parser::parseArrayLiteral() {
+    std::vector<std::unique_ptr<Expression>> elements;
+    
+    if (!check(TokenType::RBRACKET)) {
+        do {
+            elements.push_back(parseExpression());
+        } while (match(TokenType::COMMA));
+    }
+    
+    consume(TokenType::RBRACKET, "Expected ']' after array elements");
+    
+    return std::make_unique<ArrayExpr>(std::move(elements));
 }
 
 } // namespace omscript

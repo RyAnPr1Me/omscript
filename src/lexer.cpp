@@ -12,7 +12,10 @@ static std::unordered_map<std::string, TokenType> keywords = {
     {"while", TokenType::WHILE},
     {"for", TokenType::FOR},
     {"var", TokenType::VAR},
-    {"const", TokenType::CONST}
+    {"const", TokenType::CONST},
+    {"break", TokenType::BREAK},
+    {"continue", TokenType::CONTINUE},
+    {"in", TokenType::IN}
 };
 
 Lexer::Lexer(const std::string& source)
@@ -74,6 +77,10 @@ Token Lexer::scanNumber() {
     
     while (!isAtEnd() && (isdigit(peek()) || peek() == '.')) {
         if (peek() == '.') {
+            // Don't consume the dot if it's part of a range operator (...)
+            if (peek(1) == '.' && peek(2) == '.') {
+                break;
+            }
             if (isFloat) break; // Second dot, stop
             isFloat = true;
         }
@@ -159,11 +166,37 @@ std::vector<Token> Lexer::tokenize() {
             continue;
         }
         
+        // Check for range operator ...
+        if (c == '.') {
+            // peek() gives current position, peek(1) gives next
+            if (peek(1) == '.' && peek(2) == '.') {
+                advance(); // consume first .
+                advance(); // consume second .
+                advance(); // consume third .
+                tokens.push_back(makeToken(TokenType::RANGE, "..."));
+                continue;
+            }
+        }
+        
         // Single character tokens
         advance();
         switch (c) {
-            case '+': tokens.push_back(makeToken(TokenType::PLUS, "+")); break;
-            case '-': tokens.push_back(makeToken(TokenType::MINUS, "-")); break;
+            case '+':
+                if (peek() == '+') {
+                    advance();
+                    tokens.push_back(makeToken(TokenType::PLUSPLUS, "++"));
+                } else {
+                    tokens.push_back(makeToken(TokenType::PLUS, "+"));
+                }
+                break;
+            case '-':
+                if (peek() == '-') {
+                    advance();
+                    tokens.push_back(makeToken(TokenType::MINUSMINUS, "--"));
+                } else {
+                    tokens.push_back(makeToken(TokenType::MINUS, "-"));
+                }
+                break;
             case '*': tokens.push_back(makeToken(TokenType::STAR, "*")); break;
             case '/': tokens.push_back(makeToken(TokenType::SLASH, "/")); break;
             case '%': tokens.push_back(makeToken(TokenType::PERCENT, "%")); break;

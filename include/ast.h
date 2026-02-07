@@ -16,13 +16,19 @@ enum class ASTNodeType {
     RETURN_STMT,
     IF_STMT,
     WHILE_STMT,
+    FOR_STMT,
+    BREAK_STMT,
+    CONTINUE_STMT,
     EXPR_STMT,
     BINARY_EXPR,
     UNARY_EXPR,
     CALL_EXPR,
     LITERAL_EXPR,
     IDENTIFIER_EXPR,
-    ASSIGN_EXPR
+    ASSIGN_EXPR,
+    POSTFIX_EXPR,
+    ARRAY_EXPR,
+    INDEX_EXPR
 };
 
 class ASTNode {
@@ -110,6 +116,32 @@ public:
         : Expression(ASTNodeType::ASSIGN_EXPR), name(n), value(std::move(v)) {}
 };
 
+class PostfixExpr : public Expression {
+public:
+    std::string op;  // ++ or --
+    std::unique_ptr<Expression> operand;
+    
+    PostfixExpr(const std::string& o, std::unique_ptr<Expression> opnd)
+        : Expression(ASTNodeType::POSTFIX_EXPR), op(o), operand(std::move(opnd)) {}
+};
+
+class ArrayExpr : public Expression {
+public:
+    std::vector<std::unique_ptr<Expression>> elements;
+    
+    ArrayExpr(std::vector<std::unique_ptr<Expression>> elems)
+        : Expression(ASTNodeType::ARRAY_EXPR), elements(std::move(elems)) {}
+};
+
+class IndexExpr : public Expression {
+public:
+    std::unique_ptr<Expression> array;
+    std::unique_ptr<Expression> index;
+    
+    IndexExpr(std::unique_ptr<Expression> arr, std::unique_ptr<Expression> idx)
+        : Expression(ASTNodeType::INDEX_EXPR), array(std::move(arr)), index(std::move(idx)) {}
+};
+
 // Statements
 class ExprStmt : public Statement {
 public:
@@ -154,6 +186,30 @@ public:
     
     WhileStmt(std::unique_ptr<Expression> cond, std::unique_ptr<Statement> b)
         : Statement(ASTNodeType::WHILE_STMT), condition(std::move(cond)), body(std::move(b)) {}
+};
+
+class ForStmt : public Statement {
+public:
+    std::string iteratorVar;
+    std::unique_ptr<Expression> start;
+    std::unique_ptr<Expression> end;
+    std::unique_ptr<Expression> step;  // Optional, can be nullptr
+    std::unique_ptr<Statement> body;
+    
+    ForStmt(const std::string& iter, std::unique_ptr<Expression> s, std::unique_ptr<Expression> e, 
+            std::unique_ptr<Expression> st, std::unique_ptr<Statement> b)
+        : Statement(ASTNodeType::FOR_STMT), iteratorVar(iter), start(std::move(s)), 
+          end(std::move(e)), step(std::move(st)), body(std::move(b)) {}
+};
+
+class BreakStmt : public Statement {
+public:
+    BreakStmt() : Statement(ASTNodeType::BREAK_STMT) {}
+};
+
+class ContinueStmt : public Statement {
+public:
+    ContinueStmt() : Statement(ASTNodeType::CONTINUE_STMT) {}
 };
 
 class BlockStmt : public Statement {

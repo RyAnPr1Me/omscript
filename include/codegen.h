@@ -12,14 +12,22 @@
 
 namespace omscript {
 
+enum class OptimizationLevel {
+    O0,  // No optimization
+    O1,  // Basic optimization
+    O2,  // Moderate optimization
+    O3   // Aggressive optimization
+};
+
 class CodeGenerator {
 public:
-    CodeGenerator();
+    CodeGenerator(OptimizationLevel optLevel = OptimizationLevel::O2);
     ~CodeGenerator();
     
     void generate(Program* program);
     void writeObjectFile(const std::string& filename);
     llvm::Module* getModule() { return module.get(); }
+    void setOptimizationLevel(OptimizationLevel level) { optimizationLevel = level; }
     
 private:
     std::unique_ptr<llvm::LLVMContext> context;
@@ -32,6 +40,7 @@ private:
     // Bytecode emitter for dynamic code
     BytecodeEmitter bytecodeEmitter;
     bool useDynamicCompilation;
+    OptimizationLevel optimizationLevel;
     
     // Code generation methods
     llvm::Function* generateFunction(FunctionDecl* func);
@@ -51,6 +60,7 @@ private:
     void generateReturn(ReturnStmt* stmt);
     void generateIf(IfStmt* stmt);
     void generateWhile(WhileStmt* stmt);
+    void generateFor(ForStmt* stmt);
     void generateBlock(BlockStmt* stmt);
     void generateExprStmt(ExprStmt* stmt);
     
@@ -58,6 +68,10 @@ private:
     llvm::Type* getDefaultType();
     void setupPrintfDeclaration();
     llvm::Function* getPrintfFunction();
+    
+    // Optimization methods
+    void runOptimizationPasses();
+    void optimizeFunction(llvm::Function* func);
 };
 
 } // namespace omscript

@@ -22,6 +22,9 @@ enum class TokenType {
     FOR,
     VAR,
     CONST,
+    BREAK,
+    CONTINUE,
+    IN,
     
     // Operators
     PLUS,
@@ -39,6 +42,9 @@ enum class TokenType {
     AND,
     OR,
     NOT,
+    PLUSPLUS,
+    MINUSMINUS,
+    RANGE,
     
     // Delimiters
     LPAREN,

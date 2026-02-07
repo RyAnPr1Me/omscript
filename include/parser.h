@@ -31,7 +31,10 @@ private:
     std::unique_ptr<Statement> parseVarDecl();
     std::unique_ptr<Statement> parseIfStmt();
     std::unique_ptr<Statement> parseWhileStmt();
+    std::unique_ptr<Statement> parseForStmt();
     std::unique_ptr<Statement> parseReturnStmt();
+    std::unique_ptr<Statement> parseBreakStmt();
+    std::unique_ptr<Statement> parseContinueStmt();
     std::unique_ptr<Statement> parseExprStmt();
     
     std::unique_ptr<Expression> parseExpression();
@@ -43,8 +46,10 @@ private:
     std::unique_ptr<Expression> parseAddition();
     std::unique_ptr<Expression> parseMultiplication();
     std::unique_ptr<Expression> parseUnary();
+    std::unique_ptr<Expression> parsePostfix();
     std::unique_ptr<Expression> parseCall();
     std::unique_ptr<Expression> parsePrimary();
+    std::unique_ptr<Expression> parseArrayLiteral();
     
     void error(const std::string& message);
 };
