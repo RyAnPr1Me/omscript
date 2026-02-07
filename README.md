@@ -95,6 +95,7 @@ continue;
 Use `OPTMAX=:` and `OPTMAX!:` to tag functions that require maximal optimization. Inside these functions:
 - Parameters, variables, and loop iterators must include type annotations.
 - Only other `OPTMAX` functions may be called.
+The compiler applies an extra OPTMAX-only optimization pass stack beyond the default O2 pipeline and custom AST constant folding even when the rest of the program uses O2.
 
 ```omscript
 OPTMAX=:

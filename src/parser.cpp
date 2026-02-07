@@ -84,7 +84,7 @@ std::unique_ptr<Program> Parser::parse() {
 }
 
 std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
-    bool previousOptMax = inOptMaxFunction;
+    bool savedOptMaxState = inOptMaxFunction;
     inOptMaxFunction = isOptMax;
     consume(TokenType::FN, "Expected 'fn'");
     Token name = consume(TokenType::IDENTIFIER, "Expected function name");
@@ -109,7 +109,7 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
     
     auto body = std::unique_ptr<BlockStmt>(dynamic_cast<BlockStmt*>(parseBlock().release()));
     
-    inOptMaxFunction = previousOptMax;
+    inOptMaxFunction = savedOptMaxState;
     
     return std::make_unique<FunctionDecl>(name.lexeme, std::move(parameters), std::move(body), isOptMax);
 }

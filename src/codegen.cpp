@@ -20,6 +20,222 @@
 #include <iostream>
 #include <optional>
 
+namespace {
+
+using omscript::ASTNodeType;
+using omscript::BlockStmt;
+using omscript::BinaryExpr;
+using omscript::Expression;
+using omscript::LiteralExpr;
+using omscript::UnaryExpr;
+using omscript::AssignExpr;
+using omscript::CallExpr;
+using omscript::ArrayExpr;
+using omscript::IndexExpr;
+using omscript::PostfixExpr;
+using omscript::ExprStmt;
+using omscript::VarDecl;
+using omscript::ReturnStmt;
+using omscript::IfStmt;
+using omscript::WhileStmt;
+using omscript::ForStmt;
+using omscript::Statement;
+
+std::unique_ptr<Expression> optimizeOptMaxExpression(std::unique_ptr<Expression> expr);
+
+std::unique_ptr<Expression> optimizeOptMaxUnary(const std::string& op, std::unique_ptr<Expression> operand) {
+    operand = optimizeOptMaxExpression(std::move(operand));
+    auto* literal = dynamic_cast<LiteralExpr*>(operand.get());
+    if (!literal) {
+        return std::make_unique<UnaryExpr>(op, std::move(operand));
+    }
+    
+    if (literal->literalType == LiteralExpr::LiteralType::INTEGER) {
+        long long value = literal->intValue;
+        if (op == "-") {
+            return std::make_unique<LiteralExpr>(-value);
+        }
+        if (op == "!") {
+            return std::make_unique<LiteralExpr>(static_cast<long long>(value == 0));
+        }
+    } else if (literal->literalType == LiteralExpr::LiteralType::FLOAT) {
+        double value = literal->floatValue;
+        if (op == "-") {
+            return std::make_unique<LiteralExpr>(-value);
+        }
+        if (op == "!") {
+            return std::make_unique<LiteralExpr>(static_cast<long long>(value == 0.0));
+        }
+    }
+    
+    return std::make_unique<UnaryExpr>(op, std::move(operand));
+}
+
+std::unique_ptr<Expression> optimizeOptMaxBinary(const std::string& op,
+                                                 std::unique_ptr<Expression> left,
+                                                 std::unique_ptr<Expression> right) {
+    left = optimizeOptMaxExpression(std::move(left));
+    right = optimizeOptMaxExpression(std::move(right));
+    auto* leftLiteral = dynamic_cast<LiteralExpr*>(left.get());
+    auto* rightLiteral = dynamic_cast<LiteralExpr*>(right.get());
+    if (!leftLiteral || !rightLiteral) {
+        return std::make_unique<BinaryExpr>(op, std::move(left), std::move(right));
+    }
+    
+    if (leftLiteral->literalType == LiteralExpr::LiteralType::INTEGER &&
+        rightLiteral->literalType == LiteralExpr::LiteralType::INTEGER) {
+        long long lval = leftLiteral->intValue;
+        long long rval = rightLiteral->intValue;
+        if (op == "+") return std::make_unique<LiteralExpr>(lval + rval);
+        if (op == "-") return std::make_unique<LiteralExpr>(lval - rval);
+        if (op == "*") return std::make_unique<LiteralExpr>(lval * rval);
+        if (op == "/" && rval != 0) return std::make_unique<LiteralExpr>(lval / rval);
+        if (op == "%" && rval != 0) return std::make_unique<LiteralExpr>(lval % rval);
+        if (op == "==") return std::make_unique<LiteralExpr>(static_cast<long long>(lval == rval));
+        if (op == "!=") return std::make_unique<LiteralExpr>(static_cast<long long>(lval != rval));
+        if (op == "<") return std::make_unique<LiteralExpr>(static_cast<long long>(lval < rval));
+        if (op == "<=") return std::make_unique<LiteralExpr>(static_cast<long long>(lval <= rval));
+        if (op == ">") return std::make_unique<LiteralExpr>(static_cast<long long>(lval > rval));
+        if (op == ">=") return std::make_unique<LiteralExpr>(static_cast<long long>(lval >= rval));
+        if (op == "&&") return std::make_unique<LiteralExpr>(static_cast<long long>((lval != 0) && (rval != 0)));
+        if (op == "||") return std::make_unique<LiteralExpr>(static_cast<long long>((lval != 0) || (rval != 0)));
+    } else if (leftLiteral->literalType == LiteralExpr::LiteralType::FLOAT &&
+               rightLiteral->literalType == LiteralExpr::LiteralType::FLOAT) {
+        double lval = leftLiteral->floatValue;
+        double rval = rightLiteral->floatValue;
+        if (op == "+") return std::make_unique<LiteralExpr>(lval + rval);
+        if (op == "-") return std::make_unique<LiteralExpr>(lval - rval);
+        if (op == "*") return std::make_unique<LiteralExpr>(lval * rval);
+        if (op == "/" && rval != 0.0) return std::make_unique<LiteralExpr>(lval / rval);
+        if (op == "==") return std::make_unique<LiteralExpr>(static_cast<long long>(lval == rval));
+        if (op == "!=") return std::make_unique<LiteralExpr>(static_cast<long long>(lval != rval));
+        if (op == "<") return std::make_unique<LiteralExpr>(static_cast<long long>(lval < rval));
+        if (op == "<=") return std::make_unique<LiteralExpr>(static_cast<long long>(lval <= rval));
+        if (op == ">") return std::make_unique<LiteralExpr>(static_cast<long long>(lval > rval));
+        if (op == ">=") return std::make_unique<LiteralExpr>(static_cast<long long>(lval >= rval));
+        if (op == "&&") return std::make_unique<LiteralExpr>(static_cast<long long>((lval != 0.0) && (rval != 0.0)));
+        if (op == "||") return std::make_unique<LiteralExpr>(static_cast<long long>((lval != 0.0) || (rval != 0.0)));
+    }
+    
+    return std::make_unique<BinaryExpr>(op, std::move(left), std::move(right));
+}
+
+std::unique_ptr<Expression> optimizeOptMaxExpression(std::unique_ptr<Expression> expr) {
+    if (!expr) {
+        return nullptr;
+    }
+    
+    switch (expr->type) {
+        case ASTNodeType::LITERAL_EXPR:
+        case ASTNodeType::IDENTIFIER_EXPR:
+            return expr;
+        case ASTNodeType::UNARY_EXPR: {
+            auto* unary = static_cast<UnaryExpr*>(expr.get());
+            return optimizeOptMaxUnary(unary->op, std::move(unary->operand));
+        }
+        case ASTNodeType::BINARY_EXPR: {
+            auto* binary = static_cast<BinaryExpr*>(expr.get());
+            return optimizeOptMaxBinary(binary->op, std::move(binary->left), std::move(binary->right));
+        }
+        case ASTNodeType::ASSIGN_EXPR: {
+            auto* assign = static_cast<AssignExpr*>(expr.get());
+            assign->value = optimizeOptMaxExpression(std::move(assign->value));
+            return expr;
+        }
+        case ASTNodeType::CALL_EXPR: {
+            auto* call = static_cast<CallExpr*>(expr.get());
+            for (auto& arg : call->arguments) {
+                arg = optimizeOptMaxExpression(std::move(arg));
+            }
+            return expr;
+        }
+        case ASTNodeType::ARRAY_EXPR: {
+            auto* arrayExpr = static_cast<ArrayExpr*>(expr.get());
+            for (auto& element : arrayExpr->elements) {
+                element = optimizeOptMaxExpression(std::move(element));
+            }
+            return expr;
+        }
+        case ASTNodeType::INDEX_EXPR: {
+            auto* indexExpr = static_cast<IndexExpr*>(expr.get());
+            indexExpr->array = optimizeOptMaxExpression(std::move(indexExpr->array));
+            indexExpr->index = optimizeOptMaxExpression(std::move(indexExpr->index));
+            return expr;
+        }
+        case ASTNodeType::POSTFIX_EXPR: {
+            auto* postfix = static_cast<PostfixExpr*>(expr.get());
+            postfix->operand = optimizeOptMaxExpression(std::move(postfix->operand));
+            return expr;
+        }
+        default:
+            return expr;
+    }
+}
+
+void optimizeOptMaxStatement(Statement* stmt);
+
+void optimizeOptMaxBlock(BlockStmt* block) {
+    for (auto& statement : block->statements) {
+        optimizeOptMaxStatement(statement.get());
+    }
+}
+
+void optimizeOptMaxStatement(Statement* stmt) {
+    switch (stmt->type) {
+        case ASTNodeType::BLOCK:
+            optimizeOptMaxBlock(static_cast<BlockStmt*>(stmt));
+            break;
+        case ASTNodeType::VAR_DECL: {
+            auto* varDecl = static_cast<VarDecl*>(stmt);
+            if (varDecl->initializer) {
+                varDecl->initializer = optimizeOptMaxExpression(std::move(varDecl->initializer));
+            }
+            break;
+        }
+        case ASTNodeType::RETURN_STMT: {
+            auto* retStmt = static_cast<ReturnStmt*>(stmt);
+            if (retStmt->value) {
+                retStmt->value = optimizeOptMaxExpression(std::move(retStmt->value));
+            }
+            break;
+        }
+        case ASTNodeType::EXPR_STMT: {
+            auto* exprStmt = static_cast<ExprStmt*>(stmt);
+            exprStmt->expression = optimizeOptMaxExpression(std::move(exprStmt->expression));
+            break;
+        }
+        case ASTNodeType::IF_STMT: {
+            auto* ifStmt = static_cast<IfStmt*>(stmt);
+            ifStmt->condition = optimizeOptMaxExpression(std::move(ifStmt->condition));
+            optimizeOptMaxStatement(ifStmt->thenBranch.get());
+            if (ifStmt->elseBranch) {
+                optimizeOptMaxStatement(ifStmt->elseBranch.get());
+            }
+            break;
+        }
+        case ASTNodeType::WHILE_STMT: {
+            auto* whileStmt = static_cast<WhileStmt*>(stmt);
+            whileStmt->condition = optimizeOptMaxExpression(std::move(whileStmt->condition));
+            optimizeOptMaxStatement(whileStmt->body.get());
+            break;
+        }
+        case ASTNodeType::FOR_STMT: {
+            auto* forStmt = static_cast<ForStmt*>(stmt);
+            forStmt->start = optimizeOptMaxExpression(std::move(forStmt->start));
+            forStmt->end = optimizeOptMaxExpression(std::move(forStmt->end));
+            if (forStmt->step) {
+                forStmt->step = optimizeOptMaxExpression(std::move(forStmt->step));
+            }
+            optimizeOptMaxStatement(forStmt->body.get());
+            break;
+        }
+        default:
+            break;
+    }
+}
+
+} // namespace
+
 namespace omscript {
 
 CodeGenerator::CodeGenerator(OptimizationLevel optLevel) 
@@ -109,13 +325,13 @@ void CodeGenerator::generate(Program* program) {
         generateFunction(func.get());
     }
 
-    if (hasOptMaxFunctions && optimizationLevel != OptimizationLevel::O3) {
-        optimizationLevel = OptimizationLevel::O3;
-    }
-    
     // Run optimization passes
     if (optimizationLevel != OptimizationLevel::O0) {
         runOptimizationPasses();
+    }
+    
+    if (hasOptMaxFunctions) {
+        optimizeOptMaxFunctions();
     }
     
     // Verify the module
@@ -130,6 +346,9 @@ void CodeGenerator::generate(Program* program) {
 llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     inOptMaxFunction = func->isOptMax;
     hasOptMaxFunctions = hasOptMaxFunctions || func->isOptMax;
+    if (func->isOptMax) {
+        optimizeOptMaxBlock(func->body.get());
+    }
 
     // Create function type
     std::vector<llvm::Type*> paramTypes;
@@ -361,7 +580,13 @@ llvm::Value* CodeGenerator::generateUnary(UnaryExpr* expr) {
 llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     if (inOptMaxFunction) {
         if (optMaxFunctions.find(expr->callee) == optMaxFunctions.end()) {
-            throw std::runtime_error("OPTMAX blocks cannot invoke non-OPTMAX functions");
+            std::string currentFunction = "<unknown>";
+            if (builder->GetInsertBlock() && builder->GetInsertBlock()->getParent()) {
+                currentFunction = std::string(builder->GetInsertBlock()->getParent()->getName());
+            }
+            throw std::runtime_error("OPTMAX function \"" + currentFunction +
+                                     "\" cannot invoke non-OPTMAX function \"" +
+                                     expr->callee + "\"");
         }
     }
     llvm::Function* callee = functions[expr->callee];
@@ -644,6 +869,39 @@ void CodeGenerator::optimizeFunction(llvm::Function* func) {
     
     fpm.doInitialization();
     fpm.run(*func);
+    fpm.doFinalization();
+}
+
+void CodeGenerator::optimizeOptMaxFunctions() {
+    llvm::legacy::FunctionPassManager fpm(module.get());
+    
+    fpm.add(llvm::createPromoteMemoryToRegisterPass());
+    fpm.add(llvm::createInstructionCombiningPass());
+    fpm.add(llvm::createReassociatePass());
+    fpm.add(llvm::createGVNPass());
+    fpm.add(llvm::createCFGSimplificationPass());
+    fpm.add(llvm::createDeadCodeEliminationPass());
+    fpm.add(llvm::createLICMPass());
+    fpm.add(llvm::createLoopRotatePass());
+    fpm.add(llvm::createLoopStrengthReducePass());
+    fpm.add(llvm::createLoopSimplifyPass());
+    fpm.add(llvm::createLoopUnrollPass());
+    fpm.add(llvm::createTailCallEliminationPass());
+    fpm.add(llvm::createEarlyCSEPass());
+    fpm.add(llvm::createSROAPass());
+    fpm.add(llvm::createConstantHoistingPass());
+    fpm.add(llvm::createFlattenCFGPass());
+    
+    fpm.doInitialization();
+    for (auto& func : module->functions()) {
+        if (!func.isDeclaration() && optMaxFunctions.count(std::string(func.getName()))) {
+            // OPTMAX runs the aggressive pass stack twice to prioritize maximal optimization.
+            constexpr int optMaxIterations = 2;  // Second pass catches new foldable patterns after the first.
+            for (int i = 0; i < optMaxIterations; ++i) {
+                fpm.run(func);
+            }
+        }
+    }
     fpm.doFinalization();
 }
 

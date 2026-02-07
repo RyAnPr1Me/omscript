@@ -87,6 +87,7 @@ private:
     // Optimization methods
     void runOptimizationPasses();
     void optimizeFunction(llvm::Function* func);
+    void optimizeOptMaxFunctions();
 };
 
 } // namespace omscript
