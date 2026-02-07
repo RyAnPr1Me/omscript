@@ -50,6 +50,22 @@ llvm_map_components_to_libnames(llvm_libs
     target
     transformutils
     analysis
+    x86codegen
+    x86asmparser
+    x86desc
+    x86info
+    aarch64codegen
+    aarch64asmparser
+    aarch64desc
+    aarch64info
+    armcodegen
+    armasmparser
+    armdesc
+    arminfo
+    asmparser
+    codegen
+    mc
+    mcparser
 )
 
 target_link_libraries(omsc ${llvm_libs})

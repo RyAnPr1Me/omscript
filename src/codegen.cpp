@@ -2,15 +2,16 @@
 #include <llvm/IR/Verifier.h>
 #include <llvm/IR/LegacyPassManager.h>
 #include <llvm/Support/FileSystem.h>
-#include <llvm/Support/Host.h>
+#include <llvm/TargetParser/Host.h>
 #include <llvm/Support/TargetSelect.h>
-#include <llvm/Support/TargetRegistry.h>
 #include <llvm/Support/raw_ostream.h>
+#include <llvm/Support/CodeGen.h>
 #include <llvm/Target/TargetMachine.h>
 #include <llvm/Target/TargetOptions.h>
 #include <llvm/MC/TargetRegistry.h>
 #include <stdexcept>
 #include <iostream>
+#include <optional>
 
 namespace omscript {
 
@@ -27,7 +28,7 @@ CodeGenerator::~CodeGenerator() {}
 void CodeGenerator::setupPrintfDeclaration() {
     // Declare printf function for output
     std::vector<llvm::Type*> printfArgs;
-    printfArgs.push_back(llvm::Type::getInt8PtrTy(*context));
+    printfArgs.push_back(llvm::PointerType::getUnqual(*context));
     
     llvm::FunctionType* printfType = llvm::FunctionType::get(
         llvm::Type::getInt32Ty(*context),
@@ -313,8 +314,8 @@ void CodeGenerator::generateIf(IfStmt* stmt) {
     llvm::Function* function = builder->GetInsertBlock()->getParent();
     
     llvm::BasicBlock* thenBB = llvm::BasicBlock::Create(*context, "then", function);
-    llvm::BasicBlock* elseBB = stmt->elseBranch ? llvm::BasicBlock::Create(*context, "else") : nullptr;
-    llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "ifcont");
+    llvm::BasicBlock* elseBB = stmt->elseBranch ? llvm::BasicBlock::Create(*context, "else", function) : nullptr;
+    llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "ifcont", function);
     
     if (elseBB) {
         builder->CreateCondBr(condBool, thenBB, elseBB);
@@ -331,7 +332,6 @@ void CodeGenerator::generateIf(IfStmt* stmt) {
     
     // Else block
     if (elseBB) {
-        function->getBasicBlockList().push_back(elseBB);
         builder->SetInsertPoint(elseBB);
         generateStatement(stmt->elseBranch.get());
         if (!builder->GetInsertBlock()->getTerminator()) {
@@ -340,7 +340,6 @@ void CodeGenerator::generateIf(IfStmt* stmt) {
     }
     
     // Merge block
-    function->getBasicBlockList().push_back(mergeBB);
     builder->SetInsertPoint(mergeBB);
 }
 
@@ -348,8 +347,8 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
     llvm::Function* function = builder->GetInsertBlock()->getParent();
     
     llvm::BasicBlock* condBB = llvm::BasicBlock::Create(*context, "whilecond", function);
-    llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "whilebody");
-    llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "whileend");
+    llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "whilebody", function);
+    llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "whileend", function);
     
     builder->CreateBr(condBB);
     
@@ -364,7 +363,6 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
     builder->CreateCondBr(condBool, bodyBB, endBB);
     
     // Body block
-    function->getBasicBlockList().push_back(bodyBB);
     builder->SetInsertPoint(bodyBB);
     generateStatement(stmt->body.get());
     if (!builder->GetInsertBlock()->getTerminator()) {
@@ -372,7 +370,6 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
     }
     
     // End block
-    function->getBasicBlockList().push_back(endBB);
     builder->SetInsertPoint(endBB);
 }
 
@@ -390,12 +387,10 @@ void CodeGenerator::generateExprStmt(ExprStmt* stmt) {
 }
 
 void CodeGenerator::writeObjectFile(const std::string& filename) {
-    // Initialize target
-    llvm::InitializeAllTargetInfos();
-    llvm::InitializeAllTargets();
-    llvm::InitializeAllTargetMCs();
-    llvm::InitializeAllAsmParsers();
-    llvm::InitializeAllAsmPrinters();
+    // Initialize only native target
+    llvm::InitializeNativeTarget();
+    llvm::InitializeNativeTargetAsmPrinter();
+    llvm::InitializeNativeTargetAsmParser();
     
     auto targetTriple = llvm::sys::getDefaultTargetTriple();
     module->setTargetTriple(targetTriple);
@@ -411,7 +406,7 @@ void CodeGenerator::writeObjectFile(const std::string& filename) {
     auto features = "";
     
     llvm::TargetOptions opt;
-    auto RM = llvm::Optional<llvm::Reloc::Model>();
+    std::optional<llvm::Reloc::Model> RM;
     auto targetMachine = target->createTargetMachine(targetTriple, CPU, features, opt, RM);
     
     module->setDataLayout(targetMachine->createDataLayout());
@@ -424,7 +419,7 @@ void CodeGenerator::writeObjectFile(const std::string& filename) {
     }
     
     llvm::legacy::PassManager pass;
-    auto fileType = llvm::CGFT_ObjectFile;
+    auto fileType = llvm::CodeGenFileType::ObjectFile;
     
     if (targetMachine->addPassesToEmitFile(pass, dest, nullptr, fileType)) {
         throw std::runtime_error("TargetMachine can't emit a file of this type");
