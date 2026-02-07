@@ -220,6 +220,31 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     llvm::Value* left = generateExpression(expr->left.get());
     llvm::Value* right = generateExpression(expr->right.get());
     
+    // Constant folding optimization - if both operands are constants, compute at compile time
+    if (llvm::isa<llvm::ConstantInt>(left) && llvm::isa<llvm::ConstantInt>(right)) {
+        auto leftConst = llvm::dyn_cast<llvm::ConstantInt>(left);
+        auto rightConst = llvm::dyn_cast<llvm::ConstantInt>(right);
+        int64_t lval = leftConst->getSExtValue();
+        int64_t rval = rightConst->getSExtValue();
+        
+        if (expr->op == "+") {
+            return llvm::ConstantInt::get(*context, llvm::APInt(64, lval + rval));
+        } else if (expr->op == "-") {
+            return llvm::ConstantInt::get(*context, llvm::APInt(64, lval - rval));
+        } else if (expr->op == "*") {
+            return llvm::ConstantInt::get(*context, llvm::APInt(64, lval * rval));
+        } else if (expr->op == "/") {
+            if (rval != 0) {
+                return llvm::ConstantInt::get(*context, llvm::APInt(64, lval / rval));
+            }
+        } else if (expr->op == "%") {
+            if (rval != 0) {
+                return llvm::ConstantInt::get(*context, llvm::APInt(64, lval % rval));
+            }
+        }
+    }
+    
+    // Regular code generation for non-constant expressions
     if (expr->op == "+") {
         return builder->CreateAdd(left, right, "addtmp");
     } else if (expr->op == "-") {
