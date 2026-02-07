@@ -467,6 +467,8 @@ llvm::Value* CodeGenerator::generateExpression(Expression* expr) {
             return generateCall(static_cast<CallExpr*>(expr));
         case ASTNodeType::ASSIGN_EXPR:
             return generateAssign(static_cast<AssignExpr*>(expr));
+        case ASTNodeType::POSTFIX_EXPR:
+            return generatePostfix(static_cast<PostfixExpr*>(expr));
         default:
             throw std::runtime_error("Unknown expression type");
     }
@@ -615,6 +617,32 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
     
     builder->CreateStore(value, it->second);
     return value;
+}
+
+llvm::Value* CodeGenerator::generatePostfix(PostfixExpr* expr) {
+    auto* identifier = dynamic_cast<IdentifierExpr*>(expr->operand.get());
+    if (!identifier) {
+        throw std::runtime_error("Postfix operators require an identifier");
+    }
+    
+    auto it = namedValues.find(identifier->name);
+    if (it == namedValues.end() || !it->second) {
+        throw std::runtime_error("Unknown variable: " + identifier->name);
+    }
+    
+    llvm::Value* current = builder->CreateLoad(getDefaultType(), it->second, identifier->name.c_str());
+    llvm::Value* delta = llvm::ConstantInt::get(*context, llvm::APInt(64, 1));
+    llvm::Value* updated = nullptr;
+    if (expr->op == "++") {
+        updated = builder->CreateAdd(current, delta, "postinc");
+    } else if (expr->op == "--") {
+        updated = builder->CreateSub(current, delta, "postdec");
+    } else {
+        throw std::runtime_error("Unknown postfix operator: " + expr->op);
+    }
+    
+    builder->CreateStore(updated, it->second);
+    return current;
 }
 
 void CodeGenerator::generateVarDecl(VarDecl* stmt) {

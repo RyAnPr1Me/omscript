@@ -72,6 +72,7 @@ test_program "examples/advanced.om" 16
 test_program "examples/break_continue.om" 10
 test_program "examples/scoping.om" 5
 test_program "examples/optmax.om" 10
+test_program "examples/postfix.om" 4
 
 echo ""
 echo "============================================"
