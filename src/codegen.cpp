@@ -631,7 +631,7 @@ llvm::Value* CodeGenerator::generatePostfix(PostfixExpr* expr) {
     }
     
     llvm::Value* current = builder->CreateLoad(getDefaultType(), it->second, identifier->name.c_str());
-    llvm::Value* delta = llvm::ConstantInt::get(*context, llvm::APInt(64, 1));
+    llvm::Value* delta = llvm::ConstantInt::get(getDefaultType(), 1, true);
     llvm::Value* updated = nullptr;
     if (expr->op == "++") {
         updated = builder->CreateAdd(current, delta, "postinc");
