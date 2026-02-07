@@ -33,6 +33,18 @@ OmScript supports multiple optimization levels for maximum performance:
   - Early Common Subexpression Elimination (CSE)
   - Scalar Replacement of Aggregates (SROA)
 
+## Memory Management
+
+OmScript uses **reference counting** for automatic memory management:
+
+- **malloc/free based**: All heap allocations use standard C memory functions
+- **Automatic cleanup**: Reference counting ensures deterministic deallocation
+- **Zero-copy**: Shared strings through reference counting (copy-on-write)
+- **No GC pauses**: Deterministic memory management without stop-the-world collection
+- **Minimal overhead**: Only 16 bytes per unique string + data
+
+See [MEMORY_MANAGEMENT.md](MEMORY_MANAGEMENT.md) for detailed documentation.
+
 ## Language Syntax
 
 ### Functions
