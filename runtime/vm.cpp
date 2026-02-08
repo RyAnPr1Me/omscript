@@ -75,7 +75,8 @@ double VM::readFloat(const std::vector<uint8_t>& code, size_t& ip) {
 std::string VM::readString(const std::vector<uint8_t>& code, size_t& ip) {
     uint16_t length = readShort(code, ip);
     ensureReadable(code, ip, length);
-    auto begin = code.begin() + static_cast<std::vector<uint8_t>::difference_type>(ip);
+    auto offset = static_cast<std::vector<uint8_t>::difference_type>(ip);
+    auto begin = code.begin() + offset;
     auto end = begin + static_cast<std::vector<uint8_t>::difference_type>(length);
     std::string str(begin, end);
     ip += length;
@@ -268,8 +269,9 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
             
             case OpCode::RETURN:
                 // Return from current function, preserving the top of stack as the return value.
+                // If the stack is empty, return 0 to match compiler default return semantics.
                 {
-                    Value returnValue = stack.empty() ? Value() : pop();
+                    Value returnValue = stack.empty() ? Value(static_cast<int64_t>(0)) : pop();
                     stack.clear();
                     lastReturn = returnValue;
                 }

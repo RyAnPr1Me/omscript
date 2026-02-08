@@ -560,7 +560,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         builder->CreateBr(mergeBB);
         llvm::BasicBlock* rightBB = builder->GetInsertBlock();
         builder->SetInsertPoint(mergeBB);
-        llvm::PHINode* phi = builder->CreatePHI(llvm::Type::getInt1Ty(*context), 2, "boolphi");
+        llvm::PHINode* phi = builder->CreatePHI(llvm::Type::getInt1Ty(*context), 2, "bool_result");
         if (expr->op == "&&") {
             phi->addIncoming(llvm::ConstantInt::getFalse(*context), leftBB);
             phi->addIncoming(rightBool, rightBB);
