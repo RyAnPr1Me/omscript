@@ -282,10 +282,11 @@ llvm::Type* CodeGenerator::getDefaultType() {
 
 void CodeGenerator::beginScope() {
     scopeStack.emplace_back();
+    constScopeStack.emplace_back();
 }
 
 void CodeGenerator::endScope() {
-    if (scopeStack.empty()) {
+    if (scopeStack.empty() || constScopeStack.empty()) {
         return;
     }
     
@@ -298,9 +299,19 @@ void CodeGenerator::endScope() {
         }
     }
     scopeStack.pop_back();
+    
+    auto& constScope = constScopeStack.back();
+    for (const auto& entry : constScope) {
+        if (entry.second.hadValue) {
+            constValues[entry.first] = entry.second.previousValue;
+        } else {
+            constValues.erase(entry.first);
+        }
+    }
+    constScopeStack.pop_back();
 }
 
-void CodeGenerator::bindVariable(const std::string& name, llvm::Value* value) {
+void CodeGenerator::bindVariable(const std::string& name, llvm::Value* value, bool isConst) {
     if (!scopeStack.empty()) {
         auto& scope = scopeStack.back();
         if (scope.find(name) == scope.end()) {
@@ -308,7 +319,19 @@ void CodeGenerator::bindVariable(const std::string& name, llvm::Value* value) {
             scope[name] = existing == namedValues.end() ? nullptr : existing->second;
         }
     }
+    if (!constScopeStack.empty()) {
+        auto& constScope = constScopeStack.back();
+        if (constScope.find(name) == constScope.end()) {
+            auto existingConst = constValues.find(name);
+            if (existingConst == constValues.end()) {
+                constScope[name] = {false, false};
+            } else {
+                constScope[name] = {true, existingConst->second};
+            }
+        }
+    }
     namedValues[name] = value;
+    constValues[name] = isConst;
 }
 
 void CodeGenerator::generate(Program* program) {
@@ -380,6 +403,8 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     namedValues.clear();
     scopeStack.clear();
     loopStack.clear();
+    constValues.clear();
+    constScopeStack.clear();
     auto argIt = function->arg_begin();
     for (auto& param : func->parameters) {
         argIt->setName(param.name);
@@ -614,6 +639,10 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
     if (it == namedValues.end() || !it->second) {
         throw std::runtime_error("Unknown variable: " + expr->name);
     }
+    auto constIt = constValues.find(expr->name);
+    if (constIt != constValues.end() && constIt->second) {
+        throw std::runtime_error("Cannot assign to const variable: " + expr->name);
+    }
     
     builder->CreateStore(value, it->second);
     return value;
@@ -628,6 +657,10 @@ llvm::Value* CodeGenerator::generatePostfix(PostfixExpr* expr) {
     auto it = namedValues.find(identifier->name);
     if (it == namedValues.end() || !it->second) {
         throw std::runtime_error("Unknown variable: " + identifier->name);
+    }
+    auto constIt = constValues.find(identifier->name);
+    if (constIt != constValues.end() && constIt->second) {
+        throw std::runtime_error("Cannot modify const variable: " + identifier->name);
     }
     
     llvm::Value* current = builder->CreateLoad(getDefaultType(), it->second, identifier->name.c_str());
@@ -647,7 +680,7 @@ llvm::Value* CodeGenerator::generatePostfix(PostfixExpr* expr) {
 
 void CodeGenerator::generateVarDecl(VarDecl* stmt) {
     llvm::AllocaInst* alloca = builder->CreateAlloca(getDefaultType(), nullptr, stmt->name);
-    bindVariable(stmt->name, alloca);
+    bindVariable(stmt->name, alloca, stmt->isConst);
     
     if (stmt->initializer) {
         llvm::Value* initValue = generateExpression(stmt->initializer.get());

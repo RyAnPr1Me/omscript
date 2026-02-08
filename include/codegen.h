@@ -47,6 +47,13 @@ private:
     bool inOptMaxFunction;
     bool hasOptMaxFunctions;
     std::unordered_set<std::string> optMaxFunctions;
+    
+    struct ConstBinding {
+        bool hadValue;
+        bool previousValue;
+    };
+    std::unordered_map<std::string, bool> constValues;
+    std::vector<std::unordered_map<std::string, ConstBinding>> constScopeStack;
     std::unordered_map<std::string, llvm::Function*> functions;
     
     // Bytecode emitter for dynamic code
@@ -83,7 +90,7 @@ private:
     llvm::Function* getPrintfFunction();
     void beginScope();
     void endScope();
-    void bindVariable(const std::string& name, llvm::Value* value);
+    void bindVariable(const std::string& name, llvm::Value* value, bool isConst = false);
     
     // Optimization methods
     void runOptimizationPasses();
