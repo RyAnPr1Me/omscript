@@ -862,9 +862,19 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     builder->SetInsertPoint(stepFailBB);
     std::string errorMessage = "Runtime error: for-loop step cannot be zero for iterator '" +
                                stmt->iteratorVar + "'\n";
-    llvm::Value* message = builder->CreateGlobalStringPtr(errorMessage);
+    llvm::GlobalVariable* messageVar = builder->CreateGlobalString(errorMessage, "forstepmsg");
+    llvm::Constant* zeroIndex = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0);
+    llvm::Constant* indices[] = {zeroIndex, zeroIndex};
+    llvm::Constant* message = llvm::ConstantExpr::getInBoundsGetElementPtr(
+        messageVar->getValueType(),
+        messageVar,
+        indices);
     builder->CreateCall(getPrintfFunction(), {message});
-    llvm::Function* trap = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::trap);
+#if LLVM_VERSION_MAJOR >= 19
+    llvm::FunctionCallee trap = llvm::Intrinsic::getOrInsertDeclaration(module.get(), llvm::Intrinsic::trap);
+#else
+    llvm::FunctionCallee trap = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::trap);
+#endif
     builder->CreateCall(trap);
     builder->CreateUnreachable();
     
