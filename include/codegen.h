@@ -50,7 +50,7 @@ private:
     
     struct ConstBinding {
         bool hadValue;
-        bool previousValue;
+        bool previousIsConst;
     };
     std::unordered_map<std::string, bool> constValues;
     std::vector<std::unordered_map<std::string, ConstBinding>> constScopeStack;

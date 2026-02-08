@@ -311,7 +311,7 @@ void CodeGenerator::endScope() {
     }
     for (const auto& entry : constScope) {
         if (entry.second.hadValue) {
-            constValues[entry.first] = entry.second.previousValue;
+            constValues[entry.first] = entry.second.previousIsConst;
         } else {
             constValues.erase(entry.first);
         }
@@ -333,7 +333,7 @@ void CodeGenerator::bindVariable(const std::string& name, llvm::Value* value, bo
         if (constScope.find(name) == constScope.end()) {
             auto existingConst = constValues.find(name);
             if (existingConst == constValues.end()) {
-                constScope[name] = {false, false};  // hadValue=false, previousValue unused.
+                constScope[name] = {false, false};  // hadValue=false, previousIsConst unused.
             } else {
                 constScope[name] = {true, existingConst->second};
             }
