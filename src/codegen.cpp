@@ -310,7 +310,7 @@ void CodeGenerator::endScope() {
         }
     }
     for (const auto& entry : constScope) {
-        if (entry.second.hadValue) {
+        if (entry.second.wasPreviouslyDefined) {
             constValues[entry.first] = entry.second.previousIsConst;
         } else {
             constValues.erase(entry.first);
@@ -333,7 +333,7 @@ void CodeGenerator::bindVariable(const std::string& name, llvm::Value* value, bo
         if (constScope.find(name) == constScope.end()) {
             auto existingConst = constValues.find(name);
             if (existingConst == constValues.end()) {
-                constScope[name] = {false, false};  // hadValue=false, previousIsConst irrelevant (no previous binding).
+                constScope[name] = {false, false};  // wasPreviouslyDefined=false, previousIsConst set false since no prior binding.
             } else {
                 constScope[name] = {true, existingConst->second};
             }
@@ -344,7 +344,10 @@ void CodeGenerator::bindVariable(const std::string& name, llvm::Value* value, bo
 }
 
 void CodeGenerator::checkConstModification(const std::string& name, const std::string& action) {
-    // Checks const state; callers should validate variable existence separately.
+    // Checks const state and validates variable existence for safety.
+    if (namedValues.find(name) == namedValues.end()) {
+        throw std::runtime_error("Const check for unknown variable: " + name);
+    }
     auto constIt = constValues.find(name);
     if (constIt != constValues.end() && constIt->second) {
         throw std::runtime_error("Cannot " + action + " const variable: " + name);

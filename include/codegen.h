@@ -49,7 +49,7 @@ private:
     std::unordered_set<std::string> optMaxFunctions;
     
     struct ConstBinding {
-        bool hadValue;
+        bool wasPreviouslyDefined;
         bool previousIsConst;
     };
     std::unordered_map<std::string, bool> constValues;
