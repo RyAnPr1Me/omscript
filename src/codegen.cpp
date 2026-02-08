@@ -301,6 +301,7 @@ void CodeGenerator::endScope() {
     }
     
     auto& scope = scopeStack.back();
+    auto& constScope = constScopeStack.back();
     for (const auto& entry : scope) {
         if (entry.second) {
             namedValues[entry.first] = entry.second;
@@ -308,9 +309,6 @@ void CodeGenerator::endScope() {
             namedValues.erase(entry.first);
         }
     }
-    scopeStack.pop_back();
-
-    auto& constScope = constScopeStack.back();
     for (const auto& entry : constScope) {
         if (entry.second.hadValue) {
             constValues[entry.first] = entry.second.previousValue;
@@ -318,6 +316,7 @@ void CodeGenerator::endScope() {
             constValues.erase(entry.first);
         }
     }
+    scopeStack.pop_back();
     constScopeStack.pop_back();
 }
 
@@ -334,7 +333,7 @@ void CodeGenerator::bindVariable(const std::string& name, llvm::Value* value, bo
         if (constScope.find(name) == constScope.end()) {
             auto existingConst = constValues.find(name);
             if (existingConst == constValues.end()) {
-                constScope[name] = {false, false};
+                constScope[name] = {false, false};  // hadValue=false, previousValue unused.
             } else {
                 constScope[name] = {true, existingConst->second};
             }
