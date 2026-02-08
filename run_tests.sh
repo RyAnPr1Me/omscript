@@ -116,7 +116,13 @@ test_cli_output "help" "Usage:" 0 ./build/omsc --help
 test_cli_output "version" "OmScript Compiler v1.0" 0 ./build/omsc version
 test_cli_output "lex" "FN" 0 ./build/omsc lex examples/test.om
 test_cli_output "parse" "Parsed program" 0 ./build/omsc parse examples/test.om
+test_cli_output "run-success" "Compilation successful!" 0 ./build/omsc run examples/exit_zero.om
 test_cli_output "run" "Program exited with code 120" 120 ./build/omsc run examples/factorial.om
+if [ -f a.out ] || [ -f a.out.o ]; then
+    echo -e "${RED}✗ Failed (temporary output files not cleaned)${NC}"
+    rm -f a.out a.out.o
+    exit 1
+fi
 echo ""
 
 echo "Running test programs:"

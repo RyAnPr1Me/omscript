@@ -151,23 +151,41 @@ int main(int argc, char* argv[]) {
     int argIndex = 1;
     std::string firstArg = argv[argIndex];
     Command command = Command::Compile;
+    bool commandMatched = false;
     if (firstArg == "help" || firstArg == "-h" || firstArg == "--help") {
         command = Command::Help;
+        commandMatched = true;
     } else if (firstArg == "version" || firstArg == "--version") {
         command = Command::Version;
+        commandMatched = true;
     } else if (firstArg == "compile" || firstArg == "build") {
         command = Command::Compile;
         argIndex++;
+        commandMatched = true;
     } else if (firstArg == "run") {
         command = Command::Run;
         argIndex++;
+        commandMatched = true;
     } else if (firstArg == "lex" || firstArg == "tokens") {
         command = Command::Lex;
         argIndex++;
+        commandMatched = true;
     } else if (firstArg == "parse") {
         command = Command::Parse;
         argIndex++;
+        commandMatched = true;
     }
+
+    if (!commandMatched && !firstArg.empty() && firstArg[0] != '-') {
+        bool hasOmExtension = firstArg.size() >= 3 &&
+                              firstArg.substr(firstArg.size() - 3) == ".om";
+        if (!hasOmExtension && !std::filesystem::exists(firstArg)) {
+            std::cerr << "Error: unknown command '" << firstArg << "'\n";
+            printUsage(argv[0]);
+            return 1;
+        }
+    }
+
 
     if (command == Command::Help) {
         printUsage(argv[0]);
@@ -181,14 +199,14 @@ int main(int argc, char* argv[]) {
     std::string sourceFile;
     std::string outputFile = "a.out";
     bool outputSpecified = false;
-    bool allowOutput = command == Command::Compile || command == Command::Run;
+    bool supportsOutputOption = command == Command::Compile || command == Command::Run;
     bool parsingRunArgs = false;
     std::vector<std::string> runArgs;
     
     // Parse command line arguments
     for (int i = argIndex; i < argc; i++) {
         std::string arg = argv[i];
-        if (command == Command::Run && arg == "--" && !parsingRunArgs) {
+        if (command == Command::Run && arg == "--") {
             parsingRunArgs = true;
             continue;
         }
@@ -201,7 +219,7 @@ int main(int argc, char* argv[]) {
             return 0;
         }
         if (!parsingRunArgs && arg == "-o") {
-            if (!allowOutput) {
+            if (!supportsOutputOption) {
                 std::cerr << "Error: -o is only supported for compile/run commands\n";
                 return 1;
             }
@@ -225,7 +243,7 @@ int main(int argc, char* argv[]) {
             return 1;
         } else if (sourceFile.empty()) {
             sourceFile = arg;
-        } else if (command == Command::Run) {
+        } else if (command == Command::Run && parsingRunArgs) {
             runArgs.push_back(arg);
         } else {
             std::cerr << "Error: multiple input files specified ('" << sourceFile
@@ -257,17 +275,21 @@ int main(int argc, char* argv[]) {
         omscript::Compiler compiler;
         compiler.compile(sourceFile, outputFile);
         if (command == Command::Run) {
+            std::filesystem::path runPath = std::filesystem::absolute(outputFile);
+            std::string runProgram = runPath.string();
             llvm::SmallVector<llvm::StringRef, 8> argRefs;
-            argRefs.push_back(outputFile);
+            argRefs.push_back(runProgram);
             for (const auto& arg : runArgs) {
                 argRefs.push_back(arg);
             }
-            int result = llvm::sys::ExecuteAndWait(outputFile, argRefs);
+            int result = llvm::sys::ExecuteAndWait(runProgram, argRefs);
             if (result < 0) {
-                std::cerr << "Error: failed to run program\n";
+                std::cerr << "Error: failed to execute program\n";
                 return 1;
             }
-            std::cout << "Program exited with code " << result << "\n";
+            if (result != 0) {
+                std::cout << "Program exited with code " << result << "\n";
+            }
             if (!outputSpecified) {
                 std::error_code ec;
                 std::filesystem::remove(outputFile, ec);
