@@ -1,5 +1,8 @@
 #include "codegen.h"
 #include <llvm/IR/Verifier.h>
+#include <llvm/IR/Intrinsics.h>
+#include <llvm/Config/llvm-config.h>
+#include <llvm/TargetParser/Triple.h>
 #include <llvm/IR/LegacyPassManager.h>
 #include <llvm/Support/FileSystem.h>
 #include <llvm/TargetParser/Host.h>
@@ -840,19 +843,39 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         stepVal = llvm::ConstantInt::get(*context, llvm::APInt(64, 1));
     }
     
+    llvm::Value* zero = llvm::ConstantInt::get(stepVal->getType(), 0, true);
+    
     // Create blocks
+    llvm::BasicBlock* stepCheckBB = llvm::BasicBlock::Create(*context, "forstepcheck", function);
+    llvm::BasicBlock* stepFailBB = llvm::BasicBlock::Create(*context, "forstepfail", function);
     llvm::BasicBlock* condBB = llvm::BasicBlock::Create(*context, "forcond", function);
     llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "forbody", function);
     llvm::BasicBlock* incBB = llvm::BasicBlock::Create(*context, "forinc", function);
     llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "forend", function);
     
-    builder->CreateBr(condBB);
+    builder->CreateBr(stepCheckBB);
     
-    // Condition block: check if iterator < end
+    builder->SetInsertPoint(stepCheckBB);
+    llvm::Value* stepNonZero = builder->CreateICmpNE(stepVal, zero, "stepnonzero");
+    builder->CreateCondBr(stepNonZero, condBB, stepFailBB);
+    
+    builder->SetInsertPoint(stepFailBB);
+    std::string errorMessage = "Runtime error: for-loop step cannot be zero for iterator '" +
+                               stmt->iteratorVar + "'\n";
+    llvm::Value* message = builder->CreateGlobalStringPtr(errorMessage);
+    builder->CreateCall(getPrintfFunction(), {message});
+    llvm::Function* trap = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::trap);
+    builder->CreateCall(trap);
+    builder->CreateUnreachable();
+    
+    // Condition block: check if iterator < end (forward) or > end (backward)
     builder->SetInsertPoint(condBB);
     llvm::Value* curVal = builder->CreateLoad(getDefaultType(), iterAlloca, stmt->iteratorVar.c_str());
-    llvm::Value* condBool = builder->CreateICmpSLT(curVal, endVal, "forcond");
-    builder->CreateCondBr(condBool, bodyBB, endBB);
+    llvm::Value* stepPositive = builder->CreateICmpSGT(stepVal, zero, "steppositive");
+    llvm::Value* forwardCond = builder->CreateICmpSLT(curVal, endVal, "forcond_lt");
+    llvm::Value* backwardCond = builder->CreateICmpSGT(curVal, endVal, "forcond_gt");
+    llvm::Value* continueCond = builder->CreateSelect(stepPositive, forwardCond, backwardCond, "forcond_range");
+    builder->CreateCondBr(continueCond, bodyBB, endBB);
     
     // Body block
     builder->SetInsertPoint(bodyBB);
@@ -897,15 +920,29 @@ void CodeGenerator::runOptimizationPasses() {
     llvm::legacy::PassManager mpm;
     
     // Add target-specific data layout
-    auto targetTriple = llvm::sys::getDefaultTargetTriple();
+    std::string targetTripleStr = llvm::sys::getDefaultTargetTriple();
+#if LLVM_VERSION_MAJOR >= 19
+    llvm::Triple targetTriple(targetTripleStr);
     module->setTargetTriple(targetTriple);
+#else
+    module->setTargetTriple(targetTripleStr);
+#endif
     
     std::string error;
+#if LLVM_VERSION_MAJOR >= 19
     auto target = llvm::TargetRegistry::lookupTarget(targetTriple, error);
+#else
+    auto target = llvm::TargetRegistry::lookupTarget(targetTripleStr, error);
+#endif
     if (target) {
         llvm::TargetOptions opt;
-        std::optional<llvm::Reloc::Model> RM;
+        // Use PIC to support default PIE linking on modern toolchains.
+        std::optional<llvm::Reloc::Model> RM = llvm::Reloc::PIC_;
+#if LLVM_VERSION_MAJOR >= 19
         auto targetMachine = target->createTargetMachine(targetTriple, "generic", "", opt, RM);
+#else
+        auto targetMachine = target->createTargetMachine(targetTripleStr, "generic", "", opt, RM);
+#endif
         if (targetMachine) {
             module->setDataLayout(targetMachine->createDataLayout());
         }
@@ -988,7 +1025,7 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     fpm.add(llvm::createCFGSimplificationPass());
     fpm.add(llvm::createDeadCodeEliminationPass());
     fpm.add(llvm::createLICMPass());
-    fpm.add(llvm::createLoopRotatePass());
+    // Loop rotation is omitted for compatibility with LLVM builds that lack the pass.
     fpm.add(llvm::createLoopStrengthReducePass());
     fpm.add(llvm::createLoopSimplifyPass());
     fpm.add(llvm::createLoopUnrollPass());
@@ -1017,11 +1054,20 @@ void CodeGenerator::writeObjectFile(const std::string& filename) {
     llvm::InitializeNativeTargetAsmPrinter();
     llvm::InitializeNativeTargetAsmParser();
     
-    auto targetTriple = llvm::sys::getDefaultTargetTriple();
+    std::string targetTripleStr = llvm::sys::getDefaultTargetTriple();
+#if LLVM_VERSION_MAJOR >= 19
+    llvm::Triple targetTriple(targetTripleStr);
     module->setTargetTriple(targetTriple);
+#else
+    module->setTargetTriple(targetTripleStr);
+#endif
     
     std::string error;
+#if LLVM_VERSION_MAJOR >= 19
     auto target = llvm::TargetRegistry::lookupTarget(targetTriple, error);
+#else
+    auto target = llvm::TargetRegistry::lookupTarget(targetTripleStr, error);
+#endif
     
     if (!target) {
         throw std::runtime_error("Failed to lookup target: " + error);
@@ -1031,8 +1077,13 @@ void CodeGenerator::writeObjectFile(const std::string& filename) {
     auto features = "";
     
     llvm::TargetOptions opt;
-    std::optional<llvm::Reloc::Model> RM;
+    // Use PIC to support default PIE linking on modern toolchains.
+    std::optional<llvm::Reloc::Model> RM = llvm::Reloc::PIC_;
+#if LLVM_VERSION_MAJOR >= 19
     auto targetMachine = target->createTargetMachine(targetTriple, CPU, features, opt, RM);
+#else
+    auto targetMachine = target->createTargetMachine(targetTripleStr, CPU, features, opt, RM);
+#endif
     
     module->setDataLayout(targetMachine->createDataLayout());
     

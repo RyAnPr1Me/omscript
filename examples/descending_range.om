@@ -1,0 +1,11 @@
+fn sum_down(start, end, step) {
+    var total = 0;
+    for (i in start...end...step) {
+        total = total + i;
+    }
+    return total;
+}
+
+fn main() {
+    return sum_down(5, 0, -1); // end is exclusive -> iterates 5,4,3,2,1 = 15
+}
