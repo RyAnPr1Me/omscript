@@ -236,7 +236,7 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
             
             case OpCode::STORE_VAR: {
                 std::string name = readString(bytecode, ip);
-                // STORE_VAR is an assignment expression: pop the value, store it, then push it back.
+                // STORE_VAR is an assignment expression: pop, store, then push to keep stack size stable.
                 Value value = pop();
                 setGlobal(name, value);
                 push(value);
@@ -268,8 +268,11 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
             
             case OpCode::RETURN:
                 // Return from current function, preserving the top of stack as the return value.
-                lastReturn = stack.empty() ? Value() : pop();
-                stack.clear();
+                {
+                    Value returnValue = stack.empty() ? Value() : pop();
+                    stack.clear();
+                    lastReturn = returnValue;
+                }
                 return;
             
             case OpCode::HALT:
