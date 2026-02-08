@@ -67,7 +67,7 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
             std::error_code ec;
             std::filesystem::remove(objFile, ec);
             if (ec) {
-                std::cerr << "Warning: failed to remove object file '" << objFile
+                std::cerr << "Warning: failed to clean up temporary object file '" << objFile
                           << "': " << ec.message() << "\n";
             }
         }

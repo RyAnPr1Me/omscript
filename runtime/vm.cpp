@@ -7,6 +7,8 @@
 
 namespace omscript {
 
+using BytecodeOffset = std::vector<uint8_t>::difference_type;
+
 VM::VM() : lastReturn() {}
 
 void VM::push(const Value& value) {
@@ -75,7 +77,6 @@ double VM::readFloat(const std::vector<uint8_t>& code, size_t& ip) {
 std::string VM::readString(const std::vector<uint8_t>& code, size_t& ip) {
     uint16_t length = readShort(code, ip);
     ensureReadable(code, ip, length);
-    using BytecodeOffset = std::vector<uint8_t>::difference_type;
     auto offset = static_cast<BytecodeOffset>(ip);
     auto begin = code.begin() + offset;
     auto end = begin + static_cast<BytecodeOffset>(length);
@@ -272,8 +273,8 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
                 // Return from current function, preserving the top of stack as the return value.
                 // If the stack is empty, return 0 to match compiler default return semantics.
                 {
-                    constexpr int64_t defaultReturnValue = 0;
-                    Value returnValue = stack.empty() ? Value(defaultReturnValue) : pop();
+                    constexpr int64_t emptyStackReturnValue = 0;
+                    Value returnValue = stack.empty() ? Value(emptyStackReturnValue) : pop();
                     stack.clear();
                     lastReturn = returnValue;
                 }
