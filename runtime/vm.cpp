@@ -3,10 +3,11 @@
 #include <stdexcept>
 #include <iostream>
 #include <cstring>
+#include <string>
 
 namespace omscript {
 
-VM::VM() {}
+VM::VM() : lastReturn() {}
 
 void VM::push(const Value& value) {
     stack.push_back(value);
@@ -22,42 +23,62 @@ Value VM::pop() {
 }
 
 Value VM::peek(int offset) {
+    if (offset < 0) {
+        throw std::runtime_error("Invalid stack offset");
+    }
     if (stack.size() <= static_cast<size_t>(offset)) {
         throw std::runtime_error("Stack underflow");
     }
     return stack[stack.size() - 1 - offset];
 }
 
+void VM::ensureReadable(const std::vector<uint8_t>& code, size_t ip, size_t count) {
+    if (ip + count > code.size()) {
+        throw std::runtime_error("Bytecode read out of bounds at ip " + std::to_string(ip));
+    }
+}
+
 uint8_t VM::readByte(const std::vector<uint8_t>& code, size_t& ip) {
+    ensureReadable(code, ip, 1);
     return code[ip++];
 }
 
 uint16_t VM::readShort(const std::vector<uint8_t>& code, size_t& ip) {
+    ensureReadable(code, ip, 2);
     uint8_t low = code[ip++];
     uint8_t high = code[ip++];
     return static_cast<uint16_t>(low) | (static_cast<uint16_t>(high) << 8);
 }
 
 int64_t VM::readInt(const std::vector<uint8_t>& code, size_t& ip) {
-    int64_t value;
-    std::memcpy(&value, &code[ip], sizeof(value));
-    ip += sizeof(value);
+    ensureReadable(code, ip, 8);
+    uint64_t raw = 0;
+    for (int i = 0; i < 8; i++) {
+        raw |= (static_cast<uint64_t>(code[ip++]) << (i * 8));
+    }
+    int64_t value = 0;
+    std::memcpy(&value, &raw, sizeof(value));
     return value;
 }
 
 double VM::readFloat(const std::vector<uint8_t>& code, size_t& ip) {
-    double value;
-    std::memcpy(&value, &code[ip], sizeof(value));
-    ip += sizeof(value);
+    ensureReadable(code, ip, 8);
+    uint64_t raw = 0;
+    for (int i = 0; i < 8; i++) {
+        raw |= (static_cast<uint64_t>(code[ip++]) << (i * 8));
+    }
+    double value = 0.0;
+    std::memcpy(&value, &raw, sizeof(value));
     return value;
 }
 
 std::string VM::readString(const std::vector<uint8_t>& code, size_t& ip) {
     uint16_t length = readShort(code, ip);
-    std::string str;
-    for (uint16_t i = 0; i < length; i++) {
-        str += static_cast<char>(code[ip++]);
-    }
+    ensureReadable(code, ip, length);
+    auto begin = code.begin() + static_cast<std::vector<uint8_t>::difference_type>(ip);
+    auto end = begin + static_cast<std::vector<uint8_t>::difference_type>(length);
+    std::string str(begin, end);
+    ip += length;
     return str;
 }
 
@@ -75,6 +96,8 @@ Value VM::getGlobal(const std::string& name) {
 
 void VM::execute(const std::vector<uint8_t>& bytecode) {
     size_t ip = 0;
+    stack.clear();
+    lastReturn = Value();
     
     while (ip < bytecode.size()) {
         OpCode op = static_cast<OpCode>(readByte(bytecode, ip));
@@ -213,35 +236,53 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
             
             case OpCode::STORE_VAR: {
                 std::string name = readString(bytecode, ip);
-                Value value = peek();
+                // STORE_VAR is an assignment expression: pop the value, store it, then push it back.
+                Value value = pop();
                 setGlobal(name, value);
+                push(value);
                 break;
             }
             
             case OpCode::JUMP: {
+                // Jump offsets are absolute bytecode positions.
                 uint16_t offset = readShort(bytecode, ip);
+                if (offset > bytecode.size()) {
+                    throw std::runtime_error("Jump offset out of bounds");
+                }
                 ip = offset;
                 break;
             }
             
             case OpCode::JUMP_IF_FALSE: {
+                // Jump offsets are absolute bytecode positions.
                 uint16_t offset = readShort(bytecode, ip);
                 Value condition = pop();
                 if (!condition.isTruthy()) {
+                    if (offset > bytecode.size()) {
+                        throw std::runtime_error("Jump offset out of bounds");
+                    }
                     ip = offset;
                 }
                 break;
             }
             
             case OpCode::RETURN:
-                // Return from current function
+                // Return from current function, preserving the top of stack as the return value.
+                lastReturn = stack.empty() ? Value() : pop();
+                stack.clear();
                 return;
             
             case OpCode::HALT:
+                lastReturn = Value();
+                stack.clear();
                 return;
             
+            case OpCode::CALL:
+                throw std::runtime_error("CALL opcode not implemented");
+            
             default:
-                throw std::runtime_error("Unknown opcode");
+                throw std::runtime_error("Unknown opcode " + std::to_string(static_cast<uint8_t>(op)) +
+                                         " at ip " + std::to_string(ip - 1));
         }
     }
 }

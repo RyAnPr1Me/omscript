@@ -350,6 +350,11 @@ void CodeGenerator::validateScopeStacksMatch(const char* location) {
     }
 }
 
+llvm::AllocaInst* CodeGenerator::createEntryBlockAlloca(llvm::Function* function, const std::string& name) {
+    llvm::IRBuilder<> entryBuilder(&function->getEntryBlock(), function->getEntryBlock().begin());
+    return entryBuilder.CreateAlloca(getDefaultType(), nullptr, name);
+}
+
 void CodeGenerator::generate(Program* program) {
     hasOptMaxFunctions = false;
     optMaxFunctions.clear();
@@ -425,7 +430,7 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     for (auto& param : func->parameters) {
         argIt->setName(param.name);
         
-        llvm::AllocaInst* alloca = builder->CreateAlloca(getDefaultType(), nullptr, param.name);
+        llvm::AllocaInst* alloca = createEntryBlockAlloca(function, param.name);
         builder->CreateStore(&(*argIt), alloca);
         bindVariable(param.name, alloca);
         
@@ -537,6 +542,35 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
 
 llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     llvm::Value* left = generateExpression(expr->left.get());
+    if (expr->op == "&&" || expr->op == "||") {
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
+        llvm::Value* leftBool = builder->CreateICmpNE(left, zero, "leftbool");
+        llvm::BasicBlock* rhsBB = llvm::BasicBlock::Create(*context, "logic.rhs", function);
+        llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "logic.cont", function);
+        if (expr->op == "&&") {
+            builder->CreateCondBr(leftBool, rhsBB, mergeBB);
+        } else {
+            builder->CreateCondBr(leftBool, mergeBB, rhsBB);
+        }
+        llvm::BasicBlock* leftBB = builder->GetInsertBlock();
+        builder->SetInsertPoint(rhsBB);
+        llvm::Value* right = generateExpression(expr->right.get());
+        llvm::Value* rightBool = builder->CreateICmpNE(right, zero, "rightbool");
+        builder->CreateBr(mergeBB);
+        llvm::BasicBlock* rightBB = builder->GetInsertBlock();
+        builder->SetInsertPoint(mergeBB);
+        llvm::PHINode* phi = builder->CreatePHI(llvm::Type::getInt1Ty(*context), 2, "boolphi");
+        if (expr->op == "&&") {
+            phi->addIncoming(llvm::ConstantInt::getFalse(*context), leftBB);
+            phi->addIncoming(rightBool, rightBB);
+        } else {
+            phi->addIncoming(llvm::ConstantInt::getTrue(*context), leftBB);
+            phi->addIncoming(rightBool, rightBB);
+        }
+        return builder->CreateZExt(phi, getDefaultType(), "booltmp");
+    }
+    
     llvm::Value* right = generateExpression(expr->right.get());
     
     // Constant folding optimization - if both operands are constants, compute at compile time
@@ -592,16 +626,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     } else if (expr->op == ">=") {
         llvm::Value* cmp = builder->CreateICmpSGE(left, right, "cmptmp");
         return builder->CreateZExt(cmp, getDefaultType(), "booltmp");
-    } else if (expr->op == "&&") {
-        llvm::Value* leftBool = builder->CreateICmpNE(left, llvm::ConstantInt::get(*context, llvm::APInt(64, 0)), "leftbool");
-        llvm::Value* rightBool = builder->CreateICmpNE(right, llvm::ConstantInt::get(*context, llvm::APInt(64, 0)), "rightbool");
-        llvm::Value* result = builder->CreateAnd(leftBool, rightBool, "andtmp");
-        return builder->CreateZExt(result, getDefaultType(), "booltmp");
-    } else if (expr->op == "||") {
-        llvm::Value* leftBool = builder->CreateICmpNE(left, llvm::ConstantInt::get(*context, llvm::APInt(64, 0)), "leftbool");
-        llvm::Value* rightBool = builder->CreateICmpNE(right, llvm::ConstantInt::get(*context, llvm::APInt(64, 0)), "rightbool");
-        llvm::Value* result = builder->CreateOr(leftBool, rightBool, "ortmp");
-        return builder->CreateZExt(result, getDefaultType(), "booltmp");
     }
     
     throw std::runtime_error("Unknown binary operator: " + expr->op);
@@ -613,7 +637,11 @@ llvm::Value* CodeGenerator::generateUnary(UnaryExpr* expr) {
     if (expr->op == "-") {
         return builder->CreateNeg(operand, "negtmp");
     } else if (expr->op == "!") {
-        llvm::Value* cmp = builder->CreateICmpEQ(operand, llvm::ConstantInt::get(*context, llvm::APInt(64, 0)), "nottmp");
+        llvm::Value* cmp = builder->CreateICmpEQ(
+            operand,
+            llvm::ConstantInt::get(getDefaultType(), 0, true),
+            "nottmp"
+        );
         return builder->CreateZExt(cmp, getDefaultType(), "booltmp");
     }
     
@@ -689,7 +717,11 @@ llvm::Value* CodeGenerator::generatePostfix(PostfixExpr* expr) {
 }
 
 void CodeGenerator::generateVarDecl(VarDecl* stmt) {
-    llvm::AllocaInst* alloca = builder->CreateAlloca(getDefaultType(), nullptr, stmt->name);
+    llvm::Function* function = builder->GetInsertBlock()->getParent();
+    if (!function) {
+        throw std::runtime_error("Variable declaration outside of function");
+    }
+    llvm::AllocaInst* alloca = createEntryBlockAlloca(function, stmt->name);
     bindVariable(stmt->name, alloca, stmt->isConst);
     
     if (stmt->initializer) {
@@ -713,7 +745,7 @@ void CodeGenerator::generateIf(IfStmt* stmt) {
     llvm::Value* condition = generateExpression(stmt->condition.get());
     llvm::Value* condBool = builder->CreateICmpNE(
         condition,
-        llvm::ConstantInt::get(*context, llvm::APInt(64, 0)),
+        llvm::ConstantInt::get(getDefaultType(), 0, true),
         "ifcond"
     );
     
@@ -763,7 +795,7 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
     llvm::Value* condition = generateExpression(stmt->condition.get());
     llvm::Value* condBool = builder->CreateICmpNE(
         condition,
-        llvm::ConstantInt::get(*context, llvm::APInt(64, 0)),
+        llvm::ConstantInt::get(getDefaultType(), 0, true),
         "whilecond"
     );
     builder->CreateCondBr(condBool, bodyBB, endBB);
@@ -783,11 +815,14 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
 
 void CodeGenerator::generateFor(ForStmt* stmt) {
     llvm::Function* function = builder->GetInsertBlock()->getParent();
+    if (!function) {
+        throw std::runtime_error("For loop outside of function");
+    }
     
     beginScope();
     
     // Allocate iterator variable
-    llvm::AllocaInst* iterAlloca = builder->CreateAlloca(getDefaultType(), nullptr, stmt->iteratorVar);
+    llvm::AllocaInst* iterAlloca = createEntryBlockAlloca(function, stmt->iteratorVar);
     bindVariable(stmt->iteratorVar, iterAlloca);
     
     // Initialize iterator

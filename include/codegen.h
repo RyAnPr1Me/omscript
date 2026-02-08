@@ -93,6 +93,7 @@ private:
     void bindVariable(const std::string& name, llvm::Value* value, bool isConst = false);
     void checkConstModification(const std::string& name, const std::string& action);
     void validateScopeStacksMatch(const char* location);
+    llvm::AllocaInst* createEntryBlockAlloca(llvm::Function* function, const std::string& name);
     
     // Optimization methods
     void runOptimizationPasses();

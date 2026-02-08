@@ -90,6 +90,7 @@ test_program "examples/break_continue.om" 10
 test_program "examples/scoping.om" 5
 test_program "examples/optmax.om" 10
 test_program "examples/postfix.om" 4
+test_program "examples/short_circuit.om" 1
 test_compile_fail "examples/const_fail.om"
 
 echo ""
