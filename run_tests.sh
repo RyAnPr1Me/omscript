@@ -85,6 +85,7 @@ test_program "examples/fibonacci.om" 55
 test_program "examples/arithmetic.om" 240
 test_program "examples/test.om" 84
 test_program "examples/optimized_loops.om" 5040
+test_program "examples/descending_range.om" 15
 test_program "examples/advanced.om" 16
 test_program "examples/break_continue.om" 10
 test_program "examples/scoping.om" 5
