@@ -249,7 +249,7 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
             case OpCode::JUMP: {
                 // Jump offsets are absolute bytecode positions.
                 uint16_t offset = readShort(bytecode, ip);
-                if (offset > bytecode.size()) {
+                if (offset >= bytecode.size()) {
                     throw std::runtime_error("Jump offset out of bounds");
                 }
                 ip = offset;
@@ -261,7 +261,7 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
                 uint16_t offset = readShort(bytecode, ip);
                 Value condition = pop();
                 if (!condition.isTruthy()) {
-                    if (offset > bytecode.size()) {
+                    if (offset >= bytecode.size()) {
                         throw std::runtime_error("Jump offset out of bounds");
                     }
                     ip = offset;

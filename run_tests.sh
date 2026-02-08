@@ -155,6 +155,7 @@ test_program "examples/postfix.om" 4
 test_program "examples/short_circuit.om" 1
 test_program "examples/div_zero.om" 1
 test_program "examples/mod_zero.om" 1
+test_program "examples/refcount_test.om" 97
 test_compile_fail "examples/const_fail.om"
 
 echo ""

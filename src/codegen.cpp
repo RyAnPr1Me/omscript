@@ -19,6 +19,7 @@
 #include <llvm/Transforms/IPO.h>
 #include <llvm/Analysis/TargetTransformInfo.h>
 #include <llvm/Passes/PassBuilder.h>
+#include <cmath>
 #include <stdexcept>
 #include <iostream>
 #include <optional>
@@ -110,6 +111,7 @@ std::unique_ptr<Expression> optimizeOptMaxBinary(const std::string& op,
         if (op == "-") return std::make_unique<LiteralExpr>(lval - rval);
         if (op == "*") return std::make_unique<LiteralExpr>(lval * rval);
         if (op == "/" && rval != 0.0) return std::make_unique<LiteralExpr>(lval / rval);
+        if (op == "%" && rval != 0.0) return std::make_unique<LiteralExpr>(std::fmod(lval, rval));
         if (op == "==") return std::make_unique<LiteralExpr>(static_cast<long long>(lval == rval));
         if (op == "!=") return std::make_unique<LiteralExpr>(static_cast<long long>(lval != rval));
         if (op == "<") return std::make_unique<LiteralExpr>(static_cast<long long>(lval < rval));
@@ -692,10 +694,11 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                                      expr->callee + "\"");
         }
     }
-    llvm::Function* callee = functions[expr->callee];
-    if (!callee) {
+    auto calleeIt = functions.find(expr->callee);
+    if (calleeIt == functions.end() || !calleeIt->second) {
         throw std::runtime_error("Unknown function: " + expr->callee);
     }
+    llvm::Function* callee = calleeIt->second;
     
     if (callee->arg_size() != expr->arguments.size()) {
         throw std::runtime_error("Incorrect number of arguments");

@@ -120,7 +120,7 @@ private:
     
     // Allocate string data using malloc
     static StringData* allocate(size_t length) {
-        size_t totalSize = sizeof(StringData) + length; // +1 for null terminator already in chars[1]
+        size_t totalSize = sizeof(StringData) + length; // sizeof includes 1 char; total storage = length + 1 bytes (content + terminator)
         StringData* sd = static_cast<StringData*>(std::malloc(totalSize));
         if (!sd) {
             throw std::bad_alloc();
