@@ -281,6 +281,9 @@ llvm::Type* CodeGenerator::getDefaultType() {
 }
 
 void CodeGenerator::beginScope() {
+    if (scopeStack.size() != constScopeStack.size()) {
+        throw std::runtime_error("Scope tracking mismatch in codegen");
+    }
     scopeStack.emplace_back();
     constScopeStack.emplace_back();
 }
@@ -302,7 +305,7 @@ void CodeGenerator::endScope() {
         }
     }
     scopeStack.pop_back();
-    
+
     auto& constScope = constScopeStack.back();
     for (const auto& entry : constScope) {
         if (entry.second.hadValue) {
