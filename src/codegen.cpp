@@ -281,23 +281,13 @@ llvm::Type* CodeGenerator::getDefaultType() {
 }
 
 void CodeGenerator::beginScope() {
-    if (scopeStack.size() != constScopeStack.size()) {
-        std::string location = __func__;
-        throw std::runtime_error("Scope tracking mismatch in codegen (" + location + "): values=" +
-                                 std::to_string(scopeStack.size()) + ", consts=" +
-                                 std::to_string(constScopeStack.size()));
-    }
+    validateScopeStacksMatch(__func__);
     scopeStack.emplace_back();
     constScopeStack.emplace_back();
 }
 
 void CodeGenerator::endScope() {
-    if (scopeStack.size() != constScopeStack.size()) {
-        std::string location = __func__;
-        throw std::runtime_error("Scope tracking mismatch in codegen (" + location + "): values=" +
-                                 std::to_string(scopeStack.size()) + ", consts=" +
-                                 std::to_string(constScopeStack.size()));
-    }
+    validateScopeStacksMatch(__func__);
     if (scopeStack.empty()) {
         return;
     }
@@ -346,12 +336,17 @@ void CodeGenerator::bindVariable(const std::string& name, llvm::Value* value, bo
 }
 
 void CodeGenerator::checkConstModification(const std::string& name, const std::string& action) {
-    if (namedValues.find(name) == namedValues.end()) {
-        throw std::runtime_error("Const check for unknown variable: " + name);
-    }
     auto constIt = constValues.find(name);
     if (constIt != constValues.end() && constIt->second) {
         throw std::runtime_error("Cannot " + action + " const variable: " + name);
+    }
+}
+
+void CodeGenerator::validateScopeStacksMatch(const char* location) {
+    if (scopeStack.size() != constScopeStack.size()) {
+        throw std::runtime_error("Scope tracking mismatch in codegen (" + std::string(location) + "): values=" +
+                                 std::to_string(scopeStack.size()) + ", consts=" +
+                                 std::to_string(constScopeStack.size()));
     }
 }
 

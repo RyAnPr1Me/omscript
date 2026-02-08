@@ -92,6 +92,7 @@ private:
     void endScope();
     void bindVariable(const std::string& name, llvm::Value* value, bool isConst = false);
     void checkConstModification(const std::string& name, const std::string& action);
+    void validateScopeStacksMatch(const char* location);
     
     // Optimization methods
     void runOptimizationPasses();
