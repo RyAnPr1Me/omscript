@@ -272,7 +272,6 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
                 // Return from current function, preserving the top of stack as the return value.
                 // If the stack is empty, return 0 to match compiler default return semantics.
                 {
-                    // Match compiler default return semantics when no explicit value is provided.
                     constexpr int64_t defaultReturnValue = 0;
                     Value returnValue = stack.empty() ? Value(defaultReturnValue) : pop();
                     stack.clear();
