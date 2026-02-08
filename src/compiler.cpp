@@ -61,9 +61,9 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
     // Write object file
     std::string objFile = outputFile + ".o";
     std::cout << "  Writing object file to " << objFile << "..." << std::endl;
-    bool shouldCleanupObject = false;
+    bool objectFileCreated = false;
     auto cleanupObject = [&]() {
-        if (shouldCleanupObject) {
+        if (objectFileCreated) {
             std::error_code ec;
             std::filesystem::remove(objFile, ec);
             if (ec) {
@@ -74,7 +74,7 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
     };
     
     try {
-        shouldCleanupObject = true;
+        objectFileCreated = true;
         codegen.writeObjectFile(objFile);
         
         // Link to create executable
