@@ -873,7 +873,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
 #if LLVM_VERSION_MAJOR >= 19
     llvm::FunctionCallee trap = llvm::Intrinsic::getOrInsertDeclaration(module.get(), llvm::Intrinsic::trap);
 #else
-    llvm::Function* trap = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::trap);
+    llvm::FunctionCallee trap = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::trap);
 #endif
     builder->CreateCall(trap);
     builder->CreateUnreachable();
