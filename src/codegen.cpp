@@ -282,7 +282,9 @@ llvm::Type* CodeGenerator::getDefaultType() {
 
 void CodeGenerator::beginScope() {
     if (scopeStack.size() != constScopeStack.size()) {
-        throw std::runtime_error("Scope tracking mismatch in codegen");
+        throw std::runtime_error("Scope tracking mismatch in codegen (beginScope): values=" +
+                                 std::to_string(scopeStack.size()) + ", consts=" +
+                                 std::to_string(constScopeStack.size()));
     }
     scopeStack.emplace_back();
     constScopeStack.emplace_back();
@@ -290,7 +292,9 @@ void CodeGenerator::beginScope() {
 
 void CodeGenerator::endScope() {
     if (scopeStack.size() != constScopeStack.size()) {
-        throw std::runtime_error("Scope tracking mismatch in codegen");
+        throw std::runtime_error("Scope tracking mismatch in codegen (endScope): values=" +
+                                 std::to_string(scopeStack.size()) + ", consts=" +
+                                 std::to_string(constScopeStack.size()));
     }
     if (scopeStack.empty()) {
         return;
