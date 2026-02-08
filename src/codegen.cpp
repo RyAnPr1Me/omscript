@@ -19,6 +19,7 @@
 #include <llvm/Transforms/IPO.h>
 #include <llvm/Analysis/TargetTransformInfo.h>
 #include <llvm/Passes/PassBuilder.h>
+#include <cmath>
 #include <stdexcept>
 #include <iostream>
 #include <optional>
@@ -110,6 +111,7 @@ std::unique_ptr<Expression> optimizeOptMaxBinary(const std::string& op,
         if (op == "-") return std::make_unique<LiteralExpr>(lval - rval);
         if (op == "*") return std::make_unique<LiteralExpr>(lval * rval);
         if (op == "/" && rval != 0.0) return std::make_unique<LiteralExpr>(lval / rval);
+        if (op == "%" && rval != 0.0) return std::make_unique<LiteralExpr>(std::fmod(lval, rval));
         if (op == "==") return std::make_unique<LiteralExpr>(static_cast<long long>(lval == rval));
         if (op == "!=") return std::make_unique<LiteralExpr>(static_cast<long long>(lval != rval));
         if (op == "<") return std::make_unique<LiteralExpr>(static_cast<long long>(lval < rval));
@@ -607,10 +609,39 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         return builder->CreateSub(left, right, "subtmp");
     } else if (expr->op == "*") {
         return builder->CreateMul(left, right, "multmp");
-    } else if (expr->op == "/") {
-        return builder->CreateSDiv(left, right, "divtmp");
-    } else if (expr->op == "%") {
-        return builder->CreateSRem(left, right, "modtmp");
+    } else if (expr->op == "/" || expr->op == "%") {
+        bool isDivision = expr->op == "/";
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
+        llvm::Value* isZero = builder->CreateICmpEQ(right, zero, "divzero");
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        const char* zeroName = isDivision ? "div.zero" : "mod.zero";
+        const char* opName = isDivision ? "div.op" : "mod.op";
+        llvm::BasicBlock* zeroBB = llvm::BasicBlock::Create(*context, zeroName, function);
+        llvm::BasicBlock* opBB = llvm::BasicBlock::Create(*context, opName, function);
+        builder->CreateCondBr(isZero, zeroBB, opBB);
+
+        builder->SetInsertPoint(zeroBB);
+        const char* messageText = isDivision ? "Runtime error: division by zero\n"
+                                             : "Runtime error: modulo by zero\n";
+        const char* messageName = isDivision ? "divzero_msg" : "modzero_msg";
+        llvm::Value* message = builder->CreateGlobalStringPtr(messageText, messageName);
+        builder->CreateCall(getPrintfFunction(), {message});
+        llvm::Function* exitFunction = module->getFunction("exit");
+        if (!exitFunction) {
+            auto exitType = llvm::FunctionType::get(llvm::Type::getVoidTy(*context),
+                                                    {llvm::Type::getInt32Ty(*context)},
+                                                    false);
+            exitFunction = llvm::Function::Create(exitType,
+                                                  llvm::Function::ExternalLinkage,
+                                                  "exit",
+                                                  module.get());
+        }
+        builder->CreateCall(exitFunction, {llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 1)});
+        builder->CreateUnreachable();
+
+        builder->SetInsertPoint(opBB);
+        return isDivision ? builder->CreateSDiv(left, right, "divtmp")
+                          : builder->CreateSRem(left, right, "modtmp");
     } else if (expr->op == "==") {
         llvm::Value* cmp = builder->CreateICmpEQ(left, right, "cmptmp");
         return builder->CreateZExt(cmp, getDefaultType(), "booltmp");
@@ -663,10 +694,11 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                                      expr->callee + "\"");
         }
     }
-    llvm::Function* callee = functions[expr->callee];
-    if (!callee) {
+    auto calleeIt = functions.find(expr->callee);
+    if (calleeIt == functions.end() || !calleeIt->second) {
         throw std::runtime_error("Unknown function: " + expr->callee);
     }
+    llvm::Function* callee = calleeIt->second;
     
     if (callee->arg_size() != expr->arguments.size()) {
         throw std::runtime_error("Incorrect number of arguments");

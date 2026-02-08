@@ -147,6 +147,25 @@ make
 # Compile a source file
 ./build/omsc source.om -o output
 
+# Run a source file (compile + execute)
+./build/omsc run source.om
+
+# Inspect tokens
+./build/omsc lex source.om
+
+# Parse and summarize the AST
+./build/omsc parse source.om
+
+# Emit LLVM IR (stdout or file)
+./build/omsc emit-ir source.om
+./build/omsc emit-ir source.om -o output.ll
+
+# Keep temporary outputs when running
+./build/omsc run source.om --keep-temps
+
+# Clean default outputs
+./build/omsc clean
+
 # Run the compiled program
 ./output
 ```

@@ -77,7 +77,68 @@ test_compile_fail() {
     return 1
 }
 
+test_cli_output() {
+    local name=$1
+    local expected=$2
+    local expected_exit=$3
+    shift 3
+    
+    if [ -z "$expected_exit" ]; then
+        expected_exit=0
+    fi
+    
+    echo -n "Testing $name... "
+    
+    local output
+    output=$("$@" 2>&1)
+    local status=$?
+    
+    if [ $status -ne $expected_exit ]; then
+        echo -e "${RED}✗ Failed (expected exit $expected_exit, got $status)${NC}"
+        echo "$output"
+        return 1
+    fi
+    
+    if [ -n "$expected" ] && ! echo "$output" | grep -q "$expected"; then
+        echo -e "${RED}✗ Failed (missing expected output)${NC}"
+        echo "$output"
+        return 1
+    fi
+    
+    echo -e "${GREEN}✓ Passed${NC}"
+    return 0
+}
+
 # Run tests
+echo "Running CLI tests:"
+echo "--------------------------------------------"
+test_cli_output "help" "Usage:" 0 ./build/omsc --help
+test_cli_output "version" "OmScript Compiler v1.0" 0 ./build/omsc version
+test_cli_output "lex" "FN" 0 ./build/omsc lex examples/test.om
+test_cli_output "parse" "Parsed program" 0 ./build/omsc parse examples/test.om
+test_cli_output "emit-ir" "define i64 @main" 0 ./build/omsc --emit-ir examples/exit_zero.om
+test_cli_output "output-empty" "Error: -o requires a valid output file name" 1 ./build/omsc run examples/exit_zero.om -o ""
+test_cli_output "run-success" "Compilation successful!" 0 ./build/omsc run examples/exit_zero.om
+test_cli_output "run" "Program exited with code 120" 120 ./build/omsc run examples/factorial.om
+if [ -f a.out ] || [ -f a.out.o ]; then
+    echo -e "${RED}✗ Failed (temporary output files not cleaned)${NC}"
+    rm -f a.out a.out.o
+    exit 1
+fi
+test_cli_output "run-keep-temps" "Compilation successful!" 0 ./build/omsc run --keep-temps examples/exit_zero.om
+if [ ! -f a.out ] || [ ! -f a.out.o ]; then
+    echo -e "${RED}✗ Failed (expected temporary outputs to remain)${NC}"
+    rm -f a.out a.out.o
+    exit 1
+fi
+test_cli_output "clean" "Cleaned outputs" 0 ./build/omsc clean
+if [ -f a.out ] || [ -f a.out.o ]; then
+    echo -e "${RED}✗ Failed (clean did not remove outputs)${NC}"
+    rm -f a.out a.out.o
+    exit 1
+fi
+echo ""
+
 echo "Running test programs:"
 echo "--------------------------------------------"
 test_program "examples/factorial.om" 120
@@ -92,6 +153,9 @@ test_program "examples/scoping.om" 5
 test_program "examples/optmax.om" 10
 test_program "examples/postfix.om" 4
 test_program "examples/short_circuit.om" 1
+test_program "examples/div_zero.om" 1
+test_program "examples/mod_zero.om" 1
+test_program "examples/refcount_test.om" 97
 test_compile_fail "examples/const_fail.om"
 
 echo ""
