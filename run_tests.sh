@@ -117,6 +117,7 @@ test_cli_output "version" "OmScript Compiler v1.0" 0 ./build/omsc version
 test_cli_output "lex" "FN" 0 ./build/omsc lex examples/test.om
 test_cli_output "parse" "Parsed program" 0 ./build/omsc parse examples/test.om
 test_cli_output "emit-ir" "define i64 @main" 0 ./build/omsc --emit-ir examples/exit_zero.om
+test_cli_output "output-empty" "Error: -o requires a valid output file name" 1 ./build/omsc run examples/exit_zero.om -o ""
 test_cli_output "run-success" "Compilation successful!" 0 ./build/omsc run examples/exit_zero.om
 test_cli_output "run" "Program exited with code 120" 120 ./build/omsc run examples/factorial.om
 if [ -f a.out ] || [ -f a.out.o ]; then
@@ -152,6 +153,8 @@ test_program "examples/scoping.om" 5
 test_program "examples/optmax.om" 10
 test_program "examples/postfix.om" 4
 test_program "examples/short_circuit.om" 1
+test_program "examples/div_zero.om" 1
+test_program "examples/mod_zero.om" 1
 test_compile_fail "examples/const_fail.om"
 
 echo ""

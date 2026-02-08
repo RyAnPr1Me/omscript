@@ -121,8 +121,11 @@ std::unique_ptr<Statement> Parser::parseStatement() {
     if (match(TokenType::RETURN)) return parseReturnStmt();
     if (match(TokenType::BREAK)) return parseBreakStmt();
     if (match(TokenType::CONTINUE)) return parseContinueStmt();
-    if (match(TokenType::VAR) || match(TokenType::CONST)) {
-        return parseVarDecl();
+    if (match(TokenType::VAR)) {
+        return parseVarDecl(false);
+    }
+    if (match(TokenType::CONST)) {
+        return parseVarDecl(true);
     }
     if (check(TokenType::LBRACE)) return parseBlock();
     
@@ -142,8 +145,7 @@ std::unique_ptr<Statement> Parser::parseBlock() {
     return std::make_unique<BlockStmt>(std::move(statements));
 }
 
-std::unique_ptr<Statement> Parser::parseVarDecl() {
-    bool isConst = tokens[current - 1].type == TokenType::CONST;
+std::unique_ptr<Statement> Parser::parseVarDecl(bool isConst) {
     Token name = consume(TokenType::IDENTIFIER, "Expected variable name");
     std::string typeName;
     if (match(TokenType::COLON)) {

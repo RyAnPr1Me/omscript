@@ -44,6 +44,7 @@ std::string readSourceFile(const std::string& filename) {
     }
     std::stringstream buffer;
     buffer << file.rdbuf();
+    file.close();
     return buffer.str();
 }
 
@@ -255,7 +256,8 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
             if (i + 1 < argc) {
-                if (argv[i + 1][0] == '-') {
+                const char* nextArg = argv[i + 1];
+                if (nextArg[0] == '\0' || nextArg[0] == '-') {
                     std::cerr << "Error: -o requires a valid output file name\n";
                     return 1;
                 }
@@ -333,6 +335,7 @@ int main(int argc, char* argv[]) {
             codegen.generate(program.get());
             if (outputFile.empty()) {
                 codegen.getModule()->print(llvm::outs(), nullptr);
+                llvm::outs().flush();
                 return 0;
             }
             std::error_code ec;

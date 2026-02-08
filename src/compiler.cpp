@@ -22,6 +22,7 @@ std::string Compiler::readFile(const std::string& filename) {
     
     std::stringstream buffer;
     buffer << file.rdbuf();
+    file.close();
     return buffer.str();
 }
 

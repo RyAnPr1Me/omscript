@@ -1,0 +1,6 @@
+fn main() {
+    var numerator = 10;
+    var denominator = 0;
+    var quotient = numerator / denominator;
+    return quotient;
+}
