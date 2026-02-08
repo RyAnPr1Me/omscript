@@ -843,6 +843,8 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         stepVal = llvm::ConstantInt::get(*context, llvm::APInt(64, 1));
     }
     
+    llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
+    
     // Create blocks
     llvm::BasicBlock* stepCheckBB = llvm::BasicBlock::Create(*context, "forstepcheck", function);
     llvm::BasicBlock* stepFailBB = llvm::BasicBlock::Create(*context, "forstepfail", function);
@@ -854,13 +856,12 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     builder->CreateBr(stepCheckBB);
     
     builder->SetInsertPoint(stepCheckBB);
-    llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
     llvm::Value* stepNonZero = builder->CreateICmpNE(stepVal, zero, "stepnonzero");
     builder->CreateCondBr(stepNonZero, condBB, stepFailBB);
     
     builder->SetInsertPoint(stepFailBB);
     llvm::Value* message = builder->CreateGlobalStringPtr("Runtime error: for loop step cannot be zero\n");
-    builder->CreateCall(getPrintfFunction(), message);
+    builder->CreateCall(getPrintfFunction(), {message});
     llvm::Function* trap = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::trap);
     builder->CreateCall(trap);
     builder->CreateUnreachable();
