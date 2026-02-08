@@ -333,7 +333,7 @@ void CodeGenerator::bindVariable(const std::string& name, llvm::Value* value, bo
         if (constScope.find(name) == constScope.end()) {
             auto existingConst = constValues.find(name);
             if (existingConst == constValues.end()) {
-                constScope[name] = {false, false};  // hadValue=false, previousIsConst unused.
+                constScope[name] = {false, false};  // hadValue=false, previousIsConst irrelevant (no previous binding).
             } else {
                 constScope[name] = {true, existingConst->second};
             }
@@ -344,6 +344,7 @@ void CodeGenerator::bindVariable(const std::string& name, llvm::Value* value, bo
 }
 
 void CodeGenerator::checkConstModification(const std::string& name, const std::string& action) {
+    // Caller must ensure the variable exists in namedValues before invoking this check.
     auto constIt = constValues.find(name);
     if (constIt != constValues.end() && constIt->second) {
         throw std::runtime_error("Cannot " + action + " const variable: " + name);
