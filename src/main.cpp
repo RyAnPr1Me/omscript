@@ -269,7 +269,7 @@ int main(int argc, char* argv[]) {
             std::cerr << "Error: unknown option '" << arg << "'\n";
             return 1;
         } else if (command == Command::Clean) {
-            std::cerr << "Error: clean does not accept input files\n";
+            std::cerr << "Error: clean does not accept input files (got '" << arg << "')\n";
             return 1;
         } else if (sourceFile.empty()) {
             sourceFile = arg;
