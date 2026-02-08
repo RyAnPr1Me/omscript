@@ -19,8 +19,6 @@
 #include <llvm/Transforms/IPO.h>
 #include <llvm/Analysis/TargetTransformInfo.h>
 #include <llvm/Passes/PassBuilder.h>
-#include <cmath>
-#include <limits>
 #include <stdexcept>
 #include <iostream>
 #include <optional>
@@ -841,10 +839,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     llvm::Value* stepVal;
     if (stmt->step) {
         if (auto* literal = dynamic_cast<LiteralExpr*>(stmt->step.get())) {
-            bool isZero = (literal->literalType == LiteralExpr::LiteralType::INTEGER && literal->intValue == 0) ||
-                          (literal->literalType == LiteralExpr::LiteralType::FLOAT &&
-                           std::abs(literal->floatValue) < std::numeric_limits<double>::epsilon());
-            if (isZero) {
+            if (literal->literalType == LiteralExpr::LiteralType::INTEGER && literal->intValue == 0) {
                 throw std::runtime_error("For loop step cannot be zero");
             }
         }
@@ -869,8 +864,9 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     builder->CreateCondBr(stepNonZero, condBB, stepFailBB);
     
     builder->SetInsertPoint(stepFailBB);
-    llvm::Value* message = builder->CreateGlobalStringPtr("Runtime error: for loop step cannot be zero\n");
-    builder->CreateCall(getPrintfFunction(), message);
+    llvm::Value* format = builder->CreateGlobalStringPtr("%s\n");
+    llvm::Value* message = builder->CreateGlobalStringPtr("Runtime error: for loop step cannot be zero");
+    builder->CreateCall(getPrintfFunction(), {format, message});
     llvm::Function* trap = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::trap);
     builder->CreateCall(trap);
     builder->CreateUnreachable();
