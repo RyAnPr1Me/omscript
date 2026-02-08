@@ -1,14 +1,137 @@
 #include "compiler.h"
+#include "lexer.h"
+#include "parser.h"
 #include <iostream>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
+#include <vector>
+#include <llvm/ADT/SmallVector.h>
+#include <llvm/Support/Program.h>
+
+namespace {
+
+constexpr const char* kCompilerVersion = "OmScript Compiler v1.0";
 
 void printUsage(const char* progName) {
-    std::cout << "OmScript Compiler v1.0\n";
-    std::cout << "Usage: " << progName << " <source.om> [-o output]\n";
+    std::cout << kCompilerVersion << "\n";
+    std::cout << "Usage:\n";
+    std::cout << "  " << progName << " <source.om> [-o output]\n";
+    std::cout << "  " << progName << " compile <source.om> [-o output]\n";
+    std::cout << "  " << progName << " run <source.om> [-o output] [-- args...]\n";
+    std::cout << "  " << progName << " lex <source.om>\n";
+    std::cout << "  " << progName << " parse <source.om>\n";
+    std::cout << "  " << progName << " version\n";
+    std::cout << "  " << progName << " help\n";
     std::cout << "\nOptions:\n";
     std::cout << "  -o <file>    Output file name (default: a.out)\n";
     std::cout << "  -h, --help   Show this help message\n";
+    std::cout << "  --version    Show compiler version\n";
 }
+
+std::string readSourceFile(const std::string& filename) {
+    std::ifstream file(filename);
+    if (!file.is_open()) {
+        throw std::runtime_error("Could not open file: " + filename);
+    }
+    std::stringstream buffer;
+    buffer << file.rdbuf();
+    return buffer.str();
+}
+
+const char* tokenTypeToString(omscript::TokenType type) {
+    switch (type) {
+        case omscript::TokenType::INTEGER: return "INTEGER";
+        case omscript::TokenType::FLOAT: return "FLOAT";
+        case omscript::TokenType::STRING: return "STRING";
+        case omscript::TokenType::IDENTIFIER: return "IDENTIFIER";
+        case omscript::TokenType::FN: return "FN";
+        case omscript::TokenType::RETURN: return "RETURN";
+        case omscript::TokenType::IF: return "IF";
+        case omscript::TokenType::ELSE: return "ELSE";
+        case omscript::TokenType::WHILE: return "WHILE";
+        case omscript::TokenType::FOR: return "FOR";
+        case omscript::TokenType::VAR: return "VAR";
+        case omscript::TokenType::CONST: return "CONST";
+        case omscript::TokenType::BREAK: return "BREAK";
+        case omscript::TokenType::CONTINUE: return "CONTINUE";
+        case omscript::TokenType::IN: return "IN";
+        case omscript::TokenType::OPTMAX_START: return "OPTMAX_START";
+        case omscript::TokenType::OPTMAX_END: return "OPTMAX_END";
+        case omscript::TokenType::PLUS: return "PLUS";
+        case omscript::TokenType::MINUS: return "MINUS";
+        case omscript::TokenType::STAR: return "STAR";
+        case omscript::TokenType::SLASH: return "SLASH";
+        case omscript::TokenType::PERCENT: return "PERCENT";
+        case omscript::TokenType::ASSIGN: return "ASSIGN";
+        case omscript::TokenType::EQ: return "EQ";
+        case omscript::TokenType::NE: return "NE";
+        case omscript::TokenType::LT: return "LT";
+        case omscript::TokenType::LE: return "LE";
+        case omscript::TokenType::GT: return "GT";
+        case omscript::TokenType::GE: return "GE";
+        case omscript::TokenType::AND: return "AND";
+        case omscript::TokenType::OR: return "OR";
+        case omscript::TokenType::NOT: return "NOT";
+        case omscript::TokenType::PLUSPLUS: return "PLUSPLUS";
+        case omscript::TokenType::MINUSMINUS: return "MINUSMINUS";
+        case omscript::TokenType::RANGE: return "RANGE";
+        case omscript::TokenType::LPAREN: return "LPAREN";
+        case omscript::TokenType::RPAREN: return "RPAREN";
+        case omscript::TokenType::LBRACE: return "LBRACE";
+        case omscript::TokenType::RBRACE: return "RBRACE";
+        case omscript::TokenType::LBRACKET: return "LBRACKET";
+        case omscript::TokenType::RBRACKET: return "RBRACKET";
+        case omscript::TokenType::SEMICOLON: return "SEMICOLON";
+        case omscript::TokenType::COMMA: return "COMMA";
+        case omscript::TokenType::COLON: return "COLON";
+        case omscript::TokenType::DOT: return "DOT";
+        case omscript::TokenType::END_OF_FILE: return "END_OF_FILE";
+        case omscript::TokenType::INVALID: return "INVALID";
+    }
+    return "UNKNOWN";
+}
+
+void printTokens(const std::vector<omscript::Token>& tokens) {
+    for (const auto& token : tokens) {
+        std::cout << token.line << ":" << token.column << " "
+                  << tokenTypeToString(token.type);
+        if (!token.lexeme.empty()) {
+            std::cout << " '" << token.lexeme << "'";
+        }
+        std::cout << "\n";
+    }
+}
+
+void printProgramSummary(const omscript::Program* program) {
+    std::cout << "Parsed program with " << program->functions.size()
+              << " function(s).\n";
+    if (program->functions.empty()) {
+        return;
+    }
+    std::cout << "Functions:\n";
+    for (const auto& fn : program->functions) {
+        std::cout << "  " << fn->name << "(";
+        for (size_t i = 0; i < fn->parameters.size(); ++i) {
+            const auto& param = fn->parameters[i];
+            std::cout << param.name;
+            if (!param.typeName.empty()) {
+                std::cout << ": " << param.typeName;
+            }
+            if (i + 1 < fn->parameters.size()) {
+                std::cout << ", ";
+            }
+        }
+        std::cout << ")";
+        if (fn->isOptMax) {
+            std::cout << " [OPTMAX]";
+        }
+        std::cout << "\n";
+    }
+}
+
+} // namespace
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
@@ -16,16 +139,72 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     
+    enum class Command {
+        Compile,
+        Run,
+        Lex,
+        Parse,
+        Help,
+        Version
+    };
+
+    int argIndex = 1;
+    std::string firstArg = argv[argIndex];
+    Command command = Command::Compile;
+    if (firstArg == "help" || firstArg == "-h" || firstArg == "--help") {
+        command = Command::Help;
+    } else if (firstArg == "version" || firstArg == "--version") {
+        command = Command::Version;
+    } else if (firstArg == "compile" || firstArg == "build") {
+        command = Command::Compile;
+        argIndex++;
+    } else if (firstArg == "run") {
+        command = Command::Run;
+        argIndex++;
+    } else if (firstArg == "lex" || firstArg == "tokens") {
+        command = Command::Lex;
+        argIndex++;
+    } else if (firstArg == "parse") {
+        command = Command::Parse;
+        argIndex++;
+    }
+
+    if (command == Command::Help) {
+        printUsage(argv[0]);
+        return 0;
+    }
+    if (command == Command::Version) {
+        std::cout << kCompilerVersion << "\n";
+        return 0;
+    }
+
     std::string sourceFile;
     std::string outputFile = "a.out";
     bool outputSpecified = false;
+    bool allowOutput = command == Command::Compile || command == Command::Run;
+    bool parsingRunArgs = false;
+    std::vector<std::string> runArgs;
     
     // Parse command line arguments
-    for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+    for (int i = argIndex; i < argc; i++) {
+        std::string arg = argv[i];
+        if (command == Command::Run && arg == "--" && !parsingRunArgs) {
+            parsingRunArgs = true;
+            continue;
+        }
+        if (!parsingRunArgs && (arg == "-h" || arg == "--help")) {
             printUsage(argv[0]);
             return 0;
-        } else if (strcmp(argv[i], "-o") == 0) {
+        }
+        if (!parsingRunArgs && arg == "--version") {
+            std::cout << kCompilerVersion << "\n";
+            return 0;
+        }
+        if (!parsingRunArgs && arg == "-o") {
+            if (!allowOutput) {
+                std::cerr << "Error: -o is only supported for compile/run commands\n";
+                return 1;
+            }
             if (outputSpecified) {
                 std::cerr << "Error: output file specified multiple times\n";
                 return 1;
@@ -41,14 +220,16 @@ int main(int argc, char* argv[]) {
                 std::cerr << "Error: -o requires an argument\n";
                 return 1;
             }
-        } else if (argv[i][0] == '-') {
-            std::cerr << "Error: unknown option '" << argv[i] << "'\n";
+        } else if (!parsingRunArgs && !arg.empty() && arg[0] == '-') {
+            std::cerr << "Error: unknown option '" << arg << "'\n";
             return 1;
         } else if (sourceFile.empty()) {
-            sourceFile = argv[i];
+            sourceFile = arg;
+        } else if (command == Command::Run) {
+            runArgs.push_back(arg);
         } else {
             std::cerr << "Error: multiple input files specified ('" << sourceFile
-                      << "' and '" << argv[i] << "')\n";
+                      << "' and '" << arg << "')\n";
             return 1;
         }
     }
@@ -60,8 +241,48 @@ int main(int argc, char* argv[]) {
     }
     
     try {
+        if (command == Command::Lex || command == Command::Parse) {
+            std::string source = readSourceFile(sourceFile);
+            omscript::Lexer lexer(source);
+            auto tokens = lexer.tokenize();
+            if (command == Command::Lex) {
+                printTokens(tokens);
+                return 0;
+            }
+            omscript::Parser parser(tokens);
+            auto program = parser.parse();
+            printProgramSummary(program.get());
+            return 0;
+        }
         omscript::Compiler compiler;
         compiler.compile(sourceFile, outputFile);
+        if (command == Command::Run) {
+            llvm::SmallVector<llvm::StringRef, 8> argRefs;
+            argRefs.push_back(outputFile);
+            for (const auto& arg : runArgs) {
+                argRefs.push_back(arg);
+            }
+            int result = llvm::sys::ExecuteAndWait(outputFile, argRefs);
+            if (result < 0) {
+                std::cerr << "Error: failed to run program\n";
+                return 1;
+            }
+            std::cout << "Program exited with code " << result << "\n";
+            if (!outputSpecified) {
+                std::error_code ec;
+                std::filesystem::remove(outputFile, ec);
+                if (ec) {
+                    std::cerr << "Warning: failed to remove temporary output file '"
+                              << outputFile << "': " << ec.message() << "\n";
+                }
+                std::filesystem::remove(outputFile + ".o", ec);
+                if (ec) {
+                    std::cerr << "Warning: failed to remove temporary object file '"
+                              << outputFile << ".o': " << ec.message() << "\n";
+                }
+            }
+            return result;
+        }
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << std::endl;

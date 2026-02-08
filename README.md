@@ -147,6 +147,15 @@ make
 # Compile a source file
 ./build/omsc source.om -o output
 
+# Run a source file (compile + execute)
+./build/omsc run source.om
+
+# Inspect tokens
+./build/omsc lex source.om
+
+# Parse and summarize the AST
+./build/omsc parse source.om
+
 # Run the compiled program
 ./output
 ```

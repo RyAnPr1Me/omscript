@@ -77,7 +77,48 @@ test_compile_fail() {
     return 1
 }
 
+test_cli_output() {
+    local name=$1
+    local expected=$2
+    local expected_exit=$3
+    shift 3
+    
+    if [ -z "$expected_exit" ]; then
+        expected_exit=0
+    fi
+    
+    echo -n "Testing $name... "
+    
+    local output
+    output=$("$@" 2>&1)
+    local status=$?
+    
+    if [ $status -ne $expected_exit ]; then
+        echo -e "${RED}✗ Failed (expected exit $expected_exit, got $status)${NC}"
+        echo "$output"
+        return 1
+    fi
+    
+    if [ -n "$expected" ] && ! echo "$output" | grep -q "$expected"; then
+        echo -e "${RED}✗ Failed (missing expected output)${NC}"
+        echo "$output"
+        return 1
+    fi
+    
+    echo -e "${GREEN}✓ Passed${NC}"
+    return 0
+}
+
 # Run tests
+echo "Running CLI tests:"
+echo "--------------------------------------------"
+test_cli_output "help" "Usage:" 0 ./build/omsc --help
+test_cli_output "version" "OmScript Compiler v1.0" 0 ./build/omsc version
+test_cli_output "lex" "FN" 0 ./build/omsc lex examples/test.om
+test_cli_output "parse" "Parsed program" 0 ./build/omsc parse examples/test.om
+test_cli_output "run" "Program exited with code 120" 120 ./build/omsc run examples/factorial.om
+echo ""
+
 echo "Running test programs:"
 echo "--------------------------------------------"
 test_program "examples/factorial.om" 120
