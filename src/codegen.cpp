@@ -837,6 +837,13 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     // Get step value (default to 1 if not specified)
     llvm::Value* stepVal;
     if (stmt->step) {
+        if (auto* literal = dynamic_cast<LiteralExpr*>(stmt->step.get())) {
+            bool isZero = (literal->literalType == LiteralExpr::LiteralType::INTEGER && literal->intValue == 0) ||
+                          (literal->literalType == LiteralExpr::LiteralType::FLOAT && literal->floatValue == 0.0);
+            if (isZero) {
+                throw std::runtime_error("For loop step cannot be zero");
+            }
+        }
         stepVal = generateExpression(stmt->step.get());
     } else {
         stepVal = llvm::ConstantInt::get(*context, llvm::APInt(64, 1));
