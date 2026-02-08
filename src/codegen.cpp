@@ -840,8 +840,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     if (stmt->step) {
         if (auto* literal = dynamic_cast<LiteralExpr*>(stmt->step.get())) {
             bool isZero = (literal->literalType == LiteralExpr::LiteralType::INTEGER && literal->intValue == 0) ||
-                          (literal->literalType == LiteralExpr::LiteralType::FLOAT &&
-                           static_cast<int64_t>(literal->floatValue) == 0);
+                          (literal->literalType == LiteralExpr::LiteralType::FLOAT && literal->floatValue == 0.0);
             if (isZero) {
                 throw std::runtime_error("For loop step cannot be zero");
             }
@@ -867,7 +866,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     builder->CreateCondBr(stepNonZero, condBB, stepFailBB);
     
     builder->SetInsertPoint(stepFailBB);
-    llvm::Value* message = builder->CreateGlobalStringPtr("Runtime error: for loop step cannot be zero\n");
+    llvm::Value* message = builder->CreateGlobalStringPtr("Runtime error: for loop step cannot be zero");
     builder->CreateCall(getPrintfFunction(), message);
     llvm::Function* trap = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::trap);
     builder->CreateCall(trap);
@@ -941,6 +940,7 @@ void CodeGenerator::runOptimizationPasses() {
 #endif
     if (target) {
         llvm::TargetOptions opt;
+        // Use PIC to support default PIE linking on modern toolchains.
         std::optional<llvm::Reloc::Model> RM = llvm::Reloc::PIC_;
 #if LLVM_VERSION_MAJOR >= 19
         auto targetMachine = target->createTargetMachine(targetTriple, "generic", "", opt, RM);
@@ -1080,6 +1080,7 @@ void CodeGenerator::writeObjectFile(const std::string& filename) {
     auto features = "";
     
     llvm::TargetOptions opt;
+    // Use PIC to support default PIE linking on modern toolchains.
     std::optional<llvm::Reloc::Model> RM = llvm::Reloc::PIC_;
 #if LLVM_VERSION_MAJOR >= 19
     auto targetMachine = target->createTargetMachine(targetTriple, CPU, features, opt, RM);
