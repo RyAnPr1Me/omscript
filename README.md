@@ -163,6 +163,9 @@ make
 # Keep temporary outputs when running
 ./build/omsc run source.om --keep-temps
 
+# Clean default outputs
+./build/omsc clean
+
 # Run the compiled program
 ./output
 ```

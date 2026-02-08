@@ -26,6 +26,7 @@ void printUsage(const char* progName) {
     std::cout << "  " << progName << " lex <source.om>\n";
     std::cout << "  " << progName << " parse <source.om>\n";
     std::cout << "  " << progName << " emit-ir <source.om> [-o output.ll]\n";
+    std::cout << "  " << progName << " clean [-o output]\n";
     std::cout << "  " << progName << " version\n";
     std::cout << "  " << progName << " help\n";
     std::cout << "\nOptions:\n";
@@ -151,6 +152,7 @@ int main(int argc, char* argv[]) {
         Lex,
         Parse,
         EmitIR,
+        Clean,
         Help,
         Version
     };
@@ -185,6 +187,10 @@ int main(int argc, char* argv[]) {
         command = Command::EmitIR;
         argIndex++;
         commandMatched = true;
+    } else if (firstArg == "clean") {
+        command = Command::Clean;
+        argIndex++;
+        commandMatched = true;
     }
 
     if (!commandMatched && !firstArg.empty() && firstArg[0] != '-') {
@@ -211,7 +217,7 @@ int main(int argc, char* argv[]) {
     std::string outputFile = command == Command::EmitIR ? "" : "a.out";
     bool outputSpecified = false;
     bool supportsOutputOption = command == Command::Compile || command == Command::Run ||
-                                command == Command::EmitIR;
+                                command == Command::EmitIR || command == Command::Clean;
     bool parsingRunArgs = false;
     bool keepTemps = false;
     std::vector<std::string> runArgs;
@@ -262,6 +268,9 @@ int main(int argc, char* argv[]) {
         } else if (!parsingRunArgs && !arg.empty() && arg[0] == '-') {
             std::cerr << "Error: unknown option '" << arg << "'\n";
             return 1;
+        } else if (command == Command::Clean) {
+            std::cerr << "Error: clean does not accept input files\n";
+            return 1;
         } else if (sourceFile.empty()) {
             sourceFile = arg;
         } else if (command == Command::Run && parsingRunArgs) {
@@ -273,6 +282,32 @@ int main(int argc, char* argv[]) {
         }
     }
     
+    if (command == Command::Clean) {
+        bool removedAny = false;
+        auto removeIfPresent = [&](const std::string& path) {
+            std::error_code ec;
+            if (!std::filesystem::exists(path, ec)) {
+                return;
+            }
+            if (std::filesystem::remove(path, ec)) {
+                removedAny = true;
+                return;
+            }
+            if (ec) {
+                std::cerr << "Warning: failed to remove '" << path << "': "
+                          << ec.message() << "\n";
+            }
+        };
+        removeIfPresent(outputFile);
+        removeIfPresent(outputFile + ".o");
+        if (removedAny) {
+            std::cout << "Cleaned outputs for " << outputFile << "\n";
+        } else {
+            std::cout << "Nothing to clean for " << outputFile << "\n";
+        }
+        return 0;
+    }
+
     if (sourceFile.empty()) {
         std::cerr << "Error: no input file specified\n";
         printUsage(argv[0]);
