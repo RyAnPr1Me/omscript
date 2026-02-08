@@ -860,7 +860,9 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     builder->CreateCondBr(stepNonZero, condBB, stepFailBB);
     
     builder->SetInsertPoint(stepFailBB);
-    llvm::Value* message = builder->CreateGlobalStringPtr("Runtime error: for-loop step cannot be zero\n");
+    std::string errorMessage = "Runtime error: for-loop step cannot be zero for iterator '" +
+                               stmt->iteratorVar + "'\n";
+    llvm::Value* message = builder->CreateGlobalStringPtr(errorMessage);
     builder->CreateCall(getPrintfFunction(), {message});
     llvm::Function* trap = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::trap);
     builder->CreateCall(trap);
@@ -1023,6 +1025,7 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     fpm.add(llvm::createCFGSimplificationPass());
     fpm.add(llvm::createDeadCodeEliminationPass());
     fpm.add(llvm::createLICMPass());
+    // Loop rotation is omitted for compatibility with LLVM builds that lack the pass.
     fpm.add(llvm::createLoopStrengthReducePass());
     fpm.add(llvm::createLoopSimplifyPass());
     fpm.add(llvm::createLoopUnrollPass());
