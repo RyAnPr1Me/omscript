@@ -156,6 +156,13 @@ make
 # Parse and summarize the AST
 ./build/omsc parse source.om
 
+# Emit LLVM IR (stdout or file)
+./build/omsc emit-ir source.om
+./build/omsc emit-ir source.om -o output.ll
+
+# Keep temporary outputs when running
+./build/omsc run source.om --keep-temps
+
 # Run the compiled program
 ./output
 ```

@@ -1,4 +1,5 @@
 #include "compiler.h"
+#include "codegen.h"
 #include "lexer.h"
 #include "parser.h"
 #include <iostream>
@@ -8,7 +9,9 @@
 #include <sstream>
 #include <vector>
 #include <llvm/ADT/SmallVector.h>
+#include <llvm/Support/FileSystem.h>
 #include <llvm/Support/Program.h>
+#include <llvm/Support/raw_ostream.h>
 
 namespace {
 
@@ -22,11 +25,14 @@ void printUsage(const char* progName) {
     std::cout << "  " << progName << " run <source.om> [-o output] [-- args...]\n";
     std::cout << "  " << progName << " lex <source.om>\n";
     std::cout << "  " << progName << " parse <source.om>\n";
+    std::cout << "  " << progName << " emit-ir <source.om> [-o output.ll]\n";
     std::cout << "  " << progName << " version\n";
     std::cout << "  " << progName << " help\n";
     std::cout << "\nOptions:\n";
-    std::cout << "  -o <file>    Output file name (default: a.out)\n";
+    std::cout << "  -o <file>    Output file name (default: a.out, stdout for emit-ir)\n";
     std::cout << "  -h, --help   Show this help message\n";
+    std::cout << "  --emit-ir    Emit LLVM IR (alias for emit-ir)\n";
+    std::cout << "  --keep-temps Keep temporary outputs when running\n";
     std::cout << "  --version    Show compiler version\n";
 }
 
@@ -144,6 +150,7 @@ int main(int argc, char* argv[]) {
         Run,
         Lex,
         Parse,
+        EmitIR,
         Help,
         Version
     };
@@ -174,6 +181,10 @@ int main(int argc, char* argv[]) {
         command = Command::Parse;
         argIndex++;
         commandMatched = true;
+    } else if (firstArg == "emit-ir" || firstArg == "ir" || firstArg == "--emit-ir") {
+        command = Command::EmitIR;
+        argIndex++;
+        commandMatched = true;
     }
 
     if (!commandMatched && !firstArg.empty() && firstArg[0] != '-') {
@@ -197,10 +208,12 @@ int main(int argc, char* argv[]) {
     }
 
     std::string sourceFile;
-    std::string outputFile = "a.out";
+    std::string outputFile = command == Command::EmitIR ? "" : "a.out";
     bool outputSpecified = false;
-    bool supportsOutputOption = command == Command::Compile || command == Command::Run;
+    bool supportsOutputOption = command == Command::Compile || command == Command::Run ||
+                                command == Command::EmitIR;
     bool parsingRunArgs = false;
+    bool keepTemps = false;
     std::vector<std::string> runArgs;
     
     // Parse command line arguments
@@ -218,9 +231,17 @@ int main(int argc, char* argv[]) {
             std::cout << kCompilerVersion << "\n";
             return 0;
         }
+        if (!parsingRunArgs && arg == "--keep-temps") {
+            if (command != Command::Run) {
+                std::cerr << "Error: --keep-temps is only supported for run commands\n";
+                return 1;
+            }
+            keepTemps = true;
+            continue;
+        }
         if (!parsingRunArgs && arg == "-o") {
             if (!supportsOutputOption) {
-                std::cerr << "Error: -o is only supported for compile/run commands\n";
+                std::cerr << "Error: -o is only supported for compile/run/emit-ir commands\n";
                 return 1;
             }
             if (outputSpecified) {
@@ -259,7 +280,7 @@ int main(int argc, char* argv[]) {
     }
     
     try {
-        if (command == Command::Lex || command == Command::Parse) {
+        if (command == Command::Lex || command == Command::Parse || command == Command::EmitIR) {
             std::string source = readSourceFile(sourceFile);
             omscript::Lexer lexer(source);
             auto tokens = lexer.tokenize();
@@ -269,7 +290,22 @@ int main(int argc, char* argv[]) {
             }
             omscript::Parser parser(tokens);
             auto program = parser.parse();
-            printProgramSummary(program.get());
+            if (command == Command::Parse) {
+                printProgramSummary(program.get());
+                return 0;
+            }
+            omscript::CodeGenerator codegen;
+            codegen.generate(program.get());
+            if (outputFile.empty()) {
+                codegen.getModule()->print(llvm::outs(), nullptr);
+                return 0;
+            }
+            std::error_code ec;
+            llvm::raw_fd_ostream out(outputFile, ec, llvm::sys::fs::OF_Text);
+            if (ec) {
+                throw std::runtime_error("Could not write IR to file: " + ec.message());
+            }
+            codegen.getModule()->print(out, nullptr);
             return 0;
         }
         omscript::Compiler compiler;
@@ -290,7 +326,7 @@ int main(int argc, char* argv[]) {
             if (result != 0) {
                 std::cout << "Program exited with code " << result << "\n";
             }
-            if (!outputSpecified) {
+            if (!outputSpecified && !keepTemps) {
                 std::error_code ec;
                 std::filesystem::remove(outputFile, ec);
                 if (ec) {

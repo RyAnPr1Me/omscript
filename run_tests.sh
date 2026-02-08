@@ -116,6 +116,7 @@ test_cli_output "help" "Usage:" 0 ./build/omsc --help
 test_cli_output "version" "OmScript Compiler v1.0" 0 ./build/omsc version
 test_cli_output "lex" "FN" 0 ./build/omsc lex examples/test.om
 test_cli_output "parse" "Parsed program" 0 ./build/omsc parse examples/test.om
+test_cli_output "emit-ir" "define i64 @main" 0 ./build/omsc --emit-ir examples/exit_zero.om
 test_cli_output "run-success" "Compilation successful!" 0 ./build/omsc run examples/exit_zero.om
 test_cli_output "run" "Program exited with code 120" 120 ./build/omsc run examples/factorial.om
 if [ -f a.out ] || [ -f a.out.o ]; then
@@ -123,6 +124,13 @@ if [ -f a.out ] || [ -f a.out.o ]; then
     rm -f a.out a.out.o
     exit 1
 fi
+test_cli_output "run-keep-temps" "Compilation successful!" 0 ./build/omsc run --keep-temps examples/exit_zero.om
+if [ ! -f a.out ] || [ ! -f a.out.o ]; then
+    echo -e "${RED}✗ Failed (expected temporary outputs to remain)${NC}"
+    rm -f a.out a.out.o
+    exit 1
+fi
+rm -f a.out a.out.o
 echo ""
 
 echo "Running test programs:"
