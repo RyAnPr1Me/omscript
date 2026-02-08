@@ -344,7 +344,7 @@ void CodeGenerator::bindVariable(const std::string& name, llvm::Value* value, bo
 }
 
 void CodeGenerator::checkConstModification(const std::string& name, const std::string& action) {
-    // Caller must ensure the variable exists in namedValues before invoking this check.
+    // Checks const state; callers should validate variable existence separately.
     auto constIt = constValues.find(name);
     if (constIt != constValues.end() && constIt->second) {
         throw std::runtime_error("Cannot " + action + " const variable: " + name);
