@@ -1,5 +1,6 @@
 #include "codegen.h"
 #include <llvm/IR/Verifier.h>
+#include <llvm/IR/Intrinsics.h>
 #include <llvm/Config/llvm-config.h>
 #include <llvm/TargetParser/Triple.h>
 #include <llvm/IR/LegacyPassManager.h>
@@ -850,24 +851,33 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     }
     
     // Create blocks
+    llvm::BasicBlock* stepCheckBB = llvm::BasicBlock::Create(*context, "forstepcheck", function);
+    llvm::BasicBlock* stepFailBB = llvm::BasicBlock::Create(*context, "forstepfail", function);
     llvm::BasicBlock* condBB = llvm::BasicBlock::Create(*context, "forcond", function);
     llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "forbody", function);
     llvm::BasicBlock* incBB = llvm::BasicBlock::Create(*context, "forinc", function);
     llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "forend", function);
     
-    builder->CreateBr(condBB);
+    builder->CreateBr(stepCheckBB);
+    
+    builder->SetInsertPoint(stepCheckBB);
+    llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
+    llvm::Value* stepNonZero = builder->CreateICmpNE(stepVal, zero, "stepnonzero");
+    builder->CreateCondBr(stepNonZero, condBB, stepFailBB);
+    
+    builder->SetInsertPoint(stepFailBB);
+    llvm::Function* trap = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::trap);
+    builder->CreateCall(trap);
+    builder->CreateUnreachable();
     
     // Condition block: check if iterator < end (forward) or > end (backward)
     builder->SetInsertPoint(condBB);
     llvm::Value* curVal = builder->CreateLoad(getDefaultType(), iterAlloca, stmt->iteratorVar.c_str());
-    llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
-    llvm::Value* stepNonZero = builder->CreateICmpNE(stepVal, zero, "stepnonzero");
     llvm::Value* stepPositive = builder->CreateICmpSGT(stepVal, zero, "steppositive");
     llvm::Value* forwardCond = builder->CreateICmpSLT(curVal, endVal, "forcond_lt");
     llvm::Value* backwardCond = builder->CreateICmpSGT(curVal, endVal, "forcond_gt");
     llvm::Value* rangeCond = builder->CreateSelect(stepPositive, forwardCond, backwardCond, "forcond_range");
-    llvm::Value* condBool = builder->CreateAnd(stepNonZero, rangeCond, "forcond");
-    builder->CreateCondBr(condBool, bodyBB, endBB);
+    builder->CreateCondBr(rangeCond, bodyBB, endBB);
     
     // Body block
     builder->SetInsertPoint(bodyBB);
