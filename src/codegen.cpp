@@ -286,7 +286,10 @@ void CodeGenerator::beginScope() {
 }
 
 void CodeGenerator::endScope() {
-    if (scopeStack.empty() || constScopeStack.empty()) {
+    if (scopeStack.size() != constScopeStack.size()) {
+        throw std::runtime_error("Scope tracking mismatch in codegen");
+    }
+    if (scopeStack.empty()) {
         return;
     }
     
@@ -332,6 +335,13 @@ void CodeGenerator::bindVariable(const std::string& name, llvm::Value* value, bo
     }
     namedValues[name] = value;
     constValues[name] = isConst;
+}
+
+void CodeGenerator::checkConstModification(const std::string& name, const std::string& action) {
+    auto constIt = constValues.find(name);
+    if (constIt != constValues.end() && constIt->second) {
+        throw std::runtime_error("Cannot " + action + " const variable: " + name);
+    }
 }
 
 void CodeGenerator::generate(Program* program) {
@@ -639,10 +649,7 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
     if (it == namedValues.end() || !it->second) {
         throw std::runtime_error("Unknown variable: " + expr->name);
     }
-    auto constIt = constValues.find(expr->name);
-    if (constIt != constValues.end() && constIt->second) {
-        throw std::runtime_error("Cannot assign to const variable: " + expr->name);
-    }
+    checkConstModification(expr->name, "assign to");
     
     builder->CreateStore(value, it->second);
     return value;
@@ -658,10 +665,7 @@ llvm::Value* CodeGenerator::generatePostfix(PostfixExpr* expr) {
     if (it == namedValues.end() || !it->second) {
         throw std::runtime_error("Unknown variable: " + identifier->name);
     }
-    auto constIt = constValues.find(identifier->name);
-    if (constIt != constValues.end() && constIt->second) {
-        throw std::runtime_error("Cannot modify const variable: " + identifier->name);
-    }
+    checkConstModification(identifier->name, "modify");
     
     llvm::Value* current = builder->CreateLoad(getDefaultType(), it->second, identifier->name.c_str());
     llvm::Value* delta = llvm::ConstantInt::get(getDefaultType(), 1, true);

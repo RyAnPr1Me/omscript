@@ -91,6 +91,7 @@ private:
     void beginScope();
     void endScope();
     void bindVariable(const std::string& name, llvm::Value* value, bool isConst = false);
+    void checkConstModification(const std::string& name, const std::string& action);
     
     // Optimization methods
     void runOptimizationPasses();
