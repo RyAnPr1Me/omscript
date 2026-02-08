@@ -7,5 +7,5 @@ fn sum_down(start, end, step) {
 }
 
 fn main() {
-    return sum_down(5, 0, -1); // range end is exclusive -> 5+4+3+2+1 = 15
+    return sum_down(5, 0, -1); // end is exclusive -> iterates 5,4,3,2,1 = 15
 }

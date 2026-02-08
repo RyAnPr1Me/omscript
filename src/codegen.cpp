@@ -838,11 +838,6 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     // Get step value (default to 1 if not specified)
     llvm::Value* stepVal;
     if (stmt->step) {
-        if (auto* literal = dynamic_cast<LiteralExpr*>(stmt->step.get())) {
-            if (literal->literalType == LiteralExpr::LiteralType::INTEGER && literal->intValue == 0) {
-                throw std::runtime_error("For loop step cannot be zero");
-            }
-        }
         stepVal = generateExpression(stmt->step.get());
     } else {
         stepVal = llvm::ConstantInt::get(*context, llvm::APInt(64, 1));
@@ -864,9 +859,8 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     builder->CreateCondBr(stepNonZero, condBB, stepFailBB);
     
     builder->SetInsertPoint(stepFailBB);
-    llvm::Value* format = builder->CreateGlobalStringPtr("%s\n");
-    llvm::Value* message = builder->CreateGlobalStringPtr("Runtime error: for loop step cannot be zero");
-    builder->CreateCall(getPrintfFunction(), {format, message});
+    llvm::Value* message = builder->CreateGlobalStringPtr("Runtime error: for loop step cannot be zero\n");
+    builder->CreateCall(getPrintfFunction(), message);
     llvm::Function* trap = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::trap);
     builder->CreateCall(trap);
     builder->CreateUnreachable();
