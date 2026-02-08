@@ -1,0 +1,6 @@
+fn main() {
+    var x = 1;
+    var y = x++;
+    var z = x--;
+    return x + y + z;
+}

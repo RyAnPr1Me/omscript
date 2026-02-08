@@ -53,6 +53,7 @@ class BytecodeEmitter {
 public:
     void emit(OpCode op);
     void emitByte(uint8_t byte);
+    // Bytecode is encoded in little-endian order for cross-platform stability.
     void emitInt(int64_t value);
     void emitFloat(double value);
     void emitString(const std::string& str);

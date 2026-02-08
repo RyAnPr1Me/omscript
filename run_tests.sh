@@ -60,6 +60,23 @@ test_program() {
     fi
 }
 
+test_compile_fail() {
+    local source=$1
+    local name=$(basename $source .om)
+    
+    echo -n "Testing $name (compile fail)... "
+    
+    ./build/omsc $source -o ${name}_fail > /dev/null 2>&1
+    if [ $? -ne 0 ]; then
+        echo -e "${GREEN}✓ Failed as expected${NC}"
+        return 0
+    fi
+    
+    echo -e "${RED}✗ Unexpected compile success${NC}"
+    rm -f ${name}_fail ${name}_fail.o
+    return 1
+}
+
 # Run tests
 echo "Running test programs:"
 echo "--------------------------------------------"
@@ -69,6 +86,12 @@ test_program "examples/arithmetic.om" 240
 test_program "examples/test.om" 84
 test_program "examples/optimized_loops.om" 5040
 test_program "examples/advanced.om" 16
+test_program "examples/break_continue.om" 10
+test_program "examples/scoping.om" 5
+test_program "examples/optmax.om" 10
+test_program "examples/postfix.om" 4
+test_program "examples/short_circuit.om" 1
+test_compile_fail "examples/const_fail.om"
 
 echo ""
 echo "============================================"

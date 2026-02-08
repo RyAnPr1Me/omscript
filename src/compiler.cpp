@@ -6,7 +6,9 @@
 #include <sstream>
 #include <iostream>
 #include <stdexcept>
-#include <cstdlib>
+#include <filesystem>
+#include <llvm/ADT/SmallVector.h>
+#include <llvm/Support/Program.h>
 
 namespace omscript {
 
@@ -59,15 +61,44 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
     // Write object file
     std::string objFile = outputFile + ".o";
     std::cout << "  Writing object file to " << objFile << "..." << std::endl;
-    codegen.writeObjectFile(objFile);
+    bool objectFileCreated = false;
+    auto cleanupObject = [&]() {
+        if (objectFileCreated) {
+            std::error_code ec;
+            std::filesystem::remove(objFile, ec);
+            if (ec) {
+                std::cerr << "Warning: failed to clean up temporary object file '" << objFile
+                          << "': " << ec.message() << "\n";
+            }
+        }
+    };
     
-    // Link to create executable
-    std::cout << "  Linking..." << std::endl;
-    std::string linkCmd = "gcc " + objFile + " -o " + outputFile;
-    int result = std::system(linkCmd.c_str());
-    
-    if (result != 0) {
-        throw std::runtime_error("Linking failed");
+    try {
+        objectFileCreated = true;
+        codegen.writeObjectFile(objFile);
+        
+        // Link to create executable
+        std::cout << "  Linking..." << std::endl;
+        auto gccPath = llvm::sys::findProgramByName("gcc");
+        if (!gccPath) {
+            throw std::runtime_error("Failed to locate gcc for linking");
+        }
+        std::string gccProgram = *gccPath;
+        std::vector<std::string> linkArgs = {objFile, "-o", outputFile};
+        llvm::SmallVector<llvm::StringRef, 8> argRefs;
+        argRefs.push_back(gccProgram);
+        for (const auto& arg : linkArgs) {
+            argRefs.push_back(arg);
+        }
+        int result = llvm::sys::ExecuteAndWait(gccProgram, argRefs);
+        
+        if (result != 0) {
+            cleanupObject();
+            throw std::runtime_error("Linking failed with exit code " + std::to_string(result));
+        }
+    } catch (...) {
+        cleanupObject();
+        throw;
     }
     
     std::cout << "Compilation successful! Output: " << outputFile << std::endl;

@@ -25,6 +25,8 @@ enum class TokenType {
     BREAK,
     CONTINUE,
     IN,
+    OPTMAX_START,
+    OPTMAX_END,
     
     // Operators
     PLUS,
@@ -55,6 +57,7 @@ enum class TokenType {
     RBRACKET,
     SEMICOLON,
     COMMA,
+    COLON,
     DOT,
     
     // Special

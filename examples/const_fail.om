@@ -1,0 +1,6 @@
+fn main() {
+    const x = 1;
+    var y = x + 1;
+    x = 2;
+    return y;
+}

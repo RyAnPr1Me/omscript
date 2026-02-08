@@ -1,5 +1,6 @@
 #include "lexer.h"
 #include <cctype>
+#include <stdexcept>
 #include <unordered_map>
 
 namespace omscript {
@@ -113,6 +114,8 @@ Token Lexer::scanIdentifier() {
 
 Token Lexer::scanString() {
     std::string str;
+    int startLine = line;
+    int startColumn = column;
     advance(); // Skip opening quote
     
     while (!isAtEnd() && peek() != '"') {
@@ -132,9 +135,13 @@ Token Lexer::scanString() {
         }
     }
     
-    if (!isAtEnd()) {
-        advance(); // Skip closing quote
+    if (isAtEnd()) {
+        throw std::runtime_error("Unterminated string literal at line " +
+                                 std::to_string(startLine) + ", column " +
+                                 std::to_string(startColumn));
     }
+    
+    advance(); // Skip closing quote
     
     return makeToken(TokenType::STRING, str);
 }
@@ -147,6 +154,23 @@ std::vector<Token> Lexer::tokenize() {
         if (isAtEnd()) break;
         
         char c = peek();
+
+        if (c == 'O') {
+            if (source.compare(pos, 8, "OPTMAX=:") == 0) {
+                for (int i = 0; i < 8; i++) {
+                    advance();
+                }
+                tokens.push_back(makeToken(TokenType::OPTMAX_START, "OPTMAX=:"));
+                continue;
+            }
+            if (source.compare(pos, 8, "OPTMAX!:") == 0) {
+                for (int i = 0; i < 8; i++) {
+                    advance();
+                }
+                tokens.push_back(makeToken(TokenType::OPTMAX_END, "OPTMAX!:"));
+                continue;
+            }
+        }
         
         // Numbers
         if (isdigit(c)) {
@@ -179,6 +203,8 @@ std::vector<Token> Lexer::tokenize() {
         }
         
         // Single character tokens
+        int tokenLine = line;
+        int tokenColumn = column;
         advance();
         switch (c) {
             case '+':
@@ -208,6 +234,7 @@ std::vector<Token> Lexer::tokenize() {
             case ']': tokens.push_back(makeToken(TokenType::RBRACKET, "]")); break;
             case ';': tokens.push_back(makeToken(TokenType::SEMICOLON, ";")); break;
             case ',': tokens.push_back(makeToken(TokenType::COMMA, ",")); break;
+            case ':': tokens.push_back(makeToken(TokenType::COLON, ":")); break;
             case '.': tokens.push_back(makeToken(TokenType::DOT, ".")); break;
             
             case '=':
@@ -251,7 +278,9 @@ std::vector<Token> Lexer::tokenize() {
                     advance();
                     tokens.push_back(makeToken(TokenType::AND, "&&"));
                 } else {
-                    tokens.push_back(makeToken(TokenType::INVALID, "&"));
+                    throw std::runtime_error("Unexpected character '&' at line " +
+                                             std::to_string(tokenLine) + ", column " +
+                                             std::to_string(tokenColumn));
                 }
                 break;
             
@@ -260,12 +289,16 @@ std::vector<Token> Lexer::tokenize() {
                     advance();
                     tokens.push_back(makeToken(TokenType::OR, "||"));
                 } else {
-                    tokens.push_back(makeToken(TokenType::INVALID, "|"));
+                    throw std::runtime_error("Unexpected character '|' at line " +
+                                             std::to_string(tokenLine) + ", column " +
+                                             std::to_string(tokenColumn));
                 }
                 break;
             
             default:
-                tokens.push_back(makeToken(TokenType::INVALID, std::string(1, c)));
+                throw std::runtime_error("Unexpected character '" + std::string(1, c) +
+                                         "' at line " + std::to_string(tokenLine) +
+                                         ", column " + std::to_string(tokenColumn));
                 break;
         }
     }

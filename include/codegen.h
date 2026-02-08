@@ -8,7 +8,9 @@
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Value.h>
 #include <unordered_map>
+#include <unordered_set>
 #include <memory>
+#include <vector>
 
 namespace omscript {
 
@@ -35,6 +37,23 @@ private:
     std::unique_ptr<llvm::Module> module;
     
     std::unordered_map<std::string, llvm::Value*> namedValues;
+    std::vector<std::unordered_map<std::string, llvm::Value*>> scopeStack;
+    
+    struct LoopContext {
+        llvm::BasicBlock* breakTarget;
+        llvm::BasicBlock* continueTarget;
+    };
+    std::vector<LoopContext> loopStack;
+    bool inOptMaxFunction;
+    bool hasOptMaxFunctions;
+    std::unordered_set<std::string> optMaxFunctions;
+    
+    struct ConstBinding {
+        bool wasPreviouslyDefined;
+        bool previousIsConst;
+    };
+    std::unordered_map<std::string, bool> constValues;
+    std::vector<std::unordered_map<std::string, ConstBinding>> constScopeStack;
     std::unordered_map<std::string, llvm::Function*> functions;
     
     // Bytecode emitter for dynamic code
@@ -54,6 +73,7 @@ private:
     llvm::Value* generateUnary(UnaryExpr* expr);
     llvm::Value* generateCall(CallExpr* expr);
     llvm::Value* generateAssign(AssignExpr* expr);
+    llvm::Value* generatePostfix(PostfixExpr* expr);
     
     // Statement generators
     void generateVarDecl(VarDecl* stmt);
@@ -68,10 +88,17 @@ private:
     llvm::Type* getDefaultType();
     void setupPrintfDeclaration();
     llvm::Function* getPrintfFunction();
+    void beginScope();
+    void endScope();
+    void bindVariable(const std::string& name, llvm::Value* value, bool isConst = false);
+    void checkConstModification(const std::string& name, const std::string& action);
+    void validateScopeStacksMatch(const char* location);
+    llvm::AllocaInst* createEntryBlockAlloca(llvm::Function* function, const std::string& name);
     
     // Optimization methods
     void runOptimizationPasses();
     void optimizeFunction(llvm::Function* func);
+    void optimizeOptMaxFunctions();
 };
 
 } // namespace omscript

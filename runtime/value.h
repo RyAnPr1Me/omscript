@@ -4,6 +4,7 @@
 #include "refcounted.h"
 #include <string>
 #include <variant>
+#include <stdexcept>
 
 namespace omscript {
 
@@ -123,9 +124,24 @@ public:
     
     Type getType() const { return type; }
     
-    int64_t asInt() const { return intValue; }
-    double asFloat() const { return floatValue; }
-    const char* asString() const { return stringValue.c_str(); }
+    int64_t asInt() const {
+        if (type != Type::INTEGER) {
+            throw std::runtime_error("Value is not an integer");
+        }
+        return intValue;
+    }
+    double asFloat() const {
+        if (type != Type::FLOAT) {
+            throw std::runtime_error("Value is not a float");
+        }
+        return floatValue;
+    }
+    const char* asString() const {
+        if (type != Type::STRING) {
+            throw std::runtime_error("Value is not a string");
+        }
+        return stringValue.c_str();
+    }
     
     bool isTruthy() const;
     std::string toString() const;

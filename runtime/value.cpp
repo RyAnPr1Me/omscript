@@ -5,6 +5,7 @@
 namespace omscript {
 
 bool Value::isTruthy() const {
+    // Truthiness: numbers are true when non-zero, strings when non-empty, and none is false.
     switch (type) {
         case Type::INTEGER:
             return intValue != 0;

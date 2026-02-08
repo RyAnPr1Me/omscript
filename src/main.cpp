@@ -18,6 +18,7 @@ int main(int argc, char* argv[]) {
     
     std::string sourceFile;
     std::string outputFile = "a.out";
+    bool outputSpecified = false;
     
     // Parse command line arguments
     for (int i = 1; i < argc; i++) {
@@ -25,16 +26,29 @@ int main(int argc, char* argv[]) {
             printUsage(argv[0]);
             return 0;
         } else if (strcmp(argv[i], "-o") == 0) {
+            if (outputSpecified) {
+                std::cerr << "Error: output file specified multiple times\n";
+                return 1;
+            }
             if (i + 1 < argc) {
+                if (argv[i + 1][0] == '-') {
+                    std::cerr << "Error: -o requires a valid output file name\n";
+                    return 1;
+                }
                 outputFile = argv[++i];
+                outputSpecified = true;
             } else {
                 std::cerr << "Error: -o requires an argument\n";
                 return 1;
             }
+        } else if (argv[i][0] == '-') {
+            std::cerr << "Error: unknown option '" << argv[i] << "'\n";
+            return 1;
         } else if (sourceFile.empty()) {
             sourceFile = argv[i];
         } else {
-            std::cerr << "Error: unexpected argument: " << argv[i] << "\n";
+            std::cerr << "Error: multiple input files specified ('" << sourceFile
+                      << "' and '" << argv[i] << "')\n";
             return 1;
         }
     }
