@@ -181,7 +181,7 @@ int main(int argc, char* argv[]) {
         command = Command::Parse;
         argIndex++;
         commandMatched = true;
-    } else if (firstArg == "emit-ir" || firstArg == "ir" || firstArg == "--emit-ir") {
+    } else if (firstArg == "emit-ir" || firstArg == "--emit-ir") {
         command = Command::EmitIR;
         argIndex++;
         commandMatched = true;
@@ -301,7 +301,7 @@ int main(int argc, char* argv[]) {
                 return 0;
             }
             std::error_code ec;
-            llvm::raw_fd_ostream out(outputFile, ec, llvm::sys::fs::OF_Text);
+            llvm::raw_fd_ostream out(outputFile, ec, llvm::sys::fs::OF_None);
             if (ec) {
                 throw std::runtime_error("Could not write IR to file: " + ec.message());
             }
