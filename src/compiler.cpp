@@ -66,6 +66,10 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
         if (shouldCleanupObject) {
             std::error_code ec;
             std::filesystem::remove(objFile, ec);
+            if (ec) {
+                std::cerr << "Warning: failed to remove object file '" << objFile
+                          << "': " << ec.message() << "\n";
+            }
         }
     };
     

@@ -47,7 +47,8 @@ int main(int argc, char* argv[]) {
         } else if (sourceFile.empty()) {
             sourceFile = argv[i];
         } else {
-            std::cerr << "Error: multiple input files specified\n";
+            std::cerr << "Error: multiple input files specified ('" << sourceFile
+                      << "' and '" << argv[i] << "')\n";
             return 1;
         }
     }

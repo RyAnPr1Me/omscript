@@ -237,7 +237,7 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
             
             case OpCode::STORE_VAR: {
                 std::string name = readString(bytecode, ip);
-                // STORE_VAR is an assignment expression: pop, store, then push to keep stack size stable.
+                // STORE_VAR now pops then pushes to avoid stack growth while preserving assignment semantics.
                 Value value = pop();
                 setGlobal(name, value);
                 push(value);
