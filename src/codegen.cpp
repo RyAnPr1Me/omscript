@@ -282,7 +282,8 @@ llvm::Type* CodeGenerator::getDefaultType() {
 
 void CodeGenerator::beginScope() {
     if (scopeStack.size() != constScopeStack.size()) {
-        throw std::runtime_error("Scope tracking mismatch in codegen (beginScope): values=" +
+        std::string location = __func__;
+        throw std::runtime_error("Scope tracking mismatch in codegen (" + location + "): values=" +
                                  std::to_string(scopeStack.size()) + ", consts=" +
                                  std::to_string(constScopeStack.size()));
     }
@@ -292,7 +293,8 @@ void CodeGenerator::beginScope() {
 
 void CodeGenerator::endScope() {
     if (scopeStack.size() != constScopeStack.size()) {
-        throw std::runtime_error("Scope tracking mismatch in codegen (endScope): values=" +
+        std::string location = __func__;
+        throw std::runtime_error("Scope tracking mismatch in codegen (" + location + "): values=" +
                                  std::to_string(scopeStack.size()) + ", consts=" +
                                  std::to_string(constScopeStack.size()));
     }
@@ -658,7 +660,7 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
     if (it == namedValues.end() || !it->second) {
         throw std::runtime_error("Unknown variable: " + expr->name);
     }
-    checkConstModification(expr->name, "assign to");
+    checkConstModification(expr->name, "modify");
     
     builder->CreateStore(value, it->second);
     return value;
