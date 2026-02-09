@@ -52,7 +52,7 @@ private:
     std::unique_ptr<Expression> parsePrimary();
     std::unique_ptr<Expression> parseArrayLiteral();
     
-    void error(const std::string& message);
+    [[noreturn]] void error(const std::string& message);
 };
 
 } // namespace omscript
