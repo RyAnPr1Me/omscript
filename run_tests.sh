@@ -115,10 +115,20 @@ echo "--------------------------------------------"
 test_cli_output "help" "Usage:" 0 ./build/omsc --help
 test_cli_output "version" "OmScript Compiler v1.0" 0 ./build/omsc version
 test_cli_output "lex" "FN" 0 ./build/omsc lex examples/test.om
+test_cli_output "lex-flag" "FN" 0 ./build/omsc --lex examples/test.om
 test_cli_output "parse" "Parsed program" 0 ./build/omsc parse examples/test.om
+test_cli_output "parse-flag" "Parsed program" 0 ./build/omsc --parse examples/test.om
 test_cli_output "emit-ir" "define i64 @main" 0 ./build/omsc --emit-ir examples/exit_zero.om
-test_cli_output "output-empty" "Error: -o requires a valid output file name" 1 ./build/omsc run examples/exit_zero.om -o ""
+test_cli_output "emit-ir-output-flag" "" 0 ./build/omsc emit-ir examples/exit_zero.om --output emit_ir_flag.ll
+if [ ! -f emit_ir_flag.ll ] || ! grep -q "define i64 @main" emit_ir_flag.ll; then
+    echo -e "${RED}✗ Failed (emit-ir output flag did not write file)${NC}"
+    rm -f emit_ir_flag.ll
+    exit 1
+fi
+rm -f emit_ir_flag.ll
+test_cli_output "output-empty" "Error: -o/--output requires a valid output file name" 1 ./build/omsc run examples/exit_zero.om -o ""
 test_cli_output "run-success" "Compilation successful!" 0 ./build/omsc run examples/exit_zero.om
+test_cli_output "run-flag" "Compilation successful!" 0 ./build/omsc --run examples/exit_zero.om
 test_cli_output "run" "Program exited with code 120" 120 ./build/omsc run examples/factorial.om
 if [ -f a.out ] || [ -f a.out.o ]; then
     echo -e "${RED}✗ Failed (temporary output files not cleaned)${NC}"

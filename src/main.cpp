@@ -30,11 +30,16 @@ void printUsage(const char* progName) {
     std::cout << "  " << progName << " version\n";
     std::cout << "  " << progName << " help\n";
     std::cout << "\nOptions:\n";
-    std::cout << "  -o <file>    Output file name (default: a.out, stdout for emit-ir)\n";
-    std::cout << "  -h, --help   Show this help message\n";
-    std::cout << "  --emit-ir    Emit LLVM IR (alias for emit-ir)\n";
-    std::cout << "  --keep-temps Keep temporary outputs when running\n";
-    std::cout << "  --version    Show compiler version\n";
+    std::cout << "  -o, --output <file>  Output file name (default: a.out, stdout for emit-ir)\n";
+    std::cout << "  -c, --compile        Compile a source file (default)\n";
+    std::cout << "  -r, --run            Compile and run a source file\n";
+    std::cout << "  -l, --lex            Print lexer tokens\n";
+    std::cout << "  -p, --parse          Parse and summarize the AST\n";
+    std::cout << "  -e, --emit-ir        Emit LLVM IR (alias for emit-ir)\n";
+    std::cout << "  --clean              Remove outputs (alias for clean)\n";
+    std::cout << "  -h, --help           Show this help message\n";
+    std::cout << "  --keep-temps         Keep temporary outputs when running\n";
+    std::cout << "  -v, --version        Show compiler version\n";
 }
 
 std::string readSourceFile(const std::string& filename) {
@@ -165,30 +170,32 @@ int main(int argc, char* argv[]) {
     if (firstArg == "help" || firstArg == "-h" || firstArg == "--help") {
         command = Command::Help;
         commandMatched = true;
-    } else if (firstArg == "version" || firstArg == "--version") {
+    } else if (firstArg == "version" || firstArg == "-v" || firstArg == "--version") {
         command = Command::Version;
         commandMatched = true;
-    } else if (firstArg == "compile" || firstArg == "build") {
+    } else if (firstArg == "compile" || firstArg == "build" || firstArg == "-c" ||
+               firstArg == "--compile") {
         command = Command::Compile;
         argIndex++;
         commandMatched = true;
-    } else if (firstArg == "run") {
+    } else if (firstArg == "run" || firstArg == "-r" || firstArg == "--run") {
         command = Command::Run;
         argIndex++;
         commandMatched = true;
-    } else if (firstArg == "lex" || firstArg == "tokens") {
+    } else if (firstArg == "lex" || firstArg == "tokens" || firstArg == "-l" ||
+               firstArg == "--lex") {
         command = Command::Lex;
         argIndex++;
         commandMatched = true;
-    } else if (firstArg == "parse") {
+    } else if (firstArg == "parse" || firstArg == "-p" || firstArg == "--parse") {
         command = Command::Parse;
         argIndex++;
         commandMatched = true;
-    } else if (firstArg == "emit-ir" || firstArg == "--emit-ir") {
+    } else if (firstArg == "emit-ir" || firstArg == "--emit-ir" || firstArg == "-e") {
         command = Command::EmitIR;
         argIndex++;
         commandMatched = true;
-    } else if (firstArg == "clean") {
+    } else if (firstArg == "clean" || firstArg == "--clean") {
         command = Command::Clean;
         argIndex++;
         commandMatched = true;
@@ -234,7 +241,7 @@ int main(int argc, char* argv[]) {
             printUsage(argv[0]);
             return 0;
         }
-        if (!parsingRunArgs && arg == "--version") {
+        if (!parsingRunArgs && (arg == "-v" || arg == "--version")) {
             std::cout << kCompilerVersion << "\n";
             return 0;
         }
@@ -246,9 +253,9 @@ int main(int argc, char* argv[]) {
             keepTemps = true;
             continue;
         }
-        if (!parsingRunArgs && arg == "-o") {
+        if (!parsingRunArgs && (arg == "-o" || arg == "--output")) {
             if (!supportsOutputOption) {
-                std::cerr << "Error: -o is only supported for compile/run/emit-ir commands\n";
+                std::cerr << "Error: -o/--output is only supported for compile/run/emit-ir commands\n";
                 return 1;
             }
             if (outputSpecified) {
@@ -258,13 +265,13 @@ int main(int argc, char* argv[]) {
             if (i + 1 < argc) {
                 const char* nextArg = argv[i + 1];
                 if (nextArg[0] == '\0' || nextArg[0] == '-') {
-                    std::cerr << "Error: -o requires a valid output file name\n";
+                    std::cerr << "Error: -o/--output requires a valid output file name\n";
                     return 1;
                 }
                 outputFile = argv[++i];
                 outputSpecified = true;
             } else {
-                std::cerr << "Error: -o requires an argument\n";
+                std::cerr << "Error: -o/--output requires an argument\n";
                 return 1;
             }
         } else if (!parsingRunArgs && !arg.empty() && arg[0] == '-') {

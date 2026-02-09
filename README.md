@@ -166,6 +166,11 @@ make
 # Clean default outputs
 ./build/omsc clean
 
+# Flag aliases (equivalent to the commands above)
+./build/omsc --lex source.om
+./build/omsc --run source.om
+./build/omsc emit-ir source.om --output output.ll
+
 # Run the compiled program
 ./output
 ```
