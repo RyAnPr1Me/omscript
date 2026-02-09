@@ -244,10 +244,10 @@ void optimizeOptMaxStatement(Statement* stmt) {
 namespace omscript {
 
 CodeGenerator::CodeGenerator(OptimizationLevel optLevel) 
-    : useDynamicCompilation(false),
-      optimizationLevel(optLevel),
-      inOptMaxFunction(false),
-      hasOptMaxFunctions(false) {
+    : inOptMaxFunction(false),
+      hasOptMaxFunctions(false),
+      useDynamicCompilation(false),
+      optimizationLevel(optLevel) {
     context = std::make_unique<llvm::LLVMContext>();
     module = std::make_unique<llvm::Module>("omscript", *context);
     builder = std::make_unique<llvm::IRBuilder<>>(*context);
@@ -701,7 +701,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     llvm::Function* callee = calleeIt->second;
     
     if (callee->arg_size() != expr->arguments.size()) {
-        throw std::runtime_error("Incorrect number of arguments");
+        throw std::runtime_error("Function '" + expr->callee + "' expects " +
+                                 std::to_string(callee->arg_size()) + " argument(s), but " +
+                                 std::to_string(expr->arguments.size()) + " provided");
     }
     
     std::vector<llvm::Value*> args;

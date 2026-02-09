@@ -5,7 +5,7 @@
 
 namespace omscript {
 
-static std::unordered_map<std::string, TokenType> keywords = {
+static const std::unordered_map<std::string, TokenType> keywords = {
     {"fn", TokenType::FN},
     {"return", TokenType::RETURN},
     {"if", TokenType::IF},
@@ -22,7 +22,7 @@ static std::unordered_map<std::string, TokenType> keywords = {
 Lexer::Lexer(const std::string& source)
     : source(source), pos(0), line(1), column(1) {}
 
-char Lexer::peek(int offset) {
+char Lexer::peek(int offset) const {
     size_t index = pos + offset;
     if (index >= source.length()) {
         return '\0';
@@ -42,7 +42,7 @@ char Lexer::advance() {
     return c;
 }
 
-bool Lexer::isAtEnd() {
+bool Lexer::isAtEnd() const {
     return pos >= source.length();
 }
 

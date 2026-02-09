@@ -68,7 +68,7 @@ public:
         : Expression(ASTNodeType::LITERAL_EXPR), literalType(LiteralType::FLOAT), floatValue(val) {}
     
     LiteralExpr(const std::string& val)
-        : Expression(ASTNodeType::LITERAL_EXPR), literalType(LiteralType::STRING), stringValue(val), intValue(0) {}
+        : Expression(ASTNodeType::LITERAL_EXPR), literalType(LiteralType::STRING), intValue(0), stringValue(val) {}
 };
 
 class IdentifierExpr : public Expression {

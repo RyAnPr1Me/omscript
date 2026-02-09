@@ -92,9 +92,9 @@ private:
     int line;
     int column;
     
-    char peek(int offset = 0);
+    char peek(int offset = 0) const;
     char advance();
-    bool isAtEnd();
+    bool isAtEnd() const;
     void skipWhitespace();
     void skipComment();
     

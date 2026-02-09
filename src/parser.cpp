@@ -7,7 +7,7 @@ namespace omscript {
 Parser::Parser(const std::vector<Token>& tokens)
     : tokens(tokens), current(0), inOptMaxFunction(false) {}
 
-Token Parser::peek(int offset) {
+Token Parser::peek(int offset) const {
     size_t index = current + offset;
     if (index >= tokens.size()) {
         return tokens.back();
@@ -22,7 +22,7 @@ Token Parser::advance() {
     return tokens[current - 1];
 }
 
-bool Parser::check(TokenType type) {
+bool Parser::check(TokenType type) const {
     if (isAtEnd()) return false;
     return peek().type == type;
 }
@@ -35,7 +35,7 @@ bool Parser::match(TokenType type) {
     return false;
 }
 
-bool Parser::isAtEnd() {
+bool Parser::isAtEnd() const {
     return peek().type == TokenType::END_OF_FILE;
 }
 
@@ -107,7 +107,13 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
     
     consume(TokenType::RPAREN, "Expected ')' after parameters");
     
-    auto body = std::unique_ptr<BlockStmt>(dynamic_cast<BlockStmt*>(parseBlock().release()));
+    auto blockStmt = parseBlock();
+    auto* blockPtr = dynamic_cast<BlockStmt*>(blockStmt.get());
+    if (!blockPtr) {
+        error("Expected block statement in function body");
+    }
+    blockStmt.release();
+    auto body = std::unique_ptr<BlockStmt>(blockPtr);
     
     inOptMaxFunction = savedOptMaxState;
     
