@@ -31,11 +31,11 @@ void printUsage(const char* progName) {
     std::cout << "  " << progName << " help\n";
     std::cout << "\nOptions:\n";
     std::cout << "  -o, --output <file>  Output file name (default: a.out, stdout for emit-ir)\n";
-    std::cout << "  -c, --compile        Compile a source file (default)\n";
+    std::cout << "  -b, -c, --build, --compile  Compile a source file (default)\n";
     std::cout << "  -r, --run            Compile and run a source file\n";
     std::cout << "  -l, --lex, --tokens  Print lexer tokens\n";
-    std::cout << "  -p, --parse          Parse and summarize the AST\n";
-    std::cout << "  -e, --emit-ir        Emit LLVM IR\n";
+    std::cout << "  -a, -p, --ast, --parse      Parse and summarize the AST\n";
+    std::cout << "  -e, -i, --emit-ir, --ir     Emit LLVM IR\n";
     std::cout << "  -C, --clean          Remove outputs\n";
     std::cout << "  -h, --help           Show this help message\n";
     std::cout << "  -k, --keep-temps     Keep temporary outputs when running\n";
@@ -174,7 +174,7 @@ int main(int argc, char* argv[]) {
         command = Command::Version;
         commandMatched = true;
     } else if (firstArg == "compile" || firstArg == "build" || firstArg == "-c" ||
-               firstArg == "--compile") {
+               firstArg == "-b" || firstArg == "--compile" || firstArg == "--build") {
         command = Command::Compile;
         argIndex++;
         commandMatched = true;
@@ -187,11 +187,13 @@ int main(int argc, char* argv[]) {
         command = Command::Lex;
         argIndex++;
         commandMatched = true;
-    } else if (firstArg == "parse" || firstArg == "-p" || firstArg == "--parse") {
+    } else if (firstArg == "parse" || firstArg == "-p" || firstArg == "-a" ||
+               firstArg == "--parse" || firstArg == "--ast") {
         command = Command::Parse;
         argIndex++;
         commandMatched = true;
-    } else if (firstArg == "emit-ir" || firstArg == "-e" || firstArg == "--emit-ir") {
+    } else if (firstArg == "emit-ir" || firstArg == "-e" || firstArg == "-i" ||
+               firstArg == "--emit-ir" || firstArg == "--ir") {
         command = Command::EmitIR;
         argIndex++;
         commandMatched = true;
