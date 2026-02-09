@@ -18,11 +18,11 @@ private:
     size_t current;
     bool inOptMaxFunction;
     
-    Token peek(int offset = 0);
+    Token peek(int offset = 0) const;
     Token advance();
-    bool check(TokenType type);
+    bool check(TokenType type) const;
     bool match(TokenType type);
-    bool isAtEnd();
+    bool isAtEnd() const;
     Token consume(TokenType type, const std::string& message);
     
     // Parsing methods
@@ -52,7 +52,7 @@ private:
     std::unique_ptr<Expression> parsePrimary();
     std::unique_ptr<Expression> parseArrayLiteral();
     
-    void error(const std::string& message);
+    [[noreturn]] void error(const std::string& message);
 };
 
 } // namespace omscript
