@@ -33,12 +33,12 @@ void printUsage(const char* progName) {
     std::cout << "  -o, --output <file>  Output file name (default: a.out, stdout for emit-ir)\n";
     std::cout << "  -c, --compile        Compile a source file (default)\n";
     std::cout << "  -r, --run            Compile and run a source file\n";
-    std::cout << "  -l, --lex            Print lexer tokens\n";
+    std::cout << "  -l, --lex, --tokens  Print lexer tokens\n";
     std::cout << "  -p, --parse          Parse and summarize the AST\n";
     std::cout << "  -e, --emit-ir        Emit LLVM IR\n";
     std::cout << "  -C, --clean          Remove outputs\n";
     std::cout << "  -h, --help           Show this help message\n";
-    std::cout << "  --keep-temps         Keep temporary outputs when running\n";
+    std::cout << "  -k, --keep-temps     Keep temporary outputs when running\n";
     std::cout << "  -v, --version        Show compiler version\n";
 }
 
@@ -183,7 +183,7 @@ int main(int argc, char* argv[]) {
         argIndex++;
         commandMatched = true;
     } else if (firstArg == "lex" || firstArg == "tokens" || firstArg == "-l" ||
-               firstArg == "--lex") {
+               firstArg == "--lex" || firstArg == "--tokens") {
         command = Command::Lex;
         argIndex++;
         commandMatched = true;
@@ -245,9 +245,9 @@ int main(int argc, char* argv[]) {
             std::cout << kCompilerVersion << "\n";
             return 0;
         }
-        if (!parsingRunArgs && arg == "--keep-temps") {
+        if (!parsingRunArgs && (arg == "-k" || arg == "--keep-temps")) {
             if (command != Command::Run) {
-                std::cerr << "Error: --keep-temps is only supported for run commands\n";
+                std::cerr << "Error: -k/--keep-temps is only supported for run commands\n";
                 return 1;
             }
             keepTemps = true;
