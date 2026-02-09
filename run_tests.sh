@@ -141,7 +141,7 @@ if [ ! -f a.out ] || [ ! -f a.out.o ]; then
     rm -f a.out a.out.o
     exit 1
 fi
-test_cli_output "clean" "Cleaned outputs" 0 ./build/omsc clean
+test_cli_output "clean" "Cleaned outputs" 0 ./build/omsc -C
 if [ -f a.out ] || [ -f a.out.o ]; then
     echo -e "${RED}✗ Failed (clean did not remove outputs)${NC}"
     rm -f a.out a.out.o

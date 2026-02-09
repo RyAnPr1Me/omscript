@@ -35,8 +35,8 @@ void printUsage(const char* progName) {
     std::cout << "  -r, --run            Compile and run a source file\n";
     std::cout << "  -l, --lex            Print lexer tokens\n";
     std::cout << "  -p, --parse          Parse and summarize the AST\n";
-    std::cout << "  -e, --emit-ir        Emit LLVM IR (alias for emit-ir)\n";
-    std::cout << "  --clean              Remove outputs (alias for clean)\n";
+    std::cout << "  -e, --emit-ir        Emit LLVM IR\n";
+    std::cout << "  -C, --clean          Remove outputs\n";
     std::cout << "  -h, --help           Show this help message\n";
     std::cout << "  --keep-temps         Keep temporary outputs when running\n";
     std::cout << "  -v, --version        Show compiler version\n";
@@ -191,11 +191,11 @@ int main(int argc, char* argv[]) {
         command = Command::Parse;
         argIndex++;
         commandMatched = true;
-    } else if (firstArg == "emit-ir" || firstArg == "--emit-ir" || firstArg == "-e") {
+    } else if (firstArg == "emit-ir" || firstArg == "-e" || firstArg == "--emit-ir") {
         command = Command::EmitIR;
         argIndex++;
         commandMatched = true;
-    } else if (firstArg == "clean" || firstArg == "--clean") {
+    } else if (firstArg == "clean" || firstArg == "-C" || firstArg == "--clean") {
         command = Command::Clean;
         argIndex++;
         commandMatched = true;
