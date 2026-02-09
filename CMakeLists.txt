@@ -47,7 +47,7 @@ set(RUNTIME_SOURCES
 add_executable(omsc ${COMPILER_SOURCES} ${RUNTIME_SOURCES})
 
 # Link LLVM libraries
-llvm_map_components_to_libnames(llvm_libs
+set(LLVM_COMPONENTS
     core
     executionengine
     mcjit
@@ -59,23 +59,26 @@ llvm_map_components_to_libnames(llvm_libs
     target
     transformutils
     analysis
-    x86codegen
-    x86asmparser
-    x86desc
-    x86info
-    aarch64codegen
-    aarch64asmparser
-    aarch64desc
-    aarch64info
-    armcodegen
-    armasmparser
-    armdesc
-    arminfo
     asmparser
     codegen
     mc
     mcparser
 )
+
+# Conditionally add target-specific components based on available LLVM targets
+if("X86" IN_LIST LLVM_TARGETS_TO_BUILD)
+    list(APPEND LLVM_COMPONENTS x86codegen x86asmparser x86desc x86info)
+endif()
+
+if("AArch64" IN_LIST LLVM_TARGETS_TO_BUILD)
+    list(APPEND LLVM_COMPONENTS aarch64codegen aarch64asmparser aarch64desc aarch64info)
+endif()
+
+if("ARM" IN_LIST LLVM_TARGETS_TO_BUILD)
+    list(APPEND LLVM_COMPONENTS armcodegen armasmparser armdesc arminfo)
+endif()
+
+llvm_map_components_to_libnames(llvm_libs ${LLVM_COMPONENTS})
 
 target_link_libraries(omsc ${llvm_libs})
 
