@@ -624,7 +624,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         const char* messageText = isDivision ? "Runtime error: division by zero\n"
                                              : "Runtime error: modulo by zero\n";
         const char* messageName = isDivision ? "divzero_msg" : "modzero_msg";
-        llvm::Value* message = builder->CreateGlobalStringPtr(messageText, messageName);
+        llvm::Value* message = builder->CreateGlobalString(messageText, messageName);
         builder->CreateCall(getPrintfFunction(), {message});
         llvm::Function* exitFunction = module->getFunction("exit");
         if (!exitFunction) {
