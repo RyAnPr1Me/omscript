@@ -700,7 +700,11 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                                      std::to_string(expr->arguments.size()) + " provided");
         }
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
-        llvm::Value* formatStr = builder->CreateGlobalString("%lld\n", "print_fmt");
+        // Reuse a single global format string across all print() calls
+        llvm::GlobalVariable* formatStr = module->getGlobalVariable("print_fmt", true);
+        if (!formatStr) {
+            formatStr = builder->CreateGlobalString("%lld\n", "print_fmt");
+        }
         builder->CreateCall(getPrintfFunction(), {formatStr, arg});
         return arg;
     }
