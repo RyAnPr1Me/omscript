@@ -126,8 +126,11 @@ OPTMAX!:
 - Arithmetic: `+`, `-`, `*`, `/`, `%`
 - Comparison: `==`, `!=`, `<`, `<=`, `>`, `>=`
 - Logical: `&&`, `||`, `!`
+- Bitwise: `&`, `|`, `^`, `~`, `<<`, `>>`
+- Ternary: `condition ? then_expr : else_expr`
 - Assignment: `=`
 - Compound Assignment: `+=`, `-=`, `*=`, `/=`, `%=`
+- Increment/Decrement: `++x`, `--x` (prefix), `x++`, `x--` (postfix)
 
 ### Comments
 ```omscript
