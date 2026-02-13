@@ -37,6 +37,8 @@ using omscript::CallExpr;
 using omscript::ArrayExpr;
 using omscript::IndexExpr;
 using omscript::PostfixExpr;
+using omscript::PrefixExpr;
+using omscript::TernaryExpr;
 using omscript::ExprStmt;
 using omscript::VarDecl;
 using omscript::ReturnStmt;
@@ -62,6 +64,9 @@ std::unique_ptr<Expression> optimizeOptMaxUnary(const std::string& op, std::uniq
         }
         if (op == "!") {
             return std::make_unique<LiteralExpr>(static_cast<long long>(value == 0));
+        }
+        if (op == "~") {
+            return std::make_unique<LiteralExpr>(~value);
         }
     } else if (literal->literalType == LiteralExpr::LiteralType::FLOAT) {
         double value = literal->floatValue;
@@ -104,6 +109,11 @@ std::unique_ptr<Expression> optimizeOptMaxBinary(const std::string& op,
         if (op == ">=") return std::make_unique<LiteralExpr>(static_cast<long long>(lval >= rval));
         if (op == "&&") return std::make_unique<LiteralExpr>(static_cast<long long>((lval != 0) && (rval != 0)));
         if (op == "||") return std::make_unique<LiteralExpr>(static_cast<long long>((lval != 0) || (rval != 0)));
+        if (op == "&") return std::make_unique<LiteralExpr>(lval & rval);
+        if (op == "|") return std::make_unique<LiteralExpr>(lval | rval);
+        if (op == "^") return std::make_unique<LiteralExpr>(lval ^ rval);
+        if (op == "<<") return std::make_unique<LiteralExpr>(lval << rval);
+        if (op == ">>") return std::make_unique<LiteralExpr>(lval >> rval);
     } else if (leftLiteral->literalType == LiteralExpr::LiteralType::FLOAT &&
                rightLiteral->literalType == LiteralExpr::LiteralType::FLOAT) {
         double lval = leftLiteral->floatValue;
@@ -171,6 +181,18 @@ std::unique_ptr<Expression> optimizeOptMaxExpression(std::unique_ptr<Expression>
         case ASTNodeType::POSTFIX_EXPR: {
             auto* postfix = static_cast<PostfixExpr*>(expr.get());
             postfix->operand = optimizeOptMaxExpression(std::move(postfix->operand));
+            return expr;
+        }
+        case ASTNodeType::PREFIX_EXPR: {
+            auto* prefix = static_cast<PrefixExpr*>(expr.get());
+            prefix->operand = optimizeOptMaxExpression(std::move(prefix->operand));
+            return expr;
+        }
+        case ASTNodeType::TERNARY_EXPR: {
+            auto* ternary = static_cast<TernaryExpr*>(expr.get());
+            ternary->condition = optimizeOptMaxExpression(std::move(ternary->condition));
+            ternary->thenExpr = optimizeOptMaxExpression(std::move(ternary->thenExpr));
+            ternary->elseExpr = optimizeOptMaxExpression(std::move(ternary->elseExpr));
             return expr;
         }
         default:
@@ -530,6 +552,10 @@ llvm::Value* CodeGenerator::generateExpression(Expression* expr) {
             return generateAssign(static_cast<AssignExpr*>(expr));
         case ASTNodeType::POSTFIX_EXPR:
             return generatePostfix(static_cast<PostfixExpr*>(expr));
+        case ASTNodeType::PREFIX_EXPR:
+            return generatePrefix(static_cast<PrefixExpr*>(expr));
+        case ASTNodeType::TERNARY_EXPR:
+            return generateTernary(static_cast<TernaryExpr*>(expr));
         default:
             throw std::runtime_error("Unknown expression type");
     }
@@ -609,6 +635,16 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             if (rval != 0) {
                 return llvm::ConstantInt::get(*context, llvm::APInt(64, lval % rval));
             }
+        } else if (expr->op == "&") {
+            return llvm::ConstantInt::get(*context, llvm::APInt(64, lval & rval));
+        } else if (expr->op == "|") {
+            return llvm::ConstantInt::get(*context, llvm::APInt(64, lval | rval));
+        } else if (expr->op == "^") {
+            return llvm::ConstantInt::get(*context, llvm::APInt(64, lval ^ rval));
+        } else if (expr->op == "<<") {
+            return llvm::ConstantInt::get(*context, llvm::APInt(64, lval << rval));
+        } else if (expr->op == ">>") {
+            return llvm::ConstantInt::get(*context, llvm::APInt(64, lval >> rval));
         }
     }
     
@@ -670,6 +706,16 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     } else if (expr->op == ">=") {
         llvm::Value* cmp = builder->CreateICmpSGE(left, right, "cmptmp");
         return builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+    } else if (expr->op == "&") {
+        return builder->CreateAnd(left, right, "andtmp");
+    } else if (expr->op == "|") {
+        return builder->CreateOr(left, right, "ortmp");
+    } else if (expr->op == "^") {
+        return builder->CreateXor(left, right, "xortmp");
+    } else if (expr->op == "<<") {
+        return builder->CreateShl(left, right, "shltmp");
+    } else if (expr->op == ">>") {
+        return builder->CreateAShr(left, right, "ashrtmp");
     }
     
     throw std::runtime_error("Unknown binary operator: " + expr->op);
@@ -687,6 +733,8 @@ llvm::Value* CodeGenerator::generateUnary(UnaryExpr* expr) {
             "nottmp"
         );
         return builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+    } else if (expr->op == "~") {
+        return builder->CreateNot(operand, "bitnottmp");
     }
     
     throw std::runtime_error("Unknown unary operator: " + expr->op);
@@ -777,6 +825,66 @@ llvm::Value* CodeGenerator::generatePostfix(PostfixExpr* expr) {
     
     builder->CreateStore(updated, it->second);
     return current;
+}
+
+llvm::Value* CodeGenerator::generatePrefix(PrefixExpr* expr) {
+    auto* identifier = dynamic_cast<IdentifierExpr*>(expr->operand.get());
+    if (!identifier) {
+        throw std::runtime_error("Prefix operators require an identifier");
+    }
+    
+    auto it = namedValues.find(identifier->name);
+    if (it == namedValues.end() || !it->second) {
+        throw std::runtime_error("Unknown variable: " + identifier->name);
+    }
+    checkConstModification(identifier->name, "modify");
+    
+    llvm::Value* current = builder->CreateLoad(getDefaultType(), it->second, identifier->name.c_str());
+    llvm::Value* delta = llvm::ConstantInt::get(getDefaultType(), 1, true);
+    llvm::Value* updated = nullptr;
+    if (expr->op == "++") {
+        updated = builder->CreateAdd(current, delta, "preinc");
+    } else if (expr->op == "--") {
+        updated = builder->CreateSub(current, delta, "predec");
+    } else {
+        throw std::runtime_error("Unknown prefix operator: " + expr->op);
+    }
+    
+    builder->CreateStore(updated, it->second);
+    return updated;
+}
+
+llvm::Value* CodeGenerator::generateTernary(TernaryExpr* expr) {
+    llvm::Value* condition = generateExpression(expr->condition.get());
+    llvm::Value* condBool = builder->CreateICmpNE(
+        condition,
+        llvm::ConstantInt::get(getDefaultType(), 0, true),
+        "terncond"
+    );
+    
+    llvm::Function* function = builder->GetInsertBlock()->getParent();
+    llvm::BasicBlock* thenBB = llvm::BasicBlock::Create(*context, "tern.then", function);
+    llvm::BasicBlock* elseBB = llvm::BasicBlock::Create(*context, "tern.else", function);
+    llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "tern.cont", function);
+    
+    builder->CreateCondBr(condBool, thenBB, elseBB);
+    
+    builder->SetInsertPoint(thenBB);
+    llvm::Value* thenVal = generateExpression(expr->thenExpr.get());
+    builder->CreateBr(mergeBB);
+    thenBB = builder->GetInsertBlock();
+    
+    builder->SetInsertPoint(elseBB);
+    llvm::Value* elseVal = generateExpression(expr->elseExpr.get());
+    builder->CreateBr(mergeBB);
+    elseBB = builder->GetInsertBlock();
+    
+    builder->SetInsertPoint(mergeBB);
+    llvm::PHINode* phi = builder->CreatePHI(getDefaultType(), 2, "ternval");
+    phi->addIncoming(thenVal, thenBB);
+    phi->addIncoming(elseVal, elseBB);
+    
+    return phi;
 }
 
 void CodeGenerator::generateVarDecl(VarDecl* stmt) {

@@ -1,0 +1,18 @@
+// Test ternary operator: condition ? then : else
+fn main() {
+    var a = 10;
+    var b = 20;
+
+    // Basic ternary
+    var max = (a > b) ? a : b;    // max = 20
+
+    // Nested ternary
+    var x = 5;
+    var sign = (x > 0) ? 1 : ((x < 0) ? -1 : 0);  // sign = 1
+
+    // Ternary in expressions
+    var result = 10 + ((a == 10) ? 3 : 7);  // result = 13
+
+    return max + sign + result;
+    // 20 + 1 + 13 = 34
+}

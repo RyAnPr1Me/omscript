@@ -270,7 +270,7 @@ std::unique_ptr<Expression> Parser::parseExpression() {
 }
 
 std::unique_ptr<Expression> Parser::parseAssignment() {
-    auto expr = parseLogicalOr();
+    auto expr = parseTernary();
     
     if (match(TokenType::ASSIGN)) {
         // Check if left side is an identifier
@@ -317,6 +317,19 @@ std::unique_ptr<Expression> Parser::parseAssignment() {
     return expr;
 }
 
+std::unique_ptr<Expression> Parser::parseTernary() {
+    auto expr = parseLogicalOr();
+    
+    if (match(TokenType::QUESTION)) {
+        auto thenExpr = parseExpression();
+        consume(TokenType::COLON, "Expected ':' in ternary expression");
+        auto elseExpr = parseTernary();
+        return std::make_unique<TernaryExpr>(std::move(expr), std::move(thenExpr), std::move(elseExpr));
+    }
+    
+    return expr;
+}
+
 std::unique_ptr<Expression> Parser::parseLogicalOr() {
     auto left = parseLogicalAnd();
     
@@ -330,9 +343,45 @@ std::unique_ptr<Expression> Parser::parseLogicalOr() {
 }
 
 std::unique_ptr<Expression> Parser::parseLogicalAnd() {
-    auto left = parseEquality();
+    auto left = parseBitwiseOr();
     
     while (match(TokenType::AND)) {
+        std::string op = tokens[current - 1].lexeme;
+        auto right = parseBitwiseOr();
+        left = std::make_unique<BinaryExpr>(op, std::move(left), std::move(right));
+    }
+    
+    return left;
+}
+
+std::unique_ptr<Expression> Parser::parseBitwiseOr() {
+    auto left = parseBitwiseXor();
+    
+    while (match(TokenType::PIPE)) {
+        std::string op = tokens[current - 1].lexeme;
+        auto right = parseBitwiseXor();
+        left = std::make_unique<BinaryExpr>(op, std::move(left), std::move(right));
+    }
+    
+    return left;
+}
+
+std::unique_ptr<Expression> Parser::parseBitwiseXor() {
+    auto left = parseBitwiseAnd();
+    
+    while (match(TokenType::CARET)) {
+        std::string op = tokens[current - 1].lexeme;
+        auto right = parseBitwiseAnd();
+        left = std::make_unique<BinaryExpr>(op, std::move(left), std::move(right));
+    }
+    
+    return left;
+}
+
+std::unique_ptr<Expression> Parser::parseBitwiseAnd() {
+    auto left = parseEquality();
+    
+    while (match(TokenType::AMPERSAND)) {
         std::string op = tokens[current - 1].lexeme;
         auto right = parseEquality();
         left = std::make_unique<BinaryExpr>(op, std::move(left), std::move(right));
@@ -354,10 +403,22 @@ std::unique_ptr<Expression> Parser::parseEquality() {
 }
 
 std::unique_ptr<Expression> Parser::parseComparison() {
-    auto left = parseAddition();
+    auto left = parseShift();
     
     while (match(TokenType::LT) || match(TokenType::LE) ||
            match(TokenType::GT) || match(TokenType::GE)) {
+        std::string op = tokens[current - 1].lexeme;
+        auto right = parseShift();
+        left = std::make_unique<BinaryExpr>(op, std::move(left), std::move(right));
+    }
+    
+    return left;
+}
+
+std::unique_ptr<Expression> Parser::parseShift() {
+    auto left = parseAddition();
+    
+    while (match(TokenType::LSHIFT) || match(TokenType::RSHIFT)) {
         std::string op = tokens[current - 1].lexeme;
         auto right = parseAddition();
         left = std::make_unique<BinaryExpr>(op, std::move(left), std::move(right));
@@ -391,10 +452,16 @@ std::unique_ptr<Expression> Parser::parseMultiplication() {
 }
 
 std::unique_ptr<Expression> Parser::parseUnary() {
-    if (match(TokenType::MINUS) || match(TokenType::NOT)) {
+    if (match(TokenType::MINUS) || match(TokenType::NOT) || match(TokenType::TILDE)) {
         std::string op = tokens[current - 1].lexeme;
         auto operand = parseUnary();
         return std::make_unique<UnaryExpr>(op, std::move(operand));
+    }
+    
+    if (match(TokenType::PLUSPLUS) || match(TokenType::MINUSMINUS)) {
+        std::string op = tokens[current - 1].lexeme;
+        auto operand = parseUnary();
+        return std::make_unique<PrefixExpr>(op, std::move(operand));
     }
     
     return parsePostfix();

@@ -52,6 +52,13 @@ enum class TokenType {
     STAR_ASSIGN,
     SLASH_ASSIGN,
     PERCENT_ASSIGN,
+    QUESTION,
+    AMPERSAND,
+    PIPE,
+    CARET,
+    TILDE,
+    LSHIFT,
+    RSHIFT,
     RANGE,
     
     // Delimiters

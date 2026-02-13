@@ -95,6 +95,13 @@ const char* tokenTypeToString(omscript::TokenType type) {
         case omscript::TokenType::STAR_ASSIGN: return "STAR_ASSIGN";
         case omscript::TokenType::SLASH_ASSIGN: return "SLASH_ASSIGN";
         case omscript::TokenType::PERCENT_ASSIGN: return "PERCENT_ASSIGN";
+        case omscript::TokenType::QUESTION: return "QUESTION";
+        case omscript::TokenType::AMPERSAND: return "AMPERSAND";
+        case omscript::TokenType::PIPE: return "PIPE";
+        case omscript::TokenType::CARET: return "CARET";
+        case omscript::TokenType::TILDE: return "TILDE";
+        case omscript::TokenType::LSHIFT: return "LSHIFT";
+        case omscript::TokenType::RSHIFT: return "RSHIFT";
         case omscript::TokenType::RANGE: return "RANGE";
         case omscript::TokenType::LPAREN: return "LPAREN";
         case omscript::TokenType::RPAREN: return "RPAREN";

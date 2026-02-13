@@ -41,10 +41,15 @@ private:
     
     std::unique_ptr<Expression> parseExpression();
     std::unique_ptr<Expression> parseAssignment();
+    std::unique_ptr<Expression> parseTernary();
     std::unique_ptr<Expression> parseLogicalOr();
     std::unique_ptr<Expression> parseLogicalAnd();
+    std::unique_ptr<Expression> parseBitwiseOr();
+    std::unique_ptr<Expression> parseBitwiseXor();
+    std::unique_ptr<Expression> parseBitwiseAnd();
     std::unique_ptr<Expression> parseEquality();
     std::unique_ptr<Expression> parseComparison();
+    std::unique_ptr<Expression> parseShift();
     std::unique_ptr<Expression> parseAddition();
     std::unique_ptr<Expression> parseMultiplication();
     std::unique_ptr<Expression> parseUnary();

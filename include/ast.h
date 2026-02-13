@@ -28,6 +28,8 @@ enum class ASTNodeType {
     IDENTIFIER_EXPR,
     ASSIGN_EXPR,
     POSTFIX_EXPR,
+    PREFIX_EXPR,
+    TERNARY_EXPR,
     ARRAY_EXPR,
     INDEX_EXPR
 };
@@ -124,6 +126,25 @@ public:
     
     PostfixExpr(const std::string& o, std::unique_ptr<Expression> opnd)
         : Expression(ASTNodeType::POSTFIX_EXPR), op(o), operand(std::move(opnd)) {}
+};
+
+class PrefixExpr : public Expression {
+public:
+    std::string op;  // ++ or --
+    std::unique_ptr<Expression> operand;
+    
+    PrefixExpr(const std::string& o, std::unique_ptr<Expression> opnd)
+        : Expression(ASTNodeType::PREFIX_EXPR), op(o), operand(std::move(opnd)) {}
+};
+
+class TernaryExpr : public Expression {
+public:
+    std::unique_ptr<Expression> condition;
+    std::unique_ptr<Expression> thenExpr;
+    std::unique_ptr<Expression> elseExpr;
+    
+    TernaryExpr(std::unique_ptr<Expression> cond, std::unique_ptr<Expression> thenE, std::unique_ptr<Expression> elseE)
+        : Expression(ASTNodeType::TERNARY_EXPR), condition(std::move(cond)), thenExpr(std::move(thenE)), elseExpr(std::move(elseE)) {}
 };
 
 class ArrayExpr : public Expression {

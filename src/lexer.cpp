@@ -284,6 +284,7 @@ std::vector<Token> Lexer::tokenize() {
             case ';': tokens.push_back(makeToken(TokenType::SEMICOLON, ";")); break;
             case ',': tokens.push_back(makeToken(TokenType::COMMA, ",")); break;
             case ':': tokens.push_back(makeToken(TokenType::COLON, ":")); break;
+            case '?': tokens.push_back(makeToken(TokenType::QUESTION, "?")); break;
             case '.': tokens.push_back(makeToken(TokenType::DOT, ".")); break;
             
             case '=':
@@ -308,6 +309,9 @@ std::vector<Token> Lexer::tokenize() {
                 if (peek() == '=') {
                     advance();
                     tokens.push_back(makeToken(TokenType::LE, "<="));
+                } else if (peek() == '<') {
+                    advance();
+                    tokens.push_back(makeToken(TokenType::LSHIFT, "<<"));
                 } else {
                     tokens.push_back(makeToken(TokenType::LT, "<"));
                 }
@@ -317,6 +321,9 @@ std::vector<Token> Lexer::tokenize() {
                 if (peek() == '=') {
                     advance();
                     tokens.push_back(makeToken(TokenType::GE, ">="));
+                } else if (peek() == '>') {
+                    advance();
+                    tokens.push_back(makeToken(TokenType::RSHIFT, ">>"));
                 } else {
                     tokens.push_back(makeToken(TokenType::GT, ">"));
                 }
@@ -327,9 +334,7 @@ std::vector<Token> Lexer::tokenize() {
                     advance();
                     tokens.push_back(makeToken(TokenType::AND, "&&"));
                 } else {
-                    throw std::runtime_error("Unexpected character '&' at line " +
-                                             std::to_string(tokenLine) + ", column " +
-                                             std::to_string(tokenColumn));
+                    tokens.push_back(makeToken(TokenType::AMPERSAND, "&"));
                 }
                 break;
             
@@ -338,10 +343,16 @@ std::vector<Token> Lexer::tokenize() {
                     advance();
                     tokens.push_back(makeToken(TokenType::OR, "||"));
                 } else {
-                    throw std::runtime_error("Unexpected character '|' at line " +
-                                             std::to_string(tokenLine) + ", column " +
-                                             std::to_string(tokenColumn));
+                    tokens.push_back(makeToken(TokenType::PIPE, "|"));
                 }
+                break;
+            
+            case '^':
+                tokens.push_back(makeToken(TokenType::CARET, "^"));
+                break;
+            
+            case '~':
+                tokens.push_back(makeToken(TokenType::TILDE, "~"));
                 break;
             
             default:

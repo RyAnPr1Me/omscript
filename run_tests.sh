@@ -118,6 +118,8 @@ test_cli_output "lex" "FN" 0 ./build/omsc lex examples/test.om
 test_cli_output "lex-flag" "FN" 0 ./build/omsc --lex examples/test.om
 test_cli_output "lex-compound-ops" "PLUS_ASSIGN" 0 ./build/omsc lex examples/compound_assign.om
 test_cli_output "lex-do-while" "DO" 0 ./build/omsc lex examples/do_while.om
+test_cli_output "lex-ternary" "QUESTION" 0 ./build/omsc lex examples/ternary.om
+test_cli_output "lex-bitwise" "AMPERSAND" 0 ./build/omsc lex examples/bitwise.om
 test_cli_output "tokens-flag" "FN" 0 ./build/omsc --tokens examples/test.om
 test_cli_output "parse" "Parsed program" 0 ./build/omsc parse examples/test.om
 test_cli_output "parse-flag" "Parsed program" 0 ./build/omsc --parse examples/test.om
@@ -184,6 +186,9 @@ test_program "examples/compound_assign.om" 76
 test_program "examples/block_comments.om" 30
 test_program "examples/do_while.om" 16
 test_program "examples/print_test.om" 0
+test_program "examples/ternary.om" 34
+test_program "examples/bitwise.om" 52
+test_program "examples/prefix_ops.om" 50
 test_compile_fail "examples/const_fail.om"
 test_compile_fail "examples/break_outside_loop.om"
 test_compile_fail "examples/continue_outside_loop.om"
