@@ -113,11 +113,11 @@ In summary, the codebase is well-organized and easy to read, but it prioritizes 
 
 **Concerns / improvement areas:**
 - **Type model is oversimplified:** all values are treated as `int64_t`, and float literals are cast to `int64_t` during codegen. String literals are mapped to constant `0`. This diverges from the language's stated dynamic typing and causes semantic mismatches.
-- **Scoping is incomplete:** `namedValues` is a single map; only the `for` loop saves/restores an existing binding. Nested blocks and shadowing are not managed, which can lead to incorrect variable resolution.
-- **Control-flow constructs are partially implemented:** `break` and `continue` are parsed but intentionally unimplemented in codegen. This means valid programs can compile but produce incorrect runtime behavior.
+- **Scoping is complete for blocks and loops:** `namedValues` uses a scope stack to save/restore bindings. `while`, `do-while`, `for` loops, and blocks all properly isolate their scopes.
+- **Control-flow constructs are fully implemented:** `break`, `continue`, `do-while`, and all loop types are supported with correct scoping and LLVM IR generation.
 - **Error reporting:** codegen throws generic runtime errors on unknown variables/operators without context (function name or source position), which makes debugging difficult.
-- **Linking strategy:** compilation uses `std::system("gcc ...")` with string concatenation of `outputFile`. This is vulnerable to command injection if untrusted paths are passed and is platform-dependent.
-- `generateCall()` does not handle variadic or intrinsic functions and assumes exact argument count equality without type checking.
+- **Linking strategy:** compilation uses `llvm::sys::ExecuteAndWait` with `gcc` for linking. File paths are passed as separate arguments, avoiding shell injection.
+- `generateCall()` handles the built-in `print()` function and user-defined functions, checking argument counts.
 - There is no explicit LLVM data layout initialization until optimization and object emission, which can lead to inconsistent IR verification in some environments.
 
 **Quality rating:** Good foundational LLVM scaffolding, but incomplete semantics and unsafe external invocation weaken robustness.
@@ -196,11 +196,11 @@ In summary, the codebase is well-organized and easy to read, but it prioritizes 
 
 **Concerns / improvement areas:**
 - The tests are integration tests only; there are no unit tests for lexer, parser, or codegen.
-- Negative testing is absent (invalid syntax, type errors, runtime errors).
+- Negative testing is included: `const_fail.om`, `break_outside_loop.om`, `continue_outside_loop.om`, and `undefined_var.om` validate that invalid programs are rejected.
 - The test suite does not exercise arrays, strings, or error recovery paths.
 - There is no test coverage for bytecode VM behavior.
 
-**Quality rating:** Basic smoke-test coverage; insufficient for regression safety on core subsystems.
+**Quality rating:** Reasonable integration and negative test coverage; unit tests for core subsystems would improve regression safety.
 
 ---
 

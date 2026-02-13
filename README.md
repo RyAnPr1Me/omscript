@@ -9,6 +9,8 @@ A low-level, C-like programming language with dynamic typing, featuring a **heav
 - **Aggressive AOT Compilation**: Multi-level LLVM optimization (O0/O1/O2/O3) for maximum performance
 - **Reference Counted Memory**: Automatic memory management using malloc/free with deterministic deallocation
 - **For Loops with Ranges**: Modern range-based iteration with `for (i in start...end...step)`
+- **Do-While Loops**: Execute body at least once with `do { ... } while (cond);`
+- **Built-in Functions**: `print()` for output
 - **Bytecode Runtime**: Interprets dynamically typed sections at runtime
 - **Hybrid Approach**: Compiles static code paths with LLVM, uses bytecode VM for dynamic behavior
 
@@ -77,6 +79,11 @@ while (condition) {
     // code
 }
 
+// Do-while loop (body executes at least once)
+do {
+    // code
+} while (condition);
+
 // For loop with range
 for (i in 0...10) {          // 0 to 9
     // code using i
@@ -86,9 +93,15 @@ for (i in 0...100...5) {     // 0, 5, 10, ..., 95
     // step by 5
 }
 
-// Break and continue (coming soon)
+// Break and continue
 break;
 continue;
+```
+
+### Built-in Functions
+```omscript
+print(42);          // prints "42\n" to stdout
+print(x + y);       // prints the result of an expression
 ```
 
 ### OPTMAX Blocks
