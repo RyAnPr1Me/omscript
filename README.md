@@ -102,6 +102,7 @@ continue;
 ```omscript
 print(42);          // prints "42\n" to stdout
 print(x + y);       // prints the result of an expression
+var a = abs(-10);   // absolute value: a = 10
 ```
 
 ### OPTMAX Blocks
