@@ -389,6 +389,14 @@ llvm::AllocaInst* CodeGenerator::createEntryBlockAlloca(llvm::Function* function
     return entryBuilder.CreateAlloca(getDefaultType(), nullptr, name);
 }
 
+void CodeGenerator::codegenError(const std::string& message, const ASTNode* node) {
+    if (node && node->line > 0) {
+        throw std::runtime_error("Error at line " + std::to_string(node->line) +
+                                 ", column " + std::to_string(node->column) + ": " + message);
+    }
+    throw std::runtime_error(message);
+}
+
 void CodeGenerator::generate(Program* program) {
     hasOptMaxFunctions = false;
     optMaxFunctions.clear();
@@ -556,6 +564,10 @@ llvm::Value* CodeGenerator::generateExpression(Expression* expr) {
             return generatePrefix(static_cast<PrefixExpr*>(expr));
         case ASTNodeType::TERNARY_EXPR:
             return generateTernary(static_cast<TernaryExpr*>(expr));
+        case ASTNodeType::ARRAY_EXPR:
+            codegenError("Array literals are not yet supported in compiled code", expr);
+        case ASTNodeType::INDEX_EXPR:
+            codegenError("Array indexing is not yet supported in compiled code", expr);
         default:
             throw std::runtime_error("Unknown expression type");
     }
@@ -576,7 +588,7 @@ llvm::Value* CodeGenerator::generateLiteral(LiteralExpr* expr) {
 llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
     auto it = namedValues.find(expr->name);
     if (it == namedValues.end() || !it->second) {
-        throw std::runtime_error("Unknown variable: " + expr->name);
+        codegenError("Unknown variable: " + expr->name, expr);
     }
     return builder->CreateLoad(getDefaultType(), it->second, expr->name.c_str());
 }
@@ -744,8 +756,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // Handle built-in functions
     if (expr->callee == "print") {
         if (expr->arguments.size() != 1) {
-            throw std::runtime_error("Built-in function 'print' expects 1 argument, but " +
-                                     std::to_string(expr->arguments.size()) + " provided");
+            codegenError("Built-in function 'print' expects 1 argument, but " +
+                         std::to_string(expr->arguments.size()) + " provided", expr);
         }
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         // Reuse a single global format string across all print() calls
@@ -755,6 +767,19 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         }
         builder->CreateCall(getPrintfFunction(), {formatStr, arg});
         return arg;
+    }
+
+    if (expr->callee == "abs") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'abs' expects 1 argument, but " +
+                         std::to_string(expr->arguments.size()) + " provided", expr);
+        }
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        // abs(x) = x >= 0 ? x : -x
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
+        llvm::Value* isNeg = builder->CreateICmpSLT(arg, zero, "isneg");
+        llvm::Value* negVal = builder->CreateNeg(arg, "negval");
+        return builder->CreateSelect(isNeg, negVal, arg, "absval");
     }
 
     if (inOptMaxFunction) {
@@ -770,14 +795,14 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
     auto calleeIt = functions.find(expr->callee);
     if (calleeIt == functions.end() || !calleeIt->second) {
-        throw std::runtime_error("Unknown function: " + expr->callee);
+        codegenError("Unknown function: " + expr->callee, expr);
     }
     llvm::Function* callee = calleeIt->second;
     
     if (callee->arg_size() != expr->arguments.size()) {
-        throw std::runtime_error("Function '" + expr->callee + "' expects " +
-                                 std::to_string(callee->arg_size()) + " argument(s), but " +
-                                 std::to_string(expr->arguments.size()) + " provided");
+        codegenError("Function '" + expr->callee + "' expects " +
+                     std::to_string(callee->arg_size()) + " argument(s), but " +
+                     std::to_string(expr->arguments.size()) + " provided", expr);
     }
     
     std::vector<llvm::Value*> args;
@@ -792,7 +817,7 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
     llvm::Value* value = generateExpression(expr->value.get());
     auto it = namedValues.find(expr->name);
     if (it == namedValues.end() || !it->second) {
-        throw std::runtime_error("Unknown variable: " + expr->name);
+        codegenError("Unknown variable: " + expr->name, expr);
     }
     checkConstModification(expr->name, "modify");
     

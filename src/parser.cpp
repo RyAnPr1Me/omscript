@@ -277,7 +277,10 @@ std::unique_ptr<Expression> Parser::parseAssignment() {
         if (expr->type == ASTNodeType::IDENTIFIER_EXPR) {
             auto idExpr = dynamic_cast<IdentifierExpr*>(expr.get());
             auto value = parseAssignment();
-            return std::make_unique<AssignExpr>(idExpr->name, std::move(value));
+            auto node = std::make_unique<AssignExpr>(idExpr->name, std::move(value));
+            node->line = expr->line;
+            node->column = expr->column;
+            return node;
         } else {
             error("Invalid assignment target");
         }
@@ -308,7 +311,10 @@ std::unique_ptr<Expression> Parser::parseAssignment() {
             // Desugar: x += expr  =>  x = x + expr
             auto lhsRef = std::make_unique<IdentifierExpr>(name);
             auto binExpr = std::make_unique<BinaryExpr>(binOp, std::move(lhsRef), std::move(rhs));
-            return std::make_unique<AssignExpr>(name, std::move(binExpr));
+            auto node = std::make_unique<AssignExpr>(name, std::move(binExpr));
+            node->line = expr->line;
+            node->column = expr->column;
+            return node;
         } else {
             error("Invalid compound assignment target");
         }
@@ -515,22 +521,34 @@ std::unique_ptr<Expression> Parser::parseCall() {
 std::unique_ptr<Expression> Parser::parsePrimary() {
     if (match(TokenType::INTEGER)) {
         Token token = tokens[current - 1];
-        return std::make_unique<LiteralExpr>(token.intValue);
+        auto expr = std::make_unique<LiteralExpr>(token.intValue);
+        expr->line = token.line;
+        expr->column = token.column;
+        return expr;
     }
     
     if (match(TokenType::FLOAT)) {
         Token token = tokens[current - 1];
-        return std::make_unique<LiteralExpr>(token.floatValue);
+        auto expr = std::make_unique<LiteralExpr>(token.floatValue);
+        expr->line = token.line;
+        expr->column = token.column;
+        return expr;
     }
     
     if (match(TokenType::STRING)) {
         Token token = tokens[current - 1];
-        return std::make_unique<LiteralExpr>(token.lexeme);
+        auto expr = std::make_unique<LiteralExpr>(token.lexeme);
+        expr->line = token.line;
+        expr->column = token.column;
+        return expr;
     }
     
     if (match(TokenType::IDENTIFIER)) {
         Token token = tokens[current - 1];
-        return std::make_unique<IdentifierExpr>(token.lexeme);
+        auto expr = std::make_unique<IdentifierExpr>(token.lexeme);
+        expr->line = token.line;
+        expr->column = token.column;
+        return expr;
     }
     
     if (match(TokenType::LPAREN)) {

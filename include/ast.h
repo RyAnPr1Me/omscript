@@ -37,6 +37,8 @@ enum class ASTNodeType {
 class ASTNode {
 public:
     ASTNodeType type;
+    int line = 0;
+    int column = 0;
     virtual ~ASTNode() = default;
     
 protected:
