@@ -1,0 +1,27 @@
+// Test compound assignment operators: +=, -=, *=, /=, %=
+fn main() {
+    var a = 10;
+    a += 5;      // a = 15
+
+    var b = 20;
+    b -= 3;      // b = 17
+
+    var c = 4;
+    c *= 3;      // c = 12
+
+    var d = 100;
+    d /= 5;      // d = 20
+
+    var e = 17;
+    e %= 5;      // e = 2
+
+    /* compound assignments in a loop */
+    var sum = 0;
+    for (i in 0...5) {
+        sum += i;
+    }
+    // sum = 0 + 1 + 2 + 3 + 4 = 10
+
+    return a + b + c + d + e + sum;
+    // 15 + 17 + 12 + 20 + 2 + 10 = 76
+}

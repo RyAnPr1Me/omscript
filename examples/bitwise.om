@@ -1,0 +1,25 @@
+// Test bitwise operators: &, |, ^, ~, <<, >>
+fn main() {
+    // Bitwise AND
+    var a = 12 & 10;     // 1100 & 1010 = 1000 = 8
+
+    // Bitwise OR
+    var b = 12 | 10;     // 1100 | 1010 = 1110 = 14
+
+    // Bitwise XOR
+    var c = 12 ^ 10;     // 1100 ^ 1010 = 0110 = 6
+
+    // Bitwise NOT
+    var d = ~0;           // all ones = -1
+
+    // Left shift
+    var e = 1 << 4;       // 16
+
+    // Right shift (arithmetic)
+    var f = 32 >> 2;      // 8
+
+    // Combined: (-1 + 8 + 14 + 6 + 16 + 8) = 51
+    // d is -1, so we add 1 to make it 0 for easier testing
+    return a + b + c + (d + 1) + e + f;
+    // 8 + 14 + 6 + 0 + 16 + 8 = 52
+}

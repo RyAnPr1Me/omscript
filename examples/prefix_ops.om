@@ -1,0 +1,24 @@
+// Test prefix increment/decrement (++x, --x) vs postfix (x++, x--)
+fn main() {
+    // Prefix increment returns updated value
+    var a = 5;
+    var b = ++a;    // a=6, b=6
+
+    // Postfix increment returns original value
+    var c = 10;
+    var d = c++;    // c=11, d=10
+
+    // Prefix decrement returns updated value
+    var e = 20;
+    var f = --e;    // e=19, f=19
+
+    // Prefix in loop
+    var sum = 0;
+    var i = 0;
+    while (i < 5) {
+        sum += ++i;  // i becomes 1,2,3,4,5 => sum = 15
+    }
+
+    return b + d + f + sum;
+    // 6 + 10 + 19 + 15 = 50
+}

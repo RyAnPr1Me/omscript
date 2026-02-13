@@ -123,6 +123,7 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
 std::unique_ptr<Statement> Parser::parseStatement() {
     if (match(TokenType::IF)) return parseIfStmt();
     if (match(TokenType::WHILE)) return parseWhileStmt();
+    if (match(TokenType::DO)) return parseDoWhileStmt();
     if (match(TokenType::FOR)) return parseForStmt();
     if (match(TokenType::RETURN)) return parseReturnStmt();
     if (match(TokenType::BREAK)) return parseBreakStmt();
@@ -195,6 +196,17 @@ std::unique_ptr<Statement> Parser::parseWhileStmt() {
     return std::make_unique<WhileStmt>(std::move(condition), std::move(body));
 }
 
+std::unique_ptr<Statement> Parser::parseDoWhileStmt() {
+    auto body = parseStatement();
+    consume(TokenType::WHILE, "Expected 'while' after do-while body");
+    consume(TokenType::LPAREN, "Expected '(' after 'while'");
+    auto condition = parseExpression();
+    consume(TokenType::RPAREN, "Expected ')' after condition");
+    consume(TokenType::SEMICOLON, "Expected ';' after do-while statement");
+    
+    return std::make_unique<DoWhileStmt>(std::move(body), std::move(condition));
+}
+
 std::unique_ptr<Statement> Parser::parseForStmt() {
     consume(TokenType::LPAREN, "Expected '(' after 'for'");
     
@@ -258,17 +270,67 @@ std::unique_ptr<Expression> Parser::parseExpression() {
 }
 
 std::unique_ptr<Expression> Parser::parseAssignment() {
-    auto expr = parseLogicalOr();
+    auto expr = parseTernary();
     
     if (match(TokenType::ASSIGN)) {
         // Check if left side is an identifier
         if (expr->type == ASTNodeType::IDENTIFIER_EXPR) {
             auto idExpr = dynamic_cast<IdentifierExpr*>(expr.get());
             auto value = parseAssignment();
-            return std::make_unique<AssignExpr>(idExpr->name, std::move(value));
+            auto node = std::make_unique<AssignExpr>(idExpr->name, std::move(value));
+            node->line = expr->line;
+            node->column = expr->column;
+            return node;
         } else {
             error("Invalid assignment target");
         }
+    }
+    
+    // Compound assignment operators: +=, -=, *=, /=, %=
+    if (match(TokenType::PLUS_ASSIGN) || match(TokenType::MINUS_ASSIGN) ||
+        match(TokenType::STAR_ASSIGN) || match(TokenType::SLASH_ASSIGN) ||
+        match(TokenType::PERCENT_ASSIGN)) {
+        TokenType opType = tokens[current - 1].type;
+        std::string opLexeme = tokens[current - 1].lexeme;
+        if (expr->type == ASTNodeType::IDENTIFIER_EXPR) {
+            auto idExpr = dynamic_cast<IdentifierExpr*>(expr.get());
+            std::string name = idExpr->name;
+            auto rhs = parseAssignment();
+            
+            // Determine the binary operator from the compound operator
+            std::string binOp;
+            switch (opType) {
+                case TokenType::PLUS_ASSIGN:    binOp = "+"; break;
+                case TokenType::MINUS_ASSIGN:   binOp = "-"; break;
+                case TokenType::STAR_ASSIGN:    binOp = "*"; break;
+                case TokenType::SLASH_ASSIGN:   binOp = "/"; break;
+                case TokenType::PERCENT_ASSIGN: binOp = "%"; break;
+                default: error("Unknown compound assignment operator: " + opLexeme); break;
+            }
+            
+            // Desugar: x += expr  =>  x = x + expr
+            auto lhsRef = std::make_unique<IdentifierExpr>(name);
+            auto binExpr = std::make_unique<BinaryExpr>(binOp, std::move(lhsRef), std::move(rhs));
+            auto node = std::make_unique<AssignExpr>(name, std::move(binExpr));
+            node->line = expr->line;
+            node->column = expr->column;
+            return node;
+        } else {
+            error("Invalid compound assignment target");
+        }
+    }
+    
+    return expr;
+}
+
+std::unique_ptr<Expression> Parser::parseTernary() {
+    auto expr = parseLogicalOr();
+    
+    if (match(TokenType::QUESTION)) {
+        auto thenExpr = parseExpression();
+        consume(TokenType::COLON, "Expected ':' in ternary expression");
+        auto elseExpr = parseTernary();
+        return std::make_unique<TernaryExpr>(std::move(expr), std::move(thenExpr), std::move(elseExpr));
     }
     
     return expr;
@@ -287,9 +349,45 @@ std::unique_ptr<Expression> Parser::parseLogicalOr() {
 }
 
 std::unique_ptr<Expression> Parser::parseLogicalAnd() {
-    auto left = parseEquality();
+    auto left = parseBitwiseOr();
     
     while (match(TokenType::AND)) {
+        std::string op = tokens[current - 1].lexeme;
+        auto right = parseBitwiseOr();
+        left = std::make_unique<BinaryExpr>(op, std::move(left), std::move(right));
+    }
+    
+    return left;
+}
+
+std::unique_ptr<Expression> Parser::parseBitwiseOr() {
+    auto left = parseBitwiseXor();
+    
+    while (match(TokenType::PIPE)) {
+        std::string op = tokens[current - 1].lexeme;
+        auto right = parseBitwiseXor();
+        left = std::make_unique<BinaryExpr>(op, std::move(left), std::move(right));
+    }
+    
+    return left;
+}
+
+std::unique_ptr<Expression> Parser::parseBitwiseXor() {
+    auto left = parseBitwiseAnd();
+    
+    while (match(TokenType::CARET)) {
+        std::string op = tokens[current - 1].lexeme;
+        auto right = parseBitwiseAnd();
+        left = std::make_unique<BinaryExpr>(op, std::move(left), std::move(right));
+    }
+    
+    return left;
+}
+
+std::unique_ptr<Expression> Parser::parseBitwiseAnd() {
+    auto left = parseEquality();
+    
+    while (match(TokenType::AMPERSAND)) {
         std::string op = tokens[current - 1].lexeme;
         auto right = parseEquality();
         left = std::make_unique<BinaryExpr>(op, std::move(left), std::move(right));
@@ -311,10 +409,22 @@ std::unique_ptr<Expression> Parser::parseEquality() {
 }
 
 std::unique_ptr<Expression> Parser::parseComparison() {
-    auto left = parseAddition();
+    auto left = parseShift();
     
     while (match(TokenType::LT) || match(TokenType::LE) ||
            match(TokenType::GT) || match(TokenType::GE)) {
+        std::string op = tokens[current - 1].lexeme;
+        auto right = parseShift();
+        left = std::make_unique<BinaryExpr>(op, std::move(left), std::move(right));
+    }
+    
+    return left;
+}
+
+std::unique_ptr<Expression> Parser::parseShift() {
+    auto left = parseAddition();
+    
+    while (match(TokenType::LSHIFT) || match(TokenType::RSHIFT)) {
         std::string op = tokens[current - 1].lexeme;
         auto right = parseAddition();
         left = std::make_unique<BinaryExpr>(op, std::move(left), std::move(right));
@@ -348,10 +458,16 @@ std::unique_ptr<Expression> Parser::parseMultiplication() {
 }
 
 std::unique_ptr<Expression> Parser::parseUnary() {
-    if (match(TokenType::MINUS) || match(TokenType::NOT)) {
+    if (match(TokenType::MINUS) || match(TokenType::NOT) || match(TokenType::TILDE)) {
         std::string op = tokens[current - 1].lexeme;
         auto operand = parseUnary();
         return std::make_unique<UnaryExpr>(op, std::move(operand));
+    }
+    
+    if (match(TokenType::PLUSPLUS) || match(TokenType::MINUSMINUS)) {
+        std::string op = tokens[current - 1].lexeme;
+        auto operand = parseUnary();
+        return std::make_unique<PrefixExpr>(op, std::move(operand));
     }
     
     return parsePostfix();
@@ -405,22 +521,34 @@ std::unique_ptr<Expression> Parser::parseCall() {
 std::unique_ptr<Expression> Parser::parsePrimary() {
     if (match(TokenType::INTEGER)) {
         Token token = tokens[current - 1];
-        return std::make_unique<LiteralExpr>(token.intValue);
+        auto expr = std::make_unique<LiteralExpr>(token.intValue);
+        expr->line = token.line;
+        expr->column = token.column;
+        return expr;
     }
     
     if (match(TokenType::FLOAT)) {
         Token token = tokens[current - 1];
-        return std::make_unique<LiteralExpr>(token.floatValue);
+        auto expr = std::make_unique<LiteralExpr>(token.floatValue);
+        expr->line = token.line;
+        expr->column = token.column;
+        return expr;
     }
     
     if (match(TokenType::STRING)) {
         Token token = tokens[current - 1];
-        return std::make_unique<LiteralExpr>(token.lexeme);
+        auto expr = std::make_unique<LiteralExpr>(token.lexeme);
+        expr->line = token.line;
+        expr->column = token.column;
+        return expr;
     }
     
     if (match(TokenType::IDENTIFIER)) {
         Token token = tokens[current - 1];
-        return std::make_unique<IdentifierExpr>(token.lexeme);
+        auto expr = std::make_unique<IdentifierExpr>(token.lexeme);
+        expr->line = token.line;
+        expr->column = token.column;
+        return expr;
     }
     
     if (match(TokenType::LPAREN)) {

@@ -37,11 +37,14 @@ using omscript::CallExpr;
 using omscript::ArrayExpr;
 using omscript::IndexExpr;
 using omscript::PostfixExpr;
+using omscript::PrefixExpr;
+using omscript::TernaryExpr;
 using omscript::ExprStmt;
 using omscript::VarDecl;
 using omscript::ReturnStmt;
 using omscript::IfStmt;
 using omscript::WhileStmt;
+using omscript::DoWhileStmt;
 using omscript::ForStmt;
 using omscript::Statement;
 
@@ -61,6 +64,9 @@ std::unique_ptr<Expression> optimizeOptMaxUnary(const std::string& op, std::uniq
         }
         if (op == "!") {
             return std::make_unique<LiteralExpr>(static_cast<long long>(value == 0));
+        }
+        if (op == "~") {
+            return std::make_unique<LiteralExpr>(~value);
         }
     } else if (literal->literalType == LiteralExpr::LiteralType::FLOAT) {
         double value = literal->floatValue;
@@ -103,6 +109,11 @@ std::unique_ptr<Expression> optimizeOptMaxBinary(const std::string& op,
         if (op == ">=") return std::make_unique<LiteralExpr>(static_cast<long long>(lval >= rval));
         if (op == "&&") return std::make_unique<LiteralExpr>(static_cast<long long>((lval != 0) && (rval != 0)));
         if (op == "||") return std::make_unique<LiteralExpr>(static_cast<long long>((lval != 0) || (rval != 0)));
+        if (op == "&") return std::make_unique<LiteralExpr>(lval & rval);
+        if (op == "|") return std::make_unique<LiteralExpr>(lval | rval);
+        if (op == "^") return std::make_unique<LiteralExpr>(lval ^ rval);
+        if (op == "<<") return std::make_unique<LiteralExpr>(lval << rval);
+        if (op == ">>") return std::make_unique<LiteralExpr>(lval >> rval);
     } else if (leftLiteral->literalType == LiteralExpr::LiteralType::FLOAT &&
                rightLiteral->literalType == LiteralExpr::LiteralType::FLOAT) {
         double lval = leftLiteral->floatValue;
@@ -172,6 +183,18 @@ std::unique_ptr<Expression> optimizeOptMaxExpression(std::unique_ptr<Expression>
             postfix->operand = optimizeOptMaxExpression(std::move(postfix->operand));
             return expr;
         }
+        case ASTNodeType::PREFIX_EXPR: {
+            auto* prefix = static_cast<PrefixExpr*>(expr.get());
+            prefix->operand = optimizeOptMaxExpression(std::move(prefix->operand));
+            return expr;
+        }
+        case ASTNodeType::TERNARY_EXPR: {
+            auto* ternary = static_cast<TernaryExpr*>(expr.get());
+            ternary->condition = optimizeOptMaxExpression(std::move(ternary->condition));
+            ternary->thenExpr = optimizeOptMaxExpression(std::move(ternary->thenExpr));
+            ternary->elseExpr = optimizeOptMaxExpression(std::move(ternary->elseExpr));
+            return expr;
+        }
         default:
             return expr;
     }
@@ -222,6 +245,12 @@ void optimizeOptMaxStatement(Statement* stmt) {
             auto* whileStmt = static_cast<WhileStmt*>(stmt);
             whileStmt->condition = optimizeOptMaxExpression(std::move(whileStmt->condition));
             optimizeOptMaxStatement(whileStmt->body.get());
+            break;
+        }
+        case ASTNodeType::DO_WHILE_STMT: {
+            auto* doWhileStmt = static_cast<DoWhileStmt*>(stmt);
+            optimizeOptMaxStatement(doWhileStmt->body.get());
+            doWhileStmt->condition = optimizeOptMaxExpression(std::move(doWhileStmt->condition));
             break;
         }
         case ASTNodeType::FOR_STMT: {
@@ -360,6 +389,14 @@ llvm::AllocaInst* CodeGenerator::createEntryBlockAlloca(llvm::Function* function
     return entryBuilder.CreateAlloca(getDefaultType(), nullptr, name);
 }
 
+void CodeGenerator::codegenError(const std::string& message, const ASTNode* node) {
+    if (node && node->line > 0) {
+        throw std::runtime_error("Error at line " + std::to_string(node->line) +
+                                 ", column " + std::to_string(node->column) + ": " + message);
+    }
+    throw std::runtime_error(message);
+}
+
 void CodeGenerator::generate(Program* program) {
     hasOptMaxFunctions = false;
     optMaxFunctions.clear();
@@ -478,6 +515,9 @@ void CodeGenerator::generateStatement(Statement* stmt) {
         case ASTNodeType::WHILE_STMT:
             generateWhile(static_cast<WhileStmt*>(stmt));
             break;
+        case ASTNodeType::DO_WHILE_STMT:
+            generateDoWhile(static_cast<DoWhileStmt*>(stmt));
+            break;
         case ASTNodeType::FOR_STMT:
             generateFor(static_cast<ForStmt*>(stmt));
             break;
@@ -520,6 +560,14 @@ llvm::Value* CodeGenerator::generateExpression(Expression* expr) {
             return generateAssign(static_cast<AssignExpr*>(expr));
         case ASTNodeType::POSTFIX_EXPR:
             return generatePostfix(static_cast<PostfixExpr*>(expr));
+        case ASTNodeType::PREFIX_EXPR:
+            return generatePrefix(static_cast<PrefixExpr*>(expr));
+        case ASTNodeType::TERNARY_EXPR:
+            return generateTernary(static_cast<TernaryExpr*>(expr));
+        case ASTNodeType::ARRAY_EXPR:
+            codegenError("Array literals are not yet supported in compiled code", expr);
+        case ASTNodeType::INDEX_EXPR:
+            codegenError("Array indexing is not yet supported in compiled code", expr);
         default:
             throw std::runtime_error("Unknown expression type");
     }
@@ -540,7 +588,7 @@ llvm::Value* CodeGenerator::generateLiteral(LiteralExpr* expr) {
 llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
     auto it = namedValues.find(expr->name);
     if (it == namedValues.end() || !it->second) {
-        throw std::runtime_error("Unknown variable: " + expr->name);
+        codegenError("Unknown variable: " + expr->name, expr);
     }
     return builder->CreateLoad(getDefaultType(), it->second, expr->name.c_str());
 }
@@ -599,6 +647,16 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             if (rval != 0) {
                 return llvm::ConstantInt::get(*context, llvm::APInt(64, lval % rval));
             }
+        } else if (expr->op == "&") {
+            return llvm::ConstantInt::get(*context, llvm::APInt(64, lval & rval));
+        } else if (expr->op == "|") {
+            return llvm::ConstantInt::get(*context, llvm::APInt(64, lval | rval));
+        } else if (expr->op == "^") {
+            return llvm::ConstantInt::get(*context, llvm::APInt(64, lval ^ rval));
+        } else if (expr->op == "<<") {
+            return llvm::ConstantInt::get(*context, llvm::APInt(64, lval << rval));
+        } else if (expr->op == ">>") {
+            return llvm::ConstantInt::get(*context, llvm::APInt(64, lval >> rval));
         }
     }
     
@@ -660,6 +718,16 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     } else if (expr->op == ">=") {
         llvm::Value* cmp = builder->CreateICmpSGE(left, right, "cmptmp");
         return builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+    } else if (expr->op == "&") {
+        return builder->CreateAnd(left, right, "andtmp");
+    } else if (expr->op == "|") {
+        return builder->CreateOr(left, right, "ortmp");
+    } else if (expr->op == "^") {
+        return builder->CreateXor(left, right, "xortmp");
+    } else if (expr->op == "<<") {
+        return builder->CreateShl(left, right, "shltmp");
+    } else if (expr->op == ">>") {
+        return builder->CreateAShr(left, right, "ashrtmp");
     }
     
     throw std::runtime_error("Unknown binary operator: " + expr->op);
@@ -677,12 +745,43 @@ llvm::Value* CodeGenerator::generateUnary(UnaryExpr* expr) {
             "nottmp"
         );
         return builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+    } else if (expr->op == "~") {
+        return builder->CreateNot(operand, "bitnottmp");
     }
     
     throw std::runtime_error("Unknown unary operator: " + expr->op);
 }
 
 llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
+    // Handle built-in functions
+    if (expr->callee == "print") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'print' expects 1 argument, but " +
+                         std::to_string(expr->arguments.size()) + " provided", expr);
+        }
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        // Reuse a single global format string across all print() calls
+        llvm::GlobalVariable* formatStr = module->getGlobalVariable("print_fmt", true);
+        if (!formatStr) {
+            formatStr = builder->CreateGlobalString("%lld\n", "print_fmt");
+        }
+        builder->CreateCall(getPrintfFunction(), {formatStr, arg});
+        return arg;
+    }
+
+    if (expr->callee == "abs") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'abs' expects 1 argument, but " +
+                         std::to_string(expr->arguments.size()) + " provided", expr);
+        }
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        // abs(x) = x >= 0 ? x : -x
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
+        llvm::Value* isNeg = builder->CreateICmpSLT(arg, zero, "isneg");
+        llvm::Value* negVal = builder->CreateNeg(arg, "negval");
+        return builder->CreateSelect(isNeg, negVal, arg, "absval");
+    }
+
     if (inOptMaxFunction) {
         if (optMaxFunctions.find(expr->callee) == optMaxFunctions.end()) {
             std::string currentFunction = "<unknown>";
@@ -696,14 +795,14 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
     auto calleeIt = functions.find(expr->callee);
     if (calleeIt == functions.end() || !calleeIt->second) {
-        throw std::runtime_error("Unknown function: " + expr->callee);
+        codegenError("Unknown function: " + expr->callee, expr);
     }
     llvm::Function* callee = calleeIt->second;
     
     if (callee->arg_size() != expr->arguments.size()) {
-        throw std::runtime_error("Function '" + expr->callee + "' expects " +
-                                 std::to_string(callee->arg_size()) + " argument(s), but " +
-                                 std::to_string(expr->arguments.size()) + " provided");
+        codegenError("Function '" + expr->callee + "' expects " +
+                     std::to_string(callee->arg_size()) + " argument(s), but " +
+                     std::to_string(expr->arguments.size()) + " provided", expr);
     }
     
     std::vector<llvm::Value*> args;
@@ -718,7 +817,7 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
     llvm::Value* value = generateExpression(expr->value.get());
     auto it = namedValues.find(expr->name);
     if (it == namedValues.end() || !it->second) {
-        throw std::runtime_error("Unknown variable: " + expr->name);
+        codegenError("Unknown variable: " + expr->name, expr);
     }
     checkConstModification(expr->name, "modify");
     
@@ -729,28 +828,84 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
 llvm::Value* CodeGenerator::generatePostfix(PostfixExpr* expr) {
     auto* identifier = dynamic_cast<IdentifierExpr*>(expr->operand.get());
     if (!identifier) {
-        throw std::runtime_error("Postfix operators require an identifier");
+        codegenError("Postfix operators require an identifier", expr);
     }
     
     auto it = namedValues.find(identifier->name);
     if (it == namedValues.end() || !it->second) {
-        throw std::runtime_error("Unknown variable: " + identifier->name);
+        codegenError("Unknown variable: " + identifier->name, expr);
     }
     checkConstModification(identifier->name, "modify");
     
     llvm::Value* current = builder->CreateLoad(getDefaultType(), it->second, identifier->name.c_str());
     llvm::Value* delta = llvm::ConstantInt::get(getDefaultType(), 1, true);
-    llvm::Value* updated = nullptr;
-    if (expr->op == "++") {
-        updated = builder->CreateAdd(current, delta, "postinc");
-    } else if (expr->op == "--") {
-        updated = builder->CreateSub(current, delta, "postdec");
-    } else {
-        throw std::runtime_error("Unknown postfix operator: " + expr->op);
+    if (expr->op != "++" && expr->op != "--") {
+        codegenError("Unknown postfix operator: " + expr->op, expr);
     }
+    llvm::Value* updated = (expr->op == "++")
+        ? builder->CreateAdd(current, delta, "postinc")
+        : builder->CreateSub(current, delta, "postdec");
     
     builder->CreateStore(updated, it->second);
     return current;
+}
+
+llvm::Value* CodeGenerator::generatePrefix(PrefixExpr* expr) {
+    auto* identifier = dynamic_cast<IdentifierExpr*>(expr->operand.get());
+    if (!identifier) {
+        codegenError("Prefix operators require an identifier", expr);
+    }
+    
+    auto it = namedValues.find(identifier->name);
+    if (it == namedValues.end() || !it->second) {
+        codegenError("Unknown variable: " + identifier->name, expr);
+    }
+    checkConstModification(identifier->name, "modify");
+    
+    llvm::Value* current = builder->CreateLoad(getDefaultType(), it->second, identifier->name.c_str());
+    llvm::Value* delta = llvm::ConstantInt::get(getDefaultType(), 1, true);
+    if (expr->op != "++" && expr->op != "--") {
+        codegenError("Unknown prefix operator: " + expr->op, expr);
+    }
+    llvm::Value* updated = (expr->op == "++")
+        ? builder->CreateAdd(current, delta, "preinc")
+        : builder->CreateSub(current, delta, "predec");
+    
+    builder->CreateStore(updated, it->second);
+    return updated;
+}
+
+llvm::Value* CodeGenerator::generateTernary(TernaryExpr* expr) {
+    llvm::Value* condition = generateExpression(expr->condition.get());
+    llvm::Value* condBool = builder->CreateICmpNE(
+        condition,
+        llvm::ConstantInt::get(getDefaultType(), 0, true),
+        "terncond"
+    );
+    
+    llvm::Function* function = builder->GetInsertBlock()->getParent();
+    llvm::BasicBlock* thenBB = llvm::BasicBlock::Create(*context, "tern.then", function);
+    llvm::BasicBlock* elseBB = llvm::BasicBlock::Create(*context, "tern.else", function);
+    llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "tern.cont", function);
+    
+    builder->CreateCondBr(condBool, thenBB, elseBB);
+    
+    builder->SetInsertPoint(thenBB);
+    llvm::Value* thenVal = generateExpression(expr->thenExpr.get());
+    builder->CreateBr(mergeBB);
+    thenBB = builder->GetInsertBlock();
+    
+    builder->SetInsertPoint(elseBB);
+    llvm::Value* elseVal = generateExpression(expr->elseExpr.get());
+    builder->CreateBr(mergeBB);
+    elseBB = builder->GetInsertBlock();
+    
+    builder->SetInsertPoint(mergeBB);
+    llvm::PHINode* phi = builder->CreatePHI(getDefaultType(), 2, "ternval");
+    phi->addIncoming(thenVal, thenBB);
+    phi->addIncoming(elseVal, elseBB);
+    
+    return phi;
 }
 
 void CodeGenerator::generateVarDecl(VarDecl* stmt) {
@@ -821,6 +976,8 @@ void CodeGenerator::generateIf(IfStmt* stmt) {
 void CodeGenerator::generateWhile(WhileStmt* stmt) {
     llvm::Function* function = builder->GetInsertBlock()->getParent();
     
+    beginScope();
+    
     llvm::BasicBlock* condBB = llvm::BasicBlock::Create(*context, "whilecond", function);
     llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "whilebody", function);
     llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "whileend", function);
@@ -848,6 +1005,45 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
     
     // End block
     builder->SetInsertPoint(endBB);
+    
+    endScope();
+}
+
+void CodeGenerator::generateDoWhile(DoWhileStmt* stmt) {
+    llvm::Function* function = builder->GetInsertBlock()->getParent();
+    
+    beginScope();
+    
+    llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "dowhilebody", function);
+    llvm::BasicBlock* condBB = llvm::BasicBlock::Create(*context, "dowhilecond", function);
+    llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "dowhileend", function);
+    
+    // Jump directly to body (execute at least once)
+    builder->CreateBr(bodyBB);
+    
+    // Body block
+    builder->SetInsertPoint(bodyBB);
+    loopStack.push_back({endBB, condBB});
+    generateStatement(stmt->body.get());
+    loopStack.pop_back();
+    if (!builder->GetInsertBlock()->getTerminator()) {
+        builder->CreateBr(condBB);
+    }
+    
+    // Condition block
+    builder->SetInsertPoint(condBB);
+    llvm::Value* condition = generateExpression(stmt->condition.get());
+    llvm::Value* condBool = builder->CreateICmpNE(
+        condition,
+        llvm::ConstantInt::get(getDefaultType(), 0, true),
+        "dowhilecond"
+    );
+    builder->CreateCondBr(condBool, bodyBB, endBB);
+    
+    // End block
+    builder->SetInsertPoint(endBB);
+    
+    endScope();
 }
 
 void CodeGenerator::generateFor(ForStmt* stmt) {
@@ -1139,7 +1335,11 @@ void CodeGenerator::writeObjectFile(const std::string& filename) {
     }
     
     llvm::legacy::PassManager pass;
+#if LLVM_VERSION_MAJOR >= 18
     auto fileType = llvm::CodeGenFileType::ObjectFile;
+#else
+    auto fileType = llvm::CGFT_ObjectFile;
+#endif
     
     if (targetMachine->addPassesToEmitFile(pass, dest, nullptr, fileType)) {
         throw std::runtime_error("TargetMachine can't emit a file of this type");

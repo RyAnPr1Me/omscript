@@ -11,6 +11,7 @@ static const std::unordered_map<std::string, TokenType> keywords = {
     {"if", TokenType::IF},
     {"else", TokenType::ELSE},
     {"while", TokenType::WHILE},
+    {"do", TokenType::DO},
     {"for", TokenType::FOR},
     {"var", TokenType::VAR},
     {"const", TokenType::CONST},
@@ -53,6 +54,8 @@ void Lexer::skipWhitespace() {
             advance();
         } else if (c == '/' && peek(1) == '/') {
             skipComment();
+        } else if (c == '/' && peek(1) == '*') {
+            skipBlockComment();
         } else {
             break;
         }
@@ -66,6 +69,25 @@ void Lexer::skipComment() {
     while (!isAtEnd() && peek() != '\n') {
         advance();
     }
+}
+
+void Lexer::skipBlockComment() {
+    int startLine = line;
+    int startColumn = column;
+    // Skip /*
+    advance();
+    advance();
+    while (!isAtEnd()) {
+        if (peek() == '*' && peek(1) == '/') {
+            advance(); // Skip *
+            advance(); // Skip /
+            return;
+        }
+        advance();
+    }
+    throw std::runtime_error("Unterminated block comment starting at line " +
+                             std::to_string(startLine) + ", column " +
+                             std::to_string(startColumn));
 }
 
 Token Lexer::makeToken(TokenType type, const std::string& lexeme) {
@@ -211,6 +233,9 @@ std::vector<Token> Lexer::tokenize() {
                 if (peek() == '+') {
                     advance();
                     tokens.push_back(makeToken(TokenType::PLUSPLUS, "++"));
+                } else if (peek() == '=') {
+                    advance();
+                    tokens.push_back(makeToken(TokenType::PLUS_ASSIGN, "+="));
                 } else {
                     tokens.push_back(makeToken(TokenType::PLUS, "+"));
                 }
@@ -219,13 +244,37 @@ std::vector<Token> Lexer::tokenize() {
                 if (peek() == '-') {
                     advance();
                     tokens.push_back(makeToken(TokenType::MINUSMINUS, "--"));
+                } else if (peek() == '=') {
+                    advance();
+                    tokens.push_back(makeToken(TokenType::MINUS_ASSIGN, "-="));
                 } else {
                     tokens.push_back(makeToken(TokenType::MINUS, "-"));
                 }
                 break;
-            case '*': tokens.push_back(makeToken(TokenType::STAR, "*")); break;
-            case '/': tokens.push_back(makeToken(TokenType::SLASH, "/")); break;
-            case '%': tokens.push_back(makeToken(TokenType::PERCENT, "%")); break;
+            case '*':
+                if (peek() == '=') {
+                    advance();
+                    tokens.push_back(makeToken(TokenType::STAR_ASSIGN, "*="));
+                } else {
+                    tokens.push_back(makeToken(TokenType::STAR, "*"));
+                }
+                break;
+            case '/':
+                if (peek() == '=') {
+                    advance();
+                    tokens.push_back(makeToken(TokenType::SLASH_ASSIGN, "/="));
+                } else {
+                    tokens.push_back(makeToken(TokenType::SLASH, "/"));
+                }
+                break;
+            case '%':
+                if (peek() == '=') {
+                    advance();
+                    tokens.push_back(makeToken(TokenType::PERCENT_ASSIGN, "%="));
+                } else {
+                    tokens.push_back(makeToken(TokenType::PERCENT, "%"));
+                }
+                break;
             case '(': tokens.push_back(makeToken(TokenType::LPAREN, "(")); break;
             case ')': tokens.push_back(makeToken(TokenType::RPAREN, ")")); break;
             case '{': tokens.push_back(makeToken(TokenType::LBRACE, "{")); break;
@@ -235,6 +284,7 @@ std::vector<Token> Lexer::tokenize() {
             case ';': tokens.push_back(makeToken(TokenType::SEMICOLON, ";")); break;
             case ',': tokens.push_back(makeToken(TokenType::COMMA, ",")); break;
             case ':': tokens.push_back(makeToken(TokenType::COLON, ":")); break;
+            case '?': tokens.push_back(makeToken(TokenType::QUESTION, "?")); break;
             case '.': tokens.push_back(makeToken(TokenType::DOT, ".")); break;
             
             case '=':
@@ -259,6 +309,9 @@ std::vector<Token> Lexer::tokenize() {
                 if (peek() == '=') {
                     advance();
                     tokens.push_back(makeToken(TokenType::LE, "<="));
+                } else if (peek() == '<') {
+                    advance();
+                    tokens.push_back(makeToken(TokenType::LSHIFT, "<<"));
                 } else {
                     tokens.push_back(makeToken(TokenType::LT, "<"));
                 }
@@ -268,6 +321,9 @@ std::vector<Token> Lexer::tokenize() {
                 if (peek() == '=') {
                     advance();
                     tokens.push_back(makeToken(TokenType::GE, ">="));
+                } else if (peek() == '>') {
+                    advance();
+                    tokens.push_back(makeToken(TokenType::RSHIFT, ">>"));
                 } else {
                     tokens.push_back(makeToken(TokenType::GT, ">"));
                 }
@@ -278,9 +334,7 @@ std::vector<Token> Lexer::tokenize() {
                     advance();
                     tokens.push_back(makeToken(TokenType::AND, "&&"));
                 } else {
-                    throw std::runtime_error("Unexpected character '&' at line " +
-                                             std::to_string(tokenLine) + ", column " +
-                                             std::to_string(tokenColumn));
+                    tokens.push_back(makeToken(TokenType::AMPERSAND, "&"));
                 }
                 break;
             
@@ -289,10 +343,16 @@ std::vector<Token> Lexer::tokenize() {
                     advance();
                     tokens.push_back(makeToken(TokenType::OR, "||"));
                 } else {
-                    throw std::runtime_error("Unexpected character '|' at line " +
-                                             std::to_string(tokenLine) + ", column " +
-                                             std::to_string(tokenColumn));
+                    tokens.push_back(makeToken(TokenType::PIPE, "|"));
                 }
+                break;
+            
+            case '^':
+                tokens.push_back(makeToken(TokenType::CARET, "^"));
+                break;
+            
+            case '~':
+                tokens.push_back(makeToken(TokenType::TILDE, "~"));
                 break;
             
             default:

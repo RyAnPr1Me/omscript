@@ -1,0 +1,13 @@
+// Test abs() built-in function
+fn main() {
+    var a = abs(-10);     // 10
+    var b = abs(5);       // 5
+    var c = abs(0);       // 0
+    var d = abs(-1);      // 1
+
+    // abs in expressions
+    var e = abs(-3) + abs(-7);  // 3 + 7 = 10
+
+    return a + b + c + d + e;
+    // 10 + 5 + 0 + 1 + 10 = 26
+}

@@ -74,12 +74,15 @@ private:
     llvm::Value* generateCall(CallExpr* expr);
     llvm::Value* generateAssign(AssignExpr* expr);
     llvm::Value* generatePostfix(PostfixExpr* expr);
+    llvm::Value* generatePrefix(PrefixExpr* expr);
+    llvm::Value* generateTernary(TernaryExpr* expr);
     
     // Statement generators
     void generateVarDecl(VarDecl* stmt);
     void generateReturn(ReturnStmt* stmt);
     void generateIf(IfStmt* stmt);
     void generateWhile(WhileStmt* stmt);
+    void generateDoWhile(DoWhileStmt* stmt);
     void generateFor(ForStmt* stmt);
     void generateBlock(BlockStmt* stmt);
     void generateExprStmt(ExprStmt* stmt);
@@ -94,6 +97,7 @@ private:
     void checkConstModification(const std::string& name, const std::string& action);
     void validateScopeStacksMatch(const char* location);
     llvm::AllocaInst* createEntryBlockAlloca(llvm::Function* function, const std::string& name);
+    [[noreturn]] void codegenError(const std::string& message, const ASTNode* node);
     
     // Optimization methods
     void runOptimizationPasses();

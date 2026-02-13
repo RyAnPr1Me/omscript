@@ -16,6 +16,7 @@ enum class ASTNodeType {
     RETURN_STMT,
     IF_STMT,
     WHILE_STMT,
+    DO_WHILE_STMT,
     FOR_STMT,
     BREAK_STMT,
     CONTINUE_STMT,
@@ -27,6 +28,8 @@ enum class ASTNodeType {
     IDENTIFIER_EXPR,
     ASSIGN_EXPR,
     POSTFIX_EXPR,
+    PREFIX_EXPR,
+    TERNARY_EXPR,
     ARRAY_EXPR,
     INDEX_EXPR
 };
@@ -34,6 +37,8 @@ enum class ASTNodeType {
 class ASTNode {
 public:
     ASTNodeType type;
+    int line = 0;
+    int column = 0;
     virtual ~ASTNode() = default;
     
 protected:
@@ -125,6 +130,25 @@ public:
         : Expression(ASTNodeType::POSTFIX_EXPR), op(o), operand(std::move(opnd)) {}
 };
 
+class PrefixExpr : public Expression {
+public:
+    std::string op;  // ++ or --
+    std::unique_ptr<Expression> operand;
+    
+    PrefixExpr(const std::string& o, std::unique_ptr<Expression> opnd)
+        : Expression(ASTNodeType::PREFIX_EXPR), op(o), operand(std::move(opnd)) {}
+};
+
+class TernaryExpr : public Expression {
+public:
+    std::unique_ptr<Expression> condition;
+    std::unique_ptr<Expression> thenExpr;
+    std::unique_ptr<Expression> elseExpr;
+    
+    TernaryExpr(std::unique_ptr<Expression> cond, std::unique_ptr<Expression> thenE, std::unique_ptr<Expression> elseE)
+        : Expression(ASTNodeType::TERNARY_EXPR), condition(std::move(cond)), thenExpr(std::move(thenE)), elseExpr(std::move(elseE)) {}
+};
+
 class ArrayExpr : public Expression {
 public:
     std::vector<std::unique_ptr<Expression>> elements;
@@ -187,6 +211,15 @@ public:
     
     WhileStmt(std::unique_ptr<Expression> cond, std::unique_ptr<Statement> b)
         : Statement(ASTNodeType::WHILE_STMT), condition(std::move(cond)), body(std::move(b)) {}
+};
+
+class DoWhileStmt : public Statement {
+public:
+    std::unique_ptr<Statement> body;
+    std::unique_ptr<Expression> condition;
+    
+    DoWhileStmt(std::unique_ptr<Statement> b, std::unique_ptr<Expression> cond)
+        : Statement(ASTNodeType::DO_WHILE_STMT), body(std::move(b)), condition(std::move(cond)) {}
 };
 
 class ForStmt : public Statement {

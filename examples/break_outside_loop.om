@@ -1,0 +1,6 @@
+// This program should fail to compile:
+// break is used outside of a loop
+fn main() {
+    break;
+    return 0;
+}

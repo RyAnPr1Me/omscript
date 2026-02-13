@@ -19,6 +19,7 @@ enum class TokenType {
     IF,
     ELSE,
     WHILE,
+    DO,
     FOR,
     VAR,
     CONST,
@@ -46,6 +47,18 @@ enum class TokenType {
     NOT,
     PLUSPLUS,
     MINUSMINUS,
+    PLUS_ASSIGN,
+    MINUS_ASSIGN,
+    STAR_ASSIGN,
+    SLASH_ASSIGN,
+    PERCENT_ASSIGN,
+    QUESTION,
+    AMPERSAND,
+    PIPE,
+    CARET,
+    TILDE,
+    LSHIFT,
+    RSHIFT,
     RANGE,
     
     // Delimiters
@@ -97,6 +110,7 @@ private:
     bool isAtEnd() const;
     void skipWhitespace();
     void skipComment();
+    void skipBlockComment();
     
     Token makeToken(TokenType type, const std::string& lexeme);
     Token scanNumber();

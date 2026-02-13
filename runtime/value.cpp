@@ -23,8 +23,11 @@ std::string Value::toString() const {
     switch (type) {
         case Type::INTEGER:
             return std::to_string(intValue);
-        case Type::FLOAT:
-            return std::to_string(floatValue);
+        case Type::FLOAT: {
+            std::ostringstream oss;
+            oss << floatValue;
+            return oss.str();
+        }
         case Type::STRING:
             return std::string(stringValue.c_str());
         case Type::NONE:

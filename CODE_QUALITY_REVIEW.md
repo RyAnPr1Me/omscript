@@ -22,10 +22,10 @@ The goal is to document the quality of the code as it exists today: architectura
 - Build/test automation exists and is straightforward to run locally (`run_tests.sh`).
 
 **Risks and weaknesses:**
-- Limited defensive programming (bounds checks, missing error recovery, unchecked `std::system` usage).
-- Several language constructs are parsed but only partially implemented (e.g., `break`/`continue`, arrays, strings in codegen).
-- Scoping and type semantics are oversimplified in codegen, which can produce incorrect behavior in nested blocks or for float/string types.
-- Test coverage is narrow and primarily example-driven, with no negative tests or unit tests for critical subsystems.
+- Limited defensive programming (bounds checks, missing error recovery).
+- Several language constructs are parsed but only partially implemented (e.g., arrays, strings in codegen).
+- Scoping and type semantics are oversimplified in codegen, which can produce incorrect behavior for float/string types.
+- Test coverage is primarily example-driven, with negative tests but no unit tests for critical subsystems.
 
 In summary, the codebase is well-organized and easy to read, but it prioritizes simplicity over robustness. The overall quality is **good for a prototype or educational compiler**, but it needs substantial hardening for production use.
 
@@ -42,7 +42,7 @@ In summary, the codebase is well-organized and easy to read, but it prioritizes 
 
 **Concerns / improvement areas:**
 - The LLVM component list is very long and includes architecture-specific components (x86, ARM, AArch64). This increases link complexity and can cause portability headaches; a tighter set of components would be preferable for minimal builds.
-- No build-time warnings or hardening flags are configured (`-Wall`, `-Wextra`, `-Werror`, sanitizers, etc.), making it easier for defects to slip through.
+- Build-time warnings (`-Wall`, `-Wextra`, `-Wpedantic`) are now enabled via CMake for GCC and Clang.
 - `run_tests.sh` hides build output (`cmake .. > /dev/null 2>&1`), which makes debugging build failures harder and suppresses warnings that might be useful.
 - The test script uses exit codes to validate outputs, which are modulo 256. This is fine for small values but can obscure real return values and makes large numeric tests misleading.
 
@@ -62,7 +62,7 @@ In summary, the codebase is well-organized and easy to read, but it prioritizes 
 - `scanString()` does not report an error for unterminated strings; it simply consumes until EOF. This can lead to confusing downstream parse errors.
 - Invalid characters are tokenized as `TokenType::INVALID` but the lexer does not surface errors or record diagnostics, pushing error handling downstream.
 - The lexer stores numeric literal values in a union inside `Token` without tracking initialization state. This is safe only if the token type is checked carefully downstream; any misuse could be undefined behavior.
-- `skipComment()` only handles `//` comments, not `/* */`. This may be intentional, but it should be documented or validated consistently in the parser.
+- `skipComment()` handles both `//` line comments and `/* */` block comments, with proper unterminated comment error reporting.
 - Keywords are stored in a non-const global `unordered_map`. This is safe but unnecessary mutability and global state could complicate multithreaded usage.
 
 **Quality rating:** Clean and readable, but missing validation and diagnostic pathways for malformed input.
@@ -97,7 +97,7 @@ In summary, the codebase is well-organized and easy to read, but it prioritizes 
 **Concerns / improvement areas:**
 - The AST is "flat" and lacks a visitor or traversal framework, which causes codegen to rely on large switch statements and casts. This works at current scale but reduces extensibility.
 - `LiteralExpr` uses a union plus a `std::string` for storage. Only integer/float store in the union, strings store in `stringValue`. This is safe but subtle; correctness depends on always checking `literalType`.
-- `ArrayExpr` and `IndexExpr` are parsed but not supported in codegen, which can cause runtime failures later in the pipeline.
+- `ArrayExpr` and `IndexExpr` are parsed but not supported in codegen. Attempting to compile them now produces a clear error message instead of silently failing.
 
 **Quality rating:** Solid for a prototype, but lacks abstraction layers that scale with language growth.
 
@@ -113,11 +113,12 @@ In summary, the codebase is well-organized and easy to read, but it prioritizes 
 
 **Concerns / improvement areas:**
 - **Type model is oversimplified:** all values are treated as `int64_t`, and float literals are cast to `int64_t` during codegen. String literals are mapped to constant `0`. This diverges from the language's stated dynamic typing and causes semantic mismatches.
-- **Scoping is incomplete:** `namedValues` is a single map; only the `for` loop saves/restores an existing binding. Nested blocks and shadowing are not managed, which can lead to incorrect variable resolution.
-- **Control-flow constructs are partially implemented:** `break` and `continue` are parsed but intentionally unimplemented in codegen. This means valid programs can compile but produce incorrect runtime behavior.
-- **Error reporting:** codegen throws generic runtime errors on unknown variables/operators without context (function name or source position), which makes debugging difficult.
-- **Linking strategy:** compilation uses `std::system("gcc ...")` with string concatenation of `outputFile`. This is vulnerable to command injection if untrusted paths are passed and is platform-dependent.
-- `generateCall()` does not handle variadic or intrinsic functions and assumes exact argument count equality without type checking.
+- **Scoping is complete for blocks and loops:** `namedValues` uses a scope stack to save/restore bindings. `while`, `do-while`, `for` loops, and blocks all properly isolate their scopes.
+- **Control-flow constructs are fully implemented:** `break`, `continue`, `do-while`, and all loop types are supported with correct scoping and LLVM IR generation.
+- **Error reporting:** codegen now includes source location (line:column) in error messages using a `codegenError()` helper. The parser propagates token positions into AST nodes.
+- **Linking strategy:** compilation uses `llvm::sys::ExecuteAndWait` with `gcc` for linking. File paths are passed as separate arguments, avoiding shell injection.
+- `generateCall()` handles the built-in `print()` and `abs()` functions and user-defined functions, checking argument counts.
+- `ArrayExpr` and `IndexExpr` are now explicitly rejected at codegen time with clear "not yet supported" errors instead of generic failures.
 - There is no explicit LLVM data layout initialization until optimization and object emission, which can lead to inconsistent IR verification in some environments.
 
 **Quality rating:** Good foundational LLVM scaffolding, but incomplete semantics and unsafe external invocation weaken robustness.
@@ -147,7 +148,7 @@ In summary, the codebase is well-organized and easy to read, but it prioritizes 
 - The VM uses `Value` abstractions consistently, keeping type semantics centralized.
 
 **Concerns / improvement areas:**
-- **No bytecode validation:** `execute()` assumes well-formed bytecode. Reading beyond the end of the buffer is possible for malformed input.
+- **No bytecode validation:** `execute()` now includes bounds checking for bytecode reads via `ensureReadable()`, but does not fully verify bytecode structure before execution.
 - The VM does not support function calls, call frames, or local variables despite the presence of `CALL` in opcodes and `locals` in the class.
 - `STORE_VAR` pushes the value via `peek()` rather than popping; this is valid but should be documented or should mirror the language semantics more clearly.
 - Global variable lookups (`getGlobal`) throw on missing variables without context; error messages lack source location.
@@ -165,7 +166,7 @@ In summary, the codebase is well-organized and easy to read, but it prioritizes 
 
 **Concerns / improvement areas:**
 - The union in `Value` contains a non-trivial type (`RefCountedString`), which requires meticulous manual lifetime management. The code handles this correctly, but it is easy to regress.
-- `Value::toString()` uses `std::to_string` for floats, which can produce noisy formatting. This is quality-of-output rather than correctness.
+- `Value::toString()` uses `std::ostringstream` for floats, which produces clean formatting (e.g. "0.1" instead of "0.100000").
 - `RefCountedString` is not thread-safe (reference count increments/decrements are not atomic). This is fine for single-threaded usage but should be documented.
 - `RefCountedString::allocate()` uses `sizeof(StringData) + length` while `StringData` already includes `char chars[1]`. This yields an allocation of `length + sizeof(StringData)` bytes, which is correct for a flexible array member pattern but can be non-obvious; strong documentation would help prevent misuse.
 
@@ -196,11 +197,11 @@ In summary, the codebase is well-organized and easy to read, but it prioritizes 
 
 **Concerns / improvement areas:**
 - The tests are integration tests only; there are no unit tests for lexer, parser, or codegen.
-- Negative testing is absent (invalid syntax, type errors, runtime errors).
+- Negative testing is included: `const_fail.om`, `break_outside_loop.om`, `continue_outside_loop.om`, and `undefined_var.om` validate that invalid programs are rejected.
 - The test suite does not exercise arrays, strings, or error recovery paths.
 - There is no test coverage for bytecode VM behavior.
 
-**Quality rating:** Basic smoke-test coverage; insufficient for regression safety on core subsystems.
+**Quality rating:** Reasonable integration and negative test coverage; unit tests for core subsystems would improve regression safety.
 
 ---
 
