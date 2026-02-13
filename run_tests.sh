@@ -116,6 +116,7 @@ test_cli_output "help" "Usage:" 0 ./build/omsc --help
 test_cli_output "version" "OmScript Compiler v1.0" 0 ./build/omsc version
 test_cli_output "lex" "FN" 0 ./build/omsc lex examples/test.om
 test_cli_output "lex-flag" "FN" 0 ./build/omsc --lex examples/test.om
+test_cli_output "lex-compound-ops" "PLUS_ASSIGN" 0 ./build/omsc lex examples/compound_assign.om
 test_cli_output "tokens-flag" "FN" 0 ./build/omsc --tokens examples/test.om
 test_cli_output "parse" "Parsed program" 0 ./build/omsc parse examples/test.om
 test_cli_output "parse-flag" "Parsed program" 0 ./build/omsc --parse examples/test.om
@@ -177,6 +178,8 @@ test_program "examples/short_circuit.om" 1
 test_program "examples/div_zero.om" 1
 test_program "examples/mod_zero.om" 1
 test_program "examples/refcount_test.om" 97
+test_program "examples/compound_assign.om" 76
+test_program "examples/block_comments.om" 30
 test_compile_fail "examples/const_fail.om"
 
 echo ""

@@ -89,6 +89,11 @@ const char* tokenTypeToString(omscript::TokenType type) {
         case omscript::TokenType::NOT: return "NOT";
         case omscript::TokenType::PLUSPLUS: return "PLUSPLUS";
         case omscript::TokenType::MINUSMINUS: return "MINUSMINUS";
+        case omscript::TokenType::PLUS_ASSIGN: return "PLUS_ASSIGN";
+        case omscript::TokenType::MINUS_ASSIGN: return "MINUS_ASSIGN";
+        case omscript::TokenType::STAR_ASSIGN: return "STAR_ASSIGN";
+        case omscript::TokenType::SLASH_ASSIGN: return "SLASH_ASSIGN";
+        case omscript::TokenType::PERCENT_ASSIGN: return "PERCENT_ASSIGN";
         case omscript::TokenType::RANGE: return "RANGE";
         case omscript::TokenType::LPAREN: return "LPAREN";
         case omscript::TokenType::RPAREN: return "RPAREN";

@@ -114,10 +114,16 @@ OPTMAX!:
 - Comparison: `==`, `!=`, `<`, `<=`, `>`, `>=`
 - Logical: `&&`, `||`, `!`
 - Assignment: `=`
+- Compound Assignment: `+=`, `-=`, `*=`, `/=`, `%=`
 
 ### Comments
 ```omscript
 // Single line comment
+
+/* Multi-line
+   block comment */
+
+var x = 10; /* inline block comment */
 ```
 
 ## Building

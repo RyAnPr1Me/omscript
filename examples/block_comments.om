@@ -1,0 +1,10 @@
+/*
+ * Test multi-line block comments.
+ * This entire block is a comment.
+ */
+fn main() {
+    var x = 10;
+    /* inline block comment */ var y = 20;
+    var z = x + y; /* result should be 30 */
+    return z;
+}

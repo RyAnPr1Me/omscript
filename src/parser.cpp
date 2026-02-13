@@ -271,6 +271,36 @@ std::unique_ptr<Expression> Parser::parseAssignment() {
         }
     }
     
+    // Compound assignment operators: +=, -=, *=, /=, %=
+    if (match(TokenType::PLUS_ASSIGN) || match(TokenType::MINUS_ASSIGN) ||
+        match(TokenType::STAR_ASSIGN) || match(TokenType::SLASH_ASSIGN) ||
+        match(TokenType::PERCENT_ASSIGN)) {
+        TokenType opType = tokens[current - 1].type;
+        if (expr->type == ASTNodeType::IDENTIFIER_EXPR) {
+            auto idExpr = dynamic_cast<IdentifierExpr*>(expr.get());
+            std::string name = idExpr->name;
+            auto rhs = parseAssignment();
+            
+            // Determine the binary operator from the compound operator
+            std::string binOp;
+            switch (opType) {
+                case TokenType::PLUS_ASSIGN:    binOp = "+"; break;
+                case TokenType::MINUS_ASSIGN:   binOp = "-"; break;
+                case TokenType::STAR_ASSIGN:    binOp = "*"; break;
+                case TokenType::SLASH_ASSIGN:   binOp = "/"; break;
+                case TokenType::PERCENT_ASSIGN: binOp = "%"; break;
+                default: error("Unknown compound assignment operator"); break;
+            }
+            
+            // Desugar: x += expr  =>  x = x + expr
+            auto lhsRef = std::make_unique<IdentifierExpr>(name);
+            auto binExpr = std::make_unique<BinaryExpr>(binOp, std::move(lhsRef), std::move(rhs));
+            return std::make_unique<AssignExpr>(name, std::move(binExpr));
+        } else {
+            error("Invalid compound assignment target");
+        }
+    }
+    
     return expr;
 }
 

@@ -1139,7 +1139,11 @@ void CodeGenerator::writeObjectFile(const std::string& filename) {
     }
     
     llvm::legacy::PassManager pass;
+#if LLVM_VERSION_MAJOR >= 18
     auto fileType = llvm::CodeGenFileType::ObjectFile;
+#else
+    auto fileType = llvm::CGFT_ObjectFile;
+#endif
     
     if (targetMachine->addPassesToEmitFile(pass, dest, nullptr, fileType)) {
         throw std::runtime_error("TargetMachine can't emit a file of this type");

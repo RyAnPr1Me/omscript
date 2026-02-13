@@ -53,6 +53,8 @@ void Lexer::skipWhitespace() {
             advance();
         } else if (c == '/' && peek(1) == '/') {
             skipComment();
+        } else if (c == '/' && peek(1) == '*') {
+            skipBlockComment();
         } else {
             break;
         }
@@ -66,6 +68,25 @@ void Lexer::skipComment() {
     while (!isAtEnd() && peek() != '\n') {
         advance();
     }
+}
+
+void Lexer::skipBlockComment() {
+    int startLine = line;
+    int startColumn = column;
+    // Skip /*
+    advance();
+    advance();
+    while (!isAtEnd()) {
+        if (peek() == '*' && peek(1) == '/') {
+            advance(); // Skip *
+            advance(); // Skip /
+            return;
+        }
+        advance();
+    }
+    throw std::runtime_error("Unterminated block comment starting at line " +
+                             std::to_string(startLine) + ", column " +
+                             std::to_string(startColumn));
 }
 
 Token Lexer::makeToken(TokenType type, const std::string& lexeme) {
@@ -211,6 +232,9 @@ std::vector<Token> Lexer::tokenize() {
                 if (peek() == '+') {
                     advance();
                     tokens.push_back(makeToken(TokenType::PLUSPLUS, "++"));
+                } else if (peek() == '=') {
+                    advance();
+                    tokens.push_back(makeToken(TokenType::PLUS_ASSIGN, "+="));
                 } else {
                     tokens.push_back(makeToken(TokenType::PLUS, "+"));
                 }
@@ -219,13 +243,37 @@ std::vector<Token> Lexer::tokenize() {
                 if (peek() == '-') {
                     advance();
                     tokens.push_back(makeToken(TokenType::MINUSMINUS, "--"));
+                } else if (peek() == '=') {
+                    advance();
+                    tokens.push_back(makeToken(TokenType::MINUS_ASSIGN, "-="));
                 } else {
                     tokens.push_back(makeToken(TokenType::MINUS, "-"));
                 }
                 break;
-            case '*': tokens.push_back(makeToken(TokenType::STAR, "*")); break;
-            case '/': tokens.push_back(makeToken(TokenType::SLASH, "/")); break;
-            case '%': tokens.push_back(makeToken(TokenType::PERCENT, "%")); break;
+            case '*':
+                if (peek() == '=') {
+                    advance();
+                    tokens.push_back(makeToken(TokenType::STAR_ASSIGN, "*="));
+                } else {
+                    tokens.push_back(makeToken(TokenType::STAR, "*"));
+                }
+                break;
+            case '/':
+                if (peek() == '=') {
+                    advance();
+                    tokens.push_back(makeToken(TokenType::SLASH_ASSIGN, "/="));
+                } else {
+                    tokens.push_back(makeToken(TokenType::SLASH, "/"));
+                }
+                break;
+            case '%':
+                if (peek() == '=') {
+                    advance();
+                    tokens.push_back(makeToken(TokenType::PERCENT_ASSIGN, "%="));
+                } else {
+                    tokens.push_back(makeToken(TokenType::PERCENT, "%"));
+                }
+                break;
             case '(': tokens.push_back(makeToken(TokenType::LPAREN, "(")); break;
             case ')': tokens.push_back(makeToken(TokenType::RPAREN, ")")); break;
             case '{': tokens.push_back(makeToken(TokenType::LBRACE, "{")); break;
