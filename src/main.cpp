@@ -64,6 +64,7 @@ const char* tokenTypeToString(omscript::TokenType type) {
         case omscript::TokenType::IF: return "IF";
         case omscript::TokenType::ELSE: return "ELSE";
         case omscript::TokenType::WHILE: return "WHILE";
+        case omscript::TokenType::DO: return "DO";
         case omscript::TokenType::FOR: return "FOR";
         case omscript::TokenType::VAR: return "VAR";
         case omscript::TokenType::CONST: return "CONST";

@@ -32,6 +32,7 @@ private:
     std::unique_ptr<Statement> parseVarDecl(bool isConst);
     std::unique_ptr<Statement> parseIfStmt();
     std::unique_ptr<Statement> parseWhileStmt();
+    std::unique_ptr<Statement> parseDoWhileStmt();
     std::unique_ptr<Statement> parseForStmt();
     std::unique_ptr<Statement> parseReturnStmt();
     std::unique_ptr<Statement> parseBreakStmt();

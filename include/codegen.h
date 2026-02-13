@@ -80,6 +80,7 @@ private:
     void generateReturn(ReturnStmt* stmt);
     void generateIf(IfStmt* stmt);
     void generateWhile(WhileStmt* stmt);
+    void generateDoWhile(DoWhileStmt* stmt);
     void generateFor(ForStmt* stmt);
     void generateBlock(BlockStmt* stmt);
     void generateExprStmt(ExprStmt* stmt);

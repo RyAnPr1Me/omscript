@@ -117,6 +117,7 @@ test_cli_output "version" "OmScript Compiler v1.0" 0 ./build/omsc version
 test_cli_output "lex" "FN" 0 ./build/omsc lex examples/test.om
 test_cli_output "lex-flag" "FN" 0 ./build/omsc --lex examples/test.om
 test_cli_output "lex-compound-ops" "PLUS_ASSIGN" 0 ./build/omsc lex examples/compound_assign.om
+test_cli_output "lex-do-while" "DO" 0 ./build/omsc lex examples/do_while.om
 test_cli_output "tokens-flag" "FN" 0 ./build/omsc --tokens examples/test.om
 test_cli_output "parse" "Parsed program" 0 ./build/omsc parse examples/test.om
 test_cli_output "parse-flag" "Parsed program" 0 ./build/omsc --parse examples/test.om
@@ -141,6 +142,7 @@ rm -f build_flag_test build_flag_test.o
 test_cli_output "run-success" "Compilation successful!" 0 ./build/omsc run examples/exit_zero.om
 test_cli_output "run-flag" "Compilation successful!" 0 ./build/omsc --run examples/exit_zero.om
 test_cli_output "run" "Program exited with code 120" 120 ./build/omsc run examples/factorial.om
+test_cli_output "print-output" "42" 0 ./build/omsc run examples/print_test.om
 if [ -f a.out ] || [ -f a.out.o ]; then
     echo -e "${RED}✗ Failed (temporary output files not cleaned)${NC}"
     rm -f a.out a.out.o
@@ -180,7 +182,12 @@ test_program "examples/mod_zero.om" 1
 test_program "examples/refcount_test.om" 97
 test_program "examples/compound_assign.om" 76
 test_program "examples/block_comments.om" 30
+test_program "examples/do_while.om" 16
+test_program "examples/print_test.om" 0
 test_compile_fail "examples/const_fail.om"
+test_compile_fail "examples/break_outside_loop.om"
+test_compile_fail "examples/continue_outside_loop.om"
+test_compile_fail "examples/undefined_var.om"
 
 echo ""
 echo "============================================"

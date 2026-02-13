@@ -123,6 +123,7 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
 std::unique_ptr<Statement> Parser::parseStatement() {
     if (match(TokenType::IF)) return parseIfStmt();
     if (match(TokenType::WHILE)) return parseWhileStmt();
+    if (match(TokenType::DO)) return parseDoWhileStmt();
     if (match(TokenType::FOR)) return parseForStmt();
     if (match(TokenType::RETURN)) return parseReturnStmt();
     if (match(TokenType::BREAK)) return parseBreakStmt();
@@ -193,6 +194,17 @@ std::unique_ptr<Statement> Parser::parseWhileStmt() {
     auto body = parseStatement();
     
     return std::make_unique<WhileStmt>(std::move(condition), std::move(body));
+}
+
+std::unique_ptr<Statement> Parser::parseDoWhileStmt() {
+    auto body = parseStatement();
+    consume(TokenType::WHILE, "Expected 'while' after do-while body");
+    consume(TokenType::LPAREN, "Expected '(' after 'while'");
+    auto condition = parseExpression();
+    consume(TokenType::RPAREN, "Expected ')' after condition");
+    consume(TokenType::SEMICOLON, "Expected ';' after do-while statement");
+    
+    return std::make_unique<DoWhileStmt>(std::move(body), std::move(condition));
 }
 
 std::unique_ptr<Statement> Parser::parseForStmt() {

@@ -16,6 +16,7 @@ enum class ASTNodeType {
     RETURN_STMT,
     IF_STMT,
     WHILE_STMT,
+    DO_WHILE_STMT,
     FOR_STMT,
     BREAK_STMT,
     CONTINUE_STMT,
@@ -187,6 +188,15 @@ public:
     
     WhileStmt(std::unique_ptr<Expression> cond, std::unique_ptr<Statement> b)
         : Statement(ASTNodeType::WHILE_STMT), condition(std::move(cond)), body(std::move(b)) {}
+};
+
+class DoWhileStmt : public Statement {
+public:
+    std::unique_ptr<Statement> body;
+    std::unique_ptr<Expression> condition;
+    
+    DoWhileStmt(std::unique_ptr<Statement> b, std::unique_ptr<Expression> cond)
+        : Statement(ASTNodeType::DO_WHILE_STMT), body(std::move(b)), condition(std::move(cond)) {}
 };
 
 class ForStmt : public Statement {

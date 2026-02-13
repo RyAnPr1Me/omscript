@@ -1,0 +1,6 @@
+// This program should fail to compile:
+// continue is used outside of a loop
+fn main() {
+    continue;
+    return 0;
+}

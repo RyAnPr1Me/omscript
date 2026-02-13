@@ -1,0 +1,8 @@
+// Test the built-in print function
+fn main() {
+    var x = 42;
+    print(x);
+    print(100);
+    print(x + 8);
+    return 0;
+}

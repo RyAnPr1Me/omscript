@@ -42,6 +42,7 @@ using omscript::VarDecl;
 using omscript::ReturnStmt;
 using omscript::IfStmt;
 using omscript::WhileStmt;
+using omscript::DoWhileStmt;
 using omscript::ForStmt;
 using omscript::Statement;
 
@@ -222,6 +223,12 @@ void optimizeOptMaxStatement(Statement* stmt) {
             auto* whileStmt = static_cast<WhileStmt*>(stmt);
             whileStmt->condition = optimizeOptMaxExpression(std::move(whileStmt->condition));
             optimizeOptMaxStatement(whileStmt->body.get());
+            break;
+        }
+        case ASTNodeType::DO_WHILE_STMT: {
+            auto* doWhileStmt = static_cast<DoWhileStmt*>(stmt);
+            optimizeOptMaxStatement(doWhileStmt->body.get());
+            doWhileStmt->condition = optimizeOptMaxExpression(std::move(doWhileStmt->condition));
             break;
         }
         case ASTNodeType::FOR_STMT: {
@@ -478,6 +485,9 @@ void CodeGenerator::generateStatement(Statement* stmt) {
         case ASTNodeType::WHILE_STMT:
             generateWhile(static_cast<WhileStmt*>(stmt));
             break;
+        case ASTNodeType::DO_WHILE_STMT:
+            generateDoWhile(static_cast<DoWhileStmt*>(stmt));
+            break;
         case ASTNodeType::FOR_STMT:
             generateFor(static_cast<ForStmt*>(stmt));
             break;
@@ -683,6 +693,18 @@ llvm::Value* CodeGenerator::generateUnary(UnaryExpr* expr) {
 }
 
 llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
+    // Handle built-in functions
+    if (expr->callee == "print") {
+        if (expr->arguments.size() != 1) {
+            throw std::runtime_error("Built-in function 'print' expects 1 argument, but " +
+                                     std::to_string(expr->arguments.size()) + " provided");
+        }
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        llvm::Value* formatStr = builder->CreateGlobalString("%lld\n", "print_fmt");
+        builder->CreateCall(getPrintfFunction(), {formatStr, arg});
+        return arg;
+    }
+
     if (inOptMaxFunction) {
         if (optMaxFunctions.find(expr->callee) == optMaxFunctions.end()) {
             std::string currentFunction = "<unknown>";
@@ -821,6 +843,8 @@ void CodeGenerator::generateIf(IfStmt* stmt) {
 void CodeGenerator::generateWhile(WhileStmt* stmt) {
     llvm::Function* function = builder->GetInsertBlock()->getParent();
     
+    beginScope();
+    
     llvm::BasicBlock* condBB = llvm::BasicBlock::Create(*context, "whilecond", function);
     llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "whilebody", function);
     llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "whileend", function);
@@ -848,6 +872,45 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
     
     // End block
     builder->SetInsertPoint(endBB);
+    
+    endScope();
+}
+
+void CodeGenerator::generateDoWhile(DoWhileStmt* stmt) {
+    llvm::Function* function = builder->GetInsertBlock()->getParent();
+    
+    beginScope();
+    
+    llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "dowhilebody", function);
+    llvm::BasicBlock* condBB = llvm::BasicBlock::Create(*context, "dowhilecond", function);
+    llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "dowhileend", function);
+    
+    // Jump directly to body (execute at least once)
+    builder->CreateBr(bodyBB);
+    
+    // Body block
+    builder->SetInsertPoint(bodyBB);
+    loopStack.push_back({endBB, condBB});
+    generateStatement(stmt->body.get());
+    loopStack.pop_back();
+    if (!builder->GetInsertBlock()->getTerminator()) {
+        builder->CreateBr(condBB);
+    }
+    
+    // Condition block
+    builder->SetInsertPoint(condBB);
+    llvm::Value* condition = generateExpression(stmt->condition.get());
+    llvm::Value* condBool = builder->CreateICmpNE(
+        condition,
+        llvm::ConstantInt::get(getDefaultType(), 0, true),
+        "dowhilecond"
+    );
+    builder->CreateCondBr(condBool, bodyBB, endBB);
+    
+    // End block
+    builder->SetInsertPoint(endBB);
+    
+    endScope();
 }
 
 void CodeGenerator::generateFor(ForStmt* stmt) {
