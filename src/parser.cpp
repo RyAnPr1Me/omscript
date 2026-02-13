@@ -276,6 +276,7 @@ std::unique_ptr<Expression> Parser::parseAssignment() {
         match(TokenType::STAR_ASSIGN) || match(TokenType::SLASH_ASSIGN) ||
         match(TokenType::PERCENT_ASSIGN)) {
         TokenType opType = tokens[current - 1].type;
+        std::string opLexeme = tokens[current - 1].lexeme;
         if (expr->type == ASTNodeType::IDENTIFIER_EXPR) {
             auto idExpr = dynamic_cast<IdentifierExpr*>(expr.get());
             std::string name = idExpr->name;
@@ -289,7 +290,7 @@ std::unique_ptr<Expression> Parser::parseAssignment() {
                 case TokenType::STAR_ASSIGN:    binOp = "*"; break;
                 case TokenType::SLASH_ASSIGN:   binOp = "/"; break;
                 case TokenType::PERCENT_ASSIGN: binOp = "%"; break;
-                default: error("Unknown compound assignment operator"); break;
+                default: error("Unknown compound assignment operator: " + opLexeme); break;
             }
             
             // Desugar: x += expr  =>  x = x + expr
