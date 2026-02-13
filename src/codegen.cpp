@@ -828,25 +828,20 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
 llvm::Value* CodeGenerator::generatePostfix(PostfixExpr* expr) {
     auto* identifier = dynamic_cast<IdentifierExpr*>(expr->operand.get());
     if (!identifier) {
-        throw std::runtime_error("Postfix operators require an identifier");
+        codegenError("Postfix operators require an identifier", expr);
     }
     
     auto it = namedValues.find(identifier->name);
     if (it == namedValues.end() || !it->second) {
-        throw std::runtime_error("Unknown variable: " + identifier->name);
+        codegenError("Unknown variable: " + identifier->name, expr);
     }
     checkConstModification(identifier->name, "modify");
     
     llvm::Value* current = builder->CreateLoad(getDefaultType(), it->second, identifier->name.c_str());
     llvm::Value* delta = llvm::ConstantInt::get(getDefaultType(), 1, true);
-    llvm::Value* updated = nullptr;
-    if (expr->op == "++") {
-        updated = builder->CreateAdd(current, delta, "postinc");
-    } else if (expr->op == "--") {
-        updated = builder->CreateSub(current, delta, "postdec");
-    } else {
-        throw std::runtime_error("Unknown postfix operator: " + expr->op);
-    }
+    llvm::Value* updated = (expr->op == "++")
+        ? builder->CreateAdd(current, delta, "postinc")
+        : builder->CreateSub(current, delta, "postdec");
     
     builder->CreateStore(updated, it->second);
     return current;
@@ -855,25 +850,20 @@ llvm::Value* CodeGenerator::generatePostfix(PostfixExpr* expr) {
 llvm::Value* CodeGenerator::generatePrefix(PrefixExpr* expr) {
     auto* identifier = dynamic_cast<IdentifierExpr*>(expr->operand.get());
     if (!identifier) {
-        throw std::runtime_error("Prefix operators require an identifier");
+        codegenError("Prefix operators require an identifier", expr);
     }
     
     auto it = namedValues.find(identifier->name);
     if (it == namedValues.end() || !it->second) {
-        throw std::runtime_error("Unknown variable: " + identifier->name);
+        codegenError("Unknown variable: " + identifier->name, expr);
     }
     checkConstModification(identifier->name, "modify");
     
     llvm::Value* current = builder->CreateLoad(getDefaultType(), it->second, identifier->name.c_str());
     llvm::Value* delta = llvm::ConstantInt::get(getDefaultType(), 1, true);
-    llvm::Value* updated = nullptr;
-    if (expr->op == "++") {
-        updated = builder->CreateAdd(current, delta, "preinc");
-    } else if (expr->op == "--") {
-        updated = builder->CreateSub(current, delta, "predec");
-    } else {
-        throw std::runtime_error("Unknown prefix operator: " + expr->op);
-    }
+    llvm::Value* updated = (expr->op == "++")
+        ? builder->CreateAdd(current, delta, "preinc")
+        : builder->CreateSub(current, delta, "predec");
     
     builder->CreateStore(updated, it->second);
     return updated;

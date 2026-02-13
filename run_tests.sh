@@ -189,10 +189,12 @@ test_program "examples/print_test.om" 0
 test_program "examples/ternary.om" 34
 test_program "examples/bitwise.om" 52
 test_program "examples/prefix_ops.om" 50
+test_program "examples/abs_test.om" 26
 test_compile_fail "examples/const_fail.om"
 test_compile_fail "examples/break_outside_loop.om"
 test_compile_fail "examples/continue_outside_loop.om"
 test_compile_fail "examples/undefined_var.om"
+test_cli_output "error-line-info" "line" 1 ./build/omsc examples/undefined_var.om -o /tmp/test_err
 
 echo ""
 echo "============================================"
