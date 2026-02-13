@@ -839,6 +839,9 @@ llvm::Value* CodeGenerator::generatePostfix(PostfixExpr* expr) {
     
     llvm::Value* current = builder->CreateLoad(getDefaultType(), it->second, identifier->name.c_str());
     llvm::Value* delta = llvm::ConstantInt::get(getDefaultType(), 1, true);
+    if (expr->op != "++" && expr->op != "--") {
+        codegenError("Unknown postfix operator: " + expr->op, expr);
+    }
     llvm::Value* updated = (expr->op == "++")
         ? builder->CreateAdd(current, delta, "postinc")
         : builder->CreateSub(current, delta, "postdec");
@@ -861,6 +864,9 @@ llvm::Value* CodeGenerator::generatePrefix(PrefixExpr* expr) {
     
     llvm::Value* current = builder->CreateLoad(getDefaultType(), it->second, identifier->name.c_str());
     llvm::Value* delta = llvm::ConstantInt::get(getDefaultType(), 1, true);
+    if (expr->op != "++" && expr->op != "--") {
+        codegenError("Unknown prefix operator: " + expr->op, expr);
+    }
     llvm::Value* updated = (expr->op == "++")
         ? builder->CreateAdd(current, delta, "preinc")
         : builder->CreateSub(current, delta, "predec");
