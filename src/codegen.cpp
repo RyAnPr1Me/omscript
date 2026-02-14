@@ -1102,7 +1102,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateBr(loopBB);
 
         builder->SetInsertPoint(doneBB);
-        llvm::PHINode* finalResult = builder->CreatePHI(getDefaultType(), 3, "pow.final");
+        llvm::PHINode* finalResult = builder->CreatePHI(getDefaultType(), 2, "pow.final");
         finalResult->addIncoming(zero, negExpBB);
         finalResult->addIncoming(result, loopBB);
         return finalResult;
