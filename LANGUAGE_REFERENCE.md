@@ -287,7 +287,6 @@ Uninitialized variables default to `0`.
 Constants are declared with `const` and **must** be initialized:
 
 ```javascript
-const PI = 3;
 const MAX_SIZE = 100;
 ```
 
@@ -433,7 +432,7 @@ Operators are listed from **highest** to **lowest** precedence:
 | `%` | `a % b` | Modulo (remainder) |
 | `-` (unary) | `-a` | Negation |
 
-**Division and modulo by zero** produce a runtime error and terminate the program with exit code 1:
+**Division and modulo by zero** are detected in the generated machine code at runtime. They print an error and terminate the program with exit code 1:
 
 ```
 Runtime error: division by zero
