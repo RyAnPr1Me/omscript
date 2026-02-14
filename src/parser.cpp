@@ -476,17 +476,20 @@ std::unique_ptr<Expression> Parser::parseUnary() {
 std::unique_ptr<Expression> Parser::parsePostfix() {
     auto expr = parseCall();
     
-    // Handle postfix operators
-    if (match(TokenType::PLUSPLUS) || match(TokenType::MINUSMINUS)) {
-        std::string op = tokens[current - 1].lexeme;
-        return std::make_unique<PostfixExpr>(op, std::move(expr));
-    }
-    
-    // Handle array indexing
-    while (match(TokenType::LBRACKET)) {
-        auto index = parseExpression();
-        consume(TokenType::RBRACKET, "Expected ']' after array index");
-        expr = std::make_unique<IndexExpr>(std::move(expr), std::move(index));
+    while (true) {
+        // Handle postfix operators
+        if (match(TokenType::PLUSPLUS) || match(TokenType::MINUSMINUS)) {
+            std::string op = tokens[current - 1].lexeme;
+            expr = std::make_unique<PostfixExpr>(op, std::move(expr));
+        }
+        // Handle array indexing
+        else if (match(TokenType::LBRACKET)) {
+            auto index = parseExpression();
+            consume(TokenType::RBRACKET, "Expected ']' after array index");
+            expr = std::make_unique<IndexExpr>(std::move(expr), std::move(index));
+        } else {
+            break;
+        }
     }
     
     return expr;

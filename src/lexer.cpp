@@ -165,7 +165,8 @@ Token Lexer::scanString() {
     
     advance(); // Skip closing quote
     
-    return makeToken(TokenType::STRING, str);
+    Token token(TokenType::STRING, str, startLine, startColumn);
+    return token;
 }
 
 std::vector<Token> Lexer::tokenize() {

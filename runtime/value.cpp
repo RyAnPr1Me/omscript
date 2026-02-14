@@ -40,7 +40,9 @@ Value Value::operator+(const Value& other) const {
     if (type == Type::INTEGER && other.type == Type::INTEGER) {
         return Value(intValue + other.intValue);
     }
-    if (type == Type::FLOAT || other.type == Type::FLOAT) {
+    if ((type == Type::FLOAT || other.type == Type::FLOAT) &&
+        (type == Type::INTEGER || type == Type::FLOAT) &&
+        (other.type == Type::INTEGER || other.type == Type::FLOAT)) {
         double a = (type == Type::FLOAT) ? floatValue : static_cast<double>(intValue);
         double b = (other.type == Type::FLOAT) ? other.floatValue : static_cast<double>(other.intValue);
         return Value(a + b);
@@ -69,7 +71,9 @@ Value Value::operator-(const Value& other) const {
     if (type == Type::INTEGER && other.type == Type::INTEGER) {
         return Value(intValue - other.intValue);
     }
-    if (type == Type::FLOAT || other.type == Type::FLOAT) {
+    if ((type == Type::FLOAT || other.type == Type::FLOAT) &&
+        (type == Type::INTEGER || type == Type::FLOAT) &&
+        (other.type == Type::INTEGER || other.type == Type::FLOAT)) {
         double a = (type == Type::FLOAT) ? floatValue : static_cast<double>(intValue);
         double b = (other.type == Type::FLOAT) ? other.floatValue : static_cast<double>(other.intValue);
         return Value(a - b);
@@ -81,7 +85,9 @@ Value Value::operator*(const Value& other) const {
     if (type == Type::INTEGER && other.type == Type::INTEGER) {
         return Value(intValue * other.intValue);
     }
-    if (type == Type::FLOAT || other.type == Type::FLOAT) {
+    if ((type == Type::FLOAT || other.type == Type::FLOAT) &&
+        (type == Type::INTEGER || type == Type::FLOAT) &&
+        (other.type == Type::INTEGER || other.type == Type::FLOAT)) {
         double a = (type == Type::FLOAT) ? floatValue : static_cast<double>(intValue);
         double b = (other.type == Type::FLOAT) ? other.floatValue : static_cast<double>(other.intValue);
         return Value(a * b);
@@ -94,7 +100,9 @@ Value Value::operator/(const Value& other) const {
         if (other.intValue == 0) throw std::runtime_error("Division by zero");
         return Value(intValue / other.intValue);
     }
-    if (type == Type::FLOAT || other.type == Type::FLOAT) {
+    if ((type == Type::FLOAT || other.type == Type::FLOAT) &&
+        (type == Type::INTEGER || type == Type::FLOAT) &&
+        (other.type == Type::INTEGER || other.type == Type::FLOAT)) {
         double a = (type == Type::FLOAT) ? floatValue : static_cast<double>(intValue);
         double b = (other.type == Type::FLOAT) ? other.floatValue : static_cast<double>(other.intValue);
         if (b == 0.0) throw std::runtime_error("Division by zero");
@@ -150,7 +158,9 @@ bool Value::operator<(const Value& other) const {
     if (type == Type::INTEGER && other.type == Type::INTEGER) {
         return intValue < other.intValue;
     }
-    if (type == Type::FLOAT || other.type == Type::FLOAT) {
+    if ((type == Type::FLOAT || other.type == Type::FLOAT) &&
+        (type == Type::INTEGER || type == Type::FLOAT) &&
+        (other.type == Type::INTEGER || other.type == Type::FLOAT)) {
         double a = (type == Type::FLOAT) ? floatValue : static_cast<double>(intValue);
         double b = (other.type == Type::FLOAT) ? other.floatValue : static_cast<double>(other.intValue);
         return a < b;

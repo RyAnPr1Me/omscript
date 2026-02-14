@@ -112,8 +112,8 @@ std::unique_ptr<Expression> optimizeOptMaxBinary(const std::string& op,
         if (op == "&") return std::make_unique<LiteralExpr>(lval & rval);
         if (op == "|") return std::make_unique<LiteralExpr>(lval | rval);
         if (op == "^") return std::make_unique<LiteralExpr>(lval ^ rval);
-        if (op == "<<") return std::make_unique<LiteralExpr>(lval << rval);
-        if (op == ">>") return std::make_unique<LiteralExpr>(lval >> rval);
+        if (op == "<<" && rval >= 0 && rval < 64) return std::make_unique<LiteralExpr>(lval << rval);
+        if (op == ">>" && rval >= 0 && rval < 64) return std::make_unique<LiteralExpr>(lval >> rval);
     } else if (leftLiteral->literalType == LiteralExpr::LiteralType::FLOAT &&
                rightLiteral->literalType == LiteralExpr::LiteralType::FLOAT) {
         double lval = leftLiteral->floatValue;
@@ -654,9 +654,11 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         } else if (expr->op == "^") {
             return llvm::ConstantInt::get(*context, llvm::APInt(64, lval ^ rval));
         } else if (expr->op == "<<") {
-            return llvm::ConstantInt::get(*context, llvm::APInt(64, lval << rval));
+            if (rval >= 0 && rval < 64)
+                return llvm::ConstantInt::get(*context, llvm::APInt(64, lval << rval));
         } else if (expr->op == ">>") {
-            return llvm::ConstantInt::get(*context, llvm::APInt(64, lval >> rval));
+            if (rval >= 0 && rval < 64)
+                return llvm::ConstantInt::get(*context, llvm::APInt(64, lval >> rval));
         }
     }
     
