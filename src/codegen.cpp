@@ -971,10 +971,8 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
     llvm::IRBuilder<> entryBuilder(&function->getEntryBlock(), function->getEntryBlock().begin());
     llvm::AllocaInst* arrAlloca = entryBuilder.CreateAlloca(getDefaultType(), allocSize, "arr");
 
-    // Store the length in slot 0
-    llvm::Value* lenPtr = builder->CreateGEP(getDefaultType(), arrAlloca,
-        llvm::ConstantInt::get(getDefaultType(), 0), "arr.len.ptr");
-    builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), numElements), lenPtr);
+    // Store the length in slot 0 (arrAlloca points to slot 0)
+    builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), numElements), arrAlloca);
 
     // Store each element in slots 1..N
     for (size_t i = 0; i < numElements; i++) {
@@ -1011,10 +1009,8 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
 
     // Out-of-bounds path: print error and abort
     builder->SetInsertPoint(failBB);
-    llvm::GlobalVariable* errMsg = module->getGlobalVariable("idx_oob_msg", true);
-    if (!errMsg) {
-        errMsg = builder->CreateGlobalString("Runtime error: array index out of bounds\n", "idx_oob_msg");
-    }
+    llvm::Value* errMsg = builder->CreateGlobalString(
+        "Runtime error: array index out of bounds\n", "idx_oob_msg");
     builder->CreateCall(getPrintfFunction(), {errMsg});
     llvm::Function* trapFn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::trap);
     builder->CreateCall(trapFn, {});
