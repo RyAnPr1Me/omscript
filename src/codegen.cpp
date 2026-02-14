@@ -836,6 +836,141 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         return builder->CreateLoad(getDefaultType(), arrPtr, "arrlen");
     }
 
+    if (expr->callee == "min") {
+        if (expr->arguments.size() != 2) {
+            codegenError("Built-in function 'min' expects 2 arguments, but " +
+                         std::to_string(expr->arguments.size()) + " provided", expr);
+        }
+        llvm::Value* a = generateExpression(expr->arguments[0].get());
+        llvm::Value* b = generateExpression(expr->arguments[1].get());
+        llvm::Value* cmp = builder->CreateICmpSLT(a, b, "mincmp");
+        return builder->CreateSelect(cmp, a, b, "minval");
+    }
+
+    if (expr->callee == "max") {
+        if (expr->arguments.size() != 2) {
+            codegenError("Built-in function 'max' expects 2 arguments, but " +
+                         std::to_string(expr->arguments.size()) + " provided", expr);
+        }
+        llvm::Value* a = generateExpression(expr->arguments[0].get());
+        llvm::Value* b = generateExpression(expr->arguments[1].get());
+        llvm::Value* cmp = builder->CreateICmpSGT(a, b, "maxcmp");
+        return builder->CreateSelect(cmp, a, b, "maxval");
+    }
+
+    if (expr->callee == "sign") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'sign' expects 1 argument, but " +
+                         std::to_string(expr->arguments.size()) + " provided", expr);
+        }
+        llvm::Value* x = generateExpression(expr->arguments[0].get());
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
+        llvm::Value* pos = llvm::ConstantInt::get(getDefaultType(), 1, true);
+        llvm::Value* neg = llvm::ConstantInt::get(getDefaultType(), static_cast<uint64_t>(-1), true);
+        llvm::Value* isNeg = builder->CreateICmpSLT(x, zero, "signneg");
+        llvm::Value* negOrZero = builder->CreateSelect(isNeg, neg, zero, "signNZ");
+        llvm::Value* isPos = builder->CreateICmpSGT(x, zero, "signpos");
+        return builder->CreateSelect(isPos, pos, negOrZero, "signval");
+    }
+
+    if (expr->callee == "clamp") {
+        if (expr->arguments.size() != 3) {
+            codegenError("Built-in function 'clamp' expects 3 arguments, but " +
+                         std::to_string(expr->arguments.size()) + " provided", expr);
+        }
+        llvm::Value* val = generateExpression(expr->arguments[0].get());
+        llvm::Value* lo = generateExpression(expr->arguments[1].get());
+        llvm::Value* hi = generateExpression(expr->arguments[2].get());
+        // clamp(val, lo, hi) = max(lo, min(val, hi))
+        llvm::Value* cmpHi = builder->CreateICmpSLT(val, hi, "clamphi");
+        llvm::Value* minVH = builder->CreateSelect(cmpHi, val, hi, "clampmin");
+        llvm::Value* cmpLo = builder->CreateICmpSGT(minVH, lo, "clamplo");
+        return builder->CreateSelect(cmpLo, minVH, lo, "clampval");
+    }
+
+    if (expr->callee == "pow") {
+        if (expr->arguments.size() != 2) {
+            codegenError("Built-in function 'pow' expects 2 arguments, but " +
+                         std::to_string(expr->arguments.size()) + " provided", expr);
+        }
+        llvm::Value* base = generateExpression(expr->arguments[0].get());
+        llvm::Value* exp = generateExpression(expr->arguments[1].get());
+
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* entryBB = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "pow.loop", function);
+        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "pow.body", function);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "pow.done", function);
+
+        builder->CreateBr(loopBB);
+
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "pow.result");
+        llvm::PHINode* counter = builder->CreatePHI(getDefaultType(), 2, "pow.counter");
+        result->addIncoming(llvm::ConstantInt::get(getDefaultType(), 1), entryBB);
+        counter->addIncoming(exp, entryBB);
+
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
+        llvm::Value* done = builder->CreateICmpSLE(counter, zero, "pow.done.cmp");
+        builder->CreateCondBr(done, doneBB, bodyBB);
+
+        builder->SetInsertPoint(bodyBB);
+        llvm::Value* newResult = builder->CreateMul(result, base, "pow.mul");
+        llvm::Value* newCounter = builder->CreateSub(counter,
+            llvm::ConstantInt::get(getDefaultType(), 1), "pow.dec");
+        result->addIncoming(newResult, bodyBB);
+        counter->addIncoming(newCounter, bodyBB);
+        builder->CreateBr(loopBB);
+
+        builder->SetInsertPoint(doneBB);
+        return result;
+    }
+
+    if (expr->callee == "print_char") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'print_char' expects 1 argument, but " +
+                         std::to_string(expr->arguments.size()) + " provided", expr);
+        }
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        llvm::Function* putcharFn = module->getFunction("putchar");
+        if (!putcharFn) {
+            auto putcharType = llvm::FunctionType::get(
+                llvm::Type::getInt32Ty(*context),
+                {llvm::Type::getInt32Ty(*context)},
+                false);
+            putcharFn = llvm::Function::Create(putcharType,
+                llvm::Function::ExternalLinkage, "putchar", module.get());
+        }
+        llvm::Value* truncated = builder->CreateTrunc(arg, llvm::Type::getInt32Ty(*context), "charval");
+        builder->CreateCall(putcharFn, {truncated});
+        return arg;
+    }
+
+    if (expr->callee == "input") {
+        if (!expr->arguments.empty()) {
+            codegenError("Built-in function 'input' expects 0 arguments, but " +
+                         std::to_string(expr->arguments.size()) + " provided", expr);
+        }
+        llvm::Function* scanfFn = module->getFunction("scanf");
+        if (!scanfFn) {
+            auto scanfType = llvm::FunctionType::get(
+                llvm::Type::getInt32Ty(*context),
+                {llvm::PointerType::getUnqual(*context)},
+                true);
+            scanfFn = llvm::Function::Create(scanfType,
+                llvm::Function::ExternalLinkage, "scanf", module.get());
+        }
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::AllocaInst* inputAlloca = createEntryBlockAlloca(function, "input_val");
+        builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 0), inputAlloca);
+        llvm::GlobalVariable* scanfFmt = module->getGlobalVariable("scanf_fmt", true);
+        if (!scanfFmt) {
+            scanfFmt = builder->CreateGlobalString("%lld", "scanf_fmt");
+        }
+        builder->CreateCall(scanfFn, {scanfFmt, inputAlloca});
+        return builder->CreateLoad(getDefaultType(), inputAlloca, "input_read");
+    }
+
     if (inOptMaxFunction) {
         if (optMaxFunctions.find(expr->callee) == optMaxFunctions.end()) {
             std::string currentFunction = "<unknown>";
