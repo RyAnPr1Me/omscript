@@ -1,0 +1,36 @@
+// Test stdlib char functions and for-loops with float arguments
+// Previously is_alpha/is_digit crashed with float inputs,
+// and for-loops crashed with float end/step values
+fn main() {
+    var total = 0;
+
+    // is_alpha() with float (truncated to integer)
+    total = total + is_alpha(65.0);   // 1 ('A')
+    total = total + is_alpha(97.0);   // 1 ('a')
+    total = total + is_alpha(48.0);   // 0 ('0')
+    // total = 2
+
+    // is_digit() with float (truncated to integer)
+    total = total + is_digit(48.0);   // 1 ('0')
+    total = total + is_digit(57.0);   // 1 ('9')
+    total = total + is_digit(65.0);   // 0 ('A')
+    // total = 4
+
+    // for-loop with float end value
+    var count1 = 0;
+    for (i in 0...5.0) {
+        count1 = count1 + 1;
+    }
+    total = total + count1;           // 5
+    // total = 9
+
+    // for-loop with float step value
+    var count2 = 0;
+    for (i in 0...10...2.5) {
+        count2 = count2 + 1;
+    }
+    total = total + count2;           // 5 (step truncated to 2: 0, 2, 4, 6, 8)
+    // total = 14
+
+    return total;
+}

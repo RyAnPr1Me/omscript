@@ -965,6 +965,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         }
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         // Array is stored as an i64 holding a pointer to [length, elem0, elem1, ...]
+        // Convert to integer first if needed (e.g. if stored in a float variable)
+        arg = toDefaultType(arg);
         llvm::Value* arrPtr = builder->CreateIntToPtr(arg,
             llvm::PointerType::getUnqual(*context), "arrptr");
         return builder->CreateLoad(getDefaultType(), arrPtr, "arrlen");
@@ -1366,6 +1368,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                          std::to_string(expr->arguments.size()) + " provided", expr);
         }
         llvm::Value* x = generateExpression(expr->arguments[0].get());
+        // Convert float to integer since is_alpha() is an integer operation
+        x = toDefaultType(x);
         // is_alpha: (x >= 'A' && x <= 'Z') || (x >= 'a' && x <= 'z')
         llvm::Value* geA = builder->CreateICmpSGE(x, llvm::ConstantInt::get(getDefaultType(), 65), "ge.A");
         llvm::Value* leZ = builder->CreateICmpSLE(x, llvm::ConstantInt::get(getDefaultType(), 90), "le.Z");
@@ -1383,6 +1387,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                          std::to_string(expr->arguments.size()) + " provided", expr);
         }
         llvm::Value* x = generateExpression(expr->arguments[0].get());
+        // Convert float to integer since is_digit() is an integer operation
+        x = toDefaultType(x);
         // is_digit: x >= '0' && x <= '9'
         llvm::Value* ge0 = builder->CreateICmpSGE(x, llvm::ConstantInt::get(getDefaultType(), 48), "ge.0");
         llvm::Value* le9 = builder->CreateICmpSLE(x, llvm::ConstantInt::get(getDefaultType(), 57), "le.9");
@@ -1786,15 +1792,21 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     
     // Initialize iterator
     llvm::Value* startVal = generateExpression(stmt->start.get());
+    // For-loop iterator is always integer, convert if needed
+    startVal = toDefaultType(startVal);
     builder->CreateStore(startVal, iterAlloca);
     
     // Get end value
     llvm::Value* endVal = generateExpression(stmt->end.get());
+    // Convert to integer since loop bounds are always integer
+    endVal = toDefaultType(endVal);
     
     // Get step value (default to 1 if not specified)
     llvm::Value* stepVal;
     if (stmt->step) {
         stepVal = generateExpression(stmt->step.get());
+        // Convert to integer since loop step is always integer
+        stepVal = toDefaultType(stepVal);
     } else {
         stepVal = llvm::ConstantInt::get(*context, llvm::APInt(64, 1));
     }
