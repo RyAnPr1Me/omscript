@@ -94,7 +94,6 @@ public:
     // Comparison
     bool operator==(const RefCountedString& other) const {
         if (data == other.data) return true;
-        if (!data && !other.data) return true;
         if (!data || !other.data) return false;
         if (data->length != other.data->length) return false;
         return std::memcmp(data->chars, other.data->chars, data->length) == 0;
