@@ -1792,7 +1792,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     
     // Initialize iterator
     llvm::Value* startVal = generateExpression(stmt->start.get());
-    // For-loop iterator is always integer, convert if needed
+    // For-loop iterator is always integer, convert to integer
     startVal = toDefaultType(startVal);
     builder->CreateStore(startVal, iterAlloca);
     
