@@ -32,6 +32,10 @@ void Compiler::writeFile(const std::string& filename, const std::string& content
         throw std::runtime_error("Could not write to file: " + filename);
     }
     file << content;
+    if (file.fail()) {
+        throw std::runtime_error("Error writing to file: " + filename);
+    }
+    file.close();
 }
 
 void Compiler::compile(const std::string& sourceFile, const std::string& outputFile) {
@@ -75,8 +79,8 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
     };
     
     try {
-        objectFileCreated = true;
         codegen.writeObjectFile(objFile);
+        objectFileCreated = true;
         
         // Link to create executable
         std::cout << "  Linking..." << std::endl;

@@ -190,6 +190,11 @@ test_program "examples/ternary.om" 34
 test_program "examples/bitwise.om" 52
 test_program "examples/prefix_ops.om" 50
 test_program "examples/abs_test.om" 26
+test_program "examples/optimization_stress_test.om" 432
+test_program "examples/string_test.om" 0
+test_program "examples/array_test.om" 245
+test_program "examples/stdlib_test.om" 66
+test_program "examples/stdlib2_test.om" 255
 test_compile_fail "examples/const_fail.om"
 test_compile_fail "examples/break_outside_loop.om"
 test_compile_fail "examples/continue_outside_loop.om"

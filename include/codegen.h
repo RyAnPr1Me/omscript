@@ -14,6 +14,10 @@
 
 namespace omscript {
 
+// Returns true if the given name is a stdlib built-in function.
+// Stdlib functions are always compiled to native machine code.
+bool isStdlibFunction(const std::string& name);
+
 enum class OptimizationLevel {
     O0,  // No optimization
     O1,  // Basic optimization
@@ -56,7 +60,8 @@ private:
     std::vector<std::unordered_map<std::string, ConstBinding>> constScopeStack;
     std::unordered_map<std::string, llvm::Function*> functions;
     
-    // Bytecode emitter for dynamic code
+    // Bytecode emitter for dynamic/interpreted code (user-defined functions only;
+    // stdlib built-ins are always compiled to native machine code via LLVM IR).
     BytecodeEmitter bytecodeEmitter;
     bool useDynamicCompilation;
     OptimizationLevel optimizationLevel;
@@ -76,6 +81,8 @@ private:
     llvm::Value* generatePostfix(PostfixExpr* expr);
     llvm::Value* generatePrefix(PrefixExpr* expr);
     llvm::Value* generateTernary(TernaryExpr* expr);
+    llvm::Value* generateArray(ArrayExpr* expr);
+    llvm::Value* generateIndex(IndexExpr* expr);
     
     // Statement generators
     void generateVarDecl(VarDecl* stmt);
@@ -103,6 +110,18 @@ private:
     void runOptimizationPasses();
     void optimizeFunction(llvm::Function* func);
     void optimizeOptMaxFunctions();
+    
+    // Bytecode generation methods (alternative backend)
+    void generateBytecode(Program* program);
+    void emitBytecodeExpression(Expression* expr);
+    void emitBytecodeStatement(Statement* stmt);
+    void emitBytecodeBlock(BlockStmt* stmt);
+    
+public:
+    // Accessors for bytecode output
+    const BytecodeEmitter& getBytecodeEmitter() const { return bytecodeEmitter; }
+    bool isDynamicCompilation() const { return useDynamicCompilation; }
+    void setDynamicCompilation(bool enable) { useDynamicCompilation = enable; }
 };
 
 } // namespace omscript

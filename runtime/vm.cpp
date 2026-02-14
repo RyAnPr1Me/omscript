@@ -249,7 +249,7 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
             case OpCode::JUMP: {
                 // Jump offsets are absolute bytecode positions.
                 uint16_t offset = readShort(bytecode, ip);
-                if (offset >= bytecode.size()) {
+                if (offset > bytecode.size()) {
                     throw std::runtime_error("Jump offset out of bounds");
                 }
                 ip = offset;
@@ -261,7 +261,7 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
                 uint16_t offset = readShort(bytecode, ip);
                 Value condition = pop();
                 if (!condition.isTruthy()) {
-                    if (offset >= bytecode.size()) {
+                    if (offset > bytecode.size()) {
                         throw std::runtime_error("Jump offset out of bounds");
                     }
                     ip = offset;
@@ -285,8 +285,20 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
                 stack.clear();
                 return;
             
-            case OpCode::CALL:
-                throw std::runtime_error("CALL opcode not implemented");
+            case OpCode::CALL: {
+                std::string funcName = readString(bytecode, ip);
+                uint8_t argCount = readByte(bytecode, ip);
+                // Store arguments from the stack for the callee.
+                // For now, CALL is a placeholder that pops the arguments and
+                // pushes a default return value of 0.  Full function dispatch
+                // requires a call-frame stack which is not yet implemented.
+                (void)funcName; // Will be used for function lookup once call frames are added
+                for (uint8_t i = 0; i < argCount; i++) {
+                    pop();
+                }
+                push(Value(static_cast<int64_t>(0)));
+                break;
+            }
             
             default:
                 throw std::runtime_error("Unknown opcode " + std::to_string(static_cast<uint8_t>(op)) +

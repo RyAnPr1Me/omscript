@@ -88,6 +88,24 @@ std::unique_ptr<Expression> optimizeOptMaxBinary(const std::string& op,
     right = optimizeOptMaxExpression(std::move(right));
     auto* leftLiteral = dynamic_cast<LiteralExpr*>(left.get());
     auto* rightLiteral = dynamic_cast<LiteralExpr*>(right.get());
+
+    // Algebraic identity optimizations (one side is a literal)
+    if (leftLiteral && leftLiteral->literalType == LiteralExpr::LiteralType::INTEGER) {
+        long long lval = leftLiteral->intValue;
+        if (lval == 0 && op == "+") return right;            // 0 + x → x
+        if (lval == 0 && op == "*") return std::make_unique<LiteralExpr>(0LL); // 0 * x → 0
+        if (lval == 1 && op == "*") return right;            // 1 * x → x
+        if (lval == 0 && op == "/") return std::make_unique<LiteralExpr>(0LL); // 0 / x → 0
+    }
+    if (rightLiteral && rightLiteral->literalType == LiteralExpr::LiteralType::INTEGER) {
+        long long rval = rightLiteral->intValue;
+        if (rval == 0 && op == "+") return left;             // x + 0 → x
+        if (rval == 0 && op == "-") return left;             // x - 0 → x
+        if (rval == 1 && op == "*") return left;             // x * 1 → x
+        if (rval == 0 && op == "*") return std::make_unique<LiteralExpr>(0LL); // x * 0 → 0
+        if (rval == 1 && op == "/") return left;             // x / 1 → x
+    }
+
     if (!leftLiteral || !rightLiteral) {
         return std::make_unique<BinaryExpr>(op, std::move(left), std::move(right));
     }
@@ -112,8 +130,8 @@ std::unique_ptr<Expression> optimizeOptMaxBinary(const std::string& op,
         if (op == "&") return std::make_unique<LiteralExpr>(lval & rval);
         if (op == "|") return std::make_unique<LiteralExpr>(lval | rval);
         if (op == "^") return std::make_unique<LiteralExpr>(lval ^ rval);
-        if (op == "<<") return std::make_unique<LiteralExpr>(lval << rval);
-        if (op == ">>") return std::make_unique<LiteralExpr>(lval >> rval);
+        if (op == "<<" && rval >= 0 && rval < 64) return std::make_unique<LiteralExpr>(lval << rval);
+        if (op == ">>" && rval >= 0 && rval < 64) return std::make_unique<LiteralExpr>(lval >> rval);
     } else if (leftLiteral->literalType == LiteralExpr::LiteralType::FLOAT &&
                rightLiteral->literalType == LiteralExpr::LiteralType::FLOAT) {
         double lval = leftLiteral->floatValue;
@@ -193,6 +211,13 @@ std::unique_ptr<Expression> optimizeOptMaxExpression(std::unique_ptr<Expression>
             ternary->condition = optimizeOptMaxExpression(std::move(ternary->condition));
             ternary->thenExpr = optimizeOptMaxExpression(std::move(ternary->thenExpr));
             ternary->elseExpr = optimizeOptMaxExpression(std::move(ternary->elseExpr));
+            // Fold ternary when condition is a compile-time constant
+            auto* condLiteral = dynamic_cast<LiteralExpr*>(ternary->condition.get());
+            if (condLiteral && condLiteral->literalType == LiteralExpr::LiteralType::INTEGER) {
+                return condLiteral->intValue != 0
+                    ? std::move(ternary->thenExpr)
+                    : std::move(ternary->elseExpr);
+            }
             return expr;
         }
         default:
@@ -271,6 +296,19 @@ void optimizeOptMaxStatement(Statement* stmt) {
 } // namespace
 
 namespace omscript {
+
+// Canonical set of all stdlib built-in function names.
+// These functions are always compiled to native machine code via LLVM IR,
+// never through the bytecode/dynamic compilation path.
+static const std::unordered_set<std::string> stdlibFunctions = {
+    "print", "abs", "len", "min", "max", "sign", "clamp", "pow",
+    "print_char", "input", "sqrt", "is_even", "is_odd", "sum",
+    "swap", "reverse", "to_char", "is_alpha", "is_digit"
+};
+
+bool isStdlibFunction(const std::string& name) {
+    return stdlibFunctions.find(name) != stdlibFunctions.end();
+}
 
 CodeGenerator::CodeGenerator(OptimizationLevel optLevel) 
     : inOptMaxFunction(false),
@@ -565,9 +603,9 @@ llvm::Value* CodeGenerator::generateExpression(Expression* expr) {
         case ASTNodeType::TERNARY_EXPR:
             return generateTernary(static_cast<TernaryExpr*>(expr));
         case ASTNodeType::ARRAY_EXPR:
-            codegenError("Array literals are not yet supported in compiled code", expr);
+            return generateArray(static_cast<ArrayExpr*>(expr));
         case ASTNodeType::INDEX_EXPR:
-            codegenError("Array indexing is not yet supported in compiled code", expr);
+            return generateIndex(static_cast<IndexExpr*>(expr));
         default:
             throw std::runtime_error("Unknown expression type");
     }
@@ -580,8 +618,10 @@ llvm::Value* CodeGenerator::generateLiteral(LiteralExpr* expr) {
         // For simplicity, cast float to int64 in this basic implementation
         return llvm::ConstantInt::get(*context, llvm::APInt(64, static_cast<int64_t>(expr->floatValue)));
     } else {
-        // String literal - not fully supported in this basic implementation
-        return llvm::ConstantInt::get(*context, llvm::APInt(64, 0));
+        // String literal - store the address as an i64 for compatibility with the i64 type system.
+        // When passed directly to print(), the pointer form is used instead (see generateCall).
+        llvm::Value* strPtr = builder->CreateGlobalString(expr->stringValue, "str");
+        return builder->CreatePtrToInt(strPtr, getDefaultType(), "strint");
     }
 }
 
@@ -654,9 +694,11 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         } else if (expr->op == "^") {
             return llvm::ConstantInt::get(*context, llvm::APInt(64, lval ^ rval));
         } else if (expr->op == "<<") {
-            return llvm::ConstantInt::get(*context, llvm::APInt(64, lval << rval));
+            if (rval >= 0 && rval < 64)
+                return llvm::ConstantInt::get(*context, llvm::APInt(64, lval << rval));
         } else if (expr->op == ">>") {
-            return llvm::ConstantInt::get(*context, llvm::APInt(64, lval >> rval));
+            if (rval >= 0 && rval < 64)
+                return llvm::ConstantInt::get(*context, llvm::APInt(64, lval >> rval));
         }
     }
     
@@ -753,14 +795,28 @@ llvm::Value* CodeGenerator::generateUnary(UnaryExpr* expr) {
 }
 
 llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
-    // Handle built-in functions
+    // All stdlib built-in functions are compiled to native machine code below.
+    // They never use dynamic variables or the bytecode path.
     if (expr->callee == "print") {
         if (expr->arguments.size() != 1) {
             codegenError("Built-in function 'print' expects 1 argument, but " +
                          std::to_string(expr->arguments.size()) + " provided", expr);
         }
-        llvm::Value* arg = generateExpression(expr->arguments[0].get());
-        // Reuse a single global format string across all print() calls
+        // Check if the argument is a string literal to print it with %s
+        Expression* argExpr = expr->arguments[0].get();
+        if (argExpr->type == ASTNodeType::LITERAL_EXPR) {
+            auto* litExpr = static_cast<LiteralExpr*>(argExpr);
+            if (litExpr->literalType == LiteralExpr::LiteralType::STRING) {
+                llvm::Value* strPtr = builder->CreateGlobalString(litExpr->stringValue, "printstr");
+                llvm::GlobalVariable* strFmt = module->getGlobalVariable("print_str_fmt", true);
+                if (!strFmt) {
+                    strFmt = builder->CreateGlobalString("%s\n", "print_str_fmt");
+                }
+                builder->CreateCall(getPrintfFunction(), {strFmt, strPtr});
+                return llvm::ConstantInt::get(getDefaultType(), 0);
+            }
+        }
+        llvm::Value* arg = generateExpression(argExpr);
         llvm::GlobalVariable* formatStr = module->getGlobalVariable("print_fmt", true);
         if (!formatStr) {
             formatStr = builder->CreateGlobalString("%lld\n", "print_fmt");
@@ -782,8 +838,385 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         return builder->CreateSelect(isNeg, negVal, arg, "absval");
     }
 
+    if (expr->callee == "len") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'len' expects 1 argument, but " +
+                         std::to_string(expr->arguments.size()) + " provided", expr);
+        }
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        // Array is stored as an i64 holding a pointer to [length, elem0, elem1, ...]
+        llvm::Value* arrPtr = builder->CreateIntToPtr(arg,
+            llvm::PointerType::getUnqual(*context), "arrptr");
+        return builder->CreateLoad(getDefaultType(), arrPtr, "arrlen");
+    }
+
+    if (expr->callee == "min") {
+        if (expr->arguments.size() != 2) {
+            codegenError("Built-in function 'min' expects 2 arguments, but " +
+                         std::to_string(expr->arguments.size()) + " provided", expr);
+        }
+        llvm::Value* a = generateExpression(expr->arguments[0].get());
+        llvm::Value* b = generateExpression(expr->arguments[1].get());
+        llvm::Value* cmp = builder->CreateICmpSLT(a, b, "mincmp");
+        return builder->CreateSelect(cmp, a, b, "minval");
+    }
+
+    if (expr->callee == "max") {
+        if (expr->arguments.size() != 2) {
+            codegenError("Built-in function 'max' expects 2 arguments, but " +
+                         std::to_string(expr->arguments.size()) + " provided", expr);
+        }
+        llvm::Value* a = generateExpression(expr->arguments[0].get());
+        llvm::Value* b = generateExpression(expr->arguments[1].get());
+        llvm::Value* cmp = builder->CreateICmpSGT(a, b, "maxcmp");
+        return builder->CreateSelect(cmp, a, b, "maxval");
+    }
+
+    if (expr->callee == "sign") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'sign' expects 1 argument, but " +
+                         std::to_string(expr->arguments.size()) + " provided", expr);
+        }
+        llvm::Value* x = generateExpression(expr->arguments[0].get());
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
+        llvm::Value* pos = llvm::ConstantInt::get(getDefaultType(), 1, true);
+        llvm::Value* neg = llvm::ConstantInt::get(getDefaultType(), static_cast<uint64_t>(-1), true);
+        llvm::Value* isNeg = builder->CreateICmpSLT(x, zero, "signneg");
+        llvm::Value* negOrZero = builder->CreateSelect(isNeg, neg, zero, "signNZ");
+        llvm::Value* isPos = builder->CreateICmpSGT(x, zero, "signpos");
+        return builder->CreateSelect(isPos, pos, negOrZero, "signval");
+    }
+
+    if (expr->callee == "clamp") {
+        if (expr->arguments.size() != 3) {
+            codegenError("Built-in function 'clamp' expects 3 arguments, but " +
+                         std::to_string(expr->arguments.size()) + " provided", expr);
+        }
+        llvm::Value* val = generateExpression(expr->arguments[0].get());
+        llvm::Value* lo = generateExpression(expr->arguments[1].get());
+        llvm::Value* hi = generateExpression(expr->arguments[2].get());
+        // clamp(val, lo, hi) = max(lo, min(val, hi))
+        llvm::Value* cmpHi = builder->CreateICmpSLT(val, hi, "clamphi");
+        llvm::Value* minVH = builder->CreateSelect(cmpHi, val, hi, "clampmin");
+        llvm::Value* cmpLo = builder->CreateICmpSGT(minVH, lo, "clamplo");
+        return builder->CreateSelect(cmpLo, minVH, lo, "clampval");
+    }
+
+    if (expr->callee == "pow") {
+        if (expr->arguments.size() != 2) {
+            codegenError("Built-in function 'pow' expects 2 arguments, but " +
+                         std::to_string(expr->arguments.size()) + " provided", expr);
+        }
+        llvm::Value* base = generateExpression(expr->arguments[0].get());
+        llvm::Value* exp = generateExpression(expr->arguments[1].get());
+
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* entryBB = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "pow.loop", function);
+        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "pow.body", function);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "pow.done", function);
+
+        builder->CreateBr(loopBB);
+
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "pow.result");
+        llvm::PHINode* counter = builder->CreatePHI(getDefaultType(), 2, "pow.counter");
+        result->addIncoming(llvm::ConstantInt::get(getDefaultType(), 1), entryBB);
+        counter->addIncoming(exp, entryBB);
+
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
+        llvm::Value* done = builder->CreateICmpSLE(counter, zero, "pow.done.cmp");
+        builder->CreateCondBr(done, doneBB, bodyBB);
+
+        builder->SetInsertPoint(bodyBB);
+        llvm::Value* newResult = builder->CreateMul(result, base, "pow.mul");
+        llvm::Value* newCounter = builder->CreateSub(counter,
+            llvm::ConstantInt::get(getDefaultType(), 1), "pow.dec");
+        result->addIncoming(newResult, bodyBB);
+        counter->addIncoming(newCounter, bodyBB);
+        builder->CreateBr(loopBB);
+
+        builder->SetInsertPoint(doneBB);
+        return result;
+    }
+
+    if (expr->callee == "print_char") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'print_char' expects 1 argument, but " +
+                         std::to_string(expr->arguments.size()) + " provided", expr);
+        }
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        llvm::Function* putcharFn = module->getFunction("putchar");
+        if (!putcharFn) {
+            auto putcharType = llvm::FunctionType::get(
+                llvm::Type::getInt32Ty(*context),
+                {llvm::Type::getInt32Ty(*context)},
+                false);
+            putcharFn = llvm::Function::Create(putcharType,
+                llvm::Function::ExternalLinkage, "putchar", module.get());
+        }
+        llvm::Value* truncated = builder->CreateTrunc(arg, llvm::Type::getInt32Ty(*context), "charval");
+        builder->CreateCall(putcharFn, {truncated});
+        return arg;
+    }
+
+    if (expr->callee == "input") {
+        if (!expr->arguments.empty()) {
+            codegenError("Built-in function 'input' expects 0 arguments, but " +
+                         std::to_string(expr->arguments.size()) + " provided", expr);
+        }
+        llvm::Function* scanfFn = module->getFunction("scanf");
+        if (!scanfFn) {
+            auto scanfType = llvm::FunctionType::get(
+                llvm::Type::getInt32Ty(*context),
+                {llvm::PointerType::getUnqual(*context)},
+                true);
+            scanfFn = llvm::Function::Create(scanfType,
+                llvm::Function::ExternalLinkage, "scanf", module.get());
+        }
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::AllocaInst* inputAlloca = createEntryBlockAlloca(function, "input_val");
+        builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 0), inputAlloca);
+        llvm::GlobalVariable* scanfFmt = module->getGlobalVariable("scanf_fmt", true);
+        if (!scanfFmt) {
+            scanfFmt = builder->CreateGlobalString("%lld", "scanf_fmt");
+        }
+        builder->CreateCall(scanfFn, {scanfFmt, inputAlloca});
+        return builder->CreateLoad(getDefaultType(), inputAlloca, "input_read");
+    }
+
+    if (expr->callee == "sqrt") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'sqrt' expects 1 argument, but " +
+                         std::to_string(expr->arguments.size()) + " provided", expr);
+        }
+        llvm::Value* x = generateExpression(expr->arguments[0].get());
+        // Integer square root via Newton's method: guess = x, while (guess*guess > x) guess = (guess + x/guess) / 2
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* entryBB = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "sqrt.loop", function);
+        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "sqrt.body", function);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "sqrt.done", function);
+
+        // Handle x <= 0: return 0
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
+        llvm::Value* isNonPositive = builder->CreateICmpSLE(x, zero, "sqrt.nonpos");
+        llvm::BasicBlock* positiveBB = llvm::BasicBlock::Create(*context, "sqrt.positive", function);
+        builder->CreateCondBr(isNonPositive, doneBB, positiveBB);
+
+        builder->SetInsertPoint(positiveBB);
+        builder->CreateBr(loopBB);
+
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* guess = builder->CreatePHI(getDefaultType(), 2, "sqrt.guess");
+        guess->addIncoming(x, positiveBB);
+
+        llvm::Value* sq = builder->CreateMul(guess, guess, "sqrt.sq");
+        llvm::Value* tooBig = builder->CreateICmpSGT(sq, x, "sqrt.toobig");
+        builder->CreateCondBr(tooBig, bodyBB, doneBB);
+
+        builder->SetInsertPoint(bodyBB);
+        llvm::Value* div = builder->CreateSDiv(x, guess, "sqrt.div");
+        llvm::Value* sum = builder->CreateAdd(guess, div, "sqrt.sum");
+        llvm::Value* two = llvm::ConstantInt::get(getDefaultType(), 2);
+        llvm::Value* newGuess = builder->CreateSDiv(sum, two, "sqrt.newguess");
+        // Ensure progress: if newGuess >= guess, force guess - 1
+        llvm::Value* noProgress = builder->CreateICmpSGE(newGuess, guess, "sqrt.noprogress");
+        llvm::Value* forcedGuess = builder->CreateSub(guess, llvm::ConstantInt::get(getDefaultType(), 1), "sqrt.forced");
+        llvm::Value* nextGuess = builder->CreateSelect(noProgress, forcedGuess, newGuess, "sqrt.next");
+        guess->addIncoming(nextGuess, bodyBB);
+        builder->CreateBr(loopBB);
+
+        builder->SetInsertPoint(doneBB);
+        llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "sqrt.result");
+        result->addIncoming(zero, entryBB);
+        result->addIncoming(guess, loopBB);
+        return result;
+    }
+
+    if (expr->callee == "is_even") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'is_even' expects 1 argument, but " +
+                         std::to_string(expr->arguments.size()) + " provided", expr);
+        }
+        llvm::Value* x = generateExpression(expr->arguments[0].get());
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* bit = builder->CreateAnd(x, one, "evenbit");
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* isEven = builder->CreateICmpEQ(bit, zero, "iseven");
+        return builder->CreateZExt(isEven, getDefaultType(), "evenval");
+    }
+
+    if (expr->callee == "is_odd") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'is_odd' expects 1 argument, but " +
+                         std::to_string(expr->arguments.size()) + " provided", expr);
+        }
+        llvm::Value* x = generateExpression(expr->arguments[0].get());
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+        return builder->CreateAnd(x, one, "oddval");
+    }
+
+    if (expr->callee == "sum") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'sum' expects 1 argument, but " +
+                         std::to_string(expr->arguments.size()) + " provided", expr);
+        }
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        // Array layout: [length, elem0, elem1, ...]
+        llvm::Value* arrPtr = builder->CreateIntToPtr(arg,
+            llvm::PointerType::getUnqual(*context), "sum.arrptr");
+        llvm::Value* length = builder->CreateLoad(getDefaultType(), arrPtr, "sum.len");
+
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* entryBB = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "sum.loop", function);
+        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "sum.body", function);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "sum.done", function);
+
+        builder->CreateBr(loopBB);
+
+        builder->SetInsertPoint(loopBB);
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
+        llvm::PHINode* acc = builder->CreatePHI(getDefaultType(), 2, "sum.acc");
+        llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "sum.idx");
+        acc->addIncoming(zero, entryBB);
+        idx->addIncoming(zero, entryBB);
+
+        llvm::Value* done = builder->CreateICmpSGE(idx, length, "sum.done");
+        builder->CreateCondBr(done, doneBB, bodyBB);
+
+        builder->SetInsertPoint(bodyBB);
+        // Element is at offset (idx + 1) from array base
+        llvm::Value* offset = builder->CreateAdd(idx, llvm::ConstantInt::get(getDefaultType(), 1), "sum.offset");
+        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrPtr, offset, "sum.elemptr");
+        llvm::Value* elem = builder->CreateLoad(getDefaultType(), elemPtr, "sum.elem");
+        llvm::Value* newAcc = builder->CreateAdd(acc, elem, "sum.newacc");
+        llvm::Value* newIdx = builder->CreateAdd(idx, llvm::ConstantInt::get(getDefaultType(), 1), "sum.newidx");
+        acc->addIncoming(newAcc, bodyBB);
+        idx->addIncoming(newIdx, bodyBB);
+        builder->CreateBr(loopBB);
+
+        builder->SetInsertPoint(doneBB);
+        return acc;
+    }
+
+    if (expr->callee == "swap") {
+        if (expr->arguments.size() != 3) {
+            codegenError("Built-in function 'swap' expects 3 arguments (array, i, j), but " +
+                         std::to_string(expr->arguments.size()) + " provided", expr);
+        }
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        llvm::Value* i = generateExpression(expr->arguments[1].get());
+        llvm::Value* j = generateExpression(expr->arguments[2].get());
+
+        llvm::Value* arrPtr = builder->CreateIntToPtr(arg,
+            llvm::PointerType::getUnqual(*context), "swap.arrptr");
+        // Elements are at offset (index + 1)
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* offI = builder->CreateAdd(i, one, "swap.offi");
+        llvm::Value* offJ = builder->CreateAdd(j, one, "swap.offj");
+        llvm::Value* ptrI = builder->CreateGEP(getDefaultType(), arrPtr, offI, "swap.ptri");
+        llvm::Value* ptrJ = builder->CreateGEP(getDefaultType(), arrPtr, offJ, "swap.ptrj");
+        llvm::Value* valI = builder->CreateLoad(getDefaultType(), ptrI, "swap.vali");
+        llvm::Value* valJ = builder->CreateLoad(getDefaultType(), ptrJ, "swap.valj");
+        builder->CreateStore(valJ, ptrI);
+        builder->CreateStore(valI, ptrJ);
+        return llvm::ConstantInt::get(getDefaultType(), 0);
+    }
+
+    if (expr->callee == "reverse") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'reverse' expects 1 argument, but " +
+                         std::to_string(expr->arguments.size()) + " provided", expr);
+        }
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        llvm::Value* arrPtr = builder->CreateIntToPtr(arg,
+            llvm::PointerType::getUnqual(*context), "rev.arrptr");
+        llvm::Value* length = builder->CreateLoad(getDefaultType(), arrPtr, "rev.len");
+
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* entryBB = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "rev.loop", function);
+        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "rev.body", function);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "rev.done", function);
+
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* lastIdx = builder->CreateSub(length, one, "rev.last");
+        builder->CreateBr(loopBB);
+
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* lo = builder->CreatePHI(getDefaultType(), 2, "rev.lo");
+        llvm::PHINode* hi = builder->CreatePHI(getDefaultType(), 2, "rev.hi");
+        lo->addIncoming(zero, entryBB);
+        hi->addIncoming(lastIdx, entryBB);
+
+        llvm::Value* done = builder->CreateICmpSGE(lo, hi, "rev.done");
+        builder->CreateCondBr(done, doneBB, bodyBB);
+
+        builder->SetInsertPoint(bodyBB);
+        llvm::Value* offLo = builder->CreateAdd(lo, one, "rev.offlo");
+        llvm::Value* offHi = builder->CreateAdd(hi, one, "rev.offhi");
+        llvm::Value* ptrLo = builder->CreateGEP(getDefaultType(), arrPtr, offLo, "rev.ptrlo");
+        llvm::Value* ptrHi = builder->CreateGEP(getDefaultType(), arrPtr, offHi, "rev.ptrhi");
+        llvm::Value* valLo = builder->CreateLoad(getDefaultType(), ptrLo, "rev.vallo");
+        llvm::Value* valHi = builder->CreateLoad(getDefaultType(), ptrHi, "rev.valhi");
+        builder->CreateStore(valHi, ptrLo);
+        builder->CreateStore(valLo, ptrHi);
+        llvm::Value* newLo = builder->CreateAdd(lo, one, "rev.newlo");
+        llvm::Value* newHi = builder->CreateSub(hi, one, "rev.newhi");
+        lo->addIncoming(newLo, bodyBB);
+        hi->addIncoming(newHi, bodyBB);
+        builder->CreateBr(loopBB);
+
+        builder->SetInsertPoint(doneBB);
+        return arg;
+    }
+
+    if (expr->callee == "to_char") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'to_char' expects 1 argument, but " +
+                         std::to_string(expr->arguments.size()) + " provided", expr);
+        }
+        // Returns the value itself - the integer IS the character code
+        return generateExpression(expr->arguments[0].get());
+    }
+
+    if (expr->callee == "is_alpha") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'is_alpha' expects 1 argument, but " +
+                         std::to_string(expr->arguments.size()) + " provided", expr);
+        }
+        llvm::Value* x = generateExpression(expr->arguments[0].get());
+        // is_alpha: (x >= 'A' && x <= 'Z') || (x >= 'a' && x <= 'z')
+        llvm::Value* geA = builder->CreateICmpSGE(x, llvm::ConstantInt::get(getDefaultType(), 65), "ge.A");
+        llvm::Value* leZ = builder->CreateICmpSLE(x, llvm::ConstantInt::get(getDefaultType(), 90), "le.Z");
+        llvm::Value* upper = builder->CreateAnd(geA, leZ, "isupper");
+        llvm::Value* gea = builder->CreateICmpSGE(x, llvm::ConstantInt::get(getDefaultType(), 97), "ge.a");
+        llvm::Value* lez = builder->CreateICmpSLE(x, llvm::ConstantInt::get(getDefaultType(), 122), "le.z");
+        llvm::Value* lower = builder->CreateAnd(gea, lez, "islower");
+        llvm::Value* isAlpha = builder->CreateOr(upper, lower, "isalpha");
+        return builder->CreateZExt(isAlpha, getDefaultType(), "alphaval");
+    }
+
+    if (expr->callee == "is_digit") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'is_digit' expects 1 argument, but " +
+                         std::to_string(expr->arguments.size()) + " provided", expr);
+        }
+        llvm::Value* x = generateExpression(expr->arguments[0].get());
+        // is_digit: x >= '0' && x <= '9'
+        llvm::Value* ge0 = builder->CreateICmpSGE(x, llvm::ConstantInt::get(getDefaultType(), 48), "ge.0");
+        llvm::Value* le9 = builder->CreateICmpSLE(x, llvm::ConstantInt::get(getDefaultType(), 57), "le.9");
+        llvm::Value* isDigit = builder->CreateAnd(ge0, le9, "isdigit");
+        return builder->CreateZExt(isDigit, getDefaultType(), "digitval");
+    }
+
     if (inOptMaxFunction) {
-        if (optMaxFunctions.find(expr->callee) == optMaxFunctions.end()) {
+        // Stdlib functions are always native machine code, so they're safe to call from OPTMAX
+        if (!isStdlibFunction(expr->callee) &&
+            optMaxFunctions.find(expr->callee) == optMaxFunctions.end()) {
             std::string currentFunction = "<unknown>";
             if (builder->GetInsertBlock() && builder->GetInsertBlock()->getParent()) {
                 currentFunction = std::string(builder->GetInsertBlock()->getParent()->getName());
@@ -906,6 +1339,68 @@ llvm::Value* CodeGenerator::generateTernary(TernaryExpr* expr) {
     phi->addIncoming(elseVal, elseBB);
     
     return phi;
+}
+
+llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
+    size_t numElements = expr->elements.size();
+    // Allocate space for (1 + numElements) i64 slots: [length, elem0, elem1, ...]
+    size_t totalSlots = 1 + numElements;
+    llvm::Value* allocSize = llvm::ConstantInt::get(getDefaultType(), totalSlots);
+    llvm::Function* function = builder->GetInsertBlock()->getParent();
+    llvm::IRBuilder<> entryBuilder(&function->getEntryBlock(), function->getEntryBlock().begin());
+    llvm::AllocaInst* arrAlloca = entryBuilder.CreateAlloca(getDefaultType(), allocSize, "arr");
+
+    // Store the length in slot 0 (arrAlloca points to slot 0)
+    builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), numElements), arrAlloca);
+
+    // Store each element in slots 1..N
+    for (size_t i = 0; i < numElements; i++) {
+        llvm::Value* elemVal = generateExpression(expr->elements[i].get());
+        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrAlloca,
+            llvm::ConstantInt::get(getDefaultType(), i + 1), "arr.elem.ptr");
+        builder->CreateStore(elemVal, elemPtr);
+    }
+
+    // Return the array pointer as an i64 for the dynamic type system
+    return builder->CreatePtrToInt(arrAlloca, getDefaultType(), "arr.int");
+}
+
+llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
+    llvm::Value* arrVal = generateExpression(expr->array.get());
+    llvm::Value* idxVal = generateExpression(expr->index.get());
+
+    // Convert the i64 back to a pointer
+    llvm::Value* arrPtr = builder->CreateIntToPtr(arrVal,
+        llvm::PointerType::getUnqual(*context), "idx.arrptr");
+
+    // Bounds check: load length from slot 0, verify 0 <= index < length
+    llvm::Value* lenVal = builder->CreateLoad(getDefaultType(), arrPtr, "idx.len");
+    llvm::Value* inBounds = builder->CreateICmpSLT(idxVal, lenVal, "idx.inbounds");
+    llvm::Value* notNeg = builder->CreateICmpSGE(idxVal,
+        llvm::ConstantInt::get(getDefaultType(), 0), "idx.notneg");
+    llvm::Value* valid = builder->CreateAnd(inBounds, notNeg, "idx.valid");
+
+    llvm::Function* function = builder->GetInsertBlock()->getParent();
+    llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "idx.ok", function);
+    llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "idx.fail", function);
+
+    builder->CreateCondBr(valid, okBB, failBB);
+
+    // Out-of-bounds path: print error and abort
+    builder->SetInsertPoint(failBB);
+    llvm::Value* errMsg = builder->CreateGlobalString(
+        "Runtime error: array index out of bounds\n", "idx_oob_msg");
+    builder->CreateCall(getPrintfFunction(), {errMsg});
+    llvm::Function* trapFn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::trap);
+    builder->CreateCall(trapFn, {});
+    builder->CreateUnreachable();
+
+    // Success path: load element at offset (index + 1)
+    builder->SetInsertPoint(okBB);
+    llvm::Value* offset = builder->CreateAdd(idxVal,
+        llvm::ConstantInt::get(getDefaultType(), 1), "idx.offset");
+    llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrPtr, offset, "idx.elem.ptr");
+    return builder->CreateLoad(getDefaultType(), elemPtr, "idx.elem");
 }
 
 void CodeGenerator::generateVarDecl(VarDecl* stmt) {
@@ -1209,6 +1704,8 @@ void CodeGenerator::runOptimizationPasses() {
             
         case OptimizationLevel::O3:
             // Aggressive optimizations
+            fpm.add(llvm::createSROAPass());                     // Scalar replacement of aggregates (early)
+            fpm.add(llvm::createEarlyCSEPass());                 // Early common subexpression elimination
             fpm.add(llvm::createPromoteMemoryToRegisterPass());
             fpm.add(llvm::createInstructionCombiningPass());
             fpm.add(llvm::createReassociatePass());
@@ -1216,11 +1713,19 @@ void CodeGenerator::runOptimizationPasses() {
             fpm.add(llvm::createCFGSimplificationPass());
             fpm.add(llvm::createDeadCodeEliminationPass());
             fpm.add(llvm::createLICMPass());                     // Loop invariant code motion
+            fpm.add(llvm::createLoopRotatePass());               // Rotate loops for better optimization
             fpm.add(llvm::createLoopSimplifyPass());             // Canonicalize loops
+            fpm.add(llvm::createLoopInstSimplifyPass());         // Simplify instructions in loops
             fpm.add(llvm::createLoopUnrollPass());               // Unroll loops
+            fpm.add(llvm::createSinkingPass());                  // Sink instructions closer to use
+            fpm.add(llvm::createMergedLoadStoreMotionPass());    // Merge load/store across diamonds
+            fpm.add(llvm::createStraightLineStrengthReducePass()); // Strength reduce along straight lines
+            fpm.add(llvm::createNaryReassociatePass());          // N-ary reassociation
             fpm.add(llvm::createTailCallEliminationPass());      // Tail call elimination
-            fpm.add(llvm::createEarlyCSEPass());                 // Early common subexpression elimination
-            fpm.add(llvm::createSROAPass());                     // Scalar replacement of aggregates
+            // Second round of cleanup after loop and strength reduction passes
+            fpm.add(llvm::createInstructionCombiningPass());
+            fpm.add(llvm::createCFGSimplificationPass());
+            fpm.add(llvm::createDeadCodeEliminationPass());
             break;
             
         case OptimizationLevel::O0:
@@ -1258,28 +1763,45 @@ void CodeGenerator::optimizeFunction(llvm::Function* func) {
 void CodeGenerator::optimizeOptMaxFunctions() {
     llvm::legacy::FunctionPassManager fpm(module.get());
     
+    // Phase 1: Early canonicalization
+    fpm.add(llvm::createSROAPass());
+    fpm.add(llvm::createEarlyCSEPass());
     fpm.add(llvm::createPromoteMemoryToRegisterPass());
     fpm.add(llvm::createInstructionCombiningPass());
     fpm.add(llvm::createReassociatePass());
     fpm.add(llvm::createGVNPass());
     fpm.add(llvm::createCFGSimplificationPass());
     fpm.add(llvm::createDeadCodeEliminationPass());
+    // Phase 2: Loop optimizations
     fpm.add(llvm::createLICMPass());
-    // Loop rotation is omitted for compatibility with LLVM builds that lack the pass.
-    fpm.add(llvm::createLoopStrengthReducePass());
+    fpm.add(llvm::createLoopRotatePass());
     fpm.add(llvm::createLoopSimplifyPass());
+    fpm.add(llvm::createLoopInstSimplifyPass());
+    fpm.add(llvm::createLoopStrengthReducePass());
     fpm.add(llvm::createLoopUnrollPass());
+    // Phase 3: Post-loop optimizations
+    fpm.add(llvm::createSinkingPass());
+    fpm.add(llvm::createMergedLoadStoreMotionPass());
+    fpm.add(llvm::createStraightLineStrengthReducePass());
+    fpm.add(llvm::createNaryReassociatePass());
     fpm.add(llvm::createTailCallEliminationPass());
-    fpm.add(llvm::createEarlyCSEPass());
-    fpm.add(llvm::createSROAPass());
     fpm.add(llvm::createConstantHoistingPass());
     fpm.add(llvm::createFlattenCFGPass());
+    // Phase 4: Final cleanup
+    fpm.add(llvm::createInstructionCombiningPass());
+    fpm.add(llvm::createCFGSimplificationPass());
+    fpm.add(llvm::createDeadCodeEliminationPass());
     
     fpm.doInitialization();
     for (auto& func : module->functions()) {
         if (!func.isDeclaration() && optMaxFunctions.count(std::string(func.getName()))) {
-            // OPTMAX runs the aggressive pass stack twice to prioritize maximal optimization.
-            constexpr int optMaxIterations = 2;  // Second pass catches new foldable patterns after the first.
+            // OPTMAX runs the aggressive pass stack three times to maximize optimization.
+            // Each iteration can expose new patterns for subsequent passes to simplify.
+            // Three iterations is the sweet spot: the first pass does heavy lifting,
+            // the second catches patterns exposed by loop/strength-reduce transforms,
+            // and the third cleans up residuals.  Beyond three, passes reach a fixed
+            // point and additional iterations produce no further changes.
+            constexpr int optMaxIterations = 3;
             for (int i = 0; i < optMaxIterations; ++i) {
                 fpm.run(func);
             }
@@ -1347,6 +1869,305 @@ void CodeGenerator::writeObjectFile(const std::string& filename) {
     
     pass.run(*module);
     dest.flush();
+}
+
+void CodeGenerator::generateBytecode(Program* program) {
+    for (auto& func : program->functions) {
+        if (func->name == "main") {
+            emitBytecodeBlock(func->body.get());
+            bytecodeEmitter.emit(OpCode::RETURN);
+        }
+    }
+    bytecodeEmitter.emit(OpCode::HALT);
+}
+
+void CodeGenerator::emitBytecodeExpression(Expression* expr) {
+    switch (expr->type) {
+        case ASTNodeType::LITERAL_EXPR: {
+            auto* lit = static_cast<LiteralExpr*>(expr);
+            if (lit->literalType == LiteralExpr::LiteralType::INTEGER) {
+                bytecodeEmitter.emit(OpCode::PUSH_INT);
+                bytecodeEmitter.emitInt(lit->intValue);
+            } else if (lit->literalType == LiteralExpr::LiteralType::FLOAT) {
+                bytecodeEmitter.emit(OpCode::PUSH_FLOAT);
+                bytecodeEmitter.emitFloat(lit->floatValue);
+            } else if (lit->literalType == LiteralExpr::LiteralType::STRING) {
+                bytecodeEmitter.emit(OpCode::PUSH_STRING);
+                bytecodeEmitter.emitString(lit->stringValue);
+            }
+            break;
+        }
+        case ASTNodeType::IDENTIFIER_EXPR: {
+            auto* id = static_cast<IdentifierExpr*>(expr);
+            bytecodeEmitter.emit(OpCode::LOAD_VAR);
+            bytecodeEmitter.emitString(id->name);
+            break;
+        }
+        case ASTNodeType::BINARY_EXPR: {
+            auto* bin = static_cast<BinaryExpr*>(expr);
+            emitBytecodeExpression(bin->left.get());
+            emitBytecodeExpression(bin->right.get());
+            if (bin->op == "+") bytecodeEmitter.emit(OpCode::ADD);
+            else if (bin->op == "-") bytecodeEmitter.emit(OpCode::SUB);
+            else if (bin->op == "*") bytecodeEmitter.emit(OpCode::MUL);
+            else if (bin->op == "/") bytecodeEmitter.emit(OpCode::DIV);
+            else if (bin->op == "%") bytecodeEmitter.emit(OpCode::MOD);
+            else if (bin->op == "==") bytecodeEmitter.emit(OpCode::EQ);
+            else if (bin->op == "!=") bytecodeEmitter.emit(OpCode::NE);
+            else if (bin->op == "<") bytecodeEmitter.emit(OpCode::LT);
+            else if (bin->op == "<=") bytecodeEmitter.emit(OpCode::LE);
+            else if (bin->op == ">") bytecodeEmitter.emit(OpCode::GT);
+            else if (bin->op == ">=") bytecodeEmitter.emit(OpCode::GE);
+            else if (bin->op == "&&") bytecodeEmitter.emit(OpCode::AND);
+            else if (bin->op == "||") bytecodeEmitter.emit(OpCode::OR);
+            else {
+                throw std::runtime_error("Unsupported binary operator in bytecode: " + bin->op);
+            }
+            break;
+        }
+        case ASTNodeType::UNARY_EXPR: {
+            auto* unary = static_cast<UnaryExpr*>(expr);
+            emitBytecodeExpression(unary->operand.get());
+            if (unary->op == "-") bytecodeEmitter.emit(OpCode::NEG);
+            else if (unary->op == "!") bytecodeEmitter.emit(OpCode::NOT);
+            else {
+                throw std::runtime_error("Unsupported unary operator in bytecode: " + unary->op);
+            }
+            break;
+        }
+        case ASTNodeType::ASSIGN_EXPR: {
+            auto* assign = static_cast<AssignExpr*>(expr);
+            emitBytecodeExpression(assign->value.get());
+            bytecodeEmitter.emit(OpCode::STORE_VAR);
+            bytecodeEmitter.emitString(assign->name);
+            break;
+        }
+        case ASTNodeType::CALL_EXPR: {
+            auto* call = static_cast<CallExpr*>(expr);
+            if (isStdlibFunction(call->callee)) {
+                // Stdlib functions are compiled to native machine code only.
+                // They are not available in the bytecode interpreter.
+                throw std::runtime_error("Stdlib function '" + call->callee +
+                    "' must be compiled to native code, not bytecode");
+            }
+            for (auto& arg : call->arguments) {
+                emitBytecodeExpression(arg.get());
+            }
+            bytecodeEmitter.emit(OpCode::CALL);
+            bytecodeEmitter.emitString(call->callee);
+            bytecodeEmitter.emitByte(static_cast<uint8_t>(call->arguments.size()));
+            break;
+        }
+        case ASTNodeType::POSTFIX_EXPR: {
+            auto* postfix = static_cast<PostfixExpr*>(expr);
+            auto* id = dynamic_cast<IdentifierExpr*>(postfix->operand.get());
+            if (!id) {
+                throw std::runtime_error("Postfix operator requires an identifier in bytecode");
+            }
+            // Push the current value (return value for postfix)
+            bytecodeEmitter.emit(OpCode::LOAD_VAR);
+            bytecodeEmitter.emitString(id->name);
+            // Compute new value: load, push 1, add/sub, store
+            bytecodeEmitter.emit(OpCode::LOAD_VAR);
+            bytecodeEmitter.emitString(id->name);
+            bytecodeEmitter.emit(OpCode::PUSH_INT);
+            bytecodeEmitter.emitInt(1);
+            if (postfix->op == "++") {
+                bytecodeEmitter.emit(OpCode::ADD);
+            } else {
+                bytecodeEmitter.emit(OpCode::SUB);
+            }
+            bytecodeEmitter.emit(OpCode::STORE_VAR);
+            bytecodeEmitter.emitString(id->name);
+            bytecodeEmitter.emit(OpCode::POP); // STORE_VAR left the new value on top; discard it to expose the original value below
+            break;
+        }
+        case ASTNodeType::PREFIX_EXPR: {
+            auto* prefix = static_cast<PrefixExpr*>(expr);
+            auto* id = dynamic_cast<IdentifierExpr*>(prefix->operand.get());
+            if (!id) {
+                throw std::runtime_error("Prefix operator requires an identifier in bytecode");
+            }
+            // Compute new value: load, push 1, add/sub, store
+            bytecodeEmitter.emit(OpCode::LOAD_VAR);
+            bytecodeEmitter.emitString(id->name);
+            bytecodeEmitter.emit(OpCode::PUSH_INT);
+            bytecodeEmitter.emitInt(1);
+            if (prefix->op == "++") {
+                bytecodeEmitter.emit(OpCode::ADD);
+            } else {
+                bytecodeEmitter.emit(OpCode::SUB);
+            }
+            bytecodeEmitter.emit(OpCode::STORE_VAR);
+            bytecodeEmitter.emitString(id->name);
+            // STORE_VAR leaves the new value on the stack (prefix returns new value)
+            break;
+        }
+        case ASTNodeType::TERNARY_EXPR: {
+            auto* ternary = static_cast<TernaryExpr*>(expr);
+            emitBytecodeExpression(ternary->condition.get());
+            bytecodeEmitter.emit(OpCode::JUMP_IF_FALSE);
+            size_t elsePatch = bytecodeEmitter.currentOffset();
+            bytecodeEmitter.emitShort(0); // placeholder
+            
+            emitBytecodeExpression(ternary->thenExpr.get());
+            bytecodeEmitter.emit(OpCode::JUMP);
+            size_t endPatch = bytecodeEmitter.currentOffset();
+            bytecodeEmitter.emitShort(0); // placeholder
+            
+            bytecodeEmitter.patchJump(elsePatch, static_cast<uint16_t>(bytecodeEmitter.currentOffset()));
+            emitBytecodeExpression(ternary->elseExpr.get());
+            bytecodeEmitter.patchJump(endPatch, static_cast<uint16_t>(bytecodeEmitter.currentOffset()));
+            break;
+        }
+        default:
+            throw std::runtime_error("Unsupported expression type in bytecode generation");
+    }
+}
+
+void CodeGenerator::emitBytecodeStatement(Statement* stmt) {
+    switch (stmt->type) {
+        case ASTNodeType::EXPR_STMT: {
+            auto* exprStmt = static_cast<ExprStmt*>(stmt);
+            emitBytecodeExpression(exprStmt->expression.get());
+            bytecodeEmitter.emit(OpCode::POP);
+            break;
+        }
+        case ASTNodeType::VAR_DECL: {
+            auto* varDecl = static_cast<VarDecl*>(stmt);
+            if (varDecl->initializer) {
+                emitBytecodeExpression(varDecl->initializer.get());
+            } else {
+                bytecodeEmitter.emit(OpCode::PUSH_INT);
+                bytecodeEmitter.emitInt(0);
+            }
+            bytecodeEmitter.emit(OpCode::STORE_VAR);
+            bytecodeEmitter.emitString(varDecl->name);
+            // STORE_VAR leaves the value on the stack; pop it since
+            // variable declarations are statements, not expressions.
+            bytecodeEmitter.emit(OpCode::POP);
+            break;
+        }
+        case ASTNodeType::RETURN_STMT: {
+            auto* retStmt = static_cast<ReturnStmt*>(stmt);
+            if (retStmt->value) {
+                emitBytecodeExpression(retStmt->value.get());
+            } else {
+                bytecodeEmitter.emit(OpCode::PUSH_INT);
+                bytecodeEmitter.emitInt(0);
+            }
+            bytecodeEmitter.emit(OpCode::RETURN);
+            break;
+        }
+        case ASTNodeType::IF_STMT: {
+            auto* ifStmt = static_cast<IfStmt*>(stmt);
+            emitBytecodeExpression(ifStmt->condition.get());
+            
+            bytecodeEmitter.emit(OpCode::JUMP_IF_FALSE);
+            size_t elsePatch = bytecodeEmitter.currentOffset();
+            bytecodeEmitter.emitShort(0); // placeholder
+            
+            emitBytecodeStatement(ifStmt->thenBranch.get());
+            
+            if (ifStmt->elseBranch) {
+                bytecodeEmitter.emit(OpCode::JUMP);
+                size_t endPatch = bytecodeEmitter.currentOffset();
+                bytecodeEmitter.emitShort(0); // placeholder
+                
+                bytecodeEmitter.patchJump(elsePatch, static_cast<uint16_t>(bytecodeEmitter.currentOffset()));
+                emitBytecodeStatement(ifStmt->elseBranch.get());
+                bytecodeEmitter.patchJump(endPatch, static_cast<uint16_t>(bytecodeEmitter.currentOffset()));
+            } else {
+                bytecodeEmitter.patchJump(elsePatch, static_cast<uint16_t>(bytecodeEmitter.currentOffset()));
+            }
+            break;
+        }
+        case ASTNodeType::WHILE_STMT: {
+            auto* whileStmt = static_cast<WhileStmt*>(stmt);
+            size_t loopStart = bytecodeEmitter.currentOffset();
+            
+            emitBytecodeExpression(whileStmt->condition.get());
+            bytecodeEmitter.emit(OpCode::JUMP_IF_FALSE);
+            size_t exitPatch = bytecodeEmitter.currentOffset();
+            bytecodeEmitter.emitShort(0); // placeholder
+            
+            emitBytecodeStatement(whileStmt->body.get());
+            
+            bytecodeEmitter.emit(OpCode::JUMP);
+            bytecodeEmitter.emitShort(static_cast<uint16_t>(loopStart));
+            
+            bytecodeEmitter.patchJump(exitPatch, static_cast<uint16_t>(bytecodeEmitter.currentOffset()));
+            break;
+        }
+        case ASTNodeType::BLOCK: {
+            emitBytecodeBlock(static_cast<BlockStmt*>(stmt));
+            break;
+        }
+        case ASTNodeType::DO_WHILE_STMT: {
+            auto* doWhileStmt = static_cast<DoWhileStmt*>(stmt);
+            size_t loopStart = bytecodeEmitter.currentOffset();
+            
+            emitBytecodeStatement(doWhileStmt->body.get());
+            
+            emitBytecodeExpression(doWhileStmt->condition.get());
+            // Jump back to the start if condition is true (negate: jump if false to exit)
+            bytecodeEmitter.emit(OpCode::NOT);
+            bytecodeEmitter.emit(OpCode::JUMP_IF_FALSE);
+            bytecodeEmitter.emitShort(static_cast<uint16_t>(loopStart));
+            break;
+        }
+        case ASTNodeType::FOR_STMT: {
+            auto* forStmt = static_cast<ForStmt*>(stmt);
+            // Initialize iterator variable
+            emitBytecodeExpression(forStmt->start.get());
+            bytecodeEmitter.emit(OpCode::STORE_VAR);
+            bytecodeEmitter.emitString(forStmt->iteratorVar);
+            bytecodeEmitter.emit(OpCode::POP);
+            
+            size_t loopStart = bytecodeEmitter.currentOffset();
+            
+            // Condition: iterator < end
+            bytecodeEmitter.emit(OpCode::LOAD_VAR);
+            bytecodeEmitter.emitString(forStmt->iteratorVar);
+            emitBytecodeExpression(forStmt->end.get());
+            bytecodeEmitter.emit(OpCode::LT);
+            
+            bytecodeEmitter.emit(OpCode::JUMP_IF_FALSE);
+            size_t exitPatch = bytecodeEmitter.currentOffset();
+            bytecodeEmitter.emitShort(0); // placeholder
+            
+            // Body
+            emitBytecodeStatement(forStmt->body.get());
+            
+            // Increment: iterator = iterator + step (default step = 1)
+            bytecodeEmitter.emit(OpCode::LOAD_VAR);
+            bytecodeEmitter.emitString(forStmt->iteratorVar);
+            if (forStmt->step) {
+                emitBytecodeExpression(forStmt->step.get());
+            } else {
+                bytecodeEmitter.emit(OpCode::PUSH_INT);
+                bytecodeEmitter.emitInt(1);
+            }
+            bytecodeEmitter.emit(OpCode::ADD);
+            bytecodeEmitter.emit(OpCode::STORE_VAR);
+            bytecodeEmitter.emitString(forStmt->iteratorVar);
+            bytecodeEmitter.emit(OpCode::POP);
+            
+            bytecodeEmitter.emit(OpCode::JUMP);
+            bytecodeEmitter.emitShort(static_cast<uint16_t>(loopStart));
+            
+            bytecodeEmitter.patchJump(exitPatch, static_cast<uint16_t>(bytecodeEmitter.currentOffset()));
+            break;
+        }
+        default:
+            throw std::runtime_error("Unsupported statement type in bytecode generation");
+    }
+}
+
+void CodeGenerator::emitBytecodeBlock(BlockStmt* stmt) {
+    for (auto& statement : stmt->statements) {
+        emitBytecodeStatement(statement.get());
+    }
 }
 
 } // namespace omscript

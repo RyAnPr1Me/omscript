@@ -44,7 +44,6 @@ Token Parser::consume(TokenType type, const std::string& message) {
         return advance();
     }
     error(message);
-    return peek();
 }
 
 void Parser::error(const std::string& message) {
@@ -310,7 +309,11 @@ std::unique_ptr<Expression> Parser::parseAssignment() {
             
             // Desugar: x += expr  =>  x = x + expr
             auto lhsRef = std::make_unique<IdentifierExpr>(name);
+            lhsRef->line = expr->line;
+            lhsRef->column = expr->column;
             auto binExpr = std::make_unique<BinaryExpr>(binOp, std::move(lhsRef), std::move(rhs));
+            binExpr->line = expr->line;
+            binExpr->column = expr->column;
             auto node = std::make_unique<AssignExpr>(name, std::move(binExpr));
             node->line = expr->line;
             node->column = expr->column;
@@ -327,10 +330,14 @@ std::unique_ptr<Expression> Parser::parseTernary() {
     auto expr = parseLogicalOr();
     
     if (match(TokenType::QUESTION)) {
+        Token questionToken = tokens[current - 1];
         auto thenExpr = parseExpression();
         consume(TokenType::COLON, "Expected ':' in ternary expression");
         auto elseExpr = parseTernary();
-        return std::make_unique<TernaryExpr>(std::move(expr), std::move(thenExpr), std::move(elseExpr));
+        auto node = std::make_unique<TernaryExpr>(std::move(expr), std::move(thenExpr), std::move(elseExpr));
+        node->line = questionToken.line;
+        node->column = questionToken.column;
+        return node;
     }
     
     return expr;
@@ -459,15 +466,21 @@ std::unique_ptr<Expression> Parser::parseMultiplication() {
 
 std::unique_ptr<Expression> Parser::parseUnary() {
     if (match(TokenType::MINUS) || match(TokenType::NOT) || match(TokenType::TILDE)) {
-        std::string op = tokens[current - 1].lexeme;
+        Token opToken = tokens[current - 1];
         auto operand = parseUnary();
-        return std::make_unique<UnaryExpr>(op, std::move(operand));
+        auto node = std::make_unique<UnaryExpr>(opToken.lexeme, std::move(operand));
+        node->line = opToken.line;
+        node->column = opToken.column;
+        return node;
     }
     
     if (match(TokenType::PLUSPLUS) || match(TokenType::MINUSMINUS)) {
-        std::string op = tokens[current - 1].lexeme;
+        Token opToken = tokens[current - 1];
         auto operand = parseUnary();
-        return std::make_unique<PrefixExpr>(op, std::move(operand));
+        auto node = std::make_unique<PrefixExpr>(opToken.lexeme, std::move(operand));
+        node->line = opToken.line;
+        node->column = opToken.column;
+        return node;
     }
     
     return parsePostfix();
@@ -476,17 +489,26 @@ std::unique_ptr<Expression> Parser::parseUnary() {
 std::unique_ptr<Expression> Parser::parsePostfix() {
     auto expr = parseCall();
     
-    // Handle postfix operators
-    if (match(TokenType::PLUSPLUS) || match(TokenType::MINUSMINUS)) {
-        std::string op = tokens[current - 1].lexeme;
-        return std::make_unique<PostfixExpr>(op, std::move(expr));
-    }
-    
-    // Handle array indexing
-    while (match(TokenType::LBRACKET)) {
-        auto index = parseExpression();
-        consume(TokenType::RBRACKET, "Expected ']' after array index");
-        expr = std::make_unique<IndexExpr>(std::move(expr), std::move(index));
+    while (true) {
+        // Handle postfix operators
+        if (match(TokenType::PLUSPLUS) || match(TokenType::MINUSMINUS)) {
+            Token opToken = tokens[current - 1];
+            expr = std::make_unique<PostfixExpr>(opToken.lexeme, std::move(expr));
+            expr->line = opToken.line;
+            expr->column = opToken.column;
+        }
+        // Handle array indexing
+        else if (match(TokenType::LBRACKET)) {
+            Token bracketToken = tokens[current - 1];
+            auto index = parseExpression();
+            consume(TokenType::RBRACKET, "Expected ']' after array index");
+            auto indexExpr = std::make_unique<IndexExpr>(std::move(expr), std::move(index));
+            indexExpr->line = bracketToken.line;
+            indexExpr->column = bracketToken.column;
+            expr = std::move(indexExpr);
+        } else {
+            break;
+        }
     }
     
     return expr;
@@ -509,7 +531,10 @@ std::unique_ptr<Expression> Parser::parseCall() {
             
             consume(TokenType::RPAREN, "Expected ')' after arguments");
             
-            return std::make_unique<CallExpr>(idExpr->name, std::move(arguments));
+            auto callExpr = std::make_unique<CallExpr>(idExpr->name, std::move(arguments));
+            callExpr->line = expr->line;
+            callExpr->column = expr->column;
+            return callExpr;
         } else {
             error("Invalid function call");
         }
@@ -558,7 +583,11 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
     }
     
     if (match(TokenType::LBRACKET)) {
-        return parseArrayLiteral();
+        Token bracketToken = tokens[current - 1];
+        auto arrayExpr = parseArrayLiteral();
+        arrayExpr->line = bracketToken.line;
+        arrayExpr->column = bracketToken.column;
+        return arrayExpr;
     }
     
     error("Expected expression");

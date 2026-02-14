@@ -1,0 +1,23 @@
+// Test array creation, indexing, and len()
+fn main() {
+    var arr = [10, 20, 30, 40, 50];
+    var total = 0;
+
+    // Test basic indexing
+    total = total + arr[0];  // 10
+    total = total + arr[2];  // 30
+    total = total + arr[4];  // 50
+
+    // Test len()
+    total = total + len(arr); // 5
+
+    // Test array in a loop
+    var sum = 0;
+    for (i in 0...len(arr)) {
+        sum = sum + arr[i];
+    }
+    total = total + sum; // 150
+
+    // total = 10 + 30 + 50 + 5 + 150 = 245
+    return total;
+}

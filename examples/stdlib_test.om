@@ -1,0 +1,47 @@
+// Test standard library built-in functions
+fn main() {
+    var total = 0;
+
+    // Test min(a, b)
+    total = total + min(3, 7);     // 3
+    total = total + min(10, 2);    // 2
+    total = total + min(-5, -1);   // -5
+    // total = 3 + 2 + (-5) = 0
+
+    // Test max(a, b)
+    total = total + max(3, 7);     // 7
+    total = total + max(10, 2);    // 10
+    total = total + max(-5, -1);   // -1
+    // total = 16
+
+    // Test sign(x)
+    total = total + sign(42);      // 1
+    total = total + sign(-7);      // -1
+    total = total + sign(0);       // 0
+    // total = 16
+
+    // Test clamp(val, lo, hi)
+    total = total + clamp(5, 0, 10);    // 5
+    total = total + clamp(-3, 0, 10);   // 0
+    total = total + clamp(15, 0, 10);   // 10
+    // total = 31
+
+    // Test pow(base, exp)
+    total = total + pow(2, 0);     // 1
+    total = total + pow(2, 3);     // 8
+    total = total + pow(3, 2);     // 9
+    total = total + pow(5, 1);     // 5
+    // total = 54
+
+    // Test print_char (ASCII 72='H', 105='i', 10=newline)
+    print_char(72);
+    print_char(105);
+    print_char(10);
+
+    // Test abs in combination with new builtins
+    total = total + max(abs(-10), abs(3));  // max(10, 3) = 10
+    total = total + min(abs(-2), abs(5));   // min(2, 5) = 2
+    // total = 66
+
+    return total;
+}

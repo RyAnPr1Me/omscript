@@ -143,6 +143,11 @@ Token Lexer::scanString() {
     while (!isAtEnd() && peek() != '"') {
         if (peek() == '\\') {
             advance();
+            if (isAtEnd()) {
+                throw std::runtime_error("Unterminated escape sequence in string at line " +
+                                         std::to_string(startLine) + ", column " +
+                                         std::to_string(startColumn));
+            }
             char escaped = advance();
             switch (escaped) {
                 case 'n': str += '\n'; break;
@@ -165,7 +170,8 @@ Token Lexer::scanString() {
     
     advance(); // Skip closing quote
     
-    return makeToken(TokenType::STRING, str);
+    Token token(TokenType::STRING, str, startLine, startColumn);
+    return token;
 }
 
 std::vector<Token> Lexer::tokenize() {
