@@ -1,0 +1,21 @@
+// Test string variable support
+fn main() {
+    // String variable declaration and printing
+    var greeting = "hello from variable";
+    print(greeting);
+
+    // Direct string literal still works
+    print("direct string literal");
+
+    // String concatenation
+    var first = "foo";
+    var second = "bar";
+    var combined = first + second;
+    print(combined);    // Should print foobar
+
+    // String concatenation with literal
+    var msg = first + " world";
+    print(msg);         // Should print foo world
+
+    return 0;
+}

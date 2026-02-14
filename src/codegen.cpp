@@ -352,6 +352,40 @@ llvm::Type* CodeGenerator::getDefaultType() {
     return llvm::Type::getInt64Ty(*context);
 }
 
+llvm::Type* CodeGenerator::getFloatType() {
+    return llvm::Type::getDoubleTy(*context);
+}
+
+llvm::Value* CodeGenerator::toBool(llvm::Value* v) {
+    if (v->getType()->isDoubleTy()) {
+        return builder->CreateFCmpONE(v, llvm::ConstantFP::get(getFloatType(), 0.0), "tobool");
+    } else if (v->getType()->isPointerTy()) {
+        llvm::Value* intVal = builder->CreatePtrToInt(v, getDefaultType(), "ptrtoint");
+        return builder->CreateICmpNE(intVal, llvm::ConstantInt::get(getDefaultType(), 0), "tobool");
+    } else {
+        return builder->CreateICmpNE(v, llvm::ConstantInt::get(v->getType(), 0, true), "tobool");
+    }
+}
+
+llvm::Value* CodeGenerator::toDefaultType(llvm::Value* v) {
+    if (v->getType() == getDefaultType()) return v;
+    if (v->getType()->isDoubleTy()) {
+        return builder->CreateFPToSI(v, getDefaultType(), "ftoi");
+    }
+    if (v->getType()->isPointerTy()) {
+        return builder->CreatePtrToInt(v, getDefaultType(), "ptoi");
+    }
+    return v;
+}
+
+llvm::Value* CodeGenerator::ensureFloat(llvm::Value* v) {
+    if (v->getType()->isDoubleTy()) return v;
+    if (v->getType()->isIntegerTy()) {
+        return builder->CreateSIToFP(v, getFloatType(), "itof");
+    }
+    return v;
+}
+
 void CodeGenerator::beginScope() {
     validateScopeStacksMatch(__func__);
     scopeStack.emplace_back();
@@ -422,9 +456,9 @@ void CodeGenerator::validateScopeStacksMatch(const char* location) {
     }
 }
 
-llvm::AllocaInst* CodeGenerator::createEntryBlockAlloca(llvm::Function* function, const std::string& name) {
+llvm::AllocaInst* CodeGenerator::createEntryBlockAlloca(llvm::Function* function, const std::string& name, llvm::Type* type) {
     llvm::IRBuilder<> entryBuilder(&function->getEntryBlock(), function->getEntryBlock().begin());
-    return entryBuilder.CreateAlloca(getDefaultType(), nullptr, name);
+    return entryBuilder.CreateAlloca(type ? type : getDefaultType(), nullptr, name);
 }
 
 void CodeGenerator::codegenError(const std::string& message, const ASTNode* node) {
@@ -615,13 +649,11 @@ llvm::Value* CodeGenerator::generateLiteral(LiteralExpr* expr) {
     if (expr->literalType == LiteralExpr::LiteralType::INTEGER) {
         return llvm::ConstantInt::get(*context, llvm::APInt(64, expr->intValue));
     } else if (expr->literalType == LiteralExpr::LiteralType::FLOAT) {
-        // For simplicity, cast float to int64 in this basic implementation
-        return llvm::ConstantInt::get(*context, llvm::APInt(64, static_cast<int64_t>(expr->floatValue)));
+        return llvm::ConstantFP::get(getFloatType(), expr->floatValue);
     } else {
-        // String literal - store the address as an i64 for compatibility with the i64 type system.
-        // When passed directly to print(), the pointer form is used instead (see generateCall).
-        llvm::Value* strPtr = builder->CreateGlobalString(expr->stringValue, "str");
-        return builder->CreatePtrToInt(strPtr, getDefaultType(), "strint");
+        // String literal - return as a pointer to the global string data.
+        // When passed directly to print(), the pointer form is used with %s.
+        return builder->CreateGlobalString(expr->stringValue, "str");
     }
 }
 
@@ -630,15 +662,16 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
     if (it == namedValues.end() || !it->second) {
         codegenError("Unknown variable: " + expr->name, expr);
     }
-    return builder->CreateLoad(getDefaultType(), it->second, expr->name.c_str());
+    llvm::AllocaInst* alloca = llvm::dyn_cast<llvm::AllocaInst>(it->second);
+    llvm::Type* loadType = alloca ? alloca->getAllocatedType() : getDefaultType();
+    return builder->CreateLoad(loadType, it->second, expr->name.c_str());
 }
 
 llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     llvm::Value* left = generateExpression(expr->left.get());
     if (expr->op == "&&" || expr->op == "||") {
         llvm::Function* function = builder->GetInsertBlock()->getParent();
-        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
-        llvm::Value* leftBool = builder->CreateICmpNE(left, zero, "leftbool");
+        llvm::Value* leftBool = toBool(left);
         llvm::BasicBlock* rhsBB = llvm::BasicBlock::Create(*context, "logic.rhs", function);
         llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "logic.cont", function);
         if (expr->op == "&&") {
@@ -649,7 +682,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         llvm::BasicBlock* leftBB = builder->GetInsertBlock();
         builder->SetInsertPoint(rhsBB);
         llvm::Value* right = generateExpression(expr->right.get());
-        llvm::Value* rightBool = builder->CreateICmpNE(right, zero, "rightbool");
+        llvm::Value* rightBool = toBool(right);
         builder->CreateBr(mergeBB);
         llvm::BasicBlock* rightBB = builder->GetInsertBlock();
         builder->SetInsertPoint(mergeBB);
@@ -665,6 +698,84 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     }
     
     llvm::Value* right = generateExpression(expr->right.get());
+    
+    bool leftIsFloat = left->getType()->isDoubleTy();
+    bool rightIsFloat = right->getType()->isDoubleTy();
+    
+    // Float operations path
+    if (leftIsFloat || rightIsFloat) {
+        if (!leftIsFloat) left = ensureFloat(left);
+        if (!rightIsFloat) right = ensureFloat(right);
+        
+        if (expr->op == "+") return builder->CreateFAdd(left, right, "faddtmp");
+        if (expr->op == "-") return builder->CreateFSub(left, right, "fsubtmp");
+        if (expr->op == "*") return builder->CreateFMul(left, right, "fmultmp");
+        if (expr->op == "/") return builder->CreateFDiv(left, right, "fdivtmp");
+        if (expr->op == "%") return builder->CreateFRem(left, right, "fremtmp");
+        
+        if (expr->op == "==") { auto cmp = builder->CreateFCmpOEQ(left, right, "fcmptmp"); return builder->CreateZExt(cmp, getDefaultType(), "booltmp"); }
+        if (expr->op == "!=") { auto cmp = builder->CreateFCmpONE(left, right, "fcmptmp"); return builder->CreateZExt(cmp, getDefaultType(), "booltmp"); }
+        if (expr->op == "<")  { auto cmp = builder->CreateFCmpOLT(left, right, "fcmptmp"); return builder->CreateZExt(cmp, getDefaultType(), "booltmp"); }
+        if (expr->op == "<=") { auto cmp = builder->CreateFCmpOLE(left, right, "fcmptmp"); return builder->CreateZExt(cmp, getDefaultType(), "booltmp"); }
+        if (expr->op == ">")  { auto cmp = builder->CreateFCmpOGT(left, right, "fcmptmp"); return builder->CreateZExt(cmp, getDefaultType(), "booltmp"); }
+        if (expr->op == ">=") { auto cmp = builder->CreateFCmpOGE(left, right, "fcmptmp"); return builder->CreateZExt(cmp, getDefaultType(), "booltmp"); }
+        
+        throw std::runtime_error("Invalid binary operator for float operands: " + expr->op);
+    }
+    
+    // String concatenation path (pointer + pointer with '+' operator)
+    if (expr->op == "+" && left->getType()->isPointerTy() && right->getType()->isPointerTy()) {
+        // Declare C library functions for string concatenation
+        llvm::Function* strlenFn = module->getFunction("strlen");
+        if (!strlenFn) {
+            auto strlenType = llvm::FunctionType::get(getDefaultType(),
+                {llvm::PointerType::getUnqual(*context)}, false);
+            strlenFn = llvm::Function::Create(strlenType,
+                llvm::Function::ExternalLinkage, "strlen", module.get());
+        }
+        llvm::Function* mallocFn = module->getFunction("malloc");
+        if (!mallocFn) {
+            auto mallocType = llvm::FunctionType::get(
+                llvm::PointerType::getUnqual(*context),
+                {getDefaultType()}, false);
+            mallocFn = llvm::Function::Create(mallocType,
+                llvm::Function::ExternalLinkage, "malloc", module.get());
+        }
+        llvm::Function* strcpyFn = module->getFunction("strcpy");
+        if (!strcpyFn) {
+            auto strcpyType = llvm::FunctionType::get(
+                llvm::PointerType::getUnqual(*context),
+                {llvm::PointerType::getUnqual(*context), llvm::PointerType::getUnqual(*context)}, false);
+            strcpyFn = llvm::Function::Create(strcpyType,
+                llvm::Function::ExternalLinkage, "strcpy", module.get());
+        }
+        llvm::Function* strcatFn = module->getFunction("strcat");
+        if (!strcatFn) {
+            auto strcatType = llvm::FunctionType::get(
+                llvm::PointerType::getUnqual(*context),
+                {llvm::PointerType::getUnqual(*context), llvm::PointerType::getUnqual(*context)}, false);
+            strcatFn = llvm::Function::Create(strcatType,
+                llvm::Function::ExternalLinkage, "strcat", module.get());
+        }
+        
+        llvm::Value* len1 = builder->CreateCall(strlenFn, {left}, "len1");
+        llvm::Value* len2 = builder->CreateCall(strlenFn, {right}, "len2");
+        llvm::Value* totalLen = builder->CreateAdd(len1, len2, "totallen");
+        llvm::Value* allocSize = builder->CreateAdd(totalLen,
+            llvm::ConstantInt::get(getDefaultType(), 1), "allocsize");
+        llvm::Value* buf = builder->CreateCall(mallocFn, {allocSize}, "strbuf");
+        builder->CreateCall(strcpyFn, {buf, left});
+        builder->CreateCall(strcatFn, {buf, right});
+        return buf;
+    }
+    
+    // Convert pointer types to i64 for integer operations (fallback)
+    if (left->getType()->isPointerTy()) {
+        left = builder->CreatePtrToInt(left, getDefaultType(), "ptoi");
+    }
+    if (right->getType()->isPointerTy()) {
+        right = builder->CreatePtrToInt(right, getDefaultType(), "ptoi");
+    }
     
     // Constant folding optimization - if both operands are constants, compute at compile time
     if (llvm::isa<llvm::ConstantInt>(left) && llvm::isa<llvm::ConstantInt>(right)) {
@@ -779,15 +890,18 @@ llvm::Value* CodeGenerator::generateUnary(UnaryExpr* expr) {
     llvm::Value* operand = generateExpression(expr->operand.get());
     
     if (expr->op == "-") {
+        if (operand->getType()->isDoubleTy()) {
+            return builder->CreateFNeg(operand, "fnegtmp");
+        }
         return builder->CreateNeg(operand, "negtmp");
     } else if (expr->op == "!") {
-        llvm::Value* cmp = builder->CreateICmpEQ(
-            operand,
-            llvm::ConstantInt::get(getDefaultType(), 0, true),
-            "nottmp"
-        );
-        return builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+        llvm::Value* boolVal = toBool(operand);
+        llvm::Value* notVal = builder->CreateNot(boolVal, "nottmp");
+        return builder->CreateZExt(notVal, getDefaultType(), "booltmp");
     } else if (expr->op == "~") {
+        if (operand->getType()->isDoubleTy()) {
+            operand = builder->CreateFPToSI(operand, getDefaultType(), "ftoi");
+        }
         return builder->CreateNot(operand, "bitnottmp");
     }
     
@@ -802,27 +916,33 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             codegenError("Built-in function 'print' expects 1 argument, but " +
                          std::to_string(expr->arguments.size()) + " provided", expr);
         }
-        // Check if the argument is a string literal to print it with %s
         Expression* argExpr = expr->arguments[0].get();
-        if (argExpr->type == ASTNodeType::LITERAL_EXPR) {
-            auto* litExpr = static_cast<LiteralExpr*>(argExpr);
-            if (litExpr->literalType == LiteralExpr::LiteralType::STRING) {
-                llvm::Value* strPtr = builder->CreateGlobalString(litExpr->stringValue, "printstr");
-                llvm::GlobalVariable* strFmt = module->getGlobalVariable("print_str_fmt", true);
-                if (!strFmt) {
-                    strFmt = builder->CreateGlobalString("%s\n", "print_str_fmt");
-                }
-                builder->CreateCall(getPrintfFunction(), {strFmt, strPtr});
-                return llvm::ConstantInt::get(getDefaultType(), 0);
-            }
-        }
         llvm::Value* arg = generateExpression(argExpr);
-        llvm::GlobalVariable* formatStr = module->getGlobalVariable("print_fmt", true);
-        if (!formatStr) {
-            formatStr = builder->CreateGlobalString("%lld\n", "print_fmt");
+        if (arg->getType()->isDoubleTy()) {
+            // Print float value
+            llvm::GlobalVariable* floatFmt = module->getGlobalVariable("print_float_fmt", true);
+            if (!floatFmt) {
+                floatFmt = builder->CreateGlobalString("%g\n", "print_float_fmt");
+            }
+            builder->CreateCall(getPrintfFunction(), {floatFmt, arg});
+            return llvm::ConstantInt::get(getDefaultType(), 0);
+        } else if (arg->getType()->isPointerTy()) {
+            // Print string (literal or variable)
+            llvm::GlobalVariable* strFmt = module->getGlobalVariable("print_str_fmt", true);
+            if (!strFmt) {
+                strFmt = builder->CreateGlobalString("%s\n", "print_str_fmt");
+            }
+            builder->CreateCall(getPrintfFunction(), {strFmt, arg});
+            return llvm::ConstantInt::get(getDefaultType(), 0);
+        } else {
+            // Print integer
+            llvm::GlobalVariable* formatStr = module->getGlobalVariable("print_fmt", true);
+            if (!formatStr) {
+                formatStr = builder->CreateGlobalString("%lld\n", "print_fmt");
+            }
+            builder->CreateCall(getPrintfFunction(), {formatStr, arg});
+            return arg;
         }
-        builder->CreateCall(getPrintfFunction(), {formatStr, arg});
-        return arg;
     }
 
     if (expr->callee == "abs") {
@@ -831,6 +951,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                          std::to_string(expr->arguments.size()) + " provided", expr);
         }
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        if (arg->getType()->isDoubleTy()) {
+            llvm::Value* fzero = llvm::ConstantFP::get(getFloatType(), 0.0);
+            llvm::Value* isNeg = builder->CreateFCmpOLT(arg, fzero, "fisneg");
+            llvm::Value* negVal = builder->CreateFNeg(arg, "fnegval");
+            return builder->CreateSelect(isNeg, negVal, arg, "fabsval");
+        }
         // abs(x) = x >= 0 ? x : -x
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
         llvm::Value* isNeg = builder->CreateICmpSLT(arg, zero, "isneg");
@@ -857,6 +983,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         }
         llvm::Value* a = generateExpression(expr->arguments[0].get());
         llvm::Value* b = generateExpression(expr->arguments[1].get());
+        if (a->getType()->isDoubleTy() || b->getType()->isDoubleTy()) {
+            if (!a->getType()->isDoubleTy()) a = ensureFloat(a);
+            if (!b->getType()->isDoubleTy()) b = ensureFloat(b);
+            llvm::Value* cmp = builder->CreateFCmpOLT(a, b, "fmincmp");
+            return builder->CreateSelect(cmp, a, b, "fminval");
+        }
         llvm::Value* cmp = builder->CreateICmpSLT(a, b, "mincmp");
         return builder->CreateSelect(cmp, a, b, "minval");
     }
@@ -868,6 +1000,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         }
         llvm::Value* a = generateExpression(expr->arguments[0].get());
         llvm::Value* b = generateExpression(expr->arguments[1].get());
+        if (a->getType()->isDoubleTy() || b->getType()->isDoubleTy()) {
+            if (!a->getType()->isDoubleTy()) a = ensureFloat(a);
+            if (!b->getType()->isDoubleTy()) b = ensureFloat(b);
+            llvm::Value* cmp = builder->CreateFCmpOGT(a, b, "fmaxcmp");
+            return builder->CreateSelect(cmp, a, b, "fmaxval");
+        }
         llvm::Value* cmp = builder->CreateICmpSGT(a, b, "maxcmp");
         return builder->CreateSelect(cmp, a, b, "maxval");
     }
@@ -946,6 +1084,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                          std::to_string(expr->arguments.size()) + " provided", expr);
         }
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        if (arg->getType()->isDoubleTy()) {
+            arg = builder->CreateFPToSI(arg, getDefaultType(), "ftoi");
+        }
         llvm::Function* putcharFn = module->getFunction("putchar");
         if (!putcharFn) {
             auto putcharType = llvm::FunctionType::get(
@@ -1240,7 +1381,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     
     std::vector<llvm::Value*> args;
     for (auto& arg : expr->arguments) {
-        args.push_back(generateExpression(arg.get()));
+        llvm::Value* argVal = generateExpression(arg.get());
+        // Function parameters are i64, convert if needed
+        argVal = toDefaultType(argVal);
+        args.push_back(argVal);
     }
     
     return builder->CreateCall(callee, args, "calltmp");
@@ -1253,6 +1397,17 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
         codegenError("Unknown variable: " + expr->name, expr);
     }
     checkConstModification(expr->name, "modify");
+    
+    // Type conversion if the alloca type and value type differ
+    llvm::AllocaInst* alloca = llvm::dyn_cast<llvm::AllocaInst>(it->second);
+    if (alloca) {
+        llvm::Type* allocaType = alloca->getAllocatedType();
+        if (allocaType->isDoubleTy() && value->getType()->isIntegerTy()) {
+            value = builder->CreateSIToFP(value, getFloatType(), "itof");
+        } else if (allocaType->isIntegerTy() && value->getType()->isDoubleTy()) {
+            value = builder->CreateFPToSI(value, getDefaultType(), "ftoi");
+        }
+    }
     
     builder->CreateStore(value, it->second);
     return value;
@@ -1270,14 +1425,24 @@ llvm::Value* CodeGenerator::generatePostfix(PostfixExpr* expr) {
     }
     checkConstModification(identifier->name, "modify");
     
-    llvm::Value* current = builder->CreateLoad(getDefaultType(), it->second, identifier->name.c_str());
-    llvm::Value* delta = llvm::ConstantInt::get(getDefaultType(), 1, true);
+    llvm::AllocaInst* allocaInst = llvm::dyn_cast<llvm::AllocaInst>(it->second);
+    llvm::Type* loadType = allocaInst ? allocaInst->getAllocatedType() : getDefaultType();
+    llvm::Value* current = builder->CreateLoad(loadType, it->second, identifier->name.c_str());
     if (expr->op != "++" && expr->op != "--") {
         codegenError("Unknown postfix operator: " + expr->op, expr);
     }
-    llvm::Value* updated = (expr->op == "++")
-        ? builder->CreateAdd(current, delta, "postinc")
-        : builder->CreateSub(current, delta, "postdec");
+    llvm::Value* updated;
+    if (current->getType()->isDoubleTy()) {
+        llvm::Value* one = llvm::ConstantFP::get(getFloatType(), 1.0);
+        updated = (expr->op == "++")
+            ? builder->CreateFAdd(current, one, "fpostinc")
+            : builder->CreateFSub(current, one, "fpostdec");
+    } else {
+        llvm::Value* delta = llvm::ConstantInt::get(getDefaultType(), 1, true);
+        updated = (expr->op == "++")
+            ? builder->CreateAdd(current, delta, "postinc")
+            : builder->CreateSub(current, delta, "postdec");
+    }
     
     builder->CreateStore(updated, it->second);
     return current;
@@ -1295,14 +1460,24 @@ llvm::Value* CodeGenerator::generatePrefix(PrefixExpr* expr) {
     }
     checkConstModification(identifier->name, "modify");
     
-    llvm::Value* current = builder->CreateLoad(getDefaultType(), it->second, identifier->name.c_str());
-    llvm::Value* delta = llvm::ConstantInt::get(getDefaultType(), 1, true);
+    llvm::AllocaInst* allocaInst = llvm::dyn_cast<llvm::AllocaInst>(it->second);
+    llvm::Type* loadType = allocaInst ? allocaInst->getAllocatedType() : getDefaultType();
+    llvm::Value* current = builder->CreateLoad(loadType, it->second, identifier->name.c_str());
     if (expr->op != "++" && expr->op != "--") {
         codegenError("Unknown prefix operator: " + expr->op, expr);
     }
-    llvm::Value* updated = (expr->op == "++")
-        ? builder->CreateAdd(current, delta, "preinc")
-        : builder->CreateSub(current, delta, "predec");
+    llvm::Value* updated;
+    if (current->getType()->isDoubleTy()) {
+        llvm::Value* one = llvm::ConstantFP::get(getFloatType(), 1.0);
+        updated = (expr->op == "++")
+            ? builder->CreateFAdd(current, one, "fpreinc")
+            : builder->CreateFSub(current, one, "fpredec");
+    } else {
+        llvm::Value* delta = llvm::ConstantInt::get(getDefaultType(), 1, true);
+        updated = (expr->op == "++")
+            ? builder->CreateAdd(current, delta, "preinc")
+            : builder->CreateSub(current, delta, "predec");
+    }
     
     builder->CreateStore(updated, it->second);
     return updated;
@@ -1310,11 +1485,7 @@ llvm::Value* CodeGenerator::generatePrefix(PrefixExpr* expr) {
 
 llvm::Value* CodeGenerator::generateTernary(TernaryExpr* expr) {
     llvm::Value* condition = generateExpression(expr->condition.get());
-    llvm::Value* condBool = builder->CreateICmpNE(
-        condition,
-        llvm::ConstantInt::get(getDefaultType(), 0, true),
-        "terncond"
-    );
+    llvm::Value* condBool = toBool(condition);
     
     llvm::Function* function = builder->GetInsertBlock()->getParent();
     llvm::BasicBlock* thenBB = llvm::BasicBlock::Create(*context, "tern.then", function);
@@ -1325,16 +1496,36 @@ llvm::Value* CodeGenerator::generateTernary(TernaryExpr* expr) {
     
     builder->SetInsertPoint(thenBB);
     llvm::Value* thenVal = generateExpression(expr->thenExpr.get());
-    builder->CreateBr(mergeBB);
     thenBB = builder->GetInsertBlock();
     
     builder->SetInsertPoint(elseBB);
     llvm::Value* elseVal = generateExpression(expr->elseExpr.get());
+    elseBB = builder->GetInsertBlock();
+    
+    // Ensure matching types for PHI node
+    if (thenVal->getType() != elseVal->getType()) {
+        if (thenVal->getType()->isDoubleTy() || elseVal->getType()->isDoubleTy()) {
+            if (!thenVal->getType()->isDoubleTy()) {
+                builder->SetInsertPoint(thenBB);
+                thenVal = ensureFloat(thenVal);
+            }
+            if (!elseVal->getType()->isDoubleTy()) {
+                builder->SetInsertPoint(elseBB);
+                elseVal = ensureFloat(elseVal);
+            }
+        }
+    }
+    
+    builder->SetInsertPoint(thenBB);
+    builder->CreateBr(mergeBB);
+    thenBB = builder->GetInsertBlock();
+    
+    builder->SetInsertPoint(elseBB);
     builder->CreateBr(mergeBB);
     elseBB = builder->GetInsertBlock();
     
     builder->SetInsertPoint(mergeBB);
-    llvm::PHINode* phi = builder->CreatePHI(getDefaultType(), 2, "ternval");
+    llvm::PHINode* phi = builder->CreatePHI(thenVal->getType(), 2, "ternval");
     phi->addIncoming(thenVal, thenBB);
     phi->addIncoming(elseVal, elseBB);
     
@@ -1356,6 +1547,8 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
     // Store each element in slots 1..N
     for (size_t i = 0; i < numElements; i++) {
         llvm::Value* elemVal = generateExpression(expr->elements[i].get());
+        // Array slots are i64, so convert if needed
+        elemVal = toDefaultType(elemVal);
         llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrAlloca,
             llvm::ConstantInt::get(getDefaultType(), i + 1), "arr.elem.ptr");
         builder->CreateStore(elemVal, elemPtr);
@@ -1408,11 +1601,19 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
     if (!function) {
         throw std::runtime_error("Variable declaration outside of function");
     }
-    llvm::AllocaInst* alloca = createEntryBlockAlloca(function, stmt->name);
-    bindVariable(stmt->name, alloca, stmt->isConst);
+    
+    llvm::Type* allocaType = getDefaultType();
+    llvm::Value* initValue = nullptr;
     
     if (stmt->initializer) {
-        llvm::Value* initValue = generateExpression(stmt->initializer.get());
+        initValue = generateExpression(stmt->initializer.get());
+        allocaType = initValue->getType();
+    }
+    
+    llvm::AllocaInst* alloca = createEntryBlockAlloca(function, stmt->name, allocaType);
+    bindVariable(stmt->name, alloca, stmt->isConst);
+    
+    if (initValue) {
         builder->CreateStore(initValue, alloca);
     } else {
         builder->CreateStore(llvm::ConstantInt::get(*context, llvm::APInt(64, 0)), alloca);
@@ -1422,6 +1623,8 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
 void CodeGenerator::generateReturn(ReturnStmt* stmt) {
     if (stmt->value) {
         llvm::Value* retValue = generateExpression(stmt->value.get());
+        // Function return type is i64, so convert if needed
+        retValue = toDefaultType(retValue);
         builder->CreateRet(retValue);
     } else {
         builder->CreateRet(llvm::ConstantInt::get(*context, llvm::APInt(64, 0)));
@@ -1430,11 +1633,7 @@ void CodeGenerator::generateReturn(ReturnStmt* stmt) {
 
 void CodeGenerator::generateIf(IfStmt* stmt) {
     llvm::Value* condition = generateExpression(stmt->condition.get());
-    llvm::Value* condBool = builder->CreateICmpNE(
-        condition,
-        llvm::ConstantInt::get(getDefaultType(), 0, true),
-        "ifcond"
-    );
+    llvm::Value* condBool = toBool(condition);
     
     llvm::Function* function = builder->GetInsertBlock()->getParent();
     
@@ -1482,11 +1681,7 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
     // Condition block
     builder->SetInsertPoint(condBB);
     llvm::Value* condition = generateExpression(stmt->condition.get());
-    llvm::Value* condBool = builder->CreateICmpNE(
-        condition,
-        llvm::ConstantInt::get(getDefaultType(), 0, true),
-        "whilecond"
-    );
+    llvm::Value* condBool = toBool(condition);
     builder->CreateCondBr(condBool, bodyBB, endBB);
     
     // Body block
@@ -1528,11 +1723,7 @@ void CodeGenerator::generateDoWhile(DoWhileStmt* stmt) {
     // Condition block
     builder->SetInsertPoint(condBB);
     llvm::Value* condition = generateExpression(stmt->condition.get());
-    llvm::Value* condBool = builder->CreateICmpNE(
-        condition,
-        llvm::ConstantInt::get(getDefaultType(), 0, true),
-        "dowhilecond"
-    );
+    llvm::Value* condBool = toBool(condition);
     builder->CreateCondBr(condBool, bodyBB, endBB);
     
     // End block
