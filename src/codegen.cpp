@@ -1010,6 +1010,16 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                          std::to_string(expr->arguments.size()) + " provided", expr);
         }
         llvm::Value* x = generateExpression(expr->arguments[0].get());
+        if (x->getType()->isDoubleTy()) {
+            llvm::Value* fzero = llvm::ConstantFP::get(getFloatType(), 0.0);
+            llvm::Value* pos = llvm::ConstantInt::get(getDefaultType(), 1, true);
+            llvm::Value* neg = llvm::ConstantInt::get(getDefaultType(), static_cast<uint64_t>(-1), true);
+            llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
+            llvm::Value* isNeg = builder->CreateFCmpOLT(x, fzero, "fsignneg");
+            llvm::Value* negOrZero = builder->CreateSelect(isNeg, neg, zero, "fsignNZ");
+            llvm::Value* isPos = builder->CreateFCmpOGT(x, fzero, "fsignpos");
+            return builder->CreateSelect(isPos, pos, negOrZero, "fsignval");
+        }
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
         llvm::Value* pos = llvm::ConstantInt::get(getDefaultType(), 1, true);
         llvm::Value* neg = llvm::ConstantInt::get(getDefaultType(), static_cast<uint64_t>(-1), true);
@@ -1028,6 +1038,15 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* lo = generateExpression(expr->arguments[1].get());
         llvm::Value* hi = generateExpression(expr->arguments[2].get());
         // clamp(val, lo, hi) = max(lo, min(val, hi))
+        if (val->getType()->isDoubleTy() || lo->getType()->isDoubleTy() || hi->getType()->isDoubleTy()) {
+            if (!val->getType()->isDoubleTy()) val = ensureFloat(val);
+            if (!lo->getType()->isDoubleTy()) lo = ensureFloat(lo);
+            if (!hi->getType()->isDoubleTy()) hi = ensureFloat(hi);
+            llvm::Value* cmpHi = builder->CreateFCmpOLT(val, hi, "fclamphi");
+            llvm::Value* minVH = builder->CreateSelect(cmpHi, val, hi, "fclampmin");
+            llvm::Value* cmpLo = builder->CreateFCmpOGT(minVH, lo, "fclamplo");
+            return builder->CreateSelect(cmpLo, minVH, lo, "fclampval");
+        }
         llvm::Value* cmpHi = builder->CreateICmpSLT(val, hi, "clamphi");
         llvm::Value* minVH = builder->CreateSelect(cmpHi, val, hi, "clampmin");
         llvm::Value* cmpLo = builder->CreateICmpSGT(minVH, lo, "clamplo");
@@ -1041,22 +1060,36 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         }
         llvm::Value* base = generateExpression(expr->arguments[0].get());
         llvm::Value* exp = generateExpression(expr->arguments[1].get());
+        // Convert float arguments to integer since pow() is an integer operation
+        base = toDefaultType(base);
+        exp = toDefaultType(exp);
 
         llvm::Function* function = builder->GetInsertBlock()->getParent();
-        llvm::BasicBlock* entryBB = builder->GetInsertBlock();
+
+        // Handle negative exponents: pow(base, negative) = 0 for |base| > 1
+        llvm::BasicBlock* negExpBB = llvm::BasicBlock::Create(*context, "pow.negexp", function);
+        llvm::BasicBlock* posExpBB = llvm::BasicBlock::Create(*context, "pow.posexp", function);
         llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "pow.loop", function);
         llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "pow.body", function);
         llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "pow.done", function);
 
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
+        llvm::Value* isNegExp = builder->CreateICmpSLT(exp, zero, "pow.isneg");
+        builder->CreateCondBr(isNegExp, negExpBB, posExpBB);
+
+        // Negative exponent: return 0 (integer approximation of base^(-n))
+        builder->SetInsertPoint(negExpBB);
+        builder->CreateBr(doneBB);
+
+        builder->SetInsertPoint(posExpBB);
         builder->CreateBr(loopBB);
 
         builder->SetInsertPoint(loopBB);
         llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "pow.result");
         llvm::PHINode* counter = builder->CreatePHI(getDefaultType(), 2, "pow.counter");
-        result->addIncoming(llvm::ConstantInt::get(getDefaultType(), 1), entryBB);
-        counter->addIncoming(exp, entryBB);
+        result->addIncoming(llvm::ConstantInt::get(getDefaultType(), 1), posExpBB);
+        counter->addIncoming(exp, posExpBB);
 
-        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
         llvm::Value* done = builder->CreateICmpSLE(counter, zero, "pow.done.cmp");
         builder->CreateCondBr(done, doneBB, bodyBB);
 
@@ -1069,7 +1102,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateBr(loopBB);
 
         builder->SetInsertPoint(doneBB);
-        return result;
+        llvm::PHINode* finalResult = builder->CreatePHI(getDefaultType(), 3, "pow.final");
+        finalResult->addIncoming(zero, negExpBB);
+        finalResult->addIncoming(result, loopBB);
+        return finalResult;
     }
 
     if (expr->callee == "print_char") {
@@ -1126,6 +1162,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                          std::to_string(expr->arguments.size()) + " provided", expr);
         }
         llvm::Value* x = generateExpression(expr->arguments[0].get());
+        // Convert float to integer since sqrt() is an integer square root
+        x = toDefaultType(x);
         // Integer square root via Newton's method: guess = x, while (guess*guess > x) guess = (guess + x/guess) / 2
         llvm::Function* function = builder->GetInsertBlock()->getParent();
         llvm::BasicBlock* entryBB = builder->GetInsertBlock();
@@ -1175,6 +1213,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                          std::to_string(expr->arguments.size()) + " provided", expr);
         }
         llvm::Value* x = generateExpression(expr->arguments[0].get());
+        // Convert float to integer since is_even() is an integer operation
+        x = toDefaultType(x);
         llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
         llvm::Value* bit = builder->CreateAnd(x, one, "evenbit");
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
@@ -1188,6 +1228,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                          std::to_string(expr->arguments.size()) + " provided", expr);
         }
         llvm::Value* x = generateExpression(expr->arguments[0].get());
+        // Convert float to integer since is_odd() is an integer operation
+        x = toDefaultType(x);
         llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
         return builder->CreateAnd(x, one, "oddval");
     }

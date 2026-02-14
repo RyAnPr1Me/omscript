@@ -1,0 +1,33 @@
+// Test stdlib functions with float arguments
+// Previously sign/clamp/pow/sqrt/is_even/is_odd crashed with float inputs
+fn main() {
+    var total = 0;
+
+    // sign() with float: returns -1, 0, or 1
+    total = total + sign(3.5);      // 1
+    total = total + sign(-2.7);     // -1
+    total = total + sign(0.0);      // 0
+    // total = 0
+
+    // clamp() with float
+    total = total + clamp(5, 0, 10);           // 5
+    total = total + clamp(-3, 0, 10);          // 0
+
+    // pow() with float args (truncated to integer)
+    total = total + pow(2, 3);      // 8
+    total = total + pow(3, 2);      // 9
+
+    // pow() with negative exponent returns 0
+    total = total + pow(2, -1);     // 0
+
+    // sqrt() with float arg (truncated to integer)
+    total = total + sqrt(9);        // 3
+    total = total + sqrt(4.0);      // 2
+
+    // is_even/is_odd with float (truncated to integer)
+    total = total + is_even(4.0);   // 1
+    total = total + is_odd(3.0);    // 1
+
+    // total = 0 + 5 + 0 + 8 + 9 + 0 + 3 + 2 + 1 + 1 = 29
+    return total;
+}
