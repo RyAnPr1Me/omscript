@@ -971,6 +971,234 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         return builder->CreateLoad(getDefaultType(), inputAlloca, "input_read");
     }
 
+    if (expr->callee == "sqrt") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'sqrt' expects 1 argument, but " +
+                         std::to_string(expr->arguments.size()) + " provided", expr);
+        }
+        llvm::Value* x = generateExpression(expr->arguments[0].get());
+        // Integer square root via Newton's method: guess = x, while (guess*guess > x) guess = (guess + x/guess) / 2
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* entryBB = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "sqrt.loop", function);
+        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "sqrt.body", function);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "sqrt.done", function);
+
+        // Handle x <= 0: return 0
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
+        llvm::Value* isNonPositive = builder->CreateICmpSLE(x, zero, "sqrt.nonpos");
+        llvm::BasicBlock* positiveBB = llvm::BasicBlock::Create(*context, "sqrt.positive", function);
+        builder->CreateCondBr(isNonPositive, doneBB, positiveBB);
+
+        builder->SetInsertPoint(positiveBB);
+        builder->CreateBr(loopBB);
+
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* guess = builder->CreatePHI(getDefaultType(), 2, "sqrt.guess");
+        guess->addIncoming(x, positiveBB);
+
+        llvm::Value* sq = builder->CreateMul(guess, guess, "sqrt.sq");
+        llvm::Value* tooBig = builder->CreateICmpSGT(sq, x, "sqrt.toobig");
+        builder->CreateCondBr(tooBig, bodyBB, doneBB);
+
+        builder->SetInsertPoint(bodyBB);
+        llvm::Value* div = builder->CreateSDiv(x, guess, "sqrt.div");
+        llvm::Value* sum = builder->CreateAdd(guess, div, "sqrt.sum");
+        llvm::Value* two = llvm::ConstantInt::get(getDefaultType(), 2);
+        llvm::Value* newGuess = builder->CreateSDiv(sum, two, "sqrt.newguess");
+        // Ensure progress: if newGuess >= guess, force guess - 1
+        llvm::Value* noProgress = builder->CreateICmpSGE(newGuess, guess, "sqrt.noprogress");
+        llvm::Value* forcedGuess = builder->CreateSub(guess, llvm::ConstantInt::get(getDefaultType(), 1), "sqrt.forced");
+        llvm::Value* nextGuess = builder->CreateSelect(noProgress, forcedGuess, newGuess, "sqrt.next");
+        guess->addIncoming(nextGuess, bodyBB);
+        builder->CreateBr(loopBB);
+
+        builder->SetInsertPoint(doneBB);
+        llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "sqrt.result");
+        result->addIncoming(zero, entryBB);
+        result->addIncoming(guess, loopBB);
+        return result;
+    }
+
+    if (expr->callee == "is_even") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'is_even' expects 1 argument, but " +
+                         std::to_string(expr->arguments.size()) + " provided", expr);
+        }
+        llvm::Value* x = generateExpression(expr->arguments[0].get());
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* bit = builder->CreateAnd(x, one, "evenbit");
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* isEven = builder->CreateICmpEQ(bit, zero, "iseven");
+        return builder->CreateZExt(isEven, getDefaultType(), "evenval");
+    }
+
+    if (expr->callee == "is_odd") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'is_odd' expects 1 argument, but " +
+                         std::to_string(expr->arguments.size()) + " provided", expr);
+        }
+        llvm::Value* x = generateExpression(expr->arguments[0].get());
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+        return builder->CreateAnd(x, one, "oddval");
+    }
+
+    if (expr->callee == "sum") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'sum' expects 1 argument, but " +
+                         std::to_string(expr->arguments.size()) + " provided", expr);
+        }
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        // Array layout: [length, elem0, elem1, ...]
+        llvm::Value* arrPtr = builder->CreateIntToPtr(arg,
+            llvm::PointerType::getUnqual(*context), "sum.arrptr");
+        llvm::Value* length = builder->CreateLoad(getDefaultType(), arrPtr, "sum.len");
+
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* entryBB = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "sum.loop", function);
+        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "sum.body", function);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "sum.done", function);
+
+        builder->CreateBr(loopBB);
+
+        builder->SetInsertPoint(loopBB);
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
+        llvm::PHINode* acc = builder->CreatePHI(getDefaultType(), 2, "sum.acc");
+        llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "sum.idx");
+        acc->addIncoming(zero, entryBB);
+        idx->addIncoming(zero, entryBB);
+
+        llvm::Value* done = builder->CreateICmpSGE(idx, length, "sum.done");
+        builder->CreateCondBr(done, doneBB, bodyBB);
+
+        builder->SetInsertPoint(bodyBB);
+        // Element is at offset (idx + 1) from array base
+        llvm::Value* offset = builder->CreateAdd(idx, llvm::ConstantInt::get(getDefaultType(), 1), "sum.offset");
+        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrPtr, offset, "sum.elemptr");
+        llvm::Value* elem = builder->CreateLoad(getDefaultType(), elemPtr, "sum.elem");
+        llvm::Value* newAcc = builder->CreateAdd(acc, elem, "sum.newacc");
+        llvm::Value* newIdx = builder->CreateAdd(idx, llvm::ConstantInt::get(getDefaultType(), 1), "sum.newidx");
+        acc->addIncoming(newAcc, bodyBB);
+        idx->addIncoming(newIdx, bodyBB);
+        builder->CreateBr(loopBB);
+
+        builder->SetInsertPoint(doneBB);
+        return acc;
+    }
+
+    if (expr->callee == "swap") {
+        if (expr->arguments.size() != 3) {
+            codegenError("Built-in function 'swap' expects 3 arguments (array, i, j), but " +
+                         std::to_string(expr->arguments.size()) + " provided", expr);
+        }
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        llvm::Value* i = generateExpression(expr->arguments[1].get());
+        llvm::Value* j = generateExpression(expr->arguments[2].get());
+
+        llvm::Value* arrPtr = builder->CreateIntToPtr(arg,
+            llvm::PointerType::getUnqual(*context), "swap.arrptr");
+        // Elements are at offset (index + 1)
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* offI = builder->CreateAdd(i, one, "swap.offi");
+        llvm::Value* offJ = builder->CreateAdd(j, one, "swap.offj");
+        llvm::Value* ptrI = builder->CreateGEP(getDefaultType(), arrPtr, offI, "swap.ptri");
+        llvm::Value* ptrJ = builder->CreateGEP(getDefaultType(), arrPtr, offJ, "swap.ptrj");
+        llvm::Value* valI = builder->CreateLoad(getDefaultType(), ptrI, "swap.vali");
+        llvm::Value* valJ = builder->CreateLoad(getDefaultType(), ptrJ, "swap.valj");
+        builder->CreateStore(valJ, ptrI);
+        builder->CreateStore(valI, ptrJ);
+        return llvm::ConstantInt::get(getDefaultType(), 0);
+    }
+
+    if (expr->callee == "reverse") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'reverse' expects 1 argument, but " +
+                         std::to_string(expr->arguments.size()) + " provided", expr);
+        }
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        llvm::Value* arrPtr = builder->CreateIntToPtr(arg,
+            llvm::PointerType::getUnqual(*context), "rev.arrptr");
+        llvm::Value* length = builder->CreateLoad(getDefaultType(), arrPtr, "rev.len");
+
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* entryBB = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "rev.loop", function);
+        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "rev.body", function);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "rev.done", function);
+
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* lastIdx = builder->CreateSub(length, one, "rev.last");
+        builder->CreateBr(loopBB);
+
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* lo = builder->CreatePHI(getDefaultType(), 2, "rev.lo");
+        llvm::PHINode* hi = builder->CreatePHI(getDefaultType(), 2, "rev.hi");
+        lo->addIncoming(zero, entryBB);
+        hi->addIncoming(lastIdx, entryBB);
+
+        llvm::Value* done = builder->CreateICmpSGE(lo, hi, "rev.done");
+        builder->CreateCondBr(done, doneBB, bodyBB);
+
+        builder->SetInsertPoint(bodyBB);
+        llvm::Value* offLo = builder->CreateAdd(lo, one, "rev.offlo");
+        llvm::Value* offHi = builder->CreateAdd(hi, one, "rev.offhi");
+        llvm::Value* ptrLo = builder->CreateGEP(getDefaultType(), arrPtr, offLo, "rev.ptrlo");
+        llvm::Value* ptrHi = builder->CreateGEP(getDefaultType(), arrPtr, offHi, "rev.ptrhi");
+        llvm::Value* valLo = builder->CreateLoad(getDefaultType(), ptrLo, "rev.vallo");
+        llvm::Value* valHi = builder->CreateLoad(getDefaultType(), ptrHi, "rev.valhi");
+        builder->CreateStore(valHi, ptrLo);
+        builder->CreateStore(valLo, ptrHi);
+        llvm::Value* newLo = builder->CreateAdd(lo, one, "rev.newlo");
+        llvm::Value* newHi = builder->CreateSub(hi, one, "rev.newhi");
+        lo->addIncoming(newLo, bodyBB);
+        hi->addIncoming(newHi, bodyBB);
+        builder->CreateBr(loopBB);
+
+        builder->SetInsertPoint(doneBB);
+        return arg;
+    }
+
+    if (expr->callee == "to_char") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'to_char' expects 1 argument, but " +
+                         std::to_string(expr->arguments.size()) + " provided", expr);
+        }
+        // Returns the value itself - the integer IS the character code
+        return generateExpression(expr->arguments[0].get());
+    }
+
+    if (expr->callee == "is_alpha") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'is_alpha' expects 1 argument, but " +
+                         std::to_string(expr->arguments.size()) + " provided", expr);
+        }
+        llvm::Value* x = generateExpression(expr->arguments[0].get());
+        // is_alpha: (x >= 'A' && x <= 'Z') || (x >= 'a' && x <= 'z')
+        llvm::Value* geA = builder->CreateICmpSGE(x, llvm::ConstantInt::get(getDefaultType(), 65), "ge.A");
+        llvm::Value* leZ = builder->CreateICmpSLE(x, llvm::ConstantInt::get(getDefaultType(), 90), "le.Z");
+        llvm::Value* upper = builder->CreateAnd(geA, leZ, "isupper");
+        llvm::Value* gea = builder->CreateICmpSGE(x, llvm::ConstantInt::get(getDefaultType(), 97), "ge.a");
+        llvm::Value* lez = builder->CreateICmpSLE(x, llvm::ConstantInt::get(getDefaultType(), 122), "le.z");
+        llvm::Value* lower = builder->CreateAnd(gea, lez, "islower");
+        llvm::Value* isAlpha = builder->CreateOr(upper, lower, "isalpha");
+        return builder->CreateZExt(isAlpha, getDefaultType(), "alphaval");
+    }
+
+    if (expr->callee == "is_digit") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'is_digit' expects 1 argument, but " +
+                         std::to_string(expr->arguments.size()) + " provided", expr);
+        }
+        llvm::Value* x = generateExpression(expr->arguments[0].get());
+        // is_digit: x >= '0' && x <= '9'
+        llvm::Value* ge0 = builder->CreateICmpSGE(x, llvm::ConstantInt::get(getDefaultType(), 48), "ge.0");
+        llvm::Value* le9 = builder->CreateICmpSLE(x, llvm::ConstantInt::get(getDefaultType(), 57), "le.9");
+        llvm::Value* isDigit = builder->CreateAnd(ge0, le9, "isdigit");
+        return builder->CreateZExt(isDigit, getDefaultType(), "digitval");
+    }
+
     if (inOptMaxFunction) {
         if (optMaxFunctions.find(expr->callee) == optMaxFunctions.end()) {
             std::string currentFunction = "<unknown>";

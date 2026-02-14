@@ -1,0 +1,63 @@
+// Test standard library built-in functions (part 2)
+fn main() {
+    var total = 0;
+
+    // Test sqrt(x) - integer square root
+    total = total + sqrt(0);       // 0
+    total = total + sqrt(1);       // 1
+    total = total + sqrt(4);       // 2
+    total = total + sqrt(9);       // 3
+    total = total + sqrt(16);      // 4
+    total = total + sqrt(25);      // 5
+    total = total + sqrt(10);      // 3 (floor)
+    total = total + sqrt(99);      // 9 (floor)
+    // total = 0 + 1 + 2 + 3 + 4 + 5 + 3 + 9 = 27
+
+    // Test is_even / is_odd
+    total = total + is_even(4);    // 1
+    total = total + is_even(7);    // 0
+    total = total + is_odd(3);     // 1
+    total = total + is_odd(8);     // 0
+    total = total + is_even(0);    // 1
+    // total = 27 + 1 + 0 + 1 + 0 + 1 = 30
+
+    // Test sum(arr)
+    var arr = [10, 20, 30, 40];
+    total = total + sum(arr);      // 100
+    // total = 130
+
+    // Test swap(arr, i, j)
+    swap(arr, 0, 3);
+    // arr is now [40, 20, 30, 10]
+    total = total + arr[0];        // 40
+    total = total + arr[3];        // 10
+    // total = 130 + 40 + 10 = 180
+
+    // Test reverse(arr)
+    var arr2 = [1, 2, 3, 4, 5];
+    reverse(arr2);
+    // arr2 is now [5, 4, 3, 2, 1]
+    total = total + arr2[0];       // 5
+    total = total + arr2[4];       // 1
+    // total = 180 + 5 + 1 = 186
+
+    // Test to_char (identity for integer values)
+    total = total + to_char(65);   // 65 ('A')
+    // total = 186 + 65 = 251
+
+    // Test is_alpha
+    total = total + is_alpha(65);  // 1 ('A')
+    total = total + is_alpha(97);  // 1 ('a')
+    total = total + is_alpha(48);  // 0 ('0')
+    total = total + is_alpha(32);  // 0 (' ')
+    // total = 251 + 1 + 1 + 0 + 0 = 253
+
+    // Test is_digit
+    total = total + is_digit(48);  // 1 ('0')
+    total = total + is_digit(57);  // 1 ('9')
+    total = total + is_digit(65);  // 0 ('A')
+    // total = 253 + 1 + 1 + 0 = 255
+
+    // 255 % 256 = 255
+    return total;
+}
