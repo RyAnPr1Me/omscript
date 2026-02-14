@@ -1,0 +1,94 @@
+// Stress test for O3 and OPTMAX optimizations
+
+// Tests algebraic identity optimizations and loop optimizations
+OPTMAX=:
+fn optmax_identities(n: int) {
+    // Algebraic identities: x+0, x*1, x-0, x/1, 0+x, 1*x
+    var a: int = n + 0;
+    var b: int = a * 1;
+    var c: int = b - 0;
+    var d: int = c / 1;
+    var e: int = 0 + d;
+    var f: int = 1 * e;
+    // x*0 → 0
+    var zero: int = n * 0;
+    // 0/x → 0
+    var also_zero: int = 0 / 1;
+    return f + zero + also_zero;
+}
+
+fn optmax_ternary_fold(x: int) {
+    // Ternary with constant condition: should fold to the selected branch
+    var a: int = 1 ? x : 0;
+    var b: int = 0 ? 999 : x;
+    return a + b;
+}
+
+fn optmax_loop_opt(n: int) {
+    // Loop with invariant expression and strength reduction opportunities
+    var total: int = 0;
+    var factor: int = 3 + 7;
+    for (i: int in 0...n) {
+        total = total + i * factor;
+    }
+    return total;
+}
+OPTMAX!:
+
+// Tests O3 loop rotation, sinking, and strength reduction
+fn loop_sink_test(n) {
+    var result = 0;
+    for (i in 0...n) {
+        var x = i * 2;
+        var y = i * 4;
+        result = result + x + y;
+    }
+    return result;
+}
+
+fn tail_recursive_sum(n, acc) {
+    if (n <= 0) {
+        return acc;
+    }
+    return tail_recursive_sum(n - 1, acc + n);
+}
+
+fn nested_loop_invariant(size) {
+    var result = 0;
+    var inv = 5 * 4;
+    for (i in 0...size) {
+        for (j in 0...size) {
+            result = result + inv + i + j;
+        }
+    }
+    return result;
+}
+
+fn main() {
+    // optmax_identities(5) → 5 (all identities reduce to n, zeros add 0)
+    var r1 = optmax_identities(5);
+
+    // optmax_ternary_fold(7) → 7 + 7 = 14
+    var r2 = optmax_ternary_fold(7);
+
+    // optmax_loop_opt(5) → (0+1+2+3+4)*10 = 100
+    var r3 = optmax_loop_opt(5);
+
+    // loop_sink_test(5) → sum of i*6 for i=0..4 = 0+6+12+18+24 = 60
+    var r4 = loop_sink_test(5);
+
+    // tail_recursive_sum(10, 0) → 55
+    var r5 = tail_recursive_sum(10, 0);
+
+    // nested_loop_invariant(3) → 9*20 + (0+1+2)*3*2 = 180+36 = 216
+    // Details: for each (i,j) pair: inv+i+j = 20+i+j
+    // sum(i=0..2, sum(j=0..2, 20+i+j))
+    // = 9*20 + sum(i=0..2, 3*i + 3) = 180 + 3*(0+1+2) + 9 = 180+9+9 = 198
+    // Actually: sum(j=0..2, 20+i+j) = 60+3*i+3 = 63+3*i
+    // sum(i=0..2, 63+3*i) = 189 + 9 = 198
+    var r6 = nested_loop_invariant(3);
+
+    // Total: 5 + 14 + 100 + 60 + 55 + 198 = 432
+    // Return modulo 256 for exit code: 432 % 256 = 176
+    return r1 + r2 + r3 + r4 + r5 + r6;
+}

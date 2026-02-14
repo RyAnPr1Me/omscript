@@ -88,6 +88,24 @@ std::unique_ptr<Expression> optimizeOptMaxBinary(const std::string& op,
     right = optimizeOptMaxExpression(std::move(right));
     auto* leftLiteral = dynamic_cast<LiteralExpr*>(left.get());
     auto* rightLiteral = dynamic_cast<LiteralExpr*>(right.get());
+
+    // Algebraic identity optimizations (one side is a literal)
+    if (leftLiteral && leftLiteral->literalType == LiteralExpr::LiteralType::INTEGER) {
+        long long lval = leftLiteral->intValue;
+        if (lval == 0 && op == "+") return right;            // 0 + x → x
+        if (lval == 0 && op == "*") return std::make_unique<LiteralExpr>(0LL); // 0 * x → 0
+        if (lval == 1 && op == "*") return right;            // 1 * x → x
+        if (lval == 0 && op == "/") return std::make_unique<LiteralExpr>(0LL); // 0 / x → 0
+    }
+    if (rightLiteral && rightLiteral->literalType == LiteralExpr::LiteralType::INTEGER) {
+        long long rval = rightLiteral->intValue;
+        if (rval == 0 && op == "+") return left;             // x + 0 → x
+        if (rval == 0 && op == "-") return left;             // x - 0 → x
+        if (rval == 1 && op == "*") return left;             // x * 1 → x
+        if (rval == 0 && op == "*") return std::make_unique<LiteralExpr>(0LL); // x * 0 → 0
+        if (rval == 1 && op == "/") return left;             // x / 1 → x
+    }
+
     if (!leftLiteral || !rightLiteral) {
         return std::make_unique<BinaryExpr>(op, std::move(left), std::move(right));
     }
@@ -193,6 +211,13 @@ std::unique_ptr<Expression> optimizeOptMaxExpression(std::unique_ptr<Expression>
             ternary->condition = optimizeOptMaxExpression(std::move(ternary->condition));
             ternary->thenExpr = optimizeOptMaxExpression(std::move(ternary->thenExpr));
             ternary->elseExpr = optimizeOptMaxExpression(std::move(ternary->elseExpr));
+            // Fold ternary when condition is a compile-time constant
+            auto* condLiteral = dynamic_cast<LiteralExpr*>(ternary->condition.get());
+            if (condLiteral && condLiteral->literalType == LiteralExpr::LiteralType::INTEGER) {
+                return condLiteral->intValue != 0
+                    ? std::move(ternary->thenExpr)
+                    : std::move(ternary->elseExpr);
+            }
             return expr;
         }
         default:
@@ -1211,6 +1236,8 @@ void CodeGenerator::runOptimizationPasses() {
             
         case OptimizationLevel::O3:
             // Aggressive optimizations
+            fpm.add(llvm::createSROAPass());                     // Scalar replacement of aggregates (early)
+            fpm.add(llvm::createEarlyCSEPass());                 // Early common subexpression elimination
             fpm.add(llvm::createPromoteMemoryToRegisterPass());
             fpm.add(llvm::createInstructionCombiningPass());
             fpm.add(llvm::createReassociatePass());
@@ -1218,11 +1245,19 @@ void CodeGenerator::runOptimizationPasses() {
             fpm.add(llvm::createCFGSimplificationPass());
             fpm.add(llvm::createDeadCodeEliminationPass());
             fpm.add(llvm::createLICMPass());                     // Loop invariant code motion
+            fpm.add(llvm::createLoopRotatePass());               // Rotate loops for better optimization
             fpm.add(llvm::createLoopSimplifyPass());             // Canonicalize loops
+            fpm.add(llvm::createLoopInstSimplifyPass());         // Simplify instructions in loops
             fpm.add(llvm::createLoopUnrollPass());               // Unroll loops
+            fpm.add(llvm::createSinkingPass());                  // Sink instructions closer to use
+            fpm.add(llvm::createMergedLoadStoreMotionPass());    // Merge load/store across diamonds
+            fpm.add(llvm::createStraightLineStrengthReducePass()); // Strength reduce along straight lines
+            fpm.add(llvm::createNaryReassociatePass());          // N-ary reassociation
             fpm.add(llvm::createTailCallEliminationPass());      // Tail call elimination
-            fpm.add(llvm::createEarlyCSEPass());                 // Early common subexpression elimination
-            fpm.add(llvm::createSROAPass());                     // Scalar replacement of aggregates
+            // Second round of cleanup after loop and strength reduction passes
+            fpm.add(llvm::createInstructionCombiningPass());
+            fpm.add(llvm::createCFGSimplificationPass());
+            fpm.add(llvm::createDeadCodeEliminationPass());
             break;
             
         case OptimizationLevel::O0:
@@ -1260,28 +1295,41 @@ void CodeGenerator::optimizeFunction(llvm::Function* func) {
 void CodeGenerator::optimizeOptMaxFunctions() {
     llvm::legacy::FunctionPassManager fpm(module.get());
     
+    // Phase 1: Early canonicalization
+    fpm.add(llvm::createSROAPass());
+    fpm.add(llvm::createEarlyCSEPass());
     fpm.add(llvm::createPromoteMemoryToRegisterPass());
     fpm.add(llvm::createInstructionCombiningPass());
     fpm.add(llvm::createReassociatePass());
     fpm.add(llvm::createGVNPass());
     fpm.add(llvm::createCFGSimplificationPass());
     fpm.add(llvm::createDeadCodeEliminationPass());
+    // Phase 2: Loop optimizations
     fpm.add(llvm::createLICMPass());
-    // Loop rotation is omitted for compatibility with LLVM builds that lack the pass.
-    fpm.add(llvm::createLoopStrengthReducePass());
+    fpm.add(llvm::createLoopRotatePass());
     fpm.add(llvm::createLoopSimplifyPass());
+    fpm.add(llvm::createLoopInstSimplifyPass());
+    fpm.add(llvm::createLoopStrengthReducePass());
     fpm.add(llvm::createLoopUnrollPass());
+    // Phase 3: Post-loop optimizations
+    fpm.add(llvm::createSinkingPass());
+    fpm.add(llvm::createMergedLoadStoreMotionPass());
+    fpm.add(llvm::createStraightLineStrengthReducePass());
+    fpm.add(llvm::createNaryReassociatePass());
     fpm.add(llvm::createTailCallEliminationPass());
-    fpm.add(llvm::createEarlyCSEPass());
-    fpm.add(llvm::createSROAPass());
     fpm.add(llvm::createConstantHoistingPass());
     fpm.add(llvm::createFlattenCFGPass());
+    // Phase 4: Final cleanup
+    fpm.add(llvm::createInstructionCombiningPass());
+    fpm.add(llvm::createCFGSimplificationPass());
+    fpm.add(llvm::createDeadCodeEliminationPass());
     
     fpm.doInitialization();
     for (auto& func : module->functions()) {
         if (!func.isDeclaration() && optMaxFunctions.count(std::string(func.getName()))) {
-            // OPTMAX runs the aggressive pass stack twice to prioritize maximal optimization.
-            constexpr int optMaxIterations = 2;  // Second pass catches new foldable patterns after the first.
+            // OPTMAX runs the aggressive pass stack three times to maximize optimization.
+            // Each iteration can expose new patterns for subsequent passes to simplify.
+            constexpr int optMaxIterations = 3;
             for (int i = 0; i < optMaxIterations; ++i) {
                 fpm.run(func);
             }
