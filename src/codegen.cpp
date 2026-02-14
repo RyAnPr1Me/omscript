@@ -307,7 +307,7 @@ static const std::unordered_set<std::string> stdlibFunctions = {
 };
 
 bool isStdlibFunction(const std::string& name) {
-    return stdlibFunctions.count(name) > 0;
+    return stdlibFunctions.find(name) != stdlibFunctions.end();
 }
 
 CodeGenerator::CodeGenerator(OptimizationLevel optLevel) 
