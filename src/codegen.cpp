@@ -300,7 +300,6 @@ namespace omscript {
 CodeGenerator::CodeGenerator(OptimizationLevel optLevel) 
     : inOptMaxFunction(false),
       hasOptMaxFunctions(false),
-      useDynamicCompilation(false),
       optimizationLevel(optLevel) {
     context = std::make_unique<llvm::LLVMContext>();
     module = std::make_unique<llvm::Module>("omscript", *context);

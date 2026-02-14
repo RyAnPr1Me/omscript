@@ -44,7 +44,6 @@ Token Parser::consume(TokenType type, const std::string& message) {
         return advance();
     }
     error(message);
-    return peek();
 }
 
 void Parser::error(const std::string& message) {

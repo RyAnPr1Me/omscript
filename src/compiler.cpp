@@ -26,14 +26,6 @@ std::string Compiler::readFile(const std::string& filename) {
     return buffer.str();
 }
 
-void Compiler::writeFile(const std::string& filename, const std::string& content) {
-    std::ofstream file(filename);
-    if (!file.is_open()) {
-        throw std::runtime_error("Could not write to file: " + filename);
-    }
-    file << content;
-}
-
 void Compiler::compile(const std::string& sourceFile, const std::string& outputFile) {
     std::cout << "Compiling " << sourceFile << "..." << std::endl;
     

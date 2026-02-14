@@ -2,7 +2,6 @@
 #define CODEGEN_H
 
 #include "ast.h"
-#include "bytecode.h"
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Module.h>
@@ -56,9 +55,6 @@ private:
     std::vector<std::unordered_map<std::string, ConstBinding>> constScopeStack;
     std::unordered_map<std::string, llvm::Function*> functions;
     
-    // Bytecode emitter for dynamic code
-    BytecodeEmitter bytecodeEmitter;
-    bool useDynamicCompilation;
     OptimizationLevel optimizationLevel;
     
     // Code generation methods
