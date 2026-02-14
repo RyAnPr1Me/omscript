@@ -1,0 +1,342 @@
+#include <gtest/gtest.h>
+#include "lexer.h"
+
+using namespace omscript;
+
+// Helper: tokenize a source string
+static std::vector<Token> lex(const std::string& src) {
+    Lexer lexer(src);
+    return lexer.tokenize();
+}
+
+// ---------------------------------------------------------------------------
+// Empty / whitespace
+// ---------------------------------------------------------------------------
+
+TEST(LexerTest, EmptySource) {
+    auto tokens = lex("");
+    ASSERT_EQ(tokens.size(), 1u);
+    EXPECT_EQ(tokens[0].type, TokenType::END_OF_FILE);
+}
+
+TEST(LexerTest, WhitespaceOnly) {
+    auto tokens = lex("   \t\n\r  ");
+    ASSERT_EQ(tokens.size(), 1u);
+    EXPECT_EQ(tokens[0].type, TokenType::END_OF_FILE);
+}
+
+// ---------------------------------------------------------------------------
+// Integer literals
+// ---------------------------------------------------------------------------
+
+TEST(LexerTest, IntegerLiteral) {
+    auto tokens = lex("42");
+    ASSERT_GE(tokens.size(), 2u);
+    EXPECT_EQ(tokens[0].type, TokenType::INTEGER);
+    EXPECT_EQ(tokens[0].intValue, 42);
+    EXPECT_EQ(tokens[0].lexeme, "42");
+}
+
+TEST(LexerTest, IntegerZero) {
+    auto tokens = lex("0");
+    ASSERT_GE(tokens.size(), 2u);
+    EXPECT_EQ(tokens[0].type, TokenType::INTEGER);
+    EXPECT_EQ(tokens[0].intValue, 0);
+}
+
+TEST(LexerTest, IntegerOverflow) {
+    EXPECT_THROW(lex("99999999999999999999999"), std::runtime_error);
+}
+
+// ---------------------------------------------------------------------------
+// Float literals
+// ---------------------------------------------------------------------------
+
+TEST(LexerTest, FloatLiteral) {
+    auto tokens = lex("3.14");
+    ASSERT_GE(tokens.size(), 2u);
+    EXPECT_EQ(tokens[0].type, TokenType::FLOAT);
+    EXPECT_DOUBLE_EQ(tokens[0].floatValue, 3.14);
+    EXPECT_EQ(tokens[0].lexeme, "3.14");
+}
+
+TEST(LexerTest, FloatTrailingDot) {
+    auto tokens = lex("5.");
+    ASSERT_GE(tokens.size(), 2u);
+    EXPECT_EQ(tokens[0].type, TokenType::FLOAT);
+    EXPECT_DOUBLE_EQ(tokens[0].floatValue, 5.0);
+}
+
+TEST(LexerTest, FloatLeadingDotIsNotFloat) {
+    // ".5" should be DOT then INTEGER 5
+    auto tokens = lex(".5");
+    ASSERT_GE(tokens.size(), 3u);
+    EXPECT_EQ(tokens[0].type, TokenType::DOT);
+    EXPECT_EQ(tokens[1].type, TokenType::INTEGER);
+    EXPECT_EQ(tokens[1].intValue, 5);
+}
+
+// ---------------------------------------------------------------------------
+// String literals
+// ---------------------------------------------------------------------------
+
+TEST(LexerTest, StringLiteral) {
+    auto tokens = lex("\"hello\"");
+    ASSERT_GE(tokens.size(), 2u);
+    EXPECT_EQ(tokens[0].type, TokenType::STRING);
+    EXPECT_EQ(tokens[0].lexeme, "hello");
+}
+
+TEST(LexerTest, StringEscapeSequences) {
+    auto tokens = lex("\"a\\nb\\tc\\\\d\\\"e\"");
+    ASSERT_GE(tokens.size(), 2u);
+    EXPECT_EQ(tokens[0].type, TokenType::STRING);
+    EXPECT_EQ(tokens[0].lexeme, "a\nb\tc\\d\"e");
+}
+
+TEST(LexerTest, UnterminatedString) {
+    EXPECT_THROW(lex("\"hello"), std::runtime_error);
+}
+
+TEST(LexerTest, EmptyString) {
+    auto tokens = lex("\"\"");
+    ASSERT_GE(tokens.size(), 2u);
+    EXPECT_EQ(tokens[0].type, TokenType::STRING);
+    EXPECT_EQ(tokens[0].lexeme, "");
+}
+
+// ---------------------------------------------------------------------------
+// Keywords
+// ---------------------------------------------------------------------------
+
+TEST(LexerTest, Keywords) {
+    auto tokens = lex("fn return if else while do for var const break continue in");
+    // 12 keywords + EOF
+    ASSERT_EQ(tokens.size(), 13u);
+    EXPECT_EQ(tokens[0].type, TokenType::FN);
+    EXPECT_EQ(tokens[1].type, TokenType::RETURN);
+    EXPECT_EQ(tokens[2].type, TokenType::IF);
+    EXPECT_EQ(tokens[3].type, TokenType::ELSE);
+    EXPECT_EQ(tokens[4].type, TokenType::WHILE);
+    EXPECT_EQ(tokens[5].type, TokenType::DO);
+    EXPECT_EQ(tokens[6].type, TokenType::FOR);
+    EXPECT_EQ(tokens[7].type, TokenType::VAR);
+    EXPECT_EQ(tokens[8].type, TokenType::CONST);
+    EXPECT_EQ(tokens[9].type, TokenType::BREAK);
+    EXPECT_EQ(tokens[10].type, TokenType::CONTINUE);
+    EXPECT_EQ(tokens[11].type, TokenType::IN);
+}
+
+// ---------------------------------------------------------------------------
+// Identifiers
+// ---------------------------------------------------------------------------
+
+TEST(LexerTest, Identifier) {
+    auto tokens = lex("myVar _private foo123");
+    ASSERT_GE(tokens.size(), 4u);
+    EXPECT_EQ(tokens[0].type, TokenType::IDENTIFIER);
+    EXPECT_EQ(tokens[0].lexeme, "myVar");
+    EXPECT_EQ(tokens[1].type, TokenType::IDENTIFIER);
+    EXPECT_EQ(tokens[1].lexeme, "_private");
+    EXPECT_EQ(tokens[2].type, TokenType::IDENTIFIER);
+    EXPECT_EQ(tokens[2].lexeme, "foo123");
+}
+
+// ---------------------------------------------------------------------------
+// Operators
+// ---------------------------------------------------------------------------
+
+TEST(LexerTest, ArithmeticOperators) {
+    auto tokens = lex("+ - * / %");
+    ASSERT_GE(tokens.size(), 6u);
+    EXPECT_EQ(tokens[0].type, TokenType::PLUS);
+    EXPECT_EQ(tokens[1].type, TokenType::MINUS);
+    EXPECT_EQ(tokens[2].type, TokenType::STAR);
+    EXPECT_EQ(tokens[3].type, TokenType::SLASH);
+    EXPECT_EQ(tokens[4].type, TokenType::PERCENT);
+}
+
+TEST(LexerTest, ComparisonOperators) {
+    auto tokens = lex("== != < <= > >=");
+    ASSERT_GE(tokens.size(), 7u);
+    EXPECT_EQ(tokens[0].type, TokenType::EQ);
+    EXPECT_EQ(tokens[1].type, TokenType::NE);
+    EXPECT_EQ(tokens[2].type, TokenType::LT);
+    EXPECT_EQ(tokens[3].type, TokenType::LE);
+    EXPECT_EQ(tokens[4].type, TokenType::GT);
+    EXPECT_EQ(tokens[5].type, TokenType::GE);
+}
+
+TEST(LexerTest, LogicalOperators) {
+    auto tokens = lex("&& || !");
+    ASSERT_GE(tokens.size(), 4u);
+    EXPECT_EQ(tokens[0].type, TokenType::AND);
+    EXPECT_EQ(tokens[1].type, TokenType::OR);
+    EXPECT_EQ(tokens[2].type, TokenType::NOT);
+}
+
+TEST(LexerTest, BitwiseOperators) {
+    auto tokens = lex("& | ^ ~ << >>");
+    ASSERT_GE(tokens.size(), 7u);
+    EXPECT_EQ(tokens[0].type, TokenType::AMPERSAND);
+    EXPECT_EQ(tokens[1].type, TokenType::PIPE);
+    EXPECT_EQ(tokens[2].type, TokenType::CARET);
+    EXPECT_EQ(tokens[3].type, TokenType::TILDE);
+    EXPECT_EQ(tokens[4].type, TokenType::LSHIFT);
+    EXPECT_EQ(tokens[5].type, TokenType::RSHIFT);
+}
+
+TEST(LexerTest, IncrementDecrement) {
+    auto tokens = lex("++ --");
+    ASSERT_GE(tokens.size(), 3u);
+    EXPECT_EQ(tokens[0].type, TokenType::PLUSPLUS);
+    EXPECT_EQ(tokens[1].type, TokenType::MINUSMINUS);
+}
+
+TEST(LexerTest, CompoundAssignment) {
+    auto tokens = lex("+= -= *= /= %=");
+    ASSERT_GE(tokens.size(), 6u);
+    EXPECT_EQ(tokens[0].type, TokenType::PLUS_ASSIGN);
+    EXPECT_EQ(tokens[1].type, TokenType::MINUS_ASSIGN);
+    EXPECT_EQ(tokens[2].type, TokenType::STAR_ASSIGN);
+    EXPECT_EQ(tokens[3].type, TokenType::SLASH_ASSIGN);
+    EXPECT_EQ(tokens[4].type, TokenType::PERCENT_ASSIGN);
+}
+
+TEST(LexerTest, AssignmentAndEquality) {
+    auto tokens = lex("= ==");
+    ASSERT_GE(tokens.size(), 3u);
+    EXPECT_EQ(tokens[0].type, TokenType::ASSIGN);
+    EXPECT_EQ(tokens[1].type, TokenType::EQ);
+}
+
+// ---------------------------------------------------------------------------
+// Delimiters
+// ---------------------------------------------------------------------------
+
+TEST(LexerTest, Delimiters) {
+    auto tokens = lex("( ) { } [ ] ; , : ? .");
+    ASSERT_GE(tokens.size(), 12u);
+    EXPECT_EQ(tokens[0].type, TokenType::LPAREN);
+    EXPECT_EQ(tokens[1].type, TokenType::RPAREN);
+    EXPECT_EQ(tokens[2].type, TokenType::LBRACE);
+    EXPECT_EQ(tokens[3].type, TokenType::RBRACE);
+    EXPECT_EQ(tokens[4].type, TokenType::LBRACKET);
+    EXPECT_EQ(tokens[5].type, TokenType::RBRACKET);
+    EXPECT_EQ(tokens[6].type, TokenType::SEMICOLON);
+    EXPECT_EQ(tokens[7].type, TokenType::COMMA);
+    EXPECT_EQ(tokens[8].type, TokenType::COLON);
+    EXPECT_EQ(tokens[9].type, TokenType::QUESTION);
+    EXPECT_EQ(tokens[10].type, TokenType::DOT);
+}
+
+// ---------------------------------------------------------------------------
+// Range operator
+// ---------------------------------------------------------------------------
+
+TEST(LexerTest, RangeOperator) {
+    auto tokens = lex("0...10");
+    ASSERT_GE(tokens.size(), 4u);
+    EXPECT_EQ(tokens[0].type, TokenType::INTEGER);
+    EXPECT_EQ(tokens[1].type, TokenType::RANGE);
+    EXPECT_EQ(tokens[2].type, TokenType::INTEGER);
+}
+
+// ---------------------------------------------------------------------------
+// OPTMAX tokens
+// ---------------------------------------------------------------------------
+
+TEST(LexerTest, OptmaxTokens) {
+    auto tokens = lex("OPTMAX=: OPTMAX!:");
+    ASSERT_GE(tokens.size(), 3u);
+    EXPECT_EQ(tokens[0].type, TokenType::OPTMAX_START);
+    EXPECT_EQ(tokens[1].type, TokenType::OPTMAX_END);
+}
+
+// ---------------------------------------------------------------------------
+// Comments
+// ---------------------------------------------------------------------------
+
+TEST(LexerTest, LineComment) {
+    auto tokens = lex("42 // this is a comment\n7");
+    ASSERT_GE(tokens.size(), 3u);
+    EXPECT_EQ(tokens[0].type, TokenType::INTEGER);
+    EXPECT_EQ(tokens[0].intValue, 42);
+    EXPECT_EQ(tokens[1].type, TokenType::INTEGER);
+    EXPECT_EQ(tokens[1].intValue, 7);
+}
+
+TEST(LexerTest, BlockComment) {
+    auto tokens = lex("42 /* block */ 7");
+    ASSERT_GE(tokens.size(), 3u);
+    EXPECT_EQ(tokens[0].type, TokenType::INTEGER);
+    EXPECT_EQ(tokens[0].intValue, 42);
+    EXPECT_EQ(tokens[1].type, TokenType::INTEGER);
+    EXPECT_EQ(tokens[1].intValue, 7);
+}
+
+TEST(LexerTest, UnterminatedBlockComment) {
+    EXPECT_THROW(lex("/* oops"), std::runtime_error);
+}
+
+// ---------------------------------------------------------------------------
+// Line/column tracking
+// ---------------------------------------------------------------------------
+
+TEST(LexerTest, LineColumnTracking) {
+    auto tokens = lex("fn\nmain");
+    ASSERT_GE(tokens.size(), 3u);
+    EXPECT_EQ(tokens[0].line, 1);
+    EXPECT_EQ(tokens[1].line, 2);
+}
+
+// ---------------------------------------------------------------------------
+// Error: unexpected character
+// ---------------------------------------------------------------------------
+
+TEST(LexerTest, UnexpectedCharacter) {
+    EXPECT_THROW(lex("@"), std::runtime_error);
+}
+
+// ---------------------------------------------------------------------------
+// Number before range (edge case: 1...10)
+// ---------------------------------------------------------------------------
+
+TEST(LexerTest, IntegerBeforeRange) {
+    auto tokens = lex("1...10");
+    ASSERT_GE(tokens.size(), 4u);
+    EXPECT_EQ(tokens[0].type, TokenType::INTEGER);
+    EXPECT_EQ(tokens[0].intValue, 1);
+    EXPECT_EQ(tokens[1].type, TokenType::RANGE);
+    EXPECT_EQ(tokens[2].type, TokenType::INTEGER);
+    EXPECT_EQ(tokens[2].intValue, 10);
+}
+
+// ---------------------------------------------------------------------------
+// Full function tokenization
+// ---------------------------------------------------------------------------
+
+TEST(LexerTest, FullFunction) {
+    auto tokens = lex("fn main() { return 0; }");
+    // fn main ( ) { return 0 ; } EOF
+    ASSERT_EQ(tokens.size(), 10u);
+    EXPECT_EQ(tokens[0].type, TokenType::FN);
+    EXPECT_EQ(tokens[1].type, TokenType::IDENTIFIER);
+    EXPECT_EQ(tokens[1].lexeme, "main");
+    EXPECT_EQ(tokens[2].type, TokenType::LPAREN);
+    EXPECT_EQ(tokens[3].type, TokenType::RPAREN);
+    EXPECT_EQ(tokens[4].type, TokenType::LBRACE);
+    EXPECT_EQ(tokens[5].type, TokenType::RETURN);
+    EXPECT_EQ(tokens[6].type, TokenType::INTEGER);
+    EXPECT_EQ(tokens[7].type, TokenType::SEMICOLON);
+    EXPECT_EQ(tokens[8].type, TokenType::RBRACE);
+    EXPECT_EQ(tokens[9].type, TokenType::END_OF_FILE);
+}
+
+// ---------------------------------------------------------------------------
+// String escape: unterminated escape at end
+// ---------------------------------------------------------------------------
+
+TEST(LexerTest, UnterminatedEscapeAtEnd) {
+    EXPECT_THROW(lex("\"abc\\"), std::runtime_error);
+}
