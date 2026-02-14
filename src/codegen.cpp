@@ -590,9 +590,9 @@ llvm::Value* CodeGenerator::generateExpression(Expression* expr) {
         case ASTNodeType::TERNARY_EXPR:
             return generateTernary(static_cast<TernaryExpr*>(expr));
         case ASTNodeType::ARRAY_EXPR:
-            codegenError("Array literals are not yet supported in compiled code", expr);
+            return generateArray(static_cast<ArrayExpr*>(expr));
         case ASTNodeType::INDEX_EXPR:
-            codegenError("Array indexing is not yet supported in compiled code", expr);
+            return generateIndex(static_cast<IndexExpr*>(expr));
         default:
             throw std::runtime_error("Unknown expression type");
     }
@@ -824,6 +824,18 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         return builder->CreateSelect(isNeg, negVal, arg, "absval");
     }
 
+    if (expr->callee == "len") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'len' expects 1 argument, but " +
+                         std::to_string(expr->arguments.size()) + " provided", expr);
+        }
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        // Array is stored as an i64 holding a pointer to [length, elem0, elem1, ...]
+        llvm::Value* arrPtr = builder->CreateIntToPtr(arg,
+            llvm::PointerType::getUnqual(*context), "arrptr");
+        return builder->CreateLoad(getDefaultType(), arrPtr, "arrlen");
+    }
+
     if (inOptMaxFunction) {
         if (optMaxFunctions.find(expr->callee) == optMaxFunctions.end()) {
             std::string currentFunction = "<unknown>";
@@ -948,6 +960,72 @@ llvm::Value* CodeGenerator::generateTernary(TernaryExpr* expr) {
     phi->addIncoming(elseVal, elseBB);
     
     return phi;
+}
+
+llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
+    size_t numElements = expr->elements.size();
+    // Allocate space for (1 + numElements) i64 slots: [length, elem0, elem1, ...]
+    size_t totalSlots = 1 + numElements;
+    llvm::Value* allocSize = llvm::ConstantInt::get(getDefaultType(), totalSlots);
+    llvm::Function* function = builder->GetInsertBlock()->getParent();
+    llvm::IRBuilder<> entryBuilder(&function->getEntryBlock(), function->getEntryBlock().begin());
+    llvm::AllocaInst* arrAlloca = entryBuilder.CreateAlloca(getDefaultType(), allocSize, "arr");
+
+    // Store the length in slot 0
+    llvm::Value* lenPtr = builder->CreateGEP(getDefaultType(), arrAlloca,
+        llvm::ConstantInt::get(getDefaultType(), 0), "arr.len.ptr");
+    builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), numElements), lenPtr);
+
+    // Store each element in slots 1..N
+    for (size_t i = 0; i < numElements; i++) {
+        llvm::Value* elemVal = generateExpression(expr->elements[i].get());
+        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrAlloca,
+            llvm::ConstantInt::get(getDefaultType(), i + 1), "arr.elem.ptr");
+        builder->CreateStore(elemVal, elemPtr);
+    }
+
+    // Return the array pointer as an i64 for the dynamic type system
+    return builder->CreatePtrToInt(arrAlloca, getDefaultType(), "arr.int");
+}
+
+llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
+    llvm::Value* arrVal = generateExpression(expr->array.get());
+    llvm::Value* idxVal = generateExpression(expr->index.get());
+
+    // Convert the i64 back to a pointer
+    llvm::Value* arrPtr = builder->CreateIntToPtr(arrVal,
+        llvm::PointerType::getUnqual(*context), "idx.arrptr");
+
+    // Bounds check: load length from slot 0, verify 0 <= index < length
+    llvm::Value* lenVal = builder->CreateLoad(getDefaultType(), arrPtr, "idx.len");
+    llvm::Value* inBounds = builder->CreateICmpSLT(idxVal, lenVal, "idx.inbounds");
+    llvm::Value* notNeg = builder->CreateICmpSGE(idxVal,
+        llvm::ConstantInt::get(getDefaultType(), 0), "idx.notneg");
+    llvm::Value* valid = builder->CreateAnd(inBounds, notNeg, "idx.valid");
+
+    llvm::Function* function = builder->GetInsertBlock()->getParent();
+    llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "idx.ok", function);
+    llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "idx.fail", function);
+
+    builder->CreateCondBr(valid, okBB, failBB);
+
+    // Out-of-bounds path: print error and abort
+    builder->SetInsertPoint(failBB);
+    llvm::GlobalVariable* errMsg = module->getGlobalVariable("idx_oob_msg", true);
+    if (!errMsg) {
+        errMsg = builder->CreateGlobalString("Runtime error: array index out of bounds\n", "idx_oob_msg");
+    }
+    builder->CreateCall(getPrintfFunction(), {errMsg});
+    llvm::Function* trapFn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::trap);
+    builder->CreateCall(trapFn, {});
+    builder->CreateUnreachable();
+
+    // Success path: load element at offset (index + 1)
+    builder->SetInsertPoint(okBB);
+    llvm::Value* offset = builder->CreateAdd(idxVal,
+        llvm::ConstantInt::get(getDefaultType(), 1), "idx.offset");
+    llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrPtr, offset, "idx.elem.ptr");
+    return builder->CreateLoad(getDefaultType(), elemPtr, "idx.elem");
 }
 
 void CodeGenerator::generateVarDecl(VarDecl* stmt) {

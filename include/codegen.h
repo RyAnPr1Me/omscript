@@ -76,6 +76,8 @@ private:
     llvm::Value* generatePostfix(PostfixExpr* expr);
     llvm::Value* generatePrefix(PrefixExpr* expr);
     llvm::Value* generateTernary(TernaryExpr* expr);
+    llvm::Value* generateArray(ArrayExpr* expr);
+    llvm::Value* generateIndex(IndexExpr* expr);
     
     // Statement generators
     void generateVarDecl(VarDecl* stmt);

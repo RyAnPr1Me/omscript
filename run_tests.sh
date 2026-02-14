@@ -192,6 +192,7 @@ test_program "examples/prefix_ops.om" 50
 test_program "examples/abs_test.om" 26
 test_program "examples/optimization_stress_test.om" 432
 test_program "examples/string_test.om" 0
+test_program "examples/array_test.om" 245
 test_compile_fail "examples/const_fail.om"
 test_compile_fail "examples/break_outside_loop.om"
 test_compile_fail "examples/continue_outside_loop.om"
