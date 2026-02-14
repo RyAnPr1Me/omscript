@@ -80,12 +80,9 @@ fn main() {
     // tail_recursive_sum(10, 0) → 55
     var r5 = tail_recursive_sum(10, 0);
 
-    // nested_loop_invariant(3) → 9*20 + (0+1+2)*3*2 = 180+36 = 216
-    // Details: for each (i,j) pair: inv+i+j = 20+i+j
-    // sum(i=0..2, sum(j=0..2, 20+i+j))
-    // = 9*20 + sum(i=0..2, 3*i + 3) = 180 + 3*(0+1+2) + 9 = 180+9+9 = 198
-    // Actually: sum(j=0..2, 20+i+j) = 60+3*i+3 = 63+3*i
-    // sum(i=0..2, 63+3*i) = 189 + 9 = 198
+    // nested_loop_invariant(3):
+    // inv=20, sum(i=0..2, sum(j=0..2, 20+i+j))
+    // = sum(i=0..2, 63+3*i) = 63+66+69 = 198
     var r6 = nested_loop_invariant(3);
 
     // Total: 5 + 14 + 100 + 60 + 55 + 198 = 432

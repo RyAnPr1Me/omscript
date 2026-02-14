@@ -1329,6 +1329,10 @@ void CodeGenerator::optimizeOptMaxFunctions() {
         if (!func.isDeclaration() && optMaxFunctions.count(std::string(func.getName()))) {
             // OPTMAX runs the aggressive pass stack three times to maximize optimization.
             // Each iteration can expose new patterns for subsequent passes to simplify.
+            // Three iterations is the sweet spot: the first pass does heavy lifting,
+            // the second catches patterns exposed by loop/strength-reduce transforms,
+            // and the third cleans up residuals.  Beyond three, passes reach a fixed
+            // point and additional iterations produce no further changes.
             constexpr int optMaxIterations = 3;
             for (int i = 0; i < optMaxIterations; ++i) {
                 fpm.run(func);
