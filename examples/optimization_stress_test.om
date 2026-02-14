@@ -10,9 +10,9 @@ fn optmax_identities(n: int) {
     var d: int = c / 1;
     var e: int = 0 + d;
     var f: int = 1 * e;
-    // x*0 → 0
+    // n * 0 evaluates to 0 (via LLVM backend optimization)
     var zero: int = n * 0;
-    // 0/x → 0
+    // 0 / 1 → 0 (compile-time literal folding)
     var also_zero: int = 0 / 1;
     return f + zero + also_zero;
 }

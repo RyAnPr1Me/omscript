@@ -480,7 +480,18 @@ void CodeGenerator::generate(Program* program) {
         }
     }
     
-    // Generate all functions
+    // Forward-declare all functions so that any function can reference any
+    // other regardless of source-file ordering (enables mutual recursion).
+    for (auto& func : program->functions) {
+        std::vector<llvm::Type*> paramTypes(func->parameters.size(), getDefaultType());
+        llvm::FunctionType* funcType = llvm::FunctionType::get(
+            getDefaultType(), paramTypes, false);
+        llvm::Function* function = llvm::Function::Create(
+            funcType, llvm::Function::ExternalLinkage, func->name, module.get());
+        functions[func->name] = function;
+    }
+
+    // Generate all function bodies
     for (auto& func : program->functions) {
         generateFunction(func.get());
     }
@@ -510,27 +521,8 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         optimizeOptMaxBlock(func->body.get());
     }
 
-    // Create function type
-    std::vector<llvm::Type*> paramTypes;
-    for (size_t i = 0; i < func->parameters.size(); i++) {
-        paramTypes.push_back(getDefaultType());
-    }
-    
-    llvm::FunctionType* funcType = llvm::FunctionType::get(
-        getDefaultType(),
-        paramTypes,
-        false
-    );
-    
-    // Create function
-    llvm::Function* function = llvm::Function::Create(
-        funcType,
-        llvm::Function::ExternalLinkage,
-        func->name,
-        module.get()
-    );
-    
-    functions[func->name] = function;
+    // Retrieve the forward-declared function
+    llvm::Function* function = functions[func->name];
     
     // Create entry basic block
     llvm::BasicBlock* entry = llvm::BasicBlock::Create(*context, "entry", function);
@@ -1100,7 +1092,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         }
         llvm::Value* truncated = builder->CreateTrunc(arg, llvm::Type::getInt32Ty(*context), "charval");
         builder->CreateCall(putcharFn, {truncated});
-        return arg;
+        return llvm::ConstantInt::get(getDefaultType(), 0);
     }
 
     if (expr->callee == "input") {

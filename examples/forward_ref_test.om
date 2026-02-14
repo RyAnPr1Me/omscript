@@ -1,0 +1,27 @@
+// Test forward function references and mutual recursion
+fn main() {
+    // Call functions defined later in the file
+    var a = add(3, 7);
+    var b = double_val(5);
+    // Mutual recursion
+    var c = ping(4);
+    return a + b + c;  // 10 + 10 + 4 = 24
+}
+
+fn add(x, y) {
+    return x + y;
+}
+
+fn double_val(n) {
+    return n * 2;
+}
+
+fn ping(n) {
+    if (n <= 0) { return 0; }
+    return 1 + pong(n - 1);
+}
+
+fn pong(n) {
+    if (n <= 0) { return 0; }
+    return 1 + ping(n - 1);
+}

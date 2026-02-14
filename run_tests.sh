@@ -201,11 +201,14 @@ test_program "examples/float_test.om" 5
 test_program "examples/string_var_test.om" 0
 test_program "examples/print_return_test.om" 0
 test_program "examples/optmax_div_zero.om" 1
+test_program "examples/forward_ref_test.om" 24
 test_compile_fail "examples/const_fail.om"
 test_compile_fail "examples/break_outside_loop.om"
 test_compile_fail "examples/continue_outside_loop.om"
 test_compile_fail "examples/undefined_var.om"
+test_compile_fail "examples/int_overflow.om"
 test_cli_output "error-line-info" "line" 1 ./build/omsc examples/undefined_var.om -o /tmp/test_err
+test_cli_output "int-overflow-msg" "Integer literal out of range" 1 ./build/omsc examples/int_overflow.om -o /tmp/test_overflow
 
 echo ""
 echo "============================================"
