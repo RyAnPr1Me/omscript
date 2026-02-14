@@ -383,6 +383,11 @@ llvm::Value* CodeGenerator::ensureFloat(llvm::Value* v) {
     if (v->getType()->isIntegerTy()) {
         return builder->CreateSIToFP(v, getFloatType(), "itof");
     }
+    if (v->getType()->isPointerTy()) {
+        // Convert pointer to int first, then to float
+        llvm::Value* intVal = builder->CreatePtrToInt(v, getDefaultType(), "ptoi");
+        return builder->CreateSIToFP(intVal, getFloatType(), "itof");
+    }
     return v;
 }
 
@@ -1406,6 +1411,10 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
             value = builder->CreateSIToFP(value, getFloatType(), "itof");
         } else if (allocaType->isIntegerTy() && value->getType()->isDoubleTy()) {
             value = builder->CreateFPToSI(value, getDefaultType(), "ftoi");
+        } else if (allocaType->isIntegerTy() && value->getType()->isPointerTy()) {
+            value = builder->CreatePtrToInt(value, getDefaultType(), "ptoi");
+        } else if (allocaType->isPointerTy() && value->getType()->isIntegerTy()) {
+            value = builder->CreateIntToPtr(value, llvm::PointerType::getUnqual(*context), "itop");
         }
     }
     
