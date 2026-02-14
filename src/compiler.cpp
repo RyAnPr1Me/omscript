@@ -32,10 +32,10 @@ void Compiler::writeFile(const std::string& filename, const std::string& content
         throw std::runtime_error("Could not write to file: " + filename);
     }
     file << content;
-    file.close();
     if (file.fail()) {
         throw std::runtime_error("Error writing to file: " + filename);
     }
+    file.close();
 }
 
 void Compiler::compile(const std::string& sourceFile, const std::string& outputFile) {

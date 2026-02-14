@@ -1507,6 +1507,8 @@ void CodeGenerator::emitBytecodeStatement(Statement* stmt) {
             }
             bytecodeEmitter.emit(OpCode::STORE_VAR);
             bytecodeEmitter.emitString(varDecl->name);
+            // STORE_VAR leaves the value on the stack; pop it since
+            // variable declarations are statements, not expressions.
             bytecodeEmitter.emit(OpCode::POP);
             break;
         }

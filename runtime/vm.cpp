@@ -292,6 +292,7 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
                 // For now, CALL is a placeholder that pops the arguments and
                 // pushes a default return value of 0.  Full function dispatch
                 // requires a call-frame stack which is not yet implemented.
+                (void)funcName; // Will be used for function lookup once call frames are added
                 for (uint8_t i = 0; i < argCount; i++) {
                     pop();
                 }
