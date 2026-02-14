@@ -605,8 +605,10 @@ llvm::Value* CodeGenerator::generateLiteral(LiteralExpr* expr) {
         // For simplicity, cast float to int64 in this basic implementation
         return llvm::ConstantInt::get(*context, llvm::APInt(64, static_cast<int64_t>(expr->floatValue)));
     } else {
-        // String literal - not fully supported in this basic implementation
-        return llvm::ConstantInt::get(*context, llvm::APInt(64, 0));
+        // String literal - store the address as an i64 for compatibility with the i64 type system.
+        // When passed directly to print(), the pointer form is used instead (see generateCall).
+        llvm::Value* strPtr = builder->CreateGlobalString(expr->stringValue, "str");
+        return builder->CreatePtrToInt(strPtr, getDefaultType(), "strint");
     }
 }
 
@@ -786,8 +788,21 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             codegenError("Built-in function 'print' expects 1 argument, but " +
                          std::to_string(expr->arguments.size()) + " provided", expr);
         }
-        llvm::Value* arg = generateExpression(expr->arguments[0].get());
-        // Reuse a single global format string across all print() calls
+        // Check if the argument is a string literal to print it with %s
+        Expression* argExpr = expr->arguments[0].get();
+        if (argExpr->type == ASTNodeType::LITERAL_EXPR) {
+            auto* litExpr = static_cast<LiteralExpr*>(argExpr);
+            if (litExpr->literalType == LiteralExpr::LiteralType::STRING) {
+                llvm::Value* strPtr = builder->CreateGlobalString(litExpr->stringValue, "printstr");
+                llvm::GlobalVariable* strFmt = module->getGlobalVariable("print_str_fmt", true);
+                if (!strFmt) {
+                    strFmt = builder->CreateGlobalString("%s\n", "print_str_fmt");
+                }
+                builder->CreateCall(getPrintfFunction(), {strFmt, strPtr});
+                return llvm::ConstantInt::get(getDefaultType(), 0);
+            }
+        }
+        llvm::Value* arg = generateExpression(argExpr);
         llvm::GlobalVariable* formatStr = module->getGlobalVariable("print_fmt", true);
         if (!formatStr) {
             formatStr = builder->CreateGlobalString("%lld\n", "print_fmt");
@@ -1484,6 +1499,68 @@ void CodeGenerator::emitBytecodeExpression(Expression* expr) {
             bytecodeEmitter.emitByte(static_cast<uint8_t>(call->arguments.size()));
             break;
         }
+        case ASTNodeType::POSTFIX_EXPR: {
+            auto* postfix = static_cast<PostfixExpr*>(expr);
+            auto* id = dynamic_cast<IdentifierExpr*>(postfix->operand.get());
+            if (!id) {
+                throw std::runtime_error("Postfix operator requires an identifier in bytecode");
+            }
+            // Push the current value (return value for postfix)
+            bytecodeEmitter.emit(OpCode::LOAD_VAR);
+            bytecodeEmitter.emitString(id->name);
+            // Compute new value: load, push 1, add/sub, store
+            bytecodeEmitter.emit(OpCode::LOAD_VAR);
+            bytecodeEmitter.emitString(id->name);
+            bytecodeEmitter.emit(OpCode::PUSH_INT);
+            bytecodeEmitter.emitInt(1);
+            if (postfix->op == "++") {
+                bytecodeEmitter.emit(OpCode::ADD);
+            } else {
+                bytecodeEmitter.emit(OpCode::SUB);
+            }
+            bytecodeEmitter.emit(OpCode::STORE_VAR);
+            bytecodeEmitter.emitString(id->name);
+            bytecodeEmitter.emit(OpCode::POP); // Pop the stored value, keeping the original
+            break;
+        }
+        case ASTNodeType::PREFIX_EXPR: {
+            auto* prefix = static_cast<PrefixExpr*>(expr);
+            auto* id = dynamic_cast<IdentifierExpr*>(prefix->operand.get());
+            if (!id) {
+                throw std::runtime_error("Prefix operator requires an identifier in bytecode");
+            }
+            // Compute new value: load, push 1, add/sub, store
+            bytecodeEmitter.emit(OpCode::LOAD_VAR);
+            bytecodeEmitter.emitString(id->name);
+            bytecodeEmitter.emit(OpCode::PUSH_INT);
+            bytecodeEmitter.emitInt(1);
+            if (prefix->op == "++") {
+                bytecodeEmitter.emit(OpCode::ADD);
+            } else {
+                bytecodeEmitter.emit(OpCode::SUB);
+            }
+            bytecodeEmitter.emit(OpCode::STORE_VAR);
+            bytecodeEmitter.emitString(id->name);
+            // STORE_VAR leaves the new value on the stack (prefix returns new value)
+            break;
+        }
+        case ASTNodeType::TERNARY_EXPR: {
+            auto* ternary = static_cast<TernaryExpr*>(expr);
+            emitBytecodeExpression(ternary->condition.get());
+            bytecodeEmitter.emit(OpCode::JUMP_IF_FALSE);
+            size_t elsePatch = bytecodeEmitter.currentOffset();
+            bytecodeEmitter.emitShort(0); // placeholder
+            
+            emitBytecodeExpression(ternary->thenExpr.get());
+            bytecodeEmitter.emit(OpCode::JUMP);
+            size_t endPatch = bytecodeEmitter.currentOffset();
+            bytecodeEmitter.emitShort(0); // placeholder
+            
+            bytecodeEmitter.patchJump(elsePatch, static_cast<uint16_t>(bytecodeEmitter.currentOffset()));
+            emitBytecodeExpression(ternary->elseExpr.get());
+            bytecodeEmitter.patchJump(endPatch, static_cast<uint16_t>(bytecodeEmitter.currentOffset()));
+            break;
+        }
         default:
             throw std::runtime_error("Unsupported expression type in bytecode generation");
     }
@@ -1565,6 +1642,62 @@ void CodeGenerator::emitBytecodeStatement(Statement* stmt) {
         }
         case ASTNodeType::BLOCK: {
             emitBytecodeBlock(static_cast<BlockStmt*>(stmt));
+            break;
+        }
+        case ASTNodeType::DO_WHILE_STMT: {
+            auto* doWhileStmt = static_cast<DoWhileStmt*>(stmt);
+            size_t loopStart = bytecodeEmitter.currentOffset();
+            
+            emitBytecodeStatement(doWhileStmt->body.get());
+            
+            emitBytecodeExpression(doWhileStmt->condition.get());
+            // Jump back to the start if condition is true (negate: jump if false to exit)
+            bytecodeEmitter.emit(OpCode::NOT);
+            bytecodeEmitter.emit(OpCode::JUMP_IF_FALSE);
+            bytecodeEmitter.emitShort(static_cast<uint16_t>(loopStart));
+            break;
+        }
+        case ASTNodeType::FOR_STMT: {
+            auto* forStmt = static_cast<ForStmt*>(stmt);
+            // Initialize iterator variable
+            emitBytecodeExpression(forStmt->start.get());
+            bytecodeEmitter.emit(OpCode::STORE_VAR);
+            bytecodeEmitter.emitString(forStmt->iteratorVar);
+            bytecodeEmitter.emit(OpCode::POP);
+            
+            size_t loopStart = bytecodeEmitter.currentOffset();
+            
+            // Condition: iterator < end
+            bytecodeEmitter.emit(OpCode::LOAD_VAR);
+            bytecodeEmitter.emitString(forStmt->iteratorVar);
+            emitBytecodeExpression(forStmt->end.get());
+            bytecodeEmitter.emit(OpCode::LT);
+            
+            bytecodeEmitter.emit(OpCode::JUMP_IF_FALSE);
+            size_t exitPatch = bytecodeEmitter.currentOffset();
+            bytecodeEmitter.emitShort(0); // placeholder
+            
+            // Body
+            emitBytecodeStatement(forStmt->body.get());
+            
+            // Increment: iterator = iterator + step (default step = 1)
+            bytecodeEmitter.emit(OpCode::LOAD_VAR);
+            bytecodeEmitter.emitString(forStmt->iteratorVar);
+            if (forStmt->step) {
+                emitBytecodeExpression(forStmt->step.get());
+            } else {
+                bytecodeEmitter.emit(OpCode::PUSH_INT);
+                bytecodeEmitter.emitInt(1);
+            }
+            bytecodeEmitter.emit(OpCode::ADD);
+            bytecodeEmitter.emit(OpCode::STORE_VAR);
+            bytecodeEmitter.emitString(forStmt->iteratorVar);
+            bytecodeEmitter.emit(OpCode::POP);
+            
+            bytecodeEmitter.emit(OpCode::JUMP);
+            bytecodeEmitter.emitShort(static_cast<uint16_t>(loopStart));
+            
+            bytecodeEmitter.patchJump(exitPatch, static_cast<uint16_t>(bytecodeEmitter.currentOffset()));
             break;
         }
         default:

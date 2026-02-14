@@ -1,0 +1,5 @@
+fn main() {
+    print("hello world");
+    print("omscript strings work");
+    return 0;
+}
