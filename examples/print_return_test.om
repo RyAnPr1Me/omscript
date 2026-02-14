@@ -1,0 +1,10 @@
+// Test that print returns 0 consistently for all types
+fn main() {
+    // print should return 0 for all argument types
+    var int_result = print(42);
+    var float_result = print(3.14);
+    var str_result = print("hello");
+
+    // All should be 0 - if print returned arg for ints, int_result would be 42
+    return int_result + float_result + str_result;
+}

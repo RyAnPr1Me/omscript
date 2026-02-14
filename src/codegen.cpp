@@ -93,16 +93,13 @@ std::unique_ptr<Expression> optimizeOptMaxBinary(const std::string& op,
     if (leftLiteral && leftLiteral->literalType == LiteralExpr::LiteralType::INTEGER) {
         long long lval = leftLiteral->intValue;
         if (lval == 0 && op == "+") return right;            // 0 + x → x
-        if (lval == 0 && op == "*") return std::make_unique<LiteralExpr>(0LL); // 0 * x → 0
         if (lval == 1 && op == "*") return right;            // 1 * x → x
-        if (lval == 0 && op == "/") return std::make_unique<LiteralExpr>(0LL); // 0 / x → 0
     }
     if (rightLiteral && rightLiteral->literalType == LiteralExpr::LiteralType::INTEGER) {
         long long rval = rightLiteral->intValue;
         if (rval == 0 && op == "+") return left;             // x + 0 → x
         if (rval == 0 && op == "-") return left;             // x - 0 → x
         if (rval == 1 && op == "*") return left;             // x * 1 → x
-        if (rval == 0 && op == "*") return std::make_unique<LiteralExpr>(0LL); // x * 0 → 0
         if (rval == 1 && op == "/") return left;             // x / 1 → x
     }
 
@@ -946,7 +943,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 formatStr = builder->CreateGlobalString("%lld\n", "print_fmt");
             }
             builder->CreateCall(getPrintfFunction(), {formatStr, arg});
-            return arg;
+            return llvm::ConstantInt::get(getDefaultType(), 0);
         }
     }
 

@@ -199,6 +199,8 @@ test_program "examples/stdlib_test.om" 66
 test_program "examples/stdlib2_test.om" 255
 test_program "examples/float_test.om" 5
 test_program "examples/string_var_test.om" 0
+test_program "examples/print_return_test.om" 0
+test_program "examples/optmax_div_zero.om" 1
 test_compile_fail "examples/const_fail.om"
 test_compile_fail "examples/break_outside_loop.om"
 test_compile_fail "examples/continue_outside_loop.om"
