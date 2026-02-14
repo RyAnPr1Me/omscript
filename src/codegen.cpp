@@ -1520,7 +1520,7 @@ void CodeGenerator::emitBytecodeExpression(Expression* expr) {
             }
             bytecodeEmitter.emit(OpCode::STORE_VAR);
             bytecodeEmitter.emitString(id->name);
-            bytecodeEmitter.emit(OpCode::POP); // Pop the stored value, keeping the original
+            bytecodeEmitter.emit(OpCode::POP); // STORE_VAR left the new value on top; discard it to expose the original value below
             break;
         }
         case ASTNodeType::PREFIX_EXPR: {
