@@ -10,6 +10,7 @@ public:
     Compiler();
     
     void compile(const std::string& sourceFile, const std::string& outputFile);
+    void writeFile(const std::string& filename, const std::string& content);
     
 private:
     std::string readFile(const std::string& filename);

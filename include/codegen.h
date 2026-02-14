@@ -2,6 +2,7 @@
 #define CODEGEN_H
 
 #include "ast.h"
+#include "bytecode.h"
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Module.h>
@@ -55,6 +56,9 @@ private:
     std::vector<std::unordered_map<std::string, ConstBinding>> constScopeStack;
     std::unordered_map<std::string, llvm::Function*> functions;
     
+    // Bytecode emitter for dynamic/interpreted code
+    BytecodeEmitter bytecodeEmitter;
+    bool useDynamicCompilation;
     OptimizationLevel optimizationLevel;
     
     // Code generation methods
@@ -99,6 +103,18 @@ private:
     void runOptimizationPasses();
     void optimizeFunction(llvm::Function* func);
     void optimizeOptMaxFunctions();
+    
+    // Bytecode generation methods (alternative backend)
+    void generateBytecode(Program* program);
+    void emitBytecodeExpression(Expression* expr);
+    void emitBytecodeStatement(Statement* stmt);
+    void emitBytecodeBlock(BlockStmt* stmt);
+    
+public:
+    // Accessors for bytecode output
+    const BytecodeEmitter& getBytecodeEmitter() const { return bytecodeEmitter; }
+    bool isDynamicCompilation() const { return useDynamicCompilation; }
+    void setDynamicCompilation(bool enable) { useDynamicCompilation = enable; }
 };
 
 } // namespace omscript

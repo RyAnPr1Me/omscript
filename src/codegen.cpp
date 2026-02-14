@@ -300,6 +300,7 @@ namespace omscript {
 CodeGenerator::CodeGenerator(OptimizationLevel optLevel) 
     : inOptMaxFunction(false),
       hasOptMaxFunctions(false),
+      useDynamicCompilation(false),
       optimizationLevel(optLevel) {
     context = std::make_unique<llvm::LLVMContext>();
     module = std::make_unique<llvm::Module>("omscript", *context);
@@ -1400,6 +1401,179 @@ void CodeGenerator::writeObjectFile(const std::string& filename) {
     
     pass.run(*module);
     dest.flush();
+}
+
+void CodeGenerator::generateBytecode(Program* program) {
+    for (auto& func : program->functions) {
+        if (func->name == "main") {
+            emitBytecodeBlock(func->body.get());
+            bytecodeEmitter.emit(OpCode::RETURN);
+        }
+    }
+    bytecodeEmitter.emit(OpCode::HALT);
+}
+
+void CodeGenerator::emitBytecodeExpression(Expression* expr) {
+    switch (expr->type) {
+        case ASTNodeType::LITERAL_EXPR: {
+            auto* lit = static_cast<LiteralExpr*>(expr);
+            if (lit->literalType == LiteralExpr::LiteralType::INTEGER) {
+                bytecodeEmitter.emit(OpCode::PUSH_INT);
+                bytecodeEmitter.emitInt(lit->intValue);
+            } else if (lit->literalType == LiteralExpr::LiteralType::FLOAT) {
+                bytecodeEmitter.emit(OpCode::PUSH_FLOAT);
+                bytecodeEmitter.emitFloat(lit->floatValue);
+            } else if (lit->literalType == LiteralExpr::LiteralType::STRING) {
+                bytecodeEmitter.emit(OpCode::PUSH_STRING);
+                bytecodeEmitter.emitString(lit->stringValue);
+            }
+            break;
+        }
+        case ASTNodeType::IDENTIFIER_EXPR: {
+            auto* id = static_cast<IdentifierExpr*>(expr);
+            bytecodeEmitter.emit(OpCode::LOAD_VAR);
+            bytecodeEmitter.emitString(id->name);
+            break;
+        }
+        case ASTNodeType::BINARY_EXPR: {
+            auto* bin = static_cast<BinaryExpr*>(expr);
+            emitBytecodeExpression(bin->left.get());
+            emitBytecodeExpression(bin->right.get());
+            if (bin->op == "+") bytecodeEmitter.emit(OpCode::ADD);
+            else if (bin->op == "-") bytecodeEmitter.emit(OpCode::SUB);
+            else if (bin->op == "*") bytecodeEmitter.emit(OpCode::MUL);
+            else if (bin->op == "/") bytecodeEmitter.emit(OpCode::DIV);
+            else if (bin->op == "%") bytecodeEmitter.emit(OpCode::MOD);
+            else if (bin->op == "==") bytecodeEmitter.emit(OpCode::EQ);
+            else if (bin->op == "!=") bytecodeEmitter.emit(OpCode::NE);
+            else if (bin->op == "<") bytecodeEmitter.emit(OpCode::LT);
+            else if (bin->op == "<=") bytecodeEmitter.emit(OpCode::LE);
+            else if (bin->op == ">") bytecodeEmitter.emit(OpCode::GT);
+            else if (bin->op == ">=") bytecodeEmitter.emit(OpCode::GE);
+            else if (bin->op == "&&") bytecodeEmitter.emit(OpCode::AND);
+            else if (bin->op == "||") bytecodeEmitter.emit(OpCode::OR);
+            else {
+                throw std::runtime_error("Unsupported binary operator in bytecode: " + bin->op);
+            }
+            break;
+        }
+        case ASTNodeType::UNARY_EXPR: {
+            auto* unary = static_cast<UnaryExpr*>(expr);
+            emitBytecodeExpression(unary->operand.get());
+            if (unary->op == "-") bytecodeEmitter.emit(OpCode::NEG);
+            else if (unary->op == "!") bytecodeEmitter.emit(OpCode::NOT);
+            else {
+                throw std::runtime_error("Unsupported unary operator in bytecode: " + unary->op);
+            }
+            break;
+        }
+        case ASTNodeType::ASSIGN_EXPR: {
+            auto* assign = static_cast<AssignExpr*>(expr);
+            emitBytecodeExpression(assign->value.get());
+            bytecodeEmitter.emit(OpCode::STORE_VAR);
+            bytecodeEmitter.emitString(assign->name);
+            break;
+        }
+        case ASTNodeType::CALL_EXPR: {
+            auto* call = static_cast<CallExpr*>(expr);
+            for (auto& arg : call->arguments) {
+                emitBytecodeExpression(arg.get());
+            }
+            bytecodeEmitter.emit(OpCode::CALL);
+            bytecodeEmitter.emitString(call->callee);
+            bytecodeEmitter.emitByte(static_cast<uint8_t>(call->arguments.size()));
+            break;
+        }
+        default:
+            throw std::runtime_error("Unsupported expression type in bytecode generation");
+    }
+}
+
+void CodeGenerator::emitBytecodeStatement(Statement* stmt) {
+    switch (stmt->type) {
+        case ASTNodeType::EXPR_STMT: {
+            auto* exprStmt = static_cast<ExprStmt*>(stmt);
+            emitBytecodeExpression(exprStmt->expression.get());
+            bytecodeEmitter.emit(OpCode::POP);
+            break;
+        }
+        case ASTNodeType::VAR_DECL: {
+            auto* varDecl = static_cast<VarDecl*>(stmt);
+            if (varDecl->initializer) {
+                emitBytecodeExpression(varDecl->initializer.get());
+            } else {
+                bytecodeEmitter.emit(OpCode::PUSH_INT);
+                bytecodeEmitter.emitInt(0);
+            }
+            bytecodeEmitter.emit(OpCode::STORE_VAR);
+            bytecodeEmitter.emitString(varDecl->name);
+            bytecodeEmitter.emit(OpCode::POP);
+            break;
+        }
+        case ASTNodeType::RETURN_STMT: {
+            auto* retStmt = static_cast<ReturnStmt*>(stmt);
+            if (retStmt->value) {
+                emitBytecodeExpression(retStmt->value.get());
+            } else {
+                bytecodeEmitter.emit(OpCode::PUSH_INT);
+                bytecodeEmitter.emitInt(0);
+            }
+            bytecodeEmitter.emit(OpCode::RETURN);
+            break;
+        }
+        case ASTNodeType::IF_STMT: {
+            auto* ifStmt = static_cast<IfStmt*>(stmt);
+            emitBytecodeExpression(ifStmt->condition.get());
+            
+            bytecodeEmitter.emit(OpCode::JUMP_IF_FALSE);
+            size_t elsePatch = bytecodeEmitter.currentOffset();
+            bytecodeEmitter.emitShort(0); // placeholder
+            
+            emitBytecodeStatement(ifStmt->thenBranch.get());
+            
+            if (ifStmt->elseBranch) {
+                bytecodeEmitter.emit(OpCode::JUMP);
+                size_t endPatch = bytecodeEmitter.currentOffset();
+                bytecodeEmitter.emitShort(0); // placeholder
+                
+                bytecodeEmitter.patchJump(elsePatch, static_cast<uint16_t>(bytecodeEmitter.currentOffset()));
+                emitBytecodeStatement(ifStmt->elseBranch.get());
+                bytecodeEmitter.patchJump(endPatch, static_cast<uint16_t>(bytecodeEmitter.currentOffset()));
+            } else {
+                bytecodeEmitter.patchJump(elsePatch, static_cast<uint16_t>(bytecodeEmitter.currentOffset()));
+            }
+            break;
+        }
+        case ASTNodeType::WHILE_STMT: {
+            auto* whileStmt = static_cast<WhileStmt*>(stmt);
+            size_t loopStart = bytecodeEmitter.currentOffset();
+            
+            emitBytecodeExpression(whileStmt->condition.get());
+            bytecodeEmitter.emit(OpCode::JUMP_IF_FALSE);
+            size_t exitPatch = bytecodeEmitter.currentOffset();
+            bytecodeEmitter.emitShort(0); // placeholder
+            
+            emitBytecodeStatement(whileStmt->body.get());
+            
+            bytecodeEmitter.emit(OpCode::JUMP);
+            bytecodeEmitter.emitShort(static_cast<uint16_t>(loopStart));
+            
+            bytecodeEmitter.patchJump(exitPatch, static_cast<uint16_t>(bytecodeEmitter.currentOffset()));
+            break;
+        }
+        case ASTNodeType::BLOCK: {
+            emitBytecodeBlock(static_cast<BlockStmt*>(stmt));
+            break;
+        }
+        default:
+            throw std::runtime_error("Unsupported statement type in bytecode generation");
+    }
+}
+
+void CodeGenerator::emitBytecodeBlock(BlockStmt* stmt) {
+    for (auto& statement : stmt->statements) {
+        emitBytecodeStatement(statement.get());
+    }
 }
 
 } // namespace omscript
