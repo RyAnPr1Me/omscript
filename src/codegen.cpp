@@ -297,6 +297,19 @@ void optimizeOptMaxStatement(Statement* stmt) {
 
 namespace omscript {
 
+// Canonical set of all stdlib built-in function names.
+// These functions are always compiled to native machine code via LLVM IR,
+// never through the bytecode/dynamic compilation path.
+static const std::unordered_set<std::string> stdlibFunctions = {
+    "print", "abs", "len", "min", "max", "sign", "clamp", "pow",
+    "print_char", "input", "sqrt", "is_even", "is_odd", "sum",
+    "swap", "reverse", "to_char", "is_alpha", "is_digit"
+};
+
+bool isStdlibFunction(const std::string& name) {
+    return stdlibFunctions.count(name) > 0;
+}
+
 CodeGenerator::CodeGenerator(OptimizationLevel optLevel) 
     : inOptMaxFunction(false),
       hasOptMaxFunctions(false),
@@ -782,7 +795,8 @@ llvm::Value* CodeGenerator::generateUnary(UnaryExpr* expr) {
 }
 
 llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
-    // Handle built-in functions
+    // All stdlib built-in functions are compiled to native machine code below.
+    // They never use dynamic variables or the bytecode path.
     if (expr->callee == "print") {
         if (expr->arguments.size() != 1) {
             codegenError("Built-in function 'print' expects 1 argument, but " +
@@ -1200,7 +1214,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (inOptMaxFunction) {
-        if (optMaxFunctions.find(expr->callee) == optMaxFunctions.end()) {
+        // Stdlib functions are always native machine code, so they're safe to call from OPTMAX
+        if (!isStdlibFunction(expr->callee) &&
+            optMaxFunctions.find(expr->callee) == optMaxFunctions.end()) {
             std::string currentFunction = "<unknown>";
             if (builder->GetInsertBlock() && builder->GetInsertBlock()->getParent()) {
                 currentFunction = std::string(builder->GetInsertBlock()->getParent()->getName());
@@ -1928,6 +1944,12 @@ void CodeGenerator::emitBytecodeExpression(Expression* expr) {
         }
         case ASTNodeType::CALL_EXPR: {
             auto* call = static_cast<CallExpr*>(expr);
+            if (isStdlibFunction(call->callee)) {
+                // Stdlib functions are compiled to native machine code only.
+                // They are not available in the bytecode interpreter.
+                throw std::runtime_error("Stdlib function '" + call->callee +
+                    "' must be compiled to native code, not bytecode");
+            }
             for (auto& arg : call->arguments) {
                 emitBytecodeExpression(arg.get());
             }

@@ -14,6 +14,10 @@
 
 namespace omscript {
 
+// Returns true if the given name is a stdlib built-in function.
+// Stdlib functions are always compiled to native machine code.
+bool isStdlibFunction(const std::string& name);
+
 enum class OptimizationLevel {
     O0,  // No optimization
     O1,  // Basic optimization
@@ -56,7 +60,8 @@ private:
     std::vector<std::unordered_map<std::string, ConstBinding>> constScopeStack;
     std::unordered_map<std::string, llvm::Function*> functions;
     
-    // Bytecode emitter for dynamic/interpreted code
+    // Bytecode emitter for dynamic/interpreted code (user-defined functions only;
+    // stdlib built-ins are always compiled to native machine code via LLVM IR).
     BytecodeEmitter bytecodeEmitter;
     bool useDynamicCompilation;
     OptimizationLevel optimizationLevel;
