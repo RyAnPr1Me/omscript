@@ -67,8 +67,8 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
     };
     
     try {
-        objectFileCreated = true;
         codegen.writeObjectFile(objFile);
+        objectFileCreated = true;
         
         // Link to create executable
         std::cout << "  Linking..." << std::endl;
