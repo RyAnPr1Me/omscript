@@ -24,15 +24,6 @@ Value VM::pop() {
     return value;
 }
 
-Value VM::peek(int offset) {
-    if (offset < 0) {
-        throw std::runtime_error("Invalid stack offset");
-    }
-    if (stack.size() <= static_cast<size_t>(offset)) {
-        throw std::runtime_error("Stack underflow");
-    }
-    return stack[stack.size() - 1 - offset];
-}
 
 void VM::ensureReadable(const std::vector<uint8_t>& code, size_t ip, size_t count) {
     if (ip + count > code.size()) {

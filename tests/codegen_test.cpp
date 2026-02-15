@@ -1758,3 +1758,158 @@ TEST(CodegenTest, BytecodeIdentifier) {
     codegen.generateBytecode(program.get());
     EXPECT_GT(codegen.getBytecodeEmitter().getCode().size(), 0u);
 }
+
+// ===========================================================================
+// Bytecode postfix decrement and prefix increment
+// ===========================================================================
+
+TEST(CodegenTest, BytecodePostfixDecrement) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    Lexer lexer("fn main() { var x = 5; x--; return x; }");
+    auto tokens = lexer.tokenize();
+    Parser parser(tokens);
+    auto program = parser.parse();
+    codegen.generateBytecode(program.get());
+    EXPECT_GT(codegen.getBytecodeEmitter().getCode().size(), 0u);
+}
+
+TEST(CodegenTest, BytecodePrefixIncrement) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    Lexer lexer("fn main() { var x = 5; ++x; return x; }");
+    auto tokens = lexer.tokenize();
+    Parser parser(tokens);
+    auto program = parser.parse();
+    codegen.generateBytecode(program.get());
+    EXPECT_GT(codegen.getBytecodeEmitter().getCode().size(), 0u);
+}
+
+// ===========================================================================
+// Bytecode return void
+// ===========================================================================
+
+TEST(CodegenTest, BytecodeReturnVoid) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    Lexer lexer("fn main() { return; }");
+    auto tokens = lexer.tokenize();
+    Parser parser(tokens);
+    auto program = parser.parse();
+    codegen.generateBytecode(program.get());
+    EXPECT_GT(codegen.getBytecodeEmitter().getCode().size(), 0u);
+}
+
+// ===========================================================================
+// Bytecode unsupported unary (~) error
+// ===========================================================================
+
+TEST(CodegenTest, BytecodeUnsupportedUnary) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    Lexer lexer("fn main() { return ~5; }");
+    auto tokens = lexer.tokenize();
+    Parser parser(tokens);
+    auto program = parser.parse();
+    EXPECT_THROW(codegen.generateBytecode(program.get()), std::runtime_error);
+}
+
+// ===========================================================================
+// Bytecode stdlib function error
+// ===========================================================================
+
+TEST(CodegenTest, BytecodeStdlibError) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    Lexer lexer("fn main() { print(42); return 0; }");
+    auto tokens = lexer.tokenize();
+    Parser parser(tokens);
+    auto program = parser.parse();
+    EXPECT_THROW(codegen.generateBytecode(program.get()), std::runtime_error);
+}
+
+// ===========================================================================
+// Bytecode variable declaration without init
+// ===========================================================================
+
+TEST(CodegenTest, BytecodeVarDeclNoInit) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    Lexer lexer("fn main() { var x; return 0; }");
+    auto tokens = lexer.tokenize();
+    Parser parser(tokens);
+    auto program = parser.parse();
+    codegen.generateBytecode(program.get());
+    EXPECT_GT(codegen.getBytecodeEmitter().getCode().size(), 0u);
+}
+
+// ===========================================================================
+// Optimization O1 (tests legacy pass manager path)
+// ===========================================================================
+
+TEST(CodegenTest, OptimizationO1FunctionPasses) {
+    CodeGenerator codegen(OptimizationLevel::O1);
+    auto* mod = generateIR(
+        "fn add(a, b) { return a + b; } fn main() { return add(1, 2); }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+// ===========================================================================
+// Tilde on float variable (converted before bitwise not)
+// ===========================================================================
+
+TEST(CodegenTest, TildeOnFloatVar) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var x = 3.14; return ~x; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+// ===========================================================================
+// String concat with lazy function init (covers malloc/strcpy/strcat)
+// ===========================================================================
+
+TEST(CodegenTest, StringConcatLazyInit) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() {"
+        "  var a = \"hello\";"
+        "  var b = \" world\";"
+        "  var c = a + b;"
+        "  print(c);"
+        "  return 0;"
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+// ===========================================================================
+// Input function codegen (covers scanf setup)
+// ===========================================================================
+
+TEST(CodegenTest, InputFunctionCodegen) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn foo() { var x = input(); return x; }"
+        "fn main() { return 0; }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+// ===========================================================================
+// Print_char codegen (covers putchar setup)
+// ===========================================================================
+
+TEST(CodegenTest, PrintCharCodegen) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() { print_char(65); return 0; }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+// ===========================================================================
+// OPTMAX with index expression (covers index optimization path)
+// ===========================================================================
+
+TEST(CodegenTest, OptmaxIndexExpr) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "OPTMAX=: fn opt(x: int) { var a: int = [1, 2]; var b: int = a[0]; return b; } OPTMAX!: fn main() { return opt(1); }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+}
