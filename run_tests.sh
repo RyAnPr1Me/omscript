@@ -1,4 +1,5 @@
 #!/bin/bash
+set -uo pipefail
 
 echo "============================================"
 echo "OmScript Compiler Test Suite"
@@ -9,6 +10,9 @@ echo ""
 GREEN='\033[0;32m'
 RED='\033[0;31m'
 NC='\033[0m' # No Color
+
+FAILURES=0
+TOTAL=0
 
 # Build the compiler
 echo "Building compiler..."
@@ -33,12 +37,14 @@ test_program() {
     local expected=$2
     local name=$(basename $source .om)
     
+    TOTAL=$((TOTAL + 1))
     echo -n "Testing $name... "
     
     # Compile
     ./build/omsc $source -o $name > /dev/null 2>&1
     if [ $? -ne 0 ]; then
         echo -e "${RED}✗ Compilation failed${NC}"
+        FAILURES=$((FAILURES + 1))
         return 1
     fi
     
@@ -56,6 +62,7 @@ test_program() {
         return 0
     else
         echo -e "${RED}✗ Failed (expected $expected_mod, got $result)${NC}"
+        FAILURES=$((FAILURES + 1))
         return 1
     fi
 }
@@ -64,6 +71,7 @@ test_compile_fail() {
     local source=$1
     local name=$(basename $source .om)
     
+    TOTAL=$((TOTAL + 1))
     echo -n "Testing $name (compile fail)... "
     
     ./build/omsc $source -o ${name}_fail > /dev/null 2>&1
@@ -74,6 +82,7 @@ test_compile_fail() {
     
     echo -e "${RED}✗ Unexpected compile success${NC}"
     rm -f ${name}_fail ${name}_fail.o
+    FAILURES=$((FAILURES + 1))
     return 1
 }
 
@@ -87,6 +96,7 @@ test_cli_output() {
         expected_exit=0
     fi
     
+    TOTAL=$((TOTAL + 1))
     echo -n "Testing $name... "
     
     local output
@@ -96,12 +106,14 @@ test_cli_output() {
     if [ $status -ne $expected_exit ]; then
         echo -e "${RED}✗ Failed (expected exit $expected_exit, got $status)${NC}"
         echo "$output"
+        FAILURES=$((FAILURES + 1))
         return 1
     fi
     
     if [ -n "$expected" ] && ! echo "$output" | grep -q "$expected"; then
         echo -e "${RED}✗ Failed (missing expected output)${NC}"
         echo "$output"
+        FAILURES=$((FAILURES + 1))
         return 1
     fi
     
@@ -127,18 +139,18 @@ test_cli_output "ast-flag" "Parsed program" 0 ./build/omsc --ast examples/test.o
 test_cli_output "emit-ir" "define i64 @main" 0 ./build/omsc --emit-ir examples/exit_zero.om
 test_cli_output "emit-ir-alias" "define i64 @main" 0 ./build/omsc --ir examples/exit_zero.om
 test_cli_output "emit-ir-output-flag" "" 0 ./build/omsc emit-ir examples/exit_zero.om --output emit_ir_flag.ll
+TOTAL=$((TOTAL + 1))
 if [ ! -f emit_ir_flag.ll ] || ! grep -q "define i64 @main" emit_ir_flag.ll; then
     echo -e "${RED}✗ Failed (emit-ir output flag did not write file)${NC}"
-    rm -f emit_ir_flag.ll
-    exit 1
+    FAILURES=$((FAILURES + 1))
 fi
 rm -f emit_ir_flag.ll
 test_cli_output "output-empty" "Error: -o/--output requires a valid output file name" 1 ./build/omsc run examples/exit_zero.om -o ""
 test_cli_output "build-flag" "Compilation successful!" 0 ./build/omsc --build examples/exit_zero.om -o build_flag_test
+TOTAL=$((TOTAL + 1))
 if [ ! -f build_flag_test ] || [ ! -f build_flag_test.o ]; then
     echo -e "${RED}✗ Failed (build flag did not create outputs)${NC}"
-    rm -f build_flag_test build_flag_test.o
-    exit 1
+    FAILURES=$((FAILURES + 1))
 fi
 rm -f build_flag_test build_flag_test.o
 test_cli_output "run-success" "Compilation successful!" 0 ./build/omsc run examples/exit_zero.om
@@ -147,23 +159,26 @@ test_cli_output "run" "Program exited with code 120" 120 ./build/omsc run exampl
 test_cli_output "print-output" "42" 0 ./build/omsc run examples/print_test.om
 test_cli_output "float-print" "3.5" 5 ./build/omsc run examples/float_test.om
 test_cli_output "string-var-print" "hello from variable" 0 ./build/omsc run examples/string_var_test.om
+TOTAL=$((TOTAL + 1))
 if [ -f a.out ] || [ -f a.out.o ]; then
     echo -e "${RED}✗ Failed (temporary output files not cleaned)${NC}"
     rm -f a.out a.out.o
-    exit 1
+    FAILURES=$((FAILURES + 1))
 fi
 test_cli_output "run-keep-temps-long" "Compilation successful!" 0 ./build/omsc run --keep-temps examples/exit_zero.om
 test_cli_output "run-keep-temps-short" "Compilation successful!" 0 ./build/omsc run -k examples/exit_zero.om
+TOTAL=$((TOTAL + 1))
 if [ ! -f a.out ] || [ ! -f a.out.o ]; then
     echo -e "${RED}✗ Failed (expected temporary outputs to remain)${NC}"
     rm -f a.out a.out.o
-    exit 1
+    FAILURES=$((FAILURES + 1))
 fi
 test_cli_output "clean" "Cleaned outputs" 0 ./build/omsc -C
+TOTAL=$((TOTAL + 1))
 if [ -f a.out ] || [ -f a.out.o ]; then
     echo -e "${RED}✗ Failed (clean did not remove outputs)${NC}"
     rm -f a.out a.out.o
-    exit 1
+    FAILURES=$((FAILURES + 1))
 fi
 echo ""
 
@@ -222,6 +237,7 @@ echo "============================================"
 echo ""
 
 # Test optimization levels
+TOTAL=$((TOTAL + 1))
 echo -n "Testing with O3 optimization... "
 ./build/omsc examples/benchmark.om -o benchmark_o3 > /dev/null 2>&1
 if [ $? -eq 0 ]; then
@@ -230,9 +246,16 @@ if [ $? -eq 0 ]; then
     echo -e "${GREEN}✓ O3 compilation successful${NC}"
 else
     echo -e "${RED}✗ O3 compilation failed${NC}"
+    FAILURES=$((FAILURES + 1))
 fi
 
 echo ""
 echo "============================================"
-echo "Test suite complete!"
+if [ $FAILURES -eq 0 ]; then
+    echo -e "${GREEN}All $TOTAL tests passed!${NC}"
+else
+    echo -e "${RED}$FAILURES of $TOTAL tests FAILED${NC}"
+fi
 echo "============================================"
+
+exit $FAILURES

@@ -24,7 +24,7 @@ jobs:
             libgtest-dev \
             gcc
 
-      - name: Configure CMake
+      - name: Configure CMake (Release)
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release
 
       - name: Build compiler
@@ -35,3 +35,29 @@ jobs:
 
       - name: Run integration tests
         run: bash run_tests.sh
+
+  sanitizer-check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            build-essential \
+            llvm-17-dev \
+            libgtest-dev \
+            gcc
+
+      - name: Configure CMake (Debug + ASan/UBSan)
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Debug -DSANITIZE=address,undefined
+
+      - name: Build compiler
+        run: cmake --build build --parallel $(nproc)
+
+      - name: Run unit tests (sanitized)
+        run: cd build && ctest --output-on-failure
