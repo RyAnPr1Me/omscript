@@ -644,3 +644,29 @@ TEST(VMTest, VarReassignment) {
     vm.execute(code);
     EXPECT_EQ(vm.getLastReturn().asInt(), 20);
 }
+
+// ===========================================================================
+// Jump out of bounds
+// ===========================================================================
+
+TEST(VMTest, JumpOutOfBounds) {
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_INT);
+        e.emitInt(1);
+        e.emit(OpCode::JUMP);
+        e.emitShort(0xFFFF);  // way past end
+    });
+    VM vm;
+    EXPECT_THROW(vm.execute(code), std::runtime_error);
+}
+
+TEST(VMTest, JumpIfFalseOutOfBounds) {
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_INT);
+        e.emitInt(0);  // false condition
+        e.emit(OpCode::JUMP_IF_FALSE);
+        e.emitShort(0xFFFF);  // way past end
+    });
+    VM vm;
+    EXPECT_THROW(vm.execute(code), std::runtime_error);
+}

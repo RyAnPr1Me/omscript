@@ -243,3 +243,13 @@ TEST(BytecodeTest, EmitShortMax) {
     uint16_t decoded = static_cast<uint16_t>(code[0]) | (static_cast<uint16_t>(code[1]) << 8);
     EXPECT_EQ(decoded, 0xFFFF);
 }
+
+// ===========================================================================
+// String too long
+// ===========================================================================
+
+TEST(BytecodeTest, EmitStringTooLong) {
+    BytecodeEmitter emitter;
+    std::string longStr(70000, 'a');
+    EXPECT_THROW(emitter.emitString(longStr), std::runtime_error);
+}

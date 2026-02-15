@@ -408,3 +408,77 @@ TEST(ValueTest, EmptyStringValue) {
     // Empty string should result in null data in RefCountedString
     EXPECT_STREQ(v.asString(), "");
 }
+
+// ===========================================================================
+// Additional mixed-type arithmetic
+// ===========================================================================
+
+TEST(ValueTest, SubFloatInt) {
+    Value result = Value(5.0) - Value(int64_t(3));
+    EXPECT_DOUBLE_EQ(result.asFloat(), 2.0);
+}
+
+TEST(ValueTest, DivIntFloat) {
+    Value result = Value(int64_t(10)) / Value(2.5);
+    EXPECT_DOUBLE_EQ(result.asFloat(), 4.0);
+}
+
+TEST(ValueTest, MulFloatInt) {
+    Value result = Value(2.5) * Value(int64_t(4));
+    EXPECT_DOUBLE_EQ(result.asFloat(), 10.0);
+}
+
+// ===========================================================================
+// Additional copy/move semantics
+// ===========================================================================
+
+TEST(ValueTest, MoveConstructorInt) {
+    Value orig(int64_t(42));
+    Value moved(std::move(orig));
+    EXPECT_EQ(moved.getType(), Value::Type::INTEGER);
+    EXPECT_EQ(moved.asInt(), 42);
+}
+
+TEST(ValueTest, MoveConstructorFloat) {
+    Value orig(3.14);
+    Value moved(std::move(orig));
+    EXPECT_EQ(moved.getType(), Value::Type::FLOAT);
+    EXPECT_DOUBLE_EQ(moved.asFloat(), 3.14);
+}
+
+TEST(ValueTest, MoveAssignmentInt) {
+    Value a(int64_t(42));
+    Value b;
+    b = std::move(a);
+    EXPECT_EQ(b.getType(), Value::Type::INTEGER);
+    EXPECT_EQ(b.asInt(), 42);
+}
+
+TEST(ValueTest, CopyConstructorFloat) {
+    Value orig(3.14);
+    Value copy(orig);
+    EXPECT_EQ(copy.getType(), Value::Type::FLOAT);
+    EXPECT_DOUBLE_EQ(copy.asFloat(), 3.14);
+    EXPECT_DOUBLE_EQ(orig.asFloat(), 3.14);
+}
+
+TEST(ValueTest, CopyAssignmentNone) {
+    Value a;
+    Value b(int64_t(42));
+    b = a;
+    EXPECT_EQ(b.getType(), Value::Type::NONE);
+}
+
+TEST(ValueTest, MoveAssignmentNone) {
+    Value a;
+    Value b(int64_t(42));
+    b = std::move(a);
+    EXPECT_EQ(b.getType(), Value::Type::NONE);
+}
+
+TEST(ValueTest, SelfMoveAssignment) {
+    Value v("hello");
+    v = std::move(v);
+    EXPECT_EQ(v.getType(), Value::Type::STRING);
+    EXPECT_STREQ(v.asString(), "hello");
+}
