@@ -2536,25 +2536,23 @@ void CodeGenerator::emitBytecodeStatement(Statement* stmt) {
         }
         case ASTNodeType::SWITCH_STMT: {
             auto* switchStmt = static_cast<SwitchStmt*>(stmt);
-            // Emit the condition once and store in a temporary variable.
+            // Use a unique temp variable to support nested switches.
+            static int switchCounter = 0;
+            std::string tempVar = "__switch_cond_" + std::to_string(switchCounter++) + "__";
+            // Emit the condition once and store in the temporary variable.
             emitBytecodeExpression(switchStmt->condition.get());
-            std::string tempVar = "__switch_cond__";
             bytecodeEmitter.emit(OpCode::STORE_VAR);
             bytecodeEmitter.emitString(tempVar);
             bytecodeEmitter.emit(OpCode::POP);
 
-            // For each case: load temp, push case value, compare, jump if false
-            // to next case, otherwise execute body and jump to end.
+            // Emit non-default cases first, then the default case last
+            // so that the default only executes when no case matches.
             std::vector<size_t> endPatches;
+            const SwitchCase* defaultCase = nullptr;
 
             for (auto& sc : switchStmt->cases) {
                 if (sc.isDefault) {
-                    for (auto& s : sc.body) {
-                        emitBytecodeStatement(s.get());
-                    }
-                    bytecodeEmitter.emit(OpCode::JUMP);
-                    endPatches.push_back(bytecodeEmitter.currentOffset());
-                    bytecodeEmitter.emitShort(0);
+                    defaultCase = &sc;
                 } else {
                     bytecodeEmitter.emit(OpCode::LOAD_VAR);
                     bytecodeEmitter.emitString(tempVar);
@@ -2572,6 +2570,13 @@ void CodeGenerator::emitBytecodeStatement(Statement* stmt) {
                     bytecodeEmitter.emitShort(0);
 
                     bytecodeEmitter.patchJump(skipPatch, static_cast<uint16_t>(bytecodeEmitter.currentOffset()));
+                }
+            }
+
+            // Emit the default case body last (only reached if no case matched).
+            if (defaultCase) {
+                for (auto& s : defaultCase->body) {
+                    emitBytecodeStatement(s.get());
                 }
             }
 
