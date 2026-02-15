@@ -435,3 +435,91 @@ TEST(ParserTest, OptmaxEndWithoutStart) {
 TEST(ParserTest, UnterminatedOptmax) {
     EXPECT_THROW(parse("OPTMAX=: fn foo(x: int) { return x; }"), std::runtime_error);
 }
+
+// ---------------------------------------------------------------------------
+// OPTMAX parameter / variable type annotation errors
+// ---------------------------------------------------------------------------
+
+TEST(ParserTest, OptmaxParamMissingType) {
+    EXPECT_THROW(parse("OPTMAX=: fn foo(x) { return x; } OPTMAX!:"), std::runtime_error);
+}
+
+TEST(ParserTest, OptmaxVarMissingType) {
+    EXPECT_THROW(parse("OPTMAX=: fn foo(x: int) { var y = 5; } OPTMAX!:"), std::runtime_error);
+}
+
+// ---------------------------------------------------------------------------
+// For loop iterator with type annotation
+// ---------------------------------------------------------------------------
+
+TEST(ParserTest, ForLoopIteratorTypeAnnotation) {
+    auto program = parse("fn main() { for (i: int in 0...10) { continue; } }");
+    auto* forStmt = dynamic_cast<ForStmt*>(program->functions[0]->body->statements[0].get());
+    ASSERT_NE(forStmt, nullptr);
+    EXPECT_EQ(forStmt->iteratorVar, "i");
+    EXPECT_EQ(forStmt->iteratorType, "int");
+}
+
+TEST(ParserTest, OptmaxForLoopVarMissingType) {
+    EXPECT_THROW(parse("OPTMAX=: fn foo(x: int) { for (i in 0...10) { } } OPTMAX!:"), std::runtime_error);
+}
+
+// ---------------------------------------------------------------------------
+// Invalid assignment target
+// ---------------------------------------------------------------------------
+
+TEST(ParserTest, InvalidAssignmentTarget) {
+    EXPECT_THROW(parse("fn main() { 1 = 5; }"), std::runtime_error);
+}
+
+// ---------------------------------------------------------------------------
+// Slash-assign and percent-assign compound operators
+// ---------------------------------------------------------------------------
+
+TEST(ParserTest, SlashAssign) {
+    auto program = parse("fn main() { var x = 10; x /= 2; }");
+    auto* stmt = dynamic_cast<ExprStmt*>(program->functions[0]->body->statements[1].get());
+    ASSERT_NE(stmt, nullptr);
+    auto* assign = dynamic_cast<AssignExpr*>(stmt->expression.get());
+    ASSERT_NE(assign, nullptr);
+    EXPECT_EQ(assign->name, "x");
+    auto* bin = dynamic_cast<BinaryExpr*>(assign->value.get());
+    ASSERT_NE(bin, nullptr);
+    EXPECT_EQ(bin->op, "/");
+}
+
+TEST(ParserTest, PercentAssign) {
+    auto program = parse("fn main() { var x = 10; x %= 3; }");
+    auto* stmt = dynamic_cast<ExprStmt*>(program->functions[0]->body->statements[1].get());
+    ASSERT_NE(stmt, nullptr);
+    auto* assign = dynamic_cast<AssignExpr*>(stmt->expression.get());
+    ASSERT_NE(assign, nullptr);
+    EXPECT_EQ(assign->name, "x");
+    auto* bin = dynamic_cast<BinaryExpr*>(assign->value.get());
+    ASSERT_NE(bin, nullptr);
+    EXPECT_EQ(bin->op, "%");
+}
+
+// ---------------------------------------------------------------------------
+// Invalid compound assignment target
+// ---------------------------------------------------------------------------
+
+TEST(ParserTest, InvalidCompoundAssignmentTarget) {
+    EXPECT_THROW(parse("fn main() { 1 += 5; }"), std::runtime_error);
+}
+
+// ---------------------------------------------------------------------------
+// Invalid function call (non-identifier callee)
+// ---------------------------------------------------------------------------
+
+TEST(ParserTest, InvalidFunctionCall) {
+    EXPECT_THROW(parse("fn main() { (1+2)(3); }"), std::runtime_error);
+}
+
+// ---------------------------------------------------------------------------
+// Expected expression error
+// ---------------------------------------------------------------------------
+
+TEST(ParserTest, ExpectedExpressionError) {
+    EXPECT_THROW(parse("fn main() { var x = ; }"), std::runtime_error);
+}
