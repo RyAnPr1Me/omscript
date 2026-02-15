@@ -115,13 +115,14 @@ private:
     void optimizeFunction(llvm::Function* func);
     void optimizeOptMaxFunctions();
     
-    // Bytecode generation methods (alternative backend)
-    void generateBytecode(Program* program);
     void emitBytecodeExpression(Expression* expr);
     void emitBytecodeStatement(Statement* stmt);
     void emitBytecodeBlock(BlockStmt* stmt);
     
 public:
+    // Bytecode generation (alternative backend)
+    void generateBytecode(Program* program);
+
     // Accessors for bytecode output
     const BytecodeEmitter& getBytecodeEmitter() const { return bytecodeEmitter; }
     bool isDynamicCompilation() const { return useDynamicCompilation; }
