@@ -1481,3 +1481,280 @@ TEST(CodegenTest, BytecodeBlock) {
     codegen.generateBytecode(program.get());
     EXPECT_GT(codegen.getBytecodeEmitter().getCode().size(), 0u);
 }
+
+// ===========================================================================
+// Float-specific stdlib calls
+// ===========================================================================
+
+TEST(CodegenTest, PrintFloatArg) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var x = 3.14; print(x); return 0; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, AbsFloatArg) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var x = -3.14; var y = abs(x); return 0; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, MinFloatArgs) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var a = 1.5; var b = 2.5; var c = min(a, b); return 0; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, MaxFloatArgs) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var a = 1.5; var b = 2.5; var c = max(a, b); return 0; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, SignFloatArg) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var x = -3.14; var y = sign(x); return 0; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, ClampFloatArgs) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var x = 15.0; var y = clamp(x, 0.0, 10.0); return 0; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, PrintCharFloatArg) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var x = 65.0; print_char(x); return 0; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+// ===========================================================================
+// Input function wrong args
+// ===========================================================================
+
+TEST(CodegenTest, InputWrongArgs) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    EXPECT_THROW(generateIR("fn main() { var x = input(1); return 0; }", codegen), std::runtime_error);
+}
+
+// ===========================================================================
+// OPTMAX calling non-stdlib function
+// ===========================================================================
+
+TEST(CodegenTest, OptmaxCallNonStdlibError) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    EXPECT_THROW(generateIR(
+        "fn helper() { return 1; }"
+        "OPTMAX=: fn opt(x: int) { return helper(); } OPTMAX!:"
+        "fn main() { return opt(1); }",
+        codegen), std::runtime_error);
+}
+
+// ===========================================================================
+// User function wrong argument count
+// ===========================================================================
+
+TEST(CodegenTest, WrongArgCountUserFunction) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    EXPECT_THROW(generateIR("fn add(a, b) { return a + b; } fn main() { return add(1); }", codegen), std::runtime_error);
+}
+
+// ===========================================================================
+// Ternary with float branches
+// ===========================================================================
+
+TEST(CodegenTest, TernaryFloatBranches) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var x = 1 ? 1.5 : 2.5; return 0; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, TernaryMixedTypes) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var x = 1 ? 1.5 : 2; return 0; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+// ===========================================================================
+// Unary NOT on value
+// ===========================================================================
+
+TEST(CodegenTest, UnaryNotOnVar) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var x = 0; return !x; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+// ===========================================================================
+// Unary tilde on var
+// ===========================================================================
+
+TEST(CodegenTest, UnaryTildeOnVar) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var x = 5; return ~x; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+// ===========================================================================
+// Bitwise operators on variables
+// ===========================================================================
+
+TEST(CodegenTest, BitwiseAndOnVars) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var a = 5; var b = 3; return a & b; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, BitwiseOrOnVars) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var a = 5; var b = 3; return a | b; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, BitwiseXorOnVars) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var a = 5; var b = 3; return a ^ b; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, ShiftOnVars) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var a = 1; var b = 4; return a << b; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, ArithShiftRight) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var a = 16; var b = 2; return a >> b; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+// ===========================================================================
+// OPTMAX with float logical ops and for step
+// ===========================================================================
+
+TEST(CodegenTest, OptmaxFloatLogicalOps) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "OPTMAX=: fn opt(x: int) {"
+        "  var a: int = 1.0 && 2.0;"
+        "  var b: int = 0.0 || 3.0;"
+        "  return 0;"
+        "} OPTMAX!: fn main() { return opt(1); }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, OptmaxForLoopWithStepOpt) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "OPTMAX=: fn opt(x: int) {"
+        "  var s: int = 0;"
+        "  for (i: int in 0...10...2) { s = s + i; }"
+        "  return s;"
+        "} OPTMAX!: fn main() { return opt(1); }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+// ===========================================================================
+// Return void
+// ===========================================================================
+
+TEST(CodegenTest, ReturnVoid) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn foo() { return; } fn main() { foo(); return 0; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+// ===========================================================================
+// Multiple if branches with merging
+// ===========================================================================
+
+TEST(CodegenTest, IfElseMerging) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() { var x = 0; if (1) { x = 1; } else { x = 2; } return x; }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+// ===========================================================================
+// Float postfix/prefix
+// ===========================================================================
+
+TEST(CodegenTest, FloatPostfixIncrement) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var x = 1.5; x++; return 0; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, FloatPrefixDecrement) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var x = 3.14; --x; return 0; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+// ===========================================================================
+// Bytecode for-loop variable load/store
+// ===========================================================================
+
+TEST(CodegenTest, BytecodeForLoopVariableOps) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    Lexer lexer("fn main() { var total = 0; for (i in 0...5) { total = total + i; } return total; }");
+    auto tokens = lexer.tokenize();
+    Parser parser(tokens);
+    auto program = parser.parse();
+    codegen.generateBytecode(program.get());
+    EXPECT_GT(codegen.getBytecodeEmitter().getCode().size(), 0u);
+}
+
+// ===========================================================================
+// Bytecode break/continue in while loops
+// ===========================================================================
+
+TEST(CodegenTest, BytecodeWhileBreak) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    Lexer lexer("fn main() { var x = 0; while (x < 100) { x = x + 1; if (x == 10) { break; } } return x; }");
+    auto tokens = lexer.tokenize();
+    Parser parser(tokens);
+    auto program = parser.parse();
+    EXPECT_THROW(codegen.generateBytecode(program.get()), std::runtime_error);
+}
+
+TEST(CodegenTest, BytecodeWhileContinue) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    Lexer lexer("fn main() { var s = 0; var x = 0; while (x < 10) { x = x + 1; if (x == 5) { continue; } s = s + x; } return s; }");
+    auto tokens = lexer.tokenize();
+    Parser parser(tokens);
+    auto program = parser.parse();
+    EXPECT_THROW(codegen.generateBytecode(program.get()), std::runtime_error);
+}
+
+// ===========================================================================
+// Bytecode expression statement
+// ===========================================================================
+
+TEST(CodegenTest, BytecodeExpressionStatement) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    Lexer lexer("fn main() { 1 + 2; return 0; }");
+    auto tokens = lexer.tokenize();
+    Parser parser(tokens);
+    auto program = parser.parse();
+    codegen.generateBytecode(program.get());
+    EXPECT_GT(codegen.getBytecodeEmitter().getCode().size(), 0u);
+}
+
+// ===========================================================================
+// Bytecode identifier load
+// ===========================================================================
+
+TEST(CodegenTest, BytecodeIdentifier) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    Lexer lexer("fn main() { var x = 10; var y = x + 1; return y; }");
+    auto tokens = lexer.tokenize();
+    Parser parser(tokens);
+    auto program = parser.parse();
+    codegen.generateBytecode(program.get());
+    EXPECT_GT(codegen.getBytecodeEmitter().getCode().size(), 0u);
+}
