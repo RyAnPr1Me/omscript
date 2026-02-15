@@ -523,3 +523,21 @@ TEST(ParserTest, InvalidFunctionCall) {
 TEST(ParserTest, ExpectedExpressionError) {
     EXPECT_THROW(parse("fn main() { var x = ; }"), std::runtime_error);
 }
+
+// ---------------------------------------------------------------------------
+// Switch statement parsing
+// ---------------------------------------------------------------------------
+
+TEST(ParserTest, SwitchStatement) {
+    auto program = parse("fn main() { switch (x) { case 1: return 10; case 2: return 20; default: return 0; } }");
+    EXPECT_EQ(program->functions.size(), 1u);
+}
+
+TEST(ParserTest, SwitchNoCases) {
+    auto program = parse("fn main() { switch (x) { } }");
+    EXPECT_EQ(program->functions.size(), 1u);
+}
+
+TEST(ParserTest, SwitchDuplicateDefault) {
+    EXPECT_THROW(parse("fn main() { switch (x) { default: return 1; default: return 2; } }"), std::runtime_error);
+}

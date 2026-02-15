@@ -401,3 +401,16 @@ TEST(LexerTest, SingleDot) {
     EXPECT_EQ(tokens[0].type, TokenType::DOT);
     EXPECT_EQ(tokens[1].type, TokenType::END_OF_FILE);
 }
+
+// ---------------------------------------------------------------------------
+// Switch/case/default keywords
+// ---------------------------------------------------------------------------
+
+TEST(LexerTest, SwitchKeywords) {
+    auto tokens = lex("switch case default");
+    ASSERT_GE(tokens.size(), 4u);
+    EXPECT_EQ(tokens[0].type, TokenType::SWITCH);
+    EXPECT_EQ(tokens[1].type, TokenType::CASE);
+    EXPECT_EQ(tokens[2].type, TokenType::DEFAULT);
+    EXPECT_EQ(tokens[3].type, TokenType::END_OF_FILE);
+}

@@ -127,6 +127,7 @@ std::unique_ptr<Statement> Parser::parseStatement() {
     if (match(TokenType::RETURN)) return parseReturnStmt();
     if (match(TokenType::BREAK)) return parseBreakStmt();
     if (match(TokenType::CONTINUE)) return parseContinueStmt();
+    if (match(TokenType::SWITCH)) return parseSwitchStmt();
     if (match(TokenType::VAR)) {
         return parseVarDecl(false);
     }
@@ -243,6 +244,48 @@ std::unique_ptr<Statement> Parser::parseBreakStmt() {
 std::unique_ptr<Statement> Parser::parseContinueStmt() {
     consume(TokenType::SEMICOLON, "Expected ';' after 'continue'");
     return std::make_unique<ContinueStmt>();
+}
+
+std::unique_ptr<Statement> Parser::parseSwitchStmt() {
+    consume(TokenType::LPAREN, "Expected '(' after 'switch'");
+    auto condition = parseExpression();
+    consume(TokenType::RPAREN, "Expected ')' after switch condition");
+    consume(TokenType::LBRACE, "Expected '{' after switch condition");
+    
+    std::vector<SwitchCase> cases;
+    bool hasDefault = false;
+    
+    while (!check(TokenType::RBRACE) && !isAtEnd()) {
+        if (match(TokenType::CASE)) {
+            auto value = parseExpression();
+            consume(TokenType::COLON, "Expected ':' after case value");
+            
+            std::vector<std::unique_ptr<Statement>> body;
+            while (!check(TokenType::CASE) && !check(TokenType::DEFAULT) &&
+                   !check(TokenType::RBRACE) && !isAtEnd()) {
+                body.push_back(parseStatement());
+            }
+            cases.emplace_back(std::move(value), std::move(body), false);
+        } else if (match(TokenType::DEFAULT)) {
+            if (hasDefault) {
+                error("Duplicate default case in switch statement");
+            }
+            hasDefault = true;
+            consume(TokenType::COLON, "Expected ':' after 'default'");
+            
+            std::vector<std::unique_ptr<Statement>> body;
+            while (!check(TokenType::CASE) && !check(TokenType::DEFAULT) &&
+                   !check(TokenType::RBRACE) && !isAtEnd()) {
+                body.push_back(parseStatement());
+            }
+            cases.emplace_back(nullptr, std::move(body), true);
+        } else {
+            error("Expected 'case' or 'default' in switch statement");
+        }
+    }
+    
+    consume(TokenType::RBRACE, "Expected '}' after switch body");
+    return std::make_unique<SwitchStmt>(std::move(condition), std::move(cases));
 }
 
 std::unique_ptr<Statement> Parser::parseReturnStmt() {

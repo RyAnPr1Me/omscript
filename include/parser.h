@@ -37,6 +37,7 @@ private:
     std::unique_ptr<Statement> parseReturnStmt();
     std::unique_ptr<Statement> parseBreakStmt();
     std::unique_ptr<Statement> parseContinueStmt();
+    std::unique_ptr<Statement> parseSwitchStmt();
     std::unique_ptr<Statement> parseExprStmt();
     
     std::unique_ptr<Expression> parseExpression();

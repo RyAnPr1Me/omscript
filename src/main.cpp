@@ -73,6 +73,9 @@ const char* tokenTypeToString(omscript::TokenType type) {
         case omscript::TokenType::IN: return "IN";
         case omscript::TokenType::OPTMAX_START: return "OPTMAX_START";
         case omscript::TokenType::OPTMAX_END: return "OPTMAX_END";
+        case omscript::TokenType::SWITCH: return "SWITCH";
+        case omscript::TokenType::CASE: return "CASE";
+        case omscript::TokenType::DEFAULT: return "DEFAULT";
         case omscript::TokenType::PLUS: return "PLUS";
         case omscript::TokenType::MINUS: return "MINUS";
         case omscript::TokenType::STAR: return "STAR";

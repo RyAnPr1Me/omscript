@@ -1948,3 +1948,74 @@ TEST(CodegenTest, OptimizationPassesO0) {
     ASSERT_NE(mainFn, nullptr);
     EXPECT_FALSE(mainFn->empty());
 }
+
+// ===========================================================================
+// Switch statement codegen
+// ===========================================================================
+
+TEST(CodegenTest, SwitchBasic) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn classify(x) {"
+        "  switch (x) {"
+        "    case 1: return 10;"
+        "    case 2: return 20;"
+        "    default: return 0;"
+        "  }"
+        "}"
+        "fn main() { return classify(2); }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    llvm::Function* fn = mod->getFunction("classify");
+    ASSERT_NE(fn, nullptr);
+    EXPECT_FALSE(fn->empty());
+}
+
+TEST(CodegenTest, SwitchNoDefault) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() {"
+        "  var x = 5;"
+        "  switch (x) {"
+        "    case 1: return 10;"
+        "    case 2: return 20;"
+        "  }"
+        "  return 0;"
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+// ===========================================================================
+// typeof and assert codegen
+// ===========================================================================
+
+TEST(CodegenTest, TypeofCodegen) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() { var t = typeof(42); return t; }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, AssertCodegen) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() { assert(1); return 0; }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, AssertWrongArgCount) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    EXPECT_THROW(
+        generateIR("fn main() { assert(1, 2); return 0; }", codegen),
+        std::runtime_error);
+}
+
+TEST(CodegenTest, TypeofWrongArgCount) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    EXPECT_THROW(
+        generateIR("fn main() { typeof(); return 0; }", codegen),
+        std::runtime_error);
+}

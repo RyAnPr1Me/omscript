@@ -204,6 +204,8 @@ test_program "examples/optmax_div_zero.om" 1
 test_program "examples/forward_ref_test.om" 24
 test_program "examples/stdlib_float_test.om" 29
 test_program "examples/float_edge_cases.om" 14
+test_program "examples/switch_test.om" 60
+test_program "examples/typeof_assert_test.om" 1
 test_compile_fail "examples/const_fail.om"
 test_compile_fail "examples/break_outside_loop.om"
 test_compile_fail "examples/continue_outside_loop.om"

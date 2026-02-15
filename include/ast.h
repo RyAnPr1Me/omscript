@@ -20,6 +20,7 @@ enum class ASTNodeType {
     FOR_STMT,
     BREAK_STMT,
     CONTINUE_STMT,
+    SWITCH_STMT,
     EXPR_STMT,
     BINARY_EXPR,
     UNARY_EXPR,
@@ -245,6 +246,25 @@ public:
 class ContinueStmt : public Statement {
 public:
     ContinueStmt() : Statement(ASTNodeType::CONTINUE_STMT) {}
+};
+
+// A single case arm in a switch statement.
+struct SwitchCase {
+    std::unique_ptr<Expression> value;  // nullptr for default case
+    std::vector<std::unique_ptr<Statement>> body;
+    bool isDefault;
+    
+    SwitchCase(std::unique_ptr<Expression> v, std::vector<std::unique_ptr<Statement>> b, bool def = false)
+        : value(std::move(v)), body(std::move(b)), isDefault(def) {}
+};
+
+class SwitchStmt : public Statement {
+public:
+    std::unique_ptr<Expression> condition;
+    std::vector<SwitchCase> cases;
+    
+    SwitchStmt(std::unique_ptr<Expression> cond, std::vector<SwitchCase> c)
+        : Statement(ASTNodeType::SWITCH_STMT), condition(std::move(cond)), cases(std::move(c)) {}
 };
 
 class BlockStmt : public Statement {

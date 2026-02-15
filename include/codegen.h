@@ -93,6 +93,7 @@ private:
     void generateFor(ForStmt* stmt);
     void generateBlock(BlockStmt* stmt);
     void generateExprStmt(ExprStmt* stmt);
+    void generateSwitch(SwitchStmt* stmt);
     
     // Helper methods
     llvm::Type* getDefaultType();

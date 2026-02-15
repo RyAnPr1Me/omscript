@@ -28,6 +28,9 @@ enum class TokenType {
     IN,
     OPTMAX_START,
     OPTMAX_END,
+    SWITCH,
+    CASE,
+    DEFAULT,
     
     // Operators
     PLUS,

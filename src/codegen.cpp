@@ -300,7 +300,8 @@ namespace omscript {
 static const std::unordered_set<std::string> stdlibFunctions = {
     "print", "abs", "len", "min", "max", "sign", "clamp", "pow",
     "print_char", "input", "sqrt", "is_even", "is_odd", "sum",
-    "swap", "reverse", "to_char", "is_alpha", "is_digit"
+    "swap", "reverse", "to_char", "is_alpha", "is_digit",
+    "typeof", "assert"
 };
 
 bool isStdlibFunction(const std::string& name) {
@@ -604,6 +605,9 @@ void CodeGenerator::generateStatement(Statement* stmt) {
             break;
         case ASTNodeType::EXPR_STMT:
             generateExprStmt(static_cast<ExprStmt*>(stmt));
+            break;
+        case ASTNodeType::SWITCH_STMT:
+            generateSwitch(static_cast<SwitchStmt*>(stmt));
             break;
         default:
             throw std::runtime_error("Unknown statement type");
@@ -1396,6 +1400,49 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         return builder->CreateZExt(isDigit, getDefaultType(), "digitval");
     }
 
+    // typeof(x) returns 1 for integer, 2 for float, 3 for string, 0 for none.
+    // In the current LLVM compilation path, all values are represented as i64,
+    // so typeof() always returns 1 (integer).  In the bytecode VM path the
+    // runtime Value type would be inspected instead.
+    if (expr->callee == "typeof") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'typeof' expects 1 argument, but " +
+                         std::to_string(expr->arguments.size()) + " provided", expr);
+        }
+        // Evaluate the argument for its side effects, then return type tag.
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        (void)arg;
+        // In the LLVM native path all values are i64, so type is always 1 (integer).
+        return llvm::ConstantInt::get(getDefaultType(), 1);
+    }
+
+    // assert(condition) — aborts with an error if the condition is falsy.
+    if (expr->callee == "assert") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'assert' expects 1 argument, but " +
+                         std::to_string(expr->arguments.size()) + " provided", expr);
+        }
+        llvm::Value* condVal = generateExpression(expr->arguments[0].get());
+        condVal = toBool(condVal);
+
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "assert.fail", function);
+        llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "assert.ok", function);
+
+        builder->CreateCondBr(condVal, okBB, failBB);
+
+        builder->SetInsertPoint(failBB);
+        llvm::Value* errMsg = builder->CreateGlobalString(
+            "Runtime error: assertion failed\n", "assert_msg");
+        builder->CreateCall(getPrintfFunction(), {errMsg});
+        llvm::Function* trapFn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::trap);
+        builder->CreateCall(trapFn, {});
+        builder->CreateUnreachable();
+
+        builder->SetInsertPoint(okBB);
+        return llvm::ConstantInt::get(getDefaultType(), 1);
+    }
+
     if (inOptMaxFunction) {
         // Stdlib functions are always native machine code, so they're safe to call from OPTMAX
         if (!isStdlibFunction(expr->callee) &&
@@ -1890,6 +1937,64 @@ void CodeGenerator::generateBlock(BlockStmt* stmt) {
 
 void CodeGenerator::generateExprStmt(ExprStmt* stmt) {
     generateExpression(stmt->expression.get());
+}
+
+void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
+    llvm::Value* condVal = generateExpression(stmt->condition.get());
+    condVal = toDefaultType(condVal);
+    
+    llvm::Function* function = builder->GetInsertBlock()->getParent();
+    llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "switch.end", function);
+    llvm::BasicBlock* defaultBB = mergeBB;  // fall through to merge if no default
+    
+    // Find the default case block first so the switch instruction can reference it.
+    for (auto& sc : stmt->cases) {
+        if (sc.isDefault) {
+            defaultBB = llvm::BasicBlock::Create(*context, "switch.default", function, mergeBB);
+            break;
+        }
+    }
+    
+    llvm::SwitchInst* switchInst = builder->CreateSwitch(condVal, defaultBB, static_cast<unsigned>(stmt->cases.size()));
+    
+    for (auto& sc : stmt->cases) {
+        if (sc.isDefault) {
+            // Generate default block body.
+            builder->SetInsertPoint(defaultBB);
+            beginScope();
+            for (auto& s : sc.body) {
+                generateStatement(s.get());
+                if (builder->GetInsertBlock()->getTerminator()) break;
+            }
+            endScope();
+            if (!builder->GetInsertBlock()->getTerminator()) {
+                builder->CreateBr(mergeBB);
+            }
+        } else {
+            llvm::Value* caseVal = generateExpression(sc.value.get());
+            caseVal = toDefaultType(caseVal);
+            auto* caseConst = llvm::dyn_cast<llvm::ConstantInt>(caseVal);
+            if (!caseConst) {
+                throw std::runtime_error("case value must be a compile-time constant");
+            }
+            
+            llvm::BasicBlock* caseBB = llvm::BasicBlock::Create(*context, "switch.case", function, mergeBB);
+            switchInst->addCase(caseConst, caseBB);
+            
+            builder->SetInsertPoint(caseBB);
+            beginScope();
+            for (auto& s : sc.body) {
+                generateStatement(s.get());
+                if (builder->GetInsertBlock()->getTerminator()) break;
+            }
+            endScope();
+            if (!builder->GetInsertBlock()->getTerminator()) {
+                builder->CreateBr(mergeBB);
+            }
+        }
+    }
+    
+    builder->SetInsertPoint(mergeBB);
 }
 
 void CodeGenerator::runOptimizationPasses() {
