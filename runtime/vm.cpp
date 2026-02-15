@@ -97,6 +97,10 @@ Value VM::getGlobal(const std::string& name) {
     throw std::runtime_error("Undefined variable: " + name);
 }
 
+void VM::registerFunction(const BytecodeFunction& func) {
+    functions[func.name] = func;
+}
+
 void VM::execute(const std::vector<uint8_t>& bytecode) {
     size_t ip = 0;
     stack.clear();
@@ -245,6 +249,25 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
                 break;
             }
             
+            case OpCode::LOAD_LOCAL: {
+                uint8_t index = readByte(bytecode, ip);
+                if (index >= locals.size()) {
+                    throw std::runtime_error("Local variable index out of range: " +
+                        std::to_string(index));
+                }
+                push(locals[index]);
+                break;
+            }
+            
+            case OpCode::STORE_LOCAL: {
+                uint8_t index = readByte(bytecode, ip);
+                if (index >= locals.size()) {
+                    locals.resize(static_cast<size_t>(index) + 1);
+                }
+                locals[index] = peek(0);
+                break;
+            }
+            
             case OpCode::JUMP: {
                 // Jump offsets are absolute bytecode positions.
                 uint16_t offset = readShort(bytecode, ip);
@@ -287,15 +310,48 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
             case OpCode::CALL: {
                 std::string funcName = readString(bytecode, ip);
                 uint8_t argCount = readByte(bytecode, ip);
-                // Store arguments from the stack for the callee.
-                // For now, CALL is a placeholder that pops the arguments and
-                // pushes a default return value of 0.  Full function dispatch
-                // requires a call-frame stack which is not yet implemented.
-                (void)funcName; // Will be used for function lookup once call frames are added
-                for (uint8_t i = 0; i < argCount; i++) {
-                    pop();
+
+                auto it = functions.find(funcName);
+                if (it == functions.end()) {
+                    throw std::runtime_error("Undefined function: " + funcName);
                 }
-                push(Value(static_cast<int64_t>(0)));
+                const BytecodeFunction& func = it->second;
+                if (argCount != func.arity) {
+                    throw std::runtime_error("Function '" + funcName + "' expects " +
+                        std::to_string(func.arity) + " arguments but got " +
+                        std::to_string(argCount));
+                }
+
+                // Save the current call frame so we can resume after the
+                // callee returns.
+                CallFrame frame;
+                frame.function = &func;
+                frame.returnIp = ip;
+                frame.returnBytecode = &bytecode;
+                frame.savedLocals = locals;
+                callStack.push_back(std::move(frame));
+
+                // Bind arguments as local variables.  Arguments are pushed
+                // left-to-right so the first argument is deepest on the stack.
+                locals.clear();
+                locals.resize(argCount);
+                for (int i = argCount - 1; i >= 0; i--) {
+                    locals[static_cast<size_t>(i)] = pop();
+                }
+
+                // Execute the callee's bytecode inline using a recursive call
+                // to execute().  RETURN inside the callee will cause that
+                // execute() to return, at which point we restore state.
+                execute(func.bytecode);
+
+                // Restore caller state from the call frame.
+                CallFrame& top = callStack.back();
+                locals = std::move(top.savedLocals);
+                callStack.pop_back();
+
+                // The callee's return value is in lastReturn.  Push it onto
+                // the caller's stack so the caller can use it.
+                push(lastReturn);
                 break;
             }
             
