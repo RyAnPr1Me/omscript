@@ -1972,7 +1972,8 @@ void CodeGenerator::runOptimizationPasses() {
             break;
             
         case OptimizationLevel::O0:
-            // No optimization passes needed at O0
+            // No optimization passes needed at O0; return early to skip
+            // fpm.doInitialization()/doFinalization() and mpm.run() below.
             return;
     }
     
