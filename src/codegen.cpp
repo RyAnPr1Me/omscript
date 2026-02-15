@@ -1970,6 +1970,10 @@ void CodeGenerator::runOptimizationPasses() {
             fpm.add(llvm::createCFGSimplificationPass());
             fpm.add(llvm::createDeadCodeEliminationPass());
             break;
+            
+        case OptimizationLevel::O0:
+            // No optimization passes needed at O0
+            return;
     }
     
     // Run function passes on all functions
@@ -1983,6 +1987,23 @@ void CodeGenerator::runOptimizationPasses() {
     
     // Run module passes  
     mpm.run(*module);
+}
+
+void CodeGenerator::optimizeFunction(llvm::Function* func) {
+    // Per-function optimization for targeted optimization of individual functions.
+    // This allows selectively optimizing specific functions (e.g., hot functions
+    // identified at compile time, or OPTMAX-annotated functions) without running
+    // the full module-wide optimization pipeline.
+    llvm::legacy::FunctionPassManager fpm(module.get());
+    
+    fpm.add(llvm::createPromoteMemoryToRegisterPass());
+    fpm.add(llvm::createInstructionCombiningPass());
+    fpm.add(llvm::createReassociatePass());
+    fpm.add(llvm::createCFGSimplificationPass());
+    
+    fpm.doInitialization();
+    fpm.run(*func);
+    fpm.doFinalization();
 }
 
 

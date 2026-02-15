@@ -670,3 +670,29 @@ TEST(VMTest, JumpIfFalseOutOfBounds) {
     VM vm;
     EXPECT_THROW(vm.execute(code), std::runtime_error);
 }
+
+// ===========================================================================
+// STORE_VAR uses peek (value stays on stack after store)
+// ===========================================================================
+
+TEST(VMTest, StoreVarLeavesValueOnStack) {
+    // STORE_VAR uses peek() to read the value without popping.
+    // The value should remain on the stack after the store, allowing
+    // it to be used as the result of an assignment expression.
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_INT);
+        e.emitInt(99);
+        e.emit(OpCode::STORE_VAR);
+        e.emitString("x");
+        // The value 99 should still be on the stack (peek semantics)
+        // Pop the leftover value via another store or a pop
+        e.emit(OpCode::POP);
+        // Now load the stored variable and return it
+        e.emit(OpCode::LOAD_VAR);
+        e.emitString("x");
+        e.emit(OpCode::RETURN);
+    });
+    VM vm;
+    vm.execute(code);
+    EXPECT_EQ(vm.getLastReturn().asInt(), 99);
+}

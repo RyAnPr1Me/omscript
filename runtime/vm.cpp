@@ -24,6 +24,15 @@ Value VM::pop() {
     return value;
 }
 
+Value VM::peek(int offset) {
+    if (offset < 0) {
+        throw std::runtime_error("Invalid stack offset");
+    }
+    if (stack.size() <= static_cast<size_t>(offset)) {
+        throw std::runtime_error("Stack underflow");
+    }
+    return stack[stack.size() - 1 - offset];
+}
 
 void VM::ensureReadable(const std::vector<uint8_t>& code, size_t ip, size_t count) {
     if (ip + count > code.size()) {
@@ -230,10 +239,9 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
             
             case OpCode::STORE_VAR: {
                 std::string name = readString(bytecode, ip);
-                // STORE_VAR now pops then pushes to avoid stack growth while preserving assignment semantics.
-                Value value = pop();
+                // Use peek to read the value without popping, preserving assignment semantics.
+                Value value = peek(0);
                 setGlobal(name, value);
-                push(value);
                 break;
             }
             

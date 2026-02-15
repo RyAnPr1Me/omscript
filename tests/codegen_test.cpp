@@ -1914,3 +1914,37 @@ TEST(CodegenTest, OptmaxIndexExpr) {
         codegen);
     ASSERT_NE(mod, nullptr);
 }
+
+// ===========================================================================
+// optimizeFunction: per-function optimization
+// ===========================================================================
+
+TEST(CodegenTest, OptimizeFunctionPerFunction) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn add(a, b) { return a + b; } fn main() { return add(1, 2); }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    // Find the 'add' function and run per-function optimization on it
+    llvm::Function* addFn = mod->getFunction("add");
+    ASSERT_NE(addFn, nullptr);
+    codegen.optimizeFunction(addFn);
+    // The function should still be valid after optimization
+    EXPECT_FALSE(addFn->empty());
+}
+
+// ===========================================================================
+// O0 level: no optimizations applied
+// ===========================================================================
+
+TEST(CodegenTest, OptimizationPassesO0) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() { var x = 10; var y = x + 5; return y; }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    // Module should be valid even with O0 (no optimizations)
+    llvm::Function* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    EXPECT_FALSE(mainFn->empty());
+}

@@ -112,7 +112,6 @@ private:
     
     // Optimization methods
     void runOptimizationPasses();
-
     void optimizeOptMaxFunctions();
     
     void emitBytecodeExpression(Expression* expr);
@@ -120,6 +119,9 @@ private:
     void emitBytecodeBlock(BlockStmt* stmt);
     
 public:
+    // Per-function optimization for targeted optimization of individual functions
+    void optimizeFunction(llvm::Function* func);
+    
     // Bytecode generation (alternative backend)
     void generateBytecode(Program* program);
 
