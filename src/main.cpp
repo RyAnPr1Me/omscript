@@ -15,7 +15,7 @@
 
 namespace {
 
-constexpr const char* kCompilerVersion = "OmScript Compiler v1.0";
+constexpr const char* kCompilerVersion = "OmScript Compiler v0.3.1";
 
 void printUsage(const char* progName) {
     std::cout << kCompilerVersion << "\n";

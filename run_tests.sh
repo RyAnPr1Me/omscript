@@ -113,7 +113,7 @@ test_cli_output() {
 echo "Running CLI tests:"
 echo "--------------------------------------------"
 test_cli_output "help" "Usage:" 0 ./build/omsc --help
-test_cli_output "version" "OmScript Compiler v1.0" 0 ./build/omsc version
+test_cli_output "version" "OmScript Compiler v0.3.1" 0 ./build/omsc version
 test_cli_output "lex" "FN" 0 ./build/omsc lex examples/test.om
 test_cli_output "lex-flag" "FN" 0 ./build/omsc --lex examples/test.om
 test_cli_output "lex-compound-ops" "PLUS_ASSIGN" 0 ./build/omsc lex examples/compound_assign.om
