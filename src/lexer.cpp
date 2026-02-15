@@ -112,9 +112,21 @@ Token Lexer::scanNumber() {
     
     Token token = makeToken(isFloat ? TokenType::FLOAT : TokenType::INTEGER, num);
     if (isFloat) {
-        token.floatValue = std::stod(num);
+        try {
+            token.floatValue = std::stod(num);
+        } catch (const std::out_of_range&) {
+            throw std::runtime_error("Float literal out of range at line " +
+                                     std::to_string(token.line) + ", column " +
+                                     std::to_string(token.column) + ": " + num);
+        }
     } else {
-        token.intValue = std::stoll(num);
+        try {
+            token.intValue = std::stoll(num);
+        } catch (const std::out_of_range&) {
+            throw std::runtime_error("Integer literal out of range at line " +
+                                     std::to_string(token.line) + ", column " +
+                                     std::to_string(token.column) + ": " + num);
+        }
     }
     return token;
 }

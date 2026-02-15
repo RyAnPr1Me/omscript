@@ -84,3 +84,35 @@ target_link_libraries(omsc ${llvm_libs})
 
 # Installation
 install(TARGETS omsc DESTINATION bin)
+
+# --- GTest unit tests ---
+find_package(Threads QUIET)
+find_package(GTest QUIET)
+if(GTest_FOUND)
+    enable_testing()
+
+    # Library of compiler/runtime sources (without main.cpp) for tests to link against.
+    set(LIB_SOURCES
+        src/lexer.cpp
+        src/parser.cpp
+        src/ast.cpp
+        src/codegen.cpp
+        src/bytecode.cpp
+        src/compiler.cpp
+        runtime/vm.cpp
+        runtime/value.cpp
+    )
+
+    add_library(omscript_lib STATIC ${LIB_SOURCES})
+    target_link_libraries(omscript_lib ${llvm_libs})
+
+    # Collect all test source files
+    file(GLOB TEST_SOURCES tests/*_test.cpp)
+
+    foreach(test_source ${TEST_SOURCES})
+        get_filename_component(test_name ${test_source} NAME_WE)
+        add_executable(${test_name} ${test_source})
+        target_link_libraries(${test_name} omscript_lib GTest::GTest GTest::Main ${llvm_libs})
+        add_test(NAME ${test_name} COMMAND ${test_name})
+    endforeach()
+endif()

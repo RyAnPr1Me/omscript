@@ -145,6 +145,8 @@ test_cli_output "run-success" "Compilation successful!" 0 ./build/omsc run examp
 test_cli_output "run-flag" "Compilation successful!" 0 ./build/omsc --run examples/exit_zero.om
 test_cli_output "run" "Program exited with code 120" 120 ./build/omsc run examples/factorial.om
 test_cli_output "print-output" "42" 0 ./build/omsc run examples/print_test.om
+test_cli_output "float-print" "3.5" 5 ./build/omsc run examples/float_test.om
+test_cli_output "string-var-print" "hello from variable" 0 ./build/omsc run examples/string_var_test.om
 if [ -f a.out ] || [ -f a.out.o ]; then
     echo -e "${RED}✗ Failed (temporary output files not cleaned)${NC}"
     rm -f a.out a.out.o
@@ -195,11 +197,20 @@ test_program "examples/string_test.om" 0
 test_program "examples/array_test.om" 245
 test_program "examples/stdlib_test.om" 66
 test_program "examples/stdlib2_test.om" 255
+test_program "examples/float_test.om" 5
+test_program "examples/string_var_test.om" 0
+test_program "examples/print_return_test.om" 0
+test_program "examples/optmax_div_zero.om" 1
+test_program "examples/forward_ref_test.om" 24
+test_program "examples/stdlib_float_test.om" 29
+test_program "examples/float_edge_cases.om" 14
 test_compile_fail "examples/const_fail.om"
 test_compile_fail "examples/break_outside_loop.om"
 test_compile_fail "examples/continue_outside_loop.om"
 test_compile_fail "examples/undefined_var.om"
+test_compile_fail "examples/int_overflow.om"
 test_cli_output "error-line-info" "line" 1 ./build/omsc examples/undefined_var.om -o /tmp/test_err
+test_cli_output "int-overflow-msg" "Integer literal out of range" 1 ./build/omsc examples/int_overflow.om -o /tmp/test_overflow
 
 echo ""
 echo "============================================"

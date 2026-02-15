@@ -96,6 +96,10 @@ private:
     
     // Helper methods
     llvm::Type* getDefaultType();
+    llvm::Type* getFloatType();
+    llvm::Value* toBool(llvm::Value* v);
+    llvm::Value* toDefaultType(llvm::Value* v);
+    llvm::Value* ensureFloat(llvm::Value* v);
     void setupPrintfDeclaration();
     llvm::Function* getPrintfFunction();
     void beginScope();
@@ -103,7 +107,7 @@ private:
     void bindVariable(const std::string& name, llvm::Value* value, bool isConst = false);
     void checkConstModification(const std::string& name, const std::string& action);
     void validateScopeStacksMatch(const char* location);
-    llvm::AllocaInst* createEntryBlockAlloca(llvm::Function* function, const std::string& name);
+    llvm::AllocaInst* createEntryBlockAlloca(llvm::Function* function, const std::string& name, llvm::Type* type = nullptr);
     [[noreturn]] void codegenError(const std::string& message, const ASTNode* node);
     
     // Optimization methods
