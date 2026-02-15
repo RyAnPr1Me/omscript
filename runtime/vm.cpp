@@ -335,8 +335,8 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
                 // left-to-right so the first argument is deepest on the stack.
                 locals.clear();
                 locals.resize(argCount);
-                for (int i = argCount - 1; i >= 0; i--) {
-                    locals[static_cast<size_t>(i)] = pop();
+                for (size_t i = argCount; i > 0; i--) {
+                    locals[i - 1] = pop();
                 }
 
                 // Execute the callee's bytecode inline using a recursive call

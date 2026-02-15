@@ -634,7 +634,7 @@ TEST(VMTest, CallPreservesGlobals) {
         e.emitByte(0);
         e.emit(OpCode::STORE_VAR);
         e.emitString("x");
-        e.emit(OpCode::POP);  // discard value left by STORE_VAR peek
+        e.emit(OpCode::POP);  // STORE_VAR uses peek, leaving the stored value on the stack; pop it
         e.emit(OpCode::PUSH_INT);
         e.emitInt(0);
         e.emit(OpCode::RETURN);
@@ -671,7 +671,7 @@ TEST(VMTest, LoadLocalAndStoreLocal) {
         e.emit(OpCode::ADD);
         e.emit(OpCode::STORE_LOCAL);
         e.emitByte(0);
-        e.emit(OpCode::POP);  // discard value left by STORE_LOCAL peek
+        e.emit(OpCode::POP);  // STORE_LOCAL uses peek, leaving the stored value on the stack; pop it
         e.emit(OpCode::LOAD_LOCAL);
         e.emitByte(0);
         e.emit(OpCode::RETURN);
