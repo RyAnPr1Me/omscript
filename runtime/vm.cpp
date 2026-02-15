@@ -339,19 +339,27 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
                     locals[i - 1] = pop();
                 }
 
+                // Save the caller's stack so the callee starts with a clean
+                // stack.  execute() calls stack.clear() at entry which would
+                // otherwise destroy any intermediate values the caller still
+                // needs after the call returns.
+                std::vector<Value> callerStack = std::move(stack);
+                stack.clear();
+
                 // Execute the callee's bytecode inline using a recursive call
                 // to execute().  RETURN inside the callee will cause that
                 // execute() to return, at which point we restore state.
                 execute(func.bytecode);
 
                 // Restore caller state from the call frame.
+                Value returnValue = lastReturn;
+                stack = std::move(callerStack);
                 CallFrame& top = callStack.back();
                 locals = std::move(top.savedLocals);
                 callStack.pop_back();
 
-                // The callee's return value is in lastReturn.  Push it onto
-                // the caller's stack so the caller can use it.
-                push(lastReturn);
+                // Push the callee's return value onto the restored caller stack.
+                push(returnValue);
                 break;
             }
             

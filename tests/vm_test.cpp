@@ -903,3 +903,92 @@ TEST(VMTest, StoreVarLeavesValueOnStack) {
     vm.execute(code);
     EXPECT_EQ(vm.getLastReturn().asInt(), 99);
 }
+
+// ===========================================================================
+// Nested CALL preserves caller stack
+// ===========================================================================
+
+TEST(VMTest, CallPreservesCallerStack) {
+    // This test verifies that a function call does not destroy intermediate
+    // values on the caller's stack.  Before the fix, execute() called
+    // stack.clear() which wiped the caller's data.
+    //
+    // Caller logic:  push 100, push call(identity, 42), ADD → should be 142
+    //
+    // identity(x) just returns its argument.
+    auto identityCode = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitByte(0);
+        e.emit(OpCode::RETURN);
+    });
+
+    auto callerCode = buildBytecode([](BytecodeEmitter& e) {
+        // Push an intermediate value that must survive the CALL
+        e.emit(OpCode::PUSH_INT);
+        e.emitInt(100);
+        // Call identity(42)
+        e.emit(OpCode::PUSH_INT);
+        e.emitInt(42);
+        e.emit(OpCode::CALL);
+        e.emitString("identity");
+        e.emitByte(1);
+        // ADD the intermediate value (100) and the call result (42)
+        e.emit(OpCode::ADD);
+        e.emit(OpCode::RETURN);
+    });
+
+    VM vm;
+    BytecodeFunction identityFn;
+    identityFn.name = "identity";
+    identityFn.arity = 1;
+    identityFn.bytecode = identityCode;
+    vm.registerFunction(identityFn);
+
+    vm.execute(callerCode);
+    EXPECT_EQ(vm.getLastReturn().asInt(), 142);
+}
+
+// ===========================================================================
+// Multiple nested calls preserve all intermediate values
+// ===========================================================================
+
+TEST(VMTest, MultipleCallsPreserveStack) {
+    // push 10, call(id, 20), ADD, call(id, 30), ADD → 10 + 20 + 30 = 60
+    auto identityCode = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitByte(0);
+        e.emit(OpCode::RETURN);
+    });
+
+    auto callerCode = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_INT);
+        e.emitInt(10);
+
+        e.emit(OpCode::PUSH_INT);
+        e.emitInt(20);
+        e.emit(OpCode::CALL);
+        e.emitString("id");
+        e.emitByte(1);
+
+        e.emit(OpCode::ADD);
+
+        e.emit(OpCode::PUSH_INT);
+        e.emitInt(30);
+        e.emit(OpCode::CALL);
+        e.emitString("id");
+        e.emitByte(1);
+
+        e.emit(OpCode::ADD);
+        e.emit(OpCode::RETURN);
+    });
+
+    VM vm;
+    BytecodeFunction idFn;
+    idFn.name = "id";
+    idFn.arity = 1;
+    idFn.bytecode = identityCode;
+    vm.registerFunction(idFn);
+
+    vm.execute(callerCode);
+    EXPECT_EQ(vm.getLastReturn().asInt(), 60);
+}

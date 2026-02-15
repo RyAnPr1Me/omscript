@@ -2019,3 +2019,47 @@ TEST(CodegenTest, TypeofWrongArgCount) {
         generateIR("fn main() { typeof(); return 0; }", codegen),
         std::runtime_error);
 }
+
+// ===========================================================================
+// Break inside switch (no enclosing loop)
+// ===========================================================================
+
+TEST(CodegenTest, BreakInsideSwitch) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() {"
+        "  var r = 0;"
+        "  switch (1) {"
+        "    case 1: r = 10; break;"
+        "    case 2: r = 20; break;"
+        "    default: r = 99; break;"
+        "  }"
+        "  return r;"
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    llvm::Function* fn = mod->getFunction("main");
+    ASSERT_NE(fn, nullptr);
+    EXPECT_FALSE(fn->empty());
+}
+
+// ===========================================================================
+// Switch inside OPTMAX function (constant folding)
+// ===========================================================================
+
+TEST(CodegenTest, SwitchInOptmax) {
+    CodeGenerator codegen(OptimizationLevel::O2);
+    auto* mod = generateIR(
+        "OPTMAX=:"
+        "fn classify(x: int) {"
+        "  var base: int = 2 + 3;"  // should be folded to 5
+        "  switch (x) {"
+        "    case 1: return base;"
+        "    default: return 0;"
+        "  }"
+        "}"
+        "OPTMAX!:"
+        "fn main() { return classify(1); }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+}

@@ -285,6 +285,19 @@ void optimizeOptMaxStatement(Statement* stmt) {
             optimizeOptMaxStatement(forStmt->body.get());
             break;
         }
+        case ASTNodeType::SWITCH_STMT: {
+            auto* switchStmt = static_cast<omscript::SwitchStmt*>(stmt);
+            switchStmt->condition = optimizeOptMaxExpression(std::move(switchStmt->condition));
+            for (auto& sc : switchStmt->cases) {
+                if (sc.value) {
+                    sc.value = optimizeOptMaxExpression(std::move(sc.value));
+                }
+                for (auto& s : sc.body) {
+                    optimizeOptMaxStatement(s.get());
+                }
+            }
+            break;
+        }
         default:
             break;
     }
@@ -372,6 +385,9 @@ llvm::Value* CodeGenerator::toDefaultType(llvm::Value* v) {
     }
     if (v->getType()->isPointerTy()) {
         return builder->CreatePtrToInt(v, getDefaultType(), "ptoi");
+    }
+    if (v->getType()->isIntegerTy() && v->getType() != getDefaultType()) {
+        return builder->CreateZExt(v, getDefaultType(), "zext");
     }
     return v;
 }
@@ -1957,6 +1973,10 @@ void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
     
     llvm::SwitchInst* switchInst = builder->CreateSwitch(condVal, defaultBB, static_cast<unsigned>(stmt->cases.size()));
     
+    // Push a loop context so that 'break' inside a case arm exits the switch
+    // (matching C/C++ semantics where break leaves the nearest switch or loop).
+    loopStack.push_back({mergeBB, nullptr});
+    
     for (auto& sc : stmt->cases) {
         if (sc.isDefault) {
             // Generate default block body.
@@ -1993,6 +2013,8 @@ void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
             }
         }
     }
+    
+    loopStack.pop_back();
     
     builder->SetInsertPoint(mergeBB);
 }
@@ -2510,6 +2532,53 @@ void CodeGenerator::emitBytecodeStatement(Statement* stmt) {
             bytecodeEmitter.emitShort(static_cast<uint16_t>(loopStart));
             
             bytecodeEmitter.patchJump(exitPatch, static_cast<uint16_t>(bytecodeEmitter.currentOffset()));
+            break;
+        }
+        case ASTNodeType::SWITCH_STMT: {
+            auto* switchStmt = static_cast<SwitchStmt*>(stmt);
+            // Emit the condition once and store in a temporary variable.
+            emitBytecodeExpression(switchStmt->condition.get());
+            std::string tempVar = "__switch_cond__";
+            bytecodeEmitter.emit(OpCode::STORE_VAR);
+            bytecodeEmitter.emitString(tempVar);
+            bytecodeEmitter.emit(OpCode::POP);
+
+            // For each case: load temp, push case value, compare, jump if false
+            // to next case, otherwise execute body and jump to end.
+            std::vector<size_t> endPatches;
+
+            for (auto& sc : switchStmt->cases) {
+                if (sc.isDefault) {
+                    for (auto& s : sc.body) {
+                        emitBytecodeStatement(s.get());
+                    }
+                    bytecodeEmitter.emit(OpCode::JUMP);
+                    endPatches.push_back(bytecodeEmitter.currentOffset());
+                    bytecodeEmitter.emitShort(0);
+                } else {
+                    bytecodeEmitter.emit(OpCode::LOAD_VAR);
+                    bytecodeEmitter.emitString(tempVar);
+                    emitBytecodeExpression(sc.value.get());
+                    bytecodeEmitter.emit(OpCode::EQ);
+                    bytecodeEmitter.emit(OpCode::JUMP_IF_FALSE);
+                    size_t skipPatch = bytecodeEmitter.currentOffset();
+                    bytecodeEmitter.emitShort(0);
+
+                    for (auto& s : sc.body) {
+                        emitBytecodeStatement(s.get());
+                    }
+                    bytecodeEmitter.emit(OpCode::JUMP);
+                    endPatches.push_back(bytecodeEmitter.currentOffset());
+                    bytecodeEmitter.emitShort(0);
+
+                    bytecodeEmitter.patchJump(skipPatch, static_cast<uint16_t>(bytecodeEmitter.currentOffset()));
+                }
+            }
+
+            uint16_t endOffset = static_cast<uint16_t>(bytecodeEmitter.currentOffset());
+            for (size_t patch : endPatches) {
+                bytecodeEmitter.patchJump(patch, endOffset);
+            }
             break;
         }
         default:
