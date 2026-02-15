@@ -4,6 +4,7 @@
 #include "parser.h"
 
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <llvm/Support/TargetSelect.h>
 
@@ -1318,7 +1319,7 @@ TEST(CodegenTest, UndefinedFunctionCall) {
 TEST(CodegenTest, WriteObjectFile) {
     CodeGenerator codegen(OptimizationLevel::O0);
     generateIR("fn main() { return 42; }", codegen);
-    std::string filename = "/tmp/test_output.o";
+    std::string filename = (std::filesystem::temp_directory_path() / "test_output.o").string();
     codegen.writeObjectFile(filename);
     std::ifstream f(filename);
     EXPECT_TRUE(f.good());

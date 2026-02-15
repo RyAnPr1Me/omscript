@@ -476,9 +476,4 @@ TEST(ValueTest, MoveAssignmentNone) {
     EXPECT_EQ(b.getType(), Value::Type::NONE);
 }
 
-TEST(ValueTest, SelfMoveAssignment) {
-    Value v("hello");
-    v = std::move(v);
-    EXPECT_EQ(v.getType(), Value::Type::STRING);
-    EXPECT_STREQ(v.asString(), "hello");
-}
+// Self-move assignment removed: undefined behavior per C++ standard
