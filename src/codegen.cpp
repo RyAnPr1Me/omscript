@@ -47,6 +47,7 @@ using omscript::IfStmt;
 using omscript::WhileStmt;
 using omscript::DoWhileStmt;
 using omscript::ForStmt;
+using omscript::ForEachStmt;
 using omscript::Statement;
 
 std::unique_ptr<Expression> optimizeOptMaxExpression(std::unique_ptr<Expression> expr);
@@ -293,6 +294,12 @@ void optimizeOptMaxStatement(Statement* stmt) {
             optimizeOptMaxStatement(forStmt->body.get());
             break;
         }
+        case ASTNodeType::FOR_EACH_STMT: {
+            auto* forEach = static_cast<ForEachStmt*>(stmt);
+            forEach->collection = optimizeOptMaxExpression(std::move(forEach->collection));
+            optimizeOptMaxStatement(forEach->body.get());
+            break;
+        }
         case ASTNodeType::SWITCH_STMT: {
             auto* switchStmt = static_cast<omscript::SwitchStmt*>(stmt);
             switchStmt->condition = optimizeOptMaxExpression(std::move(switchStmt->condition));
@@ -322,7 +329,7 @@ static const std::unordered_set<std::string> stdlibFunctions = {
     "print", "abs", "len", "min", "max", "sign", "clamp", "pow",
     "print_char", "input", "sqrt", "is_even", "is_odd", "sum",
     "swap", "reverse", "to_char", "is_alpha", "is_digit",
-    "typeof", "assert"
+    "typeof", "assert", "str_len", "char_at"
 };
 
 bool isStdlibFunction(const std::string& name) {
@@ -611,6 +618,9 @@ void CodeGenerator::generateStatement(Statement* stmt) {
             break;
         case ASTNodeType::FOR_STMT:
             generateFor(static_cast<ForStmt*>(stmt));
+            break;
+        case ASTNodeType::FOR_EACH_STMT:
+            generateForEach(static_cast<ForEachStmt*>(stmt));
             break;
         case ASTNodeType::BREAK_STMT:
             if (loopStack.empty()) {
@@ -1469,6 +1479,47 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         return llvm::ConstantInt::get(getDefaultType(), 1);
     }
 
+    if (expr->callee == "str_len") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'str_len' expects 1 argument, but " +
+                         std::to_string(expr->arguments.size()) + " provided", expr);
+        }
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        // String is stored as an i64 holding a pointer to a C string
+        llvm::Value* strPtr = builder->CreateIntToPtr(arg,
+            llvm::PointerType::getUnqual(*context), "strlen.ptr");
+        // Declare strlen if not already declared
+        llvm::Function* strlenFn = module->getFunction("strlen");
+        if (!strlenFn) {
+            llvm::FunctionType* strlenTy = llvm::FunctionType::get(
+                getDefaultType(),
+                {llvm::PointerType::getUnqual(*context)},
+                false);
+            strlenFn = llvm::Function::Create(strlenTy, llvm::Function::ExternalLinkage, "strlen", module.get());
+        }
+        return builder->CreateCall(strlenFn, {strPtr}, "strlen.result");
+    }
+
+    if (expr->callee == "char_at") {
+        if (expr->arguments.size() != 2) {
+            codegenError("Built-in function 'char_at' expects 2 arguments (string, index), but " +
+                         std::to_string(expr->arguments.size()) + " provided", expr);
+        }
+        llvm::Value* strArg = generateExpression(expr->arguments[0].get());
+        llvm::Value* idxArg = generateExpression(expr->arguments[1].get());
+        idxArg = toDefaultType(idxArg);
+        // Convert to pointer
+        llvm::Value* strPtr = builder->CreateIntToPtr(strArg,
+            llvm::PointerType::getUnqual(*context), "charat.ptr");
+        // Load char via GEP
+        llvm::Value* charPtr = builder->CreateGEP(
+            llvm::Type::getInt8Ty(*context), strPtr, idxArg, "charat.gep");
+        llvm::Value* charVal = builder->CreateLoad(
+            llvm::Type::getInt8Ty(*context), charPtr, "charat.char");
+        // Zero-extend to i64
+        return builder->CreateZExt(charVal, getDefaultType(), "charat.ext");
+    }
+
     if (inOptMaxFunction) {
         // Stdlib functions are always native machine code, so they're safe to call from OPTMAX
         if (!isStdlibFunction(expr->callee) &&
@@ -1986,6 +2037,76 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     builder->CreateBr(condBB);
     
     // End block
+    builder->SetInsertPoint(endBB);
+    
+    endScope();
+}
+
+void CodeGenerator::generateForEach(ForEachStmt* stmt) {
+    llvm::Function* function = builder->GetInsertBlock()->getParent();
+    if (!function) {
+        throw std::runtime_error("For-each loop outside of function");
+    }
+    
+    beginScope();
+    
+    // Evaluate the collection (array)
+    llvm::Value* collVal = generateExpression(stmt->collection.get());
+    collVal = toDefaultType(collVal);
+    
+    // Convert i64 to pointer — array layout is [length, elem0, elem1, ...]
+    llvm::Value* arrPtr = builder->CreateIntToPtr(collVal,
+        llvm::PointerType::getUnqual(*context), "foreach.arrptr");
+    
+    // Load length from slot 0
+    llvm::Value* lenVal = builder->CreateLoad(getDefaultType(), arrPtr, "foreach.len");
+    
+    // Allocate hidden index variable and the user's iterator variable
+    llvm::AllocaInst* idxAlloca = createEntryBlockAlloca(function, "__foreach_idx");
+    builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 0), idxAlloca);
+    
+    llvm::AllocaInst* iterAlloca = createEntryBlockAlloca(function, stmt->iteratorVar);
+    bindVariable(stmt->iteratorVar, iterAlloca);
+    
+    // Create blocks
+    llvm::BasicBlock* condBB = llvm::BasicBlock::Create(*context, "foreach.cond", function);
+    llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "foreach.body", function);
+    llvm::BasicBlock* incBB = llvm::BasicBlock::Create(*context, "foreach.inc", function);
+    llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "foreach.end", function);
+    
+    builder->CreateBr(condBB);
+    
+    // Condition: idx < length
+    builder->SetInsertPoint(condBB);
+    llvm::Value* curIdx = builder->CreateLoad(getDefaultType(), idxAlloca, "foreach.idx");
+    llvm::Value* cond = builder->CreateICmpSLT(curIdx, lenVal, "foreach.cmp");
+    builder->CreateCondBr(cond, bodyBB, endBB);
+    
+    // Body: load current element into iterator variable, then execute body
+    builder->SetInsertPoint(bodyBB);
+    llvm::Value* bodyIdx = builder->CreateLoad(getDefaultType(), idxAlloca, "foreach.bidx");
+    llvm::Value* offset = builder->CreateAdd(bodyIdx,
+        llvm::ConstantInt::get(getDefaultType(), 1), "foreach.offset");
+    llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrPtr, offset, "foreach.elem.ptr");
+    llvm::Value* elemVal = builder->CreateLoad(getDefaultType(), elemPtr, "foreach.elem");
+    builder->CreateStore(elemVal, iterAlloca);
+    
+    loopStack.push_back({endBB, incBB});
+    generateStatement(stmt->body.get());
+    loopStack.pop_back();
+    if (!builder->GetInsertBlock()->getTerminator()) {
+        builder->CreateBr(incBB);
+    }
+    
+    // Increment hidden index
+    builder->SetInsertPoint(incBB);
+    llvm::Value* nextIdx = builder->CreateLoad(getDefaultType(), idxAlloca, "foreach.nidx");
+    llvm::Value* incIdx = builder->CreateAdd(nextIdx,
+        llvm::ConstantInt::get(getDefaultType(), 1), "foreach.next");
+    builder->CreateStore(incIdx, idxAlloca);
+    builder->CreateBr(condBB);
+    
+    // End
     builder->SetInsertPoint(endBB);
     
     endScope();
@@ -2639,6 +2760,8 @@ void CodeGenerator::emitBytecodeStatement(Statement* stmt) {
             }
             break;
         }
+        case ASTNodeType::FOR_EACH_STMT:
+            throw std::runtime_error("For-each loops are not supported in bytecode mode");
         default:
             throw std::runtime_error("Unsupported statement type in bytecode generation");
     }

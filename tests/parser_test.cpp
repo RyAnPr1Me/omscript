@@ -561,3 +561,24 @@ TEST(ParserTest, ArrayIndexAssignmentInvalid) {
     // Cannot assign to a non-identifier, non-index target
     EXPECT_THROW(parse("fn main() { 42 = 1; }"), std::runtime_error);
 }
+
+// ---------------------------------------------------------------------------
+// For-each loop parsing
+// ---------------------------------------------------------------------------
+
+TEST(ParserTest, ForEachLoop) {
+    auto program = parse("fn main() { var arr = [1, 2, 3]; for (x in arr) { return x; } }");
+    EXPECT_EQ(program->functions.size(), 1u);
+    auto& stmts = program->functions[0]->body->statements;
+    ASSERT_GE(stmts.size(), 2u);
+    EXPECT_EQ(stmts[1]->type, omscript::ASTNodeType::FOR_EACH_STMT);
+}
+
+TEST(ParserTest, ForEachVsRangeFor) {
+    // Range-based for should still work
+    auto program = parse("fn main() { for (i in 0...10) { return i; } }");
+    EXPECT_EQ(program->functions.size(), 1u);
+    auto& stmts = program->functions[0]->body->statements;
+    ASSERT_GE(stmts.size(), 1u);
+    EXPECT_EQ(stmts[0]->type, omscript::ASTNodeType::FOR_STMT);
+}

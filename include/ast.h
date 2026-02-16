@@ -21,6 +21,7 @@ enum class ASTNodeType {
     BREAK_STMT,
     CONTINUE_STMT,
     SWITCH_STMT,
+    FOR_EACH_STMT,
     EXPR_STMT,
     BINARY_EXPR,
     UNARY_EXPR,
@@ -257,6 +258,18 @@ public:
 class ContinueStmt : public Statement {
 public:
     ContinueStmt() : Statement(ASTNodeType::CONTINUE_STMT) {}
+};
+
+class ForEachStmt : public Statement {
+public:
+    std::string iteratorVar;
+    std::unique_ptr<Expression> collection;
+    std::unique_ptr<Statement> body;
+    
+    ForEachStmt(const std::string& iter, std::unique_ptr<Expression> coll,
+                std::unique_ptr<Statement> b)
+        : Statement(ASTNodeType::FOR_EACH_STMT), iteratorVar(iter),
+          collection(std::move(coll)), body(std::move(b)) {}
 };
 
 // A single case arm in a switch statement.

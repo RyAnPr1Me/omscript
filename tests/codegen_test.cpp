@@ -2096,3 +2096,100 @@ TEST(CodegenTest, ArrayIndexAssignmentMultiple) {
         codegen);
     ASSERT_NE(mod, nullptr);
 }
+
+// ===========================================================================
+// For-each loop codegen
+// ===========================================================================
+
+TEST(CodegenTest, ForEachBasic) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() {"
+        "  var arr = [10, 20, 30];"
+        "  var total = 0;"
+        "  for (x in arr) {"
+        "    total = total + x;"
+        "  }"
+        "  return total;"
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    llvm::Function* fn = mod->getFunction("main");
+    ASSERT_NE(fn, nullptr);
+    EXPECT_FALSE(fn->empty());
+}
+
+TEST(CodegenTest, ForEachWithBreak) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() {"
+        "  var arr = [1, 2, 3, 4, 5];"
+        "  var total = 0;"
+        "  for (x in arr) {"
+        "    if (x == 4) { break; }"
+        "    total = total + x;"
+        "  }"
+        "  return total;"
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, ForEachWithContinue) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() {"
+        "  var arr = [1, 2, 3, 4, 5];"
+        "  var total = 0;"
+        "  for (x in arr) {"
+        "    if (x % 2 == 0) { continue; }"
+        "    total = total + x;"
+        "  }"
+        "  return total;"
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+// ===========================================================================
+// String functions: str_len and char_at
+// ===========================================================================
+
+TEST(CodegenTest, StrLen) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() {"
+        "  var s = \"Hello\";"
+        "  return str_len(s);"
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    llvm::Function* fn = mod->getFunction("main");
+    ASSERT_NE(fn, nullptr);
+    EXPECT_FALSE(fn->empty());
+}
+
+TEST(CodegenTest, CharAt) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() {"
+        "  var s = \"ABC\";"
+        "  return char_at(s, 0);"
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, StrLenWrongArity) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    EXPECT_THROW(generateIR(
+        "fn main() { return str_len(); }",
+        codegen), std::runtime_error);
+}
+
+TEST(CodegenTest, CharAtWrongArity) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    EXPECT_THROW(generateIR(
+        "fn main() { return char_at(\"a\"); }",
+        codegen), std::runtime_error);
+}

@@ -211,6 +211,7 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
     consume(TokenType::LPAREN, "Expected '(' after 'for'");
     
     // Parse: for (var in start...end) or for (var in start...end...step)
+    //    or: for (var in collection)  -- for-each over array
     Token varName = consume(TokenType::IDENTIFIER, "Expected iterator variable");
     std::string iteratorType;
     if (match(TokenType::COLON)) {
@@ -220,20 +221,27 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
     }
     consume(TokenType::IN, "Expected 'in' after iterator variable");
     
-    auto start = parseExpression();
-    consume(TokenType::RANGE, "Expected '...' in for range");
-    auto end = parseExpression();
+    auto firstExpr = parseExpression();
     
-    std::unique_ptr<Expression> step = nullptr;
+    // If next token is '...', this is a range-based for loop
     if (match(TokenType::RANGE)) {
-        step = parseExpression();
+        auto end = parseExpression();
+        
+        std::unique_ptr<Expression> step = nullptr;
+        if (match(TokenType::RANGE)) {
+            step = parseExpression();
+        }
+        
+        consume(TokenType::RPAREN, "Expected ')' after for range");
+        auto body = parseStatement();
+        
+        return std::make_unique<ForStmt>(varName.lexeme, std::move(firstExpr), std::move(end), std::move(step), std::move(body), iteratorType);
     }
     
-    consume(TokenType::RPAREN, "Expected ')' after for range");
-    
+    // Otherwise this is a for-each loop: for (var in collection)
+    consume(TokenType::RPAREN, "Expected ')' after for-each collection");
     auto body = parseStatement();
-    
-    return std::make_unique<ForStmt>(varName.lexeme, std::move(start), std::move(end), std::move(step), std::move(body), iteratorType);
+    return std::make_unique<ForEachStmt>(varName.lexeme, std::move(firstExpr), std::move(body));
 }
 
 std::unique_ptr<Statement> Parser::parseBreakStmt() {

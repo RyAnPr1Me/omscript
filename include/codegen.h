@@ -92,6 +92,7 @@ private:
     void generateWhile(WhileStmt* stmt);
     void generateDoWhile(DoWhileStmt* stmt);
     void generateFor(ForStmt* stmt);
+    void generateForEach(ForEachStmt* stmt);
     void generateBlock(BlockStmt* stmt);
     void generateExprStmt(ExprStmt* stmt);
     void generateSwitch(SwitchStmt* stmt);

@@ -1,0 +1,19 @@
+// Test for-each with break and continue
+fn main() {
+    var arr = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    var total = 0;
+    
+    // Sum only even numbers, stop at 8
+    for (x in arr) {
+        if (x == 8) {
+            break;
+        }
+        if (x % 2 != 0) {
+            continue;
+        }
+        total = total + x;
+    }
+    
+    // Even numbers before 8: 2 + 4 + 6 = 12
+    return total;
+}

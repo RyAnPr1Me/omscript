@@ -211,6 +211,9 @@ test_program "examples/optimization_stress_test.om" 432
 test_program "examples/string_test.om" 0
 test_program "examples/array_test.om" 245
 test_program "examples/array_assign_test.om" 286
+test_program "examples/foreach_test.om" 150
+test_program "examples/foreach_break_test.om" 12
+test_program "examples/string_func_test.om" 178
 test_program "examples/stdlib_test.om" 66
 test_program "examples/stdlib2_test.om" 255
 test_program "examples/float_test.om" 5

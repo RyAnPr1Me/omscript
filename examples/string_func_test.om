@@ -1,0 +1,12 @@
+// Test string functions: str_len and char_at
+fn main() {
+    var s = "Hello";
+    var length = str_len(s);
+    // "Hello" has 5 characters
+    
+    var h = char_at(s, 0);  // 'H' = 72
+    var e = char_at(s, 1);  // 'e' = 101
+    
+    // 5 + 72 + 101 = 178
+    return length + h + e;
+}
