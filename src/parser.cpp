@@ -190,9 +190,10 @@ std::unique_ptr<Statement> Parser::parseBlock() {
         if (check(TokenType::VAR) || check(TokenType::CONST)) {
             bool isConst = check(TokenType::CONST);
             advance(); // consume var/const
-            do {
+            statements.push_back(parseVarDecl(isConst));
+            while (match(TokenType::COMMA)) {
                 statements.push_back(parseVarDecl(isConst));
-            } while (match(TokenType::COMMA));
+            }
             consume(TokenType::SEMICOLON, "Expected ';' after variable declaration");
         } else {
             statements.push_back(parseStatement());
