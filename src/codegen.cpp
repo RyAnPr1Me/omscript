@@ -326,10 +326,9 @@ namespace omscript {
 // These functions are always compiled to native machine code via LLVM IR,
 // never through the bytecode/dynamic compilation path.
 static const std::unordered_set<std::string> stdlibFunctions = {
-    "print", "abs", "len", "min", "max", "sign", "clamp", "pow",
-    "print_char", "input", "sqrt", "is_even", "is_odd", "sum",
-    "swap", "reverse", "to_char", "is_alpha", "is_digit",
-    "typeof", "assert", "str_len", "char_at"
+    "abs", "assert", "char_at", "clamp", "input", "is_alpha", "is_digit",
+    "is_even", "is_odd", "len", "max", "min", "pow", "print", "print_char",
+    "reverse", "sign", "sqrt", "str_len", "sum", "swap", "to_char", "typeof"
 };
 
 bool isStdlibFunction(const std::string& name) {
@@ -2062,7 +2061,7 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
     llvm::Value* lenVal = builder->CreateLoad(getDefaultType(), arrPtr, "foreach.len");
     
     // Allocate hidden index variable and the user's iterator variable
-    llvm::AllocaInst* idxAlloca = createEntryBlockAlloca(function, "__foreach_idx");
+    llvm::AllocaInst* idxAlloca = createEntryBlockAlloca(function, "_foreach_idx");
     builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 0), idxAlloca);
     
     llvm::AllocaInst* iterAlloca = createEntryBlockAlloca(function, stmt->iteratorVar);
