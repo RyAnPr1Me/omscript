@@ -40,6 +40,7 @@ void printUsage(const char* progName) {
     std::cout << "  -h, --help           Show this help message\n";
     std::cout << "  -k, --keep-temps     Keep temporary outputs when running\n";
     std::cout << "  -v, --version        Show compiler version\n";
+    std::cout << "  -V, --verbose        Show detailed compilation output (IR, progress)\n";
 }
 
 std::string readSourceFile(const std::string& filename) {
@@ -246,6 +247,7 @@ int main(int argc, char* argv[]) {
                                 command == Command::EmitIR || command == Command::Clean;
     bool parsingRunArgs = false;
     bool keepTemps = false;
+    bool verbose = false;
     std::vector<std::string> runArgs;
     
     // Parse command line arguments
@@ -269,6 +271,10 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
             keepTemps = true;
+            continue;
+        }
+        if (!parsingRunArgs && (arg == "-V" || arg == "--verbose")) {
+            verbose = true;
             continue;
         }
         if (!parsingRunArgs && (arg == "-o" || arg == "--output")) {
@@ -372,6 +378,7 @@ int main(int argc, char* argv[]) {
             return 0;
         }
         omscript::Compiler compiler;
+        compiler.setVerbose(verbose);
         compiler.compile(sourceFile, outputFile);
         if (command == Command::Run) {
             std::filesystem::path runPath = std::filesystem::absolute(outputFile);
