@@ -9,6 +9,5 @@ fn main() {
     // Read back modified values
     var sum = arr[0] + arr[1] + arr[2] + arr[3] + arr[4];
     // 99 + 20 + 77 + 40 + 50 = 286
-    // 286 % 256 = 30
     return sum;
 }

@@ -372,33 +372,8 @@ std::unique_ptr<Expression> Parser::parseAssignment() {
             node->column = expr->column;
             return node;
         } else if (expr->type == ASTNodeType::INDEX_EXPR) {
-            auto* indexExpr = static_cast<IndexExpr*>(expr.get());
-            // Determine the binary operator from the compound operator
-            std::string binOp;
-            switch (opType) {
-                case TokenType::PLUS_ASSIGN:    binOp = "+"; break;
-                case TokenType::MINUS_ASSIGN:   binOp = "-"; break;
-                case TokenType::STAR_ASSIGN:    binOp = "*"; break;
-                case TokenType::SLASH_ASSIGN:   binOp = "/"; break;
-                case TokenType::PERCENT_ASSIGN: binOp = "%"; break;
-                default: error("Unknown compound assignment operator: " + opLexeme); break;
-            }
-            auto rhs = parseAssignment();
-            // Desugar: arr[i] += expr  =>  arr[i] = arr[i] + expr
-            // We need to regenerate the index read as the RHS of the binary op
-            auto arrExpr = std::move(indexExpr->array);
-            auto idxExpr = std::move(indexExpr->index);
-            auto node = std::make_unique<IndexAssignExpr>(
-                std::move(arrExpr), std::move(idxExpr), std::move(rhs));
-            node->line = expr->line;
-            node->column = expr->column;
-            // Note: the compound form is handled in codegen which reads the old value,
-            // applies the binary op, and stores the result.  We encode the operator
-            // by wrapping the value in a BinaryExpr with a placeholder LHS that codegen
-            // will replace with the current element value.  For simplicity, we just
-            // store the raw rhs here—compound array assignment desugar is deferred to
-            // a future iteration.  For now this becomes arr[i] = rhs.
-            return node;
+            error("Compound assignment to array elements is not yet supported; use arr[i] = arr[i] " +
+                  opLexeme.substr(0, opLexeme.size() - 1) + " value instead");
         } else {
             error("Invalid compound assignment target");
         }
