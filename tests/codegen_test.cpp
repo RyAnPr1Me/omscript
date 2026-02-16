@@ -2193,3 +2193,32 @@ TEST(CodegenTest, CharAtWrongArity) {
         "fn main() { return char_at(\"a\"); }",
         codegen), std::runtime_error);
 }
+
+// ===========================================================================
+// Multi-variable declarations
+// ===========================================================================
+
+TEST(CodegenTest, MultiVarDeclaration) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() {"
+        "  var a = 10, b = 20, c = 30;"
+        "  return a + b + c;"
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    llvm::Function* fn = mod->getFunction("main");
+    ASSERT_NE(fn, nullptr);
+    EXPECT_FALSE(fn->empty());
+}
+
+TEST(CodegenTest, MultiConstDeclaration) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() {"
+        "  const x = 5, y = 10;"
+        "  return x * y;"
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+}

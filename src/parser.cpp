@@ -129,10 +129,14 @@ std::unique_ptr<Statement> Parser::parseStatement() {
     if (match(TokenType::CONTINUE)) return parseContinueStmt();
     if (match(TokenType::SWITCH)) return parseSwitchStmt();
     if (match(TokenType::VAR)) {
-        return parseVarDecl(false);
+        auto decl = parseVarDecl(false);
+        consume(TokenType::SEMICOLON, "Expected ';' after variable declaration");
+        return decl;
     }
     if (match(TokenType::CONST)) {
-        return parseVarDecl(true);
+        auto decl = parseVarDecl(true);
+        consume(TokenType::SEMICOLON, "Expected ';' after variable declaration");
+        return decl;
     }
     if (check(TokenType::LBRACE)) return parseBlock();
     
@@ -144,7 +148,17 @@ std::unique_ptr<Statement> Parser::parseBlock() {
     
     std::vector<std::unique_ptr<Statement>> statements;
     while (!check(TokenType::RBRACE) && !isAtEnd()) {
-        statements.push_back(parseStatement());
+        // Multi-variable declarations: var a = 1, b = 2;
+        if (check(TokenType::VAR) || check(TokenType::CONST)) {
+            bool isConst = check(TokenType::CONST);
+            advance(); // consume var/const
+            do {
+                statements.push_back(parseVarDecl(isConst));
+            } while (match(TokenType::COMMA));
+            consume(TokenType::SEMICOLON, "Expected ';' after variable declaration");
+        } else {
+            statements.push_back(parseStatement());
+        }
     }
     
     consume(TokenType::RBRACE, "Expected '}'");
@@ -160,15 +174,16 @@ std::unique_ptr<Statement> Parser::parseVarDecl(bool isConst) {
     } else if (inOptMaxFunction) {
         error("OPTMAX variables must include type annotations");
     }
-    
+
     std::unique_ptr<Expression> initializer = nullptr;
     if (match(TokenType::ASSIGN)) {
         initializer = parseExpression();
     }
-    
-    consume(TokenType::SEMICOLON, "Expected ';' after variable declaration");
-    
-    return std::make_unique<VarDecl>(name.lexeme, std::move(initializer), isConst, typeName);
+
+    auto decl = std::make_unique<VarDecl>(name.lexeme, std::move(initializer), isConst, typeName);
+    decl->line = name.line;
+    decl->column = name.column;
+    return decl;
 }
 
 std::unique_ptr<Statement> Parser::parseIfStmt() {

@@ -582,3 +582,43 @@ TEST(ParserTest, ForEachVsRangeFor) {
     ASSERT_GE(stmts.size(), 1u);
     EXPECT_EQ(stmts[0]->type, omscript::ASTNodeType::FOR_STMT);
 }
+
+// ---------------------------------------------------------------------------
+// Multi-variable declarations
+// ---------------------------------------------------------------------------
+
+TEST(ParserTest, MultiVarDeclaration) {
+    auto program = parse("fn main() { var a = 1, b = 2, c = 3; }");
+    EXPECT_EQ(program->functions.size(), 1u);
+    auto& stmts = program->functions[0]->body->statements;
+    ASSERT_EQ(stmts.size(), 3u);
+    EXPECT_EQ(stmts[0]->type, omscript::ASTNodeType::VAR_DECL);
+    EXPECT_EQ(stmts[1]->type, omscript::ASTNodeType::VAR_DECL);
+    EXPECT_EQ(stmts[2]->type, omscript::ASTNodeType::VAR_DECL);
+    auto* a = dynamic_cast<omscript::VarDecl*>(stmts[0].get());
+    auto* b = dynamic_cast<omscript::VarDecl*>(stmts[1].get());
+    auto* c = dynamic_cast<omscript::VarDecl*>(stmts[2].get());
+    EXPECT_EQ(a->name, "a");
+    EXPECT_EQ(b->name, "b");
+    EXPECT_EQ(c->name, "c");
+    EXPECT_FALSE(a->isConst);
+}
+
+TEST(ParserTest, MultiConstDeclaration) {
+    auto program = parse("fn main() { const x = 10, y = 20; }");
+    auto& stmts = program->functions[0]->body->statements;
+    ASSERT_EQ(stmts.size(), 2u);
+    auto* x = dynamic_cast<omscript::VarDecl*>(stmts[0].get());
+    auto* y = dynamic_cast<omscript::VarDecl*>(stmts[1].get());
+    EXPECT_EQ(x->name, "x");
+    EXPECT_TRUE(x->isConst);
+    EXPECT_EQ(y->name, "y");
+    EXPECT_TRUE(y->isConst);
+}
+
+TEST(ParserTest, SingleVarStillWorks) {
+    auto program = parse("fn main() { var x = 42; }");
+    auto& stmts = program->functions[0]->body->statements;
+    ASSERT_EQ(stmts.size(), 1u);
+    EXPECT_EQ(stmts[0]->type, omscript::ASTNodeType::VAR_DECL);
+}

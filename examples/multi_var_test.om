@@ -1,0 +1,8 @@
+// Test multi-variable declarations
+fn main() {
+    var a = 10, b = 20, c = 30;
+    const x = 1, y = 2;
+    var sum = a + b + c + x + y;
+    // 10 + 20 + 30 + 1 + 2 = 63
+    return sum;
+}
