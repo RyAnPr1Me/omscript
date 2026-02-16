@@ -485,24 +485,231 @@ TEST(VMTest, ReturnEmptyStack) {
 }
 
 // ===========================================================================
-// Call opcode
+// Call opcode – full function dispatch
 // ===========================================================================
 
-TEST(VMTest, CallPlaceholder) {
+TEST(VMTest, CallSimpleFunction) {
+    // Register a function "add" that loads its two local args and adds them.
+    BytecodeFunction addFunc;
+    addFunc.name = "add";
+    addFunc.arity = 2;
+    addFunc.bytecode = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitByte(0);          // first arg
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitByte(1);          // second arg
+        e.emit(OpCode::ADD);
+        e.emit(OpCode::RETURN);
+    });
+
+    // Main bytecode: push 3 and 4, call add(3, 4), return result.
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_INT);
+        e.emitInt(3);
+        e.emit(OpCode::PUSH_INT);
+        e.emitInt(4);
+        e.emit(OpCode::CALL);
+        e.emitString("add");
+        e.emitByte(2);
+        e.emit(OpCode::RETURN);
+    });
+
+    VM vm;
+    vm.registerFunction(addFunc);
+    vm.execute(code);
+    EXPECT_EQ(vm.getLastReturn().asInt(), 7);
+}
+
+TEST(VMTest, CallFunctionNoArgs) {
+    // Register a zero-argument function that returns 42.
+    BytecodeFunction constFunc;
+    constFunc.name = "answer";
+    constFunc.arity = 0;
+    constFunc.bytecode = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_INT);
+        e.emitInt(42);
+        e.emit(OpCode::RETURN);
+    });
+
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::CALL);
+        e.emitString("answer");
+        e.emitByte(0);
+        e.emit(OpCode::RETURN);
+    });
+
+    VM vm;
+    vm.registerFunction(constFunc);
+    vm.execute(code);
+    EXPECT_EQ(vm.getLastReturn().asInt(), 42);
+}
+
+TEST(VMTest, CallNestedFunctions) {
+    // "double_it" multiplies its arg by 2
+    BytecodeFunction doubleIt;
+    doubleIt.name = "double_it";
+    doubleIt.arity = 1;
+    doubleIt.bytecode = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitByte(0);
+        e.emit(OpCode::PUSH_INT);
+        e.emitInt(2);
+        e.emit(OpCode::MUL);
+        e.emit(OpCode::RETURN);
+    });
+
+    // "quad" calls double_it twice: double_it(double_it(x))
+    BytecodeFunction quad;
+    quad.name = "quad";
+    quad.arity = 1;
+    quad.bytecode = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitByte(0);
+        e.emit(OpCode::CALL);
+        e.emitString("double_it");
+        e.emitByte(1);
+        // result of double_it is on stack; call double_it again
+        e.emit(OpCode::CALL);
+        e.emitString("double_it");
+        e.emitByte(1);
+        e.emit(OpCode::RETURN);
+    });
+
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_INT);
+        e.emitInt(5);
+        e.emit(OpCode::CALL);
+        e.emitString("quad");
+        e.emitByte(1);
+        e.emit(OpCode::RETURN);
+    });
+
+    VM vm;
+    vm.registerFunction(doubleIt);
+    vm.registerFunction(quad);
+    vm.execute(code);
+    EXPECT_EQ(vm.getLastReturn().asInt(), 20); // 5 * 2 * 2 = 20
+}
+
+TEST(VMTest, CallUndefinedFunction) {
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::CALL);
+        e.emitString("nonexistent");
+        e.emitByte(0);
+    });
+    VM vm;
+    EXPECT_THROW(vm.execute(code), std::runtime_error);
+}
+
+TEST(VMTest, CallArityMismatch) {
+    BytecodeFunction func;
+    func.name = "f";
+    func.arity = 2;
+    func.bytecode = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_INT);
+        e.emitInt(0);
+        e.emit(OpCode::RETURN);
+    });
+
     auto code = buildBytecode([](BytecodeEmitter& e) {
         e.emit(OpCode::PUSH_INT);
         e.emitInt(1);
-        e.emit(OpCode::PUSH_INT);
-        e.emitInt(2);
         e.emit(OpCode::CALL);
-        e.emitString("add");
-        e.emitByte(2); // 2 arguments
+        e.emitString("f");
+        e.emitByte(1); // expects 2 but got 1
+    });
+
+    VM vm;
+    vm.registerFunction(func);
+    EXPECT_THROW(vm.execute(code), std::runtime_error);
+}
+
+TEST(VMTest, CallPreservesGlobals) {
+    // A function that sets a global and returns.
+    BytecodeFunction setter;
+    setter.name = "set_x";
+    setter.arity = 1;
+    setter.bytecode = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitByte(0);
+        e.emit(OpCode::STORE_VAR);
+        e.emitString("x");
+        e.emit(OpCode::POP);  // STORE_VAR uses peek, leaving the stored value on the stack; pop it
+        e.emit(OpCode::PUSH_INT);
+        e.emitInt(0);
         e.emit(OpCode::RETURN);
     });
+
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_INT);
+        e.emitInt(99);
+        e.emit(OpCode::CALL);
+        e.emitString("set_x");
+        e.emitByte(1);
+        e.emit(OpCode::POP);  // discard return value
+        e.emit(OpCode::LOAD_VAR);
+        e.emitString("x");
+        e.emit(OpCode::RETURN);
+    });
+
     VM vm;
+    vm.registerFunction(setter);
     vm.execute(code);
-    // CALL pops args and pushes 0 as placeholder
-    EXPECT_EQ(vm.getLastReturn().asInt(), 0);
+    EXPECT_EQ(vm.getLastReturn().asInt(), 99);
+}
+
+TEST(VMTest, LoadLocalAndStoreLocal) {
+    // Register a function that modifies a local and returns it.
+    BytecodeFunction func;
+    func.name = "inc";
+    func.arity = 1;
+    func.bytecode = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitByte(0);
+        e.emit(OpCode::PUSH_INT);
+        e.emitInt(10);
+        e.emit(OpCode::ADD);
+        e.emit(OpCode::STORE_LOCAL);
+        e.emitByte(0);
+        e.emit(OpCode::POP);  // STORE_LOCAL uses peek, leaving the stored value on the stack; pop it
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitByte(0);
+        e.emit(OpCode::RETURN);
+    });
+
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_INT);
+        e.emitInt(5);
+        e.emit(OpCode::CALL);
+        e.emitString("inc");
+        e.emitByte(1);
+        e.emit(OpCode::RETURN);
+    });
+
+    VM vm;
+    vm.registerFunction(func);
+    vm.execute(code);
+    EXPECT_EQ(vm.getLastReturn().asInt(), 15); // 5 + 10
+}
+
+TEST(VMTest, LoadLocalOutOfRange) {
+    BytecodeFunction func;
+    func.name = "bad";
+    func.arity = 0;
+    func.bytecode = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitByte(5); // no locals
+    });
+
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::CALL);
+        e.emitString("bad");
+        e.emitByte(0);
+    });
+
+    VM vm;
+    vm.registerFunction(func);
+    EXPECT_THROW(vm.execute(code), std::runtime_error);
 }
 
 // ===========================================================================
@@ -643,4 +850,145 @@ TEST(VMTest, VarReassignment) {
     VM vm;
     vm.execute(code);
     EXPECT_EQ(vm.getLastReturn().asInt(), 20);
+}
+
+// ===========================================================================
+// Jump out of bounds
+// ===========================================================================
+
+TEST(VMTest, JumpOutOfBounds) {
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_INT);
+        e.emitInt(1);
+        e.emit(OpCode::JUMP);
+        e.emitShort(0xFFFF);  // way past end
+    });
+    VM vm;
+    EXPECT_THROW(vm.execute(code), std::runtime_error);
+}
+
+TEST(VMTest, JumpIfFalseOutOfBounds) {
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_INT);
+        e.emitInt(0);  // false condition
+        e.emit(OpCode::JUMP_IF_FALSE);
+        e.emitShort(0xFFFF);  // way past end
+    });
+    VM vm;
+    EXPECT_THROW(vm.execute(code), std::runtime_error);
+}
+
+// ===========================================================================
+// STORE_VAR uses peek (value stays on stack after store)
+// ===========================================================================
+
+TEST(VMTest, StoreVarLeavesValueOnStack) {
+    // STORE_VAR uses peek() to read the value without popping.
+    // The value should remain on the stack after the store, allowing
+    // it to be used as the result of an assignment expression.
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_INT);
+        e.emitInt(99);
+        e.emit(OpCode::STORE_VAR);
+        e.emitString("x");
+        // The value 99 should still be on the stack (peek semantics)
+        // Pop the leftover value via another store or a pop
+        e.emit(OpCode::POP);
+        // Now load the stored variable and return it
+        e.emit(OpCode::LOAD_VAR);
+        e.emitString("x");
+        e.emit(OpCode::RETURN);
+    });
+    VM vm;
+    vm.execute(code);
+    EXPECT_EQ(vm.getLastReturn().asInt(), 99);
+}
+
+// ===========================================================================
+// Nested CALL preserves caller stack
+// ===========================================================================
+
+TEST(VMTest, CallPreservesCallerStack) {
+    // This test verifies that a function call does not destroy intermediate
+    // values on the caller's stack.  Before the fix, execute() called
+    // stack.clear() which wiped the caller's data.
+    //
+    // Caller logic:  push 100, push call(identity, 42), ADD → should be 142
+    //
+    // identity(x) just returns its argument.
+    auto identityCode = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitByte(0);
+        e.emit(OpCode::RETURN);
+    });
+
+    auto callerCode = buildBytecode([](BytecodeEmitter& e) {
+        // Push an intermediate value that must survive the CALL
+        e.emit(OpCode::PUSH_INT);
+        e.emitInt(100);
+        // Call identity(42)
+        e.emit(OpCode::PUSH_INT);
+        e.emitInt(42);
+        e.emit(OpCode::CALL);
+        e.emitString("identity");
+        e.emitByte(1);
+        // ADD the intermediate value (100) and the call result (42)
+        e.emit(OpCode::ADD);
+        e.emit(OpCode::RETURN);
+    });
+
+    VM vm;
+    BytecodeFunction identityFn;
+    identityFn.name = "identity";
+    identityFn.arity = 1;
+    identityFn.bytecode = identityCode;
+    vm.registerFunction(identityFn);
+
+    vm.execute(callerCode);
+    EXPECT_EQ(vm.getLastReturn().asInt(), 142);
+}
+
+// ===========================================================================
+// Multiple nested calls preserve all intermediate values
+// ===========================================================================
+
+TEST(VMTest, MultipleCallsPreserveStack) {
+    // push 10, call(id, 20), ADD, call(id, 30), ADD → 10 + 20 + 30 = 60
+    auto identityCode = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitByte(0);
+        e.emit(OpCode::RETURN);
+    });
+
+    auto callerCode = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_INT);
+        e.emitInt(10);
+
+        e.emit(OpCode::PUSH_INT);
+        e.emitInt(20);
+        e.emit(OpCode::CALL);
+        e.emitString("id");
+        e.emitByte(1);
+
+        e.emit(OpCode::ADD);
+
+        e.emit(OpCode::PUSH_INT);
+        e.emitInt(30);
+        e.emit(OpCode::CALL);
+        e.emitString("id");
+        e.emitByte(1);
+
+        e.emit(OpCode::ADD);
+        e.emit(OpCode::RETURN);
+    });
+
+    VM vm;
+    BytecodeFunction idFn;
+    idFn.name = "id";
+    idFn.arity = 1;
+    idFn.bytecode = identityCode;
+    vm.registerFunction(idFn);
+
+    vm.execute(callerCode);
+    EXPECT_EQ(vm.getLastReturn().asInt(), 60);
 }

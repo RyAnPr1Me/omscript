@@ -36,6 +36,7 @@ using omscript::AssignExpr;
 using omscript::CallExpr;
 using omscript::ArrayExpr;
 using omscript::IndexExpr;
+using omscript::IndexAssignExpr;
 using omscript::PostfixExpr;
 using omscript::PrefixExpr;
 using omscript::TernaryExpr;
@@ -46,6 +47,7 @@ using omscript::IfStmt;
 using omscript::WhileStmt;
 using omscript::DoWhileStmt;
 using omscript::ForStmt;
+using omscript::ForEachStmt;
 using omscript::Statement;
 
 std::unique_ptr<Expression> optimizeOptMaxExpression(std::unique_ptr<Expression> expr);
@@ -193,6 +195,13 @@ std::unique_ptr<Expression> optimizeOptMaxExpression(std::unique_ptr<Expression>
             indexExpr->index = optimizeOptMaxExpression(std::move(indexExpr->index));
             return expr;
         }
+        case ASTNodeType::INDEX_ASSIGN_EXPR: {
+            auto* ia = static_cast<IndexAssignExpr*>(expr.get());
+            ia->array = optimizeOptMaxExpression(std::move(ia->array));
+            ia->index = optimizeOptMaxExpression(std::move(ia->index));
+            ia->value = optimizeOptMaxExpression(std::move(ia->value));
+            return expr;
+        }
         case ASTNodeType::POSTFIX_EXPR: {
             auto* postfix = static_cast<PostfixExpr*>(expr.get());
             postfix->operand = optimizeOptMaxExpression(std::move(postfix->operand));
@@ -285,6 +294,25 @@ void optimizeOptMaxStatement(Statement* stmt) {
             optimizeOptMaxStatement(forStmt->body.get());
             break;
         }
+        case ASTNodeType::FOR_EACH_STMT: {
+            auto* forEach = static_cast<ForEachStmt*>(stmt);
+            forEach->collection = optimizeOptMaxExpression(std::move(forEach->collection));
+            optimizeOptMaxStatement(forEach->body.get());
+            break;
+        }
+        case ASTNodeType::SWITCH_STMT: {
+            auto* switchStmt = static_cast<omscript::SwitchStmt*>(stmt);
+            switchStmt->condition = optimizeOptMaxExpression(std::move(switchStmt->condition));
+            for (auto& sc : switchStmt->cases) {
+                if (sc.value) {
+                    sc.value = optimizeOptMaxExpression(std::move(sc.value));
+                }
+                for (auto& s : sc.body) {
+                    optimizeOptMaxStatement(s.get());
+                }
+            }
+            break;
+        }
         default:
             break;
     }
@@ -298,9 +326,9 @@ namespace omscript {
 // These functions are always compiled to native machine code via LLVM IR,
 // never through the bytecode/dynamic compilation path.
 static const std::unordered_set<std::string> stdlibFunctions = {
-    "print", "abs", "len", "min", "max", "sign", "clamp", "pow",
-    "print_char", "input", "sqrt", "is_even", "is_odd", "sum",
-    "swap", "reverse", "to_char", "is_alpha", "is_digit"
+    "abs", "assert", "char_at", "clamp", "input", "is_alpha", "is_digit",
+    "is_even", "is_odd", "len", "max", "min", "pow", "print", "print_char",
+    "reverse", "sign", "sqrt", "str_eq", "str_len", "sum", "swap", "to_char", "typeof"
 };
 
 bool isStdlibFunction(const std::string& name) {
@@ -371,6 +399,9 @@ llvm::Value* CodeGenerator::toDefaultType(llvm::Value* v) {
     }
     if (v->getType()->isPointerTy()) {
         return builder->CreatePtrToInt(v, getDefaultType(), "ptoi");
+    }
+    if (v->getType()->isIntegerTy() && v->getType() != getDefaultType()) {
+        return builder->CreateZExt(v, getDefaultType(), "zext");
     }
     return v;
 }
@@ -587,6 +618,9 @@ void CodeGenerator::generateStatement(Statement* stmt) {
         case ASTNodeType::FOR_STMT:
             generateFor(static_cast<ForStmt*>(stmt));
             break;
+        case ASTNodeType::FOR_EACH_STMT:
+            generateForEach(static_cast<ForEachStmt*>(stmt));
+            break;
         case ASTNodeType::BREAK_STMT:
             if (loopStack.empty()) {
                 throw std::runtime_error("break used outside of a loop");
@@ -604,6 +638,9 @@ void CodeGenerator::generateStatement(Statement* stmt) {
             break;
         case ASTNodeType::EXPR_STMT:
             generateExprStmt(static_cast<ExprStmt*>(stmt));
+            break;
+        case ASTNodeType::SWITCH_STMT:
+            generateSwitch(static_cast<SwitchStmt*>(stmt));
             break;
         default:
             throw std::runtime_error("Unknown statement type");
@@ -634,6 +671,8 @@ llvm::Value* CodeGenerator::generateExpression(Expression* expr) {
             return generateArray(static_cast<ArrayExpr*>(expr));
         case ASTNodeType::INDEX_EXPR:
             return generateIndex(static_cast<IndexExpr*>(expr));
+        case ASTNodeType::INDEX_ASSIGN_EXPR:
+            return generateIndexAssign(static_cast<IndexAssignExpr*>(expr));
         default:
             throw std::runtime_error("Unknown expression type");
     }
@@ -1396,6 +1435,117 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         return builder->CreateZExt(isDigit, getDefaultType(), "digitval");
     }
 
+    // typeof(x) returns 1 for integer, 2 for float, 3 for string, 0 for none.
+    // In the current LLVM compilation path, all values are represented as i64,
+    // so typeof() always returns 1 (integer).  In the bytecode VM path the
+    // runtime Value type would be inspected instead.
+    if (expr->callee == "typeof") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'typeof' expects 1 argument, but " +
+                         std::to_string(expr->arguments.size()) + " provided", expr);
+        }
+        // Evaluate the argument for its side effects, then return type tag.
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        (void)arg;
+        // In the LLVM native path all values are i64, so type is always 1 (integer).
+        return llvm::ConstantInt::get(getDefaultType(), 1);
+    }
+
+    // assert(condition) — aborts with an error if the condition is falsy.
+    if (expr->callee == "assert") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'assert' expects 1 argument, but " +
+                         std::to_string(expr->arguments.size()) + " provided", expr);
+        }
+        llvm::Value* condVal = generateExpression(expr->arguments[0].get());
+        condVal = toBool(condVal);
+
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "assert.fail", function);
+        llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "assert.ok", function);
+
+        builder->CreateCondBr(condVal, okBB, failBB);
+
+        builder->SetInsertPoint(failBB);
+        llvm::Value* errMsg = builder->CreateGlobalString(
+            "Runtime error: assertion failed\n", "assert_msg");
+        builder->CreateCall(getPrintfFunction(), {errMsg});
+        llvm::Function* trapFn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::trap);
+        builder->CreateCall(trapFn, {});
+        builder->CreateUnreachable();
+
+        builder->SetInsertPoint(okBB);
+        return llvm::ConstantInt::get(getDefaultType(), 1);
+    }
+
+    if (expr->callee == "str_len") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'str_len' expects 1 argument, but " +
+                         std::to_string(expr->arguments.size()) + " provided", expr);
+        }
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        // String is stored as an i64 holding a pointer to a C string
+        llvm::Value* strPtr = builder->CreateIntToPtr(arg,
+            llvm::PointerType::getUnqual(*context), "strlen.ptr");
+        // Declare strlen if not already declared
+        llvm::Function* strlenFn = module->getFunction("strlen");
+        if (!strlenFn) {
+            llvm::FunctionType* strlenTy = llvm::FunctionType::get(
+                getDefaultType(),
+                {llvm::PointerType::getUnqual(*context)},
+                false);
+            strlenFn = llvm::Function::Create(strlenTy, llvm::Function::ExternalLinkage, "strlen", module.get());
+        }
+        return builder->CreateCall(strlenFn, {strPtr}, "strlen.result");
+    }
+
+    if (expr->callee == "char_at") {
+        if (expr->arguments.size() != 2) {
+            codegenError("Built-in function 'char_at' expects 2 arguments (string, index), but " +
+                         std::to_string(expr->arguments.size()) + " provided", expr);
+        }
+        llvm::Value* strArg = generateExpression(expr->arguments[0].get());
+        llvm::Value* idxArg = generateExpression(expr->arguments[1].get());
+        idxArg = toDefaultType(idxArg);
+        // Convert to pointer
+        llvm::Value* strPtr = builder->CreateIntToPtr(strArg,
+            llvm::PointerType::getUnqual(*context), "charat.ptr");
+        // Load char via GEP
+        llvm::Value* charPtr = builder->CreateGEP(
+            llvm::Type::getInt8Ty(*context), strPtr, idxArg, "charat.gep");
+        llvm::Value* charVal = builder->CreateLoad(
+            llvm::Type::getInt8Ty(*context), charPtr, "charat.char");
+        // Zero-extend to i64
+        return builder->CreateZExt(charVal, getDefaultType(), "charat.ext");
+    }
+
+    if (expr->callee == "str_eq") {
+        if (expr->arguments.size() != 2) {
+            codegenError("Built-in function 'str_eq' expects 2 arguments, but " +
+                         std::to_string(expr->arguments.size()) + " provided", expr);
+        }
+        llvm::Value* lhsArg = generateExpression(expr->arguments[0].get());
+        llvm::Value* rhsArg = generateExpression(expr->arguments[1].get());
+        // Convert i64 to pointers to C strings
+        llvm::Value* lhsPtr = builder->CreateIntToPtr(lhsArg,
+            llvm::PointerType::getUnqual(*context), "streq.lhs");
+        llvm::Value* rhsPtr = builder->CreateIntToPtr(rhsArg,
+            llvm::PointerType::getUnqual(*context), "streq.rhs");
+        // Declare strcmp if not already declared
+        llvm::Function* strcmpFn = module->getFunction("strcmp");
+        if (!strcmpFn) {
+            llvm::FunctionType* strcmpTy = llvm::FunctionType::get(
+                builder->getInt32Ty(),
+                {llvm::PointerType::getUnqual(*context), llvm::PointerType::getUnqual(*context)},
+                false);
+            strcmpFn = llvm::Function::Create(strcmpTy, llvm::Function::ExternalLinkage, "strcmp", module.get());
+        }
+        llvm::Value* cmpResult = builder->CreateCall(strcmpFn, {lhsPtr, rhsPtr}, "streq.cmp");
+        // strcmp returns 0 on equality; convert to boolean (1 if equal, 0 otherwise)
+        llvm::Value* isEqual = builder->CreateICmpEQ(cmpResult, builder->getInt32(0), "streq.eq");
+        return builder->CreateZExt(isEqual, getDefaultType(), "streq.result");
+    }
+
     if (inOptMaxFunction) {
         // Stdlib functions are always native machine code, so they're safe to call from OPTMAX
         if (!isStdlibFunction(expr->callee) &&
@@ -1642,6 +1792,47 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
     return builder->CreateLoad(getDefaultType(), elemPtr, "idx.elem");
 }
 
+llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
+    llvm::Value* arrVal = generateExpression(expr->array.get());
+    llvm::Value* idxVal = generateExpression(expr->index.get());
+    llvm::Value* newVal = generateExpression(expr->value.get());
+    newVal = toDefaultType(newVal);
+
+    // Convert the i64 back to a pointer
+    llvm::Value* arrPtr = builder->CreateIntToPtr(arrVal,
+        llvm::PointerType::getUnqual(*context), "idxa.arrptr");
+
+    // Bounds check: load length from slot 0, verify 0 <= index < length
+    llvm::Value* lenVal = builder->CreateLoad(getDefaultType(), arrPtr, "idxa.len");
+    llvm::Value* inBounds = builder->CreateICmpSLT(idxVal, lenVal, "idxa.inbounds");
+    llvm::Value* notNeg = builder->CreateICmpSGE(idxVal,
+        llvm::ConstantInt::get(getDefaultType(), 0), "idxa.notneg");
+    llvm::Value* valid = builder->CreateAnd(inBounds, notNeg, "idxa.valid");
+
+    llvm::Function* function = builder->GetInsertBlock()->getParent();
+    llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "idxa.ok", function);
+    llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "idxa.fail", function);
+
+    builder->CreateCondBr(valid, okBB, failBB);
+
+    // Out-of-bounds path: print error and abort
+    builder->SetInsertPoint(failBB);
+    llvm::Value* errMsg = builder->CreateGlobalString(
+        "Runtime error: array index out of bounds\n", "idxa_oob_msg");
+    builder->CreateCall(getPrintfFunction(), {errMsg});
+    llvm::Function* trapFn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::trap);
+    builder->CreateCall(trapFn, {});
+    builder->CreateUnreachable();
+
+    // Success path: store element at offset (index + 1)
+    builder->SetInsertPoint(okBB);
+    llvm::Value* offset = builder->CreateAdd(idxVal,
+        llvm::ConstantInt::get(getDefaultType(), 1), "idxa.offset");
+    llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrPtr, offset, "idxa.elem.ptr");
+    builder->CreateStore(newVal, elemPtr);
+    return newVal;
+}
+
 void CodeGenerator::generateVarDecl(VarDecl* stmt) {
     llvm::Function* function = builder->GetInsertBlock()->getParent();
     if (!function) {
@@ -1877,6 +2068,76 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     endScope();
 }
 
+void CodeGenerator::generateForEach(ForEachStmt* stmt) {
+    llvm::Function* function = builder->GetInsertBlock()->getParent();
+    if (!function) {
+        throw std::runtime_error("For-each loop outside of function");
+    }
+    
+    beginScope();
+    
+    // Evaluate the collection (array)
+    llvm::Value* collVal = generateExpression(stmt->collection.get());
+    collVal = toDefaultType(collVal);
+    
+    // Convert i64 to pointer — array layout is [length, elem0, elem1, ...]
+    llvm::Value* arrPtr = builder->CreateIntToPtr(collVal,
+        llvm::PointerType::getUnqual(*context), "foreach.arrptr");
+    
+    // Load length from slot 0
+    llvm::Value* lenVal = builder->CreateLoad(getDefaultType(), arrPtr, "foreach.len");
+    
+    // Allocate hidden index variable and the user's iterator variable
+    llvm::AllocaInst* idxAlloca = createEntryBlockAlloca(function, "_foreach_idx");
+    builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 0), idxAlloca);
+    
+    llvm::AllocaInst* iterAlloca = createEntryBlockAlloca(function, stmt->iteratorVar);
+    bindVariable(stmt->iteratorVar, iterAlloca);
+    
+    // Create blocks
+    llvm::BasicBlock* condBB = llvm::BasicBlock::Create(*context, "foreach.cond", function);
+    llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "foreach.body", function);
+    llvm::BasicBlock* incBB = llvm::BasicBlock::Create(*context, "foreach.inc", function);
+    llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "foreach.end", function);
+    
+    builder->CreateBr(condBB);
+    
+    // Condition: idx < length
+    builder->SetInsertPoint(condBB);
+    llvm::Value* curIdx = builder->CreateLoad(getDefaultType(), idxAlloca, "foreach.idx");
+    llvm::Value* cond = builder->CreateICmpSLT(curIdx, lenVal, "foreach.cmp");
+    builder->CreateCondBr(cond, bodyBB, endBB);
+    
+    // Body: load current element into iterator variable, then execute body
+    builder->SetInsertPoint(bodyBB);
+    llvm::Value* bodyIdx = builder->CreateLoad(getDefaultType(), idxAlloca, "foreach.bidx");
+    llvm::Value* offset = builder->CreateAdd(bodyIdx,
+        llvm::ConstantInt::get(getDefaultType(), 1), "foreach.offset");
+    llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrPtr, offset, "foreach.elem.ptr");
+    llvm::Value* elemVal = builder->CreateLoad(getDefaultType(), elemPtr, "foreach.elem");
+    builder->CreateStore(elemVal, iterAlloca);
+    
+    loopStack.push_back({endBB, incBB});
+    generateStatement(stmt->body.get());
+    loopStack.pop_back();
+    if (!builder->GetInsertBlock()->getTerminator()) {
+        builder->CreateBr(incBB);
+    }
+    
+    // Increment hidden index
+    builder->SetInsertPoint(incBB);
+    llvm::Value* nextIdx = builder->CreateLoad(getDefaultType(), idxAlloca, "foreach.nidx");
+    llvm::Value* incIdx = builder->CreateAdd(nextIdx,
+        llvm::ConstantInt::get(getDefaultType(), 1), "foreach.next");
+    builder->CreateStore(incIdx, idxAlloca);
+    builder->CreateBr(condBB);
+    
+    // End
+    builder->SetInsertPoint(endBB);
+    
+    endScope();
+}
+
 void CodeGenerator::generateBlock(BlockStmt* stmt) {
     beginScope();
     for (auto& statement : stmt->statements) {
@@ -1890,6 +2151,70 @@ void CodeGenerator::generateBlock(BlockStmt* stmt) {
 
 void CodeGenerator::generateExprStmt(ExprStmt* stmt) {
     generateExpression(stmt->expression.get());
+}
+
+void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
+    llvm::Value* condVal = generateExpression(stmt->condition.get());
+    condVal = toDefaultType(condVal);
+    
+    llvm::Function* function = builder->GetInsertBlock()->getParent();
+    llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "switch.end", function);
+    llvm::BasicBlock* defaultBB = mergeBB;  // fall through to merge if no default
+    
+    // Find the default case block first so the switch instruction can reference it.
+    for (auto& sc : stmt->cases) {
+        if (sc.isDefault) {
+            defaultBB = llvm::BasicBlock::Create(*context, "switch.default", function, mergeBB);
+            break;
+        }
+    }
+    
+    llvm::SwitchInst* switchInst = builder->CreateSwitch(condVal, defaultBB, static_cast<unsigned>(stmt->cases.size()));
+    
+    // Push a loop context so that 'break' inside a case arm exits the switch
+    // (matching C/C++ semantics where break leaves the nearest switch or loop).
+    loopStack.push_back({mergeBB, nullptr});
+    
+    for (auto& sc : stmt->cases) {
+        if (sc.isDefault) {
+            // Generate default block body.
+            builder->SetInsertPoint(defaultBB);
+            beginScope();
+            for (auto& s : sc.body) {
+                generateStatement(s.get());
+                if (builder->GetInsertBlock()->getTerminator()) break;
+            }
+            endScope();
+            if (!builder->GetInsertBlock()->getTerminator()) {
+                builder->CreateBr(mergeBB);
+            }
+        } else {
+            llvm::Value* caseVal = generateExpression(sc.value.get());
+            caseVal = toDefaultType(caseVal);
+            auto* caseConst = llvm::dyn_cast<llvm::ConstantInt>(caseVal);
+            if (!caseConst) {
+                throw std::runtime_error("case value must be a compile-time constant");
+            }
+            
+            llvm::BasicBlock* caseBB = llvm::BasicBlock::Create(*context, "switch.case", function, mergeBB);
+            switchInst->addCase(caseConst, caseBB);
+            
+            builder->SetInsertPoint(caseBB);
+            beginScope();
+            for (auto& s : sc.body) {
+                generateStatement(s.get());
+                if (builder->GetInsertBlock()->getTerminator()) break;
+            }
+            endScope();
+            if (!builder->GetInsertBlock()->getTerminator()) {
+                builder->CreateBr(mergeBB);
+            }
+        }
+    }
+    
+    loopStack.pop_back();
+    
+    builder->SetInsertPoint(mergeBB);
 }
 
 void CodeGenerator::runOptimizationPasses() {
@@ -1972,7 +2297,8 @@ void CodeGenerator::runOptimizationPasses() {
             break;
             
         case OptimizationLevel::O0:
-            // No optimization
+            // No optimization passes needed at O0; return early to skip
+            // fpm.doInitialization()/doFinalization() and mpm.run() below.
             return;
     }
     
@@ -1990,7 +2316,10 @@ void CodeGenerator::runOptimizationPasses() {
 }
 
 void CodeGenerator::optimizeFunction(llvm::Function* func) {
-    // Per-function optimization (if needed for specific cases)
+    // Per-function optimization for targeted optimization of individual functions.
+    // This allows selectively optimizing specific functions (e.g., hot functions
+    // identified at compile time, or OPTMAX-annotated functions) without running
+    // the full module-wide optimization pipeline.
     llvm::legacy::FunctionPassManager fpm(module.get());
     
     fpm.add(llvm::createPromoteMemoryToRegisterPass());
@@ -2002,6 +2331,7 @@ void CodeGenerator::optimizeFunction(llvm::Function* func) {
     fpm.run(*func);
     fpm.doFinalization();
 }
+
 
 void CodeGenerator::optimizeOptMaxFunctions() {
     llvm::legacy::FunctionPassManager fpm(module.get());
@@ -2263,6 +2593,8 @@ void CodeGenerator::emitBytecodeExpression(Expression* expr) {
             bytecodeEmitter.patchJump(endPatch, static_cast<uint16_t>(bytecodeEmitter.currentOffset()));
             break;
         }
+        case ASTNodeType::INDEX_ASSIGN_EXPR:
+            throw std::runtime_error("Array index assignment is not supported in bytecode mode");
         default:
             throw std::runtime_error("Unsupported expression type in bytecode generation");
     }
@@ -2402,6 +2734,60 @@ void CodeGenerator::emitBytecodeStatement(Statement* stmt) {
             bytecodeEmitter.patchJump(exitPatch, static_cast<uint16_t>(bytecodeEmitter.currentOffset()));
             break;
         }
+        case ASTNodeType::SWITCH_STMT: {
+            auto* switchStmt = static_cast<SwitchStmt*>(stmt);
+            // Use a unique temp variable to support nested switches.
+            static int switchCounter = 0;
+            std::string tempVar = "__switch_cond_" + std::to_string(switchCounter++) + "__";
+            // Emit the condition once and store in the temporary variable.
+            emitBytecodeExpression(switchStmt->condition.get());
+            bytecodeEmitter.emit(OpCode::STORE_VAR);
+            bytecodeEmitter.emitString(tempVar);
+            bytecodeEmitter.emit(OpCode::POP);
+
+            // Emit non-default cases first, then the default case last
+            // so that the default only executes when no case matches.
+            std::vector<size_t> endPatches;
+            const SwitchCase* defaultCase = nullptr;
+
+            for (auto& sc : switchStmt->cases) {
+                if (sc.isDefault) {
+                    defaultCase = &sc;
+                } else {
+                    bytecodeEmitter.emit(OpCode::LOAD_VAR);
+                    bytecodeEmitter.emitString(tempVar);
+                    emitBytecodeExpression(sc.value.get());
+                    bytecodeEmitter.emit(OpCode::EQ);
+                    bytecodeEmitter.emit(OpCode::JUMP_IF_FALSE);
+                    size_t skipPatch = bytecodeEmitter.currentOffset();
+                    bytecodeEmitter.emitShort(0);
+
+                    for (auto& s : sc.body) {
+                        emitBytecodeStatement(s.get());
+                    }
+                    bytecodeEmitter.emit(OpCode::JUMP);
+                    endPatches.push_back(bytecodeEmitter.currentOffset());
+                    bytecodeEmitter.emitShort(0);
+
+                    bytecodeEmitter.patchJump(skipPatch, static_cast<uint16_t>(bytecodeEmitter.currentOffset()));
+                }
+            }
+
+            // Emit the default case body last (only reached if no case matched).
+            if (defaultCase) {
+                for (auto& s : defaultCase->body) {
+                    emitBytecodeStatement(s.get());
+                }
+            }
+
+            uint16_t endOffset = static_cast<uint16_t>(bytecodeEmitter.currentOffset());
+            for (size_t patch : endPatches) {
+                bytecodeEmitter.patchJump(patch, endOffset);
+            }
+            break;
+        }
+        case ASTNodeType::FOR_EACH_STMT:
+            throw std::runtime_error("For-each loops are not supported in bytecode mode");
         default:
             throw std::runtime_error("Unsupported statement type in bytecode generation");
     }

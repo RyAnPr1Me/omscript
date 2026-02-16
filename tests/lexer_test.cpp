@@ -340,3 +340,108 @@ TEST(LexerTest, FullFunction) {
 TEST(LexerTest, UnterminatedEscapeAtEnd) {
     EXPECT_THROW(lex("\"abc\\"), std::runtime_error);
 }
+
+// ---------------------------------------------------------------------------
+// String escape: carriage return
+// ---------------------------------------------------------------------------
+
+TEST(LexerTest, StringEscapeCarriageReturn) {
+    auto tokens = lex("\"a\\rb\"");
+    ASSERT_GE(tokens.size(), 2u);
+    EXPECT_EQ(tokens[0].type, TokenType::STRING);
+    EXPECT_EQ(tokens[0].lexeme, "a\rb");
+}
+
+// ---------------------------------------------------------------------------
+// String escape: null, backspace, form feed, vertical tab
+// ---------------------------------------------------------------------------
+
+TEST(LexerTest, StringEscapeNull) {
+    auto tokens = lex("\"a\\0b\"");
+    ASSERT_GE(tokens.size(), 2u);
+    EXPECT_EQ(tokens[0].type, TokenType::STRING);
+    std::string expected = std::string("a") + '\0' + "b";
+    EXPECT_EQ(tokens[0].lexeme, expected);
+}
+
+TEST(LexerTest, StringEscapeBackspace) {
+    auto tokens = lex("\"a\\bb\"");
+    ASSERT_GE(tokens.size(), 2u);
+    EXPECT_EQ(tokens[0].type, TokenType::STRING);
+    EXPECT_EQ(tokens[0].lexeme, "a\bb");
+}
+
+TEST(LexerTest, StringEscapeFormFeed) {
+    auto tokens = lex("\"a\\fb\"");
+    ASSERT_GE(tokens.size(), 2u);
+    EXPECT_EQ(tokens[0].type, TokenType::STRING);
+    EXPECT_EQ(tokens[0].lexeme, "a\fb");
+}
+
+TEST(LexerTest, StringEscapeVerticalTab) {
+    auto tokens = lex("\"a\\vb\"");
+    ASSERT_GE(tokens.size(), 2u);
+    EXPECT_EQ(tokens[0].type, TokenType::STRING);
+    EXPECT_EQ(tokens[0].lexeme, "a\vb");
+}
+
+// ---------------------------------------------------------------------------
+// String escape: unknown escape sequence
+// ---------------------------------------------------------------------------
+
+TEST(LexerTest, StringEscapeUnknown) {
+    // Unknown escape sequences should produce an error instead of being silently accepted.
+    EXPECT_THROW(lex("\"a\\zb\""), std::runtime_error);
+}
+
+// ---------------------------------------------------------------------------
+// Float with double dot: 1.2.3 -> FLOAT 1.2, DOT, INTEGER 3
+// ---------------------------------------------------------------------------
+
+TEST(LexerTest, FloatDoubleDot) {
+    auto tokens = lex("1.2.3");
+    ASSERT_GE(tokens.size(), 4u);
+    EXPECT_EQ(tokens[0].type, TokenType::FLOAT);
+    EXPECT_DOUBLE_EQ(tokens[0].floatValue, 1.2);
+    EXPECT_EQ(tokens[1].type, TokenType::DOT);
+    EXPECT_EQ(tokens[2].type, TokenType::INTEGER);
+    EXPECT_EQ(tokens[2].intValue, 3);
+}
+
+// ---------------------------------------------------------------------------
+// Multiple-digit integer before range: 42...100
+// ---------------------------------------------------------------------------
+
+TEST(LexerTest, MultipleNumbersBeforeRange) {
+    auto tokens = lex("42...100");
+    ASSERT_GE(tokens.size(), 4u);
+    EXPECT_EQ(tokens[0].type, TokenType::INTEGER);
+    EXPECT_EQ(tokens[0].intValue, 42);
+    EXPECT_EQ(tokens[1].type, TokenType::RANGE);
+    EXPECT_EQ(tokens[2].type, TokenType::INTEGER);
+    EXPECT_EQ(tokens[2].intValue, 100);
+}
+
+// ---------------------------------------------------------------------------
+// Single dot token
+// ---------------------------------------------------------------------------
+
+TEST(LexerTest, SingleDot) {
+    auto tokens = lex(".");
+    ASSERT_GE(tokens.size(), 2u);
+    EXPECT_EQ(tokens[0].type, TokenType::DOT);
+    EXPECT_EQ(tokens[1].type, TokenType::END_OF_FILE);
+}
+
+// ---------------------------------------------------------------------------
+// Switch/case/default keywords
+// ---------------------------------------------------------------------------
+
+TEST(LexerTest, SwitchKeywords) {
+    auto tokens = lex("switch case default");
+    ASSERT_GE(tokens.size(), 4u);
+    EXPECT_EQ(tokens[0].type, TokenType::SWITCH);
+    EXPECT_EQ(tokens[1].type, TokenType::CASE);
+    EXPECT_EQ(tokens[2].type, TokenType::DEFAULT);
+    EXPECT_EQ(tokens[3].type, TokenType::END_OF_FILE);
+}

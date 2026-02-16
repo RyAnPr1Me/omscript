@@ -97,6 +97,10 @@ Value VM::getGlobal(const std::string& name) {
     throw std::runtime_error("Undefined variable: " + name);
 }
 
+void VM::registerFunction(const BytecodeFunction& func) {
+    functions[func.name] = func;
+}
+
 void VM::execute(const std::vector<uint8_t>& bytecode) {
     size_t ip = 0;
     stack.clear();
@@ -239,10 +243,28 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
             
             case OpCode::STORE_VAR: {
                 std::string name = readString(bytecode, ip);
-                // STORE_VAR now pops then pushes to avoid stack growth while preserving assignment semantics.
-                Value value = pop();
+                // Use peek to read the value without popping, preserving assignment semantics.
+                Value value = peek(0);
                 setGlobal(name, value);
-                push(value);
+                break;
+            }
+            
+            case OpCode::LOAD_LOCAL: {
+                uint8_t index = readByte(bytecode, ip);
+                if (index >= locals.size()) {
+                    throw std::runtime_error("Local variable index out of range: " +
+                        std::to_string(index));
+                }
+                push(locals[index]);
+                break;
+            }
+            
+            case OpCode::STORE_LOCAL: {
+                uint8_t index = readByte(bytecode, ip);
+                if (index >= locals.size()) {
+                    locals.resize(static_cast<size_t>(index) + 1);
+                }
+                locals[index] = peek(0);
                 break;
             }
             
@@ -288,15 +310,56 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
             case OpCode::CALL: {
                 std::string funcName = readString(bytecode, ip);
                 uint8_t argCount = readByte(bytecode, ip);
-                // Store arguments from the stack for the callee.
-                // For now, CALL is a placeholder that pops the arguments and
-                // pushes a default return value of 0.  Full function dispatch
-                // requires a call-frame stack which is not yet implemented.
-                (void)funcName; // Will be used for function lookup once call frames are added
-                for (uint8_t i = 0; i < argCount; i++) {
-                    pop();
+
+                auto it = functions.find(funcName);
+                if (it == functions.end()) {
+                    throw std::runtime_error("Undefined function: " + funcName);
                 }
-                push(Value(static_cast<int64_t>(0)));
+                const BytecodeFunction& func = it->second;
+                if (argCount != func.arity) {
+                    throw std::runtime_error("Function '" + funcName + "' expects " +
+                        std::to_string(func.arity) + " arguments but got " +
+                        std::to_string(argCount));
+                }
+
+                // Save the current call frame so we can resume after the
+                // callee returns.
+                CallFrame frame;
+                frame.function = &func;
+                frame.returnIp = ip;
+                frame.returnBytecode = &bytecode;
+                frame.savedLocals = locals;
+                callStack.push_back(std::move(frame));
+
+                // Bind arguments as local variables.  Arguments are pushed
+                // left-to-right so the first argument is deepest on the stack.
+                locals.clear();
+                locals.resize(argCount);
+                for (size_t i = argCount; i > 0; i--) {
+                    locals[i - 1] = pop();
+                }
+
+                // Save the caller's stack so the callee starts with a clean
+                // stack.  execute() calls stack.clear() at entry which would
+                // otherwise destroy any intermediate values the caller still
+                // needs after the call returns.
+                std::vector<Value> callerStack = std::move(stack);
+                stack.clear();
+
+                // Execute the callee's bytecode inline using a recursive call
+                // to execute().  RETURN inside the callee will cause that
+                // execute() to return, at which point we restore state.
+                execute(func.bytecode);
+
+                // Restore caller state from the call frame.
+                Value returnValue = lastReturn;
+                stack = std::move(callerStack);
+                CallFrame& top = callStack.back();
+                locals = std::move(top.savedLocals);
+                callStack.pop_back();
+
+                // Push the callee's return value onto the restored caller stack.
+                push(returnValue);
                 break;
             }
             

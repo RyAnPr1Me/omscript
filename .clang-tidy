@@ -1,0 +1,22 @@
+---
+# Clang-tidy configuration for OmScript
+# Run with: clang-tidy -p build src/*.cpp runtime/*.cpp
+Checks: >
+  -*,
+  bugprone-*,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-narrowing-conversions,
+  misc-redundant-expression,
+  misc-unused-using-decls,
+  modernize-use-nullptr,
+  modernize-use-override,
+  modernize-use-auto,
+  performance-unnecessary-value-param,
+  performance-for-range-copy,
+  readability-redundant-string-cstr,
+  readability-simplify-boolean-expr
+
+WarningsAsErrors: ''
+
+HeaderFilterRegex: '(include|runtime)/.*\.h$'
+---

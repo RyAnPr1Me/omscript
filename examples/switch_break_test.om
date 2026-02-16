@@ -1,0 +1,28 @@
+// Test break inside switch statement
+fn classify(x) {
+    var result = 0;
+    switch (x) {
+        case 1:
+            result = 10;
+            break;
+        case 2:
+            result = 20;
+            break;
+        case 3:
+            result = 30;
+            break;
+        default:
+            result = 99;
+            break;
+    }
+    return result;
+}
+
+fn main() {
+    var a = classify(1);   // 10
+    var b = classify(2);   // 20
+    var c = classify(3);   // 30
+    var d = classify(99);  // 99 (default)
+    
+    return a + b + c + d;  // 159
+}

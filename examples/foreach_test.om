@@ -1,0 +1,12 @@
+// Test for-each loop over arrays
+fn main() {
+    var arr = [10, 20, 30, 40, 50];
+    var total = 0;
+    
+    for (x in arr) {
+        total = total + x;
+    }
+    
+    // 10 + 20 + 30 + 40 + 50 = 150
+    return total;
+}

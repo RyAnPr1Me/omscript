@@ -1,0 +1,14 @@
+// Test typeof and assert stdlib functions
+fn main() {
+    var x = 42;
+    var t = typeof(x);
+    
+    // typeof returns 1 for integer in native compilation path
+    assert(t == 1);
+    
+    // assert with a truthy value should pass
+    assert(1);
+    assert(42);
+    
+    return t;  // 1
+}

@@ -1,0 +1,22 @@
+// Test switch/case statement
+fn classify(x) {
+    switch (x) {
+        case 1:
+            return 10;
+        case 2:
+            return 20;
+        case 3:
+            return 30;
+        default:
+            return 0;
+    }
+}
+
+fn main() {
+    var a = classify(1);   // 10
+    var b = classify(2);   // 20
+    var c = classify(3);   // 30
+    var d = classify(99);  // 0 (default)
+    
+    return a + b + c + d;  // 60
+}

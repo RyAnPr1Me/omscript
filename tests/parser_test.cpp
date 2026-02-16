@@ -435,3 +435,211 @@ TEST(ParserTest, OptmaxEndWithoutStart) {
 TEST(ParserTest, UnterminatedOptmax) {
     EXPECT_THROW(parse("OPTMAX=: fn foo(x: int) { return x; }"), std::runtime_error);
 }
+
+// ---------------------------------------------------------------------------
+// OPTMAX parameter / variable type annotation errors
+// ---------------------------------------------------------------------------
+
+TEST(ParserTest, OptmaxParamMissingType) {
+    EXPECT_THROW(parse("OPTMAX=: fn foo(x) { return x; } OPTMAX!:"), std::runtime_error);
+}
+
+TEST(ParserTest, OptmaxVarMissingType) {
+    EXPECT_THROW(parse("OPTMAX=: fn foo(x: int) { var y = 5; } OPTMAX!:"), std::runtime_error);
+}
+
+// ---------------------------------------------------------------------------
+// For loop iterator with type annotation
+// ---------------------------------------------------------------------------
+
+TEST(ParserTest, ForLoopIteratorTypeAnnotation) {
+    auto program = parse("fn main() { for (i: int in 0...10) { continue; } }");
+    auto* forStmt = dynamic_cast<ForStmt*>(program->functions[0]->body->statements[0].get());
+    ASSERT_NE(forStmt, nullptr);
+    EXPECT_EQ(forStmt->iteratorVar, "i");
+    EXPECT_EQ(forStmt->iteratorType, "int");
+}
+
+TEST(ParserTest, OptmaxForLoopVarMissingType) {
+    EXPECT_THROW(parse("OPTMAX=: fn foo(x: int) { for (i in 0...10) { } } OPTMAX!:"), std::runtime_error);
+}
+
+// ---------------------------------------------------------------------------
+// Invalid assignment target
+// ---------------------------------------------------------------------------
+
+TEST(ParserTest, InvalidAssignmentTarget) {
+    EXPECT_THROW(parse("fn main() { 1 = 5; }"), std::runtime_error);
+}
+
+// ---------------------------------------------------------------------------
+// Slash-assign and percent-assign compound operators
+// ---------------------------------------------------------------------------
+
+TEST(ParserTest, SlashAssign) {
+    auto program = parse("fn main() { var x = 10; x /= 2; }");
+    auto* stmt = dynamic_cast<ExprStmt*>(program->functions[0]->body->statements[1].get());
+    ASSERT_NE(stmt, nullptr);
+    auto* assign = dynamic_cast<AssignExpr*>(stmt->expression.get());
+    ASSERT_NE(assign, nullptr);
+    EXPECT_EQ(assign->name, "x");
+    auto* bin = dynamic_cast<BinaryExpr*>(assign->value.get());
+    ASSERT_NE(bin, nullptr);
+    EXPECT_EQ(bin->op, "/");
+}
+
+TEST(ParserTest, PercentAssign) {
+    auto program = parse("fn main() { var x = 10; x %= 3; }");
+    auto* stmt = dynamic_cast<ExprStmt*>(program->functions[0]->body->statements[1].get());
+    ASSERT_NE(stmt, nullptr);
+    auto* assign = dynamic_cast<AssignExpr*>(stmt->expression.get());
+    ASSERT_NE(assign, nullptr);
+    EXPECT_EQ(assign->name, "x");
+    auto* bin = dynamic_cast<BinaryExpr*>(assign->value.get());
+    ASSERT_NE(bin, nullptr);
+    EXPECT_EQ(bin->op, "%");
+}
+
+// ---------------------------------------------------------------------------
+// Invalid compound assignment target
+// ---------------------------------------------------------------------------
+
+TEST(ParserTest, InvalidCompoundAssignmentTarget) {
+    EXPECT_THROW(parse("fn main() { 1 += 5; }"), std::runtime_error);
+}
+
+// ---------------------------------------------------------------------------
+// Invalid function call (non-identifier callee)
+// ---------------------------------------------------------------------------
+
+TEST(ParserTest, InvalidFunctionCall) {
+    EXPECT_THROW(parse("fn main() { (1+2)(3); }"), std::runtime_error);
+}
+
+// ---------------------------------------------------------------------------
+// Expected expression error
+// ---------------------------------------------------------------------------
+
+TEST(ParserTest, ExpectedExpressionError) {
+    EXPECT_THROW(parse("fn main() { var x = ; }"), std::runtime_error);
+}
+
+// ---------------------------------------------------------------------------
+// Switch statement parsing
+// ---------------------------------------------------------------------------
+
+TEST(ParserTest, SwitchStatement) {
+    auto program = parse("fn main() { switch (x) { case 1: return 10; case 2: return 20; default: return 0; } }");
+    EXPECT_EQ(program->functions.size(), 1u);
+}
+
+TEST(ParserTest, SwitchNoCases) {
+    auto program = parse("fn main() { switch (x) { } }");
+    EXPECT_EQ(program->functions.size(), 1u);
+}
+
+TEST(ParserTest, SwitchDuplicateDefault) {
+    EXPECT_THROW(parse("fn main() { switch (x) { default: return 1; default: return 2; } }"), std::runtime_error);
+}
+
+// ---------------------------------------------------------------------------
+// Array element assignment
+// ---------------------------------------------------------------------------
+
+TEST(ParserTest, ArrayIndexAssignment) {
+    auto program = parse("fn main() { var arr = [1, 2, 3]; arr[0] = 42; }");
+    EXPECT_EQ(program->functions.size(), 1u);
+    auto& stmts = program->functions[0]->body->statements;
+    ASSERT_GE(stmts.size(), 2u);
+    // Second statement is an expression statement containing IndexAssignExpr
+    auto* exprStmt = dynamic_cast<omscript::ExprStmt*>(stmts[1].get());
+    ASSERT_NE(exprStmt, nullptr);
+    EXPECT_EQ(exprStmt->expression->type, omscript::ASTNodeType::INDEX_ASSIGN_EXPR);
+}
+
+TEST(ParserTest, ArrayIndexAssignmentInvalid) {
+    // Cannot assign to a non-identifier, non-index target
+    EXPECT_THROW(parse("fn main() { 42 = 1; }"), std::runtime_error);
+}
+
+// ---------------------------------------------------------------------------
+// For-each loop parsing
+// ---------------------------------------------------------------------------
+
+TEST(ParserTest, ForEachLoop) {
+    auto program = parse("fn main() { var arr = [1, 2, 3]; for (x in arr) { return x; } }");
+    EXPECT_EQ(program->functions.size(), 1u);
+    auto& stmts = program->functions[0]->body->statements;
+    ASSERT_GE(stmts.size(), 2u);
+    EXPECT_EQ(stmts[1]->type, omscript::ASTNodeType::FOR_EACH_STMT);
+}
+
+TEST(ParserTest, ForEachVsRangeFor) {
+    // Range-based for should still work
+    auto program = parse("fn main() { for (i in 0...10) { return i; } }");
+    EXPECT_EQ(program->functions.size(), 1u);
+    auto& stmts = program->functions[0]->body->statements;
+    ASSERT_GE(stmts.size(), 1u);
+    EXPECT_EQ(stmts[0]->type, omscript::ASTNodeType::FOR_STMT);
+}
+
+// ---------------------------------------------------------------------------
+// Multi-variable declarations
+// ---------------------------------------------------------------------------
+
+TEST(ParserTest, MultiVarDeclaration) {
+    auto program = parse("fn main() { var a = 1, b = 2, c = 3; }");
+    EXPECT_EQ(program->functions.size(), 1u);
+    auto& stmts = program->functions[0]->body->statements;
+    ASSERT_EQ(stmts.size(), 3u);
+    EXPECT_EQ(stmts[0]->type, omscript::ASTNodeType::VAR_DECL);
+    EXPECT_EQ(stmts[1]->type, omscript::ASTNodeType::VAR_DECL);
+    EXPECT_EQ(stmts[2]->type, omscript::ASTNodeType::VAR_DECL);
+    auto* a = dynamic_cast<omscript::VarDecl*>(stmts[0].get());
+    auto* b = dynamic_cast<omscript::VarDecl*>(stmts[1].get());
+    auto* c = dynamic_cast<omscript::VarDecl*>(stmts[2].get());
+    EXPECT_EQ(a->name, "a");
+    EXPECT_EQ(b->name, "b");
+    EXPECT_EQ(c->name, "c");
+    EXPECT_FALSE(a->isConst);
+}
+
+TEST(ParserTest, MultiConstDeclaration) {
+    auto program = parse("fn main() { const x = 10, y = 20; }");
+    auto& stmts = program->functions[0]->body->statements;
+    ASSERT_EQ(stmts.size(), 2u);
+    auto* x = dynamic_cast<omscript::VarDecl*>(stmts[0].get());
+    auto* y = dynamic_cast<omscript::VarDecl*>(stmts[1].get());
+    EXPECT_EQ(x->name, "x");
+    EXPECT_TRUE(x->isConst);
+    EXPECT_EQ(y->name, "y");
+    EXPECT_TRUE(y->isConst);
+}
+
+TEST(ParserTest, SingleVarStillWorks) {
+    auto program = parse("fn main() { var x = 42; }");
+    auto& stmts = program->functions[0]->body->statements;
+    ASSERT_EQ(stmts.size(), 1u);
+    EXPECT_EQ(stmts[0]->type, omscript::ASTNodeType::VAR_DECL);
+}
+
+// ---------------------------------------------------------------------------
+// Multi-error reporting
+// ---------------------------------------------------------------------------
+
+TEST(ParserTest, MultipleErrors) {
+    // Two bad functions + one good one — should report both errors
+    try {
+        parse("fn a() { return } fn b() { return } fn main() { return 0; }");
+        FAIL() << "Expected exception for multiple errors";
+    } catch (const std::runtime_error& e) {
+        std::string msg = e.what();
+        // Should contain error references from both bad functions
+        EXPECT_NE(msg.find("line 1"), std::string::npos);
+        // Should contain at least 2 "Parse error" occurrences
+        size_t first = msg.find("Parse error");
+        EXPECT_NE(first, std::string::npos);
+        size_t second = msg.find("Parse error", first + 1);
+        EXPECT_NE(second, std::string::npos);
+    }
+}

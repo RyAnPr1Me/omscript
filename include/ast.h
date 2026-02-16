@@ -20,6 +20,8 @@ enum class ASTNodeType {
     FOR_STMT,
     BREAK_STMT,
     CONTINUE_STMT,
+    SWITCH_STMT,
+    FOR_EACH_STMT,
     EXPR_STMT,
     BINARY_EXPR,
     UNARY_EXPR,
@@ -31,7 +33,8 @@ enum class ASTNodeType {
     PREFIX_EXPR,
     TERNARY_EXPR,
     ARRAY_EXPR,
-    INDEX_EXPR
+    INDEX_EXPR,
+    INDEX_ASSIGN_EXPR
 };
 
 class ASTNode {
@@ -166,6 +169,16 @@ public:
         : Expression(ASTNodeType::INDEX_EXPR), array(std::move(arr)), index(std::move(idx)) {}
 };
 
+class IndexAssignExpr : public Expression {
+public:
+    std::unique_ptr<Expression> array;
+    std::unique_ptr<Expression> index;
+    std::unique_ptr<Expression> value;
+    
+    IndexAssignExpr(std::unique_ptr<Expression> arr, std::unique_ptr<Expression> idx, std::unique_ptr<Expression> val)
+        : Expression(ASTNodeType::INDEX_ASSIGN_EXPR), array(std::move(arr)), index(std::move(idx)), value(std::move(val)) {}
+};
+
 // Statements
 class ExprStmt : public Statement {
 public:
@@ -245,6 +258,37 @@ public:
 class ContinueStmt : public Statement {
 public:
     ContinueStmt() : Statement(ASTNodeType::CONTINUE_STMT) {}
+};
+
+class ForEachStmt : public Statement {
+public:
+    std::string iteratorVar;
+    std::unique_ptr<Expression> collection;
+    std::unique_ptr<Statement> body;
+    
+    ForEachStmt(const std::string& iter, std::unique_ptr<Expression> coll,
+                std::unique_ptr<Statement> b)
+        : Statement(ASTNodeType::FOR_EACH_STMT), iteratorVar(iter),
+          collection(std::move(coll)), body(std::move(b)) {}
+};
+
+// A single case arm in a switch statement.
+struct SwitchCase {
+    std::unique_ptr<Expression> value;  // nullptr for default case
+    std::vector<std::unique_ptr<Statement>> body;
+    bool isDefault;
+    
+    SwitchCase(std::unique_ptr<Expression> v, std::vector<std::unique_ptr<Statement>> b, bool def = false)
+        : value(std::move(v)), body(std::move(b)), isDefault(def) {}
+};
+
+class SwitchStmt : public Statement {
+public:
+    std::unique_ptr<Expression> condition;
+    std::vector<SwitchCase> cases;
+    
+    SwitchStmt(std::unique_ptr<Expression> cond, std::vector<SwitchCase> c)
+        : Statement(ASTNodeType::SWITCH_STMT), condition(std::move(cond)), cases(std::move(c)) {}
 };
 
 class BlockStmt : public Statement {

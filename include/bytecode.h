@@ -38,6 +38,8 @@ enum class OpCode : uint8_t {
     // Variables
     LOAD_VAR,
     STORE_VAR,
+    LOAD_LOCAL,   // Load a local variable by index
+    STORE_LOCAL,  // Store a local variable by index
     
     // Control flow
     JUMP,

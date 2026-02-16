@@ -15,7 +15,7 @@
 
 namespace {
 
-constexpr const char* kCompilerVersion = "OmScript Compiler v1.0";
+constexpr const char* kCompilerVersion = "OmScript Compiler v0.3.1";
 
 void printUsage(const char* progName) {
     std::cout << kCompilerVersion << "\n";
@@ -40,6 +40,7 @@ void printUsage(const char* progName) {
     std::cout << "  -h, --help           Show this help message\n";
     std::cout << "  -k, --keep-temps     Keep temporary outputs when running\n";
     std::cout << "  -v, --version        Show compiler version\n";
+    std::cout << "  -V, --verbose        Show detailed compilation output (IR, progress)\n";
 }
 
 std::string readSourceFile(const std::string& filename) {
@@ -73,6 +74,9 @@ const char* tokenTypeToString(omscript::TokenType type) {
         case omscript::TokenType::IN: return "IN";
         case omscript::TokenType::OPTMAX_START: return "OPTMAX_START";
         case omscript::TokenType::OPTMAX_END: return "OPTMAX_END";
+        case omscript::TokenType::SWITCH: return "SWITCH";
+        case omscript::TokenType::CASE: return "CASE";
+        case omscript::TokenType::DEFAULT: return "DEFAULT";
         case omscript::TokenType::PLUS: return "PLUS";
         case omscript::TokenType::MINUS: return "MINUS";
         case omscript::TokenType::STAR: return "STAR";
@@ -243,6 +247,7 @@ int main(int argc, char* argv[]) {
                                 command == Command::EmitIR || command == Command::Clean;
     bool parsingRunArgs = false;
     bool keepTemps = false;
+    bool verbose = false;
     std::vector<std::string> runArgs;
     
     // Parse command line arguments
@@ -266,6 +271,10 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
             keepTemps = true;
+            continue;
+        }
+        if (!parsingRunArgs && (arg == "-V" || arg == "--verbose")) {
+            verbose = true;
             continue;
         }
         if (!parsingRunArgs && (arg == "-o" || arg == "--output")) {
@@ -369,6 +378,7 @@ int main(int argc, char* argv[]) {
             return 0;
         }
         omscript::Compiler compiler;
+        compiler.setVerbose(verbose);
         compiler.compile(sourceFile, outputFile);
         if (command == Command::Run) {
             std::filesystem::path runPath = std::filesystem::absolute(outputFile);

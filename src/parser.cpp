@@ -53,6 +53,30 @@ void Parser::error(const std::string& message) {
     throw std::runtime_error(errorMsg);
 }
 
+void Parser::synchronize() {
+    advance();
+    while (!isAtEnd()) {
+        // After a semicolon, we're likely at a new statement.
+        if (current > 0 && tokens[current - 1].type == TokenType::SEMICOLON) return;
+        // Before a keyword that starts a new statement/declaration.
+        switch (peek().type) {
+            case TokenType::FN:
+            case TokenType::VAR:
+            case TokenType::CONST:
+            case TokenType::IF:
+            case TokenType::WHILE:
+            case TokenType::DO:
+            case TokenType::FOR:
+            case TokenType::RETURN:
+            case TokenType::SWITCH:
+                return;
+            default:
+                break;
+        }
+        advance();
+    }
+}
+
 std::unique_ptr<Program> Parser::parse() {
     std::vector<std::unique_ptr<FunctionDecl>> functions;
     bool optMaxTagActive = false;
@@ -72,11 +96,25 @@ std::unique_ptr<Program> Parser::parse() {
             optMaxTagActive = false;
             continue;
         }
-        functions.push_back(parseFunction(optMaxTagActive));
+        try {
+            functions.push_back(parseFunction(optMaxTagActive));
+        } catch (const std::runtime_error& e) {
+            errors_.push_back(e.what());
+            synchronize();
+        }
     }
 
     if (optMaxTagActive) {
-        error("Unterminated OPTMAX block");
+        errors_.push_back("Parse error: Unterminated OPTMAX block");
+    }
+
+    if (!errors_.empty()) {
+        std::string combined;
+        for (size_t i = 0; i < errors_.size(); ++i) {
+            if (i > 0) combined += "\n";
+            combined += errors_[i];
+        }
+        throw std::runtime_error(combined);
     }
     
     return std::make_unique<Program>(std::move(functions));
@@ -127,11 +165,16 @@ std::unique_ptr<Statement> Parser::parseStatement() {
     if (match(TokenType::RETURN)) return parseReturnStmt();
     if (match(TokenType::BREAK)) return parseBreakStmt();
     if (match(TokenType::CONTINUE)) return parseContinueStmt();
+    if (match(TokenType::SWITCH)) return parseSwitchStmt();
     if (match(TokenType::VAR)) {
-        return parseVarDecl(false);
+        auto decl = parseVarDecl(false);
+        consume(TokenType::SEMICOLON, "Expected ';' after variable declaration");
+        return decl;
     }
     if (match(TokenType::CONST)) {
-        return parseVarDecl(true);
+        auto decl = parseVarDecl(true);
+        consume(TokenType::SEMICOLON, "Expected ';' after variable declaration");
+        return decl;
     }
     if (check(TokenType::LBRACE)) return parseBlock();
     
@@ -143,7 +186,18 @@ std::unique_ptr<Statement> Parser::parseBlock() {
     
     std::vector<std::unique_ptr<Statement>> statements;
     while (!check(TokenType::RBRACE) && !isAtEnd()) {
-        statements.push_back(parseStatement());
+        // Multi-variable declarations: var a = 1, b = 2;
+        if (check(TokenType::VAR) || check(TokenType::CONST)) {
+            bool isConst = check(TokenType::CONST);
+            advance(); // consume var/const
+            statements.push_back(parseVarDecl(isConst));
+            while (match(TokenType::COMMA)) {
+                statements.push_back(parseVarDecl(isConst));
+            }
+            consume(TokenType::SEMICOLON, "Expected ';' after variable declaration");
+        } else {
+            statements.push_back(parseStatement());
+        }
     }
     
     consume(TokenType::RBRACE, "Expected '}'");
@@ -159,15 +213,16 @@ std::unique_ptr<Statement> Parser::parseVarDecl(bool isConst) {
     } else if (inOptMaxFunction) {
         error("OPTMAX variables must include type annotations");
     }
-    
+
     std::unique_ptr<Expression> initializer = nullptr;
     if (match(TokenType::ASSIGN)) {
         initializer = parseExpression();
     }
-    
-    consume(TokenType::SEMICOLON, "Expected ';' after variable declaration");
-    
-    return std::make_unique<VarDecl>(name.lexeme, std::move(initializer), isConst, typeName);
+
+    auto decl = std::make_unique<VarDecl>(name.lexeme, std::move(initializer), isConst, typeName);
+    decl->line = name.line;
+    decl->column = name.column;
+    return decl;
 }
 
 std::unique_ptr<Statement> Parser::parseIfStmt() {
@@ -210,6 +265,7 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
     consume(TokenType::LPAREN, "Expected '(' after 'for'");
     
     // Parse: for (var in start...end) or for (var in start...end...step)
+    //    or: for (var in collection)  -- for-each over array
     Token varName = consume(TokenType::IDENTIFIER, "Expected iterator variable");
     std::string iteratorType;
     if (match(TokenType::COLON)) {
@@ -219,20 +275,27 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
     }
     consume(TokenType::IN, "Expected 'in' after iterator variable");
     
-    auto start = parseExpression();
-    consume(TokenType::RANGE, "Expected '...' in for range");
-    auto end = parseExpression();
+    auto firstExpr = parseExpression();
     
-    std::unique_ptr<Expression> step = nullptr;
+    // If next token is '...', this is a range-based for loop
     if (match(TokenType::RANGE)) {
-        step = parseExpression();
+        auto end = parseExpression();
+        
+        std::unique_ptr<Expression> step = nullptr;
+        if (match(TokenType::RANGE)) {
+            step = parseExpression();
+        }
+        
+        consume(TokenType::RPAREN, "Expected ')' after for range");
+        auto body = parseStatement();
+        
+        return std::make_unique<ForStmt>(varName.lexeme, std::move(firstExpr), std::move(end), std::move(step), std::move(body), iteratorType);
     }
     
-    consume(TokenType::RPAREN, "Expected ')' after for range");
-    
+    // Otherwise this is a for-each loop: for (var in collection)
+    consume(TokenType::RPAREN, "Expected ')' after for-each collection");
     auto body = parseStatement();
-    
-    return std::make_unique<ForStmt>(varName.lexeme, std::move(start), std::move(end), std::move(step), std::move(body), iteratorType);
+    return std::make_unique<ForEachStmt>(varName.lexeme, std::move(firstExpr), std::move(body));
 }
 
 std::unique_ptr<Statement> Parser::parseBreakStmt() {
@@ -243,6 +306,48 @@ std::unique_ptr<Statement> Parser::parseBreakStmt() {
 std::unique_ptr<Statement> Parser::parseContinueStmt() {
     consume(TokenType::SEMICOLON, "Expected ';' after 'continue'");
     return std::make_unique<ContinueStmt>();
+}
+
+std::unique_ptr<Statement> Parser::parseSwitchStmt() {
+    consume(TokenType::LPAREN, "Expected '(' after 'switch'");
+    auto condition = parseExpression();
+    consume(TokenType::RPAREN, "Expected ')' after switch condition");
+    consume(TokenType::LBRACE, "Expected '{' after switch condition");
+    
+    std::vector<SwitchCase> cases;
+    bool hasDefault = false;
+    
+    while (!check(TokenType::RBRACE) && !isAtEnd()) {
+        if (match(TokenType::CASE)) {
+            auto value = parseExpression();
+            consume(TokenType::COLON, "Expected ':' after case value");
+            
+            std::vector<std::unique_ptr<Statement>> body;
+            while (!check(TokenType::CASE) && !check(TokenType::DEFAULT) &&
+                   !check(TokenType::RBRACE) && !isAtEnd()) {
+                body.push_back(parseStatement());
+            }
+            cases.emplace_back(std::move(value), std::move(body), false);
+        } else if (match(TokenType::DEFAULT)) {
+            if (hasDefault) {
+                error("Duplicate default case in switch statement");
+            }
+            hasDefault = true;
+            consume(TokenType::COLON, "Expected ':' after 'default'");
+            
+            std::vector<std::unique_ptr<Statement>> body;
+            while (!check(TokenType::CASE) && !check(TokenType::DEFAULT) &&
+                   !check(TokenType::RBRACE) && !isAtEnd()) {
+                body.push_back(parseStatement());
+            }
+            cases.emplace_back(nullptr, std::move(body), true);
+        } else {
+            error("Expected 'case' or 'default' in switch statement");
+        }
+    }
+    
+    consume(TokenType::RBRACE, "Expected '}' after switch body");
+    return std::make_unique<SwitchStmt>(std::move(condition), std::move(cases));
 }
 
 std::unique_ptr<Statement> Parser::parseReturnStmt() {
@@ -277,6 +382,16 @@ std::unique_ptr<Expression> Parser::parseAssignment() {
             auto idExpr = dynamic_cast<IdentifierExpr*>(expr.get());
             auto value = parseAssignment();
             auto node = std::make_unique<AssignExpr>(idExpr->name, std::move(value));
+            node->line = expr->line;
+            node->column = expr->column;
+            return node;
+        } else if (expr->type == ASTNodeType::INDEX_EXPR) {
+            auto* indexExpr = static_cast<IndexExpr*>(expr.get());
+            auto value = parseAssignment();
+            auto arrClone = std::move(indexExpr->array);
+            auto idxClone = std::move(indexExpr->index);
+            auto node = std::make_unique<IndexAssignExpr>(
+                std::move(arrClone), std::move(idxClone), std::move(value));
             node->line = expr->line;
             node->column = expr->column;
             return node;
@@ -318,6 +433,9 @@ std::unique_ptr<Expression> Parser::parseAssignment() {
             node->line = expr->line;
             node->column = expr->column;
             return node;
+        } else if (expr->type == ASTNodeType::INDEX_EXPR) {
+            error("Compound assignment to array elements is not yet supported; use arr[i] = arr[i] " +
+                  opLexeme.substr(0, opLexeme.size() - 1) + " value instead");
         } else {
             error("Invalid compound assignment target");
         }

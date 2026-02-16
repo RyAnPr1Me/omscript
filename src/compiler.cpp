@@ -39,33 +39,45 @@ void Compiler::writeFile(const std::string& filename, const std::string& content
 }
 
 void Compiler::compile(const std::string& sourceFile, const std::string& outputFile) {
-    std::cout << "Compiling " << sourceFile << "..." << std::endl;
+    if (verbose_) {
+        std::cout << "Compiling " << sourceFile << "..." << std::endl;
+    }
     
     // Read source code
     std::string source = readFile(sourceFile);
     
     // Lexical analysis
-    std::cout << "  Lexing..." << std::endl;
+    if (verbose_) {
+        std::cout << "  Lexing..." << std::endl;
+    }
     Lexer lexer(source);
     auto tokens = lexer.tokenize();
     
     // Syntax analysis
-    std::cout << "  Parsing..." << std::endl;
+    if (verbose_) {
+        std::cout << "  Parsing..." << std::endl;
+    }
     Parser parser(tokens);
     auto program = parser.parse();
     
     // Code generation
-    std::cout << "  Generating code..." << std::endl;
+    if (verbose_) {
+        std::cout << "  Generating code..." << std::endl;
+    }
     CodeGenerator codegen;
     codegen.generate(program.get());
     
-    // Print LLVM IR
-    std::cout << "  LLVM IR:" << std::endl;
-    codegen.getModule()->print(llvm::outs(), nullptr);
+    // Print LLVM IR only in verbose mode
+    if (verbose_) {
+        std::cout << "  LLVM IR:" << std::endl;
+        codegen.getModule()->print(llvm::outs(), nullptr);
+    }
     
     // Write object file
     std::string objFile = outputFile + ".o";
-    std::cout << "  Writing object file to " << objFile << "..." << std::endl;
+    if (verbose_) {
+        std::cout << "  Writing object file to " << objFile << "..." << std::endl;
+    }
     bool objectFileCreated = false;
     auto cleanupObject = [&]() {
         if (objectFileCreated) {
@@ -83,7 +95,9 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
         objectFileCreated = true;
         
         // Link to create executable
-        std::cout << "  Linking..." << std::endl;
+        if (verbose_) {
+            std::cout << "  Linking..." << std::endl;
+        }
         auto gccPath = llvm::sys::findProgramByName("gcc");
         if (!gccPath) {
             throw std::runtime_error("Failed to locate gcc for linking");

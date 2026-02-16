@@ -1,0 +1,73 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            build-essential \
+            llvm-17-dev \
+            libgtest-dev \
+            gcc
+
+      - name: Configure CMake
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build compiler
+        run: cmake --build build --parallel $(nproc)
+
+      - name: Run unit tests
+        run: cd build && ctest --output-on-failure
+
+      - name: Run integration tests
+        run: bash run_tests.sh
+
+      - name: Extract version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+
+      - name: Package binary
+        run: |
+          mkdir -p release
+          cp build/omsc release/omsc-linux-x86_64
+          chmod +x release/omsc-linux-x86_64
+          tar -czf release/omsc-${{ steps.version.outputs.VERSION }}-linux-x86_64.tar.gz \
+            -C release omsc-linux-x86_64
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: OmScript v${{ steps.version.outputs.VERSION }}
+          body: |
+            ## OmScript v${{ steps.version.outputs.VERSION }}
+
+            ### Installation
+            ```bash
+            tar -xzf omsc-${{ steps.version.outputs.VERSION }}-linux-x86_64.tar.gz
+            chmod +x omsc-linux-x86_64
+            sudo mv omsc-linux-x86_64 /usr/local/bin/omsc
+            ```
+
+            ### Requirements
+            - LLVM 17 runtime libraries
+            - GCC (for linking)
+          files: |
+            release/omsc-${{ steps.version.outputs.VERSION }}-linux-x86_64.tar.gz
+          draft: false
+          prerelease: false

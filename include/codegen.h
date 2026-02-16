@@ -83,6 +83,7 @@ private:
     llvm::Value* generateTernary(TernaryExpr* expr);
     llvm::Value* generateArray(ArrayExpr* expr);
     llvm::Value* generateIndex(IndexExpr* expr);
+    llvm::Value* generateIndexAssign(IndexAssignExpr* expr);
     
     // Statement generators
     void generateVarDecl(VarDecl* stmt);
@@ -91,8 +92,10 @@ private:
     void generateWhile(WhileStmt* stmt);
     void generateDoWhile(DoWhileStmt* stmt);
     void generateFor(ForStmt* stmt);
+    void generateForEach(ForEachStmt* stmt);
     void generateBlock(BlockStmt* stmt);
     void generateExprStmt(ExprStmt* stmt);
+    void generateSwitch(SwitchStmt* stmt);
     
     // Helper methods
     llvm::Type* getDefaultType();
@@ -112,16 +115,19 @@ private:
     
     // Optimization methods
     void runOptimizationPasses();
-    void optimizeFunction(llvm::Function* func);
     void optimizeOptMaxFunctions();
     
-    // Bytecode generation methods (alternative backend)
-    void generateBytecode(Program* program);
     void emitBytecodeExpression(Expression* expr);
     void emitBytecodeStatement(Statement* stmt);
     void emitBytecodeBlock(BlockStmt* stmt);
     
 public:
+    // Per-function optimization for targeted optimization of individual functions
+    void optimizeFunction(llvm::Function* func);
+    
+    // Bytecode generation (alternative backend)
+    void generateBytecode(Program* program);
+
     // Accessors for bytecode output
     const BytecodeEmitter& getBytecodeEmitter() const { return bytecodeEmitter; }
     bool isDynamicCompilation() const { return useDynamicCompilation; }
