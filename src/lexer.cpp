@@ -206,7 +206,7 @@ std::vector<Token> Lexer::tokenize() {
         
         char c = peek();
 
-        if (c == 'O') {
+        if (c == 'O' && pos + 8 <= source.length()) {
             if (source.compare(pos, 8, "OPTMAX=:") == 0) {
                 for (int i = 0; i < 8; i++) {
                     advance();

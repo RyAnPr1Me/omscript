@@ -253,6 +253,14 @@ TEST(LexerTest, OptmaxTokens) {
     EXPECT_EQ(tokens[1].type, TokenType::OPTMAX_END);
 }
 
+TEST(LexerTest, OptmaxPrefixNotEnoughChars) {
+    // "OPTMAX" alone (fewer than 8 chars) should be lexed as an identifier, not crash.
+    auto tokens = lex("OPTMAX");
+    ASSERT_GE(tokens.size(), 1u);
+    EXPECT_EQ(tokens[0].type, TokenType::IDENTIFIER);
+    EXPECT_EQ(tokens[0].lexeme, "OPTMAX");
+}
+
 // ---------------------------------------------------------------------------
 // Comments
 // ---------------------------------------------------------------------------

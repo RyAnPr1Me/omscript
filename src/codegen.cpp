@@ -2242,9 +2242,9 @@ void CodeGenerator::runOptimizationPasses() {
         // Use PIC to support default PIE linking on modern toolchains.
         std::optional<llvm::Reloc::Model> RM = llvm::Reloc::PIC_;
 #if LLVM_VERSION_MAJOR >= 19
-        auto targetMachine = target->createTargetMachine(targetTriple, "generic", "", opt, RM);
+        std::unique_ptr<llvm::TargetMachine> targetMachine(target->createTargetMachine(targetTriple, "generic", "", opt, RM));
 #else
-        auto targetMachine = target->createTargetMachine(targetTripleStr, "generic", "", opt, RM);
+        std::unique_ptr<llvm::TargetMachine> targetMachine(target->createTargetMachine(targetTripleStr, "generic", "", opt, RM));
 #endif
         if (targetMachine) {
             module->setDataLayout(targetMachine->createDataLayout());
@@ -2415,10 +2415,14 @@ void CodeGenerator::writeObjectFile(const std::string& filename) {
     // Use PIC to support default PIE linking on modern toolchains.
     std::optional<llvm::Reloc::Model> RM = llvm::Reloc::PIC_;
 #if LLVM_VERSION_MAJOR >= 19
-    auto targetMachine = target->createTargetMachine(targetTriple, CPU, features, opt, RM);
+    std::unique_ptr<llvm::TargetMachine> targetMachine(target->createTargetMachine(targetTriple, CPU, features, opt, RM));
 #else
-    auto targetMachine = target->createTargetMachine(targetTripleStr, CPU, features, opt, RM);
+    std::unique_ptr<llvm::TargetMachine> targetMachine(target->createTargetMachine(targetTripleStr, CPU, features, opt, RM));
 #endif
+    
+    if (!targetMachine) {
+        throw std::runtime_error("Failed to create target machine");
+    }
     
     module->setDataLayout(targetMachine->createDataLayout());
     

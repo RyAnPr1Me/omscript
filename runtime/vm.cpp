@@ -12,6 +12,10 @@ using BytecodeIteratorDiff = std::vector<uint8_t>::difference_type;
 VM::VM() : lastReturn() {}
 
 void VM::push(const Value& value) {
+    if (stack.size() >= kMaxStackSize) {
+        throw std::runtime_error("Stack overflow: exceeded maximum stack size of " +
+                                 std::to_string(kMaxStackSize));
+    }
     stack.push_back(value);
 }
 
@@ -320,6 +324,11 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
                     throw std::runtime_error("Function '" + funcName + "' expects " +
                         std::to_string(func.arity) + " arguments but got " +
                         std::to_string(argCount));
+                }
+
+                if (callStack.size() >= kMaxCallDepth) {
+                    throw std::runtime_error("Call stack overflow: exceeded maximum call depth of " +
+                                             std::to_string(kMaxCallDepth));
                 }
 
                 // Save the current call frame so we can resume after the
