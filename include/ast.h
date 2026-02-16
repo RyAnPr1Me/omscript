@@ -32,7 +32,8 @@ enum class ASTNodeType {
     PREFIX_EXPR,
     TERNARY_EXPR,
     ARRAY_EXPR,
-    INDEX_EXPR
+    INDEX_EXPR,
+    INDEX_ASSIGN_EXPR
 };
 
 class ASTNode {
@@ -165,6 +166,16 @@ public:
     
     IndexExpr(std::unique_ptr<Expression> arr, std::unique_ptr<Expression> idx)
         : Expression(ASTNodeType::INDEX_EXPR), array(std::move(arr)), index(std::move(idx)) {}
+};
+
+class IndexAssignExpr : public Expression {
+public:
+    std::unique_ptr<Expression> array;
+    std::unique_ptr<Expression> index;
+    std::unique_ptr<Expression> value;
+    
+    IndexAssignExpr(std::unique_ptr<Expression> arr, std::unique_ptr<Expression> idx, std::unique_ptr<Expression> val)
+        : Expression(ASTNodeType::INDEX_ASSIGN_EXPR), array(std::move(arr)), index(std::move(idx)), value(std::move(val)) {}
 };
 
 // Statements

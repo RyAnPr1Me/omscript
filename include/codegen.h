@@ -83,6 +83,7 @@ private:
     llvm::Value* generateTernary(TernaryExpr* expr);
     llvm::Value* generateArray(ArrayExpr* expr);
     llvm::Value* generateIndex(IndexExpr* expr);
+    llvm::Value* generateIndexAssign(IndexAssignExpr* expr);
     
     // Statement generators
     void generateVarDecl(VarDecl* stmt);

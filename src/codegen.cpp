@@ -36,6 +36,7 @@ using omscript::AssignExpr;
 using omscript::CallExpr;
 using omscript::ArrayExpr;
 using omscript::IndexExpr;
+using omscript::IndexAssignExpr;
 using omscript::PostfixExpr;
 using omscript::PrefixExpr;
 using omscript::TernaryExpr;
@@ -191,6 +192,13 @@ std::unique_ptr<Expression> optimizeOptMaxExpression(std::unique_ptr<Expression>
             auto* indexExpr = static_cast<IndexExpr*>(expr.get());
             indexExpr->array = optimizeOptMaxExpression(std::move(indexExpr->array));
             indexExpr->index = optimizeOptMaxExpression(std::move(indexExpr->index));
+            return expr;
+        }
+        case ASTNodeType::INDEX_ASSIGN_EXPR: {
+            auto* ia = static_cast<IndexAssignExpr*>(expr.get());
+            ia->array = optimizeOptMaxExpression(std::move(ia->array));
+            ia->index = optimizeOptMaxExpression(std::move(ia->index));
+            ia->value = optimizeOptMaxExpression(std::move(ia->value));
             return expr;
         }
         case ASTNodeType::POSTFIX_EXPR: {
@@ -654,6 +662,8 @@ llvm::Value* CodeGenerator::generateExpression(Expression* expr) {
             return generateArray(static_cast<ArrayExpr*>(expr));
         case ASTNodeType::INDEX_EXPR:
             return generateIndex(static_cast<IndexExpr*>(expr));
+        case ASTNodeType::INDEX_ASSIGN_EXPR:
+            return generateIndexAssign(static_cast<IndexAssignExpr*>(expr));
         default:
             throw std::runtime_error("Unknown expression type");
     }
@@ -1705,6 +1715,47 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
     return builder->CreateLoad(getDefaultType(), elemPtr, "idx.elem");
 }
 
+llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
+    llvm::Value* arrVal = generateExpression(expr->array.get());
+    llvm::Value* idxVal = generateExpression(expr->index.get());
+    llvm::Value* newVal = generateExpression(expr->value.get());
+    newVal = toDefaultType(newVal);
+
+    // Convert the i64 back to a pointer
+    llvm::Value* arrPtr = builder->CreateIntToPtr(arrVal,
+        llvm::PointerType::getUnqual(*context), "idxa.arrptr");
+
+    // Bounds check: load length from slot 0, verify 0 <= index < length
+    llvm::Value* lenVal = builder->CreateLoad(getDefaultType(), arrPtr, "idxa.len");
+    llvm::Value* inBounds = builder->CreateICmpSLT(idxVal, lenVal, "idxa.inbounds");
+    llvm::Value* notNeg = builder->CreateICmpSGE(idxVal,
+        llvm::ConstantInt::get(getDefaultType(), 0), "idxa.notneg");
+    llvm::Value* valid = builder->CreateAnd(inBounds, notNeg, "idxa.valid");
+
+    llvm::Function* function = builder->GetInsertBlock()->getParent();
+    llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "idxa.ok", function);
+    llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "idxa.fail", function);
+
+    builder->CreateCondBr(valid, okBB, failBB);
+
+    // Out-of-bounds path: print error and abort
+    builder->SetInsertPoint(failBB);
+    llvm::Value* errMsg = builder->CreateGlobalString(
+        "Runtime error: array index out of bounds\n", "idxa_oob_msg");
+    builder->CreateCall(getPrintfFunction(), {errMsg});
+    llvm::Function* trapFn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::trap);
+    builder->CreateCall(trapFn, {});
+    builder->CreateUnreachable();
+
+    // Success path: store element at offset (index + 1)
+    builder->SetInsertPoint(okBB);
+    llvm::Value* offset = builder->CreateAdd(idxVal,
+        llvm::ConstantInt::get(getDefaultType(), 1), "idxa.offset");
+    llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrPtr, offset, "idxa.elem.ptr");
+    builder->CreateStore(newVal, elemPtr);
+    return newVal;
+}
+
 void CodeGenerator::generateVarDecl(VarDecl* stmt) {
     llvm::Function* function = builder->GetInsertBlock()->getParent();
     if (!function) {
@@ -2395,6 +2446,8 @@ void CodeGenerator::emitBytecodeExpression(Expression* expr) {
             bytecodeEmitter.patchJump(endPatch, static_cast<uint16_t>(bytecodeEmitter.currentOffset()));
             break;
         }
+        case ASTNodeType::INDEX_ASSIGN_EXPR:
+            throw std::runtime_error("Array index assignment is not supported in bytecode mode");
         default:
             throw std::runtime_error("Unsupported expression type in bytecode generation");
     }

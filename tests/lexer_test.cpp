@@ -353,14 +353,45 @@ TEST(LexerTest, StringEscapeCarriageReturn) {
 }
 
 // ---------------------------------------------------------------------------
+// String escape: null, backspace, form feed, vertical tab
+// ---------------------------------------------------------------------------
+
+TEST(LexerTest, StringEscapeNull) {
+    auto tokens = lex("\"a\\0b\"");
+    ASSERT_GE(tokens.size(), 2u);
+    EXPECT_EQ(tokens[0].type, TokenType::STRING);
+    std::string expected = std::string("a") + '\0' + "b";
+    EXPECT_EQ(tokens[0].lexeme, expected);
+}
+
+TEST(LexerTest, StringEscapeBackspace) {
+    auto tokens = lex("\"a\\bb\"");
+    ASSERT_GE(tokens.size(), 2u);
+    EXPECT_EQ(tokens[0].type, TokenType::STRING);
+    EXPECT_EQ(tokens[0].lexeme, "a\bb");
+}
+
+TEST(LexerTest, StringEscapeFormFeed) {
+    auto tokens = lex("\"a\\fb\"");
+    ASSERT_GE(tokens.size(), 2u);
+    EXPECT_EQ(tokens[0].type, TokenType::STRING);
+    EXPECT_EQ(tokens[0].lexeme, "a\fb");
+}
+
+TEST(LexerTest, StringEscapeVerticalTab) {
+    auto tokens = lex("\"a\\vb\"");
+    ASSERT_GE(tokens.size(), 2u);
+    EXPECT_EQ(tokens[0].type, TokenType::STRING);
+    EXPECT_EQ(tokens[0].lexeme, "a\vb");
+}
+
+// ---------------------------------------------------------------------------
 // String escape: unknown escape sequence
 // ---------------------------------------------------------------------------
 
 TEST(LexerTest, StringEscapeUnknown) {
-    auto tokens = lex("\"a\\zb\"");
-    ASSERT_GE(tokens.size(), 2u);
-    EXPECT_EQ(tokens[0].type, TokenType::STRING);
-    EXPECT_EQ(tokens[0].lexeme, "azb");
+    // Unknown escape sequences should produce an error instead of being silently accepted.
+    EXPECT_THROW(lex("\"a\\zb\""), std::runtime_error);
 }
 
 // ---------------------------------------------------------------------------

@@ -541,3 +541,23 @@ TEST(ParserTest, SwitchNoCases) {
 TEST(ParserTest, SwitchDuplicateDefault) {
     EXPECT_THROW(parse("fn main() { switch (x) { default: return 1; default: return 2; } }"), std::runtime_error);
 }
+
+// ---------------------------------------------------------------------------
+// Array element assignment
+// ---------------------------------------------------------------------------
+
+TEST(ParserTest, ArrayIndexAssignment) {
+    auto program = parse("fn main() { var arr = [1, 2, 3]; arr[0] = 42; }");
+    EXPECT_EQ(program->functions.size(), 1u);
+    auto& stmts = program->functions[0]->body->statements;
+    ASSERT_GE(stmts.size(), 2u);
+    // Second statement is an expression statement containing IndexAssignExpr
+    auto* exprStmt = dynamic_cast<omscript::ExprStmt*>(stmts[1].get());
+    ASSERT_NE(exprStmt, nullptr);
+    EXPECT_EQ(exprStmt->expression->type, omscript::ASTNodeType::INDEX_ASSIGN_EXPR);
+}
+
+TEST(ParserTest, ArrayIndexAssignmentInvalid) {
+    // Cannot assign to a non-identifier, non-index target
+    EXPECT_THROW(parse("fn main() { 42 = 1; }"), std::runtime_error);
+}

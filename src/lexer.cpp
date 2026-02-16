@@ -168,9 +168,17 @@ Token Lexer::scanString() {
                 case 'n': str += '\n'; break;
                 case 't': str += '\t'; break;
                 case 'r': str += '\r'; break;
+                case '0': str += '\0'; break;
+                case 'b': str += '\b'; break;
+                case 'f': str += '\f'; break;
+                case 'v': str += '\v'; break;
                 case '\\': str += '\\'; break;
                 case '"': str += '"'; break;
-                default: str += escaped; break;
+                default:
+                    throw std::runtime_error(
+                        "Unknown escape sequence '\\" + std::string(1, escaped) +
+                        "' in string at line " + std::to_string(line) +
+                        ", column " + std::to_string(column));
             }
         } else {
             str += advance();

@@ -210,6 +210,7 @@ test_program "examples/abs_test.om" 26
 test_program "examples/optimization_stress_test.om" 432
 test_program "examples/string_test.om" 0
 test_program "examples/array_test.om" 245
+test_program "examples/array_assign_test.om" 286
 test_program "examples/stdlib_test.om" 66
 test_program "examples/stdlib2_test.om" 255
 test_program "examples/float_test.om" 5

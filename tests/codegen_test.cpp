@@ -2063,3 +2063,36 @@ TEST(CodegenTest, SwitchInOptmax) {
         codegen);
     ASSERT_NE(mod, nullptr);
 }
+
+// ===========================================================================
+// Array element assignment: arr[i] = value
+// ===========================================================================
+
+TEST(CodegenTest, ArrayIndexAssignment) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() {"
+        "  var arr = [10, 20, 30];"
+        "  arr[0] = 99;"
+        "  return arr[0];"
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    llvm::Function* fn = mod->getFunction("main");
+    ASSERT_NE(fn, nullptr);
+    EXPECT_FALSE(fn->empty());
+}
+
+TEST(CodegenTest, ArrayIndexAssignmentMultiple) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() {"
+        "  var arr = [1, 2, 3];"
+        "  arr[0] = 10;"
+        "  arr[1] = 20;"
+        "  arr[2] = 30;"
+        "  return arr[0] + arr[1] + arr[2];"
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+}
