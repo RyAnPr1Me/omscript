@@ -992,3 +992,48 @@ TEST(VMTest, MultipleCallsPreserveStack) {
     vm.execute(callerCode);
     EXPECT_EQ(vm.getLastReturn().asInt(), 60);
 }
+
+// ===========================================================================
+// Stack overflow protection
+// ===========================================================================
+
+TEST(VMTest, StackOverflowThrows) {
+    // Build bytecode that pushes values in a tight loop exceeding the stack limit.
+    BytecodeEmitter emitter;
+    for (size_t i = 0; i <= VM::kMaxStackSize; ++i) {
+        emitter.emit(OpCode::PUSH_INT);
+        emitter.emitInt(static_cast<int64_t>(i));
+    }
+    emitter.emit(OpCode::HALT);
+
+    VM vm;
+    EXPECT_THROW(vm.execute(emitter.getCode()), std::runtime_error);
+}
+
+// ===========================================================================
+// Call depth limit
+// ===========================================================================
+
+TEST(VMTest, CallDepthLimitThrows) {
+    // A function that calls itself unconditionally will hit the call depth limit.
+    BytecodeEmitter body;
+    body.emit(OpCode::CALL);
+    body.emitString("recurse");
+    body.emitByte(0);  // 0 arguments
+    body.emit(OpCode::RETURN);
+
+    BytecodeFunction fn;
+    fn.name = "recurse";
+    fn.arity = 0;
+    fn.bytecode = body.getCode();
+
+    BytecodeEmitter caller;
+    caller.emit(OpCode::CALL);
+    caller.emitString("recurse");
+    caller.emitByte(0);
+    caller.emit(OpCode::HALT);
+
+    VM vm;
+    vm.registerFunction(fn);
+    EXPECT_THROW(vm.execute(caller.getCode()), std::runtime_error);
+}

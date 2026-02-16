@@ -2420,6 +2420,10 @@ void CodeGenerator::writeObjectFile(const std::string& filename) {
     std::unique_ptr<llvm::TargetMachine> targetMachine(target->createTargetMachine(targetTripleStr, CPU, features, opt, RM));
 #endif
     
+    if (!targetMachine) {
+        throw std::runtime_error("Failed to create target machine");
+    }
+    
     module->setDataLayout(targetMachine->createDataLayout());
     
     std::error_code EC;

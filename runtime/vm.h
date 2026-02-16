@@ -28,6 +28,11 @@ struct CallFrame {
 
 class VM {
 public:
+    // Maximum number of values allowed on the operand stack.
+    static constexpr size_t kMaxStackSize = 65536;
+    // Maximum call depth to prevent runaway recursion.
+    static constexpr size_t kMaxCallDepth = 1024;
+
     VM();
     
     void execute(const std::vector<uint8_t>& bytecode);
