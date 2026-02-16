@@ -12,11 +12,15 @@ class Parser {
 public:
     Parser(const std::vector<Token>& tokens);
     std::unique_ptr<Program> parse();
+
+    /// Returns collected parse errors (populated when multi-error mode is active).
+    const std::vector<std::string>& errors() const { return errors_; }
     
 private:
     std::vector<Token> tokens;
     size_t current;
     bool inOptMaxFunction;
+    std::vector<std::string> errors_;
     
     Token peek(int offset = 0) const;
     Token advance();
@@ -25,6 +29,9 @@ private:
     bool isAtEnd() const;
     Token consume(TokenType type, const std::string& message);
     
+    /// Synchronize: skip tokens until we reach a statement boundary.
+    void synchronize();
+
     // Parsing methods
     std::unique_ptr<FunctionDecl> parseFunction(bool isOptMax);
     std::unique_ptr<Statement> parseStatement();

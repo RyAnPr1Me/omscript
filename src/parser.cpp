@@ -53,6 +53,30 @@ void Parser::error(const std::string& message) {
     throw std::runtime_error(errorMsg);
 }
 
+void Parser::synchronize() {
+    advance();
+    while (!isAtEnd()) {
+        // After a semicolon, we're likely at a new statement.
+        if (current > 0 && tokens[current - 1].type == TokenType::SEMICOLON) return;
+        // Before a keyword that starts a new statement/declaration.
+        switch (peek().type) {
+            case TokenType::FN:
+            case TokenType::VAR:
+            case TokenType::CONST:
+            case TokenType::IF:
+            case TokenType::WHILE:
+            case TokenType::DO:
+            case TokenType::FOR:
+            case TokenType::RETURN:
+            case TokenType::SWITCH:
+                return;
+            default:
+                break;
+        }
+        advance();
+    }
+}
+
 std::unique_ptr<Program> Parser::parse() {
     std::vector<std::unique_ptr<FunctionDecl>> functions;
     bool optMaxTagActive = false;
@@ -72,11 +96,25 @@ std::unique_ptr<Program> Parser::parse() {
             optMaxTagActive = false;
             continue;
         }
-        functions.push_back(parseFunction(optMaxTagActive));
+        try {
+            functions.push_back(parseFunction(optMaxTagActive));
+        } catch (const std::runtime_error& e) {
+            errors_.push_back(e.what());
+            synchronize();
+        }
     }
 
     if (optMaxTagActive) {
-        error("Unterminated OPTMAX block");
+        errors_.push_back("Parse error: Unterminated OPTMAX block");
+    }
+
+    if (!errors_.empty()) {
+        std::string combined;
+        for (size_t i = 0; i < errors_.size(); ++i) {
+            if (i > 0) combined += "\n";
+            combined += errors_[i];
+        }
+        throw std::runtime_error(combined);
     }
     
     return std::make_unique<Program>(std::move(functions));

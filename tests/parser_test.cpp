@@ -622,3 +622,24 @@ TEST(ParserTest, SingleVarStillWorks) {
     ASSERT_EQ(stmts.size(), 1u);
     EXPECT_EQ(stmts[0]->type, omscript::ASTNodeType::VAR_DECL);
 }
+
+// ---------------------------------------------------------------------------
+// Multi-error reporting
+// ---------------------------------------------------------------------------
+
+TEST(ParserTest, MultipleErrors) {
+    // Two bad functions + one good one — should report both errors
+    try {
+        parse("fn a() { return } fn b() { return } fn main() { return 0; }");
+        FAIL() << "Expected exception for multiple errors";
+    } catch (const std::runtime_error& e) {
+        std::string msg = e.what();
+        // Should contain error references from both bad functions
+        EXPECT_NE(msg.find("line 1"), std::string::npos);
+        // Should contain at least 2 "Parse error" occurrences
+        size_t first = msg.find("Parse error");
+        EXPECT_NE(first, std::string::npos);
+        size_t second = msg.find("Parse error", first + 1);
+        EXPECT_NE(second, std::string::npos);
+    }
+}
