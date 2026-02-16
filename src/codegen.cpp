@@ -328,7 +328,7 @@ namespace omscript {
 static const std::unordered_set<std::string> stdlibFunctions = {
     "abs", "assert", "char_at", "clamp", "input", "is_alpha", "is_digit",
     "is_even", "is_odd", "len", "max", "min", "pow", "print", "print_char",
-    "reverse", "sign", "sqrt", "str_len", "sum", "swap", "to_char", "typeof"
+    "reverse", "sign", "sqrt", "str_eq", "str_len", "sum", "swap", "to_char", "typeof"
 };
 
 bool isStdlibFunction(const std::string& name) {
@@ -1517,6 +1517,33 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             llvm::Type::getInt8Ty(*context), charPtr, "charat.char");
         // Zero-extend to i64
         return builder->CreateZExt(charVal, getDefaultType(), "charat.ext");
+    }
+
+    if (expr->callee == "str_eq") {
+        if (expr->arguments.size() != 2) {
+            codegenError("Built-in function 'str_eq' expects 2 arguments, but " +
+                         std::to_string(expr->arguments.size()) + " provided", expr);
+        }
+        llvm::Value* lhsArg = generateExpression(expr->arguments[0].get());
+        llvm::Value* rhsArg = generateExpression(expr->arguments[1].get());
+        // Convert i64 to pointers to C strings
+        llvm::Value* lhsPtr = builder->CreateIntToPtr(lhsArg,
+            llvm::PointerType::getUnqual(*context), "streq.lhs");
+        llvm::Value* rhsPtr = builder->CreateIntToPtr(rhsArg,
+            llvm::PointerType::getUnqual(*context), "streq.rhs");
+        // Declare strcmp if not already declared
+        llvm::Function* strcmpFn = module->getFunction("strcmp");
+        if (!strcmpFn) {
+            llvm::FunctionType* strcmpTy = llvm::FunctionType::get(
+                builder->getInt32Ty(),
+                {llvm::PointerType::getUnqual(*context), llvm::PointerType::getUnqual(*context)},
+                false);
+            strcmpFn = llvm::Function::Create(strcmpTy, llvm::Function::ExternalLinkage, "strcmp", module.get());
+        }
+        llvm::Value* cmpResult = builder->CreateCall(strcmpFn, {lhsPtr, rhsPtr}, "streq.cmp");
+        // strcmp returns 0 on equality; convert to boolean (1 if equal, 0 otherwise)
+        llvm::Value* isEqual = builder->CreateICmpEQ(cmpResult, builder->getInt32(0), "streq.eq");
+        return builder->CreateZExt(isEqual, getDefaultType(), "streq.result");
     }
 
     if (inOptMaxFunction) {

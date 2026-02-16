@@ -1,0 +1,12 @@
+// Test string comparison function
+fn main() {
+    var a = "hello";
+    var b = "hello";
+    var c = "world";
+
+    var same = str_eq(a, b);     // 1 (equal)
+    var diff = str_eq(a, c);     // 0 (different)
+
+    // same * 10 + diff = 1 * 10 + 0 = 10
+    return same * 10 + diff;
+}

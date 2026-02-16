@@ -2222,3 +2222,29 @@ TEST(CodegenTest, MultiConstDeclaration) {
         codegen);
     ASSERT_NE(mod, nullptr);
 }
+
+// ===========================================================================
+// str_eq string comparison
+// ===========================================================================
+
+TEST(CodegenTest, StrEqFunction) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() {"
+        "  var a = \"hello\";"
+        "  var b = \"hello\";"
+        "  return str_eq(a, b);"
+        "}",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    llvm::Function* fn = mod->getFunction("main");
+    ASSERT_NE(fn, nullptr);
+    EXPECT_FALSE(fn->empty());
+}
+
+TEST(CodegenTest, StrEqWrongArgCount) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    EXPECT_THROW(
+        generateIR("fn main() { return str_eq(\"a\"); }", codegen),
+        std::runtime_error);
+}
