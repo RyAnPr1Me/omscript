@@ -476,7 +476,7 @@ std::unique_ptr<Expression> Parser::parseAssignment() {
                 if (litIdx->literalType == LiteralExpr::LiteralType::INTEGER) {
                     idxRef2 = std::make_unique<LiteralExpr>(litIdx->intValue);
                 } else {
-                    idxRef2 = std::make_unique<LiteralExpr>(litIdx->floatValue);
+                    error("Array index must be an integer, not a float");
                 }
                 idxRef2->line = idxClone->line;
                 idxRef2->column = idxClone->column;
