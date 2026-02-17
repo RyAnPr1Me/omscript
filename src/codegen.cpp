@@ -2497,6 +2497,11 @@ void CodeGenerator::emitBytecodeExpression(Expression* expr) {
             else if (bin->op == ">=") bytecodeEmitter.emit(OpCode::GE);
             else if (bin->op == "&&") bytecodeEmitter.emit(OpCode::AND);
             else if (bin->op == "||") bytecodeEmitter.emit(OpCode::OR);
+            else if (bin->op == "&") bytecodeEmitter.emit(OpCode::BIT_AND);
+            else if (bin->op == "|") bytecodeEmitter.emit(OpCode::BIT_OR);
+            else if (bin->op == "^") bytecodeEmitter.emit(OpCode::BIT_XOR);
+            else if (bin->op == "<<") bytecodeEmitter.emit(OpCode::SHL);
+            else if (bin->op == ">>") bytecodeEmitter.emit(OpCode::SHR);
             else {
                 throw std::runtime_error("Unsupported binary operator in bytecode: " + bin->op);
             }
@@ -2507,6 +2512,7 @@ void CodeGenerator::emitBytecodeExpression(Expression* expr) {
             emitBytecodeExpression(unary->operand.get());
             if (unary->op == "-") bytecodeEmitter.emit(OpCode::NEG);
             else if (unary->op == "!") bytecodeEmitter.emit(OpCode::NOT);
+            else if (unary->op == "~") bytecodeEmitter.emit(OpCode::BIT_NOT);
             else {
                 throw std::runtime_error("Unsupported unary operator in bytecode: " + unary->op);
             }
@@ -2521,8 +2527,19 @@ void CodeGenerator::emitBytecodeExpression(Expression* expr) {
         }
         case ASTNodeType::CALL_EXPR: {
             auto* call = static_cast<CallExpr*>(expr);
+            if (call->callee == "print") {
+                // Emit PRINT opcode for each argument
+                for (auto& arg : call->arguments) {
+                    emitBytecodeExpression(arg.get());
+                    bytecodeEmitter.emit(OpCode::PRINT);
+                }
+                // print() returns 0 in the native path; push 0 for consistency
+                bytecodeEmitter.emit(OpCode::PUSH_INT);
+                bytecodeEmitter.emitInt(0);
+                break;
+            }
             if (isStdlibFunction(call->callee)) {
-                // Stdlib functions are compiled to native machine code only.
+                // Other stdlib functions are compiled to native machine code only.
                 // They are not available in the bytecode interpreter.
                 throw std::runtime_error("Stdlib function '" + call->callee +
                     "' must be compiled to native code, not bytecode");

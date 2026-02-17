@@ -2,6 +2,7 @@
 #include "codegen.h"
 #include "lexer.h"
 #include "parser.h"
+#include "vm.h"
 
 #include <cstdio>
 #include <filesystem>
@@ -1803,12 +1804,17 @@ TEST(CodegenTest, BytecodeReturnVoid) {
 // ===========================================================================
 
 TEST(CodegenTest, BytecodeUnsupportedUnary) {
+    // The ~ operator is now supported in bytecode via the BIT_NOT opcode.
     CodeGenerator codegen(OptimizationLevel::O0);
     Lexer lexer("fn main() { return ~5; }");
     auto tokens = lexer.tokenize();
     Parser parser(tokens);
     auto program = parser.parse();
-    EXPECT_THROW(codegen.generateBytecode(program.get()), std::runtime_error);
+    codegen.generateBytecode(program.get());
+
+    VM vm;
+    vm.execute(codegen.getBytecodeEmitter().getCode());
+    EXPECT_EQ(vm.getLastReturn().asInt(), ~static_cast<int64_t>(5));
 }
 
 // ===========================================================================
@@ -1816,8 +1822,10 @@ TEST(CodegenTest, BytecodeUnsupportedUnary) {
 // ===========================================================================
 
 TEST(CodegenTest, BytecodeStdlibError) {
+    // print() is now supported in bytecode via the PRINT opcode.
+    // Other stdlib functions should still throw.
     CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer("fn main() { print(42); return 0; }");
+    Lexer lexer("fn main() { var x = abs(5); return 0; }");
     auto tokens = lexer.tokenize();
     Parser parser(tokens);
     auto program = parser.parse();
@@ -2247,4 +2255,106 @@ TEST(CodegenTest, StrEqWrongArgCount) {
     EXPECT_THROW(
         generateIR("fn main() { return str_eq(\"a\"); }", codegen),
         std::runtime_error);
+}
+
+// ===========================================================================
+// Bytecode bitwise operators
+// ===========================================================================
+
+TEST(CodegenTest, BytecodeBitwiseAnd) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    Lexer lexer("fn main() { return 255 & 15; }");
+    auto tokens = lexer.tokenize();
+    Parser parser(tokens);
+    auto program = parser.parse();
+    codegen.generateBytecode(program.get());
+
+    VM vm;
+    vm.execute(codegen.getBytecodeEmitter().getCode());
+    EXPECT_EQ(vm.getLastReturn().asInt(), 15);
+}
+
+TEST(CodegenTest, BytecodeBitwiseOr) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    Lexer lexer("fn main() { return 240 | 15; }");
+    auto tokens = lexer.tokenize();
+    Parser parser(tokens);
+    auto program = parser.parse();
+    codegen.generateBytecode(program.get());
+
+    VM vm;
+    vm.execute(codegen.getBytecodeEmitter().getCode());
+    EXPECT_EQ(vm.getLastReturn().asInt(), 255);
+}
+
+TEST(CodegenTest, BytecodeBitwiseXor) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    Lexer lexer("fn main() { return 255 ^ 15; }");
+    auto tokens = lexer.tokenize();
+    Parser parser(tokens);
+    auto program = parser.parse();
+    codegen.generateBytecode(program.get());
+
+    VM vm;
+    vm.execute(codegen.getBytecodeEmitter().getCode());
+    EXPECT_EQ(vm.getLastReturn().asInt(), 240);
+}
+
+TEST(CodegenTest, BytecodeShiftLeft) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    Lexer lexer("fn main() { return 1 << 4; }");
+    auto tokens = lexer.tokenize();
+    Parser parser(tokens);
+    auto program = parser.parse();
+    codegen.generateBytecode(program.get());
+
+    VM vm;
+    vm.execute(codegen.getBytecodeEmitter().getCode());
+    EXPECT_EQ(vm.getLastReturn().asInt(), 16);
+}
+
+TEST(CodegenTest, BytecodeShiftRight) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    Lexer lexer("fn main() { return 16 >> 4; }");
+    auto tokens = lexer.tokenize();
+    Parser parser(tokens);
+    auto program = parser.parse();
+    codegen.generateBytecode(program.get());
+
+    VM vm;
+    vm.execute(codegen.getBytecodeEmitter().getCode());
+    EXPECT_EQ(vm.getLastReturn().asInt(), 1);
+}
+
+TEST(CodegenTest, BytecodeBitwiseNot) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    Lexer lexer("fn main() { return ~0; }");
+    auto tokens = lexer.tokenize();
+    Parser parser(tokens);
+    auto program = parser.parse();
+    codegen.generateBytecode(program.get());
+
+    VM vm;
+    vm.execute(codegen.getBytecodeEmitter().getCode());
+    EXPECT_EQ(vm.getLastReturn().asInt(), ~static_cast<int64_t>(0));
+}
+
+// ===========================================================================
+// Bytecode print support
+// ===========================================================================
+
+TEST(CodegenTest, BytecodePrint) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    Lexer lexer("fn main() { print(42); return 0; }");
+    auto tokens = lexer.tokenize();
+    Parser parser(tokens);
+    auto program = parser.parse();
+    codegen.generateBytecode(program.get());
+
+    VM vm;
+    testing::internal::CaptureStdout();
+    vm.execute(codegen.getBytecodeEmitter().getCode());
+    std::string output = testing::internal::GetCapturedStdout();
+    EXPECT_EQ(output, "42\n");
+    EXPECT_EQ(vm.getLastReturn().asInt(), 0);
 }

@@ -183,4 +183,52 @@ bool Value::operator>=(const Value& other) const {
     return !(*this < other);
 }
 
+Value Value::operator&(const Value& other) const {
+    if (type == Type::INTEGER && other.type == Type::INTEGER) {
+        return Value(intValue & other.intValue);
+    }
+    throw std::runtime_error("Invalid operands for & (both must be integers)");
+}
+
+Value Value::operator|(const Value& other) const {
+    if (type == Type::INTEGER && other.type == Type::INTEGER) {
+        return Value(intValue | other.intValue);
+    }
+    throw std::runtime_error("Invalid operands for | (both must be integers)");
+}
+
+Value Value::operator^(const Value& other) const {
+    if (type == Type::INTEGER && other.type == Type::INTEGER) {
+        return Value(intValue ^ other.intValue);
+    }
+    throw std::runtime_error("Invalid operands for ^ (both must be integers)");
+}
+
+Value Value::operator~() const {
+    if (type == Type::INTEGER) {
+        return Value(~intValue);
+    }
+    throw std::runtime_error("Invalid operand for ~ (must be integer)");
+}
+
+Value Value::operator<<(const Value& other) const {
+    if (type == Type::INTEGER && other.type == Type::INTEGER) {
+        if (other.intValue < 0 || other.intValue >= 64) {
+            throw std::runtime_error("Shift amount out of range (0-63)");
+        }
+        return Value(intValue << other.intValue);
+    }
+    throw std::runtime_error("Invalid operands for << (both must be integers)");
+}
+
+Value Value::operator>>(const Value& other) const {
+    if (type == Type::INTEGER && other.type == Type::INTEGER) {
+        if (other.intValue < 0 || other.intValue >= 64) {
+            throw std::runtime_error("Shift amount out of range (0-63)");
+        }
+        return Value(intValue >> other.intValue);
+    }
+    throw std::runtime_error("Invalid operands for >> (both must be integers)");
+}
+
 } // namespace omscript
