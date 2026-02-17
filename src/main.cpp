@@ -290,11 +290,13 @@ int main(int argc, char* argv[]) {
             verbose = true;
             continue;
         }
-        if (!parsingRunArgs && (arg == "-O0" || arg == "-O1" || arg == "-O2" || arg == "-O3")) {
-            if (arg == "-O0") optLevel = omscript::OptimizationLevel::O0;
-            else if (arg == "-O1") optLevel = omscript::OptimizationLevel::O1;
-            else if (arg == "-O2") optLevel = omscript::OptimizationLevel::O2;
-            else if (arg == "-O3") optLevel = omscript::OptimizationLevel::O3;
+        if (!parsingRunArgs && arg.size() == 3 && arg[0] == '-' && arg[1] == 'O' &&
+            arg[2] >= '0' && arg[2] <= '3') {
+            static constexpr omscript::OptimizationLevel levels[] = {
+                omscript::OptimizationLevel::O0, omscript::OptimizationLevel::O1,
+                omscript::OptimizationLevel::O2, omscript::OptimizationLevel::O3
+            };
+            optLevel = levels[arg[2] - '0'];
             continue;
         }
         if (!parsingRunArgs && (arg == "-o" || arg == "--output")) {
