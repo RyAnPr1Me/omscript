@@ -208,6 +208,7 @@ test_program "examples/bitwise.om" 52
 test_program "examples/prefix_ops.om" 50
 test_program "examples/abs_test.om" 26
 test_program "examples/optimization_stress_test.om" 432
+test_program "examples/inlining_test.om" 52
 test_program "examples/string_test.om" 0
 test_program "examples/array_test.om" 245
 test_program "examples/array_assign_test.om" 286

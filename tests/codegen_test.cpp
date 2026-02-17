@@ -2358,3 +2358,144 @@ TEST(CodegenTest, BytecodePrint) {
     EXPECT_EQ(output, "42\n");
     EXPECT_EQ(vm.getLastReturn().asInt(), 0);
 }
+
+// ===========================================================================
+// New pass manager IPO optimizations (inlining, IPSCCP, GlobalDCE)
+// ===========================================================================
+
+TEST(CodegenTest, InliningAtO2) {
+    // At O2, the new pass manager should inline small functions.
+    // After inlining square(5) + square(3), IPSCCP should fold to 34.
+    CodeGenerator codegen(OptimizationLevel::O2);
+    auto* mod = generateIR(
+        "fn square(x) { return x * x; }"
+        "fn main() { return square(5) + square(3); }",
+        codegen);
+    llvm::Function* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    // After inlining + constant propagation, main should have no call to square
+    bool hasCallToSquare = false;
+    for (auto& BB : *mainFn) {
+        for (auto& I : BB) {
+            if (auto* call = llvm::dyn_cast<llvm::CallInst>(&I)) {
+                if (call->getCalledFunction() &&
+                    call->getCalledFunction()->getName() == "square") {
+                    hasCallToSquare = true;
+                }
+            }
+        }
+    }
+    EXPECT_FALSE(hasCallToSquare) << "square() should be inlined at O2";
+}
+
+TEST(CodegenTest, InliningAtO3) {
+    CodeGenerator codegen(OptimizationLevel::O3);
+    auto* mod = generateIR(
+        "fn double_it(n) { return n + n; }"
+        "fn main() { return double_it(21); }",
+        codegen);
+    llvm::Function* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    bool hasCall = false;
+    for (auto& BB : *mainFn) {
+        for (auto& I : BB) {
+            if (auto* call = llvm::dyn_cast<llvm::CallInst>(&I)) {
+                if (call->getCalledFunction() &&
+                    call->getCalledFunction()->getName() == "double_it") {
+                    hasCall = true;
+                }
+            }
+        }
+    }
+    EXPECT_FALSE(hasCall) << "double_it() should be inlined at O3";
+}
+
+TEST(CodegenTest, NoInliningAtO1) {
+    // O1 uses the lightweight legacy pipeline which doesn't include inlining.
+    CodeGenerator codegen(OptimizationLevel::O1);
+    auto* mod = generateIR(
+        "fn helper(x) { return x * 2; }"
+        "fn main() { return helper(10); }",
+        codegen);
+    llvm::Function* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    bool hasCall = false;
+    for (auto& BB : *mainFn) {
+        for (auto& I : BB) {
+            if (auto* call = llvm::dyn_cast<llvm::CallInst>(&I)) {
+                if (call->getCalledFunction() &&
+                    call->getCalledFunction()->getName() == "helper") {
+                    hasCall = true;
+                }
+            }
+        }
+    }
+    EXPECT_TRUE(hasCall) << "helper() should NOT be inlined at O1";
+}
+
+TEST(CodegenTest, ConstantPropagationThroughInline) {
+    // After inlining + IPSCCP, the entire program should fold to a constant
+    CodeGenerator codegen(OptimizationLevel::O2);
+    auto* mod = generateIR(
+        "fn add(a, b) { return a + b; }"
+        "fn mul(a, b) { return a * b; }"
+        "fn main() { return add(mul(3, 4), mul(5, 6)); }",
+        codegen);
+    llvm::Function* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    // Check that main has a single block with just a ret instruction
+    ASSERT_EQ(mainFn->size(), 1u);
+    auto& entry = mainFn->getEntryBlock();
+    // First (and only) instruction should be ret i64 42 (3*4 + 5*6)
+    auto& firstInst = entry.front();
+    auto* retInst = llvm::dyn_cast<llvm::ReturnInst>(&firstInst);
+    ASSERT_NE(retInst, nullptr);
+    auto* constVal = llvm::dyn_cast<llvm::ConstantInt>(retInst->getReturnValue());
+    ASSERT_NE(constVal, nullptr);
+    EXPECT_EQ(constVal->getSExtValue(), 42);
+}
+
+// ===========================================================================
+// OPTMAX mixed-type constant folding
+// ===========================================================================
+
+TEST(CodegenTest, OptmaxMixedTypeConstantFolding) {
+    // OPTMAX should fold 5 + 1.5 into 6.5 at the AST level
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "OPTMAX=: fn main() { return 5 + 1.0; } OPTMAX!:",
+        codegen);
+    llvm::Function* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    // The result of mixed int+float should be folded to a constant float
+    // then converted back to i64 for the return. Check that no add instruction exists.
+    bool hasAddInst = false;
+    for (auto& BB : *mainFn) {
+        for (auto& I : BB) {
+            if (I.getOpcode() == llvm::Instruction::FAdd ||
+                I.getOpcode() == llvm::Instruction::Add) {
+                hasAddInst = true;
+            }
+        }
+    }
+    EXPECT_FALSE(hasAddInst) << "Mixed int+float should be folded at compile time in OPTMAX";
+}
+
+TEST(CodegenTest, OptmaxMixedTypeMul) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "OPTMAX=: fn main() { return 3 * 2.5; } OPTMAX!:",
+        codegen);
+    llvm::Function* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    bool hasMulInst = false;
+    for (auto& BB : *mainFn) {
+        for (auto& I : BB) {
+            if (I.getOpcode() == llvm::Instruction::FMul ||
+                I.getOpcode() == llvm::Instruction::Mul) {
+                hasMulInst = true;
+            }
+        }
+    }
+    EXPECT_FALSE(hasMulInst) << "Mixed int*float should be folded at compile time in OPTMAX";
+}

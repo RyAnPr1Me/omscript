@@ -19,6 +19,9 @@
 #include <llvm/Transforms/IPO.h>
 #include <llvm/Analysis/TargetTransformInfo.h>
 #include <llvm/Passes/PassBuilder.h>
+#include <llvm/Passes/OptimizationLevel.h>
+#include <llvm/Transforms/IPO/GlobalDCE.h>
+#include <llvm/Transforms/IPO/AlwaysInliner.h>
 #include <cmath>
 #include <stdexcept>
 #include <iostream>
@@ -148,6 +151,23 @@ std::unique_ptr<Expression> optimizeOptMaxBinary(const std::string& op,
         if (op == ">=") return std::make_unique<LiteralExpr>(static_cast<long long>(lval >= rval));
         if (op == "&&") return std::make_unique<LiteralExpr>(static_cast<long long>((lval != 0.0) && (rval != 0.0)));
         if (op == "||") return std::make_unique<LiteralExpr>(static_cast<long long>((lval != 0.0) || (rval != 0.0)));
+    } else {
+        // Mixed int/float constant folding: promote the integer operand to float
+        double lval = (leftLiteral->literalType == LiteralExpr::LiteralType::FLOAT)
+            ? leftLiteral->floatValue : static_cast<double>(leftLiteral->intValue);
+        double rval = (rightLiteral->literalType == LiteralExpr::LiteralType::FLOAT)
+            ? rightLiteral->floatValue : static_cast<double>(rightLiteral->intValue);
+        if (op == "+") return std::make_unique<LiteralExpr>(lval + rval);
+        if (op == "-") return std::make_unique<LiteralExpr>(lval - rval);
+        if (op == "*") return std::make_unique<LiteralExpr>(lval * rval);
+        if (op == "/" && rval != 0.0) return std::make_unique<LiteralExpr>(lval / rval);
+        if (op == "%" && rval != 0.0) return std::make_unique<LiteralExpr>(std::fmod(lval, rval));
+        if (op == "==") return std::make_unique<LiteralExpr>(static_cast<long long>(lval == rval));
+        if (op == "!=") return std::make_unique<LiteralExpr>(static_cast<long long>(lval != rval));
+        if (op == "<") return std::make_unique<LiteralExpr>(static_cast<long long>(lval < rval));
+        if (op == "<=") return std::make_unique<LiteralExpr>(static_cast<long long>(lval <= rval));
+        if (op == ">") return std::make_unique<LiteralExpr>(static_cast<long long>(lval > rval));
+        if (op == ">=") return std::make_unique<LiteralExpr>(static_cast<long long>(lval >= rval));
     }
     
     return std::make_unique<BinaryExpr>(op, std::move(left), std::move(right));
@@ -2218,10 +2238,6 @@ void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
 }
 
 void CodeGenerator::runOptimizationPasses() {
-    // Create a function pass manager
-    llvm::legacy::FunctionPassManager fpm(module.get());
-    llvm::legacy::PassManager mpm;
-    
     // Add target-specific data layout
     std::string targetTripleStr = llvm::sys::getDefaultTargetTriple();
 #if LLVM_VERSION_MAJOR >= 19
@@ -2237,82 +2253,62 @@ void CodeGenerator::runOptimizationPasses() {
 #else
     auto target = llvm::TargetRegistry::lookupTarget(targetTripleStr, error);
 #endif
+    std::unique_ptr<llvm::TargetMachine> targetMachine;
     if (target) {
         llvm::TargetOptions opt;
         // Use PIC to support default PIE linking on modern toolchains.
         std::optional<llvm::Reloc::Model> RM = llvm::Reloc::PIC_;
 #if LLVM_VERSION_MAJOR >= 19
-        std::unique_ptr<llvm::TargetMachine> targetMachine(target->createTargetMachine(targetTriple, "generic", "", opt, RM));
+        targetMachine.reset(target->createTargetMachine(targetTriple, "generic", "", opt, RM));
 #else
-        std::unique_ptr<llvm::TargetMachine> targetMachine(target->createTargetMachine(targetTripleStr, "generic", "", opt, RM));
+        targetMachine.reset(target->createTargetMachine(targetTripleStr, "generic", "", opt, RM));
 #endif
         if (targetMachine) {
             module->setDataLayout(targetMachine->createDataLayout());
         }
     }
     
-    // Configure optimization based on level
-    switch (optimizationLevel) {
-        case OptimizationLevel::O1:
-            // Basic optimizations
-            fpm.add(llvm::createInstructionCombiningPass());
-            fpm.add(llvm::createReassociatePass());
-            fpm.add(llvm::createCFGSimplificationPass());
-            break;
-            
-        case OptimizationLevel::O2:
-            // Moderate optimizations
-            fpm.add(llvm::createPromoteMemoryToRegisterPass());  // mem2reg
-            fpm.add(llvm::createInstructionCombiningPass());     // Instruction combining
-            fpm.add(llvm::createReassociatePass());              // Reassociate expressions
-            fpm.add(llvm::createGVNPass());                      // Global value numbering
-            fpm.add(llvm::createCFGSimplificationPass());        // Simplify CFG
-            fpm.add(llvm::createDeadCodeEliminationPass());      // Dead code elimination
-            break;
-            
-        case OptimizationLevel::O3:
-            // Aggressive optimizations
-            fpm.add(llvm::createSROAPass());                     // Scalar replacement of aggregates (early)
-            fpm.add(llvm::createEarlyCSEPass());                 // Early common subexpression elimination
-            fpm.add(llvm::createPromoteMemoryToRegisterPass());
-            fpm.add(llvm::createInstructionCombiningPass());
-            fpm.add(llvm::createReassociatePass());
-            fpm.add(llvm::createGVNPass());
-            fpm.add(llvm::createCFGSimplificationPass());
-            fpm.add(llvm::createDeadCodeEliminationPass());
-            fpm.add(llvm::createLICMPass());                     // Loop invariant code motion
-            fpm.add(llvm::createLoopRotatePass());               // Rotate loops for better optimization
-            fpm.add(llvm::createLoopSimplifyPass());             // Canonicalize loops
-            fpm.add(llvm::createLoopInstSimplifyPass());         // Simplify instructions in loops
-            fpm.add(llvm::createLoopUnrollPass());               // Unroll loops
-            fpm.add(llvm::createSinkingPass());                  // Sink instructions closer to use
-            fpm.add(llvm::createMergedLoadStoreMotionPass());    // Merge load/store across diamonds
-            fpm.add(llvm::createStraightLineStrengthReducePass()); // Strength reduce along straight lines
-            fpm.add(llvm::createNaryReassociatePass());          // N-ary reassociation
-            fpm.add(llvm::createTailCallEliminationPass());      // Tail call elimination
-            // Second round of cleanup after loop and strength reduction passes
-            fpm.add(llvm::createInstructionCombiningPass());
-            fpm.add(llvm::createCFGSimplificationPass());
-            fpm.add(llvm::createDeadCodeEliminationPass());
-            break;
-            
-        case OptimizationLevel::O0:
-            // No optimization passes needed at O0; return early to skip
-            // fpm.doInitialization()/doFinalization() and mpm.run() below.
-            return;
+    if (optimizationLevel == OptimizationLevel::O0) {
+        return;
     }
-    
-    // Run function passes on all functions
-    fpm.doInitialization();
-    for (auto& func : module->functions()) {
-        if (!func.isDeclaration()) {
-            fpm.run(func);
+
+    // O1 uses a lightweight legacy function pass pipeline (no IPO).
+    if (optimizationLevel == OptimizationLevel::O1) {
+        llvm::legacy::FunctionPassManager fpm(module.get());
+        fpm.add(llvm::createInstructionCombiningPass());
+        fpm.add(llvm::createReassociatePass());
+        fpm.add(llvm::createCFGSimplificationPass());
+        fpm.doInitialization();
+        for (auto& func : module->functions()) {
+            if (!func.isDeclaration()) {
+                fpm.run(func);
+            }
         }
+        fpm.doFinalization();
+        return;
     }
-    fpm.doFinalization();
-    
-    // Run module passes  
-    mpm.run(*module);
+
+    // O2 and O3 use the new pass manager's standard pipeline which includes
+    // interprocedural optimizations: function inlining, IPSCCP (sparse
+    // conditional constant propagation), GlobalDCE (dead function removal),
+    // jump threading, correlated value propagation, and more.
+    llvm::PassBuilder PB(targetMachine.get());
+    llvm::LoopAnalysisManager LAM;
+    llvm::FunctionAnalysisManager FAM;
+    llvm::CGSCCAnalysisManager CGAM;
+    llvm::ModuleAnalysisManager MAM;
+    PB.registerModuleAnalyses(MAM);
+    PB.registerCGSCCAnalyses(CGAM);
+    PB.registerFunctionAnalyses(FAM);
+    PB.registerLoopAnalyses(LAM);
+    PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
+
+    llvm::OptimizationLevel newPMLevel =
+        (optimizationLevel == OptimizationLevel::O3)
+            ? llvm::OptimizationLevel::O3
+            : llvm::OptimizationLevel::O2;
+    llvm::ModulePassManager MPM = PB.buildPerModuleDefaultPipeline(newPMLevel);
+    MPM.run(*module, MAM);
 }
 
 void CodeGenerator::optimizeFunction(llvm::Function* func) {

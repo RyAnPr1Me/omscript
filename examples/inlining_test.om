@@ -1,0 +1,17 @@
+// Test that function inlining works correctly at O2/O3.
+// The compiler should inline these small helper functions,
+// enabling constant propagation to compute the result at compile time.
+
+fn square(x) {
+    return x * x;
+}
+
+fn cube(x) {
+    return x * square(x);
+}
+
+fn main() {
+    // square(5) = 25, cube(3) = 27 → 25 + 27 = 52
+    var result = square(5) + cube(3);
+    return result;
+}
