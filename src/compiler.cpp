@@ -74,7 +74,7 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
     if (verbose_) {
         std::cout << "  Generating code..." << std::endl;
     }
-    CodeGenerator codegen;
+    CodeGenerator codegen(optLevel_);
     try {
         codegen.generate(program.get());
     } catch (const std::runtime_error& e) {

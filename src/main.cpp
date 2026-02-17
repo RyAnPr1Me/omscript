@@ -41,6 +41,10 @@ void printUsage(const char* progName) {
     std::cout << "  -k, --keep-temps     Keep temporary outputs when running\n";
     std::cout << "  -v, --version        Show compiler version\n";
     std::cout << "  -V, --verbose        Show detailed compilation output (IR, progress)\n";
+    std::cout << "  -O0                  No optimization\n";
+    std::cout << "  -O1                  Basic optimization\n";
+    std::cout << "  -O2                  Moderate optimization (default)\n";
+    std::cout << "  -O3                  Aggressive optimization\n";
 }
 
 std::string readSourceFile(const std::string& filename) {
@@ -256,6 +260,7 @@ int main(int argc, char* argv[]) {
     bool parsingRunArgs = false;
     bool keepTemps = false;
     bool verbose = false;
+    omscript::OptimizationLevel optLevel = omscript::OptimizationLevel::O2;
     std::vector<std::string> runArgs;
     
     // Parse command line arguments
@@ -283,6 +288,13 @@ int main(int argc, char* argv[]) {
         }
         if (!parsingRunArgs && (arg == "-V" || arg == "--verbose")) {
             verbose = true;
+            continue;
+        }
+        if (!parsingRunArgs && (arg == "-O0" || arg == "-O1" || arg == "-O2" || arg == "-O3")) {
+            if (arg == "-O0") optLevel = omscript::OptimizationLevel::O0;
+            else if (arg == "-O1") optLevel = omscript::OptimizationLevel::O1;
+            else if (arg == "-O2") optLevel = omscript::OptimizationLevel::O2;
+            else if (arg == "-O3") optLevel = omscript::OptimizationLevel::O3;
             continue;
         }
         if (!parsingRunArgs && (arg == "-o" || arg == "--output")) {
@@ -370,7 +382,7 @@ int main(int argc, char* argv[]) {
                 printProgramSummary(program.get());
                 return 0;
             }
-            omscript::CodeGenerator codegen;
+            omscript::CodeGenerator codegen(optLevel);
             codegen.generate(program.get());
             if (outputFile.empty()) {
                 codegen.getModule()->print(llvm::outs(), nullptr);
@@ -387,6 +399,7 @@ int main(int argc, char* argv[]) {
         }
         omscript::Compiler compiler;
         compiler.setVerbose(verbose);
+        compiler.setOptimizationLevel(optLevel);
         compiler.compile(sourceFile, outputFile);
         if (command == Command::Run) {
             std::filesystem::path runPath = std::filesystem::absolute(outputFile);

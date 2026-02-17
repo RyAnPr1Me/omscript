@@ -110,7 +110,7 @@ test_cli_output() {
         return 1
     fi
     
-    if [ -n "$expected" ] && ! echo "$output" | grep -q "$expected"; then
+    if [ -n "$expected" ] && ! echo "$output" | grep -qF -- "$expected"; then
         echo -e "${RED}✗ Failed (missing expected output)${NC}"
         echo "$output"
         FAILURES=$((FAILURES + 1))
@@ -251,7 +251,18 @@ echo "Optimization Tests"
 echo "============================================"
 echo ""
 
-# Test optimization levels
+# Test optimization level flags
+test_cli_output "opt-O0-compile" "Compilation successful!" 0 ./build/omsc -O0 examples/exit_zero.om -o /tmp/test_o0
+rm -f /tmp/test_o0 /tmp/test_o0.o
+test_cli_output "opt-O1-compile" "Compilation successful!" 0 ./build/omsc -O1 examples/exit_zero.om -o /tmp/test_o1
+rm -f /tmp/test_o1 /tmp/test_o1.o
+test_cli_output "opt-O3-compile" "Compilation successful!" 0 ./build/omsc -O3 examples/exit_zero.om -o /tmp/test_o3
+rm -f /tmp/test_o3 /tmp/test_o3.o
+test_cli_output "opt-O0-emit-ir" "define i64 @main" 0 ./build/omsc emit-ir -O0 examples/exit_zero.om
+test_cli_output "opt-O3-emit-ir" "define i64 @main" 0 ./build/omsc emit-ir -O3 examples/exit_zero.om
+test_cli_output "opt-O0-run" "Compilation successful!" 0 ./build/omsc run -O0 examples/exit_zero.om
+test_cli_output "opt-help-shows-flags" "-O0" 0 ./build/omsc --help
+
 TOTAL=$((TOTAL + 1))
 echo -n "Testing with O3 optimization... "
 ./build/omsc examples/benchmark.om -o benchmark_o3 > /dev/null 2>&1
