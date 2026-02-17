@@ -1,0 +1,47 @@
+// Test boolean literals (true, false) and null keyword
+fn main() {
+    var result = 0;
+    
+    // true is 1, false is 0, null is 0
+    var t = true;
+    var f = false;
+    var n = null;
+    
+    // Basic truth values
+    result = result + t;        // 0 + 1 = 1
+    result = result + f;        // 1 + 0 = 1
+    result = result + n;        // 1 + 0 = 1
+    
+    // true in conditions
+    if (true) {
+        result = result + 10;   // 1 + 10 = 11
+    }
+    
+    // false in conditions
+    if (false) {
+        result = result + 100;  // should not execute
+    }
+    
+    // null in conditions (falsy)
+    if (null) {
+        result = result + 100;  // should not execute
+    }
+    
+    // negation
+    if (!false) {
+        result = result + 20;   // 11 + 20 = 31
+    }
+    
+    if (!null) {
+        result = result + 30;   // 31 + 30 = 61
+    }
+    
+    // boolean in ternary
+    var x = true ? 5 : 10;     // x = 5
+    result = result + x;        // 61 + 5 = 66
+    
+    var y = false ? 100 : 7;   // y = 7
+    result = result + y;        // 66 + 7 = 73
+    
+    return result;  // 73
+}

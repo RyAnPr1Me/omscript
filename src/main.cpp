@@ -72,6 +72,9 @@ const char* tokenTypeToString(omscript::TokenType type) {
         case omscript::TokenType::BREAK: return "BREAK";
         case omscript::TokenType::CONTINUE: return "CONTINUE";
         case omscript::TokenType::IN: return "IN";
+        case omscript::TokenType::TRUE: return "TRUE";
+        case omscript::TokenType::FALSE: return "FALSE";
+        case omscript::TokenType::NULL_LITERAL: return "NULL_LITERAL";
         case omscript::TokenType::OPTMAX_START: return "OPTMAX_START";
         case omscript::TokenType::OPTMAX_END: return "OPTMAX_END";
         case omscript::TokenType::SWITCH: return "SWITCH";
@@ -99,6 +102,11 @@ const char* tokenTypeToString(omscript::TokenType type) {
         case omscript::TokenType::STAR_ASSIGN: return "STAR_ASSIGN";
         case omscript::TokenType::SLASH_ASSIGN: return "SLASH_ASSIGN";
         case omscript::TokenType::PERCENT_ASSIGN: return "PERCENT_ASSIGN";
+        case omscript::TokenType::AMPERSAND_ASSIGN: return "AMPERSAND_ASSIGN";
+        case omscript::TokenType::PIPE_ASSIGN: return "PIPE_ASSIGN";
+        case omscript::TokenType::CARET_ASSIGN: return "CARET_ASSIGN";
+        case omscript::TokenType::LSHIFT_ASSIGN: return "LSHIFT_ASSIGN";
+        case omscript::TokenType::RSHIFT_ASSIGN: return "RSHIFT_ASSIGN";
         case omscript::TokenType::QUESTION: return "QUESTION";
         case omscript::TokenType::AMPERSAND: return "AMPERSAND";
         case omscript::TokenType::PIPE: return "PIPE";

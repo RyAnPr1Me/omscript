@@ -2499,3 +2499,108 @@ TEST(CodegenTest, OptmaxMixedTypeMul) {
     }
     EXPECT_FALSE(hasMulInst) << "Mixed int*float should be folded at compile time in OPTMAX";
 }
+
+// ===========================================================================
+// Boolean and null literals
+// ===========================================================================
+
+TEST(CodegenTest, TrueLiteral) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return true; }", codegen);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    EXPECT_FALSE(mainFn->empty());
+}
+
+TEST(CodegenTest, FalseLiteral) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return false; }", codegen);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    EXPECT_FALSE(mainFn->empty());
+}
+
+TEST(CodegenTest, NullLiteral) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var x = null; return x; }", codegen);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    EXPECT_FALSE(mainFn->empty());
+}
+
+TEST(CodegenTest, TrueInCondition) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { if (true) { return 1; } return 0; }", codegen);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+}
+
+// ===========================================================================
+// Bitwise compound assignment
+// ===========================================================================
+
+TEST(CodegenTest, BitwiseAndAssign) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var x = 15; x &= 6; return x; }", codegen);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+}
+
+TEST(CodegenTest, BitwiseOrAssign) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var x = 3; x |= 12; return x; }", codegen);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+}
+
+TEST(CodegenTest, BitwiseXorAssign) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var x = 15; x ^= 9; return x; }", codegen);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+}
+
+TEST(CodegenTest, ShiftLeftAssign) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var x = 1; x <<= 3; return x; }", codegen);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+}
+
+TEST(CodegenTest, ShiftRightAssign) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var x = 32; x >>= 2; return x; }", codegen);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+}
+
+// ===========================================================================
+// Array compound assignment
+// ===========================================================================
+
+TEST(CodegenTest, ArrayCompoundAssignPlus) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() { var arr = [10, 20]; arr[0] += 5; return arr[0]; }",
+        codegen);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+}
+
+TEST(CodegenTest, ArrayCompoundAssignMinus) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() { var arr = [10, 20]; arr[1] -= 3; return arr[1]; }",
+        codegen);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+}
+
+TEST(CodegenTest, ArrayCompoundAssignMul) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() { var arr = [10]; arr[0] *= 3; return arr[0]; }",
+        codegen);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+}

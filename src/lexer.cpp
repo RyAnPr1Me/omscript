@@ -18,6 +18,9 @@ static const std::unordered_map<std::string, TokenType> keywords = {
     {"break", TokenType::BREAK},
     {"continue", TokenType::CONTINUE},
     {"in", TokenType::IN},
+    {"true", TokenType::TRUE},
+    {"false", TokenType::FALSE},
+    {"null", TokenType::NULL_LITERAL},
     {"switch", TokenType::SWITCH},
     {"case", TokenType::CASE},
     {"default", TokenType::DEFAULT}
@@ -340,7 +343,12 @@ std::vector<Token> Lexer::tokenize() {
                     tokens.push_back(makeToken(TokenType::LE, "<="));
                 } else if (peek() == '<') {
                     advance();
-                    tokens.push_back(makeToken(TokenType::LSHIFT, "<<"));
+                    if (peek() == '=') {
+                        advance();
+                        tokens.push_back(makeToken(TokenType::LSHIFT_ASSIGN, "<<="));
+                    } else {
+                        tokens.push_back(makeToken(TokenType::LSHIFT, "<<"));
+                    }
                 } else {
                     tokens.push_back(makeToken(TokenType::LT, "<"));
                 }
@@ -352,7 +360,12 @@ std::vector<Token> Lexer::tokenize() {
                     tokens.push_back(makeToken(TokenType::GE, ">="));
                 } else if (peek() == '>') {
                     advance();
-                    tokens.push_back(makeToken(TokenType::RSHIFT, ">>"));
+                    if (peek() == '=') {
+                        advance();
+                        tokens.push_back(makeToken(TokenType::RSHIFT_ASSIGN, ">>="));
+                    } else {
+                        tokens.push_back(makeToken(TokenType::RSHIFT, ">>"));
+                    }
                 } else {
                     tokens.push_back(makeToken(TokenType::GT, ">"));
                 }
@@ -362,6 +375,9 @@ std::vector<Token> Lexer::tokenize() {
                 if (peek() == '&') {
                     advance();
                     tokens.push_back(makeToken(TokenType::AND, "&&"));
+                } else if (peek() == '=') {
+                    advance();
+                    tokens.push_back(makeToken(TokenType::AMPERSAND_ASSIGN, "&="));
                 } else {
                     tokens.push_back(makeToken(TokenType::AMPERSAND, "&"));
                 }
@@ -371,13 +387,21 @@ std::vector<Token> Lexer::tokenize() {
                 if (peek() == '|') {
                     advance();
                     tokens.push_back(makeToken(TokenType::OR, "||"));
+                } else if (peek() == '=') {
+                    advance();
+                    tokens.push_back(makeToken(TokenType::PIPE_ASSIGN, "|="));
                 } else {
                     tokens.push_back(makeToken(TokenType::PIPE, "|"));
                 }
                 break;
             
             case '^':
-                tokens.push_back(makeToken(TokenType::CARET, "^"));
+                if (peek() == '=') {
+                    advance();
+                    tokens.push_back(makeToken(TokenType::CARET_ASSIGN, "^="));
+                } else {
+                    tokens.push_back(makeToken(TokenType::CARET, "^"));
+                }
                 break;
             
             case '~':

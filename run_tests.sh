@@ -132,6 +132,10 @@ test_cli_output "lex-compound-ops" "PLUS_ASSIGN" 0 ./build/omsc lex examples/com
 test_cli_output "lex-do-while" "DO" 0 ./build/omsc lex examples/do_while.om
 test_cli_output "lex-ternary" "QUESTION" 0 ./build/omsc lex examples/ternary.om
 test_cli_output "lex-bitwise" "AMPERSAND" 0 ./build/omsc lex examples/bitwise.om
+test_cli_output "lex-bool-true" "TRUE" 0 ./build/omsc lex examples/bool_test.om
+test_cli_output "lex-bool-false" "FALSE" 0 ./build/omsc lex examples/bool_test.om
+test_cli_output "lex-null" "NULL_LITERAL" 0 ./build/omsc lex examples/bool_test.om
+test_cli_output "lex-bitwise-assign" "AMPERSAND_ASSIGN" 0 ./build/omsc lex examples/bitwise_assign_test.om
 test_cli_output "tokens-flag" "FN" 0 ./build/omsc --tokens examples/test.om
 test_cli_output "parse" "Parsed program" 0 ./build/omsc parse examples/test.om
 test_cli_output "parse-flag" "Parsed program" 0 ./build/omsc --parse examples/test.om
@@ -229,6 +233,9 @@ test_program "examples/float_edge_cases.om" 14
 test_program "examples/switch_test.om" 60
 test_program "examples/switch_break_test.om" 159
 test_program "examples/typeof_assert_test.om" 1
+test_program "examples/bool_test.om" 73
+test_program "examples/bitwise_assign_test.om" 55
+test_program "examples/array_compound_test.om" 164
 test_compile_fail "examples/const_fail.om"
 test_compile_fail "examples/break_outside_loop.om"
 test_compile_fail "examples/continue_outside_loop.om"
