@@ -8,7 +8,12 @@
 
 namespace omscript {
 
-// Reference counted string implementation using malloc/free
+// Reference counted string implementation using malloc/free.
+//
+// Thread safety: This class is NOT thread-safe. Reference count operations
+// (retain/release) are non-atomic. Instances must not be shared across threads
+// without external synchronization. This is acceptable for the OmScript runtime
+// which is single-threaded.
 class RefCountedString {
 public:
     RefCountedString() : data(nullptr) {}

@@ -144,13 +144,7 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
     
     consume(TokenType::RPAREN, "Expected ')' after parameters");
     
-    auto blockStmt = parseBlock();
-    auto* blockPtr = dynamic_cast<BlockStmt*>(blockStmt.get());
-    if (!blockPtr) {
-        error("Expected block statement in function body");
-    }
-    blockStmt.release();
-    auto body = std::unique_ptr<BlockStmt>(blockPtr);
+    auto body = parseBlock();
     
     inOptMaxFunction = savedOptMaxState;
     
@@ -181,7 +175,7 @@ std::unique_ptr<Statement> Parser::parseStatement() {
     return parseExprStmt();
 }
 
-std::unique_ptr<Statement> Parser::parseBlock() {
+std::unique_ptr<BlockStmt> Parser::parseBlock() {
     consume(TokenType::LBRACE, "Expected '{'");
     
     std::vector<std::unique_ptr<Statement>> statements;
@@ -595,6 +589,9 @@ std::unique_ptr<Expression> Parser::parseUnary() {
     if (match(TokenType::PLUSPLUS) || match(TokenType::MINUSMINUS)) {
         Token opToken = tokens[current - 1];
         auto operand = parseUnary();
+        if (operand->type != ASTNodeType::IDENTIFIER_EXPR) {
+            error("Prefix " + opToken.lexeme + " requires an identifier operand");
+        }
         auto node = std::make_unique<PrefixExpr>(opToken.lexeme, std::move(operand));
         node->line = opToken.line;
         node->column = opToken.column;
@@ -611,6 +608,9 @@ std::unique_ptr<Expression> Parser::parsePostfix() {
         // Handle postfix operators
         if (match(TokenType::PLUSPLUS) || match(TokenType::MINUSMINUS)) {
             Token opToken = tokens[current - 1];
+            if (expr->type != ASTNodeType::IDENTIFIER_EXPR) {
+                error("Postfix " + opToken.lexeme + " requires an identifier operand");
+            }
             expr = std::make_unique<PostfixExpr>(opToken.lexeme, std::move(expr));
             expr->line = opToken.line;
             expr->column = opToken.column;

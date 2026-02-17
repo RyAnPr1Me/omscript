@@ -643,3 +643,45 @@ TEST(ParserTest, MultipleErrors) {
         EXPECT_NE(second, std::string::npos);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Postfix/prefix operator validation
+// ---------------------------------------------------------------------------
+
+TEST(ParserTest, PostfixIncrementOnLiteral) {
+    EXPECT_THROW(parse("fn main() { 5++; return 0; }"), std::runtime_error);
+}
+
+TEST(ParserTest, PostfixDecrementOnLiteral) {
+    EXPECT_THROW(parse("fn main() { 5--; return 0; }"), std::runtime_error);
+}
+
+TEST(ParserTest, PrefixIncrementOnLiteral) {
+    EXPECT_THROW(parse("fn main() { ++5; return 0; }"), std::runtime_error);
+}
+
+TEST(ParserTest, PrefixDecrementOnLiteral) {
+    EXPECT_THROW(parse("fn main() { --5; return 0; }"), std::runtime_error);
+}
+
+TEST(ParserTest, PostfixOnIdentifierSucceeds) {
+    auto program = parse("fn main() { var x = 0; x++; return x; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+}
+
+TEST(ParserTest, PrefixOnIdentifierSucceeds) {
+    auto program = parse("fn main() { var x = 0; ++x; return x; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+}
+
+TEST(ParserTest, PostfixOnParenExprSucceeds) {
+    // (a)++ is valid because parenthesized (a) resolves to identifier a
+    auto program = parse("fn main() { var a = 1; (a)++; return 0; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+}
+
+TEST(ParserTest, PrefixOnParenExprSucceeds) {
+    // ++(a) is valid because parenthesized (a) resolves to identifier a
+    auto program = parse("fn main() { var a = 1; ++(a); return 0; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+}
