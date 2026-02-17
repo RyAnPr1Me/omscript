@@ -2460,7 +2460,7 @@ TEST(CodegenTest, ConstantPropagationThroughInline) {
 // ===========================================================================
 
 TEST(CodegenTest, OptmaxMixedTypeConstantFolding) {
-    // OPTMAX should fold 5 + 1.5 into 6.5 at the AST level
+    // OPTMAX should fold 5 + 1.0 into 6.0 at the AST level
     CodeGenerator codegen(OptimizationLevel::O0);
     auto* mod = generateIR(
         "OPTMAX=: fn main() { return 5 + 1.0; } OPTMAX!:",

@@ -152,22 +152,22 @@ std::unique_ptr<Expression> optimizeOptMaxBinary(const std::string& op,
         if (op == "&&") return std::make_unique<LiteralExpr>(static_cast<long long>((lval != 0.0) && (rval != 0.0)));
         if (op == "||") return std::make_unique<LiteralExpr>(static_cast<long long>((lval != 0.0) || (rval != 0.0)));
     } else {
-        // Mixed int/float constant folding: promote the integer operand to float
-        double lval = (leftLiteral->literalType == LiteralExpr::LiteralType::FLOAT)
+        // Mixed int/float constant folding: promote the integer operand to double
+        double leftDouble = (leftLiteral->literalType == LiteralExpr::LiteralType::FLOAT)
             ? leftLiteral->floatValue : static_cast<double>(leftLiteral->intValue);
-        double rval = (rightLiteral->literalType == LiteralExpr::LiteralType::FLOAT)
+        double rightDouble = (rightLiteral->literalType == LiteralExpr::LiteralType::FLOAT)
             ? rightLiteral->floatValue : static_cast<double>(rightLiteral->intValue);
-        if (op == "+") return std::make_unique<LiteralExpr>(lval + rval);
-        if (op == "-") return std::make_unique<LiteralExpr>(lval - rval);
-        if (op == "*") return std::make_unique<LiteralExpr>(lval * rval);
-        if (op == "/" && rval != 0.0) return std::make_unique<LiteralExpr>(lval / rval);
-        if (op == "%" && rval != 0.0) return std::make_unique<LiteralExpr>(std::fmod(lval, rval));
-        if (op == "==") return std::make_unique<LiteralExpr>(static_cast<long long>(lval == rval));
-        if (op == "!=") return std::make_unique<LiteralExpr>(static_cast<long long>(lval != rval));
-        if (op == "<") return std::make_unique<LiteralExpr>(static_cast<long long>(lval < rval));
-        if (op == "<=") return std::make_unique<LiteralExpr>(static_cast<long long>(lval <= rval));
-        if (op == ">") return std::make_unique<LiteralExpr>(static_cast<long long>(lval > rval));
-        if (op == ">=") return std::make_unique<LiteralExpr>(static_cast<long long>(lval >= rval));
+        if (op == "+") return std::make_unique<LiteralExpr>(leftDouble + rightDouble);
+        if (op == "-") return std::make_unique<LiteralExpr>(leftDouble - rightDouble);
+        if (op == "*") return std::make_unique<LiteralExpr>(leftDouble * rightDouble);
+        if (op == "/" && rightDouble != 0.0) return std::make_unique<LiteralExpr>(leftDouble / rightDouble);
+        if (op == "%" && rightDouble != 0.0) return std::make_unique<LiteralExpr>(std::fmod(leftDouble, rightDouble));
+        if (op == "==") return std::make_unique<LiteralExpr>(static_cast<long long>(leftDouble == rightDouble));
+        if (op == "!=") return std::make_unique<LiteralExpr>(static_cast<long long>(leftDouble != rightDouble));
+        if (op == "<") return std::make_unique<LiteralExpr>(static_cast<long long>(leftDouble < rightDouble));
+        if (op == "<=") return std::make_unique<LiteralExpr>(static_cast<long long>(leftDouble <= rightDouble));
+        if (op == ">") return std::make_unique<LiteralExpr>(static_cast<long long>(leftDouble > rightDouble));
+        if (op == ">=") return std::make_unique<LiteralExpr>(static_cast<long long>(leftDouble >= rightDouble));
     }
     
     return std::make_unique<BinaryExpr>(op, std::move(left), std::move(right));
