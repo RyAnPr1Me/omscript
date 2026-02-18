@@ -148,7 +148,10 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
     
     inOptMaxFunction = savedOptMaxState;
     
-    return std::make_unique<FunctionDecl>(name.lexeme, std::move(parameters), std::move(body), isOptMax);
+    auto funcDecl = std::make_unique<FunctionDecl>(name.lexeme, std::move(parameters), std::move(body), isOptMax);
+    funcDecl->line = name.line;
+    funcDecl->column = name.column;
+    return funcDecl;
 }
 
 std::unique_ptr<Statement> Parser::parseStatement() {

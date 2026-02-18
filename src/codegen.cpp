@@ -525,10 +525,37 @@ void CodeGenerator::codegenError(const std::string& message, const ASTNode* node
 void CodeGenerator::generate(Program* program) {
     hasOptMaxFunctions = false;
     optMaxFunctions.clear();
+
+    // Validate: check for duplicate function names and duplicate parameters.
+    bool hasMain = false;
+    std::unordered_map<std::string, const FunctionDecl*> seenFunctions;
     for (auto& func : program->functions) {
+        if (func->name == "main") {
+            hasMain = true;
+        }
+        auto it = seenFunctions.find(func->name);
+        if (it != seenFunctions.end()) {
+            codegenError("Duplicate function definition: '" + func->name +
+                         "' (previously defined at line " +
+                         std::to_string(it->second->line) + ")", func.get());
+        }
+        seenFunctions[func->name] = func.get();
+
+        // Check for duplicate parameter names within this function.
+        std::unordered_set<std::string> seenParams;
+        for (const auto& param : func->parameters) {
+            if (!seenParams.insert(param.name).second) {
+                codegenError("Duplicate parameter name '" + param.name +
+                             "' in function '" + func->name + "'", func.get());
+            }
+        }
+
         if (func->isOptMax) {
             optMaxFunctions.insert(func->name);
         }
+    }
+    if (!hasMain) {
+        throw std::runtime_error("No 'main' function defined");
     }
     
     // Forward-declare all functions so that any function can reference any
@@ -643,13 +670,13 @@ void CodeGenerator::generateStatement(Statement* stmt) {
             break;
         case ASTNodeType::BREAK_STMT:
             if (loopStack.empty()) {
-                throw std::runtime_error("break used outside of a loop");
+                codegenError("break used outside of a loop", stmt);
             }
             builder->CreateBr(loopStack.back().breakTarget);
             break;
         case ASTNodeType::CONTINUE_STMT:
             if (loopStack.empty()) {
-                throw std::runtime_error("continue used outside of a loop");
+                codegenError("continue used outside of a loop", stmt);
             }
             builder->CreateBr(loopStack.back().continueTarget);
             break;
@@ -663,7 +690,7 @@ void CodeGenerator::generateStatement(Statement* stmt) {
             generateSwitch(static_cast<SwitchStmt*>(stmt));
             break;
         default:
-            throw std::runtime_error("Unknown statement type");
+            codegenError("Unknown statement type", stmt);
     }
 }
 
@@ -694,7 +721,7 @@ llvm::Value* CodeGenerator::generateExpression(Expression* expr) {
         case ASTNodeType::INDEX_ASSIGN_EXPR:
             return generateIndexAssign(static_cast<IndexAssignExpr*>(expr));
         default:
-            throw std::runtime_error("Unknown expression type");
+            codegenError("Unknown expression type", expr);
     }
 }
 
@@ -773,7 +800,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         if (expr->op == ">")  { auto cmp = builder->CreateFCmpOGT(left, right, "fcmptmp"); return builder->CreateZExt(cmp, getDefaultType(), "booltmp"); }
         if (expr->op == ">=") { auto cmp = builder->CreateFCmpOGE(left, right, "fcmptmp"); return builder->CreateZExt(cmp, getDefaultType(), "booltmp"); }
         
-        throw std::runtime_error("Invalid binary operator for float operands: " + expr->op);
+        codegenError("Invalid binary operator for float operands: " + expr->op, expr);
     }
     
     // String concatenation path (pointer + pointer with '+' operator)
@@ -936,7 +963,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         return builder->CreateAShr(left, right, "ashrtmp");
     }
     
-    throw std::runtime_error("Unknown binary operator: " + expr->op);
+    codegenError("Unknown binary operator: " + expr->op, expr);
 }
 
 llvm::Value* CodeGenerator::generateUnary(UnaryExpr* expr) {
@@ -958,7 +985,7 @@ llvm::Value* CodeGenerator::generateUnary(UnaryExpr* expr) {
         return builder->CreateNot(operand, "bitnottmp");
     }
     
-    throw std::runtime_error("Unknown unary operator: " + expr->op);
+    codegenError("Unknown unary operator: " + expr->op, expr);
 }
 
 llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
@@ -1574,9 +1601,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             if (builder->GetInsertBlock() && builder->GetInsertBlock()->getParent()) {
                 currentFunction = std::string(builder->GetInsertBlock()->getParent()->getName());
             }
-            throw std::runtime_error("OPTMAX function \"" + currentFunction +
+            codegenError("OPTMAX function \"" + currentFunction +
                                      "\" cannot invoke non-OPTMAX function \"" +
-                                     expr->callee + "\"");
+                                     expr->callee + "\"", expr);
         }
     }
     auto calleeIt = functions.find(expr->callee);
@@ -1856,7 +1883,7 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
 void CodeGenerator::generateVarDecl(VarDecl* stmt) {
     llvm::Function* function = builder->GetInsertBlock()->getParent();
     if (!function) {
-        throw std::runtime_error("Variable declaration outside of function");
+        codegenError("Variable declaration outside of function", stmt);
     }
     
     llvm::Type* allocaType = getDefaultType();
@@ -1992,7 +2019,7 @@ void CodeGenerator::generateDoWhile(DoWhileStmt* stmt) {
 void CodeGenerator::generateFor(ForStmt* stmt) {
     llvm::Function* function = builder->GetInsertBlock()->getParent();
     if (!function) {
-        throw std::runtime_error("For loop outside of function");
+        codegenError("For loop outside of function", stmt);
     }
     
     beginScope();
@@ -2091,7 +2118,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
 void CodeGenerator::generateForEach(ForEachStmt* stmt) {
     llvm::Function* function = builder->GetInsertBlock()->getParent();
     if (!function) {
-        throw std::runtime_error("For-each loop outside of function");
+        codegenError("For-each loop outside of function", stmt);
     }
     
     beginScope();
@@ -2213,7 +2240,7 @@ void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
             caseVal = toDefaultType(caseVal);
             auto* caseConst = llvm::dyn_cast<llvm::ConstantInt>(caseVal);
             if (!caseConst) {
-                throw std::runtime_error("case value must be a compile-time constant");
+                codegenError("case value must be a compile-time constant", sc.value.get());
             }
             
             llvm::BasicBlock* caseBB = llvm::BasicBlock::Create(*context, "switch.case", function, mergeBB);

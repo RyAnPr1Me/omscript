@@ -2604,3 +2604,75 @@ TEST(CodegenTest, ArrayCompoundAssignMul) {
     auto* mainFn = mod->getFunction("main");
     ASSERT_NE(mainFn, nullptr);
 }
+
+// ===========================================================================
+// Semantic validation: missing main, duplicate functions, duplicate params
+// ===========================================================================
+
+TEST(CodegenTest, NoMainFunction) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    EXPECT_THROW({
+        generateIR("fn foo() { return 42; }", codegen);
+    }, std::runtime_error);
+}
+
+TEST(CodegenTest, NoMainFunctionMessage) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    try {
+        generateIR("fn foo() { return 42; }", codegen);
+        FAIL() << "Expected exception";
+    } catch (const std::runtime_error& e) {
+        EXPECT_NE(std::string(e.what()).find("No 'main' function defined"), std::string::npos);
+    }
+}
+
+TEST(CodegenTest, DuplicateFunction) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    EXPECT_THROW({
+        generateIR("fn add(a, b) { return a + b; }\n"
+                    "fn add(x, y) { return x + y; }\n"
+                    "fn main() { return add(1, 2); }", codegen);
+    }, std::runtime_error);
+}
+
+TEST(CodegenTest, DuplicateFunctionMessage) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    try {
+        generateIR("fn add(a, b) { return a + b; }\n"
+                    "fn add(x, y) { return x + y; }\n"
+                    "fn main() { return add(1, 2); }", codegen);
+        FAIL() << "Expected exception";
+    } catch (const std::runtime_error& e) {
+        EXPECT_NE(std::string(e.what()).find("Duplicate function definition"), std::string::npos);
+    }
+}
+
+TEST(CodegenTest, DuplicateParameter) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    EXPECT_THROW({
+        generateIR("fn add(a, a) { return a + a; }\n"
+                    "fn main() { return add(1, 2); }", codegen);
+    }, std::runtime_error);
+}
+
+TEST(CodegenTest, DuplicateParameterMessage) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    try {
+        generateIR("fn add(a, a) { return a + a; }\n"
+                    "fn main() { return add(1, 2); }", codegen);
+        FAIL() << "Expected exception";
+    } catch (const std::runtime_error& e) {
+        EXPECT_NE(std::string(e.what()).find("Duplicate parameter name"), std::string::npos);
+    }
+}
+
+TEST(CodegenTest, ValidProgramAccepted) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn add(a, b) { return a + b; }\n"
+        "fn main() { return add(1, 2); }", codegen);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    auto* addFn = mod->getFunction("add");
+    ASSERT_NE(addFn, nullptr);
+}
