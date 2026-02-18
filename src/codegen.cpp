@@ -555,6 +555,7 @@ void CodeGenerator::generate(Program* program) {
         }
     }
     if (!hasMain) {
+        // Program-level error — no specific AST node to reference for location.
         throw std::runtime_error("No 'main' function defined");
     }
     
