@@ -879,6 +879,18 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             if (rval != 0) {
                 return llvm::ConstantInt::get(*context, llvm::APInt(64, lval % rval));
             }
+        } else if (expr->op == "==") {
+            return llvm::ConstantInt::get(*context, llvm::APInt(64, lval == rval ? 1 : 0));
+        } else if (expr->op == "!=") {
+            return llvm::ConstantInt::get(*context, llvm::APInt(64, lval != rval ? 1 : 0));
+        } else if (expr->op == "<") {
+            return llvm::ConstantInt::get(*context, llvm::APInt(64, lval < rval ? 1 : 0));
+        } else if (expr->op == "<=") {
+            return llvm::ConstantInt::get(*context, llvm::APInt(64, lval <= rval ? 1 : 0));
+        } else if (expr->op == ">") {
+            return llvm::ConstantInt::get(*context, llvm::APInt(64, lval > rval ? 1 : 0));
+        } else if (expr->op == ">=") {
+            return llvm::ConstantInt::get(*context, llvm::APInt(64, lval >= rval ? 1 : 0));
         } else if (expr->op == "&") {
             return llvm::ConstantInt::get(*context, llvm::APInt(64, lval & rval));
         } else if (expr->op == "|") {
@@ -924,6 +936,20 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         return builder->CreateMul(left, right, "multmp");
     } else if (expr->op == "/" || expr->op == "%") {
         bool isDivision = expr->op == "/";
+        // Strength reduction: unsigned division by power of 2 → right shift.
+        // This is safe because we know the divisor is a non-zero constant.
+        if (isDivision) {
+            if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
+                int64_t val = ci->getSExtValue();
+                if (val > 0 && (val & (val - 1)) == 0) {
+                    unsigned shift = 0;
+                    int64_t tmp = val;
+                    while (tmp > 1) { tmp >>= 1; shift++; }
+                    return builder->CreateAShr(left,
+                        llvm::ConstantInt::get(getDefaultType(), shift), "divshrtmp");
+                }
+            }
+        }
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
         llvm::Value* isZero = builder->CreateICmpEQ(right, zero, "divzero");
         llvm::Function* function = builder->GetInsertBlock()->getParent();
@@ -2562,6 +2588,44 @@ void CodeGenerator::emitBytecodeExpression(Expression* expr) {
         }
         case ASTNodeType::BINARY_EXPR: {
             auto* bin = static_cast<BinaryExpr*>(expr);
+            // Bytecode constant folding: if both operands are integer literals,
+            // evaluate at compile time and emit a single PUSH_INT.
+            auto* leftLit = (bin->left->type == ASTNodeType::LITERAL_EXPR)
+                ? static_cast<LiteralExpr*>(bin->left.get()) : nullptr;
+            auto* rightLit = (bin->right->type == ASTNodeType::LITERAL_EXPR)
+                ? static_cast<LiteralExpr*>(bin->right.get()) : nullptr;
+            if (leftLit && rightLit &&
+                leftLit->literalType == LiteralExpr::LiteralType::INTEGER &&
+                rightLit->literalType == LiteralExpr::LiteralType::INTEGER) {
+                long long lv = leftLit->intValue;
+                long long rv = rightLit->intValue;
+                bool folded = true;
+                long long result = 0;
+                if (bin->op == "+") result = lv + rv;
+                else if (bin->op == "-") result = lv - rv;
+                else if (bin->op == "*") result = lv * rv;
+                else if (bin->op == "/" && rv != 0) result = lv / rv;
+                else if (bin->op == "%" && rv != 0) result = lv % rv;
+                else if (bin->op == "&") result = lv & rv;
+                else if (bin->op == "|") result = lv | rv;
+                else if (bin->op == "^") result = lv ^ rv;
+                else if (bin->op == "<<" && rv >= 0 && rv < 64) result = lv << rv;
+                else if (bin->op == ">>" && rv >= 0 && rv < 64) result = lv >> rv;
+                else if (bin->op == "==") result = static_cast<long long>(lv == rv);
+                else if (bin->op == "!=") result = static_cast<long long>(lv != rv);
+                else if (bin->op == "<") result = static_cast<long long>(lv < rv);
+                else if (bin->op == "<=") result = static_cast<long long>(lv <= rv);
+                else if (bin->op == ">") result = static_cast<long long>(lv > rv);
+                else if (bin->op == ">=") result = static_cast<long long>(lv >= rv);
+                else if (bin->op == "&&") result = static_cast<long long>((lv != 0) && (rv != 0));
+                else if (bin->op == "||") result = static_cast<long long>((lv != 0) || (rv != 0));
+                else folded = false;
+                if (folded) {
+                    bytecodeEmitter.emit(OpCode::PUSH_INT);
+                    bytecodeEmitter.emitInt(result);
+                    break;
+                }
+            }
             emitBytecodeExpression(bin->left.get());
             emitBytecodeExpression(bin->right.get());
             if (bin->op == "+") bytecodeEmitter.emit(OpCode::ADD);
@@ -2589,6 +2653,23 @@ void CodeGenerator::emitBytecodeExpression(Expression* expr) {
         }
         case ASTNodeType::UNARY_EXPR: {
             auto* unary = static_cast<UnaryExpr*>(expr);
+            // Bytecode constant folding for unary on integer literals.
+            auto* operandLit = (unary->operand->type == ASTNodeType::LITERAL_EXPR)
+                ? static_cast<LiteralExpr*>(unary->operand.get()) : nullptr;
+            if (operandLit && operandLit->literalType == LiteralExpr::LiteralType::INTEGER) {
+                long long val = operandLit->intValue;
+                bool folded = true;
+                long long result = 0;
+                if (unary->op == "-") result = -val;
+                else if (unary->op == "!") result = (val == 0) ? 1 : 0;
+                else if (unary->op == "~") result = ~val;
+                else folded = false;
+                if (folded) {
+                    bytecodeEmitter.emit(OpCode::PUSH_INT);
+                    bytecodeEmitter.emitInt(result);
+                    break;
+                }
+            }
             emitBytecodeExpression(unary->operand.get());
             if (unary->op == "-") bytecodeEmitter.emit(OpCode::NEG);
             else if (unary->op == "!") bytecodeEmitter.emit(OpCode::NOT);

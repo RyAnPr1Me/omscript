@@ -120,6 +120,336 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
     size_t ip = 0;
     stack.clear();
     lastReturn = Value();
+
+// Use computed-goto dispatch on GCC/Clang for faster opcode dispatch.
+// The dispatch table eliminates the overhead of the switch jump and branch
+// prediction failures that occur with a traditional switch statement.
+#if defined(__GNUC__) || defined(__clang__)
+#define USE_COMPUTED_GOTO 1
+#else
+#define USE_COMPUTED_GOTO 0
+#endif
+
+#if USE_COMPUTED_GOTO
+    static const void* dispatchTable[] = {
+        &&op_PUSH_INT,    // 0
+        &&op_PUSH_FLOAT,  // 1
+        &&op_PUSH_STRING, // 2
+        &&op_POP,         // 3
+        &&op_ADD,         // 4
+        &&op_SUB,         // 5
+        &&op_MUL,         // 6
+        &&op_DIV,         // 7
+        &&op_MOD,         // 8
+        &&op_NEG,         // 9
+        &&op_EQ,          // 10
+        &&op_NE,          // 11
+        &&op_LT,          // 12
+        &&op_LE,          // 13
+        &&op_GT,          // 14
+        &&op_GE,          // 15
+        &&op_AND,         // 16
+        &&op_OR,          // 17
+        &&op_NOT,         // 18
+        &&op_BIT_AND,     // 19
+        &&op_BIT_OR,      // 20
+        &&op_BIT_XOR,     // 21
+        &&op_BIT_NOT,     // 22
+        &&op_SHL,         // 23
+        &&op_SHR,         // 24
+        &&op_LOAD_VAR,    // 25
+        &&op_STORE_VAR,   // 26
+        &&op_LOAD_LOCAL,  // 27
+        &&op_STORE_LOCAL, // 28
+        &&op_JUMP,        // 29
+        &&op_JUMP_IF_FALSE, // 30
+        &&op_CALL,        // 31
+        &&op_RETURN,      // 32
+        &&op_PRINT,       // 33
+        &&op_DUP,         // 34
+        &&op_HALT,        // 35
+    };
+
+    static constexpr size_t kDispatchTableSize = 36;
+
+#define DISPATCH() \
+    do { \
+        if (ip >= bytecode.size()) goto vm_exit; \
+        uint8_t opByte = readByte(bytecode, ip); \
+        if (opByte >= kDispatchTableSize) goto op_UNKNOWN; \
+        goto *dispatchTable[opByte]; \
+    } while (0)
+
+    DISPATCH();
+
+    op_PUSH_INT: {
+        int64_t value = readInt(bytecode, ip);
+        push(Value(value));
+        DISPATCH();
+    }
+    op_PUSH_FLOAT: {
+        double value = readFloat(bytecode, ip);
+        push(Value(value));
+        DISPATCH();
+    }
+    op_PUSH_STRING: {
+        std::string value = readString(bytecode, ip);
+        push(Value(value));
+        DISPATCH();
+    }
+    op_POP: {
+        pop();
+        DISPATCH();
+    }
+    op_ADD: {
+        Value b = pop();
+        Value a = pop();
+        push(a + b);
+        DISPATCH();
+    }
+    op_SUB: {
+        Value b = pop();
+        Value a = pop();
+        push(a - b);
+        DISPATCH();
+    }
+    op_MUL: {
+        Value b = pop();
+        Value a = pop();
+        push(a * b);
+        DISPATCH();
+    }
+    op_DIV: {
+        Value b = pop();
+        Value a = pop();
+        push(a / b);
+        DISPATCH();
+    }
+    op_MOD: {
+        Value b = pop();
+        Value a = pop();
+        push(a % b);
+        DISPATCH();
+    }
+    op_NEG: {
+        Value a = pop();
+        push(-a);
+        DISPATCH();
+    }
+    op_EQ: {
+        Value b = pop();
+        Value a = pop();
+        push(Value(static_cast<int64_t>(a == b)));
+        DISPATCH();
+    }
+    op_NE: {
+        Value b = pop();
+        Value a = pop();
+        push(Value(static_cast<int64_t>(a != b)));
+        DISPATCH();
+    }
+    op_LT: {
+        Value b = pop();
+        Value a = pop();
+        push(Value(static_cast<int64_t>(a < b)));
+        DISPATCH();
+    }
+    op_LE: {
+        Value b = pop();
+        Value a = pop();
+        push(Value(static_cast<int64_t>(a <= b)));
+        DISPATCH();
+    }
+    op_GT: {
+        Value b = pop();
+        Value a = pop();
+        push(Value(static_cast<int64_t>(a > b)));
+        DISPATCH();
+    }
+    op_GE: {
+        Value b = pop();
+        Value a = pop();
+        push(Value(static_cast<int64_t>(a >= b)));
+        DISPATCH();
+    }
+    op_AND: {
+        Value b = pop();
+        Value a = pop();
+        push(Value(static_cast<int64_t>(a.isTruthy() && b.isTruthy())));
+        DISPATCH();
+    }
+    op_OR: {
+        Value b = pop();
+        Value a = pop();
+        push(Value(static_cast<int64_t>(a.isTruthy() || b.isTruthy())));
+        DISPATCH();
+    }
+    op_NOT: {
+        Value a = pop();
+        push(Value(static_cast<int64_t>(!a.isTruthy())));
+        DISPATCH();
+    }
+    op_BIT_AND: {
+        Value b = pop();
+        Value a = pop();
+        push(a & b);
+        DISPATCH();
+    }
+    op_BIT_OR: {
+        Value b = pop();
+        Value a = pop();
+        push(a | b);
+        DISPATCH();
+    }
+    op_BIT_XOR: {
+        Value b = pop();
+        Value a = pop();
+        push(a ^ b);
+        DISPATCH();
+    }
+    op_BIT_NOT: {
+        Value a = pop();
+        push(~a);
+        DISPATCH();
+    }
+    op_SHL: {
+        Value b = pop();
+        Value a = pop();
+        push(a << b);
+        DISPATCH();
+    }
+    op_SHR: {
+        Value b = pop();
+        Value a = pop();
+        push(a >> b);
+        DISPATCH();
+    }
+    op_LOAD_VAR: {
+        std::string name = readString(bytecode, ip);
+        push(getGlobal(name));
+        DISPATCH();
+    }
+    op_STORE_VAR: {
+        std::string name = readString(bytecode, ip);
+        setGlobal(name, peek(0));
+        DISPATCH();
+    }
+    op_LOAD_LOCAL: {
+        uint8_t index = readByte(bytecode, ip);
+        if (index >= locals.size()) {
+            throw std::runtime_error("Local variable index out of range: " +
+                std::to_string(index));
+        }
+        push(locals[index]);
+        DISPATCH();
+    }
+    op_STORE_LOCAL: {
+        uint8_t index = readByte(bytecode, ip);
+        if (index >= locals.size()) {
+            locals.resize(static_cast<size_t>(index) + 1);
+        }
+        locals[index] = peek(0);
+        DISPATCH();
+    }
+    op_JUMP: {
+        uint16_t offset = readShort(bytecode, ip);
+        if (offset > bytecode.size()) {
+            throw std::runtime_error("Jump offset out of bounds");
+        }
+        ip = offset;
+        DISPATCH();
+    }
+    op_JUMP_IF_FALSE: {
+        uint16_t offset = readShort(bytecode, ip);
+        Value condition = pop();
+        if (!condition.isTruthy()) {
+            if (offset > bytecode.size()) {
+                throw std::runtime_error("Jump offset out of bounds");
+            }
+            ip = offset;
+        }
+        DISPATCH();
+    }
+    op_RETURN: {
+        constexpr int64_t defaultReturnValue = 0;
+        Value returnValue = stack.empty() ? Value(defaultReturnValue) : pop();
+        stack.clear();
+        lastReturn = returnValue;
+        return;
+    }
+    op_PRINT: {
+        Value a = pop();
+        std::cout << a.toString() << std::endl;
+        DISPATCH();
+    }
+    op_DUP: {
+        push(peek(0));
+        DISPATCH();
+    }
+    op_HALT: {
+        lastReturn = Value();
+        stack.clear();
+        return;
+    }
+    op_CALL: {
+        std::string funcName = readString(bytecode, ip);
+        uint8_t argCount = readByte(bytecode, ip);
+
+        auto it = functions.find(funcName);
+        if (it == functions.end()) {
+            throw std::runtime_error("Undefined function: " + funcName);
+        }
+        const BytecodeFunction& func = it->second;
+        if (argCount != func.arity) {
+            throw std::runtime_error("Function '" + funcName + "' expects " +
+                std::to_string(func.arity) + " arguments but got " +
+                std::to_string(argCount));
+        }
+
+        if (callStack.size() >= kMaxCallDepth) {
+            throw std::runtime_error("Call stack overflow: exceeded maximum call depth of " +
+                                     std::to_string(kMaxCallDepth));
+        }
+
+        CallFrame frame;
+        frame.function = &func;
+        frame.returnIp = ip;
+        frame.returnBytecode = &bytecode;
+        frame.savedLocals = locals;
+        callStack.push_back(std::move(frame));
+
+        locals.clear();
+        locals.resize(argCount);
+        for (size_t i = argCount; i > 0; i--) {
+            locals[i - 1] = pop();
+        }
+
+        std::vector<Value> callerStack = std::move(stack);
+        stack.clear();
+
+        execute(func.bytecode);
+
+        Value returnValue = lastReturn;
+        stack = std::move(callerStack);
+        CallFrame& top = callStack.back();
+        locals = std::move(top.savedLocals);
+        callStack.pop_back();
+
+        push(returnValue);
+        DISPATCH();
+    }
+
+    op_UNKNOWN:
+        throw std::runtime_error("Unknown opcode " + std::to_string(bytecode[ip - 1]) +
+                                 " at ip " + std::to_string(ip - 1));
+
+vm_exit:
+    return;
+
+#undef DISPATCH
+#undef USE_COMPUTED_GOTO
+
+#else // Fallback: standard switch dispatch
     
     while (ip < bytecode.size()) {
         OpCode op = static_cast<OpCode>(readByte(bytecode, ip));
@@ -439,6 +769,7 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
                                          " at ip " + std::to_string(ip - 1));
         }
     }
+#endif // USE_COMPUTED_GOTO
 }
 
 } // namespace omscript

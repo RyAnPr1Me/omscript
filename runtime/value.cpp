@@ -4,21 +4,6 @@
 
 namespace omscript {
 
-bool Value::isTruthy() const {
-    // Truthiness: numbers are true when non-zero, strings when non-empty, and none is false.
-    switch (type) {
-        case Type::INTEGER:
-            return intValue != 0;
-        case Type::FLOAT:
-            return floatValue != 0.0;
-        case Type::STRING:
-            return !stringValue.empty();
-        case Type::NONE:
-            return false;
-    }
-    return false;
-}
-
 std::string Value::toString() const {
     switch (type) {
         case Type::INTEGER:

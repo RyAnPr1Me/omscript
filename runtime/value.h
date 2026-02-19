@@ -143,7 +143,15 @@ public:
         return stringValue.c_str();
     }
     
-    bool isTruthy() const;
+    bool isTruthy() const {
+        switch (type) {
+            case Type::INTEGER: return intValue != 0;
+            case Type::FLOAT: return floatValue != 0.0;
+            case Type::STRING: return !stringValue.empty();
+            case Type::NONE: return false;
+        }
+        return false;
+    }
     std::string toString() const;
     
     // Arithmetic operations
