@@ -49,6 +49,7 @@ set(COMPILER_SOURCES
 set(RUNTIME_SOURCES
     runtime/vm.cpp
     runtime/value.cpp
+    runtime/jit.cpp
 )
 
 # Compiler executable
@@ -109,6 +110,7 @@ if(GTest_FOUND)
         src/compiler.cpp
         runtime/vm.cpp
         runtime/value.cpp
+        runtime/jit.cpp
     )
 
     add_library(omscript_lib STATIC ${LIB_SOURCES})

@@ -1,4 +1,5 @@
 #include "vm.h"
+#include "jit.h"
 #include "../include/bytecode.h"
 #include <stdexcept>
 #include <iostream>
@@ -9,10 +10,12 @@ namespace omscript {
 
 using BytecodeIteratorDiff = std::vector<uint8_t>::difference_type;
 
-VM::VM() : lastReturn() {
+VM::VM() : lastReturn(), jit_(std::make_unique<BytecodeJIT>()) {
     stack.reserve(256);
     locals.reserve(16);
 }
+
+VM::~VM() = default;
 
 void VM::push(const Value& value) {
     if (stack.size() >= kMaxStackSize) {
@@ -116,6 +119,10 @@ void VM::registerFunction(const BytecodeFunction& func) {
     functions[func.name] = func;
 }
 
+bool VM::isJITCompiled(const std::string& name) const {
+    return jit_ && jit_->isCompiled(name);
+}
+
 void VM::execute(const std::vector<uint8_t>& bytecode) {
     size_t ip = 0;
     stack.clear();
@@ -180,6 +187,36 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
         goto *dispatchTable[opByte]; \
     } while (0)
 
+// Integer fast-path helpers — avoid the overhead of Value operators and
+// pop()/push() bounds checks when both operands are known to be integers.
+#define VM_INT_ARITH_FAST(OP) \
+    do { \
+        size_t sz = stack.size(); \
+        if (sz >= 2 && \
+            stack[sz-1].getType() == Value::Type::INTEGER && \
+            stack[sz-2].getType() == Value::Type::INTEGER) { \
+            int64_t bv = stack[sz-1].unsafeAsInt(); \
+            int64_t av = stack[sz-2].unsafeAsInt(); \
+            stack.pop_back(); \
+            stack.back() = Value(av OP bv); \
+            DISPATCH(); \
+        } \
+    } while (0)
+
+#define VM_INT_CMP_FAST(OP) \
+    do { \
+        size_t sz = stack.size(); \
+        if (sz >= 2 && \
+            stack[sz-1].getType() == Value::Type::INTEGER && \
+            stack[sz-2].getType() == Value::Type::INTEGER) { \
+            int64_t bv = stack[sz-1].unsafeAsInt(); \
+            int64_t av = stack[sz-2].unsafeAsInt(); \
+            stack.pop_back(); \
+            stack.back() = Value(static_cast<int64_t>(av OP bv)); \
+            DISPATCH(); \
+        } \
+    } while (0)
+
     DISPATCH();
 
     op_PUSH_INT: {
@@ -202,18 +239,21 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
         DISPATCH();
     }
     op_ADD: {
+        VM_INT_ARITH_FAST(+);
         Value b = pop();
         Value a = pop();
         push(a + b);
         DISPATCH();
     }
     op_SUB: {
+        VM_INT_ARITH_FAST(-);
         Value b = pop();
         Value a = pop();
         push(a - b);
         DISPATCH();
     }
     op_MUL: {
+        VM_INT_ARITH_FAST(*);
         Value b = pop();
         Value a = pop();
         push(a * b);
@@ -237,36 +277,42 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
         DISPATCH();
     }
     op_EQ: {
+        VM_INT_CMP_FAST(==);
         Value b = pop();
         Value a = pop();
         push(Value(static_cast<int64_t>(a == b)));
         DISPATCH();
     }
     op_NE: {
+        VM_INT_CMP_FAST(!=);
         Value b = pop();
         Value a = pop();
         push(Value(static_cast<int64_t>(a != b)));
         DISPATCH();
     }
     op_LT: {
+        VM_INT_CMP_FAST(<);
         Value b = pop();
         Value a = pop();
         push(Value(static_cast<int64_t>(a < b)));
         DISPATCH();
     }
     op_LE: {
+        VM_INT_CMP_FAST(<=);
         Value b = pop();
         Value a = pop();
         push(Value(static_cast<int64_t>(a <= b)));
         DISPATCH();
     }
     op_GT: {
+        VM_INT_CMP_FAST(>);
         Value b = pop();
         Value a = pop();
         push(Value(static_cast<int64_t>(a > b)));
         DISPATCH();
     }
     op_GE: {
+        VM_INT_CMP_FAST(>=);
         Value b = pop();
         Value a = pop();
         push(Value(static_cast<int64_t>(a >= b)));
@@ -395,6 +441,30 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
         std::string funcName = readString(bytecode, ip);
         uint8_t argCount = readByte(bytecode, ip);
 
+        // ---- JIT fast path ----
+        if (jit_) {
+            if (jit_->isCompiled(funcName)) {
+                // Verify all args are integers (JIT only handles integers).
+                bool allInts = true;
+                for (size_t i = 0; i < argCount && allInts; i++) {
+                    if (stack[stack.size() - 1 - i].getType() != Value::Type::INTEGER)
+                        allInts = false;
+                }
+                if (allInts) {
+                    std::vector<int64_t> args(argCount);
+                    for (size_t i = argCount; i > 0; i--)
+                        args[i - 1] = pop().unsafeAsInt();
+                    int64_t result = jit_->getCompiled(funcName)(args.data(), static_cast<int>(argCount));
+                    push(Value(result));
+                    DISPATCH();
+                }
+            } else if (jit_->recordCall(funcName)) {
+                auto fit = functions.find(funcName);
+                if (fit != functions.end())
+                    jit_->compile(fit->second);
+            }
+        }
+
         auto it = functions.find(funcName);
         if (it == functions.end()) {
             throw std::runtime_error("Undefined function: " + funcName);
@@ -447,6 +517,8 @@ vm_exit:
     return;
 
 #undef DISPATCH
+#undef VM_INT_ARITH_FAST
+#undef VM_INT_CMP_FAST
 #undef USE_COMPUTED_GOTO
 
 #else // Fallback: standard switch dispatch
@@ -706,6 +778,29 @@ vm_exit:
             case OpCode::CALL: {
                 std::string funcName = readString(bytecode, ip);
                 uint8_t argCount = readByte(bytecode, ip);
+
+                // ---- JIT fast path ----
+                if (jit_) {
+                    if (jit_->isCompiled(funcName)) {
+                        bool allInts = true;
+                        for (size_t i = 0; i < argCount && allInts; i++) {
+                            if (stack[stack.size() - 1 - i].getType() != Value::Type::INTEGER)
+                                allInts = false;
+                        }
+                        if (allInts) {
+                            std::vector<int64_t> args(argCount);
+                            for (size_t i = argCount; i > 0; i--)
+                                args[i - 1] = pop().unsafeAsInt();
+                            int64_t result = jit_->getCompiled(funcName)(args.data(), static_cast<int>(argCount));
+                            push(Value(result));
+                            break;
+                        }
+                    } else if (jit_->recordCall(funcName)) {
+                        auto fit = functions.find(funcName);
+                        if (fit != functions.end())
+                            jit_->compile(fit->second);
+                    }
+                }
 
                 auto it = functions.find(funcName);
                 if (it == functions.end()) {

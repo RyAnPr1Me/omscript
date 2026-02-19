@@ -1215,3 +1215,193 @@ TEST(VMTest, PrintString) {
     std::string output = testing::internal::GetCapturedStdout();
     EXPECT_EQ(output, "hello world\n");
 }
+
+// ===========================================================================
+// JIT compilation
+// ===========================================================================
+
+#include "jit.h"
+
+// Helper: build a BytecodeFunction from a lambda.
+static BytecodeFunction makeBytecodeFunc(
+    const std::string& name, uint8_t arity,
+    std::function<void(BytecodeEmitter&)> fn) {
+    BytecodeEmitter emitter;
+    fn(emitter);
+    BytecodeFunction f;
+    f.name = name;
+    f.arity = arity;
+    f.bytecode = emitter.getCode();
+    return f;
+}
+
+TEST(VMTest, JITSimpleAdd) {
+    // fn add(a, b) { return a + b; }
+    auto addFunc = makeBytecodeFunc("add", 2, [](BytecodeEmitter& e) {
+        e.emit(OpCode::LOAD_LOCAL); e.emitByte(0);
+        e.emit(OpCode::LOAD_LOCAL); e.emitByte(1);
+        e.emit(OpCode::ADD);
+        e.emit(OpCode::RETURN);
+    });
+
+    VM vm;
+    vm.registerFunction(addFunc);
+
+    // Call more than JIT threshold times — the function should be JIT-compiled.
+    for (size_t i = 0; i <= BytecodeJIT::kJITThreshold + 1; i++) {
+        auto code = buildBytecode([](BytecodeEmitter& e) {
+            e.emit(OpCode::PUSH_INT); e.emitInt(3);
+            e.emit(OpCode::PUSH_INT); e.emitInt(4);
+            e.emit(OpCode::CALL);
+            e.emitString("add");
+            e.emitByte(2);
+            e.emit(OpCode::RETURN);
+        });
+        vm.execute(code);
+        EXPECT_EQ(vm.getLastReturn().asInt(), 7);
+    }
+
+    // After enough calls, the function should be JIT-compiled.
+    EXPECT_TRUE(vm.isJITCompiled("add"));
+}
+
+TEST(VMTest, JITWithControlFlow) {
+    // fn abs(x) { if (x < 0) return -x; return x; }
+    auto absFunc = makeBytecodeFunc("myabs", 1, [](BytecodeEmitter& e) {
+        e.emit(OpCode::LOAD_LOCAL); e.emitByte(0);
+        e.emit(OpCode::PUSH_INT);   e.emitInt(0);
+        e.emit(OpCode::LT);
+        e.emit(OpCode::JUMP_IF_FALSE);
+        size_t patch = e.currentOffset();
+        e.emitShort(0); // placeholder
+
+        // if-body: return -x
+        e.emit(OpCode::LOAD_LOCAL); e.emitByte(0);
+        e.emit(OpCode::NEG);
+        e.emit(OpCode::RETURN);
+
+        // after-if: return x
+        e.patchJump(patch, static_cast<uint16_t>(e.currentOffset()));
+        e.emit(OpCode::LOAD_LOCAL); e.emitByte(0);
+        e.emit(OpCode::RETURN);
+    });
+
+    VM vm;
+    vm.registerFunction(absFunc);
+
+    // Warm up with positive value to trigger JIT.
+    for (size_t i = 0; i <= BytecodeJIT::kJITThreshold + 1; i++) {
+        auto code = buildBytecode([](BytecodeEmitter& e) {
+            e.emit(OpCode::PUSH_INT); e.emitInt(5);
+            e.emit(OpCode::CALL);
+            e.emitString("myabs");
+            e.emitByte(1);
+            e.emit(OpCode::RETURN);
+        });
+        vm.execute(code);
+        EXPECT_EQ(vm.getLastReturn().asInt(), 5);
+    }
+
+    EXPECT_TRUE(vm.isJITCompiled("myabs"));
+
+    // Now test with negative value (through the JIT path).
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_INT); e.emitInt(-7);
+        e.emit(OpCode::CALL);
+        e.emitString("myabs");
+        e.emitByte(1);
+        e.emit(OpCode::RETURN);
+    });
+    vm.execute(code);
+    EXPECT_EQ(vm.getLastReturn().asInt(), 7);
+}
+
+TEST(VMTest, JITFallbackForStrings) {
+    // A function that uses PRINT — not JIT-eligible.
+    auto printFunc = makeBytecodeFunc("printer", 0, [](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_STRING); e.emitString("hello");
+        e.emit(OpCode::PRINT);
+        e.emit(OpCode::PUSH_INT); e.emitInt(0);
+        e.emit(OpCode::RETURN);
+    });
+
+    VM vm;
+    vm.registerFunction(printFunc);
+
+    // Call many times — should NOT be JIT-compiled (uses PRINT + STRING).
+    for (size_t i = 0; i <= BytecodeJIT::kJITThreshold + 1; i++) {
+        auto code = buildBytecode([](BytecodeEmitter& e) {
+            e.emit(OpCode::CALL);
+            e.emitString("printer");
+            e.emitByte(0);
+            e.emit(OpCode::RETURN);
+        });
+        testing::internal::CaptureStdout();
+        vm.execute(code);
+        testing::internal::GetCapturedStdout();
+        EXPECT_EQ(vm.getLastReturn().asInt(), 0);
+    }
+
+    // Should NOT be JIT-compiled.
+    EXPECT_FALSE(vm.isJITCompiled("printer"));
+}
+
+TEST(VMTest, JITMultiply) {
+    // fn mul(a, b) { return a * b; }
+    auto mulFunc = makeBytecodeFunc("mul", 2, [](BytecodeEmitter& e) {
+        e.emit(OpCode::LOAD_LOCAL); e.emitByte(0);
+        e.emit(OpCode::LOAD_LOCAL); e.emitByte(1);
+        e.emit(OpCode::MUL);
+        e.emit(OpCode::RETURN);
+    });
+
+    VM vm;
+    vm.registerFunction(mulFunc);
+
+    for (size_t i = 0; i <= BytecodeJIT::kJITThreshold + 1; i++) {
+        auto code = buildBytecode([](BytecodeEmitter& e) {
+            e.emit(OpCode::PUSH_INT); e.emitInt(6);
+            e.emit(OpCode::PUSH_INT); e.emitInt(7);
+            e.emit(OpCode::CALL);
+            e.emitString("mul");
+            e.emitByte(2);
+            e.emit(OpCode::RETURN);
+        });
+        vm.execute(code);
+        EXPECT_EQ(vm.getLastReturn().asInt(), 42);
+    }
+    EXPECT_TRUE(vm.isJITCompiled("mul"));
+}
+
+TEST(VMTest, JITWithLocals) {
+    // fn compute(x) { var y = x * 2; return y + 1; }
+    auto func = makeBytecodeFunc("compute", 1, [](BytecodeEmitter& e) {
+        // y = x * 2
+        e.emit(OpCode::LOAD_LOCAL); e.emitByte(0);   // push x
+        e.emit(OpCode::PUSH_INT);   e.emitInt(2);     // push 2
+        e.emit(OpCode::MUL);                           // x * 2
+        e.emit(OpCode::STORE_LOCAL); e.emitByte(1);   // store to local 1 (y)
+        e.emit(OpCode::POP);                           // clean stack
+        // return y + 1
+        e.emit(OpCode::LOAD_LOCAL); e.emitByte(1);    // push y
+        e.emit(OpCode::PUSH_INT);   e.emitInt(1);     // push 1
+        e.emit(OpCode::ADD);                           // y + 1
+        e.emit(OpCode::RETURN);
+    });
+
+    VM vm;
+    vm.registerFunction(func);
+
+    for (size_t i = 0; i <= BytecodeJIT::kJITThreshold + 1; i++) {
+        auto code = buildBytecode([](BytecodeEmitter& e) {
+            e.emit(OpCode::PUSH_INT); e.emitInt(10);
+            e.emit(OpCode::CALL);
+            e.emitString("compute");
+            e.emitByte(1);
+            e.emit(OpCode::RETURN);
+        });
+        vm.execute(code);
+        EXPECT_EQ(vm.getLastReturn().asInt(), 21);  // 10*2+1
+    }
+    EXPECT_TRUE(vm.isJITCompiled("compute"));
+}

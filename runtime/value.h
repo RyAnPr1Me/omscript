@@ -142,6 +142,11 @@ public:
         }
         return stringValue.c_str();
     }
+
+    // Unchecked accessors for performance-critical paths (VM dispatch loop,
+    // JIT call interface).  Caller must guarantee the type matches.
+    int64_t unsafeAsInt() const { return intValue; }
+    double unsafeAsFloat() const { return floatValue; }
     
     bool isTruthy() const {
         switch (type) {

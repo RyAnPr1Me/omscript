@@ -6,8 +6,11 @@
 #include <unordered_map>
 #include <string>
 #include <cstdint>
+#include <memory>
 
 namespace omscript {
+
+class BytecodeJIT;  // forward declaration (defined in jit.h)
 
 // Describes a bytecode function registered with the VM.
 struct BytecodeFunction {
@@ -34,6 +37,7 @@ public:
     static constexpr size_t kMaxCallDepth = 1024;
 
     VM();
+    ~VM();  // defined in vm.cpp for proper BytecodeJIT cleanup
     
     void execute(const std::vector<uint8_t>& bytecode);
     void setGlobal(const std::string& name, const Value& value);
@@ -42,6 +46,9 @@ public:
     
     // Register a bytecode function that can be invoked via the CALL opcode.
     void registerFunction(const BytecodeFunction& func);
+
+    /// Return true if the named function has been JIT-compiled.
+    bool isJITCompiled(const std::string& name) const;
     
 private:
     std::vector<Value> stack;
@@ -54,6 +61,9 @@ private:
     
     // Call-frame stack for nested function calls.
     std::vector<CallFrame> callStack;
+
+    // JIT compiler for hot bytecode functions.
+    std::unique_ptr<BytecodeJIT> jit_;
     
     void push(const Value& value);
     void push(Value&& value);
