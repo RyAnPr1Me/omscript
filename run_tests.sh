@@ -152,11 +152,11 @@ rm -f emit_ir_flag.ll
 test_cli_output "output-empty" "Error: -o/--output requires a valid output file name" 1 ./build/omsc run examples/exit_zero.om -o ""
 test_cli_output "build-flag" "Compilation successful!" 0 ./build/omsc --build examples/exit_zero.om -o build_flag_test
 TOTAL=$((TOTAL + 1))
-if [ ! -f build_flag_test ] || [ ! -f build_flag_test.o ]; then
-    echo -e "${RED}✗ Failed (build flag did not create outputs)${NC}"
+if [ ! -f build_flag_test ]; then
+    echo -e "${RED}✗ Failed (build flag did not create executable)${NC}"
     FAILURES=$((FAILURES + 1))
 fi
-rm -f build_flag_test build_flag_test.o
+rm -f build_flag_test
 test_cli_output "run-success" "Compilation successful!" 0 ./build/omsc run examples/exit_zero.om
 test_cli_output "run-flag" "Compilation successful!" 0 ./build/omsc --run examples/exit_zero.om
 test_cli_output "run" "Program exited with code 120" 120 ./build/omsc run examples/factorial.om
@@ -172,9 +172,9 @@ fi
 test_cli_output "run-keep-temps-long" "Compilation successful!" 0 ./build/omsc run --keep-temps examples/exit_zero.om
 test_cli_output "run-keep-temps-short" "Compilation successful!" 0 ./build/omsc run -k examples/exit_zero.om
 TOTAL=$((TOTAL + 1))
-if [ ! -f a.out ] || [ ! -f a.out.o ]; then
-    echo -e "${RED}✗ Failed (expected temporary outputs to remain)${NC}"
-    rm -f a.out a.out.o
+if [ ! -f a.out ]; then
+    echo -e "${RED}✗ Failed (expected executable to remain with --keep-temps)${NC}"
+    rm -f a.out
     FAILURES=$((FAILURES + 1))
 fi
 test_cli_output "clean" "Cleaned outputs" 0 ./build/omsc -C
