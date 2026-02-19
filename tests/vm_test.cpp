@@ -1,6 +1,9 @@
 #include <gtest/gtest.h>
 #include "vm.h"
 #include "bytecode.h"
+#include "codegen.h"
+#include "lexer.h"
+#include "parser.h"
 
 using namespace omscript;
 
@@ -1441,4 +1444,102 @@ TEST(VMTest, JITGetCallCount) {
     EXPECT_EQ(jit.getCallCount("foo"), 1u);
     jit.recordCall("foo");
     EXPECT_EQ(jit.getCallCount("foo"), 2u);
+}
+
+// ===========================================================================
+// Hybrid compilation — execute bytecode from generateHybrid()
+// ===========================================================================
+
+// Helper: run hybrid codegen and register resulting bytecode functions with a VM.
+static void hybridCompileAndRegister(const std::string& source, VM& vm, CodeGenerator& codegen) {
+    Lexer lexer(source);
+    auto tokens = lexer.tokenize();
+    Parser parser(tokens);
+    auto program = parser.parse();
+    codegen.generateHybrid(program.get());
+
+    for (auto& bcFunc : codegen.getBytecodeFunctions()) {
+        BytecodeFunction f;
+        f.name = bcFunc.name;
+        f.arity = bcFunc.arity;
+        f.bytecode = bcFunc.bytecode;
+        vm.registerFunction(f);
+    }
+}
+
+TEST(VMTest, HybridBytecodeExecutesCorrectly) {
+    // fn compute(x, y) { return x + y; }
+    // The hybrid compiler should emit bytecode for 'compute' since it lacks
+    // type annotations.  We can then register it with the VM and call it.
+    CodeGenerator codegen;
+    VM vm;
+    hybridCompileAndRegister(R"(
+        fn compute(x, y) { return x + y; }
+        fn main() { return compute(3, 4); }
+    )", vm, codegen);
+
+    // 'compute' should have been classified as Interpreted
+    EXPECT_EQ(codegen.getFunctionTier("compute"), ExecutionTier::Interpreted);
+    EXPECT_TRUE(codegen.hasHybridBytecodeFunctions());
+
+    // Build main bytecode that calls compute(10, 20)
+    auto mainCode = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_INT); e.emitInt(10);
+        e.emit(OpCode::PUSH_INT); e.emitInt(20);
+        e.emit(OpCode::CALL);
+        e.emitString("compute");
+        e.emitByte(2);
+        e.emit(OpCode::RETURN);
+    });
+    vm.execute(mainCode);
+    EXPECT_EQ(vm.getLastReturn().asInt(), 30);
+}
+
+TEST(VMTest, HybridMultipleFunctionsExecute) {
+    // Two untyped functions: doubler and adder
+    CodeGenerator codegen;
+    VM vm;
+    hybridCompileAndRegister(R"(
+        fn doubler(x) { return x * 2; }
+        fn adder(a, b) { return a + b; }
+        fn main() { return adder(doubler(3), 4); }
+    )", vm, codegen);
+
+    EXPECT_EQ(codegen.getBytecodeFunctions().size(), 2u);
+
+    // Call doubler(5) => 10
+    auto code1 = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_INT); e.emitInt(5);
+        e.emit(OpCode::CALL);
+        e.emitString("doubler");
+        e.emitByte(1);
+        e.emit(OpCode::RETURN);
+    });
+    vm.execute(code1);
+    EXPECT_EQ(vm.getLastReturn().asInt(), 10);
+
+    // Call adder(3, 7) => 10
+    auto code2 = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_INT); e.emitInt(3);
+        e.emit(OpCode::PUSH_INT); e.emitInt(7);
+        e.emit(OpCode::CALL);
+        e.emitString("adder");
+        e.emitByte(2);
+        e.emit(OpCode::RETURN);
+    });
+    vm.execute(code2);
+    EXPECT_EQ(vm.getLastReturn().asInt(), 10);
+}
+
+TEST(VMTest, HybridAOTFunctionNotInBytecode) {
+    // Fully typed functions should NOT produce bytecode
+    CodeGenerator codegen;
+    VM vm;
+    hybridCompileAndRegister(R"(
+        fn typed_add(a: int, b: int) { return a + b; }
+        fn main() { return typed_add(1, 2); }
+    )", vm, codegen);
+
+    EXPECT_EQ(codegen.getFunctionTier("typed_add"), ExecutionTier::AOT);
+    EXPECT_FALSE(codegen.hasHybridBytecodeFunctions());
 }

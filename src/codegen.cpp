@@ -2589,6 +2589,84 @@ void CodeGenerator::generateBytecode(Program* program) {
     bytecodeEmitter.emit(OpCode::HALT);
 }
 
+// ---------------------------------------------------------------------------
+// Hybrid code generation
+// ---------------------------------------------------------------------------
+
+void CodeGenerator::emitBytecodeForFunction(FunctionDecl* func) {
+    // Save and reset emitter + local variable state.
+    BytecodeEmitter savedEmitter = std::move(bytecodeEmitter);
+    auto savedLocals = std::move(bytecodeLocals_);
+    uint8_t savedNextLocal = bytecodeNextLocal_;
+
+    bytecodeEmitter = BytecodeEmitter();
+    bytecodeLocals_.clear();
+    bytecodeNextLocal_ = 0;
+
+    // Bind parameters as local variables at indices 0..arity-1.
+    // The VM's CALL handler copies arguments into locals before executing
+    // the function body, so this mapping is all we need.
+    for (auto& param : func->parameters) {
+        bytecodeLocals_[param.name] = bytecodeNextLocal_++;
+    }
+
+    emitBytecodeBlock(func->body.get());
+
+    // Ensure the function always returns (implicit return 0).
+    bytecodeEmitter.emit(OpCode::PUSH_INT);
+    bytecodeEmitter.emitInt(0);
+    bytecodeEmitter.emit(OpCode::RETURN);
+
+    CompiledBytecodeFunc compiled;
+    compiled.name = func->name;
+    compiled.arity = static_cast<uint8_t>(func->parameters.size());
+    compiled.bytecode = bytecodeEmitter.getCode();
+    bytecodeFunctions_.push_back(std::move(compiled));
+
+    // Restore saved state.
+    bytecodeEmitter = std::move(savedEmitter);
+    bytecodeLocals_ = std::move(savedLocals);
+    bytecodeNextLocal_ = savedNextLocal;
+}
+
+void CodeGenerator::generateHybrid(Program* program) {
+    // Phase 1: Run the normal AOT pipeline which classifies all functions,
+    // forward-declares them in LLVM, and generates IR for every function.
+    generate(program);
+
+    // Phase 2: For each Interpreted-tier function, also emit bytecode so
+    // the VM can execute it (or later JIT-compile it).
+    for (auto& func : program->functions) {
+        if (functionTiers[func->name] == ExecutionTier::Interpreted) {
+            emitBytecodeForFunction(func.get());
+        }
+    }
+}
+
+// Helper: emit LOAD_LOCAL or LOAD_VAR depending on whether name is a known local.
+void CodeGenerator::emitBytecodeLoad(const std::string& name) {
+    auto it = bytecodeLocals_.find(name);
+    if (it != bytecodeLocals_.end()) {
+        bytecodeEmitter.emit(OpCode::LOAD_LOCAL);
+        bytecodeEmitter.emitByte(it->second);
+    } else {
+        bytecodeEmitter.emit(OpCode::LOAD_VAR);
+        bytecodeEmitter.emitString(name);
+    }
+}
+
+// Helper: emit STORE_LOCAL or STORE_VAR depending on whether name is a known local.
+void CodeGenerator::emitBytecodeStore(const std::string& name) {
+    auto it = bytecodeLocals_.find(name);
+    if (it != bytecodeLocals_.end()) {
+        bytecodeEmitter.emit(OpCode::STORE_LOCAL);
+        bytecodeEmitter.emitByte(it->second);
+    } else {
+        bytecodeEmitter.emit(OpCode::STORE_VAR);
+        bytecodeEmitter.emitString(name);
+    }
+}
+
 void CodeGenerator::emitBytecodeExpression(Expression* expr) {
     switch (expr->type) {
         case ASTNodeType::LITERAL_EXPR: {
@@ -2607,8 +2685,7 @@ void CodeGenerator::emitBytecodeExpression(Expression* expr) {
         }
         case ASTNodeType::IDENTIFIER_EXPR: {
             auto* id = static_cast<IdentifierExpr*>(expr);
-            bytecodeEmitter.emit(OpCode::LOAD_VAR);
-            bytecodeEmitter.emitString(id->name);
+            emitBytecodeLoad(id->name);
             break;
         }
         case ASTNodeType::BINARY_EXPR: {
@@ -2707,8 +2784,7 @@ void CodeGenerator::emitBytecodeExpression(Expression* expr) {
         case ASTNodeType::ASSIGN_EXPR: {
             auto* assign = static_cast<AssignExpr*>(expr);
             emitBytecodeExpression(assign->value.get());
-            bytecodeEmitter.emit(OpCode::STORE_VAR);
-            bytecodeEmitter.emitString(assign->name);
+            emitBytecodeStore(assign->name);
             break;
         }
         case ASTNodeType::CALL_EXPR: {
@@ -2745,11 +2821,9 @@ void CodeGenerator::emitBytecodeExpression(Expression* expr) {
                 throw std::runtime_error("Postfix operator requires an identifier in bytecode");
             }
             // Push the current value (return value for postfix)
-            bytecodeEmitter.emit(OpCode::LOAD_VAR);
-            bytecodeEmitter.emitString(id->name);
+            emitBytecodeLoad(id->name);
             // Compute new value: load, push 1, add/sub, store
-            bytecodeEmitter.emit(OpCode::LOAD_VAR);
-            bytecodeEmitter.emitString(id->name);
+            emitBytecodeLoad(id->name);
             bytecodeEmitter.emit(OpCode::PUSH_INT);
             bytecodeEmitter.emitInt(1);
             if (postfix->op == "++") {
@@ -2757,9 +2831,8 @@ void CodeGenerator::emitBytecodeExpression(Expression* expr) {
             } else {
                 bytecodeEmitter.emit(OpCode::SUB);
             }
-            bytecodeEmitter.emit(OpCode::STORE_VAR);
-            bytecodeEmitter.emitString(id->name);
-            bytecodeEmitter.emit(OpCode::POP); // STORE_VAR left the new value on top; discard it to expose the original value below
+            emitBytecodeStore(id->name);
+            bytecodeEmitter.emit(OpCode::POP); // discard new value to expose the original value below
             break;
         }
         case ASTNodeType::PREFIX_EXPR: {
@@ -2769,8 +2842,7 @@ void CodeGenerator::emitBytecodeExpression(Expression* expr) {
                 throw std::runtime_error("Prefix operator requires an identifier in bytecode");
             }
             // Compute new value: load, push 1, add/sub, store
-            bytecodeEmitter.emit(OpCode::LOAD_VAR);
-            bytecodeEmitter.emitString(id->name);
+            emitBytecodeLoad(id->name);
             bytecodeEmitter.emit(OpCode::PUSH_INT);
             bytecodeEmitter.emitInt(1);
             if (prefix->op == "++") {
@@ -2778,9 +2850,8 @@ void CodeGenerator::emitBytecodeExpression(Expression* expr) {
             } else {
                 bytecodeEmitter.emit(OpCode::SUB);
             }
-            bytecodeEmitter.emit(OpCode::STORE_VAR);
-            bytecodeEmitter.emitString(id->name);
-            // STORE_VAR leaves the new value on the stack (prefix returns new value)
+            emitBytecodeStore(id->name);
+            // STORE leaves the new value on the stack (prefix returns new value)
             break;
         }
         case ASTNodeType::TERNARY_EXPR: {
@@ -2823,9 +2894,14 @@ void CodeGenerator::emitBytecodeStatement(Statement* stmt) {
                 bytecodeEmitter.emit(OpCode::PUSH_INT);
                 bytecodeEmitter.emitInt(0);
             }
-            bytecodeEmitter.emit(OpCode::STORE_VAR);
-            bytecodeEmitter.emitString(varDecl->name);
-            // STORE_VAR leaves the value on the stack; pop it since
+            // If we're inside a function (bytecodeLocals_ is active),
+            // allocate a new local index for this variable declaration.
+            if (!bytecodeLocals_.empty() || bytecodeNextLocal_ > 0) {
+                uint8_t idx = bytecodeNextLocal_++;
+                bytecodeLocals_[varDecl->name] = idx;
+            }
+            emitBytecodeStore(varDecl->name);
+            // STORE leaves the value on the stack; pop it since
             // variable declarations are statements, not expressions.
             bytecodeEmitter.emit(OpCode::POP);
             break;
@@ -2900,17 +2976,21 @@ void CodeGenerator::emitBytecodeStatement(Statement* stmt) {
         }
         case ASTNodeType::FOR_STMT: {
             auto* forStmt = static_cast<ForStmt*>(stmt);
+            // Allocate the iterator as a local if we're in function context.
+            if (!bytecodeLocals_.empty() || bytecodeNextLocal_ > 0) {
+                if (bytecodeLocals_.find(forStmt->iteratorVar) == bytecodeLocals_.end()) {
+                    bytecodeLocals_[forStmt->iteratorVar] = bytecodeNextLocal_++;
+                }
+            }
             // Initialize iterator variable
             emitBytecodeExpression(forStmt->start.get());
-            bytecodeEmitter.emit(OpCode::STORE_VAR);
-            bytecodeEmitter.emitString(forStmt->iteratorVar);
+            emitBytecodeStore(forStmt->iteratorVar);
             bytecodeEmitter.emit(OpCode::POP);
             
             size_t loopStart = bytecodeEmitter.currentOffset();
             
             // Condition: iterator < end
-            bytecodeEmitter.emit(OpCode::LOAD_VAR);
-            bytecodeEmitter.emitString(forStmt->iteratorVar);
+            emitBytecodeLoad(forStmt->iteratorVar);
             emitBytecodeExpression(forStmt->end.get());
             bytecodeEmitter.emit(OpCode::LT);
             
@@ -2922,8 +3002,7 @@ void CodeGenerator::emitBytecodeStatement(Statement* stmt) {
             emitBytecodeStatement(forStmt->body.get());
             
             // Increment: iterator = iterator + step (default step = 1)
-            bytecodeEmitter.emit(OpCode::LOAD_VAR);
-            bytecodeEmitter.emitString(forStmt->iteratorVar);
+            emitBytecodeLoad(forStmt->iteratorVar);
             if (forStmt->step) {
                 emitBytecodeExpression(forStmt->step.get());
             } else {
@@ -2931,8 +3010,7 @@ void CodeGenerator::emitBytecodeStatement(Statement* stmt) {
                 bytecodeEmitter.emitInt(1);
             }
             bytecodeEmitter.emit(OpCode::ADD);
-            bytecodeEmitter.emit(OpCode::STORE_VAR);
-            bytecodeEmitter.emitString(forStmt->iteratorVar);
+            emitBytecodeStore(forStmt->iteratorVar);
             bytecodeEmitter.emit(OpCode::POP);
             
             bytecodeEmitter.emit(OpCode::JUMP);
@@ -2946,10 +3024,13 @@ void CodeGenerator::emitBytecodeStatement(Statement* stmt) {
             // Use a unique temp variable to support nested switches.
             static int switchCounter = 0;
             std::string tempVar = "__switch_cond_" + std::to_string(switchCounter++) + "__";
+            // Allocate the temp as a local if we're in function context.
+            if (!bytecodeLocals_.empty() || bytecodeNextLocal_ > 0) {
+                bytecodeLocals_[tempVar] = bytecodeNextLocal_++;
+            }
             // Emit the condition once and store in the temporary variable.
             emitBytecodeExpression(switchStmt->condition.get());
-            bytecodeEmitter.emit(OpCode::STORE_VAR);
-            bytecodeEmitter.emitString(tempVar);
+            emitBytecodeStore(tempVar);
             bytecodeEmitter.emit(OpCode::POP);
 
             // Emit non-default cases first, then the default case last
@@ -2961,8 +3042,7 @@ void CodeGenerator::emitBytecodeStatement(Statement* stmt) {
                 if (sc.isDefault) {
                     defaultCase = &sc;
                 } else {
-                    bytecodeEmitter.emit(OpCode::LOAD_VAR);
-                    bytecodeEmitter.emitString(tempVar);
+                    emitBytecodeLoad(tempVar);
                     emitBytecodeExpression(sc.value.get());
                     bytecodeEmitter.emit(OpCode::EQ);
                     bytecodeEmitter.emit(OpCode::JUMP_IF_FALSE);

@@ -96,9 +96,27 @@ private:
     // Per-function execution tier decided during code generation.
     std::unordered_map<std::string, ExecutionTier> functionTiers;
 
+    /// Compiled bytecode functions for Interpreted-tier functions.
+    /// Populated by generateHybrid() when the hybrid execution model is active.
+    struct CompiledBytecodeFunc {
+        std::string name;
+        uint8_t arity;
+        std::vector<uint8_t> bytecode;
+    };
+    std::vector<CompiledBytecodeFunc> bytecodeFunctions_;
+
+    /// Local variable name → index mapping for per-function bytecode emission.
+    /// Parameters are bound to indices 0..arity-1; additional locals are
+    /// allocated on demand during bytecode statement emission.
+    std::unordered_map<std::string, uint8_t> bytecodeLocals_;
+    uint8_t bytecodeNextLocal_ = 0;
+
     /// Classify a function into its execution tier based on type annotations,
     /// OPTMAX status, and whether it is a special function (main/stdlib).
     ExecutionTier classifyFunction(const FunctionDecl* func) const;
+
+    /// Emit bytecode for a single function body (used by hybrid compilation).
+    void emitBytecodeForFunction(FunctionDecl* func);
     
     // Code generation methods
     llvm::Function* generateFunction(FunctionDecl* func);
@@ -154,6 +172,8 @@ private:
     void emitBytecodeExpression(Expression* expr);
     void emitBytecodeStatement(Statement* stmt);
     void emitBytecodeBlock(BlockStmt* stmt);
+    void emitBytecodeLoad(const std::string& name);
+    void emitBytecodeStore(const std::string& name);
     
 public:
     // Per-function optimization for targeted optimization of individual functions
@@ -161,6 +181,20 @@ public:
     
     // Bytecode generation (alternative backend)
     void generateBytecode(Program* program);
+
+    /// Hybrid code generation: generates LLVM IR for AOT-tier functions and
+    /// bytecode for Interpreted-tier functions in a single pass.  AOT-tier
+    /// functions that call Interpreted-tier functions get IR stubs that
+    /// invoke the VM at runtime, enabling seamless cross-tier calls.
+    void generateHybrid(Program* program);
+
+    /// Return true if hybrid compilation produced any bytecode functions.
+    bool hasHybridBytecodeFunctions() const { return !bytecodeFunctions_.empty(); }
+
+    /// Return the list of bytecode functions produced by hybrid compilation.
+    const std::vector<CompiledBytecodeFunc>& getBytecodeFunctions() const {
+        return bytecodeFunctions_;
+    }
 
     /// Return the execution tier assigned to a function, or AOT if not found.
     ExecutionTier getFunctionTier(const std::string& name) const {

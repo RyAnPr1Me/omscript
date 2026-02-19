@@ -2909,3 +2909,134 @@ TEST(CodegenTest, HasFullTypeAnnotationsHelper) {
     EXPECT_TRUE(foundTyped);
     EXPECT_TRUE(foundUntyped);
 }
+
+// ===========================================================================
+// Hybrid compilation
+// ===========================================================================
+
+// Helper: run hybrid generation and return the codegen
+static void generateHybridIR(const std::string& source, CodeGenerator& codegen) {
+    Lexer lexer(source);
+    auto tokens = lexer.tokenize();
+    Parser parser(tokens);
+    auto program = parser.parse();
+    codegen.generateHybrid(program.get());
+}
+
+TEST(CodegenTest, HybridEmitsBytecodeForUntypedFunction) {
+    std::string src = R"(
+        fn compute(x, y) { return x + y; }
+        fn main() { return compute(3, 4); }
+    )";
+    CodeGenerator codegen;
+    generateHybridIR(src, codegen);
+
+    // compute is Interpreted, main is AOT
+    EXPECT_EQ(codegen.getFunctionTier("compute"), ExecutionTier::Interpreted);
+    EXPECT_EQ(codegen.getFunctionTier("main"), ExecutionTier::AOT);
+
+    // Hybrid should produce bytecode for the untyped function
+    EXPECT_TRUE(codegen.hasHybridBytecodeFunctions());
+    auto& bcFuncs = codegen.getBytecodeFunctions();
+    ASSERT_EQ(bcFuncs.size(), 1u);
+    EXPECT_EQ(bcFuncs[0].name, "compute");
+    EXPECT_EQ(bcFuncs[0].arity, 2);
+    EXPECT_FALSE(bcFuncs[0].bytecode.empty());
+}
+
+TEST(CodegenTest, HybridNoBytecodeForFullyTyped) {
+    std::string src = R"(
+        fn add(a: int, b: int) { return a + b; }
+        fn main() { return add(1, 2); }
+    )";
+    CodeGenerator codegen;
+    generateHybridIR(src, codegen);
+
+    // Both functions are AOT — no bytecode should be emitted
+    EXPECT_EQ(codegen.getFunctionTier("add"), ExecutionTier::AOT);
+    EXPECT_EQ(codegen.getFunctionTier("main"), ExecutionTier::AOT);
+    EXPECT_FALSE(codegen.hasHybridBytecodeFunctions());
+}
+
+TEST(CodegenTest, HybridMultipleUntypedFunctions) {
+    std::string src = R"(
+        fn helper(x) { return x * 2; }
+        fn dynamic_add(a, b) { return a + b; }
+        fn main() { return helper(5) + dynamic_add(1, 2); }
+    )";
+    CodeGenerator codegen;
+    generateHybridIR(src, codegen);
+
+    EXPECT_EQ(codegen.getFunctionTier("helper"), ExecutionTier::Interpreted);
+    EXPECT_EQ(codegen.getFunctionTier("dynamic_add"), ExecutionTier::Interpreted);
+    EXPECT_EQ(codegen.getFunctionTier("main"), ExecutionTier::AOT);
+
+    auto& bcFuncs = codegen.getBytecodeFunctions();
+    ASSERT_EQ(bcFuncs.size(), 2u);
+
+    // Verify both functions have valid bytecode and correct arity
+    std::unordered_map<std::string, uint8_t> foundFuncs;
+    for (auto& f : bcFuncs) {
+        foundFuncs[f.name] = f.arity;
+        EXPECT_FALSE(f.bytecode.empty());
+    }
+    EXPECT_EQ(foundFuncs["helper"], 1);
+    EXPECT_EQ(foundFuncs["dynamic_add"], 2);
+}
+
+TEST(CodegenTest, HybridMixedTiersWithOptMax) {
+    std::string src = R"(
+        OPTMAX=: fn fast(x: int) { return x * x; } OPTMAX!:
+        fn dynamic(x) { return x + 1; }
+        fn main() { return fast(3) + dynamic(2); }
+    )";
+    CodeGenerator codegen;
+    generateHybridIR(src, codegen);
+
+    EXPECT_EQ(codegen.getFunctionTier("fast"), ExecutionTier::AOT);
+    EXPECT_EQ(codegen.getFunctionTier("dynamic"), ExecutionTier::Interpreted);
+    EXPECT_EQ(codegen.getFunctionTier("main"), ExecutionTier::AOT);
+
+    auto& bcFuncs = codegen.getBytecodeFunctions();
+    ASSERT_EQ(bcFuncs.size(), 1u);
+    EXPECT_EQ(bcFuncs[0].name, "dynamic");
+    EXPECT_EQ(bcFuncs[0].arity, 1);
+}
+
+TEST(CodegenTest, HybridPreservesLLVMIR) {
+    std::string src = R"(
+        fn dynamic_fn(x) { return x; }
+        fn main() { return dynamic_fn(42); }
+    )";
+    CodeGenerator codegen;
+    generateHybridIR(src, codegen);
+
+    // The LLVM module should still have both functions as IR
+    auto* mod = codegen.getModule();
+    ASSERT_NE(mod, nullptr);
+    EXPECT_NE(mod->getFunction("main"), nullptr);
+    EXPECT_NE(mod->getFunction("dynamic_fn"), nullptr);
+}
+
+TEST(CodegenTest, HybridBytecodeContainsReturn) {
+    std::string src = R"(
+        fn identity(x) { return x; }
+        fn main() { return identity(5); }
+    )";
+    CodeGenerator codegen;
+    generateHybridIR(src, codegen);
+
+    auto& bcFuncs = codegen.getBytecodeFunctions();
+    ASSERT_EQ(bcFuncs.size(), 1u);
+
+    // The bytecode should contain at least one RETURN opcode
+    auto& code = bcFuncs[0].bytecode;
+    bool hasReturn = false;
+    for (uint8_t byte : code) {
+        if (byte == static_cast<uint8_t>(OpCode::RETURN)) {
+            hasReturn = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(hasReturn);
+}
