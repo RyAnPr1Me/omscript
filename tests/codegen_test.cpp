@@ -2695,9 +2695,9 @@ TEST(CodegenTest, BytecodeConstantFoldingAdd) {
     VM vm;
     vm.execute(code);
     EXPECT_EQ(vm.getLastReturn().asInt(), 30);
-    // The bytecode should be smaller with folding (no ADD opcode needed)
-    // Without folding: PUSH_INT(9) + PUSH_INT(9) + ADD(1) + RETURN(1) + HALT(1) = 21
-    // With folding:    PUSH_INT(9) + RETURN(1) + HALT(1) = 11
+    // The bytecode should be smaller with folding (no ADD opcode needed).
+    // Without folding: PUSH_INT(1+8) + PUSH_INT(1+8) + ADD(1) + RETURN(1) + HALT(1) = 21
+    // With folding:    PUSH_INT(1+8) + RETURN(1) + HALT(1) = 11
     EXPECT_LT(code.size(), 21u);
 }
 

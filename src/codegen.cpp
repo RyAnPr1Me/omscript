@@ -936,7 +936,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         return builder->CreateMul(left, right, "multmp");
     } else if (expr->op == "/" || expr->op == "%") {
         bool isDivision = expr->op == "/";
-        // Strength reduction: unsigned division by power of 2 → right shift.
+        // Strength reduction: signed division by power of 2 → arithmetic right shift.
         // This is safe because we know the divisor is a non-zero constant.
         if (isDivision) {
             if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {

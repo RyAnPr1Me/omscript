@@ -170,7 +170,7 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
         &&op_HALT,        // 35
     };
 
-    static constexpr size_t kDispatchTableSize = 36;
+    static constexpr size_t kDispatchTableSize = sizeof(dispatchTable) / sizeof(dispatchTable[0]);
 
 #define DISPATCH() \
     do { \
