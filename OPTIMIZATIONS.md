@@ -13,9 +13,12 @@ OmScript features a **heavily optimized** compilation pipeline using LLVM's prod
 
 ### O1 - Basic Optimization
 - **Passes**:
+  - **mem2reg**: Promotes memory to registers (eliminates allocas)
   - Instruction Combining: Merges redundant instructions
   - Reassociation: Reorders expressions for better optimization
+  - **GVN**: Global Value Numbering (common subexpression elimination)
   - CFG Simplification: Removes unreachable blocks, simplifies control flow
+  - **DCE**: Dead Code Elimination (removes unused code)
 
 ### O2 - Moderate Optimization (Default)
 - **Pipeline**: LLVM new pass manager's standard O2 pipeline, which includes:
@@ -274,6 +277,29 @@ if (a && b) { }
 ### Induction Variable Simplification
 Loop counters are optimized to use the most efficient form.
 
+### Unary Constant Folding
+Unary operations on compile-time constants are evaluated during code generation:
+```omscript
+-5      →  constant -5 (no runtime negation)
+!0      →  constant 1
+~0xFF   →  constant ~0xFF
+```
+
+### Constant Condition Elimination
+When an `if` condition is a compile-time constant, only the live branch is generated:
+```omscript
+if (1) { x = 10; } else { x = 20; }
+// Generates only: x = 10
+```
+
+### IR-Level Strength Reduction
+Multiplication by powers of 2 is converted to left shifts during IR generation, even at O0:
+```omscript
+n * 2   →  n << 1
+n * 8   →  n << 3
+n * 64  →  n << 6
+```
+
 ## Best Practices for Maximum Performance
 
 ### 1. Use Constants When Possible
@@ -338,6 +364,10 @@ OmScript's optimization infrastructure provides:
 - ✅ Battle-tested LLVM passes via the new pass manager
 - ✅ Interprocedural optimizations (inlining, IPSCCP, GlobalDCE)
 - ✅ Auto-vectorization for SIMD (at O3)
+- ✅ Compile-time constant folding for unary and binary expressions
+- ✅ Dead branch elimination for constant conditions
+- ✅ IR-level strength reduction (multiply to shift)
+- ✅ Optimized VM runtime with move semantics and pre-allocated storage
 - ✅ Measurable, significant improvements
 
 The compiler transforms high-level OmScript code into highly optimized machine code that rivals hand-written assembly in many cases, while maintaining code readability and developer productivity.
