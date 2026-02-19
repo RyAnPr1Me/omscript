@@ -42,17 +42,27 @@ OmScript is a complete, production-ready programming language implementation fea
 - Support for arithmetic, logical, and control flow operations
 
 ### 3. Backend (Execution)
-**LLVM AOT Compiler**
-- Compiles LLVM IR to native machine code
-- Target-independent code generation
-- Leverages LLVM's optimization passes
-- Generates object files and links to executables
 
-**Bytecode VM** (`runtime/vm.cpp`)
-- Stack-based virtual machine
-- Executes dynamically typed code
-- Runtime type checking
-- Integration points with LLVM-compiled code
+OmScript uses a **tiered execution model** that automatically selects the best strategy
+for each function:
+
+**Tier 1: AOT (Ahead-of-Time) — LLVM Native Compilation**
+- Functions with full type annotations, `OPTMAX`, `main`, or stdlib built-ins
+- Compiled to native machine code via LLVM IR with full optimization passes
+- Best performance — no runtime overhead
+
+**Tier 2: Interpreted — Bytecode VM** (`runtime/vm.cpp`)
+- Functions without type annotations (dynamic code)
+- Stack-based virtual machine with computed-goto dispatch
+- Integer fast paths for arithmetic/comparison operations
+- Runtime type checking and dynamic dispatch
+
+**Tier 3: JIT — Hot Function Compilation** (`runtime/jit.h`, `runtime/jit.cpp`)
+- Interpreted functions automatically promoted after 10 calls
+- Bytecode → LLVM IR → native code via LLVM MCJIT
+- Handles integer arithmetic, comparisons, locals, control flow
+- Post-JIT type-specialized recompilation after 50 additional calls
+- Graceful fallback for non-JIT-eligible functions
 
 **Value System** (`runtime/value.cpp`)
 - Dynamic value representation
@@ -212,14 +222,13 @@ omscript/
 
 ## Future Enhancements
 Potential areas for expansion:
-- Additional data types (arrays, structs)
-- More control flow (for loops, switch statements)
-- Standard library functions
+- Additional data types (structs, maps)
 - Module system for code organization
 - Garbage collection for memory management
-- JIT compilation for dynamic code
+- ~~JIT compilation for dynamic code~~ ✅ Implemented (bytecode JIT with LLVM MCJIT)
 - Debugging support and REPL
-- Advanced optimizations
+- Profile-Guided Optimization (PGO)
+- Link-Time Optimization (LTO)
 
 ## Conclusion
 OmScript is a complete, working programming language implementation that demonstrates:

@@ -85,22 +85,25 @@ size_t BytecodeJIT::getCallCount(const std::string& name) const {
 }
 
 bool BytecodeJIT::recompile(const BytecodeFunction& func) {
-    // Mark as recompiled so we only attempt once.
+    // Mark as recompiled so we only attempt once per function lifetime.
     recompiled_.insert(func.name);
 
-    // Use the same compile() infrastructure — if the function is still
-    // JIT-eligible the new code replaces the old pointer.  The old
-    // JITModule remains alive (so any in-flight calls don't fault) but
-    // future calls use the new pointer.
+    // Recompilation reuses the compile() infrastructure.  We need to
+    // temporarily remove the function from compiled_ because compile()
+    // checks that map before proceeding.  The old JITModule stays alive
+    // in modules_ so any in-flight native calls remain safe.
     ensureInitialized();
 
-    // Temporarily remove from compiled_ so compile() can proceed.
     auto oldIt = compiled_.find(func.name);
     JITFnPtr oldPtr = nullptr;
     if (oldIt != compiled_.end()) {
         oldPtr = oldIt->second;
         compiled_.erase(oldIt);
     }
+
+    // Also clear from failedCompilations_ so a previously-failed function
+    // gets a second chance with updated profiling data.
+    failedCompilations_.erase(func.name);
 
     bool ok = compile(func);
     if (!ok && oldPtr) {

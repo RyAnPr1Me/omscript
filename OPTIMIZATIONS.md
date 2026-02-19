@@ -346,6 +346,62 @@ functions to native machine code via LLVM MCJIT:
 - **Native invocation**: JIT-compiled functions are called directly via native function
   pointers, eliminating the overhead of recursive `execute()` calls, stack save/restore,
   and opcode dispatch.
+- **Type-specialized recompilation**: after a function has been JIT-compiled, the profiler
+  continues to track calls.  After 50 additional post-JIT calls, the function is
+  recompiled with updated type specialization data.  This allows precompiled bytecode
+  to be progressively optimized as more runtime type information becomes available.
+
+## Execution Model
+
+OmScript uses a **tiered execution model** that automatically selects the best execution
+strategy for each function based on static analysis:
+
+### Tier 1: AOT (Ahead-of-Time Compilation)
+Functions that can be fully statically analyzed are compiled directly to native machine code
+via LLVM IR.  A function qualifies for AOT compilation if any of the following are true:
+- It is `main` (the program entry point)
+- It is a stdlib built-in function (`print`, `abs`, `sqrt`, etc.)
+- It is marked with `OPTMAX=:` / `OPTMAX!:` for aggressive optimization
+- **All parameters have type annotations** (e.g. `fn add(a: int, b: int)`)
+
+AOT-compiled functions run at full native speed with LLVM optimizations applied.
+
+### Tier 2: Interpreted (Bytecode VM)
+Functions without complete type annotations are compiled to bytecode and run by the
+stack-based VM interpreter:
+- No type annotations → dynamic typing at runtime
+- Partial annotations (e.g. `fn mixed(a: int, b)`) → treated as dynamic
+- Full access to dynamic features (string operations, dynamic dispatch)
+
+The interpreter includes computed-goto dispatch and integer fast paths for performance.
+
+### Tier 3: JIT (Just-In-Time Compilation)
+Hot interpreted functions are automatically promoted to native code:
+1. The VM profiler tracks per-function call counts
+2. After 10 interpreted calls, the JIT attempts to compile the function
+3. Integer-only functions are translated to LLVM IR and compiled to native code
+4. Subsequent calls bypass the interpreter entirely
+5. After 50 additional post-JIT calls, type-specialized recompilation is attempted
+
+### Tier Selection Example
+```omscript
+// AOT — fully typed, compiled to native code
+fn add(a: int, b: int) { return a + b; }
+
+// AOT — OPTMAX block, compiled with aggressive optimization
+OPTMAX=:
+fn fast_compute(x: int) { return x * x + x; }
+OPTMAX!:
+
+// Interpreted → JIT — no type annotations, starts as bytecode
+// After 10 calls, JIT-compiled to native code if integer-only
+fn dynamic_add(a, b) { return a + b; }
+
+// Always AOT — main is always compiled to native code
+fn main() {
+    return add(1, 2) + dynamic_add(3, 4);
+}
+```
 
 ## Best Practices for Maximum Performance
 
@@ -418,6 +474,8 @@ OmScript's optimization infrastructure provides:
 - ✅ Computed-goto VM dispatch for faster bytecode execution
 - ✅ Integer-specialized fast paths for common arithmetic/comparison ops
 - ✅ Bytecode JIT compiler with automatic hot-function detection
+- ✅ Type-specialized JIT recompilation for precompiled bytecode
+- ✅ Tiered execution model (AOT → Interpreted → JIT) with automatic tier selection
 - ✅ Optimized VM runtime with move semantics and pre-allocated storage
 - ✅ Inline hot-path functions (isTruthy) for better VM throughput
 - ✅ Measurable, significant improvements
