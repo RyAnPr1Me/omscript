@@ -2455,12 +2455,10 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     fpm.add(llvm::createLICMPass());
     fpm.add(llvm::createLoopRotatePass());
     fpm.add(llvm::createLoopSimplifyPass());
-    fpm.add(llvm::createLoopInstSimplifyPass());
     fpm.add(llvm::createLoopStrengthReducePass());
     fpm.add(llvm::createLoopUnrollPass());
     // Phase 3: Post-loop optimizations
     fpm.add(llvm::createSinkingPass());
-    fpm.add(llvm::createMergedLoadStoreMotionPass());
     fpm.add(llvm::createStraightLineStrengthReducePass());
     fpm.add(llvm::createNaryReassociatePass());
     fpm.add(llvm::createTailCallEliminationPass());
