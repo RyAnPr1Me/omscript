@@ -322,6 +322,31 @@ statement. This eliminates branch prediction overhead and indirect jump penaltie
 in significantly faster opcode dispatch. A standard `switch` fallback is used on other
 compilers.
 
+### Integer Fast Paths
+When both operands on the VM stack are integers, arithmetic and comparison operations
+(ADD, SUB, MUL, EQ, NE, LT, LE, GT, GE) bypass the full `Value` operator dispatch.
+The fast path reads the raw `int64_t` values directly, avoiding type-checking overhead,
+temporary `Value` construction, and bounds-checked `pop()`/`push()` calls.
+
+### Bytecode JIT Compiler
+The VM includes a lightweight JIT compiler that automatically translates hot bytecode
+functions to native machine code via LLVM MCJIT:
+
+- **Hot function profiling**: each bytecode function's call count is tracked.  After
+  10 interpreted calls, the JIT attempts to compile the function.
+- **Bytecode → LLVM IR**: the JIT performs basic-block analysis, simulates the operand
+  stack at compile time, and emits SSA-form LLVM IR.  Local variables become `alloca`
+  instructions; stack operations become direct register operations.
+- **Supported opcodes**: `PUSH_INT`, arithmetic (`+`, `-`, `*`, `/`, `%`), comparisons,
+  logical/bitwise operations, `LOAD_LOCAL`/`STORE_LOCAL`, `JUMP`, `JUMP_IF_FALSE`, `RETURN`.
+- **Control flow**: if/else branches and while loops are handled via basic-block splitting
+  and LLVM conditional branches.
+- **Graceful fallback**: functions that use floats, strings, globals, `CALL`, or `PRINT`
+  remain interpreted.  Failed compilations are remembered so the JIT never retries.
+- **Native invocation**: JIT-compiled functions are called directly via native function
+  pointers, eliminating the overhead of recursive `execute()` calls, stack save/restore,
+  and opcode dispatch.
+
 ## Best Practices for Maximum Performance
 
 ### 1. Use Constants When Possible
@@ -391,6 +416,8 @@ OmScript's optimization infrastructure provides:
 - ✅ IR-level strength reduction (multiply/divide by power-of-2 to shift)
 - ✅ Bytecode constant folding for the interpreter backend
 - ✅ Computed-goto VM dispatch for faster bytecode execution
+- ✅ Integer-specialized fast paths for common arithmetic/comparison ops
+- ✅ Bytecode JIT compiler with automatic hot-function detection
 - ✅ Optimized VM runtime with move semantics and pre-allocated storage
 - ✅ Inline hot-path functions (isTruthy) for better VM throughput
 - ✅ Measurable, significant improvements

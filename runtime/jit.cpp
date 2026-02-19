@@ -354,9 +354,9 @@ bool BytecodeJIT::compile(const BytecodeFunction& func) {
                 if (cstack.size() < 2) { failedCompilations_.insert(func.name); return false; }
                 auto* b = cstack.back(); cstack.pop_back();
                 auto* a = cstack.back(); cstack.pop_back();
-                auto* ab = builder.CreateICmpNE(a, llvm::ConstantInt::get(int64Ty, 0));
-                auto* bb2 = builder.CreateICmpNE(b, llvm::ConstantInt::get(int64Ty, 0));
-                auto* r = builder.CreateAnd(ab, bb2, "and");
+                auto* boolA = builder.CreateICmpNE(a, llvm::ConstantInt::get(int64Ty, 0));
+                auto* boolB = builder.CreateICmpNE(b, llvm::ConstantInt::get(int64Ty, 0));
+                auto* r = builder.CreateAnd(boolA, boolB, "and");
                 cstack.push_back(builder.CreateZExt(r, int64Ty, "and_i64"));
                 break;
             }
@@ -364,9 +364,9 @@ bool BytecodeJIT::compile(const BytecodeFunction& func) {
                 if (cstack.size() < 2) { failedCompilations_.insert(func.name); return false; }
                 auto* b = cstack.back(); cstack.pop_back();
                 auto* a = cstack.back(); cstack.pop_back();
-                auto* ab = builder.CreateICmpNE(a, llvm::ConstantInt::get(int64Ty, 0));
-                auto* bb2 = builder.CreateICmpNE(b, llvm::ConstantInt::get(int64Ty, 0));
-                auto* r = builder.CreateOr(ab, bb2, "or");
+                auto* boolA = builder.CreateICmpNE(a, llvm::ConstantInt::get(int64Ty, 0));
+                auto* boolB = builder.CreateICmpNE(b, llvm::ConstantInt::get(int64Ty, 0));
+                auto* r = builder.CreateOr(boolA, boolB, "or");
                 cstack.push_back(builder.CreateZExt(r, int64Ty, "or_i64"));
                 break;
             }
