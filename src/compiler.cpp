@@ -112,29 +112,39 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
         if (verbose_) {
             std::cout << "  Linking..." << std::endl;
         }
-        auto gccPath = llvm::sys::findProgramByName("gcc");
-        if (!gccPath) {
-            throw std::runtime_error("Failed to locate gcc for linking");
+        // Try gcc first, then cc (POSIX standard), then clang for portability.
+        std::string linkerProgram;
+        for (const char* candidate : {"gcc", "cc", "clang"}) {
+            auto path = llvm::sys::findProgramByName(candidate);
+            if (path) {
+                linkerProgram = *path;
+                break;
+            }
         }
-        std::string gccProgram = *gccPath;
+        if (linkerProgram.empty()) {
+            throw std::runtime_error("Failed to locate a C linker (tried gcc, cc, clang)");
+        }
         std::vector<std::string> linkArgs = {objFile, "-o", outputFile};
         llvm::SmallVector<llvm::StringRef, 8> argRefs;
-        argRefs.push_back(gccProgram);
+        argRefs.push_back(linkerProgram);
         for (const auto& arg : linkArgs) {
             argRefs.push_back(arg);
         }
-        int result = llvm::sys::ExecuteAndWait(gccProgram, argRefs);
+        int result = llvm::sys::ExecuteAndWait(linkerProgram, argRefs);
         
         if (result != 0) {
             cleanupObject();
             throw std::runtime_error("Linking failed with exit code " + std::to_string(result));
         }
+        
+        // Clean up temporary object file after successful link.
+        cleanupObject();
     } catch (...) {
         cleanupObject();
         throw;
     }
     
-    std::cout << "Compilation successful! Output: " << outputFile << std::endl;
+    std::cerr << "Compilation successful! Output: " << outputFile << std::endl;
 }
 
 } // namespace omscript

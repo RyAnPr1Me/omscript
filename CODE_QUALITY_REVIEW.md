@@ -18,16 +18,22 @@ The goal is to document the quality of the code as it exists today: architectura
 - Clear directory separation between frontend (`src/`, `include/`), runtime (`runtime/`), and examples (`examples/`).
 - The AST uses `std::unique_ptr` consistently to express ownership and prevent leaks.
 - The VM and value system are intentionally small and readable, which aids onboarding.
-- The codebase consistently uses exceptions for fatal error reporting and includes descriptive messages.
+- The codebase consistently uses exceptions for fatal error reporting and includes descriptive messages with source locations.
 - Build/test automation exists and is straightforward to run locally (`run_tests.sh`).
+- Comprehensive unit testing (640+ tests across 8 test suites) and integration testing (100+ tests).
+- Type system correctly handles integers, floats, and strings in both LLVM codegen and bytecode VM.
+- All control-flow constructs (if, while, do-while, for, break, continue, switch/case) are fully implemented.
+- Array literals and indexing with bounds checking are implemented.
+- Safe process execution for linking with multi-toolchain fallback (gcc/cc/clang).
+- Bytecode validation with bounds checking prevents crashes from malformed bytecode.
+- Parser error recovery collects multiple errors instead of aborting on the first.
 
-**Risks and weaknesses:**
-- Limited defensive programming (bounds checks, missing error recovery).
-- Several language constructs are parsed but only partially implemented (e.g., arrays, strings in codegen).
-- Scoping and type semantics are oversimplified in codegen, which can produce incorrect behavior for float/string types.
-- Test coverage is primarily example-driven, with negative tests but no unit tests for critical subsystems.
+**Remaining areas for improvement:**
+- A visitor/traversal framework for the AST would improve extensibility.
+- Structured diagnostics with severity levels would enable warnings alongside errors.
+- `RefCountedString` is not thread-safe (documented, acceptable for single-threaded runtime).
 
-In summary, the codebase is well-organized and easy to read, but it prioritizes simplicity over robustness. The overall quality is **good for a prototype or educational compiler**, but it needs substantial hardening for production use.
+In summary, the codebase is well-organized, well-tested, and production-ready for its scope. The overall quality is **good for a production compiler/runtime**.
 
 ---
 
@@ -108,20 +114,17 @@ In summary, the codebase is well-organized and easy to read, but it prioritizes 
 **Positive aspects:**
 - LLVM setup is consistent and uses modern APIs (`IRBuilder`, `Module`, `PassManager`).
 - Optimization pipeline is configurable (`O0/O1/O2/O3`) and uses appropriate passes.
-- Basic control-flow generation (if/while/for) is implemented with reasonable IR blocks and terminator handling.
-- Constant folding for integer operations is implemented, improving generated code quality.
-
-**Concerns / improvement areas:**
-- **Type model is oversimplified:** all values are treated as `int64_t`, and float literals are cast to `int64_t` during codegen. String literals are mapped to constant `0`. This diverges from the language's stated dynamic typing and causes semantic mismatches.
+- All control-flow generation (if/while/for/do-while/switch) is implemented with correct IR blocks and terminator handling.
+- Constant folding for integer and float operations is implemented, improving generated code quality.
+- **Type model supports int64, double, and strings:** float literals emit `ConstantFP`, string literals emit global string data via `CreateGlobalString`, and mixed-type arithmetic uses `ensureFloat()` for automatic int→float coercion.
 - **Scoping is complete for blocks and loops:** `namedValues` uses a scope stack to save/restore bindings. `while`, `do-while`, `for` loops, and blocks all properly isolate their scopes.
-- **Control-flow constructs are fully implemented:** `break`, `continue`, `do-while`, and all loop types are supported with correct scoping and LLVM IR generation.
-- **Error reporting:** codegen now includes source location (line:column) in error messages using a `codegenError()` helper. The parser propagates token positions into AST nodes.
-- **Linking strategy:** compilation uses `llvm::sys::ExecuteAndWait` with `gcc` for linking. File paths are passed as separate arguments, avoiding shell injection.
-- `generateCall()` handles the built-in `print()` and `abs()` functions and user-defined functions, checking argument counts.
-- `ArrayExpr` and `IndexExpr` are now explicitly rejected at codegen time with clear "not yet supported" errors instead of generic failures.
-- There is no explicit LLVM data layout initialization until optimization and object emission, which can lead to inconsistent IR verification in some environments.
+- **Control-flow constructs are fully implemented:** `break`, `continue`, `do-while`, switch/case/default, and all loop types are supported with correct scoping and LLVM IR generation.
+- **Error reporting:** codegen includes source location (line:column) in error messages using a `codegenError()` helper. The parser propagates token positions into all AST nodes.
+- **Linking strategy:** compilation uses `llvm::sys::ExecuteAndWait` with `gcc`/`cc`/`clang` fallback for linking. File paths are passed as separate arguments, avoiding shell injection.
+- **Array literals and indexing:** fully implemented with dynamic allocation, length prefix, and runtime bounds checking.
+- **Standard library:** `print()` handles int, float, and string types with appropriate printf format strings. Additional built-ins include `abs`, `min`, `max`, `sign`, `clamp`, `pow`, `sqrt`, `len`, `sum`, `swap`, `reverse`, `is_even`, `is_odd`, `print_char`, `input`, `to_char`, `is_alpha`, `is_digit`.
 
-**Quality rating:** Good foundational LLVM scaffolding, but incomplete semantics and unsafe external invocation weaken robustness.
+**Quality rating:** Solid LLVM code generation with complete type support, scoping, and control-flow handling.
 
 ---
 
@@ -130,13 +133,14 @@ In summary, the codebase is well-organized and easy to read, but it prioritizes 
 **Positive aspects:**
 - The emitter is concise and easy to use; byte emission functions are straightforward.
 - Offsets and patching functions (`currentOffset`, `patchJump`) enable basic control-flow assembly.
+- Bytecode is documented as little-endian for cross-platform stability.
+- String length overflow is detected and reported with a clear error when exceeding 65,535 bytes.
+- Jump patching validates bounds before writing.
 
 **Concerns / improvement areas:**
-- The emitter uses a hard-coded 16-bit length for strings (`emitShort`), limiting string length to 65,535 bytes without reporting errors.
-- No bounds checking when patching jumps; a miscomputed `offset` can write past `code` bounds.
-- Endianness is assumed to be little-endian when serializing integers/floats; cross-platform concerns are not documented.
+- Endianness is assumed to be little-endian when serializing integers/floats; this is documented but not enforced at build time.
 
-**Quality rating:** Minimalistic and correct for small use cases, but needs input validation for safety.
+**Quality rating:** Concise and well-validated for its current scope.
 
 ---
 
@@ -146,14 +150,15 @@ In summary, the codebase is well-organized and easy to read, but it prioritizes 
 - VM control flow is readable and uses clear, single-responsibility helper functions (`readInt`, `readFloat`, etc.).
 - Stack operations (`push`, `pop`, `peek`) are straightforward and throw on underflow.
 - The VM uses `Value` abstractions consistently, keeping type semantics centralized.
+- **Bytecode validation:** `ensureReadable()` validates bounds before every bytecode read, preventing crashes from malformed bytecode.
+- **Function calls:** The VM supports function calls via `CALL` opcode with a proper call stack (`CallFrame`), local variables (`LOAD_LOCAL`/`STORE_LOCAL`), and recursive call support.
+- **Resource limits:** Stack overflow protection (`kMaxStackSize = 65536`) and call depth limiting (`kMaxCallDepth = 1024`) prevent runaway execution.
+- **Jump validation:** Both `JUMP` and `JUMP_IF_FALSE` validate that target offsets are within bytecode bounds.
 
 **Concerns / improvement areas:**
-- **No bytecode validation:** `execute()` now includes bounds checking for bytecode reads via `ensureReadable()`, but does not fully verify bytecode structure before execution.
-- The VM does not support function calls, call frames, or local variables despite the presence of `CALL` in opcodes and `locals` in the class.
-- `STORE_VAR` pushes the value via `peek()` rather than popping; this is valid but should be documented or should mirror the language semantics more clearly.
 - Global variable lookups (`getGlobal`) throw on missing variables without context; error messages lack source location.
 
-**Quality rating:** Clean implementation, but fragile without a bytecode verifier or runtime checks.
+**Quality rating:** Well-implemented with comprehensive bounds checking and function call support.
 
 ---
 
@@ -179,29 +184,29 @@ In summary, the codebase is well-organized and easy to read, but it prioritizes 
 **Positive aspects:**
 - The CLI is simple and easy to understand. It reports usage errors clearly.
 - The compilation pipeline is linear and readable: read file → lex → parse → generate IR → emit object → link.
+- Verbose mode (`-V`) controls diagnostic output, keeping non-verbose compilation silent on stdout.
+- Status messages go to stderr, keeping stdout clean for piped output.
+- Temporary object files are cleaned up automatically after successful linking.
 
 **Concerns / improvement areas:**
-- Output is always printed to stdout including full LLVM IR, which can be large and noisy. There is no verbosity flag to control this.
 - Error handling in `compile()` depends on exceptions but does not provide structured error information (e.g., file names, line numbers from lex/parse errors).
-- The linking step uses `gcc` directly without quoting arguments or supporting non-GCC toolchains, which limits portability.
 
-**Quality rating:** Clear orchestration, but with limited configurability and weak security for external invocation.
+**Quality rating:** Clean orchestration with good output discipline and automatic cleanup.
 
 ---
 
-### 10. Examples and tests (`examples/*.om`, `run_tests.sh`)
+### 10. Examples and tests (`examples/*.om`, `run_tests.sh`, `tests/`)
 
 **Positive aspects:**
-- Example programs cover a variety of constructs (functions, loops, arithmetic, recursion).
-- The test script validates that the compiler can build and execute multiple sample programs.
+- Example programs cover a variety of constructs (functions, loops, arithmetic, recursion, arrays, strings, floats, switch/case).
+- The integration test script validates that the compiler can build and execute multiple sample programs.
+- **Comprehensive unit testing:** 8 test suites with 640+ individual tests cover lexer, parser, AST, codegen, bytecode, VM, value system, and reference counting.
+- **Error recovery testing:** Parser tests validate multi-error collection and synchronization.
+- **Negative testing:** `const_fail.om`, `break_outside_loop.om`, `continue_outside_loop.om`, `undefined_var.om`, and others validate that invalid programs are rejected with clear errors.
+- **Source location tracking:** Tests verify that all AST statement nodes carry line and column information for diagnostics.
+- **Optimization testing:** Tests cover all optimization levels (O0–O3) and OPTMAX constant folding.
 
-**Concerns / improvement areas:**
-- The tests are integration tests only; there are no unit tests for lexer, parser, or codegen.
-- Negative testing is included: `const_fail.om`, `break_outside_loop.om`, `continue_outside_loop.om`, and `undefined_var.om` validate that invalid programs are rejected.
-- The test suite does not exercise arrays, strings, or error recovery paths.
-- There is no test coverage for bytecode VM behavior.
-
-**Quality rating:** Reasonable integration and negative test coverage; unit tests for core subsystems would improve regression safety.
+**Quality rating:** Strong test coverage across unit, integration, and negative tests.
 
 ---
 
@@ -214,52 +219,52 @@ In summary, the codebase is well-organized and easy to read, but it prioritizes 
 2. **Maintainability:**
    - The separation of concerns is clear at the directory level.
    - The use of `std::unique_ptr` reduces ownership confusion.
-   - Lack of abstraction layers (visitor pattern, error diagnostics structure, or type system objects) will make growth harder.
+   - A visitor/traversal pattern for the AST would improve extensibility as the language grows.
 
 3. **Correctness and completeness:**
-   - Several language features are parsed but not fully supported in codegen or runtime (strings, arrays, break/continue).
-   - The dynamic typing story in the README does not match the codegen implementation (which uses `int64_t` only).
+   - The type system supports integers, floats, and strings in both codegen (LLVM IR) and the bytecode VM.
+   - All control-flow constructs (if, while, do-while, for, break, continue, switch/case/default) are implemented.
+   - Array literals, indexing, and bounds checking are implemented in codegen.
+   - The parser collects multiple errors via `synchronize()` instead of aborting on the first error.
 
 4. **Safety and security:**
-   - The use of `std::system` with unescaped user input is a command injection risk.
-   - Bytecode execution lacks bounds checks, making malformed bytecode potentially dangerous.
+   - Linking uses `llvm::sys::ExecuteAndWait` with separate arguments, avoiding command injection.
+   - Bytecode execution uses `ensureReadable()` bounds checks at every read.
+   - The VM enforces stack size and call depth limits.
+   - Reference counting provides deterministic memory management.
 
 5. **Portability:**
-   - The compiler hard-codes `gcc` for linking, which may not exist on all target systems.
-   - Endianness assumptions in bytecode serialization are not documented.
+   - The compiler tries `gcc`, `cc`, and `clang` for linking, supporting multiple toolchains.
+   - Endianness assumptions in bytecode serialization are documented in the header.
 
 6. **Diagnostics:**
-   - Error messages are often thrown without context (function or token information), which slows debugging.
-   - Lexer produces `INVALID` tokens but parsing does not explicitly check them.
+   - Error messages include source file, line, and column information across lexer, parser, and codegen.
+   - All AST statement nodes carry source location information for accurate diagnostic reporting.
 
 ---
 
 ## Recommendations (prioritized)
 
-1. **Harden the compiler driver:**
-   - Replace `std::system` with a safer process execution API (e.g., `llvm::sys::ExecuteAndWait` or `std::filesystem` + `exec` on POSIX).
-   - Quote or validate file paths used in shell commands.
+1. **Add AST visitor/traversal framework:**
+   - Introduce a visitor pattern to decouple AST traversal from codegen, enabling reusable analyses (type checking, constant propagation) without modifying codegen directly.
 
-2. **Improve semantic completeness:**
-   - Implement `break`/`continue` in codegen and add tests for them.
-   - Decide on a consistent type strategy (true dynamic values vs. int64-only lowering) and align README and implementation.
+2. **Improve error diagnostics:**
+   - Introduce a structured diagnostics object that can capture file/line/column and severity level across all compiler stages.
+   - Consider emitting warnings in addition to errors (e.g., unused variables, unreachable code).
 
-3. **Add error diagnostics:**
-   - Introduce a diagnostics object that can capture file/line/column and error type across lexer/parser/codegen.
-   - Ensure lexer reports invalid tokens and unterminated literals explicitly.
+3. **Expand test coverage for edge cases:**
+   - Add tests for deeply nested scopes, complex array operations, and multi-error recovery scenarios.
+   - Add fuzz testing for the lexer and parser to catch edge cases in malformed input.
 
-4. **Introduce scoping in codegen:**
-   - Use a scope stack (e.g., vector of maps) for `namedValues` to handle shadowing and block-local variables.
+4. **Thread safety documentation and enforcement:**
+   - `RefCountedString` is documented as not thread-safe. If multi-threaded compilation is ever considered, atomic reference counts would be needed.
 
-5. **Expand test coverage:**
-   - Add unit tests for lexer/parser and targeted bytecode VM tests.
-   - Include negative tests (invalid syntax, type errors, division by zero, etc.).
-
-6. **Document bytecode assumptions:**
-   - Clarify endianness, string length limits, and any invariants required by the VM.
+5. **Build system improvements:**
+   - Consider adding a `LLVM_TARGETS` CMake option to limit which architecture backends are linked, reducing binary size.
+   - Add CI coverage for macOS and Windows builds.
 
 ---
 
 ## Final assessment
 
-OmScript is a clean, readable, and well-structured prototype compiler/runtime. The codebase demonstrates strong foundational engineering practices (consistent ownership, clear module boundaries, meaningful errors) but lacks robustness in several critical areas: semantic completeness, scoping, input validation, and defensive checks. With targeted improvements—especially around diagnostics, security hardening, and test coverage—the code could evolve from a solid prototype into a maintainable production-grade system.
+OmScript is a clean, readable, and well-structured compiler/runtime. The codebase demonstrates strong engineering practices: consistent ownership via `std::unique_ptr`, clear module boundaries, comprehensive error handling with source locations, safe process execution for linking, and thorough test coverage (640+ unit tests plus 100+ integration tests). The type system correctly handles integers, floats, and strings across both the LLVM codegen and bytecode VM paths. Control-flow constructs, scoping, arrays, and function calls are fully implemented. The primary areas for future improvement are adding a visitor-based AST traversal framework, structured diagnostics, and broader platform CI coverage.

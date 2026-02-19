@@ -155,14 +155,55 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
 }
 
 std::unique_ptr<Statement> Parser::parseStatement() {
-    if (match(TokenType::IF)) return parseIfStmt();
-    if (match(TokenType::WHILE)) return parseWhileStmt();
-    if (match(TokenType::DO)) return parseDoWhileStmt();
-    if (match(TokenType::FOR)) return parseForStmt();
-    if (match(TokenType::RETURN)) return parseReturnStmt();
-    if (match(TokenType::BREAK)) return parseBreakStmt();
-    if (match(TokenType::CONTINUE)) return parseContinueStmt();
-    if (match(TokenType::SWITCH)) return parseSwitchStmt();
+    // Capture the keyword token position for source location tracking.
+    if (match(TokenType::IF)) {
+        Token kw = tokens[current - 1];
+        auto stmt = parseIfStmt();
+        stmt->line = kw.line; stmt->column = kw.column;
+        return stmt;
+    }
+    if (match(TokenType::WHILE)) {
+        Token kw = tokens[current - 1];
+        auto stmt = parseWhileStmt();
+        stmt->line = kw.line; stmt->column = kw.column;
+        return stmt;
+    }
+    if (match(TokenType::DO)) {
+        Token kw = tokens[current - 1];
+        auto stmt = parseDoWhileStmt();
+        stmt->line = kw.line; stmt->column = kw.column;
+        return stmt;
+    }
+    if (match(TokenType::FOR)) {
+        Token kw = tokens[current - 1];
+        auto stmt = parseForStmt();
+        stmt->line = kw.line; stmt->column = kw.column;
+        return stmt;
+    }
+    if (match(TokenType::RETURN)) {
+        Token kw = tokens[current - 1];
+        auto stmt = parseReturnStmt();
+        stmt->line = kw.line; stmt->column = kw.column;
+        return stmt;
+    }
+    if (match(TokenType::BREAK)) {
+        Token kw = tokens[current - 1];
+        auto stmt = parseBreakStmt();
+        stmt->line = kw.line; stmt->column = kw.column;
+        return stmt;
+    }
+    if (match(TokenType::CONTINUE)) {
+        Token kw = tokens[current - 1];
+        auto stmt = parseContinueStmt();
+        stmt->line = kw.line; stmt->column = kw.column;
+        return stmt;
+    }
+    if (match(TokenType::SWITCH)) {
+        Token kw = tokens[current - 1];
+        auto stmt = parseSwitchStmt();
+        stmt->line = kw.line; stmt->column = kw.column;
+        return stmt;
+    }
     if (match(TokenType::VAR)) {
         auto decl = parseVarDecl(false);
         consume(TokenType::SEMICOLON, "Expected ';' after variable declaration");
@@ -173,7 +214,12 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         consume(TokenType::SEMICOLON, "Expected ';' after variable declaration");
         return decl;
     }
-    if (check(TokenType::LBRACE)) return parseBlock();
+    if (check(TokenType::LBRACE)) {
+        Token kw = peek();
+        auto stmt = parseBlock();
+        stmt->line = kw.line; stmt->column = kw.column;
+        return stmt;
+    }
     
     return parseExprStmt();
 }
@@ -360,10 +406,14 @@ std::unique_ptr<Statement> Parser::parseReturnStmt() {
 }
 
 std::unique_ptr<Statement> Parser::parseExprStmt() {
+    Token start = peek();
     auto expr = parseExpression();
     consume(TokenType::SEMICOLON, "Expected ';' after expression");
     
-    return std::make_unique<ExprStmt>(std::move(expr));
+    auto stmt = std::make_unique<ExprStmt>(std::move(expr));
+    stmt->line = start.line;
+    stmt->column = start.column;
+    return stmt;
 }
 
 std::unique_ptr<Expression> Parser::parseExpression() {

@@ -788,3 +788,96 @@ TEST(ParserTest, ArrayCompoundAssignWithVarIndex) {
     auto program = parse("fn main() { var arr = [10]; var i = 0; arr[i] += 5; return 0; }");
     ASSERT_EQ(program->functions.size(), 1u);
 }
+
+// ---------------------------------------------------------------------------
+// Source location tracking on statement nodes
+// ---------------------------------------------------------------------------
+
+TEST(ParserTest, IfStmtHasSourceLocation) {
+    auto program = parse("fn main() {\n  if (1) { return 0; }\n}");
+    ASSERT_EQ(program->functions.size(), 1u);
+    auto& stmts = program->functions[0]->body->statements;
+    ASSERT_GE(stmts.size(), 1u);
+    EXPECT_EQ(stmts[0]->type, ASTNodeType::IF_STMT);
+    EXPECT_EQ(stmts[0]->line, 2);
+    EXPECT_GT(stmts[0]->column, 0);
+}
+
+TEST(ParserTest, WhileStmtHasSourceLocation) {
+    auto program = parse("fn main() {\n  while (0) {}\n}");
+    auto& stmts = program->functions[0]->body->statements;
+    ASSERT_GE(stmts.size(), 1u);
+    EXPECT_EQ(stmts[0]->type, ASTNodeType::WHILE_STMT);
+    EXPECT_EQ(stmts[0]->line, 2);
+}
+
+TEST(ParserTest, ReturnStmtHasSourceLocation) {
+    auto program = parse("fn main() {\n  return 0;\n}");
+    auto& stmts = program->functions[0]->body->statements;
+    ASSERT_GE(stmts.size(), 1u);
+    EXPECT_EQ(stmts[0]->type, ASTNodeType::RETURN_STMT);
+    EXPECT_EQ(stmts[0]->line, 2);
+}
+
+TEST(ParserTest, BreakStmtHasSourceLocation) {
+    auto program = parse("fn main() {\n  while (1) {\n    break;\n  }\n}");
+    auto& stmts = program->functions[0]->body->statements;
+    ASSERT_GE(stmts.size(), 1u);
+    auto* whileStmt = dynamic_cast<WhileStmt*>(stmts[0].get());
+    ASSERT_NE(whileStmt, nullptr);
+    auto* body = dynamic_cast<BlockStmt*>(whileStmt->body.get());
+    ASSERT_NE(body, nullptr);
+    ASSERT_GE(body->statements.size(), 1u);
+    EXPECT_EQ(body->statements[0]->type, ASTNodeType::BREAK_STMT);
+    EXPECT_EQ(body->statements[0]->line, 3);
+}
+
+TEST(ParserTest, ContinueStmtHasSourceLocation) {
+    auto program = parse("fn main() {\n  while (1) {\n    continue;\n  }\n}");
+    auto& stmts = program->functions[0]->body->statements;
+    auto* whileStmt = dynamic_cast<WhileStmt*>(stmts[0].get());
+    auto* body = dynamic_cast<BlockStmt*>(whileStmt->body.get());
+    ASSERT_GE(body->statements.size(), 1u);
+    EXPECT_EQ(body->statements[0]->type, ASTNodeType::CONTINUE_STMT);
+    EXPECT_EQ(body->statements[0]->line, 3);
+}
+
+TEST(ParserTest, ForStmtHasSourceLocation) {
+    auto program = parse("fn main() {\n  for (i in 0...10) {}\n}");
+    auto& stmts = program->functions[0]->body->statements;
+    ASSERT_GE(stmts.size(), 1u);
+    EXPECT_EQ(stmts[0]->type, ASTNodeType::FOR_STMT);
+    EXPECT_EQ(stmts[0]->line, 2);
+}
+
+TEST(ParserTest, DoWhileStmtHasSourceLocation) {
+    auto program = parse("fn main() {\n  do {} while (0);\n}");
+    auto& stmts = program->functions[0]->body->statements;
+    ASSERT_GE(stmts.size(), 1u);
+    EXPECT_EQ(stmts[0]->type, ASTNodeType::DO_WHILE_STMT);
+    EXPECT_EQ(stmts[0]->line, 2);
+}
+
+TEST(ParserTest, SwitchStmtHasSourceLocation) {
+    auto program = parse("fn main() {\n  switch (1) { case 1: return 0; }\n}");
+    auto& stmts = program->functions[0]->body->statements;
+    ASSERT_GE(stmts.size(), 1u);
+    EXPECT_EQ(stmts[0]->type, ASTNodeType::SWITCH_STMT);
+    EXPECT_EQ(stmts[0]->line, 2);
+}
+
+TEST(ParserTest, ExprStmtHasSourceLocation) {
+    auto program = parse("fn main() {\n  print(1);\n}");
+    auto& stmts = program->functions[0]->body->statements;
+    ASSERT_GE(stmts.size(), 1u);
+    EXPECT_EQ(stmts[0]->type, ASTNodeType::EXPR_STMT);
+    EXPECT_EQ(stmts[0]->line, 2);
+}
+
+TEST(ParserTest, BlockStmtHasSourceLocation) {
+    auto program = parse("fn main() {\n  {\n    return 0;\n  }\n}");
+    auto& stmts = program->functions[0]->body->statements;
+    ASSERT_GE(stmts.size(), 1u);
+    EXPECT_EQ(stmts[0]->type, ASTNodeType::BLOCK);
+    EXPECT_EQ(stmts[0]->line, 2);
+}
