@@ -9,7 +9,10 @@ namespace omscript {
 
 using BytecodeIteratorDiff = std::vector<uint8_t>::difference_type;
 
-VM::VM() : lastReturn() {}
+VM::VM() : lastReturn() {
+    stack.reserve(256);
+    locals.reserve(16);
+}
 
 void VM::push(const Value& value) {
     if (stack.size() >= kMaxStackSize) {
@@ -19,16 +22,24 @@ void VM::push(const Value& value) {
     stack.push_back(value);
 }
 
+void VM::push(Value&& value) {
+    if (stack.size() >= kMaxStackSize) {
+        throw std::runtime_error("Stack overflow: exceeded maximum stack size of " +
+                                 std::to_string(kMaxStackSize));
+    }
+    stack.push_back(std::move(value));
+}
+
 Value VM::pop() {
     if (stack.empty()) {
         throw std::runtime_error("Stack underflow");
     }
-    Value value = stack.back();
+    Value value = std::move(stack.back());
     stack.pop_back();
     return value;
 }
 
-Value VM::peek(int offset) {
+const Value& VM::peek(int offset) const {
     if (offset < 0) {
         throw std::runtime_error("Invalid stack offset");
     }
@@ -289,8 +300,7 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
             case OpCode::STORE_VAR: {
                 std::string name = readString(bytecode, ip);
                 // Use peek to read the value without popping, preserving assignment semantics.
-                Value value = peek(0);
-                setGlobal(name, value);
+                setGlobal(name, peek(0));
                 break;
             }
             
@@ -354,8 +364,7 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
             }
             
             case OpCode::DUP: {
-                Value a = peek(0);
-                push(a);
+                push(peek(0));
                 break;
             }
             

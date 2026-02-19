@@ -56,8 +56,9 @@ private:
     std::vector<CallFrame> callStack;
     
     void push(const Value& value);
+    void push(Value&& value);
     Value pop();
-    Value peek(int offset = 0);
+    const Value& peek(int offset = 0) const;
     
     void ensureReadable(const std::vector<uint8_t>& code, size_t ip, size_t count);
     uint8_t readByte(const std::vector<uint8_t>& code, size_t& ip);

@@ -900,6 +900,27 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     } else if (expr->op == "-") {
         return builder->CreateSub(left, right, "subtmp");
     } else if (expr->op == "*") {
+        // Strength reduction: multiply by power of 2 → left shift
+        if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
+            int64_t val = ci->getSExtValue();
+            if (val > 0 && (val & (val - 1)) == 0) {
+                unsigned shift = 0;
+                int64_t tmp = val;
+                while (tmp > 1) { tmp >>= 1; shift++; }
+                return builder->CreateShl(left,
+                    llvm::ConstantInt::get(getDefaultType(), shift), "shltmp");
+            }
+        }
+        if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left)) {
+            int64_t val = ci->getSExtValue();
+            if (val > 0 && (val & (val - 1)) == 0) {
+                unsigned shift = 0;
+                int64_t tmp = val;
+                while (tmp > 1) { tmp >>= 1; shift++; }
+                return builder->CreateShl(right,
+                    llvm::ConstantInt::get(getDefaultType(), shift), "shltmp");
+            }
+        }
         return builder->CreateMul(left, right, "multmp");
     } else if (expr->op == "/" || expr->op == "%") {
         bool isDivision = expr->op == "/";
@@ -969,6 +990,23 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
 
 llvm::Value* CodeGenerator::generateUnary(UnaryExpr* expr) {
     llvm::Value* operand = generateExpression(expr->operand.get());
+    
+    // Constant folding for unary operations
+    if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(operand)) {
+        int64_t val = ci->getSExtValue();
+        if (expr->op == "-") {
+            return llvm::ConstantInt::get(*context, llvm::APInt(64, -val));
+        } else if (expr->op == "!") {
+            return llvm::ConstantInt::get(*context, llvm::APInt(64, val == 0 ? 1 : 0));
+        } else if (expr->op == "~") {
+            return llvm::ConstantInt::get(*context, llvm::APInt(64, ~val));
+        }
+    }
+    if (auto* cf = llvm::dyn_cast<llvm::ConstantFP>(operand)) {
+        if (expr->op == "-") {
+            return llvm::ConstantFP::get(getFloatType(), -cf->getValueAPF().convertToDouble());
+        }
+    }
     
     if (expr->op == "-") {
         if (operand->getType()->isDoubleTy()) {
@@ -1918,6 +1956,21 @@ void CodeGenerator::generateReturn(ReturnStmt* stmt) {
 
 void CodeGenerator::generateIf(IfStmt* stmt) {
     llvm::Value* condition = generateExpression(stmt->condition.get());
+    
+    // Constant condition elimination: skip dead branch when condition is known
+    if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(condition)) {
+        if (ci->isZero()) {
+            // Condition is false: only generate else branch if present
+            if (stmt->elseBranch) {
+                generateStatement(stmt->elseBranch.get());
+            }
+        } else {
+            // Condition is true: only generate then branch
+            generateStatement(stmt->thenBranch.get());
+        }
+        return;
+    }
+    
     llvm::Value* condBool = toBool(condition);
     
     llvm::Function* function = builder->GetInsertBlock()->getParent();
@@ -2303,9 +2356,12 @@ void CodeGenerator::runOptimizationPasses() {
     // O1 uses a lightweight legacy function pass pipeline (no IPO).
     if (optimizationLevel == OptimizationLevel::O1) {
         llvm::legacy::FunctionPassManager fpm(module.get());
+        fpm.add(llvm::createPromoteMemoryToRegisterPass());
         fpm.add(llvm::createInstructionCombiningPass());
         fpm.add(llvm::createReassociatePass());
+        fpm.add(llvm::createGVNPass());
         fpm.add(llvm::createCFGSimplificationPass());
+        fpm.add(llvm::createDeadCodeEliminationPass());
         fpm.doInitialization();
         for (auto& func : module->functions()) {
             if (!func.isDeclaration()) {
