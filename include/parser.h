@@ -35,7 +35,7 @@ private:
     // Parsing methods
     std::unique_ptr<FunctionDecl> parseFunction(bool isOptMax);
     std::unique_ptr<Statement> parseStatement();
-    std::unique_ptr<Statement> parseBlock();
+    std::unique_ptr<BlockStmt> parseBlock();
     std::unique_ptr<Statement> parseVarDecl(bool isConst);
     std::unique_ptr<Statement> parseIfStmt();
     std::unique_ptr<Statement> parseWhileStmt();

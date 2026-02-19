@@ -19,6 +19,9 @@
 #include <llvm/Transforms/IPO.h>
 #include <llvm/Analysis/TargetTransformInfo.h>
 #include <llvm/Passes/PassBuilder.h>
+#include <llvm/Passes/OptimizationLevel.h>
+#include <llvm/Transforms/IPO/GlobalDCE.h>
+#include <llvm/Transforms/IPO/AlwaysInliner.h>
 #include <cmath>
 #include <stdexcept>
 #include <iostream>
@@ -148,6 +151,23 @@ std::unique_ptr<Expression> optimizeOptMaxBinary(const std::string& op,
         if (op == ">=") return std::make_unique<LiteralExpr>(static_cast<long long>(lval >= rval));
         if (op == "&&") return std::make_unique<LiteralExpr>(static_cast<long long>((lval != 0.0) && (rval != 0.0)));
         if (op == "||") return std::make_unique<LiteralExpr>(static_cast<long long>((lval != 0.0) || (rval != 0.0)));
+    } else {
+        // Mixed int/float constant folding: promote the integer operand to double
+        double leftDouble = (leftLiteral->literalType == LiteralExpr::LiteralType::FLOAT)
+            ? leftLiteral->floatValue : static_cast<double>(leftLiteral->intValue);
+        double rightDouble = (rightLiteral->literalType == LiteralExpr::LiteralType::FLOAT)
+            ? rightLiteral->floatValue : static_cast<double>(rightLiteral->intValue);
+        if (op == "+") return std::make_unique<LiteralExpr>(leftDouble + rightDouble);
+        if (op == "-") return std::make_unique<LiteralExpr>(leftDouble - rightDouble);
+        if (op == "*") return std::make_unique<LiteralExpr>(leftDouble * rightDouble);
+        if (op == "/" && rightDouble != 0.0) return std::make_unique<LiteralExpr>(leftDouble / rightDouble);
+        if (op == "%" && rightDouble != 0.0) return std::make_unique<LiteralExpr>(std::fmod(leftDouble, rightDouble));
+        if (op == "==") return std::make_unique<LiteralExpr>(static_cast<long long>(leftDouble == rightDouble));
+        if (op == "!=") return std::make_unique<LiteralExpr>(static_cast<long long>(leftDouble != rightDouble));
+        if (op == "<") return std::make_unique<LiteralExpr>(static_cast<long long>(leftDouble < rightDouble));
+        if (op == "<=") return std::make_unique<LiteralExpr>(static_cast<long long>(leftDouble <= rightDouble));
+        if (op == ">") return std::make_unique<LiteralExpr>(static_cast<long long>(leftDouble > rightDouble));
+        if (op == ">=") return std::make_unique<LiteralExpr>(static_cast<long long>(leftDouble >= rightDouble));
     }
     
     return std::make_unique<BinaryExpr>(op, std::move(left), std::move(right));
@@ -505,10 +525,38 @@ void CodeGenerator::codegenError(const std::string& message, const ASTNode* node
 void CodeGenerator::generate(Program* program) {
     hasOptMaxFunctions = false;
     optMaxFunctions.clear();
+
+    // Validate: check for duplicate function names and duplicate parameters.
+    bool hasMain = false;
+    std::unordered_map<std::string, const FunctionDecl*> seenFunctions;
     for (auto& func : program->functions) {
+        if (func->name == "main") {
+            hasMain = true;
+        }
+        auto it = seenFunctions.find(func->name);
+        if (it != seenFunctions.end()) {
+            codegenError("Duplicate function definition: '" + func->name +
+                         "' (previously defined at line " +
+                         std::to_string(it->second->line) + ")", func.get());
+        }
+        seenFunctions[func->name] = func.get();
+
+        // Check for duplicate parameter names within this function.
+        std::unordered_set<std::string> seenParams;
+        for (const auto& param : func->parameters) {
+            if (!seenParams.insert(param.name).second) {
+                codegenError("Duplicate parameter name '" + param.name +
+                             "' in function '" + func->name + "'", func.get());
+            }
+        }
+
         if (func->isOptMax) {
             optMaxFunctions.insert(func->name);
         }
+    }
+    if (!hasMain) {
+        // Program-level error — no specific AST node to reference for location.
+        throw std::runtime_error("No 'main' function defined");
     }
     
     // Forward-declare all functions so that any function can reference any
@@ -623,13 +671,13 @@ void CodeGenerator::generateStatement(Statement* stmt) {
             break;
         case ASTNodeType::BREAK_STMT:
             if (loopStack.empty()) {
-                throw std::runtime_error("break used outside of a loop");
+                codegenError("break used outside of a loop", stmt);
             }
             builder->CreateBr(loopStack.back().breakTarget);
             break;
         case ASTNodeType::CONTINUE_STMT:
             if (loopStack.empty()) {
-                throw std::runtime_error("continue used outside of a loop");
+                codegenError("continue used outside of a loop", stmt);
             }
             builder->CreateBr(loopStack.back().continueTarget);
             break;
@@ -643,7 +691,7 @@ void CodeGenerator::generateStatement(Statement* stmt) {
             generateSwitch(static_cast<SwitchStmt*>(stmt));
             break;
         default:
-            throw std::runtime_error("Unknown statement type");
+            codegenError("Unknown statement type", stmt);
     }
 }
 
@@ -674,7 +722,7 @@ llvm::Value* CodeGenerator::generateExpression(Expression* expr) {
         case ASTNodeType::INDEX_ASSIGN_EXPR:
             return generateIndexAssign(static_cast<IndexAssignExpr*>(expr));
         default:
-            throw std::runtime_error("Unknown expression type");
+            codegenError("Unknown expression type", expr);
     }
 }
 
@@ -753,7 +801,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         if (expr->op == ">")  { auto cmp = builder->CreateFCmpOGT(left, right, "fcmptmp"); return builder->CreateZExt(cmp, getDefaultType(), "booltmp"); }
         if (expr->op == ">=") { auto cmp = builder->CreateFCmpOGE(left, right, "fcmptmp"); return builder->CreateZExt(cmp, getDefaultType(), "booltmp"); }
         
-        throw std::runtime_error("Invalid binary operator for float operands: " + expr->op);
+        codegenError("Invalid binary operator for float operands: " + expr->op, expr);
     }
     
     // String concatenation path (pointer + pointer with '+' operator)
@@ -916,7 +964,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         return builder->CreateAShr(left, right, "ashrtmp");
     }
     
-    throw std::runtime_error("Unknown binary operator: " + expr->op);
+    codegenError("Unknown binary operator: " + expr->op, expr);
 }
 
 llvm::Value* CodeGenerator::generateUnary(UnaryExpr* expr) {
@@ -938,7 +986,7 @@ llvm::Value* CodeGenerator::generateUnary(UnaryExpr* expr) {
         return builder->CreateNot(operand, "bitnottmp");
     }
     
-    throw std::runtime_error("Unknown unary operator: " + expr->op);
+    codegenError("Unknown unary operator: " + expr->op, expr);
 }
 
 llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
@@ -1554,9 +1602,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             if (builder->GetInsertBlock() && builder->GetInsertBlock()->getParent()) {
                 currentFunction = std::string(builder->GetInsertBlock()->getParent()->getName());
             }
-            throw std::runtime_error("OPTMAX function \"" + currentFunction +
+            codegenError("OPTMAX function \"" + currentFunction +
                                      "\" cannot invoke non-OPTMAX function \"" +
-                                     expr->callee + "\"");
+                                     expr->callee + "\"", expr);
         }
     }
     auto calleeIt = functions.find(expr->callee);
@@ -1836,7 +1884,7 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
 void CodeGenerator::generateVarDecl(VarDecl* stmt) {
     llvm::Function* function = builder->GetInsertBlock()->getParent();
     if (!function) {
-        throw std::runtime_error("Variable declaration outside of function");
+        codegenError("Variable declaration outside of function", stmt);
     }
     
     llvm::Type* allocaType = getDefaultType();
@@ -1972,7 +2020,7 @@ void CodeGenerator::generateDoWhile(DoWhileStmt* stmt) {
 void CodeGenerator::generateFor(ForStmt* stmt) {
     llvm::Function* function = builder->GetInsertBlock()->getParent();
     if (!function) {
-        throw std::runtime_error("For loop outside of function");
+        codegenError("For loop outside of function", stmt);
     }
     
     beginScope();
@@ -2071,7 +2119,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
 void CodeGenerator::generateForEach(ForEachStmt* stmt) {
     llvm::Function* function = builder->GetInsertBlock()->getParent();
     if (!function) {
-        throw std::runtime_error("For-each loop outside of function");
+        codegenError("For-each loop outside of function", stmt);
     }
     
     beginScope();
@@ -2193,7 +2241,7 @@ void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
             caseVal = toDefaultType(caseVal);
             auto* caseConst = llvm::dyn_cast<llvm::ConstantInt>(caseVal);
             if (!caseConst) {
-                throw std::runtime_error("case value must be a compile-time constant");
+                codegenError("case value must be a compile-time constant", sc.value.get());
             }
             
             llvm::BasicBlock* caseBB = llvm::BasicBlock::Create(*context, "switch.case", function, mergeBB);
@@ -2218,10 +2266,6 @@ void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
 }
 
 void CodeGenerator::runOptimizationPasses() {
-    // Create a function pass manager
-    llvm::legacy::FunctionPassManager fpm(module.get());
-    llvm::legacy::PassManager mpm;
-    
     // Add target-specific data layout
     std::string targetTripleStr = llvm::sys::getDefaultTargetTriple();
 #if LLVM_VERSION_MAJOR >= 19
@@ -2237,82 +2281,62 @@ void CodeGenerator::runOptimizationPasses() {
 #else
     auto target = llvm::TargetRegistry::lookupTarget(targetTripleStr, error);
 #endif
+    std::unique_ptr<llvm::TargetMachine> targetMachine;
     if (target) {
         llvm::TargetOptions opt;
         // Use PIC to support default PIE linking on modern toolchains.
         std::optional<llvm::Reloc::Model> RM = llvm::Reloc::PIC_;
 #if LLVM_VERSION_MAJOR >= 19
-        std::unique_ptr<llvm::TargetMachine> targetMachine(target->createTargetMachine(targetTriple, "generic", "", opt, RM));
+        targetMachine.reset(target->createTargetMachine(targetTriple, "generic", "", opt, RM));
 #else
-        std::unique_ptr<llvm::TargetMachine> targetMachine(target->createTargetMachine(targetTripleStr, "generic", "", opt, RM));
+        targetMachine.reset(target->createTargetMachine(targetTripleStr, "generic", "", opt, RM));
 #endif
         if (targetMachine) {
             module->setDataLayout(targetMachine->createDataLayout());
         }
     }
     
-    // Configure optimization based on level
-    switch (optimizationLevel) {
-        case OptimizationLevel::O1:
-            // Basic optimizations
-            fpm.add(llvm::createInstructionCombiningPass());
-            fpm.add(llvm::createReassociatePass());
-            fpm.add(llvm::createCFGSimplificationPass());
-            break;
-            
-        case OptimizationLevel::O2:
-            // Moderate optimizations
-            fpm.add(llvm::createPromoteMemoryToRegisterPass());  // mem2reg
-            fpm.add(llvm::createInstructionCombiningPass());     // Instruction combining
-            fpm.add(llvm::createReassociatePass());              // Reassociate expressions
-            fpm.add(llvm::createGVNPass());                      // Global value numbering
-            fpm.add(llvm::createCFGSimplificationPass());        // Simplify CFG
-            fpm.add(llvm::createDeadCodeEliminationPass());      // Dead code elimination
-            break;
-            
-        case OptimizationLevel::O3:
-            // Aggressive optimizations
-            fpm.add(llvm::createSROAPass());                     // Scalar replacement of aggregates (early)
-            fpm.add(llvm::createEarlyCSEPass());                 // Early common subexpression elimination
-            fpm.add(llvm::createPromoteMemoryToRegisterPass());
-            fpm.add(llvm::createInstructionCombiningPass());
-            fpm.add(llvm::createReassociatePass());
-            fpm.add(llvm::createGVNPass());
-            fpm.add(llvm::createCFGSimplificationPass());
-            fpm.add(llvm::createDeadCodeEliminationPass());
-            fpm.add(llvm::createLICMPass());                     // Loop invariant code motion
-            fpm.add(llvm::createLoopRotatePass());               // Rotate loops for better optimization
-            fpm.add(llvm::createLoopSimplifyPass());             // Canonicalize loops
-            fpm.add(llvm::createLoopInstSimplifyPass());         // Simplify instructions in loops
-            fpm.add(llvm::createLoopUnrollPass());               // Unroll loops
-            fpm.add(llvm::createSinkingPass());                  // Sink instructions closer to use
-            fpm.add(llvm::createMergedLoadStoreMotionPass());    // Merge load/store across diamonds
-            fpm.add(llvm::createStraightLineStrengthReducePass()); // Strength reduce along straight lines
-            fpm.add(llvm::createNaryReassociatePass());          // N-ary reassociation
-            fpm.add(llvm::createTailCallEliminationPass());      // Tail call elimination
-            // Second round of cleanup after loop and strength reduction passes
-            fpm.add(llvm::createInstructionCombiningPass());
-            fpm.add(llvm::createCFGSimplificationPass());
-            fpm.add(llvm::createDeadCodeEliminationPass());
-            break;
-            
-        case OptimizationLevel::O0:
-            // No optimization passes needed at O0; return early to skip
-            // fpm.doInitialization()/doFinalization() and mpm.run() below.
-            return;
+    if (optimizationLevel == OptimizationLevel::O0) {
+        return;
     }
-    
-    // Run function passes on all functions
-    fpm.doInitialization();
-    for (auto& func : module->functions()) {
-        if (!func.isDeclaration()) {
-            fpm.run(func);
+
+    // O1 uses a lightweight legacy function pass pipeline (no IPO).
+    if (optimizationLevel == OptimizationLevel::O1) {
+        llvm::legacy::FunctionPassManager fpm(module.get());
+        fpm.add(llvm::createInstructionCombiningPass());
+        fpm.add(llvm::createReassociatePass());
+        fpm.add(llvm::createCFGSimplificationPass());
+        fpm.doInitialization();
+        for (auto& func : module->functions()) {
+            if (!func.isDeclaration()) {
+                fpm.run(func);
+            }
         }
+        fpm.doFinalization();
+        return;
     }
-    fpm.doFinalization();
-    
-    // Run module passes  
-    mpm.run(*module);
+
+    // O2 and O3 use the new pass manager's standard pipeline which includes
+    // interprocedural optimizations: function inlining, IPSCCP (sparse
+    // conditional constant propagation), GlobalDCE (dead function removal),
+    // jump threading, correlated value propagation, and more.
+    llvm::PassBuilder PB(targetMachine.get());
+    llvm::LoopAnalysisManager LAM;
+    llvm::FunctionAnalysisManager FAM;
+    llvm::CGSCCAnalysisManager CGAM;
+    llvm::ModuleAnalysisManager MAM;
+    PB.registerModuleAnalyses(MAM);
+    PB.registerCGSCCAnalyses(CGAM);
+    PB.registerFunctionAnalyses(FAM);
+    PB.registerLoopAnalyses(LAM);
+    PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
+
+    llvm::OptimizationLevel newPMLevel =
+        (optimizationLevel == OptimizationLevel::O3)
+            ? llvm::OptimizationLevel::O3
+            : llvm::OptimizationLevel::O2;
+    llvm::ModulePassManager MPM = PB.buildPerModuleDefaultPipeline(newPMLevel);
+    MPM.run(*module, MAM);
 }
 
 void CodeGenerator::optimizeFunction(llvm::Function* func) {
@@ -2497,6 +2521,11 @@ void CodeGenerator::emitBytecodeExpression(Expression* expr) {
             else if (bin->op == ">=") bytecodeEmitter.emit(OpCode::GE);
             else if (bin->op == "&&") bytecodeEmitter.emit(OpCode::AND);
             else if (bin->op == "||") bytecodeEmitter.emit(OpCode::OR);
+            else if (bin->op == "&") bytecodeEmitter.emit(OpCode::BIT_AND);
+            else if (bin->op == "|") bytecodeEmitter.emit(OpCode::BIT_OR);
+            else if (bin->op == "^") bytecodeEmitter.emit(OpCode::BIT_XOR);
+            else if (bin->op == "<<") bytecodeEmitter.emit(OpCode::SHL);
+            else if (bin->op == ">>") bytecodeEmitter.emit(OpCode::SHR);
             else {
                 throw std::runtime_error("Unsupported binary operator in bytecode: " + bin->op);
             }
@@ -2507,6 +2536,7 @@ void CodeGenerator::emitBytecodeExpression(Expression* expr) {
             emitBytecodeExpression(unary->operand.get());
             if (unary->op == "-") bytecodeEmitter.emit(OpCode::NEG);
             else if (unary->op == "!") bytecodeEmitter.emit(OpCode::NOT);
+            else if (unary->op == "~") bytecodeEmitter.emit(OpCode::BIT_NOT);
             else {
                 throw std::runtime_error("Unsupported unary operator in bytecode: " + unary->op);
             }
@@ -2521,8 +2551,19 @@ void CodeGenerator::emitBytecodeExpression(Expression* expr) {
         }
         case ASTNodeType::CALL_EXPR: {
             auto* call = static_cast<CallExpr*>(expr);
+            if (call->callee == "print") {
+                // Emit PRINT opcode for each argument
+                for (auto& arg : call->arguments) {
+                    emitBytecodeExpression(arg.get());
+                    bytecodeEmitter.emit(OpCode::PRINT);
+                }
+                // print() returns 0 in the native path; push 0 for consistency
+                bytecodeEmitter.emit(OpCode::PUSH_INT);
+                bytecodeEmitter.emitInt(0);
+                break;
+            }
             if (isStdlibFunction(call->callee)) {
-                // Stdlib functions are compiled to native machine code only.
+                // Other stdlib functions are compiled to native machine code only.
                 // They are not available in the bytecode interpreter.
                 throw std::runtime_error("Stdlib function '" + call->callee +
                     "' must be compiled to native code, not bytecode");

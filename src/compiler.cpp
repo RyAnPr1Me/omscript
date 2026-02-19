@@ -51,21 +51,35 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
         std::cout << "  Lexing..." << std::endl;
     }
     Lexer lexer(source);
-    auto tokens = lexer.tokenize();
+    std::vector<Token> tokens;
+    try {
+        tokens = lexer.tokenize();
+    } catch (const std::runtime_error& e) {
+        throw std::runtime_error(sourceFile + ": " + e.what());
+    }
     
     // Syntax analysis
     if (verbose_) {
         std::cout << "  Parsing..." << std::endl;
     }
     Parser parser(tokens);
-    auto program = parser.parse();
+    std::unique_ptr<Program> program;
+    try {
+        program = parser.parse();
+    } catch (const std::runtime_error& e) {
+        throw std::runtime_error(sourceFile + ": " + e.what());
+    }
     
     // Code generation
     if (verbose_) {
         std::cout << "  Generating code..." << std::endl;
     }
-    CodeGenerator codegen;
-    codegen.generate(program.get());
+    CodeGenerator codegen(optLevel_);
+    try {
+        codegen.generate(program.get());
+    } catch (const std::runtime_error& e) {
+        throw std::runtime_error(sourceFile + ": " + e.what());
+    }
     
     // Print LLVM IR only in verbose mode
     if (verbose_) {

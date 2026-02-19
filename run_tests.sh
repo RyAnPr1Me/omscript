@@ -110,7 +110,7 @@ test_cli_output() {
         return 1
     fi
     
-    if [ -n "$expected" ] && ! echo "$output" | grep -q "$expected"; then
+    if [ -n "$expected" ] && ! echo "$output" | grep -qF -- "$expected"; then
         echo -e "${RED}✗ Failed (missing expected output)${NC}"
         echo "$output"
         FAILURES=$((FAILURES + 1))
@@ -132,6 +132,10 @@ test_cli_output "lex-compound-ops" "PLUS_ASSIGN" 0 ./build/omsc lex examples/com
 test_cli_output "lex-do-while" "DO" 0 ./build/omsc lex examples/do_while.om
 test_cli_output "lex-ternary" "QUESTION" 0 ./build/omsc lex examples/ternary.om
 test_cli_output "lex-bitwise" "AMPERSAND" 0 ./build/omsc lex examples/bitwise.om
+test_cli_output "lex-bool-true" "TRUE" 0 ./build/omsc lex examples/bool_test.om
+test_cli_output "lex-bool-false" "FALSE" 0 ./build/omsc lex examples/bool_test.om
+test_cli_output "lex-null" "NULL_LITERAL" 0 ./build/omsc lex examples/bool_test.om
+test_cli_output "lex-bitwise-assign" "AMPERSAND_ASSIGN" 0 ./build/omsc lex examples/bitwise_assign_test.om
 test_cli_output "tokens-flag" "FN" 0 ./build/omsc --tokens examples/test.om
 test_cli_output "parse" "Parsed program" 0 ./build/omsc parse examples/test.om
 test_cli_output "parse-flag" "Parsed program" 0 ./build/omsc --parse examples/test.om
@@ -208,6 +212,7 @@ test_program "examples/bitwise.om" 52
 test_program "examples/prefix_ops.om" 50
 test_program "examples/abs_test.om" 26
 test_program "examples/optimization_stress_test.om" 432
+test_program "examples/inlining_test.om" 52
 test_program "examples/string_test.om" 0
 test_program "examples/array_test.om" 245
 test_program "examples/array_assign_test.om" 286
@@ -228,13 +233,23 @@ test_program "examples/float_edge_cases.om" 14
 test_program "examples/switch_test.om" 60
 test_program "examples/switch_break_test.om" 159
 test_program "examples/typeof_assert_test.om" 1
+test_program "examples/bool_test.om" 73
+test_program "examples/bitwise_assign_test.om" 55
+test_program "examples/array_compound_test.om" 164
 test_compile_fail "examples/const_fail.om"
 test_compile_fail "examples/break_outside_loop.om"
 test_compile_fail "examples/continue_outside_loop.om"
 test_compile_fail "examples/undefined_var.om"
 test_compile_fail "examples/int_overflow.om"
+test_compile_fail "examples/no_main.om"
+test_compile_fail "examples/dup_func.om"
+test_compile_fail "examples/dup_param.om"
 test_cli_output "error-line-info" "line" 1 ./build/omsc examples/undefined_var.om -o /tmp/test_err
+test_cli_output "error-includes-filename" "undefined_var.om" 1 ./build/omsc examples/undefined_var.om -o /tmp/test_err
 test_cli_output "int-overflow-msg" "Integer literal out of range" 1 ./build/omsc examples/int_overflow.om -o /tmp/test_overflow
+test_cli_output "no-main-msg" "No 'main' function defined" 1 ./build/omsc examples/no_main.om -o /tmp/test_nomain
+test_cli_output "dup-func-msg" "Duplicate function definition" 1 ./build/omsc examples/dup_func.om -o /tmp/test_dupfunc
+test_cli_output "dup-param-msg" "Duplicate parameter name" 1 ./build/omsc examples/dup_param.om -o /tmp/test_dupparam
 
 echo ""
 echo "============================================"
@@ -242,7 +257,18 @@ echo "Optimization Tests"
 echo "============================================"
 echo ""
 
-# Test optimization levels
+# Test optimization level flags
+test_cli_output "opt-O0-compile" "Compilation successful!" 0 ./build/omsc -O0 examples/exit_zero.om -o /tmp/test_o0
+rm -f /tmp/test_o0 /tmp/test_o0.o
+test_cli_output "opt-O1-compile" "Compilation successful!" 0 ./build/omsc -O1 examples/exit_zero.om -o /tmp/test_o1
+rm -f /tmp/test_o1 /tmp/test_o1.o
+test_cli_output "opt-O3-compile" "Compilation successful!" 0 ./build/omsc -O3 examples/exit_zero.om -o /tmp/test_o3
+rm -f /tmp/test_o3 /tmp/test_o3.o
+test_cli_output "opt-O0-emit-ir" "define i64 @main" 0 ./build/omsc emit-ir -O0 examples/exit_zero.om
+test_cli_output "opt-O3-emit-ir" "define i64 @main" 0 ./build/omsc emit-ir -O3 examples/exit_zero.om
+test_cli_output "opt-O0-run" "Compilation successful!" 0 ./build/omsc run -O0 examples/exit_zero.om
+test_cli_output "opt-help-shows-flags" "-O0" 0 ./build/omsc --help
+
 TOTAL=$((TOTAL + 1))
 echo -n "Testing with O3 optimization... "
 ./build/omsc examples/benchmark.om -o benchmark_o3 > /dev/null 2>&1

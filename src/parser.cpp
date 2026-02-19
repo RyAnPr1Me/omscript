@@ -144,17 +144,14 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
     
     consume(TokenType::RPAREN, "Expected ')' after parameters");
     
-    auto blockStmt = parseBlock();
-    auto* blockPtr = dynamic_cast<BlockStmt*>(blockStmt.get());
-    if (!blockPtr) {
-        error("Expected block statement in function body");
-    }
-    blockStmt.release();
-    auto body = std::unique_ptr<BlockStmt>(blockPtr);
+    auto body = parseBlock();
     
     inOptMaxFunction = savedOptMaxState;
     
-    return std::make_unique<FunctionDecl>(name.lexeme, std::move(parameters), std::move(body), isOptMax);
+    auto funcDecl = std::make_unique<FunctionDecl>(name.lexeme, std::move(parameters), std::move(body), isOptMax);
+    funcDecl->line = name.line;
+    funcDecl->column = name.column;
+    return funcDecl;
 }
 
 std::unique_ptr<Statement> Parser::parseStatement() {
@@ -181,7 +178,7 @@ std::unique_ptr<Statement> Parser::parseStatement() {
     return parseExprStmt();
 }
 
-std::unique_ptr<Statement> Parser::parseBlock() {
+std::unique_ptr<BlockStmt> Parser::parseBlock() {
     consume(TokenType::LBRACE, "Expected '{'");
     
     std::vector<std::unique_ptr<Statement>> statements;
@@ -400,27 +397,35 @@ std::unique_ptr<Expression> Parser::parseAssignment() {
         }
     }
     
-    // Compound assignment operators: +=, -=, *=, /=, %=
+    // Compound assignment operators: +=, -=, *=, /=, %=, &=, |=, ^=, <<=, >>=
     if (match(TokenType::PLUS_ASSIGN) || match(TokenType::MINUS_ASSIGN) ||
         match(TokenType::STAR_ASSIGN) || match(TokenType::SLASH_ASSIGN) ||
-        match(TokenType::PERCENT_ASSIGN)) {
+        match(TokenType::PERCENT_ASSIGN) || match(TokenType::AMPERSAND_ASSIGN) ||
+        match(TokenType::PIPE_ASSIGN) || match(TokenType::CARET_ASSIGN) ||
+        match(TokenType::LSHIFT_ASSIGN) || match(TokenType::RSHIFT_ASSIGN)) {
         TokenType opType = tokens[current - 1].type;
         std::string opLexeme = tokens[current - 1].lexeme;
+        
+        // Determine the binary operator from the compound operator
+        std::string binOp;
+        switch (opType) {
+            case TokenType::PLUS_ASSIGN:      binOp = "+"; break;
+            case TokenType::MINUS_ASSIGN:     binOp = "-"; break;
+            case TokenType::STAR_ASSIGN:      binOp = "*"; break;
+            case TokenType::SLASH_ASSIGN:     binOp = "/"; break;
+            case TokenType::PERCENT_ASSIGN:   binOp = "%"; break;
+            case TokenType::AMPERSAND_ASSIGN: binOp = "&"; break;
+            case TokenType::PIPE_ASSIGN:      binOp = "|"; break;
+            case TokenType::CARET_ASSIGN:     binOp = "^"; break;
+            case TokenType::LSHIFT_ASSIGN:    binOp = "<<"; break;
+            case TokenType::RSHIFT_ASSIGN:    binOp = ">>"; break;
+            default: error("Unknown compound assignment operator: " + opLexeme); break;
+        }
+        
         if (expr->type == ASTNodeType::IDENTIFIER_EXPR) {
             auto idExpr = dynamic_cast<IdentifierExpr*>(expr.get());
             std::string name = idExpr->name;
             auto rhs = parseAssignment();
-            
-            // Determine the binary operator from the compound operator
-            std::string binOp;
-            switch (opType) {
-                case TokenType::PLUS_ASSIGN:    binOp = "+"; break;
-                case TokenType::MINUS_ASSIGN:   binOp = "-"; break;
-                case TokenType::STAR_ASSIGN:    binOp = "*"; break;
-                case TokenType::SLASH_ASSIGN:   binOp = "/"; break;
-                case TokenType::PERCENT_ASSIGN: binOp = "%"; break;
-                default: error("Unknown compound assignment operator: " + opLexeme); break;
-            }
             
             // Desugar: x += expr  =>  x = x + expr
             auto lhsRef = std::make_unique<IdentifierExpr>(name);
@@ -434,8 +439,68 @@ std::unique_ptr<Expression> Parser::parseAssignment() {
             node->column = expr->column;
             return node;
         } else if (expr->type == ASTNodeType::INDEX_EXPR) {
-            error("Compound assignment to array elements is not yet supported; use arr[i] = arr[i] " +
-                  opLexeme.substr(0, opLexeme.size() - 1) + " value instead");
+            // Desugar: arr[i] += expr  =>  arr[i] = arr[i] + expr
+            auto* indexExpr = static_cast<IndexExpr*>(expr.get());
+            auto rhs = parseAssignment();
+            
+            // We need to re-read arr and i for the RHS since the originals will be moved.
+            // The array and index expressions are moved into both the read and write sides.
+            // We duplicate the array/index by creating fresh identifier references.
+            // Note: This only works for simple array[index] patterns; the array expression
+            // and index expression are AST subtrees that we cannot clone generically.
+            // However, the common case is identifier[expr], which we handle here.
+            auto arrClone = std::move(indexExpr->array);
+            auto idxClone = std::move(indexExpr->index);
+            
+            // Build the read side: create a new IndexExpr for arr[i] on the RHS.
+            // We need separate copies of the array and index expressions.
+            // Since we can't clone arbitrary AST nodes, we extract identifier names
+            // and rebuild the expressions. The array must be an identifier.
+            // For the index, we support integer literals and identifiers.
+            std::unique_ptr<Expression> arrRef2;
+            std::unique_ptr<Expression> idxRef2;
+            
+            if (arrClone->type == ASTNodeType::IDENTIFIER_EXPR) {
+                auto* arrId = static_cast<IdentifierExpr*>(arrClone.get());
+                arrRef2 = std::make_unique<IdentifierExpr>(arrId->name);
+                arrRef2->line = arrClone->line;
+                arrRef2->column = arrClone->column;
+            } else {
+                error("Compound assignment to array elements requires a simple array variable");
+            }
+            
+            if (idxClone->type == ASTNodeType::IDENTIFIER_EXPR) {
+                auto* idxId = static_cast<IdentifierExpr*>(idxClone.get());
+                idxRef2 = std::make_unique<IdentifierExpr>(idxId->name);
+                idxRef2->line = idxClone->line;
+                idxRef2->column = idxClone->column;
+            } else if (idxClone->type == ASTNodeType::LITERAL_EXPR) {
+                auto* litIdx = static_cast<LiteralExpr*>(idxClone.get());
+                if (litIdx->literalType == LiteralExpr::LiteralType::INTEGER) {
+                    idxRef2 = std::make_unique<LiteralExpr>(litIdx->intValue);
+                } else {
+                    error("Array index must be an integer, not a float");
+                }
+                idxRef2->line = idxClone->line;
+                idxRef2->column = idxClone->column;
+            } else {
+                error("Compound assignment to array elements requires a simple index expression");
+            }
+            
+            // Build: arr[i] + rhs
+            auto readExpr = std::make_unique<IndexExpr>(std::move(arrRef2), std::move(idxRef2));
+            readExpr->line = expr->line;
+            readExpr->column = expr->column;
+            auto binExpr = std::make_unique<BinaryExpr>(binOp, std::move(readExpr), std::move(rhs));
+            binExpr->line = expr->line;
+            binExpr->column = expr->column;
+            
+            // Build: arr[i] = (arr[i] + rhs)
+            auto node = std::make_unique<IndexAssignExpr>(
+                std::move(arrClone), std::move(idxClone), std::move(binExpr));
+            node->line = expr->line;
+            node->column = expr->column;
+            return node;
         } else {
             error("Invalid compound assignment target");
         }
@@ -595,6 +660,9 @@ std::unique_ptr<Expression> Parser::parseUnary() {
     if (match(TokenType::PLUSPLUS) || match(TokenType::MINUSMINUS)) {
         Token opToken = tokens[current - 1];
         auto operand = parseUnary();
+        if (operand->type != ASTNodeType::IDENTIFIER_EXPR) {
+            error("Prefix " + opToken.lexeme + " requires an identifier operand");
+        }
         auto node = std::make_unique<PrefixExpr>(opToken.lexeme, std::move(operand));
         node->line = opToken.line;
         node->column = opToken.column;
@@ -611,6 +679,9 @@ std::unique_ptr<Expression> Parser::parsePostfix() {
         // Handle postfix operators
         if (match(TokenType::PLUSPLUS) || match(TokenType::MINUSMINUS)) {
             Token opToken = tokens[current - 1];
+            if (expr->type != ASTNodeType::IDENTIFIER_EXPR) {
+                error("Postfix " + opToken.lexeme + " requires an identifier operand");
+            }
             expr = std::make_unique<PostfixExpr>(opToken.lexeme, std::move(expr));
             expr->line = opToken.line;
             expr->column = opToken.column;
@@ -681,6 +752,22 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
     if (match(TokenType::STRING)) {
         Token token = tokens[current - 1];
         auto expr = std::make_unique<LiteralExpr>(token.lexeme);
+        expr->line = token.line;
+        expr->column = token.column;
+        return expr;
+    }
+    
+    if (match(TokenType::TRUE)) {
+        Token token = tokens[current - 1];
+        auto expr = std::make_unique<LiteralExpr>(static_cast<long long>(1));
+        expr->line = token.line;
+        expr->column = token.column;
+        return expr;
+    }
+    
+    if (match(TokenType::FALSE) || match(TokenType::NULL_LITERAL)) {
+        Token token = tokens[current - 1];
+        auto expr = std::make_unique<LiteralExpr>(static_cast<long long>(0));
         expr->line = token.line;
         expr->column = token.column;
         return expr;

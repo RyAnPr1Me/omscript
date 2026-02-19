@@ -239,6 +239,47 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
                 break;
             }
             
+            case OpCode::BIT_AND: {
+                Value b = pop();
+                Value a = pop();
+                push(a & b);
+                break;
+            }
+            
+            case OpCode::BIT_OR: {
+                Value b = pop();
+                Value a = pop();
+                push(a | b);
+                break;
+            }
+            
+            case OpCode::BIT_XOR: {
+                Value b = pop();
+                Value a = pop();
+                push(a ^ b);
+                break;
+            }
+            
+            case OpCode::BIT_NOT: {
+                Value a = pop();
+                push(~a);
+                break;
+            }
+            
+            case OpCode::SHL: {
+                Value b = pop();
+                Value a = pop();
+                push(a << b);
+                break;
+            }
+            
+            case OpCode::SHR: {
+                Value b = pop();
+                Value a = pop();
+                push(a >> b);
+                break;
+            }
+            
             case OpCode::LOAD_VAR: {
                 std::string name = readString(bytecode, ip);
                 push(getGlobal(name));
@@ -305,6 +346,18 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
                     lastReturn = returnValue;
                 }
                 return;
+            
+            case OpCode::PRINT: {
+                Value a = pop();
+                std::cout << a.toString() << std::endl;
+                break;
+            }
+            
+            case OpCode::DUP: {
+                Value a = peek(0);
+                push(a);
+                break;
+            }
             
             case OpCode::HALT:
                 lastReturn = Value();

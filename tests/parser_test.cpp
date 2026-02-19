@@ -643,3 +643,148 @@ TEST(ParserTest, MultipleErrors) {
         EXPECT_NE(second, std::string::npos);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Postfix/prefix operator validation
+// ---------------------------------------------------------------------------
+
+TEST(ParserTest, PostfixIncrementOnLiteral) {
+    EXPECT_THROW(parse("fn main() { 5++; return 0; }"), std::runtime_error);
+}
+
+TEST(ParserTest, PostfixDecrementOnLiteral) {
+    EXPECT_THROW(parse("fn main() { 5--; return 0; }"), std::runtime_error);
+}
+
+TEST(ParserTest, PrefixIncrementOnLiteral) {
+    EXPECT_THROW(parse("fn main() { ++5; return 0; }"), std::runtime_error);
+}
+
+TEST(ParserTest, PrefixDecrementOnLiteral) {
+    EXPECT_THROW(parse("fn main() { --5; return 0; }"), std::runtime_error);
+}
+
+TEST(ParserTest, PostfixOnIdentifierSucceeds) {
+    auto program = parse("fn main() { var x = 0; x++; return x; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+}
+
+TEST(ParserTest, PrefixOnIdentifierSucceeds) {
+    auto program = parse("fn main() { var x = 0; ++x; return x; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+}
+
+TEST(ParserTest, PostfixOnParenExprSucceeds) {
+    // (a)++ is valid because parenthesized (a) resolves to identifier a
+    auto program = parse("fn main() { var a = 1; (a)++; return 0; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+}
+
+TEST(ParserTest, PrefixOnParenExprSucceeds) {
+    // ++(a) is valid because parenthesized (a) resolves to identifier a
+    auto program = parse("fn main() { var a = 1; ++(a); return 0; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+}
+
+// ---------------------------------------------------------------------------
+// Boolean and null literals
+// ---------------------------------------------------------------------------
+
+TEST(ParserTest, TrueLiteral) {
+    auto program = parse("fn main() { return true; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    auto& body = program->functions[0]->body->statements;
+    ASSERT_EQ(body.size(), 1u);
+    auto* retStmt = dynamic_cast<ReturnStmt*>(body[0].get());
+    ASSERT_NE(retStmt, nullptr);
+    auto* lit = dynamic_cast<LiteralExpr*>(retStmt->value.get());
+    ASSERT_NE(lit, nullptr);
+    EXPECT_EQ(lit->literalType, LiteralExpr::LiteralType::INTEGER);
+    EXPECT_EQ(lit->intValue, 1);
+}
+
+TEST(ParserTest, FalseLiteral) {
+    auto program = parse("fn main() { return false; }");
+    auto& body = program->functions[0]->body->statements;
+    auto* retStmt = dynamic_cast<ReturnStmt*>(body[0].get());
+    auto* lit = dynamic_cast<LiteralExpr*>(retStmt->value.get());
+    ASSERT_NE(lit, nullptr);
+    EXPECT_EQ(lit->intValue, 0);
+}
+
+TEST(ParserTest, NullLiteral) {
+    auto program = parse("fn main() { return null; }");
+    auto& body = program->functions[0]->body->statements;
+    auto* retStmt = dynamic_cast<ReturnStmt*>(body[0].get());
+    auto* lit = dynamic_cast<LiteralExpr*>(retStmt->value.get());
+    ASSERT_NE(lit, nullptr);
+    EXPECT_EQ(lit->intValue, 0);
+}
+
+TEST(ParserTest, BoolInCondition) {
+    auto program = parse("fn main() { if (true) { return 1; } return 0; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+}
+
+TEST(ParserTest, BoolInVarDecl) {
+    auto program = parse("fn main() { var x = true; var y = false; var z = null; return 0; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    auto& body = program->functions[0]->body->statements;
+    ASSERT_GE(body.size(), 4u);
+}
+
+// ---------------------------------------------------------------------------
+// Bitwise compound assignment
+// ---------------------------------------------------------------------------
+
+TEST(ParserTest, BitwiseAndAssign) {
+    auto program = parse("fn main() { var x = 15; x &= 6; return x; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    auto& body = program->functions[0]->body->statements;
+    ASSERT_GE(body.size(), 2u);
+    // x &= 6 desugars to x = x & 6
+    auto* exprStmt = dynamic_cast<ExprStmt*>(body[1].get());
+    ASSERT_NE(exprStmt, nullptr);
+    auto* assign = dynamic_cast<AssignExpr*>(exprStmt->expression.get());
+    ASSERT_NE(assign, nullptr);
+    EXPECT_EQ(assign->name, "x");
+    auto* binExpr = dynamic_cast<BinaryExpr*>(assign->value.get());
+    ASSERT_NE(binExpr, nullptr);
+    EXPECT_EQ(binExpr->op, "&");
+}
+
+TEST(ParserTest, ShiftAssignLeft) {
+    auto program = parse("fn main() { var x = 1; x <<= 3; return x; }");
+    auto& body = program->functions[0]->body->statements;
+    auto* exprStmt = dynamic_cast<ExprStmt*>(body[1].get());
+    auto* assign = dynamic_cast<AssignExpr*>(exprStmt->expression.get());
+    ASSERT_NE(assign, nullptr);
+    auto* binExpr = dynamic_cast<BinaryExpr*>(assign->value.get());
+    ASSERT_NE(binExpr, nullptr);
+    EXPECT_EQ(binExpr->op, "<<");
+}
+
+// ---------------------------------------------------------------------------
+// Array compound assignment
+// ---------------------------------------------------------------------------
+
+TEST(ParserTest, ArrayCompoundAssign) {
+    auto program = parse("fn main() { var arr = [10, 20]; arr[0] += 5; return arr[0]; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    auto& body = program->functions[0]->body->statements;
+    ASSERT_GE(body.size(), 2u);
+    // arr[0] += 5 desugars to arr[0] = arr[0] + 5 → IndexAssignExpr
+    auto* exprStmt = dynamic_cast<ExprStmt*>(body[1].get());
+    ASSERT_NE(exprStmt, nullptr);
+    auto* idxAssign = dynamic_cast<IndexAssignExpr*>(exprStmt->expression.get());
+    ASSERT_NE(idxAssign, nullptr);
+    // The value should be a BinaryExpr with op "+"
+    auto* binExpr = dynamic_cast<BinaryExpr*>(idxAssign->value.get());
+    ASSERT_NE(binExpr, nullptr);
+    EXPECT_EQ(binExpr->op, "+");
+}
+
+TEST(ParserTest, ArrayCompoundAssignWithVarIndex) {
+    auto program = parse("fn main() { var arr = [10]; var i = 0; arr[i] += 5; return 0; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+}

@@ -1037,3 +1037,181 @@ TEST(VMTest, CallDepthLimitThrows) {
     vm.registerFunction(fn);
     EXPECT_THROW(vm.execute(caller.getCode()), std::runtime_error);
 }
+
+// ===========================================================================
+// Bitwise operations in VM
+// ===========================================================================
+
+TEST(VMTest, BitwiseAnd) {
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_INT);
+        e.emitInt(0xFF);
+        e.emit(OpCode::PUSH_INT);
+        e.emitInt(0x0F);
+        e.emit(OpCode::BIT_AND);
+        e.emit(OpCode::RETURN);
+    });
+    VM vm;
+    vm.execute(code);
+    EXPECT_EQ(vm.getLastReturn().asInt(), 0x0F);
+}
+
+TEST(VMTest, BitwiseOr) {
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_INT);
+        e.emitInt(0xF0);
+        e.emit(OpCode::PUSH_INT);
+        e.emitInt(0x0F);
+        e.emit(OpCode::BIT_OR);
+        e.emit(OpCode::RETURN);
+    });
+    VM vm;
+    vm.execute(code);
+    EXPECT_EQ(vm.getLastReturn().asInt(), 0xFF);
+}
+
+TEST(VMTest, BitwiseXor) {
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_INT);
+        e.emitInt(0xFF);
+        e.emit(OpCode::PUSH_INT);
+        e.emitInt(0x0F);
+        e.emit(OpCode::BIT_XOR);
+        e.emit(OpCode::RETURN);
+    });
+    VM vm;
+    vm.execute(code);
+    EXPECT_EQ(vm.getLastReturn().asInt(), 0xF0);
+}
+
+TEST(VMTest, BitwiseNot) {
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_INT);
+        e.emitInt(0);
+        e.emit(OpCode::BIT_NOT);
+        e.emit(OpCode::RETURN);
+    });
+    VM vm;
+    vm.execute(code);
+    EXPECT_EQ(vm.getLastReturn().asInt(), ~static_cast<int64_t>(0));
+}
+
+TEST(VMTest, ShiftLeft) {
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_INT);
+        e.emitInt(1);
+        e.emit(OpCode::PUSH_INT);
+        e.emitInt(4);
+        e.emit(OpCode::SHL);
+        e.emit(OpCode::RETURN);
+    });
+    VM vm;
+    vm.execute(code);
+    EXPECT_EQ(vm.getLastReturn().asInt(), 16);
+}
+
+TEST(VMTest, ShiftRight) {
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_INT);
+        e.emitInt(16);
+        e.emit(OpCode::PUSH_INT);
+        e.emitInt(4);
+        e.emit(OpCode::SHR);
+        e.emit(OpCode::RETURN);
+    });
+    VM vm;
+    vm.execute(code);
+    EXPECT_EQ(vm.getLastReturn().asInt(), 1);
+}
+
+TEST(VMTest, BitwiseAndOnFloatThrows) {
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_FLOAT);
+        e.emitFloat(1.0);
+        e.emit(OpCode::PUSH_INT);
+        e.emitInt(1);
+        e.emit(OpCode::BIT_AND);
+    });
+    VM vm;
+    EXPECT_THROW(vm.execute(code), std::runtime_error);
+}
+
+TEST(VMTest, ShiftLeftOutOfRange) {
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_INT);
+        e.emitInt(1);
+        e.emit(OpCode::PUSH_INT);
+        e.emitInt(64);
+        e.emit(OpCode::SHL);
+    });
+    VM vm;
+    EXPECT_THROW(vm.execute(code), std::runtime_error);
+}
+
+// ===========================================================================
+// DUP opcode
+// ===========================================================================
+
+TEST(VMTest, Dup) {
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_INT);
+        e.emitInt(42);
+        e.emit(OpCode::DUP);
+        e.emit(OpCode::ADD);
+        e.emit(OpCode::RETURN);
+    });
+    VM vm;
+    vm.execute(code);
+    EXPECT_EQ(vm.getLastReturn().asInt(), 84);
+}
+
+TEST(VMTest, DupString) {
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_STRING);
+        e.emitString("hello");
+        e.emit(OpCode::DUP);
+        e.emit(OpCode::ADD);
+        e.emit(OpCode::RETURN);
+    });
+    VM vm;
+    vm.execute(code);
+    EXPECT_STREQ(vm.getLastReturn().asString(), "hellohello");
+}
+
+// ===========================================================================
+// PRINT opcode
+// ===========================================================================
+
+TEST(VMTest, PrintInt) {
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_INT);
+        e.emitInt(42);
+        e.emit(OpCode::PRINT);
+        e.emit(OpCode::PUSH_INT);
+        e.emitInt(0);
+        e.emit(OpCode::RETURN);
+    });
+    VM vm;
+    // Redirect stdout to check output
+    testing::internal::CaptureStdout();
+    vm.execute(code);
+    std::string output = testing::internal::GetCapturedStdout();
+    EXPECT_EQ(output, "42\n");
+    EXPECT_EQ(vm.getLastReturn().asInt(), 0);
+}
+
+TEST(VMTest, PrintString) {
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_STRING);
+        e.emitString("hello world");
+        e.emit(OpCode::PRINT);
+        e.emit(OpCode::PUSH_INT);
+        e.emitInt(0);
+        e.emit(OpCode::RETURN);
+    });
+    VM vm;
+    testing::internal::CaptureStdout();
+    vm.execute(code);
+    std::string output = testing::internal::GetCapturedStdout();
+    EXPECT_EQ(output, "hello world\n");
+}

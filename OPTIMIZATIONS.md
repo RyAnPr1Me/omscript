@@ -18,18 +18,25 @@ OmScript features a **heavily optimized** compilation pipeline using LLVM's prod
   - CFG Simplification: Removes unreachable blocks, simplifies control flow
 
 ### O2 - Moderate Optimization (Default)
-- **Passes**: All O1 passes plus:
+- **Pipeline**: LLVM new pass manager's standard O2 pipeline, which includes:
   - **mem2reg**: Promotes memory to registers (eliminates allocas)
   - **GVN**: Global Value Numbering (common subexpression elimination)
   - **DCE**: Dead Code Elimination (removes unused code)
-  - **Instruction Combining**: Advanced pattern matching
+  - **IPSCCP**: Interprocedural Sparse Conditional Constant Propagation
+  - **Function Inlining**: Inlines small functions for better optimization
+  - **GlobalDCE**: Removes unreachable dead functions
+  - **Jump Threading**: Eliminates conditional branches from predecessors
+  - **Correlated Value Propagation**: Narrows value ranges
   - **CFG Simplification**: Control flow optimization
+  - **Instruction Combining**: Advanced pattern matching
 - **Use Case**: Production builds with good compile time
 
 ### O3 - Aggressive Optimization
-- **Passes**: All O2 passes plus:
+- **Pipeline**: LLVM new pass manager's standard O3 pipeline, which includes all O2 passes plus:
+  - **Aggressive Function Inlining**: Higher inline threshold
   - **LICM**: Loop Invariant Code Motion (moves invariant code outside loops)
   - **Loop Simplify**: Canonicalizes loop structure
+  - **Loop Vectorization**: Auto-vectorizes loops for SIMD
   - **Loop Unrolling**: Unrolls small loops for better performance
   - **Tail Call Elimination**: Converts tail calls to jumps
   - **Early CSE**: Common subexpression elimination early in pipeline
@@ -318,8 +325,6 @@ var result = n << 1;  // Less readable, same performance
 
 Planned additions:
 - Profile-Guided Optimization (PGO)
-- Auto-vectorization for SIMD
-- Interprocedural optimization (whole program optimization)
 - Link-Time Optimization (LTO)
 - Polyhedral loop optimization
 - Devirtualization for dynamic dispatch
@@ -330,7 +335,9 @@ OmScript's optimization infrastructure provides:
 - ✅ Production-grade performance
 - ✅ Automatic application (no hints needed)
 - ✅ Multiple optimization levels
-- ✅ Battle-tested LLVM passes
+- ✅ Battle-tested LLVM passes via the new pass manager
+- ✅ Interprocedural optimizations (inlining, IPSCCP, GlobalDCE)
+- ✅ Auto-vectorization for SIMD (at O3)
 - ✅ Measurable, significant improvements
 
 The compiler transforms high-level OmScript code into highly optimized machine code that rivals hand-written assembly in many cases, while maintaining code readability and developer productivity.

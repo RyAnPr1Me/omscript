@@ -35,6 +35,14 @@ enum class OpCode : uint8_t {
     OR,
     NOT,
     
+    // Bitwise
+    BIT_AND,
+    BIT_OR,
+    BIT_XOR,
+    BIT_NOT,
+    SHL,
+    SHR,
+    
     // Variables
     LOAD_VAR,
     STORE_VAR,
@@ -48,6 +56,8 @@ enum class OpCode : uint8_t {
     RETURN,
     
     // Special
+    PRINT,
+    DUP,
     HALT
 };
 

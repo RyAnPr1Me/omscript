@@ -477,3 +477,92 @@ TEST(ValueTest, MoveAssignmentNone) {
 }
 
 // Self-move assignment removed: undefined behavior per C++ standard
+
+// ===========================================================================
+// Bitwise operations
+// ===========================================================================
+
+TEST(ValueTest, BitwiseAnd) {
+    Value result = Value(int64_t(0xFF)) & Value(int64_t(0x0F));
+    EXPECT_EQ(result.asInt(), 0x0F);
+}
+
+TEST(ValueTest, BitwiseOr) {
+    Value result = Value(int64_t(0xF0)) | Value(int64_t(0x0F));
+    EXPECT_EQ(result.asInt(), 0xFF);
+}
+
+TEST(ValueTest, BitwiseXor) {
+    Value result = Value(int64_t(0xFF)) ^ Value(int64_t(0x0F));
+    EXPECT_EQ(result.asInt(), 0xF0);
+}
+
+TEST(ValueTest, BitwiseNot) {
+    Value result = ~Value(int64_t(0));
+    EXPECT_EQ(result.asInt(), ~static_cast<int64_t>(0));
+}
+
+TEST(ValueTest, BitwiseNotNonZero) {
+    Value result = ~Value(int64_t(0xFF));
+    EXPECT_EQ(result.asInt(), ~static_cast<int64_t>(0xFF));
+}
+
+TEST(ValueTest, ShiftLeft) {
+    Value result = Value(int64_t(1)) << Value(int64_t(4));
+    EXPECT_EQ(result.asInt(), 16);
+}
+
+TEST(ValueTest, ShiftRight) {
+    Value result = Value(int64_t(16)) >> Value(int64_t(4));
+    EXPECT_EQ(result.asInt(), 1);
+}
+
+TEST(ValueTest, ShiftLeftZero) {
+    Value result = Value(int64_t(42)) << Value(int64_t(0));
+    EXPECT_EQ(result.asInt(), 42);
+}
+
+TEST(ValueTest, ShiftRightZero) {
+    Value result = Value(int64_t(42)) >> Value(int64_t(0));
+    EXPECT_EQ(result.asInt(), 42);
+}
+
+TEST(ValueTest, BitwiseAndInvalidFloat) {
+    EXPECT_THROW(Value(1.0) & Value(int64_t(1)), std::runtime_error);
+}
+
+TEST(ValueTest, BitwiseOrInvalidFloat) {
+    EXPECT_THROW(Value(int64_t(1)) | Value(1.0), std::runtime_error);
+}
+
+TEST(ValueTest, BitwiseXorInvalidString) {
+    EXPECT_THROW(Value("a") ^ Value("b"), std::runtime_error);
+}
+
+TEST(ValueTest, BitwiseNotInvalidFloat) {
+    EXPECT_THROW(~Value(1.0), std::runtime_error);
+}
+
+TEST(ValueTest, ShiftLeftOutOfRange) {
+    EXPECT_THROW(Value(int64_t(1)) << Value(int64_t(64)), std::runtime_error);
+}
+
+TEST(ValueTest, ShiftLeftNegative) {
+    EXPECT_THROW(Value(int64_t(1)) << Value(int64_t(-1)), std::runtime_error);
+}
+
+TEST(ValueTest, ShiftRightOutOfRange) {
+    EXPECT_THROW(Value(int64_t(1)) >> Value(int64_t(64)), std::runtime_error);
+}
+
+TEST(ValueTest, ShiftRightNegative) {
+    EXPECT_THROW(Value(int64_t(1)) >> Value(int64_t(-1)), std::runtime_error);
+}
+
+TEST(ValueTest, ShiftLeftInvalidTypes) {
+    EXPECT_THROW(Value(1.0) << Value(int64_t(1)), std::runtime_error);
+}
+
+TEST(ValueTest, ShiftRightInvalidTypes) {
+    EXPECT_THROW(Value(int64_t(1)) >> Value(1.0), std::runtime_error);
+}

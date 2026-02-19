@@ -453,3 +453,95 @@ TEST(LexerTest, SwitchKeywords) {
     EXPECT_EQ(tokens[2].type, TokenType::DEFAULT);
     EXPECT_EQ(tokens[3].type, TokenType::END_OF_FILE);
 }
+
+// ---------------------------------------------------------------------------
+// Boolean and null keywords
+// ---------------------------------------------------------------------------
+
+TEST(LexerTest, TrueKeyword) {
+    auto tokens = lex("true");
+    ASSERT_GE(tokens.size(), 2u);
+    EXPECT_EQ(tokens[0].type, TokenType::TRUE);
+    EXPECT_EQ(tokens[0].lexeme, "true");
+}
+
+TEST(LexerTest, FalseKeyword) {
+    auto tokens = lex("false");
+    ASSERT_GE(tokens.size(), 2u);
+    EXPECT_EQ(tokens[0].type, TokenType::FALSE);
+    EXPECT_EQ(tokens[0].lexeme, "false");
+}
+
+TEST(LexerTest, NullKeyword) {
+    auto tokens = lex("null");
+    ASSERT_GE(tokens.size(), 2u);
+    EXPECT_EQ(tokens[0].type, TokenType::NULL_LITERAL);
+    EXPECT_EQ(tokens[0].lexeme, "null");
+}
+
+TEST(LexerTest, BoolKeywordsInContext) {
+    auto tokens = lex("var x = true; var y = false; var z = null;");
+    int trueCount = 0, falseCount = 0, nullCount = 0;
+    for (const auto& t : tokens) {
+        if (t.type == TokenType::TRUE) trueCount++;
+        if (t.type == TokenType::FALSE) falseCount++;
+        if (t.type == TokenType::NULL_LITERAL) nullCount++;
+    }
+    EXPECT_EQ(trueCount, 1);
+    EXPECT_EQ(falseCount, 1);
+    EXPECT_EQ(nullCount, 1);
+}
+
+// ---------------------------------------------------------------------------
+// Bitwise compound assignment operators
+// ---------------------------------------------------------------------------
+
+TEST(LexerTest, AmpersandAssign) {
+    auto tokens = lex("x &= 5");
+    ASSERT_GE(tokens.size(), 4u);
+    EXPECT_EQ(tokens[0].type, TokenType::IDENTIFIER);
+    EXPECT_EQ(tokens[1].type, TokenType::AMPERSAND_ASSIGN);
+    EXPECT_EQ(tokens[1].lexeme, "&=");
+}
+
+TEST(LexerTest, PipeAssign) {
+    auto tokens = lex("x |= 5");
+    ASSERT_GE(tokens.size(), 4u);
+    EXPECT_EQ(tokens[1].type, TokenType::PIPE_ASSIGN);
+    EXPECT_EQ(tokens[1].lexeme, "|=");
+}
+
+TEST(LexerTest, CaretAssign) {
+    auto tokens = lex("x ^= 5");
+    ASSERT_GE(tokens.size(), 4u);
+    EXPECT_EQ(tokens[1].type, TokenType::CARET_ASSIGN);
+    EXPECT_EQ(tokens[1].lexeme, "^=");
+}
+
+TEST(LexerTest, LShiftAssign) {
+    auto tokens = lex("x <<= 2");
+    ASSERT_GE(tokens.size(), 4u);
+    EXPECT_EQ(tokens[1].type, TokenType::LSHIFT_ASSIGN);
+    EXPECT_EQ(tokens[1].lexeme, "<<=");
+}
+
+TEST(LexerTest, RShiftAssign) {
+    auto tokens = lex("x >>= 2");
+    ASSERT_GE(tokens.size(), 4u);
+    EXPECT_EQ(tokens[1].type, TokenType::RSHIFT_ASSIGN);
+    EXPECT_EQ(tokens[1].lexeme, ">>=");
+}
+
+TEST(LexerTest, BitwiseAssignDoesNotConflict) {
+    // Ensure &= doesn't conflict with && or &
+    auto tokens = lex("a & b && c &= d");
+    int ampCount = 0, andCount = 0, ampAssignCount = 0;
+    for (const auto& t : tokens) {
+        if (t.type == TokenType::AMPERSAND) ampCount++;
+        if (t.type == TokenType::AND) andCount++;
+        if (t.type == TokenType::AMPERSAND_ASSIGN) ampAssignCount++;
+    }
+    EXPECT_EQ(ampCount, 1);
+    EXPECT_EQ(andCount, 1);
+    EXPECT_EQ(ampAssignCount, 1);
+}

@@ -2,6 +2,7 @@
 #include "codegen.h"
 #include "lexer.h"
 #include "parser.h"
+#include "vm.h"
 
 #include <cstdio>
 #include <filesystem>
@@ -1803,12 +1804,17 @@ TEST(CodegenTest, BytecodeReturnVoid) {
 // ===========================================================================
 
 TEST(CodegenTest, BytecodeUnsupportedUnary) {
+    // The ~ operator is now supported in bytecode via the BIT_NOT opcode.
     CodeGenerator codegen(OptimizationLevel::O0);
     Lexer lexer("fn main() { return ~5; }");
     auto tokens = lexer.tokenize();
     Parser parser(tokens);
     auto program = parser.parse();
-    EXPECT_THROW(codegen.generateBytecode(program.get()), std::runtime_error);
+    codegen.generateBytecode(program.get());
+
+    VM vm;
+    vm.execute(codegen.getBytecodeEmitter().getCode());
+    EXPECT_EQ(vm.getLastReturn().asInt(), ~static_cast<int64_t>(5));
 }
 
 // ===========================================================================
@@ -1816,8 +1822,10 @@ TEST(CodegenTest, BytecodeUnsupportedUnary) {
 // ===========================================================================
 
 TEST(CodegenTest, BytecodeStdlibError) {
+    // print() is now supported in bytecode via the PRINT opcode.
+    // Other stdlib functions should still throw.
     CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer("fn main() { print(42); return 0; }");
+    Lexer lexer("fn main() { var x = abs(5); return 0; }");
     auto tokens = lexer.tokenize();
     Parser parser(tokens);
     auto program = parser.parse();
@@ -2247,4 +2255,424 @@ TEST(CodegenTest, StrEqWrongArgCount) {
     EXPECT_THROW(
         generateIR("fn main() { return str_eq(\"a\"); }", codegen),
         std::runtime_error);
+}
+
+// ===========================================================================
+// Bytecode bitwise operators
+// ===========================================================================
+
+TEST(CodegenTest, BytecodeBitwiseAnd) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    Lexer lexer("fn main() { return 255 & 15; }");
+    auto tokens = lexer.tokenize();
+    Parser parser(tokens);
+    auto program = parser.parse();
+    codegen.generateBytecode(program.get());
+
+    VM vm;
+    vm.execute(codegen.getBytecodeEmitter().getCode());
+    EXPECT_EQ(vm.getLastReturn().asInt(), 15);
+}
+
+TEST(CodegenTest, BytecodeBitwiseOr) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    Lexer lexer("fn main() { return 240 | 15; }");
+    auto tokens = lexer.tokenize();
+    Parser parser(tokens);
+    auto program = parser.parse();
+    codegen.generateBytecode(program.get());
+
+    VM vm;
+    vm.execute(codegen.getBytecodeEmitter().getCode());
+    EXPECT_EQ(vm.getLastReturn().asInt(), 255);
+}
+
+TEST(CodegenTest, BytecodeBitwiseXor) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    Lexer lexer("fn main() { return 255 ^ 15; }");
+    auto tokens = lexer.tokenize();
+    Parser parser(tokens);
+    auto program = parser.parse();
+    codegen.generateBytecode(program.get());
+
+    VM vm;
+    vm.execute(codegen.getBytecodeEmitter().getCode());
+    EXPECT_EQ(vm.getLastReturn().asInt(), 240);
+}
+
+TEST(CodegenTest, BytecodeShiftLeft) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    Lexer lexer("fn main() { return 1 << 4; }");
+    auto tokens = lexer.tokenize();
+    Parser parser(tokens);
+    auto program = parser.parse();
+    codegen.generateBytecode(program.get());
+
+    VM vm;
+    vm.execute(codegen.getBytecodeEmitter().getCode());
+    EXPECT_EQ(vm.getLastReturn().asInt(), 16);
+}
+
+TEST(CodegenTest, BytecodeShiftRight) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    Lexer lexer("fn main() { return 16 >> 4; }");
+    auto tokens = lexer.tokenize();
+    Parser parser(tokens);
+    auto program = parser.parse();
+    codegen.generateBytecode(program.get());
+
+    VM vm;
+    vm.execute(codegen.getBytecodeEmitter().getCode());
+    EXPECT_EQ(vm.getLastReturn().asInt(), 1);
+}
+
+TEST(CodegenTest, BytecodeBitwiseNot) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    Lexer lexer("fn main() { return ~0; }");
+    auto tokens = lexer.tokenize();
+    Parser parser(tokens);
+    auto program = parser.parse();
+    codegen.generateBytecode(program.get());
+
+    VM vm;
+    vm.execute(codegen.getBytecodeEmitter().getCode());
+    EXPECT_EQ(vm.getLastReturn().asInt(), ~static_cast<int64_t>(0));
+}
+
+// ===========================================================================
+// Bytecode print support
+// ===========================================================================
+
+TEST(CodegenTest, BytecodePrint) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    Lexer lexer("fn main() { print(42); return 0; }");
+    auto tokens = lexer.tokenize();
+    Parser parser(tokens);
+    auto program = parser.parse();
+    codegen.generateBytecode(program.get());
+
+    VM vm;
+    testing::internal::CaptureStdout();
+    vm.execute(codegen.getBytecodeEmitter().getCode());
+    std::string output = testing::internal::GetCapturedStdout();
+    EXPECT_EQ(output, "42\n");
+    EXPECT_EQ(vm.getLastReturn().asInt(), 0);
+}
+
+// ===========================================================================
+// New pass manager IPO optimizations (inlining, IPSCCP, GlobalDCE)
+// ===========================================================================
+
+TEST(CodegenTest, InliningAtO2) {
+    // At O2, the new pass manager should inline small functions.
+    // After inlining square(5) + square(3), IPSCCP should fold to 34.
+    CodeGenerator codegen(OptimizationLevel::O2);
+    auto* mod = generateIR(
+        "fn square(x) { return x * x; }"
+        "fn main() { return square(5) + square(3); }",
+        codegen);
+    llvm::Function* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    // After inlining + constant propagation, main should have no call to square
+    bool hasCallToSquare = false;
+    for (auto& BB : *mainFn) {
+        for (auto& I : BB) {
+            if (auto* call = llvm::dyn_cast<llvm::CallInst>(&I)) {
+                if (call->getCalledFunction() &&
+                    call->getCalledFunction()->getName() == "square") {
+                    hasCallToSquare = true;
+                }
+            }
+        }
+    }
+    EXPECT_FALSE(hasCallToSquare) << "square() should be inlined at O2";
+}
+
+TEST(CodegenTest, InliningAtO3) {
+    CodeGenerator codegen(OptimizationLevel::O3);
+    auto* mod = generateIR(
+        "fn double_it(n) { return n + n; }"
+        "fn main() { return double_it(21); }",
+        codegen);
+    llvm::Function* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    bool hasCall = false;
+    for (auto& BB : *mainFn) {
+        for (auto& I : BB) {
+            if (auto* call = llvm::dyn_cast<llvm::CallInst>(&I)) {
+                if (call->getCalledFunction() &&
+                    call->getCalledFunction()->getName() == "double_it") {
+                    hasCall = true;
+                }
+            }
+        }
+    }
+    EXPECT_FALSE(hasCall) << "double_it() should be inlined at O3";
+}
+
+TEST(CodegenTest, NoInliningAtO1) {
+    // O1 uses the lightweight legacy pipeline which doesn't include inlining.
+    CodeGenerator codegen(OptimizationLevel::O1);
+    auto* mod = generateIR(
+        "fn helper(x) { return x * 2; }"
+        "fn main() { return helper(10); }",
+        codegen);
+    llvm::Function* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    bool hasCall = false;
+    for (auto& BB : *mainFn) {
+        for (auto& I : BB) {
+            if (auto* call = llvm::dyn_cast<llvm::CallInst>(&I)) {
+                if (call->getCalledFunction() &&
+                    call->getCalledFunction()->getName() == "helper") {
+                    hasCall = true;
+                }
+            }
+        }
+    }
+    EXPECT_TRUE(hasCall) << "helper() should NOT be inlined at O1";
+}
+
+TEST(CodegenTest, ConstantPropagationThroughInline) {
+    // After inlining + IPSCCP, the entire program should fold to a constant
+    CodeGenerator codegen(OptimizationLevel::O2);
+    auto* mod = generateIR(
+        "fn add(a, b) { return a + b; }"
+        "fn mul(a, b) { return a * b; }"
+        "fn main() { return add(mul(3, 4), mul(5, 6)); }",
+        codegen);
+    llvm::Function* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    // Check that main has a single block with just a ret instruction
+    ASSERT_EQ(mainFn->size(), 1u);
+    auto& entry = mainFn->getEntryBlock();
+    // First (and only) instruction should be ret i64 42 (3*4 + 5*6)
+    auto& firstInst = entry.front();
+    auto* retInst = llvm::dyn_cast<llvm::ReturnInst>(&firstInst);
+    ASSERT_NE(retInst, nullptr);
+    auto* constVal = llvm::dyn_cast<llvm::ConstantInt>(retInst->getReturnValue());
+    ASSERT_NE(constVal, nullptr);
+    EXPECT_EQ(constVal->getSExtValue(), 42);
+}
+
+// ===========================================================================
+// OPTMAX mixed-type constant folding
+// ===========================================================================
+
+TEST(CodegenTest, OptmaxMixedTypeConstantFolding) {
+    // OPTMAX should fold 5 + 1.0 into 6.0 at the AST level
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "OPTMAX=: fn main() { return 5 + 1.0; } OPTMAX!:",
+        codegen);
+    llvm::Function* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    // The result of mixed int+float should be folded to a constant float
+    // then converted back to i64 for the return. Check that no add instruction exists.
+    bool hasAddInst = false;
+    for (auto& BB : *mainFn) {
+        for (auto& I : BB) {
+            if (I.getOpcode() == llvm::Instruction::FAdd ||
+                I.getOpcode() == llvm::Instruction::Add) {
+                hasAddInst = true;
+            }
+        }
+    }
+    EXPECT_FALSE(hasAddInst) << "Mixed int+float should be folded at compile time in OPTMAX";
+}
+
+TEST(CodegenTest, OptmaxMixedTypeMul) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "OPTMAX=: fn main() { return 3 * 2.5; } OPTMAX!:",
+        codegen);
+    llvm::Function* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    bool hasMulInst = false;
+    for (auto& BB : *mainFn) {
+        for (auto& I : BB) {
+            if (I.getOpcode() == llvm::Instruction::FMul ||
+                I.getOpcode() == llvm::Instruction::Mul) {
+                hasMulInst = true;
+            }
+        }
+    }
+    EXPECT_FALSE(hasMulInst) << "Mixed int*float should be folded at compile time in OPTMAX";
+}
+
+// ===========================================================================
+// Boolean and null literals
+// ===========================================================================
+
+TEST(CodegenTest, TrueLiteral) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return true; }", codegen);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    EXPECT_FALSE(mainFn->empty());
+}
+
+TEST(CodegenTest, FalseLiteral) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return false; }", codegen);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    EXPECT_FALSE(mainFn->empty());
+}
+
+TEST(CodegenTest, NullLiteral) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var x = null; return x; }", codegen);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    EXPECT_FALSE(mainFn->empty());
+}
+
+TEST(CodegenTest, TrueInCondition) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { if (true) { return 1; } return 0; }", codegen);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+}
+
+// ===========================================================================
+// Bitwise compound assignment
+// ===========================================================================
+
+TEST(CodegenTest, BitwiseAndAssign) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var x = 15; x &= 6; return x; }", codegen);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+}
+
+TEST(CodegenTest, BitwiseOrAssign) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var x = 3; x |= 12; return x; }", codegen);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+}
+
+TEST(CodegenTest, BitwiseXorAssign) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var x = 15; x ^= 9; return x; }", codegen);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+}
+
+TEST(CodegenTest, ShiftLeftAssign) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var x = 1; x <<= 3; return x; }", codegen);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+}
+
+TEST(CodegenTest, ShiftRightAssign) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var x = 32; x >>= 2; return x; }", codegen);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+}
+
+// ===========================================================================
+// Array compound assignment
+// ===========================================================================
+
+TEST(CodegenTest, ArrayCompoundAssignPlus) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() { var arr = [10, 20]; arr[0] += 5; return arr[0]; }",
+        codegen);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+}
+
+TEST(CodegenTest, ArrayCompoundAssignMinus) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() { var arr = [10, 20]; arr[1] -= 3; return arr[1]; }",
+        codegen);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+}
+
+TEST(CodegenTest, ArrayCompoundAssignMul) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() { var arr = [10]; arr[0] *= 3; return arr[0]; }",
+        codegen);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+}
+
+// ===========================================================================
+// Semantic validation: missing main, duplicate functions, duplicate params
+// ===========================================================================
+
+TEST(CodegenTest, NoMainFunction) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    EXPECT_THROW({
+        generateIR("fn foo() { return 42; }", codegen);
+    }, std::runtime_error);
+}
+
+TEST(CodegenTest, NoMainFunctionMessage) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    try {
+        generateIR("fn foo() { return 42; }", codegen);
+        FAIL() << "Expected exception";
+    } catch (const std::runtime_error& e) {
+        EXPECT_NE(std::string(e.what()).find("No 'main' function defined"), std::string::npos);
+    }
+}
+
+TEST(CodegenTest, DuplicateFunction) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    EXPECT_THROW({
+        generateIR("fn add(a, b) { return a + b; }\n"
+                    "fn add(x, y) { return x + y; }\n"
+                    "fn main() { return add(1, 2); }", codegen);
+    }, std::runtime_error);
+}
+
+TEST(CodegenTest, DuplicateFunctionMessage) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    try {
+        generateIR("fn add(a, b) { return a + b; }\n"
+                    "fn add(x, y) { return x + y; }\n"
+                    "fn main() { return add(1, 2); }", codegen);
+        FAIL() << "Expected exception";
+    } catch (const std::runtime_error& e) {
+        EXPECT_NE(std::string(e.what()).find("Duplicate function definition"), std::string::npos);
+    }
+}
+
+TEST(CodegenTest, DuplicateParameter) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    EXPECT_THROW({
+        generateIR("fn add(a, a) { return a + a; }\n"
+                    "fn main() { return add(1, 2); }", codegen);
+    }, std::runtime_error);
+}
+
+TEST(CodegenTest, DuplicateParameterMessage) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    try {
+        generateIR("fn add(a, a) { return a + a; }\n"
+                    "fn main() { return add(1, 2); }", codegen);
+        FAIL() << "Expected exception";
+    } catch (const std::runtime_error& e) {
+        EXPECT_NE(std::string(e.what()).find("Duplicate parameter name"), std::string::npos);
+    }
+}
+
+TEST(CodegenTest, ValidProgramAccepted) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn add(a, b) { return a + b; }\n"
+        "fn main() { return add(1, 2); }", codegen);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    auto* addFn = mod->getFunction("add");
+    ASSERT_NE(addFn, nullptr);
 }

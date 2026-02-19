@@ -41,6 +41,10 @@ void printUsage(const char* progName) {
     std::cout << "  -k, --keep-temps     Keep temporary outputs when running\n";
     std::cout << "  -v, --version        Show compiler version\n";
     std::cout << "  -V, --verbose        Show detailed compilation output (IR, progress)\n";
+    std::cout << "  -O0                  No optimization\n";
+    std::cout << "  -O1                  Basic optimization\n";
+    std::cout << "  -O2                  Moderate optimization (default)\n";
+    std::cout << "  -O3                  Aggressive optimization\n";
 }
 
 std::string readSourceFile(const std::string& filename) {
@@ -72,6 +76,9 @@ const char* tokenTypeToString(omscript::TokenType type) {
         case omscript::TokenType::BREAK: return "BREAK";
         case omscript::TokenType::CONTINUE: return "CONTINUE";
         case omscript::TokenType::IN: return "IN";
+        case omscript::TokenType::TRUE: return "TRUE";
+        case omscript::TokenType::FALSE: return "FALSE";
+        case omscript::TokenType::NULL_LITERAL: return "NULL_LITERAL";
         case omscript::TokenType::OPTMAX_START: return "OPTMAX_START";
         case omscript::TokenType::OPTMAX_END: return "OPTMAX_END";
         case omscript::TokenType::SWITCH: return "SWITCH";
@@ -99,6 +106,11 @@ const char* tokenTypeToString(omscript::TokenType type) {
         case omscript::TokenType::STAR_ASSIGN: return "STAR_ASSIGN";
         case omscript::TokenType::SLASH_ASSIGN: return "SLASH_ASSIGN";
         case omscript::TokenType::PERCENT_ASSIGN: return "PERCENT_ASSIGN";
+        case omscript::TokenType::AMPERSAND_ASSIGN: return "AMPERSAND_ASSIGN";
+        case omscript::TokenType::PIPE_ASSIGN: return "PIPE_ASSIGN";
+        case omscript::TokenType::CARET_ASSIGN: return "CARET_ASSIGN";
+        case omscript::TokenType::LSHIFT_ASSIGN: return "LSHIFT_ASSIGN";
+        case omscript::TokenType::RSHIFT_ASSIGN: return "RSHIFT_ASSIGN";
         case omscript::TokenType::QUESTION: return "QUESTION";
         case omscript::TokenType::AMPERSAND: return "AMPERSAND";
         case omscript::TokenType::PIPE: return "PIPE";
@@ -248,6 +260,7 @@ int main(int argc, char* argv[]) {
     bool parsingRunArgs = false;
     bool keepTemps = false;
     bool verbose = false;
+    omscript::OptimizationLevel optLevel = omscript::OptimizationLevel::O2;
     std::vector<std::string> runArgs;
     
     // Parse command line arguments
@@ -275,6 +288,15 @@ int main(int argc, char* argv[]) {
         }
         if (!parsingRunArgs && (arg == "-V" || arg == "--verbose")) {
             verbose = true;
+            continue;
+        }
+        if (!parsingRunArgs && arg.size() == 3 && arg[0] == '-' && arg[1] == 'O' &&
+            arg[2] >= '0' && arg[2] <= '3') {
+            static constexpr omscript::OptimizationLevel levels[] = {
+                omscript::OptimizationLevel::O0, omscript::OptimizationLevel::O1,
+                omscript::OptimizationLevel::O2, omscript::OptimizationLevel::O3
+            };
+            optLevel = levels[arg[2] - '0'];
             continue;
         }
         if (!parsingRunArgs && (arg == "-o" || arg == "--output")) {
@@ -362,7 +384,7 @@ int main(int argc, char* argv[]) {
                 printProgramSummary(program.get());
                 return 0;
             }
-            omscript::CodeGenerator codegen;
+            omscript::CodeGenerator codegen(optLevel);
             codegen.generate(program.get());
             if (outputFile.empty()) {
                 codegen.getModule()->print(llvm::outs(), nullptr);
@@ -379,6 +401,7 @@ int main(int argc, char* argv[]) {
         }
         omscript::Compiler compiler;
         compiler.setVerbose(verbose);
+        compiler.setOptimizationLevel(optLevel);
         compiler.compile(sourceFile, outputFile);
         if (command == Command::Run) {
             std::filesystem::path runPath = std::filesystem::absolute(outputFile);

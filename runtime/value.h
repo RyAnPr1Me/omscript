@@ -162,6 +162,14 @@ public:
     bool operator>(const Value& other) const;
     bool operator>=(const Value& other) const;
     
+    // Bitwise operations
+    Value operator&(const Value& other) const;
+    Value operator|(const Value& other) const;
+    Value operator^(const Value& other) const;
+    Value operator~() const;
+    Value operator<<(const Value& other) const;
+    Value operator>>(const Value& other) const;
+    
 private:
     Type type;
     union {
