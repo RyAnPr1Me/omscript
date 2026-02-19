@@ -403,6 +403,30 @@ fn main() {
 }
 ```
 
+### Hybrid Compilation
+
+The `generateHybrid()` method enables all three execution tiers to coexist in a single
+program.  A single compilation pass:
+
+1. **Classifies** every function into its execution tier (AOT or Interpreted)
+2. **Generates LLVM IR** for all functions (AOT-tier functions get full optimization)
+3. **Emits bytecode** for each Interpreted-tier function into isolated `BytecodeFunction`
+   objects with proper local variable tracking
+
+At runtime the compiled program can seamlessly mix:
+- AOT-compiled native functions (maximum speed)
+- Bytecode-interpreted functions (dynamic flexibility)
+- JIT-compiled functions (hot bytecode promoted to native code by the VM profiler)
+
+The compiler automatically selects the fastest execution path for each function:
+
+| Function Characteristic | Tier | Runtime Path |
+|------------------------|------|-------------|
+| Full type annotations  | AOT  | Native code via LLVM |
+| OPTMAX / main / stdlib | AOT  | Native code with aggressive optimization |
+| No type annotations    | Interpreted → JIT | Bytecode → native after 10 hot calls |
+| Partial type annotations | Interpreted → JIT | Bytecode → native after profiling |
+
 ## Best Practices for Maximum Performance
 
 ### 1. Use Constants When Possible
@@ -476,6 +500,8 @@ OmScript's optimization infrastructure provides:
 - ✅ Bytecode JIT compiler with automatic hot-function detection
 - ✅ Type-specialized JIT recompilation for precompiled bytecode
 - ✅ Tiered execution model (AOT → Interpreted → JIT) with automatic tier selection
+- ✅ **Hybrid compilation** — AOT + bytecode in a single pass for cross-tier programs
+- ✅ Per-function local variable tracking in hybrid bytecode emission
 - ✅ Optimized VM runtime with move semantics and pre-allocated storage
 - ✅ Inline hot-path functions (isTruthy) for better VM throughput
 - ✅ Measurable, significant improvements

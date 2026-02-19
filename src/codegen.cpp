@@ -2896,7 +2896,7 @@ void CodeGenerator::emitBytecodeStatement(Statement* stmt) {
             }
             // If we're inside a function (bytecodeLocals_ is active),
             // allocate a new local index for this variable declaration.
-            if (!bytecodeLocals_.empty() || bytecodeNextLocal_ > 0) {
+            if (isInBytecodeFunctionContext()) {
                 uint8_t idx = bytecodeNextLocal_++;
                 bytecodeLocals_[varDecl->name] = idx;
             }
@@ -2977,7 +2977,7 @@ void CodeGenerator::emitBytecodeStatement(Statement* stmt) {
         case ASTNodeType::FOR_STMT: {
             auto* forStmt = static_cast<ForStmt*>(stmt);
             // Allocate the iterator as a local if we're in function context.
-            if (!bytecodeLocals_.empty() || bytecodeNextLocal_ > 0) {
+            if (isInBytecodeFunctionContext()) {
                 if (bytecodeLocals_.find(forStmt->iteratorVar) == bytecodeLocals_.end()) {
                     bytecodeLocals_[forStmt->iteratorVar] = bytecodeNextLocal_++;
                 }
@@ -3025,7 +3025,7 @@ void CodeGenerator::emitBytecodeStatement(Statement* stmt) {
             static int switchCounter = 0;
             std::string tempVar = "__switch_cond_" + std::to_string(switchCounter++) + "__";
             // Allocate the temp as a local if we're in function context.
-            if (!bytecodeLocals_.empty() || bytecodeNextLocal_ > 0) {
+            if (isInBytecodeFunctionContext()) {
                 bytecodeLocals_[tempVar] = bytecodeNextLocal_++;
             }
             // Emit the condition once and store in the temporary variable.

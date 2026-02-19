@@ -111,6 +111,12 @@ private:
     std::unordered_map<std::string, uint8_t> bytecodeLocals_;
     uint8_t bytecodeNextLocal_ = 0;
 
+    /// Return true when bytecode is being emitted for a function body
+    /// (as opposed to top-level / main code).
+    bool isInBytecodeFunctionContext() const {
+        return !bytecodeLocals_.empty() || bytecodeNextLocal_ > 0;
+    }
+
     /// Classify a function into its execution tier based on type annotations,
     /// OPTMAX status, and whether it is a special function (main/stdlib).
     ExecutionTier classifyFunction(const FunctionDecl* func) const;
