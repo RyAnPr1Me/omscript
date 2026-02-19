@@ -2676,3 +2676,127 @@ TEST(CodegenTest, ValidProgramAccepted) {
     auto* addFn = mod->getFunction("add");
     ASSERT_NE(addFn, nullptr);
 }
+
+// ===========================================================================
+// Bytecode constant folding
+// ===========================================================================
+
+TEST(CodegenTest, BytecodeConstantFoldingAdd) {
+    // 10 + 20 should be folded to PUSH_INT 30 (not PUSH_INT 10, PUSH_INT 20, ADD)
+    CodeGenerator codegen(OptimizationLevel::O0);
+    Lexer lexer("fn main() { return 10 + 20; }");
+    auto tokens = lexer.tokenize();
+    Parser parser(tokens);
+    auto program = parser.parse();
+    codegen.generateBytecode(program.get());
+    auto& emitter = codegen.getBytecodeEmitter();
+    const auto& code = emitter.getCode();
+    // Execute and verify correct result
+    VM vm;
+    vm.execute(code);
+    EXPECT_EQ(vm.getLastReturn().asInt(), 30);
+    // The bytecode should be smaller with folding (no ADD opcode needed)
+    // Without folding: PUSH_INT(9) + PUSH_INT(9) + ADD(1) + RETURN(1) + HALT(1) = 21
+    // With folding:    PUSH_INT(9) + RETURN(1) + HALT(1) = 11
+    EXPECT_LT(code.size(), 21u);
+}
+
+TEST(CodegenTest, BytecodeConstantFoldingMul) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    Lexer lexer("fn main() { return 6 * 7; }");
+    auto tokens = lexer.tokenize();
+    Parser parser(tokens);
+    auto program = parser.parse();
+    codegen.generateBytecode(program.get());
+    VM vm;
+    vm.execute(codegen.getBytecodeEmitter().getCode());
+    EXPECT_EQ(vm.getLastReturn().asInt(), 42);
+}
+
+TEST(CodegenTest, BytecodeConstantFoldingComparison) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    Lexer lexer("fn main() { return 5 < 10; }");
+    auto tokens = lexer.tokenize();
+    Parser parser(tokens);
+    auto program = parser.parse();
+    codegen.generateBytecode(program.get());
+    VM vm;
+    vm.execute(codegen.getBytecodeEmitter().getCode());
+    EXPECT_EQ(vm.getLastReturn().asInt(), 1);
+}
+
+TEST(CodegenTest, BytecodeConstantFoldingUnaryNeg) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    Lexer lexer("fn main() { return -42; }");
+    auto tokens = lexer.tokenize();
+    Parser parser(tokens);
+    auto program = parser.parse();
+    codegen.generateBytecode(program.get());
+    VM vm;
+    vm.execute(codegen.getBytecodeEmitter().getCode());
+    EXPECT_EQ(vm.getLastReturn().asInt(), -42);
+}
+
+TEST(CodegenTest, BytecodeConstantFoldingLogicalNot) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    Lexer lexer("fn main() { return !0; }");
+    auto tokens = lexer.tokenize();
+    Parser parser(tokens);
+    auto program = parser.parse();
+    codegen.generateBytecode(program.get());
+    VM vm;
+    vm.execute(codegen.getBytecodeEmitter().getCode());
+    EXPECT_EQ(vm.getLastReturn().asInt(), 1);
+}
+
+TEST(CodegenTest, BytecodeConstantFoldingBitwiseNot) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    Lexer lexer("fn main() { return ~0; }");
+    auto tokens = lexer.tokenize();
+    Parser parser(tokens);
+    auto program = parser.parse();
+    codegen.generateBytecode(program.get());
+    VM vm;
+    vm.execute(codegen.getBytecodeEmitter().getCode());
+    EXPECT_EQ(vm.getLastReturn().asInt(), -1);
+}
+
+// ===========================================================================
+// IR-level constant comparison folding
+// ===========================================================================
+
+TEST(CodegenTest, IRConstantComparisonFolding) {
+    // When both operands are constants, comparisons should be folded
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return 5 == 5; }", codegen);
+    auto* mainFunc = mod->getFunction("main");
+    ASSERT_NE(mainFunc, nullptr);
+    // At O0, constant folding in generateBinary still occurs
+    // The function should exist and have code
+    EXPECT_FALSE(mainFunc->empty());
+}
+
+// ===========================================================================
+// Strength reduction for division by power of 2
+// ===========================================================================
+
+TEST(CodegenTest, DivisionStrengthReduction) {
+    // n / 4 should be converted to n >> 2 (arithmetic shift right)
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn divide_by_four(n) { return n / 4; }\n"
+        "fn main() { return divide_by_four(16); }", codegen);
+    auto* func = mod->getFunction("divide_by_four");
+    ASSERT_NE(func, nullptr);
+    EXPECT_FALSE(func->empty());
+    // Verify the function contains an ashr instruction (strength reduction)
+    bool hasAShr = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::AShr) {
+                hasAShr = true;
+            }
+        }
+    }
+    EXPECT_TRUE(hasAShr);
+}

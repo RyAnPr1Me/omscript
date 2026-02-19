@@ -293,12 +293,34 @@ if (1) { x = 10; } else { x = 20; }
 ```
 
 ### IR-Level Strength Reduction
-Multiplication by powers of 2 is converted to left shifts during IR generation, even at O0:
+Multiplication and division by powers of 2 are converted to shifts during IR generation, even at O0:
 ```omscript
 n * 2   →  n << 1
 n * 8   →  n << 3
 n * 64  →  n << 6
+n / 4   →  n >> 2
+n / 16  →  n >> 4
 ```
+
+### Constant Comparison Folding
+Comparisons between compile-time constant integers are evaluated at IR generation time:
+```omscript
+5 == 5  →  1  (no runtime comparison)
+3 > 7   →  0
+10 <= 10 → 1
+```
+
+### Bytecode Constant Folding
+When targeting the bytecode backend, constant expressions are evaluated at compile time.
+Instead of emitting `PUSH_INT, PUSH_INT, ADD`, the compiler emits a single `PUSH_INT` with the
+pre-computed result. This applies to all arithmetic, comparison, logical, and bitwise operations
+on integer literals, as well as unary operations (`-`, `!`, `~`).
+
+### Computed-Goto VM Dispatch
+On GCC/Clang, the bytecode VM uses a computed-goto dispatch table instead of a `switch`
+statement. This eliminates branch prediction overhead and indirect jump penalties, resulting
+in significantly faster opcode dispatch. A standard `switch` fallback is used on other
+compilers.
 
 ## Best Practices for Maximum Performance
 
@@ -364,10 +386,13 @@ OmScript's optimization infrastructure provides:
 - ✅ Battle-tested LLVM passes via the new pass manager
 - ✅ Interprocedural optimizations (inlining, IPSCCP, GlobalDCE)
 - ✅ Auto-vectorization for SIMD (at O3)
-- ✅ Compile-time constant folding for unary and binary expressions
+- ✅ Compile-time constant folding for unary, binary, and comparison expressions
 - ✅ Dead branch elimination for constant conditions
-- ✅ IR-level strength reduction (multiply to shift)
+- ✅ IR-level strength reduction (multiply/divide by power-of-2 to shift)
+- ✅ Bytecode constant folding for the interpreter backend
+- ✅ Computed-goto VM dispatch for faster bytecode execution
 - ✅ Optimized VM runtime with move semantics and pre-allocated storage
+- ✅ Inline hot-path functions (isTruthy) for better VM throughput
 - ✅ Measurable, significant improvements
 
 The compiler transforms high-level OmScript code into highly optimized machine code that rivals hand-written assembly in many cases, while maintaining code readability and developer productivity.
