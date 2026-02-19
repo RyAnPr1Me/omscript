@@ -70,6 +70,46 @@ bool BytecodeJIT::recordCall(const std::string& name) {
     return count == kJITThreshold;
 }
 
+bool BytecodeJIT::recordPostJITCall(const std::string& name) {
+    if (!compiled_.count(name) || recompiled_.count(name))
+        return false;
+    auto& count = postJITCallCounts_[name];
+    ++count;
+    return count == kRecompileThreshold;
+}
+
+size_t BytecodeJIT::getCallCount(const std::string& name) const {
+    auto it = callCounts_.find(name);
+    if (it != callCounts_.end()) return it->second;
+    return 0;
+}
+
+bool BytecodeJIT::recompile(const BytecodeFunction& func) {
+    // Mark as recompiled so we only attempt once.
+    recompiled_.insert(func.name);
+
+    // Use the same compile() infrastructure — if the function is still
+    // JIT-eligible the new code replaces the old pointer.  The old
+    // JITModule remains alive (so any in-flight calls don't fault) but
+    // future calls use the new pointer.
+    ensureInitialized();
+
+    // Temporarily remove from compiled_ so compile() can proceed.
+    auto oldIt = compiled_.find(func.name);
+    JITFnPtr oldPtr = nullptr;
+    if (oldIt != compiled_.end()) {
+        oldPtr = oldIt->second;
+        compiled_.erase(oldIt);
+    }
+
+    bool ok = compile(func);
+    if (!ok && oldPtr) {
+        // Restore the old pointer if recompilation failed.
+        compiled_[func.name] = oldPtr;
+    }
+    return ok;
+}
+
 // ---------------------------------------------------------------------------
 // compile() — translate bytecode → LLVM IR → native code
 // ---------------------------------------------------------------------------

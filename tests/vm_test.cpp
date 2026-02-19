@@ -1405,3 +1405,40 @@ TEST(VMTest, JITWithLocals) {
     }
     EXPECT_TRUE(vm.isJITCompiled("compute"));
 }
+
+TEST(VMTest, JITRecompileAfterThreshold) {
+    // fn doubler(x) { return x * 2; }
+    auto func = makeBytecodeFunc("doubler", 1, [](BytecodeEmitter& e) {
+        e.emit(OpCode::LOAD_LOCAL); e.emitByte(0);
+        e.emit(OpCode::PUSH_INT);   e.emitInt(2);
+        e.emit(OpCode::MUL);
+        e.emit(OpCode::RETURN);
+    });
+
+    VM vm;
+    vm.registerFunction(func);
+
+    // Warm up past JIT threshold + recompile threshold.
+    size_t totalCalls = BytecodeJIT::kJITThreshold + BytecodeJIT::kRecompileThreshold + 5;
+    for (size_t i = 0; i < totalCalls; i++) {
+        auto code = buildBytecode([](BytecodeEmitter& e) {
+            e.emit(OpCode::PUSH_INT); e.emitInt(7);
+            e.emit(OpCode::CALL);
+            e.emitString("doubler");
+            e.emitByte(1);
+            e.emit(OpCode::RETURN);
+        });
+        vm.execute(code);
+        EXPECT_EQ(vm.getLastReturn().asInt(), 14);
+    }
+    EXPECT_TRUE(vm.isJITCompiled("doubler"));
+}
+
+TEST(VMTest, JITGetCallCount) {
+    BytecodeJIT jit;
+    EXPECT_EQ(jit.getCallCount("foo"), 0u);
+    jit.recordCall("foo");
+    EXPECT_EQ(jit.getCallCount("foo"), 1u);
+    jit.recordCall("foo");
+    EXPECT_EQ(jit.getCallCount("foo"), 2u);
+}

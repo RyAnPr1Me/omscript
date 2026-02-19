@@ -456,6 +456,13 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
                         args[i - 1] = pop().unsafeAsInt();
                     int64_t result = jit_->getCompiled(funcName)(args.data(), static_cast<int>(argCount));
                     push(Value(result));
+
+                    // Track post-JIT calls for type-specialized recompilation.
+                    if (jit_->recordPostJITCall(funcName)) {
+                        auto fit = functions.find(funcName);
+                        if (fit != functions.end())
+                            jit_->recompile(fit->second);
+                    }
                     DISPATCH();
                 }
             } else if (jit_->recordCall(funcName)) {
@@ -793,6 +800,13 @@ vm_exit:
                                 args[i - 1] = pop().unsafeAsInt();
                             int64_t result = jit_->getCompiled(funcName)(args.data(), static_cast<int>(argCount));
                             push(Value(result));
+
+                            // Track post-JIT calls for type-specialized recompilation.
+                            if (jit_->recordPostJITCall(funcName)) {
+                                auto fit = functions.find(funcName);
+                                if (fit != functions.end())
+                                    jit_->recompile(fit->second);
+                            }
                             break;
                         }
                     } else if (jit_->recordCall(funcName)) {

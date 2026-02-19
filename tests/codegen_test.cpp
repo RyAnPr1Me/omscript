@@ -23,6 +23,14 @@ struct LLVMInit {
 static LLVMInit llvmInit;
 } // namespace
 
+// Helper: parse source into a Program
+static std::unique_ptr<Program> parseSource(const std::string& source) {
+    Lexer lexer(source);
+    auto tokens = lexer.tokenize();
+    Parser parser(tokens);
+    return parser.parse();
+}
+
 // Helper: generate IR module from source
 static llvm::Module* generateIR(const std::string& source, CodeGenerator& codegen) {
     Lexer lexer(source);
@@ -2799,4 +2807,105 @@ TEST(CodegenTest, DivisionStrengthReduction) {
         }
     }
     EXPECT_TRUE(hasAShr);
+}
+
+// ===========================================================================
+// Execution-tier classification
+// ===========================================================================
+
+TEST(CodegenTest, ClassifyMainAsAOT) {
+    std::string src = "fn main() { return 0; }";
+    CodeGenerator codegen;
+    generateIR(src, codegen);
+    EXPECT_EQ(codegen.getFunctionTier("main"), ExecutionTier::AOT);
+}
+
+TEST(CodegenTest, ClassifyOptMaxAsAOT) {
+    std::string src = R"(
+        OPTMAX=: fn optimized(x: int) { return x * 2; } OPTMAX!:
+        fn main() { return optimized(5); }
+    )";
+    CodeGenerator codegen;
+    generateIR(src, codegen);
+    EXPECT_EQ(codegen.getFunctionTier("optimized"), ExecutionTier::AOT);
+}
+
+TEST(CodegenTest, ClassifyFullyAnnotatedAsAOT) {
+    std::string src = R"(
+        fn add(a: int, b: int) { return a + b; }
+        fn main() { return add(1, 2); }
+    )";
+    CodeGenerator codegen;
+    generateIR(src, codegen);
+    EXPECT_EQ(codegen.getFunctionTier("add"), ExecutionTier::AOT);
+}
+
+TEST(CodegenTest, ClassifyUnannotatedAsInterpreted) {
+    std::string src = R"(
+        fn compute(x, y) { return x + y; }
+        fn main() { return compute(3, 4); }
+    )";
+    CodeGenerator codegen;
+    generateIR(src, codegen);
+    EXPECT_EQ(codegen.getFunctionTier("compute"), ExecutionTier::Interpreted);
+}
+
+TEST(CodegenTest, ClassifyPartiallyAnnotatedAsInterpreted) {
+    std::string src = R"(
+        fn mixed(a: int, b) { return a + b; }
+        fn main() { return mixed(1, 2); }
+    )";
+    CodeGenerator codegen;
+    generateIR(src, codegen);
+    EXPECT_EQ(codegen.getFunctionTier("mixed"), ExecutionTier::Interpreted);
+}
+
+TEST(CodegenTest, ClassifyNoParamsAsAOT) {
+    // Functions with no parameters are trivially fully-annotated.
+    std::string src = R"(
+        fn zero() { return 0; }
+        fn main() { return zero(); }
+    )";
+    CodeGenerator codegen;
+    generateIR(src, codegen);
+    EXPECT_EQ(codegen.getFunctionTier("zero"), ExecutionTier::AOT);
+}
+
+TEST(CodegenTest, ExecutionTierNameStrings) {
+    EXPECT_STREQ(executionTierName(ExecutionTier::AOT), "AOT");
+    EXPECT_STREQ(executionTierName(ExecutionTier::Interpreted), "Interpreted");
+    EXPECT_STREQ(executionTierName(ExecutionTier::JIT), "JIT");
+}
+
+TEST(CodegenTest, FunctionTierMapContainsAllFunctions) {
+    std::string src = R"(
+        fn helper(x) { return x; }
+        fn main() { return helper(0); }
+    )";
+    CodeGenerator codegen;
+    generateIR(src, codegen);
+    auto& tiers = codegen.getFunctionTiers();
+    EXPECT_NE(tiers.find("helper"), tiers.end());
+    EXPECT_NE(tiers.find("main"), tiers.end());
+}
+
+TEST(CodegenTest, HasFullTypeAnnotationsHelper) {
+    auto prog = parseSource(R"(
+        fn typed(a: int, b: int) { return a + b; }
+        fn untyped(a, b) { return a + b; }
+        fn main() { return 0; }
+    )");
+    bool foundTyped = false, foundUntyped = false;
+    for (auto& fn : prog->functions) {
+        if (fn->name == "typed") {
+            EXPECT_TRUE(fn->hasFullTypeAnnotations());
+            foundTyped = true;
+        }
+        if (fn->name == "untyped") {
+            EXPECT_FALSE(fn->hasFullTypeAnnotations());
+            foundUntyped = true;
+        }
+    }
+    EXPECT_TRUE(foundTyped);
+    EXPECT_TRUE(foundUntyped);
 }

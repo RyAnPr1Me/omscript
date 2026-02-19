@@ -25,6 +25,33 @@ enum class OptimizationLevel {
     O3   // Aggressive optimization
 };
 
+/// Execution tier assigned to each function during compilation.
+///
+///  - **AOT**: The function has full type annotations (or is OPTMAX / main /
+///    stdlib) and can be compiled to native machine code ahead of time via
+///    LLVM IR.
+///  - **Interpreted**: The function lacks type annotations or uses dynamic
+///    features.  It is compiled to bytecode and run by the VM interpreter.
+///  - **JIT**: An interpreted function that has been identified as hot by
+///    the VM profiler and was successfully JIT-compiled to native code.
+///    This tier also covers precompiled bytecode that is later recompiled
+///    with type-specialized native code when profiling data is available.
+enum class ExecutionTier {
+    AOT,         // Compiled to native code via LLVM IR
+    Interpreted, // Compiled to bytecode, run by the VM
+    JIT          // Hot bytecode function JIT-compiled to native code
+};
+
+/// Return a human-readable label for an ExecutionTier value.
+inline const char* executionTierName(ExecutionTier tier) {
+    switch (tier) {
+        case ExecutionTier::AOT:         return "AOT";
+        case ExecutionTier::Interpreted: return "Interpreted";
+        case ExecutionTier::JIT:         return "JIT";
+    }
+    return "Unknown";
+}
+
 class CodeGenerator {
 public:
     CodeGenerator(OptimizationLevel optLevel = OptimizationLevel::O2);
@@ -65,6 +92,13 @@ private:
     BytecodeEmitter bytecodeEmitter;
     bool useDynamicCompilation;
     OptimizationLevel optimizationLevel;
+
+    // Per-function execution tier decided during code generation.
+    std::unordered_map<std::string, ExecutionTier> functionTiers;
+
+    /// Classify a function into its execution tier based on type annotations,
+    /// OPTMAX status, and whether it is a special function (main/stdlib).
+    ExecutionTier classifyFunction(const FunctionDecl* func) const;
     
     // Code generation methods
     llvm::Function* generateFunction(FunctionDecl* func);
@@ -127,6 +161,17 @@ public:
     
     // Bytecode generation (alternative backend)
     void generateBytecode(Program* program);
+
+    /// Return the execution tier assigned to a function, or AOT if not found.
+    ExecutionTier getFunctionTier(const std::string& name) const {
+        auto it = functionTiers.find(name);
+        return it != functionTiers.end() ? it->second : ExecutionTier::AOT;
+    }
+
+    /// Return a read-only view of all function tier assignments.
+    const std::unordered_map<std::string, ExecutionTier>& getFunctionTiers() const {
+        return functionTiers;
+    }
 
     // Accessors for bytecode output
     const BytecodeEmitter& getBytecodeEmitter() const { return bytecodeEmitter; }
