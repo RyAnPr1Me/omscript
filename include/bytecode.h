@@ -58,7 +58,8 @@ enum class OpCode : uint8_t {
     // Special
     PRINT,
     DUP,
-    HALT
+    HALT,
+    MOV          // rd, rs — register-to-register copy
 };
 
 class BytecodeEmitter {
@@ -70,6 +71,7 @@ public:
     void emitFloat(double value);
     void emitString(const std::string& str);
     void emitShort(uint16_t value);
+    void emitReg(uint8_t reg) { emitByte(reg); }
     
     size_t currentOffset() const;
     void patchJump(size_t offset, uint16_t jump);

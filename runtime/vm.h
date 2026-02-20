@@ -27,16 +27,20 @@ struct CallFrame {
     size_t returnIp;                   // instruction pointer to resume in caller
     const std::vector<uint8_t>* returnBytecode;  // caller's bytecode
     std::vector<Value> savedLocals;    // caller's locals snapshot
+    std::vector<Value> savedRegisters; // caller's register file snapshot
+    uint8_t returnReg;                 // destination register for return value
 };
 
 class VM {
 public:
-    // Maximum number of values allowed on the operand stack.
+    // Maximum number of values allowed on the operand stack (kept for compat).
     static constexpr size_t kMaxStackSize = 65536;
     // Maximum call depth to prevent runaway recursion.
     static constexpr size_t kMaxCallDepth = 1024;
     // Maximum number of local variables per function scope.
     static constexpr size_t kMaxLocals = 256;
+    // Register file size.
+    static constexpr size_t kMaxRegisters = 256;
 
     VM();
     ~VM();  // defined in vm.cpp for proper BytecodeJIT cleanup
@@ -53,7 +57,7 @@ public:
     bool isJITCompiled(const std::string& name) const;
     
 private:
-    std::vector<Value> stack;
+    Value registers[kMaxRegisters];
     std::unordered_map<std::string, Value> globals;
     std::vector<Value> locals;
     Value lastReturn;
@@ -78,18 +82,14 @@ private:
     // stack-allocated buffer (avoids heap allocation for common cases).
     static constexpr size_t kMaxStackArgs = 8;
 
-    // Invoke a JIT-compiled function, popping args from the VM stack
-    // and pushing the result.  Returns true if successful.
-    bool invokeJIT(JITFnPtr fn, uint8_t argCount);
-    bool invokeJITFloat(JITFloatFnPtr fn, uint8_t argCount);
+    // Invoke a JIT-compiled function, reading args from VM registers
+    // and putting the result in registers[rd].  Returns true if successful.
+    bool invokeJIT(JITFnPtr fn, uint8_t argCount, const uint8_t* argRegs, uint8_t rd);
+    bool invokeJITFloat(JITFloatFnPtr fn, uint8_t argCount, const uint8_t* argRegs, uint8_t rd);
 
-    // Classify argument types on top of the stack for JIT type profiling.
-    void classifyArgTypes(uint8_t argCount, bool& allInt, bool& allFloat) const;
+    // Classify argument types from registers for JIT type profiling.
+    void classifyArgTypes(uint8_t argCount, const uint8_t* argRegs, bool& allInt, bool& allFloat) const;
     
-    void push(const Value& value);
-    void push(Value&& value);
-    Value pop();
-    const Value& peek(int offset = 0) const;
     
     // Hot-path bytecode readers — force-inlined into the dispatch loop.
     inline void ensureReadable(const std::vector<uint8_t>& code, size_t ip, size_t count) __attribute__((always_inline));

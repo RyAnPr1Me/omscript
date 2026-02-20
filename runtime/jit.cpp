@@ -224,15 +224,16 @@ bool BytecodeJIT::compileInt(const BytecodeFunction& func) {
 
         switch (op) {
         case OpCode::PUSH_INT:
-            ip += 8;
+            ip += 1 + 8;  // rd + value
             break;
         case OpCode::POP:
+        case OpCode::DUP:
+            break;
         case OpCode::ADD:
         case OpCode::SUB:
         case OpCode::MUL:
         case OpCode::DIV:
         case OpCode::MOD:
-        case OpCode::NEG:
         case OpCode::EQ:
         case OpCode::NE:
         case OpCode::LT:
@@ -241,19 +242,31 @@ bool BytecodeJIT::compileInt(const BytecodeFunction& func) {
         case OpCode::GE:
         case OpCode::AND:
         case OpCode::OR:
-        case OpCode::NOT:
         case OpCode::BIT_AND:
         case OpCode::BIT_OR:
         case OpCode::BIT_XOR:
-        case OpCode::BIT_NOT:
         case OpCode::SHL:
         case OpCode::SHR:
-        case OpCode::DUP:
+            ip += 3;  // rd, rs1, rs2
             break;
-        case OpCode::LOAD_LOCAL:
+        case OpCode::NEG:
+        case OpCode::NOT:
+        case OpCode::BIT_NOT:
+        case OpCode::MOV:
+            ip += 2;  // rd, rs
+            break;
+        case OpCode::LOAD_LOCAL: {
+            ip++;  // rd
+            uint8_t idx = code[ip];
+            ip++;  // idx
+            if (idx > maxLocalIdx)
+                maxLocalIdx = idx;
+            break;
+        }
         case OpCode::STORE_LOCAL: {
             uint8_t idx = code[ip];
-            ip++;
+            ip++;  // idx
+            ip++;  // rs
             if (idx > maxLocalIdx)
                 maxLocalIdx = idx;
             break;
@@ -266,6 +279,7 @@ bool BytecodeJIT::compileInt(const BytecodeFunction& func) {
             break;
         }
         case OpCode::JUMP_IF_FALSE: {
+            ip++;  // rs
             uint16_t target = peekShort(code, ip);
             ip += 2;
             blockStarts.insert(target);
@@ -273,18 +287,12 @@ bool BytecodeJIT::compileInt(const BytecodeFunction& func) {
             break;
         }
         case OpCode::RETURN:
+            ip++;  // rs
             blockStarts.insert(ip);
             break;
-
-        // Unsupported opcodes — bail out to interpretation.
-        case OpCode::PUSH_FLOAT:
-        case OpCode::PUSH_STRING:
-        case OpCode::LOAD_VAR:
-        case OpCode::STORE_VAR:
-        case OpCode::CALL:
         case OpCode::PRINT:
-        case OpCode::HALT:
-        default:
+            ip++;  // rs
+            // fall through to unsupported
             failedCompilations_.insert(func.name);
             return false;
         }
@@ -352,8 +360,20 @@ bool BytecodeJIT::compileInt(const BytecodeFunction& func) {
         mod->getOrInsertFunction("abort", abortType);
 
     // ------------------------------------------------------------------
-    // Phase 3: Translate each basic block
+    // Phase 3: Translate each basic block (register-based)
     // ------------------------------------------------------------------
+    // Allocate alloca-based register storage. LLVM mem2reg will promote to SSA.
+    static constexpr size_t kJITMaxRegs = 256;
+    std::vector<llvm::AllocaInst*> regAlloc(kJITMaxRegs);
+    {
+        llvm::IRBuilder<> allocBuilder(entryBB, entryBB->begin());
+        for (size_t i = 0; i < kJITMaxRegs; i++) {
+            regAlloc[i] = allocBuilder.CreateAlloca(
+                int64Ty, nullptr, "r" + std::to_string(i));
+            allocBuilder.CreateStore(llvm::ConstantInt::get(int64Ty, 0), regAlloc[i]);
+        }
+    }
+
     for (auto blockIt = blocks.begin(); blockIt != blocks.end(); ++blockIt) {
         size_t blockStart = blockIt->first;
         llvm::BasicBlock* bb = blockIt->second;
@@ -366,9 +386,6 @@ bool BytecodeJIT::compileInt(const BytecodeFunction& func) {
         builder.SetInsertPoint(bb);
         llvm::BasicBlock* currentBB = bb;
 
-        // Compile-time operand stack (SSA values).
-        std::vector<llvm::Value*> cstack;
-
         ip = blockStart;
         bool terminated = false;
 
@@ -378,46 +395,40 @@ bool BytecodeJIT::compileInt(const BytecodeFunction& func) {
 
             switch (op) {
             case OpCode::PUSH_INT: {
+                uint8_t rd = code[ip++];
                 int64_t val = peekInt(code, ip);
                 ip += 8;
-                cstack.push_back(llvm::ConstantInt::get(int64Ty, val));
+                builder.CreateStore(llvm::ConstantInt::get(int64Ty, val), regAlloc[rd]);
                 break;
             }
             case OpCode::POP:
-                if (cstack.empty()) { failedCompilations_.insert(func.name); return false; }
-                cstack.pop_back();
-                break;
             case OpCode::DUP:
-                if (cstack.empty()) { failedCompilations_.insert(func.name); return false; }
-                cstack.push_back(cstack.back());
                 break;
+            case OpCode::MOV: {
+                uint8_t rd = code[ip++];
+                uint8_t rs = code[ip++];
+                auto* val = builder.CreateLoad(int64Ty, regAlloc[rs], "mov");
+                builder.CreateStore(val, regAlloc[rd]);
+                break;
+            }
 
-            // ---- arithmetic ----
-            case OpCode::ADD: {
-                if (cstack.size() < 2) { failedCompilations_.insert(func.name); return false; }
-                auto* b = cstack.back(); cstack.pop_back();
-                auto* a = cstack.back(); cstack.pop_back();
-                cstack.push_back(builder.CreateNSWAdd(a, b, "add"));
-                break;
+#define JIT_REG_BINOP(NAME, CREATE) \
+            case OpCode::NAME: { \
+                uint8_t rd = code[ip++], rs1 = code[ip++], rs2 = code[ip++]; \
+                auto* a = builder.CreateLoad(int64Ty, regAlloc[rs1], "a"); \
+                auto* b = builder.CreateLoad(int64Ty, regAlloc[rs2], "b"); \
+                builder.CreateStore(builder.CREATE(a, b, #NAME), regAlloc[rd]); \
+                break; \
             }
-            case OpCode::SUB: {
-                if (cstack.size() < 2) { failedCompilations_.insert(func.name); return false; }
-                auto* b = cstack.back(); cstack.pop_back();
-                auto* a = cstack.back(); cstack.pop_back();
-                cstack.push_back(builder.CreateNSWSub(a, b, "sub"));
-                break;
-            }
-            case OpCode::MUL: {
-                if (cstack.size() < 2) { failedCompilations_.insert(func.name); return false; }
-                auto* b = cstack.back(); cstack.pop_back();
-                auto* a = cstack.back(); cstack.pop_back();
-                cstack.push_back(builder.CreateNSWMul(a, b, "mul"));
-                break;
-            }
+            JIT_REG_BINOP(ADD, CreateNSWAdd)
+            JIT_REG_BINOP(SUB, CreateNSWSub)
+            JIT_REG_BINOP(MUL, CreateNSWMul)
+#undef JIT_REG_BINOP
+
             case OpCode::DIV: {
-                if (cstack.size() < 2) { failedCompilations_.insert(func.name); return false; }
-                auto* b = cstack.back(); cstack.pop_back();
-                auto* a = cstack.back(); cstack.pop_back();
+                uint8_t rd = code[ip++], rs1 = code[ip++], rs2 = code[ip++];
+                auto* a = builder.CreateLoad(int64Ty, regAlloc[rs1], "a");
+                auto* b = builder.CreateLoad(int64Ty, regAlloc[rs2], "b");
                 auto* isZero = builder.CreateICmpEQ(
                     b, llvm::ConstantInt::get(int64Ty, 0), "divzero");
                 auto* errBB = llvm::BasicBlock::Create(*ctx, "diverr", fn);
@@ -428,13 +439,13 @@ bool BytecodeJIT::compileInt(const BytecodeFunction& func) {
                 builder.CreateUnreachable();
                 builder.SetInsertPoint(okBB);
                 currentBB = okBB;
-                cstack.push_back(builder.CreateSDiv(a, b, "div"));
+                builder.CreateStore(builder.CreateSDiv(a, b, "div"), regAlloc[rd]);
                 break;
             }
             case OpCode::MOD: {
-                if (cstack.size() < 2) { failedCompilations_.insert(func.name); return false; }
-                auto* b = cstack.back(); cstack.pop_back();
-                auto* a = cstack.back(); cstack.pop_back();
+                uint8_t rd = code[ip++], rs1 = code[ip++], rs2 = code[ip++];
+                auto* a = builder.CreateLoad(int64Ty, regAlloc[rs1], "a");
+                auto* b = builder.CreateLoad(int64Ty, regAlloc[rs2], "b");
                 auto* isZero = builder.CreateICmpEQ(
                     b, llvm::ConstantInt::get(int64Ty, 0), "modzero");
                 auto* errBB = llvm::BasicBlock::Create(*ctx, "moderr", fn);
@@ -445,131 +456,106 @@ bool BytecodeJIT::compileInt(const BytecodeFunction& func) {
                 builder.CreateUnreachable();
                 builder.SetInsertPoint(okBB);
                 currentBB = okBB;
-                cstack.push_back(builder.CreateSRem(a, b, "mod"));
+                builder.CreateStore(builder.CreateSRem(a, b, "mod"), regAlloc[rd]);
                 break;
             }
             case OpCode::NEG: {
-                if (cstack.empty()) { failedCompilations_.insert(func.name); return false; }
-                auto* a = cstack.back(); cstack.pop_back();
-                cstack.push_back(builder.CreateNeg(a, "neg"));
+                uint8_t rd = code[ip++], rs = code[ip++];
+                auto* a = builder.CreateLoad(int64Ty, regAlloc[rs], "a");
+                builder.CreateStore(builder.CreateNeg(a, "neg"), regAlloc[rd]);
                 break;
             }
 
-            // ---- comparisons (result is 0 or 1 as i64) ----
-#define JIT_CMP(NAME, PRED) \
+#define JIT_CMP_REG(NAME, PRED) \
             case OpCode::NAME: { \
-                if (cstack.size() < 2) { failedCompilations_.insert(func.name); return false; } \
-                auto* b = cstack.back(); cstack.pop_back(); \
-                auto* a = cstack.back(); cstack.pop_back(); \
+                uint8_t rd = code[ip++], rs1 = code[ip++], rs2 = code[ip++]; \
+                auto* a = builder.CreateLoad(int64Ty, regAlloc[rs1], "a"); \
+                auto* b = builder.CreateLoad(int64Ty, regAlloc[rs2], "b"); \
                 auto* cmp = builder.CreateICmp(llvm::CmpInst::PRED, a, b, #NAME); \
-                cstack.push_back(builder.CreateZExt(cmp, int64Ty, #NAME "_i64")); \
+                builder.CreateStore(builder.CreateZExt(cmp, int64Ty, #NAME "_i64"), regAlloc[rd]); \
                 break; \
             }
-            JIT_CMP(EQ, ICMP_EQ)
-            JIT_CMP(NE, ICMP_NE)
-            JIT_CMP(LT, ICMP_SLT)
-            JIT_CMP(LE, ICMP_SLE)
-            JIT_CMP(GT, ICMP_SGT)
-            JIT_CMP(GE, ICMP_SGE)
-#undef JIT_CMP
+            JIT_CMP_REG(EQ, ICMP_EQ)
+            JIT_CMP_REG(NE, ICMP_NE)
+            JIT_CMP_REG(LT, ICMP_SLT)
+            JIT_CMP_REG(LE, ICMP_SLE)
+            JIT_CMP_REG(GT, ICMP_SGT)
+            JIT_CMP_REG(GE, ICMP_SGE)
+#undef JIT_CMP_REG
 
-            // ---- logical ----
             case OpCode::AND: {
-                if (cstack.size() < 2) { failedCompilations_.insert(func.name); return false; }
-                auto* b = cstack.back(); cstack.pop_back();
-                auto* a = cstack.back(); cstack.pop_back();
+                uint8_t rd = code[ip++], rs1 = code[ip++], rs2 = code[ip++];
+                auto* a = builder.CreateLoad(int64Ty, regAlloc[rs1], "a");
+                auto* b = builder.CreateLoad(int64Ty, regAlloc[rs2], "b");
                 auto* boolA = builder.CreateICmpNE(a, llvm::ConstantInt::get(int64Ty, 0));
                 auto* boolB = builder.CreateICmpNE(b, llvm::ConstantInt::get(int64Ty, 0));
                 auto* r = builder.CreateAnd(boolA, boolB, "and");
-                cstack.push_back(builder.CreateZExt(r, int64Ty, "and_i64"));
+                builder.CreateStore(builder.CreateZExt(r, int64Ty, "and_i64"), regAlloc[rd]);
                 break;
             }
             case OpCode::OR: {
-                if (cstack.size() < 2) { failedCompilations_.insert(func.name); return false; }
-                auto* b = cstack.back(); cstack.pop_back();
-                auto* a = cstack.back(); cstack.pop_back();
+                uint8_t rd = code[ip++], rs1 = code[ip++], rs2 = code[ip++];
+                auto* a = builder.CreateLoad(int64Ty, regAlloc[rs1], "a");
+                auto* b = builder.CreateLoad(int64Ty, regAlloc[rs2], "b");
                 auto* boolA = builder.CreateICmpNE(a, llvm::ConstantInt::get(int64Ty, 0));
                 auto* boolB = builder.CreateICmpNE(b, llvm::ConstantInt::get(int64Ty, 0));
                 auto* r = builder.CreateOr(boolA, boolB, "or");
-                cstack.push_back(builder.CreateZExt(r, int64Ty, "or_i64"));
+                builder.CreateStore(builder.CreateZExt(r, int64Ty, "or_i64"), regAlloc[rd]);
                 break;
             }
             case OpCode::NOT: {
-                if (cstack.empty()) { failedCompilations_.insert(func.name); return false; }
-                auto* a = cstack.back(); cstack.pop_back();
-                auto* r = builder.CreateICmpEQ(
-                    a, llvm::ConstantInt::get(int64Ty, 0), "not");
-                cstack.push_back(builder.CreateZExt(r, int64Ty, "not_i64"));
+                uint8_t rd = code[ip++], rs = code[ip++];
+                auto* a = builder.CreateLoad(int64Ty, regAlloc[rs], "a");
+                auto* r = builder.CreateICmpEQ(a, llvm::ConstantInt::get(int64Ty, 0), "not");
+                builder.CreateStore(builder.CreateZExt(r, int64Ty, "not_i64"), regAlloc[rd]);
                 break;
             }
 
-            // ---- bitwise ----
-            case OpCode::BIT_AND: {
-                if (cstack.size() < 2) { failedCompilations_.insert(func.name); return false; }
-                auto* b = cstack.back(); cstack.pop_back();
-                auto* a = cstack.back(); cstack.pop_back();
-                cstack.push_back(builder.CreateAnd(a, b, "band"));
-                break;
+#define JIT_BIT_REG(NAME, CREATE) \
+            case OpCode::NAME: { \
+                uint8_t rd = code[ip++], rs1 = code[ip++], rs2 = code[ip++]; \
+                auto* a = builder.CreateLoad(int64Ty, regAlloc[rs1], "a"); \
+                auto* b = builder.CreateLoad(int64Ty, regAlloc[rs2], "b"); \
+                builder.CreateStore(builder.CREATE(a, b, #NAME), regAlloc[rd]); \
+                break; \
             }
-            case OpCode::BIT_OR: {
-                if (cstack.size() < 2) { failedCompilations_.insert(func.name); return false; }
-                auto* b = cstack.back(); cstack.pop_back();
-                auto* a = cstack.back(); cstack.pop_back();
-                cstack.push_back(builder.CreateOr(a, b, "bor"));
-                break;
-            }
-            case OpCode::BIT_XOR: {
-                if (cstack.size() < 2) { failedCompilations_.insert(func.name); return false; }
-                auto* b = cstack.back(); cstack.pop_back();
-                auto* a = cstack.back(); cstack.pop_back();
-                cstack.push_back(builder.CreateXor(a, b, "bxor"));
-                break;
-            }
+            JIT_BIT_REG(BIT_AND, CreateAnd)
+            JIT_BIT_REG(BIT_OR, CreateOr)
+            JIT_BIT_REG(BIT_XOR, CreateXor)
+            JIT_BIT_REG(SHL, CreateShl)
+            JIT_BIT_REG(SHR, CreateAShr)
+#undef JIT_BIT_REG
+
             case OpCode::BIT_NOT: {
-                if (cstack.empty()) { failedCompilations_.insert(func.name); return false; }
-                auto* a = cstack.back(); cstack.pop_back();
-                cstack.push_back(builder.CreateNot(a, "bnot"));
-                break;
-            }
-            case OpCode::SHL: {
-                if (cstack.size() < 2) { failedCompilations_.insert(func.name); return false; }
-                auto* b = cstack.back(); cstack.pop_back();
-                auto* a = cstack.back(); cstack.pop_back();
-                cstack.push_back(builder.CreateShl(a, b, "shl"));
-                break;
-            }
-            case OpCode::SHR: {
-                if (cstack.size() < 2) { failedCompilations_.insert(func.name); return false; }
-                auto* b = cstack.back(); cstack.pop_back();
-                auto* a = cstack.back(); cstack.pop_back();
-                cstack.push_back(builder.CreateAShr(a, b, "shr"));
+                uint8_t rd = code[ip++], rs = code[ip++];
+                auto* a = builder.CreateLoad(int64Ty, regAlloc[rs], "a");
+                builder.CreateStore(builder.CreateNot(a, "bnot"), regAlloc[rd]);
                 break;
             }
 
-            // ---- locals ----
             case OpCode::LOAD_LOCAL: {
+                uint8_t rd = code[ip++];
                 uint8_t idx = code[ip++];
                 if (idx >= numLocals) { failedCompilations_.insert(func.name); return false; }
-                cstack.push_back(builder.CreateLoad(
-                    int64Ty, locals[idx], "ld_" + std::to_string(idx)));
+                auto* val = builder.CreateLoad(int64Ty, locals[idx], "ld_" + std::to_string(idx));
+                builder.CreateStore(val, regAlloc[rd]);
                 break;
             }
             case OpCode::STORE_LOCAL: {
                 uint8_t idx = code[ip++];
-                if (idx >= numLocals || cstack.empty()) {
+                uint8_t rs = code[ip++];
+                if (idx >= numLocals) {
                     failedCompilations_.insert(func.name);
                     return false;
                 }
-                // STORE_LOCAL peeks (does not pop) in the interpreter.
-                builder.CreateStore(cstack.back(), locals[idx]);
+                auto* val = builder.CreateLoad(int64Ty, regAlloc[rs], "st_val");
+                builder.CreateStore(val, locals[idx]);
                 break;
             }
 
-            // ---- control flow ----
             case OpCode::JUMP: {
                 uint16_t target = peekShort(code, ip);
                 ip += 2;
-                if (!cstack.empty()) { failedCompilations_.insert(func.name); return false; }
                 auto it = blocks.find(target);
                 if (it == blocks.end()) { failedCompilations_.insert(func.name); return false; }
                 builder.CreateBr(it->second);
@@ -577,11 +563,10 @@ bool BytecodeJIT::compileInt(const BytecodeFunction& func) {
                 break;
             }
             case OpCode::JUMP_IF_FALSE: {
+                uint8_t rs = code[ip++];
                 uint16_t target = peekShort(code, ip);
                 ip += 2;
-                if (cstack.empty()) { failedCompilations_.insert(func.name); return false; }
-                auto* cond = cstack.back(); cstack.pop_back();
-                if (!cstack.empty()) { failedCompilations_.insert(func.name); return false; }
+                auto* cond = builder.CreateLoad(int64Ty, regAlloc[rs], "cond_val");
                 auto* condBool = builder.CreateICmpNE(
                     cond, llvm::ConstantInt::get(int64Ty, 0), "cond");
                 auto targetIt = blocks.find(target);
@@ -593,13 +578,8 @@ bool BytecodeJIT::compileInt(const BytecodeFunction& func) {
                 break;
             }
             case OpCode::RETURN: {
-                llvm::Value* retVal;
-                if (cstack.empty()) {
-                    retVal = llvm::ConstantInt::get(int64Ty, 0);
-                } else {
-                    retVal = cstack.back();
-                    cstack.pop_back();
-                }
+                uint8_t rs = code[ip++];
+                auto* retVal = builder.CreateLoad(int64Ty, regAlloc[rs], "ret_val");
                 builder.CreateRet(retVal);
                 terminated = true;
                 break;
@@ -610,17 +590,12 @@ bool BytecodeJIT::compileInt(const BytecodeFunction& func) {
             }
         }
 
-        // If the block fell through without a terminator, branch to the next.
         if (!terminated && currentBB->getTerminator() == nullptr) {
             auto nextBBIt = blocks.find(blockEnd);
             if (nextBBIt != blocks.end()) {
-                if (!cstack.empty()) { failedCompilations_.insert(func.name); return false; }
                 builder.CreateBr(nextBBIt->second);
             } else {
-                llvm::Value* rv = cstack.empty()
-                    ? llvm::ConstantInt::get(int64Ty, 0)
-                    : cstack.back();
-                builder.CreateRet(rv);
+                builder.CreateRet(llvm::ConstantInt::get(int64Ty, 0));
             }
         }
     }
@@ -714,18 +689,29 @@ bool BytecodeJIT::compileFloat(const BytecodeFunction& func) {
         switch (op) {
         case OpCode::PUSH_INT:
         case OpCode::PUSH_FLOAT:
-            ip += 8;
+            ip += 1 + 8;  // rd + value
             break;
         case OpCode::POP:
+        case OpCode::DUP:
+            break;
         case OpCode::ADD: case OpCode::SUB: case OpCode::MUL:
-        case OpCode::DIV: case OpCode::MOD: case OpCode::NEG:
+        case OpCode::DIV: case OpCode::MOD:
         case OpCode::EQ: case OpCode::NE: case OpCode::LT:
         case OpCode::LE: case OpCode::GT: case OpCode::GE:
-        case OpCode::NOT: case OpCode::DUP:
+            ip += 3;  // rd, rs1, rs2
             break;
-        case OpCode::LOAD_LOCAL:
+        case OpCode::NEG: case OpCode::NOT: case OpCode::MOV:
+            ip += 2;  // rd, rs
+            break;
+        case OpCode::LOAD_LOCAL: {
+            ip++;  // rd
+            uint8_t idx = code[ip]; ip++;
+            if (idx > maxLocalIdx) maxLocalIdx = idx;
+            break;
+        }
         case OpCode::STORE_LOCAL: {
             uint8_t idx = code[ip]; ip++;
+            ip++;  // rs
             if (idx > maxLocalIdx) maxLocalIdx = idx;
             break;
         }
@@ -736,16 +722,16 @@ bool BytecodeJIT::compileFloat(const BytecodeFunction& func) {
             break;
         }
         case OpCode::JUMP_IF_FALSE: {
+            ip++;  // rs
             uint16_t target = peekShort(code, ip); ip += 2;
             blockStarts.insert(target);
             blockStarts.insert(ip);
             break;
         }
         case OpCode::RETURN:
+            ip++;  // rs
             blockStarts.insert(ip);
             break;
-        // Float JIT does not support strings, globals, CALL, PRINT,
-        // or bitwise ops (which only make sense for integers).
         default:
             failedCompilations_.insert(func.name);
             return false;
@@ -816,6 +802,18 @@ bool BytecodeJIT::compileFloat(const BytecodeFunction& func) {
     // ------------------------------------------------------------------
     // Phase 3: Translate each basic block (double-typed arithmetic)
     // ------------------------------------------------------------------
+    // Allocate alloca-based register storage for float JIT
+    static constexpr size_t kJITMaxRegsF = 256;
+    std::vector<llvm::AllocaInst*> regAlloc(kJITMaxRegsF);
+    {
+        llvm::IRBuilder<> allocBuilder(entryBB, entryBB->begin());
+        for (size_t i = 0; i < kJITMaxRegsF; i++) {
+            regAlloc[i] = allocBuilder.CreateAlloca(
+                doubleTy, nullptr, "fr" + std::to_string(i));
+            allocBuilder.CreateStore(llvm::ConstantFP::get(doubleTy, 0.0), regAlloc[i]);
+        }
+    }
+
     for (auto blockIt = blocks.begin(); blockIt != blocks.end(); ++blockIt) {
         size_t blockStart = blockIt->first;
         llvm::BasicBlock* bb = blockIt->second;
@@ -826,7 +824,6 @@ bool BytecodeJIT::compileFloat(const BytecodeFunction& func) {
 
         builder.SetInsertPoint(bb);
         llvm::BasicBlock* currentBB = bb;
-        std::vector<llvm::Value*> cstack;
 
         ip = blockStart;
         bool terminated = false;
@@ -836,52 +833,44 @@ bool BytecodeJIT::compileFloat(const BytecodeFunction& func) {
 
             switch (op) {
             case OpCode::PUSH_INT: {
-                // Promote integer constants to double in float specialization.
+                uint8_t rd = code[ip++];
                 int64_t val = peekInt(code, ip); ip += 8;
-                cstack.push_back(llvm::ConstantFP::get(doubleTy, static_cast<double>(val)));
+                builder.CreateStore(llvm::ConstantFP::get(doubleTy, static_cast<double>(val)), regAlloc[rd]);
                 break;
             }
             case OpCode::PUSH_FLOAT: {
-                double val = peekFloat(code, ip);
-                ip += 8;
-                cstack.push_back(llvm::ConstantFP::get(doubleTy, val));
+                uint8_t rd = code[ip++];
+                double val = peekFloat(code, ip); ip += 8;
+                builder.CreateStore(llvm::ConstantFP::get(doubleTy, val), regAlloc[rd]);
                 break;
             }
             case OpCode::POP:
-                if (cstack.empty()) { failedCompilations_.insert(func.name); return false; }
-                cstack.pop_back();
-                break;
             case OpCode::DUP:
-                if (cstack.empty()) { failedCompilations_.insert(func.name); return false; }
-                cstack.push_back(cstack.back());
                 break;
+            case OpCode::MOV: {
+                uint8_t rd = code[ip++], rs = code[ip++];
+                auto* val = builder.CreateLoad(doubleTy, regAlloc[rs], "fmov");
+                builder.CreateStore(val, regAlloc[rd]);
+                break;
+            }
 
-            // ---- float arithmetic ----
-            case OpCode::ADD: {
-                if (cstack.size() < 2) { failedCompilations_.insert(func.name); return false; }
-                auto* b = cstack.back(); cstack.pop_back();
-                auto* a = cstack.back(); cstack.pop_back();
-                cstack.push_back(builder.CreateFAdd(a, b, "fadd"));
-                break;
+#define FJIT_BINOP(NAME, CREATE) \
+            case OpCode::NAME: { \
+                uint8_t rd = code[ip++], rs1 = code[ip++], rs2 = code[ip++]; \
+                auto* a = builder.CreateLoad(doubleTy, regAlloc[rs1], "a"); \
+                auto* b = builder.CreateLoad(doubleTy, regAlloc[rs2], "b"); \
+                builder.CreateStore(builder.CREATE(a, b, "f" #NAME), regAlloc[rd]); \
+                break; \
             }
-            case OpCode::SUB: {
-                if (cstack.size() < 2) { failedCompilations_.insert(func.name); return false; }
-                auto* b = cstack.back(); cstack.pop_back();
-                auto* a = cstack.back(); cstack.pop_back();
-                cstack.push_back(builder.CreateFSub(a, b, "fsub"));
-                break;
-            }
-            case OpCode::MUL: {
-                if (cstack.size() < 2) { failedCompilations_.insert(func.name); return false; }
-                auto* b = cstack.back(); cstack.pop_back();
-                auto* a = cstack.back(); cstack.pop_back();
-                cstack.push_back(builder.CreateFMul(a, b, "fmul"));
-                break;
-            }
+            FJIT_BINOP(ADD, CreateFAdd)
+            FJIT_BINOP(SUB, CreateFSub)
+            FJIT_BINOP(MUL, CreateFMul)
+#undef FJIT_BINOP
+
             case OpCode::DIV: {
-                if (cstack.size() < 2) { failedCompilations_.insert(func.name); return false; }
-                auto* b = cstack.back(); cstack.pop_back();
-                auto* a = cstack.back(); cstack.pop_back();
+                uint8_t rd = code[ip++], rs1 = code[ip++], rs2 = code[ip++];
+                auto* a = builder.CreateLoad(doubleTy, regAlloc[rs1], "a");
+                auto* b = builder.CreateLoad(doubleTy, regAlloc[rs2], "b");
                 auto* isZero = builder.CreateFCmpOEQ(
                     b, llvm::ConstantFP::get(doubleTy, 0.0), "fdivzero");
                 auto* errBB = llvm::BasicBlock::Create(*ctx, "fdiverr", fn);
@@ -892,13 +881,13 @@ bool BytecodeJIT::compileFloat(const BytecodeFunction& func) {
                 builder.CreateUnreachable();
                 builder.SetInsertPoint(okBB);
                 currentBB = okBB;
-                cstack.push_back(builder.CreateFDiv(a, b, "fdiv"));
+                builder.CreateStore(builder.CreateFDiv(a, b, "fdiv"), regAlloc[rd]);
                 break;
             }
             case OpCode::MOD: {
-                if (cstack.size() < 2) { failedCompilations_.insert(func.name); return false; }
-                auto* b = cstack.back(); cstack.pop_back();
-                auto* a = cstack.back(); cstack.pop_back();
+                uint8_t rd = code[ip++], rs1 = code[ip++], rs2 = code[ip++];
+                auto* a = builder.CreateLoad(doubleTy, regAlloc[rs1], "a");
+                auto* b = builder.CreateLoad(doubleTy, regAlloc[rs2], "b");
                 auto* isZero = builder.CreateFCmpOEQ(
                     b, llvm::ConstantFP::get(doubleTy, 0.0), "fmodzero");
                 auto* errBB = llvm::BasicBlock::Create(*ctx, "fmoderr", fn);
@@ -909,64 +898,63 @@ bool BytecodeJIT::compileFloat(const BytecodeFunction& func) {
                 builder.CreateUnreachable();
                 builder.SetInsertPoint(okBB);
                 currentBB = okBB;
-                cstack.push_back(builder.CreateFRem(a, b, "fmod"));
+                builder.CreateStore(builder.CreateFRem(a, b, "fmod"), regAlloc[rd]);
                 break;
             }
             case OpCode::NEG: {
-                if (cstack.empty()) { failedCompilations_.insert(func.name); return false; }
-                auto* a = cstack.back(); cstack.pop_back();
-                cstack.push_back(builder.CreateFNeg(a, "fneg"));
+                uint8_t rd = code[ip++], rs = code[ip++];
+                auto* a = builder.CreateLoad(doubleTy, regAlloc[rs], "a");
+                builder.CreateStore(builder.CreateFNeg(a, "fneg"), regAlloc[rd]);
                 break;
             }
 
-            // ---- float comparisons (result is 0.0 or 1.0) ----
-#define FLOAT_CMP(NAME, PRED) \
+#define FJIT_CMP(NAME, PRED) \
             case OpCode::NAME: { \
-                if (cstack.size() < 2) { failedCompilations_.insert(func.name); return false; } \
-                auto* b = cstack.back(); cstack.pop_back(); \
-                auto* a = cstack.back(); cstack.pop_back(); \
+                uint8_t rd = code[ip++], rs1 = code[ip++], rs2 = code[ip++]; \
+                auto* a = builder.CreateLoad(doubleTy, regAlloc[rs1], "a"); \
+                auto* b = builder.CreateLoad(doubleTy, regAlloc[rs2], "b"); \
                 auto* cmp = builder.CreateFCmp(llvm::CmpInst::PRED, a, b, "f" #NAME); \
-                cstack.push_back(builder.CreateUIToFP(cmp, doubleTy, "f" #NAME "_d")); \
+                builder.CreateStore(builder.CreateUIToFP(cmp, doubleTy, "f" #NAME "_d"), regAlloc[rd]); \
                 break; \
             }
-            FLOAT_CMP(EQ, FCMP_OEQ)
-            FLOAT_CMP(NE, FCMP_ONE)
-            FLOAT_CMP(LT, FCMP_OLT)
-            FLOAT_CMP(LE, FCMP_OLE)
-            FLOAT_CMP(GT, FCMP_OGT)
-            FLOAT_CMP(GE, FCMP_OGE)
-#undef FLOAT_CMP
+            FJIT_CMP(EQ, FCMP_OEQ)
+            FJIT_CMP(NE, FCMP_ONE)
+            FJIT_CMP(LT, FCMP_OLT)
+            FJIT_CMP(LE, FCMP_OLE)
+            FJIT_CMP(GT, FCMP_OGT)
+            FJIT_CMP(GE, FCMP_OGE)
+#undef FJIT_CMP
 
             case OpCode::NOT: {
-                if (cstack.empty()) { failedCompilations_.insert(func.name); return false; }
-                auto* a = cstack.back(); cstack.pop_back();
+                uint8_t rd = code[ip++], rs = code[ip++];
+                auto* a = builder.CreateLoad(doubleTy, regAlloc[rs], "a");
                 auto* isZero = builder.CreateFCmpOEQ(
                     a, llvm::ConstantFP::get(doubleTy, 0.0), "fnot");
-                cstack.push_back(builder.CreateUIToFP(isZero, doubleTy, "fnot_d"));
+                builder.CreateStore(builder.CreateUIToFP(isZero, doubleTy, "fnot_d"), regAlloc[rd]);
                 break;
             }
 
-            // ---- locals ----
             case OpCode::LOAD_LOCAL: {
+                uint8_t rd = code[ip++];
                 uint8_t idx = code[ip++];
                 if (idx >= numLocals) { failedCompilations_.insert(func.name); return false; }
-                cstack.push_back(builder.CreateLoad(
-                    doubleTy, locals[idx], "fld_" + std::to_string(idx)));
+                auto* val = builder.CreateLoad(doubleTy, locals[idx], "fld_" + std::to_string(idx));
+                builder.CreateStore(val, regAlloc[rd]);
                 break;
             }
             case OpCode::STORE_LOCAL: {
                 uint8_t idx = code[ip++];
-                if (idx >= numLocals || cstack.empty()) {
+                uint8_t rs = code[ip++];
+                if (idx >= numLocals) {
                     failedCompilations_.insert(func.name); return false;
                 }
-                builder.CreateStore(cstack.back(), locals[idx]);
+                auto* val = builder.CreateLoad(doubleTy, regAlloc[rs], "fst_val");
+                builder.CreateStore(val, locals[idx]);
                 break;
             }
 
-            // ---- control flow ----
             case OpCode::JUMP: {
                 uint16_t target = peekShort(code, ip); ip += 2;
-                if (!cstack.empty()) { failedCompilations_.insert(func.name); return false; }
                 auto it = blocks.find(target);
                 if (it == blocks.end()) { failedCompilations_.insert(func.name); return false; }
                 builder.CreateBr(it->second);
@@ -974,11 +962,9 @@ bool BytecodeJIT::compileFloat(const BytecodeFunction& func) {
                 break;
             }
             case OpCode::JUMP_IF_FALSE: {
+                uint8_t rs = code[ip++];
                 uint16_t target = peekShort(code, ip); ip += 2;
-                if (cstack.empty()) { failedCompilations_.insert(func.name); return false; }
-                auto* cond = cstack.back(); cstack.pop_back();
-                if (!cstack.empty()) { failedCompilations_.insert(func.name); return false; }
-                // Compare double != 0.0 for truthiness
+                auto* cond = builder.CreateLoad(doubleTy, regAlloc[rs], "fcond_val");
                 auto* condBool = builder.CreateFCmpONE(
                     cond, llvm::ConstantFP::get(doubleTy, 0.0), "fcond");
                 auto targetIt = blocks.find(target);
@@ -990,13 +976,8 @@ bool BytecodeJIT::compileFloat(const BytecodeFunction& func) {
                 break;
             }
             case OpCode::RETURN: {
-                llvm::Value* retVal;
-                if (cstack.empty()) {
-                    retVal = llvm::ConstantFP::get(doubleTy, 0.0);
-                } else {
-                    retVal = cstack.back();
-                    cstack.pop_back();
-                }
+                uint8_t rs = code[ip++];
+                auto* retVal = builder.CreateLoad(doubleTy, regAlloc[rs], "fret_val");
                 builder.CreateRet(retVal);
                 terminated = true;
                 break;
@@ -1010,13 +991,9 @@ bool BytecodeJIT::compileFloat(const BytecodeFunction& func) {
         if (!terminated && currentBB->getTerminator() == nullptr) {
             auto nextBBIt = blocks.find(blockEnd);
             if (nextBBIt != blocks.end()) {
-                if (!cstack.empty()) { failedCompilations_.insert(func.name); return false; }
                 builder.CreateBr(nextBBIt->second);
             } else {
-                llvm::Value* rv = cstack.empty()
-                    ? llvm::ConstantFP::get(doubleTy, 0.0)
-                    : cstack.back();
-                builder.CreateRet(rv);
+                builder.CreateRet(llvm::ConstantFP::get(doubleTy, 0.0));
             }
         }
     }

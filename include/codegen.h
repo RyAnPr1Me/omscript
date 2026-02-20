@@ -111,6 +111,18 @@ private:
     std::unordered_map<std::string, uint8_t> bytecodeLocals_;
     uint8_t bytecodeNextLocal_ = 0;
 
+    /// Register allocator state for register-based bytecode.
+    uint8_t bytecodeNextReg_ = 0;
+    uint8_t bytecodeLocalBase_ = 0;
+
+    uint8_t allocReg() {
+        if (bytecodeNextReg_ >= 256)
+            throw std::runtime_error("Register file overflow (max 256 registers)");
+        return bytecodeNextReg_++;
+    }
+
+    void resetTempRegs() { bytecodeNextReg_ = bytecodeLocalBase_; }
+
     /// Return true when bytecode is being emitted for a function body
     /// (as opposed to top-level / main code).
     bool isInBytecodeFunctionContext() const {
@@ -175,11 +187,11 @@ private:
     void runOptimizationPasses();
     void optimizeOptMaxFunctions();
     
-    void emitBytecodeExpression(Expression* expr);
+    uint8_t emitBytecodeExpression(Expression* expr);
     void emitBytecodeStatement(Statement* stmt);
     void emitBytecodeBlock(BlockStmt* stmt);
-    void emitBytecodeLoad(const std::string& name);
-    void emitBytecodeStore(const std::string& name);
+    uint8_t emitBytecodeLoad(const std::string& name);
+    void emitBytecodeStore(const std::string& name, uint8_t rs);
     
 public:
     // Per-function optimization for targeted optimization of individual functions

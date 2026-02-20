@@ -160,17 +160,22 @@ TEST(BytecodeTest, PatchJumpOutOfBounds) {
 TEST(BytecodeTest, FullPushIntSequence) {
     BytecodeEmitter emitter;
     emitter.emit(OpCode::PUSH_INT);
+    emitter.emitReg(0);  // rd
     emitter.emitInt(42);
     emitter.emit(OpCode::PUSH_INT);
+    emitter.emitReg(1);  // rd
     emitter.emitInt(10);
     emitter.emit(OpCode::ADD);
+    emitter.emitReg(2);  // rd
+    emitter.emitReg(0);  // rs1
+    emitter.emitReg(1);  // rs2
 
     auto& code = emitter.getCode();
-    // 1 + 8 + 1 + 8 + 1 = 19
-    EXPECT_EQ(code.size(), 19u);
+    // (1+1+8) + (1+1+8) + (1+3) = 10 + 10 + 4 = 24
+    EXPECT_EQ(code.size(), 24u);
     EXPECT_EQ(static_cast<OpCode>(code[0]), OpCode::PUSH_INT);
-    EXPECT_EQ(static_cast<OpCode>(code[9]), OpCode::PUSH_INT);
-    EXPECT_EQ(static_cast<OpCode>(code[18]), OpCode::ADD);
+    EXPECT_EQ(static_cast<OpCode>(code[10]), OpCode::PUSH_INT);
+    EXPECT_EQ(static_cast<OpCode>(code[20]), OpCode::ADD);
 }
 
 // ===========================================================================
@@ -206,7 +211,8 @@ TEST(BytecodeTest, AllOpCodes) {
     emitter.emit(OpCode::CALL);
     emitter.emit(OpCode::RETURN);
     emitter.emit(OpCode::HALT);
-    EXPECT_EQ(emitter.currentOffset(), 26u);
+    emitter.emit(OpCode::MOV);
+    EXPECT_EQ(emitter.currentOffset(), 27u);
 }
 
 TEST(BytecodeTest, EmitIntZero) {
