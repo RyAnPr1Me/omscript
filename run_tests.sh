@@ -149,7 +149,16 @@ if [ ! -f emit_ir_flag.ll ] || ! grep -q "i64 @main" emit_ir_flag.ll; then
     FAILURES=$((FAILURES + 1))
 fi
 rm -f emit_ir_flag.ll
+test_cli_output "unknown-command" "Error: unknown command" 1 ./build/omsc frob
+test_cli_output "unknown-option" "Error: unknown option '--bad-flag'" 1 ./build/omsc run examples/exit_zero.om --bad-flag
+test_cli_output "output-unsupported-for-lex" "Error: -o/--output is only supported for compile/run/emit-ir commands" 1 ./build/omsc lex examples/test.om -o /tmp/lex_out
 test_cli_output "output-empty" "Error: -o/--output requires a valid output file name" 1 ./build/omsc run examples/exit_zero.om -o ""
+test_cli_output "output-missing-arg" "Error: -o/--output requires an argument" 1 ./build/omsc run examples/exit_zero.om -o
+test_cli_output "output-multiple" "Error: output file specified multiple times" 1 ./build/omsc examples/exit_zero.om -o /tmp/out_a -o /tmp/out_b
+test_cli_output "keep-temps-non-run" "Error: -k/--keep-temps is only supported for run commands" 1 ./build/omsc examples/exit_zero.om -k
+test_cli_output "clean-input-rejected" "Error: clean does not accept input files" 1 ./build/omsc clean examples/test.om
+test_cli_output "multiple-inputs" "Error: multiple input files specified" 1 ./build/omsc examples/test.om examples/factorial.om
+test_cli_output "run-missing-input" "Error: no input file specified" 1 ./build/omsc run
 test_cli_output "build-flag" "Compilation successful!" 0 ./build/omsc --build examples/exit_zero.om -o build_flag_test
 TOTAL=$((TOTAL + 1))
 if [ ! -f build_flag_test ]; then
