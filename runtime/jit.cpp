@@ -32,11 +32,13 @@ TypeProfile BytecodeJIT::emptyProfile_;
 // ---------------------------------------------------------------------------
 
 static uint16_t peekShort(const std::vector<uint8_t>& code, size_t offset) {
+    if (offset + 2 > code.size()) return 0;
     return static_cast<uint16_t>(code[offset]) |
            (static_cast<uint16_t>(code[offset + 1]) << 8);
 }
 
 static int64_t peekInt(const std::vector<uint8_t>& code, size_t offset) {
+    if (offset + 8 > code.size()) return 0;
     uint64_t raw = 0;
     for (int i = 0; i < 8; i++) {
         raw |= static_cast<uint64_t>(code[offset + i]) << (i * 8);
@@ -47,6 +49,7 @@ static int64_t peekInt(const std::vector<uint8_t>& code, size_t offset) {
 }
 
 static double peekFloat(const std::vector<uint8_t>& code, size_t offset) {
+    if (offset + 8 > code.size()) return 0.0;
     uint64_t raw = 0;
     for (int i = 0; i < 8; i++) {
         raw |= static_cast<uint64_t>(code[offset + i]) << (i * 8);
@@ -636,6 +639,9 @@ bool BytecodeJIT::compileInt(const BytecodeFunction& func) {
     std::string errStr;
     llvm::raw_string_ostream errStream(errStr);
     if (llvm::verifyFunction(*fn, &errStream)) {
+        errStream.flush();
+        llvm::errs() << "JIT int verification failed for " << func.name
+                     << ": " << errStr << "\n";
         failedCompilations_.insert(func.name);
         return false;
     }
@@ -1029,6 +1035,9 @@ bool BytecodeJIT::compileFloat(const BytecodeFunction& func) {
     std::string errStr;
     llvm::raw_string_ostream errStream(errStr);
     if (llvm::verifyFunction(*fn, &errStream)) {
+        errStream.flush();
+        llvm::errs() << "JIT float verification failed for " << func.name
+                     << ": " << errStr << "\n";
         failedCompilations_.insert(func.name);
         return false;
     }

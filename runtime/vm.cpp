@@ -127,6 +127,7 @@ bool VM::isJITCompiled(const std::string& name) const {
 }
 
 bool VM::invokeJIT(JITFnPtr fn, uint8_t argCount) {
+    if (stack.size() < argCount) return false;
     // Verify all args are integers (int-specialized JIT).
     for (size_t i = 0; i < argCount; i++) {
         if (stack[stack.size() - 1 - i].getType() != Value::Type::INTEGER)
@@ -148,6 +149,7 @@ bool VM::invokeJIT(JITFnPtr fn, uint8_t argCount) {
 }
 
 bool VM::invokeJITFloat(JITFloatFnPtr fn, uint8_t argCount) {
+    if (stack.size() < argCount) return false;
     // Verify all args are float (float-specialized JIT).
     for (size_t i = 0; i < argCount; i++) {
         if (stack[stack.size() - 1 - i].getType() != Value::Type::FLOAT)
@@ -170,6 +172,11 @@ bool VM::invokeJITFloat(JITFloatFnPtr fn, uint8_t argCount) {
 void VM::classifyArgTypes(uint8_t argCount, bool& allInt, bool& allFloat) const {
     allInt = true;
     allFloat = true;
+    if (stack.size() < argCount) {
+        allInt = false;
+        allFloat = false;
+        return;
+    }
     for (size_t i = 0; i < argCount; i++) {
         auto t = stack[stack.size() - 1 - i].getType();
         if (t != Value::Type::INTEGER) allInt = false;
@@ -565,6 +572,10 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
     op_STORE_LOCAL: {
         uint8_t index = readByte(bytecode, ip);
         if (index >= locals.size()) {
+            if (static_cast<size_t>(index) + 1 > kMaxLocals) {
+                throw std::runtime_error("Local variable index exceeds maximum (" +
+                    std::to_string(kMaxLocals) + ")");
+            }
             locals.resize(static_cast<size_t>(index) + 1);
         }
         locals[index] = peek(0);
@@ -572,7 +583,7 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
     }
     op_JUMP: {
         uint16_t offset = readShort(bytecode, ip);
-        if (offset > bytecode.size()) {
+        if (offset >= bytecode.size()) {
             throw std::runtime_error("Jump offset out of bounds at ip " + std::to_string(ip - 2));
         }
         ip = offset;
@@ -585,7 +596,7 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
             bool isZero = stack.back().unsafeAsInt() == 0;
             stack.pop_back();
             if (isZero) {
-                if (offset > bytecode.size()) {
+                if (offset >= bytecode.size()) {
                     throw std::runtime_error("Jump offset out of bounds at ip " + std::to_string(ip - 2));
                 }
                 ip = offset;
@@ -594,7 +605,7 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
         }
         Value condition = pop();
         if (!condition.isTruthy()) {
-            if (offset > bytecode.size()) {
+            if (offset >= bytecode.size()) {
                 throw std::runtime_error("Jump offset out of bounds at ip " + std::to_string(ip - 2));
             }
             ip = offset;
@@ -938,6 +949,10 @@ vm_exit:
             case OpCode::STORE_LOCAL: {
                 uint8_t index = readByte(bytecode, ip);
                 if (index >= locals.size()) {
+                    if (static_cast<size_t>(index) + 1 > kMaxLocals) {
+                        throw std::runtime_error("Local variable index exceeds maximum (" +
+                            std::to_string(kMaxLocals) + ")");
+                    }
                     locals.resize(static_cast<size_t>(index) + 1);
                 }
                 locals[index] = peek(0);
@@ -947,7 +962,7 @@ vm_exit:
             case OpCode::JUMP: {
                 // Jump offsets are absolute bytecode positions.
                 uint16_t offset = readShort(bytecode, ip);
-                if (offset > bytecode.size()) {
+                if (offset >= bytecode.size()) {
                     throw std::runtime_error("Jump offset out of bounds at ip " + std::to_string(ip - 2));
                 }
                 ip = offset;
@@ -962,7 +977,7 @@ vm_exit:
                     bool isZero = stack.back().unsafeAsInt() == 0;
                     stack.pop_back();
                     if (isZero) {
-                        if (offset > bytecode.size()) {
+                        if (offset >= bytecode.size()) {
                             throw std::runtime_error("Jump offset out of bounds at ip " + std::to_string(ip - 2));
                         }
                         ip = offset;
@@ -971,7 +986,7 @@ vm_exit:
                 }
                 Value condition = pop();
                 if (!condition.isTruthy()) {
-                    if (offset > bytecode.size()) {
+                    if (offset >= bytecode.size()) {
                         throw std::runtime_error("Jump offset out of bounds at ip " + std::to_string(ip - 2));
                     }
                     ip = offset;

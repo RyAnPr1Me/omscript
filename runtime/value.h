@@ -58,6 +58,9 @@ public:
                 break;
             case Type::STRING:
                 new (&stringValue) RefCountedString(std::move(other.stringValue));
+                other.stringValue.~RefCountedString();
+                other.type = Type::NONE;
+                other.intValue = 0;
                 break;
             case Type::NONE:
                 intValue = 0;
@@ -113,6 +116,9 @@ public:
                     break;
                 case Type::STRING:
                     new (&stringValue) RefCountedString(std::move(other.stringValue));
+                    other.stringValue.~RefCountedString();
+                    other.type = Type::NONE;
+                    other.intValue = 0;
                     break;
                 case Type::NONE:
                     intValue = 0;

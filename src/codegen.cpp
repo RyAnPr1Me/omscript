@@ -2943,6 +2943,9 @@ void CodeGenerator::emitBytecodeStatement(Statement* stmt) {
             // If we're inside a function (bytecodeLocals_ is active),
             // allocate a new local index for this variable declaration.
             if (isInBytecodeFunctionContext()) {
+                if (bytecodeNextLocal_ == 255) {
+                    throw std::runtime_error("Too many local variables in function (max 255)");
+                }
                 uint8_t idx = bytecodeNextLocal_++;
                 bytecodeLocals_[varDecl->name] = idx;
             }

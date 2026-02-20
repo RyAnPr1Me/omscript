@@ -35,6 +35,8 @@ public:
     static constexpr size_t kMaxStackSize = 65536;
     // Maximum call depth to prevent runaway recursion.
     static constexpr size_t kMaxCallDepth = 1024;
+    // Maximum number of local variables per function scope.
+    static constexpr size_t kMaxLocals = 256;
 
     VM();
     ~VM();  // defined in vm.cpp for proper BytecodeJIT cleanup
