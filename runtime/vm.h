@@ -70,11 +70,12 @@ private:
     Value pop();
     const Value& peek(int offset = 0) const;
     
-    void ensureReadable(const std::vector<uint8_t>& code, size_t ip, size_t count);
-    uint8_t readByte(const std::vector<uint8_t>& code, size_t& ip);
-    uint16_t readShort(const std::vector<uint8_t>& code, size_t& ip);
-    int64_t readInt(const std::vector<uint8_t>& code, size_t& ip);
-    double readFloat(const std::vector<uint8_t>& code, size_t& ip);
+    // Hot-path bytecode readers — force-inlined into the dispatch loop.
+    inline void ensureReadable(const std::vector<uint8_t>& code, size_t ip, size_t count) __attribute__((always_inline));
+    inline uint8_t readByte(const std::vector<uint8_t>& code, size_t& ip) __attribute__((always_inline));
+    inline uint16_t readShort(const std::vector<uint8_t>& code, size_t& ip) __attribute__((always_inline));
+    inline int64_t readInt(const std::vector<uint8_t>& code, size_t& ip) __attribute__((always_inline));
+    inline double readFloat(const std::vector<uint8_t>& code, size_t& ip) __attribute__((always_inline));
     std::string readString(const std::vector<uint8_t>& code, size_t& ip);
 };
 

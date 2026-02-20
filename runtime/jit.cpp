@@ -6,10 +6,15 @@
 #include <llvm/ExecutionEngine/MCJIT.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/LLVMContext.h>
+#include <llvm/IR/LegacyPassManager.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Verifier.h>
 #include <llvm/Support/TargetSelect.h>
 #include <llvm/Support/raw_ostream.h>
+#include <llvm/Transforms/Scalar.h>
+#include <llvm/Transforms/Scalar/GVN.h>
+#include <llvm/Transforms/InstCombine/InstCombine.h>
+#include <llvm/Transforms/Utils.h>
 
 #include <algorithm>
 #include <cassert>
@@ -553,7 +558,7 @@ bool BytecodeJIT::compile(const BytecodeFunction& func) {
     }
 
     // ------------------------------------------------------------------
-    // Phase 4: Verify & JIT-compile
+    // Phase 4: Verify, optimize & JIT-compile
     // ------------------------------------------------------------------
     std::string errStr;
     llvm::raw_string_ostream errStream(errStr);
@@ -562,10 +567,26 @@ bool BytecodeJIT::compile(const BytecodeFunction& func) {
         return false;
     }
 
+    // Run lightweight optimization passes on the JIT module to reduce
+    // redundant loads/stores and simplify control flow before compiling
+    // to native code.
+    {
+        llvm::legacy::FunctionPassManager fpm(mod.get());
+        fpm.add(llvm::createPromoteMemoryToRegisterPass());
+        fpm.add(llvm::createInstructionCombiningPass());
+        fpm.add(llvm::createReassociatePass());
+        fpm.add(llvm::createGVNPass());
+        fpm.add(llvm::createCFGSimplificationPass());
+        fpm.doInitialization();
+        fpm.run(*fn);
+        fpm.doFinalization();
+    }
+
     std::string engineError;
     llvm::EngineBuilder engineBuilder(std::move(mod));
     engineBuilder.setErrorStr(&engineError);
     engineBuilder.setEngineKind(llvm::EngineKind::JIT);
+    engineBuilder.setOptLevel(llvm::CodeGenOptLevel::Aggressive);
     llvm::ExecutionEngine* engine = engineBuilder.create();
     if (!engine) {
         failedCompilations_.insert(func.name);

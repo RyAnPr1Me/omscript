@@ -217,6 +217,21 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
         } \
     } while (0)
 
+// Integer bitwise fast-path — same pattern for &, |, ^, <<, >>
+#define VM_INT_BITWISE_FAST(OP) \
+    do { \
+        size_t sz = stack.size(); \
+        if (sz >= 2 && \
+            stack[sz-1].getType() == Value::Type::INTEGER && \
+            stack[sz-2].getType() == Value::Type::INTEGER) { \
+            int64_t bv = stack[sz-1].unsafeAsInt(); \
+            int64_t av = stack[sz-2].unsafeAsInt(); \
+            stack.pop_back(); \
+            stack.back() = Value(av OP bv); \
+            DISPATCH(); \
+        } \
+    } while (0)
+
     DISPATCH();
 
     op_PUSH_INT: {
@@ -260,18 +275,53 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
         DISPATCH();
     }
     op_DIV: {
+        // Integer fast path with zero-check
+        {
+            size_t sz = stack.size();
+            if (sz >= 2 &&
+                stack[sz-1].getType() == Value::Type::INTEGER &&
+                stack[sz-2].getType() == Value::Type::INTEGER) {
+                int64_t bv = stack[sz-1].unsafeAsInt();
+                int64_t av = stack[sz-2].unsafeAsInt();
+                if (bv != 0) {
+                    stack.pop_back();
+                    stack.back() = Value(av / bv);
+                    DISPATCH();
+                }
+            }
+        }
         Value b = pop();
         Value a = pop();
         push(a / b);
         DISPATCH();
     }
     op_MOD: {
+        // Integer fast path with zero-check
+        {
+            size_t sz = stack.size();
+            if (sz >= 2 &&
+                stack[sz-1].getType() == Value::Type::INTEGER &&
+                stack[sz-2].getType() == Value::Type::INTEGER) {
+                int64_t bv = stack[sz-1].unsafeAsInt();
+                int64_t av = stack[sz-2].unsafeAsInt();
+                if (bv != 0) {
+                    stack.pop_back();
+                    stack.back() = Value(av % bv);
+                    DISPATCH();
+                }
+            }
+        }
         Value b = pop();
         Value a = pop();
         push(a % b);
         DISPATCH();
     }
     op_NEG: {
+        // Integer fast path for unary negation
+        if (!stack.empty() && stack.back().getType() == Value::Type::INTEGER) {
+            stack.back() = Value(-stack.back().unsafeAsInt());
+            DISPATCH();
+        }
         Value a = pop();
         push(-a);
         DISPATCH();
@@ -319,52 +369,121 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
         DISPATCH();
     }
     op_AND: {
+        // Integer fast path: both ints → result = (a!=0 && b!=0) as i64
+        {
+            size_t sz = stack.size();
+            if (sz >= 2 &&
+                stack[sz-1].getType() == Value::Type::INTEGER &&
+                stack[sz-2].getType() == Value::Type::INTEGER) {
+                int64_t bv = stack[sz-1].unsafeAsInt();
+                int64_t av = stack[sz-2].unsafeAsInt();
+                stack.pop_back();
+                stack.back() = Value(static_cast<int64_t>(av != 0 && bv != 0));
+                DISPATCH();
+            }
+        }
         Value b = pop();
         Value a = pop();
         push(Value(static_cast<int64_t>(a.isTruthy() && b.isTruthy())));
         DISPATCH();
     }
     op_OR: {
+        // Integer fast path
+        {
+            size_t sz = stack.size();
+            if (sz >= 2 &&
+                stack[sz-1].getType() == Value::Type::INTEGER &&
+                stack[sz-2].getType() == Value::Type::INTEGER) {
+                int64_t bv = stack[sz-1].unsafeAsInt();
+                int64_t av = stack[sz-2].unsafeAsInt();
+                stack.pop_back();
+                stack.back() = Value(static_cast<int64_t>(av != 0 || bv != 0));
+                DISPATCH();
+            }
+        }
         Value b = pop();
         Value a = pop();
         push(Value(static_cast<int64_t>(a.isTruthy() || b.isTruthy())));
         DISPATCH();
     }
     op_NOT: {
+        // Integer fast path
+        if (!stack.empty() && stack.back().getType() == Value::Type::INTEGER) {
+            stack.back() = Value(static_cast<int64_t>(stack.back().unsafeAsInt() == 0));
+            DISPATCH();
+        }
         Value a = pop();
         push(Value(static_cast<int64_t>(!a.isTruthy())));
         DISPATCH();
     }
     op_BIT_AND: {
+        VM_INT_BITWISE_FAST(&);
         Value b = pop();
         Value a = pop();
         push(a & b);
         DISPATCH();
     }
     op_BIT_OR: {
+        VM_INT_BITWISE_FAST(|);
         Value b = pop();
         Value a = pop();
         push(a | b);
         DISPATCH();
     }
     op_BIT_XOR: {
+        VM_INT_BITWISE_FAST(^);
         Value b = pop();
         Value a = pop();
         push(a ^ b);
         DISPATCH();
     }
     op_BIT_NOT: {
+        // Integer fast path for unary bitwise NOT
+        if (!stack.empty() && stack.back().getType() == Value::Type::INTEGER) {
+            stack.back() = Value(~stack.back().unsafeAsInt());
+            DISPATCH();
+        }
         Value a = pop();
         push(~a);
         DISPATCH();
     }
     op_SHL: {
+        // Integer fast path with shift range validation
+        {
+            size_t sz = stack.size();
+            if (sz >= 2 &&
+                stack[sz-1].getType() == Value::Type::INTEGER &&
+                stack[sz-2].getType() == Value::Type::INTEGER) {
+                int64_t bv = stack[sz-1].unsafeAsInt();
+                int64_t av = stack[sz-2].unsafeAsInt();
+                if (bv >= 0 && bv < 64) {
+                    stack.pop_back();
+                    stack.back() = Value(av << bv);
+                    DISPATCH();
+                }
+            }
+        }
         Value b = pop();
         Value a = pop();
         push(a << b);
         DISPATCH();
     }
     op_SHR: {
+        // Integer fast path with shift range validation
+        {
+            size_t sz = stack.size();
+            if (sz >= 2 &&
+                stack[sz-1].getType() == Value::Type::INTEGER &&
+                stack[sz-2].getType() == Value::Type::INTEGER) {
+                int64_t bv = stack[sz-1].unsafeAsInt();
+                int64_t av = stack[sz-2].unsafeAsInt();
+                if (bv >= 0 && bv < 64) {
+                    stack.pop_back();
+                    stack.back() = Value(av >> bv);
+                    DISPATCH();
+                }
+            }
+        }
         Value b = pop();
         Value a = pop();
         push(a >> b);
@@ -492,7 +611,7 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
         frame.function = &func;
         frame.returnIp = ip;
         frame.returnBytecode = &bytecode;
-        frame.savedLocals = locals;
+        frame.savedLocals = std::move(locals);
         callStack.push_back(std::move(frame));
 
         locals.clear();
@@ -526,6 +645,7 @@ vm_exit:
 #undef DISPATCH
 #undef VM_INT_ARITH_FAST
 #undef VM_INT_CMP_FAST
+#undef VM_INT_BITWISE_FAST
 #undef USE_COMPUTED_GOTO
 
 #else // Fallback: standard switch dispatch
@@ -838,7 +958,7 @@ vm_exit:
                 frame.function = &func;
                 frame.returnIp = ip;
                 frame.returnBytecode = &bytecode;
-                frame.savedLocals = locals;
+                frame.savedLocals = std::move(locals);
                 callStack.push_back(std::move(frame));
 
                 // Bind arguments as local variables.  Arguments are pushed

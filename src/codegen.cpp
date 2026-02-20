@@ -6,6 +6,8 @@
 #include <llvm/IR/LegacyPassManager.h>
 #include <llvm/Support/FileSystem.h>
 #include <llvm/TargetParser/Host.h>
+#include <llvm/TargetParser/SubtargetFeature.h>
+#include <llvm/ADT/StringMap.h>
 #include <llvm/Support/TargetSelect.h>
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/Support/CodeGen.h>
@@ -629,6 +631,15 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
 
     // Retrieve the forward-declared function
     llvm::Function* function = functions[func->name];
+
+    // Hint small helper functions for inlining at O2+.  OPTMAX functions
+    // already get aggressive optimization; non-main functions with few
+    // statements benefit from being inlined into their callers.
+    if (func->name != "main" &&
+        optimizationLevel >= OptimizationLevel::O2 &&
+        func->body && func->body->statements.size() <= 8) {
+        function->addFnAttr(llvm::Attribute::InlineHint);
+    }
     
     // Create entry basic block
     llvm::BasicBlock* entry = llvm::BasicBlock::Create(*context, "entry", function);
@@ -935,9 +946,9 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     
     // Regular code generation for non-constant expressions
     if (expr->op == "+") {
-        return builder->CreateAdd(left, right, "addtmp");
+        return builder->CreateNSWAdd(left, right, "addtmp");
     } else if (expr->op == "-") {
-        return builder->CreateSub(left, right, "subtmp");
+        return builder->CreateNSWSub(left, right, "subtmp");
     } else if (expr->op == "*") {
         // Strength reduction: multiply by power of 2 → left shift
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
@@ -960,7 +971,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                     llvm::ConstantInt::get(getDefaultType(), shift), "shltmp");
             }
         }
-        return builder->CreateMul(left, right, "multmp");
+        return builder->CreateNSWMul(left, right, "multmp");
     } else if (expr->op == "/" || expr->op == "%") {
         bool isDivision = expr->op == "/";
         // Strength reduction: signed division by power of 2 → arithmetic right shift.
@@ -2392,10 +2403,21 @@ void CodeGenerator::runOptimizationPasses() {
         llvm::TargetOptions opt;
         // Use PIC to support default PIE linking on modern toolchains.
         std::optional<llvm::Reloc::Model> RM = llvm::Reloc::PIC_;
+        // Use native CPU features (SSE, AVX, etc.) instead of "generic"
+        // for maximum codegen quality on the build host.
+        std::string cpu = llvm::sys::getHostCPUName().str();
+        llvm::SubtargetFeatures features;
+        llvm::StringMap<bool> hostFeatures;
+        if (llvm::sys::getHostCPUFeatures(hostFeatures)) {
+            for (auto& feature : hostFeatures) {
+                features.AddFeature(feature.first(), feature.second);
+            }
+        }
+        std::string featureStr = features.getString();
 #if LLVM_VERSION_MAJOR >= 19
-        targetMachine.reset(target->createTargetMachine(targetTriple, "generic", "", opt, RM));
+        targetMachine.reset(target->createTargetMachine(targetTriple, cpu, featureStr, opt, RM));
 #else
-        targetMachine.reset(target->createTargetMachine(targetTripleStr, "generic", "", opt, RM));
+        targetMachine.reset(target->createTargetMachine(targetTripleStr, cpu, featureStr, opt, RM));
 #endif
         if (targetMachine) {
             module->setDataLayout(targetMachine->createDataLayout());
@@ -2539,8 +2561,15 @@ void CodeGenerator::writeObjectFile(const std::string& filename) {
         throw std::runtime_error("Failed to lookup target: " + error);
     }
     
-    auto CPU = "generic";
-    auto features = "";
+    auto CPU = llvm::sys::getHostCPUName().str();
+    llvm::SubtargetFeatures featureSet;
+    llvm::StringMap<bool> hostFeatures;
+    if (llvm::sys::getHostCPUFeatures(hostFeatures)) {
+        for (auto& feature : hostFeatures) {
+            featureSet.AddFeature(feature.first(), feature.second);
+        }
+    }
+    auto features = featureSet.getString();
     
     llvm::TargetOptions opt;
     // Use PIC to support default PIE linking on modern toolchains.

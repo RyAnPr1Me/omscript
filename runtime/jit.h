@@ -41,7 +41,7 @@ public:
     using JITFnPtr = int64_t (*)(int64_t*, int);
 
     /// Number of interpreted calls before a function is JIT-compiled.
-    static constexpr size_t kJITThreshold = 10;
+    static constexpr size_t kJITThreshold = 5;
 
     /// After this many *additional* calls post-JIT, consider recompilation
     /// with updated type-specialization data.
