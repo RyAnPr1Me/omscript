@@ -126,6 +126,27 @@ bool VM::isJITCompiled(const std::string& name) const {
     return jit_ && jit_->isCompiled(name);
 }
 
+bool VM::invokeJIT(JITFnPtr fn, uint8_t argCount) {
+    // Verify all args are integers (JIT only handles integers).
+    for (size_t i = 0; i < argCount; i++) {
+        if (stack[stack.size() - 1 - i].getType() != Value::Type::INTEGER)
+            return false;
+    }
+    // Stack-based arg buffer — avoids heap allocation per call.
+    int64_t stackArgs[kMaxStackArgs];
+    std::unique_ptr<int64_t[]> heapArgs;
+    int64_t* args = stackArgs;
+    if (argCount > kMaxStackArgs) {
+        heapArgs = std::make_unique<int64_t[]>(argCount);
+        args = heapArgs.get();
+    }
+    for (size_t i = argCount; i > 0; i--)
+        args[i - 1] = pop().unsafeAsInt();
+    int64_t result = fn(args, static_cast<int>(argCount));
+    push(Value(result));
+    return true;
+}
+
 void VM::execute(const std::vector<uint8_t>& bytecode) {
     size_t ip = 0;
     stack.clear();
@@ -579,31 +600,12 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
         {
             auto cacheIt = jitCache_.find(funcName);
             if (cacheIt != jitCache_.end()) {
-                // Verify all args are integers (JIT only handles integers).
-                bool allInts = true;
-                for (size_t i = 0; i < argCount && allInts; i++) {
-                    if (stack[stack.size() - 1 - i].getType() != Value::Type::INTEGER)
-                        allInts = false;
-                }
-                if (allInts) {
-                    // Stack-based arg buffer — avoids heap allocation per call.
-                    static constexpr size_t kMaxStackArgs = 8;
-                    int64_t stackArgs[kMaxStackArgs];
-                    int64_t* args = (argCount <= kMaxStackArgs)
-                        ? stackArgs
-                        : new int64_t[argCount];
-                    for (size_t i = argCount; i > 0; i--)
-                        args[i - 1] = pop().unsafeAsInt();
-                    int64_t result = cacheIt->second(args, static_cast<int>(argCount));
-                    if (argCount > kMaxStackArgs) delete[] args;
-                    push(Value(result));
-
+                if (invokeJIT(cacheIt->second, argCount)) {
                     // Track post-JIT calls for type-specialized recompilation.
                     if (jit_ && jit_->recordPostJITCall(funcName)) {
                         auto fit = functions.find(funcName);
                         if (fit != functions.end()) {
                             jit_->recompile(fit->second);
-                            // Update cache with recompiled pointer.
                             jitCache_[funcName] = jit_->getCompiled(funcName);
                         }
                     }
@@ -955,23 +957,7 @@ vm_exit:
                 {
                     auto cacheIt = jitCache_.find(funcName);
                     if (cacheIt != jitCache_.end()) {
-                        bool allInts = true;
-                        for (size_t i = 0; i < argCount && allInts; i++) {
-                            if (stack[stack.size() - 1 - i].getType() != Value::Type::INTEGER)
-                                allInts = false;
-                        }
-                        if (allInts) {
-                            static constexpr size_t kMaxStackArgs = 8;
-                            int64_t stackArgs[kMaxStackArgs];
-                            int64_t* args = (argCount <= kMaxStackArgs)
-                                ? stackArgs
-                                : new int64_t[argCount];
-                            for (size_t i = argCount; i > 0; i--)
-                                args[i - 1] = pop().unsafeAsInt();
-                            int64_t result = cacheIt->second(args, static_cast<int>(argCount));
-                            if (argCount > kMaxStackArgs) delete[] args;
-                            push(Value(result));
-
+                        if (invokeJIT(cacheIt->second, argCount)) {
                             if (jit_ && jit_->recordPostJITCall(funcName)) {
                                 auto fit = functions.find(funcName);
                                 if (fit != functions.end()) {

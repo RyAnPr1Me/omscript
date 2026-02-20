@@ -1614,9 +1614,8 @@ TEST(VMTest, JITSkipsTinyFunctions) {
     BytecodeJIT jit;
     // Tiny functions (< kMinBytecodeSize opcodes) should fail to compile.
     bool compiled = jit.compile(tinyFunc);
-    // The exact threshold depends on kMinBytecodeSize; the function bytecode
-    // is 10 bytes (PUSH_INT + 8 bytes + RETURN) which should be >= 4.
-    // So this should actually compile. Let's test with truly tiny code.
+    // The function bytecode is 10 bytes (1 opcode + 8 data + 1 RETURN),
+    // which is >= kMinBytecodeSize (4), so it should compile successfully.
     if (tinyFunc.bytecode.size() >= BytecodeJIT::kMinBytecodeSize) {
         EXPECT_TRUE(compiled);
     } else {
