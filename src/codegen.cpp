@@ -2608,6 +2608,12 @@ void CodeGenerator::writeObjectFile(const std::string& filename) {
     
     pass.run(*module);
     dest.flush();
+    // Detect errors during close (e.g. I/O errors that occurred during write).
+    if (dest.has_error()) {
+        std::string errMsg = "Error writing object file: " + dest.error().message();
+        dest.clear_error();
+        throw std::runtime_error(errMsg);
+    }
 }
 
 void CodeGenerator::generateBytecode(Program* program) {

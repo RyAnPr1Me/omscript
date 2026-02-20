@@ -134,6 +134,9 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
         
         if (result != 0) {
             cleanupObject();
+            if (result < 0) {
+                throw std::runtime_error("Linker terminated by signal " + std::to_string(-result));
+            }
             throw std::runtime_error("Linking failed with exit code " + std::to_string(result));
         }
         
@@ -144,7 +147,7 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
         throw;
     }
     
-    std::cerr << "Compilation successful! Output: " << outputFile << std::endl;
+    std::cout << "Compilation successful! Output: " << outputFile << std::endl;
 }
 
 } // namespace omscript
