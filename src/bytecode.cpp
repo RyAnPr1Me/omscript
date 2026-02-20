@@ -49,7 +49,7 @@ size_t BytecodeEmitter::currentOffset() const {
 }
 
 void BytecodeEmitter::patchJump(size_t offset, uint16_t jump) {
-    if (offset + 1 >= code.size()) {
+    if (offset + 2 > code.size()) {
         throw std::runtime_error("Invalid jump patch offset");
     }
     code[offset] = static_cast<uint8_t>(jump & 0xFF);
