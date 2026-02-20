@@ -76,9 +76,18 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
     }
     CodeGenerator codegen(optLevel_);
     try {
-        codegen.generate(program.get());
+        // Use hybrid compilation to produce both LLVM IR (for AOT-tier
+        // functions) and bytecode (for Interpreted-tier functions).
+        // This enables compiled binaries to contain bytecode that the
+        // embedded JIT runtime can recompile with type specialization.
+        codegen.generateHybrid(program.get());
     } catch (const std::runtime_error& e) {
         throw std::runtime_error(sourceFile + ": " + e.what());
+    }
+
+    if (codegen.hasHybridBytecodeFunctions() && verbose_) {
+        std::cout << "  Hybrid mode: " << codegen.getBytecodeFunctions().size()
+                  << " function(s) compiled to bytecode for JIT recompilation" << std::endl;
     }
     
     // Print LLVM IR only in verbose mode
@@ -134,6 +143,9 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
         
         if (result != 0) {
             cleanupObject();
+            if (result < 0) {
+                throw std::runtime_error("Linker terminated by signal " + std::to_string(-result));
+            }
             throw std::runtime_error("Linking failed with exit code " + std::to_string(result));
         }
         
@@ -144,7 +156,7 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
         throw;
     }
     
-    std::cerr << "Compilation successful! Output: " << outputFile << std::endl;
+    std::cout << "Compilation successful! Output: " << outputFile << std::endl;
 }
 
 } // namespace omscript

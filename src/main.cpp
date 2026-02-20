@@ -3,7 +3,9 @@
 #include "lexer.h"
 #include "parser.h"
 #include <iostream>
+#include <csignal>
 #include <cstring>
+#include <unistd.h>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -15,7 +17,29 @@
 
 namespace {
 
-constexpr const char* kCompilerVersion = "OmScript Compiler v0.3.1";
+constexpr const char* kCompilerVersion = "OmScript Compiler v0.4.0";
+
+// Paths of temporary files to clean up on abnormal exit (signal).
+// These are set by the 'run' command before executing the compiled program.
+// Fixed-size C-style buffers for async-signal-safe access in signal handlers.
+static constexpr size_t kMaxTempPathLen = 4096;
+static char g_tempOutputFile[kMaxTempPathLen] = {};
+static char g_tempObjectFile[kMaxTempPathLen] = {};
+
+// Signal handler for SIGINT / SIGTERM — removes temporary files created
+// during `omsc run` and re-raises so the default handler sets the exit status.
+// Uses only async-signal-safe operations (unlink, _exit, signal, raise).
+void signalHandler(int sig) {
+    if (g_tempOutputFile[0] != '\0') {
+        unlink(g_tempOutputFile);
+    }
+    if (g_tempObjectFile[0] != '\0') {
+        unlink(g_tempObjectFile);
+    }
+    // Re-raise the signal with default action so the exit status reflects it.
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
 
 void printUsage(const char* progName) {
     std::cout << kCompilerVersion << "\n";
@@ -176,6 +200,10 @@ void printProgramSummary(const omscript::Program* program) {
 } // namespace
 
 int main(int argc, char* argv[]) {
+    // Install signal handlers for graceful cleanup of temporary files.
+    std::signal(SIGINT, signalHandler);
+    std::signal(SIGTERM, signalHandler);
+
     if (argc < 2) {
         printUsage(argv[0]);
         return 1;
@@ -404,6 +432,12 @@ int main(int argc, char* argv[]) {
         compiler.setOptimizationLevel(optLevel);
         compiler.compile(sourceFile, outputFile);
         if (command == Command::Run) {
+            // Register temp files for cleanup on signal (Ctrl+C during program run).
+            if (!outputSpecified && !keepTemps) {
+                std::string objPath = outputFile + ".o";
+                std::strncpy(g_tempOutputFile, outputFile.c_str(), kMaxTempPathLen - 1);
+                std::strncpy(g_tempObjectFile, objPath.c_str(), kMaxTempPathLen - 1);
+            }
             std::filesystem::path runPath = std::filesystem::absolute(outputFile);
             std::string runProgram = runPath.string();
             llvm::SmallVector<llvm::StringRef, 8> argRefs;
@@ -413,8 +447,14 @@ int main(int argc, char* argv[]) {
             }
             int result = llvm::sys::ExecuteAndWait(runProgram, argRefs);
             if (result < 0) {
-                std::cerr << "Error: failed to execute program\n";
-                return 1;
+                std::cerr << "Error: program terminated by signal " << (-result) << "\n";
+                // Clean up temp files even on signal failure.
+                if (!outputSpecified && !keepTemps) {
+                    std::error_code ec;
+                    std::filesystem::remove(outputFile, ec);
+                    std::filesystem::remove(outputFile + ".o", ec);
+                }
+                return 128 + (-result);  // Follow shell convention for signal exits
             }
             if (result != 0) {
                 std::cout << "Program exited with code " << result << "\n";

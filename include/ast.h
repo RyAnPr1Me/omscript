@@ -317,6 +317,15 @@ public:
     
     FunctionDecl(const std::string& n, std::vector<Parameter> params, std::unique_ptr<BlockStmt> b, bool optMax = false)
         : ASTNode(ASTNodeType::FUNCTION), name(n), parameters(std::move(params)), body(std::move(b)), isOptMax(optMax) {}
+
+    /// Returns true if every parameter has a type annotation.
+    bool hasFullTypeAnnotations() const {
+        if (parameters.empty()) return true;
+        for (const auto& p : parameters) {
+            if (p.typeName.empty()) return false;
+        }
+        return true;
+    }
 };
 
 class Program : public ASTNode {

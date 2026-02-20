@@ -13,9 +13,12 @@ OmScript features a **heavily optimized** compilation pipeline using LLVM's prod
 
 ### O1 - Basic Optimization
 - **Passes**:
+  - **mem2reg**: Promotes memory to registers (eliminates allocas)
   - Instruction Combining: Merges redundant instructions
   - Reassociation: Reorders expressions for better optimization
+  - **GVN**: Global Value Numbering (common subexpression elimination)
   - CFG Simplification: Removes unreachable blocks, simplifies control flow
+  - **DCE**: Dead Code Elimination (removes unused code)
 
 ### O2 - Moderate Optimization (Default)
 - **Pipeline**: LLVM new pass manager's standard O2 pipeline, which includes:
@@ -274,6 +277,156 @@ if (a && b) { }
 ### Induction Variable Simplification
 Loop counters are optimized to use the most efficient form.
 
+### Unary Constant Folding
+Unary operations on compile-time constants are evaluated during code generation:
+```omscript
+-5      →  constant -5 (no runtime negation)
+!0      →  constant 1
+~0xFF   →  constant ~0xFF
+```
+
+### Constant Condition Elimination
+When an `if` condition is a compile-time constant, only the live branch is generated:
+```omscript
+if (1) { x = 10; } else { x = 20; }
+// Generates only: x = 10
+```
+
+### IR-Level Strength Reduction
+Multiplication and division by powers of 2 are converted to shifts during IR generation, even at O0:
+```omscript
+n * 2   →  n << 1
+n * 8   →  n << 3
+n * 64  →  n << 6
+n / 4   →  n >> 2
+n / 16  →  n >> 4
+```
+
+### Constant Comparison Folding
+Comparisons between compile-time constant integers are evaluated at IR generation time:
+```omscript
+5 == 5  →  1  (no runtime comparison)
+3 > 7   →  0
+10 <= 10 → 1
+```
+
+### Bytecode Constant Folding
+When targeting the bytecode backend, constant expressions are evaluated at compile time.
+Instead of emitting `PUSH_INT, PUSH_INT, ADD`, the compiler emits a single `PUSH_INT` with the
+pre-computed result. This applies to all arithmetic, comparison, logical, and bitwise operations
+on integer literals, as well as unary operations (`-`, `!`, `~`).
+
+### Computed-Goto VM Dispatch
+On GCC/Clang, the bytecode VM uses a computed-goto dispatch table instead of a `switch`
+statement. This eliminates branch prediction overhead and indirect jump penalties, resulting
+in significantly faster opcode dispatch. A standard `switch` fallback is used on other
+compilers.
+
+### Integer Fast Paths
+When both operands on the VM stack are integers, arithmetic and comparison operations
+(ADD, SUB, MUL, EQ, NE, LT, LE, GT, GE) bypass the full `Value` operator dispatch.
+The fast path reads the raw `int64_t` values directly, avoiding type-checking overhead,
+temporary `Value` construction, and bounds-checked `pop()`/`push()` calls.
+
+### Bytecode JIT Compiler
+The VM includes a lightweight JIT compiler that automatically translates hot bytecode
+functions to native machine code via LLVM MCJIT:
+
+- **Hot function profiling**: each bytecode function's call count is tracked.  After
+  10 interpreted calls, the JIT attempts to compile the function.
+- **Bytecode → LLVM IR**: the JIT performs basic-block analysis, simulates the operand
+  stack at compile time, and emits SSA-form LLVM IR.  Local variables become `alloca`
+  instructions; stack operations become direct register operations.
+- **Supported opcodes**: `PUSH_INT`, arithmetic (`+`, `-`, `*`, `/`, `%`), comparisons,
+  logical/bitwise operations, `LOAD_LOCAL`/`STORE_LOCAL`, `JUMP`, `JUMP_IF_FALSE`, `RETURN`.
+- **Control flow**: if/else branches and while loops are handled via basic-block splitting
+  and LLVM conditional branches.
+- **Graceful fallback**: functions that use floats, strings, globals, `CALL`, or `PRINT`
+  remain interpreted.  Failed compilations are remembered so the JIT never retries.
+- **Native invocation**: JIT-compiled functions are called directly via native function
+  pointers, eliminating the overhead of recursive `execute()` calls, stack save/restore,
+  and opcode dispatch.
+- **Type-specialized recompilation**: after a function has been JIT-compiled, the profiler
+  continues to track calls.  After 50 additional post-JIT calls, the function is
+  recompiled with updated type specialization data.  This allows precompiled bytecode
+  to be progressively optimized as more runtime type information becomes available.
+
+## Execution Model
+
+OmScript uses a **tiered execution model** that automatically selects the best execution
+strategy for each function based on static analysis:
+
+### Tier 1: AOT (Ahead-of-Time Compilation)
+Functions that can be fully statically analyzed are compiled directly to native machine code
+via LLVM IR.  A function qualifies for AOT compilation if any of the following are true:
+- It is `main` (the program entry point)
+- It is a stdlib built-in function (`print`, `abs`, `sqrt`, etc.)
+- It is marked with `OPTMAX=:` / `OPTMAX!:` for aggressive optimization
+- **All parameters have type annotations** (e.g. `fn add(a: int, b: int)`)
+
+AOT-compiled functions run at full native speed with LLVM optimizations applied.
+
+### Tier 2: Interpreted (Bytecode VM)
+Functions without complete type annotations are compiled to bytecode and run by the
+stack-based VM interpreter:
+- No type annotations → dynamic typing at runtime
+- Partial annotations (e.g. `fn mixed(a: int, b)`) → treated as dynamic
+- Full access to dynamic features (string operations, dynamic dispatch)
+
+The interpreter includes computed-goto dispatch and integer fast paths for performance.
+
+### Tier 3: JIT (Just-In-Time Compilation)
+Hot interpreted functions are automatically promoted to native code:
+1. The VM profiler tracks per-function call counts
+2. After 10 interpreted calls, the JIT attempts to compile the function
+3. Integer-only functions are translated to LLVM IR and compiled to native code
+4. Subsequent calls bypass the interpreter entirely
+5. After 50 additional post-JIT calls, type-specialized recompilation is attempted
+
+### Tier Selection Example
+```omscript
+// AOT — fully typed, compiled to native code
+fn add(a: int, b: int) { return a + b; }
+
+// AOT — OPTMAX block, compiled with aggressive optimization
+OPTMAX=:
+fn fast_compute(x: int) { return x * x + x; }
+OPTMAX!:
+
+// Interpreted → JIT — no type annotations, starts as bytecode
+// After 10 calls, JIT-compiled to native code if integer-only
+fn dynamic_add(a, b) { return a + b; }
+
+// Always AOT — main is always compiled to native code
+fn main() {
+    return add(1, 2) + dynamic_add(3, 4);
+}
+```
+
+### Hybrid Compilation
+
+The `generateHybrid()` method enables all three execution tiers to coexist in a single
+program.  A single compilation pass:
+
+1. **Classifies** every function into its execution tier (AOT or Interpreted)
+2. **Generates LLVM IR** for all functions (AOT-tier functions get full optimization)
+3. **Emits bytecode** for each Interpreted-tier function into isolated `BytecodeFunction`
+   objects with proper local variable tracking
+
+At runtime the compiled program can seamlessly mix:
+- AOT-compiled native functions (maximum speed)
+- Bytecode-interpreted functions (dynamic flexibility)
+- JIT-compiled functions (hot bytecode promoted to native code by the VM profiler)
+
+The compiler automatically selects the fastest execution path for each function:
+
+| Function Characteristic | Tier | Runtime Path |
+|------------------------|------|-------------|
+| Full type annotations  | AOT  | Native code via LLVM |
+| OPTMAX / main / stdlib | AOT  | Native code with aggressive optimization |
+| No type annotations    | Interpreted → JIT | Bytecode → native after 10 hot calls |
+| Partial type annotations | Interpreted → JIT | Bytecode → native after profiling |
+
 ## Best Practices for Maximum Performance
 
 ### 1. Use Constants When Possible
@@ -338,6 +491,19 @@ OmScript's optimization infrastructure provides:
 - ✅ Battle-tested LLVM passes via the new pass manager
 - ✅ Interprocedural optimizations (inlining, IPSCCP, GlobalDCE)
 - ✅ Auto-vectorization for SIMD (at O3)
+- ✅ Compile-time constant folding for unary, binary, and comparison expressions
+- ✅ Dead branch elimination for constant conditions
+- ✅ IR-level strength reduction (multiply/divide by power-of-2 to shift)
+- ✅ Bytecode constant folding for the interpreter backend
+- ✅ Computed-goto VM dispatch for faster bytecode execution
+- ✅ Integer-specialized fast paths for common arithmetic/comparison ops
+- ✅ Bytecode JIT compiler with automatic hot-function detection
+- ✅ Type-specialized JIT recompilation for precompiled bytecode
+- ✅ Tiered execution model (AOT → Interpreted → JIT) with automatic tier selection
+- ✅ **Hybrid compilation** — AOT + bytecode in a single pass for cross-tier programs
+- ✅ Per-function local variable tracking in hybrid bytecode emission
+- ✅ Optimized VM runtime with move semantics and pre-allocated storage
+- ✅ Inline hot-path functions (isTruthy) for better VM throughput
 - ✅ Measurable, significant improvements
 
 The compiler transforms high-level OmScript code into highly optimized machine code that rivals hand-written assembly in many cases, while maintaining code readability and developer productivity.

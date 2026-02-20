@@ -58,6 +58,9 @@ public:
                 break;
             case Type::STRING:
                 new (&stringValue) RefCountedString(std::move(other.stringValue));
+                other.stringValue.~RefCountedString();
+                other.type = Type::NONE;
+                other.intValue = 0;
                 break;
             case Type::NONE:
                 intValue = 0;
@@ -113,6 +116,9 @@ public:
                     break;
                 case Type::STRING:
                     new (&stringValue) RefCountedString(std::move(other.stringValue));
+                    other.stringValue.~RefCountedString();
+                    other.type = Type::NONE;
+                    other.intValue = 0;
                     break;
                 case Type::NONE:
                     intValue = 0;
@@ -142,8 +148,21 @@ public:
         }
         return stringValue.c_str();
     }
+
+    // Unchecked accessors for performance-critical paths (VM dispatch loop,
+    // JIT call interface).  Caller must guarantee the type matches.
+    int64_t unsafeAsInt() const { return intValue; }
+    double unsafeAsFloat() const { return floatValue; }
     
-    bool isTruthy() const;
+    bool isTruthy() const {
+        switch (type) {
+            case Type::INTEGER: return intValue != 0;
+            case Type::FLOAT: return floatValue != 0.0;
+            case Type::STRING: return !stringValue.empty();
+            case Type::NONE: return false;
+        }
+        return false;
+    }
     std::string toString() const;
     
     // Arithmetic operations

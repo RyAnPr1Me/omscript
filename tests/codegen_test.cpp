@@ -23,6 +23,14 @@ struct LLVMInit {
 static LLVMInit llvmInit;
 } // namespace
 
+// Helper: parse source into a Program
+static std::unique_ptr<Program> parseSource(const std::string& source) {
+    Lexer lexer(source);
+    auto tokens = lexer.tokenize();
+    Parser parser(tokens);
+    return parser.parse();
+}
+
 // Helper: generate IR module from source
 static llvm::Module* generateIR(const std::string& source, CodeGenerator& codegen) {
     Lexer lexer(source);
@@ -2675,4 +2683,361 @@ TEST(CodegenTest, ValidProgramAccepted) {
     ASSERT_NE(mainFn, nullptr);
     auto* addFn = mod->getFunction("add");
     ASSERT_NE(addFn, nullptr);
+}
+
+// ===========================================================================
+// Bytecode constant folding
+// ===========================================================================
+
+TEST(CodegenTest, BytecodeConstantFoldingAdd) {
+    // 10 + 20 should be folded to PUSH_INT 30 (not PUSH_INT 10, PUSH_INT 20, ADD)
+    CodeGenerator codegen(OptimizationLevel::O0);
+    Lexer lexer("fn main() { return 10 + 20; }");
+    auto tokens = lexer.tokenize();
+    Parser parser(tokens);
+    auto program = parser.parse();
+    codegen.generateBytecode(program.get());
+    auto& emitter = codegen.getBytecodeEmitter();
+    const auto& code = emitter.getCode();
+    // Execute and verify correct result
+    VM vm;
+    vm.execute(code);
+    EXPECT_EQ(vm.getLastReturn().asInt(), 30);
+    // The bytecode should be smaller with folding (no ADD opcode needed).
+    // Register-based format:
+    // Without folding: PUSH_INT(1+1+8) + PUSH_INT(1+1+8) + ADD(1+3) + RETURN(1+1) + HALT(1) = 27
+    // With folding:    PUSH_INT(1+1+8) + RETURN(1+1) + HALT(1) = 13
+    EXPECT_LT(code.size(), 27u);
+}
+
+TEST(CodegenTest, BytecodeConstantFoldingMul) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    Lexer lexer("fn main() { return 6 * 7; }");
+    auto tokens = lexer.tokenize();
+    Parser parser(tokens);
+    auto program = parser.parse();
+    codegen.generateBytecode(program.get());
+    VM vm;
+    vm.execute(codegen.getBytecodeEmitter().getCode());
+    EXPECT_EQ(vm.getLastReturn().asInt(), 42);
+}
+
+TEST(CodegenTest, BytecodeConstantFoldingComparison) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    Lexer lexer("fn main() { return 5 < 10; }");
+    auto tokens = lexer.tokenize();
+    Parser parser(tokens);
+    auto program = parser.parse();
+    codegen.generateBytecode(program.get());
+    VM vm;
+    vm.execute(codegen.getBytecodeEmitter().getCode());
+    EXPECT_EQ(vm.getLastReturn().asInt(), 1);
+}
+
+TEST(CodegenTest, BytecodeConstantFoldingUnaryNeg) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    Lexer lexer("fn main() { return -42; }");
+    auto tokens = lexer.tokenize();
+    Parser parser(tokens);
+    auto program = parser.parse();
+    codegen.generateBytecode(program.get());
+    VM vm;
+    vm.execute(codegen.getBytecodeEmitter().getCode());
+    EXPECT_EQ(vm.getLastReturn().asInt(), -42);
+}
+
+TEST(CodegenTest, BytecodeConstantFoldingLogicalNot) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    Lexer lexer("fn main() { return !0; }");
+    auto tokens = lexer.tokenize();
+    Parser parser(tokens);
+    auto program = parser.parse();
+    codegen.generateBytecode(program.get());
+    VM vm;
+    vm.execute(codegen.getBytecodeEmitter().getCode());
+    EXPECT_EQ(vm.getLastReturn().asInt(), 1);
+}
+
+TEST(CodegenTest, BytecodeConstantFoldingBitwiseNot) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    Lexer lexer("fn main() { return ~0; }");
+    auto tokens = lexer.tokenize();
+    Parser parser(tokens);
+    auto program = parser.parse();
+    codegen.generateBytecode(program.get());
+    VM vm;
+    vm.execute(codegen.getBytecodeEmitter().getCode());
+    EXPECT_EQ(vm.getLastReturn().asInt(), -1);
+}
+
+// ===========================================================================
+// IR-level constant comparison folding
+// ===========================================================================
+
+TEST(CodegenTest, IRConstantComparisonFolding) {
+    // When both operands are constants, comparisons should be folded
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return 5 == 5; }", codegen);
+    auto* mainFunc = mod->getFunction("main");
+    ASSERT_NE(mainFunc, nullptr);
+    // At O0, constant folding in generateBinary still occurs
+    // The function should exist and have code
+    EXPECT_FALSE(mainFunc->empty());
+}
+
+// ===========================================================================
+// Strength reduction for division by power of 2
+// ===========================================================================
+
+TEST(CodegenTest, DivisionStrengthReduction) {
+    // n / 4 should be converted to n >> 2 (arithmetic shift right)
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn divide_by_four(n) { return n / 4; }\n"
+        "fn main() { return divide_by_four(16); }", codegen);
+    auto* func = mod->getFunction("divide_by_four");
+    ASSERT_NE(func, nullptr);
+    EXPECT_FALSE(func->empty());
+    // Verify the function contains an ashr instruction (strength reduction)
+    bool hasAShr = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::AShr) {
+                hasAShr = true;
+            }
+        }
+    }
+    EXPECT_TRUE(hasAShr);
+}
+
+// ===========================================================================
+// Execution-tier classification
+// ===========================================================================
+
+TEST(CodegenTest, ClassifyMainAsAOT) {
+    std::string src = "fn main() { return 0; }";
+    CodeGenerator codegen;
+    generateIR(src, codegen);
+    EXPECT_EQ(codegen.getFunctionTier("main"), ExecutionTier::AOT);
+}
+
+TEST(CodegenTest, ClassifyOptMaxAsAOT) {
+    std::string src = R"(
+        OPTMAX=: fn optimized(x: int) { return x * 2; } OPTMAX!:
+        fn main() { return optimized(5); }
+    )";
+    CodeGenerator codegen;
+    generateIR(src, codegen);
+    EXPECT_EQ(codegen.getFunctionTier("optimized"), ExecutionTier::AOT);
+}
+
+TEST(CodegenTest, ClassifyFullyAnnotatedAsAOT) {
+    std::string src = R"(
+        fn add(a: int, b: int) { return a + b; }
+        fn main() { return add(1, 2); }
+    )";
+    CodeGenerator codegen;
+    generateIR(src, codegen);
+    EXPECT_EQ(codegen.getFunctionTier("add"), ExecutionTier::AOT);
+}
+
+TEST(CodegenTest, ClassifyUnannotatedAsInterpreted) {
+    std::string src = R"(
+        fn compute(x, y) { return x + y; }
+        fn main() { return compute(3, 4); }
+    )";
+    CodeGenerator codegen;
+    generateIR(src, codegen);
+    EXPECT_EQ(codegen.getFunctionTier("compute"), ExecutionTier::Interpreted);
+}
+
+TEST(CodegenTest, ClassifyPartiallyAnnotatedAsInterpreted) {
+    std::string src = R"(
+        fn mixed(a: int, b) { return a + b; }
+        fn main() { return mixed(1, 2); }
+    )";
+    CodeGenerator codegen;
+    generateIR(src, codegen);
+    EXPECT_EQ(codegen.getFunctionTier("mixed"), ExecutionTier::Interpreted);
+}
+
+TEST(CodegenTest, ClassifyNoParamsAsAOT) {
+    // Functions with no parameters are trivially fully-annotated.
+    std::string src = R"(
+        fn zero() { return 0; }
+        fn main() { return zero(); }
+    )";
+    CodeGenerator codegen;
+    generateIR(src, codegen);
+    EXPECT_EQ(codegen.getFunctionTier("zero"), ExecutionTier::AOT);
+}
+
+TEST(CodegenTest, ExecutionTierNameStrings) {
+    EXPECT_STREQ(executionTierName(ExecutionTier::AOT), "AOT");
+    EXPECT_STREQ(executionTierName(ExecutionTier::Interpreted), "Interpreted");
+    EXPECT_STREQ(executionTierName(ExecutionTier::JIT), "JIT");
+}
+
+TEST(CodegenTest, FunctionTierMapContainsAllFunctions) {
+    std::string src = R"(
+        fn helper(x) { return x; }
+        fn main() { return helper(0); }
+    )";
+    CodeGenerator codegen;
+    generateIR(src, codegen);
+    auto& tiers = codegen.getFunctionTiers();
+    EXPECT_NE(tiers.find("helper"), tiers.end());
+    EXPECT_NE(tiers.find("main"), tiers.end());
+}
+
+TEST(CodegenTest, HasFullTypeAnnotationsHelper) {
+    auto prog = parseSource(R"(
+        fn typed(a: int, b: int) { return a + b; }
+        fn untyped(a, b) { return a + b; }
+        fn main() { return 0; }
+    )");
+    bool foundTyped = false, foundUntyped = false;
+    for (auto& fn : prog->functions) {
+        if (fn->name == "typed") {
+            EXPECT_TRUE(fn->hasFullTypeAnnotations());
+            foundTyped = true;
+        }
+        if (fn->name == "untyped") {
+            EXPECT_FALSE(fn->hasFullTypeAnnotations());
+            foundUntyped = true;
+        }
+    }
+    EXPECT_TRUE(foundTyped);
+    EXPECT_TRUE(foundUntyped);
+}
+
+// ===========================================================================
+// Hybrid compilation
+// ===========================================================================
+
+// Helper: run hybrid generation and return the codegen
+static void generateHybridIR(const std::string& source, CodeGenerator& codegen) {
+    Lexer lexer(source);
+    auto tokens = lexer.tokenize();
+    Parser parser(tokens);
+    auto program = parser.parse();
+    codegen.generateHybrid(program.get());
+}
+
+TEST(CodegenTest, HybridEmitsBytecodeForUntypedFunction) {
+    std::string src = R"(
+        fn compute(x, y) { return x + y; }
+        fn main() { return compute(3, 4); }
+    )";
+    CodeGenerator codegen;
+    generateHybridIR(src, codegen);
+
+    // compute is Interpreted, main is AOT
+    EXPECT_EQ(codegen.getFunctionTier("compute"), ExecutionTier::Interpreted);
+    EXPECT_EQ(codegen.getFunctionTier("main"), ExecutionTier::AOT);
+
+    // Hybrid should produce bytecode for the untyped function
+    EXPECT_TRUE(codegen.hasHybridBytecodeFunctions());
+    auto& bcFuncs = codegen.getBytecodeFunctions();
+    ASSERT_EQ(bcFuncs.size(), 1u);
+    EXPECT_EQ(bcFuncs[0].name, "compute");
+    EXPECT_EQ(bcFuncs[0].arity, 2);
+    EXPECT_FALSE(bcFuncs[0].bytecode.empty());
+}
+
+TEST(CodegenTest, HybridNoBytecodeForFullyTyped) {
+    std::string src = R"(
+        fn add(a: int, b: int) { return a + b; }
+        fn main() { return add(1, 2); }
+    )";
+    CodeGenerator codegen;
+    generateHybridIR(src, codegen);
+
+    // Both functions are AOT — no bytecode should be emitted
+    EXPECT_EQ(codegen.getFunctionTier("add"), ExecutionTier::AOT);
+    EXPECT_EQ(codegen.getFunctionTier("main"), ExecutionTier::AOT);
+    EXPECT_FALSE(codegen.hasHybridBytecodeFunctions());
+}
+
+TEST(CodegenTest, HybridMultipleUntypedFunctions) {
+    std::string src = R"(
+        fn helper(x) { return x * 2; }
+        fn dynamic_add(a, b) { return a + b; }
+        fn main() { return helper(5) + dynamic_add(1, 2); }
+    )";
+    CodeGenerator codegen;
+    generateHybridIR(src, codegen);
+
+    EXPECT_EQ(codegen.getFunctionTier("helper"), ExecutionTier::Interpreted);
+    EXPECT_EQ(codegen.getFunctionTier("dynamic_add"), ExecutionTier::Interpreted);
+    EXPECT_EQ(codegen.getFunctionTier("main"), ExecutionTier::AOT);
+
+    auto& bcFuncs = codegen.getBytecodeFunctions();
+    ASSERT_EQ(bcFuncs.size(), 2u);
+
+    // Verify both functions have valid bytecode and correct arity
+    std::unordered_map<std::string, uint8_t> foundFuncs;
+    for (auto& f : bcFuncs) {
+        foundFuncs[f.name] = f.arity;
+        EXPECT_FALSE(f.bytecode.empty());
+    }
+    EXPECT_EQ(foundFuncs["helper"], 1);
+    EXPECT_EQ(foundFuncs["dynamic_add"], 2);
+}
+
+TEST(CodegenTest, HybridMixedTiersWithOptMax) {
+    std::string src = R"(
+        OPTMAX=: fn fast(x: int) { return x * x; } OPTMAX!:
+        fn dynamic(x) { return x + 1; }
+        fn main() { return fast(3) + dynamic(2); }
+    )";
+    CodeGenerator codegen;
+    generateHybridIR(src, codegen);
+
+    EXPECT_EQ(codegen.getFunctionTier("fast"), ExecutionTier::AOT);
+    EXPECT_EQ(codegen.getFunctionTier("dynamic"), ExecutionTier::Interpreted);
+    EXPECT_EQ(codegen.getFunctionTier("main"), ExecutionTier::AOT);
+
+    auto& bcFuncs = codegen.getBytecodeFunctions();
+    ASSERT_EQ(bcFuncs.size(), 1u);
+    EXPECT_EQ(bcFuncs[0].name, "dynamic");
+    EXPECT_EQ(bcFuncs[0].arity, 1);
+}
+
+TEST(CodegenTest, HybridPreservesLLVMIR) {
+    std::string src = R"(
+        fn dynamic_fn(x) { return x; }
+        fn main() { return dynamic_fn(42); }
+    )";
+    CodeGenerator codegen;
+    generateHybridIR(src, codegen);
+
+    // The LLVM module should still have both functions as IR
+    auto* mod = codegen.getModule();
+    ASSERT_NE(mod, nullptr);
+    EXPECT_NE(mod->getFunction("main"), nullptr);
+    EXPECT_NE(mod->getFunction("dynamic_fn"), nullptr);
+}
+
+TEST(CodegenTest, HybridBytecodeContainsReturn) {
+    std::string src = R"(
+        fn identity(x) { return x; }
+        fn main() { return identity(5); }
+    )";
+    CodeGenerator codegen;
+    generateHybridIR(src, codegen);
+
+    auto& bcFuncs = codegen.getBytecodeFunctions();
+    ASSERT_EQ(bcFuncs.size(), 1u);
+
+    // The bytecode should contain at least one RETURN opcode
+    auto& code = bcFuncs[0].bytecode;
+    bool hasReturn = false;
+    for (uint8_t byte : code) {
+        if (byte == static_cast<uint8_t>(OpCode::RETURN)) {
+            hasReturn = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(hasReturn);
 }

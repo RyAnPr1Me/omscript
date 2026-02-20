@@ -25,6 +25,33 @@ enum class OptimizationLevel {
     O3   // Aggressive optimization
 };
 
+/// Execution tier assigned to each function during compilation.
+///
+///  - **AOT**: The function has full type annotations (or is OPTMAX / main /
+///    stdlib) and can be compiled to native machine code ahead of time via
+///    LLVM IR.
+///  - **Interpreted**: The function lacks type annotations or uses dynamic
+///    features.  It is compiled to bytecode and run by the VM interpreter.
+///  - **JIT**: An interpreted function that has been identified as hot by
+///    the VM profiler and was successfully JIT-compiled to native code.
+///    This tier also covers precompiled bytecode that is later recompiled
+///    with type-specialized native code when profiling data is available.
+enum class ExecutionTier {
+    AOT,         // Compiled to native code via LLVM IR
+    Interpreted, // Compiled to bytecode, run by the VM
+    JIT          // Hot bytecode function JIT-compiled to native code
+};
+
+/// Return a human-readable label for an ExecutionTier value.
+inline const char* executionTierName(ExecutionTier tier) {
+    switch (tier) {
+        case ExecutionTier::AOT:         return "AOT";
+        case ExecutionTier::Interpreted: return "Interpreted";
+        case ExecutionTier::JIT:         return "JIT";
+    }
+    return "Unknown";
+}
+
 class CodeGenerator {
 public:
     CodeGenerator(OptimizationLevel optLevel = OptimizationLevel::O2);
@@ -65,6 +92,49 @@ private:
     BytecodeEmitter bytecodeEmitter;
     bool useDynamicCompilation;
     OptimizationLevel optimizationLevel;
+
+    // Per-function execution tier decided during code generation.
+    std::unordered_map<std::string, ExecutionTier> functionTiers;
+
+    /// Compiled bytecode functions for Interpreted-tier functions.
+    /// Populated by generateHybrid() when the hybrid execution model is active.
+    struct CompiledBytecodeFunc {
+        std::string name;
+        uint8_t arity;
+        std::vector<uint8_t> bytecode;
+    };
+    std::vector<CompiledBytecodeFunc> bytecodeFunctions_;
+
+    /// Local variable name → index mapping for per-function bytecode emission.
+    /// Parameters are bound to indices 0..arity-1; additional locals are
+    /// allocated on demand during bytecode statement emission.
+    std::unordered_map<std::string, uint8_t> bytecodeLocals_;
+    uint8_t bytecodeNextLocal_ = 0;
+
+    /// Register allocator state for register-based bytecode.
+    uint8_t bytecodeNextReg_ = 0;
+    uint8_t bytecodeLocalBase_ = 0;
+
+    uint8_t allocReg() {
+        if (bytecodeNextReg_ == 255)
+            throw std::runtime_error("Register file overflow (max 256 registers)");
+        return bytecodeNextReg_++;
+    }
+
+    void resetTempRegs() { bytecodeNextReg_ = bytecodeLocalBase_; }
+
+    /// Return true when bytecode is being emitted for a function body
+    /// (as opposed to top-level / main code).
+    bool isInBytecodeFunctionContext() const {
+        return !bytecodeLocals_.empty() || bytecodeNextLocal_ > 0;
+    }
+
+    /// Classify a function into its execution tier based on type annotations,
+    /// OPTMAX status, and whether it is a special function (main/stdlib).
+    ExecutionTier classifyFunction(const FunctionDecl* func) const;
+
+    /// Emit bytecode for a single function body (used by hybrid compilation).
+    void emitBytecodeForFunction(FunctionDecl* func);
     
     // Code generation methods
     llvm::Function* generateFunction(FunctionDecl* func);
@@ -117,9 +187,11 @@ private:
     void runOptimizationPasses();
     void optimizeOptMaxFunctions();
     
-    void emitBytecodeExpression(Expression* expr);
+    uint8_t emitBytecodeExpression(Expression* expr);
     void emitBytecodeStatement(Statement* stmt);
     void emitBytecodeBlock(BlockStmt* stmt);
+    uint8_t emitBytecodeLoad(const std::string& name);
+    void emitBytecodeStore(const std::string& name, uint8_t rs);
     
 public:
     // Per-function optimization for targeted optimization of individual functions
@@ -127,6 +199,31 @@ public:
     
     // Bytecode generation (alternative backend)
     void generateBytecode(Program* program);
+
+    /// Hybrid code generation: generates LLVM IR for AOT-tier functions and
+    /// bytecode for Interpreted-tier functions in a single pass.  AOT-tier
+    /// functions that call Interpreted-tier functions get IR stubs that
+    /// invoke the VM at runtime, enabling seamless cross-tier calls.
+    void generateHybrid(Program* program);
+
+    /// Return true if hybrid compilation produced any bytecode functions.
+    bool hasHybridBytecodeFunctions() const { return !bytecodeFunctions_.empty(); }
+
+    /// Return the list of bytecode functions produced by hybrid compilation.
+    const std::vector<CompiledBytecodeFunc>& getBytecodeFunctions() const {
+        return bytecodeFunctions_;
+    }
+
+    /// Return the execution tier assigned to a function, or AOT if not found.
+    ExecutionTier getFunctionTier(const std::string& name) const {
+        auto it = functionTiers.find(name);
+        return it != functionTiers.end() ? it->second : ExecutionTier::AOT;
+    }
+
+    /// Return a read-only view of all function tier assignments.
+    const std::unordered_map<std::string, ExecutionTier>& getFunctionTiers() const {
+        return functionTiers;
+    }
 
     // Accessors for bytecode output
     const BytecodeEmitter& getBytecodeEmitter() const { return bytecodeEmitter; }

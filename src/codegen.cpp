@@ -6,6 +6,8 @@
 #include <llvm/IR/LegacyPassManager.h>
 #include <llvm/Support/FileSystem.h>
 #include <llvm/TargetParser/Host.h>
+#include <llvm/TargetParser/SubtargetFeature.h>
+#include <llvm/ADT/StringMap.h>
 #include <llvm/Support/TargetSelect.h>
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/Support/CodeGen.h>
@@ -369,6 +371,30 @@ CodeGenerator::CodeGenerator(OptimizationLevel optLevel)
 
 CodeGenerator::~CodeGenerator() {}
 
+// ---------------------------------------------------------------------------
+// Execution-tier classification
+// ---------------------------------------------------------------------------
+
+ExecutionTier CodeGenerator::classifyFunction(const FunctionDecl* func) const {
+    // main is always AOT-compiled — it is the program entry point.
+    if (func->name == "main") return ExecutionTier::AOT;
+
+    // OPTMAX functions are explicitly marked for aggressive AOT optimisation.
+    if (func->isOptMax) return ExecutionTier::AOT;
+
+    // Stdlib built-ins are always native (handled separately, but classify
+    // them here for completeness).
+    if (isStdlibFunction(func->name)) return ExecutionTier::AOT;
+
+    // If every parameter carries a type annotation the function is
+    // statically typed and therefore eligible for AOT compilation.
+    if (func->hasFullTypeAnnotations()) return ExecutionTier::AOT;
+
+    // Everything else starts life as interpreted bytecode.
+    // The VM profiler may later promote it to JIT.
+    return ExecutionTier::Interpreted;
+}
+
 void CodeGenerator::setupPrintfDeclaration() {
     // Declare printf function for output
     std::vector<llvm::Type*> printfArgs;
@@ -553,6 +579,9 @@ void CodeGenerator::generate(Program* program) {
         if (func->isOptMax) {
             optMaxFunctions.insert(func->name);
         }
+
+        // Classify the execution tier for this function.
+        functionTiers[func->name] = classifyFunction(func.get());
     }
     if (!hasMain) {
         // Program-level error — no specific AST node to reference for location.
@@ -602,6 +631,17 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
 
     // Retrieve the forward-declared function
     llvm::Function* function = functions[func->name];
+
+    // Hint small helper functions for inlining at O2+.  OPTMAX functions
+    // already get aggressive optimization; non-main functions with few
+    // statements benefit from being inlined into their callers.
+    // 8 statements covers most simple accessors and arithmetic helpers.
+    static constexpr size_t kMaxInlineHintStatements = 8;
+    if (func->name != "main" &&
+        optimizationLevel >= OptimizationLevel::O2 &&
+        func->body && func->body->statements.size() <= kMaxInlineHintStatements) {
+        function->addFnAttr(llvm::Attribute::InlineHint);
+    }
     
     // Create entry basic block
     llvm::BasicBlock* entry = llvm::BasicBlock::Create(*context, "entry", function);
@@ -879,6 +919,18 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             if (rval != 0) {
                 return llvm::ConstantInt::get(*context, llvm::APInt(64, lval % rval));
             }
+        } else if (expr->op == "==") {
+            return llvm::ConstantInt::get(*context, llvm::APInt(64, lval == rval ? 1 : 0));
+        } else if (expr->op == "!=") {
+            return llvm::ConstantInt::get(*context, llvm::APInt(64, lval != rval ? 1 : 0));
+        } else if (expr->op == "<") {
+            return llvm::ConstantInt::get(*context, llvm::APInt(64, lval < rval ? 1 : 0));
+        } else if (expr->op == "<=") {
+            return llvm::ConstantInt::get(*context, llvm::APInt(64, lval <= rval ? 1 : 0));
+        } else if (expr->op == ">") {
+            return llvm::ConstantInt::get(*context, llvm::APInt(64, lval > rval ? 1 : 0));
+        } else if (expr->op == ">=") {
+            return llvm::ConstantInt::get(*context, llvm::APInt(64, lval >= rval ? 1 : 0));
         } else if (expr->op == "&") {
             return llvm::ConstantInt::get(*context, llvm::APInt(64, lval & rval));
         } else if (expr->op == "|") {
@@ -896,13 +948,48 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     
     // Regular code generation for non-constant expressions
     if (expr->op == "+") {
-        return builder->CreateAdd(left, right, "addtmp");
+        return builder->CreateNSWAdd(left, right, "addtmp");
     } else if (expr->op == "-") {
-        return builder->CreateSub(left, right, "subtmp");
+        return builder->CreateNSWSub(left, right, "subtmp");
     } else if (expr->op == "*") {
-        return builder->CreateMul(left, right, "multmp");
+        // Strength reduction: multiply by power of 2 → left shift
+        if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
+            int64_t val = ci->getSExtValue();
+            if (val > 0 && (val & (val - 1)) == 0) {
+                unsigned shift = 0;
+                int64_t tmp = val;
+                while (tmp > 1) { tmp >>= 1; shift++; }
+                return builder->CreateShl(left,
+                    llvm::ConstantInt::get(getDefaultType(), shift), "shltmp");
+            }
+        }
+        if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left)) {
+            int64_t val = ci->getSExtValue();
+            if (val > 0 && (val & (val - 1)) == 0) {
+                unsigned shift = 0;
+                int64_t tmp = val;
+                while (tmp > 1) { tmp >>= 1; shift++; }
+                return builder->CreateShl(right,
+                    llvm::ConstantInt::get(getDefaultType(), shift), "shltmp");
+            }
+        }
+        return builder->CreateNSWMul(left, right, "multmp");
     } else if (expr->op == "/" || expr->op == "%") {
         bool isDivision = expr->op == "/";
+        // Strength reduction: signed division by power of 2 → arithmetic right shift.
+        // This is safe because we know the divisor is a non-zero constant.
+        if (isDivision) {
+            if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
+                int64_t val = ci->getSExtValue();
+                if (val > 0 && (val & (val - 1)) == 0) {
+                    unsigned shift = 0;
+                    int64_t tmp = val;
+                    while (tmp > 1) { tmp >>= 1; shift++; }
+                    return builder->CreateAShr(left,
+                        llvm::ConstantInt::get(getDefaultType(), shift), "divshrtmp");
+                }
+            }
+        }
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
         llvm::Value* isZero = builder->CreateICmpEQ(right, zero, "divzero");
         llvm::Function* function = builder->GetInsertBlock()->getParent();
@@ -969,6 +1056,23 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
 
 llvm::Value* CodeGenerator::generateUnary(UnaryExpr* expr) {
     llvm::Value* operand = generateExpression(expr->operand.get());
+    
+    // Constant folding for unary operations
+    if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(operand)) {
+        int64_t val = ci->getSExtValue();
+        if (expr->op == "-") {
+            return llvm::ConstantInt::get(*context, llvm::APInt(64, -val));
+        } else if (expr->op == "!") {
+            return llvm::ConstantInt::get(*context, llvm::APInt(64, val == 0 ? 1 : 0));
+        } else if (expr->op == "~") {
+            return llvm::ConstantInt::get(*context, llvm::APInt(64, ~val));
+        }
+    }
+    if (auto* cf = llvm::dyn_cast<llvm::ConstantFP>(operand)) {
+        if (expr->op == "-") {
+            return llvm::ConstantFP::get(getFloatType(), -cf->getValueAPF().convertToDouble());
+        }
+    }
     
     if (expr->op == "-") {
         if (operand->getType()->isDoubleTy()) {
@@ -1918,6 +2022,21 @@ void CodeGenerator::generateReturn(ReturnStmt* stmt) {
 
 void CodeGenerator::generateIf(IfStmt* stmt) {
     llvm::Value* condition = generateExpression(stmt->condition.get());
+    
+    // Constant condition elimination: skip dead branch when condition is known
+    if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(condition)) {
+        if (ci->isZero()) {
+            // Condition is false: only generate else branch if present
+            if (stmt->elseBranch) {
+                generateStatement(stmt->elseBranch.get());
+            }
+        } else {
+            // Condition is true: only generate then branch
+            generateStatement(stmt->thenBranch.get());
+        }
+        return;
+    }
+    
     llvm::Value* condBool = toBool(condition);
     
     llvm::Function* function = builder->GetInsertBlock()->getParent();
@@ -2286,10 +2405,21 @@ void CodeGenerator::runOptimizationPasses() {
         llvm::TargetOptions opt;
         // Use PIC to support default PIE linking on modern toolchains.
         std::optional<llvm::Reloc::Model> RM = llvm::Reloc::PIC_;
+        // Use native CPU features (SSE, AVX, etc.) instead of "generic"
+        // for maximum codegen quality on the build host.
+        std::string cpu = llvm::sys::getHostCPUName().str();
+        llvm::SubtargetFeatures features;
+        llvm::StringMap<bool> hostFeatures;
+        if (llvm::sys::getHostCPUFeatures(hostFeatures)) {
+            for (auto& feature : hostFeatures) {
+                features.AddFeature(feature.first(), feature.second);
+            }
+        }
+        std::string featureStr = features.getString();
 #if LLVM_VERSION_MAJOR >= 19
-        targetMachine.reset(target->createTargetMachine(targetTriple, "generic", "", opt, RM));
+        targetMachine.reset(target->createTargetMachine(targetTriple, cpu, featureStr, opt, RM));
 #else
-        targetMachine.reset(target->createTargetMachine(targetTripleStr, "generic", "", opt, RM));
+        targetMachine.reset(target->createTargetMachine(targetTripleStr, cpu, featureStr, opt, RM));
 #endif
         if (targetMachine) {
             module->setDataLayout(targetMachine->createDataLayout());
@@ -2303,9 +2433,12 @@ void CodeGenerator::runOptimizationPasses() {
     // O1 uses a lightweight legacy function pass pipeline (no IPO).
     if (optimizationLevel == OptimizationLevel::O1) {
         llvm::legacy::FunctionPassManager fpm(module.get());
+        fpm.add(llvm::createPromoteMemoryToRegisterPass());
         fpm.add(llvm::createInstructionCombiningPass());
         fpm.add(llvm::createReassociatePass());
+        fpm.add(llvm::createGVNPass());
         fpm.add(llvm::createCFGSimplificationPass());
+        fpm.add(llvm::createDeadCodeEliminationPass());
         fpm.doInitialization();
         for (auto& func : module->functions()) {
             if (!func.isDeclaration()) {
@@ -2373,12 +2506,10 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     fpm.add(llvm::createLICMPass());
     fpm.add(llvm::createLoopRotatePass());
     fpm.add(llvm::createLoopSimplifyPass());
-    fpm.add(llvm::createLoopInstSimplifyPass());
     fpm.add(llvm::createLoopStrengthReducePass());
     fpm.add(llvm::createLoopUnrollPass());
     // Phase 3: Post-loop optimizations
     fpm.add(llvm::createSinkingPass());
-    fpm.add(llvm::createMergedLoadStoreMotionPass());
     fpm.add(llvm::createStraightLineStrengthReducePass());
     fpm.add(llvm::createNaryReassociatePass());
     fpm.add(llvm::createTailCallEliminationPass());
@@ -2432,8 +2563,15 @@ void CodeGenerator::writeObjectFile(const std::string& filename) {
         throw std::runtime_error("Failed to lookup target: " + error);
     }
     
-    auto CPU = "generic";
-    auto features = "";
+    auto CPU = llvm::sys::getHostCPUName().str();
+    llvm::SubtargetFeatures featureSet;
+    llvm::StringMap<bool> hostFeatures;
+    if (llvm::sys::getHostCPUFeatures(hostFeatures)) {
+        for (auto& feature : hostFeatures) {
+            featureSet.AddFeature(feature.first(), feature.second);
+        }
+    }
+    auto features = featureSet.getString();
     
     llvm::TargetOptions opt;
     // Use PIC to support default PIE linking on modern toolchains.
@@ -2470,44 +2608,200 @@ void CodeGenerator::writeObjectFile(const std::string& filename) {
     
     pass.run(*module);
     dest.flush();
+    // Detect errors during close (e.g. I/O errors that occurred during write).
+    if (dest.has_error()) {
+        std::string errMsg = "Error writing object file: " + dest.error().message();
+        dest.clear_error();
+        throw std::runtime_error(errMsg);
+    }
 }
 
 void CodeGenerator::generateBytecode(Program* program) {
+    bytecodeNextReg_ = 0;
+    bytecodeLocalBase_ = 0;
     for (auto& func : program->functions) {
         if (func->name == "main") {
             emitBytecodeBlock(func->body.get());
+            uint8_t rs = allocReg();
+            bytecodeEmitter.emit(OpCode::PUSH_INT);
+            bytecodeEmitter.emitReg(rs);
+            bytecodeEmitter.emitInt(0);
             bytecodeEmitter.emit(OpCode::RETURN);
+            bytecodeEmitter.emitReg(rs);
         }
     }
     bytecodeEmitter.emit(OpCode::HALT);
 }
 
-void CodeGenerator::emitBytecodeExpression(Expression* expr) {
+// ---------------------------------------------------------------------------
+// Hybrid code generation
+// ---------------------------------------------------------------------------
+
+void CodeGenerator::emitBytecodeForFunction(FunctionDecl* func) {
+    // Save and reset emitter + local variable state.
+    BytecodeEmitter savedEmitter = std::move(bytecodeEmitter);
+    auto savedLocals = std::move(bytecodeLocals_);
+    uint8_t savedNextLocal = bytecodeNextLocal_;
+    uint8_t savedNextReg = bytecodeNextReg_;
+    uint8_t savedLocalBase = bytecodeLocalBase_;
+
+    bytecodeEmitter = BytecodeEmitter();
+    bytecodeLocals_.clear();
+    bytecodeNextLocal_ = 0;
+    bytecodeNextReg_ = 0;
+    bytecodeLocalBase_ = 0;
+
+    // Bind parameters as local variables at indices 0..arity-1.
+    for (auto& param : func->parameters) {
+        bytecodeLocals_[param.name] = bytecodeNextLocal_++;
+    }
+
+    emitBytecodeBlock(func->body.get());
+
+    // Ensure the function always returns (implicit return 0).
+    uint8_t rs = allocReg();
+    bytecodeEmitter.emit(OpCode::PUSH_INT);
+    bytecodeEmitter.emitReg(rs);
+    bytecodeEmitter.emitInt(0);
+    bytecodeEmitter.emit(OpCode::RETURN);
+    bytecodeEmitter.emitReg(rs);
+
+    CompiledBytecodeFunc compiled;
+    compiled.name = func->name;
+    compiled.arity = static_cast<uint8_t>(func->parameters.size());
+    compiled.bytecode = bytecodeEmitter.getCode();
+    bytecodeFunctions_.push_back(std::move(compiled));
+
+    // Restore saved state.
+    bytecodeEmitter = std::move(savedEmitter);
+    bytecodeLocals_ = std::move(savedLocals);
+    bytecodeNextLocal_ = savedNextLocal;
+    bytecodeNextReg_ = savedNextReg;
+    bytecodeLocalBase_ = savedLocalBase;
+}
+
+void CodeGenerator::generateHybrid(Program* program) {
+    // Phase 1: Run the normal AOT pipeline which classifies all functions,
+    // forward-declares them in LLVM, and generates IR for every function.
+    generate(program);
+
+    // Phase 2: For each Interpreted-tier function, also emit bytecode so
+    // the VM can execute it (or later JIT-compile it).  If bytecode
+    // emission fails (e.g. unsupported statement type), the function
+    // remains AOT-only — no bytecode is produced for it.
+    for (auto& func : program->functions) {
+        if (functionTiers[func->name] == ExecutionTier::Interpreted) {
+            try {
+                emitBytecodeForFunction(func.get());
+            } catch (const std::runtime_error&) {
+                // Bytecode emission failed — keep function as AOT-only.
+                // This can happen for functions using features not yet
+                // supported in the bytecode emitter (e.g. break in switch).
+                functionTiers[func->name] = ExecutionTier::AOT;
+            }
+        }
+    }
+}
+
+// Helper: emit LOAD_LOCAL or LOAD_VAR depending on whether name is a known local.
+uint8_t CodeGenerator::emitBytecodeLoad(const std::string& name) {
+    uint8_t rd = allocReg();
+    auto it = bytecodeLocals_.find(name);
+    if (it != bytecodeLocals_.end()) {
+        bytecodeEmitter.emit(OpCode::LOAD_LOCAL);
+        bytecodeEmitter.emitReg(rd);
+        bytecodeEmitter.emitByte(it->second);
+    } else {
+        bytecodeEmitter.emit(OpCode::LOAD_VAR);
+        bytecodeEmitter.emitReg(rd);
+        bytecodeEmitter.emitString(name);
+    }
+    return rd;
+}
+
+// Helper: emit STORE_LOCAL or STORE_VAR depending on whether name is a known local.
+void CodeGenerator::emitBytecodeStore(const std::string& name, uint8_t rs) {
+    auto it = bytecodeLocals_.find(name);
+    if (it != bytecodeLocals_.end()) {
+        bytecodeEmitter.emit(OpCode::STORE_LOCAL);
+        bytecodeEmitter.emitByte(it->second);
+        bytecodeEmitter.emitReg(rs);
+    } else {
+        bytecodeEmitter.emit(OpCode::STORE_VAR);
+        bytecodeEmitter.emitReg(rs);
+        bytecodeEmitter.emitString(name);
+    }
+}
+
+uint8_t CodeGenerator::emitBytecodeExpression(Expression* expr) {
     switch (expr->type) {
         case ASTNodeType::LITERAL_EXPR: {
             auto* lit = static_cast<LiteralExpr*>(expr);
+            uint8_t rd = allocReg();
             if (lit->literalType == LiteralExpr::LiteralType::INTEGER) {
                 bytecodeEmitter.emit(OpCode::PUSH_INT);
+                bytecodeEmitter.emitReg(rd);
                 bytecodeEmitter.emitInt(lit->intValue);
             } else if (lit->literalType == LiteralExpr::LiteralType::FLOAT) {
                 bytecodeEmitter.emit(OpCode::PUSH_FLOAT);
+                bytecodeEmitter.emitReg(rd);
                 bytecodeEmitter.emitFloat(lit->floatValue);
             } else if (lit->literalType == LiteralExpr::LiteralType::STRING) {
                 bytecodeEmitter.emit(OpCode::PUSH_STRING);
+                bytecodeEmitter.emitReg(rd);
                 bytecodeEmitter.emitString(lit->stringValue);
             }
-            break;
+            return rd;
         }
         case ASTNodeType::IDENTIFIER_EXPR: {
             auto* id = static_cast<IdentifierExpr*>(expr);
-            bytecodeEmitter.emit(OpCode::LOAD_VAR);
-            bytecodeEmitter.emitString(id->name);
-            break;
+            return emitBytecodeLoad(id->name);
         }
         case ASTNodeType::BINARY_EXPR: {
             auto* bin = static_cast<BinaryExpr*>(expr);
-            emitBytecodeExpression(bin->left.get());
-            emitBytecodeExpression(bin->right.get());
+            // Bytecode constant folding: if both operands are integer literals,
+            // evaluate at compile time and emit a single PUSH_INT.
+            auto* leftLit = (bin->left->type == ASTNodeType::LITERAL_EXPR)
+                ? static_cast<LiteralExpr*>(bin->left.get()) : nullptr;
+            auto* rightLit = (bin->right->type == ASTNodeType::LITERAL_EXPR)
+                ? static_cast<LiteralExpr*>(bin->right.get()) : nullptr;
+            if (leftLit && rightLit &&
+                leftLit->literalType == LiteralExpr::LiteralType::INTEGER &&
+                rightLit->literalType == LiteralExpr::LiteralType::INTEGER) {
+                long long lv = leftLit->intValue;
+                long long rv = rightLit->intValue;
+                bool folded = true;
+                long long result = 0;
+                if (bin->op == "+") result = lv + rv;
+                else if (bin->op == "-") result = lv - rv;
+                else if (bin->op == "*") result = lv * rv;
+                else if (bin->op == "/" && rv != 0) result = lv / rv;
+                else if (bin->op == "%" && rv != 0) result = lv % rv;
+                else if (bin->op == "&") result = lv & rv;
+                else if (bin->op == "|") result = lv | rv;
+                else if (bin->op == "^") result = lv ^ rv;
+                else if (bin->op == "<<" && rv >= 0 && rv < 64) result = lv << rv;
+                else if (bin->op == ">>" && rv >= 0 && rv < 64) result = lv >> rv;
+                else if (bin->op == "==") result = static_cast<long long>(lv == rv);
+                else if (bin->op == "!=") result = static_cast<long long>(lv != rv);
+                else if (bin->op == "<") result = static_cast<long long>(lv < rv);
+                else if (bin->op == "<=") result = static_cast<long long>(lv <= rv);
+                else if (bin->op == ">") result = static_cast<long long>(lv > rv);
+                else if (bin->op == ">=") result = static_cast<long long>(lv >= rv);
+                else if (bin->op == "&&") result = static_cast<long long>((lv != 0) && (rv != 0));
+                else if (bin->op == "||") result = static_cast<long long>((lv != 0) || (rv != 0));
+                else folded = false;
+                if (folded) {
+                    uint8_t rd = allocReg();
+                    bytecodeEmitter.emit(OpCode::PUSH_INT);
+                    bytecodeEmitter.emitReg(rd);
+                    bytecodeEmitter.emitInt(result);
+                    return rd;
+                }
+            }
+            uint8_t rs1 = emitBytecodeExpression(bin->left.get());
+            uint8_t rs2 = emitBytecodeExpression(bin->right.get());
+            uint8_t rd = allocReg();
             if (bin->op == "+") bytecodeEmitter.emit(OpCode::ADD);
             else if (bin->op == "-") bytecodeEmitter.emit(OpCode::SUB);
             else if (bin->op == "*") bytecodeEmitter.emit(OpCode::MUL);
@@ -2529,52 +2823,81 @@ void CodeGenerator::emitBytecodeExpression(Expression* expr) {
             else {
                 throw std::runtime_error("Unsupported binary operator in bytecode: " + bin->op);
             }
-            break;
+            bytecodeEmitter.emitReg(rd);
+            bytecodeEmitter.emitReg(rs1);
+            bytecodeEmitter.emitReg(rs2);
+            return rd;
         }
         case ASTNodeType::UNARY_EXPR: {
             auto* unary = static_cast<UnaryExpr*>(expr);
-            emitBytecodeExpression(unary->operand.get());
+            // Bytecode constant folding for unary on integer literals.
+            auto* operandLit = (unary->operand->type == ASTNodeType::LITERAL_EXPR)
+                ? static_cast<LiteralExpr*>(unary->operand.get()) : nullptr;
+            if (operandLit && operandLit->literalType == LiteralExpr::LiteralType::INTEGER) {
+                long long val = operandLit->intValue;
+                bool folded = true;
+                long long result = 0;
+                if (unary->op == "-") result = -val;
+                else if (unary->op == "!") result = (val == 0) ? 1 : 0;
+                else if (unary->op == "~") result = ~val;
+                else folded = false;
+                if (folded) {
+                    uint8_t rd = allocReg();
+                    bytecodeEmitter.emit(OpCode::PUSH_INT);
+                    bytecodeEmitter.emitReg(rd);
+                    bytecodeEmitter.emitInt(result);
+                    return rd;
+                }
+            }
+            uint8_t rs = emitBytecodeExpression(unary->operand.get());
+            uint8_t rd = allocReg();
             if (unary->op == "-") bytecodeEmitter.emit(OpCode::NEG);
             else if (unary->op == "!") bytecodeEmitter.emit(OpCode::NOT);
             else if (unary->op == "~") bytecodeEmitter.emit(OpCode::BIT_NOT);
             else {
                 throw std::runtime_error("Unsupported unary operator in bytecode: " + unary->op);
             }
-            break;
+            bytecodeEmitter.emitReg(rd);
+            bytecodeEmitter.emitReg(rs);
+            return rd;
         }
         case ASTNodeType::ASSIGN_EXPR: {
             auto* assign = static_cast<AssignExpr*>(expr);
-            emitBytecodeExpression(assign->value.get());
-            bytecodeEmitter.emit(OpCode::STORE_VAR);
-            bytecodeEmitter.emitString(assign->name);
-            break;
+            uint8_t rs = emitBytecodeExpression(assign->value.get());
+            emitBytecodeStore(assign->name, rs);
+            return rs;
         }
         case ASTNodeType::CALL_EXPR: {
             auto* call = static_cast<CallExpr*>(expr);
             if (call->callee == "print") {
-                // Emit PRINT opcode for each argument
                 for (auto& arg : call->arguments) {
-                    emitBytecodeExpression(arg.get());
+                    uint8_t rs = emitBytecodeExpression(arg.get());
                     bytecodeEmitter.emit(OpCode::PRINT);
+                    bytecodeEmitter.emitReg(rs);
                 }
-                // print() returns 0 in the native path; push 0 for consistency
+                uint8_t rd = allocReg();
                 bytecodeEmitter.emit(OpCode::PUSH_INT);
+                bytecodeEmitter.emitReg(rd);
                 bytecodeEmitter.emitInt(0);
-                break;
+                return rd;
             }
             if (isStdlibFunction(call->callee)) {
-                // Other stdlib functions are compiled to native machine code only.
-                // They are not available in the bytecode interpreter.
                 throw std::runtime_error("Stdlib function '" + call->callee +
                     "' must be compiled to native code, not bytecode");
             }
+            std::vector<uint8_t> argRegs;
             for (auto& arg : call->arguments) {
-                emitBytecodeExpression(arg.get());
+                argRegs.push_back(emitBytecodeExpression(arg.get()));
             }
+            uint8_t rd = allocReg();
             bytecodeEmitter.emit(OpCode::CALL);
+            bytecodeEmitter.emitReg(rd);
             bytecodeEmitter.emitString(call->callee);
             bytecodeEmitter.emitByte(static_cast<uint8_t>(call->arguments.size()));
-            break;
+            for (uint8_t reg : argRegs) {
+                bytecodeEmitter.emitReg(reg);
+            }
+            return rd;
         }
         case ASTNodeType::POSTFIX_EXPR: {
             auto* postfix = static_cast<PostfixExpr*>(expr);
@@ -2582,23 +2905,18 @@ void CodeGenerator::emitBytecodeExpression(Expression* expr) {
             if (!id) {
                 throw std::runtime_error("Postfix operator requires an identifier in bytecode");
             }
-            // Push the current value (return value for postfix)
-            bytecodeEmitter.emit(OpCode::LOAD_VAR);
-            bytecodeEmitter.emitString(id->name);
-            // Compute new value: load, push 1, add/sub, store
-            bytecodeEmitter.emit(OpCode::LOAD_VAR);
-            bytecodeEmitter.emitString(id->name);
+            uint8_t origReg = emitBytecodeLoad(id->name);
+            uint8_t oneReg = allocReg();
             bytecodeEmitter.emit(OpCode::PUSH_INT);
+            bytecodeEmitter.emitReg(oneReg);
             bytecodeEmitter.emitInt(1);
-            if (postfix->op == "++") {
-                bytecodeEmitter.emit(OpCode::ADD);
-            } else {
-                bytecodeEmitter.emit(OpCode::SUB);
-            }
-            bytecodeEmitter.emit(OpCode::STORE_VAR);
-            bytecodeEmitter.emitString(id->name);
-            bytecodeEmitter.emit(OpCode::POP); // STORE_VAR left the new value on top; discard it to expose the original value below
-            break;
+            uint8_t newReg = allocReg();
+            bytecodeEmitter.emit(postfix->op == "++" ? OpCode::ADD : OpCode::SUB);
+            bytecodeEmitter.emitReg(newReg);
+            bytecodeEmitter.emitReg(origReg);
+            bytecodeEmitter.emitReg(oneReg);
+            emitBytecodeStore(id->name, newReg);
+            return origReg;
         }
         case ASTNodeType::PREFIX_EXPR: {
             auto* prefix = static_cast<PrefixExpr*>(expr);
@@ -2606,37 +2924,42 @@ void CodeGenerator::emitBytecodeExpression(Expression* expr) {
             if (!id) {
                 throw std::runtime_error("Prefix operator requires an identifier in bytecode");
             }
-            // Compute new value: load, push 1, add/sub, store
-            bytecodeEmitter.emit(OpCode::LOAD_VAR);
-            bytecodeEmitter.emitString(id->name);
+            uint8_t origReg = emitBytecodeLoad(id->name);
+            uint8_t oneReg = allocReg();
             bytecodeEmitter.emit(OpCode::PUSH_INT);
+            bytecodeEmitter.emitReg(oneReg);
             bytecodeEmitter.emitInt(1);
-            if (prefix->op == "++") {
-                bytecodeEmitter.emit(OpCode::ADD);
-            } else {
-                bytecodeEmitter.emit(OpCode::SUB);
-            }
-            bytecodeEmitter.emit(OpCode::STORE_VAR);
-            bytecodeEmitter.emitString(id->name);
-            // STORE_VAR leaves the new value on the stack (prefix returns new value)
-            break;
+            uint8_t newReg = allocReg();
+            bytecodeEmitter.emit(prefix->op == "++" ? OpCode::ADD : OpCode::SUB);
+            bytecodeEmitter.emitReg(newReg);
+            bytecodeEmitter.emitReg(origReg);
+            bytecodeEmitter.emitReg(oneReg);
+            emitBytecodeStore(id->name, newReg);
+            return newReg;
         }
         case ASTNodeType::TERNARY_EXPR: {
             auto* ternary = static_cast<TernaryExpr*>(expr);
-            emitBytecodeExpression(ternary->condition.get());
+            uint8_t condReg = emitBytecodeExpression(ternary->condition.get());
             bytecodeEmitter.emit(OpCode::JUMP_IF_FALSE);
+            bytecodeEmitter.emitReg(condReg);
             size_t elsePatch = bytecodeEmitter.currentOffset();
-            bytecodeEmitter.emitShort(0); // placeholder
+            bytecodeEmitter.emitShort(0);
             
-            emitBytecodeExpression(ternary->thenExpr.get());
+            uint8_t thenReg = emitBytecodeExpression(ternary->thenExpr.get());
+            uint8_t resultReg = thenReg;
             bytecodeEmitter.emit(OpCode::JUMP);
             size_t endPatch = bytecodeEmitter.currentOffset();
-            bytecodeEmitter.emitShort(0); // placeholder
+            bytecodeEmitter.emitShort(0);
             
             bytecodeEmitter.patchJump(elsePatch, static_cast<uint16_t>(bytecodeEmitter.currentOffset()));
-            emitBytecodeExpression(ternary->elseExpr.get());
+            uint8_t elseReg = emitBytecodeExpression(ternary->elseExpr.get());
+            if (elseReg != resultReg) {
+                bytecodeEmitter.emit(OpCode::MOV);
+                bytecodeEmitter.emitReg(resultReg);
+                bytecodeEmitter.emitReg(elseReg);
+            }
             bytecodeEmitter.patchJump(endPatch, static_cast<uint16_t>(bytecodeEmitter.currentOffset()));
-            break;
+            return resultReg;
         }
         case ASTNodeType::INDEX_ASSIGN_EXPR:
             throw std::runtime_error("Array index assignment is not supported in bytecode mode");
@@ -2650,49 +2973,60 @@ void CodeGenerator::emitBytecodeStatement(Statement* stmt) {
         case ASTNodeType::EXPR_STMT: {
             auto* exprStmt = static_cast<ExprStmt*>(stmt);
             emitBytecodeExpression(exprStmt->expression.get());
-            bytecodeEmitter.emit(OpCode::POP);
+            // No POP needed in register-based mode
             break;
         }
         case ASTNodeType::VAR_DECL: {
             auto* varDecl = static_cast<VarDecl*>(stmt);
+            uint8_t rs;
             if (varDecl->initializer) {
-                emitBytecodeExpression(varDecl->initializer.get());
+                rs = emitBytecodeExpression(varDecl->initializer.get());
             } else {
+                rs = allocReg();
                 bytecodeEmitter.emit(OpCode::PUSH_INT);
+                bytecodeEmitter.emitReg(rs);
                 bytecodeEmitter.emitInt(0);
             }
-            bytecodeEmitter.emit(OpCode::STORE_VAR);
-            bytecodeEmitter.emitString(varDecl->name);
-            // STORE_VAR leaves the value on the stack; pop it since
-            // variable declarations are statements, not expressions.
-            bytecodeEmitter.emit(OpCode::POP);
+            if (isInBytecodeFunctionContext()) {
+                if (bytecodeNextLocal_ == 255) {
+                    throw std::runtime_error("Too many local variables in function (max 255)");
+                }
+                uint8_t idx = bytecodeNextLocal_++;
+                bytecodeLocals_[varDecl->name] = idx;
+            }
+            emitBytecodeStore(varDecl->name, rs);
             break;
         }
         case ASTNodeType::RETURN_STMT: {
             auto* retStmt = static_cast<ReturnStmt*>(stmt);
+            uint8_t rs;
             if (retStmt->value) {
-                emitBytecodeExpression(retStmt->value.get());
+                rs = emitBytecodeExpression(retStmt->value.get());
             } else {
+                rs = allocReg();
                 bytecodeEmitter.emit(OpCode::PUSH_INT);
+                bytecodeEmitter.emitReg(rs);
                 bytecodeEmitter.emitInt(0);
             }
             bytecodeEmitter.emit(OpCode::RETURN);
+            bytecodeEmitter.emitReg(rs);
             break;
         }
         case ASTNodeType::IF_STMT: {
             auto* ifStmt = static_cast<IfStmt*>(stmt);
-            emitBytecodeExpression(ifStmt->condition.get());
+            uint8_t condReg = emitBytecodeExpression(ifStmt->condition.get());
             
             bytecodeEmitter.emit(OpCode::JUMP_IF_FALSE);
+            bytecodeEmitter.emitReg(condReg);
             size_t elsePatch = bytecodeEmitter.currentOffset();
-            bytecodeEmitter.emitShort(0); // placeholder
+            bytecodeEmitter.emitShort(0);
             
             emitBytecodeStatement(ifStmt->thenBranch.get());
             
             if (ifStmt->elseBranch) {
                 bytecodeEmitter.emit(OpCode::JUMP);
                 size_t endPatch = bytecodeEmitter.currentOffset();
-                bytecodeEmitter.emitShort(0); // placeholder
+                bytecodeEmitter.emitShort(0);
                 
                 bytecodeEmitter.patchJump(elsePatch, static_cast<uint16_t>(bytecodeEmitter.currentOffset()));
                 emitBytecodeStatement(ifStmt->elseBranch.get());
@@ -2706,10 +3040,11 @@ void CodeGenerator::emitBytecodeStatement(Statement* stmt) {
             auto* whileStmt = static_cast<WhileStmt*>(stmt);
             size_t loopStart = bytecodeEmitter.currentOffset();
             
-            emitBytecodeExpression(whileStmt->condition.get());
+            uint8_t condReg = emitBytecodeExpression(whileStmt->condition.get());
             bytecodeEmitter.emit(OpCode::JUMP_IF_FALSE);
+            bytecodeEmitter.emitReg(condReg);
             size_t exitPatch = bytecodeEmitter.currentOffset();
-            bytecodeEmitter.emitShort(0); // placeholder
+            bytecodeEmitter.emitShort(0);
             
             emitBytecodeStatement(whileStmt->body.get());
             
@@ -2729,49 +3064,59 @@ void CodeGenerator::emitBytecodeStatement(Statement* stmt) {
             
             emitBytecodeStatement(doWhileStmt->body.get());
             
-            emitBytecodeExpression(doWhileStmt->condition.get());
-            // Jump back to the start if condition is true (negate: jump if false to exit)
+            uint8_t condReg = emitBytecodeExpression(doWhileStmt->condition.get());
+            uint8_t notReg = allocReg();
             bytecodeEmitter.emit(OpCode::NOT);
+            bytecodeEmitter.emitReg(notReg);
+            bytecodeEmitter.emitReg(condReg);
             bytecodeEmitter.emit(OpCode::JUMP_IF_FALSE);
+            bytecodeEmitter.emitReg(notReg);
             bytecodeEmitter.emitShort(static_cast<uint16_t>(loopStart));
             break;
         }
         case ASTNodeType::FOR_STMT: {
             auto* forStmt = static_cast<ForStmt*>(stmt);
-            // Initialize iterator variable
-            emitBytecodeExpression(forStmt->start.get());
-            bytecodeEmitter.emit(OpCode::STORE_VAR);
-            bytecodeEmitter.emitString(forStmt->iteratorVar);
-            bytecodeEmitter.emit(OpCode::POP);
+            if (isInBytecodeFunctionContext()) {
+                if (bytecodeLocals_.find(forStmt->iteratorVar) == bytecodeLocals_.end()) {
+                    bytecodeLocals_[forStmt->iteratorVar] = bytecodeNextLocal_++;
+                }
+            }
+            uint8_t startReg = emitBytecodeExpression(forStmt->start.get());
+            emitBytecodeStore(forStmt->iteratorVar, startReg);
             
             size_t loopStart = bytecodeEmitter.currentOffset();
             
-            // Condition: iterator < end
-            bytecodeEmitter.emit(OpCode::LOAD_VAR);
-            bytecodeEmitter.emitString(forStmt->iteratorVar);
-            emitBytecodeExpression(forStmt->end.get());
+            uint8_t iterReg = emitBytecodeLoad(forStmt->iteratorVar);
+            uint8_t endReg = emitBytecodeExpression(forStmt->end.get());
+            uint8_t cmpReg = allocReg();
             bytecodeEmitter.emit(OpCode::LT);
+            bytecodeEmitter.emitReg(cmpReg);
+            bytecodeEmitter.emitReg(iterReg);
+            bytecodeEmitter.emitReg(endReg);
             
             bytecodeEmitter.emit(OpCode::JUMP_IF_FALSE);
+            bytecodeEmitter.emitReg(cmpReg);
             size_t exitPatch = bytecodeEmitter.currentOffset();
-            bytecodeEmitter.emitShort(0); // placeholder
+            bytecodeEmitter.emitShort(0);
             
-            // Body
             emitBytecodeStatement(forStmt->body.get());
             
-            // Increment: iterator = iterator + step (default step = 1)
-            bytecodeEmitter.emit(OpCode::LOAD_VAR);
-            bytecodeEmitter.emitString(forStmt->iteratorVar);
+            uint8_t curReg = emitBytecodeLoad(forStmt->iteratorVar);
+            uint8_t stepReg;
             if (forStmt->step) {
-                emitBytecodeExpression(forStmt->step.get());
+                stepReg = emitBytecodeExpression(forStmt->step.get());
             } else {
+                stepReg = allocReg();
                 bytecodeEmitter.emit(OpCode::PUSH_INT);
+                bytecodeEmitter.emitReg(stepReg);
                 bytecodeEmitter.emitInt(1);
             }
+            uint8_t newIterReg = allocReg();
             bytecodeEmitter.emit(OpCode::ADD);
-            bytecodeEmitter.emit(OpCode::STORE_VAR);
-            bytecodeEmitter.emitString(forStmt->iteratorVar);
-            bytecodeEmitter.emit(OpCode::POP);
+            bytecodeEmitter.emitReg(newIterReg);
+            bytecodeEmitter.emitReg(curReg);
+            bytecodeEmitter.emitReg(stepReg);
+            emitBytecodeStore(forStmt->iteratorVar, newIterReg);
             
             bytecodeEmitter.emit(OpCode::JUMP);
             bytecodeEmitter.emitShort(static_cast<uint16_t>(loopStart));
@@ -2781,17 +3126,14 @@ void CodeGenerator::emitBytecodeStatement(Statement* stmt) {
         }
         case ASTNodeType::SWITCH_STMT: {
             auto* switchStmt = static_cast<SwitchStmt*>(stmt);
-            // Use a unique temp variable to support nested switches.
             static int switchCounter = 0;
             std::string tempVar = "__switch_cond_" + std::to_string(switchCounter++) + "__";
-            // Emit the condition once and store in the temporary variable.
-            emitBytecodeExpression(switchStmt->condition.get());
-            bytecodeEmitter.emit(OpCode::STORE_VAR);
-            bytecodeEmitter.emitString(tempVar);
-            bytecodeEmitter.emit(OpCode::POP);
+            if (isInBytecodeFunctionContext()) {
+                bytecodeLocals_[tempVar] = bytecodeNextLocal_++;
+            }
+            uint8_t condReg = emitBytecodeExpression(switchStmt->condition.get());
+            emitBytecodeStore(tempVar, condReg);
 
-            // Emit non-default cases first, then the default case last
-            // so that the default only executes when no case matches.
             std::vector<size_t> endPatches;
             const SwitchCase* defaultCase = nullptr;
 
@@ -2799,11 +3141,15 @@ void CodeGenerator::emitBytecodeStatement(Statement* stmt) {
                 if (sc.isDefault) {
                     defaultCase = &sc;
                 } else {
-                    bytecodeEmitter.emit(OpCode::LOAD_VAR);
-                    bytecodeEmitter.emitString(tempVar);
-                    emitBytecodeExpression(sc.value.get());
+                    uint8_t loadedCond = emitBytecodeLoad(tempVar);
+                    uint8_t caseValReg = emitBytecodeExpression(sc.value.get());
+                    uint8_t eqReg = allocReg();
                     bytecodeEmitter.emit(OpCode::EQ);
+                    bytecodeEmitter.emitReg(eqReg);
+                    bytecodeEmitter.emitReg(loadedCond);
+                    bytecodeEmitter.emitReg(caseValReg);
                     bytecodeEmitter.emit(OpCode::JUMP_IF_FALSE);
+                    bytecodeEmitter.emitReg(eqReg);
                     size_t skipPatch = bytecodeEmitter.currentOffset();
                     bytecodeEmitter.emitShort(0);
 
@@ -2818,7 +3164,6 @@ void CodeGenerator::emitBytecodeStatement(Statement* stmt) {
                 }
             }
 
-            // Emit the default case body last (only reached if no case matched).
             if (defaultCase) {
                 for (auto& s : defaultCase->body) {
                     emitBytecodeStatement(s.get());
