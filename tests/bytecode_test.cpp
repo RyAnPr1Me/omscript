@@ -159,6 +159,12 @@ TEST(BytecodeTest, PatchJumpBoundaryValidation) {
     emitter.emitByte(0);
     EXPECT_NO_THROW(emitter.patchJump(0, 0));
     EXPECT_THROW(emitter.patchJump(1, 0), std::runtime_error);
+
+    BytecodeEmitter emitter2;
+    emitter2.emitByte(0);
+    emitter2.emitByte(0);
+    emitter2.emitByte(0);
+    EXPECT_NO_THROW(emitter2.patchJump(emitter2.getCode().size() - 2, 0));
 }
 
 // ===========================================================================
