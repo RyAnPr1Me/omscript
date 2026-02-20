@@ -37,8 +37,8 @@ void signalHandler(int sig) {
         unlink(g_tempObjectFile);
     }
     // Re-raise the signal with default action so the exit status reflects it.
-    std::signal(sig, SIG_DFL);
-    std::raise(sig);
+    signal(sig, SIG_DFL);
+    raise(sig);
 }
 
 void printUsage(const char* progName) {

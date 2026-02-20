@@ -94,6 +94,7 @@ bool VM::isJITCompiled(const std::string& name) const {
 
 bool VM::invokeJIT(JITFnPtr fn, uint8_t argCount, const uint8_t* argRegs, uint8_t rd) {
     for (size_t i = 0; i < argCount; i++) {
+        if (argRegs[i] >= kMaxRegisters) return false;
         if (registers[argRegs[i]].getType() != Value::Type::INTEGER)
             return false;
     }
@@ -113,6 +114,7 @@ bool VM::invokeJIT(JITFnPtr fn, uint8_t argCount, const uint8_t* argRegs, uint8_
 
 bool VM::invokeJITFloat(JITFloatFnPtr fn, uint8_t argCount, const uint8_t* argRegs, uint8_t rd) {
     for (size_t i = 0; i < argCount; i++) {
+        if (argRegs[i] >= kMaxRegisters) return false;
         if (registers[argRegs[i]].getType() != Value::Type::FLOAT)
             return false;
     }
@@ -134,6 +136,7 @@ void VM::classifyArgTypes(uint8_t argCount, const uint8_t* argRegs, bool& allInt
     allInt = true;
     allFloat = true;
     for (size_t i = 0; i < argCount; i++) {
+        if (argRegs[i] >= kMaxRegisters) { allInt = false; allFloat = false; return; }
         auto t = registers[argRegs[i]].getType();
         if (t != Value::Type::INTEGER) allInt = false;
         if (t != Value::Type::FLOAT) allFloat = false;

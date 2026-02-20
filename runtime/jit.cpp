@@ -274,6 +274,7 @@ bool BytecodeJIT::compileInt(const BytecodeFunction& func) {
         case OpCode::JUMP: {
             uint16_t target = peekShort(code, ip);
             ip += 2;
+            if (target > code.size()) { failedCompilations_.insert(func.name); return false; }
             blockStarts.insert(target);
             blockStarts.insert(ip);
             break;
@@ -282,6 +283,7 @@ bool BytecodeJIT::compileInt(const BytecodeFunction& func) {
             ip++;  // rs
             uint16_t target = peekShort(code, ip);
             ip += 2;
+            if (target > code.size()) { failedCompilations_.insert(func.name); return false; }
             blockStarts.insert(target);
             blockStarts.insert(ip);
             break;
@@ -717,6 +719,7 @@ bool BytecodeJIT::compileFloat(const BytecodeFunction& func) {
         }
         case OpCode::JUMP: {
             uint16_t target = peekShort(code, ip); ip += 2;
+            if (target > code.size()) { failedCompilations_.insert(func.name); return false; }
             blockStarts.insert(target);
             blockStarts.insert(ip);
             break;
@@ -724,6 +727,7 @@ bool BytecodeJIT::compileFloat(const BytecodeFunction& func) {
         case OpCode::JUMP_IF_FALSE: {
             ip++;  // rs
             uint16_t target = peekShort(code, ip); ip += 2;
+            if (target > code.size()) { failedCompilations_.insert(func.name); return false; }
             blockStarts.insert(target);
             blockStarts.insert(ip);
             break;

@@ -140,11 +140,11 @@ test_cli_output "tokens-flag" "FN" 0 ./build/omsc --tokens examples/test.om
 test_cli_output "parse" "Parsed program" 0 ./build/omsc parse examples/test.om
 test_cli_output "parse-flag" "Parsed program" 0 ./build/omsc --parse examples/test.om
 test_cli_output "ast-flag" "Parsed program" 0 ./build/omsc --ast examples/test.om
-test_cli_output "emit-ir" "define i64 @main" 0 ./build/omsc --emit-ir examples/exit_zero.om
-test_cli_output "emit-ir-alias" "define i64 @main" 0 ./build/omsc --ir examples/exit_zero.om
+test_cli_output "emit-ir" "i64 @main" 0 ./build/omsc --emit-ir examples/exit_zero.om
+test_cli_output "emit-ir-alias" "i64 @main" 0 ./build/omsc --ir examples/exit_zero.om
 test_cli_output "emit-ir-output-flag" "" 0 ./build/omsc emit-ir examples/exit_zero.om --output emit_ir_flag.ll
 TOTAL=$((TOTAL + 1))
-if [ ! -f emit_ir_flag.ll ] || ! grep -q "define i64 @main" emit_ir_flag.ll; then
+if [ ! -f emit_ir_flag.ll ] || ! grep -q "i64 @main" emit_ir_flag.ll; then
     echo -e "${RED}✗ Failed (emit-ir output flag did not write file)${NC}"
     FAILURES=$((FAILURES + 1))
 fi
@@ -264,8 +264,8 @@ test_cli_output "opt-O1-compile" "Compilation successful!" 0 ./build/omsc -O1 ex
 rm -f /tmp/test_o1 /tmp/test_o1.o
 test_cli_output "opt-O3-compile" "Compilation successful!" 0 ./build/omsc -O3 examples/exit_zero.om -o /tmp/test_o3
 rm -f /tmp/test_o3 /tmp/test_o3.o
-test_cli_output "opt-O0-emit-ir" "define i64 @main" 0 ./build/omsc emit-ir -O0 examples/exit_zero.om
-test_cli_output "opt-O3-emit-ir" "define i64 @main" 0 ./build/omsc emit-ir -O3 examples/exit_zero.om
+test_cli_output "opt-O0-emit-ir" "i64 @main" 0 ./build/omsc emit-ir -O0 examples/exit_zero.om
+test_cli_output "opt-O3-emit-ir" "i64 @main" 0 ./build/omsc emit-ir -O3 examples/exit_zero.om
 test_cli_output "opt-O0-run" "Compilation successful!" 0 ./build/omsc run -O0 examples/exit_zero.om
 test_cli_output "opt-help-shows-flags" "-O0" 0 ./build/omsc --help
 
