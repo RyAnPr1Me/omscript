@@ -306,6 +306,11 @@ TEST(LexerTest, UnexpectedCharacter) {
     EXPECT_THROW(lex("@"), std::runtime_error);
 }
 
+TEST(LexerTest, NonAsciiByteIsRejected) {
+    const std::string src(1, static_cast<char>(0xFF));
+    EXPECT_THROW(lex(src), std::runtime_error);
+}
+
 // ---------------------------------------------------------------------------
 // Number before range (edge case: 1...10)
 // ---------------------------------------------------------------------------

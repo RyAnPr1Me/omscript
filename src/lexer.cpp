@@ -5,6 +5,12 @@
 
 namespace omscript {
 
+namespace {
+inline bool isDigit(char c) { return std::isdigit(static_cast<unsigned char>(c)) != 0; }
+inline bool isAlpha(char c) { return std::isalpha(static_cast<unsigned char>(c)) != 0; }
+inline bool isAlnum(char c) { return std::isalnum(static_cast<unsigned char>(c)) != 0; }
+} // namespace
+
 static const std::unordered_map<std::string, TokenType> keywords = {
     {"fn", TokenType::FN},
     {"return", TokenType::RETURN},
@@ -104,7 +110,7 @@ Token Lexer::scanNumber() {
     std::string num;
     bool isFloat = false;
     
-    while (!isAtEnd() && (isdigit(peek()) || peek() == '.')) {
+    while (!isAtEnd() && (isDigit(peek()) || peek() == '.')) {
         if (peek() == '.') {
             // Don't consume the dot if it's part of a range operator (...)
             if (peek(1) == '.' && peek(2) == '.') {
@@ -140,7 +146,7 @@ Token Lexer::scanNumber() {
 Token Lexer::scanIdentifier() {
     std::string id;
     
-    while (!isAtEnd() && (isalnum(peek()) || peek() == '_')) {
+    while (!isAtEnd() && (isAlnum(peek()) || peek() == '_')) {
         id += advance();
     }
     
@@ -227,13 +233,13 @@ std::vector<Token> Lexer::tokenize() {
         }
         
         // Numbers
-        if (isdigit(c)) {
+        if (isDigit(c)) {
             tokens.push_back(scanNumber());
             continue;
         }
         
         // Identifiers and keywords
-        if (isalpha(c) || c == '_') {
+        if (isAlpha(c) || c == '_') {
             tokens.push_back(scanIdentifier());
             continue;
         }
