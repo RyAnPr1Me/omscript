@@ -116,7 +116,7 @@ private:
     uint8_t bytecodeLocalBase_ = 0;
 
     uint8_t allocReg() {
-        if (bytecodeNextReg_ >= 256)
+        if (bytecodeNextReg_ == 255)
             throw std::runtime_error("Register file overflow (max 256 registers)");
         return bytecodeNextReg_++;
     }
