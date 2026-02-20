@@ -125,6 +125,7 @@ test_cli_output() {
 echo "Running CLI tests:"
 echo "--------------------------------------------"
 test_cli_output "help" "Usage:" 0 ./build/omsc --help
+test_cli_output "help-command" "Usage:" 0 ./build/omsc help
 test_cli_output "version" "OmScript Compiler v0.4.0" 0 ./build/omsc version
 test_cli_output "lex" "FN" 0 ./build/omsc lex examples/test.om
 test_cli_output "lex-flag" "FN" 0 ./build/omsc --lex examples/test.om
@@ -149,7 +150,17 @@ if [ ! -f emit_ir_flag.ll ] || ! grep -q "i64 @main" emit_ir_flag.ll; then
     FAILURES=$((FAILURES + 1))
 fi
 rm -f emit_ir_flag.ll
+test_cli_output "unknown-command" "Error: unknown command" 1 ./build/omsc frob
+test_cli_output "unknown-option" "Error: unknown option '--bad-flag'" 1 ./build/omsc run examples/exit_zero.om --bad-flag
+test_cli_output "output-unsupported-for-lex" "Error: -o/--output is only supported for compile/run/emit-ir commands" 1 ./build/omsc lex examples/test.om -o /tmp/lex_out
 test_cli_output "output-empty" "Error: -o/--output requires a valid output file name" 1 ./build/omsc run examples/exit_zero.om -o ""
+test_cli_output "output-dash-invalid" "Error: -o/--output requires a valid output file name" 1 ./build/omsc run examples/exit_zero.om -o -bad
+test_cli_output "output-missing-arg" "Error: -o/--output requires an argument" 1 ./build/omsc run examples/exit_zero.om -o
+test_cli_output "output-multiple" "Error: output file specified multiple times" 1 ./build/omsc examples/exit_zero.om -o /tmp/out_a -o /tmp/out_b
+test_cli_output "keep-temps-non-run" "Error: -k/--keep-temps is only supported for run commands" 1 ./build/omsc examples/exit_zero.om -k
+test_cli_output "clean-input-rejected" "Error: clean does not accept input files" 1 ./build/omsc clean examples/test.om
+test_cli_output "multiple-inputs" "Error: multiple input files specified" 1 ./build/omsc examples/test.om examples/factorial.om
+test_cli_output "run-missing-input" "Error: no input file specified" 1 ./build/omsc run
 test_cli_output "build-flag" "Compilation successful!" 0 ./build/omsc --build examples/exit_zero.om -o build_flag_test
 TOTAL=$((TOTAL + 1))
 if [ ! -f build_flag_test ]; then
@@ -159,6 +170,7 @@ fi
 rm -f build_flag_test
 test_cli_output "run-success" "Compilation successful!" 0 ./build/omsc run examples/exit_zero.om
 test_cli_output "run-flag" "Compilation successful!" 0 ./build/omsc --run examples/exit_zero.om
+test_cli_output "run-with-args-delimiter" "Compilation successful!" 0 ./build/omsc run examples/exit_zero.om -- --bad-flag 123
 test_cli_output "run" "Program exited with code 120" 120 ./build/omsc run examples/factorial.om
 test_cli_output "print-output" "42" 0 ./build/omsc run examples/print_test.om
 test_cli_output "float-print" "3.5" 5 ./build/omsc run examples/float_test.om
@@ -184,6 +196,7 @@ if [ -f a.out ] || [ -f a.out.o ]; then
     rm -f a.out a.out.o
     FAILURES=$((FAILURES + 1))
 fi
+test_cli_output "clean-noop" "Nothing to clean" 0 ./build/omsc clean
 echo ""
 
 echo "Running test programs:"
@@ -244,8 +257,10 @@ test_compile_fail "examples/int_overflow.om"
 test_compile_fail "examples/no_main.om"
 test_compile_fail "examples/dup_func.om"
 test_compile_fail "examples/dup_param.om"
+test_compile_fail "examples/missing_semicolon.om"
 test_cli_output "error-line-info" "line" 1 ./build/omsc examples/undefined_var.om -o /tmp/test_err
 test_cli_output "error-includes-filename" "undefined_var.om" 1 ./build/omsc examples/undefined_var.om -o /tmp/test_err
+test_cli_output "missing-semicolon-msg" "Expected ';'" 1 ./build/omsc examples/missing_semicolon.om -o /tmp/test_semicolon
 test_cli_output "int-overflow-msg" "Integer literal out of range" 1 ./build/omsc examples/int_overflow.om -o /tmp/test_overflow
 test_cli_output "no-main-msg" "No 'main' function defined" 1 ./build/omsc examples/no_main.om -o /tmp/test_nomain
 test_cli_output "dup-func-msg" "Duplicate function definition" 1 ./build/omsc examples/dup_func.om -o /tmp/test_dupfunc

@@ -349,6 +349,15 @@ TEST(ParserTest, MissingSemicolon) {
     EXPECT_THROW(parse("fn main() { return 0 }"), std::runtime_error);
 }
 
+TEST(ParserTest, MissingSemicolonMessage) {
+    try {
+        parse("fn main() { return 0 }");
+        FAIL() << "Expected parser error";
+    } catch (const std::runtime_error& e) {
+        EXPECT_NE(std::string(e.what()).find("Expected ';'"), std::string::npos);
+    }
+}
+
 TEST(ParserTest, MissingFunction) {
     EXPECT_THROW(parse("return 0;"), std::runtime_error);
 }

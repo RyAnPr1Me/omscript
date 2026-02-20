@@ -44,6 +44,7 @@ Token Parser::consume(TokenType type, const std::string& message) {
         return advance();
     }
     error(message);
+    throw std::logic_error("unreachable parser consume() path");
 }
 
 void Parser::error(const std::string& message) {
