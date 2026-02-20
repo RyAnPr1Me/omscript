@@ -1654,3 +1654,192 @@ TEST(VMTest, JITCachedPointerReuse) {
     }
     EXPECT_TRUE(vm.isJITCompiled("cached_add"));
 }
+
+// ===========================================================================
+// Float JIT compilation
+// ===========================================================================
+
+TEST(VMTest, FloatJITSimpleAdd) {
+    // Register a function that adds two floats: PUSH args + ADD + RETURN.
+    BytecodeFunction addFunc;
+    addFunc.name = "fadd";
+    addFunc.arity = 2;
+    addFunc.bytecode = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::LOAD_LOCAL); e.emitByte(0);
+        e.emit(OpCode::LOAD_LOCAL); e.emitByte(1);
+        e.emit(OpCode::ADD);
+        e.emit(OpCode::RETURN);
+    });
+
+    VM vm;
+    vm.registerFunction(addFunc);
+
+    // Call with float args enough times to trigger float-specialized JIT.
+    for (size_t i = 0; i < BytecodeJIT::kJITThreshold + 3; i++) {
+        auto code = buildBytecode([&](BytecodeEmitter& e) {
+            e.emit(OpCode::PUSH_FLOAT); e.emitFloat(1.5);
+            e.emit(OpCode::PUSH_FLOAT); e.emitFloat(2.5);
+            e.emit(OpCode::CALL);
+            e.emitString("fadd");
+            e.emitByte(2);
+            e.emit(OpCode::RETURN);
+        });
+        vm.execute(code);
+        EXPECT_DOUBLE_EQ(vm.getLastReturn().asFloat(), 4.0);
+    }
+    EXPECT_TRUE(vm.isJITCompiled("fadd"));
+}
+
+TEST(VMTest, FloatJITMulSub) {
+    // Register: (a * b) - a
+    BytecodeFunction func;
+    func.name = "fmulsub";
+    func.arity = 2;
+    func.bytecode = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::LOAD_LOCAL); e.emitByte(0);
+        e.emit(OpCode::LOAD_LOCAL); e.emitByte(1);
+        e.emit(OpCode::MUL);
+        e.emit(OpCode::LOAD_LOCAL); e.emitByte(0);
+        e.emit(OpCode::SUB);
+        e.emit(OpCode::RETURN);
+    });
+
+    VM vm;
+    vm.registerFunction(func);
+
+    for (size_t i = 0; i < BytecodeJIT::kJITThreshold + 3; i++) {
+        auto code = buildBytecode([](BytecodeEmitter& e) {
+            e.emit(OpCode::PUSH_FLOAT); e.emitFloat(3.0);
+            e.emit(OpCode::PUSH_FLOAT); e.emitFloat(4.0);
+            e.emit(OpCode::CALL);
+            e.emitString("fmulsub");
+            e.emitByte(2);
+            e.emit(OpCode::RETURN);
+        });
+        vm.execute(code);
+        // (3.0 * 4.0) - 3.0 = 9.0
+        EXPECT_DOUBLE_EQ(vm.getLastReturn().asFloat(), 9.0);
+    }
+    EXPECT_TRUE(vm.isJITCompiled("fmulsub"));
+}
+
+TEST(VMTest, TypeProfileRecordsIntCalls) {
+    // Register a simple add function.
+    BytecodeFunction addFunc;
+    addFunc.name = "typed_add";
+    addFunc.arity = 2;
+    addFunc.bytecode = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::LOAD_LOCAL); e.emitByte(0);
+        e.emit(OpCode::LOAD_LOCAL); e.emitByte(1);
+        e.emit(OpCode::ADD);
+        e.emit(OpCode::RETURN);
+    });
+
+    VM vm;
+    vm.registerFunction(addFunc);
+
+    // Call with int args — should record int type profile.
+    for (size_t i = 0; i < BytecodeJIT::kJITThreshold + 1; i++) {
+        auto code = buildBytecode([](BytecodeEmitter& e) {
+            e.emit(OpCode::PUSH_INT); e.emitInt(10);
+            e.emit(OpCode::PUSH_INT); e.emitInt(20);
+            e.emit(OpCode::CALL);
+            e.emitString("typed_add");
+            e.emitByte(2);
+            e.emit(OpCode::RETURN);
+        });
+        vm.execute(code);
+        EXPECT_EQ(vm.getLastReturn().asInt(), 30);
+    }
+    // After enough calls, should be JIT-compiled with int specialization.
+    EXPECT_TRUE(vm.isJITCompiled("typed_add"));
+}
+
+TEST(VMTest, TypeProfileRecordsFloatCalls) {
+    // Same function, called with floats.
+    BytecodeFunction addFunc;
+    addFunc.name = "typed_fadd";
+    addFunc.arity = 2;
+    addFunc.bytecode = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::LOAD_LOCAL); e.emitByte(0);
+        e.emit(OpCode::LOAD_LOCAL); e.emitByte(1);
+        e.emit(OpCode::ADD);
+        e.emit(OpCode::RETURN);
+    });
+
+    VM vm;
+    vm.registerFunction(addFunc);
+
+    for (size_t i = 0; i < BytecodeJIT::kJITThreshold + 1; i++) {
+        auto code = buildBytecode([](BytecodeEmitter& e) {
+            e.emit(OpCode::PUSH_FLOAT); e.emitFloat(1.1);
+            e.emit(OpCode::PUSH_FLOAT); e.emitFloat(2.2);
+            e.emit(OpCode::CALL);
+            e.emitString("typed_fadd");
+            e.emitByte(2);
+            e.emit(OpCode::RETURN);
+        });
+        vm.execute(code);
+        EXPECT_NEAR(vm.getLastReturn().asFloat(), 3.3, 0.001);
+    }
+    EXPECT_TRUE(vm.isJITCompiled("typed_fadd"));
+}
+
+TEST(VMTest, FloatJITWithPushFloat) {
+    // A function that uses PUSH_FLOAT constants inside the body.
+    BytecodeFunction func;
+    func.name = "fconst";
+    func.arity = 1;
+    func.bytecode = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::LOAD_LOCAL); e.emitByte(0);
+        e.emit(OpCode::PUSH_FLOAT); e.emitFloat(10.0);
+        e.emit(OpCode::MUL);
+        e.emit(OpCode::RETURN);
+    });
+
+    VM vm;
+    vm.registerFunction(func);
+
+    for (size_t i = 0; i < BytecodeJIT::kJITThreshold + 3; i++) {
+        auto code = buildBytecode([](BytecodeEmitter& e) {
+            e.emit(OpCode::PUSH_FLOAT); e.emitFloat(5.0);
+            e.emit(OpCode::CALL);
+            e.emitString("fconst");
+            e.emitByte(1);
+            e.emit(OpCode::RETURN);
+        });
+        vm.execute(code);
+        EXPECT_DOUBLE_EQ(vm.getLastReturn().asFloat(), 50.0);
+    }
+    EXPECT_TRUE(vm.isJITCompiled("fconst"));
+}
+
+// ===========================================================================
+// Hybrid compiler integration
+// ===========================================================================
+
+TEST(VMTest, HybridCompilerProducesBytecode) {
+    // Verify that generateHybrid produces bytecode for untyped functions.
+    std::string source = R"(
+        fn add(a, b) {
+            return a + b;
+        }
+        fn main() {
+            return add(1, 2);
+        }
+    )";
+    omscript::Lexer lexer(source);
+    auto tokens = lexer.tokenize();
+    omscript::Parser parser(tokens);
+    auto program = parser.parse();
+
+    omscript::CodeGenerator codegen(omscript::OptimizationLevel::O0);
+    codegen.generateHybrid(program.get());
+
+    // 'add' has no type annotations → should be Interpreted tier.
+    EXPECT_EQ(codegen.getFunctionTier("add"), omscript::ExecutionTier::Interpreted);
+    // 'main' is always AOT.
+    EXPECT_EQ(codegen.getFunctionTier("main"), omscript::ExecutionTier::AOT);
+    // Hybrid mode should have produced bytecode for 'add'.
+    EXPECT_TRUE(codegen.hasHybridBytecodeFunctions());
+}

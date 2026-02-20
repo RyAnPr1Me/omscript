@@ -127,7 +127,7 @@ bool VM::isJITCompiled(const std::string& name) const {
 }
 
 bool VM::invokeJIT(JITFnPtr fn, uint8_t argCount) {
-    // Verify all args are integers (JIT only handles integers).
+    // Verify all args are integers (int-specialized JIT).
     for (size_t i = 0; i < argCount; i++) {
         if (stack[stack.size() - 1 - i].getType() != Value::Type::INTEGER)
             return false;
@@ -143,6 +143,26 @@ bool VM::invokeJIT(JITFnPtr fn, uint8_t argCount) {
     for (size_t i = argCount; i > 0; i--)
         args[i - 1] = pop().unsafeAsInt();
     int64_t result = fn(args, static_cast<int>(argCount));
+    push(Value(result));
+    return true;
+}
+
+bool VM::invokeJITFloat(JITFloatFnPtr fn, uint8_t argCount) {
+    // Verify all args are float (float-specialized JIT).
+    for (size_t i = 0; i < argCount; i++) {
+        if (stack[stack.size() - 1 - i].getType() != Value::Type::FLOAT)
+            return false;
+    }
+    double stackArgs[kMaxStackArgs];
+    std::unique_ptr<double[]> heapArgs;
+    double* args = stackArgs;
+    if (argCount > kMaxStackArgs) {
+        heapArgs = std::make_unique<double[]>(argCount);
+        args = heapArgs.get();
+    }
+    for (size_t i = argCount; i > 0; i--)
+        args[i - 1] = pop().unsafeAsFloat();
+    double result = fn(args, static_cast<int>(argCount));
     push(Value(result));
     return true;
 }
@@ -596,7 +616,29 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
         std::string funcName = readString(bytecode, ip);
         uint8_t argCount = readByte(bytecode, ip);
 
-        // ---- JIT fast path: use cached native pointer ----
+        // ---- Record argument types for type-profiled JIT ----
+        if (jit_ && argCount > 0) {
+            bool allInt = true, allFloat = true;
+            for (size_t i = 0; i < argCount; i++) {
+                auto t = stack[stack.size() - 1 - i].getType();
+                if (t != Value::Type::INTEGER) allInt = false;
+                if (t != Value::Type::FLOAT) allFloat = false;
+            }
+            jit_->recordTypes(funcName, allInt, allFloat);
+        }
+
+        // ---- JIT fast path: float-specialized ----
+        {
+            auto floatIt = jitFloatCache_.find(funcName);
+            if (floatIt != jitFloatCache_.end()) {
+                if (invokeJITFloat(floatIt->second, argCount)) {
+                    if (jit_) jit_->recordPostJITCall(funcName);
+                    DISPATCH();
+                }
+            }
+        }
+
+        // ---- JIT fast path: int-specialized ----
         {
             auto cacheIt = jitCache_.find(funcName);
             if (cacheIt != jitCache_.end()) {
@@ -606,7 +648,11 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
                         auto fit = functions.find(funcName);
                         if (fit != functions.end()) {
                             jit_->recompile(fit->second);
-                            jitCache_[funcName] = jit_->getCompiled(funcName);
+                            // Update caches based on new specialization.
+                            auto newIntPtr = jit_->getCompiled(funcName);
+                            auto newFloatPtr = jit_->getCompiledFloat(funcName);
+                            if (newIntPtr) jitCache_[funcName] = newIntPtr;
+                            if (newFloatPtr) jitFloatCache_[funcName] = newFloatPtr;
                         }
                     }
                     DISPATCH();
@@ -619,8 +665,13 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
             if (jit_->recordCall(funcName)) {
                 auto fit = functions.find(funcName);
                 if (fit != functions.end()) {
-                    if (jit_->compile(fit->second)) {
-                        jitCache_[funcName] = jit_->getCompiled(funcName);
+                    // Choose specialization based on type profile.
+                    auto spec = jit_->getTypeProfile(funcName).bestSpecialization();
+                    if (jit_->compile(fit->second, spec)) {
+                        auto intPtr = jit_->getCompiled(funcName);
+                        auto floatPtr = jit_->getCompiledFloat(funcName);
+                        if (intPtr) jitCache_[funcName] = intPtr;
+                        if (floatPtr) jitFloatCache_[funcName] = floatPtr;
                     }
                 }
             }
@@ -953,7 +1004,29 @@ vm_exit:
                 std::string funcName = readString(bytecode, ip);
                 uint8_t argCount = readByte(bytecode, ip);
 
-                // ---- JIT fast path: use cached native pointer ----
+                // ---- Record argument types for type-profiled JIT ----
+                if (jit_ && argCount > 0) {
+                    bool allInt = true, allFloat = true;
+                    for (size_t i = 0; i < argCount; i++) {
+                        auto t = stack[stack.size() - 1 - i].getType();
+                        if (t != Value::Type::INTEGER) allInt = false;
+                        if (t != Value::Type::FLOAT) allFloat = false;
+                    }
+                    jit_->recordTypes(funcName, allInt, allFloat);
+                }
+
+                // ---- JIT fast path: float-specialized ----
+                {
+                    auto floatIt = jitFloatCache_.find(funcName);
+                    if (floatIt != jitFloatCache_.end()) {
+                        if (invokeJITFloat(floatIt->second, argCount)) {
+                            if (jit_) jit_->recordPostJITCall(funcName);
+                            break;
+                        }
+                    }
+                }
+
+                // ---- JIT fast path: int-specialized ----
                 {
                     auto cacheIt = jitCache_.find(funcName);
                     if (cacheIt != jitCache_.end()) {
@@ -962,7 +1035,10 @@ vm_exit:
                                 auto fit = functions.find(funcName);
                                 if (fit != functions.end()) {
                                     jit_->recompile(fit->second);
-                                    jitCache_[funcName] = jit_->getCompiled(funcName);
+                                    auto newIntPtr = jit_->getCompiled(funcName);
+                                    auto newFloatPtr = jit_->getCompiledFloat(funcName);
+                                    if (newIntPtr) jitCache_[funcName] = newIntPtr;
+                                    if (newFloatPtr) jitFloatCache_[funcName] = newFloatPtr;
                                 }
                             }
                             break;
@@ -975,8 +1051,12 @@ vm_exit:
                     if (jit_->recordCall(funcName)) {
                         auto fit = functions.find(funcName);
                         if (fit != functions.end()) {
-                            if (jit_->compile(fit->second)) {
-                                jitCache_[funcName] = jit_->getCompiled(funcName);
+                            auto spec = jit_->getTypeProfile(funcName).bestSpecialization();
+                            if (jit_->compile(fit->second, spec)) {
+                                auto intPtr = jit_->getCompiled(funcName);
+                                auto floatPtr = jit_->getCompiledFloat(funcName);
+                                if (intPtr) jitCache_[funcName] = intPtr;
+                                if (floatPtr) jitFloatCache_[funcName] = floatPtr;
                             }
                         }
                     }

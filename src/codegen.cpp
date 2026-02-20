@@ -2672,10 +2672,19 @@ void CodeGenerator::generateHybrid(Program* program) {
     generate(program);
 
     // Phase 2: For each Interpreted-tier function, also emit bytecode so
-    // the VM can execute it (or later JIT-compile it).
+    // the VM can execute it (or later JIT-compile it).  If bytecode
+    // emission fails (e.g. unsupported statement type), the function
+    // remains AOT-only — no bytecode is produced for it.
     for (auto& func : program->functions) {
         if (functionTiers[func->name] == ExecutionTier::Interpreted) {
-            emitBytecodeForFunction(func.get());
+            try {
+                emitBytecodeForFunction(func.get());
+            } catch (const std::runtime_error&) {
+                // Bytecode emission failed — keep function as AOT-only.
+                // This can happen for functions using features not yet
+                // supported in the bytecode emitter (e.g. break in switch).
+                functionTiers[func->name] = ExecutionTier::AOT;
+            }
         }
     }
 }

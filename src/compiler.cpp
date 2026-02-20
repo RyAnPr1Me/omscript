@@ -76,9 +76,18 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
     }
     CodeGenerator codegen(optLevel_);
     try {
-        codegen.generate(program.get());
+        // Use hybrid compilation to produce both LLVM IR (for AOT-tier
+        // functions) and bytecode (for Interpreted-tier functions).
+        // This enables compiled binaries to contain bytecode that the
+        // embedded JIT runtime can recompile with type specialization.
+        codegen.generateHybrid(program.get());
     } catch (const std::runtime_error& e) {
         throw std::runtime_error(sourceFile + ": " + e.what());
+    }
+
+    if (codegen.hasHybridBytecodeFunctions() && verbose_) {
+        std::cout << "  Hybrid mode: " << codegen.getBytecodeFunctions().size()
+                  << " function(s) compiled to bytecode for JIT recompilation" << std::endl;
     }
     
     // Print LLVM IR only in verbose mode

@@ -19,26 +19,57 @@ namespace omscript {
 // Forward-declare BytecodeFunction (defined in vm.h).
 struct BytecodeFunction;
 
+/// Observed type specialization for a function's arguments.
+enum class JITSpecialization {
+    Unknown,   // Not enough data yet
+    IntOnly,   // All observed calls used integer arguments
+    FloatOnly, // All observed calls used float arguments
+    Mixed      // Arguments include a mix of int and float (not specializable)
+};
+
+/// Runtime type profile for a function.  The VM records argument types
+/// at each call site and the JIT uses this profile to select the best
+/// specialization when compiling or recompiling.
+struct TypeProfile {
+    size_t intCalls = 0;    // Calls where all args were INTEGER
+    size_t floatCalls = 0;  // Calls where all args were FLOAT
+    size_t mixedCalls = 0;  // Calls with mixed or other types
+
+    /// Determine the best specialization from observed data.
+    JITSpecialization bestSpecialization() const {
+        if (intCalls == 0 && floatCalls == 0 && mixedCalls == 0)
+            return JITSpecialization::Unknown;
+        if (mixedCalls > 0)
+            return JITSpecialization::Mixed;
+        if (floatCalls > 0 && intCalls == 0)
+            return JITSpecialization::FloatOnly;
+        if (intCalls > 0 && floatCalls == 0)
+            return JITSpecialization::IntOnly;
+        return JITSpecialization::Mixed;
+    }
+};
+
 /// Lightweight JIT compiler for bytecode functions.
 ///
-/// Translates integer-only bytecode to LLVM IR, then compiles it to native
-/// machine code via LLVM MCJIT.  Functions that use floats, strings, globals,
-/// or CALL/PRINT are not JIT-eligible and will continue to be interpreted.
+/// Translates bytecode to LLVM IR and compiles to native machine code
+/// via LLVM MCJIT.  Supports two specializations:
 ///
-/// The VM feeds call-count data into recordCall(); once the threshold is
-/// reached the VM invokes compile().  Subsequent calls to the function go
-/// through the native pointer returned by getCompiled().
+///  - **Integer**: all arithmetic uses i64 (original path)
+///  - **Float**: all arithmetic uses double (enabled by type profiling)
 ///
-/// **Type-specialized recompilation**: After a function has been JIT-compiled
-/// with integer-only specialization, the profiler continues to observe
-/// argument types.  If the function is later called with consistent type
-/// patterns (e.g. always int,int), it may be recompiled with a tighter
-/// specialization.  The `recompile()` method supports this path — it is
-/// called when profiling data suggests a better specialization is available.
+/// Functions that use strings, globals, CALL, or PRINT remain interpreted.
+///
+/// The VM feeds call-count and type-profile data; once the JIT threshold
+/// is reached, compile() selects a specialization based on the profile.
+/// After additional calls, recompile() can switch to a better specialization
+/// if the profile has changed (e.g., initially int, later mostly float).
 class BytecodeJIT {
 public:
-    /// Native function signature: takes (args_array, num_args), returns int64_t.
+    /// Integer-specialized native function signature.
     using JITFnPtr = int64_t (*)(int64_t*, int);
+
+    /// Float-specialized native function signature.
+    using JITFloatFnPtr = double (*)(double*, int);
 
     /// Number of interpreted calls before a function is JIT-compiled.
     static constexpr size_t kJITThreshold = 5;
@@ -54,19 +85,26 @@ public:
     BytecodeJIT();
     ~BytecodeJIT();
 
-    /// Try to JIT-compile @p func.  Returns true on success.
-    bool compile(const BytecodeFunction& func);
+    /// Try to JIT-compile @p func with the given specialization.
+    /// If @p spec is Unknown, defaults to IntOnly.  Returns true on success.
+    bool compile(const BytecodeFunction& func,
+                 JITSpecialization spec = JITSpecialization::IntOnly);
 
-    /// Recompile a previously-compiled function with updated type
-    /// specialization.  This replaces the old native code pointer.
-    /// Returns true on success.
+    /// Recompile a previously-compiled function with the specialization
+    /// determined by its current type profile.  Returns true on success.
     bool recompile(const BytecodeFunction& func);
 
     /// Return true if @p name has been successfully JIT-compiled.
     bool isCompiled(const std::string& name) const;
 
-    /// Get the native function pointer for a JIT-compiled function.
+    /// Get the integer-specialized native function pointer.
     JITFnPtr getCompiled(const std::string& name) const;
+
+    /// Get the float-specialized native function pointer (nullptr if N/A).
+    JITFloatFnPtr getCompiledFloat(const std::string& name) const;
+
+    /// Return the specialization used for a compiled function.
+    JITSpecialization getSpecialization(const std::string& name) const;
 
     /// Increment the call counter for @p name.
     /// Returns true exactly once — when the counter first reaches kJITThreshold.
@@ -80,6 +118,12 @@ public:
     /// Return the total number of calls recorded for @p name.
     size_t getCallCount(const std::string& name) const;
 
+    /// Record argument types for a call to @p name.
+    void recordTypes(const std::string& name, bool allInt, bool allFloat);
+
+    /// Get the type profile for @p name.
+    const TypeProfile& getTypeProfile(const std::string& name) const;
+
 private:
     /// Keep LLVM execution engines alive so compiled code remains valid.
     struct JITModule {
@@ -89,14 +133,23 @@ private:
     };
 
     std::unordered_map<std::string, JITFnPtr> compiled_;
+    std::unordered_map<std::string, JITFloatFnPtr> compiledFloat_;
+    std::unordered_map<std::string, JITSpecialization> specializations_;
+    std::unordered_map<std::string, TypeProfile> typeProfiles_;
     std::unordered_map<std::string, size_t> callCounts_;
     std::unordered_map<std::string, size_t> postJITCallCounts_;
     std::unordered_set<std::string> failedCompilations_;
     std::unordered_set<std::string> recompiled_;
     std::vector<JITModule> modules_;
 
+    static TypeProfile emptyProfile_;
+
     bool initialized_ = false;
     void ensureInitialized();
+
+    /// Internal: compile with a specific specialization.
+    bool compileInt(const BytecodeFunction& func);
+    bool compileFloat(const BytecodeFunction& func);
 };
 
 } // namespace omscript

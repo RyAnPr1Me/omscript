@@ -68,7 +68,9 @@ private:
     // Cached JIT native pointers — avoids repeated hash lookups into
     // BytecodeJIT::compiled_ on every call.
     using JITFnPtr = int64_t (*)(int64_t*, int);
+    using JITFloatFnPtr = double (*)(double*, int);
     std::unordered_map<std::string, JITFnPtr> jitCache_;
+    std::unordered_map<std::string, JITFloatFnPtr> jitFloatCache_;
 
     // Maximum number of JIT call arguments that can be passed via
     // stack-allocated buffer (avoids heap allocation for common cases).
@@ -77,6 +79,7 @@ private:
     // Invoke a JIT-compiled function, popping args from the VM stack
     // and pushing the result.  Returns true if successful.
     bool invokeJIT(JITFnPtr fn, uint8_t argCount);
+    bool invokeJITFloat(JITFloatFnPtr fn, uint8_t argCount);
     
     void push(const Value& value);
     void push(Value&& value);
