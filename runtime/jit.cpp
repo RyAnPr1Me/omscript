@@ -126,7 +126,7 @@ bool BytecodeJIT::compile(const BytecodeFunction& func) {
     ensureInitialized();
 
     const auto& code = func.bytecode;
-    if (code.empty()) {
+    if (code.empty() || code.size() < kMinBytecodeSize) {
         failedCompilations_.insert(func.name);
         return false;
     }
@@ -321,21 +321,21 @@ bool BytecodeJIT::compile(const BytecodeFunction& func) {
                 if (cstack.size() < 2) { failedCompilations_.insert(func.name); return false; }
                 auto* b = cstack.back(); cstack.pop_back();
                 auto* a = cstack.back(); cstack.pop_back();
-                cstack.push_back(builder.CreateAdd(a, b, "add"));
+                cstack.push_back(builder.CreateNSWAdd(a, b, "add"));
                 break;
             }
             case OpCode::SUB: {
                 if (cstack.size() < 2) { failedCompilations_.insert(func.name); return false; }
                 auto* b = cstack.back(); cstack.pop_back();
                 auto* a = cstack.back(); cstack.pop_back();
-                cstack.push_back(builder.CreateSub(a, b, "sub"));
+                cstack.push_back(builder.CreateNSWSub(a, b, "sub"));
                 break;
             }
             case OpCode::MUL: {
                 if (cstack.size() < 2) { failedCompilations_.insert(func.name); return false; }
                 auto* b = cstack.back(); cstack.pop_back();
                 auto* a = cstack.back(); cstack.pop_back();
-                cstack.push_back(builder.CreateMul(a, b, "mul"));
+                cstack.push_back(builder.CreateNSWMul(a, b, "mul"));
                 break;
             }
             case OpCode::DIV: {

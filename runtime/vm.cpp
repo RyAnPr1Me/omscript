@@ -529,6 +529,18 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
     }
     op_JUMP_IF_FALSE: {
         uint16_t offset = readShort(bytecode, ip);
+        // Integer fast path: avoid pop()/isTruthy() overhead.
+        if (!stack.empty() && stack.back().getType() == Value::Type::INTEGER) {
+            bool isZero = stack.back().unsafeAsInt() == 0;
+            stack.pop_back();
+            if (isZero) {
+                if (offset > bytecode.size()) {
+                    throw std::runtime_error("Jump offset out of bounds at ip " + std::to_string(ip - 2));
+                }
+                ip = offset;
+            }
+            DISPATCH();
+        }
         Value condition = pop();
         if (!condition.isTruthy()) {
             if (offset > bytecode.size()) {
@@ -563,9 +575,10 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
         std::string funcName = readString(bytecode, ip);
         uint8_t argCount = readByte(bytecode, ip);
 
-        // ---- JIT fast path ----
-        if (jit_) {
-            if (jit_->isCompiled(funcName)) {
+        // ---- JIT fast path: use cached native pointer ----
+        {
+            auto cacheIt = jitCache_.find(funcName);
+            if (cacheIt != jitCache_.end()) {
                 // Verify all args are integers (JIT only handles integers).
                 bool allInts = true;
                 for (size_t i = 0; i < argCount && allInts; i++) {
@@ -573,24 +586,41 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
                         allInts = false;
                 }
                 if (allInts) {
-                    std::vector<int64_t> args(argCount);
+                    // Stack-based arg buffer — avoids heap allocation per call.
+                    static constexpr size_t kMaxStackArgs = 8;
+                    int64_t stackArgs[kMaxStackArgs];
+                    int64_t* args = (argCount <= kMaxStackArgs)
+                        ? stackArgs
+                        : new int64_t[argCount];
                     for (size_t i = argCount; i > 0; i--)
                         args[i - 1] = pop().unsafeAsInt();
-                    int64_t result = jit_->getCompiled(funcName)(args.data(), static_cast<int>(argCount));
+                    int64_t result = cacheIt->second(args, static_cast<int>(argCount));
+                    if (argCount > kMaxStackArgs) delete[] args;
                     push(Value(result));
 
                     // Track post-JIT calls for type-specialized recompilation.
-                    if (jit_->recordPostJITCall(funcName)) {
+                    if (jit_ && jit_->recordPostJITCall(funcName)) {
                         auto fit = functions.find(funcName);
-                        if (fit != functions.end())
+                        if (fit != functions.end()) {
                             jit_->recompile(fit->second);
+                            // Update cache with recompiled pointer.
+                            jitCache_[funcName] = jit_->getCompiled(funcName);
+                        }
                     }
                     DISPATCH();
                 }
-            } else if (jit_->recordCall(funcName)) {
+            }
+        }
+
+        // ---- JIT compilation trigger ----
+        if (jit_) {
+            if (jit_->recordCall(funcName)) {
                 auto fit = functions.find(funcName);
-                if (fit != functions.end())
-                    jit_->compile(fit->second);
+                if (fit != functions.end()) {
+                    if (jit_->compile(fit->second)) {
+                        jitCache_[funcName] = jit_->getCompiled(funcName);
+                    }
+                }
             }
         }
 
@@ -868,6 +898,18 @@ vm_exit:
             case OpCode::JUMP_IF_FALSE: {
                 // Jump offsets are absolute bytecode positions.
                 uint16_t offset = readShort(bytecode, ip);
+                // Integer fast path: avoid pop()/isTruthy() overhead.
+                if (!stack.empty() && stack.back().getType() == Value::Type::INTEGER) {
+                    bool isZero = stack.back().unsafeAsInt() == 0;
+                    stack.pop_back();
+                    if (isZero) {
+                        if (offset > bytecode.size()) {
+                            throw std::runtime_error("Jump offset out of bounds at ip " + std::to_string(ip - 2));
+                        }
+                        ip = offset;
+                    }
+                    break;
+                }
                 Value condition = pop();
                 if (!condition.isTruthy()) {
                     if (offset > bytecode.size()) {
@@ -909,33 +951,48 @@ vm_exit:
                 std::string funcName = readString(bytecode, ip);
                 uint8_t argCount = readByte(bytecode, ip);
 
-                // ---- JIT fast path ----
-                if (jit_) {
-                    if (jit_->isCompiled(funcName)) {
+                // ---- JIT fast path: use cached native pointer ----
+                {
+                    auto cacheIt = jitCache_.find(funcName);
+                    if (cacheIt != jitCache_.end()) {
                         bool allInts = true;
                         for (size_t i = 0; i < argCount && allInts; i++) {
                             if (stack[stack.size() - 1 - i].getType() != Value::Type::INTEGER)
                                 allInts = false;
                         }
                         if (allInts) {
-                            std::vector<int64_t> args(argCount);
+                            static constexpr size_t kMaxStackArgs = 8;
+                            int64_t stackArgs[kMaxStackArgs];
+                            int64_t* args = (argCount <= kMaxStackArgs)
+                                ? stackArgs
+                                : new int64_t[argCount];
                             for (size_t i = argCount; i > 0; i--)
                                 args[i - 1] = pop().unsafeAsInt();
-                            int64_t result = jit_->getCompiled(funcName)(args.data(), static_cast<int>(argCount));
+                            int64_t result = cacheIt->second(args, static_cast<int>(argCount));
+                            if (argCount > kMaxStackArgs) delete[] args;
                             push(Value(result));
 
-                            // Track post-JIT calls for type-specialized recompilation.
-                            if (jit_->recordPostJITCall(funcName)) {
+                            if (jit_ && jit_->recordPostJITCall(funcName)) {
                                 auto fit = functions.find(funcName);
-                                if (fit != functions.end())
+                                if (fit != functions.end()) {
                                     jit_->recompile(fit->second);
+                                    jitCache_[funcName] = jit_->getCompiled(funcName);
+                                }
                             }
                             break;
                         }
-                    } else if (jit_->recordCall(funcName)) {
+                    }
+                }
+
+                // ---- JIT compilation trigger ----
+                if (jit_) {
+                    if (jit_->recordCall(funcName)) {
                         auto fit = functions.find(funcName);
-                        if (fit != functions.end())
-                            jit_->compile(fit->second);
+                        if (fit != functions.end()) {
+                            if (jit_->compile(fit->second)) {
+                                jitCache_[funcName] = jit_->getCompiled(funcName);
+                            }
+                        }
                     }
                 }
 

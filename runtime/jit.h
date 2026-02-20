@@ -47,6 +47,10 @@ public:
     /// with updated type-specialization data.
     static constexpr size_t kRecompileThreshold = 50;
 
+    /// Functions with fewer than this many opcodes are too small to benefit
+    /// from JIT compilation — the compilation overhead exceeds the savings.
+    static constexpr size_t kMinBytecodeSize = 4;
+
     BytecodeJIT();
     ~BytecodeJIT();
 

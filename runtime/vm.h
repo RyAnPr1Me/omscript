@@ -64,6 +64,11 @@ private:
 
     // JIT compiler for hot bytecode functions.
     std::unique_ptr<BytecodeJIT> jit_;
+
+    // Cached JIT native pointers — avoids repeated hash lookups into
+    // BytecodeJIT::compiled_ on every call.
+    using JITFnPtr = int64_t (*)(int64_t*, int);
+    std::unordered_map<std::string, JITFnPtr> jitCache_;
     
     void push(const Value& value);
     void push(Value&& value);
