@@ -10,6 +10,9 @@ namespace omscript {
 
 using BytecodeIteratorDiff = std::vector<uint8_t>::difference_type;
 
+// Maximum valid shift amount for 64-bit integers (0–63).
+static constexpr int64_t kInt64BitWidth = 64;
+
 VM::VM() : lastReturn(), jit_(std::make_unique<BytecodeJIT>()) {
     stack.reserve(256);
     locals.reserve(16);
@@ -456,7 +459,7 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
                 stack[sz-2].getType() == Value::Type::INTEGER) {
                 int64_t bv = stack[sz-1].unsafeAsInt();
                 int64_t av = stack[sz-2].unsafeAsInt();
-                if (bv >= 0 && bv < 64) {
+                if (bv >= 0 && bv < kInt64BitWidth) {
                     stack.pop_back();
                     stack.back() = Value(av << bv);
                     DISPATCH();
@@ -477,7 +480,7 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
                 stack[sz-2].getType() == Value::Type::INTEGER) {
                 int64_t bv = stack[sz-1].unsafeAsInt();
                 int64_t av = stack[sz-2].unsafeAsInt();
-                if (bv >= 0 && bv < 64) {
+                if (bv >= 0 && bv < kInt64BitWidth) {
                     stack.pop_back();
                     stack.back() = Value(av >> bv);
                     DISPATCH();

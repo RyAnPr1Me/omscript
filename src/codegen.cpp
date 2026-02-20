@@ -635,9 +635,11 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     // Hint small helper functions for inlining at O2+.  OPTMAX functions
     // already get aggressive optimization; non-main functions with few
     // statements benefit from being inlined into their callers.
+    // 8 statements covers most simple accessors and arithmetic helpers.
+    static constexpr size_t kMaxInlineHintStatements = 8;
     if (func->name != "main" &&
         optimizationLevel >= OptimizationLevel::O2 &&
-        func->body && func->body->statements.size() <= 8) {
+        func->body && func->body->statements.size() <= kMaxInlineHintStatements) {
         function->addFnAttr(llvm::Attribute::InlineHint);
     }
     
