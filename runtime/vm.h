@@ -80,6 +80,9 @@ private:
     // and pushing the result.  Returns true if successful.
     bool invokeJIT(JITFnPtr fn, uint8_t argCount);
     bool invokeJITFloat(JITFloatFnPtr fn, uint8_t argCount);
+
+    // Classify argument types on top of the stack for JIT type profiling.
+    void classifyArgTypes(uint8_t argCount, bool& allInt, bool& allFloat) const;
     
     void push(const Value& value);
     void push(Value&& value);

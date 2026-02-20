@@ -46,6 +46,16 @@ static int64_t peekInt(const std::vector<uint8_t>& code, size_t offset) {
     return value;
 }
 
+static double peekFloat(const std::vector<uint8_t>& code, size_t offset) {
+    uint64_t raw = 0;
+    for (int i = 0; i < 8; i++) {
+        raw |= static_cast<uint64_t>(code[offset + i]) << (i * 8);
+    }
+    double value;
+    std::memcpy(&value, &raw, sizeof(value));
+    return value;
+}
+
 // ---------------------------------------------------------------------------
 // BytecodeJIT
 // ---------------------------------------------------------------------------
@@ -826,11 +836,7 @@ bool BytecodeJIT::compileFloat(const BytecodeFunction& func) {
                 break;
             }
             case OpCode::PUSH_FLOAT: {
-                double val;
-                uint64_t raw = 0;
-                for (int i = 0; i < 8; i++)
-                    raw |= static_cast<uint64_t>(code[ip + i]) << (i * 8);
-                std::memcpy(&val, &raw, sizeof(val));
+                double val = peekFloat(code, ip);
                 ip += 8;
                 cstack.push_back(llvm::ConstantFP::get(doubleTy, val));
                 break;

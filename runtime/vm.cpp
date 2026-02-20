@@ -167,6 +167,16 @@ bool VM::invokeJITFloat(JITFloatFnPtr fn, uint8_t argCount) {
     return true;
 }
 
+void VM::classifyArgTypes(uint8_t argCount, bool& allInt, bool& allFloat) const {
+    allInt = true;
+    allFloat = true;
+    for (size_t i = 0; i < argCount; i++) {
+        auto t = stack[stack.size() - 1 - i].getType();
+        if (t != Value::Type::INTEGER) allInt = false;
+        if (t != Value::Type::FLOAT) allFloat = false;
+    }
+}
+
 void VM::execute(const std::vector<uint8_t>& bytecode) {
     size_t ip = 0;
     stack.clear();
@@ -618,12 +628,8 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
 
         // ---- Record argument types for type-profiled JIT ----
         if (jit_ && argCount > 0) {
-            bool allInt = true, allFloat = true;
-            for (size_t i = 0; i < argCount; i++) {
-                auto t = stack[stack.size() - 1 - i].getType();
-                if (t != Value::Type::INTEGER) allInt = false;
-                if (t != Value::Type::FLOAT) allFloat = false;
-            }
+            bool allInt, allFloat;
+            classifyArgTypes(argCount, allInt, allFloat);
             jit_->recordTypes(funcName, allInt, allFloat);
         }
 
@@ -1006,12 +1012,8 @@ vm_exit:
 
                 // ---- Record argument types for type-profiled JIT ----
                 if (jit_ && argCount > 0) {
-                    bool allInt = true, allFloat = true;
-                    for (size_t i = 0; i < argCount; i++) {
-                        auto t = stack[stack.size() - 1 - i].getType();
-                        if (t != Value::Type::INTEGER) allInt = false;
-                        if (t != Value::Type::FLOAT) allFloat = false;
-                    }
+                    bool allInt, allFloat;
+                    classifyArgTypes(argCount, allInt, allFloat);
                     jit_->recordTypes(funcName, allInt, allFloat);
                 }
 
