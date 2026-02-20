@@ -5,6 +5,7 @@
 #include <iostream>
 #include <csignal>
 #include <cstring>
+#include <unistd.h>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -20,20 +21,20 @@ constexpr const char* kCompilerVersion = "OmScript Compiler v0.4.0";
 
 // Paths of temporary files to clean up on abnormal exit (signal).
 // These are set by the 'run' command before executing the compiled program.
-static std::string g_tempOutputFile;
-static std::string g_tempObjectFile;
+// Fixed-size C-style buffers for async-signal-safe access in signal handlers.
+static constexpr size_t kMaxTempPathLen = 4096;
+static char g_tempOutputFile[kMaxTempPathLen] = {};
+static char g_tempObjectFile[kMaxTempPathLen] = {};
 
 // Signal handler for SIGINT / SIGTERM — removes temporary files created
 // during `omsc run` and re-raises so the default handler sets the exit status.
+// Uses only async-signal-safe operations (unlink, _exit, signal, raise).
 void signalHandler(int sig) {
-    // Only async-signal-safe operations here (unlink, _exit).
-    if (!g_tempOutputFile.empty()) {
-        std::error_code ec;
-        std::filesystem::remove(g_tempOutputFile, ec);
+    if (g_tempOutputFile[0] != '\0') {
+        unlink(g_tempOutputFile);
     }
-    if (!g_tempObjectFile.empty()) {
-        std::error_code ec;
-        std::filesystem::remove(g_tempObjectFile, ec);
+    if (g_tempObjectFile[0] != '\0') {
+        unlink(g_tempObjectFile);
     }
     // Re-raise the signal with default action so the exit status reflects it.
     std::signal(sig, SIG_DFL);
@@ -433,8 +434,9 @@ int main(int argc, char* argv[]) {
         if (command == Command::Run) {
             // Register temp files for cleanup on signal (Ctrl+C during program run).
             if (!outputSpecified && !keepTemps) {
-                g_tempOutputFile = outputFile;
-                g_tempObjectFile = outputFile + ".o";
+                std::string objPath = outputFile + ".o";
+                std::strncpy(g_tempOutputFile, outputFile.c_str(), kMaxTempPathLen - 1);
+                std::strncpy(g_tempObjectFile, objPath.c_str(), kMaxTempPathLen - 1);
             }
             std::filesystem::path runPath = std::filesystem::absolute(outputFile);
             std::string runProgram = runPath.string();
