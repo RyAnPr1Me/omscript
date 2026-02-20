@@ -1,6 +1,7 @@
 #include "parser.h"
 #include <stdexcept>
 #include <iostream>
+#include <cstdlib>
 
 namespace omscript {
 
@@ -44,6 +45,7 @@ Token Parser::consume(TokenType type, const std::string& message) {
         return advance();
     }
     error(message);
+    std::abort();
 }
 
 void Parser::error(const std::string& message) {
