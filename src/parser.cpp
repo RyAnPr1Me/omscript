@@ -8,6 +8,10 @@ Parser::Parser(const std::vector<Token>& tokens)
     : tokens(tokens), current(0), inOptMaxFunction(false) {}
 
 Token Parser::peek(int offset) const {
+    if (tokens.empty()) {
+        static const Token eofToken(TokenType::END_OF_FILE, "", 0, 0);
+        return eofToken;
+    }
     size_t index = current + offset;
     if (index >= tokens.size()) {
         return tokens.back();
