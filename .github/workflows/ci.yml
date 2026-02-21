@@ -10,6 +10,59 @@ permissions:
   contents: read
 
 jobs:
+  format-check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install clang-format
+        run: sudo apt-get install -y clang-format
+
+      - name: Check code formatting
+        run: |
+          find . -name '*.cpp' -o -name '*.h' | xargs clang-format --dry-run -Werror | grep -q . && exit 1 || true
+          # Actually format and check for differences
+          for f in $(find src runtime include -name '*.cpp' -o -name '*.h' 2>/dev/null); do
+            clang-format "$f" > /tmp/formatted.cpp
+            if ! diff -q "$f" /tmp/formatted.cpp > /dev/null 2>&1; then
+              echo "Formatting issues found in $f"
+              clang-format --dry-run -Werror "$f"
+              exit 1
+            fi
+          done
+          echo "Code formatting OK"
+
+  tidy-check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential llvm-17-dev libgtest-dev clang-tidy gcc
+
+      - name: Configure CMake
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Debug
+
+      - name: Build
+        run: cmake --build build --parallel $(nproc)
+
+      - name: Run clang-tidy
+        run: |
+          cd build
+          find ../src ../runtime -name '*.cpp' | head -5 | xargs -I{} clang-tidy -p . {} -- -I../include -I../runtime 2>&1 | tee tidy.log || true
+          if grep -q "error:" tidy.log; then
+            echo "clang-tidy errors found"
+            cat tidy.log
+            exit 1
+          fi
+          echo "clang-tidy check complete"
+
   build-and-test:
     runs-on: ubuntu-latest
 

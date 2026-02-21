@@ -24,6 +24,20 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebI
     endif()
 endif()
 
+# Disable LTO by default to avoid linking issues (can be enabled with -DLTO=ON)
+if(NOT DEFINED LTO)
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION FALSE)
+endif()
+
+# Code coverage configuration
+option(COVERAGE "Enable code coverage" OFF)
+if(COVERAGE)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        add_compile_options(--coverage -fno-inline)
+        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} --coverage")
+    endif()
+endif()
+
 # Optional sanitizer support for catching memory and undefined behavior bugs.
 # Usage: cmake -DSANITIZE=address  (or: thread, undefined, address,undefined)
 if(SANITIZE)
@@ -87,6 +101,8 @@ set(LLVM_COMPONENTS
     codegen
     mc
     mcparser
+    orcjit
+    linker
 )
 
 # Conditionally add target-specific components based on available LLVM targets
@@ -141,3 +157,29 @@ if(GTest_FOUND)
         add_test(NAME ${test_name} COMMAND ${test_name})
     endforeach()
 endif()
+
+# CPack configuration for distribution packages
+include(CPack)
+set(CPACK_PACKAGE_NAME "OmScript")
+set(CPACK_PACKAGE_VENDOR "OmScript")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "A low-level C-like programming language with LLVM AOT compilation")
+set(CPACK_PACKAGE_VERSION_MAJOR ${PROJECT_VERSION_MAJOR})
+set(CPACK_PACKAGE_VERSION_MINOR ${PROJECT_VERSION_MINOR})
+set(CPACK_PACKAGE_VERSION_PATCH ${PROJECT_VERSION_PATCH})
+set(CPACK_PACKAGE_INSTALL_DIRECTORY "OmScript")
+set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_SOURCE_DIR}/LICENSE")
+set(CPACK_RESOURCE_FILE_README "${CMAKE_SOURCE_DIR}/README.md")
+set(CPACK_SOURCE_IGNORE_FILES
+    "^/build"
+    "^/.git"
+    "^/examples"
+    "^/tests"
+    "^/.github"
+    "^/CMakeLists.txt$"
+    "^/.clang-format$"
+    "^/.clang-tidy$"
+    "^/.editorconfig$"
+    "^/Makefile$"
+    "^/run_tests.sh$"
+)
+set(CPACK_BINARY_TGZ "ON")

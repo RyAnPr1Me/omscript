@@ -1,14 +1,14 @@
 #include "compiler.h"
+#include "codegen.h"
 #include "lexer.h"
 #include "parser.h"
-#include "codegen.h"
-#include <fstream>
-#include <sstream>
-#include <iostream>
-#include <stdexcept>
 #include <filesystem>
+#include <fstream>
+#include <iostream>
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/Support/Program.h>
+#include <sstream>
+#include <stdexcept>
 
 namespace omscript {
 
@@ -19,7 +19,7 @@ std::string Compiler::readFile(const std::string& filename) {
     if (!file.is_open()) {
         throw std::runtime_error("Could not open file: " + filename);
     }
-    
+
     std::stringstream buffer;
     buffer << file.rdbuf();
     file.close();
@@ -39,13 +39,38 @@ void Compiler::writeFile(const std::string& filename, const std::string& content
 }
 
 void Compiler::compile(const std::string& sourceFile, const std::string& outputFile) {
+    // Validate input file
+    if (sourceFile.empty()) {
+        throw std::runtime_error("Source file name cannot be empty");
+    }
+    if (sourceFile.size() > 4096) {
+        throw std::runtime_error("Source file name too long (max 4096 characters)");
+    }
+    if (outputFile.empty()) {
+        throw std::runtime_error("Output file name cannot be empty");
+    }
+    if (outputFile.size() > 4096) {
+        throw std::runtime_error("Output file name too long (max 4096 characters)");
+    }
+
+    // Check if source file exists before attempting to read
+    if (!std::filesystem::exists(sourceFile)) {
+        throw std::runtime_error("Source file does not exist: " + sourceFile);
+    }
+
+    // Check file size to prevent memory exhaustion
+    auto fileSize = std::filesystem::file_size(sourceFile);
+    if (fileSize > 100 * 1024 * 1024) { // 100MB limit
+        throw std::runtime_error("Source file too large (max 100MB): " + sourceFile);
+    }
+
     if (verbose_) {
         std::cout << "Compiling " << sourceFile << "..." << std::endl;
     }
-    
+
     // Read source code
     std::string source = readFile(sourceFile);
-    
+
     // Lexical analysis
     if (verbose_) {
         std::cout << "  Lexing..." << std::endl;
@@ -57,7 +82,7 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
     } catch (const std::runtime_error& e) {
         throw std::runtime_error(sourceFile + ": " + e.what());
     }
-    
+
     // Syntax analysis
     if (verbose_) {
         std::cout << "  Parsing..." << std::endl;
@@ -69,7 +94,7 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
     } catch (const std::runtime_error& e) {
         throw std::runtime_error(sourceFile + ": " + e.what());
     }
-    
+
     // Code generation
     if (verbose_) {
         std::cout << "  Generating code..." << std::endl;
@@ -89,13 +114,13 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
         std::cout << "  Hybrid mode: " << codegen.getBytecodeFunctions().size()
                   << " function(s) compiled to bytecode for JIT recompilation" << std::endl;
     }
-    
+
     // Print LLVM IR only in verbose mode
     if (verbose_) {
         std::cout << "  LLVM IR:" << std::endl;
         codegen.getModule()->print(llvm::outs(), nullptr);
     }
-    
+
     // Write object file
     std::string objFile = outputFile + ".o";
     if (verbose_) {
@@ -107,16 +132,16 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
             std::error_code ec;
             std::filesystem::remove(objFile, ec);
             if (ec) {
-                std::cerr << "Warning: failed to clean up temporary object file '" << objFile
-                          << "': " << ec.message() << "\n";
+                std::cerr << "Warning: failed to clean up temporary object file '" << objFile << "': " << ec.message()
+                          << "\n";
             }
         }
     };
-    
+
     try {
         codegen.writeObjectFile(objFile);
         objectFileCreated = true;
-        
+
         // Link to create executable
         if (verbose_) {
             std::cout << "  Linking..." << std::endl;
@@ -140,7 +165,7 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
             argRefs.push_back(arg);
         }
         int result = llvm::sys::ExecuteAndWait(linkerProgram, argRefs);
-        
+
         if (result != 0) {
             cleanupObject();
             if (result < 0) {
@@ -148,14 +173,14 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
             }
             throw std::runtime_error("Linking failed with exit code " + std::to_string(result));
         }
-        
+
         // Clean up temporary object file after successful link.
         cleanupObject();
     } catch (...) {
         cleanupObject();
         throw;
     }
-    
+
     std::cout << "Compilation successful! Output: " << outputFile << std::endl;
 }
 

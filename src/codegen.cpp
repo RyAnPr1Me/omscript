@@ -1,59 +1,59 @@
 #include "codegen.h"
-#include <llvm/IR/Verifier.h>
-#include <llvm/IR/Intrinsics.h>
-#include <llvm/Config/llvm-config.h>
-#include <llvm/TargetParser/Triple.h>
-#include <llvm/IR/LegacyPassManager.h>
-#include <llvm/Support/FileSystem.h>
-#include <llvm/TargetParser/Host.h>
-#include <llvm/TargetParser/SubtargetFeature.h>
+#include <cmath>
+#include <iostream>
 #include <llvm/ADT/StringMap.h>
+#include <llvm/Analysis/TargetTransformInfo.h>
+#include <llvm/Config/llvm-config.h>
+#include <llvm/IR/Intrinsics.h>
+#include <llvm/IR/LegacyPassManager.h>
+#include <llvm/IR/Verifier.h>
+#include <llvm/MC/TargetRegistry.h>
+#include <llvm/Passes/OptimizationLevel.h>
+#include <llvm/Passes/PassBuilder.h>
+#include <llvm/Support/CodeGen.h>
+#include <llvm/Support/FileSystem.h>
 #include <llvm/Support/TargetSelect.h>
 #include <llvm/Support/raw_ostream.h>
-#include <llvm/Support/CodeGen.h>
 #include <llvm/Target/TargetMachine.h>
 #include <llvm/Target/TargetOptions.h>
-#include <llvm/MC/TargetRegistry.h>
+#include <llvm/TargetParser/Host.h>
+#include <llvm/TargetParser/SubtargetFeature.h>
+#include <llvm/TargetParser/Triple.h>
+#include <llvm/Transforms/IPO.h>
+#include <llvm/Transforms/IPO/AlwaysInliner.h>
+#include <llvm/Transforms/IPO/GlobalDCE.h>
+#include <llvm/Transforms/InstCombine/InstCombine.h>
 #include <llvm/Transforms/Scalar.h>
 #include <llvm/Transforms/Scalar/GVN.h>
-#include <llvm/Transforms/InstCombine/InstCombine.h>
 #include <llvm/Transforms/Utils.h>
-#include <llvm/Transforms/IPO.h>
-#include <llvm/Analysis/TargetTransformInfo.h>
-#include <llvm/Passes/PassBuilder.h>
-#include <llvm/Passes/OptimizationLevel.h>
-#include <llvm/Transforms/IPO/GlobalDCE.h>
-#include <llvm/Transforms/IPO/AlwaysInliner.h>
-#include <cmath>
-#include <stdexcept>
-#include <iostream>
 #include <optional>
+#include <stdexcept>
 
 namespace {
 
-using omscript::ASTNodeType;
-using omscript::BlockStmt;
-using omscript::BinaryExpr;
-using omscript::Expression;
-using omscript::LiteralExpr;
-using omscript::UnaryExpr;
-using omscript::AssignExpr;
-using omscript::CallExpr;
 using omscript::ArrayExpr;
-using omscript::IndexExpr;
+using omscript::AssignExpr;
+using omscript::ASTNodeType;
+using omscript::BinaryExpr;
+using omscript::BlockStmt;
+using omscript::CallExpr;
+using omscript::DoWhileStmt;
+using omscript::Expression;
+using omscript::ExprStmt;
+using omscript::ForEachStmt;
+using omscript::ForStmt;
+using omscript::IfStmt;
 using omscript::IndexAssignExpr;
+using omscript::IndexExpr;
+using omscript::LiteralExpr;
 using omscript::PostfixExpr;
 using omscript::PrefixExpr;
-using omscript::TernaryExpr;
-using omscript::ExprStmt;
-using omscript::VarDecl;
 using omscript::ReturnStmt;
-using omscript::IfStmt;
-using omscript::WhileStmt;
-using omscript::DoWhileStmt;
-using omscript::ForStmt;
-using omscript::ForEachStmt;
 using omscript::Statement;
+using omscript::TernaryExpr;
+using omscript::UnaryExpr;
+using omscript::VarDecl;
+using omscript::WhileStmt;
 
 std::unique_ptr<Expression> optimizeOptMaxExpression(std::unique_ptr<Expression> expr);
 
@@ -63,7 +63,7 @@ std::unique_ptr<Expression> optimizeOptMaxUnary(const std::string& op, std::uniq
     if (!literal) {
         return std::make_unique<UnaryExpr>(op, std::move(operand));
     }
-    
+
     if (literal->literalType == LiteralExpr::LiteralType::INTEGER) {
         long long value = literal->intValue;
         if (op == "-") {
@@ -84,12 +84,11 @@ std::unique_ptr<Expression> optimizeOptMaxUnary(const std::string& op, std::uniq
             return std::make_unique<LiteralExpr>(static_cast<long long>(value == 0.0));
         }
     }
-    
+
     return std::make_unique<UnaryExpr>(op, std::move(operand));
 }
 
-std::unique_ptr<Expression> optimizeOptMaxBinary(const std::string& op,
-                                                 std::unique_ptr<Expression> left,
+std::unique_ptr<Expression> optimizeOptMaxBinary(const std::string& op, std::unique_ptr<Expression> left,
                                                  std::unique_ptr<Expression> right) {
     left = optimizeOptMaxExpression(std::move(left));
     right = optimizeOptMaxExpression(std::move(right));
@@ -99,79 +98,129 @@ std::unique_ptr<Expression> optimizeOptMaxBinary(const std::string& op,
     // Algebraic identity optimizations (one side is a literal)
     if (leftLiteral && leftLiteral->literalType == LiteralExpr::LiteralType::INTEGER) {
         long long lval = leftLiteral->intValue;
-        if (lval == 0 && op == "+") return right;            // 0 + x → x
-        if (lval == 1 && op == "*") return right;            // 1 * x → x
+        if (lval == 0 && op == "+")
+            return right; // 0 + x → x
+        if (lval == 1 && op == "*")
+            return right; // 1 * x → x
     }
     if (rightLiteral && rightLiteral->literalType == LiteralExpr::LiteralType::INTEGER) {
         long long rval = rightLiteral->intValue;
-        if (rval == 0 && op == "+") return left;             // x + 0 → x
-        if (rval == 0 && op == "-") return left;             // x - 0 → x
-        if (rval == 1 && op == "*") return left;             // x * 1 → x
-        if (rval == 1 && op == "/") return left;             // x / 1 → x
+        if (rval == 0 && op == "+")
+            return left; // x + 0 → x
+        if (rval == 0 && op == "-")
+            return left; // x - 0 → x
+        if (rval == 1 && op == "*")
+            return left; // x * 1 → x
+        if (rval == 1 && op == "/")
+            return left; // x / 1 → x
     }
 
     if (!leftLiteral || !rightLiteral) {
         return std::make_unique<BinaryExpr>(op, std::move(left), std::move(right));
     }
-    
+
     if (leftLiteral->literalType == LiteralExpr::LiteralType::INTEGER &&
         rightLiteral->literalType == LiteralExpr::LiteralType::INTEGER) {
         long long lval = leftLiteral->intValue;
         long long rval = rightLiteral->intValue;
-        if (op == "+") return std::make_unique<LiteralExpr>(lval + rval);
-        if (op == "-") return std::make_unique<LiteralExpr>(lval - rval);
-        if (op == "*") return std::make_unique<LiteralExpr>(lval * rval);
-        if (op == "/" && rval != 0) return std::make_unique<LiteralExpr>(lval / rval);
-        if (op == "%" && rval != 0) return std::make_unique<LiteralExpr>(lval % rval);
-        if (op == "==") return std::make_unique<LiteralExpr>(static_cast<long long>(lval == rval));
-        if (op == "!=") return std::make_unique<LiteralExpr>(static_cast<long long>(lval != rval));
-        if (op == "<") return std::make_unique<LiteralExpr>(static_cast<long long>(lval < rval));
-        if (op == "<=") return std::make_unique<LiteralExpr>(static_cast<long long>(lval <= rval));
-        if (op == ">") return std::make_unique<LiteralExpr>(static_cast<long long>(lval > rval));
-        if (op == ">=") return std::make_unique<LiteralExpr>(static_cast<long long>(lval >= rval));
-        if (op == "&&") return std::make_unique<LiteralExpr>(static_cast<long long>((lval != 0) && (rval != 0)));
-        if (op == "||") return std::make_unique<LiteralExpr>(static_cast<long long>((lval != 0) || (rval != 0)));
-        if (op == "&") return std::make_unique<LiteralExpr>(lval & rval);
-        if (op == "|") return std::make_unique<LiteralExpr>(lval | rval);
-        if (op == "^") return std::make_unique<LiteralExpr>(lval ^ rval);
-        if (op == "<<" && rval >= 0 && rval < 64) return std::make_unique<LiteralExpr>(lval << rval);
-        if (op == ">>" && rval >= 0 && rval < 64) return std::make_unique<LiteralExpr>(lval >> rval);
+        if (op == "+")
+            return std::make_unique<LiteralExpr>(lval + rval);
+        if (op == "-")
+            return std::make_unique<LiteralExpr>(lval - rval);
+        if (op == "*")
+            return std::make_unique<LiteralExpr>(lval * rval);
+        if (op == "/" && rval != 0)
+            return std::make_unique<LiteralExpr>(lval / rval);
+        if (op == "%" && rval != 0)
+            return std::make_unique<LiteralExpr>(lval % rval);
+        if (op == "==")
+            return std::make_unique<LiteralExpr>(static_cast<long long>(lval == rval));
+        if (op == "!=")
+            return std::make_unique<LiteralExpr>(static_cast<long long>(lval != rval));
+        if (op == "<")
+            return std::make_unique<LiteralExpr>(static_cast<long long>(lval < rval));
+        if (op == "<=")
+            return std::make_unique<LiteralExpr>(static_cast<long long>(lval <= rval));
+        if (op == ">")
+            return std::make_unique<LiteralExpr>(static_cast<long long>(lval > rval));
+        if (op == ">=")
+            return std::make_unique<LiteralExpr>(static_cast<long long>(lval >= rval));
+        if (op == "&&")
+            return std::make_unique<LiteralExpr>(static_cast<long long>((lval != 0) && (rval != 0)));
+        if (op == "||")
+            return std::make_unique<LiteralExpr>(static_cast<long long>((lval != 0) || (rval != 0)));
+        if (op == "&")
+            return std::make_unique<LiteralExpr>(lval & rval);
+        if (op == "|")
+            return std::make_unique<LiteralExpr>(lval | rval);
+        if (op == "^")
+            return std::make_unique<LiteralExpr>(lval ^ rval);
+        if (op == "<<" && rval >= 0 && rval < 64)
+            return std::make_unique<LiteralExpr>(lval << rval);
+        if (op == ">>" && rval >= 0 && rval < 64)
+            return std::make_unique<LiteralExpr>(lval >> rval);
     } else if (leftLiteral->literalType == LiteralExpr::LiteralType::FLOAT &&
                rightLiteral->literalType == LiteralExpr::LiteralType::FLOAT) {
         double lval = leftLiteral->floatValue;
         double rval = rightLiteral->floatValue;
-        if (op == "+") return std::make_unique<LiteralExpr>(lval + rval);
-        if (op == "-") return std::make_unique<LiteralExpr>(lval - rval);
-        if (op == "*") return std::make_unique<LiteralExpr>(lval * rval);
-        if (op == "/" && rval != 0.0) return std::make_unique<LiteralExpr>(lval / rval);
-        if (op == "%" && rval != 0.0) return std::make_unique<LiteralExpr>(std::fmod(lval, rval));
-        if (op == "==") return std::make_unique<LiteralExpr>(static_cast<long long>(lval == rval));
-        if (op == "!=") return std::make_unique<LiteralExpr>(static_cast<long long>(lval != rval));
-        if (op == "<") return std::make_unique<LiteralExpr>(static_cast<long long>(lval < rval));
-        if (op == "<=") return std::make_unique<LiteralExpr>(static_cast<long long>(lval <= rval));
-        if (op == ">") return std::make_unique<LiteralExpr>(static_cast<long long>(lval > rval));
-        if (op == ">=") return std::make_unique<LiteralExpr>(static_cast<long long>(lval >= rval));
-        if (op == "&&") return std::make_unique<LiteralExpr>(static_cast<long long>((lval != 0.0) && (rval != 0.0)));
-        if (op == "||") return std::make_unique<LiteralExpr>(static_cast<long long>((lval != 0.0) || (rval != 0.0)));
+        if (op == "+")
+            return std::make_unique<LiteralExpr>(lval + rval);
+        if (op == "-")
+            return std::make_unique<LiteralExpr>(lval - rval);
+        if (op == "*")
+            return std::make_unique<LiteralExpr>(lval * rval);
+        if (op == "/" && rval != 0.0)
+            return std::make_unique<LiteralExpr>(lval / rval);
+        if (op == "%" && rval != 0.0)
+            return std::make_unique<LiteralExpr>(std::fmod(lval, rval));
+        if (op == "==")
+            return std::make_unique<LiteralExpr>(static_cast<long long>(lval == rval));
+        if (op == "!=")
+            return std::make_unique<LiteralExpr>(static_cast<long long>(lval != rval));
+        if (op == "<")
+            return std::make_unique<LiteralExpr>(static_cast<long long>(lval < rval));
+        if (op == "<=")
+            return std::make_unique<LiteralExpr>(static_cast<long long>(lval <= rval));
+        if (op == ">")
+            return std::make_unique<LiteralExpr>(static_cast<long long>(lval > rval));
+        if (op == ">=")
+            return std::make_unique<LiteralExpr>(static_cast<long long>(lval >= rval));
+        if (op == "&&")
+            return std::make_unique<LiteralExpr>(static_cast<long long>((lval != 0.0) && (rval != 0.0)));
+        if (op == "||")
+            return std::make_unique<LiteralExpr>(static_cast<long long>((lval != 0.0) || (rval != 0.0)));
     } else {
         // Mixed int/float constant folding: promote the integer operand to double
         double leftDouble = (leftLiteral->literalType == LiteralExpr::LiteralType::FLOAT)
-            ? leftLiteral->floatValue : static_cast<double>(leftLiteral->intValue);
+                                ? leftLiteral->floatValue
+                                : static_cast<double>(leftLiteral->intValue);
         double rightDouble = (rightLiteral->literalType == LiteralExpr::LiteralType::FLOAT)
-            ? rightLiteral->floatValue : static_cast<double>(rightLiteral->intValue);
-        if (op == "+") return std::make_unique<LiteralExpr>(leftDouble + rightDouble);
-        if (op == "-") return std::make_unique<LiteralExpr>(leftDouble - rightDouble);
-        if (op == "*") return std::make_unique<LiteralExpr>(leftDouble * rightDouble);
-        if (op == "/" && rightDouble != 0.0) return std::make_unique<LiteralExpr>(leftDouble / rightDouble);
-        if (op == "%" && rightDouble != 0.0) return std::make_unique<LiteralExpr>(std::fmod(leftDouble, rightDouble));
-        if (op == "==") return std::make_unique<LiteralExpr>(static_cast<long long>(leftDouble == rightDouble));
-        if (op == "!=") return std::make_unique<LiteralExpr>(static_cast<long long>(leftDouble != rightDouble));
-        if (op == "<") return std::make_unique<LiteralExpr>(static_cast<long long>(leftDouble < rightDouble));
-        if (op == "<=") return std::make_unique<LiteralExpr>(static_cast<long long>(leftDouble <= rightDouble));
-        if (op == ">") return std::make_unique<LiteralExpr>(static_cast<long long>(leftDouble > rightDouble));
-        if (op == ">=") return std::make_unique<LiteralExpr>(static_cast<long long>(leftDouble >= rightDouble));
+                                 ? rightLiteral->floatValue
+                                 : static_cast<double>(rightLiteral->intValue);
+        if (op == "+")
+            return std::make_unique<LiteralExpr>(leftDouble + rightDouble);
+        if (op == "-")
+            return std::make_unique<LiteralExpr>(leftDouble - rightDouble);
+        if (op == "*")
+            return std::make_unique<LiteralExpr>(leftDouble * rightDouble);
+        if (op == "/" && rightDouble != 0.0)
+            return std::make_unique<LiteralExpr>(leftDouble / rightDouble);
+        if (op == "%" && rightDouble != 0.0)
+            return std::make_unique<LiteralExpr>(std::fmod(leftDouble, rightDouble));
+        if (op == "==")
+            return std::make_unique<LiteralExpr>(static_cast<long long>(leftDouble == rightDouble));
+        if (op == "!=")
+            return std::make_unique<LiteralExpr>(static_cast<long long>(leftDouble != rightDouble));
+        if (op == "<")
+            return std::make_unique<LiteralExpr>(static_cast<long long>(leftDouble < rightDouble));
+        if (op == "<=")
+            return std::make_unique<LiteralExpr>(static_cast<long long>(leftDouble <= rightDouble));
+        if (op == ">")
+            return std::make_unique<LiteralExpr>(static_cast<long long>(leftDouble > rightDouble));
+        if (op == ">=")
+            return std::make_unique<LiteralExpr>(static_cast<long long>(leftDouble >= rightDouble));
     }
-    
+
     return std::make_unique<BinaryExpr>(op, std::move(left), std::move(right));
 }
 
@@ -179,77 +228,75 @@ std::unique_ptr<Expression> optimizeOptMaxExpression(std::unique_ptr<Expression>
     if (!expr) {
         return nullptr;
     }
-    
+
     switch (expr->type) {
-        case ASTNodeType::LITERAL_EXPR:
-        case ASTNodeType::IDENTIFIER_EXPR:
-            return expr;
-        case ASTNodeType::UNARY_EXPR: {
-            auto* unary = static_cast<UnaryExpr*>(expr.get());
-            return optimizeOptMaxUnary(unary->op, std::move(unary->operand));
+    case ASTNodeType::LITERAL_EXPR:
+    case ASTNodeType::IDENTIFIER_EXPR:
+        return expr;
+    case ASTNodeType::UNARY_EXPR: {
+        auto* unary = static_cast<UnaryExpr*>(expr.get());
+        return optimizeOptMaxUnary(unary->op, std::move(unary->operand));
+    }
+    case ASTNodeType::BINARY_EXPR: {
+        auto* binary = static_cast<BinaryExpr*>(expr.get());
+        return optimizeOptMaxBinary(binary->op, std::move(binary->left), std::move(binary->right));
+    }
+    case ASTNodeType::ASSIGN_EXPR: {
+        auto* assign = static_cast<AssignExpr*>(expr.get());
+        assign->value = optimizeOptMaxExpression(std::move(assign->value));
+        return expr;
+    }
+    case ASTNodeType::CALL_EXPR: {
+        auto* call = static_cast<CallExpr*>(expr.get());
+        for (auto& arg : call->arguments) {
+            arg = optimizeOptMaxExpression(std::move(arg));
         }
-        case ASTNodeType::BINARY_EXPR: {
-            auto* binary = static_cast<BinaryExpr*>(expr.get());
-            return optimizeOptMaxBinary(binary->op, std::move(binary->left), std::move(binary->right));
+        return expr;
+    }
+    case ASTNodeType::ARRAY_EXPR: {
+        auto* arrayExpr = static_cast<ArrayExpr*>(expr.get());
+        for (auto& element : arrayExpr->elements) {
+            element = optimizeOptMaxExpression(std::move(element));
         }
-        case ASTNodeType::ASSIGN_EXPR: {
-            auto* assign = static_cast<AssignExpr*>(expr.get());
-            assign->value = optimizeOptMaxExpression(std::move(assign->value));
-            return expr;
+        return expr;
+    }
+    case ASTNodeType::INDEX_EXPR: {
+        auto* indexExpr = static_cast<IndexExpr*>(expr.get());
+        indexExpr->array = optimizeOptMaxExpression(std::move(indexExpr->array));
+        indexExpr->index = optimizeOptMaxExpression(std::move(indexExpr->index));
+        return expr;
+    }
+    case ASTNodeType::INDEX_ASSIGN_EXPR: {
+        auto* ia = static_cast<IndexAssignExpr*>(expr.get());
+        ia->array = optimizeOptMaxExpression(std::move(ia->array));
+        ia->index = optimizeOptMaxExpression(std::move(ia->index));
+        ia->value = optimizeOptMaxExpression(std::move(ia->value));
+        return expr;
+    }
+    case ASTNodeType::POSTFIX_EXPR: {
+        auto* postfix = static_cast<PostfixExpr*>(expr.get());
+        postfix->operand = optimizeOptMaxExpression(std::move(postfix->operand));
+        return expr;
+    }
+    case ASTNodeType::PREFIX_EXPR: {
+        auto* prefix = static_cast<PrefixExpr*>(expr.get());
+        prefix->operand = optimizeOptMaxExpression(std::move(prefix->operand));
+        return expr;
+    }
+    case ASTNodeType::TERNARY_EXPR: {
+        auto* ternary = static_cast<TernaryExpr*>(expr.get());
+        ternary->condition = optimizeOptMaxExpression(std::move(ternary->condition));
+        ternary->thenExpr = optimizeOptMaxExpression(std::move(ternary->thenExpr));
+        ternary->elseExpr = optimizeOptMaxExpression(std::move(ternary->elseExpr));
+        // Fold ternary when condition is a compile-time constant
+        auto* condLiteral = dynamic_cast<LiteralExpr*>(ternary->condition.get());
+        if (condLiteral && condLiteral->literalType == LiteralExpr::LiteralType::INTEGER) {
+            return condLiteral->intValue != 0 ? std::move(ternary->thenExpr) : std::move(ternary->elseExpr);
         }
-        case ASTNodeType::CALL_EXPR: {
-            auto* call = static_cast<CallExpr*>(expr.get());
-            for (auto& arg : call->arguments) {
-                arg = optimizeOptMaxExpression(std::move(arg));
-            }
-            return expr;
-        }
-        case ASTNodeType::ARRAY_EXPR: {
-            auto* arrayExpr = static_cast<ArrayExpr*>(expr.get());
-            for (auto& element : arrayExpr->elements) {
-                element = optimizeOptMaxExpression(std::move(element));
-            }
-            return expr;
-        }
-        case ASTNodeType::INDEX_EXPR: {
-            auto* indexExpr = static_cast<IndexExpr*>(expr.get());
-            indexExpr->array = optimizeOptMaxExpression(std::move(indexExpr->array));
-            indexExpr->index = optimizeOptMaxExpression(std::move(indexExpr->index));
-            return expr;
-        }
-        case ASTNodeType::INDEX_ASSIGN_EXPR: {
-            auto* ia = static_cast<IndexAssignExpr*>(expr.get());
-            ia->array = optimizeOptMaxExpression(std::move(ia->array));
-            ia->index = optimizeOptMaxExpression(std::move(ia->index));
-            ia->value = optimizeOptMaxExpression(std::move(ia->value));
-            return expr;
-        }
-        case ASTNodeType::POSTFIX_EXPR: {
-            auto* postfix = static_cast<PostfixExpr*>(expr.get());
-            postfix->operand = optimizeOptMaxExpression(std::move(postfix->operand));
-            return expr;
-        }
-        case ASTNodeType::PREFIX_EXPR: {
-            auto* prefix = static_cast<PrefixExpr*>(expr.get());
-            prefix->operand = optimizeOptMaxExpression(std::move(prefix->operand));
-            return expr;
-        }
-        case ASTNodeType::TERNARY_EXPR: {
-            auto* ternary = static_cast<TernaryExpr*>(expr.get());
-            ternary->condition = optimizeOptMaxExpression(std::move(ternary->condition));
-            ternary->thenExpr = optimizeOptMaxExpression(std::move(ternary->thenExpr));
-            ternary->elseExpr = optimizeOptMaxExpression(std::move(ternary->elseExpr));
-            // Fold ternary when condition is a compile-time constant
-            auto* condLiteral = dynamic_cast<LiteralExpr*>(ternary->condition.get());
-            if (condLiteral && condLiteral->literalType == LiteralExpr::LiteralType::INTEGER) {
-                return condLiteral->intValue != 0
-                    ? std::move(ternary->thenExpr)
-                    : std::move(ternary->elseExpr);
-            }
-            return expr;
-        }
-        default:
-            return expr;
+        return expr;
+    }
+    default:
+        return expr;
     }
 }
 
@@ -263,80 +310,80 @@ void optimizeOptMaxBlock(BlockStmt* block) {
 
 void optimizeOptMaxStatement(Statement* stmt) {
     switch (stmt->type) {
-        case ASTNodeType::BLOCK:
-            optimizeOptMaxBlock(static_cast<BlockStmt*>(stmt));
-            break;
-        case ASTNodeType::VAR_DECL: {
-            auto* varDecl = static_cast<VarDecl*>(stmt);
-            if (varDecl->initializer) {
-                varDecl->initializer = optimizeOptMaxExpression(std::move(varDecl->initializer));
+    case ASTNodeType::BLOCK:
+        optimizeOptMaxBlock(static_cast<BlockStmt*>(stmt));
+        break;
+    case ASTNodeType::VAR_DECL: {
+        auto* varDecl = static_cast<VarDecl*>(stmt);
+        if (varDecl->initializer) {
+            varDecl->initializer = optimizeOptMaxExpression(std::move(varDecl->initializer));
+        }
+        break;
+    }
+    case ASTNodeType::RETURN_STMT: {
+        auto* retStmt = static_cast<ReturnStmt*>(stmt);
+        if (retStmt->value) {
+            retStmt->value = optimizeOptMaxExpression(std::move(retStmt->value));
+        }
+        break;
+    }
+    case ASTNodeType::EXPR_STMT: {
+        auto* exprStmt = static_cast<ExprStmt*>(stmt);
+        exprStmt->expression = optimizeOptMaxExpression(std::move(exprStmt->expression));
+        break;
+    }
+    case ASTNodeType::IF_STMT: {
+        auto* ifStmt = static_cast<IfStmt*>(stmt);
+        ifStmt->condition = optimizeOptMaxExpression(std::move(ifStmt->condition));
+        optimizeOptMaxStatement(ifStmt->thenBranch.get());
+        if (ifStmt->elseBranch) {
+            optimizeOptMaxStatement(ifStmt->elseBranch.get());
+        }
+        break;
+    }
+    case ASTNodeType::WHILE_STMT: {
+        auto* whileStmt = static_cast<WhileStmt*>(stmt);
+        whileStmt->condition = optimizeOptMaxExpression(std::move(whileStmt->condition));
+        optimizeOptMaxStatement(whileStmt->body.get());
+        break;
+    }
+    case ASTNodeType::DO_WHILE_STMT: {
+        auto* doWhileStmt = static_cast<DoWhileStmt*>(stmt);
+        optimizeOptMaxStatement(doWhileStmt->body.get());
+        doWhileStmt->condition = optimizeOptMaxExpression(std::move(doWhileStmt->condition));
+        break;
+    }
+    case ASTNodeType::FOR_STMT: {
+        auto* forStmt = static_cast<ForStmt*>(stmt);
+        forStmt->start = optimizeOptMaxExpression(std::move(forStmt->start));
+        forStmt->end = optimizeOptMaxExpression(std::move(forStmt->end));
+        if (forStmt->step) {
+            forStmt->step = optimizeOptMaxExpression(std::move(forStmt->step));
+        }
+        optimizeOptMaxStatement(forStmt->body.get());
+        break;
+    }
+    case ASTNodeType::FOR_EACH_STMT: {
+        auto* forEach = static_cast<ForEachStmt*>(stmt);
+        forEach->collection = optimizeOptMaxExpression(std::move(forEach->collection));
+        optimizeOptMaxStatement(forEach->body.get());
+        break;
+    }
+    case ASTNodeType::SWITCH_STMT: {
+        auto* switchStmt = static_cast<omscript::SwitchStmt*>(stmt);
+        switchStmt->condition = optimizeOptMaxExpression(std::move(switchStmt->condition));
+        for (auto& sc : switchStmt->cases) {
+            if (sc.value) {
+                sc.value = optimizeOptMaxExpression(std::move(sc.value));
             }
-            break;
-        }
-        case ASTNodeType::RETURN_STMT: {
-            auto* retStmt = static_cast<ReturnStmt*>(stmt);
-            if (retStmt->value) {
-                retStmt->value = optimizeOptMaxExpression(std::move(retStmt->value));
+            for (auto& s : sc.body) {
+                optimizeOptMaxStatement(s.get());
             }
-            break;
         }
-        case ASTNodeType::EXPR_STMT: {
-            auto* exprStmt = static_cast<ExprStmt*>(stmt);
-            exprStmt->expression = optimizeOptMaxExpression(std::move(exprStmt->expression));
-            break;
-        }
-        case ASTNodeType::IF_STMT: {
-            auto* ifStmt = static_cast<IfStmt*>(stmt);
-            ifStmt->condition = optimizeOptMaxExpression(std::move(ifStmt->condition));
-            optimizeOptMaxStatement(ifStmt->thenBranch.get());
-            if (ifStmt->elseBranch) {
-                optimizeOptMaxStatement(ifStmt->elseBranch.get());
-            }
-            break;
-        }
-        case ASTNodeType::WHILE_STMT: {
-            auto* whileStmt = static_cast<WhileStmt*>(stmt);
-            whileStmt->condition = optimizeOptMaxExpression(std::move(whileStmt->condition));
-            optimizeOptMaxStatement(whileStmt->body.get());
-            break;
-        }
-        case ASTNodeType::DO_WHILE_STMT: {
-            auto* doWhileStmt = static_cast<DoWhileStmt*>(stmt);
-            optimizeOptMaxStatement(doWhileStmt->body.get());
-            doWhileStmt->condition = optimizeOptMaxExpression(std::move(doWhileStmt->condition));
-            break;
-        }
-        case ASTNodeType::FOR_STMT: {
-            auto* forStmt = static_cast<ForStmt*>(stmt);
-            forStmt->start = optimizeOptMaxExpression(std::move(forStmt->start));
-            forStmt->end = optimizeOptMaxExpression(std::move(forStmt->end));
-            if (forStmt->step) {
-                forStmt->step = optimizeOptMaxExpression(std::move(forStmt->step));
-            }
-            optimizeOptMaxStatement(forStmt->body.get());
-            break;
-        }
-        case ASTNodeType::FOR_EACH_STMT: {
-            auto* forEach = static_cast<ForEachStmt*>(stmt);
-            forEach->collection = optimizeOptMaxExpression(std::move(forEach->collection));
-            optimizeOptMaxStatement(forEach->body.get());
-            break;
-        }
-        case ASTNodeType::SWITCH_STMT: {
-            auto* switchStmt = static_cast<omscript::SwitchStmt*>(stmt);
-            switchStmt->condition = optimizeOptMaxExpression(std::move(switchStmt->condition));
-            for (auto& sc : switchStmt->cases) {
-                if (sc.value) {
-                    sc.value = optimizeOptMaxExpression(std::move(sc.value));
-                }
-                for (auto& s : sc.body) {
-                    optimizeOptMaxStatement(s.get());
-                }
-            }
-            break;
-        }
-        default:
-            break;
+        break;
+    }
+    default:
+        break;
     }
 }
 
@@ -348,24 +395,20 @@ namespace omscript {
 // These functions are always compiled to native machine code via LLVM IR,
 // never through the bytecode/dynamic compilation path.
 static const std::unordered_set<std::string> stdlibFunctions = {
-    "abs", "assert", "char_at", "clamp", "input", "is_alpha", "is_digit",
-    "is_even", "is_odd", "len", "max", "min", "pow", "print", "print_char",
-    "reverse", "sign", "sqrt", "str_eq", "str_len", "sum", "swap", "to_char", "typeof"
-};
+    "abs",    "assert", "char_at", "clamp",   "input", "is_alpha", "is_digit",   "is_even",
+    "is_odd", "len",    "max",     "min",     "pow",   "print",    "print_char", "reverse",
+    "sign",   "sqrt",   "str_eq",  "str_len", "sum",   "swap",     "to_char",    "typeof"};
 
 bool isStdlibFunction(const std::string& name) {
     return stdlibFunctions.find(name) != stdlibFunctions.end();
 }
 
-CodeGenerator::CodeGenerator(OptimizationLevel optLevel) 
-    : inOptMaxFunction(false),
-      hasOptMaxFunctions(false),
-      useDynamicCompilation(false),
-      optimizationLevel(optLevel) {
+CodeGenerator::CodeGenerator(OptimizationLevel optLevel)
+    : inOptMaxFunction(false), hasOptMaxFunctions(false), useDynamicCompilation(false), optimizationLevel(optLevel) {
     context = std::make_unique<llvm::LLVMContext>();
     module = std::make_unique<llvm::Module>("omscript", *context);
     builder = std::make_unique<llvm::IRBuilder<>>(*context);
-    
+
     setupPrintfDeclaration();
 }
 
@@ -377,18 +420,22 @@ CodeGenerator::~CodeGenerator() {}
 
 ExecutionTier CodeGenerator::classifyFunction(const FunctionDecl* func) const {
     // main is always AOT-compiled — it is the program entry point.
-    if (func->name == "main") return ExecutionTier::AOT;
+    if (func->name == "main")
+        return ExecutionTier::AOT;
 
     // OPTMAX functions are explicitly marked for aggressive AOT optimisation.
-    if (func->isOptMax) return ExecutionTier::AOT;
+    if (func->isOptMax)
+        return ExecutionTier::AOT;
 
     // Stdlib built-ins are always native (handled separately, but classify
     // them here for completeness).
-    if (isStdlibFunction(func->name)) return ExecutionTier::AOT;
+    if (isStdlibFunction(func->name))
+        return ExecutionTier::AOT;
 
     // If every parameter carries a type annotation the function is
     // statically typed and therefore eligible for AOT compilation.
-    if (func->hasFullTypeAnnotations()) return ExecutionTier::AOT;
+    if (func->hasFullTypeAnnotations())
+        return ExecutionTier::AOT;
 
     // Everything else starts life as interpreted bytecode.
     // The VM profiler may later promote it to JIT.
@@ -399,19 +446,10 @@ void CodeGenerator::setupPrintfDeclaration() {
     // Declare printf function for output
     std::vector<llvm::Type*> printfArgs;
     printfArgs.push_back(llvm::PointerType::getUnqual(*context));
-    
-    llvm::FunctionType* printfType = llvm::FunctionType::get(
-        llvm::Type::getInt32Ty(*context),
-        printfArgs,
-        true
-    );
-    
-    llvm::Function::Create(
-        printfType,
-        llvm::Function::ExternalLinkage,
-        "printf",
-        module.get()
-    );
+
+    llvm::FunctionType* printfType = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), printfArgs, true);
+
+    llvm::Function::Create(printfType, llvm::Function::ExternalLinkage, "printf", module.get());
 }
 
 llvm::Function* CodeGenerator::getPrintfFunction() {
@@ -439,7 +477,8 @@ llvm::Value* CodeGenerator::toBool(llvm::Value* v) {
 }
 
 llvm::Value* CodeGenerator::toDefaultType(llvm::Value* v) {
-    if (v->getType() == getDefaultType()) return v;
+    if (v->getType() == getDefaultType())
+        return v;
     if (v->getType()->isDoubleTy()) {
         return builder->CreateFPToSI(v, getDefaultType(), "ftoi");
     }
@@ -453,7 +492,8 @@ llvm::Value* CodeGenerator::toDefaultType(llvm::Value* v) {
 }
 
 llvm::Value* CodeGenerator::ensureFloat(llvm::Value* v) {
-    if (v->getType()->isDoubleTy()) return v;
+    if (v->getType()->isDoubleTy())
+        return v;
     if (v->getType()->isIntegerTy()) {
         return builder->CreateSIToFP(v, getFloatType(), "itof");
     }
@@ -476,7 +516,7 @@ void CodeGenerator::endScope() {
     if (scopeStack.empty()) {
         return;
     }
-    
+
     auto& scope = scopeStack.back();
     auto& constScope = constScopeStack.back();
     for (const auto& entry : scope) {
@@ -529,21 +569,22 @@ void CodeGenerator::checkConstModification(const std::string& name, const std::s
 
 void CodeGenerator::validateScopeStacksMatch(const char* location) {
     if (scopeStack.size() != constScopeStack.size()) {
-        throw std::runtime_error("Scope tracking mismatch in codegen (" + std::string(location) + "): values=" +
-                                 std::to_string(scopeStack.size()) + ", consts=" +
-                                 std::to_string(constScopeStack.size()));
+        throw std::runtime_error("Scope tracking mismatch in codegen (" + std::string(location) +
+                                 "): values=" + std::to_string(scopeStack.size()) +
+                                 ", consts=" + std::to_string(constScopeStack.size()));
     }
 }
 
-llvm::AllocaInst* CodeGenerator::createEntryBlockAlloca(llvm::Function* function, const std::string& name, llvm::Type* type) {
+llvm::AllocaInst* CodeGenerator::createEntryBlockAlloca(llvm::Function* function, const std::string& name,
+                                                        llvm::Type* type) {
     llvm::IRBuilder<> entryBuilder(&function->getEntryBlock(), function->getEntryBlock().begin());
     return entryBuilder.CreateAlloca(type ? type : getDefaultType(), nullptr, name);
 }
 
 void CodeGenerator::codegenError(const std::string& message, const ASTNode* node) {
     if (node && node->line > 0) {
-        throw std::runtime_error("Error at line " + std::to_string(node->line) +
-                                 ", column " + std::to_string(node->column) + ": " + message);
+        throw std::runtime_error("Error at line " + std::to_string(node->line) + ", column " +
+                                 std::to_string(node->column) + ": " + message);
     }
     throw std::runtime_error(message);
 }
@@ -561,9 +602,9 @@ void CodeGenerator::generate(Program* program) {
         }
         auto it = seenFunctions.find(func->name);
         if (it != seenFunctions.end()) {
-            codegenError("Duplicate function definition: '" + func->name +
-                         "' (previously defined at line " +
-                         std::to_string(it->second->line) + ")", func.get());
+            codegenError("Duplicate function definition: '" + func->name + "' (previously defined at line " +
+                             std::to_string(it->second->line) + ")",
+                         func.get());
         }
         seenFunctions[func->name] = func.get();
 
@@ -571,8 +612,8 @@ void CodeGenerator::generate(Program* program) {
         std::unordered_set<std::string> seenParams;
         for (const auto& param : func->parameters) {
             if (!seenParams.insert(param.name).second) {
-                codegenError("Duplicate parameter name '" + param.name +
-                             "' in function '" + func->name + "'", func.get());
+                codegenError("Duplicate parameter name '" + param.name + "' in function '" + func->name + "'",
+                             func.get());
             }
         }
 
@@ -587,15 +628,14 @@ void CodeGenerator::generate(Program* program) {
         // Program-level error — no specific AST node to reference for location.
         throw std::runtime_error("No 'main' function defined");
     }
-    
+
     // Forward-declare all functions so that any function can reference any
     // other regardless of source-file ordering (enables mutual recursion).
     for (auto& func : program->functions) {
         std::vector<llvm::Type*> paramTypes(func->parameters.size(), getDefaultType());
-        llvm::FunctionType* funcType = llvm::FunctionType::get(
-            getDefaultType(), paramTypes, false);
-        llvm::Function* function = llvm::Function::Create(
-            funcType, llvm::Function::ExternalLinkage, func->name, module.get());
+        llvm::FunctionType* funcType = llvm::FunctionType::get(getDefaultType(), paramTypes, false);
+        llvm::Function* function =
+            llvm::Function::Create(funcType, llvm::Function::ExternalLinkage, func->name, module.get());
         functions[func->name] = function;
     }
 
@@ -608,11 +648,11 @@ void CodeGenerator::generate(Program* program) {
     if (optimizationLevel != OptimizationLevel::O0) {
         runOptimizationPasses();
     }
-    
+
     if (hasOptMaxFunctions) {
         optimizeOptMaxFunctions();
     }
-    
+
     // Verify the module
     std::string errorStr;
     llvm::raw_string_ostream errorStream(errorStr);
@@ -637,16 +677,15 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     // statements benefit from being inlined into their callers.
     // 8 statements covers most simple accessors and arithmetic helpers.
     static constexpr size_t kMaxInlineHintStatements = 8;
-    if (func->name != "main" &&
-        optimizationLevel >= OptimizationLevel::O2 &&
-        func->body && func->body->statements.size() <= kMaxInlineHintStatements) {
+    if (func->name != "main" && optimizationLevel >= OptimizationLevel::O2 && func->body &&
+        func->body->statements.size() <= kMaxInlineHintStatements) {
         function->addFnAttr(llvm::Attribute::InlineHint);
     }
-    
+
     // Create entry basic block
     llvm::BasicBlock* entry = llvm::BasicBlock::Create(*context, "entry", function);
     builder->SetInsertPoint(entry);
-    
+
     // Set parameter names and create allocas
     namedValues.clear();
     scopeStack.clear();
@@ -656,22 +695,22 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     auto argIt = function->arg_begin();
     for (auto& param : func->parameters) {
         argIt->setName(param.name);
-        
+
         llvm::AllocaInst* alloca = createEntryBlockAlloca(function, param.name);
         builder->CreateStore(&(*argIt), alloca);
         bindVariable(param.name, alloca);
-        
+
         ++argIt;
     }
-    
+
     // Generate function body
     generateBlock(func->body.get());
-    
+
     // Add default return if needed
     if (!builder->GetInsertBlock()->getTerminator()) {
         builder->CreateRet(llvm::ConstantInt::get(*context, llvm::APInt(64, 0)));
     }
-    
+
     // Verify function
     std::string errorStr;
     llvm::raw_string_ostream errorStream(errorStr);
@@ -680,89 +719,89 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         function->print(llvm::errs());
         throw std::runtime_error("Function verification failed");
     }
-    
+
     inOptMaxFunction = false;
-    
+
     return function;
 }
 
 void CodeGenerator::generateStatement(Statement* stmt) {
     switch (stmt->type) {
-        case ASTNodeType::VAR_DECL:
-            generateVarDecl(static_cast<VarDecl*>(stmt));
-            break;
-        case ASTNodeType::RETURN_STMT:
-            generateReturn(static_cast<ReturnStmt*>(stmt));
-            break;
-        case ASTNodeType::IF_STMT:
-            generateIf(static_cast<IfStmt*>(stmt));
-            break;
-        case ASTNodeType::WHILE_STMT:
-            generateWhile(static_cast<WhileStmt*>(stmt));
-            break;
-        case ASTNodeType::DO_WHILE_STMT:
-            generateDoWhile(static_cast<DoWhileStmt*>(stmt));
-            break;
-        case ASTNodeType::FOR_STMT:
-            generateFor(static_cast<ForStmt*>(stmt));
-            break;
-        case ASTNodeType::FOR_EACH_STMT:
-            generateForEach(static_cast<ForEachStmt*>(stmt));
-            break;
-        case ASTNodeType::BREAK_STMT:
-            if (loopStack.empty()) {
-                codegenError("break used outside of a loop", stmt);
-            }
-            builder->CreateBr(loopStack.back().breakTarget);
-            break;
-        case ASTNodeType::CONTINUE_STMT:
-            if (loopStack.empty()) {
-                codegenError("continue used outside of a loop", stmt);
-            }
-            builder->CreateBr(loopStack.back().continueTarget);
-            break;
-        case ASTNodeType::BLOCK:
-            generateBlock(static_cast<BlockStmt*>(stmt));
-            break;
-        case ASTNodeType::EXPR_STMT:
-            generateExprStmt(static_cast<ExprStmt*>(stmt));
-            break;
-        case ASTNodeType::SWITCH_STMT:
-            generateSwitch(static_cast<SwitchStmt*>(stmt));
-            break;
-        default:
-            codegenError("Unknown statement type", stmt);
+    case ASTNodeType::VAR_DECL:
+        generateVarDecl(static_cast<VarDecl*>(stmt));
+        break;
+    case ASTNodeType::RETURN_STMT:
+        generateReturn(static_cast<ReturnStmt*>(stmt));
+        break;
+    case ASTNodeType::IF_STMT:
+        generateIf(static_cast<IfStmt*>(stmt));
+        break;
+    case ASTNodeType::WHILE_STMT:
+        generateWhile(static_cast<WhileStmt*>(stmt));
+        break;
+    case ASTNodeType::DO_WHILE_STMT:
+        generateDoWhile(static_cast<DoWhileStmt*>(stmt));
+        break;
+    case ASTNodeType::FOR_STMT:
+        generateFor(static_cast<ForStmt*>(stmt));
+        break;
+    case ASTNodeType::FOR_EACH_STMT:
+        generateForEach(static_cast<ForEachStmt*>(stmt));
+        break;
+    case ASTNodeType::BREAK_STMT:
+        if (loopStack.empty()) {
+            codegenError("break used outside of a loop", stmt);
+        }
+        builder->CreateBr(loopStack.back().breakTarget);
+        break;
+    case ASTNodeType::CONTINUE_STMT:
+        if (loopStack.empty()) {
+            codegenError("continue used outside of a loop", stmt);
+        }
+        builder->CreateBr(loopStack.back().continueTarget);
+        break;
+    case ASTNodeType::BLOCK:
+        generateBlock(static_cast<BlockStmt*>(stmt));
+        break;
+    case ASTNodeType::EXPR_STMT:
+        generateExprStmt(static_cast<ExprStmt*>(stmt));
+        break;
+    case ASTNodeType::SWITCH_STMT:
+        generateSwitch(static_cast<SwitchStmt*>(stmt));
+        break;
+    default:
+        codegenError("Unknown statement type", stmt);
     }
 }
 
 llvm::Value* CodeGenerator::generateExpression(Expression* expr) {
     switch (expr->type) {
-        case ASTNodeType::LITERAL_EXPR:
-            return generateLiteral(static_cast<LiteralExpr*>(expr));
-        case ASTNodeType::IDENTIFIER_EXPR:
-            return generateIdentifier(static_cast<IdentifierExpr*>(expr));
-        case ASTNodeType::BINARY_EXPR:
-            return generateBinary(static_cast<BinaryExpr*>(expr));
-        case ASTNodeType::UNARY_EXPR:
-            return generateUnary(static_cast<UnaryExpr*>(expr));
-        case ASTNodeType::CALL_EXPR:
-            return generateCall(static_cast<CallExpr*>(expr));
-        case ASTNodeType::ASSIGN_EXPR:
-            return generateAssign(static_cast<AssignExpr*>(expr));
-        case ASTNodeType::POSTFIX_EXPR:
-            return generatePostfix(static_cast<PostfixExpr*>(expr));
-        case ASTNodeType::PREFIX_EXPR:
-            return generatePrefix(static_cast<PrefixExpr*>(expr));
-        case ASTNodeType::TERNARY_EXPR:
-            return generateTernary(static_cast<TernaryExpr*>(expr));
-        case ASTNodeType::ARRAY_EXPR:
-            return generateArray(static_cast<ArrayExpr*>(expr));
-        case ASTNodeType::INDEX_EXPR:
-            return generateIndex(static_cast<IndexExpr*>(expr));
-        case ASTNodeType::INDEX_ASSIGN_EXPR:
-            return generateIndexAssign(static_cast<IndexAssignExpr*>(expr));
-        default:
-            codegenError("Unknown expression type", expr);
+    case ASTNodeType::LITERAL_EXPR:
+        return generateLiteral(static_cast<LiteralExpr*>(expr));
+    case ASTNodeType::IDENTIFIER_EXPR:
+        return generateIdentifier(static_cast<IdentifierExpr*>(expr));
+    case ASTNodeType::BINARY_EXPR:
+        return generateBinary(static_cast<BinaryExpr*>(expr));
+    case ASTNodeType::UNARY_EXPR:
+        return generateUnary(static_cast<UnaryExpr*>(expr));
+    case ASTNodeType::CALL_EXPR:
+        return generateCall(static_cast<CallExpr*>(expr));
+    case ASTNodeType::ASSIGN_EXPR:
+        return generateAssign(static_cast<AssignExpr*>(expr));
+    case ASTNodeType::POSTFIX_EXPR:
+        return generatePostfix(static_cast<PostfixExpr*>(expr));
+    case ASTNodeType::PREFIX_EXPR:
+        return generatePrefix(static_cast<PrefixExpr*>(expr));
+    case ASTNodeType::TERNARY_EXPR:
+        return generateTernary(static_cast<TernaryExpr*>(expr));
+    case ASTNodeType::ARRAY_EXPR:
+        return generateArray(static_cast<ArrayExpr*>(expr));
+    case ASTNodeType::INDEX_EXPR:
+        return generateIndex(static_cast<IndexExpr*>(expr));
+    case ASTNodeType::INDEX_ASSIGN_EXPR:
+        return generateIndexAssign(static_cast<IndexAssignExpr*>(expr));
+    default:
+        codegenError("Unknown expression type", expr);
     }
 }
 
@@ -817,79 +856,98 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         }
         return builder->CreateZExt(phi, getDefaultType(), "booltmp");
     }
-    
+
     llvm::Value* right = generateExpression(expr->right.get());
-    
+
     bool leftIsFloat = left->getType()->isDoubleTy();
     bool rightIsFloat = right->getType()->isDoubleTy();
-    
+
     // Float operations path
     if (leftIsFloat || rightIsFloat) {
-        if (!leftIsFloat) left = ensureFloat(left);
-        if (!rightIsFloat) right = ensureFloat(right);
-        
-        if (expr->op == "+") return builder->CreateFAdd(left, right, "faddtmp");
-        if (expr->op == "-") return builder->CreateFSub(left, right, "fsubtmp");
-        if (expr->op == "*") return builder->CreateFMul(left, right, "fmultmp");
-        if (expr->op == "/") return builder->CreateFDiv(left, right, "fdivtmp");
-        if (expr->op == "%") return builder->CreateFRem(left, right, "fremtmp");
-        
-        if (expr->op == "==") { auto cmp = builder->CreateFCmpOEQ(left, right, "fcmptmp"); return builder->CreateZExt(cmp, getDefaultType(), "booltmp"); }
-        if (expr->op == "!=") { auto cmp = builder->CreateFCmpONE(left, right, "fcmptmp"); return builder->CreateZExt(cmp, getDefaultType(), "booltmp"); }
-        if (expr->op == "<")  { auto cmp = builder->CreateFCmpOLT(left, right, "fcmptmp"); return builder->CreateZExt(cmp, getDefaultType(), "booltmp"); }
-        if (expr->op == "<=") { auto cmp = builder->CreateFCmpOLE(left, right, "fcmptmp"); return builder->CreateZExt(cmp, getDefaultType(), "booltmp"); }
-        if (expr->op == ">")  { auto cmp = builder->CreateFCmpOGT(left, right, "fcmptmp"); return builder->CreateZExt(cmp, getDefaultType(), "booltmp"); }
-        if (expr->op == ">=") { auto cmp = builder->CreateFCmpOGE(left, right, "fcmptmp"); return builder->CreateZExt(cmp, getDefaultType(), "booltmp"); }
-        
+        if (!leftIsFloat)
+            left = ensureFloat(left);
+        if (!rightIsFloat)
+            right = ensureFloat(right);
+
+        if (expr->op == "+")
+            return builder->CreateFAdd(left, right, "faddtmp");
+        if (expr->op == "-")
+            return builder->CreateFSub(left, right, "fsubtmp");
+        if (expr->op == "*")
+            return builder->CreateFMul(left, right, "fmultmp");
+        if (expr->op == "/")
+            return builder->CreateFDiv(left, right, "fdivtmp");
+        if (expr->op == "%")
+            return builder->CreateFRem(left, right, "fremtmp");
+
+        if (expr->op == "==") {
+            auto cmp = builder->CreateFCmpOEQ(left, right, "fcmptmp");
+            return builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+        }
+        if (expr->op == "!=") {
+            auto cmp = builder->CreateFCmpONE(left, right, "fcmptmp");
+            return builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+        }
+        if (expr->op == "<") {
+            auto cmp = builder->CreateFCmpOLT(left, right, "fcmptmp");
+            return builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+        }
+        if (expr->op == "<=") {
+            auto cmp = builder->CreateFCmpOLE(left, right, "fcmptmp");
+            return builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+        }
+        if (expr->op == ">") {
+            auto cmp = builder->CreateFCmpOGT(left, right, "fcmptmp");
+            return builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+        }
+        if (expr->op == ">=") {
+            auto cmp = builder->CreateFCmpOGE(left, right, "fcmptmp");
+            return builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+        }
+
         codegenError("Invalid binary operator for float operands: " + expr->op, expr);
     }
-    
+
     // String concatenation path (pointer + pointer with '+' operator)
     if (expr->op == "+" && left->getType()->isPointerTy() && right->getType()->isPointerTy()) {
         // Declare C library functions for string concatenation
         llvm::Function* strlenFn = module->getFunction("strlen");
         if (!strlenFn) {
-            auto strlenType = llvm::FunctionType::get(getDefaultType(),
-                {llvm::PointerType::getUnqual(*context)}, false);
-            strlenFn = llvm::Function::Create(strlenType,
-                llvm::Function::ExternalLinkage, "strlen", module.get());
+            auto strlenType =
+                llvm::FunctionType::get(getDefaultType(), {llvm::PointerType::getUnqual(*context)}, false);
+            strlenFn = llvm::Function::Create(strlenType, llvm::Function::ExternalLinkage, "strlen", module.get());
         }
         llvm::Function* mallocFn = module->getFunction("malloc");
         if (!mallocFn) {
-            auto mallocType = llvm::FunctionType::get(
-                llvm::PointerType::getUnqual(*context),
-                {getDefaultType()}, false);
-            mallocFn = llvm::Function::Create(mallocType,
-                llvm::Function::ExternalLinkage, "malloc", module.get());
+            auto mallocType =
+                llvm::FunctionType::get(llvm::PointerType::getUnqual(*context), {getDefaultType()}, false);
+            mallocFn = llvm::Function::Create(mallocType, llvm::Function::ExternalLinkage, "malloc", module.get());
         }
         llvm::Function* strcpyFn = module->getFunction("strcpy");
         if (!strcpyFn) {
             auto strcpyType = llvm::FunctionType::get(
                 llvm::PointerType::getUnqual(*context),
                 {llvm::PointerType::getUnqual(*context), llvm::PointerType::getUnqual(*context)}, false);
-            strcpyFn = llvm::Function::Create(strcpyType,
-                llvm::Function::ExternalLinkage, "strcpy", module.get());
+            strcpyFn = llvm::Function::Create(strcpyType, llvm::Function::ExternalLinkage, "strcpy", module.get());
         }
         llvm::Function* strcatFn = module->getFunction("strcat");
         if (!strcatFn) {
             auto strcatType = llvm::FunctionType::get(
                 llvm::PointerType::getUnqual(*context),
                 {llvm::PointerType::getUnqual(*context), llvm::PointerType::getUnqual(*context)}, false);
-            strcatFn = llvm::Function::Create(strcatType,
-                llvm::Function::ExternalLinkage, "strcat", module.get());
+            strcatFn = llvm::Function::Create(strcatType, llvm::Function::ExternalLinkage, "strcat", module.get());
         }
-        
+
         llvm::Value* len1 = builder->CreateCall(strlenFn, {left}, "len1");
         llvm::Value* len2 = builder->CreateCall(strlenFn, {right}, "len2");
         llvm::Value* totalLen = builder->CreateAdd(len1, len2, "totallen");
-        llvm::Value* allocSize = builder->CreateAdd(totalLen,
-            llvm::ConstantInt::get(getDefaultType(), 1), "allocsize");
+        llvm::Value* allocSize = builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "allocsize");
         llvm::Value* buf = builder->CreateCall(mallocFn, {allocSize}, "strbuf");
         builder->CreateCall(strcpyFn, {buf, left});
         builder->CreateCall(strcatFn, {buf, right});
         return buf;
     }
-    
+
     // Convert pointer types to i64 for integer operations (fallback)
     if (left->getType()->isPointerTy()) {
         left = builder->CreatePtrToInt(left, getDefaultType(), "ptoi");
@@ -897,14 +955,14 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     if (right->getType()->isPointerTy()) {
         right = builder->CreatePtrToInt(right, getDefaultType(), "ptoi");
     }
-    
+
     // Constant folding optimization - if both operands are constants, compute at compile time
     if (llvm::isa<llvm::ConstantInt>(left) && llvm::isa<llvm::ConstantInt>(right)) {
         auto leftConst = llvm::dyn_cast<llvm::ConstantInt>(left);
         auto rightConst = llvm::dyn_cast<llvm::ConstantInt>(right);
         int64_t lval = leftConst->getSExtValue();
         int64_t rval = rightConst->getSExtValue();
-        
+
         if (expr->op == "+") {
             return llvm::ConstantInt::get(*context, llvm::APInt(64, lval + rval));
         } else if (expr->op == "-") {
@@ -945,7 +1003,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 return llvm::ConstantInt::get(*context, llvm::APInt(64, lval >> rval));
         }
     }
-    
+
     // Regular code generation for non-constant expressions
     if (expr->op == "+") {
         return builder->CreateNSWAdd(left, right, "addtmp");
@@ -958,9 +1016,11 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             if (val > 0 && (val & (val - 1)) == 0) {
                 unsigned shift = 0;
                 int64_t tmp = val;
-                while (tmp > 1) { tmp >>= 1; shift++; }
-                return builder->CreateShl(left,
-                    llvm::ConstantInt::get(getDefaultType(), shift), "shltmp");
+                while (tmp > 1) {
+                    tmp >>= 1;
+                    shift++;
+                }
+                return builder->CreateShl(left, llvm::ConstantInt::get(getDefaultType(), shift), "shltmp");
             }
         }
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left)) {
@@ -968,9 +1028,11 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             if (val > 0 && (val & (val - 1)) == 0) {
                 unsigned shift = 0;
                 int64_t tmp = val;
-                while (tmp > 1) { tmp >>= 1; shift++; }
-                return builder->CreateShl(right,
-                    llvm::ConstantInt::get(getDefaultType(), shift), "shltmp");
+                while (tmp > 1) {
+                    tmp >>= 1;
+                    shift++;
+                }
+                return builder->CreateShl(right, llvm::ConstantInt::get(getDefaultType(), shift), "shltmp");
             }
         }
         return builder->CreateNSWMul(left, right, "multmp");
@@ -984,9 +1046,11 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 if (val > 0 && (val & (val - 1)) == 0) {
                     unsigned shift = 0;
                     int64_t tmp = val;
-                    while (tmp > 1) { tmp >>= 1; shift++; }
-                    return builder->CreateAShr(left,
-                        llvm::ConstantInt::get(getDefaultType(), shift), "divshrtmp");
+                    while (tmp > 1) {
+                        tmp >>= 1;
+                        shift++;
+                    }
+                    return builder->CreateAShr(left, llvm::ConstantInt::get(getDefaultType(), shift), "divshrtmp");
                 }
             }
         }
@@ -1000,27 +1064,21 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         builder->CreateCondBr(isZero, zeroBB, opBB);
 
         builder->SetInsertPoint(zeroBB);
-        const char* messageText = isDivision ? "Runtime error: division by zero\n"
-                                             : "Runtime error: modulo by zero\n";
+        const char* messageText = isDivision ? "Runtime error: division by zero\n" : "Runtime error: modulo by zero\n";
         const char* messageName = isDivision ? "divzero_msg" : "modzero_msg";
         llvm::Value* message = builder->CreateGlobalString(messageText, messageName);
         builder->CreateCall(getPrintfFunction(), {message});
         llvm::Function* exitFunction = module->getFunction("exit");
         if (!exitFunction) {
-            auto exitType = llvm::FunctionType::get(llvm::Type::getVoidTy(*context),
-                                                    {llvm::Type::getInt32Ty(*context)},
-                                                    false);
-            exitFunction = llvm::Function::Create(exitType,
-                                                  llvm::Function::ExternalLinkage,
-                                                  "exit",
-                                                  module.get());
+            auto exitType =
+                llvm::FunctionType::get(llvm::Type::getVoidTy(*context), {llvm::Type::getInt32Ty(*context)}, false);
+            exitFunction = llvm::Function::Create(exitType, llvm::Function::ExternalLinkage, "exit", module.get());
         }
         builder->CreateCall(exitFunction, {llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 1)});
         builder->CreateUnreachable();
 
         builder->SetInsertPoint(opBB);
-        return isDivision ? builder->CreateSDiv(left, right, "divtmp")
-                          : builder->CreateSRem(left, right, "modtmp");
+        return isDivision ? builder->CreateSDiv(left, right, "divtmp") : builder->CreateSRem(left, right, "modtmp");
     } else if (expr->op == "==") {
         llvm::Value* cmp = builder->CreateICmpEQ(left, right, "cmptmp");
         return builder->CreateZExt(cmp, getDefaultType(), "booltmp");
@@ -1050,13 +1108,13 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     } else if (expr->op == ">>") {
         return builder->CreateAShr(left, right, "ashrtmp");
     }
-    
+
     codegenError("Unknown binary operator: " + expr->op, expr);
 }
 
 llvm::Value* CodeGenerator::generateUnary(UnaryExpr* expr) {
     llvm::Value* operand = generateExpression(expr->operand.get());
-    
+
     // Constant folding for unary operations
     if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(operand)) {
         int64_t val = ci->getSExtValue();
@@ -1073,7 +1131,7 @@ llvm::Value* CodeGenerator::generateUnary(UnaryExpr* expr) {
             return llvm::ConstantFP::get(getFloatType(), -cf->getValueAPF().convertToDouble());
         }
     }
-    
+
     if (expr->op == "-") {
         if (operand->getType()->isDoubleTy()) {
             return builder->CreateFNeg(operand, "fnegtmp");
@@ -1089,7 +1147,7 @@ llvm::Value* CodeGenerator::generateUnary(UnaryExpr* expr) {
         }
         return builder->CreateNot(operand, "bitnottmp");
     }
-    
+
     codegenError("Unknown unary operator: " + expr->op, expr);
 }
 
@@ -1098,8 +1156,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // They never use dynamic variables or the bytecode path.
     if (expr->callee == "print") {
         if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'print' expects 1 argument, but " +
-                         std::to_string(expr->arguments.size()) + " provided", expr);
+            codegenError("Built-in function 'print' expects 1 argument, but " + std::to_string(expr->arguments.size()) +
+                             " provided",
+                         expr);
         }
         Expression* argExpr = expr->arguments[0].get();
         llvm::Value* arg = generateExpression(argExpr);
@@ -1132,8 +1191,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (expr->callee == "abs") {
         if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'abs' expects 1 argument, but " +
-                         std::to_string(expr->arguments.size()) + " provided", expr);
+            codegenError("Built-in function 'abs' expects 1 argument, but " + std::to_string(expr->arguments.size()) +
+                             " provided",
+                         expr);
         }
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         if (arg->getType()->isDoubleTy()) {
@@ -1151,28 +1211,31 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (expr->callee == "len") {
         if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'len' expects 1 argument, but " +
-                         std::to_string(expr->arguments.size()) + " provided", expr);
+            codegenError("Built-in function 'len' expects 1 argument, but " + std::to_string(expr->arguments.size()) +
+                             " provided",
+                         expr);
         }
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         // Array is stored as an i64 holding a pointer to [length, elem0, elem1, ...]
         // Convert to integer first if needed (e.g. if stored in a float variable)
         arg = toDefaultType(arg);
-        llvm::Value* arrPtr = builder->CreateIntToPtr(arg,
-            llvm::PointerType::getUnqual(*context), "arrptr");
+        llvm::Value* arrPtr = builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "arrptr");
         return builder->CreateLoad(getDefaultType(), arrPtr, "arrlen");
     }
 
     if (expr->callee == "min") {
         if (expr->arguments.size() != 2) {
-            codegenError("Built-in function 'min' expects 2 arguments, but " +
-                         std::to_string(expr->arguments.size()) + " provided", expr);
+            codegenError("Built-in function 'min' expects 2 arguments, but " + std::to_string(expr->arguments.size()) +
+                             " provided",
+                         expr);
         }
         llvm::Value* a = generateExpression(expr->arguments[0].get());
         llvm::Value* b = generateExpression(expr->arguments[1].get());
         if (a->getType()->isDoubleTy() || b->getType()->isDoubleTy()) {
-            if (!a->getType()->isDoubleTy()) a = ensureFloat(a);
-            if (!b->getType()->isDoubleTy()) b = ensureFloat(b);
+            if (!a->getType()->isDoubleTy())
+                a = ensureFloat(a);
+            if (!b->getType()->isDoubleTy())
+                b = ensureFloat(b);
             llvm::Value* cmp = builder->CreateFCmpOLT(a, b, "fmincmp");
             return builder->CreateSelect(cmp, a, b, "fminval");
         }
@@ -1182,14 +1245,17 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (expr->callee == "max") {
         if (expr->arguments.size() != 2) {
-            codegenError("Built-in function 'max' expects 2 arguments, but " +
-                         std::to_string(expr->arguments.size()) + " provided", expr);
+            codegenError("Built-in function 'max' expects 2 arguments, but " + std::to_string(expr->arguments.size()) +
+                             " provided",
+                         expr);
         }
         llvm::Value* a = generateExpression(expr->arguments[0].get());
         llvm::Value* b = generateExpression(expr->arguments[1].get());
         if (a->getType()->isDoubleTy() || b->getType()->isDoubleTy()) {
-            if (!a->getType()->isDoubleTy()) a = ensureFloat(a);
-            if (!b->getType()->isDoubleTy()) b = ensureFloat(b);
+            if (!a->getType()->isDoubleTy())
+                a = ensureFloat(a);
+            if (!b->getType()->isDoubleTy())
+                b = ensureFloat(b);
             llvm::Value* cmp = builder->CreateFCmpOGT(a, b, "fmaxcmp");
             return builder->CreateSelect(cmp, a, b, "fmaxval");
         }
@@ -1199,8 +1265,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (expr->callee == "sign") {
         if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'sign' expects 1 argument, but " +
-                         std::to_string(expr->arguments.size()) + " provided", expr);
+            codegenError("Built-in function 'sign' expects 1 argument, but " + std::to_string(expr->arguments.size()) +
+                             " provided",
+                         expr);
         }
         llvm::Value* x = generateExpression(expr->arguments[0].get());
         if (x->getType()->isDoubleTy()) {
@@ -1225,16 +1292,20 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     if (expr->callee == "clamp") {
         if (expr->arguments.size() != 3) {
             codegenError("Built-in function 'clamp' expects 3 arguments, but " +
-                         std::to_string(expr->arguments.size()) + " provided", expr);
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
         }
         llvm::Value* val = generateExpression(expr->arguments[0].get());
         llvm::Value* lo = generateExpression(expr->arguments[1].get());
         llvm::Value* hi = generateExpression(expr->arguments[2].get());
         // clamp(val, lo, hi) = max(lo, min(val, hi))
         if (val->getType()->isDoubleTy() || lo->getType()->isDoubleTy() || hi->getType()->isDoubleTy()) {
-            if (!val->getType()->isDoubleTy()) val = ensureFloat(val);
-            if (!lo->getType()->isDoubleTy()) lo = ensureFloat(lo);
-            if (!hi->getType()->isDoubleTy()) hi = ensureFloat(hi);
+            if (!val->getType()->isDoubleTy())
+                val = ensureFloat(val);
+            if (!lo->getType()->isDoubleTy())
+                lo = ensureFloat(lo);
+            if (!hi->getType()->isDoubleTy())
+                hi = ensureFloat(hi);
             llvm::Value* cmpHi = builder->CreateFCmpOLT(val, hi, "fclamphi");
             llvm::Value* minVH = builder->CreateSelect(cmpHi, val, hi, "fclampmin");
             llvm::Value* cmpLo = builder->CreateFCmpOGT(minVH, lo, "fclamplo");
@@ -1248,8 +1319,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (expr->callee == "pow") {
         if (expr->arguments.size() != 2) {
-            codegenError("Built-in function 'pow' expects 2 arguments, but " +
-                         std::to_string(expr->arguments.size()) + " provided", expr);
+            codegenError("Built-in function 'pow' expects 2 arguments, but " + std::to_string(expr->arguments.size()) +
+                             " provided",
+                         expr);
         }
         llvm::Value* base = generateExpression(expr->arguments[0].get());
         llvm::Value* exp = generateExpression(expr->arguments[1].get());
@@ -1288,8 +1360,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         builder->SetInsertPoint(bodyBB);
         llvm::Value* newResult = builder->CreateMul(result, base, "pow.mul");
-        llvm::Value* newCounter = builder->CreateSub(counter,
-            llvm::ConstantInt::get(getDefaultType(), 1), "pow.dec");
+        llvm::Value* newCounter = builder->CreateSub(counter, llvm::ConstantInt::get(getDefaultType(), 1), "pow.dec");
         result->addIncoming(newResult, bodyBB);
         counter->addIncoming(newCounter, bodyBB);
         builder->CreateBr(loopBB);
@@ -1304,7 +1375,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     if (expr->callee == "print_char") {
         if (expr->arguments.size() != 1) {
             codegenError("Built-in function 'print_char' expects 1 argument, but " +
-                         std::to_string(expr->arguments.size()) + " provided", expr);
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
         }
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         if (arg->getType()->isDoubleTy()) {
@@ -1312,12 +1384,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         }
         llvm::Function* putcharFn = module->getFunction("putchar");
         if (!putcharFn) {
-            auto putcharType = llvm::FunctionType::get(
-                llvm::Type::getInt32Ty(*context),
-                {llvm::Type::getInt32Ty(*context)},
-                false);
-            putcharFn = llvm::Function::Create(putcharType,
-                llvm::Function::ExternalLinkage, "putchar", module.get());
+            auto putcharType =
+                llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {llvm::Type::getInt32Ty(*context)}, false);
+            putcharFn = llvm::Function::Create(putcharType, llvm::Function::ExternalLinkage, "putchar", module.get());
         }
         llvm::Value* truncated = builder->CreateTrunc(arg, llvm::Type::getInt32Ty(*context), "charval");
         builder->CreateCall(putcharFn, {truncated});
@@ -1327,16 +1396,14 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     if (expr->callee == "input") {
         if (!expr->arguments.empty()) {
             codegenError("Built-in function 'input' expects 0 arguments, but " +
-                         std::to_string(expr->arguments.size()) + " provided", expr);
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
         }
         llvm::Function* scanfFn = module->getFunction("scanf");
         if (!scanfFn) {
-            auto scanfType = llvm::FunctionType::get(
-                llvm::Type::getInt32Ty(*context),
-                {llvm::PointerType::getUnqual(*context)},
-                true);
-            scanfFn = llvm::Function::Create(scanfType,
-                llvm::Function::ExternalLinkage, "scanf", module.get());
+            auto scanfType = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context),
+                                                     {llvm::PointerType::getUnqual(*context)}, true);
+            scanfFn = llvm::Function::Create(scanfType, llvm::Function::ExternalLinkage, "scanf", module.get());
         }
         llvm::Function* function = builder->GetInsertBlock()->getParent();
         llvm::AllocaInst* inputAlloca = createEntryBlockAlloca(function, "input_val");
@@ -1351,8 +1418,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (expr->callee == "sqrt") {
         if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'sqrt' expects 1 argument, but " +
-                         std::to_string(expr->arguments.size()) + " provided", expr);
+            codegenError("Built-in function 'sqrt' expects 1 argument, but " + std::to_string(expr->arguments.size()) +
+                             " provided",
+                         expr);
         }
         llvm::Value* x = generateExpression(expr->arguments[0].get());
         // Convert float to integer since sqrt() is an integer square root
@@ -1388,7 +1456,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* newGuess = builder->CreateSDiv(sum, two, "sqrt.newguess");
         // Ensure progress: if newGuess >= guess, force guess - 1
         llvm::Value* noProgress = builder->CreateICmpSGE(newGuess, guess, "sqrt.noprogress");
-        llvm::Value* forcedGuess = builder->CreateSub(guess, llvm::ConstantInt::get(getDefaultType(), 1), "sqrt.forced");
+        llvm::Value* forcedGuess =
+            builder->CreateSub(guess, llvm::ConstantInt::get(getDefaultType(), 1), "sqrt.forced");
         llvm::Value* nextGuess = builder->CreateSelect(noProgress, forcedGuess, newGuess, "sqrt.next");
         guess->addIncoming(nextGuess, bodyBB);
         builder->CreateBr(loopBB);
@@ -1403,7 +1472,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     if (expr->callee == "is_even") {
         if (expr->arguments.size() != 1) {
             codegenError("Built-in function 'is_even' expects 1 argument, but " +
-                         std::to_string(expr->arguments.size()) + " provided", expr);
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
         }
         llvm::Value* x = generateExpression(expr->arguments[0].get());
         // Convert float to integer since is_even() is an integer operation
@@ -1418,7 +1488,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     if (expr->callee == "is_odd") {
         if (expr->arguments.size() != 1) {
             codegenError("Built-in function 'is_odd' expects 1 argument, but " +
-                         std::to_string(expr->arguments.size()) + " provided", expr);
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
         }
         llvm::Value* x = generateExpression(expr->arguments[0].get());
         // Convert float to integer since is_odd() is an integer operation
@@ -1429,13 +1500,13 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (expr->callee == "sum") {
         if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'sum' expects 1 argument, but " +
-                         std::to_string(expr->arguments.size()) + " provided", expr);
+            codegenError("Built-in function 'sum' expects 1 argument, but " + std::to_string(expr->arguments.size()) +
+                             " provided",
+                         expr);
         }
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         // Array layout: [length, elem0, elem1, ...]
-        llvm::Value* arrPtr = builder->CreateIntToPtr(arg,
-            llvm::PointerType::getUnqual(*context), "sum.arrptr");
+        llvm::Value* arrPtr = builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "sum.arrptr");
         llvm::Value* length = builder->CreateLoad(getDefaultType(), arrPtr, "sum.len");
 
         llvm::Function* function = builder->GetInsertBlock()->getParent();
@@ -1474,14 +1545,14 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     if (expr->callee == "swap") {
         if (expr->arguments.size() != 3) {
             codegenError("Built-in function 'swap' expects 3 arguments (array, i, j), but " +
-                         std::to_string(expr->arguments.size()) + " provided", expr);
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
         }
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         llvm::Value* i = generateExpression(expr->arguments[1].get());
         llvm::Value* j = generateExpression(expr->arguments[2].get());
 
-        llvm::Value* arrPtr = builder->CreateIntToPtr(arg,
-            llvm::PointerType::getUnqual(*context), "swap.arrptr");
+        llvm::Value* arrPtr = builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "swap.arrptr");
         // Elements are at offset (index + 1)
         llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
         llvm::Value* offI = builder->CreateAdd(i, one, "swap.offi");
@@ -1498,11 +1569,11 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     if (expr->callee == "reverse") {
         if (expr->arguments.size() != 1) {
             codegenError("Built-in function 'reverse' expects 1 argument, but " +
-                         std::to_string(expr->arguments.size()) + " provided", expr);
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
         }
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
-        llvm::Value* arrPtr = builder->CreateIntToPtr(arg,
-            llvm::PointerType::getUnqual(*context), "rev.arrptr");
+        llvm::Value* arrPtr = builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "rev.arrptr");
         llvm::Value* length = builder->CreateLoad(getDefaultType(), arrPtr, "rev.len");
 
         llvm::Function* function = builder->GetInsertBlock()->getParent();
@@ -1547,7 +1618,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     if (expr->callee == "to_char") {
         if (expr->arguments.size() != 1) {
             codegenError("Built-in function 'to_char' expects 1 argument, but " +
-                         std::to_string(expr->arguments.size()) + " provided", expr);
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
         }
         // Returns the value itself - the integer IS the character code
         return generateExpression(expr->arguments[0].get());
@@ -1556,7 +1628,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     if (expr->callee == "is_alpha") {
         if (expr->arguments.size() != 1) {
             codegenError("Built-in function 'is_alpha' expects 1 argument, but " +
-                         std::to_string(expr->arguments.size()) + " provided", expr);
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
         }
         llvm::Value* x = generateExpression(expr->arguments[0].get());
         // Convert float to integer since is_alpha() is an integer operation
@@ -1575,7 +1648,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     if (expr->callee == "is_digit") {
         if (expr->arguments.size() != 1) {
             codegenError("Built-in function 'is_digit' expects 1 argument, but " +
-                         std::to_string(expr->arguments.size()) + " provided", expr);
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
         }
         llvm::Value* x = generateExpression(expr->arguments[0].get());
         // Convert float to integer since is_digit() is an integer operation
@@ -1594,7 +1668,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     if (expr->callee == "typeof") {
         if (expr->arguments.size() != 1) {
             codegenError("Built-in function 'typeof' expects 1 argument, but " +
-                         std::to_string(expr->arguments.size()) + " provided", expr);
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
         }
         // Evaluate the argument for its side effects, then return type tag.
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
@@ -1607,7 +1682,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     if (expr->callee == "assert") {
         if (expr->arguments.size() != 1) {
             codegenError("Built-in function 'assert' expects 1 argument, but " +
-                         std::to_string(expr->arguments.size()) + " provided", expr);
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
         }
         llvm::Value* condVal = generateExpression(expr->arguments[0].get());
         condVal = toBool(condVal);
@@ -1619,10 +1695,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateCondBr(condVal, okBB, failBB);
 
         builder->SetInsertPoint(failBB);
-        llvm::Value* errMsg = builder->CreateGlobalString(
-            "Runtime error: assertion failed\n", "assert_msg");
+        llvm::Value* errMsg = builder->CreateGlobalString("Runtime error: assertion failed\n", "assert_msg");
         builder->CreateCall(getPrintfFunction(), {errMsg});
-        llvm::Function* trapFn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::trap);
+        llvm::Function* trapFn = llvm::Intrinsic::getOrInsertDeclaration(module.get(), llvm::Intrinsic::trap);
         builder->CreateCall(trapFn, {});
         builder->CreateUnreachable();
 
@@ -1633,19 +1708,17 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     if (expr->callee == "str_len") {
         if (expr->arguments.size() != 1) {
             codegenError("Built-in function 'str_len' expects 1 argument, but " +
-                         std::to_string(expr->arguments.size()) + " provided", expr);
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
         }
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         // String is stored as an i64 holding a pointer to a C string
-        llvm::Value* strPtr = builder->CreateIntToPtr(arg,
-            llvm::PointerType::getUnqual(*context), "strlen.ptr");
+        llvm::Value* strPtr = builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "strlen.ptr");
         // Declare strlen if not already declared
         llvm::Function* strlenFn = module->getFunction("strlen");
         if (!strlenFn) {
-            llvm::FunctionType* strlenTy = llvm::FunctionType::get(
-                getDefaultType(),
-                {llvm::PointerType::getUnqual(*context)},
-                false);
+            llvm::FunctionType* strlenTy =
+                llvm::FunctionType::get(getDefaultType(), {llvm::PointerType::getUnqual(*context)}, false);
             strlenFn = llvm::Function::Create(strlenTy, llvm::Function::ExternalLinkage, "strlen", module.get());
         }
         return builder->CreateCall(strlenFn, {strPtr}, "strlen.result");
@@ -1654,19 +1727,17 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     if (expr->callee == "char_at") {
         if (expr->arguments.size() != 2) {
             codegenError("Built-in function 'char_at' expects 2 arguments (string, index), but " +
-                         std::to_string(expr->arguments.size()) + " provided", expr);
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
         }
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* idxArg = generateExpression(expr->arguments[1].get());
         idxArg = toDefaultType(idxArg);
         // Convert to pointer
-        llvm::Value* strPtr = builder->CreateIntToPtr(strArg,
-            llvm::PointerType::getUnqual(*context), "charat.ptr");
+        llvm::Value* strPtr = builder->CreateIntToPtr(strArg, llvm::PointerType::getUnqual(*context), "charat.ptr");
         // Load char via GEP
-        llvm::Value* charPtr = builder->CreateGEP(
-            llvm::Type::getInt8Ty(*context), strPtr, idxArg, "charat.gep");
-        llvm::Value* charVal = builder->CreateLoad(
-            llvm::Type::getInt8Ty(*context), charPtr, "charat.char");
+        llvm::Value* charPtr = builder->CreateGEP(llvm::Type::getInt8Ty(*context), strPtr, idxArg, "charat.gep");
+        llvm::Value* charVal = builder->CreateLoad(llvm::Type::getInt8Ty(*context), charPtr, "charat.char");
         // Zero-extend to i64
         return builder->CreateZExt(charVal, getDefaultType(), "charat.ext");
     }
@@ -1674,21 +1745,19 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     if (expr->callee == "str_eq") {
         if (expr->arguments.size() != 2) {
             codegenError("Built-in function 'str_eq' expects 2 arguments, but " +
-                         std::to_string(expr->arguments.size()) + " provided", expr);
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
         }
         llvm::Value* lhsArg = generateExpression(expr->arguments[0].get());
         llvm::Value* rhsArg = generateExpression(expr->arguments[1].get());
         // Convert i64 to pointers to C strings
-        llvm::Value* lhsPtr = builder->CreateIntToPtr(lhsArg,
-            llvm::PointerType::getUnqual(*context), "streq.lhs");
-        llvm::Value* rhsPtr = builder->CreateIntToPtr(rhsArg,
-            llvm::PointerType::getUnqual(*context), "streq.rhs");
+        llvm::Value* lhsPtr = builder->CreateIntToPtr(lhsArg, llvm::PointerType::getUnqual(*context), "streq.lhs");
+        llvm::Value* rhsPtr = builder->CreateIntToPtr(rhsArg, llvm::PointerType::getUnqual(*context), "streq.rhs");
         // Declare strcmp if not already declared
         llvm::Function* strcmpFn = module->getFunction("strcmp");
         if (!strcmpFn) {
             llvm::FunctionType* strcmpTy = llvm::FunctionType::get(
-                builder->getInt32Ty(),
-                {llvm::PointerType::getUnqual(*context), llvm::PointerType::getUnqual(*context)},
+                builder->getInt32Ty(), {llvm::PointerType::getUnqual(*context), llvm::PointerType::getUnqual(*context)},
                 false);
             strcmpFn = llvm::Function::Create(strcmpTy, llvm::Function::ExternalLinkage, "strcmp", module.get());
         }
@@ -1700,15 +1769,14 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (inOptMaxFunction) {
         // Stdlib functions are always native machine code, so they're safe to call from OPTMAX
-        if (!isStdlibFunction(expr->callee) &&
-            optMaxFunctions.find(expr->callee) == optMaxFunctions.end()) {
+        if (!isStdlibFunction(expr->callee) && optMaxFunctions.find(expr->callee) == optMaxFunctions.end()) {
             std::string currentFunction = "<unknown>";
             if (builder->GetInsertBlock() && builder->GetInsertBlock()->getParent()) {
                 currentFunction = std::string(builder->GetInsertBlock()->getParent()->getName());
             }
-            codegenError("OPTMAX function \"" + currentFunction +
-                                     "\" cannot invoke non-OPTMAX function \"" +
-                                     expr->callee + "\"", expr);
+            codegenError("OPTMAX function \"" + currentFunction + "\" cannot invoke non-OPTMAX function \"" +
+                             expr->callee + "\"",
+                         expr);
         }
     }
     auto calleeIt = functions.find(expr->callee);
@@ -1716,13 +1784,13 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         codegenError("Unknown function: " + expr->callee, expr);
     }
     llvm::Function* callee = calleeIt->second;
-    
+
     if (callee->arg_size() != expr->arguments.size()) {
-        codegenError("Function '" + expr->callee + "' expects " +
-                     std::to_string(callee->arg_size()) + " argument(s), but " +
-                     std::to_string(expr->arguments.size()) + " provided", expr);
+        codegenError("Function '" + expr->callee + "' expects " + std::to_string(callee->arg_size()) +
+                         " argument(s), but " + std::to_string(expr->arguments.size()) + " provided",
+                     expr);
     }
-    
+
     std::vector<llvm::Value*> args;
     for (auto& arg : expr->arguments) {
         llvm::Value* argVal = generateExpression(arg.get());
@@ -1730,7 +1798,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         argVal = toDefaultType(argVal);
         args.push_back(argVal);
     }
-    
+
     return builder->CreateCall(callee, args, "calltmp");
 }
 
@@ -1741,7 +1809,7 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
         codegenError("Unknown variable: " + expr->name, expr);
     }
     checkConstModification(expr->name, "modify");
-    
+
     // Type conversion if the alloca type and value type differ
     llvm::AllocaInst* alloca = llvm::dyn_cast<llvm::AllocaInst>(it->second);
     if (alloca) {
@@ -1756,7 +1824,7 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
             value = builder->CreateIntToPtr(value, llvm::PointerType::getUnqual(*context), "itop");
         }
     }
-    
+
     builder->CreateStore(value, it->second);
     return value;
 }
@@ -1766,13 +1834,13 @@ llvm::Value* CodeGenerator::generatePostfix(PostfixExpr* expr) {
     if (!identifier) {
         codegenError("Postfix operators require an identifier", expr);
     }
-    
+
     auto it = namedValues.find(identifier->name);
     if (it == namedValues.end() || !it->second) {
         codegenError("Unknown variable: " + identifier->name, expr);
     }
     checkConstModification(identifier->name, "modify");
-    
+
     llvm::AllocaInst* allocaInst = llvm::dyn_cast<llvm::AllocaInst>(it->second);
     llvm::Type* loadType = allocaInst ? allocaInst->getAllocatedType() : getDefaultType();
     llvm::Value* current = builder->CreateLoad(loadType, it->second, identifier->name.c_str());
@@ -1782,16 +1850,14 @@ llvm::Value* CodeGenerator::generatePostfix(PostfixExpr* expr) {
     llvm::Value* updated;
     if (current->getType()->isDoubleTy()) {
         llvm::Value* one = llvm::ConstantFP::get(getFloatType(), 1.0);
-        updated = (expr->op == "++")
-            ? builder->CreateFAdd(current, one, "fpostinc")
-            : builder->CreateFSub(current, one, "fpostdec");
+        updated = (expr->op == "++") ? builder->CreateFAdd(current, one, "fpostinc")
+                                     : builder->CreateFSub(current, one, "fpostdec");
     } else {
         llvm::Value* delta = llvm::ConstantInt::get(getDefaultType(), 1, true);
-        updated = (expr->op == "++")
-            ? builder->CreateAdd(current, delta, "postinc")
-            : builder->CreateSub(current, delta, "postdec");
+        updated = (expr->op == "++") ? builder->CreateAdd(current, delta, "postinc")
+                                     : builder->CreateSub(current, delta, "postdec");
     }
-    
+
     builder->CreateStore(updated, it->second);
     return current;
 }
@@ -1801,13 +1867,13 @@ llvm::Value* CodeGenerator::generatePrefix(PrefixExpr* expr) {
     if (!identifier) {
         codegenError("Prefix operators require an identifier", expr);
     }
-    
+
     auto it = namedValues.find(identifier->name);
     if (it == namedValues.end() || !it->second) {
         codegenError("Unknown variable: " + identifier->name, expr);
     }
     checkConstModification(identifier->name, "modify");
-    
+
     llvm::AllocaInst* allocaInst = llvm::dyn_cast<llvm::AllocaInst>(it->second);
     llvm::Type* loadType = allocaInst ? allocaInst->getAllocatedType() : getDefaultType();
     llvm::Value* current = builder->CreateLoad(loadType, it->second, identifier->name.c_str());
@@ -1817,16 +1883,14 @@ llvm::Value* CodeGenerator::generatePrefix(PrefixExpr* expr) {
     llvm::Value* updated;
     if (current->getType()->isDoubleTy()) {
         llvm::Value* one = llvm::ConstantFP::get(getFloatType(), 1.0);
-        updated = (expr->op == "++")
-            ? builder->CreateFAdd(current, one, "fpreinc")
-            : builder->CreateFSub(current, one, "fpredec");
+        updated = (expr->op == "++") ? builder->CreateFAdd(current, one, "fpreinc")
+                                     : builder->CreateFSub(current, one, "fpredec");
     } else {
         llvm::Value* delta = llvm::ConstantInt::get(getDefaultType(), 1, true);
-        updated = (expr->op == "++")
-            ? builder->CreateAdd(current, delta, "preinc")
-            : builder->CreateSub(current, delta, "predec");
+        updated = (expr->op == "++") ? builder->CreateAdd(current, delta, "preinc")
+                                     : builder->CreateSub(current, delta, "predec");
     }
-    
+
     builder->CreateStore(updated, it->second);
     return updated;
 }
@@ -1834,22 +1898,22 @@ llvm::Value* CodeGenerator::generatePrefix(PrefixExpr* expr) {
 llvm::Value* CodeGenerator::generateTernary(TernaryExpr* expr) {
     llvm::Value* condition = generateExpression(expr->condition.get());
     llvm::Value* condBool = toBool(condition);
-    
+
     llvm::Function* function = builder->GetInsertBlock()->getParent();
     llvm::BasicBlock* thenBB = llvm::BasicBlock::Create(*context, "tern.then", function);
     llvm::BasicBlock* elseBB = llvm::BasicBlock::Create(*context, "tern.else", function);
     llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "tern.cont", function);
-    
+
     builder->CreateCondBr(condBool, thenBB, elseBB);
-    
+
     builder->SetInsertPoint(thenBB);
     llvm::Value* thenVal = generateExpression(expr->thenExpr.get());
     thenBB = builder->GetInsertBlock();
-    
+
     builder->SetInsertPoint(elseBB);
     llvm::Value* elseVal = generateExpression(expr->elseExpr.get());
     elseBB = builder->GetInsertBlock();
-    
+
     // Ensure matching types for PHI node
     if (thenVal->getType() != elseVal->getType()) {
         if (thenVal->getType()->isDoubleTy() || elseVal->getType()->isDoubleTy()) {
@@ -1863,20 +1927,20 @@ llvm::Value* CodeGenerator::generateTernary(TernaryExpr* expr) {
             }
         }
     }
-    
+
     builder->SetInsertPoint(thenBB);
     builder->CreateBr(mergeBB);
     thenBB = builder->GetInsertBlock();
-    
+
     builder->SetInsertPoint(elseBB);
     builder->CreateBr(mergeBB);
     elseBB = builder->GetInsertBlock();
-    
+
     builder->SetInsertPoint(mergeBB);
     llvm::PHINode* phi = builder->CreatePHI(thenVal->getType(), 2, "ternval");
     phi->addIncoming(thenVal, thenBB);
     phi->addIncoming(elseVal, elseBB);
-    
+
     return phi;
 }
 
@@ -1898,7 +1962,7 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
         // Array slots are i64, so convert if needed
         elemVal = toDefaultType(elemVal);
         llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrAlloca,
-            llvm::ConstantInt::get(getDefaultType(), i + 1), "arr.elem.ptr");
+                                                  llvm::ConstantInt::get(getDefaultType(), i + 1), "arr.elem.ptr");
         builder->CreateStore(elemVal, elemPtr);
     }
 
@@ -1911,14 +1975,12 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
     llvm::Value* idxVal = generateExpression(expr->index.get());
 
     // Convert the i64 back to a pointer
-    llvm::Value* arrPtr = builder->CreateIntToPtr(arrVal,
-        llvm::PointerType::getUnqual(*context), "idx.arrptr");
+    llvm::Value* arrPtr = builder->CreateIntToPtr(arrVal, llvm::PointerType::getUnqual(*context), "idx.arrptr");
 
     // Bounds check: load length from slot 0, verify 0 <= index < length
     llvm::Value* lenVal = builder->CreateLoad(getDefaultType(), arrPtr, "idx.len");
     llvm::Value* inBounds = builder->CreateICmpSLT(idxVal, lenVal, "idx.inbounds");
-    llvm::Value* notNeg = builder->CreateICmpSGE(idxVal,
-        llvm::ConstantInt::get(getDefaultType(), 0), "idx.notneg");
+    llvm::Value* notNeg = builder->CreateICmpSGE(idxVal, llvm::ConstantInt::get(getDefaultType(), 0), "idx.notneg");
     llvm::Value* valid = builder->CreateAnd(inBounds, notNeg, "idx.valid");
 
     llvm::Function* function = builder->GetInsertBlock()->getParent();
@@ -1929,17 +1991,15 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
 
     // Out-of-bounds path: print error and abort
     builder->SetInsertPoint(failBB);
-    llvm::Value* errMsg = builder->CreateGlobalString(
-        "Runtime error: array index out of bounds\n", "idx_oob_msg");
+    llvm::Value* errMsg = builder->CreateGlobalString("Runtime error: array index out of bounds\n", "idx_oob_msg");
     builder->CreateCall(getPrintfFunction(), {errMsg});
-    llvm::Function* trapFn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::trap);
+    llvm::Function* trapFn = llvm::Intrinsic::getOrInsertDeclaration(module.get(), llvm::Intrinsic::trap);
     builder->CreateCall(trapFn, {});
     builder->CreateUnreachable();
 
     // Success path: load element at offset (index + 1)
     builder->SetInsertPoint(okBB);
-    llvm::Value* offset = builder->CreateAdd(idxVal,
-        llvm::ConstantInt::get(getDefaultType(), 1), "idx.offset");
+    llvm::Value* offset = builder->CreateAdd(idxVal, llvm::ConstantInt::get(getDefaultType(), 1), "idx.offset");
     llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrPtr, offset, "idx.elem.ptr");
     return builder->CreateLoad(getDefaultType(), elemPtr, "idx.elem");
 }
@@ -1951,14 +2011,12 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
     newVal = toDefaultType(newVal);
 
     // Convert the i64 back to a pointer
-    llvm::Value* arrPtr = builder->CreateIntToPtr(arrVal,
-        llvm::PointerType::getUnqual(*context), "idxa.arrptr");
+    llvm::Value* arrPtr = builder->CreateIntToPtr(arrVal, llvm::PointerType::getUnqual(*context), "idxa.arrptr");
 
     // Bounds check: load length from slot 0, verify 0 <= index < length
     llvm::Value* lenVal = builder->CreateLoad(getDefaultType(), arrPtr, "idxa.len");
     llvm::Value* inBounds = builder->CreateICmpSLT(idxVal, lenVal, "idxa.inbounds");
-    llvm::Value* notNeg = builder->CreateICmpSGE(idxVal,
-        llvm::ConstantInt::get(getDefaultType(), 0), "idxa.notneg");
+    llvm::Value* notNeg = builder->CreateICmpSGE(idxVal, llvm::ConstantInt::get(getDefaultType(), 0), "idxa.notneg");
     llvm::Value* valid = builder->CreateAnd(inBounds, notNeg, "idxa.valid");
 
     llvm::Function* function = builder->GetInsertBlock()->getParent();
@@ -1969,17 +2027,15 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
 
     // Out-of-bounds path: print error and abort
     builder->SetInsertPoint(failBB);
-    llvm::Value* errMsg = builder->CreateGlobalString(
-        "Runtime error: array index out of bounds\n", "idxa_oob_msg");
+    llvm::Value* errMsg = builder->CreateGlobalString("Runtime error: array index out of bounds\n", "idxa_oob_msg");
     builder->CreateCall(getPrintfFunction(), {errMsg});
-    llvm::Function* trapFn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::trap);
+    llvm::Function* trapFn = llvm::Intrinsic::getOrInsertDeclaration(module.get(), llvm::Intrinsic::trap);
     builder->CreateCall(trapFn, {});
     builder->CreateUnreachable();
 
     // Success path: store element at offset (index + 1)
     builder->SetInsertPoint(okBB);
-    llvm::Value* offset = builder->CreateAdd(idxVal,
-        llvm::ConstantInt::get(getDefaultType(), 1), "idxa.offset");
+    llvm::Value* offset = builder->CreateAdd(idxVal, llvm::ConstantInt::get(getDefaultType(), 1), "idxa.offset");
     llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrPtr, offset, "idxa.elem.ptr");
     builder->CreateStore(newVal, elemPtr);
     return newVal;
@@ -1990,18 +2046,18 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
     if (!function) {
         codegenError("Variable declaration outside of function", stmt);
     }
-    
+
     llvm::Type* allocaType = getDefaultType();
     llvm::Value* initValue = nullptr;
-    
+
     if (stmt->initializer) {
         initValue = generateExpression(stmt->initializer.get());
         allocaType = initValue->getType();
     }
-    
+
     llvm::AllocaInst* alloca = createEntryBlockAlloca(function, stmt->name, allocaType);
     bindVariable(stmt->name, alloca, stmt->isConst);
-    
+
     if (initValue) {
         builder->CreateStore(initValue, alloca);
     } else {
@@ -2022,7 +2078,7 @@ void CodeGenerator::generateReturn(ReturnStmt* stmt) {
 
 void CodeGenerator::generateIf(IfStmt* stmt) {
     llvm::Value* condition = generateExpression(stmt->condition.get());
-    
+
     // Constant condition elimination: skip dead branch when condition is known
     if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(condition)) {
         if (ci->isZero()) {
@@ -2036,28 +2092,28 @@ void CodeGenerator::generateIf(IfStmt* stmt) {
         }
         return;
     }
-    
+
     llvm::Value* condBool = toBool(condition);
-    
+
     llvm::Function* function = builder->GetInsertBlock()->getParent();
-    
+
     llvm::BasicBlock* thenBB = llvm::BasicBlock::Create(*context, "then", function);
     llvm::BasicBlock* elseBB = stmt->elseBranch ? llvm::BasicBlock::Create(*context, "else", function) : nullptr;
     llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "ifcont", function);
-    
+
     if (elseBB) {
         builder->CreateCondBr(condBool, thenBB, elseBB);
     } else {
         builder->CreateCondBr(condBool, thenBB, mergeBB);
     }
-    
+
     // Then block
     builder->SetInsertPoint(thenBB);
     generateStatement(stmt->thenBranch.get());
     if (!builder->GetInsertBlock()->getTerminator()) {
         builder->CreateBr(mergeBB);
     }
-    
+
     // Else block
     if (elseBB) {
         builder->SetInsertPoint(elseBB);
@@ -2066,28 +2122,28 @@ void CodeGenerator::generateIf(IfStmt* stmt) {
             builder->CreateBr(mergeBB);
         }
     }
-    
+
     // Merge block
     builder->SetInsertPoint(mergeBB);
 }
 
 void CodeGenerator::generateWhile(WhileStmt* stmt) {
     llvm::Function* function = builder->GetInsertBlock()->getParent();
-    
+
     beginScope();
-    
+
     llvm::BasicBlock* condBB = llvm::BasicBlock::Create(*context, "whilecond", function);
     llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "whilebody", function);
     llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "whileend", function);
-    
+
     builder->CreateBr(condBB);
-    
+
     // Condition block
     builder->SetInsertPoint(condBB);
     llvm::Value* condition = generateExpression(stmt->condition.get());
     llvm::Value* condBool = toBool(condition);
     builder->CreateCondBr(condBool, bodyBB, endBB);
-    
+
     // Body block
     builder->SetInsertPoint(bodyBB);
     loopStack.push_back({endBB, condBB});
@@ -2096,25 +2152,25 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
     if (!builder->GetInsertBlock()->getTerminator()) {
         builder->CreateBr(condBB);
     }
-    
+
     // End block
     builder->SetInsertPoint(endBB);
-    
+
     endScope();
 }
 
 void CodeGenerator::generateDoWhile(DoWhileStmt* stmt) {
     llvm::Function* function = builder->GetInsertBlock()->getParent();
-    
+
     beginScope();
-    
+
     llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "dowhilebody", function);
     llvm::BasicBlock* condBB = llvm::BasicBlock::Create(*context, "dowhilecond", function);
     llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "dowhileend", function);
-    
+
     // Jump directly to body (execute at least once)
     builder->CreateBr(bodyBB);
-    
+
     // Body block
     builder->SetInsertPoint(bodyBB);
     loopStack.push_back({endBB, condBB});
@@ -2123,16 +2179,16 @@ void CodeGenerator::generateDoWhile(DoWhileStmt* stmt) {
     if (!builder->GetInsertBlock()->getTerminator()) {
         builder->CreateBr(condBB);
     }
-    
+
     // Condition block
     builder->SetInsertPoint(condBB);
     llvm::Value* condition = generateExpression(stmt->condition.get());
     llvm::Value* condBool = toBool(condition);
     builder->CreateCondBr(condBool, bodyBB, endBB);
-    
+
     // End block
     builder->SetInsertPoint(endBB);
-    
+
     endScope();
 }
 
@@ -2141,24 +2197,24 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     if (!function) {
         codegenError("For loop outside of function", stmt);
     }
-    
+
     beginScope();
-    
+
     // Allocate iterator variable
     llvm::AllocaInst* iterAlloca = createEntryBlockAlloca(function, stmt->iteratorVar);
     bindVariable(stmt->iteratorVar, iterAlloca);
-    
+
     // Initialize iterator
     llvm::Value* startVal = generateExpression(stmt->start.get());
     // For-loop iterator is always integer, convert to integer
     startVal = toDefaultType(startVal);
     builder->CreateStore(startVal, iterAlloca);
-    
+
     // Get end value
     llvm::Value* endVal = generateExpression(stmt->end.get());
     // Convert to integer since loop bounds are always integer
     endVal = toDefaultType(endVal);
-    
+
     // Get step value (default to 1 if not specified)
     llvm::Value* stepVal;
     if (stmt->step) {
@@ -2168,9 +2224,9 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     } else {
         stepVal = llvm::ConstantInt::get(*context, llvm::APInt(64, 1));
     }
-    
+
     llvm::Value* zero = llvm::ConstantInt::get(stepVal->getType(), 0, true);
-    
+
     // Create blocks
     llvm::BasicBlock* stepCheckBB = llvm::BasicBlock::Create(*context, "forstepcheck", function);
     llvm::BasicBlock* stepFailBB = llvm::BasicBlock::Create(*context, "forstepfail", function);
@@ -2178,32 +2234,29 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "forbody", function);
     llvm::BasicBlock* incBB = llvm::BasicBlock::Create(*context, "forinc", function);
     llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "forend", function);
-    
+
     builder->CreateBr(stepCheckBB);
-    
+
     builder->SetInsertPoint(stepCheckBB);
     llvm::Value* stepNonZero = builder->CreateICmpNE(stepVal, zero, "stepnonzero");
     builder->CreateCondBr(stepNonZero, condBB, stepFailBB);
-    
+
     builder->SetInsertPoint(stepFailBB);
-    std::string errorMessage = "Runtime error: for-loop step cannot be zero for iterator '" +
-                               stmt->iteratorVar + "'\n";
+    std::string errorMessage = "Runtime error: for-loop step cannot be zero for iterator '" + stmt->iteratorVar + "'\n";
     llvm::GlobalVariable* messageVar = builder->CreateGlobalString(errorMessage, "forstepmsg");
     llvm::Constant* zeroIndex = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0);
     llvm::Constant* indices[] = {zeroIndex, zeroIndex};
-    llvm::Constant* message = llvm::ConstantExpr::getInBoundsGetElementPtr(
-        messageVar->getValueType(),
-        messageVar,
-        indices);
+    llvm::Constant* message =
+        llvm::ConstantExpr::getInBoundsGetElementPtr(messageVar->getValueType(), messageVar, indices);
     builder->CreateCall(getPrintfFunction(), {message});
 #if LLVM_VERSION_MAJOR >= 19
     llvm::FunctionCallee trap = llvm::Intrinsic::getOrInsertDeclaration(module.get(), llvm::Intrinsic::trap);
 #else
-    llvm::FunctionCallee trap = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::trap);
+    llvm::FunctionCallee trap = llvm::Intrinsic::getOrInsertDeclaration(module.get(), llvm::Intrinsic::trap);
 #endif
     builder->CreateCall(trap);
     builder->CreateUnreachable();
-    
+
     // Condition block: check if iterator < end (forward) or > end (backward)
     builder->SetInsertPoint(condBB);
     llvm::Value* curVal = builder->CreateLoad(getDefaultType(), iterAlloca, stmt->iteratorVar.c_str());
@@ -2212,7 +2265,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     llvm::Value* backwardCond = builder->CreateICmpSGT(curVal, endVal, "forcond_gt");
     llvm::Value* continueCond = builder->CreateSelect(stepPositive, forwardCond, backwardCond, "forcond_range");
     builder->CreateCondBr(continueCond, bodyBB, endBB);
-    
+
     // Body block
     builder->SetInsertPoint(bodyBB);
     loopStack.push_back({endBB, incBB});
@@ -2221,17 +2274,17 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     if (!builder->GetInsertBlock()->getTerminator()) {
         builder->CreateBr(incBB);
     }
-    
+
     // Increment block
     builder->SetInsertPoint(incBB);
     llvm::Value* nextVal = builder->CreateLoad(getDefaultType(), iterAlloca, stmt->iteratorVar.c_str());
     llvm::Value* incVal = builder->CreateAdd(nextVal, stepVal, "nextvar");
     builder->CreateStore(incVal, iterAlloca);
     builder->CreateBr(condBB);
-    
+
     // End block
     builder->SetInsertPoint(endBB);
-    
+
     endScope();
 }
 
@@ -2240,68 +2293,65 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
     if (!function) {
         codegenError("For-each loop outside of function", stmt);
     }
-    
+
     beginScope();
-    
+
     // Evaluate the collection (array)
     llvm::Value* collVal = generateExpression(stmt->collection.get());
     collVal = toDefaultType(collVal);
-    
+
     // Convert i64 to pointer — array layout is [length, elem0, elem1, ...]
-    llvm::Value* arrPtr = builder->CreateIntToPtr(collVal,
-        llvm::PointerType::getUnqual(*context), "foreach.arrptr");
-    
+    llvm::Value* arrPtr = builder->CreateIntToPtr(collVal, llvm::PointerType::getUnqual(*context), "foreach.arrptr");
+
     // Load length from slot 0
     llvm::Value* lenVal = builder->CreateLoad(getDefaultType(), arrPtr, "foreach.len");
-    
+
     // Allocate hidden index variable and the user's iterator variable
     llvm::AllocaInst* idxAlloca = createEntryBlockAlloca(function, "_foreach_idx");
     builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 0), idxAlloca);
-    
+
     llvm::AllocaInst* iterAlloca = createEntryBlockAlloca(function, stmt->iteratorVar);
     bindVariable(stmt->iteratorVar, iterAlloca);
-    
+
     // Create blocks
     llvm::BasicBlock* condBB = llvm::BasicBlock::Create(*context, "foreach.cond", function);
     llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "foreach.body", function);
     llvm::BasicBlock* incBB = llvm::BasicBlock::Create(*context, "foreach.inc", function);
     llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "foreach.end", function);
-    
+
     builder->CreateBr(condBB);
-    
+
     // Condition: idx < length
     builder->SetInsertPoint(condBB);
     llvm::Value* curIdx = builder->CreateLoad(getDefaultType(), idxAlloca, "foreach.idx");
     llvm::Value* cond = builder->CreateICmpSLT(curIdx, lenVal, "foreach.cmp");
     builder->CreateCondBr(cond, bodyBB, endBB);
-    
+
     // Body: load current element into iterator variable, then execute body
     builder->SetInsertPoint(bodyBB);
     llvm::Value* bodyIdx = builder->CreateLoad(getDefaultType(), idxAlloca, "foreach.bidx");
-    llvm::Value* offset = builder->CreateAdd(bodyIdx,
-        llvm::ConstantInt::get(getDefaultType(), 1), "foreach.offset");
+    llvm::Value* offset = builder->CreateAdd(bodyIdx, llvm::ConstantInt::get(getDefaultType(), 1), "foreach.offset");
     llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrPtr, offset, "foreach.elem.ptr");
     llvm::Value* elemVal = builder->CreateLoad(getDefaultType(), elemPtr, "foreach.elem");
     builder->CreateStore(elemVal, iterAlloca);
-    
+
     loopStack.push_back({endBB, incBB});
     generateStatement(stmt->body.get());
     loopStack.pop_back();
     if (!builder->GetInsertBlock()->getTerminator()) {
         builder->CreateBr(incBB);
     }
-    
+
     // Increment hidden index
     builder->SetInsertPoint(incBB);
     llvm::Value* nextIdx = builder->CreateLoad(getDefaultType(), idxAlloca, "foreach.nidx");
-    llvm::Value* incIdx = builder->CreateAdd(nextIdx,
-        llvm::ConstantInt::get(getDefaultType(), 1), "foreach.next");
+    llvm::Value* incIdx = builder->CreateAdd(nextIdx, llvm::ConstantInt::get(getDefaultType(), 1), "foreach.next");
     builder->CreateStore(incIdx, idxAlloca);
     builder->CreateBr(condBB);
-    
+
     // End
     builder->SetInsertPoint(endBB);
-    
+
     endScope();
 }
 
@@ -2309,7 +2359,7 @@ void CodeGenerator::generateBlock(BlockStmt* stmt) {
     beginScope();
     for (auto& statement : stmt->statements) {
         if (builder->GetInsertBlock()->getTerminator()) {
-            break;  // Don't generate unreachable code
+            break; // Don't generate unreachable code
         }
         generateStatement(statement.get());
     }
@@ -2323,11 +2373,11 @@ void CodeGenerator::generateExprStmt(ExprStmt* stmt) {
 void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
     llvm::Value* condVal = generateExpression(stmt->condition.get());
     condVal = toDefaultType(condVal);
-    
+
     llvm::Function* function = builder->GetInsertBlock()->getParent();
     llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "switch.end", function);
-    llvm::BasicBlock* defaultBB = mergeBB;  // fall through to merge if no default
-    
+    llvm::BasicBlock* defaultBB = mergeBB; // fall through to merge if no default
+
     // Find the default case block first so the switch instruction can reference it.
     for (auto& sc : stmt->cases) {
         if (sc.isDefault) {
@@ -2335,13 +2385,13 @@ void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
             break;
         }
     }
-    
+
     llvm::SwitchInst* switchInst = builder->CreateSwitch(condVal, defaultBB, static_cast<unsigned>(stmt->cases.size()));
-    
+
     // Push a loop context so that 'break' inside a case arm exits the switch
     // (matching C/C++ semantics where break leaves the nearest switch or loop).
     loopStack.push_back({mergeBB, nullptr});
-    
+
     for (auto& sc : stmt->cases) {
         if (sc.isDefault) {
             // Generate default block body.
@@ -2349,7 +2399,8 @@ void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
             beginScope();
             for (auto& s : sc.body) {
                 generateStatement(s.get());
-                if (builder->GetInsertBlock()->getTerminator()) break;
+                if (builder->GetInsertBlock()->getTerminator())
+                    break;
             }
             endScope();
             if (!builder->GetInsertBlock()->getTerminator()) {
@@ -2362,15 +2413,16 @@ void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
             if (!caseConst) {
                 codegenError("case value must be a compile-time constant", sc.value.get());
             }
-            
+
             llvm::BasicBlock* caseBB = llvm::BasicBlock::Create(*context, "switch.case", function, mergeBB);
             switchInst->addCase(caseConst, caseBB);
-            
+
             builder->SetInsertPoint(caseBB);
             beginScope();
             for (auto& s : sc.body) {
                 generateStatement(s.get());
-                if (builder->GetInsertBlock()->getTerminator()) break;
+                if (builder->GetInsertBlock()->getTerminator())
+                    break;
             }
             endScope();
             if (!builder->GetInsertBlock()->getTerminator()) {
@@ -2378,9 +2430,9 @@ void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
             }
         }
     }
-    
+
     loopStack.pop_back();
-    
+
     builder->SetInsertPoint(mergeBB);
 }
 
@@ -2393,7 +2445,7 @@ void CodeGenerator::runOptimizationPasses() {
 #else
     module->setTargetTriple(targetTripleStr);
 #endif
-    
+
     std::string error;
 #if LLVM_VERSION_MAJOR >= 19
     auto target = llvm::TargetRegistry::lookupTarget(targetTriple, error);
@@ -2401,21 +2453,21 @@ void CodeGenerator::runOptimizationPasses() {
     auto target = llvm::TargetRegistry::lookupTarget(targetTripleStr, error);
 #endif
     std::unique_ptr<llvm::TargetMachine> targetMachine;
+    std::string cpu;
+    std::string featureStr;
     if (target) {
         llvm::TargetOptions opt;
         // Use PIC to support default PIE linking on modern toolchains.
         std::optional<llvm::Reloc::Model> RM = llvm::Reloc::PIC_;
         // Use native CPU features (SSE, AVX, etc.) instead of "generic"
         // for maximum codegen quality on the build host.
-        std::string cpu = llvm::sys::getHostCPUName().str();
+        cpu = llvm::sys::getHostCPUName().str();
         llvm::SubtargetFeatures features;
-        llvm::StringMap<bool> hostFeatures;
-        if (llvm::sys::getHostCPUFeatures(hostFeatures)) {
-            for (auto& feature : hostFeatures) {
-                features.AddFeature(feature.first(), feature.second);
-            }
+        llvm::StringMap<bool> hostFeatures = llvm::sys::getHostCPUFeatures();
+        for (auto& feature : hostFeatures) {
+            features.AddFeature(feature.first(), feature.second);
         }
-        std::string featureStr = features.getString();
+        featureStr = features.getString();
 #if LLVM_VERSION_MAJOR >= 19
         targetMachine.reset(target->createTargetMachine(targetTriple, cpu, featureStr, opt, RM));
 #else
@@ -2425,7 +2477,7 @@ void CodeGenerator::runOptimizationPasses() {
             module->setDataLayout(targetMachine->createDataLayout());
         }
     }
-    
+
     if (optimizationLevel == OptimizationLevel::O0) {
         return;
     }
@@ -2465,9 +2517,7 @@ void CodeGenerator::runOptimizationPasses() {
     PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
 
     llvm::OptimizationLevel newPMLevel =
-        (optimizationLevel == OptimizationLevel::O3)
-            ? llvm::OptimizationLevel::O3
-            : llvm::OptimizationLevel::O2;
+        (optimizationLevel == OptimizationLevel::O3) ? llvm::OptimizationLevel::O3 : llvm::OptimizationLevel::O2;
     llvm::ModulePassManager MPM = PB.buildPerModuleDefaultPipeline(newPMLevel);
     MPM.run(*module, MAM);
 }
@@ -2478,12 +2528,12 @@ void CodeGenerator::optimizeFunction(llvm::Function* func) {
     // identified at compile time, or OPTMAX-annotated functions) without running
     // the full module-wide optimization pipeline.
     llvm::legacy::FunctionPassManager fpm(module.get());
-    
+
     fpm.add(llvm::createPromoteMemoryToRegisterPass());
     fpm.add(llvm::createInstructionCombiningPass());
     fpm.add(llvm::createReassociatePass());
     fpm.add(llvm::createCFGSimplificationPass());
-    
+
     fpm.doInitialization();
     fpm.run(*func);
     fpm.doFinalization();
@@ -2492,7 +2542,7 @@ void CodeGenerator::optimizeFunction(llvm::Function* func) {
 
 void CodeGenerator::optimizeOptMaxFunctions() {
     llvm::legacy::FunctionPassManager fpm(module.get());
-    
+
     // Phase 1: Early canonicalization
     fpm.add(llvm::createSROAPass());
     fpm.add(llvm::createEarlyCSEPass());
@@ -2504,7 +2554,6 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     fpm.add(llvm::createDeadCodeEliminationPass());
     // Phase 2: Loop optimizations
     fpm.add(llvm::createLICMPass());
-    fpm.add(llvm::createLoopRotatePass());
     fpm.add(llvm::createLoopSimplifyPass());
     fpm.add(llvm::createLoopStrengthReducePass());
     fpm.add(llvm::createLoopUnrollPass());
@@ -2519,7 +2568,7 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     fpm.add(llvm::createInstructionCombiningPass());
     fpm.add(llvm::createCFGSimplificationPass());
     fpm.add(llvm::createDeadCodeEliminationPass());
-    
+
     fpm.doInitialization();
     for (auto& func : module->functions()) {
         if (!func.isDeclaration() && optMaxFunctions.count(std::string(func.getName()))) {
@@ -2543,7 +2592,7 @@ void CodeGenerator::writeObjectFile(const std::string& filename) {
     llvm::InitializeNativeTarget();
     llvm::InitializeNativeTargetAsmPrinter();
     llvm::InitializeNativeTargetAsmParser();
-    
+
     std::string targetTripleStr = llvm::sys::getDefaultTargetTriple();
 #if LLVM_VERSION_MAJOR >= 19
     llvm::Triple targetTriple(targetTripleStr);
@@ -2551,61 +2600,61 @@ void CodeGenerator::writeObjectFile(const std::string& filename) {
 #else
     module->setTargetTriple(targetTripleStr);
 #endif
-    
+
     std::string error;
 #if LLVM_VERSION_MAJOR >= 19
     auto target = llvm::TargetRegistry::lookupTarget(targetTriple, error);
 #else
     auto target = llvm::TargetRegistry::lookupTarget(targetTripleStr, error);
 #endif
-    
+
     if (!target) {
         throw std::runtime_error("Failed to lookup target: " + error);
     }
-    
+
     auto CPU = llvm::sys::getHostCPUName().str();
     llvm::SubtargetFeatures featureSet;
-    llvm::StringMap<bool> hostFeatures;
-    if (llvm::sys::getHostCPUFeatures(hostFeatures)) {
-        for (auto& feature : hostFeatures) {
-            featureSet.AddFeature(feature.first(), feature.second);
-        }
+    llvm::StringMap<bool> hostFeatures = llvm::sys::getHostCPUFeatures();
+    for (auto& feature : hostFeatures) {
+        featureSet.AddFeature(feature.first(), feature.second);
     }
     auto features = featureSet.getString();
-    
+
     llvm::TargetOptions opt;
     // Use PIC to support default PIE linking on modern toolchains.
     std::optional<llvm::Reloc::Model> RM = llvm::Reloc::PIC_;
 #if LLVM_VERSION_MAJOR >= 19
-    std::unique_ptr<llvm::TargetMachine> targetMachine(target->createTargetMachine(targetTriple, CPU, features, opt, RM));
+    std::unique_ptr<llvm::TargetMachine> targetMachine(
+        target->createTargetMachine(targetTriple, CPU, features, opt, RM));
 #else
-    std::unique_ptr<llvm::TargetMachine> targetMachine(target->createTargetMachine(targetTripleStr, CPU, features, opt, RM));
+    std::unique_ptr<llvm::TargetMachine> targetMachine(
+        target->createTargetMachine(targetTripleStr, CPU, features, opt, RM));
 #endif
-    
+
     if (!targetMachine) {
         throw std::runtime_error("Failed to create target machine");
     }
-    
+
     module->setDataLayout(targetMachine->createDataLayout());
-    
+
     std::error_code EC;
     llvm::raw_fd_ostream dest(filename, EC, llvm::sys::fs::OF_None);
-    
+
     if (EC) {
         throw std::runtime_error("Could not open file: " + EC.message());
     }
-    
+
     llvm::legacy::PassManager pass;
 #if LLVM_VERSION_MAJOR >= 18
     auto fileType = llvm::CodeGenFileType::ObjectFile;
 #else
     auto fileType = llvm::CGFT_ObjectFile;
 #endif
-    
+
     if (targetMachine->addPassesToEmitFile(pass, dest, nullptr, fileType)) {
         throw std::runtime_error("TargetMachine can't emit a file of this type");
     }
-    
+
     pass.run(*module);
     dest.flush();
     // Detect errors during close (e.g. I/O errors that occurred during write).
@@ -2735,451 +2784,495 @@ void CodeGenerator::emitBytecodeStore(const std::string& name, uint8_t rs) {
 
 uint8_t CodeGenerator::emitBytecodeExpression(Expression* expr) {
     switch (expr->type) {
-        case ASTNodeType::LITERAL_EXPR: {
-            auto* lit = static_cast<LiteralExpr*>(expr);
-            uint8_t rd = allocReg();
-            if (lit->literalType == LiteralExpr::LiteralType::INTEGER) {
-                bytecodeEmitter.emit(OpCode::PUSH_INT);
-                bytecodeEmitter.emitReg(rd);
-                bytecodeEmitter.emitInt(lit->intValue);
-            } else if (lit->literalType == LiteralExpr::LiteralType::FLOAT) {
-                bytecodeEmitter.emit(OpCode::PUSH_FLOAT);
-                bytecodeEmitter.emitReg(rd);
-                bytecodeEmitter.emitFloat(lit->floatValue);
-            } else if (lit->literalType == LiteralExpr::LiteralType::STRING) {
-                bytecodeEmitter.emit(OpCode::PUSH_STRING);
-                bytecodeEmitter.emitReg(rd);
-                bytecodeEmitter.emitString(lit->stringValue);
-            }
-            return rd;
-        }
-        case ASTNodeType::IDENTIFIER_EXPR: {
-            auto* id = static_cast<IdentifierExpr*>(expr);
-            return emitBytecodeLoad(id->name);
-        }
-        case ASTNodeType::BINARY_EXPR: {
-            auto* bin = static_cast<BinaryExpr*>(expr);
-            // Bytecode constant folding: if both operands are integer literals,
-            // evaluate at compile time and emit a single PUSH_INT.
-            auto* leftLit = (bin->left->type == ASTNodeType::LITERAL_EXPR)
-                ? static_cast<LiteralExpr*>(bin->left.get()) : nullptr;
-            auto* rightLit = (bin->right->type == ASTNodeType::LITERAL_EXPR)
-                ? static_cast<LiteralExpr*>(bin->right.get()) : nullptr;
-            if (leftLit && rightLit &&
-                leftLit->literalType == LiteralExpr::LiteralType::INTEGER &&
-                rightLit->literalType == LiteralExpr::LiteralType::INTEGER) {
-                long long lv = leftLit->intValue;
-                long long rv = rightLit->intValue;
-                bool folded = true;
-                long long result = 0;
-                if (bin->op == "+") result = lv + rv;
-                else if (bin->op == "-") result = lv - rv;
-                else if (bin->op == "*") result = lv * rv;
-                else if (bin->op == "/" && rv != 0) result = lv / rv;
-                else if (bin->op == "%" && rv != 0) result = lv % rv;
-                else if (bin->op == "&") result = lv & rv;
-                else if (bin->op == "|") result = lv | rv;
-                else if (bin->op == "^") result = lv ^ rv;
-                else if (bin->op == "<<" && rv >= 0 && rv < 64) result = lv << rv;
-                else if (bin->op == ">>" && rv >= 0 && rv < 64) result = lv >> rv;
-                else if (bin->op == "==") result = static_cast<long long>(lv == rv);
-                else if (bin->op == "!=") result = static_cast<long long>(lv != rv);
-                else if (bin->op == "<") result = static_cast<long long>(lv < rv);
-                else if (bin->op == "<=") result = static_cast<long long>(lv <= rv);
-                else if (bin->op == ">") result = static_cast<long long>(lv > rv);
-                else if (bin->op == ">=") result = static_cast<long long>(lv >= rv);
-                else if (bin->op == "&&") result = static_cast<long long>((lv != 0) && (rv != 0));
-                else if (bin->op == "||") result = static_cast<long long>((lv != 0) || (rv != 0));
-                else folded = false;
-                if (folded) {
-                    uint8_t rd = allocReg();
-                    bytecodeEmitter.emit(OpCode::PUSH_INT);
-                    bytecodeEmitter.emitReg(rd);
-                    bytecodeEmitter.emitInt(result);
-                    return rd;
-                }
-            }
-            uint8_t rs1 = emitBytecodeExpression(bin->left.get());
-            uint8_t rs2 = emitBytecodeExpression(bin->right.get());
-            uint8_t rd = allocReg();
-            if (bin->op == "+") bytecodeEmitter.emit(OpCode::ADD);
-            else if (bin->op == "-") bytecodeEmitter.emit(OpCode::SUB);
-            else if (bin->op == "*") bytecodeEmitter.emit(OpCode::MUL);
-            else if (bin->op == "/") bytecodeEmitter.emit(OpCode::DIV);
-            else if (bin->op == "%") bytecodeEmitter.emit(OpCode::MOD);
-            else if (bin->op == "==") bytecodeEmitter.emit(OpCode::EQ);
-            else if (bin->op == "!=") bytecodeEmitter.emit(OpCode::NE);
-            else if (bin->op == "<") bytecodeEmitter.emit(OpCode::LT);
-            else if (bin->op == "<=") bytecodeEmitter.emit(OpCode::LE);
-            else if (bin->op == ">") bytecodeEmitter.emit(OpCode::GT);
-            else if (bin->op == ">=") bytecodeEmitter.emit(OpCode::GE);
-            else if (bin->op == "&&") bytecodeEmitter.emit(OpCode::AND);
-            else if (bin->op == "||") bytecodeEmitter.emit(OpCode::OR);
-            else if (bin->op == "&") bytecodeEmitter.emit(OpCode::BIT_AND);
-            else if (bin->op == "|") bytecodeEmitter.emit(OpCode::BIT_OR);
-            else if (bin->op == "^") bytecodeEmitter.emit(OpCode::BIT_XOR);
-            else if (bin->op == "<<") bytecodeEmitter.emit(OpCode::SHL);
-            else if (bin->op == ">>") bytecodeEmitter.emit(OpCode::SHR);
-            else {
-                throw std::runtime_error("Unsupported binary operator in bytecode: " + bin->op);
-            }
+    case ASTNodeType::LITERAL_EXPR: {
+        auto* lit = static_cast<LiteralExpr*>(expr);
+        uint8_t rd = allocReg();
+        if (lit->literalType == LiteralExpr::LiteralType::INTEGER) {
+            bytecodeEmitter.emit(OpCode::PUSH_INT);
             bytecodeEmitter.emitReg(rd);
-            bytecodeEmitter.emitReg(rs1);
-            bytecodeEmitter.emitReg(rs2);
-            return rd;
-        }
-        case ASTNodeType::UNARY_EXPR: {
-            auto* unary = static_cast<UnaryExpr*>(expr);
-            // Bytecode constant folding for unary on integer literals.
-            auto* operandLit = (unary->operand->type == ASTNodeType::LITERAL_EXPR)
-                ? static_cast<LiteralExpr*>(unary->operand.get()) : nullptr;
-            if (operandLit && operandLit->literalType == LiteralExpr::LiteralType::INTEGER) {
-                long long val = operandLit->intValue;
-                bool folded = true;
-                long long result = 0;
-                if (unary->op == "-") result = -val;
-                else if (unary->op == "!") result = (val == 0) ? 1 : 0;
-                else if (unary->op == "~") result = ~val;
-                else folded = false;
-                if (folded) {
-                    uint8_t rd = allocReg();
-                    bytecodeEmitter.emit(OpCode::PUSH_INT);
-                    bytecodeEmitter.emitReg(rd);
-                    bytecodeEmitter.emitInt(result);
-                    return rd;
-                }
-            }
-            uint8_t rs = emitBytecodeExpression(unary->operand.get());
-            uint8_t rd = allocReg();
-            if (unary->op == "-") bytecodeEmitter.emit(OpCode::NEG);
-            else if (unary->op == "!") bytecodeEmitter.emit(OpCode::NOT);
-            else if (unary->op == "~") bytecodeEmitter.emit(OpCode::BIT_NOT);
-            else {
-                throw std::runtime_error("Unsupported unary operator in bytecode: " + unary->op);
-            }
+            bytecodeEmitter.emitInt(lit->intValue);
+        } else if (lit->literalType == LiteralExpr::LiteralType::FLOAT) {
+            bytecodeEmitter.emit(OpCode::PUSH_FLOAT);
             bytecodeEmitter.emitReg(rd);
-            bytecodeEmitter.emitReg(rs);
-            return rd;
+            bytecodeEmitter.emitFloat(lit->floatValue);
+        } else if (lit->literalType == LiteralExpr::LiteralType::STRING) {
+            bytecodeEmitter.emit(OpCode::PUSH_STRING);
+            bytecodeEmitter.emitReg(rd);
+            bytecodeEmitter.emitString(lit->stringValue);
         }
-        case ASTNodeType::ASSIGN_EXPR: {
-            auto* assign = static_cast<AssignExpr*>(expr);
-            uint8_t rs = emitBytecodeExpression(assign->value.get());
-            emitBytecodeStore(assign->name, rs);
-            return rs;
-        }
-        case ASTNodeType::CALL_EXPR: {
-            auto* call = static_cast<CallExpr*>(expr);
-            if (call->callee == "print") {
-                for (auto& arg : call->arguments) {
-                    uint8_t rs = emitBytecodeExpression(arg.get());
-                    bytecodeEmitter.emit(OpCode::PRINT);
-                    bytecodeEmitter.emitReg(rs);
-                }
+        return rd;
+    }
+    case ASTNodeType::IDENTIFIER_EXPR: {
+        auto* id = static_cast<IdentifierExpr*>(expr);
+        return emitBytecodeLoad(id->name);
+    }
+    case ASTNodeType::BINARY_EXPR: {
+        auto* bin = static_cast<BinaryExpr*>(expr);
+        // Bytecode constant folding: if both operands are integer literals,
+        // evaluate at compile time and emit a single PUSH_INT.
+        auto* leftLit =
+            (bin->left->type == ASTNodeType::LITERAL_EXPR) ? static_cast<LiteralExpr*>(bin->left.get()) : nullptr;
+        auto* rightLit =
+            (bin->right->type == ASTNodeType::LITERAL_EXPR) ? static_cast<LiteralExpr*>(bin->right.get()) : nullptr;
+        if (leftLit && rightLit && leftLit->literalType == LiteralExpr::LiteralType::INTEGER &&
+            rightLit->literalType == LiteralExpr::LiteralType::INTEGER) {
+            long long lv = leftLit->intValue;
+            long long rv = rightLit->intValue;
+            bool folded = true;
+            long long result = 0;
+            if (bin->op == "+")
+                result = lv + rv;
+            else if (bin->op == "-")
+                result = lv - rv;
+            else if (bin->op == "*")
+                result = lv * rv;
+            else if (bin->op == "/" && rv != 0)
+                result = lv / rv;
+            else if (bin->op == "%" && rv != 0)
+                result = lv % rv;
+            else if (bin->op == "&")
+                result = lv & rv;
+            else if (bin->op == "|")
+                result = lv | rv;
+            else if (bin->op == "^")
+                result = lv ^ rv;
+            else if (bin->op == "<<" && rv >= 0 && rv < 64)
+                result = lv << rv;
+            else if (bin->op == ">>" && rv >= 0 && rv < 64)
+                result = lv >> rv;
+            else if (bin->op == "==")
+                result = static_cast<long long>(lv == rv);
+            else if (bin->op == "!=")
+                result = static_cast<long long>(lv != rv);
+            else if (bin->op == "<")
+                result = static_cast<long long>(lv < rv);
+            else if (bin->op == "<=")
+                result = static_cast<long long>(lv <= rv);
+            else if (bin->op == ">")
+                result = static_cast<long long>(lv > rv);
+            else if (bin->op == ">=")
+                result = static_cast<long long>(lv >= rv);
+            else if (bin->op == "&&")
+                result = static_cast<long long>((lv != 0) && (rv != 0));
+            else if (bin->op == "||")
+                result = static_cast<long long>((lv != 0) || (rv != 0));
+            else
+                folded = false;
+            if (folded) {
                 uint8_t rd = allocReg();
                 bytecodeEmitter.emit(OpCode::PUSH_INT);
                 bytecodeEmitter.emitReg(rd);
-                bytecodeEmitter.emitInt(0);
+                bytecodeEmitter.emitInt(result);
                 return rd;
             }
-            if (isStdlibFunction(call->callee)) {
-                throw std::runtime_error("Stdlib function '" + call->callee +
-                    "' must be compiled to native code, not bytecode");
+        }
+        uint8_t rs1 = emitBytecodeExpression(bin->left.get());
+        uint8_t rs2 = emitBytecodeExpression(bin->right.get());
+        uint8_t rd = allocReg();
+        if (bin->op == "+")
+            bytecodeEmitter.emit(OpCode::ADD);
+        else if (bin->op == "-")
+            bytecodeEmitter.emit(OpCode::SUB);
+        else if (bin->op == "*")
+            bytecodeEmitter.emit(OpCode::MUL);
+        else if (bin->op == "/")
+            bytecodeEmitter.emit(OpCode::DIV);
+        else if (bin->op == "%")
+            bytecodeEmitter.emit(OpCode::MOD);
+        else if (bin->op == "==")
+            bytecodeEmitter.emit(OpCode::EQ);
+        else if (bin->op == "!=")
+            bytecodeEmitter.emit(OpCode::NE);
+        else if (bin->op == "<")
+            bytecodeEmitter.emit(OpCode::LT);
+        else if (bin->op == "<=")
+            bytecodeEmitter.emit(OpCode::LE);
+        else if (bin->op == ">")
+            bytecodeEmitter.emit(OpCode::GT);
+        else if (bin->op == ">=")
+            bytecodeEmitter.emit(OpCode::GE);
+        else if (bin->op == "&&")
+            bytecodeEmitter.emit(OpCode::AND);
+        else if (bin->op == "||")
+            bytecodeEmitter.emit(OpCode::OR);
+        else if (bin->op == "&")
+            bytecodeEmitter.emit(OpCode::BIT_AND);
+        else if (bin->op == "|")
+            bytecodeEmitter.emit(OpCode::BIT_OR);
+        else if (bin->op == "^")
+            bytecodeEmitter.emit(OpCode::BIT_XOR);
+        else if (bin->op == "<<")
+            bytecodeEmitter.emit(OpCode::SHL);
+        else if (bin->op == ">>")
+            bytecodeEmitter.emit(OpCode::SHR);
+        else {
+            throw std::runtime_error("Unsupported binary operator in bytecode: " + bin->op);
+        }
+        bytecodeEmitter.emitReg(rd);
+        bytecodeEmitter.emitReg(rs1);
+        bytecodeEmitter.emitReg(rs2);
+        return rd;
+    }
+    case ASTNodeType::UNARY_EXPR: {
+        auto* unary = static_cast<UnaryExpr*>(expr);
+        // Bytecode constant folding for unary on integer literals.
+        auto* operandLit = (unary->operand->type == ASTNodeType::LITERAL_EXPR)
+                               ? static_cast<LiteralExpr*>(unary->operand.get())
+                               : nullptr;
+        if (operandLit && operandLit->literalType == LiteralExpr::LiteralType::INTEGER) {
+            long long val = operandLit->intValue;
+            bool folded = true;
+            long long result = 0;
+            if (unary->op == "-")
+                result = -val;
+            else if (unary->op == "!")
+                result = (val == 0) ? 1 : 0;
+            else if (unary->op == "~")
+                result = ~val;
+            else
+                folded = false;
+            if (folded) {
+                uint8_t rd = allocReg();
+                bytecodeEmitter.emit(OpCode::PUSH_INT);
+                bytecodeEmitter.emitReg(rd);
+                bytecodeEmitter.emitInt(result);
+                return rd;
             }
-            std::vector<uint8_t> argRegs;
+        }
+        uint8_t rs = emitBytecodeExpression(unary->operand.get());
+        uint8_t rd = allocReg();
+        if (unary->op == "-")
+            bytecodeEmitter.emit(OpCode::NEG);
+        else if (unary->op == "!")
+            bytecodeEmitter.emit(OpCode::NOT);
+        else if (unary->op == "~")
+            bytecodeEmitter.emit(OpCode::BIT_NOT);
+        else {
+            throw std::runtime_error("Unsupported unary operator in bytecode: " + unary->op);
+        }
+        bytecodeEmitter.emitReg(rd);
+        bytecodeEmitter.emitReg(rs);
+        return rd;
+    }
+    case ASTNodeType::ASSIGN_EXPR: {
+        auto* assign = static_cast<AssignExpr*>(expr);
+        uint8_t rs = emitBytecodeExpression(assign->value.get());
+        emitBytecodeStore(assign->name, rs);
+        return rs;
+    }
+    case ASTNodeType::CALL_EXPR: {
+        auto* call = static_cast<CallExpr*>(expr);
+        if (call->callee == "print") {
             for (auto& arg : call->arguments) {
-                argRegs.push_back(emitBytecodeExpression(arg.get()));
+                uint8_t rs = emitBytecodeExpression(arg.get());
+                bytecodeEmitter.emit(OpCode::PRINT);
+                bytecodeEmitter.emitReg(rs);
             }
             uint8_t rd = allocReg();
-            bytecodeEmitter.emit(OpCode::CALL);
+            bytecodeEmitter.emit(OpCode::PUSH_INT);
             bytecodeEmitter.emitReg(rd);
-            bytecodeEmitter.emitString(call->callee);
-            bytecodeEmitter.emitByte(static_cast<uint8_t>(call->arguments.size()));
-            for (uint8_t reg : argRegs) {
-                bytecodeEmitter.emitReg(reg);
-            }
+            bytecodeEmitter.emitInt(0);
             return rd;
         }
-        case ASTNodeType::POSTFIX_EXPR: {
-            auto* postfix = static_cast<PostfixExpr*>(expr);
-            auto* id = dynamic_cast<IdentifierExpr*>(postfix->operand.get());
-            if (!id) {
-                throw std::runtime_error("Postfix operator requires an identifier in bytecode");
-            }
-            uint8_t origReg = emitBytecodeLoad(id->name);
-            uint8_t oneReg = allocReg();
-            bytecodeEmitter.emit(OpCode::PUSH_INT);
-            bytecodeEmitter.emitReg(oneReg);
-            bytecodeEmitter.emitInt(1);
-            uint8_t newReg = allocReg();
-            bytecodeEmitter.emit(postfix->op == "++" ? OpCode::ADD : OpCode::SUB);
-            bytecodeEmitter.emitReg(newReg);
-            bytecodeEmitter.emitReg(origReg);
-            bytecodeEmitter.emitReg(oneReg);
-            emitBytecodeStore(id->name, newReg);
-            return origReg;
+        if (isStdlibFunction(call->callee)) {
+            throw std::runtime_error("Stdlib function '" + call->callee +
+                                     "' must be compiled to native code, not bytecode");
         }
-        case ASTNodeType::PREFIX_EXPR: {
-            auto* prefix = static_cast<PrefixExpr*>(expr);
-            auto* id = dynamic_cast<IdentifierExpr*>(prefix->operand.get());
-            if (!id) {
-                throw std::runtime_error("Prefix operator requires an identifier in bytecode");
-            }
-            uint8_t origReg = emitBytecodeLoad(id->name);
-            uint8_t oneReg = allocReg();
-            bytecodeEmitter.emit(OpCode::PUSH_INT);
-            bytecodeEmitter.emitReg(oneReg);
-            bytecodeEmitter.emitInt(1);
-            uint8_t newReg = allocReg();
-            bytecodeEmitter.emit(prefix->op == "++" ? OpCode::ADD : OpCode::SUB);
-            bytecodeEmitter.emitReg(newReg);
-            bytecodeEmitter.emitReg(origReg);
-            bytecodeEmitter.emitReg(oneReg);
-            emitBytecodeStore(id->name, newReg);
-            return newReg;
+        std::vector<uint8_t> argRegs;
+        for (auto& arg : call->arguments) {
+            argRegs.push_back(emitBytecodeExpression(arg.get()));
         }
-        case ASTNodeType::TERNARY_EXPR: {
-            auto* ternary = static_cast<TernaryExpr*>(expr);
-            uint8_t condReg = emitBytecodeExpression(ternary->condition.get());
-            bytecodeEmitter.emit(OpCode::JUMP_IF_FALSE);
-            bytecodeEmitter.emitReg(condReg);
-            size_t elsePatch = bytecodeEmitter.currentOffset();
-            bytecodeEmitter.emitShort(0);
-            
-            uint8_t thenReg = emitBytecodeExpression(ternary->thenExpr.get());
-            uint8_t resultReg = thenReg;
-            bytecodeEmitter.emit(OpCode::JUMP);
-            size_t endPatch = bytecodeEmitter.currentOffset();
-            bytecodeEmitter.emitShort(0);
-            
-            bytecodeEmitter.patchJump(elsePatch, static_cast<uint16_t>(bytecodeEmitter.currentOffset()));
-            uint8_t elseReg = emitBytecodeExpression(ternary->elseExpr.get());
-            if (elseReg != resultReg) {
-                bytecodeEmitter.emit(OpCode::MOV);
-                bytecodeEmitter.emitReg(resultReg);
-                bytecodeEmitter.emitReg(elseReg);
-            }
-            bytecodeEmitter.patchJump(endPatch, static_cast<uint16_t>(bytecodeEmitter.currentOffset()));
-            return resultReg;
+        uint8_t rd = allocReg();
+        bytecodeEmitter.emit(OpCode::CALL);
+        bytecodeEmitter.emitReg(rd);
+        bytecodeEmitter.emitString(call->callee);
+        bytecodeEmitter.emitByte(static_cast<uint8_t>(call->arguments.size()));
+        for (uint8_t reg : argRegs) {
+            bytecodeEmitter.emitReg(reg);
         }
-        case ASTNodeType::INDEX_ASSIGN_EXPR:
-            throw std::runtime_error("Array index assignment is not supported in bytecode mode");
-        default:
-            throw std::runtime_error("Unsupported expression type in bytecode generation");
+        return rd;
+    }
+    case ASTNodeType::POSTFIX_EXPR: {
+        auto* postfix = static_cast<PostfixExpr*>(expr);
+        auto* id = dynamic_cast<IdentifierExpr*>(postfix->operand.get());
+        if (!id) {
+            throw std::runtime_error("Postfix operator requires an identifier in bytecode");
+        }
+        uint8_t origReg = emitBytecodeLoad(id->name);
+        uint8_t oneReg = allocReg();
+        bytecodeEmitter.emit(OpCode::PUSH_INT);
+        bytecodeEmitter.emitReg(oneReg);
+        bytecodeEmitter.emitInt(1);
+        uint8_t newReg = allocReg();
+        bytecodeEmitter.emit(postfix->op == "++" ? OpCode::ADD : OpCode::SUB);
+        bytecodeEmitter.emitReg(newReg);
+        bytecodeEmitter.emitReg(origReg);
+        bytecodeEmitter.emitReg(oneReg);
+        emitBytecodeStore(id->name, newReg);
+        return origReg;
+    }
+    case ASTNodeType::PREFIX_EXPR: {
+        auto* prefix = static_cast<PrefixExpr*>(expr);
+        auto* id = dynamic_cast<IdentifierExpr*>(prefix->operand.get());
+        if (!id) {
+            throw std::runtime_error("Prefix operator requires an identifier in bytecode");
+        }
+        uint8_t origReg = emitBytecodeLoad(id->name);
+        uint8_t oneReg = allocReg();
+        bytecodeEmitter.emit(OpCode::PUSH_INT);
+        bytecodeEmitter.emitReg(oneReg);
+        bytecodeEmitter.emitInt(1);
+        uint8_t newReg = allocReg();
+        bytecodeEmitter.emit(prefix->op == "++" ? OpCode::ADD : OpCode::SUB);
+        bytecodeEmitter.emitReg(newReg);
+        bytecodeEmitter.emitReg(origReg);
+        bytecodeEmitter.emitReg(oneReg);
+        emitBytecodeStore(id->name, newReg);
+        return newReg;
+    }
+    case ASTNodeType::TERNARY_EXPR: {
+        auto* ternary = static_cast<TernaryExpr*>(expr);
+        uint8_t condReg = emitBytecodeExpression(ternary->condition.get());
+        bytecodeEmitter.emit(OpCode::JUMP_IF_FALSE);
+        bytecodeEmitter.emitReg(condReg);
+        size_t elsePatch = bytecodeEmitter.currentOffset();
+        bytecodeEmitter.emitShort(0);
+
+        uint8_t thenReg = emitBytecodeExpression(ternary->thenExpr.get());
+        uint8_t resultReg = thenReg;
+        bytecodeEmitter.emit(OpCode::JUMP);
+        size_t endPatch = bytecodeEmitter.currentOffset();
+        bytecodeEmitter.emitShort(0);
+
+        bytecodeEmitter.patchJump(elsePatch, static_cast<uint16_t>(bytecodeEmitter.currentOffset()));
+        uint8_t elseReg = emitBytecodeExpression(ternary->elseExpr.get());
+        if (elseReg != resultReg) {
+            bytecodeEmitter.emit(OpCode::MOV);
+            bytecodeEmitter.emitReg(resultReg);
+            bytecodeEmitter.emitReg(elseReg);
+        }
+        bytecodeEmitter.patchJump(endPatch, static_cast<uint16_t>(bytecodeEmitter.currentOffset()));
+        return resultReg;
+    }
+    case ASTNodeType::INDEX_ASSIGN_EXPR:
+        throw std::runtime_error("Array index assignment is not supported in bytecode mode");
+    default:
+        throw std::runtime_error("Unsupported expression type in bytecode generation");
     }
 }
 
 void CodeGenerator::emitBytecodeStatement(Statement* stmt) {
     switch (stmt->type) {
-        case ASTNodeType::EXPR_STMT: {
-            auto* exprStmt = static_cast<ExprStmt*>(stmt);
-            emitBytecodeExpression(exprStmt->expression.get());
-            // No POP needed in register-based mode
-            break;
-        }
-        case ASTNodeType::VAR_DECL: {
-            auto* varDecl = static_cast<VarDecl*>(stmt);
-            uint8_t rs;
-            if (varDecl->initializer) {
-                rs = emitBytecodeExpression(varDecl->initializer.get());
-            } else {
-                rs = allocReg();
-                bytecodeEmitter.emit(OpCode::PUSH_INT);
-                bytecodeEmitter.emitReg(rs);
-                bytecodeEmitter.emitInt(0);
-            }
-            if (isInBytecodeFunctionContext()) {
-                if (bytecodeNextLocal_ == 255) {
-                    throw std::runtime_error("Too many local variables in function (max 255)");
-                }
-                uint8_t idx = bytecodeNextLocal_++;
-                bytecodeLocals_[varDecl->name] = idx;
-            }
-            emitBytecodeStore(varDecl->name, rs);
-            break;
-        }
-        case ASTNodeType::RETURN_STMT: {
-            auto* retStmt = static_cast<ReturnStmt*>(stmt);
-            uint8_t rs;
-            if (retStmt->value) {
-                rs = emitBytecodeExpression(retStmt->value.get());
-            } else {
-                rs = allocReg();
-                bytecodeEmitter.emit(OpCode::PUSH_INT);
-                bytecodeEmitter.emitReg(rs);
-                bytecodeEmitter.emitInt(0);
-            }
-            bytecodeEmitter.emit(OpCode::RETURN);
+    case ASTNodeType::EXPR_STMT: {
+        auto* exprStmt = static_cast<ExprStmt*>(stmt);
+        emitBytecodeExpression(exprStmt->expression.get());
+        // No POP needed in register-based mode
+        break;
+    }
+    case ASTNodeType::VAR_DECL: {
+        auto* varDecl = static_cast<VarDecl*>(stmt);
+        uint8_t rs;
+        if (varDecl->initializer) {
+            rs = emitBytecodeExpression(varDecl->initializer.get());
+        } else {
+            rs = allocReg();
+            bytecodeEmitter.emit(OpCode::PUSH_INT);
             bytecodeEmitter.emitReg(rs);
-            break;
+            bytecodeEmitter.emitInt(0);
         }
-        case ASTNodeType::IF_STMT: {
-            auto* ifStmt = static_cast<IfStmt*>(stmt);
-            uint8_t condReg = emitBytecodeExpression(ifStmt->condition.get());
-            
-            bytecodeEmitter.emit(OpCode::JUMP_IF_FALSE);
-            bytecodeEmitter.emitReg(condReg);
-            size_t elsePatch = bytecodeEmitter.currentOffset();
-            bytecodeEmitter.emitShort(0);
-            
-            emitBytecodeStatement(ifStmt->thenBranch.get());
-            
-            if (ifStmt->elseBranch) {
-                bytecodeEmitter.emit(OpCode::JUMP);
-                size_t endPatch = bytecodeEmitter.currentOffset();
-                bytecodeEmitter.emitShort(0);
-                
-                bytecodeEmitter.patchJump(elsePatch, static_cast<uint16_t>(bytecodeEmitter.currentOffset()));
-                emitBytecodeStatement(ifStmt->elseBranch.get());
-                bytecodeEmitter.patchJump(endPatch, static_cast<uint16_t>(bytecodeEmitter.currentOffset()));
-            } else {
-                bytecodeEmitter.patchJump(elsePatch, static_cast<uint16_t>(bytecodeEmitter.currentOffset()));
+        if (isInBytecodeFunctionContext()) {
+            if (bytecodeNextLocal_ == 255) {
+                throw std::runtime_error("Too many local variables in function (max 255)");
             }
-            break;
+            uint8_t idx = bytecodeNextLocal_++;
+            bytecodeLocals_[varDecl->name] = idx;
         }
-        case ASTNodeType::WHILE_STMT: {
-            auto* whileStmt = static_cast<WhileStmt*>(stmt);
-            size_t loopStart = bytecodeEmitter.currentOffset();
-            
-            uint8_t condReg = emitBytecodeExpression(whileStmt->condition.get());
-            bytecodeEmitter.emit(OpCode::JUMP_IF_FALSE);
-            bytecodeEmitter.emitReg(condReg);
-            size_t exitPatch = bytecodeEmitter.currentOffset();
-            bytecodeEmitter.emitShort(0);
-            
-            emitBytecodeStatement(whileStmt->body.get());
-            
+        emitBytecodeStore(varDecl->name, rs);
+        break;
+    }
+    case ASTNodeType::RETURN_STMT: {
+        auto* retStmt = static_cast<ReturnStmt*>(stmt);
+        uint8_t rs;
+        if (retStmt->value) {
+            rs = emitBytecodeExpression(retStmt->value.get());
+        } else {
+            rs = allocReg();
+            bytecodeEmitter.emit(OpCode::PUSH_INT);
+            bytecodeEmitter.emitReg(rs);
+            bytecodeEmitter.emitInt(0);
+        }
+        bytecodeEmitter.emit(OpCode::RETURN);
+        bytecodeEmitter.emitReg(rs);
+        break;
+    }
+    case ASTNodeType::IF_STMT: {
+        auto* ifStmt = static_cast<IfStmt*>(stmt);
+        uint8_t condReg = emitBytecodeExpression(ifStmt->condition.get());
+
+        bytecodeEmitter.emit(OpCode::JUMP_IF_FALSE);
+        bytecodeEmitter.emitReg(condReg);
+        size_t elsePatch = bytecodeEmitter.currentOffset();
+        bytecodeEmitter.emitShort(0);
+
+        emitBytecodeStatement(ifStmt->thenBranch.get());
+
+        if (ifStmt->elseBranch) {
             bytecodeEmitter.emit(OpCode::JUMP);
-            bytecodeEmitter.emitShort(static_cast<uint16_t>(loopStart));
-            
-            bytecodeEmitter.patchJump(exitPatch, static_cast<uint16_t>(bytecodeEmitter.currentOffset()));
-            break;
-        }
-        case ASTNodeType::BLOCK: {
-            emitBytecodeBlock(static_cast<BlockStmt*>(stmt));
-            break;
-        }
-        case ASTNodeType::DO_WHILE_STMT: {
-            auto* doWhileStmt = static_cast<DoWhileStmt*>(stmt);
-            size_t loopStart = bytecodeEmitter.currentOffset();
-            
-            emitBytecodeStatement(doWhileStmt->body.get());
-            
-            uint8_t condReg = emitBytecodeExpression(doWhileStmt->condition.get());
-            uint8_t notReg = allocReg();
-            bytecodeEmitter.emit(OpCode::NOT);
-            bytecodeEmitter.emitReg(notReg);
-            bytecodeEmitter.emitReg(condReg);
-            bytecodeEmitter.emit(OpCode::JUMP_IF_FALSE);
-            bytecodeEmitter.emitReg(notReg);
-            bytecodeEmitter.emitShort(static_cast<uint16_t>(loopStart));
-            break;
-        }
-        case ASTNodeType::FOR_STMT: {
-            auto* forStmt = static_cast<ForStmt*>(stmt);
-            if (isInBytecodeFunctionContext()) {
-                if (bytecodeLocals_.find(forStmt->iteratorVar) == bytecodeLocals_.end()) {
-                    bytecodeLocals_[forStmt->iteratorVar] = bytecodeNextLocal_++;
-                }
-            }
-            uint8_t startReg = emitBytecodeExpression(forStmt->start.get());
-            emitBytecodeStore(forStmt->iteratorVar, startReg);
-            
-            size_t loopStart = bytecodeEmitter.currentOffset();
-            
-            uint8_t iterReg = emitBytecodeLoad(forStmt->iteratorVar);
-            uint8_t endReg = emitBytecodeExpression(forStmt->end.get());
-            uint8_t cmpReg = allocReg();
-            bytecodeEmitter.emit(OpCode::LT);
-            bytecodeEmitter.emitReg(cmpReg);
-            bytecodeEmitter.emitReg(iterReg);
-            bytecodeEmitter.emitReg(endReg);
-            
-            bytecodeEmitter.emit(OpCode::JUMP_IF_FALSE);
-            bytecodeEmitter.emitReg(cmpReg);
-            size_t exitPatch = bytecodeEmitter.currentOffset();
+            size_t endPatch = bytecodeEmitter.currentOffset();
             bytecodeEmitter.emitShort(0);
-            
-            emitBytecodeStatement(forStmt->body.get());
-            
-            uint8_t curReg = emitBytecodeLoad(forStmt->iteratorVar);
-            uint8_t stepReg;
-            if (forStmt->step) {
-                stepReg = emitBytecodeExpression(forStmt->step.get());
-            } else {
-                stepReg = allocReg();
-                bytecodeEmitter.emit(OpCode::PUSH_INT);
-                bytecodeEmitter.emitReg(stepReg);
-                bytecodeEmitter.emitInt(1);
+
+            bytecodeEmitter.patchJump(elsePatch, static_cast<uint16_t>(bytecodeEmitter.currentOffset()));
+            emitBytecodeStatement(ifStmt->elseBranch.get());
+            bytecodeEmitter.patchJump(endPatch, static_cast<uint16_t>(bytecodeEmitter.currentOffset()));
+        } else {
+            bytecodeEmitter.patchJump(elsePatch, static_cast<uint16_t>(bytecodeEmitter.currentOffset()));
+        }
+        break;
+    }
+    case ASTNodeType::WHILE_STMT: {
+        auto* whileStmt = static_cast<WhileStmt*>(stmt);
+        size_t loopStart = bytecodeEmitter.currentOffset();
+
+        uint8_t condReg = emitBytecodeExpression(whileStmt->condition.get());
+        bytecodeEmitter.emit(OpCode::JUMP_IF_FALSE);
+        bytecodeEmitter.emitReg(condReg);
+        size_t exitPatch = bytecodeEmitter.currentOffset();
+        bytecodeEmitter.emitShort(0);
+
+        emitBytecodeStatement(whileStmt->body.get());
+
+        bytecodeEmitter.emit(OpCode::JUMP);
+        bytecodeEmitter.emitShort(static_cast<uint16_t>(loopStart));
+
+        bytecodeEmitter.patchJump(exitPatch, static_cast<uint16_t>(bytecodeEmitter.currentOffset()));
+        break;
+    }
+    case ASTNodeType::BLOCK: {
+        emitBytecodeBlock(static_cast<BlockStmt*>(stmt));
+        break;
+    }
+    case ASTNodeType::DO_WHILE_STMT: {
+        auto* doWhileStmt = static_cast<DoWhileStmt*>(stmt);
+        size_t loopStart = bytecodeEmitter.currentOffset();
+
+        emitBytecodeStatement(doWhileStmt->body.get());
+
+        uint8_t condReg = emitBytecodeExpression(doWhileStmt->condition.get());
+        uint8_t notReg = allocReg();
+        bytecodeEmitter.emit(OpCode::NOT);
+        bytecodeEmitter.emitReg(notReg);
+        bytecodeEmitter.emitReg(condReg);
+        bytecodeEmitter.emit(OpCode::JUMP_IF_FALSE);
+        bytecodeEmitter.emitReg(notReg);
+        bytecodeEmitter.emitShort(static_cast<uint16_t>(loopStart));
+        break;
+    }
+    case ASTNodeType::FOR_STMT: {
+        auto* forStmt = static_cast<ForStmt*>(stmt);
+        if (isInBytecodeFunctionContext()) {
+            if (bytecodeLocals_.find(forStmt->iteratorVar) == bytecodeLocals_.end()) {
+                bytecodeLocals_[forStmt->iteratorVar] = bytecodeNextLocal_++;
             }
-            uint8_t newIterReg = allocReg();
-            bytecodeEmitter.emit(OpCode::ADD);
-            bytecodeEmitter.emitReg(newIterReg);
-            bytecodeEmitter.emitReg(curReg);
+        }
+        uint8_t startReg = emitBytecodeExpression(forStmt->start.get());
+        emitBytecodeStore(forStmt->iteratorVar, startReg);
+
+        size_t loopStart = bytecodeEmitter.currentOffset();
+
+        uint8_t iterReg = emitBytecodeLoad(forStmt->iteratorVar);
+        uint8_t endReg = emitBytecodeExpression(forStmt->end.get());
+        uint8_t cmpReg = allocReg();
+        bytecodeEmitter.emit(OpCode::LT);
+        bytecodeEmitter.emitReg(cmpReg);
+        bytecodeEmitter.emitReg(iterReg);
+        bytecodeEmitter.emitReg(endReg);
+
+        bytecodeEmitter.emit(OpCode::JUMP_IF_FALSE);
+        bytecodeEmitter.emitReg(cmpReg);
+        size_t exitPatch = bytecodeEmitter.currentOffset();
+        bytecodeEmitter.emitShort(0);
+
+        emitBytecodeStatement(forStmt->body.get());
+
+        uint8_t curReg = emitBytecodeLoad(forStmt->iteratorVar);
+        uint8_t stepReg;
+        if (forStmt->step) {
+            stepReg = emitBytecodeExpression(forStmt->step.get());
+        } else {
+            stepReg = allocReg();
+            bytecodeEmitter.emit(OpCode::PUSH_INT);
             bytecodeEmitter.emitReg(stepReg);
-            emitBytecodeStore(forStmt->iteratorVar, newIterReg);
-            
-            bytecodeEmitter.emit(OpCode::JUMP);
-            bytecodeEmitter.emitShort(static_cast<uint16_t>(loopStart));
-            
-            bytecodeEmitter.patchJump(exitPatch, static_cast<uint16_t>(bytecodeEmitter.currentOffset()));
-            break;
+            bytecodeEmitter.emitInt(1);
         }
-        case ASTNodeType::SWITCH_STMT: {
-            auto* switchStmt = static_cast<SwitchStmt*>(stmt);
-            static int switchCounter = 0;
-            std::string tempVar = "__switch_cond_" + std::to_string(switchCounter++) + "__";
-            if (isInBytecodeFunctionContext()) {
-                bytecodeLocals_[tempVar] = bytecodeNextLocal_++;
-            }
-            uint8_t condReg = emitBytecodeExpression(switchStmt->condition.get());
-            emitBytecodeStore(tempVar, condReg);
+        uint8_t newIterReg = allocReg();
+        bytecodeEmitter.emit(OpCode::ADD);
+        bytecodeEmitter.emitReg(newIterReg);
+        bytecodeEmitter.emitReg(curReg);
+        bytecodeEmitter.emitReg(stepReg);
+        emitBytecodeStore(forStmt->iteratorVar, newIterReg);
 
-            std::vector<size_t> endPatches;
-            const SwitchCase* defaultCase = nullptr;
+        bytecodeEmitter.emit(OpCode::JUMP);
+        bytecodeEmitter.emitShort(static_cast<uint16_t>(loopStart));
 
-            for (auto& sc : switchStmt->cases) {
-                if (sc.isDefault) {
-                    defaultCase = &sc;
-                } else {
-                    uint8_t loadedCond = emitBytecodeLoad(tempVar);
-                    uint8_t caseValReg = emitBytecodeExpression(sc.value.get());
-                    uint8_t eqReg = allocReg();
-                    bytecodeEmitter.emit(OpCode::EQ);
-                    bytecodeEmitter.emitReg(eqReg);
-                    bytecodeEmitter.emitReg(loadedCond);
-                    bytecodeEmitter.emitReg(caseValReg);
-                    bytecodeEmitter.emit(OpCode::JUMP_IF_FALSE);
-                    bytecodeEmitter.emitReg(eqReg);
-                    size_t skipPatch = bytecodeEmitter.currentOffset();
-                    bytecodeEmitter.emitShort(0);
+        bytecodeEmitter.patchJump(exitPatch, static_cast<uint16_t>(bytecodeEmitter.currentOffset()));
+        break;
+    }
+    case ASTNodeType::SWITCH_STMT: {
+        auto* switchStmt = static_cast<SwitchStmt*>(stmt);
+        static int switchCounter = 0;
+        std::string tempVar = "__switch_cond_" + std::to_string(switchCounter++) + "__";
+        if (isInBytecodeFunctionContext()) {
+            bytecodeLocals_[tempVar] = bytecodeNextLocal_++;
+        }
+        uint8_t condReg = emitBytecodeExpression(switchStmt->condition.get());
+        emitBytecodeStore(tempVar, condReg);
 
-                    for (auto& s : sc.body) {
-                        emitBytecodeStatement(s.get());
-                    }
-                    bytecodeEmitter.emit(OpCode::JUMP);
-                    endPatches.push_back(bytecodeEmitter.currentOffset());
-                    bytecodeEmitter.emitShort(0);
+        std::vector<size_t> endPatches;
+        const SwitchCase* defaultCase = nullptr;
 
-                    bytecodeEmitter.patchJump(skipPatch, static_cast<uint16_t>(bytecodeEmitter.currentOffset()));
-                }
-            }
+        for (auto& sc : switchStmt->cases) {
+            if (sc.isDefault) {
+                defaultCase = &sc;
+            } else {
+                uint8_t loadedCond = emitBytecodeLoad(tempVar);
+                uint8_t caseValReg = emitBytecodeExpression(sc.value.get());
+                uint8_t eqReg = allocReg();
+                bytecodeEmitter.emit(OpCode::EQ);
+                bytecodeEmitter.emitReg(eqReg);
+                bytecodeEmitter.emitReg(loadedCond);
+                bytecodeEmitter.emitReg(caseValReg);
+                bytecodeEmitter.emit(OpCode::JUMP_IF_FALSE);
+                bytecodeEmitter.emitReg(eqReg);
+                size_t skipPatch = bytecodeEmitter.currentOffset();
+                bytecodeEmitter.emitShort(0);
 
-            if (defaultCase) {
-                for (auto& s : defaultCase->body) {
+                for (auto& s : sc.body) {
                     emitBytecodeStatement(s.get());
                 }
-            }
+                bytecodeEmitter.emit(OpCode::JUMP);
+                endPatches.push_back(bytecodeEmitter.currentOffset());
+                bytecodeEmitter.emitShort(0);
 
-            uint16_t endOffset = static_cast<uint16_t>(bytecodeEmitter.currentOffset());
-            for (size_t patch : endPatches) {
-                bytecodeEmitter.patchJump(patch, endOffset);
+                bytecodeEmitter.patchJump(skipPatch, static_cast<uint16_t>(bytecodeEmitter.currentOffset()));
             }
-            break;
         }
-        case ASTNodeType::FOR_EACH_STMT:
-            throw std::runtime_error("For-each loops are not supported in bytecode mode");
-        default:
-            throw std::runtime_error("Unsupported statement type in bytecode generation");
+
+        if (defaultCase) {
+            for (auto& s : defaultCase->body) {
+                emitBytecodeStatement(s.get());
+            }
+        }
+
+        uint16_t endOffset = static_cast<uint16_t>(bytecodeEmitter.currentOffset());
+        for (size_t patch : endPatches) {
+            bytecodeEmitter.patchJump(patch, endOffset);
+        }
+        break;
+    }
+    case ASTNodeType::FOR_EACH_STMT:
+        throw std::runtime_error("For-each loops are not supported in bytecode mode");
+    default:
+        throw std::runtime_error("Unsupported statement type in bytecode generation");
     }
 }
 
