@@ -3,13 +3,13 @@
 
 #include "ast.h"
 #include "bytecode.h"
-#include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/IRBuilder.h>
+#include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Value.h>
+#include <memory>
 #include <unordered_map>
 #include <unordered_set>
-#include <memory>
 #include <vector>
 
 namespace omscript {
@@ -19,10 +19,10 @@ namespace omscript {
 bool isStdlibFunction(const std::string& name);
 
 enum class OptimizationLevel {
-    O0,  // No optimization
-    O1,  // Basic optimization
-    O2,  // Moderate optimization
-    O3   // Aggressive optimization
+    O0, // No optimization
+    O1, // Basic optimization
+    O2, // Moderate optimization
+    O3  // Aggressive optimization
 };
 
 /// Execution tier assigned to each function during compilation.
@@ -45,31 +45,38 @@ enum class ExecutionTier {
 /// Return a human-readable label for an ExecutionTier value.
 inline const char* executionTierName(ExecutionTier tier) {
     switch (tier) {
-        case ExecutionTier::AOT:         return "AOT";
-        case ExecutionTier::Interpreted: return "Interpreted";
-        case ExecutionTier::JIT:         return "JIT";
+    case ExecutionTier::AOT:
+        return "AOT";
+    case ExecutionTier::Interpreted:
+        return "Interpreted";
+    case ExecutionTier::JIT:
+        return "JIT";
     }
     return "Unknown";
 }
 
 class CodeGenerator {
-public:
+  public:
     CodeGenerator(OptimizationLevel optLevel = OptimizationLevel::O2);
     ~CodeGenerator();
-    
+
     void generate(Program* program);
     void writeObjectFile(const std::string& filename);
-    llvm::Module* getModule() { return module.get(); }
-    void setOptimizationLevel(OptimizationLevel level) { optimizationLevel = level; }
-    
-private:
+    llvm::Module* getModule() {
+        return module.get();
+    }
+    void setOptimizationLevel(OptimizationLevel level) {
+        optimizationLevel = level;
+    }
+
+  private:
     std::unique_ptr<llvm::LLVMContext> context;
     std::unique_ptr<llvm::IRBuilder<>> builder;
     std::unique_ptr<llvm::Module> module;
-    
+
     std::unordered_map<std::string, llvm::Value*> namedValues;
     std::vector<std::unordered_map<std::string, llvm::Value*>> scopeStack;
-    
+
     struct LoopContext {
         llvm::BasicBlock* breakTarget;
         llvm::BasicBlock* continueTarget;
@@ -78,7 +85,7 @@ private:
     bool inOptMaxFunction;
     bool hasOptMaxFunctions;
     std::unordered_set<std::string> optMaxFunctions;
-    
+
     struct ConstBinding {
         bool wasPreviouslyDefined;
         bool previousIsConst;
@@ -86,7 +93,7 @@ private:
     std::unordered_map<std::string, bool> constValues;
     std::vector<std::unordered_map<std::string, ConstBinding>> constScopeStack;
     std::unordered_map<std::string, llvm::Function*> functions;
-    
+
     // Bytecode emitter for dynamic/interpreted code (user-defined functions only;
     // stdlib built-ins are always compiled to native machine code via LLVM IR).
     BytecodeEmitter bytecodeEmitter;
@@ -121,7 +128,9 @@ private:
         return bytecodeNextReg_++;
     }
 
-    void resetTempRegs() { bytecodeNextReg_ = bytecodeLocalBase_; }
+    void resetTempRegs() {
+        bytecodeNextReg_ = bytecodeLocalBase_;
+    }
 
     /// Return true when bytecode is being emitted for a function body
     /// (as opposed to top-level / main code).
@@ -135,12 +144,12 @@ private:
 
     /// Emit bytecode for a single function body (used by hybrid compilation).
     void emitBytecodeForFunction(FunctionDecl* func);
-    
+
     // Code generation methods
     llvm::Function* generateFunction(FunctionDecl* func);
     void generateStatement(Statement* stmt);
     llvm::Value* generateExpression(Expression* expr);
-    
+
     // Expression generators
     llvm::Value* generateLiteral(LiteralExpr* expr);
     llvm::Value* generateIdentifier(IdentifierExpr* expr);
@@ -154,7 +163,7 @@ private:
     llvm::Value* generateArray(ArrayExpr* expr);
     llvm::Value* generateIndex(IndexExpr* expr);
     llvm::Value* generateIndexAssign(IndexAssignExpr* expr);
-    
+
     // Statement generators
     void generateVarDecl(VarDecl* stmt);
     void generateReturn(ReturnStmt* stmt);
@@ -166,7 +175,7 @@ private:
     void generateBlock(BlockStmt* stmt);
     void generateExprStmt(ExprStmt* stmt);
     void generateSwitch(SwitchStmt* stmt);
-    
+
     // Helper methods
     llvm::Type* getDefaultType();
     llvm::Type* getFloatType();
@@ -180,23 +189,24 @@ private:
     void bindVariable(const std::string& name, llvm::Value* value, bool isConst = false);
     void checkConstModification(const std::string& name, const std::string& action);
     void validateScopeStacksMatch(const char* location);
-    llvm::AllocaInst* createEntryBlockAlloca(llvm::Function* function, const std::string& name, llvm::Type* type = nullptr);
+    llvm::AllocaInst* createEntryBlockAlloca(llvm::Function* function, const std::string& name,
+                                             llvm::Type* type = nullptr);
     [[noreturn]] void codegenError(const std::string& message, const ASTNode* node);
-    
+
     // Optimization methods
     void runOptimizationPasses();
     void optimizeOptMaxFunctions();
-    
+
     uint8_t emitBytecodeExpression(Expression* expr);
     void emitBytecodeStatement(Statement* stmt);
     void emitBytecodeBlock(BlockStmt* stmt);
     uint8_t emitBytecodeLoad(const std::string& name);
     void emitBytecodeStore(const std::string& name, uint8_t rs);
-    
-public:
+
+  public:
     // Per-function optimization for targeted optimization of individual functions
     void optimizeFunction(llvm::Function* func);
-    
+
     // Bytecode generation (alternative backend)
     void generateBytecode(Program* program);
 
@@ -207,7 +217,9 @@ public:
     void generateHybrid(Program* program);
 
     /// Return true if hybrid compilation produced any bytecode functions.
-    bool hasHybridBytecodeFunctions() const { return !bytecodeFunctions_.empty(); }
+    bool hasHybridBytecodeFunctions() const {
+        return !bytecodeFunctions_.empty();
+    }
 
     /// Return the list of bytecode functions produced by hybrid compilation.
     const std::vector<CompiledBytecodeFunc>& getBytecodeFunctions() const {
@@ -226,9 +238,15 @@ public:
     }
 
     // Accessors for bytecode output
-    const BytecodeEmitter& getBytecodeEmitter() const { return bytecodeEmitter; }
-    bool isDynamicCompilation() const { return useDynamicCompilation; }
-    void setDynamicCompilation(bool enable) { useDynamicCompilation = enable; }
+    const BytecodeEmitter& getBytecodeEmitter() const {
+        return bytecodeEmitter;
+    }
+    bool isDynamicCompilation() const {
+        return useDynamicCompilation;
+    }
+    void setDynamicCompilation(bool enable) {
+        useDynamicCompilation = enable;
+    }
 };
 
 } // namespace omscript

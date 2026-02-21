@@ -1,9 +1,9 @@
 #ifndef BYTECODE_H
 #define BYTECODE_H
 
-#include <vector>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace omscript {
 
@@ -13,7 +13,7 @@ enum class OpCode : uint8_t {
     PUSH_FLOAT,
     PUSH_STRING,
     POP,
-    
+
     // Arithmetic
     ADD,
     SUB,
@@ -21,7 +21,7 @@ enum class OpCode : uint8_t {
     DIV,
     MOD,
     NEG,
-    
+
     // Comparison
     EQ,
     NE,
@@ -29,12 +29,12 @@ enum class OpCode : uint8_t {
     LE,
     GT,
     GE,
-    
+
     // Logical
     AND,
     OR,
     NOT,
-    
+
     // Bitwise
     BIT_AND,
     BIT_OR,
@@ -42,28 +42,28 @@ enum class OpCode : uint8_t {
     BIT_NOT,
     SHL,
     SHR,
-    
+
     // Variables
     LOAD_VAR,
     STORE_VAR,
-    LOAD_LOCAL,   // Load a local variable by index
-    STORE_LOCAL,  // Store a local variable by index
-    
+    LOAD_LOCAL,  // Load a local variable by index
+    STORE_LOCAL, // Store a local variable by index
+
     // Control flow
     JUMP,
     JUMP_IF_FALSE,
     CALL,
     RETURN,
-    
+
     // Special
     PRINT,
     DUP,
     HALT,
-    MOV          // rd, rs — register-to-register copy
+    MOV // rd, rs — register-to-register copy
 };
 
 class BytecodeEmitter {
-public:
+  public:
     void emit(OpCode op);
     void emitByte(uint8_t byte);
     // Bytecode is encoded in little-endian order for cross-platform stability.
@@ -71,14 +71,18 @@ public:
     void emitFloat(double value);
     void emitString(const std::string& str);
     void emitShort(uint16_t value);
-    void emitReg(uint8_t reg) { emitByte(reg); }
-    
+    void emitReg(uint8_t reg) {
+        emitByte(reg);
+    }
+
     size_t currentOffset() const;
     void patchJump(size_t offset, uint16_t jump);
-    
-    const std::vector<uint8_t>& getCode() const { return code; }
-    
-private:
+
+    const std::vector<uint8_t>& getCode() const {
+        return code;
+    }
+
+  private:
     std::vector<uint8_t> code;
 };
 

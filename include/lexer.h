@@ -12,7 +12,7 @@ enum class TokenType {
     FLOAT,
     STRING,
     IDENTIFIER,
-    
+
     // Keywords
     FN,
     RETURN,
@@ -34,7 +34,7 @@ enum class TokenType {
     SWITCH,
     CASE,
     DEFAULT,
-    
+
     // Operators
     PLUS,
     MINUS,
@@ -71,7 +71,7 @@ enum class TokenType {
     LSHIFT,
     RSHIFT,
     RANGE,
-    
+
     // Delimiters
     LPAREN,
     RPAREN,
@@ -83,7 +83,7 @@ enum class TokenType {
     COMMA,
     COLON,
     DOT,
-    
+
     // Special
     END_OF_FILE,
     INVALID
@@ -94,35 +94,35 @@ struct Token {
     std::string lexeme;
     int line;
     int column;
-    
+
     // For literals
     union {
         long long intValue;
         double floatValue;
     };
-    
+
     Token(TokenType t, const std::string& lex, int ln, int col)
         : type(t), lexeme(lex), line(ln), column(col), intValue(0) {}
 };
 
 class Lexer {
-public:
+  public:
     Lexer(const std::string& source);
     std::vector<Token> tokenize();
-    
-private:
+
+  private:
     std::string source;
     size_t pos;
     int line;
     int column;
-    
+
     char peek(int offset = 0) const;
     char advance();
     bool isAtEnd() const;
     void skipWhitespace();
     void skipComment();
     void skipBlockComment();
-    
+
     Token makeToken(TokenType type, const std::string& lexeme);
     Token scanNumber();
     Token scanIdentifier();

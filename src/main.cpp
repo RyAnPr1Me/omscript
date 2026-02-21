@@ -1,20 +1,20 @@
-#include "compiler.h"
 #include "codegen.h"
+#include "compiler.h"
 #include "lexer.h"
 #include "parser.h"
-#include <iostream>
 #include <csignal>
 #include <cstring>
-#include <unistd.h>
 #include <filesystem>
 #include <fstream>
-#include <sstream>
-#include <vector>
-#include <optional>
+#include <iostream>
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/Support/FileSystem.h>
 #include <llvm/Support/Program.h>
 #include <llvm/Support/raw_ostream.h>
+#include <optional>
+#include <sstream>
+#include <unistd.h>
+#include <vector>
 
 namespace {
 
@@ -87,85 +87,155 @@ std::string readSourceFile(const std::string& filename) {
 
 const char* tokenTypeToString(omscript::TokenType type) {
     switch (type) {
-        case omscript::TokenType::INTEGER: return "INTEGER";
-        case omscript::TokenType::FLOAT: return "FLOAT";
-        case omscript::TokenType::STRING: return "STRING";
-        case omscript::TokenType::IDENTIFIER: return "IDENTIFIER";
-        case omscript::TokenType::FN: return "FN";
-        case omscript::TokenType::RETURN: return "RETURN";
-        case omscript::TokenType::IF: return "IF";
-        case omscript::TokenType::ELSE: return "ELSE";
-        case omscript::TokenType::WHILE: return "WHILE";
-        case omscript::TokenType::DO: return "DO";
-        case omscript::TokenType::FOR: return "FOR";
-        case omscript::TokenType::VAR: return "VAR";
-        case omscript::TokenType::CONST: return "CONST";
-        case omscript::TokenType::BREAK: return "BREAK";
-        case omscript::TokenType::CONTINUE: return "CONTINUE";
-        case omscript::TokenType::IN: return "IN";
-        case omscript::TokenType::TRUE: return "TRUE";
-        case omscript::TokenType::FALSE: return "FALSE";
-        case omscript::TokenType::NULL_LITERAL: return "NULL_LITERAL";
-        case omscript::TokenType::OPTMAX_START: return "OPTMAX_START";
-        case omscript::TokenType::OPTMAX_END: return "OPTMAX_END";
-        case omscript::TokenType::SWITCH: return "SWITCH";
-        case omscript::TokenType::CASE: return "CASE";
-        case omscript::TokenType::DEFAULT: return "DEFAULT";
-        case omscript::TokenType::PLUS: return "PLUS";
-        case omscript::TokenType::MINUS: return "MINUS";
-        case omscript::TokenType::STAR: return "STAR";
-        case omscript::TokenType::SLASH: return "SLASH";
-        case omscript::TokenType::PERCENT: return "PERCENT";
-        case omscript::TokenType::ASSIGN: return "ASSIGN";
-        case omscript::TokenType::EQ: return "EQ";
-        case omscript::TokenType::NE: return "NE";
-        case omscript::TokenType::LT: return "LT";
-        case omscript::TokenType::LE: return "LE";
-        case omscript::TokenType::GT: return "GT";
-        case omscript::TokenType::GE: return "GE";
-        case omscript::TokenType::AND: return "AND";
-        case omscript::TokenType::OR: return "OR";
-        case omscript::TokenType::NOT: return "NOT";
-        case omscript::TokenType::PLUSPLUS: return "PLUSPLUS";
-        case omscript::TokenType::MINUSMINUS: return "MINUSMINUS";
-        case omscript::TokenType::PLUS_ASSIGN: return "PLUS_ASSIGN";
-        case omscript::TokenType::MINUS_ASSIGN: return "MINUS_ASSIGN";
-        case omscript::TokenType::STAR_ASSIGN: return "STAR_ASSIGN";
-        case omscript::TokenType::SLASH_ASSIGN: return "SLASH_ASSIGN";
-        case omscript::TokenType::PERCENT_ASSIGN: return "PERCENT_ASSIGN";
-        case omscript::TokenType::AMPERSAND_ASSIGN: return "AMPERSAND_ASSIGN";
-        case omscript::TokenType::PIPE_ASSIGN: return "PIPE_ASSIGN";
-        case omscript::TokenType::CARET_ASSIGN: return "CARET_ASSIGN";
-        case omscript::TokenType::LSHIFT_ASSIGN: return "LSHIFT_ASSIGN";
-        case omscript::TokenType::RSHIFT_ASSIGN: return "RSHIFT_ASSIGN";
-        case omscript::TokenType::QUESTION: return "QUESTION";
-        case omscript::TokenType::AMPERSAND: return "AMPERSAND";
-        case omscript::TokenType::PIPE: return "PIPE";
-        case omscript::TokenType::CARET: return "CARET";
-        case omscript::TokenType::TILDE: return "TILDE";
-        case omscript::TokenType::LSHIFT: return "LSHIFT";
-        case omscript::TokenType::RSHIFT: return "RSHIFT";
-        case omscript::TokenType::RANGE: return "RANGE";
-        case omscript::TokenType::LPAREN: return "LPAREN";
-        case omscript::TokenType::RPAREN: return "RPAREN";
-        case omscript::TokenType::LBRACE: return "LBRACE";
-        case omscript::TokenType::RBRACE: return "RBRACE";
-        case omscript::TokenType::LBRACKET: return "LBRACKET";
-        case omscript::TokenType::RBRACKET: return "RBRACKET";
-        case omscript::TokenType::SEMICOLON: return "SEMICOLON";
-        case omscript::TokenType::COMMA: return "COMMA";
-        case omscript::TokenType::COLON: return "COLON";
-        case omscript::TokenType::DOT: return "DOT";
-        case omscript::TokenType::END_OF_FILE: return "END_OF_FILE";
-        case omscript::TokenType::INVALID: return "INVALID";
+    case omscript::TokenType::INTEGER:
+        return "INTEGER";
+    case omscript::TokenType::FLOAT:
+        return "FLOAT";
+    case omscript::TokenType::STRING:
+        return "STRING";
+    case omscript::TokenType::IDENTIFIER:
+        return "IDENTIFIER";
+    case omscript::TokenType::FN:
+        return "FN";
+    case omscript::TokenType::RETURN:
+        return "RETURN";
+    case omscript::TokenType::IF:
+        return "IF";
+    case omscript::TokenType::ELSE:
+        return "ELSE";
+    case omscript::TokenType::WHILE:
+        return "WHILE";
+    case omscript::TokenType::DO:
+        return "DO";
+    case omscript::TokenType::FOR:
+        return "FOR";
+    case omscript::TokenType::VAR:
+        return "VAR";
+    case omscript::TokenType::CONST:
+        return "CONST";
+    case omscript::TokenType::BREAK:
+        return "BREAK";
+    case omscript::TokenType::CONTINUE:
+        return "CONTINUE";
+    case omscript::TokenType::IN:
+        return "IN";
+    case omscript::TokenType::TRUE:
+        return "TRUE";
+    case omscript::TokenType::FALSE:
+        return "FALSE";
+    case omscript::TokenType::NULL_LITERAL:
+        return "NULL_LITERAL";
+    case omscript::TokenType::OPTMAX_START:
+        return "OPTMAX_START";
+    case omscript::TokenType::OPTMAX_END:
+        return "OPTMAX_END";
+    case omscript::TokenType::SWITCH:
+        return "SWITCH";
+    case omscript::TokenType::CASE:
+        return "CASE";
+    case omscript::TokenType::DEFAULT:
+        return "DEFAULT";
+    case omscript::TokenType::PLUS:
+        return "PLUS";
+    case omscript::TokenType::MINUS:
+        return "MINUS";
+    case omscript::TokenType::STAR:
+        return "STAR";
+    case omscript::TokenType::SLASH:
+        return "SLASH";
+    case omscript::TokenType::PERCENT:
+        return "PERCENT";
+    case omscript::TokenType::ASSIGN:
+        return "ASSIGN";
+    case omscript::TokenType::EQ:
+        return "EQ";
+    case omscript::TokenType::NE:
+        return "NE";
+    case omscript::TokenType::LT:
+        return "LT";
+    case omscript::TokenType::LE:
+        return "LE";
+    case omscript::TokenType::GT:
+        return "GT";
+    case omscript::TokenType::GE:
+        return "GE";
+    case omscript::TokenType::AND:
+        return "AND";
+    case omscript::TokenType::OR:
+        return "OR";
+    case omscript::TokenType::NOT:
+        return "NOT";
+    case omscript::TokenType::PLUSPLUS:
+        return "PLUSPLUS";
+    case omscript::TokenType::MINUSMINUS:
+        return "MINUSMINUS";
+    case omscript::TokenType::PLUS_ASSIGN:
+        return "PLUS_ASSIGN";
+    case omscript::TokenType::MINUS_ASSIGN:
+        return "MINUS_ASSIGN";
+    case omscript::TokenType::STAR_ASSIGN:
+        return "STAR_ASSIGN";
+    case omscript::TokenType::SLASH_ASSIGN:
+        return "SLASH_ASSIGN";
+    case omscript::TokenType::PERCENT_ASSIGN:
+        return "PERCENT_ASSIGN";
+    case omscript::TokenType::AMPERSAND_ASSIGN:
+        return "AMPERSAND_ASSIGN";
+    case omscript::TokenType::PIPE_ASSIGN:
+        return "PIPE_ASSIGN";
+    case omscript::TokenType::CARET_ASSIGN:
+        return "CARET_ASSIGN";
+    case omscript::TokenType::LSHIFT_ASSIGN:
+        return "LSHIFT_ASSIGN";
+    case omscript::TokenType::RSHIFT_ASSIGN:
+        return "RSHIFT_ASSIGN";
+    case omscript::TokenType::QUESTION:
+        return "QUESTION";
+    case omscript::TokenType::AMPERSAND:
+        return "AMPERSAND";
+    case omscript::TokenType::PIPE:
+        return "PIPE";
+    case omscript::TokenType::CARET:
+        return "CARET";
+    case omscript::TokenType::TILDE:
+        return "TILDE";
+    case omscript::TokenType::LSHIFT:
+        return "LSHIFT";
+    case omscript::TokenType::RSHIFT:
+        return "RSHIFT";
+    case omscript::TokenType::RANGE:
+        return "RANGE";
+    case omscript::TokenType::LPAREN:
+        return "LPAREN";
+    case omscript::TokenType::RPAREN:
+        return "RPAREN";
+    case omscript::TokenType::LBRACE:
+        return "LBRACE";
+    case omscript::TokenType::RBRACE:
+        return "RBRACE";
+    case omscript::TokenType::LBRACKET:
+        return "LBRACKET";
+    case omscript::TokenType::RBRACKET:
+        return "RBRACKET";
+    case omscript::TokenType::SEMICOLON:
+        return "SEMICOLON";
+    case omscript::TokenType::COMMA:
+        return "COMMA";
+    case omscript::TokenType::COLON:
+        return "COLON";
+    case omscript::TokenType::DOT:
+        return "DOT";
+    case omscript::TokenType::END_OF_FILE:
+        return "END_OF_FILE";
+    case omscript::TokenType::INVALID:
+        return "INVALID";
     }
     return "UNKNOWN";
 }
 
 void printTokens(const std::vector<omscript::Token>& tokens) {
     for (const auto& token : tokens) {
-        std::cout << token.line << ":" << token.column << " "
-                  << tokenTypeToString(token.type);
+        std::cout << token.line << ":" << token.column << " " << tokenTypeToString(token.type);
         if (!token.lexeme.empty()) {
             std::cout << " '" << token.lexeme << "'";
         }
@@ -174,8 +244,7 @@ void printTokens(const std::vector<omscript::Token>& tokens) {
 }
 
 void printProgramSummary(const omscript::Program* program) {
-    std::cout << "Parsed program with " << program->functions.size()
-              << " function(s).\n";
+    std::cout << "Parsed program with " << program->functions.size() << " function(s).\n";
     if (program->functions.empty()) {
         return;
     }
@@ -211,32 +280,20 @@ int main(int argc, char* argv[]) {
         printUsage(argv[0]);
         return 1;
     }
-    
-    enum class Command {
-        Compile,
-        Run,
-        Lex,
-        Parse,
-        EmitIR,
-        Clean,
-        Help,
-        Version
-    };
+
+    enum class Command { Compile, Run, Lex, Parse, EmitIR, Clean, Help, Version };
 
     int argIndex = 1;
     bool verbose = false;
     omscript::OptimizationLevel optLevel = omscript::OptimizationLevel::O2;
-    const auto tryParseOptimizationFlag = [](const std::string& arg)
-        -> std::optional<omscript::OptimizationLevel> {
+    const auto tryParseOptimizationFlag = [](const std::string& arg) -> std::optional<omscript::OptimizationLevel> {
         if (arg == "-Ofast") {
             return omscript::OptimizationLevel::O3;
         }
-        if (arg.size() == 3 && arg[0] == '-' && arg[1] == 'O' &&
-            arg[2] >= '0' && arg[2] <= '3') {
+        if (arg.size() == 3 && arg[0] == '-' && arg[1] == 'O' && arg[2] >= '0' && arg[2] <= '3') {
             static constexpr omscript::OptimizationLevel levels[] = {
-                omscript::OptimizationLevel::O0, omscript::OptimizationLevel::O1,
-                omscript::OptimizationLevel::O2, omscript::OptimizationLevel::O3
-            };
+                omscript::OptimizationLevel::O0, omscript::OptimizationLevel::O1, omscript::OptimizationLevel::O2,
+                omscript::OptimizationLevel::O3};
             return levels[arg[2] - '0'];
         }
         return std::nullopt;
@@ -271,8 +328,8 @@ int main(int argc, char* argv[]) {
     } else if (firstArg == "version" || firstArg == "-v" || firstArg == "--version") {
         command = Command::Version;
         commandMatched = true;
-    } else if (firstArg == "compile" || firstArg == "build" || firstArg == "-c" ||
-               firstArg == "-b" || firstArg == "--compile" || firstArg == "--build") {
+    } else if (firstArg == "compile" || firstArg == "build" || firstArg == "-c" || firstArg == "-b" ||
+               firstArg == "--compile" || firstArg == "--build") {
         command = Command::Compile;
         argIndex++;
         commandMatched = true;
@@ -280,19 +337,18 @@ int main(int argc, char* argv[]) {
         command = Command::Run;
         argIndex++;
         commandMatched = true;
-    } else if (firstArg == "lex" || firstArg == "tokens" || firstArg == "-l" ||
-               firstArg == "--lex" || firstArg == "--tokens") {
+    } else if (firstArg == "lex" || firstArg == "tokens" || firstArg == "-l" || firstArg == "--lex" ||
+               firstArg == "--tokens") {
         command = Command::Lex;
         argIndex++;
         commandMatched = true;
-    } else if (firstArg == "parse" || firstArg == "emit-ast" ||
-               firstArg == "-p" || firstArg == "-a" ||
+    } else if (firstArg == "parse" || firstArg == "emit-ast" || firstArg == "-p" || firstArg == "-a" ||
                firstArg == "--parse" || firstArg == "--ast" || firstArg == "--emit-ast") {
         command = Command::Parse;
         argIndex++;
         commandMatched = true;
-    } else if (firstArg == "emit-ir" || firstArg == "-e" || firstArg == "-i" ||
-               firstArg == "--emit-ir" || firstArg == "--ir") {
+    } else if (firstArg == "emit-ir" || firstArg == "-e" || firstArg == "-i" || firstArg == "--emit-ir" ||
+               firstArg == "--ir") {
         command = Command::EmitIR;
         argIndex++;
         commandMatched = true;
@@ -303,8 +359,7 @@ int main(int argc, char* argv[]) {
     }
 
     if (!commandMatched && !firstArg.empty() && firstArg[0] != '-') {
-        bool hasOmExtension = firstArg.size() >= 3 &&
-                              firstArg.substr(firstArg.size() - 3) == ".om";
+        bool hasOmExtension = firstArg.size() >= 3 && firstArg.substr(firstArg.size() - 3) == ".om";
         if (!hasOmExtension && !std::filesystem::exists(firstArg)) {
             std::cerr << "Error: unknown command '" << firstArg << "'\n";
             printUsage(argv[0]);
@@ -325,12 +380,12 @@ int main(int argc, char* argv[]) {
     std::string sourceFile;
     std::string outputFile = command == Command::EmitIR ? "" : "a.out";
     bool outputSpecified = false;
-    bool supportsOutputOption = command == Command::Compile || command == Command::Run ||
-                                command == Command::EmitIR || command == Command::Clean;
+    bool supportsOutputOption = command == Command::Compile || command == Command::Run || command == Command::EmitIR ||
+                                command == Command::Clean;
     bool parsingRunArgs = false;
     bool keepTemps = false;
     std::vector<std::string> runArgs;
-    
+
     // Parse command line arguments
     for (int i = argIndex; i < argc; i++) {
         std::string arg = argv[i];
@@ -396,12 +451,11 @@ int main(int argc, char* argv[]) {
         } else if (command == Command::Run && parsingRunArgs) {
             runArgs.push_back(arg);
         } else {
-            std::cerr << "Error: multiple input files specified ('" << sourceFile
-                      << "' and '" << arg << "')\n";
+            std::cerr << "Error: multiple input files specified ('" << sourceFile << "' and '" << arg << "')\n";
             return 1;
         }
     }
-    
+
     if (command == Command::Clean) {
         bool removedAny = false;
         auto removeIfPresent = [&](const std::string& path) {
@@ -414,8 +468,7 @@ int main(int argc, char* argv[]) {
                 return;
             }
             if (ec) {
-                std::cerr << "Warning: failed to remove '" << path << "': "
-                          << ec.message() << "\n";
+                std::cerr << "Warning: failed to remove '" << path << "': " << ec.message() << "\n";
             }
         };
         removeIfPresent(outputFile);
@@ -433,7 +486,7 @@ int main(int argc, char* argv[]) {
         printUsage(argv[0]);
         return 1;
     }
-    
+
     try {
         if (command == Command::Lex || command == Command::Parse || command == Command::EmitIR) {
             std::string source = readSourceFile(sourceFile);
@@ -491,7 +544,7 @@ int main(int argc, char* argv[]) {
                     std::filesystem::remove(outputFile, ec);
                     std::filesystem::remove(outputFile + ".o", ec);
                 }
-                return 128 + (-result);  // Follow shell convention for signal exits
+                return 128 + (-result); // Follow shell convention for signal exits
             }
             if (result != 0) {
                 std::cout << "Program exited with code " << result << "\n";
@@ -500,13 +553,13 @@ int main(int argc, char* argv[]) {
                 std::error_code ec;
                 std::filesystem::remove(outputFile, ec);
                 if (ec) {
-                    std::cerr << "Warning: failed to remove temporary output file '"
-                              << outputFile << "': " << ec.message() << "\n";
+                    std::cerr << "Warning: failed to remove temporary output file '" << outputFile
+                              << "': " << ec.message() << "\n";
                 }
                 std::filesystem::remove(outputFile + ".o", ec);
                 if (ec) {
-                    std::cerr << "Warning: failed to remove temporary object file '"
-                              << outputFile << ".o': " << ec.message() << "\n";
+                    std::cerr << "Warning: failed to remove temporary object file '" << outputFile
+                              << ".o': " << ec.message() << "\n";
                 }
             }
             return result;

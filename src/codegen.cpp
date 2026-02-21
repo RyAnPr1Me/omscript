@@ -1695,10 +1695,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateCondBr(condVal, okBB, failBB);
 
         builder->SetInsertPoint(failBB);
-        llvm::Value* errMsg = builder->CreateGlobalString("Runtime error: assertion failed\n", "assert_msg");
+        llvm::Value* errMsg = builder->CreateGlobalString("Runtime error: array index out of bounds\n", "idxa_oob_msg");
         builder->CreateCall(getPrintfFunction(), {errMsg});
-        llvm::Function* trapFn = llvm::Intrinsic::getOrInsertDeclaration(module.get(), llvm::Intrinsic::trap);
-        builder->CreateCall(trapFn, {});
+        builder->CreateCall(
+            module->getOrInsertFunction("abort", llvm::FunctionType::get(llvm::Type::getVoidTy(*context), false)));
         builder->CreateUnreachable();
 
         builder->SetInsertPoint(okBB);
@@ -1991,10 +1991,10 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
 
     // Out-of-bounds path: print error and abort
     builder->SetInsertPoint(failBB);
-    llvm::Value* errMsg = builder->CreateGlobalString("Runtime error: array index out of bounds\n", "idx_oob_msg");
+    llvm::Value* errMsg = builder->CreateGlobalString("Runtime error: assertion failed\n", "assert_msg");
     builder->CreateCall(getPrintfFunction(), {errMsg});
-    llvm::Function* trapFn = llvm::Intrinsic::getOrInsertDeclaration(module.get(), llvm::Intrinsic::trap);
-    builder->CreateCall(trapFn, {});
+    builder->CreateCall(
+        module->getOrInsertFunction("abort", llvm::FunctionType::get(llvm::Type::getVoidTy(*context), false)));
     builder->CreateUnreachable();
 
     // Success path: load element at offset (index + 1)
@@ -2027,10 +2027,10 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
 
     // Out-of-bounds path: print error and abort
     builder->SetInsertPoint(failBB);
-    llvm::Value* errMsg = builder->CreateGlobalString("Runtime error: array index out of bounds\n", "idxa_oob_msg");
+    llvm::Value* errMsg = builder->CreateGlobalString("Runtime error: array index out of bounds\n", "idx_oob_msg");
     builder->CreateCall(getPrintfFunction(), {errMsg});
-    llvm::Function* trapFn = llvm::Intrinsic::getOrInsertDeclaration(module.get(), llvm::Intrinsic::trap);
-    builder->CreateCall(trapFn, {});
+    builder->CreateCall(
+        module->getOrInsertFunction("abort", llvm::FunctionType::get(llvm::Type::getVoidTy(*context), false)));
     builder->CreateUnreachable();
 
     // Success path: store element at offset (index + 1)
@@ -2249,15 +2249,9 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     llvm::Constant* message =
         llvm::ConstantExpr::getInBoundsGetElementPtr(messageVar->getValueType(), messageVar, indices);
     builder->CreateCall(getPrintfFunction(), {message});
-#if LLVM_VERSION_MAJOR >= 19
-    llvm::FunctionCallee trap = llvm::Intrinsic::getOrInsertDeclaration(module.get(), llvm::Intrinsic::trap);
-#else
-    llvm::FunctionCallee trap = llvm::Intrinsic::getOrInsertDeclaration(module.get(), llvm::Intrinsic::trap);
-#endif
-    builder->CreateCall(trap);
+    builder->CreateCall(
+        module->getOrInsertFunction("abort", llvm::FunctionType::get(llvm::Type::getVoidTy(*context), false)));
     builder->CreateUnreachable();
-
-    // Condition block: check if iterator < end (forward) or > end (backward)
     builder->SetInsertPoint(condBB);
     llvm::Value* curVal = builder->CreateLoad(getDefaultType(), iterAlloca, stmt->iteratorVar.c_str());
     llvm::Value* stepPositive = builder->CreateICmpSGT(stepVal, zero, "steppositive");
