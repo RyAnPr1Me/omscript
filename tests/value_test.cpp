@@ -1,5 +1,7 @@
-#include <gtest/gtest.h>
 #include "value.h"
+#include <cmath>
+#include <gtest/gtest.h>
+#include <limits>
 
 using namespace omscript;
 
@@ -565,4 +567,119 @@ TEST(ValueTest, ShiftLeftInvalidTypes) {
 
 TEST(ValueTest, ShiftRightInvalidTypes) {
     EXPECT_THROW(Value(int64_t(1)) >> Value(1.0), std::runtime_error);
+}
+
+// ===========================================================================
+// Edge cases - integer limits
+// ===========================================================================
+
+TEST(ValueTest, Int64Max) {
+    Value v(std::numeric_limits<int64_t>::max());
+    EXPECT_EQ(v.asInt(), std::numeric_limits<int64_t>::max());
+}
+
+TEST(ValueTest, Int64Min) {
+    Value v(std::numeric_limits<int64_t>::min());
+    EXPECT_EQ(v.asInt(), std::numeric_limits<int64_t>::min());
+}
+
+TEST(ValueTest, IntMaxPlusOne) {
+    Value v(int64_t(std::numeric_limits<int>::max()) + 1);
+    EXPECT_GT(v.asInt(), int64_t(std::numeric_limits<int>::max()));
+}
+
+TEST(ValueTest, IntMinMinusOne) {
+    Value v(int64_t(std::numeric_limits<int>::min()) - 1);
+    EXPECT_LT(v.asInt(), int64_t(std::numeric_limits<int>::min()));
+}
+
+TEST(ValueTest, ZeroDivisionInteger) {
+    EXPECT_THROW(Value(int64_t(10)) / Value(int64_t(0)), std::runtime_error);
+}
+
+TEST(ValueTest, ZeroModuloInteger) {
+    EXPECT_THROW(Value(int64_t(10)) % Value(int64_t(0)), std::runtime_error);
+}
+
+// ===========================================================================
+// Edge cases - float limits
+// ===========================================================================
+
+TEST(ValueTest, FloatMax) {
+    Value v(std::numeric_limits<double>::max());
+    EXPECT_EQ(v.asFloat(), std::numeric_limits<double>::max());
+}
+
+TEST(ValueTest, FloatMin) {
+    Value v(std::numeric_limits<double>::min());
+    EXPECT_EQ(v.asFloat(), std::numeric_limits<double>::min());
+}
+
+TEST(ValueTest, FloatInfinity) {
+    Value v(std::numeric_limits<double>::infinity());
+    EXPECT_EQ(v.asFloat(), std::numeric_limits<double>::infinity());
+}
+
+TEST(ValueTest, FloatNegativeInfinity) {
+    Value v(-std::numeric_limits<double>::infinity());
+    EXPECT_EQ(v.asFloat(), -std::numeric_limits<double>::infinity());
+}
+
+TEST(ValueTest, FloatNaN) {
+    Value v(std::numeric_limits<double>::quiet_NaN());
+    EXPECT_TRUE(std::isnan(v.asFloat()));
+}
+
+TEST(ValueTest, FloatZero) {
+    Value v(0.0);
+    EXPECT_EQ(v.asFloat(), 0.0);
+}
+
+TEST(ValueTest, FloatNegativeZero) {
+    Value v(-0.0);
+    EXPECT_EQ(v.asFloat(), -0.0);
+}
+
+TEST(ValueTest, FloatZeroDivision) {
+    EXPECT_THROW(Value(1.0) / Value(0.0), std::runtime_error);
+}
+
+// ===========================================================================
+// Edge cases - string operations
+// ===========================================================================
+
+TEST(ValueTest, StringConcatMultiple) {
+    Value a("hello");
+    Value b(" ");
+    Value c("world");
+    Value result = a + b + c;
+    EXPECT_STREQ(result.asString(), "hello world");
+}
+
+TEST(ValueTest, StringConcatWithInt) {
+    Value a("number: ");
+    Value b(int64_t(42));
+    Value result = a + b;
+    EXPECT_STREQ(result.asString(), "number: 42");
+}
+
+TEST(ValueTest, StringConcatWithFloat) {
+    Value a("pi: ");
+    Value b(3.14);
+    Value result = a + b;
+    EXPECT_STREQ(result.asString(), "pi: 3.14");
+}
+
+TEST(ValueTest, EmptyStringConcat) {
+    Value empty("");
+    Value nonEmpty("test");
+    Value result = empty + nonEmpty;
+    EXPECT_STREQ(result.asString(), "test");
+}
+
+TEST(ValueTest, StringConcatEmptyOther) {
+    Value nonEmpty("test");
+    Value empty("");
+    Value result = nonEmpty + empty;
+    EXPECT_STREQ(result.asString(), "test");
 }

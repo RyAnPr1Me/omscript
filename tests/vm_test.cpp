@@ -1,9 +1,9 @@
-#include <gtest/gtest.h>
-#include "vm.h"
 #include "bytecode.h"
 #include "codegen.h"
 #include "lexer.h"
 #include "parser.h"
+#include "vm.h"
+#include <gtest/gtest.h>
 
 using namespace omscript;
 
@@ -20,8 +20,11 @@ static std::vector<uint8_t> buildBytecode(std::function<void(BytecodeEmitter&)> 
 
 TEST(VMTest, PushIntAndReturn) {
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT);  e.emitReg(0); e.emitInt(42);
-        e.emit(OpCode::RETURN);    e.emitReg(0);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(42);
+        e.emit(OpCode::RETURN);
+        e.emitReg(0);
     });
     VM vm;
     vm.execute(code);
@@ -30,8 +33,11 @@ TEST(VMTest, PushIntAndReturn) {
 
 TEST(VMTest, PushFloatAndReturn) {
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_FLOAT); e.emitReg(0); e.emitFloat(3.14);
-        e.emit(OpCode::RETURN);     e.emitReg(0);
+        e.emit(OpCode::PUSH_FLOAT);
+        e.emitReg(0);
+        e.emitFloat(3.14);
+        e.emit(OpCode::RETURN);
+        e.emitReg(0);
     });
     VM vm;
     vm.execute(code);
@@ -40,8 +46,11 @@ TEST(VMTest, PushFloatAndReturn) {
 
 TEST(VMTest, PushStringAndReturn) {
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_STRING); e.emitReg(0); e.emitString("hello");
-        e.emit(OpCode::RETURN);      e.emitReg(0);
+        e.emit(OpCode::PUSH_STRING);
+        e.emitReg(0);
+        e.emitString("hello");
+        e.emit(OpCode::RETURN);
+        e.emitReg(0);
     });
     VM vm;
     vm.execute(code);
@@ -54,10 +63,18 @@ TEST(VMTest, PushStringAndReturn) {
 
 TEST(VMTest, AddIntegers) {
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(3);
-        e.emit(OpCode::PUSH_INT); e.emitReg(1); e.emitInt(4);
-        e.emit(OpCode::ADD);      e.emitReg(2); e.emitReg(0); e.emitReg(1);
-        e.emit(OpCode::RETURN);   e.emitReg(2);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(3);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(1);
+        e.emitInt(4);
+        e.emit(OpCode::ADD);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
     });
     VM vm;
     vm.execute(code);
@@ -66,10 +83,18 @@ TEST(VMTest, AddIntegers) {
 
 TEST(VMTest, SubIntegers) {
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(10);
-        e.emit(OpCode::PUSH_INT); e.emitReg(1); e.emitInt(3);
-        e.emit(OpCode::SUB);      e.emitReg(2); e.emitReg(0); e.emitReg(1);
-        e.emit(OpCode::RETURN);   e.emitReg(2);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(10);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(1);
+        e.emitInt(3);
+        e.emit(OpCode::SUB);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
     });
     VM vm;
     vm.execute(code);
@@ -78,10 +103,18 @@ TEST(VMTest, SubIntegers) {
 
 TEST(VMTest, MulIntegers) {
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(5);
-        e.emit(OpCode::PUSH_INT); e.emitReg(1); e.emitInt(6);
-        e.emit(OpCode::MUL);      e.emitReg(2); e.emitReg(0); e.emitReg(1);
-        e.emit(OpCode::RETURN);   e.emitReg(2);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(5);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(1);
+        e.emitInt(6);
+        e.emit(OpCode::MUL);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
     });
     VM vm;
     vm.execute(code);
@@ -90,10 +123,18 @@ TEST(VMTest, MulIntegers) {
 
 TEST(VMTest, DivIntegers) {
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(10);
-        e.emit(OpCode::PUSH_INT); e.emitReg(1); e.emitInt(3);
-        e.emit(OpCode::DIV);      e.emitReg(2); e.emitReg(0); e.emitReg(1);
-        e.emit(OpCode::RETURN);   e.emitReg(2);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(10);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(1);
+        e.emitInt(3);
+        e.emit(OpCode::DIV);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
     });
     VM vm;
     vm.execute(code);
@@ -102,10 +143,18 @@ TEST(VMTest, DivIntegers) {
 
 TEST(VMTest, ModIntegers) {
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(10);
-        e.emit(OpCode::PUSH_INT); e.emitReg(1); e.emitInt(3);
-        e.emit(OpCode::MOD);      e.emitReg(2); e.emitReg(0); e.emitReg(1);
-        e.emit(OpCode::RETURN);   e.emitReg(2);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(10);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(1);
+        e.emitInt(3);
+        e.emit(OpCode::MOD);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
     });
     VM vm;
     vm.execute(code);
@@ -114,9 +163,14 @@ TEST(VMTest, ModIntegers) {
 
 TEST(VMTest, NegInteger) {
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(5);
-        e.emit(OpCode::NEG);      e.emitReg(1); e.emitReg(0);
-        e.emit(OpCode::RETURN);   e.emitReg(1);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(5);
+        e.emit(OpCode::NEG);
+        e.emitReg(1);
+        e.emitReg(0);
+        e.emit(OpCode::RETURN);
+        e.emitReg(1);
     });
     VM vm;
     vm.execute(code);
@@ -129,10 +183,18 @@ TEST(VMTest, NegInteger) {
 
 TEST(VMTest, EqualTrue) {
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(5);
-        e.emit(OpCode::PUSH_INT); e.emitReg(1); e.emitInt(5);
-        e.emit(OpCode::EQ);       e.emitReg(2); e.emitReg(0); e.emitReg(1);
-        e.emit(OpCode::RETURN);   e.emitReg(2);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(5);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(1);
+        e.emitInt(5);
+        e.emit(OpCode::EQ);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
     });
     VM vm;
     vm.execute(code);
@@ -141,10 +203,18 @@ TEST(VMTest, EqualTrue) {
 
 TEST(VMTest, EqualFalse) {
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(5);
-        e.emit(OpCode::PUSH_INT); e.emitReg(1); e.emitInt(3);
-        e.emit(OpCode::EQ);       e.emitReg(2); e.emitReg(0); e.emitReg(1);
-        e.emit(OpCode::RETURN);   e.emitReg(2);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(5);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(1);
+        e.emitInt(3);
+        e.emit(OpCode::EQ);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
     });
     VM vm;
     vm.execute(code);
@@ -153,10 +223,18 @@ TEST(VMTest, EqualFalse) {
 
 TEST(VMTest, NotEqual) {
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(5);
-        e.emit(OpCode::PUSH_INT); e.emitReg(1); e.emitInt(3);
-        e.emit(OpCode::NE);       e.emitReg(2); e.emitReg(0); e.emitReg(1);
-        e.emit(OpCode::RETURN);   e.emitReg(2);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(5);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(1);
+        e.emitInt(3);
+        e.emit(OpCode::NE);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
     });
     VM vm;
     vm.execute(code);
@@ -165,10 +243,18 @@ TEST(VMTest, NotEqual) {
 
 TEST(VMTest, LessThan) {
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(3);
-        e.emit(OpCode::PUSH_INT); e.emitReg(1); e.emitInt(5);
-        e.emit(OpCode::LT);       e.emitReg(2); e.emitReg(0); e.emitReg(1);
-        e.emit(OpCode::RETURN);   e.emitReg(2);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(3);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(1);
+        e.emitInt(5);
+        e.emit(OpCode::LT);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
     });
     VM vm;
     vm.execute(code);
@@ -177,10 +263,18 @@ TEST(VMTest, LessThan) {
 
 TEST(VMTest, LessOrEqual) {
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(5);
-        e.emit(OpCode::PUSH_INT); e.emitReg(1); e.emitInt(5);
-        e.emit(OpCode::LE);       e.emitReg(2); e.emitReg(0); e.emitReg(1);
-        e.emit(OpCode::RETURN);   e.emitReg(2);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(5);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(1);
+        e.emitInt(5);
+        e.emit(OpCode::LE);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
     });
     VM vm;
     vm.execute(code);
@@ -189,10 +283,18 @@ TEST(VMTest, LessOrEqual) {
 
 TEST(VMTest, GreaterThan) {
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(5);
-        e.emit(OpCode::PUSH_INT); e.emitReg(1); e.emitInt(3);
-        e.emit(OpCode::GT);       e.emitReg(2); e.emitReg(0); e.emitReg(1);
-        e.emit(OpCode::RETURN);   e.emitReg(2);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(5);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(1);
+        e.emitInt(3);
+        e.emit(OpCode::GT);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
     });
     VM vm;
     vm.execute(code);
@@ -201,10 +303,18 @@ TEST(VMTest, GreaterThan) {
 
 TEST(VMTest, GreaterOrEqual) {
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(5);
-        e.emit(OpCode::PUSH_INT); e.emitReg(1); e.emitInt(5);
-        e.emit(OpCode::GE);       e.emitReg(2); e.emitReg(0); e.emitReg(1);
-        e.emit(OpCode::RETURN);   e.emitReg(2);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(5);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(1);
+        e.emitInt(5);
+        e.emit(OpCode::GE);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
     });
     VM vm;
     vm.execute(code);
@@ -217,10 +327,18 @@ TEST(VMTest, GreaterOrEqual) {
 
 TEST(VMTest, LogicalAnd) {
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(1);
-        e.emit(OpCode::PUSH_INT); e.emitReg(1); e.emitInt(1);
-        e.emit(OpCode::AND);      e.emitReg(2); e.emitReg(0); e.emitReg(1);
-        e.emit(OpCode::RETURN);   e.emitReg(2);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(1);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(1);
+        e.emitInt(1);
+        e.emit(OpCode::AND);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
     });
     VM vm;
     vm.execute(code);
@@ -229,10 +347,18 @@ TEST(VMTest, LogicalAnd) {
 
 TEST(VMTest, LogicalAndFalse) {
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(1);
-        e.emit(OpCode::PUSH_INT); e.emitReg(1); e.emitInt(0);
-        e.emit(OpCode::AND);      e.emitReg(2); e.emitReg(0); e.emitReg(1);
-        e.emit(OpCode::RETURN);   e.emitReg(2);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(1);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(1);
+        e.emitInt(0);
+        e.emit(OpCode::AND);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
     });
     VM vm;
     vm.execute(code);
@@ -241,10 +367,18 @@ TEST(VMTest, LogicalAndFalse) {
 
 TEST(VMTest, LogicalOr) {
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(0);
-        e.emit(OpCode::PUSH_INT); e.emitReg(1); e.emitInt(1);
-        e.emit(OpCode::OR);       e.emitReg(2); e.emitReg(0); e.emitReg(1);
-        e.emit(OpCode::RETURN);   e.emitReg(2);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(0);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(1);
+        e.emitInt(1);
+        e.emit(OpCode::OR);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
     });
     VM vm;
     vm.execute(code);
@@ -253,9 +387,14 @@ TEST(VMTest, LogicalOr) {
 
 TEST(VMTest, LogicalNot) {
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(0);
-        e.emit(OpCode::NOT);      e.emitReg(1); e.emitReg(0);
-        e.emit(OpCode::RETURN);   e.emitReg(1);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(0);
+        e.emit(OpCode::NOT);
+        e.emitReg(1);
+        e.emitReg(0);
+        e.emit(OpCode::RETURN);
+        e.emitReg(1);
     });
     VM vm;
     vm.execute(code);
@@ -264,9 +403,14 @@ TEST(VMTest, LogicalNot) {
 
 TEST(VMTest, LogicalNotTrue) {
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(1);
-        e.emit(OpCode::NOT);      e.emitReg(1); e.emitReg(0);
-        e.emit(OpCode::RETURN);   e.emitReg(1);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(1);
+        e.emit(OpCode::NOT);
+        e.emitReg(1);
+        e.emitReg(0);
+        e.emit(OpCode::RETURN);
+        e.emitReg(1);
     });
     VM vm;
     vm.execute(code);
@@ -279,10 +423,17 @@ TEST(VMTest, LogicalNotTrue) {
 
 TEST(VMTest, StoreAndLoadVar) {
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT);  e.emitReg(0); e.emitInt(42);
-        e.emit(OpCode::STORE_VAR); e.emitReg(0); e.emitString("x");
-        e.emit(OpCode::LOAD_VAR);  e.emitReg(1); e.emitString("x");
-        e.emit(OpCode::RETURN);    e.emitReg(1);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(42);
+        e.emit(OpCode::STORE_VAR);
+        e.emitReg(0);
+        e.emitString("x");
+        e.emit(OpCode::LOAD_VAR);
+        e.emitReg(1);
+        e.emitString("x");
+        e.emit(OpCode::RETURN);
+        e.emitReg(1);
     });
     VM vm;
     vm.execute(code);
@@ -293,8 +444,11 @@ TEST(VMTest, SetGlobalBeforeExecute) {
     VM vm;
     vm.setGlobal("x", Value(int64_t(100)));
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::LOAD_VAR); e.emitReg(0); e.emitString("x");
-        e.emit(OpCode::RETURN);   e.emitReg(0);
+        e.emit(OpCode::LOAD_VAR);
+        e.emitReg(0);
+        e.emitString("x");
+        e.emit(OpCode::RETURN);
+        e.emitReg(0);
     });
     vm.execute(code);
     EXPECT_EQ(vm.getLastReturn().asInt(), 100);
@@ -313,8 +467,11 @@ TEST(VMTest, GetUndefinedGlobal) {
 
 TEST(VMTest, LoadUndefinedVar) {
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::LOAD_VAR); e.emitReg(0); e.emitString("undef");
-        e.emit(OpCode::RETURN);   e.emitReg(0);
+        e.emit(OpCode::LOAD_VAR);
+        e.emitReg(0);
+        e.emitString("undef");
+        e.emit(OpCode::RETURN);
+        e.emitReg(0);
     });
     VM vm;
     EXPECT_THROW(vm.execute(code), std::runtime_error);
@@ -327,18 +484,23 @@ TEST(VMTest, LoadUndefinedVar) {
 TEST(VMTest, Jump) {
     // PUSH_INT r0, 1; JUMP over PUSH_INT r0, 2; RETURN r0
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(1);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(1);
         e.emit(OpCode::JUMP);
         size_t jumpAddr = e.currentOffset();
         e.emitShort(0); // placeholder
 
         // This should be skipped
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(2);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(2);
 
         uint16_t target = static_cast<uint16_t>(e.currentOffset());
         e.patchJump(jumpAddr, target);
 
-        e.emit(OpCode::RETURN); e.emitReg(0);
+        e.emit(OpCode::RETURN);
+        e.emitReg(0);
     });
     VM vm;
     vm.execute(code);
@@ -347,20 +509,29 @@ TEST(VMTest, Jump) {
 
 TEST(VMTest, JumpIfFalseSkips) {
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT);       e.emitReg(0); e.emitInt(0); // false
-        e.emit(OpCode::JUMP_IF_FALSE);  e.emitReg(0);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(0); // false
+        e.emit(OpCode::JUMP_IF_FALSE);
+        e.emitReg(0);
         size_t jumpAddr = e.currentOffset();
         e.emitShort(0); // placeholder
 
         // This should be skipped
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(99);
-        e.emit(OpCode::RETURN);   e.emitReg(0);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(99);
+        e.emit(OpCode::RETURN);
+        e.emitReg(0);
 
         uint16_t target = static_cast<uint16_t>(e.currentOffset());
         e.patchJump(jumpAddr, target);
 
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(42);
-        e.emit(OpCode::RETURN);   e.emitReg(0);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(42);
+        e.emit(OpCode::RETURN);
+        e.emitReg(0);
     });
     VM vm;
     vm.execute(code);
@@ -369,20 +540,29 @@ TEST(VMTest, JumpIfFalseSkips) {
 
 TEST(VMTest, JumpIfFalseDoesNotSkip) {
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT);       e.emitReg(0); e.emitInt(1); // true
-        e.emit(OpCode::JUMP_IF_FALSE);  e.emitReg(0);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(1); // true
+        e.emit(OpCode::JUMP_IF_FALSE);
+        e.emitReg(0);
         size_t jumpAddr = e.currentOffset();
         e.emitShort(0); // placeholder
 
         // This should NOT be skipped
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(99);
-        e.emit(OpCode::RETURN);   e.emitReg(0);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(99);
+        e.emit(OpCode::RETURN);
+        e.emitReg(0);
 
         uint16_t target = static_cast<uint16_t>(e.currentOffset());
         e.patchJump(jumpAddr, target);
 
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(42);
-        e.emit(OpCode::RETURN);   e.emitReg(0);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(42);
+        e.emit(OpCode::RETURN);
+        e.emitReg(0);
     });
     VM vm;
     vm.execute(code);
@@ -395,7 +575,9 @@ TEST(VMTest, JumpIfFalseDoesNotSkip) {
 
 TEST(VMTest, Halt) {
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(42);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(42);
         e.emit(OpCode::HALT);
     });
     VM vm;
@@ -410,8 +592,11 @@ TEST(VMTest, Halt) {
 
 TEST(VMTest, ReturnEmptyStack) {
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(0);
-        e.emit(OpCode::RETURN);   e.emitReg(0);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(0);
+        e.emit(OpCode::RETURN);
+        e.emitReg(0);
     });
     VM vm;
     vm.execute(code);
@@ -428,18 +613,36 @@ TEST(VMTest, CallSimpleFunction) {
     addFunc.name = "add";
     addFunc.arity = 2;
     addFunc.bytecode = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::LOAD_LOCAL); e.emitReg(0); e.emitByte(0);
-        e.emit(OpCode::LOAD_LOCAL); e.emitReg(1); e.emitByte(1);
-        e.emit(OpCode::ADD);        e.emitReg(2); e.emitReg(0); e.emitReg(1);
-        e.emit(OpCode::RETURN);     e.emitReg(2);
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitReg(0);
+        e.emitByte(0);
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitReg(1);
+        e.emitByte(1);
+        e.emit(OpCode::ADD);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
     });
 
     // Main bytecode: push 3 and 4, call add(3, 4), return result.
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(3);
-        e.emit(OpCode::PUSH_INT); e.emitReg(1); e.emitInt(4);
-        e.emit(OpCode::CALL);     e.emitReg(2); e.emitString("add"); e.emitByte(2); e.emitReg(0); e.emitReg(1);
-        e.emit(OpCode::RETURN);   e.emitReg(2);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(3);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(1);
+        e.emitInt(4);
+        e.emit(OpCode::CALL);
+        e.emitReg(2);
+        e.emitString("add");
+        e.emitByte(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
     });
 
     VM vm;
@@ -454,13 +657,20 @@ TEST(VMTest, CallFunctionNoArgs) {
     constFunc.name = "answer";
     constFunc.arity = 0;
     constFunc.bytecode = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(42);
-        e.emit(OpCode::RETURN);   e.emitReg(0);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(42);
+        e.emit(OpCode::RETURN);
+        e.emitReg(0);
     });
 
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::CALL);   e.emitReg(0); e.emitString("answer"); e.emitByte(0);
-        e.emit(OpCode::RETURN); e.emitReg(0);
+        e.emit(OpCode::CALL);
+        e.emitReg(0);
+        e.emitString("answer");
+        e.emitByte(0);
+        e.emit(OpCode::RETURN);
+        e.emitReg(0);
     });
 
     VM vm;
@@ -475,10 +685,18 @@ TEST(VMTest, CallNestedFunctions) {
     doubleIt.name = "double_it";
     doubleIt.arity = 1;
     doubleIt.bytecode = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::LOAD_LOCAL); e.emitReg(0); e.emitByte(0);
-        e.emit(OpCode::PUSH_INT);   e.emitReg(1); e.emitInt(2);
-        e.emit(OpCode::MUL);        e.emitReg(2); e.emitReg(0); e.emitReg(1);
-        e.emit(OpCode::RETURN);     e.emitReg(2);
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitReg(0);
+        e.emitByte(0);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(1);
+        e.emitInt(2);
+        e.emit(OpCode::MUL);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
     });
 
     // "quad" calls double_it twice: double_it(double_it(x))
@@ -486,16 +704,34 @@ TEST(VMTest, CallNestedFunctions) {
     quad.name = "quad";
     quad.arity = 1;
     quad.bytecode = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::LOAD_LOCAL); e.emitReg(0); e.emitByte(0);
-        e.emit(OpCode::CALL);      e.emitReg(1); e.emitString("double_it"); e.emitByte(1); e.emitReg(0);
-        e.emit(OpCode::CALL);      e.emitReg(2); e.emitString("double_it"); e.emitByte(1); e.emitReg(1);
-        e.emit(OpCode::RETURN);    e.emitReg(2);
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitReg(0);
+        e.emitByte(0);
+        e.emit(OpCode::CALL);
+        e.emitReg(1);
+        e.emitString("double_it");
+        e.emitByte(1);
+        e.emitReg(0);
+        e.emit(OpCode::CALL);
+        e.emitReg(2);
+        e.emitString("double_it");
+        e.emitByte(1);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
     });
 
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(5);
-        e.emit(OpCode::CALL);     e.emitReg(1); e.emitString("quad"); e.emitByte(1); e.emitReg(0);
-        e.emit(OpCode::RETURN);   e.emitReg(1);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(5);
+        e.emit(OpCode::CALL);
+        e.emitReg(1);
+        e.emitString("quad");
+        e.emitByte(1);
+        e.emitReg(0);
+        e.emit(OpCode::RETURN);
+        e.emitReg(1);
     });
 
     VM vm;
@@ -507,7 +743,10 @@ TEST(VMTest, CallNestedFunctions) {
 
 TEST(VMTest, CallUndefinedFunction) {
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::CALL); e.emitReg(0); e.emitString("nonexistent"); e.emitByte(0);
+        e.emit(OpCode::CALL);
+        e.emitReg(0);
+        e.emitString("nonexistent");
+        e.emitByte(0);
     });
     VM vm;
     EXPECT_THROW(vm.execute(code), std::runtime_error);
@@ -518,13 +757,22 @@ TEST(VMTest, CallArityMismatch) {
     func.name = "f";
     func.arity = 2;
     func.bytecode = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(0);
-        e.emit(OpCode::RETURN);   e.emitReg(0);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(0);
+        e.emit(OpCode::RETURN);
+        e.emitReg(0);
     });
 
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(1);
-        e.emit(OpCode::CALL);     e.emitReg(1); e.emitString("f"); e.emitByte(1); e.emitReg(0);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(1);
+        e.emit(OpCode::CALL);
+        e.emitReg(1);
+        e.emitString("f");
+        e.emitByte(1);
+        e.emitReg(0);
     });
 
     VM vm;
@@ -538,17 +786,33 @@ TEST(VMTest, CallPreservesGlobals) {
     setter.name = "set_x";
     setter.arity = 1;
     setter.bytecode = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::LOAD_LOCAL); e.emitReg(0); e.emitByte(0);
-        e.emit(OpCode::STORE_VAR);  e.emitReg(0); e.emitString("x");
-        e.emit(OpCode::PUSH_INT);   e.emitReg(1); e.emitInt(0);
-        e.emit(OpCode::RETURN);     e.emitReg(1);
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitReg(0);
+        e.emitByte(0);
+        e.emit(OpCode::STORE_VAR);
+        e.emitReg(0);
+        e.emitString("x");
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(1);
+        e.emitInt(0);
+        e.emit(OpCode::RETURN);
+        e.emitReg(1);
     });
 
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(99);
-        e.emit(OpCode::CALL);     e.emitReg(1); e.emitString("set_x"); e.emitByte(1); e.emitReg(0);
-        e.emit(OpCode::LOAD_VAR); e.emitReg(2); e.emitString("x");
-        e.emit(OpCode::RETURN);   e.emitReg(2);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(99);
+        e.emit(OpCode::CALL);
+        e.emitReg(1);
+        e.emitString("set_x");
+        e.emitByte(1);
+        e.emitReg(0);
+        e.emit(OpCode::LOAD_VAR);
+        e.emitReg(2);
+        e.emitString("x");
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
     });
 
     VM vm;
@@ -563,18 +827,37 @@ TEST(VMTest, LoadLocalAndStoreLocal) {
     func.name = "inc";
     func.arity = 1;
     func.bytecode = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::LOAD_LOCAL);  e.emitReg(0); e.emitByte(0);
-        e.emit(OpCode::PUSH_INT);    e.emitReg(1); e.emitInt(10);
-        e.emit(OpCode::ADD);         e.emitReg(2); e.emitReg(0); e.emitReg(1);
-        e.emit(OpCode::STORE_LOCAL); e.emitByte(0); e.emitReg(2);
-        e.emit(OpCode::LOAD_LOCAL);  e.emitReg(3); e.emitByte(0);
-        e.emit(OpCode::RETURN);      e.emitReg(3);
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitReg(0);
+        e.emitByte(0);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(1);
+        e.emitInt(10);
+        e.emit(OpCode::ADD);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::STORE_LOCAL);
+        e.emitByte(0);
+        e.emitReg(2);
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitReg(3);
+        e.emitByte(0);
+        e.emit(OpCode::RETURN);
+        e.emitReg(3);
     });
 
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(5);
-        e.emit(OpCode::CALL);     e.emitReg(1); e.emitString("inc"); e.emitByte(1); e.emitReg(0);
-        e.emit(OpCode::RETURN);   e.emitReg(1);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(5);
+        e.emit(OpCode::CALL);
+        e.emitReg(1);
+        e.emitString("inc");
+        e.emitByte(1);
+        e.emitReg(0);
+        e.emit(OpCode::RETURN);
+        e.emitReg(1);
     });
 
     VM vm;
@@ -588,11 +871,16 @@ TEST(VMTest, LoadLocalOutOfRange) {
     func.name = "bad";
     func.arity = 0;
     func.bytecode = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::LOAD_LOCAL); e.emitReg(0); e.emitByte(5); // no locals
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitReg(0);
+        e.emitByte(5); // no locals
     });
 
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::CALL); e.emitReg(0); e.emitString("bad"); e.emitByte(0);
+        e.emit(OpCode::CALL);
+        e.emitReg(0);
+        e.emitString("bad");
+        e.emitByte(0);
     });
 
     VM vm;
@@ -607,7 +895,10 @@ TEST(VMTest, LoadLocalOutOfRange) {
 TEST(VMTest, StackUnderflow) {
     // In register-based VM, adding two uninitialized (NONE) registers throws.
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::ADD); e.emitReg(0); e.emitReg(0); e.emitReg(0);
+        e.emit(OpCode::ADD);
+        e.emitReg(0);
+        e.emitReg(0);
+        e.emitReg(0);
     });
     VM vm;
     EXPECT_THROW(vm.execute(code), std::runtime_error);
@@ -632,10 +923,18 @@ TEST(VMTest, BytecodeReadOutOfBounds) {
 
 TEST(VMTest, AddFloats) {
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_FLOAT); e.emitReg(0); e.emitFloat(1.5);
-        e.emit(OpCode::PUSH_FLOAT); e.emitReg(1); e.emitFloat(2.5);
-        e.emit(OpCode::ADD);        e.emitReg(2); e.emitReg(0); e.emitReg(1);
-        e.emit(OpCode::RETURN);     e.emitReg(2);
+        e.emit(OpCode::PUSH_FLOAT);
+        e.emitReg(0);
+        e.emitFloat(1.5);
+        e.emit(OpCode::PUSH_FLOAT);
+        e.emitReg(1);
+        e.emitFloat(2.5);
+        e.emit(OpCode::ADD);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
     });
     VM vm;
     vm.execute(code);
@@ -644,10 +943,18 @@ TEST(VMTest, AddFloats) {
 
 TEST(VMTest, SubFloats) {
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_FLOAT); e.emitReg(0); e.emitFloat(5.0);
-        e.emit(OpCode::PUSH_FLOAT); e.emitReg(1); e.emitFloat(2.5);
-        e.emit(OpCode::SUB);        e.emitReg(2); e.emitReg(0); e.emitReg(1);
-        e.emit(OpCode::RETURN);     e.emitReg(2);
+        e.emit(OpCode::PUSH_FLOAT);
+        e.emitReg(0);
+        e.emitFloat(5.0);
+        e.emit(OpCode::PUSH_FLOAT);
+        e.emitReg(1);
+        e.emitFloat(2.5);
+        e.emit(OpCode::SUB);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
     });
     VM vm;
     vm.execute(code);
@@ -656,9 +963,14 @@ TEST(VMTest, SubFloats) {
 
 TEST(VMTest, NegFloat) {
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_FLOAT); e.emitReg(0); e.emitFloat(3.14);
-        e.emit(OpCode::NEG);        e.emitReg(1); e.emitReg(0);
-        e.emit(OpCode::RETURN);     e.emitReg(1);
+        e.emit(OpCode::PUSH_FLOAT);
+        e.emitReg(0);
+        e.emitFloat(3.14);
+        e.emit(OpCode::NEG);
+        e.emitReg(1);
+        e.emitReg(0);
+        e.emit(OpCode::RETURN);
+        e.emitReg(1);
     });
     VM vm;
     vm.execute(code);
@@ -671,10 +983,18 @@ TEST(VMTest, NegFloat) {
 
 TEST(VMTest, ConcatStrings) {
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_STRING); e.emitReg(0); e.emitString("hello ");
-        e.emit(OpCode::PUSH_STRING); e.emitReg(1); e.emitString("world");
-        e.emit(OpCode::ADD);         e.emitReg(2); e.emitReg(0); e.emitReg(1);
-        e.emit(OpCode::RETURN);      e.emitReg(2);
+        e.emit(OpCode::PUSH_STRING);
+        e.emitReg(0);
+        e.emitString("hello ");
+        e.emit(OpCode::PUSH_STRING);
+        e.emitReg(1);
+        e.emitString("world");
+        e.emit(OpCode::ADD);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
     });
     VM vm;
     vm.execute(code);
@@ -687,9 +1007,16 @@ TEST(VMTest, ConcatStrings) {
 
 TEST(VMTest, DivByZero) {
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(1);
-        e.emit(OpCode::PUSH_INT); e.emitReg(1); e.emitInt(0);
-        e.emit(OpCode::DIV);      e.emitReg(2); e.emitReg(0); e.emitReg(1);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(1);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(1);
+        e.emitInt(0);
+        e.emit(OpCode::DIV);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
     });
     VM vm;
     EXPECT_THROW(vm.execute(code), std::runtime_error);
@@ -697,9 +1024,16 @@ TEST(VMTest, DivByZero) {
 
 TEST(VMTest, ModByZero) {
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(1);
-        e.emit(OpCode::PUSH_INT); e.emitReg(1); e.emitInt(0);
-        e.emit(OpCode::MOD);      e.emitReg(2); e.emitReg(0); e.emitReg(1);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(1);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(1);
+        e.emitInt(0);
+        e.emit(OpCode::MOD);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
     });
     VM vm;
     EXPECT_THROW(vm.execute(code), std::runtime_error);
@@ -711,12 +1045,23 @@ TEST(VMTest, ModByZero) {
 
 TEST(VMTest, VarReassignment) {
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT);  e.emitReg(0); e.emitInt(10);
-        e.emit(OpCode::STORE_VAR); e.emitReg(0); e.emitString("x");
-        e.emit(OpCode::PUSH_INT);  e.emitReg(0); e.emitInt(20);
-        e.emit(OpCode::STORE_VAR); e.emitReg(0); e.emitString("x");
-        e.emit(OpCode::LOAD_VAR);  e.emitReg(1); e.emitString("x");
-        e.emit(OpCode::RETURN);    e.emitReg(1);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(10);
+        e.emit(OpCode::STORE_VAR);
+        e.emitReg(0);
+        e.emitString("x");
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(20);
+        e.emit(OpCode::STORE_VAR);
+        e.emitReg(0);
+        e.emitString("x");
+        e.emit(OpCode::LOAD_VAR);
+        e.emitReg(1);
+        e.emitString("x");
+        e.emit(OpCode::RETURN);
+        e.emitReg(1);
     });
     VM vm;
     vm.execute(code);
@@ -729,9 +1074,11 @@ TEST(VMTest, VarReassignment) {
 
 TEST(VMTest, JumpOutOfBounds) {
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(1);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(1);
         e.emit(OpCode::JUMP);
-        e.emitShort(0xFFFF);  // way past end
+        e.emitShort(0xFFFF); // way past end
     });
     VM vm;
     EXPECT_THROW(vm.execute(code), std::runtime_error);
@@ -739,9 +1086,12 @@ TEST(VMTest, JumpOutOfBounds) {
 
 TEST(VMTest, JumpIfFalseOutOfBounds) {
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT);      e.emitReg(0); e.emitInt(0);
-        e.emit(OpCode::JUMP_IF_FALSE); e.emitReg(0);
-        e.emitShort(0xFFFF);  // way past end
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(0);
+        e.emit(OpCode::JUMP_IF_FALSE);
+        e.emitReg(0);
+        e.emitShort(0xFFFF); // way past end
     });
     VM vm;
     EXPECT_THROW(vm.execute(code), std::runtime_error);
@@ -754,10 +1104,17 @@ TEST(VMTest, JumpIfFalseOutOfBounds) {
 TEST(VMTest, StoreVarLeavesValueOnStack) {
     // In register-based VM, STORE_VAR reads from a register without modifying it.
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT);  e.emitReg(0); e.emitInt(99);
-        e.emit(OpCode::STORE_VAR); e.emitReg(0); e.emitString("x");
-        e.emit(OpCode::LOAD_VAR);  e.emitReg(1); e.emitString("x");
-        e.emit(OpCode::RETURN);    e.emitReg(1);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(99);
+        e.emit(OpCode::STORE_VAR);
+        e.emitReg(0);
+        e.emitString("x");
+        e.emit(OpCode::LOAD_VAR);
+        e.emitReg(1);
+        e.emitString("x");
+        e.emit(OpCode::RETURN);
+        e.emitReg(1);
     });
     VM vm;
     vm.execute(code);
@@ -771,17 +1128,32 @@ TEST(VMTest, StoreVarLeavesValueOnStack) {
 TEST(VMTest, CallPreservesCallerStack) {
     // identity(x) just returns its argument.
     auto identityCode = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::LOAD_LOCAL); e.emitReg(0); e.emitByte(0);
-        e.emit(OpCode::RETURN);     e.emitReg(0);
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitReg(0);
+        e.emitByte(0);
+        e.emit(OpCode::RETURN);
+        e.emitReg(0);
     });
 
     // Caller: r0=100, call identity(42)->r2, ADD r0+r2->r3, return r3
     auto callerCode = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(100);
-        e.emit(OpCode::PUSH_INT); e.emitReg(1); e.emitInt(42);
-        e.emit(OpCode::CALL);     e.emitReg(2); e.emitString("identity"); e.emitByte(1); e.emitReg(1);
-        e.emit(OpCode::ADD);      e.emitReg(3); e.emitReg(0); e.emitReg(2);
-        e.emit(OpCode::RETURN);   e.emitReg(3);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(100);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(1);
+        e.emitInt(42);
+        e.emit(OpCode::CALL);
+        e.emitReg(2);
+        e.emitString("identity");
+        e.emitByte(1);
+        e.emitReg(1);
+        e.emit(OpCode::ADD);
+        e.emitReg(3);
+        e.emitReg(0);
+        e.emitReg(2);
+        e.emit(OpCode::RETURN);
+        e.emitReg(3);
     });
 
     VM vm;
@@ -802,23 +1174,47 @@ TEST(VMTest, CallPreservesCallerStack) {
 TEST(VMTest, MultipleCallsPreserveStack) {
     // 10 + id(20) + id(30) = 60
     auto identityCode = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::LOAD_LOCAL); e.emitReg(0); e.emitByte(0);
-        e.emit(OpCode::RETURN);     e.emitReg(0);
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitReg(0);
+        e.emitByte(0);
+        e.emit(OpCode::RETURN);
+        e.emitReg(0);
     });
 
     auto callerCode = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(10);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(10);
 
-        e.emit(OpCode::PUSH_INT); e.emitReg(1); e.emitInt(20);
-        e.emit(OpCode::CALL);     e.emitReg(2); e.emitString("id"); e.emitByte(1); e.emitReg(1);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(1);
+        e.emitInt(20);
+        e.emit(OpCode::CALL);
+        e.emitReg(2);
+        e.emitString("id");
+        e.emitByte(1);
+        e.emitReg(1);
 
-        e.emit(OpCode::ADD);      e.emitReg(3); e.emitReg(0); e.emitReg(2);
+        e.emit(OpCode::ADD);
+        e.emitReg(3);
+        e.emitReg(0);
+        e.emitReg(2);
 
-        e.emit(OpCode::PUSH_INT); e.emitReg(4); e.emitInt(30);
-        e.emit(OpCode::CALL);     e.emitReg(5); e.emitString("id"); e.emitByte(1); e.emitReg(4);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(4);
+        e.emitInt(30);
+        e.emit(OpCode::CALL);
+        e.emitReg(5);
+        e.emitString("id");
+        e.emitByte(1);
+        e.emitReg(4);
 
-        e.emit(OpCode::ADD);      e.emitReg(6); e.emitReg(3); e.emitReg(5);
-        e.emit(OpCode::RETURN);   e.emitReg(6);
+        e.emit(OpCode::ADD);
+        e.emitReg(6);
+        e.emitReg(3);
+        e.emitReg(5);
+        e.emit(OpCode::RETURN);
+        e.emitReg(6);
     });
 
     VM vm;
@@ -839,8 +1235,12 @@ TEST(VMTest, MultipleCallsPreserveStack) {
 TEST(VMTest, CallDepthLimitThrows) {
     // A function that calls itself unconditionally will hit the call depth limit.
     BytecodeEmitter body;
-    body.emit(OpCode::CALL); body.emitReg(0); body.emitString("recurse"); body.emitByte(0);
-    body.emit(OpCode::RETURN); body.emitReg(0);
+    body.emit(OpCode::CALL);
+    body.emitReg(0);
+    body.emitString("recurse");
+    body.emitByte(0);
+    body.emit(OpCode::RETURN);
+    body.emitReg(0);
 
     BytecodeFunction fn;
     fn.name = "recurse";
@@ -848,7 +1248,10 @@ TEST(VMTest, CallDepthLimitThrows) {
     fn.bytecode = body.getCode();
 
     BytecodeEmitter caller;
-    caller.emit(OpCode::CALL); caller.emitReg(0); caller.emitString("recurse"); caller.emitByte(0);
+    caller.emit(OpCode::CALL);
+    caller.emitReg(0);
+    caller.emitString("recurse");
+    caller.emitByte(0);
     caller.emit(OpCode::HALT);
 
     VM vm;
@@ -862,10 +1265,18 @@ TEST(VMTest, CallDepthLimitThrows) {
 
 TEST(VMTest, BitwiseAnd) {
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(0xFF);
-        e.emit(OpCode::PUSH_INT); e.emitReg(1); e.emitInt(0x0F);
-        e.emit(OpCode::BIT_AND);  e.emitReg(2); e.emitReg(0); e.emitReg(1);
-        e.emit(OpCode::RETURN);   e.emitReg(2);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(0xFF);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(1);
+        e.emitInt(0x0F);
+        e.emit(OpCode::BIT_AND);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
     });
     VM vm;
     vm.execute(code);
@@ -874,10 +1285,18 @@ TEST(VMTest, BitwiseAnd) {
 
 TEST(VMTest, BitwiseOr) {
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(0xF0);
-        e.emit(OpCode::PUSH_INT); e.emitReg(1); e.emitInt(0x0F);
-        e.emit(OpCode::BIT_OR);   e.emitReg(2); e.emitReg(0); e.emitReg(1);
-        e.emit(OpCode::RETURN);   e.emitReg(2);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(0xF0);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(1);
+        e.emitInt(0x0F);
+        e.emit(OpCode::BIT_OR);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
     });
     VM vm;
     vm.execute(code);
@@ -886,10 +1305,18 @@ TEST(VMTest, BitwiseOr) {
 
 TEST(VMTest, BitwiseXor) {
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(0xFF);
-        e.emit(OpCode::PUSH_INT); e.emitReg(1); e.emitInt(0x0F);
-        e.emit(OpCode::BIT_XOR);  e.emitReg(2); e.emitReg(0); e.emitReg(1);
-        e.emit(OpCode::RETURN);   e.emitReg(2);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(0xFF);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(1);
+        e.emitInt(0x0F);
+        e.emit(OpCode::BIT_XOR);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
     });
     VM vm;
     vm.execute(code);
@@ -898,9 +1325,14 @@ TEST(VMTest, BitwiseXor) {
 
 TEST(VMTest, BitwiseNot) {
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(0);
-        e.emit(OpCode::BIT_NOT);  e.emitReg(1); e.emitReg(0);
-        e.emit(OpCode::RETURN);   e.emitReg(1);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(0);
+        e.emit(OpCode::BIT_NOT);
+        e.emitReg(1);
+        e.emitReg(0);
+        e.emit(OpCode::RETURN);
+        e.emitReg(1);
     });
     VM vm;
     vm.execute(code);
@@ -909,10 +1341,18 @@ TEST(VMTest, BitwiseNot) {
 
 TEST(VMTest, ShiftLeft) {
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(1);
-        e.emit(OpCode::PUSH_INT); e.emitReg(1); e.emitInt(4);
-        e.emit(OpCode::SHL);      e.emitReg(2); e.emitReg(0); e.emitReg(1);
-        e.emit(OpCode::RETURN);   e.emitReg(2);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(1);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(1);
+        e.emitInt(4);
+        e.emit(OpCode::SHL);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
     });
     VM vm;
     vm.execute(code);
@@ -921,10 +1361,18 @@ TEST(VMTest, ShiftLeft) {
 
 TEST(VMTest, ShiftRight) {
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(16);
-        e.emit(OpCode::PUSH_INT); e.emitReg(1); e.emitInt(4);
-        e.emit(OpCode::SHR);      e.emitReg(2); e.emitReg(0); e.emitReg(1);
-        e.emit(OpCode::RETURN);   e.emitReg(2);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(16);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(1);
+        e.emitInt(4);
+        e.emit(OpCode::SHR);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
     });
     VM vm;
     vm.execute(code);
@@ -933,9 +1381,16 @@ TEST(VMTest, ShiftRight) {
 
 TEST(VMTest, BitwiseAndOnFloatThrows) {
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_FLOAT); e.emitReg(0); e.emitFloat(1.0);
-        e.emit(OpCode::PUSH_INT);   e.emitReg(1); e.emitInt(1);
-        e.emit(OpCode::BIT_AND);    e.emitReg(2); e.emitReg(0); e.emitReg(1);
+        e.emit(OpCode::PUSH_FLOAT);
+        e.emitReg(0);
+        e.emitFloat(1.0);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(1);
+        e.emitInt(1);
+        e.emit(OpCode::BIT_AND);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
     });
     VM vm;
     EXPECT_THROW(vm.execute(code), std::runtime_error);
@@ -943,9 +1398,16 @@ TEST(VMTest, BitwiseAndOnFloatThrows) {
 
 TEST(VMTest, ShiftLeftOutOfRange) {
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(1);
-        e.emit(OpCode::PUSH_INT); e.emitReg(1); e.emitInt(64);
-        e.emit(OpCode::SHL);      e.emitReg(2); e.emitReg(0); e.emitReg(1);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(1);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(1);
+        e.emitInt(64);
+        e.emit(OpCode::SHL);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
     });
     VM vm;
     EXPECT_THROW(vm.execute(code), std::runtime_error);
@@ -957,10 +1419,18 @@ TEST(VMTest, ShiftLeftOutOfRange) {
 
 TEST(VMTest, Dup) {
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(42);
-        e.emit(OpCode::MOV);      e.emitReg(1); e.emitReg(0);
-        e.emit(OpCode::ADD);      e.emitReg(2); e.emitReg(0); e.emitReg(1);
-        e.emit(OpCode::RETURN);   e.emitReg(2);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(42);
+        e.emit(OpCode::MOV);
+        e.emitReg(1);
+        e.emitReg(0);
+        e.emit(OpCode::ADD);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
     });
     VM vm;
     vm.execute(code);
@@ -969,10 +1439,18 @@ TEST(VMTest, Dup) {
 
 TEST(VMTest, DupString) {
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_STRING); e.emitReg(0); e.emitString("hello");
-        e.emit(OpCode::MOV);         e.emitReg(1); e.emitReg(0);
-        e.emit(OpCode::ADD);         e.emitReg(2); e.emitReg(0); e.emitReg(1);
-        e.emit(OpCode::RETURN);      e.emitReg(2);
+        e.emit(OpCode::PUSH_STRING);
+        e.emitReg(0);
+        e.emitString("hello");
+        e.emit(OpCode::MOV);
+        e.emitReg(1);
+        e.emitReg(0);
+        e.emit(OpCode::ADD);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
     });
     VM vm;
     vm.execute(code);
@@ -985,10 +1463,16 @@ TEST(VMTest, DupString) {
 
 TEST(VMTest, PrintInt) {
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(42);
-        e.emit(OpCode::PRINT);    e.emitReg(0);
-        e.emit(OpCode::PUSH_INT); e.emitReg(1); e.emitInt(0);
-        e.emit(OpCode::RETURN);   e.emitReg(1);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(42);
+        e.emit(OpCode::PRINT);
+        e.emitReg(0);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(1);
+        e.emitInt(0);
+        e.emit(OpCode::RETURN);
+        e.emitReg(1);
     });
     VM vm;
     // Redirect stdout to check output
@@ -1001,10 +1485,16 @@ TEST(VMTest, PrintInt) {
 
 TEST(VMTest, PrintString) {
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_STRING); e.emitReg(0); e.emitString("hello world");
-        e.emit(OpCode::PRINT);       e.emitReg(0);
-        e.emit(OpCode::PUSH_INT);    e.emitReg(1); e.emitInt(0);
-        e.emit(OpCode::RETURN);      e.emitReg(1);
+        e.emit(OpCode::PUSH_STRING);
+        e.emitReg(0);
+        e.emitString("hello world");
+        e.emit(OpCode::PRINT);
+        e.emitReg(0);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(1);
+        e.emitInt(0);
+        e.emit(OpCode::RETURN);
+        e.emitReg(1);
     });
     VM vm;
     testing::internal::CaptureStdout();
@@ -1020,9 +1510,8 @@ TEST(VMTest, PrintString) {
 #include "jit.h"
 
 // Helper: build a BytecodeFunction from a lambda.
-static BytecodeFunction makeBytecodeFunc(
-    const std::string& name, uint8_t arity,
-    std::function<void(BytecodeEmitter&)> fn) {
+static BytecodeFunction makeBytecodeFunc(const std::string& name, uint8_t arity,
+                                         std::function<void(BytecodeEmitter&)> fn) {
     BytecodeEmitter emitter;
     fn(emitter);
     BytecodeFunction f;
@@ -1035,10 +1524,18 @@ static BytecodeFunction makeBytecodeFunc(
 TEST(VMTest, JITSimpleAdd) {
     // fn add(a, b) { return a + b; }
     auto addFunc = makeBytecodeFunc("add", 2, [](BytecodeEmitter& e) {
-        e.emit(OpCode::LOAD_LOCAL); e.emitReg(0); e.emitByte(0);
-        e.emit(OpCode::LOAD_LOCAL); e.emitReg(1); e.emitByte(1);
-        e.emit(OpCode::ADD);        e.emitReg(2); e.emitReg(0); e.emitReg(1);
-        e.emit(OpCode::RETURN);     e.emitReg(2);
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitReg(0);
+        e.emitByte(0);
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitReg(1);
+        e.emitByte(1);
+        e.emit(OpCode::ADD);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
     });
 
     VM vm;
@@ -1047,10 +1544,20 @@ TEST(VMTest, JITSimpleAdd) {
     // Call more than JIT threshold times — the function should be JIT-compiled.
     for (size_t i = 0; i <= BytecodeJIT::kJITThreshold + 1; i++) {
         auto code = buildBytecode([](BytecodeEmitter& e) {
-            e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(3);
-            e.emit(OpCode::PUSH_INT); e.emitReg(1); e.emitInt(4);
-            e.emit(OpCode::CALL);     e.emitReg(2); e.emitString("add"); e.emitByte(2); e.emitReg(0); e.emitReg(1);
-            e.emit(OpCode::RETURN);   e.emitReg(2);
+            e.emit(OpCode::PUSH_INT);
+            e.emitReg(0);
+            e.emitInt(3);
+            e.emit(OpCode::PUSH_INT);
+            e.emitReg(1);
+            e.emitInt(4);
+            e.emit(OpCode::CALL);
+            e.emitReg(2);
+            e.emitString("add");
+            e.emitByte(2);
+            e.emitReg(0);
+            e.emitReg(1);
+            e.emit(OpCode::RETURN);
+            e.emitReg(2);
         });
         vm.execute(code);
         EXPECT_EQ(vm.getLastReturn().asInt(), 7);
@@ -1063,22 +1570,38 @@ TEST(VMTest, JITSimpleAdd) {
 TEST(VMTest, JITWithControlFlow) {
     // fn abs(x) { if (x < 0) return -x; return x; }
     auto absFunc = makeBytecodeFunc("myabs", 1, [](BytecodeEmitter& e) {
-        e.emit(OpCode::LOAD_LOCAL);    e.emitReg(0); e.emitByte(0);
-        e.emit(OpCode::PUSH_INT);      e.emitReg(1); e.emitInt(0);
-        e.emit(OpCode::LT);            e.emitReg(2); e.emitReg(0); e.emitReg(1);
-        e.emit(OpCode::JUMP_IF_FALSE); e.emitReg(2);
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitReg(0);
+        e.emitByte(0);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(1);
+        e.emitInt(0);
+        e.emit(OpCode::LT);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::JUMP_IF_FALSE);
+        e.emitReg(2);
         size_t patch = e.currentOffset();
         e.emitShort(0); // placeholder
 
         // if-body: return -x
-        e.emit(OpCode::LOAD_LOCAL); e.emitReg(3); e.emitByte(0);
-        e.emit(OpCode::NEG);        e.emitReg(4); e.emitReg(3);
-        e.emit(OpCode::RETURN);     e.emitReg(4);
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitReg(3);
+        e.emitByte(0);
+        e.emit(OpCode::NEG);
+        e.emitReg(4);
+        e.emitReg(3);
+        e.emit(OpCode::RETURN);
+        e.emitReg(4);
 
         // after-if: return x
         e.patchJump(patch, static_cast<uint16_t>(e.currentOffset()));
-        e.emit(OpCode::LOAD_LOCAL); e.emitReg(5); e.emitByte(0);
-        e.emit(OpCode::RETURN);     e.emitReg(5);
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitReg(5);
+        e.emitByte(0);
+        e.emit(OpCode::RETURN);
+        e.emitReg(5);
     });
 
     VM vm;
@@ -1087,9 +1610,16 @@ TEST(VMTest, JITWithControlFlow) {
     // Warm up with positive value to trigger JIT.
     for (size_t i = 0; i <= BytecodeJIT::kJITThreshold + 1; i++) {
         auto code = buildBytecode([](BytecodeEmitter& e) {
-            e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(5);
-            e.emit(OpCode::CALL);     e.emitReg(1); e.emitString("myabs"); e.emitByte(1); e.emitReg(0);
-            e.emit(OpCode::RETURN);   e.emitReg(1);
+            e.emit(OpCode::PUSH_INT);
+            e.emitReg(0);
+            e.emitInt(5);
+            e.emit(OpCode::CALL);
+            e.emitReg(1);
+            e.emitString("myabs");
+            e.emitByte(1);
+            e.emitReg(0);
+            e.emit(OpCode::RETURN);
+            e.emitReg(1);
         });
         vm.execute(code);
         EXPECT_EQ(vm.getLastReturn().asInt(), 5);
@@ -1099,9 +1629,16 @@ TEST(VMTest, JITWithControlFlow) {
 
     // Now test with negative value (through the JIT path).
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(-7);
-        e.emit(OpCode::CALL);     e.emitReg(1); e.emitString("myabs"); e.emitByte(1); e.emitReg(0);
-        e.emit(OpCode::RETURN);   e.emitReg(1);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(-7);
+        e.emit(OpCode::CALL);
+        e.emitReg(1);
+        e.emitString("myabs");
+        e.emitByte(1);
+        e.emitReg(0);
+        e.emit(OpCode::RETURN);
+        e.emitReg(1);
     });
     vm.execute(code);
     EXPECT_EQ(vm.getLastReturn().asInt(), 7);
@@ -1110,10 +1647,16 @@ TEST(VMTest, JITWithControlFlow) {
 TEST(VMTest, JITFallbackForStrings) {
     // A function that uses PRINT — not JIT-eligible.
     auto printFunc = makeBytecodeFunc("printer", 0, [](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_STRING); e.emitReg(0); e.emitString("hello");
-        e.emit(OpCode::PRINT);       e.emitReg(0);
-        e.emit(OpCode::PUSH_INT);    e.emitReg(1); e.emitInt(0);
-        e.emit(OpCode::RETURN);      e.emitReg(1);
+        e.emit(OpCode::PUSH_STRING);
+        e.emitReg(0);
+        e.emitString("hello");
+        e.emit(OpCode::PRINT);
+        e.emitReg(0);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(1);
+        e.emitInt(0);
+        e.emit(OpCode::RETURN);
+        e.emitReg(1);
     });
 
     VM vm;
@@ -1122,8 +1665,12 @@ TEST(VMTest, JITFallbackForStrings) {
     // Call many times — should NOT be JIT-compiled (uses PRINT + STRING).
     for (size_t i = 0; i <= BytecodeJIT::kJITThreshold + 1; i++) {
         auto code = buildBytecode([](BytecodeEmitter& e) {
-            e.emit(OpCode::CALL);   e.emitReg(0); e.emitString("printer"); e.emitByte(0);
-            e.emit(OpCode::RETURN); e.emitReg(0);
+            e.emit(OpCode::CALL);
+            e.emitReg(0);
+            e.emitString("printer");
+            e.emitByte(0);
+            e.emit(OpCode::RETURN);
+            e.emitReg(0);
         });
         testing::internal::CaptureStdout();
         vm.execute(code);
@@ -1138,10 +1685,18 @@ TEST(VMTest, JITFallbackForStrings) {
 TEST(VMTest, JITMultiply) {
     // fn mul(a, b) { return a * b; }
     auto mulFunc = makeBytecodeFunc("mul", 2, [](BytecodeEmitter& e) {
-        e.emit(OpCode::LOAD_LOCAL); e.emitReg(0); e.emitByte(0);
-        e.emit(OpCode::LOAD_LOCAL); e.emitReg(1); e.emitByte(1);
-        e.emit(OpCode::MUL);        e.emitReg(2); e.emitReg(0); e.emitReg(1);
-        e.emit(OpCode::RETURN);     e.emitReg(2);
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitReg(0);
+        e.emitByte(0);
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitReg(1);
+        e.emitByte(1);
+        e.emit(OpCode::MUL);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
     });
 
     VM vm;
@@ -1149,10 +1704,20 @@ TEST(VMTest, JITMultiply) {
 
     for (size_t i = 0; i <= BytecodeJIT::kJITThreshold + 1; i++) {
         auto code = buildBytecode([](BytecodeEmitter& e) {
-            e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(6);
-            e.emit(OpCode::PUSH_INT); e.emitReg(1); e.emitInt(7);
-            e.emit(OpCode::CALL);     e.emitReg(2); e.emitString("mul"); e.emitByte(2); e.emitReg(0); e.emitReg(1);
-            e.emit(OpCode::RETURN);   e.emitReg(2);
+            e.emit(OpCode::PUSH_INT);
+            e.emitReg(0);
+            e.emitInt(6);
+            e.emit(OpCode::PUSH_INT);
+            e.emitReg(1);
+            e.emitInt(7);
+            e.emit(OpCode::CALL);
+            e.emitReg(2);
+            e.emitString("mul");
+            e.emitByte(2);
+            e.emitReg(0);
+            e.emitReg(1);
+            e.emit(OpCode::RETURN);
+            e.emitReg(2);
         });
         vm.execute(code);
         EXPECT_EQ(vm.getLastReturn().asInt(), 42);
@@ -1164,15 +1729,32 @@ TEST(VMTest, JITWithLocals) {
     // fn compute(x) { var y = x * 2; return y + 1; }
     auto func = makeBytecodeFunc("compute", 1, [](BytecodeEmitter& e) {
         // y = x * 2
-        e.emit(OpCode::LOAD_LOCAL);  e.emitReg(0); e.emitByte(0);   // r0 = x
-        e.emit(OpCode::PUSH_INT);    e.emitReg(1); e.emitInt(2);     // r1 = 2
-        e.emit(OpCode::MUL);         e.emitReg(2); e.emitReg(0); e.emitReg(1); // r2 = x * 2
-        e.emit(OpCode::STORE_LOCAL); e.emitByte(1); e.emitReg(2);   // local[1] = y
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitReg(0);
+        e.emitByte(0); // r0 = x
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(1);
+        e.emitInt(2); // r1 = 2
+        e.emit(OpCode::MUL);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1); // r2 = x * 2
+        e.emit(OpCode::STORE_LOCAL);
+        e.emitByte(1);
+        e.emitReg(2); // local[1] = y
         // return y + 1
-        e.emit(OpCode::LOAD_LOCAL);  e.emitReg(3); e.emitByte(1);    // r3 = y
-        e.emit(OpCode::PUSH_INT);    e.emitReg(4); e.emitInt(1);     // r4 = 1
-        e.emit(OpCode::ADD);         e.emitReg(5); e.emitReg(3); e.emitReg(4); // r5 = y + 1
-        e.emit(OpCode::RETURN);      e.emitReg(5);
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitReg(3);
+        e.emitByte(1); // r3 = y
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(4);
+        e.emitInt(1); // r4 = 1
+        e.emit(OpCode::ADD);
+        e.emitReg(5);
+        e.emitReg(3);
+        e.emitReg(4); // r5 = y + 1
+        e.emit(OpCode::RETURN);
+        e.emitReg(5);
     });
 
     VM vm;
@@ -1180,12 +1762,19 @@ TEST(VMTest, JITWithLocals) {
 
     for (size_t i = 0; i <= BytecodeJIT::kJITThreshold + 1; i++) {
         auto code = buildBytecode([](BytecodeEmitter& e) {
-            e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(10);
-            e.emit(OpCode::CALL);     e.emitReg(1); e.emitString("compute"); e.emitByte(1); e.emitReg(0);
-            e.emit(OpCode::RETURN);   e.emitReg(1);
+            e.emit(OpCode::PUSH_INT);
+            e.emitReg(0);
+            e.emitInt(10);
+            e.emit(OpCode::CALL);
+            e.emitReg(1);
+            e.emitString("compute");
+            e.emitByte(1);
+            e.emitReg(0);
+            e.emit(OpCode::RETURN);
+            e.emitReg(1);
         });
         vm.execute(code);
-        EXPECT_EQ(vm.getLastReturn().asInt(), 21);  // 10*2+1
+        EXPECT_EQ(vm.getLastReturn().asInt(), 21); // 10*2+1
     }
     EXPECT_TRUE(vm.isJITCompiled("compute"));
 }
@@ -1193,10 +1782,18 @@ TEST(VMTest, JITWithLocals) {
 TEST(VMTest, JITRecompileAfterThreshold) {
     // fn doubler(x) { return x * 2; }
     auto func = makeBytecodeFunc("doubler", 1, [](BytecodeEmitter& e) {
-        e.emit(OpCode::LOAD_LOCAL); e.emitReg(0); e.emitByte(0);
-        e.emit(OpCode::PUSH_INT);   e.emitReg(1); e.emitInt(2);
-        e.emit(OpCode::MUL);        e.emitReg(2); e.emitReg(0); e.emitReg(1);
-        e.emit(OpCode::RETURN);     e.emitReg(2);
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitReg(0);
+        e.emitByte(0);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(1);
+        e.emitInt(2);
+        e.emit(OpCode::MUL);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
     });
 
     VM vm;
@@ -1206,9 +1803,16 @@ TEST(VMTest, JITRecompileAfterThreshold) {
     size_t totalCalls = BytecodeJIT::kJITThreshold + BytecodeJIT::kRecompileThreshold + 5;
     for (size_t i = 0; i < totalCalls; i++) {
         auto code = buildBytecode([](BytecodeEmitter& e) {
-            e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(7);
-            e.emit(OpCode::CALL);     e.emitReg(1); e.emitString("doubler"); e.emitByte(1); e.emitReg(0);
-            e.emit(OpCode::RETURN);   e.emitReg(1);
+            e.emit(OpCode::PUSH_INT);
+            e.emitReg(0);
+            e.emitInt(7);
+            e.emit(OpCode::CALL);
+            e.emitReg(1);
+            e.emitString("doubler");
+            e.emitByte(1);
+            e.emitReg(0);
+            e.emit(OpCode::RETURN);
+            e.emitReg(1);
         });
         vm.execute(code);
         EXPECT_EQ(vm.getLastReturn().asInt(), 14);
@@ -1252,17 +1856,28 @@ TEST(VMTest, HybridBytecodeExecutesCorrectly) {
     hybridCompileAndRegister(R"(
         fn compute(x, y) { return x + y; }
         fn main() { return compute(3, 4); }
-    )", vm, codegen);
+    )",
+                             vm, codegen);
 
     EXPECT_EQ(codegen.getFunctionTier("compute"), ExecutionTier::Interpreted);
     EXPECT_TRUE(codegen.hasHybridBytecodeFunctions());
 
     // Build main bytecode that calls compute(10, 20)
     auto mainCode = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(10);
-        e.emit(OpCode::PUSH_INT); e.emitReg(1); e.emitInt(20);
-        e.emit(OpCode::CALL);     e.emitReg(2); e.emitString("compute"); e.emitByte(2); e.emitReg(0); e.emitReg(1);
-        e.emit(OpCode::RETURN);   e.emitReg(2);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(10);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(1);
+        e.emitInt(20);
+        e.emit(OpCode::CALL);
+        e.emitReg(2);
+        e.emitString("compute");
+        e.emitByte(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
     });
     vm.execute(mainCode);
     EXPECT_EQ(vm.getLastReturn().asInt(), 30);
@@ -1275,25 +1890,43 @@ TEST(VMTest, HybridMultipleFunctionsExecute) {
         fn doubler(x) { return x * 2; }
         fn adder(a, b) { return a + b; }
         fn main() { return adder(doubler(3), 4); }
-    )", vm, codegen);
+    )",
+                             vm, codegen);
 
     EXPECT_EQ(codegen.getBytecodeFunctions().size(), 2u);
 
     // Call doubler(5) => 10
     auto code1 = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(5);
-        e.emit(OpCode::CALL);     e.emitReg(1); e.emitString("doubler"); e.emitByte(1); e.emitReg(0);
-        e.emit(OpCode::RETURN);   e.emitReg(1);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(5);
+        e.emit(OpCode::CALL);
+        e.emitReg(1);
+        e.emitString("doubler");
+        e.emitByte(1);
+        e.emitReg(0);
+        e.emit(OpCode::RETURN);
+        e.emitReg(1);
     });
     vm.execute(code1);
     EXPECT_EQ(vm.getLastReturn().asInt(), 10);
 
     // Call adder(3, 7) => 10
     auto code2 = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(3);
-        e.emit(OpCode::PUSH_INT); e.emitReg(1); e.emitInt(7);
-        e.emit(OpCode::CALL);     e.emitReg(2); e.emitString("adder"); e.emitByte(2); e.emitReg(0); e.emitReg(1);
-        e.emit(OpCode::RETURN);   e.emitReg(2);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(3);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(1);
+        e.emitInt(7);
+        e.emit(OpCode::CALL);
+        e.emitReg(2);
+        e.emitString("adder");
+        e.emitByte(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
     });
     vm.execute(code2);
     EXPECT_EQ(vm.getLastReturn().asInt(), 10);
@@ -1306,7 +1939,8 @@ TEST(VMTest, HybridAOTFunctionNotInBytecode) {
     hybridCompileAndRegister(R"(
         fn typed_add(a: int, b: int) { return a + b; }
         fn main() { return typed_add(1, 2); }
-    )", vm, codegen);
+    )",
+                             vm, codegen);
 
     EXPECT_EQ(codegen.getFunctionTier("typed_add"), ExecutionTier::AOT);
     EXPECT_FALSE(codegen.hasHybridBytecodeFunctions());
@@ -1318,19 +1952,28 @@ TEST(VMTest, HybridAOTFunctionNotInBytecode) {
 
 TEST(VMTest, JumpIfFalseIntegerFastPath) {
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT);       e.emitReg(0); e.emitInt(0); // false
-        e.emit(OpCode::JUMP_IF_FALSE);  e.emitReg(0);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(0); // false
+        e.emit(OpCode::JUMP_IF_FALSE);
+        e.emitReg(0);
         size_t patch = e.currentOffset();
         e.emitShort(0); // placeholder
 
         // true branch (should be skipped)
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(99);
-        e.emit(OpCode::RETURN);   e.emitReg(0);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(99);
+        e.emit(OpCode::RETURN);
+        e.emitReg(0);
 
         // false branch
         e.patchJump(patch, static_cast<uint16_t>(e.currentOffset()));
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(42);
-        e.emit(OpCode::RETURN);   e.emitReg(0);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(42);
+        e.emit(OpCode::RETURN);
+        e.emitReg(0);
     });
     VM vm;
     vm.execute(code);
@@ -1339,19 +1982,28 @@ TEST(VMTest, JumpIfFalseIntegerFastPath) {
 
 TEST(VMTest, JumpIfFalseIntegerTruthy) {
     auto code = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT);       e.emitReg(0); e.emitInt(1); // true
-        e.emit(OpCode::JUMP_IF_FALSE);  e.emitReg(0);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(1); // true
+        e.emit(OpCode::JUMP_IF_FALSE);
+        e.emitReg(0);
         size_t patch = e.currentOffset();
         e.emitShort(0);
 
         // true branch
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(99);
-        e.emit(OpCode::RETURN);   e.emitReg(0);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(99);
+        e.emit(OpCode::RETURN);
+        e.emitReg(0);
 
         // false branch (should not reach)
         e.patchJump(patch, static_cast<uint16_t>(e.currentOffset()));
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(0);
-        e.emit(OpCode::RETURN);   e.emitReg(0);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(0);
+        e.emit(OpCode::RETURN);
+        e.emitReg(0);
     });
     VM vm;
     vm.execute(code);
@@ -1365,8 +2017,11 @@ TEST(VMTest, JumpIfFalseIntegerTruthy) {
 TEST(VMTest, JITSkipsTinyFunctions) {
     // A function with just RETURN (1 byte) should be too small for JIT.
     auto tinyFunc = makeBytecodeFunc("tiny", 0, [](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(1);
-        e.emit(OpCode::RETURN);   e.emitReg(0);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(0);
     });
 
     BytecodeJIT jit;
@@ -1388,10 +2043,18 @@ TEST(VMTest, JITSkipsTinyFunctions) {
 TEST(VMTest, JITCachedPointerReuse) {
     // Verify that after JIT compilation, subsequent calls use the cached path.
     auto addFunc = makeBytecodeFunc("cached_add", 2, [](BytecodeEmitter& e) {
-        e.emit(OpCode::LOAD_LOCAL); e.emitReg(0); e.emitByte(0);
-        e.emit(OpCode::LOAD_LOCAL); e.emitReg(1); e.emitByte(1);
-        e.emit(OpCode::ADD);        e.emitReg(2); e.emitReg(0); e.emitReg(1);
-        e.emit(OpCode::RETURN);     e.emitReg(2);
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitReg(0);
+        e.emitByte(0);
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitReg(1);
+        e.emitByte(1);
+        e.emit(OpCode::ADD);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
     });
 
     VM vm;
@@ -1400,10 +2063,20 @@ TEST(VMTest, JITCachedPointerReuse) {
     // Call enough times to trigger JIT, then call more to exercise cached path.
     for (size_t i = 0; i < BytecodeJIT::kJITThreshold + 10; i++) {
         auto code = buildBytecode([&](BytecodeEmitter& e) {
-            e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(static_cast<int64_t>(i));
-            e.emit(OpCode::PUSH_INT); e.emitReg(1); e.emitInt(1);
-            e.emit(OpCode::CALL);     e.emitReg(2); e.emitString("cached_add"); e.emitByte(2); e.emitReg(0); e.emitReg(1);
-            e.emit(OpCode::RETURN);   e.emitReg(2);
+            e.emit(OpCode::PUSH_INT);
+            e.emitReg(0);
+            e.emitInt(static_cast<int64_t>(i));
+            e.emit(OpCode::PUSH_INT);
+            e.emitReg(1);
+            e.emitInt(1);
+            e.emit(OpCode::CALL);
+            e.emitReg(2);
+            e.emitString("cached_add");
+            e.emitByte(2);
+            e.emitReg(0);
+            e.emitReg(1);
+            e.emit(OpCode::RETURN);
+            e.emitReg(2);
         });
         vm.execute(code);
         EXPECT_EQ(vm.getLastReturn().asInt(), static_cast<int64_t>(i) + 1);
@@ -1421,10 +2094,18 @@ TEST(VMTest, FloatJITSimpleAdd) {
     addFunc.name = "fadd";
     addFunc.arity = 2;
     addFunc.bytecode = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::LOAD_LOCAL); e.emitReg(0); e.emitByte(0);
-        e.emit(OpCode::LOAD_LOCAL); e.emitReg(1); e.emitByte(1);
-        e.emit(OpCode::ADD);        e.emitReg(2); e.emitReg(0); e.emitReg(1);
-        e.emit(OpCode::RETURN);     e.emitReg(2);
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitReg(0);
+        e.emitByte(0);
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitReg(1);
+        e.emitByte(1);
+        e.emit(OpCode::ADD);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
     });
 
     VM vm;
@@ -1433,10 +2114,20 @@ TEST(VMTest, FloatJITSimpleAdd) {
     // Call with float args enough times to trigger float-specialized JIT.
     for (size_t i = 0; i < BytecodeJIT::kJITThreshold + 3; i++) {
         auto code = buildBytecode([&](BytecodeEmitter& e) {
-            e.emit(OpCode::PUSH_FLOAT); e.emitReg(0); e.emitFloat(1.5);
-            e.emit(OpCode::PUSH_FLOAT); e.emitReg(1); e.emitFloat(2.5);
-            e.emit(OpCode::CALL);       e.emitReg(2); e.emitString("fadd"); e.emitByte(2); e.emitReg(0); e.emitReg(1);
-            e.emit(OpCode::RETURN);     e.emitReg(2);
+            e.emit(OpCode::PUSH_FLOAT);
+            e.emitReg(0);
+            e.emitFloat(1.5);
+            e.emit(OpCode::PUSH_FLOAT);
+            e.emitReg(1);
+            e.emitFloat(2.5);
+            e.emit(OpCode::CALL);
+            e.emitReg(2);
+            e.emitString("fadd");
+            e.emitByte(2);
+            e.emitReg(0);
+            e.emitReg(1);
+            e.emit(OpCode::RETURN);
+            e.emitReg(2);
         });
         vm.execute(code);
         EXPECT_DOUBLE_EQ(vm.getLastReturn().asFloat(), 4.0);
@@ -1450,12 +2141,25 @@ TEST(VMTest, FloatJITMulSub) {
     func.name = "fmulsub";
     func.arity = 2;
     func.bytecode = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::LOAD_LOCAL); e.emitReg(0); e.emitByte(0);
-        e.emit(OpCode::LOAD_LOCAL); e.emitReg(1); e.emitByte(1);
-        e.emit(OpCode::MUL);        e.emitReg(2); e.emitReg(0); e.emitReg(1);
-        e.emit(OpCode::LOAD_LOCAL); e.emitReg(3); e.emitByte(0);
-        e.emit(OpCode::SUB);        e.emitReg(4); e.emitReg(2); e.emitReg(3);
-        e.emit(OpCode::RETURN);     e.emitReg(4);
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitReg(0);
+        e.emitByte(0);
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitReg(1);
+        e.emitByte(1);
+        e.emit(OpCode::MUL);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitReg(3);
+        e.emitByte(0);
+        e.emit(OpCode::SUB);
+        e.emitReg(4);
+        e.emitReg(2);
+        e.emitReg(3);
+        e.emit(OpCode::RETURN);
+        e.emitReg(4);
     });
 
     VM vm;
@@ -1463,10 +2167,20 @@ TEST(VMTest, FloatJITMulSub) {
 
     for (size_t i = 0; i < BytecodeJIT::kJITThreshold + 3; i++) {
         auto code = buildBytecode([](BytecodeEmitter& e) {
-            e.emit(OpCode::PUSH_FLOAT); e.emitReg(0); e.emitFloat(3.0);
-            e.emit(OpCode::PUSH_FLOAT); e.emitReg(1); e.emitFloat(4.0);
-            e.emit(OpCode::CALL);       e.emitReg(2); e.emitString("fmulsub"); e.emitByte(2); e.emitReg(0); e.emitReg(1);
-            e.emit(OpCode::RETURN);     e.emitReg(2);
+            e.emit(OpCode::PUSH_FLOAT);
+            e.emitReg(0);
+            e.emitFloat(3.0);
+            e.emit(OpCode::PUSH_FLOAT);
+            e.emitReg(1);
+            e.emitFloat(4.0);
+            e.emit(OpCode::CALL);
+            e.emitReg(2);
+            e.emitString("fmulsub");
+            e.emitByte(2);
+            e.emitReg(0);
+            e.emitReg(1);
+            e.emit(OpCode::RETURN);
+            e.emitReg(2);
         });
         vm.execute(code);
         // (3.0 * 4.0) - 3.0 = 9.0
@@ -1481,10 +2195,18 @@ TEST(VMTest, TypeProfileRecordsIntCalls) {
     addFunc.name = "typed_add";
     addFunc.arity = 2;
     addFunc.bytecode = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::LOAD_LOCAL); e.emitReg(0); e.emitByte(0);
-        e.emit(OpCode::LOAD_LOCAL); e.emitReg(1); e.emitByte(1);
-        e.emit(OpCode::ADD);        e.emitReg(2); e.emitReg(0); e.emitReg(1);
-        e.emit(OpCode::RETURN);     e.emitReg(2);
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitReg(0);
+        e.emitByte(0);
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitReg(1);
+        e.emitByte(1);
+        e.emit(OpCode::ADD);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
     });
 
     VM vm;
@@ -1493,10 +2215,20 @@ TEST(VMTest, TypeProfileRecordsIntCalls) {
     // Call with int args — should record int type profile.
     for (size_t i = 0; i < BytecodeJIT::kJITThreshold + 1; i++) {
         auto code = buildBytecode([](BytecodeEmitter& e) {
-            e.emit(OpCode::PUSH_INT); e.emitReg(0); e.emitInt(10);
-            e.emit(OpCode::PUSH_INT); e.emitReg(1); e.emitInt(20);
-            e.emit(OpCode::CALL);     e.emitReg(2); e.emitString("typed_add"); e.emitByte(2); e.emitReg(0); e.emitReg(1);
-            e.emit(OpCode::RETURN);   e.emitReg(2);
+            e.emit(OpCode::PUSH_INT);
+            e.emitReg(0);
+            e.emitInt(10);
+            e.emit(OpCode::PUSH_INT);
+            e.emitReg(1);
+            e.emitInt(20);
+            e.emit(OpCode::CALL);
+            e.emitReg(2);
+            e.emitString("typed_add");
+            e.emitByte(2);
+            e.emitReg(0);
+            e.emitReg(1);
+            e.emit(OpCode::RETURN);
+            e.emitReg(2);
         });
         vm.execute(code);
         EXPECT_EQ(vm.getLastReturn().asInt(), 30);
@@ -1511,10 +2243,18 @@ TEST(VMTest, TypeProfileRecordsFloatCalls) {
     addFunc.name = "typed_fadd";
     addFunc.arity = 2;
     addFunc.bytecode = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::LOAD_LOCAL); e.emitReg(0); e.emitByte(0);
-        e.emit(OpCode::LOAD_LOCAL); e.emitReg(1); e.emitByte(1);
-        e.emit(OpCode::ADD);        e.emitReg(2); e.emitReg(0); e.emitReg(1);
-        e.emit(OpCode::RETURN);     e.emitReg(2);
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitReg(0);
+        e.emitByte(0);
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitReg(1);
+        e.emitByte(1);
+        e.emit(OpCode::ADD);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
     });
 
     VM vm;
@@ -1522,10 +2262,20 @@ TEST(VMTest, TypeProfileRecordsFloatCalls) {
 
     for (size_t i = 0; i < BytecodeJIT::kJITThreshold + 1; i++) {
         auto code = buildBytecode([](BytecodeEmitter& e) {
-            e.emit(OpCode::PUSH_FLOAT); e.emitReg(0); e.emitFloat(1.1);
-            e.emit(OpCode::PUSH_FLOAT); e.emitReg(1); e.emitFloat(2.2);
-            e.emit(OpCode::CALL);       e.emitReg(2); e.emitString("typed_fadd"); e.emitByte(2); e.emitReg(0); e.emitReg(1);
-            e.emit(OpCode::RETURN);     e.emitReg(2);
+            e.emit(OpCode::PUSH_FLOAT);
+            e.emitReg(0);
+            e.emitFloat(1.1);
+            e.emit(OpCode::PUSH_FLOAT);
+            e.emitReg(1);
+            e.emitFloat(2.2);
+            e.emit(OpCode::CALL);
+            e.emitReg(2);
+            e.emitString("typed_fadd");
+            e.emitByte(2);
+            e.emitReg(0);
+            e.emitReg(1);
+            e.emit(OpCode::RETURN);
+            e.emitReg(2);
         });
         vm.execute(code);
         EXPECT_NEAR(vm.getLastReturn().asFloat(), 3.3, 0.001);
@@ -1539,10 +2289,18 @@ TEST(VMTest, FloatJITWithPushFloat) {
     func.name = "fconst";
     func.arity = 1;
     func.bytecode = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::LOAD_LOCAL);  e.emitReg(0); e.emitByte(0);
-        e.emit(OpCode::PUSH_FLOAT); e.emitReg(1); e.emitFloat(10.0);
-        e.emit(OpCode::MUL);        e.emitReg(2); e.emitReg(0); e.emitReg(1);
-        e.emit(OpCode::RETURN);     e.emitReg(2);
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitReg(0);
+        e.emitByte(0);
+        e.emit(OpCode::PUSH_FLOAT);
+        e.emitReg(1);
+        e.emitFloat(10.0);
+        e.emit(OpCode::MUL);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
     });
 
     VM vm;
@@ -1550,9 +2308,16 @@ TEST(VMTest, FloatJITWithPushFloat) {
 
     for (size_t i = 0; i < BytecodeJIT::kJITThreshold + 3; i++) {
         auto code = buildBytecode([](BytecodeEmitter& e) {
-            e.emit(OpCode::PUSH_FLOAT); e.emitReg(0); e.emitFloat(5.0);
-            e.emit(OpCode::CALL);       e.emitReg(1); e.emitString("fconst"); e.emitByte(1); e.emitReg(0);
-            e.emit(OpCode::RETURN);     e.emitReg(1);
+            e.emit(OpCode::PUSH_FLOAT);
+            e.emitReg(0);
+            e.emitFloat(5.0);
+            e.emit(OpCode::CALL);
+            e.emitReg(1);
+            e.emitString("fconst");
+            e.emitByte(1);
+            e.emitReg(0);
+            e.emit(OpCode::RETURN);
+            e.emitReg(1);
         });
         vm.execute(code);
         EXPECT_DOUBLE_EQ(vm.getLastReturn().asFloat(), 50.0);
@@ -1588,4 +2353,250 @@ TEST(VMTest, HybridCompilerProducesBytecode) {
     EXPECT_EQ(codegen.getFunctionTier("main"), omscript::ExecutionTier::AOT);
     // Hybrid mode should have produced bytecode for 'add'.
     EXPECT_TRUE(codegen.hasHybridBytecodeFunctions());
+}
+
+// ===========================================================================
+// Edge cases - register operations
+// ===========================================================================
+
+TEST(VMTest, RegisterPreservationAcrossCalls) {
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        // Set reg 0 to 10
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(10);
+        // Call function that modifies registers
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(1);
+        e.emitInt(99);
+        // Return original reg 0 value
+        e.emit(OpCode::RETURN);
+        e.emitReg(0);
+    });
+    VM vm;
+    vm.execute(code);
+    EXPECT_EQ(vm.getLastReturn().asInt(), 10);
+}
+
+TEST(VMTest, ManyLocals) {
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        // Store values in many local slots
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(1);
+        e.emit(OpCode::STORE_LOCAL);
+        e.emitReg(0);
+        e.emitByte(0);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(1);
+        e.emitInt(2);
+        e.emit(OpCode::STORE_LOCAL);
+        e.emitReg(1);
+        e.emitByte(1);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(2);
+        e.emitInt(3);
+        e.emit(OpCode::STORE_LOCAL);
+        e.emitReg(2);
+        e.emitByte(2);
+        // Load them back and sum
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitReg(3);
+        e.emitByte(0);
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitReg(4);
+        e.emitByte(1);
+        e.emit(OpCode::ADD);
+        e.emitReg(5);
+        e.emitReg(3);
+        e.emitReg(4);
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitReg(6);
+        e.emitByte(2);
+        e.emit(OpCode::ADD);
+        e.emitReg(7);
+        e.emitReg(5);
+        e.emitReg(6);
+        e.emit(OpCode::RETURN);
+        e.emitReg(7);
+    });
+    VM vm;
+    vm.execute(code);
+    EXPECT_EQ(vm.getLastReturn().asInt(), 6);
+}
+
+TEST(VMTest, DuplicateLoadLocal) {
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(42);
+        e.emit(OpCode::STORE_LOCAL);
+        e.emitReg(0);
+        e.emitByte(0);
+        // Load same local twice into different registers
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitReg(1);
+        e.emitByte(0);
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitReg(2);
+        e.emitByte(0);
+        e.emit(OpCode::ADD);
+        e.emitReg(3);
+        e.emitReg(1);
+        e.emitReg(2);
+        e.emit(OpCode::RETURN);
+        e.emitReg(3);
+    });
+    VM vm;
+    vm.execute(code);
+    EXPECT_EQ(vm.getLastReturn().asInt(), 84);
+}
+
+TEST(VMTest, DuplicateStoreLocal) {
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        // Store 10 to local 0
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(10);
+        e.emit(OpCode::STORE_LOCAL);
+        e.emitByte(0);
+        e.emitReg(0);
+        // Store 20 to same local 0
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(1);
+        e.emitInt(20);
+        e.emit(OpCode::STORE_LOCAL);
+        e.emitByte(0);
+        e.emitReg(1);
+        // Load should get 20
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitReg(2);
+        e.emitByte(0);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
+    });
+    VM vm;
+    vm.execute(code);
+    EXPECT_EQ(vm.getLastReturn().asInt(), 20);
+}
+
+// ===========================================================================
+// Edge cases - string operations
+// ===========================================================================
+
+TEST(VMTest, StringInRegister) {
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_STRING);
+        e.emitReg(0);
+        e.emitString("hello");
+        e.emit(OpCode::RETURN);
+        e.emitReg(0);
+    });
+    VM vm;
+    vm.execute(code);
+    EXPECT_STREQ(vm.getLastReturn().asString(), "hello");
+}
+
+TEST(VMTest, StringConcatenationViaOp) {
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_STRING);
+        e.emitReg(0);
+        e.emitString("hello");
+        e.emit(OpCode::PUSH_STRING);
+        e.emitReg(1);
+        e.emitString("world");
+        e.emit(OpCode::ADD);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
+    });
+    VM vm;
+    vm.execute(code);
+    EXPECT_STREQ(vm.getLastReturn().asString(), "helloworld");
+}
+
+TEST(VMTest, StringEquality) {
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_STRING);
+        e.emitReg(0);
+        e.emitString("test");
+        e.emit(OpCode::PUSH_STRING);
+        e.emitReg(1);
+        e.emitString("test");
+        e.emit(OpCode::EQ);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
+    });
+    VM vm;
+    vm.execute(code);
+    EXPECT_NE(vm.getLastReturn().asInt(), 0); // true
+}
+
+TEST(VMTest, StringInequality) {
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_STRING);
+        e.emitReg(0);
+        e.emitString("a");
+        e.emit(OpCode::PUSH_STRING);
+        e.emitReg(1);
+        e.emitString("b");
+        e.emit(OpCode::EQ);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
+    });
+    VM vm;
+    vm.execute(code);
+    EXPECT_EQ(vm.getLastReturn().asInt(), 0); // false
+}
+
+// ===========================================================================
+// Edge cases - mixed types
+// ===========================================================================
+
+TEST(VMTest, IntPlusFloat) {
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(5);
+        e.emit(OpCode::PUSH_FLOAT);
+        e.emitReg(1);
+        e.emitFloat(3.5);
+        e.emit(OpCode::ADD);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
+    });
+    VM vm;
+    vm.execute(code);
+    EXPECT_DOUBLE_EQ(vm.getLastReturn().asFloat(), 8.5);
+}
+
+TEST(VMTest, FloatPlusInt) {
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_FLOAT);
+        e.emitReg(0);
+        e.emitFloat(2.5);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(1);
+        e.emitInt(3);
+        e.emit(OpCode::ADD);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
+    });
+    VM vm;
+    vm.execute(code);
+    EXPECT_DOUBLE_EQ(vm.getLastReturn().asFloat(), 5.5);
 }

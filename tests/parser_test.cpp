@@ -1,7 +1,7 @@
-#include <gtest/gtest.h>
+#include "ast.h"
 #include "lexer.h"
 #include "parser.h"
-#include "ast.h"
+#include <gtest/gtest.h>
 
 using namespace omscript;
 
@@ -899,4 +899,61 @@ TEST(ParserTest, BlockStmtHasSourceLocation) {
     ASSERT_GE(stmts.size(), 1u);
     EXPECT_EQ(stmts[0]->type, ASTNodeType::BLOCK);
     EXPECT_EQ(stmts[0]->line, 2);
+}
+
+// ===========================================================================
+// Edge cases - error handling
+// ===========================================================================
+
+TEST(ParserTest, MissingRightParen) {
+    EXPECT_THROW(parse("fn main() { (1 + 2; }"), std::runtime_error);
+}
+
+TEST(ParserTest, MissingRightBracket) {
+    EXPECT_THROW(parse("fn main() { [1, 2; }"), std::runtime_error);
+}
+
+TEST(ParserTest, MissingRightBrace) {
+    EXPECT_THROW(parse("fn main() { var x = 1;"), std::runtime_error);
+}
+
+TEST(ParserTest, EmptyFunctionBody) {
+    auto program = parse("fn empty() { }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    EXPECT_EQ(program->functions[0]->name, "empty");
+}
+
+TEST(ParserTest, NestedBlocks) {
+    auto program = parse("fn main() { { { return 1; } } }");
+    auto* block = dynamic_cast<BlockStmt*>(program->functions[0]->body.get());
+    ASSERT_NE(block, nullptr);
+    ASSERT_EQ(block->statements.size(), 1u);
+    EXPECT_EQ(block->statements[0]->type, ASTNodeType::BLOCK);
+}
+
+TEST(ParserTest, MultipleStatementsInBlock) {
+    auto program = parse("fn main() { var a = 1; var b = 2; return a + b; }");
+    auto* block = dynamic_cast<BlockStmt*>(program->functions[0]->body.get());
+    ASSERT_NE(block, nullptr);
+    EXPECT_EQ(block->statements.size(), 3u);
+}
+
+TEST(ParserTest, TernaryWithComplexCondition) {
+    auto program = parse("fn main() { var x = 1; return x > 0 ? x : -x; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+}
+
+TEST(ParserTest, TernaryNested) {
+    auto program = parse("fn main() { return true ? (false ? 1 : 2) : 3; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+}
+
+TEST(ParserTest, ArrayInCondition) {
+    auto program = parse("fn main() { var arr = [1, 2, 3]; if (arr[0]) { return 1; } return 0; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+}
+
+TEST(ParserTest, FunctionCallAsArrayIndex) {
+    auto program = parse("fn getIdx() { return 0; } fn main() { var arr = [10]; return arr[getIdx()]; }");
+    ASSERT_EQ(program->functions.size(), 2u);
 }
