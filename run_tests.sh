@@ -127,6 +127,8 @@ echo "--------------------------------------------"
 test_cli_output "help" "Usage:" 0 ./build/omsc --help
 test_cli_output "help-command" "Usage:" 0 ./build/omsc help
 test_cli_output "version" "OmScript Compiler v0.4.0" 0 ./build/omsc version
+test_cli_output "parse-leading-verbose" "Parsed program" 0 ./build/omsc -V parse examples/test.om
+test_cli_output "emit-ir-leading-opt" "i64 @main" 0 ./build/omsc -O3 emit-ir examples/exit_zero.om
 test_cli_output "lex" "FN" 0 ./build/omsc lex examples/test.om
 test_cli_output "lex-flag" "FN" 0 ./build/omsc --lex examples/test.om
 test_cli_output "lex-compound-ops" "PLUS_ASSIGN" 0 ./build/omsc lex examples/compound_assign.om
@@ -139,6 +141,8 @@ test_cli_output "lex-null" "NULL_LITERAL" 0 ./build/omsc lex examples/bool_test.
 test_cli_output "lex-bitwise-assign" "AMPERSAND_ASSIGN" 0 ./build/omsc lex examples/bitwise_assign_test.om
 test_cli_output "tokens-flag" "FN" 0 ./build/omsc --tokens examples/test.om
 test_cli_output "parse" "Parsed program" 0 ./build/omsc parse examples/test.om
+test_cli_output "emit-ast-command" "Parsed program" 0 ./build/omsc emit-ast examples/test.om
+test_cli_output "emit-ast-flag" "Parsed program" 0 ./build/omsc --emit-ast examples/test.om
 test_cli_output "parse-flag" "Parsed program" 0 ./build/omsc --parse examples/test.om
 test_cli_output "ast-flag" "Parsed program" 0 ./build/omsc --ast examples/test.om
 test_cli_output "emit-ir" "i64 @main" 0 ./build/omsc --emit-ir examples/exit_zero.om
@@ -152,7 +156,7 @@ fi
 rm -f emit_ir_flag.ll
 test_cli_output "unknown-command" "Error: unknown command" 1 ./build/omsc frob
 test_cli_output "unknown-option" "Error: unknown option '--bad-flag'" 1 ./build/omsc run examples/exit_zero.om --bad-flag
-test_cli_output "output-unsupported-for-lex" "Error: -o/--output is only supported for compile/run/emit-ir commands" 1 ./build/omsc lex examples/test.om -o /tmp/lex_out
+test_cli_output "output-unsupported-for-lex" "Error: -o/--output is only supported for compile/run/emit-ir/clean commands" 1 ./build/omsc lex examples/test.om -o /tmp/lex_out
 test_cli_output "output-empty" "Error: -o/--output requires a valid output file name" 1 ./build/omsc run examples/exit_zero.om -o ""
 test_cli_output "output-dash-invalid" "Error: -o/--output requires a valid output file name" 1 ./build/omsc run examples/exit_zero.om -o -bad
 test_cli_output "output-missing-arg" "Error: -o/--output requires an argument" 1 ./build/omsc run examples/exit_zero.om -o
@@ -197,6 +201,19 @@ if [ -f a.out ] || [ -f a.out.o ]; then
     FAILURES=$((FAILURES + 1))
 fi
 test_cli_output "clean-noop" "Nothing to clean" 0 ./build/omsc clean
+test_cli_output "build-custom-clean-target" "Compilation successful!" 0 ./build/omsc examples/exit_zero.om -o /tmp/omscript_clean_target
+TOTAL=$((TOTAL + 1))
+if [ ! -f /tmp/omscript_clean_target ]; then
+    echo -e "${RED}✗ Failed (expected custom clean target executable)${NC}"
+    FAILURES=$((FAILURES + 1))
+fi
+test_cli_output "clean-custom-output" "Cleaned outputs" 0 ./build/omsc clean -o /tmp/omscript_clean_target
+TOTAL=$((TOTAL + 1))
+if [ -f /tmp/omscript_clean_target ] || [ -f /tmp/omscript_clean_target.o ]; then
+    echo -e "${RED}✗ Failed (clean -o did not remove custom outputs)${NC}"
+    rm -f /tmp/omscript_clean_target /tmp/omscript_clean_target.o
+    FAILURES=$((FAILURES + 1))
+fi
 echo ""
 
 echo "Running test programs:"
@@ -279,10 +296,15 @@ test_cli_output "opt-O1-compile" "Compilation successful!" 0 ./build/omsc -O1 ex
 rm -f /tmp/test_o1 /tmp/test_o1.o
 test_cli_output "opt-O3-compile" "Compilation successful!" 0 ./build/omsc -O3 examples/exit_zero.om -o /tmp/test_o3
 rm -f /tmp/test_o3 /tmp/test_o3.o
+test_cli_output "opt-Ofast-compile" "Compilation successful!" 0 ./build/omsc -Ofast examples/exit_zero.om -o /tmp/test_ofast
+rm -f /tmp/test_ofast /tmp/test_ofast.o
 test_cli_output "opt-O0-emit-ir" "i64 @main" 0 ./build/omsc emit-ir -O0 examples/exit_zero.om
 test_cli_output "opt-O3-emit-ir" "i64 @main" 0 ./build/omsc emit-ir -O3 examples/exit_zero.om
+test_cli_output "opt-Ofast-emit-ir" "i64 @main" 0 ./build/omsc emit-ir -Ofast examples/exit_zero.om
 test_cli_output "opt-O0-run" "Compilation successful!" 0 ./build/omsc run -O0 examples/exit_zero.om
+test_cli_output "opt-Ofast-run" "Compilation successful!" 0 ./build/omsc run -Ofast examples/exit_zero.om
 test_cli_output "opt-help-shows-flags" "-O0" 0 ./build/omsc --help
+test_cli_output "opt-help-shows-ofast" "-Ofast" 0 ./build/omsc --help
 
 TOTAL=$((TOTAL + 1))
 echo -n "Testing with O3 optimization... "

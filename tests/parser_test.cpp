@@ -40,6 +40,16 @@ TEST(ParserTest, MultipleFunctions) {
     EXPECT_EQ(program->functions[1]->name, "b");
 }
 
+TEST(ParserTest, EmptyTokenVectorDoesNotCrash) {
+    std::vector<Token> tokens;
+    Parser parser(tokens);
+    EXPECT_NO_THROW({
+        auto program = parser.parse();
+        ASSERT_NE(program, nullptr);
+        EXPECT_TRUE(program->functions.empty());
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Return statement
 // ---------------------------------------------------------------------------

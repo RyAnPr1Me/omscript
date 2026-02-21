@@ -10,6 +10,7 @@
 #include <fstream>
 #include <sstream>
 #include <vector>
+#include <optional>
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/Support/FileSystem.h>
 #include <llvm/Support/Program.h>
@@ -49,6 +50,7 @@ void printUsage(const char* progName) {
     std::cout << "  " << progName << " run <source.om> [-o output] [-- args...]\n";
     std::cout << "  " << progName << " lex <source.om>\n";
     std::cout << "  " << progName << " parse <source.om>\n";
+    std::cout << "  " << progName << " emit-ast <source.om>\n";
     std::cout << "  " << progName << " emit-ir <source.om> [-o output.ll]\n";
     std::cout << "  " << progName << " clean [-o output]\n";
     std::cout << "  " << progName << " version\n";
@@ -58,7 +60,7 @@ void printUsage(const char* progName) {
     std::cout << "  -b, -c, --build, --compile  Compile a source file (default)\n";
     std::cout << "  -r, --run            Compile and run a source file\n";
     std::cout << "  -l, --lex, --tokens  Print lexer tokens\n";
-    std::cout << "  -a, -p, --ast, --parse      Parse and summarize the AST\n";
+    std::cout << "  -a, -p, --ast, --parse, --emit-ast  Parse and summarize the AST\n";
     std::cout << "  -e, -i, --emit-ir, --ir     Emit LLVM IR\n";
     std::cout << "  -C, --clean          Remove outputs\n";
     std::cout << "  -h, --help           Show this help message\n";
@@ -69,6 +71,7 @@ void printUsage(const char* progName) {
     std::cout << "  -O1                  Basic optimization\n";
     std::cout << "  -O2                  Moderate optimization (default)\n";
     std::cout << "  -O3                  Aggressive optimization\n";
+    std::cout << "  -Ofast               Maximum runtime optimization (alias for -O3)\n";
 }
 
 std::string readSourceFile(const std::string& filename) {
@@ -221,7 +224,45 @@ int main(int argc, char* argv[]) {
     };
 
     int argIndex = 1;
-    std::string firstArg = argv[argIndex];
+    bool verbose = false;
+    omscript::OptimizationLevel optLevel = omscript::OptimizationLevel::O2;
+    const auto tryParseOptimizationFlag = [](const std::string& arg)
+        -> std::optional<omscript::OptimizationLevel> {
+        if (arg == "-Ofast") {
+            return omscript::OptimizationLevel::O3;
+        }
+        if (arg.size() == 3 && arg[0] == '-' && arg[1] == 'O' &&
+            arg[2] >= '0' && arg[2] <= '3') {
+            static constexpr omscript::OptimizationLevel levels[] = {
+                omscript::OptimizationLevel::O0, omscript::OptimizationLevel::O1,
+                omscript::OptimizationLevel::O2, omscript::OptimizationLevel::O3
+            };
+            return levels[arg[2] - '0'];
+        }
+        return std::nullopt;
+    };
+
+    // Allow global options before commands/input (e.g. `omsc -V parse file.om`).
+    while (argIndex < argc) {
+        std::string arg = argv[argIndex];
+        if (arg == "-V" || arg == "--verbose") {
+            verbose = true;
+            argIndex++;
+            continue;
+        }
+        if (auto parsedOpt = tryParseOptimizationFlag(arg)) {
+            optLevel = *parsedOpt;
+            argIndex++;
+            continue;
+        }
+        break;
+    }
+
+    std::string firstArg = argIndex < argc ? argv[argIndex] : "";
+    if (firstArg.empty()) {
+        std::cerr << "Error: no input file specified (run '" << argv[0] << " --help' for usage)\n";
+        return 1;
+    }
     Command command = Command::Compile;
     bool commandMatched = false;
     if (firstArg == "help" || firstArg == "-h" || firstArg == "--help") {
@@ -244,8 +285,9 @@ int main(int argc, char* argv[]) {
         command = Command::Lex;
         argIndex++;
         commandMatched = true;
-    } else if (firstArg == "parse" || firstArg == "-p" || firstArg == "-a" ||
-               firstArg == "--parse" || firstArg == "--ast") {
+    } else if (firstArg == "parse" || firstArg == "emit-ast" ||
+               firstArg == "-p" || firstArg == "-a" ||
+               firstArg == "--parse" || firstArg == "--ast" || firstArg == "--emit-ast") {
         command = Command::Parse;
         argIndex++;
         commandMatched = true;
@@ -287,8 +329,6 @@ int main(int argc, char* argv[]) {
                                 command == Command::EmitIR || command == Command::Clean;
     bool parsingRunArgs = false;
     bool keepTemps = false;
-    bool verbose = false;
-    omscript::OptimizationLevel optLevel = omscript::OptimizationLevel::O2;
     std::vector<std::string> runArgs;
     
     // Parse command line arguments
@@ -318,18 +358,15 @@ int main(int argc, char* argv[]) {
             verbose = true;
             continue;
         }
-        if (!parsingRunArgs && arg.size() == 3 && arg[0] == '-' && arg[1] == 'O' &&
-            arg[2] >= '0' && arg[2] <= '3') {
-            static constexpr omscript::OptimizationLevel levels[] = {
-                omscript::OptimizationLevel::O0, omscript::OptimizationLevel::O1,
-                omscript::OptimizationLevel::O2, omscript::OptimizationLevel::O3
-            };
-            optLevel = levels[arg[2] - '0'];
-            continue;
+        if (!parsingRunArgs) {
+            if (auto parsedOpt = tryParseOptimizationFlag(arg)) {
+                optLevel = *parsedOpt;
+                continue;
+            }
         }
         if (!parsingRunArgs && (arg == "-o" || arg == "--output")) {
             if (!supportsOutputOption) {
-                std::cerr << "Error: -o/--output is only supported for compile/run/emit-ir commands\n";
+                std::cerr << "Error: -o/--output is only supported for compile/run/emit-ir/clean commands\n";
                 return 1;
             }
             if (outputSpecified) {
