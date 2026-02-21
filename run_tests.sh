@@ -139,6 +139,8 @@ test_cli_output "lex-null" "NULL_LITERAL" 0 ./build/omsc lex examples/bool_test.
 test_cli_output "lex-bitwise-assign" "AMPERSAND_ASSIGN" 0 ./build/omsc lex examples/bitwise_assign_test.om
 test_cli_output "tokens-flag" "FN" 0 ./build/omsc --tokens examples/test.om
 test_cli_output "parse" "Parsed program" 0 ./build/omsc parse examples/test.om
+test_cli_output "emit-ast-command" "Parsed program" 0 ./build/omsc emit-ast examples/test.om
+test_cli_output "emit-ast-flag" "Parsed program" 0 ./build/omsc --emit-ast examples/test.om
 test_cli_output "parse-flag" "Parsed program" 0 ./build/omsc --parse examples/test.om
 test_cli_output "ast-flag" "Parsed program" 0 ./build/omsc --ast examples/test.om
 test_cli_output "emit-ir" "i64 @main" 0 ./build/omsc --emit-ir examples/exit_zero.om

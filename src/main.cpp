@@ -49,6 +49,7 @@ void printUsage(const char* progName) {
     std::cout << "  " << progName << " run <source.om> [-o output] [-- args...]\n";
     std::cout << "  " << progName << " lex <source.om>\n";
     std::cout << "  " << progName << " parse <source.om>\n";
+    std::cout << "  " << progName << " emit-ast <source.om>\n";
     std::cout << "  " << progName << " emit-ir <source.om> [-o output.ll]\n";
     std::cout << "  " << progName << " clean [-o output]\n";
     std::cout << "  " << progName << " version\n";
@@ -58,7 +59,7 @@ void printUsage(const char* progName) {
     std::cout << "  -b, -c, --build, --compile  Compile a source file (default)\n";
     std::cout << "  -r, --run            Compile and run a source file\n";
     std::cout << "  -l, --lex, --tokens  Print lexer tokens\n";
-    std::cout << "  -a, -p, --ast, --parse      Parse and summarize the AST\n";
+    std::cout << "  -a, -p, --ast, --parse, --emit-ast  Parse and summarize the AST\n";
     std::cout << "  -e, -i, --emit-ir, --ir     Emit LLVM IR\n";
     std::cout << "  -C, --clean          Remove outputs\n";
     std::cout << "  -h, --help           Show this help message\n";
@@ -244,8 +245,9 @@ int main(int argc, char* argv[]) {
         command = Command::Lex;
         argIndex++;
         commandMatched = true;
-    } else if (firstArg == "parse" || firstArg == "-p" || firstArg == "-a" ||
-               firstArg == "--parse" || firstArg == "--ast") {
+    } else if (firstArg == "parse" || firstArg == "emit-ast" ||
+               firstArg == "-p" || firstArg == "-a" ||
+               firstArg == "--parse" || firstArg == "--ast" || firstArg == "--emit-ast") {
         command = Command::Parse;
         argIndex++;
         commandMatched = true;
