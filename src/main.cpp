@@ -10,6 +10,7 @@
 #include <fstream>
 #include <sstream>
 #include <vector>
+#include <optional>
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/Support/FileSystem.h>
 #include <llvm/Support/Program.h>
@@ -70,6 +71,7 @@ void printUsage(const char* progName) {
     std::cout << "  -O1                  Basic optimization\n";
     std::cout << "  -O2                  Moderate optimization (default)\n";
     std::cout << "  -O3                  Aggressive optimization\n";
+    std::cout << "  -Ofast               Maximum runtime optimization (alias for -O3)\n";
 }
 
 std::string readSourceFile(const std::string& filename) {
@@ -224,6 +226,21 @@ int main(int argc, char* argv[]) {
     int argIndex = 1;
     bool verbose = false;
     omscript::OptimizationLevel optLevel = omscript::OptimizationLevel::O2;
+    const auto tryParseOptimizationFlag = [](const std::string& arg)
+        -> std::optional<omscript::OptimizationLevel> {
+        if (arg == "-Ofast") {
+            return omscript::OptimizationLevel::O3;
+        }
+        if (arg.size() == 3 && arg[0] == '-' && arg[1] == 'O' &&
+            arg[2] >= '0' && arg[2] <= '3') {
+            static constexpr omscript::OptimizationLevel levels[] = {
+                omscript::OptimizationLevel::O0, omscript::OptimizationLevel::O1,
+                omscript::OptimizationLevel::O2, omscript::OptimizationLevel::O3
+            };
+            return levels[arg[2] - '0'];
+        }
+        return std::nullopt;
+    };
 
     // Allow global options before commands/input (e.g. `omsc -V parse file.om`).
     while (argIndex < argc) {
@@ -233,13 +250,8 @@ int main(int argc, char* argv[]) {
             argIndex++;
             continue;
         }
-        if (arg.size() == 3 && arg[0] == '-' && arg[1] == 'O' &&
-            arg[2] >= '0' && arg[2] <= '3') {
-            static constexpr omscript::OptimizationLevel levels[] = {
-                omscript::OptimizationLevel::O0, omscript::OptimizationLevel::O1,
-                omscript::OptimizationLevel::O2, omscript::OptimizationLevel::O3
-            };
-            optLevel = levels[arg[2] - '0'];
+        if (auto parsedOpt = tryParseOptimizationFlag(arg)) {
+            optLevel = *parsedOpt;
             argIndex++;
             continue;
         }
@@ -346,18 +358,15 @@ int main(int argc, char* argv[]) {
             verbose = true;
             continue;
         }
-        if (!parsingRunArgs && arg.size() == 3 && arg[0] == '-' && arg[1] == 'O' &&
-            arg[2] >= '0' && arg[2] <= '3') {
-            static constexpr omscript::OptimizationLevel levels[] = {
-                omscript::OptimizationLevel::O0, omscript::OptimizationLevel::O1,
-                omscript::OptimizationLevel::O2, omscript::OptimizationLevel::O3
-            };
-            optLevel = levels[arg[2] - '0'];
-            continue;
+        if (!parsingRunArgs) {
+            if (auto parsedOpt = tryParseOptimizationFlag(arg)) {
+                optLevel = *parsedOpt;
+                continue;
+            }
         }
         if (!parsingRunArgs && (arg == "-o" || arg == "--output")) {
             if (!supportsOutputOption) {
-                std::cerr << "Error: -o/--output is only supported for compile/run/emit-ir commands\n";
+                std::cerr << "Error: -o/--output is only supported for compile/run/emit-ir/clean commands\n";
                 return 1;
             }
             if (outputSpecified) {
