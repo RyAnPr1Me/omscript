@@ -57,6 +57,43 @@ TEST(VMTest, PushStringAndReturn) {
     EXPECT_STREQ(vm.getLastReturn().asString(), "hello");
 }
 
+TEST(VMTest, PopOperation) {
+    // POP should discard the top of stack
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(10);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(1);
+        e.emitInt(20);
+        e.emit(OpCode::POP); // discards 20
+        e.emit(OpCode::RETURN);
+        e.emitReg(0); // returns 10
+    });
+    VM vm;
+    vm.execute(code);
+    EXPECT_EQ(vm.getLastReturn().asInt(), 10);
+}
+
+TEST(VMTest, DupOperation) {
+    // DUP duplicates the top of stack
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(42);
+        e.emit(OpCode::DUP);
+        e.emit(OpCode::ADD);
+        e.emitReg(1);
+        e.emitReg(0);
+        e.emitReg(0);
+        e.emit(OpCode::RETURN);
+        e.emitReg(1);
+    });
+    VM vm;
+    vm.execute(code);
+    EXPECT_EQ(vm.getLastReturn().asInt(), 84); // 42 + 42
+}
+
 // ===========================================================================
 // Arithmetic operations
 // ===========================================================================
