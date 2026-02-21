@@ -9,8 +9,7 @@ Parser::Parser(const std::vector<Token>& tokens)
 
 Token Parser::peek(int offset) const {
     if (tokens.empty()) {
-        static const Token eofToken(TokenType::END_OF_FILE, "", 0, 0);
-        return eofToken;
+        return Token(TokenType::END_OF_FILE, "", 0, 0);
     }
     size_t index = current + offset;
     if (index >= tokens.size()) {
