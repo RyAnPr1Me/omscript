@@ -2457,7 +2457,12 @@ void CodeGenerator::runOptimizationPasses() {
         // for maximum codegen quality on the build host.
         cpu = llvm::sys::getHostCPUName().str();
         llvm::SubtargetFeatures features;
+#if LLVM_VERSION_MAJOR >= 19
         llvm::StringMap<bool> hostFeatures = llvm::sys::getHostCPUFeatures();
+#else
+        llvm::StringMap<bool> hostFeatures;
+        llvm::sys::getHostCPUFeatures(hostFeatures);
+#endif
         for (auto& feature : hostFeatures) {
             features.AddFeature(feature.first(), feature.second);
         }
@@ -2608,7 +2613,12 @@ void CodeGenerator::writeObjectFile(const std::string& filename) {
 
     auto CPU = llvm::sys::getHostCPUName().str();
     llvm::SubtargetFeatures featureSet;
+#if LLVM_VERSION_MAJOR >= 19
     llvm::StringMap<bool> hostFeatures = llvm::sys::getHostCPUFeatures();
+#else
+    llvm::StringMap<bool> hostFeatures;
+    llvm::sys::getHostCPUFeatures(hostFeatures);
+#endif
     for (auto& feature : hostFeatures) {
         featureSet.AddFeature(feature.first(), feature.second);
     }
