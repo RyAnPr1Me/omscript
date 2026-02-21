@@ -222,7 +222,35 @@ int main(int argc, char* argv[]) {
     };
 
     int argIndex = 1;
-    std::string firstArg = argv[argIndex];
+    bool verbose = false;
+    omscript::OptimizationLevel optLevel = omscript::OptimizationLevel::O2;
+
+    // Allow global options before commands/input (e.g. `omsc -V parse file.om`).
+    while (argIndex < argc) {
+        std::string arg = argv[argIndex];
+        if (arg == "-V" || arg == "--verbose") {
+            verbose = true;
+            argIndex++;
+            continue;
+        }
+        if (arg.size() == 3 && arg[0] == '-' && arg[1] == 'O' &&
+            arg[2] >= '0' && arg[2] <= '3') {
+            static constexpr omscript::OptimizationLevel levels[] = {
+                omscript::OptimizationLevel::O0, omscript::OptimizationLevel::O1,
+                omscript::OptimizationLevel::O2, omscript::OptimizationLevel::O3
+            };
+            optLevel = levels[arg[2] - '0'];
+            argIndex++;
+            continue;
+        }
+        break;
+    }
+
+    std::string firstArg = argIndex < argc ? argv[argIndex] : "";
+    if (firstArg.empty()) {
+        std::cerr << "Error: no input file specified (run '" << argv[0] << " --help' for usage)\n";
+        return 1;
+    }
     Command command = Command::Compile;
     bool commandMatched = false;
     if (firstArg == "help" || firstArg == "-h" || firstArg == "--help") {
@@ -289,8 +317,6 @@ int main(int argc, char* argv[]) {
                                 command == Command::EmitIR || command == Command::Clean;
     bool parsingRunArgs = false;
     bool keepTemps = false;
-    bool verbose = false;
-    omscript::OptimizationLevel optLevel = omscript::OptimizationLevel::O2;
     std::vector<std::string> runArgs;
     
     // Parse command line arguments
