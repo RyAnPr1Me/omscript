@@ -2,7 +2,7 @@
 #include "../include/bytecode.h"
 #include "jit.h"
 #include <algorithm>
-#include <climits>
+#include <cstdint>
 #include <cstring>
 #include <iostream>
 #include <stdexcept>

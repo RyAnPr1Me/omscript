@@ -1,5 +1,4 @@
 #include "value.h"
-#include <climits>
 #include <cstdint>
 #include <sstream>
 #include <stdexcept>
