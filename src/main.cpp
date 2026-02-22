@@ -757,6 +757,8 @@ const char* tokenTypeToString(omscript::TokenType type) {
         return "RSHIFT";
     case omscript::TokenType::RANGE:
         return "RANGE";
+    case omscript::TokenType::ARROW:
+        return "ARROW";
     case omscript::TokenType::LPAREN:
         return "LPAREN";
     case omscript::TokenType::RPAREN:

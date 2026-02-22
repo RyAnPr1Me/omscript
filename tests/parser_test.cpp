@@ -25,6 +25,22 @@ TEST(ParserTest, EmptyFunction) {
     EXPECT_TRUE(program->functions[0]->body->statements.empty());
 }
 
+TEST(ParserTest, FunctionWithReturnType) {
+    auto program = parse("fn main() -> int { return 0; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    EXPECT_EQ(program->functions[0]->name, "main");
+    ASSERT_EQ(program->functions[0]->body->statements.size(), 1u);
+}
+
+TEST(ParserTest, FunctionWithParamsAndReturnType) {
+    auto program = parse("fn add(a: int, b: int) -> int { return a; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    ASSERT_EQ(program->functions[0]->parameters.size(), 2u);
+    EXPECT_EQ(program->functions[0]->parameters[0].name, "a");
+    EXPECT_EQ(program->functions[0]->parameters[1].name, "b");
+    ASSERT_EQ(program->functions[0]->body->statements.size(), 1u);
+}
+
 TEST(ParserTest, FunctionWithParameters) {
     auto program = parse("fn add(a, b) { return a; }");
     ASSERT_EQ(program->functions.size(), 1u);

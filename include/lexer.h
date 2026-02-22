@@ -71,6 +71,7 @@ enum class TokenType {
     LSHIFT,
     RSHIFT,
     RANGE,
+    ARROW,
 
     // Delimiters
     LPAREN,

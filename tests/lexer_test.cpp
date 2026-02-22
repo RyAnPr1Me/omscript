@@ -203,6 +203,26 @@ TEST(LexerTest, CompoundAssignment) {
     EXPECT_EQ(tokens[4].type, TokenType::PERCENT_ASSIGN);
 }
 
+TEST(LexerTest, ArrowToken) {
+    auto tokens = lex("->");
+    ASSERT_GE(tokens.size(), 2u);
+    EXPECT_EQ(tokens[0].type, TokenType::ARROW);
+    EXPECT_EQ(tokens[0].lexeme, "->");
+}
+
+TEST(LexerTest, ArrowVsMinusGt) {
+    // -> should be a single ARROW token, not MINUS then GT
+    auto tokens = lex("fn f() -> int {}");
+    bool foundArrow = false;
+    for (const auto& t : tokens) {
+        if (t.type == TokenType::ARROW) {
+            foundArrow = true;
+        }
+        EXPECT_NE(t.type, TokenType::MINUS);
+    }
+    EXPECT_TRUE(foundArrow);
+}
+
 TEST(LexerTest, AssignmentAndEquality) {
     auto tokens = lex("= ==");
     ASSERT_GE(tokens.size(), 3u);
