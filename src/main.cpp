@@ -108,6 +108,7 @@ void printUsage(const char* progName) {
     std::cout << "  " << progName << " emit-ir <source.om> [-o output.ll]\n";
     std::cout << "  " << progName << " clean [-o output]\n";
     std::cout << "  " << progName << " version\n";
+    std::cout << "  " << progName << " install\n";
     std::cout << "  " << progName << " help\n";
     std::cout << "\nOptions:\n";
     std::cout << "  -o, --output <file>  Output file name (default: a.out, stdout for emit-ir)\n";
@@ -126,6 +127,8 @@ void printUsage(const char* progName) {
     std::cout << "  -O2                  Moderate optimization (default)\n";
     std::cout << "  -O3                  Aggressive optimization\n";
     std::cout << "  -Ofast               Maximum runtime optimization (alias for -O3)\n";
+    std::cout << "\nInstallation:\n";
+    std::cout << "  " << progName << " install        Add to PATH (first run or update)\n";
 }
 
 std::string readSourceFile(const std::string& filename) {
@@ -338,7 +341,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    enum class Command { Compile, Run, Lex, Parse, EmitIR, Clean, Help, Version };
+    enum class Command { Compile, Run, Lex, Parse, EmitIR, Clean, Help, Version, Install };
 
     int argIndex = 1;
     bool verbose = false;
@@ -384,6 +387,9 @@ int main(int argc, char* argv[]) {
         commandMatched = true;
     } else if (firstArg == "version" || firstArg == "-v" || firstArg == "--version") {
         command = Command::Version;
+        commandMatched = true;
+    } else if (firstArg == "install" || firstArg == "update" || firstArg == "--install" || firstArg == "--update") {
+        command = Command::Install;
         commandMatched = true;
     } else if (firstArg == "compile" || firstArg == "build" || firstArg == "-c" || firstArg == "-b" ||
                firstArg == "--compile" || firstArg == "--build") {
@@ -431,6 +437,10 @@ int main(int argc, char* argv[]) {
     }
     if (command == Command::Version) {
         std::cout << kCompilerVersion << "\n";
+        return 0;
+    }
+    if (command == Command::Install) {
+        ensureInPath();
         return 0;
     }
 

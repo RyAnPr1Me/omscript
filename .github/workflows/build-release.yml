@@ -40,8 +40,14 @@ jobs:
       - name: Determine version bump
         id: version
         run: |
-          if [ "${{ github.event.inputs.version_bump }}" != "auto" ]; then
-            BUMP_TYPE="${{ github.event.inputs.version_bump }}"
+          # Get version_bump input, default to auto if not set
+          VERSION_BUMP_INPUT="${{ github.event.inputs.version_bump }}"
+          if [ -z "$VERSION_BUMP_INPUT" ]; then
+            VERSION_BUMP_INPUT="auto"
+          fi
+          
+          if [ "$VERSION_BUMP_INPUT" != "auto" ]; then
+            BUMP_TYPE="$VERSION_BUMP_INPUT"
           else
             # Get number of files changed in last commit
             FILES_CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null | wc -l)
@@ -142,10 +148,11 @@ jobs:
       - name: Create release archive
         run: |
           VERSION="${{ steps.version.outputs.VERSION }}"
-          tar -czf "omscript-$VERSION-linux-x86_64.tar.gz" -C release omsc omsc-bin
+          mkdir -p "release"
+          tar -czvf "omscript-${VERSION}-linux-x86_64.tar.gz" -C release omsc omsc-bin
           
           # Also create zip for Windows compatibility
-          zip -j "omscript-$VERSION-linux-x86_64.zip" release/omsc release/omsc-bin
+          zip -j "omscript-${VERSION}-linux-x86_64.zip" release/omsc release/omsc-bin
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -191,8 +198,8 @@ jobs:
             ### What's Changed
             - Version bump type: **${{ steps.version.outputs.BUMP_TYPE }}**
           files: |
-            omscript-*-linux-x86_64.tar.gz
-            omscript-*-linux-x86_64.zip
+            omscript-${{ steps.version.outputs.VERSION }}-linux-x86_64.tar.gz
+            omscript-${{ steps.version.outputs.VERSION }}-linux-x86_64.zip
           draft: false
           prerelease: false
         env:
