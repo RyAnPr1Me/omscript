@@ -1,0 +1,206 @@
+name: Build and Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_bump:
+        description: 'Version bump type (auto, patch, minor, major)'
+        required: false
+        default: 'auto'
+        type: choice
+        options:
+          - auto
+          - patch
+          - minor
+          - major
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            build-essential \
+            llvm-17-dev \
+            libgtest-dev \
+            gcc
+
+      - name: Determine version bump
+        id: version
+        run: |
+          if [ "${{ github.event.inputs.version_bump }}" != "auto" ]; then
+            BUMP_TYPE="${{ github.event.inputs.version_bump }}"
+          else
+            # Get number of files changed in last commit
+            FILES_CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null | wc -l)
+            # Get lines changed
+            LINES_CHANGED=$(git diff --shortstat HEAD~1 HEAD 2>/dev/null | awk '{print $1+$4}' || echo "0")
+            
+            echo "Files changed: $FILES_CHANGED"
+            echo "Lines changed: $LINES_CHANGED"
+            
+            # Small change: <= 5 files and <= 100 lines -> patch
+            # Medium change: <= 20 files and <= 500 lines -> minor  
+            # Large change: anything bigger -> major
+            if [ "$FILES_CHANGED" -le 5 ] && [ "$LINES_CHANGED" -le 100 ]; then
+              BUMP_TYPE="patch"
+            elif [ "$FILES_CHANGED" -le 20 ] && [ "$LINES_CHANGED" -le 500 ]; then
+              BUMP_TYPE="minor"
+            else
+              BUMP_TYPE="major"
+            fi
+          fi
+          
+          echo "Bump type: $BUMP_TYPE"
+          
+          # Read current version
+          MAJOR=$(grep -oP 'OMSCRIPT_VERSION_MAJOR \K\d+' include/version.h)
+          MINOR=$(grep -oP 'OMSCRIPT_VERSION_MINOR \K\d+' include/version.h)
+          PATCH=$(grep -oP 'OMSCRIPT_VERSION_PATCH \K\d+' include/version.h)
+          
+          echo "Current version: $MAJOR.$MINOR.$PATCH"
+          
+          # Calculate new version
+          if [ "$BUMP_TYPE" = "major" ]; then
+            NEW_MAJOR=$((MAJOR + 1))
+            NEW_MINOR=0
+            NEW_PATCH=0
+          elif [ "$BUMP_TYPE" = "minor" ]; then
+            NEW_MAJOR=$MAJOR
+            NEW_MINOR=$((MINOR + 1))
+            NEW_PATCH=0
+          else
+            NEW_MAJOR=$MAJOR
+            NEW_MINOR=$MINOR
+            NEW_PATCH=$((PATCH + 1))
+          fi
+          
+          NEW_VERSION="$NEW_MAJOR.$NEW_MINOR.$NEW_PATCH"
+          echo "New version: $NEW_VERSION"
+          
+          echo "VERSION=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+          echo "BUMP_TYPE=$BUMP_TYPE" >> "$GITHUB_OUTPUT"
+
+      - name: Update version header
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          MAJOR=$(echo "$VERSION" | cut -d. -f1)
+          MINOR=$(echo "$VERSION" | cut -d. -f2)
+          PATCH=$(echo "$VERSION" | cut -d. -f3)
+          
+          sed -i "s/OMSCRIPT_VERSION_MAJOR \K\d+/$MAJOR/" include/version.h
+          sed -i "s/OMSCRIPT_VERSION_MINOR \K\d+/$MINOR/" include/version.h
+          sed -i "s/OMSCRIPT_VERSION_PATCH \K\d+/$PATCH/" include/version.h
+          sed -i "s/OMSCRIPT_VERSION_STRING \"\K[^\"]+/$VERSION/" include/version.h
+          
+          cat include/version.h
+
+      - name: Configure CMake
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build compiler
+        run: cmake --build build --parallel $(nproc)
+
+      - name: Run unit tests
+        run: cd build && ctest --output-on-failure
+
+      - name: Create wrapper script
+        run: |
+          mkdir -p release
+          
+          # Create the wrapper script
+          cat > release/omsc << 'WRAPPER_EOF'
+          #!/bin/bash
+          # OmScript compiler wrapper
+          # This script adds the omsc binary to PATH and provides convenient access
+          
+          SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+          export PATH="$SCRIPT_DIR:$PATH"
+          
+          # Run the actual compiler
+          exec "$SCRIPT_DIR/omsc-bin" "$@"
+          WRAPPER_EOF
+          chmod +x release/omsc
+          
+          # Copy the actual binary
+          cp build/omsc release/omsc-bin
+          chmod +x release/omsc-bin
+
+      - name: Create release archive
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          tar -czf "omscript-$VERSION-linux-x86_64.tar.gz" -C release omsc omsc-bin
+          
+          # Also create zip for Windows compatibility
+          zip -j "omscript-$VERSION-linux-x86_64.zip" release/omsc release/omsc-bin
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: OmScript v${{ steps.version.outputs.VERSION }}
+          body: |
+            ## OmScript v${{ steps.version.outputs.VERSION }}
+
+            **Version bump:** ${{ steps.version.outputs.BUMP_TYPE }}
+
+            ### Installation
+
+            Extract the archive and add to PATH:
+
+            ```bash
+            tar -xzf omscript-${{ steps.version.outputs.VERSION }}-linux-x86_64.tar.gz
+            cd omscript-${{ steps.version.outputs.VERSION }}-linux-x86_64
+            
+            # Add to PATH (add to ~/.bashrc for permanent installation)
+            export PATH="$(pwd):$PATH"
+            
+            # Or install system-wide (requires sudo)
+            sudo cp omsc-bin /usr/local/bin/omsc
+            ```
+
+            ### Quick Start
+
+            ```bash
+            # Compile a file
+            omsc script.om
+            
+            # Run with JIT
+            omsc --jit script.om
+            
+            # Show version
+            omsc --version
+            ```
+
+            ### Requirements
+            - LLVM 17 runtime libraries
+            - GCC (for linking)
+
+            ### What's Changed
+            - Version bump type: **${{ steps.version.outputs.BUMP_TYPE }}**
+          files: |
+            omscript-*-linux-x86_64.tar.gz
+            omscript-*-linux-x86_64.zip
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Commit version update
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add include/version.h
+          git commit -m "Bump version to ${{ steps.version.outputs.VERSION }}"
+          git push
