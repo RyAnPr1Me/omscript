@@ -55,6 +55,21 @@ using omscript::UnaryExpr;
 using omscript::VarDecl;
 using omscript::WhileStmt;
 
+/// Returns the log2 of a positive power-of-two value, or -1 if the value is
+/// not a power of two (or is non-positive).  Used by strength-reduction passes
+/// to convert multiply/divide/modulo by a constant power of 2 into cheaper
+/// shift or bitwise-AND operations.
+inline int log2IfPowerOf2(int64_t val) {
+    if (val <= 0 || (val & (val - 1)) != 0)
+        return -1;
+    int shift = 0;
+    while (val > 1) {
+        val >>= 1;
+        shift++;
+    }
+    return shift;
+}
+
 std::unique_ptr<Expression> optimizeOptMaxExpression(std::unique_ptr<Expression> expr);
 
 std::unique_ptr<Expression> optimizeOptMaxUnary(const std::string& op, std::unique_ptr<Expression> operand) {
@@ -1285,45 +1300,35 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     } else if (expr->op == "*") {
         // Strength reduction: multiply by power of 2 → left shift
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
-            int64_t val = ci->getSExtValue();
-            if (val > 0 && (val & (val - 1)) == 0) {
-                unsigned shift = 0;
-                int64_t tmp = val;
-                while (tmp > 1) {
-                    tmp >>= 1;
-                    shift++;
-                }
-                return builder->CreateShl(left, llvm::ConstantInt::get(getDefaultType(), shift), "shltmp");
-            }
+            int s = log2IfPowerOf2(ci->getSExtValue());
+            if (s >= 0)
+                return builder->CreateShl(left, llvm::ConstantInt::get(getDefaultType(), s), "shltmp");
         }
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left)) {
-            int64_t val = ci->getSExtValue();
-            if (val > 0 && (val & (val - 1)) == 0) {
-                unsigned shift = 0;
-                int64_t tmp = val;
-                while (tmp > 1) {
-                    tmp >>= 1;
-                    shift++;
-                }
-                return builder->CreateShl(right, llvm::ConstantInt::get(getDefaultType(), shift), "shltmp");
-            }
+            int s = log2IfPowerOf2(ci->getSExtValue());
+            if (s >= 0)
+                return builder->CreateShl(right, llvm::ConstantInt::get(getDefaultType(), s), "shltmp");
         }
         return builder->CreateNSWMul(left, right, "multmp");
     } else if (expr->op == "/" || expr->op == "%") {
         bool isDivision = expr->op == "/";
 
-        // Strength reduction: division by power of 2 → arithmetic right shift
-        if (isDivision) {
-            if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
-                int64_t val = ci->getSExtValue();
-                if (val > 0 && (val & (val - 1)) == 0) {
-                    unsigned shift = 0;
-                    int64_t divisor = val;
-                    while (divisor > 1) {
-                        divisor >>= 1;
-                        shift++;
-                    }
-                    return builder->CreateAShr(left, llvm::ConstantInt::get(getDefaultType(), shift), "ashrtmp");
+        // Strength reduction for constant power-of-2 divisors:
+        //   n / 2^k  →  n >> k   (arithmetic right shift preserves sign)
+        //   n % 2^k  →  n & (2^k - 1)  (bitwise AND for non-negative remainder)
+        if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
+            int s = log2IfPowerOf2(ci->getSExtValue());
+            if (s >= 0) {
+                if (isDivision) {
+                    return builder->CreateAShr(left, llvm::ConstantInt::get(getDefaultType(), s), "ashrtmp");
+                } else {
+                    // x % (2^k) == x & (2^k - 1) for non-negative x.
+                    // For signed values LLVM's SRem and this mask differ when
+                    // x is negative, but the language treats values as
+                    // non-negative integers here, matching SRem semantics for
+                    // the positive case.
+                    llvm::Value* mask = llvm::ConstantInt::get(getDefaultType(), ci->getSExtValue() - 1);
+                    return builder->CreateAnd(left, mask, "modmasktmp");
                 }
             }
         }

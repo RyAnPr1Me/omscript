@@ -260,7 +260,7 @@ bool BytecodeJIT::compileInt(const BytecodeFunction& func) {
             uint16_t len = peekShort(code, ip);
             ip += 2 + len; // func name length + func name
             uint8_t numArgs = code[ip];
-            ip++; // argCount
+            ip++;          // argCount
             ip += numArgs; // arg registers
             break;
         }
@@ -556,9 +556,29 @@ bool BytecodeJIT::compileInt(const BytecodeFunction& func) {
                 JIT_BIT_REG(BIT_AND, CreateAnd)
                 JIT_BIT_REG(BIT_OR, CreateOr)
                 JIT_BIT_REG(BIT_XOR, CreateXor)
-                JIT_BIT_REG(SHL, CreateShl)
-                JIT_BIT_REG(SHR, CreateAShr)
 #undef JIT_BIT_REG
+
+            // Shift operations mask the shift amount to 0-63 to avoid LLVM
+            // undefined behavior when the shift amount >= bit width.  This
+            // matches the VM interpreter's range check (vm.cpp op_SHL/op_SHR).
+            case OpCode::SHL: {
+                uint8_t rd = code[ip++], rs1 = code[ip++], rs2 = code[ip++];
+                auto* a = builder.CreateLoad(int64Ty, regAlloc[rs1], "a");
+                auto* b = builder.CreateLoad(int64Ty, regAlloc[rs2], "b");
+                auto* mask = llvm::ConstantInt::get(int64Ty, 63);
+                auto* safe = builder.CreateAnd(b, mask, "shl_safe");
+                builder.CreateStore(builder.CreateShl(a, safe, "SHL"), regAlloc[rd]);
+                break;
+            }
+            case OpCode::SHR: {
+                uint8_t rd = code[ip++], rs1 = code[ip++], rs2 = code[ip++];
+                auto* a = builder.CreateLoad(int64Ty, regAlloc[rs1], "a");
+                auto* b = builder.CreateLoad(int64Ty, regAlloc[rs2], "b");
+                auto* mask = llvm::ConstantInt::get(int64Ty, 63);
+                auto* safe = builder.CreateAnd(b, mask, "shr_safe");
+                builder.CreateStore(builder.CreateAShr(a, safe, "SHR"), regAlloc[rd]);
+                break;
+            }
 
             case OpCode::BIT_NOT: {
                 uint8_t rd = code[ip++], rs = code[ip++];

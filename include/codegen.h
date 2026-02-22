@@ -260,9 +260,9 @@ class CodeGenerator {
     void scanStmtForStringCalls(Statement* stmt);
 
     // Target CPU configuration for LLVM code generation.
-    std::string marchCpu_;   // -march: CPU arch for instruction selection ("" = native)
-    std::string mtuneCpu_;   // -mtune: CPU for scheduling tuning ("" = same as march)
-    bool usePIC_ = true;     // -fpic / -fno-pic
+    std::string marchCpu_;     // -march: CPU arch for instruction selection ("" = native)
+    std::string mtuneCpu_;     // -mtune: CPU for scheduling tuning ("" = same as march)
+    bool usePIC_ = true;       // -fpic / -fno-pic
     bool useFastMath_ = false; // -ffast-math / -fno-fast-math
     bool enableOptMax_ = true; // -foptmax / -fno-optmax
 
@@ -298,8 +298,8 @@ class CodeGenerator {
     /// Shared implementation for prefix and postfix increment/decrement.
     /// Returns the *old* value for postfix (isPostfix=true) and the *new*
     /// value for prefix (isPostfix=false).
-    llvm::Value* generateIncDec(Expression* operandExpr, const std::string& op,
-                                bool isPostfix, const ASTNode* errorNode);
+    llvm::Value* generateIncDec(Expression* operandExpr, const std::string& op, bool isPostfix,
+                                const ASTNode* errorNode);
 
     // Optimization methods
     void runOptimizationPasses();
