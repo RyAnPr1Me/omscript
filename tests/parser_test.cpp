@@ -510,7 +510,8 @@ TEST(ParserTest, OptmaxErrorNoCascadingFnErrors) {
     // "Expected 'fn'" errors for every keyword token in the remainder of the
     // function body.
     try {
-        parse("OPTMAX=: fn foo(x: int) { var y = 5; for (i: int in 0...10) { return i; } } OPTMAX!: fn main() { return 0; }");
+        parse("OPTMAX=: fn foo(x: int) { var y = 5; for (i: int in 0...10) { return i; } } OPTMAX!: fn main() { return "
+              "0; }");
         FAIL() << "Expected std::runtime_error";
     } catch (const std::runtime_error& e) {
         std::string msg = e.what();

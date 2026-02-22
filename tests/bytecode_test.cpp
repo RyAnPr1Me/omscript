@@ -1,7 +1,7 @@
-#include <gtest/gtest.h>
 #include "bytecode.h"
-#include <cstring>
 #include <cstdint>
+#include <cstring>
+#include <gtest/gtest.h>
 
 using namespace omscript;
 
@@ -142,8 +142,7 @@ TEST(BytecodeTest, PatchJump) {
     emitter.patchJump(jumpOffset, target);
 
     auto& code = emitter.getCode();
-    uint16_t patched = static_cast<uint16_t>(code[jumpOffset]) |
-                       (static_cast<uint16_t>(code[jumpOffset + 1]) << 8);
+    uint16_t patched = static_cast<uint16_t>(code[jumpOffset]) | (static_cast<uint16_t>(code[jumpOffset + 1]) << 8);
     EXPECT_EQ(patched, target);
 }
 
@@ -174,15 +173,15 @@ TEST(BytecodeTest, PatchJumpBoundaryValidation) {
 TEST(BytecodeTest, FullPushIntSequence) {
     BytecodeEmitter emitter;
     emitter.emit(OpCode::PUSH_INT);
-    emitter.emitReg(0);  // rd
+    emitter.emitReg(0); // rd
     emitter.emitInt(42);
     emitter.emit(OpCode::PUSH_INT);
-    emitter.emitReg(1);  // rd
+    emitter.emitReg(1); // rd
     emitter.emitInt(10);
     emitter.emit(OpCode::ADD);
-    emitter.emitReg(2);  // rd
-    emitter.emitReg(0);  // rs1
-    emitter.emitReg(1);  // rs2
+    emitter.emitReg(2); // rd
+    emitter.emitReg(0); // rs1
+    emitter.emitReg(1); // rs2
 
     auto& code = emitter.getCode();
     // (1+1+8) + (1+1+8) + (1+3) = 10 + 10 + 4 = 24

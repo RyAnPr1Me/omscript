@@ -215,14 +215,12 @@ class CodeGenerator {
     // isPreAnalysisStringExpr: lightweight AST-only string check used by the
     //   pre-analysis (no access to namedValues; uses stringReturningFunctions_
     //   and paramStringIndices to track string parameters).
-    bool isPreAnalysisStringExpr(Expression* expr,
-                                  const std::unordered_set<size_t>& paramStringIndices,
-                                  const FunctionDecl* func) const;
+    bool isPreAnalysisStringExpr(Expression* expr, const std::unordered_set<size_t>& paramStringIndices,
+                                 const FunctionDecl* func) const;
     // scanStmtForStringReturns: returns true if any return statement in the
     //   given statement subtree returns a string expression.
-    bool scanStmtForStringReturns(Statement* stmt,
-                                   const std::unordered_set<size_t>& paramStringIndices,
-                                   const FunctionDecl* func) const;
+    bool scanStmtForStringReturns(Statement* stmt, const std::unordered_set<size_t>& paramStringIndices,
+                                  const FunctionDecl* func) const;
     // scanStmtForStringCalls: walks a statement subtree and records which
     //   function parameters receive string arguments at call sites.
     void scanStmtForStringCalls(Statement* stmt);
