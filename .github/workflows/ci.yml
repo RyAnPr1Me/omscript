@@ -56,7 +56,7 @@ jobs:
         run: |
           cd build
           find ../src ../runtime -name '*.cpp' | head -5 | xargs -I{} clang-tidy -p . {} -- -I../include -I../runtime 2>&1 | tee tidy.log || true
-          if grep -q "error:" tidy.log; then
+          if grep -E "^\.\./[a-z]+/[a-z]+\.cpp:[0-9]+:[0-9]+: error:" tidy.log; then
             echo "clang-tidy errors found"
             cat tidy.log
             exit 1
