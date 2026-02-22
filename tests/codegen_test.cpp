@@ -2721,7 +2721,11 @@ TEST(CodegenTest, IRConstantComparisonFolding) {
 // ===========================================================================
 
 TEST(CodegenTest, DivisionStrengthReduction) {
-    // n / 4 should be converted to n >> 2 (arithmetic shift right)
+    // n / 4 where divisor is a known power-of-2 constant should skip the
+    // runtime division-by-zero check (the constant is never zero).  The IR
+    // should contain SDiv but no conditional branch for the zero-check.
+    // SDiv is used instead of AShr because AShr rounds toward -infinity,
+    // while signed division must truncate toward zero.
     CodeGenerator codegen(OptimizationLevel::O0);
     auto* mod = generateIR("fn divide_by_four(n) { return n / 4; }\n"
                            "fn main() { return divide_by_four(16); }",
@@ -2729,16 +2733,21 @@ TEST(CodegenTest, DivisionStrengthReduction) {
     auto* func = mod->getFunction("divide_by_four");
     ASSERT_NE(func, nullptr);
     EXPECT_FALSE(func->empty());
-    // Verify the function contains an ashr instruction (strength reduction)
-    bool hasAShr = false;
+    // Verify the function contains an SDiv instruction with no zero-check branch
+    bool hasSDiv = false;
+    bool hasCondBr = false;
     for (auto& bb : *func) {
         for (auto& inst : bb) {
-            if (inst.getOpcode() == llvm::Instruction::AShr) {
-                hasAShr = true;
+            if (inst.getOpcode() == llvm::Instruction::SDiv)
+                hasSDiv = true;
+            if (auto* br = llvm::dyn_cast<llvm::BranchInst>(&inst)) {
+                if (br->isConditional())
+                    hasCondBr = true;
             }
         }
     }
-    EXPECT_TRUE(hasAShr);
+    EXPECT_TRUE(hasSDiv);
+    EXPECT_FALSE(hasCondBr);
 }
 
 TEST(CodegenTest, ModuloStrengthReduction) {
