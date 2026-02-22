@@ -12,6 +12,9 @@
 #include <unordered_set>
 #include <vector>
 
+// Forward declaration avoids including the full TargetMachine header,
+// reducing compilation dependencies for translation units that only
+// need the CodeGenerator interface (e.g. compiler.cpp, main.cpp).
 namespace llvm {
 class TargetMachine;
 } // namespace llvm
@@ -293,9 +296,10 @@ class CodeGenerator {
     llvm::Function* getOrDeclareAbort();
 
     /// Shared implementation for prefix and postfix increment/decrement.
-    /// Returns the *old* value for postfix and the *new* value for prefix.
+    /// Returns the *old* value for postfix (isPostfix=true) and the *new*
+    /// value for prefix (isPostfix=false).
     llvm::Value* generateIncDec(Expression* operandExpr, const std::string& op,
-                                bool returnOld, const ASTNode* errorNode);
+                                bool isPostfix, const ASTNode* errorNode);
 
     // Optimization methods
     void runOptimizationPasses();

@@ -658,9 +658,10 @@ llvm::Function* CodeGenerator::getOrDeclareExit() {
 }
 
 llvm::Function* CodeGenerator::getOrDeclareAbort() {
-    auto callee = module->getOrInsertFunction(
-        "abort", llvm::FunctionType::get(llvm::Type::getVoidTy(*context), false));
-    return llvm::cast<llvm::Function>(callee.getCallee());
+    if (auto* fn = module->getFunction("abort"))
+        return fn;
+    auto* ty = llvm::FunctionType::get(llvm::Type::getVoidTy(*context), false);
+    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "abort", module.get());
 }
 
 // ---------------------------------------------------------------------------
@@ -2115,7 +2116,7 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
 // returns the value *before* the update, prefix returns the value *after*.
 
 llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::string& op,
-                                           bool returnOld, const ASTNode* errorNode) {
+                                           bool isPostfix, const ASTNode* errorNode) {
     auto* identifier = dynamic_cast<IdentifierExpr*>(operandExpr);
     if (!identifier) {
         codegenError("Increment/decrement operators require an identifier", errorNode);
@@ -2146,15 +2147,15 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
     }
 
     builder->CreateStore(updated, it->second);
-    return returnOld ? current : updated;
+    return isPostfix ? current : updated;
 }
 
 llvm::Value* CodeGenerator::generatePostfix(PostfixExpr* expr) {
-    return generateIncDec(expr->operand.get(), expr->op, /*returnOld=*/true, expr);
+    return generateIncDec(expr->operand.get(), expr->op, /*isPostfix=*/true, expr);
 }
 
 llvm::Value* CodeGenerator::generatePrefix(PrefixExpr* expr) {
-    return generateIncDec(expr->operand.get(), expr->op, /*returnOld=*/false, expr);
+    return generateIncDec(expr->operand.get(), expr->op, /*isPostfix=*/false, expr);
 }
 
 llvm::Value* CodeGenerator::generateTernary(TernaryExpr* expr) {
