@@ -37,7 +37,7 @@ jobs:
             libgtest-dev \
             gcc
 
-      - name: Determine version bump
+      - name: Determine version and build
         id: version
         run: |
           # Get version_bump input, default to auto if not set
@@ -96,100 +96,71 @@ jobs:
           NEW_VERSION="$NEW_MAJOR.$NEW_MINOR.$NEW_PATCH"
           echo "New version: $NEW_VERSION"
           
-          echo "VERSION=$NEW_VERSION" >> "$GITHUB_OUTPUT"
-          echo "VERSION=$NEW_VERSION" >> /tmp/version.txt
-          echo "BUMP_TYPE=$BUMP_TYPE" >> "$GITHUB_OUTPUT"
-
-      - name: Update version header
-        run: |
-          VERSION="${{ steps.version.outputs.VERSION }}"
-          MAJOR=$(echo "$VERSION" | cut -d. -f1)
-          MINOR=$(echo "$VERSION" | cut -d. -f2)
-          PATCH=$(echo "$VERSION" | cut -d. -f3)
-          
-          sed -i "s/OMSCRIPT_VERSION_MAJOR \K\d+/$MAJOR/" include/version.h
-          sed -i "s/OMSCRIPT_VERSION_MINOR \K\d+/$MINOR/" include/version.h
-          sed -i "s/OMSCRIPT_VERSION_PATCH \K\d+/$PATCH/" include/version.h
-          sed -i "s/OMSCRIPT_VERSION_STRING \"\K[^\"]+/$VERSION/" include/version.h
+          # Update version header
+          sed -i "s/OMSCRIPT_VERSION_MAJOR \K\d+/$NEW_MAJOR/" include/version.h
+          sed -i "s/OMSCRIPT_VERSION_MINOR \K\d+/$NEW_MINOR/" include/version.h
+          sed -i "s/OMSCRIPT_VERSION_PATCH \K\d+/$NEW_PATCH/" include/version.h
+          sed -i "s/OMSCRIPT_VERSION_STRING \"\K[^\"]+/$NEW_VERSION/" include/version.h
           
           cat include/version.h
-
-      - name: Configure CMake
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
-
-      - name: Build compiler
-        run: cmake --build build --parallel $(nproc)
-
-      - name: Run unit tests
-        run: cd build && ctest --output-on-failure
-
-      - name: Create release binary
-        run: |
+          
+          # Configure and build
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --parallel $(nproc)
+          
+          # Run tests
+          cd build && ctest --output-on-failure
+          
+          # Create release
           mkdir -p release
           cp build/omsc release/omsc
           chmod +x release/omsc
-
-      - name: Create release archive
-        run: |
-          mkdir -p release
-          VER="${{ steps.version.outputs.VERSION }}"
-          echo "VERSION is: '$VER'"
-          tar -czvf "omscript-${VER}-linux-x86_64.tar.gz" -C release omsc
           
-          zip -j "omscript-${VER}-linux-x86_64.zip" release/omsc
+          # Create archive
+          ARCHIVE_NAME="omscript-${NEW_VERSION}-linux-x86_64.tar.gz"
+          tar -czf "$ARCHIVE_NAME" -C release omsc
+          zip -j "omscript-${NEW_VERSION}-linux-x86_64.zip" release/omsc
+          
+          echo "Created archives: $ARCHIVE_NAME"
+          
+          # Create release body
+          RELEASE_BODY="## OmScript v${NEW_VERSION}
+
+**Version bump:** $BUMP_TYPE
+
+### Installation
+
+Run: \`./omsc install\` for user install or \`sudo ./omsc install\` for system-wide.
+
+### Quick Start
+
+\`\`\`bash
+# Compile a file
+omsc script.om
+
+# Show version
+omsc --version
+\`\`\`
+"
+          echo "$RELEASE_BODY" > /tmp/release_body.txt
+          
+          # Commit version update
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add include/version.h
+          git commit -m "Bump version to $NEW_VERSION"
+          git push
+          
+          # Set outputs
+          echo "VERSION=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+          echo "BUMP_TYPE=$BUMP_TYPE" >> "$GITHUB_OUTPUT"
+          echo "ARCHIVE_NAME=$ARCHIVE_NAME" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           name: OmScript v${{ steps.version.outputs.VERSION }}
-          body: |
-            ## OmScript v${{ steps.version.outputs.VERSION }}
-
-            **Version bump:** ${{ steps.version.outputs.BUMP_TYPE }}
-
-            ### Installation
-
-            Extract the archive:
-
-            ```bash
-            tar -xzf omscript-${{ steps.version.outputs.VERSION }}-linux-x86_64.tar.gz
-            cd omscript-${{ steps.version.outputs.VERSION }}-linux-x86_64
-            ```
-
-            ### Quick Install/Update
-
-            Run the binary with the `install` command:
-
-            ```bash
-            # User installation (to ~/.local/bin)
-            ./omsc install
-
-            # System-wide installation (requires sudo)
-            sudo ./omsc install
-
-            # Or manually:
-            sudo cp omsc /usr/local/bin/omsc
-            ```
-
-            ### Quick Start
-
-            ```bash
-            # Compile a file
-            omsc script.om
-            
-            # Run with JIT
-            omsc --jit script.om
-            
-            # Show version
-            omsc --version
-            ```
-
-            ### Requirements
-            - LLVM 17 runtime libraries
-            - GCC (for linking)
-
-            ### What's Changed
-            - Version bump type: **${{ steps.version.outputs.BUMP_TYPE }}**
+          body_path: /tmp/release_body.txt
           files: |
             omscript-${{ steps.version.outputs.VERSION }}-linux-x86_64.tar.gz
             omscript-${{ steps.version.outputs.VERSION }}-linux-x86_64.zip
@@ -197,11 +168,3 @@ jobs:
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Commit version update
-        run: |
-          git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git config --local user.name "github-actions[bot]"
-          git add include/version.h
-          git commit -m "Bump version to ${{ steps.version.outputs.VERSION }}"
-          git push
