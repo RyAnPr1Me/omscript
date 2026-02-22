@@ -144,27 +144,15 @@ omsc --version
 "
           echo "$RELEASE_BODY" > /tmp/release_body.txt
           
-          # Commit version update
+          # Commit version update and push tag to trigger release workflow
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           git add include/version.h
           git commit -m "Bump version to $NEW_VERSION"
-          git push
+          git tag "v${NEW_VERSION}"
+          git push --follow-tags
           
           # Set outputs
           echo "VERSION=$NEW_VERSION" >> "$GITHUB_OUTPUT"
           echo "BUMP_TYPE=$BUMP_TYPE" >> "$GITHUB_OUTPUT"
           echo "ARCHIVE_NAME=$ARCHIVE_NAME" >> "$GITHUB_OUTPUT"
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          name: OmScript v${{ steps.version.outputs.VERSION }}
-          body_path: /tmp/release_body.txt
-          files: |
-            omscript-${{ steps.version.outputs.VERSION }}-linux-x86_64.tar.gz
-            omscript-${{ steps.version.outputs.VERSION }}-linux-x86_64.zip
-          draft: false
-          prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
