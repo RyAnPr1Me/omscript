@@ -256,7 +256,7 @@ bool BytecodeJIT::compileInt(const BytecodeFunction& func) {
             break;
         }
         case OpCode::CALL: {
-            ip++; // rd
+            ip++; // rd (return value destination register)
             uint16_t len = peekShort(code, ip);
             ip += 2 + len; // func name length + func name
             uint8_t numArgs = code[ip];

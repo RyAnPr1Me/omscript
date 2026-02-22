@@ -668,6 +668,9 @@ void ensureInPath() {
         std::string linkPath = binaryDir + "/omsc";
         std::error_code ec;
         std::filesystem::create_symlink(exePath, linkPath, ec);
+        if (ec) {
+            std::cerr << "Warning: could not create symlink " << linkPath << ": " << ec.message() << "\n";
+        }
     }
 }
 
