@@ -18,7 +18,7 @@
 
 namespace {
 
-constexpr const char* kCompilerVersion = "OmScript Compiler v0.9.3";
+constexpr const char* kCompilerVersion = "OmScript Compiler v" OMSC_VERSION;
 constexpr const char* kPathConfigMarker = "# omsc-path-auto";
 constexpr const char* kGitHubReleasesApiUrl = "https://api.github.com/repos/RyAnPr1Me/omscript/releases/latest";
 constexpr const char* kGitHubReleasesDownloadBase = "https://github.com/RyAnPr1Me/omscript/releases/download";
