@@ -683,3 +683,23 @@ TEST(ValueTest, StringConcatEmptyOther) {
     Value result = nonEmpty + empty;
     EXPECT_STREQ(result.asString(), "test");
 }
+
+// ===========================================================================
+// Overflow protection: INT64_MIN edge cases
+// ===========================================================================
+
+TEST(ValueTest, DivInt64MinByNegOne) {
+    // INT64_MIN / -1 would overflow; must throw instead of UB.
+    EXPECT_THROW(Value(std::numeric_limits<int64_t>::min()) / Value(int64_t(-1)), std::runtime_error);
+}
+
+TEST(ValueTest, ModInt64MinByNegOne) {
+    // INT64_MIN % -1 would overflow; result is mathematically 0.
+    Value result = Value(std::numeric_limits<int64_t>::min()) % Value(int64_t(-1));
+    EXPECT_EQ(result.asInt(), 0);
+}
+
+TEST(ValueTest, NegateInt64Min) {
+    // -INT64_MIN would overflow; must throw instead of UB.
+    EXPECT_THROW(-Value(std::numeric_limits<int64_t>::min()), std::runtime_error);
+}

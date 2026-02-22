@@ -214,6 +214,10 @@ Token Lexer::scanString() {
 
 std::vector<Token> Lexer::tokenize() {
     std::vector<Token> tokens;
+    // Heuristic pre-allocation: most source characters produce roughly
+    // one token per ~4 characters.  This avoids repeated reallocations
+    // for typical inputs.
+    tokens.reserve(source.length() / 4 + 16);
 
     while (!isAtEnd()) {
         skipWhitespace();

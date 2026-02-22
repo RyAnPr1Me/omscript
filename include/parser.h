@@ -11,6 +11,7 @@ namespace omscript {
 class Parser {
   public:
     Parser(const std::vector<Token>& tokens);
+    Parser(std::vector<Token>&& tokens);
     std::unique_ptr<Program> parse();
 
     /// Returns collected parse errors (populated when multi-error mode is active).

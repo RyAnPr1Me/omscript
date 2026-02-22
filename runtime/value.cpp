@@ -1,4 +1,6 @@
 #include "value.h"
+#include <climits>
+#include <cstdint>
 #include <sstream>
 #include <stdexcept>
 
@@ -72,6 +74,9 @@ Value Value::operator/(const Value& other) const {
     if (type == Type::INTEGER && other.type == Type::INTEGER) {
         if (other.intValue == 0)
             throw std::runtime_error("Division by zero");
+        // INT64_MIN / -1 overflows signed 64-bit; trap instead of UB.
+        if (intValue == INT64_MIN && other.intValue == -1)
+            throw std::runtime_error("Integer overflow in division (INT64_MIN / -1)");
         return Value(intValue / other.intValue);
     }
     if (needsFloatPromotion(other)) {
@@ -87,6 +92,9 @@ Value Value::operator%(const Value& other) const {
     if (type == Type::INTEGER && other.type == Type::INTEGER) {
         if (other.intValue == 0)
             throw std::runtime_error("Modulo by zero");
+        // INT64_MIN % -1 is UB (overflow); mathematically the result is 0.
+        if (intValue == INT64_MIN && other.intValue == -1)
+            return Value(static_cast<int64_t>(0));
         return Value(intValue % other.intValue);
     }
     throw std::runtime_error("Invalid operands for %");
@@ -94,6 +102,9 @@ Value Value::operator%(const Value& other) const {
 
 Value Value::operator-() const {
     if (type == Type::INTEGER) {
+        // Negating INT64_MIN overflows signed 64-bit; trap instead of UB.
+        if (intValue == INT64_MIN)
+            throw std::runtime_error("Integer overflow in negation (cannot negate INT64_MIN)");
         return Value(-intValue);
     }
     if (type == Type::FLOAT) {

@@ -2,6 +2,7 @@
 #include "../include/bytecode.h"
 #include "jit.h"
 #include <algorithm>
+#include <climits>
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
@@ -280,9 +281,11 @@ op_DIV: {
     uint8_t rs1 = readByte(bytecode, ip);
     uint8_t rs2 = readByte(bytecode, ip);
     if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
+        int64_t av = registers[rs1].unsafeAsInt();
         int64_t bv = registers[rs2].unsafeAsInt();
-        if (bv != 0) {
-            registers[rd] = Value(registers[rs1].unsafeAsInt() / bv);
+        // Guard against division by zero AND INT64_MIN / -1 overflow (UB).
+        if (bv != 0 && !(av == INT64_MIN && bv == -1)) {
+            registers[rd] = Value(av / bv);
             DISPATCH();
         }
     }
@@ -294,9 +297,12 @@ op_MOD: {
     uint8_t rs1 = readByte(bytecode, ip);
     uint8_t rs2 = readByte(bytecode, ip);
     if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
+        int64_t av = registers[rs1].unsafeAsInt();
         int64_t bv = registers[rs2].unsafeAsInt();
-        if (bv != 0) {
-            registers[rd] = Value(registers[rs1].unsafeAsInt() % bv);
+        // Guard against modulo by zero; INT64_MIN % -1 is handled by
+        // the Value::operator% fallback which returns 0.
+        if (bv != 0 && !(av == INT64_MIN && bv == -1)) {
+            registers[rd] = Value(av % bv);
             DISPATCH();
         }
     }
@@ -307,8 +313,13 @@ op_NEG: {
     uint8_t rd = readByte(bytecode, ip);
     uint8_t rs = readByte(bytecode, ip);
     if (registers[rs].getType() == Value::Type::INTEGER) {
-        registers[rd] = Value(-registers[rs].unsafeAsInt());
-        DISPATCH();
+        int64_t val = registers[rs].unsafeAsInt();
+        // Guard against -INT64_MIN overflow; fall through to Value::operator-
+        // which throws a descriptive error.
+        if (val != INT64_MIN) {
+            registers[rd] = Value(-val);
+            DISPATCH();
+        }
     }
     registers[rd] = -registers[rs];
     DISPATCH();
