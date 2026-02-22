@@ -132,10 +132,11 @@ jobs:
       - name: Create release archive
         run: |
           mkdir -p release
-          echo "VERSION=${{ steps.version.outputs.VERSION }}"
-          tar -czvf omscript-${{ steps.version.outputs.VERSION }}-linux-x86_64.tar.gz -C release omsc
+          VER="${{ steps.version.outputs.VERSION }}"
+          echo "VERSION is: '$VER'"
+          tar -czvf "omscript-${VER}-linux-x86_64.tar.gz" -C release omsc
           
-          zip -j omscript-${{ steps.version.outputs.VERSION }}-linux-x86_64.zip release/omsc
+          zip -j "omscript-${VER}-linux-x86_64.zip" release/omsc
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
