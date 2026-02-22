@@ -1265,22 +1265,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         return builder->CreateNSWMul(left, right, "multmp");
     } else if (expr->op == "/" || expr->op == "%") {
         bool isDivision = expr->op == "/";
-        // Strength reduction: signed division by power of 2 → arithmetic right shift.
-        // This is safe because we know the divisor is a non-zero constant.
-        if (isDivision) {
-            if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
-                int64_t val = ci->getSExtValue();
-                if (val > 0 && (val & (val - 1)) == 0) {
-                    unsigned shift = 0;
-                    int64_t tmp = val;
-                    while (tmp > 1) {
-                        tmp >>= 1;
-                        shift++;
-                    }
-                    return builder->CreateAShr(left, llvm::ConstantInt::get(getDefaultType(), shift), "divshrtmp");
-                }
-            }
-        }
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
         llvm::Value* isZero = builder->CreateICmpEQ(right, zero, "divzero");
         llvm::Function* function = builder->GetInsertBlock()->getParent();

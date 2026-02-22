@@ -234,6 +234,7 @@ bool BytecodeJIT::compileInt(const BytecodeFunction& func) {
             ip += 1 + 8; // rd + value
             break;
         case OpCode::PUSH_STRING: {
+            ip++; // rd
             uint16_t len = peekShort(code, ip);
             ip += 2 + len; // length + string data
             break;
@@ -243,24 +244,24 @@ bool BytecodeJIT::compileInt(const BytecodeFunction& func) {
         case OpCode::HALT:
             break;
         case OpCode::LOAD_VAR: {
-            uint8_t rd = code[ip];
-            ip++;
+            ip++; // rd
             uint16_t len = peekShort(code, ip);
             ip += 2 + len; // var name length + var name
             break;
         }
         case OpCode::STORE_VAR: {
-            uint8_t rd = code[ip];
-            ip++;
+            ip++; // rs
             uint16_t len = peekShort(code, ip);
             ip += 2 + len; // var name length + var name
             break;
         }
         case OpCode::CALL: {
-            uint8_t numArgs = code[ip];
-            ip++;
+            ip++; // rd
             uint16_t len = peekShort(code, ip);
             ip += 2 + len; // func name length + func name
+            uint8_t numArgs = code[ip];
+            ip++; // argCount
+            ip += numArgs; // arg registers
             break;
         }
         case OpCode::ADD:

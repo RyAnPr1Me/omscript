@@ -415,38 +415,6 @@ bool installToSystem(const std::string& targetDir, bool force) {
     return true;
 }
 
-void printInstallHelp(const std::string& distro) {
-    std::cout << "\nOmScript Installation Options:\n\n";
-
-    std::string userBinDir = getInstallBinDir(false);
-    std::cout << "1. User installation (" << userBinDir << "):\n";
-    std::cout << "   mkdir -p " << userBinDir << "\n";
-    std::cout << "   cp " << userBinDir << "/omsc " << userBinDir << "/omsc-new || true\n";
-    std::cout << "   # Then copy this binary to " << userBinDir << "/omsc\n\n";
-
-    std::cout << "2. System-wide installation (requires sudo):\n";
-    std::cout << "   sudo cp omsc /usr/local/bin/omsc\n";
-    std::cout << "   # or\n";
-    std::cout << "   sudo cp omsc /usr/bin/omsc\n\n";
-
-    if (distro == "arch") {
-        std::cout << "3. Arch Linux PKGBUILD (create /tmp/omscript/PKGBUILD):\n";
-        std::cout << "   pkgname=omscript\n";
-        std::cout << "   pkgver=VERSION\n";
-        std::cout << "   pkgrel=1\n";
-        std::cout << "   pkgdesc='OmScript programming language compiler'\n";
-        std::cout << "   arch=('x86_64')\n";
-        std::cout << "   source=('omsc')\n";
-        std::cout << "   package() { install -Dm755 omsc \"$pkgdir/usr/bin/omsc\" }\n\n";
-    } else if (distro == "debian") {
-        std::cout << "3. Debian/Ubuntu .deb package:\n";
-        std::cout << "   # Create debian package using alien or dpkg-deb\n";
-        std::cout << "   dpkg-deb --build omscript_VERSION_amd64.deb\n\n";
-    }
-
-    std::cout << "For automatic installation, run: sudo " << kCompilerVersion << " install\n";
-}
-
 void doInstall() {
     std::string distro = detectDistro();
     std::cout << "Detected distribution: " << distro << "\n";
@@ -698,7 +666,8 @@ void ensureInPath() {
 
     if (exePath != binaryDir + "/omsc") {
         std::string linkPath = binaryDir + "/omsc";
-        std::filesystem::create_symlink(exePath, linkPath);
+        std::error_code ec;
+        std::filesystem::create_symlink(exePath, linkPath, ec);
     }
 }
 
