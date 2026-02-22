@@ -97,6 +97,7 @@ jobs:
           echo "New version: $NEW_VERSION"
           
           echo "VERSION=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+          echo "VERSION=$NEW_VERSION" >> /tmp/version.txt
           echo "BUMP_TYPE=$BUMP_TYPE" >> "$GITHUB_OUTPUT"
 
       - name: Update version header
@@ -130,6 +131,7 @@ jobs:
 
       - name: Create release archive
         run: |
+          mkdir -p release
           echo "VERSION=${{ steps.version.outputs.VERSION }}"
           tar -czvf omscript-${{ steps.version.outputs.VERSION }}-linux-x86_64.tar.gz -C release omsc
           
