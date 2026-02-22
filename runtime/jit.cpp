@@ -230,9 +230,39 @@ bool BytecodeJIT::compileInt(const BytecodeFunction& func) {
         case OpCode::PUSH_INT:
             ip += 1 + 8; // rd + value
             break;
+        case OpCode::PUSH_FLOAT:
+            ip += 1 + 8; // rd + value
+            break;
+        case OpCode::PUSH_STRING: {
+            uint16_t len = peekShort(code, ip);
+            ip += 2 + len; // length + string data
+            break;
+        }
         case OpCode::POP:
         case OpCode::DUP:
+        case OpCode::HALT:
             break;
+        case OpCode::LOAD_VAR: {
+            uint8_t rd = code[ip];
+            ip++;
+            uint16_t len = peekShort(code, ip);
+            ip += 2 + len; // var name length + var name
+            break;
+        }
+        case OpCode::STORE_VAR: {
+            uint8_t rd = code[ip];
+            ip++;
+            uint16_t len = peekShort(code, ip);
+            ip += 2 + len; // var name length + var name
+            break;
+        }
+        case OpCode::CALL: {
+            uint8_t numArgs = code[ip];
+            ip++;
+            uint16_t len = peekShort(code, ip);
+            ip += 2 + len; // func name length + func name
+            break;
+        }
         case OpCode::ADD:
         case OpCode::SUB:
         case OpCode::MUL:
@@ -307,6 +337,9 @@ bool BytecodeJIT::compileInt(const BytecodeFunction& func) {
             // fall through to unsupported
             failedCompilations_.insert(func.name);
             return false;
+        default:
+            // Unknown opcode - skip it (will fail at runtime)
+            break;
         }
     }
 
