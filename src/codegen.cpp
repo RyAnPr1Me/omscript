@@ -958,12 +958,24 @@ void CodeGenerator::generateStatement(Statement* stmt) {
         }
         builder->CreateBr(loopStack.back().breakTarget);
         break;
-    case ASTNodeType::CONTINUE_STMT:
-        if (loopStack.empty()) {
+    case ASTNodeType::CONTINUE_STMT: {
+        // Search backwards through the loop stack for the nearest enclosing loop
+        // (not switch) that has a non-null continueTarget.  Switch statements push
+        // a context with nullptr continueTarget so that 'break' exits the switch,
+        // but 'continue' must skip over switch contexts to reach the loop.
+        llvm::BasicBlock* continueTarget = nullptr;
+        for (auto it = loopStack.rbegin(); it != loopStack.rend(); ++it) {
+            if (it->continueTarget != nullptr) {
+                continueTarget = it->continueTarget;
+                break;
+            }
+        }
+        if (!continueTarget) {
             codegenError("continue used outside of a loop", stmt);
         }
-        builder->CreateBr(loopStack.back().continueTarget);
+        builder->CreateBr(continueTarget);
         break;
+    }
     case ASTNodeType::BLOCK:
         generateBlock(static_cast<BlockStmt*>(stmt));
         break;
@@ -1914,7 +1926,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateCondBr(condVal, okBB, failBB);
 
         builder->SetInsertPoint(failBB);
-        llvm::Value* errMsg = builder->CreateGlobalString("Runtime error: array index out of bounds\n", "idxa_oob_msg");
+        llvm::Value* errMsg = builder->CreateGlobalString("Runtime error: assertion failed\n", "assert_fail_msg");
         builder->CreateCall(getPrintfFunction(), {errMsg});
         builder->CreateCall(
             module->getOrInsertFunction("abort", llvm::FunctionType::get(llvm::Type::getVoidTy(*context), false)));
@@ -2215,7 +2227,7 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
 
     // Out-of-bounds path: print error and abort
     builder->SetInsertPoint(failBB);
-    llvm::Value* errMsg = builder->CreateGlobalString("Runtime error: assertion failed\n", "assert_msg");
+    llvm::Value* errMsg = builder->CreateGlobalString("Runtime error: array index out of bounds\n", "idx_oob_msg");
     builder->CreateCall(getPrintfFunction(), {errMsg});
     builder->CreateCall(
         module->getOrInsertFunction("abort", llvm::FunctionType::get(llvm::Type::getVoidTy(*context), false)));

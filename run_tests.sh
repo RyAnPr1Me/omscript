@@ -267,6 +267,8 @@ test_program "examples/stdlib_float_test.om" 29
 test_program "examples/float_edge_cases.om" 14
 test_program "examples/switch_test.om" 60
 test_program "examples/switch_break_test.om" 159
+test_program "examples/continue_in_switch.om" 4
+test_program "examples/continue_in_switch_loop.om" 27
 test_program "examples/typeof_assert_test.om" 1
 test_program "examples/bool_test.om" 73
 test_program "examples/bitwise_assign_test.om" 55
@@ -274,6 +276,7 @@ test_program "examples/array_compound_test.om" 164
 test_compile_fail "examples/const_fail.om"
 test_compile_fail "examples/break_outside_loop.om"
 test_compile_fail "examples/continue_outside_loop.om"
+test_compile_fail "examples/continue_in_switch_no_loop.om"
 test_compile_fail "examples/undefined_var.om"
 test_compile_fail "examples/int_overflow.om"
 test_compile_fail "examples/no_main.om"

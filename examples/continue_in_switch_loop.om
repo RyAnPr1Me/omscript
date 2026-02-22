@@ -1,0 +1,14 @@
+// Test that continue inside a switch inside a for loop correctly
+// continues the for loop (not an error, not a crash)
+fn main() {
+    var sum = 0;
+    for (i in 0...10) {
+        switch (i % 3) {
+            case 0:
+                continue;
+        }
+        sum = sum + i;
+    }
+    // sum of 1..9 where i%3 != 0: 1+2+4+5+7+8 = 27
+    return sum;
+}
