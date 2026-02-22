@@ -644,16 +644,15 @@ llvm::Function* CodeGenerator::getOrDeclarePutchar() {
 llvm::Function* CodeGenerator::getOrDeclareScanf() {
     if (auto* fn = module->getFunction("scanf"))
         return fn;
-    auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context),
-                                       {llvm::PointerType::getUnqual(*context)}, true);
+    auto* ty =
+        llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {llvm::PointerType::getUnqual(*context)}, true);
     return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "scanf", module.get());
 }
 
 llvm::Function* CodeGenerator::getOrDeclareExit() {
     if (auto* fn = module->getFunction("exit"))
         return fn;
-    auto* ty = llvm::FunctionType::get(llvm::Type::getVoidTy(*context),
-                                       {llvm::Type::getInt32Ty(*context)}, false);
+    auto* ty = llvm::FunctionType::get(llvm::Type::getVoidTy(*context), {llvm::Type::getInt32Ty(*context)}, false);
     return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "exit", module.get());
 }
 
@@ -1312,6 +1311,23 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         return builder->CreateNSWMul(left, right, "multmp");
     } else if (expr->op == "/" || expr->op == "%") {
         bool isDivision = expr->op == "/";
+
+        // Strength reduction: division by power of 2 → arithmetic right shift
+        if (isDivision) {
+            if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
+                int64_t val = ci->getSExtValue();
+                if (val > 0 && (val & (val - 1)) == 0) {
+                    unsigned shift = 0;
+                    int64_t tmp = val;
+                    while (tmp > 1) {
+                        tmp >>= 1;
+                        shift++;
+                    }
+                    return builder->CreateAShr(left, llvm::ConstantInt::get(getDefaultType(), shift), "ashrtmp");
+                }
+            }
+        }
+
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
         llvm::Value* isZero = builder->CreateICmpEQ(right, zero, "divzero");
         llvm::Function* function = builder->GetInsertBlock()->getParent();
@@ -1815,8 +1831,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateCondBr(bothValid, okBB, failBB);
 
         builder->SetInsertPoint(failBB);
-        llvm::Value* errMsg =
-            builder->CreateGlobalString("Runtime error: swap index out of bounds\n", "swap_oob_msg");
+        llvm::Value* errMsg = builder->CreateGlobalString("Runtime error: swap index out of bounds\n", "swap_oob_msg");
         builder->CreateCall(getPrintfFunction(), {errMsg});
         builder->CreateCall(getOrDeclareAbort());
         builder->CreateUnreachable();
@@ -2115,8 +2130,8 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
 // identical.  The only semantic difference is the return value: postfix
 // returns the value *before* the update, prefix returns the value *after*.
 
-llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::string& op,
-                                           bool isPostfix, const ASTNode* errorNode) {
+llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::string& op, bool isPostfix,
+                                           const ASTNode* errorNode) {
     auto* identifier = dynamic_cast<IdentifierExpr*>(operandExpr);
     if (!identifier) {
         codegenError("Increment/decrement operators require an identifier", errorNode);
@@ -2138,12 +2153,10 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
     llvm::Value* updated;
     if (current->getType()->isDoubleTy()) {
         llvm::Value* one = llvm::ConstantFP::get(getFloatType(), 1.0);
-        updated = (op == "++") ? builder->CreateFAdd(current, one, "finc")
-                               : builder->CreateFSub(current, one, "fdec");
+        updated = (op == "++") ? builder->CreateFAdd(current, one, "finc") : builder->CreateFSub(current, one, "fdec");
     } else {
         llvm::Value* delta = llvm::ConstantInt::get(getDefaultType(), 1, true);
-        updated = (op == "++") ? builder->CreateAdd(current, delta, "inc")
-                               : builder->CreateSub(current, delta, "dec");
+        updated = (op == "++") ? builder->CreateAdd(current, delta, "inc") : builder->CreateSub(current, delta, "dec");
     }
 
     builder->CreateStore(updated, it->second);
@@ -2767,19 +2780,16 @@ std::unique_ptr<llvm::TargetMachine> CodeGenerator::createTargetMachine() const 
         opt.NoNaNsFPMath = true;
         opt.NoSignedZerosFPMath = true;
     }
-    std::optional<llvm::Reloc::Model> RM =
-        usePIC_ ? llvm::Reloc::PIC_ : llvm::Reloc::Static;
+    std::optional<llvm::Reloc::Model> RM = usePIC_ ? llvm::Reloc::PIC_ : llvm::Reloc::Static;
 
     std::string cpu;
     std::string features;
     resolveTargetCPU(cpu, features);
 
 #if LLVM_VERSION_MAJOR >= 19
-    return std::unique_ptr<llvm::TargetMachine>(
-        target->createTargetMachine(targetTriple, cpu, features, opt, RM));
+    return std::unique_ptr<llvm::TargetMachine>(target->createTargetMachine(targetTriple, cpu, features, opt, RM));
 #else
-    return std::unique_ptr<llvm::TargetMachine>(
-        target->createTargetMachine(targetTripleStr, cpu, features, opt, RM));
+    return std::unique_ptr<llvm::TargetMachine>(target->createTargetMachine(targetTripleStr, cpu, features, opt, RM));
 #endif
 }
 

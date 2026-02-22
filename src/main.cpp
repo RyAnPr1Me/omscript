@@ -546,8 +546,7 @@ void doUninstall() {
     if (!homeDir) {
         return;
     }
-    std::vector<std::string> shellConfigs = {std::string(homeDir) + "/.bashrc",
-                                             std::string(homeDir) + "/.profile",
+    std::vector<std::string> shellConfigs = {std::string(homeDir) + "/.bashrc", std::string(homeDir) + "/.profile",
                                              std::string(homeDir) + "/.zshrc"};
     for (const auto& configPath : shellConfigs) {
         std::ifstream in(configPath);
@@ -1007,20 +1006,62 @@ int main(int argc, char* argv[]) {
             mtuneCpu = arg.substr(7);
             return true;
         }
-        if (arg == "-flto") { flagLTO = true; return true; }
-        if (arg == "-fno-lto") { flagLTO = false; return true; }
-        if (arg == "-fpic") { flagPIC = true; return true; }
-        if (arg == "-fno-pic") { flagPIC = false; return true; }
-        if (arg == "-ffast-math") { flagFastMath = true; return true; }
-        if (arg == "-fno-fast-math") { flagFastMath = false; return true; }
-        if (arg == "-foptmax") { flagOptMax = true; return true; }
-        if (arg == "-fno-optmax") { flagOptMax = false; return true; }
-        if (arg == "-fjit") { flagJIT = true; return true; }
-        if (arg == "-fno-jit") { flagJIT = false; return true; }
-        if (arg == "-fstack-protector") { flagStackProtector = true; return true; }
-        if (arg == "-fno-stack-protector") { flagStackProtector = false; return true; }
-        if (arg == "-static") { flagStatic = true; return true; }
-        if (arg == "-s" || arg == "--strip") { flagStrip = true; return true; }
+        if (arg == "-flto") {
+            flagLTO = true;
+            return true;
+        }
+        if (arg == "-fno-lto") {
+            flagLTO = false;
+            return true;
+        }
+        if (arg == "-fpic") {
+            flagPIC = true;
+            return true;
+        }
+        if (arg == "-fno-pic") {
+            flagPIC = false;
+            return true;
+        }
+        if (arg == "-ffast-math") {
+            flagFastMath = true;
+            return true;
+        }
+        if (arg == "-fno-fast-math") {
+            flagFastMath = false;
+            return true;
+        }
+        if (arg == "-foptmax") {
+            flagOptMax = true;
+            return true;
+        }
+        if (arg == "-fno-optmax") {
+            flagOptMax = false;
+            return true;
+        }
+        if (arg == "-fjit") {
+            flagJIT = true;
+            return true;
+        }
+        if (arg == "-fno-jit") {
+            flagJIT = false;
+            return true;
+        }
+        if (arg == "-fstack-protector") {
+            flagStackProtector = true;
+            return true;
+        }
+        if (arg == "-fno-stack-protector") {
+            flagStackProtector = false;
+            return true;
+        }
+        if (arg == "-static") {
+            flagStatic = true;
+            return true;
+        }
+        if (arg == "-s" || arg == "--strip") {
+            flagStrip = true;
+            return true;
+        }
         return false;
     };
 
