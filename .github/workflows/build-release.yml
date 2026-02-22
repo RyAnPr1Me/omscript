@@ -128,6 +128,7 @@ jobs:
           
           SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
           export PATH="$SCRIPT_DIR:$PATH"
+          export OMSC_BINARY_PATH="$SCRIPT_DIR/omsc-bin"
           
           # Run the actual compiler
           exec "$SCRIPT_DIR/omsc-bin" "$@"

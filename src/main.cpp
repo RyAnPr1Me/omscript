@@ -19,6 +19,60 @@
 namespace {
 
 constexpr const char* kCompilerVersion = "OmScript Compiler v0.4.0";
+constexpr const char* kPathConfigMarker = "# omsc-path-auto";
+
+void ensureInPath() {
+    const char* binaryPath = getenv("OMSC_BINARY_PATH");
+    if (!binaryPath) {
+        return;
+    }
+
+    std::string binaryDir = std::filesystem::path(binaryPath).parent_path();
+    std::string exePath = std::filesystem::canonical(binaryPath);
+
+    const char* homeDir = getenv("HOME");
+    if (!homeDir) {
+        return;
+    }
+    std::string shellConfig = std::string(homeDir) + "/.bashrc";
+    std::ifstream checkConfig(shellConfig);
+    if (!checkConfig.is_open()) {
+        shellConfig = std::string(homeDir) + "/.profile";
+    }
+    checkConfig.close();
+
+    std::ifstream readConfig(shellConfig);
+    if (!readConfig.is_open()) {
+        return;
+    }
+
+    std::string line;
+    bool found = false;
+    while (std::getline(readConfig, line)) {
+        if (line.find(kPathConfigMarker) != std::string::npos && line.find(binaryDir) != std::string::npos) {
+            found = true;
+            break;
+        }
+    }
+    readConfig.close();
+
+    if (!found) {
+        std::ofstream writeConfig(shellConfig, std::ios::app);
+        if (writeConfig.is_open()) {
+            writeConfig << "\n"
+                        << kPathConfigMarker << "\n"
+                        << "export PATH=\"" << binaryDir << ":$PATH\"\n";
+            writeConfig.close();
+            std::cout << "Added " << binaryDir << " to PATH in " << shellConfig << "\n";
+            std::cout << "Please run 'source " << shellConfig << "' or restart your terminal\n";
+        }
+    }
+
+    if (exePath != binaryDir + "/omsc") {
+        std::string linkPath = binaryDir + "/omsc";
+        std::filesystem::create_symlink(exePath, linkPath);
+    }
+}
 
 // Paths of temporary files to clean up on abnormal exit (signal).
 // These are set by the 'run' command before executing the compiled program.
@@ -275,6 +329,9 @@ int main(int argc, char* argv[]) {
     // Install signal handlers for graceful cleanup of temporary files.
     std::signal(SIGINT, signalHandler);
     std::signal(SIGTERM, signalHandler);
+
+    // Add to PATH on first run if needed
+    ensureInPath();
 
     if (argc < 2) {
         printUsage(argv[0]);
