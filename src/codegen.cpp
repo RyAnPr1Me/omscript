@@ -2758,8 +2758,11 @@ void CodeGenerator::resolveTargetCPU(std::string& cpu, std::string& features) co
         features = "";
     }
 
-    // If -mtune is specified, override the CPU used for scheduling.
-    if (!mtuneCpu_.empty()) {
+    // -mtune overrides the CPU used for scheduling when -march is native or
+    // unset.  When an explicit -march is given, it takes precedence because
+    // LLVM's createTargetMachine uses a single CPU parameter for both
+    // instruction selection and scheduling.
+    if (!mtuneCpu_.empty() && isNative) {
         cpu = mtuneCpu_;
     }
 }

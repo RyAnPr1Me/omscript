@@ -180,12 +180,6 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
         if (stackProtector_) {
             linkArgs.push_back("-fstack-protector-strong");
         }
-        if (!march_.empty() && march_ != "native") {
-            linkArgs.push_back("-march=" + march_);
-        }
-        if (!mtune_.empty()) {
-            linkArgs.push_back("-mtune=" + mtune_);
-        }
         llvm::SmallVector<llvm::StringRef, 8> argRefs;
         argRefs.push_back(linkerProgram);
         for (const auto& arg : linkArgs) {

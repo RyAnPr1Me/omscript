@@ -29,7 +29,8 @@ class Compiler {
         return optLevel_;
     }
 
-    /// Target CPU architecture for instruction selection ("native" or LLVM CPU name).
+    /// Target CPU architecture for instruction selection.
+    /// Empty string or "native" triggers host auto-detection (default).
     void setMarch(const std::string& cpu) {
         march_ = cpu;
     }
