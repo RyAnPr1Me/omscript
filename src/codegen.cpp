@@ -589,6 +589,198 @@ void CodeGenerator::codegenError(const std::string& message, const ASTNode* node
     throw std::runtime_error(message);
 }
 
+// ---------------------------------------------------------------------------
+// String type inference helpers
+// ---------------------------------------------------------------------------
+
+bool CodeGenerator::isPreAnalysisStringExpr(Expression* expr,
+                                              const std::unordered_set<size_t>& paramStringIndices,
+                                              const FunctionDecl* func) const {
+    if (!expr)
+        return false;
+    if (auto* lit = dynamic_cast<LiteralExpr*>(expr))
+        return lit->literalType == LiteralExpr::LiteralType::STRING;
+    if (auto* id = dynamic_cast<IdentifierExpr*>(expr)) {
+        if (func) {
+            for (size_t i = 0; i < func->parameters.size(); i++) {
+                if (func->parameters[i].name == id->name && paramStringIndices.count(i))
+                    return true;
+            }
+        }
+        return false;
+    }
+    if (auto* bin = dynamic_cast<BinaryExpr*>(expr)) {
+        return bin->op == "+" &&
+               (isPreAnalysisStringExpr(bin->left.get(), paramStringIndices, func) ||
+                isPreAnalysisStringExpr(bin->right.get(), paramStringIndices, func));
+    }
+    if (auto* tern = dynamic_cast<TernaryExpr*>(expr)) {
+        return isPreAnalysisStringExpr(tern->thenExpr.get(), paramStringIndices, func) ||
+               isPreAnalysisStringExpr(tern->elseExpr.get(), paramStringIndices, func);
+    }
+    if (auto* call = dynamic_cast<CallExpr*>(expr))
+        return stringReturningFunctions_.count(call->callee) > 0;
+    return false;
+}
+
+bool CodeGenerator::scanStmtForStringReturns(Statement* stmt,
+                                              const std::unordered_set<size_t>& paramStringIndices,
+                                              const FunctionDecl* func) const {
+    if (!stmt)
+        return false;
+    if (auto* ret = dynamic_cast<ReturnStmt*>(stmt))
+        return ret->value && isPreAnalysisStringExpr(ret->value.get(), paramStringIndices, func);
+    if (auto* block = dynamic_cast<BlockStmt*>(stmt)) {
+        for (auto& s : block->statements)
+            if (scanStmtForStringReturns(s.get(), paramStringIndices, func))
+                return true;
+    }
+    if (auto* ifS = dynamic_cast<IfStmt*>(stmt)) {
+        return scanStmtForStringReturns(ifS->thenBranch.get(), paramStringIndices, func) ||
+               scanStmtForStringReturns(ifS->elseBranch.get(), paramStringIndices, func);
+    }
+    if (auto* whileS = dynamic_cast<WhileStmt*>(stmt))
+        return scanStmtForStringReturns(whileS->body.get(), paramStringIndices, func);
+    if (auto* doS = dynamic_cast<DoWhileStmt*>(stmt))
+        return scanStmtForStringReturns(doS->body.get(), paramStringIndices, func);
+    if (auto* forS = dynamic_cast<ForStmt*>(stmt))
+        return scanStmtForStringReturns(forS->body.get(), paramStringIndices, func);
+    if (auto* forEachS = dynamic_cast<ForEachStmt*>(stmt))
+        return scanStmtForStringReturns(forEachS->body.get(), paramStringIndices, func);
+    return false;
+}
+
+void CodeGenerator::scanStmtForStringCalls(Statement* stmt) {
+    if (!stmt)
+        return;
+    auto scanExpr = [this](auto& self, Expression* expr) -> void {
+        if (!expr)
+            return;
+        if (auto* call = dynamic_cast<CallExpr*>(expr)) {
+            for (size_t i = 0; i < call->arguments.size(); i++) {
+                if (isPreAnalysisStringExpr(call->arguments[i].get(), {}, nullptr))
+                    funcParamStringTypes_[call->callee].insert(i);
+            }
+            for (auto& arg : call->arguments)
+                self(self, arg.get());
+        }
+        if (auto* bin = dynamic_cast<BinaryExpr*>(expr)) {
+            self(self, bin->left.get());
+            self(self, bin->right.get());
+        }
+        if (auto* assign = dynamic_cast<AssignExpr*>(expr))
+            self(self, assign->value.get());
+        if (auto* tern = dynamic_cast<TernaryExpr*>(expr)) {
+            self(self, tern->condition.get());
+            self(self, tern->thenExpr.get());
+            self(self, tern->elseExpr.get());
+        }
+    };
+    auto scanStmt = [&](auto& self, Statement* s) -> void {
+        if (!s)
+            return;
+        if (auto* block = dynamic_cast<BlockStmt*>(s)) {
+            for (auto& st : block->statements)
+                self(self, st.get());
+        } else if (auto* exprS = dynamic_cast<ExprStmt*>(s)) {
+            scanExpr(scanExpr, exprS->expression.get());
+        } else if (auto* varDecl = dynamic_cast<VarDecl*>(s)) {
+            if (varDecl->initializer)
+                scanExpr(scanExpr, varDecl->initializer.get());
+        } else if (auto* ret = dynamic_cast<ReturnStmt*>(s)) {
+            if (ret->value)
+                scanExpr(scanExpr, ret->value.get());
+        } else if (auto* ifS = dynamic_cast<IfStmt*>(s)) {
+            scanExpr(scanExpr, ifS->condition.get());
+            self(self, ifS->thenBranch.get());
+            self(self, ifS->elseBranch.get());
+        } else if (auto* whileS = dynamic_cast<WhileStmt*>(s)) {
+            scanExpr(scanExpr, whileS->condition.get());
+            self(self, whileS->body.get());
+        } else if (auto* doS = dynamic_cast<DoWhileStmt*>(s)) {
+            self(self, doS->body.get());
+            scanExpr(scanExpr, doS->condition.get());
+        } else if (auto* forS = dynamic_cast<ForStmt*>(s)) {
+            if (forS->start)  scanExpr(scanExpr, forS->start.get());
+            if (forS->end)    scanExpr(scanExpr, forS->end.get());
+            if (forS->step)   scanExpr(scanExpr, forS->step.get());
+            self(self, forS->body.get());
+        } else if (auto* forEachS = dynamic_cast<ForEachStmt*>(s)) {
+            scanExpr(scanExpr, forEachS->collection.get());
+            self(self, forEachS->body.get());
+        }
+    };
+    scanStmt(scanStmt, stmt);
+}
+
+void CodeGenerator::preAnalyzeStringTypes(Program* program) {
+    // Iteratively propagate string type information until no new facts are learned.
+    // Each iteration may uncover new string-returning functions or string parameters,
+    // which in turn enables further propagation in the next iteration.
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (auto& func : program->functions) {
+            // Collect the set of parameter indices known to receive string arguments
+            // for this function (from funcParamStringTypes_ populated so far).
+            std::unordered_set<size_t> paramStrIdx;
+            auto pit = funcParamStringTypes_.find(func->name);
+            if (pit != funcParamStringTypes_.end())
+                paramStrIdx = pit->second;
+
+            // Check if this function returns a string value.
+            if (!stringReturningFunctions_.count(func->name)) {
+                if (scanStmtForStringReturns(func->body.get(), paramStrIdx, func.get())) {
+                    stringReturningFunctions_.insert(func->name);
+                    changed = true;
+                }
+            }
+
+            // Scan all call sites in this function's body to find which parameters
+            // of other functions receive string arguments.
+            // Track change by counting total entries before/after.
+            size_t prevTotal = 0;
+            for (auto& kv : funcParamStringTypes_)
+                prevTotal += kv.second.size();
+            scanStmtForStringCalls(func->body.get());
+            size_t newTotal = 0;
+            for (auto& kv : funcParamStringTypes_)
+                newTotal += kv.second.size();
+            if (newTotal > prevTotal)
+                changed = true;
+        }
+    }
+}
+
+bool CodeGenerator::isStringExpr(Expression* expr) const {
+    if (!expr)
+        return false;
+    if (auto* lit = dynamic_cast<LiteralExpr*>(expr))
+        return lit->literalType == LiteralExpr::LiteralType::STRING;
+    if (auto* id = dynamic_cast<IdentifierExpr*>(expr)) {
+        // Check the LLVM alloca type (handles local vars initialized with string literals).
+        auto it = namedValues.find(id->name);
+        if (it != namedValues.end() && it->second) {
+            auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(it->second);
+            if (alloca && alloca->getAllocatedType()->isPointerTy())
+                return true;
+        }
+        // Check the runtime string-variable tracker (handles params and vars
+        // assigned from string function returns).
+        return stringVars_.count(id->name) > 0;
+    }
+    if (auto* bin = dynamic_cast<BinaryExpr*>(expr)) {
+        return bin->op == "+" &&
+               (isStringExpr(bin->left.get()) || isStringExpr(bin->right.get()));
+    }
+    if (auto* tern = dynamic_cast<TernaryExpr*>(expr)) {
+        return isStringExpr(tern->thenExpr.get()) || isStringExpr(tern->elseExpr.get());
+    }
+    if (auto* call = dynamic_cast<CallExpr*>(expr))
+        return stringReturningFunctions_.count(call->callee) > 0;
+    return false;
+}
+
 void CodeGenerator::generate(Program* program) {
     hasOptMaxFunctions = false;
     optMaxFunctions.clear();
@@ -638,6 +830,11 @@ void CodeGenerator::generate(Program* program) {
             llvm::Function::Create(funcType, llvm::Function::ExternalLinkage, func->name, module.get());
         functions[func->name] = function;
     }
+
+    // Pre-analyze string types: determine which functions return strings and
+    // which parameters receive string arguments, so that print/concat/etc.
+    // work correctly when strings cross function boundaries.
+    preAnalyzeStringTypes(program);
 
     // Generate all function bodies
     for (auto& func : program->functions) {
@@ -692,13 +889,21 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     loopStack.clear();
     constValues.clear();
     constScopeStack.clear();
+    stringVars_.clear();
+
+    // Pre-populate stringVars_ for parameters known to receive string arguments.
+    auto paramStrIt = funcParamStringTypes_.find(func->name);
     auto argIt = function->arg_begin();
-    for (auto& param : func->parameters) {
+    for (size_t paramIdx = 0; paramIdx < func->parameters.size(); ++paramIdx) {
+        auto& param = func->parameters[paramIdx];
         argIt->setName(param.name);
 
         llvm::AllocaInst* alloca = createEntryBlockAlloca(function, param.name);
         builder->CreateStore(&(*argIt), alloca);
         bindVariable(param.name, alloca);
+
+        if (paramStrIt != funcParamStringTypes_.end() && paramStrIt->second.count(paramIdx))
+            stringVars_.insert(param.name);
 
         ++argIt;
     }
@@ -908,44 +1113,57 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         codegenError("Invalid binary operator for float operands: " + expr->op, expr);
     }
 
-    // String concatenation path (pointer + pointer with '+' operator)
-    if (expr->op == "+" && left->getType()->isPointerTy() && right->getType()->isPointerTy()) {
-        // Declare C library functions for string concatenation
-        llvm::Function* strlenFn = module->getFunction("strlen");
-        if (!strlenFn) {
-            auto strlenType =
-                llvm::FunctionType::get(getDefaultType(), {llvm::PointerType::getUnqual(*context)}, false);
-            strlenFn = llvm::Function::Create(strlenType, llvm::Function::ExternalLinkage, "strlen", module.get());
-        }
-        llvm::Function* mallocFn = module->getFunction("malloc");
-        if (!mallocFn) {
-            auto mallocType =
-                llvm::FunctionType::get(llvm::PointerType::getUnqual(*context), {getDefaultType()}, false);
-            mallocFn = llvm::Function::Create(mallocType, llvm::Function::ExternalLinkage, "malloc", module.get());
-        }
-        llvm::Function* strcpyFn = module->getFunction("strcpy");
-        if (!strcpyFn) {
-            auto strcpyType = llvm::FunctionType::get(
-                llvm::PointerType::getUnqual(*context),
-                {llvm::PointerType::getUnqual(*context), llvm::PointerType::getUnqual(*context)}, false);
-            strcpyFn = llvm::Function::Create(strcpyType, llvm::Function::ExternalLinkage, "strcpy", module.get());
-        }
-        llvm::Function* strcatFn = module->getFunction("strcat");
-        if (!strcatFn) {
-            auto strcatType = llvm::FunctionType::get(
-                llvm::PointerType::getUnqual(*context),
-                {llvm::PointerType::getUnqual(*context), llvm::PointerType::getUnqual(*context)}, false);
-            strcatFn = llvm::Function::Create(strcatType, llvm::Function::ExternalLinkage, "strcat", module.get());
-        }
+    // String concatenation path: either operand is a string (ptr or i64-as-string).
+    if (expr->op == "+") {
+        bool leftIsStr  = left->getType()->isPointerTy()  || isStringExpr(expr->left.get());
+        bool rightIsStr = right->getType()->isPointerTy() || isStringExpr(expr->right.get());
+        if (leftIsStr && rightIsStr) {
+            // Convert i64 string values back to ptr if necessary.
+            if (!left->getType()->isPointerTy())
+                left = builder->CreateIntToPtr(left, llvm::PointerType::getUnqual(*context), "str.l.ptr");
+            if (!right->getType()->isPointerTy())
+                right = builder->CreateIntToPtr(right, llvm::PointerType::getUnqual(*context), "str.r.ptr");
 
-        llvm::Value* len1 = builder->CreateCall(strlenFn, {left}, "len1");
-        llvm::Value* len2 = builder->CreateCall(strlenFn, {right}, "len2");
-        llvm::Value* totalLen = builder->CreateAdd(len1, len2, "totallen");
-        llvm::Value* allocSize = builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "allocsize");
-        llvm::Value* buf = builder->CreateCall(mallocFn, {allocSize}, "strbuf");
-        builder->CreateCall(strcpyFn, {buf, left});
-        builder->CreateCall(strcatFn, {buf, right});
-        return buf;
+            // Declare C library functions for string concatenation
+            llvm::Function* strlenFn = module->getFunction("strlen");
+            if (!strlenFn) {
+                auto strlenType =
+                    llvm::FunctionType::get(getDefaultType(), {llvm::PointerType::getUnqual(*context)}, false);
+                strlenFn = llvm::Function::Create(strlenType, llvm::Function::ExternalLinkage, "strlen", module.get());
+            }
+            llvm::Function* mallocFn = module->getFunction("malloc");
+            if (!mallocFn) {
+                auto mallocType =
+                    llvm::FunctionType::get(llvm::PointerType::getUnqual(*context), {getDefaultType()}, false);
+                mallocFn = llvm::Function::Create(mallocType, llvm::Function::ExternalLinkage, "malloc", module.get());
+            }
+            llvm::Function* strcpyFn = module->getFunction("strcpy");
+            if (!strcpyFn) {
+                auto strcpyType = llvm::FunctionType::get(
+                    llvm::PointerType::getUnqual(*context),
+                    {llvm::PointerType::getUnqual(*context), llvm::PointerType::getUnqual(*context)}, false);
+                strcpyFn =
+                    llvm::Function::Create(strcpyType, llvm::Function::ExternalLinkage, "strcpy", module.get());
+            }
+            llvm::Function* strcatFn = module->getFunction("strcat");
+            if (!strcatFn) {
+                auto strcatType = llvm::FunctionType::get(
+                    llvm::PointerType::getUnqual(*context),
+                    {llvm::PointerType::getUnqual(*context), llvm::PointerType::getUnqual(*context)}, false);
+                strcatFn =
+                    llvm::Function::Create(strcatType, llvm::Function::ExternalLinkage, "strcat", module.get());
+            }
+
+            llvm::Value* len1 = builder->CreateCall(strlenFn, {left}, "len1");
+            llvm::Value* len2 = builder->CreateCall(strlenFn, {right}, "len2");
+            llvm::Value* totalLen = builder->CreateAdd(len1, len2, "totallen");
+            llvm::Value* allocSize =
+                builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "allocsize");
+            llvm::Value* buf = builder->CreateCall(mallocFn, {allocSize}, "strbuf");
+            builder->CreateCall(strcpyFn, {buf, left});
+            builder->CreateCall(strcatFn, {buf, right});
+            return buf;
+        }
     }
 
     // Convert pointer types to i64 for integer operations (fallback)
@@ -1170,8 +1388,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             }
             builder->CreateCall(getPrintfFunction(), {floatFmt, arg});
             return llvm::ConstantInt::get(getDefaultType(), 0);
-        } else if (arg->getType()->isPointerTy()) {
-            // Print string (literal or variable)
+        } else if (arg->getType()->isPointerTy() || isStringExpr(argExpr)) {
+            // Print string (literal, local string variable, or i64 holding a
+            // string pointer that crossed a function boundary via ptrtoint).
+            if (!arg->getType()->isPointerTy()) {
+                arg = builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "print.str.ptr");
+            }
             llvm::GlobalVariable* strFmt = module->getGlobalVariable("print_str_fmt", true);
             if (!strFmt) {
                 strFmt = builder->CreateGlobalString("%s\n", "print_str_fmt");
@@ -1826,6 +2048,11 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
     }
 
     builder->CreateStore(value, it->second);
+    // Update string variable tracking after assignment.
+    if (value->getType()->isPointerTy() || isStringExpr(expr->value.get()))
+        stringVars_.insert(expr->name);
+    else
+        stringVars_.erase(expr->name);
     return value;
 }
 
@@ -2060,6 +2287,14 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
 
     if (initValue) {
         builder->CreateStore(initValue, alloca);
+        // Track whether this variable holds a string value so that print(),
+        // concatenation, and comparison operators handle it correctly when
+        // the variable's alloca type is i64 (e.g. assigned from a function
+        // call that returns a string as i64 via ptrtoint).
+        if (initValue->getType()->isPointerTy() || isStringExpr(stmt->initializer.get()))
+            stringVars_.insert(stmt->name);
+        else
+            stringVars_.erase(stmt->name);
     } else {
         builder->CreateStore(llvm::ConstantInt::get(*context, llvm::APInt(64, 0)), alloca);
     }
@@ -2068,6 +2303,13 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
 void CodeGenerator::generateReturn(ReturnStmt* stmt) {
     if (stmt->value) {
         llvm::Value* retValue = generateExpression(stmt->value.get());
+        // Record that the current function returns a string value so that
+        // callers can use isStringExpr() on the CallExpr and track the result.
+        if (retValue->getType()->isPointerTy() || isStringExpr(stmt->value.get())) {
+            if (builder->GetInsertBlock() && builder->GetInsertBlock()->getParent())
+                stringReturningFunctions_.insert(
+                    std::string(builder->GetInsertBlock()->getParent()->getName()));
+        }
         // Function return type is i64, so convert if needed
         retValue = toDefaultType(retValue);
         builder->CreateRet(retValue);

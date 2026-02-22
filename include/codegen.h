@@ -103,6 +103,16 @@ class CodeGenerator {
     // Per-function execution tier decided during code generation.
     std::unordered_map<std::string, ExecutionTier> functionTiers;
 
+    // String type tracking across function boundaries.
+    // stringVars_: names of variables/parameters that hold string values in the
+    //   current function scope (pointer-typed values stored as i64).
+    // stringReturningFunctions_: functions known to return a string value.
+    // funcParamStringTypes_: maps function name to the set of parameter indices
+    //   that are expected to receive string arguments.
+    std::unordered_set<std::string> stringVars_;
+    std::unordered_set<std::string> stringReturningFunctions_;
+    std::unordered_map<std::string, std::unordered_set<size_t>> funcParamStringTypes_;
+
     /// Compiled bytecode functions for Interpreted-tier functions.
     /// Populated by generateHybrid() when the hybrid execution model is active.
     struct CompiledBytecodeFunc {
@@ -192,6 +202,30 @@ class CodeGenerator {
     llvm::AllocaInst* createEntryBlockAlloca(llvm::Function* function, const std::string& name,
                                              llvm::Type* type = nullptr);
     [[noreturn]] void codegenError(const std::string& message, const ASTNode* node);
+
+    // String type inference helpers.
+    // isStringExpr: returns true if the given AST expression is known to
+    //   produce a string value at the current codegen point (uses namedValues
+    //   and stringVars_ for identifier lookups).
+    bool isStringExpr(Expression* expr) const;
+    // preAnalyzeStringTypes: iterative pre-pass over the full program AST to
+    //   populate stringReturningFunctions_ and funcParamStringTypes_ before
+    //   any function body is generated.
+    void preAnalyzeStringTypes(Program* program);
+    // isPreAnalysisStringExpr: lightweight AST-only string check used by the
+    //   pre-analysis (no access to namedValues; uses stringReturningFunctions_
+    //   and paramStringIndices to track string parameters).
+    bool isPreAnalysisStringExpr(Expression* expr,
+                                  const std::unordered_set<size_t>& paramStringIndices,
+                                  const FunctionDecl* func) const;
+    // scanStmtForStringReturns: returns true if any return statement in the
+    //   given statement subtree returns a string expression.
+    bool scanStmtForStringReturns(Statement* stmt,
+                                   const std::unordered_set<size_t>& paramStringIndices,
+                                   const FunctionDecl* func) const;
+    // scanStmtForStringCalls: walks a statement subtree and records which
+    //   function parameters receive string arguments at call sites.
+    void scanStmtForStringCalls(Statement* stmt);
 
     // Optimization methods
     void runOptimizationPasses();

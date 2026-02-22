@@ -1,0 +1,36 @@
+// Test string values passed as function parameters and returned from functions.
+
+fn print_msg(msg) {
+    print(msg);
+}
+
+fn greet(name) {
+    return "hello " + name;
+}
+
+fn identity(s) {
+    return s;
+}
+
+fn concat3(a, b, c) {
+    return a + b + c;
+}
+
+fn main() {
+    // String passed to function parameter, then printed
+    print_msg("from param");
+
+    // String returned from function, then printed
+    var g = greet("world");
+    print(g);
+
+    // String passed through identity function
+    var id = identity("through identity");
+    print(id);
+
+    // Three-way concatenation via function
+    var r = concat3("foo", "bar", "baz");
+    print(r);
+
+    return 0;
+}
