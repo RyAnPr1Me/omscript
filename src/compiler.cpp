@@ -60,7 +60,7 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
 
     // Check file size to prevent memory exhaustion
     auto fileSize = std::filesystem::file_size(sourceFile);
-    if (fileSize > 100 * 1024 * 1024) { // 100MB limit
+    if (fileSize > size_t{100} * 1024 * 1024) { // 100MB limit
         throw std::runtime_error("Source file too large (max 100MB): " + sourceFile);
     }
 

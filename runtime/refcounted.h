@@ -132,7 +132,7 @@ class RefCountedString {
     static StringData* allocate(size_t length) {
         size_t totalSize = sizeof(StringData) +
                            length; // sizeof includes 1 char; total storage = length + 1 bytes (content + terminator)
-        StringData* sd = static_cast<StringData*>(std::malloc(totalSize));
+        auto* sd = static_cast<StringData*>(std::malloc(totalSize));
         if (!sd) {
             throw std::bad_alloc();
         }

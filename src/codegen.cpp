@@ -822,7 +822,7 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
     if (it == namedValues.end() || !it->second) {
         codegenError("Unknown variable: " + expr->name, expr);
     }
-    llvm::AllocaInst* alloca = llvm::dyn_cast<llvm::AllocaInst>(it->second);
+    auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(it->second);
     llvm::Type* loadType = alloca ? alloca->getAllocatedType() : getDefaultType();
     return builder->CreateLoad(loadType, it->second, expr->name.c_str());
 }
@@ -1811,7 +1811,7 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
     checkConstModification(expr->name, "modify");
 
     // Type conversion if the alloca type and value type differ
-    llvm::AllocaInst* alloca = llvm::dyn_cast<llvm::AllocaInst>(it->second);
+    auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(it->second);
     if (alloca) {
         llvm::Type* allocaType = alloca->getAllocatedType();
         if (allocaType->isDoubleTy() && value->getType()->isIntegerTy()) {
@@ -1841,7 +1841,7 @@ llvm::Value* CodeGenerator::generatePostfix(PostfixExpr* expr) {
     }
     checkConstModification(identifier->name, "modify");
 
-    llvm::AllocaInst* allocaInst = llvm::dyn_cast<llvm::AllocaInst>(it->second);
+    auto* allocaInst = llvm::dyn_cast<llvm::AllocaInst>(it->second);
     llvm::Type* loadType = allocaInst ? allocaInst->getAllocatedType() : getDefaultType();
     llvm::Value* current = builder->CreateLoad(loadType, it->second, identifier->name.c_str());
     if (expr->op != "++" && expr->op != "--") {
@@ -1874,7 +1874,7 @@ llvm::Value* CodeGenerator::generatePrefix(PrefixExpr* expr) {
     }
     checkConstModification(identifier->name, "modify");
 
-    llvm::AllocaInst* allocaInst = llvm::dyn_cast<llvm::AllocaInst>(it->second);
+    auto* allocaInst = llvm::dyn_cast<llvm::AllocaInst>(it->second);
     llvm::Type* loadType = allocaInst ? allocaInst->getAllocatedType() : getDefaultType();
     llvm::Value* current = builder->CreateLoad(loadType, it->second, identifier->name.c_str());
     if (expr->op != "++" && expr->op != "--") {
@@ -3267,7 +3267,7 @@ void CodeGenerator::emitBytecodeStatement(Statement* stmt) {
             }
         }
 
-        uint16_t endOffset = static_cast<uint16_t>(bytecodeEmitter.currentOffset());
+        auto endOffset = static_cast<uint16_t>(bytecodeEmitter.currentOffset());
         for (size_t patch : endPatches) {
             bytecodeEmitter.patchJump(patch, endOffset);
         }
