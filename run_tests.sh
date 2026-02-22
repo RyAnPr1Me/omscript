@@ -396,6 +396,76 @@ test_cli_output "help-shows-fstack-protector" "-fstack-protector" 0 ./build/omsc
 
 echo ""
 echo "============================================"
+echo "New CLI Feature Tests"
+echo "============================================"
+echo ""
+
+# check command
+test_cli_output "check-valid" "OK" 0 ./build/omsc check examples/factorial.om
+test_cli_output "check-syntax-error" "Expected ';'" 1 ./build/omsc check examples/missing_semicolon.om
+test_cli_output "check-flag" "OK" 0 ./build/omsc --check examples/exit_zero.om
+
+# --quiet flag
+test_cli_output "quiet-check" "" 0 ./build/omsc -q check examples/factorial.om
+test_cli_output "quiet-long" "" 0 ./build/omsc --quiet check examples/factorial.om
+
+# --time flag
+test_cli_output "time-check" "Timing:" 0 ./build/omsc check examples/factorial.om --time
+test_cli_output "time-lex" "Timing:" 0 ./build/omsc lex examples/exit_zero.om --time
+test_cli_output "time-parse" "Timing:" 0 ./build/omsc parse examples/exit_zero.om --time
+test_cli_output "time-compile" "Timing:" 0 ./build/omsc --time examples/exit_zero.om -o /tmp/omsc_time_test
+rm -f /tmp/omsc_time_test /tmp/omsc_time_test.o
+
+# --dump-ast flag
+test_cli_output "dump-ast" "FunctionDecl" 0 ./build/omsc parse examples/exit_zero.om --dump-ast
+test_cli_output "dump-ast-shows-return" "ReturnStmt" 0 ./build/omsc parse examples/exit_zero.om --dump-ast
+test_cli_output "dump-ast-shows-block" "Block" 0 ./build/omsc parse examples/exit_zero.om --dump-ast
+
+# --dump-tokens alias
+test_cli_output "dump-tokens-alias" "FN" 0 ./build/omsc --dump-tokens examples/test.om
+
+# --dry-run flag
+test_cli_output "dry-run-compile" "Dry run" 0 ./build/omsc --dry-run examples/factorial.om
+test_cli_output "dry-run-no-output-file" "" 0 ./build/omsc --dry-run examples/exit_zero.om
+TOTAL=$((TOTAL + 1))
+echo -n "Testing dry-run-no-binary-created... "
+./build/omsc --dry-run examples/exit_zero.om > /dev/null 2>&1
+if [ ! -f a.out ]; then
+    echo -e "${GREEN}✓ Passed${NC}"
+else
+    echo -e "${RED}✗ Failed (binary should not be created in dry-run mode)${NC}"
+    rm -f a.out
+    FAILURES=$((FAILURES + 1))
+fi
+test_cli_output "dry-run-invalid" "Unknown variable" 1 ./build/omsc --dry-run examples/undefined_var.om
+test_cli_output "dry-run-emit-ir" "Dry run" 0 ./build/omsc --dry-run emit-ir examples/exit_zero.om
+
+# --emit-obj flag
+test_cli_output "emit-obj" "Object file written" 0 ./build/omsc --emit-obj examples/exit_zero.om -o /tmp/omsc_obj_test.o
+TOTAL=$((TOTAL + 1))
+echo -n "Testing emit-obj-file-exists... "
+if [ -f /tmp/omsc_obj_test.o ]; then
+    echo -e "${GREEN}✓ Passed${NC}"
+else
+    echo -e "${RED}✗ Failed (object file should exist)${NC}"
+    FAILURES=$((FAILURES + 1))
+fi
+rm -f /tmp/omsc_obj_test.o
+
+# help output includes new features
+test_cli_output "help-shows-check" "--check" 0 ./build/omsc --help
+test_cli_output "help-shows-time" "--time" 0 ./build/omsc --help
+test_cli_output "help-shows-dump-ast" "--dump-ast" 0 ./build/omsc --help
+test_cli_output "help-shows-dump-tokens" "--dump-tokens" 0 ./build/omsc --help
+test_cli_output "help-shows-emit-obj" "--emit-obj" 0 ./build/omsc --help
+test_cli_output "help-shows-dry-run" "--dry-run" 0 ./build/omsc --help
+test_cli_output "help-shows-quiet" "--quiet" 0 ./build/omsc --help
+
+# Version shows full semver
+test_cli_output "version-full-semver" "v1.0.0" 0 ./build/omsc --version
+
+echo ""
+echo "============================================"
 if [ $FAILURES -eq 0 ]; then
     echo -e "${GREEN}All $TOTAL tests passed!${NC}"
 else

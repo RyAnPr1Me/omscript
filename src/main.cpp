@@ -2,6 +2,7 @@
 #include "compiler.h"
 #include "lexer.h"
 #include "parser.h"
+#include <chrono>
 #include <csignal>
 #include <cstring>
 #include <filesystem>
@@ -701,6 +702,7 @@ void printUsage(const char* progName) {
     std::cout << "  " << progName << " <source.om> [-o output]\n";
     std::cout << "  " << progName << " compile <source.om> [-o output]\n";
     std::cout << "  " << progName << " run <source.om> [-o output] [-- args...]\n";
+    std::cout << "  " << progName << " check <source.om>\n";
     std::cout << "  " << progName << " lex <source.om>\n";
     std::cout << "  " << progName << " parse <source.om>\n";
     std::cout << "  " << progName << " emit-ast <source.om>\n";
@@ -713,6 +715,7 @@ void printUsage(const char* progName) {
     std::cout << "\nCommands:\n";
     std::cout << "  -b, -c, --build, --compile  Compile a source file (default)\n";
     std::cout << "  -r, --run            Compile and run a source file\n";
+    std::cout << "  --check              Parse and validate a source file without generating code\n";
     std::cout << "  -l, --lex, --tokens  Print lexer tokens\n";
     std::cout << "  -a, -p, --ast, --parse, --emit-ast  Parse and summarize the AST\n";
     std::cout << "  -e, -i, --emit-ir, --ir     Emit LLVM IR\n";
@@ -723,6 +726,12 @@ void printUsage(const char* progName) {
     std::cout << "  -o, --output <file>  Output file name (default: a.out, stdout for emit-ir)\n";
     std::cout << "  -k, --keep-temps     Keep temporary outputs when running\n";
     std::cout << "  -V, --verbose        Show detailed compilation output (IR, progress)\n";
+    std::cout << "  -q, --quiet          Suppress all non-error output\n";
+    std::cout << "  --time               Show compilation timing breakdown\n";
+    std::cout << "  --dump-ast           Print the full AST tree (with parse/emit-ast command)\n";
+    std::cout << "  --dump-tokens        Alias for the lex command\n";
+    std::cout << "  --emit-obj           Emit object file only (skip linking)\n";
+    std::cout << "  --dry-run            Validate and compile without writing output files\n";
     std::cout << "\nOptimization Levels:\n";
     std::cout << "  -O0                  No optimization\n";
     std::cout << "  -O1                  Basic optimization\n";
@@ -952,6 +961,293 @@ void printProgramSummary(const omscript::Program* program) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// AST dump helpers — recursive pretty-printer for --dump-ast
+// ---------------------------------------------------------------------------
+
+void dumpExpression(const omscript::Expression* expr, int indent);
+void dumpStatement(const omscript::Statement* stmt, int indent);
+
+void printIndent(int indent) {
+    for (int i = 0; i < indent; ++i) {
+        std::cout << "  ";
+    }
+}
+
+void dumpExpression(const omscript::Expression* expr, int indent) {
+    if (!expr) {
+        printIndent(indent);
+        std::cout << "(null)\n";
+        return;
+    }
+    printIndent(indent);
+    switch (expr->type) {
+    case omscript::ASTNodeType::LITERAL_EXPR: {
+        auto* lit = static_cast<const omscript::LiteralExpr*>(expr);
+        std::cout << "LiteralExpr";
+        if (lit->literalType == omscript::LiteralExpr::LiteralType::INTEGER) {
+            std::cout << " int=" << lit->intValue;
+        } else if (lit->literalType == omscript::LiteralExpr::LiteralType::FLOAT) {
+            std::cout << " float=" << lit->floatValue;
+        } else {
+            std::cout << " str=\"" << lit->stringValue << "\"";
+        }
+        std::cout << "\n";
+        break;
+    }
+    case omscript::ASTNodeType::IDENTIFIER_EXPR: {
+        auto* id = static_cast<const omscript::IdentifierExpr*>(expr);
+        std::cout << "IdentifierExpr '" << id->name << "'\n";
+        break;
+    }
+    case omscript::ASTNodeType::BINARY_EXPR: {
+        auto* bin = static_cast<const omscript::BinaryExpr*>(expr);
+        std::cout << "BinaryExpr op='" << bin->op << "'\n";
+        dumpExpression(bin->left.get(), indent + 1);
+        dumpExpression(bin->right.get(), indent + 1);
+        break;
+    }
+    case omscript::ASTNodeType::UNARY_EXPR: {
+        auto* un = static_cast<const omscript::UnaryExpr*>(expr);
+        std::cout << "UnaryExpr op='" << un->op << "'\n";
+        dumpExpression(un->operand.get(), indent + 1);
+        break;
+    }
+    case omscript::ASTNodeType::CALL_EXPR: {
+        auto* call = static_cast<const omscript::CallExpr*>(expr);
+        std::cout << "CallExpr '" << call->callee << "' args=" << call->arguments.size() << "\n";
+        for (const auto& arg : call->arguments) {
+            dumpExpression(arg.get(), indent + 1);
+        }
+        break;
+    }
+    case omscript::ASTNodeType::ASSIGN_EXPR: {
+        auto* assign = static_cast<const omscript::AssignExpr*>(expr);
+        std::cout << "AssignExpr '" << assign->name << "'\n";
+        dumpExpression(assign->value.get(), indent + 1);
+        break;
+    }
+    case omscript::ASTNodeType::POSTFIX_EXPR: {
+        auto* pf = static_cast<const omscript::PostfixExpr*>(expr);
+        std::cout << "PostfixExpr op='" << pf->op << "'\n";
+        dumpExpression(pf->operand.get(), indent + 1);
+        break;
+    }
+    case omscript::ASTNodeType::PREFIX_EXPR: {
+        auto* pf = static_cast<const omscript::PrefixExpr*>(expr);
+        std::cout << "PrefixExpr op='" << pf->op << "'\n";
+        dumpExpression(pf->operand.get(), indent + 1);
+        break;
+    }
+    case omscript::ASTNodeType::TERNARY_EXPR: {
+        auto* tern = static_cast<const omscript::TernaryExpr*>(expr);
+        std::cout << "TernaryExpr\n";
+        printIndent(indent + 1);
+        std::cout << "condition:\n";
+        dumpExpression(tern->condition.get(), indent + 2);
+        printIndent(indent + 1);
+        std::cout << "then:\n";
+        dumpExpression(tern->thenExpr.get(), indent + 2);
+        printIndent(indent + 1);
+        std::cout << "else:\n";
+        dumpExpression(tern->elseExpr.get(), indent + 2);
+        break;
+    }
+    case omscript::ASTNodeType::ARRAY_EXPR: {
+        auto* arr = static_cast<const omscript::ArrayExpr*>(expr);
+        std::cout << "ArrayExpr elements=" << arr->elements.size() << "\n";
+        for (const auto& el : arr->elements) {
+            dumpExpression(el.get(), indent + 1);
+        }
+        break;
+    }
+    case omscript::ASTNodeType::INDEX_EXPR: {
+        auto* idx = static_cast<const omscript::IndexExpr*>(expr);
+        std::cout << "IndexExpr\n";
+        dumpExpression(idx->array.get(), indent + 1);
+        dumpExpression(idx->index.get(), indent + 1);
+        break;
+    }
+    case omscript::ASTNodeType::INDEX_ASSIGN_EXPR: {
+        auto* ia = static_cast<const omscript::IndexAssignExpr*>(expr);
+        std::cout << "IndexAssignExpr\n";
+        dumpExpression(ia->array.get(), indent + 1);
+        dumpExpression(ia->index.get(), indent + 1);
+        dumpExpression(ia->value.get(), indent + 1);
+        break;
+    }
+    default:
+        std::cout << "Expression(unknown)\n";
+        break;
+    }
+}
+
+void dumpStatement(const omscript::Statement* stmt, int indent) {
+    if (!stmt) {
+        printIndent(indent);
+        std::cout << "(null)\n";
+        return;
+    }
+    printIndent(indent);
+    switch (stmt->type) {
+    case omscript::ASTNodeType::VAR_DECL: {
+        auto* vd = static_cast<const omscript::VarDecl*>(stmt);
+        std::cout << "VarDecl '" << vd->name << "'";
+        if (vd->isConst)
+            std::cout << " const";
+        if (!vd->typeName.empty())
+            std::cout << " type=" << vd->typeName;
+        std::cout << "\n";
+        if (vd->initializer) {
+            dumpExpression(vd->initializer.get(), indent + 1);
+        }
+        break;
+    }
+    case omscript::ASTNodeType::RETURN_STMT: {
+        auto* ret = static_cast<const omscript::ReturnStmt*>(stmt);
+        std::cout << "ReturnStmt\n";
+        if (ret->value) {
+            dumpExpression(ret->value.get(), indent + 1);
+        }
+        break;
+    }
+    case omscript::ASTNodeType::IF_STMT: {
+        auto* ifs = static_cast<const omscript::IfStmt*>(stmt);
+        std::cout << "IfStmt\n";
+        printIndent(indent + 1);
+        std::cout << "condition:\n";
+        dumpExpression(ifs->condition.get(), indent + 2);
+        printIndent(indent + 1);
+        std::cout << "then:\n";
+        dumpStatement(ifs->thenBranch.get(), indent + 2);
+        if (ifs->elseBranch) {
+            printIndent(indent + 1);
+            std::cout << "else:\n";
+            dumpStatement(ifs->elseBranch.get(), indent + 2);
+        }
+        break;
+    }
+    case omscript::ASTNodeType::WHILE_STMT: {
+        auto* ws = static_cast<const omscript::WhileStmt*>(stmt);
+        std::cout << "WhileStmt\n";
+        printIndent(indent + 1);
+        std::cout << "condition:\n";
+        dumpExpression(ws->condition.get(), indent + 2);
+        printIndent(indent + 1);
+        std::cout << "body:\n";
+        dumpStatement(ws->body.get(), indent + 2);
+        break;
+    }
+    case omscript::ASTNodeType::DO_WHILE_STMT: {
+        auto* dw = static_cast<const omscript::DoWhileStmt*>(stmt);
+        std::cout << "DoWhileStmt\n";
+        printIndent(indent + 1);
+        std::cout << "body:\n";
+        dumpStatement(dw->body.get(), indent + 2);
+        printIndent(indent + 1);
+        std::cout << "condition:\n";
+        dumpExpression(dw->condition.get(), indent + 2);
+        break;
+    }
+    case omscript::ASTNodeType::FOR_STMT: {
+        auto* fs = static_cast<const omscript::ForStmt*>(stmt);
+        std::cout << "ForStmt iter='" << fs->iteratorVar << "'";
+        if (!fs->iteratorType.empty())
+            std::cout << " type=" << fs->iteratorType;
+        std::cout << "\n";
+        printIndent(indent + 1);
+        std::cout << "start:\n";
+        dumpExpression(fs->start.get(), indent + 2);
+        printIndent(indent + 1);
+        std::cout << "end:\n";
+        dumpExpression(fs->end.get(), indent + 2);
+        if (fs->step) {
+            printIndent(indent + 1);
+            std::cout << "step:\n";
+            dumpExpression(fs->step.get(), indent + 2);
+        }
+        printIndent(indent + 1);
+        std::cout << "body:\n";
+        dumpStatement(fs->body.get(), indent + 2);
+        break;
+    }
+    case omscript::ASTNodeType::FOR_EACH_STMT: {
+        auto* fe = static_cast<const omscript::ForEachStmt*>(stmt);
+        std::cout << "ForEachStmt iter='" << fe->iteratorVar << "'\n";
+        printIndent(indent + 1);
+        std::cout << "collection:\n";
+        dumpExpression(fe->collection.get(), indent + 2);
+        printIndent(indent + 1);
+        std::cout << "body:\n";
+        dumpStatement(fe->body.get(), indent + 2);
+        break;
+    }
+    case omscript::ASTNodeType::BREAK_STMT:
+        std::cout << "BreakStmt\n";
+        break;
+    case omscript::ASTNodeType::CONTINUE_STMT:
+        std::cout << "ContinueStmt\n";
+        break;
+    case omscript::ASTNodeType::SWITCH_STMT: {
+        auto* sw = static_cast<const omscript::SwitchStmt*>(stmt);
+        std::cout << "SwitchStmt cases=" << sw->cases.size() << "\n";
+        printIndent(indent + 1);
+        std::cout << "condition:\n";
+        dumpExpression(sw->condition.get(), indent + 2);
+        for (size_t ci = 0; ci < sw->cases.size(); ++ci) {
+            const auto& sc = sw->cases[ci];
+            printIndent(indent + 1);
+            if (sc.isDefault) {
+                std::cout << "default:\n";
+            } else {
+                std::cout << "case:\n";
+                dumpExpression(sc.value.get(), indent + 2);
+            }
+            for (const auto& s : sc.body) {
+                dumpStatement(s.get(), indent + 2);
+            }
+        }
+        break;
+    }
+    case omscript::ASTNodeType::BLOCK: {
+        auto* block = static_cast<const omscript::BlockStmt*>(stmt);
+        std::cout << "Block stmts=" << block->statements.size() << "\n";
+        for (const auto& s : block->statements) {
+            dumpStatement(s.get(), indent + 1);
+        }
+        break;
+    }
+    case omscript::ASTNodeType::EXPR_STMT: {
+        auto* es = static_cast<const omscript::ExprStmt*>(stmt);
+        std::cout << "ExprStmt\n";
+        dumpExpression(es->expression.get(), indent + 1);
+        break;
+    }
+    default:
+        std::cout << "Statement(unknown)\n";
+        break;
+    }
+}
+
+void dumpAST(const omscript::Program* program) {
+    std::cout << "Program functions=" << program->functions.size() << "\n";
+    for (const auto& fn : program->functions) {
+        std::cout << "  FunctionDecl '" << fn->name << "' params=" << fn->parameters.size();
+        if (fn->isOptMax)
+            std::cout << " [OPTMAX]";
+        std::cout << "\n";
+        for (const auto& p : fn->parameters) {
+            std::cout << "    Param '" << p.name << "'";
+            if (!p.typeName.empty())
+                std::cout << " type=" << p.typeName;
+            std::cout << "\n";
+        }
+        if (fn->body) {
+            dumpStatement(fn->body.get(), 2);
+        }
+    }
+}
+
 } // namespace
 
 int main(int argc, char* argv[]) {
@@ -967,10 +1263,15 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    enum class Command { Compile, Run, Lex, Parse, EmitIR, Clean, Help, Version, Install, Uninstall };
+    enum class Command { Compile, Run, Lex, Parse, EmitIR, Clean, Help, Version, Install, Uninstall, Check };
 
     int argIndex = 1;
     bool verbose = false;
+    bool quiet = false;
+    bool showTiming = false;
+    bool dumpAstFull = false;
+    bool emitObjOnly = false;
+    bool dryRun = false;
     omscript::OptimizationLevel optLevel = omscript::OptimizationLevel::O2;
     std::string marchCpu;
     std::string mtuneCpu;
@@ -1073,6 +1374,31 @@ int main(int argc, char* argv[]) {
             argIndex++;
             continue;
         }
+        if (arg == "-q" || arg == "--quiet") {
+            quiet = true;
+            argIndex++;
+            continue;
+        }
+        if (arg == "--time") {
+            showTiming = true;
+            argIndex++;
+            continue;
+        }
+        if (arg == "--dump-ast") {
+            dumpAstFull = true;
+            argIndex++;
+            continue;
+        }
+        if (arg == "--emit-obj") {
+            emitObjOnly = true;
+            argIndex++;
+            continue;
+        }
+        if (arg == "--dry-run") {
+            dryRun = true;
+            argIndex++;
+            continue;
+        }
         if (auto parsedOpt = tryParseOptimizationFlag(arg)) {
             optLevel = *parsedOpt;
             argIndex++;
@@ -1113,8 +1439,12 @@ int main(int argc, char* argv[]) {
         command = Command::Run;
         argIndex++;
         commandMatched = true;
+    } else if (firstArg == "check" || firstArg == "--check") {
+        command = Command::Check;
+        argIndex++;
+        commandMatched = true;
     } else if (firstArg == "lex" || firstArg == "tokens" || firstArg == "-l" || firstArg == "--lex" ||
-               firstArg == "--tokens") {
+               firstArg == "--tokens" || firstArg == "--dump-tokens") {
         command = Command::Lex;
         argIndex++;
         commandMatched = true;
@@ -1197,6 +1527,26 @@ int main(int argc, char* argv[]) {
             verbose = true;
             continue;
         }
+        if (!parsingRunArgs && (arg == "-q" || arg == "--quiet")) {
+            quiet = true;
+            continue;
+        }
+        if (!parsingRunArgs && arg == "--time") {
+            showTiming = true;
+            continue;
+        }
+        if (!parsingRunArgs && arg == "--dump-ast") {
+            dumpAstFull = true;
+            continue;
+        }
+        if (!parsingRunArgs && arg == "--emit-obj") {
+            emitObjOnly = true;
+            continue;
+        }
+        if (!parsingRunArgs && arg == "--dry-run") {
+            dryRun = true;
+            continue;
+        }
         if (!parsingRunArgs) {
             if (auto parsedOpt = tryParseOptimizationFlag(arg)) {
                 optLevel = *parsedOpt;
@@ -1275,35 +1625,182 @@ int main(int argc, char* argv[]) {
     }
 
     try {
-        if (command == Command::Lex || command == Command::Parse || command == Command::EmitIR) {
+        auto totalStart = std::chrono::steady_clock::now();
+
+        if (command == Command::Lex || command == Command::Parse || command == Command::EmitIR ||
+            command == Command::Check) {
+            auto lexStart = std::chrono::steady_clock::now();
             std::string source = readSourceFile(sourceFile);
             omscript::Lexer lexer(source);
             auto tokens = lexer.tokenize();
+            auto lexEnd = std::chrono::steady_clock::now();
+
             if (command == Command::Lex) {
                 printTokens(tokens);
+                if (showTiming) {
+                    auto lexMs =
+                        std::chrono::duration_cast<std::chrono::microseconds>(lexEnd - lexStart).count() / 1000.0;
+                    std::cerr << "Timing: lex " << lexMs << "ms\n";
+                }
                 return 0;
             }
+
+            auto parseStart = std::chrono::steady_clock::now();
             omscript::Parser parser(tokens);
             auto program = parser.parse();
-            if (command == Command::Parse) {
-                printProgramSummary(program.get());
+            auto parseEnd = std::chrono::steady_clock::now();
+
+            if (command == Command::Check) {
+                if (!quiet) {
+                    std::cout << sourceFile << ": OK (" << program->functions.size() << " function(s))\n";
+                }
+                if (showTiming) {
+                    auto lexMs =
+                        std::chrono::duration_cast<std::chrono::microseconds>(lexEnd - lexStart).count() / 1000.0;
+                    auto parseMs =
+                        std::chrono::duration_cast<std::chrono::microseconds>(parseEnd - parseStart).count() / 1000.0;
+                    auto totalMs = std::chrono::duration_cast<std::chrono::microseconds>(
+                                       std::chrono::steady_clock::now() - totalStart)
+                                       .count() /
+                                   1000.0;
+                    std::cerr << "Timing: lex " << lexMs << "ms, parse " << parseMs << "ms, total " << totalMs
+                              << "ms\n";
+                }
                 return 0;
             }
+
+            if (command == Command::Parse) {
+                if (dumpAstFull) {
+                    dumpAST(program.get());
+                } else {
+                    printProgramSummary(program.get());
+                }
+                if (showTiming) {
+                    auto lexMs =
+                        std::chrono::duration_cast<std::chrono::microseconds>(lexEnd - lexStart).count() / 1000.0;
+                    auto parseMs =
+                        std::chrono::duration_cast<std::chrono::microseconds>(parseEnd - parseStart).count() / 1000.0;
+                    std::cerr << "Timing: lex " << lexMs << "ms, parse " << parseMs << "ms\n";
+                }
+                return 0;
+            }
+
+            // EmitIR
+            auto codegenStart = std::chrono::steady_clock::now();
             omscript::CodeGenerator codegen(optLevel);
             codegen.generate(program.get());
-            if (outputFile.empty()) {
-                codegen.getModule()->print(llvm::outs(), nullptr);
-                llvm::outs().flush();
-                return 0;
+            auto codegenEnd = std::chrono::steady_clock::now();
+
+            if (!dryRun) {
+                if (outputFile.empty()) {
+                    codegen.getModule()->print(llvm::outs(), nullptr);
+                    llvm::outs().flush();
+                } else {
+                    std::error_code ec;
+                    llvm::raw_fd_ostream out(outputFile, ec, llvm::sys::fs::OF_None);
+                    if (ec) {
+                        throw std::runtime_error("Could not write IR to file: " + ec.message());
+                    }
+                    codegen.getModule()->print(out, nullptr);
+                }
+            } else if (!quiet) {
+                std::cout << "Dry run: IR generation successful for " << sourceFile << "\n";
             }
-            std::error_code ec;
-            llvm::raw_fd_ostream out(outputFile, ec, llvm::sys::fs::OF_None);
-            if (ec) {
-                throw std::runtime_error("Could not write IR to file: " + ec.message());
+            if (showTiming) {
+                auto lexMs =
+                    std::chrono::duration_cast<std::chrono::microseconds>(lexEnd - lexStart).count() / 1000.0;
+                auto parseMs =
+                    std::chrono::duration_cast<std::chrono::microseconds>(parseEnd - parseStart).count() / 1000.0;
+                auto codegenMs =
+                    std::chrono::duration_cast<std::chrono::microseconds>(codegenEnd - codegenStart).count() / 1000.0;
+                std::cerr << "Timing: lex " << lexMs << "ms, parse " << parseMs << "ms, codegen " << codegenMs
+                          << "ms\n";
             }
-            codegen.getModule()->print(out, nullptr);
             return 0;
         }
+
+        if (dryRun) {
+            // For compile/run with --dry-run: lex, parse, codegen but don't write files.
+            auto lexStart = std::chrono::steady_clock::now();
+            std::string source = readSourceFile(sourceFile);
+            omscript::Lexer lexer(source);
+            auto tokens = lexer.tokenize();
+            auto lexEnd = std::chrono::steady_clock::now();
+
+            auto parseStart = std::chrono::steady_clock::now();
+            omscript::Parser parser(tokens);
+            auto program = parser.parse();
+            auto parseEnd = std::chrono::steady_clock::now();
+
+            auto codegenStart = std::chrono::steady_clock::now();
+            omscript::CodeGenerator codegen(optLevel);
+            codegen.setMarch(marchCpu);
+            codegen.setMtune(mtuneCpu);
+            codegen.setPIC(flagPIC);
+            codegen.setFastMath(flagFastMath);
+            codegen.setOptMax(flagOptMax);
+            if (flagJIT) {
+                codegen.generateHybrid(program.get());
+            } else {
+                codegen.generate(program.get());
+            }
+            auto codegenEnd = std::chrono::steady_clock::now();
+
+            if (!quiet) {
+                std::cout << "Dry run: compilation successful for " << sourceFile << "\n";
+            }
+            if (showTiming) {
+                auto lexMs =
+                    std::chrono::duration_cast<std::chrono::microseconds>(lexEnd - lexStart).count() / 1000.0;
+                auto parseMs =
+                    std::chrono::duration_cast<std::chrono::microseconds>(parseEnd - parseStart).count() / 1000.0;
+                auto codegenMs =
+                    std::chrono::duration_cast<std::chrono::microseconds>(codegenEnd - codegenStart).count() / 1000.0;
+                auto totalMs = std::chrono::duration_cast<std::chrono::microseconds>(
+                                   std::chrono::steady_clock::now() - totalStart)
+                                   .count() /
+                               1000.0;
+                std::cerr << "Timing: lex " << lexMs << "ms, parse " << parseMs << "ms, codegen " << codegenMs
+                          << "ms, total " << totalMs << "ms\n";
+            }
+            return 0;
+        }
+
+        if (emitObjOnly) {
+            // Compile to object file only (no linking).
+            std::string source = readSourceFile(sourceFile);
+            omscript::Lexer lexer(source);
+            auto tokens = lexer.tokenize();
+            omscript::Parser parser(tokens);
+            auto program = parser.parse();
+
+            omscript::CodeGenerator codegen(optLevel);
+            codegen.setMarch(marchCpu);
+            codegen.setMtune(mtuneCpu);
+            codegen.setPIC(flagPIC);
+            codegen.setFastMath(flagFastMath);
+            codegen.setOptMax(flagOptMax);
+            if (flagJIT) {
+                codegen.generateHybrid(program.get());
+            } else {
+                codegen.generate(program.get());
+            }
+
+            std::string objFile = outputSpecified ? outputFile : (outputFile + ".o");
+            codegen.writeObjectFile(objFile);
+            if (!quiet) {
+                std::cout << "Object file written: " << objFile << "\n";
+            }
+            if (showTiming) {
+                auto totalMs = std::chrono::duration_cast<std::chrono::microseconds>(
+                                   std::chrono::steady_clock::now() - totalStart)
+                                   .count() /
+                               1000.0;
+                std::cerr << "Timing: total " << totalMs << "ms\n";
+            }
+            return 0;
+        }
+
         omscript::Compiler compiler;
         compiler.setVerbose(verbose);
         compiler.setOptimizationLevel(optLevel);
@@ -1317,7 +1814,19 @@ int main(int argc, char* argv[]) {
         compiler.setStaticLinking(flagStatic);
         compiler.setStrip(flagStrip);
         compiler.setStackProtector(flagStackProtector);
+        if (quiet) {
+            compiler.setVerbose(false);
+        }
         compiler.compile(sourceFile, outputFile);
+
+        if (showTiming) {
+            auto totalMs = std::chrono::duration_cast<std::chrono::microseconds>(
+                               std::chrono::steady_clock::now() - totalStart)
+                               .count() /
+                           1000.0;
+            std::cerr << "Timing: total " << totalMs << "ms\n";
+        }
+
         if (command == Command::Run) {
             // Register temp files for cleanup on signal (Ctrl+C during program run).
             if (!outputSpecified && !keepTemps) {
