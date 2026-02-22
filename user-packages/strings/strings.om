@@ -1,0 +1,20 @@
+// strings package - utility functions for string operations
+
+fn str_is_empty(s) {
+    return str_len(s) == 0;
+}
+
+fn str_char_count(s, ch) {
+    var count = 0;
+    var length = str_len(s);
+    for (i in 0...length) {
+        if (char_at(s, i) == ch) {
+            count = count + 1;
+        }
+    }
+    return count;
+}
+
+fn str_contains_char(s, ch) {
+    return str_char_count(s, ch) > 0;
+}

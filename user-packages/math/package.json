@@ -1,0 +1,7 @@
+{
+  "name": "math",
+  "version": "1.0.0",
+  "description": "Math utility functions: factorial, fibonacci, gcd, lcm, power",
+  "entry": "math.om",
+  "files": ["math.om"]
+}

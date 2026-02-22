@@ -468,6 +468,97 @@ test_cli_output "version-full-semver" "v1.0.0" 0 ./build/omsc --version
 
 echo ""
 echo "============================================"
+echo "Package Manager Tests"
+echo "============================================"
+echo ""
+
+# Clean up any leftover packages
+rm -rf om_packages
+
+# Help text shows package manager
+test_cli_output "help-shows-pkg" "pkg install" 0 ./build/omsc --help
+test_cli_output "help-shows-pkg-search" "pkg search" 0 ./build/omsc --help
+
+# pkg search - list all packages
+test_cli_output "pkg-search-all" "math@" 0 ./build/omsc pkg search
+test_cli_output "pkg-search-algorithms" "algorithms@" 0 ./build/omsc pkg search
+test_cli_output "pkg-search-strings" "strings@" 0 ./build/omsc pkg search
+
+# pkg search with query
+test_cli_output "pkg-search-query" "math@" 0 ./build/omsc pkg search math
+test_cli_output "pkg-search-no-match" "No packages matching" 0 ./build/omsc pkg search zzzznonexistent
+
+# pkg info
+test_cli_output "pkg-info-math" "math" 0 ./build/omsc pkg info math
+test_cli_output "pkg-info-version" "1.0.0" 0 ./build/omsc pkg info math
+test_cli_output "pkg-info-not-installed" "Installed:   no" 0 ./build/omsc pkg info math
+test_cli_output "pkg-info-nonexistent" "not found" 1 ./build/omsc pkg info nonexistent
+
+# pkg list empty
+test_cli_output "pkg-list-empty" "No packages installed" 0 ./build/omsc pkg list
+
+# pkg install
+test_cli_output "pkg-install-math" "Installed math@1.0.0" 0 ./build/omsc pkg install math
+TOTAL=$((TOTAL + 1))
+echo -n "Testing pkg-install-creates-files... "
+if [ -f om_packages/math/math.om ] && [ -f om_packages/math/package.json ]; then
+    echo -e "${GREEN}✓ Passed${NC}"
+else
+    echo -e "${RED}✗ Failed (package files not created)${NC}"
+    FAILURES=$((FAILURES + 1))
+fi
+
+# pkg list after install
+test_cli_output "pkg-list-installed" "math@1.0.0" 0 ./build/omsc pkg list
+
+# pkg info shows installed
+test_cli_output "pkg-info-installed" "Installed:   yes" 0 ./build/omsc pkg info math
+
+# pkg install another
+test_cli_output "pkg-install-algorithms" "Installed algorithms@1.0.0" 0 ./build/omsc pkg install algorithms
+
+# pkg list shows both
+test_cli_output "pkg-list-multiple" "algorithms@" 0 ./build/omsc pkg list
+
+# pkg remove
+test_cli_output "pkg-remove-math" "Removed math" 0 ./build/omsc pkg remove math
+TOTAL=$((TOTAL + 1))
+echo -n "Testing pkg-remove-deletes-files... "
+if [ ! -d om_packages/math ]; then
+    echo -e "${GREEN}✓ Passed${NC}"
+else
+    echo -e "${RED}✗ Failed (package directory still exists)${NC}"
+    FAILURES=$((FAILURES + 1))
+fi
+
+# pkg remove nonexistent
+test_cli_output "pkg-remove-not-installed" "not installed" 1 ./build/omsc pkg remove nonexistent
+
+# Error cases
+test_cli_output "pkg-no-subcommand" "missing pkg subcommand" 1 ./build/omsc pkg
+test_cli_output "pkg-unknown-subcommand" "unknown pkg subcommand" 1 ./build/omsc pkg frob
+test_cli_output "pkg-install-no-name" "requires a package name" 1 ./build/omsc pkg install
+test_cli_output "pkg-remove-no-name" "requires a package name" 1 ./build/omsc pkg remove
+test_cli_output "pkg-info-no-name" "requires a package name" 1 ./build/omsc pkg info
+test_cli_output "pkg-install-nonexistent" "not found" 1 ./build/omsc pkg install nonexistent
+
+# Aliases
+test_cli_output "pkg-add-alias" "Installed strings@" 0 ./build/omsc pkg add strings
+test_cli_output "pkg-ls-alias" "strings@" 0 ./build/omsc pkg ls
+test_cli_output "pkg-rm-alias" "Removed" 0 ./build/omsc pkg rm strings
+test_cli_output "pkg-find-alias" "math@" 0 ./build/omsc pkg find math
+test_cli_output "pkg-show-alias" "math" 0 ./build/omsc pkg show math
+test_cli_output "package-command-alias" "algorithms@" 0 ./build/omsc package list
+
+# Quiet mode
+test_cli_output "pkg-install-quiet" "" 0 ./build/omsc -q pkg install strings
+test_cli_output "pkg-remove-quiet" "" 0 ./build/omsc -q pkg remove strings
+
+# Clean up
+rm -rf om_packages
+
+echo ""
+echo "============================================"
 if [ $FAILURES -eq 0 ]; then
     echo -e "${GREEN}All $TOTAL tests passed!${NC}"
 else

@@ -23,6 +23,8 @@ constexpr const char* kCompilerVersion = "OmScript Compiler v" OMSC_VERSION;
 constexpr const char* kPathConfigMarker = "# omsc-path-auto";
 constexpr const char* kGitHubReleasesApiUrl = "https://api.github.com/repos/RyAnPr1Me/omscript/releases/latest";
 constexpr const char* kGitHubReleasesDownloadBase = "https://github.com/RyAnPr1Me/omscript/releases/download";
+constexpr const char* kGitHubRawBase = "https://raw.githubusercontent.com/RyAnPr1Me/omscript/main/user-packages";
+constexpr const char* kLocalPackagesDir = "om_packages";
 constexpr int kApiTimeoutSeconds = 10;
 constexpr int kDownloadTimeoutSeconds = 120;
 
@@ -696,6 +698,360 @@ void signalHandler(int sig) {
     raise(sig);
 }
 
+// ---------------------------------------------------------------------------
+// Package manager
+// ---------------------------------------------------------------------------
+
+/// Resolve the path to the user-packages registry directory.
+/// First checks next to the running binary (source tree layout), then
+/// falls back to the compiled-in repo location, then empty string.
+std::string findUserPackagesDir() {
+    // Try relative to the executable (works when running from the build tree).
+    try {
+        auto exePath = std::filesystem::read_symlink("/proc/self/exe");
+        // build/omsc -> look for ../user-packages
+        auto candidate = exePath.parent_path().parent_path() / "user-packages";
+        if (std::filesystem::is_directory(candidate)) {
+            return std::filesystem::canonical(candidate).string();
+        }
+        // Also try same directory as exe (installed layout)
+        candidate = exePath.parent_path() / "user-packages";
+        if (std::filesystem::is_directory(candidate)) {
+            return std::filesystem::canonical(candidate).string();
+        }
+    } catch (...) {
+    }
+    // Try current working directory
+    if (std::filesystem::is_directory("user-packages")) {
+        return std::filesystem::canonical("user-packages").string();
+    }
+    return "";
+}
+
+/// Minimal JSON string field extractor (reuse the existing pattern).
+/// Extracts a simple "key":"value" or "key": "value" pair.
+std::string jsonField(const std::string& json, const std::string& key) {
+    // Try with no space: "key":"value"
+    std::string pattern1 = "\"" + key + "\":\"";
+    size_t pos = json.find(pattern1);
+    if (pos != std::string::npos) {
+        pos += pattern1.size();
+        size_t end = json.find('"', pos);
+        if (end != std::string::npos) {
+            return json.substr(pos, end - pos);
+        }
+    }
+    // Try with space: "key": "value"
+    std::string pattern2 = "\"" + key + "\": \"";
+    pos = json.find(pattern2);
+    if (pos != std::string::npos) {
+        pos += pattern2.size();
+        size_t end = json.find('"', pos);
+        if (end != std::string::npos) {
+            return json.substr(pos, end - pos);
+        }
+    }
+    return "";
+}
+
+/// Extract a JSON array of strings, e.g. "files": ["a.om", "b.om"]
+std::vector<std::string> jsonArrayField(const std::string& json, const std::string& key) {
+    std::vector<std::string> result;
+    std::string pattern = "\"" + key + "\"";
+    size_t pos = json.find(pattern);
+    if (pos == std::string::npos) {
+        return result;
+    }
+    pos = json.find('[', pos);
+    if (pos == std::string::npos) {
+        return result;
+    }
+    size_t end = json.find(']', pos);
+    if (end == std::string::npos) {
+        return result;
+    }
+    std::string arr = json.substr(pos + 1, end - pos - 1);
+    // Parse simple quoted strings from the array
+    size_t i = 0;
+    while (i < arr.size()) {
+        size_t q1 = arr.find('"', i);
+        if (q1 == std::string::npos)
+            break;
+        size_t q2 = arr.find('"', q1 + 1);
+        if (q2 == std::string::npos)
+            break;
+        result.push_back(arr.substr(q1 + 1, q2 - q1 - 1));
+        i = q2 + 1;
+    }
+    return result;
+}
+
+struct PackageInfo {
+    std::string name;
+    std::string version;
+    std::string description;
+    std::string entry;
+    std::vector<std::string> files;
+    bool valid = false;
+};
+
+PackageInfo readPackageManifest(const std::string& manifestPath) {
+    PackageInfo info;
+    std::ifstream f(manifestPath);
+    if (!f.is_open()) {
+        return info;
+    }
+    std::string json((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    f.close();
+    info.name = jsonField(json, "name");
+    info.version = jsonField(json, "version");
+    info.description = jsonField(json, "description");
+    info.entry = jsonField(json, "entry");
+    info.files = jsonArrayField(json, "files");
+    info.valid = !info.name.empty();
+    return info;
+}
+
+/// List all packages available in the user-packages registry.
+std::vector<PackageInfo> listAvailablePackages(const std::string& registryDir) {
+    std::vector<PackageInfo> packages;
+    if (registryDir.empty() || !std::filesystem::is_directory(registryDir)) {
+        return packages;
+    }
+    for (const auto& entry : std::filesystem::directory_iterator(registryDir)) {
+        if (!entry.is_directory()) {
+            continue;
+        }
+        auto manifest = entry.path() / "package.json";
+        if (!std::filesystem::exists(manifest)) {
+            continue;
+        }
+        auto info = readPackageManifest(manifest.string());
+        if (info.valid) {
+            packages.push_back(info);
+        }
+    }
+    // Sort by name for consistent output
+    std::sort(packages.begin(), packages.end(),
+              [](const PackageInfo& a, const PackageInfo& b) { return a.name < b.name; });
+    return packages;
+}
+
+int doPkgInstall(const std::string& pkgName, bool quiet) {
+    std::string registryDir = findUserPackagesDir();
+    if (registryDir.empty()) {
+        std::cerr << "Error: cannot locate user-packages registry\n";
+        return 1;
+    }
+    std::string pkgDir = registryDir + "/" + pkgName;
+    if (!std::filesystem::is_directory(pkgDir)) {
+        std::cerr << "Error: package '" << pkgName << "' not found in registry\n";
+        return 1;
+    }
+    auto manifest = readPackageManifest(pkgDir + "/package.json");
+    if (!manifest.valid) {
+        std::cerr << "Error: invalid package manifest for '" << pkgName << "'\n";
+        return 1;
+    }
+    // Determine files to copy
+    std::vector<std::string> files = manifest.files;
+    if (files.empty() && !manifest.entry.empty()) {
+        files.push_back(manifest.entry);
+    }
+    if (files.empty()) {
+        std::cerr << "Error: package '" << pkgName << "' has no files to install\n";
+        return 1;
+    }
+    // Create local install directory
+    std::string localDir = std::string(kLocalPackagesDir) + "/" + pkgName;
+    std::filesystem::create_directories(localDir);
+    // Copy files
+    for (const auto& file : files) {
+        std::string src = pkgDir + "/" + file;
+        std::string dst = localDir + "/" + file;
+        if (!std::filesystem::exists(src)) {
+            std::cerr << "Warning: file '" << file << "' listed in manifest but not found\n";
+            continue;
+        }
+        std::filesystem::copy_file(src, dst, std::filesystem::copy_options::overwrite_existing);
+    }
+    // Also copy the manifest
+    std::filesystem::copy_file(pkgDir + "/package.json", localDir + "/package.json",
+                               std::filesystem::copy_options::overwrite_existing);
+    if (!quiet) {
+        std::cout << "Installed " << pkgName << "@" << manifest.version << " (" << files.size() << " file(s))\n";
+    }
+    return 0;
+}
+
+int doPkgRemove(const std::string& pkgName, bool quiet) {
+    std::string localDir = std::string(kLocalPackagesDir) + "/" + pkgName;
+    if (!std::filesystem::is_directory(localDir)) {
+        std::cerr << "Error: package '" << pkgName << "' is not installed\n";
+        return 1;
+    }
+    std::error_code ec;
+    std::filesystem::remove_all(localDir, ec);
+    if (ec) {
+        std::cerr << "Error: failed to remove package '" << pkgName << "': " << ec.message() << "\n";
+        return 1;
+    }
+    if (!quiet) {
+        std::cout << "Removed " << pkgName << "\n";
+    }
+    return 0;
+}
+
+int doPkgList(bool quiet) {
+    if (!std::filesystem::is_directory(kLocalPackagesDir)) {
+        if (!quiet) {
+            std::cout << "No packages installed.\n";
+        }
+        return 0;
+    }
+    bool found = false;
+    for (const auto& entry : std::filesystem::directory_iterator(kLocalPackagesDir)) {
+        if (!entry.is_directory()) {
+            continue;
+        }
+        auto manifest = entry.path() / "package.json";
+        if (std::filesystem::exists(manifest)) {
+            auto info = readPackageManifest(manifest.string());
+            if (info.valid) {
+                std::cout << info.name << "@" << info.version;
+                if (!info.description.empty()) {
+                    std::cout << " - " << info.description;
+                }
+                std::cout << "\n";
+                found = true;
+            }
+        }
+    }
+    if (!found && !quiet) {
+        std::cout << "No packages installed.\n";
+    }
+    return 0;
+}
+
+int doPkgSearch(const std::string& query, bool quiet) {
+    std::string registryDir = findUserPackagesDir();
+    if (registryDir.empty()) {
+        std::cerr << "Error: cannot locate user-packages registry\n";
+        return 1;
+    }
+    auto packages = listAvailablePackages(registryDir);
+    if (packages.empty()) {
+        if (!quiet) {
+            std::cout << "No packages available.\n";
+        }
+        return 0;
+    }
+    bool found = false;
+    for (const auto& pkg : packages) {
+        // If query is empty, show all; otherwise filter by name or description
+        if (!query.empty()) {
+            if (pkg.name.find(query) == std::string::npos && pkg.description.find(query) == std::string::npos) {
+                continue;
+            }
+        }
+        std::cout << pkg.name << "@" << pkg.version;
+        if (!pkg.description.empty()) {
+            std::cout << " - " << pkg.description;
+        }
+        std::cout << "\n";
+        found = true;
+    }
+    if (!found && !quiet) {
+        std::cout << "No packages matching '" << query << "'.\n";
+    }
+    return 0;
+}
+
+int doPkgInfo(const std::string& pkgName) {
+    // First check installed packages
+    std::string localManifest = std::string(kLocalPackagesDir) + "/" + pkgName + "/package.json";
+    bool installed = std::filesystem::exists(localManifest);
+
+    // Then check registry
+    std::string registryDir = findUserPackagesDir();
+    std::string registryManifest;
+    if (!registryDir.empty()) {
+        registryManifest = registryDir + "/" + pkgName + "/package.json";
+    }
+
+    PackageInfo info;
+    if (installed) {
+        info = readPackageManifest(localManifest);
+    } else if (!registryManifest.empty() && std::filesystem::exists(registryManifest)) {
+        info = readPackageManifest(registryManifest);
+    }
+
+    if (!info.valid) {
+        std::cerr << "Error: package '" << pkgName << "' not found\n";
+        return 1;
+    }
+
+    std::cout << "Name:        " << info.name << "\n";
+    std::cout << "Version:     " << info.version << "\n";
+    std::cout << "Description: " << info.description << "\n";
+    std::cout << "Entry:       " << info.entry << "\n";
+    if (!info.files.empty()) {
+        std::cout << "Files:       ";
+        for (size_t i = 0; i < info.files.size(); ++i) {
+            if (i > 0)
+                std::cout << ", ";
+            std::cout << info.files[i];
+        }
+        std::cout << "\n";
+    }
+    std::cout << "Installed:   " << (installed ? "yes" : "no") << "\n";
+    return 0;
+}
+
+/// Entry point for `omsc pkg <subcommand> [args...]`.
+/// Returns the exit code.
+int doPkg(int argc, char* argv[], int startIndex, bool quiet) {
+    if (startIndex >= argc) {
+        std::cerr << "Error: missing pkg subcommand (install, remove, list, search, info)\n";
+        return 1;
+    }
+    std::string sub = argv[startIndex];
+    if (sub == "install" || sub == "add") {
+        if (startIndex + 1 >= argc) {
+            std::cerr << "Error: pkg install requires a package name\n";
+            return 1;
+        }
+        return doPkgInstall(argv[startIndex + 1], quiet);
+    }
+    if (sub == "remove" || sub == "uninstall" || sub == "rm") {
+        if (startIndex + 1 >= argc) {
+            std::cerr << "Error: pkg remove requires a package name\n";
+            return 1;
+        }
+        return doPkgRemove(argv[startIndex + 1], quiet);
+    }
+    if (sub == "list" || sub == "ls") {
+        return doPkgList(quiet);
+    }
+    if (sub == "search" || sub == "find") {
+        std::string query;
+        if (startIndex + 1 < argc) {
+            query = argv[startIndex + 1];
+        }
+        return doPkgSearch(query, quiet);
+    }
+    if (sub == "info" || sub == "show") {
+        if (startIndex + 1 >= argc) {
+            std::cerr << "Error: pkg info requires a package name\n";
+            return 1;
+        }
+        return doPkgInfo(argv[startIndex + 1]);
+    }
+    std::cerr << "Error: unknown pkg subcommand '" << sub << "'\n";
+    std::cerr << "Available subcommands: install, remove, list, search, info\n";
+    return 1;
+}
+
 void printUsage(const char* progName) {
     std::cout << kCompilerVersion << "\n";
     std::cout << "Usage:\n";
@@ -711,6 +1067,7 @@ void printUsage(const char* progName) {
     std::cout << "  " << progName << " version\n";
     std::cout << "  " << progName << " install\n";
     std::cout << "  " << progName << " uninstall\n";
+    std::cout << "  " << progName << " pkg <subcommand> [args]\n";
     std::cout << "  " << progName << " help\n";
     std::cout << "\nCommands:\n";
     std::cout << "  -b, -c, --build, --compile  Compile a source file (default)\n";
@@ -762,6 +1119,12 @@ void printUsage(const char* progName) {
     std::cout << "\nInstallation:\n";
     std::cout << "  " << progName << " install        Add to PATH (first run or update)\n";
     std::cout << "  " << progName << " uninstall      Remove installed binary and PATH entry\n";
+    std::cout << "\nPackage Manager:\n";
+    std::cout << "  " << progName << " pkg install <name>    Install a package from the registry\n";
+    std::cout << "  " << progName << " pkg remove <name>     Remove an installed package\n";
+    std::cout << "  " << progName << " pkg list              List installed packages\n";
+    std::cout << "  " << progName << " pkg search [query]    Search available packages\n";
+    std::cout << "  " << progName << " pkg info <name>       Show package details\n";
 }
 
 std::string readSourceFile(const std::string& filename) {
@@ -1263,7 +1626,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    enum class Command { Compile, Run, Lex, Parse, EmitIR, Clean, Help, Version, Install, Uninstall, Check };
+    enum class Command { Compile, Run, Lex, Parse, EmitIR, Clean, Help, Version, Install, Uninstall, Check, Pkg };
 
     int argIndex = 1;
     bool verbose = false;
@@ -1430,6 +1793,10 @@ int main(int argc, char* argv[]) {
     } else if (firstArg == "uninstall" || firstArg == "--uninstall") {
         command = Command::Uninstall;
         commandMatched = true;
+    } else if (firstArg == "pkg" || firstArg == "--pkg" || firstArg == "package") {
+        command = Command::Pkg;
+        argIndex++;
+        commandMatched = true;
     } else if (firstArg == "compile" || firstArg == "build" || firstArg == "-c" || firstArg == "-b" ||
                firstArg == "--compile" || firstArg == "--build") {
         command = Command::Compile;
@@ -1489,6 +1856,9 @@ int main(int argc, char* argv[]) {
     if (command == Command::Uninstall) {
         doUninstall();
         return 0;
+    }
+    if (command == Command::Pkg) {
+        return doPkg(argc, argv, argIndex, quiet);
     }
 
     std::string sourceFile;
