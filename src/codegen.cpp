@@ -1316,13 +1316,13 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         // Strength reduction for constant power-of-2 divisors.
         // Since the divisor is a known positive constant it is never zero,
         // so we can skip the division-by-zero guard entirely.
-        //   n / 2^k  →  n >> k   (arithmetic right shift preserves sign)
+        //   n / 2^k  →  SDiv (truncation toward zero; AShr rounds toward -∞)
         //   n % 2^k  →  SRem with the zero-check elided (constant != 0)
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
             int s = log2IfPowerOf2(ci->getSExtValue());
             if (s >= 0) {
                 if (isDivision) {
-                    return builder->CreateAShr(left, llvm::ConstantInt::get(getDefaultType(), s), "ashrtmp");
+                    return builder->CreateSDiv(left, right, "divtmp");
                 }
                 // For modulo we still use SRem to preserve correct signed
                 // semantics (e.g. -7 % 4 == -3), but the divisor is a known
