@@ -22,28 +22,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            cmake \
-            build-essential \
-            llvm-17-dev \
-            libgtest-dev \
-            gcc
-
-      - name: Configure CMake
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
-
-      - name: Build compiler
-        run: cmake --build build --parallel $(nproc)
-
-      - name: Run unit tests
-        run: cd build && ctest --output-on-failure
-
-      - name: Run integration tests
-        run: bash run_tests.sh
-
       - name: Extract version from tag
         id: version
         run: |
@@ -60,6 +38,28 @@ jobs:
             exit 1
           fi
           echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            build-essential \
+            llvm-17-dev \
+            libgtest-dev \
+            gcc
+
+      - name: Configure CMake
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release "-DOMSC_VERSION=${{ steps.version.outputs.VERSION }}"
+
+      - name: Build compiler
+        run: cmake --build build --parallel $(nproc)
+
+      - name: Run unit tests
+        run: cd build && ctest --output-on-failure
+
+      - name: Run integration tests
+        run: bash run_tests.sh
 
       - name: Package binary
         run: |
