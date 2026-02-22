@@ -5,6 +5,11 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g. 1.2.3, without the leading v)'
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -42,9 +47,16 @@ jobs:
       - name: Extract version from tag
         id: version
         run: |
-          VERSION="${GITHUB_REF#refs/tags/v}"
-          if [[ "$VERSION" = "$GITHUB_REF" ]] || [[ "$VERSION" == refs/* ]]; then
-            echo "Error: workflow must be triggered by a version tag (e.g. v1.2.3)"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          elif [[ -n "${{ github.event.inputs.version }}" ]]; then
+            VERSION="${{ github.event.inputs.version }}"
+            if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "Error: version input must be a semantic version (e.g. 1.2.3)"
+              exit 1
+            fi
+          else
+            echo "Error: workflow must be triggered by a version tag (e.g. v1.2.3) or provide a version input"
             exit 1
           fi
           echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
