@@ -18,7 +18,7 @@
 
 namespace {
 
-constexpr const char* kCompilerVersion = "OmScript Compiler v0.4.0";
+constexpr const char* kCompilerVersion = "OmScript Compiler v0.9.3";
 constexpr const char* kPathConfigMarker = "# omsc-path-auto";
 
 bool isRoot() {
