@@ -7,7 +7,7 @@ Thank you for considering contributing to OmScript!
 ### Prerequisites
 - CMake 3.13+
 - C++17 compiler (GCC or Clang)
-- LLVM 17 development libraries
+- LLVM 18 development libraries
 - Google Test (libgtest-dev)
 
 ### Building

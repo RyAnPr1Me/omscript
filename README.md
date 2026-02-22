@@ -10,7 +10,7 @@ A low-level, C-like programming language with dynamic typing, featuring a **heav
 - **Reference Counted Memory**: Automatic memory management using malloc/free with deterministic deallocation
 - **For Loops with Ranges**: Modern range-based iteration with `for (i in start...end...step)`
 - **Do-While Loops**: Execute body at least once with `do { ... } while (cond);`
-- **Built-in Functions**: `print()` for output
+- **Built-in Functions**: 24 standard library functions — math, array manipulation, strings, character classification, and I/O
 - **Bytecode Runtime**: Interprets dynamically typed sections at runtime
 - **Hybrid Approach**: Compiles static code paths with LLVM, uses bytecode VM for dynamic behavior
 
@@ -100,10 +100,16 @@ continue;
 
 ### Built-in Functions
 ```omscript
-print(42);          // prints "42\n" to stdout
-print(x + y);       // prints the result of an expression
-var a = abs(-10);   // absolute value: a = 10
+print(42);               // prints "42\n" to stdout
+print("hello world");    // prints string
+print_char(65);          // prints 'A' (returns the char code)
+var n = str_len("hi");   // string length: n = 2
+var a = abs(-10);        // absolute value: a = 10
+var m = min(3, 7);       // minimum: m = 3
+var p = pow(2, 8);       // integer exponentiation: p = 256
+var s = sqrt(16);        // integer square root: s = 4
 ```
+See [LANGUAGE_REFERENCE.md](LANGUAGE_REFERENCE.md) for the full list of 24 built-in functions.
 
 ### OPTMAX Blocks
 Use `OPTMAX=:` and `OPTMAX!:` to tag functions that require maximal optimization. Inside these functions:
@@ -315,10 +321,10 @@ Types are determined at runtime, allowing flexible code while maintaining perfor
 ## Testing
 
 ```bash
-# Run example programs
-make test
+# Run integration tests
+bash run_tests.sh
 
-# Or manually
+# Or run a single example manually
 ./build/omsc examples/factorial.om -o factorial
 ./factorial
 ```
@@ -350,10 +356,10 @@ omscript/
 │   ├── vm.cpp         # Bytecode VM
 │   └── vm.h
 └── examples/          # Example programs
-    ├── arithmetic.om
     ├── factorial.om
     ├── fibonacci.om
-    └── test.om
+    ├── advanced.om
+    └── ...            # 40+ examples covering all language features
 ```
 
 ## License
