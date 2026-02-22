@@ -292,6 +292,9 @@ std::vector<Token> Lexer::tokenize() {
             } else if (peek() == '=') {
                 advance();
                 tokens.push_back(makeToken(TokenType::MINUS_ASSIGN, "-="));
+            } else if (peek() == '>') {
+                advance();
+                tokens.push_back(makeToken(TokenType::ARROW, "->"));
             } else {
                 tokens.push_back(makeToken(TokenType::MINUS, "-"));
             }

@@ -145,6 +145,11 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
 
     consume(TokenType::RPAREN, "Expected ')' after parameters");
 
+    // Optional return type annotation: -> type
+    if (match(TokenType::ARROW)) {
+        consume(TokenType::IDENTIFIER, "Expected return type after '->'");
+    }
+
     auto body = parseBlock();
 
     inOptMaxFunction = savedOptMaxState;
