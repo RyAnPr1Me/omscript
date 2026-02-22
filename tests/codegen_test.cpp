@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <llvm/IR/Instructions.h>
 #include <llvm/Support/TargetSelect.h>
 
 using namespace omscript;
@@ -2738,6 +2739,56 @@ TEST(CodegenTest, DivisionStrengthReduction) {
         }
     }
     EXPECT_TRUE(hasAShr);
+}
+
+TEST(CodegenTest, ModuloStrengthReduction) {
+    // n % 8 where the divisor is a known power-of-2 constant should skip the
+    // runtime division-by-zero check (the constant is never zero).  The IR
+    // should contain SRem but no conditional branch for the zero-check.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn mod_by_eight(n) { return n % 8; }\n"
+                           "fn main() { return mod_by_eight(17); }",
+                           codegen);
+    auto* func = mod->getFunction("mod_by_eight");
+    ASSERT_NE(func, nullptr);
+    EXPECT_FALSE(func->empty());
+    // The function should use SRem (correct for signed values) but should NOT
+    // have a conditional branch for division-by-zero since 8 is never zero.
+    bool hasSRem = false;
+    bool hasCondBr = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::SRem)
+                hasSRem = true;
+            if (auto* br = llvm::dyn_cast<llvm::BranchInst>(&inst)) {
+                if (br->isConditional())
+                    hasCondBr = true;
+            }
+        }
+    }
+    EXPECT_TRUE(hasSRem);
+    EXPECT_FALSE(hasCondBr);
+}
+
+TEST(CodegenTest, MultiplyStrengthReduction) {
+    // n * 8 should be converted to n << 3 (left shift) when the multiplier
+    // is a power of 2.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn mul_by_eight(n) { return n * 8; }\n"
+                           "fn main() { return mul_by_eight(3); }",
+                           codegen);
+    auto* func = mod->getFunction("mul_by_eight");
+    ASSERT_NE(func, nullptr);
+    EXPECT_FALSE(func->empty());
+    bool hasShl = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::Shl) {
+                hasShl = true;
+            }
+        }
+    }
+    EXPECT_TRUE(hasShl);
 }
 
 // ===========================================================================

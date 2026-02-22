@@ -201,6 +201,20 @@ class Value {
         double floatValue;
         RefCountedString stringValue;
     };
+
+    /// Return true when both operands are numeric (int or float) and at least
+    /// one is float, indicating that integer-to-float promotion is needed.
+    bool needsFloatPromotion(const Value& other) const {
+        bool thisNumeric = (type == Type::INTEGER || type == Type::FLOAT);
+        bool otherNumeric = (other.type == Type::INTEGER || other.type == Type::FLOAT);
+        bool hasFloat = (type == Type::FLOAT || other.type == Type::FLOAT);
+        return thisNumeric && otherNumeric && hasFloat;
+    }
+
+    /// Convert this value to double, assuming it is either INTEGER or FLOAT.
+    double toDouble() const {
+        return (type == Type::FLOAT) ? floatValue : static_cast<double>(intValue);
+    }
 };
 
 } // namespace omscript

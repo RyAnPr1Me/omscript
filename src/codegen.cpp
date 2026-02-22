@@ -55,6 +55,21 @@ using omscript::UnaryExpr;
 using omscript::VarDecl;
 using omscript::WhileStmt;
 
+/// Returns the log2 of a positive power-of-two value, or -1 if the value is
+/// not a power of two (or is non-positive).  Used by strength-reduction passes
+/// to convert multiply/divide/modulo by a constant power of 2 into cheaper
+/// shift or bitwise-AND operations.
+inline int log2IfPowerOf2(int64_t val) {
+    if (val <= 0 || (val & (val - 1)) != 0)
+        return -1;
+    int shift = 0;
+    while (val > 1) {
+        val >>= 1;
+        shift++;
+    }
+    return shift;
+}
+
 std::unique_ptr<Expression> optimizeOptMaxExpression(std::unique_ptr<Expression> expr);
 
 std::unique_ptr<Expression> optimizeOptMaxUnary(const std::string& op, std::unique_ptr<Expression> operand) {
@@ -644,16 +659,15 @@ llvm::Function* CodeGenerator::getOrDeclarePutchar() {
 llvm::Function* CodeGenerator::getOrDeclareScanf() {
     if (auto* fn = module->getFunction("scanf"))
         return fn;
-    auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context),
-                                       {llvm::PointerType::getUnqual(*context)}, true);
+    auto* ty =
+        llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {llvm::PointerType::getUnqual(*context)}, true);
     return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "scanf", module.get());
 }
 
 llvm::Function* CodeGenerator::getOrDeclareExit() {
     if (auto* fn = module->getFunction("exit"))
         return fn;
-    auto* ty = llvm::FunctionType::get(llvm::Type::getVoidTy(*context),
-                                       {llvm::Type::getInt32Ty(*context)}, false);
+    auto* ty = llvm::FunctionType::get(llvm::Type::getVoidTy(*context), {llvm::Type::getInt32Ty(*context)}, false);
     return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "exit", module.get());
 }
 
@@ -1286,32 +1300,37 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     } else if (expr->op == "*") {
         // Strength reduction: multiply by power of 2 → left shift
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
-            int64_t val = ci->getSExtValue();
-            if (val > 0 && (val & (val - 1)) == 0) {
-                unsigned shift = 0;
-                int64_t tmp = val;
-                while (tmp > 1) {
-                    tmp >>= 1;
-                    shift++;
-                }
-                return builder->CreateShl(left, llvm::ConstantInt::get(getDefaultType(), shift), "shltmp");
-            }
+            int s = log2IfPowerOf2(ci->getSExtValue());
+            if (s >= 0)
+                return builder->CreateShl(left, llvm::ConstantInt::get(getDefaultType(), s), "shltmp");
         }
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left)) {
-            int64_t val = ci->getSExtValue();
-            if (val > 0 && (val & (val - 1)) == 0) {
-                unsigned shift = 0;
-                int64_t tmp = val;
-                while (tmp > 1) {
-                    tmp >>= 1;
-                    shift++;
-                }
-                return builder->CreateShl(right, llvm::ConstantInt::get(getDefaultType(), shift), "shltmp");
-            }
+            int s = log2IfPowerOf2(ci->getSExtValue());
+            if (s >= 0)
+                return builder->CreateShl(right, llvm::ConstantInt::get(getDefaultType(), s), "shltmp");
         }
         return builder->CreateNSWMul(left, right, "multmp");
     } else if (expr->op == "/" || expr->op == "%") {
         bool isDivision = expr->op == "/";
+
+        // Strength reduction for constant power-of-2 divisors.
+        // Since the divisor is a known positive constant it is never zero,
+        // so we can skip the division-by-zero guard entirely.
+        //   n / 2^k  →  n >> k   (arithmetic right shift preserves sign)
+        //   n % 2^k  →  SRem with the zero-check elided (constant != 0)
+        if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
+            int s = log2IfPowerOf2(ci->getSExtValue());
+            if (s >= 0) {
+                if (isDivision) {
+                    return builder->CreateAShr(left, llvm::ConstantInt::get(getDefaultType(), s), "ashrtmp");
+                }
+                // For modulo we still use SRem to preserve correct signed
+                // semantics (e.g. -7 % 4 == -3), but the divisor is a known
+                // non-zero constant so the zero-check is unnecessary.
+                return builder->CreateSRem(left, right, "modtmp");
+            }
+        }
+
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
         llvm::Value* isZero = builder->CreateICmpEQ(right, zero, "divzero");
         llvm::Function* function = builder->GetInsertBlock()->getParent();
@@ -1815,8 +1834,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateCondBr(bothValid, okBB, failBB);
 
         builder->SetInsertPoint(failBB);
-        llvm::Value* errMsg =
-            builder->CreateGlobalString("Runtime error: swap index out of bounds\n", "swap_oob_msg");
+        llvm::Value* errMsg = builder->CreateGlobalString("Runtime error: swap index out of bounds\n", "swap_oob_msg");
         builder->CreateCall(getPrintfFunction(), {errMsg});
         builder->CreateCall(getOrDeclareAbort());
         builder->CreateUnreachable();
@@ -2115,8 +2133,8 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
 // identical.  The only semantic difference is the return value: postfix
 // returns the value *before* the update, prefix returns the value *after*.
 
-llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::string& op,
-                                           bool isPostfix, const ASTNode* errorNode) {
+llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::string& op, bool isPostfix,
+                                           const ASTNode* errorNode) {
     auto* identifier = dynamic_cast<IdentifierExpr*>(operandExpr);
     if (!identifier) {
         codegenError("Increment/decrement operators require an identifier", errorNode);
@@ -2138,12 +2156,10 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
     llvm::Value* updated;
     if (current->getType()->isDoubleTy()) {
         llvm::Value* one = llvm::ConstantFP::get(getFloatType(), 1.0);
-        updated = (op == "++") ? builder->CreateFAdd(current, one, "finc")
-                               : builder->CreateFSub(current, one, "fdec");
+        updated = (op == "++") ? builder->CreateFAdd(current, one, "finc") : builder->CreateFSub(current, one, "fdec");
     } else {
         llvm::Value* delta = llvm::ConstantInt::get(getDefaultType(), 1, true);
-        updated = (op == "++") ? builder->CreateAdd(current, delta, "inc")
-                               : builder->CreateSub(current, delta, "dec");
+        updated = (op == "++") ? builder->CreateAdd(current, delta, "inc") : builder->CreateSub(current, delta, "dec");
     }
 
     builder->CreateStore(updated, it->second);
@@ -2767,19 +2783,16 @@ std::unique_ptr<llvm::TargetMachine> CodeGenerator::createTargetMachine() const 
         opt.NoNaNsFPMath = true;
         opt.NoSignedZerosFPMath = true;
     }
-    std::optional<llvm::Reloc::Model> RM =
-        usePIC_ ? llvm::Reloc::PIC_ : llvm::Reloc::Static;
+    std::optional<llvm::Reloc::Model> RM = usePIC_ ? llvm::Reloc::PIC_ : llvm::Reloc::Static;
 
     std::string cpu;
     std::string features;
     resolveTargetCPU(cpu, features);
 
 #if LLVM_VERSION_MAJOR >= 19
-    return std::unique_ptr<llvm::TargetMachine>(
-        target->createTargetMachine(targetTriple, cpu, features, opt, RM));
+    return std::unique_ptr<llvm::TargetMachine>(target->createTargetMachine(targetTriple, cpu, features, opt, RM));
 #else
-    return std::unique_ptr<llvm::TargetMachine>(
-        target->createTargetMachine(targetTripleStr, cpu, features, opt, RM));
+    return std::unique_ptr<llvm::TargetMachine>(target->createTargetMachine(targetTripleStr, cpu, features, opt, RM));
 #endif
 }
 
