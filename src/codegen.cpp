@@ -1318,9 +1318,9 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 int64_t val = ci->getSExtValue();
                 if (val > 0 && (val & (val - 1)) == 0) {
                     unsigned shift = 0;
-                    int64_t tmp = val;
-                    while (tmp > 1) {
-                        tmp >>= 1;
+                    int64_t divisor = val;
+                    while (divisor > 1) {
+                        divisor >>= 1;
                         shift++;
                     }
                     return builder->CreateAShr(left, llvm::ConstantInt::get(getDefaultType(), shift), "ashrtmp");
