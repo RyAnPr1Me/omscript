@@ -179,6 +179,8 @@ test_cli_output "run" "Program exited with code 120" 120 ./build/omsc run exampl
 test_cli_output "print-output" "42" 0 ./build/omsc run examples/print_test.om
 test_cli_output "float-print" "3.5" 5 ./build/omsc run examples/float_test.om
 test_cli_output "string-var-print" "hello from variable" 0 ./build/omsc run examples/string_var_test.om
+test_cli_output "string-param-print" "from param" 0 ./build/omsc run examples/string_param_test.om
+test_cli_output "string-return-print" "hello world" 0 ./build/omsc run examples/string_param_test.om
 TOTAL=$((TOTAL + 1))
 if [ -f a.out ] || [ -f a.out.o ]; then
     echo -e "${RED}✗ Failed (temporary output files not cleaned)${NC}"
@@ -255,6 +257,7 @@ test_program "examples/stdlib_test.om" 66
 test_program "examples/stdlib2_test.om" 255
 test_program "examples/float_test.om" 5
 test_program "examples/string_var_test.om" 0
+test_program "examples/string_param_test.om" 0
 test_program "examples/print_return_test.om" 0
 test_program "examples/optmax_div_zero.om" 1
 test_program "examples/forward_ref_test.om" 24

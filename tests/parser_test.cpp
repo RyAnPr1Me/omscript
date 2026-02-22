@@ -484,6 +484,44 @@ TEST(ParserTest, OptmaxForLoopVarMissingType) {
 }
 
 // ---------------------------------------------------------------------------
+// OPTMAX synchronize regression tests
+// An error inside an OPTMAX function must NOT consume OPTMAX!: (which would
+// leave the block unterminated) and must NOT produce cascading "Expected 'fn'"
+// errors for statement-level keywords inside the broken function body.
+// ---------------------------------------------------------------------------
+
+TEST(ParserTest, OptmaxErrorDoesNotLeakUnterminatedBlock) {
+    // var without type annotation triggers an error inside the OPTMAX block.
+    // The error message should be exactly the annotation error, NOT also
+    // "Unterminated OPTMAX block".
+    try {
+        parse("OPTMAX=: fn foo(x: int) { var y = 5; } OPTMAX!: fn main() { return 0; }");
+        FAIL() << "Expected std::runtime_error";
+    } catch (const std::runtime_error& e) {
+        std::string msg = e.what();
+        EXPECT_NE(msg.find("OPTMAX variables must include type annotations"), std::string::npos);
+        EXPECT_EQ(msg.find("Unterminated OPTMAX block"), std::string::npos)
+            << "synchronize() must not skip OPTMAX!: and leave block unterminated";
+    }
+}
+
+TEST(ParserTest, OptmaxErrorNoCascadingFnErrors) {
+    // An error early in an OPTMAX function body must not produce dozens of
+    // "Expected 'fn'" errors for every keyword token in the remainder of the
+    // function body.
+    try {
+        parse("OPTMAX=: fn foo(x: int) { var y = 5; for (i: int in 0...10) { return i; } } OPTMAX!: fn main() { return 0; }");
+        FAIL() << "Expected std::runtime_error";
+    } catch (const std::runtime_error& e) {
+        std::string msg = e.what();
+        // The message must contain the true error but must NOT contain cascaded fn errors.
+        EXPECT_NE(msg.find("OPTMAX variables must include type annotations"), std::string::npos);
+        EXPECT_EQ(msg.find("Expected 'fn'"), std::string::npos)
+            << "synchronize() must not stop at statement keywords and cause cascading errors";
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Invalid assignment target
 // ---------------------------------------------------------------------------
 
