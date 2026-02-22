@@ -47,7 +47,7 @@ jobs:
           sudo apt-get install -y cmake build-essential llvm-17-dev libgtest-dev clang-tidy gcc
 
       - name: Configure CMake
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Debug
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 
       - name: Build
         run: cmake --build build --parallel $(nproc)
@@ -55,7 +55,7 @@ jobs:
       - name: Run clang-tidy
         run: |
           cd build
-          find ../src ../runtime -name '*.cpp' | head -5 | xargs -I{} clang-tidy -p . {} -- -I../include -I../runtime 2>&1 | tee tidy.log || true
+          find ../src ../runtime -name '*.cpp' | head -5 | xargs -I{} clang-tidy -p . {} 2>&1 | tee tidy.log || true
           if grep -E "^\.\./[a-z]+/[a-z]+\.cpp:[0-9]+:[0-9]+: error:" tidy.log; then
             echo "clang-tidy errors found"
             cat tidy.log
