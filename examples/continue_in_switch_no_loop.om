@@ -1,0 +1,9 @@
+// This program should fail to compile:
+// continue inside a switch without an enclosing loop
+fn main() {
+    switch (1) {
+        case 1:
+            continue;
+    }
+    return 0;
+}

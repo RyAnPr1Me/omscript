@@ -267,13 +267,20 @@ test_program "examples/stdlib_float_test.om" 29
 test_program "examples/float_edge_cases.om" 14
 test_program "examples/switch_test.om" 60
 test_program "examples/switch_break_test.om" 159
+test_program "examples/continue_in_switch.om" 4
+test_program "examples/continue_in_switch_loop.om" 27
 test_program "examples/typeof_assert_test.om" 1
 test_program "examples/bool_test.om" 73
 test_program "examples/bitwise_assign_test.om" 55
 test_program "examples/array_compound_test.om" 164
+test_program "examples/print_char_return_test.om" 1
+test_program "examples/swap_oob.om" 134
+test_program "examples/char_at_oob.om" 134
 test_compile_fail "examples/const_fail.om"
 test_compile_fail "examples/break_outside_loop.om"
 test_compile_fail "examples/continue_outside_loop.om"
+test_compile_fail "examples/continue_in_switch_no_loop.om"
+test_compile_fail "examples/switch_float_case.om"
 test_compile_fail "examples/undefined_var.om"
 test_compile_fail "examples/int_overflow.om"
 test_compile_fail "examples/no_main.om"
@@ -287,6 +294,7 @@ test_cli_output "int-overflow-msg" "Integer literal out of range" 1 ./build/omsc
 test_cli_output "no-main-msg" "No 'main' function defined" 1 ./build/omsc examples/no_main.om -o /tmp/test_nomain
 test_cli_output "dup-func-msg" "Duplicate function definition" 1 ./build/omsc examples/dup_func.om -o /tmp/test_dupfunc
 test_cli_output "dup-param-msg" "Duplicate parameter name" 1 ./build/omsc examples/dup_param.om -o /tmp/test_dupparam
+test_cli_output "switch-float-case-msg" "case value must be an integer constant, not a float" 1 ./build/omsc examples/switch_float_case.om -o /tmp/test_sfcase
 
 echo ""
 echo "============================================"
