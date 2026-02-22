@@ -20,6 +20,261 @@ namespace {
 
 constexpr const char* kCompilerVersion = "OmScript Compiler v0.9.3";
 constexpr const char* kPathConfigMarker = "# omsc-path-auto";
+constexpr const char* kGitHubReleasesApiUrl =
+    "https://api.github.com/repos/RyAnPr1Me/omscript/releases/latest";
+constexpr const char* kGitHubReleasesDownloadBase =
+    "https://github.com/RyAnPr1Me/omscript/releases/download";
+constexpr int kApiTimeoutSeconds = 10;
+constexpr int kDownloadTimeoutSeconds = 120;
+
+struct Version {
+    int major = 0;
+    int minor = 0;
+    int patch = 0;
+    bool valid = false;
+};
+
+Version parseVersion(const std::string& versionStr) {
+    Version v;
+    std::string s = versionStr;
+    if (!s.empty() && s[0] == 'v') {
+        s = s.substr(1);
+    }
+    try {
+        std::istringstream ss(s);
+        std::string part;
+        if (!std::getline(ss, part, '.') || part.empty()) {
+            return v;
+        }
+        v.major = std::stoi(part);
+        if (!std::getline(ss, part, '.') || part.empty()) {
+            return v;
+        }
+        v.minor = std::stoi(part);
+        if (std::getline(ss, part, '.') && !part.empty()) {
+            v.patch = std::stoi(part);
+        }
+        v.valid = true;
+    } catch (const std::exception&) {
+        v.valid = false;
+    }
+    return v;
+}
+
+bool versionGreaterThan(const Version& a, const Version& b) {
+    if (a.major != b.major) {
+        return a.major > b.major;
+    }
+    if (a.minor != b.minor) {
+        return a.minor > b.minor;
+    }
+    return a.patch > b.patch;
+}
+
+// Extract the value of a simple JSON string field (e.g. "tag_name":"v0.9.4").
+std::string extractJsonStringField(const std::string& json, const std::string& key) {
+    std::string searchKey = "\"" + key + "\":\"";
+    size_t pos = json.find(searchKey);
+    if (pos == std::string::npos) {
+        return "";
+    }
+    pos += searchKey.size();
+    size_t end = json.find('"', pos);
+    if (end == std::string::npos) {
+        return "";
+    }
+    return json.substr(pos, end - pos);
+}
+
+// Use curl to fetch the latest release tag from the GitHub API.
+// Returns an empty string on failure.
+std::string fetchLatestReleaseTag() {
+    auto curlPathOrErr = llvm::sys::findProgramByName("curl");
+    if (!curlPathOrErr) {
+        return "";
+    }
+    std::string curlBin = *curlPathOrErr;
+
+    // Create a secure temporary file using mkstemp.
+    std::string tmpTemplate = std::filesystem::temp_directory_path().string() + "/omsc_release_XXXXXX";
+    std::vector<char> tmpBuf(tmpTemplate.begin(), tmpTemplate.end());
+    tmpBuf.push_back('\0');
+    int fd = mkstemp(tmpBuf.data());
+    if (fd == -1) {
+        return "";
+    }
+    close(fd);
+    std::string tmpFile(tmpBuf.data());
+
+    std::string timeoutStr = std::to_string(kApiTimeoutSeconds);
+    std::vector<std::string> args = {
+        curlBin, "-s", "-L", "--max-time", timeoutStr,
+        "-H", "Accept: application/vnd.github.v3+json",
+        "-H", "User-Agent: omsc-updater",
+        "-o", tmpFile,
+        kGitHubReleasesApiUrl};
+    llvm::SmallVector<llvm::StringRef, 14> argRefs;
+    for (const auto& a : args) {
+        argRefs.push_back(a);
+    }
+
+    int rc = llvm::sys::ExecuteAndWait(curlBin, argRefs);
+    if (rc != 0) {
+        std::error_code ec;
+        std::filesystem::remove(tmpFile, ec);
+        return "";
+    }
+
+    std::ifstream f(tmpFile);
+    if (!f.is_open()) {
+        std::error_code ec;
+        std::filesystem::remove(tmpFile, ec);
+        return "";
+    }
+    std::string json((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    f.close();
+    std::error_code ec;
+    std::filesystem::remove(tmpFile, ec);
+
+    if (json.empty()) {
+        return "";
+    }
+    return extractJsonStringField(json, "tag_name");
+}
+
+// Download the release tarball for `tagName` and install the binary to `installDir`.
+bool downloadAndInstallRelease(const std::string& tagName, const std::string& installDir) {
+    auto curlPathOrErr = llvm::sys::findProgramByName("curl");
+    if (!curlPathOrErr) {
+        std::cerr << "Error: curl is required to download updates but was not found\n";
+        return false;
+    }
+    auto tarPathOrErr = llvm::sys::findProgramByName("tar");
+    if (!tarPathOrErr) {
+        std::cerr << "Error: tar is required to extract updates but was not found\n";
+        return false;
+    }
+    std::string curlBin = *curlPathOrErr;
+    std::string tarBin = *tarPathOrErr;
+
+    // Detect platform/architecture for the asset name.
+#if defined(__aarch64__) || defined(_M_ARM64)
+    std::string platformArch = "linux-aarch64";
+#else
+    std::string platformArch = "linux-x86_64";
+#endif
+
+    // Build the download URL: e.g. .../download/v0.9.4/omsc-0.9.4-linux-x86_64.tar.gz
+    std::string version = tagName;
+    if (!version.empty() && version[0] == 'v') {
+        version = version.substr(1);
+    }
+    std::string assetName = "omsc-" + version + "-" + platformArch + ".tar.gz";
+    std::string downloadUrl =
+        std::string(kGitHubReleasesDownloadBase) + "/" + tagName + "/" + assetName;
+
+    // Create a secure temporary file for the tarball using mkstemp.
+    std::string tmpBase = std::filesystem::temp_directory_path().string();
+    std::string tarTemplate = tmpBase + "/omsc_update_XXXXXX";
+    std::vector<char> tarBuf(tarTemplate.begin(), tarTemplate.end());
+    tarBuf.push_back('\0');
+    int tarFd = mkstemp(tarBuf.data());
+    if (tarFd == -1) {
+        std::cerr << "Error: failed to create temporary file for download\n";
+        return false;
+    }
+    close(tarFd);
+    std::string tmpTarball(tarBuf.data());
+
+    // Create a secure temporary directory for extraction using mkdtemp.
+    std::string dirTemplate = tmpBase + "/omsc_extract_XXXXXX";
+    std::vector<char> dirBuf(dirTemplate.begin(), dirTemplate.end());
+    dirBuf.push_back('\0');
+    if (mkdtemp(dirBuf.data()) == nullptr) {
+        std::cerr << "Error: failed to create temporary directory for extraction\n";
+        std::error_code ec;
+        std::filesystem::remove(tmpTarball, ec);
+        return false;
+    }
+    std::string tmpDir(dirBuf.data());
+
+    std::cout << "Downloading " << assetName << "...\n";
+
+    // Download tarball
+    std::string downloadTimeout = std::to_string(kDownloadTimeoutSeconds);
+    std::vector<std::string> dlArgs = {
+        curlBin, "-L", "--max-time", downloadTimeout,
+        "-H", "User-Agent: omsc-updater",
+        "-o", tmpTarball, downloadUrl};
+    llvm::SmallVector<llvm::StringRef, 10> dlArgRefs;
+    for (const auto& a : dlArgs) {
+        dlArgRefs.push_back(a);
+    }
+    int rc = llvm::sys::ExecuteAndWait(curlBin, dlArgRefs);
+    if (rc != 0) {
+        std::cerr << "Error: failed to download " << assetName << "\n";
+        std::error_code ec;
+        std::filesystem::remove(tmpTarball, ec);
+        std::filesystem::remove_all(tmpDir, ec);
+        return false;
+    }
+
+    // Extract tarball
+    std::vector<std::string> tarArgs = {tarBin, "-xzf", tmpTarball, "-C", tmpDir};
+    llvm::SmallVector<llvm::StringRef, 6> tarArgRefs;
+    for (const auto& a : tarArgs) {
+        tarArgRefs.push_back(a);
+    }
+    rc = llvm::sys::ExecuteAndWait(tarBin, tarArgRefs);
+    std::error_code ec;
+    std::filesystem::remove(tmpTarball, ec);
+    if (rc != 0) {
+        std::cerr << "Error: failed to extract " << assetName << "\n";
+        std::filesystem::remove_all(tmpDir, ec);
+        return false;
+    }
+
+    // Locate the omsc binary inside the extracted directory
+    std::string binaryPath;
+    try {
+        for (const auto& entry : std::filesystem::recursive_directory_iterator(tmpDir)) {
+            std::string name = entry.path().filename().string();
+            if (name == "omsc" || name == "omsc-" + platformArch) {
+                binaryPath = entry.path().string();
+                break;
+            }
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "Error searching extracted archive: " << e.what() << "\n";
+        std::filesystem::remove_all(tmpDir, ec);
+        return false;
+    }
+    if (binaryPath.empty()) {
+        std::cerr << "Error: could not find omsc binary in extracted archive\n";
+        std::filesystem::remove_all(tmpDir, ec);
+        return false;
+    }
+
+    // Install the binary
+    std::string targetPath = installDir + "/omsc";
+    try {
+        std::filesystem::copy_file(binaryPath, targetPath,
+                                   std::filesystem::copy_options::overwrite_existing);
+        std::filesystem::permissions(
+            targetPath,
+            std::filesystem::perms::owner_exec | std::filesystem::perms::group_exec |
+                std::filesystem::perms::others_exec | std::filesystem::perms::owner_read |
+                std::filesystem::perms::group_read | std::filesystem::perms::others_read,
+            std::filesystem::perm_options::add);
+    } catch (const std::exception& e) {
+        std::cerr << "Error installing update: " << e.what() << "\n";
+        std::filesystem::remove_all(tmpDir, ec);
+        return false;
+    }
+    std::filesystem::remove_all(tmpDir, ec);
+    std::cout << "OmScript updated to " << tagName << " at " << targetPath << "\n";
+    return true;
+}
 
 bool isRoot() {
     return geteuid() == 0;
@@ -170,6 +425,48 @@ void printInstallHelp(const std::string& distro) {
 void doInstall() {
     std::string distro = detectDistro();
     std::cout << "Detected distribution: " << distro << "\n";
+
+    // Determine install directory up front so the update path can use it.
+    std::string installDir = isRoot() ? "/usr/local/bin" : getInstallBinDir(false);
+
+    // Check GitHub releases for a newer version.
+    std::cout << "Checking for updates...\n";
+    std::string latestTag = fetchLatestReleaseTag();
+    if (!latestTag.empty()) {
+        // Extract the version tag from the compiled-in version string (e.g. "v0.9.3").
+        std::string currentTag;
+        std::string versionStr(kCompilerVersion);
+        size_t vPos = versionStr.rfind('v');
+        if (vPos != std::string::npos) {
+            currentTag = versionStr.substr(vPos);
+        }
+
+        Version currentVer = parseVersion(currentTag);
+        Version latestVer = parseVersion(latestTag);
+
+        if (currentVer.valid && latestVer.valid && versionGreaterThan(latestVer, currentVer)) {
+            std::cout << "New version available: " << latestTag
+                      << " (current: " << currentTag << ")\n";
+            if (!fileExists(installDir)) {
+                std::filesystem::create_directories(installDir);
+            }
+            if (downloadAndInstallRelease(latestTag, installDir)) {
+                std::cout << "\nOmScript has been updated to " << latestTag << "!\n";
+                if (!isRoot() && !isInPath(installDir)) {
+                    std::cout << "\nIMPORTANT: Add " << installDir << " to your PATH:\n";
+                    std::cout << "    echo 'export PATH=\"" << installDir
+                              << ":$PATH\"' >> ~/.bashrc\n";
+                    std::cout << "    source ~/.bashrc\n";
+                }
+                return;
+            }
+            std::cout << "Update failed, falling back to installing current version...\n";
+        } else if (currentVer.valid && latestVer.valid) {
+            std::cout << "Already at the latest version (" << currentTag << ").\n";
+        }
+    } else {
+        std::cout << "Could not check for updates (network unavailable or curl not found).\n";
+    }
 
     const char* envPath = getenv("OMSC_BINARY_PATH");
     std::string exePath = envPath ? envPath : std::filesystem::read_symlink("/proc/self/exe").string();
