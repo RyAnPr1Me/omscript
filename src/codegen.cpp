@@ -845,7 +845,7 @@ void CodeGenerator::generate(Program* program) {
         runOptimizationPasses();
     }
 
-    if (hasOptMaxFunctions) {
+    if (hasOptMaxFunctions && enableOptMax_) {
         optimizeOptMaxFunctions();
     }
 
@@ -2737,6 +2737,33 @@ void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
     builder->SetInsertPoint(mergeBB);
 }
 
+void CodeGenerator::resolveTargetCPU(std::string& cpu, std::string& features) const {
+    bool isNative = marchCpu_.empty() || marchCpu_ == "native";
+    if (isNative) {
+        cpu = llvm::sys::getHostCPUName().str();
+        llvm::SubtargetFeatures featureSet;
+#if LLVM_VERSION_MAJOR >= 19
+        llvm::StringMap<bool> hostFeatures = llvm::sys::getHostCPUFeatures();
+#else
+        llvm::StringMap<bool> hostFeatures;
+        llvm::sys::getHostCPUFeatures(hostFeatures);
+#endif
+        for (auto& feature : hostFeatures) {
+            featureSet.AddFeature(feature.first(), feature.second);
+        }
+        features = featureSet.getString();
+    } else {
+        // Use the specified CPU; LLVM derives features from the CPU name.
+        cpu = marchCpu_;
+        features = "";
+    }
+
+    // If -mtune is specified, override the CPU used for scheduling.
+    if (!mtuneCpu_.empty()) {
+        cpu = mtuneCpu_;
+    }
+}
+
 void CodeGenerator::runOptimizationPasses() {
     // Add target-specific data layout
     std::string targetTripleStr = llvm::sys::getDefaultTargetTriple();
@@ -2758,22 +2785,15 @@ void CodeGenerator::runOptimizationPasses() {
     std::string featureStr;
     if (target) {
         llvm::TargetOptions opt;
-        // Use PIC to support default PIE linking on modern toolchains.
-        std::optional<llvm::Reloc::Model> RM = llvm::Reloc::PIC_;
-        // Use native CPU features (SSE, AVX, etc.) instead of "generic"
-        // for maximum codegen quality on the build host.
-        cpu = llvm::sys::getHostCPUName().str();
-        llvm::SubtargetFeatures features;
-#if LLVM_VERSION_MAJOR >= 19
-        llvm::StringMap<bool> hostFeatures = llvm::sys::getHostCPUFeatures();
-#else
-        llvm::StringMap<bool> hostFeatures;
-        llvm::sys::getHostCPUFeatures(hostFeatures);
-#endif
-        for (auto& feature : hostFeatures) {
-            features.AddFeature(feature.first(), feature.second);
+        if (useFastMath_) {
+            opt.UnsafeFPMath = true;
+            opt.NoInfsFPMath = true;
+            opt.NoNaNsFPMath = true;
+            opt.NoSignedZerosFPMath = true;
         }
-        featureStr = features.getString();
+        std::optional<llvm::Reloc::Model> RM =
+            usePIC_ ? llvm::Reloc::PIC_ : llvm::Reloc::Static;
+        resolveTargetCPU(cpu, featureStr);
 #if LLVM_VERSION_MAJOR >= 19
         targetMachine.reset(target->createTargetMachine(targetTriple, cpu, featureStr, opt, RM));
 #else
@@ -2918,22 +2938,19 @@ void CodeGenerator::writeObjectFile(const std::string& filename) {
         throw std::runtime_error("Failed to lookup target: " + error);
     }
 
-    auto CPU = llvm::sys::getHostCPUName().str();
-    llvm::SubtargetFeatures featureSet;
-#if LLVM_VERSION_MAJOR >= 19
-    llvm::StringMap<bool> hostFeatures = llvm::sys::getHostCPUFeatures();
-#else
-    llvm::StringMap<bool> hostFeatures;
-    llvm::sys::getHostCPUFeatures(hostFeatures);
-#endif
-    for (auto& feature : hostFeatures) {
-        featureSet.AddFeature(feature.first(), feature.second);
-    }
-    auto features = featureSet.getString();
+    std::string CPU;
+    std::string features;
+    resolveTargetCPU(CPU, features);
 
     llvm::TargetOptions opt;
-    // Use PIC to support default PIE linking on modern toolchains.
-    std::optional<llvm::Reloc::Model> RM = llvm::Reloc::PIC_;
+    if (useFastMath_) {
+        opt.UnsafeFPMath = true;
+        opt.NoInfsFPMath = true;
+        opt.NoNaNsFPMath = true;
+        opt.NoSignedZerosFPMath = true;
+    }
+    std::optional<llvm::Reloc::Model> RM =
+        usePIC_ ? llvm::Reloc::PIC_ : llvm::Reloc::Static;
 #if LLVM_VERSION_MAJOR >= 19
     std::unique_ptr<llvm::TargetMachine> targetMachine(
         target->createTargetMachine(targetTriple, CPU, features, opt, RM));

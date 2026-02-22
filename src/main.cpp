@@ -739,8 +739,7 @@ void printUsage(const char* progName) {
     std::cout << "  " << progName << " install\n";
     std::cout << "  " << progName << " uninstall\n";
     std::cout << "  " << progName << " help\n";
-    std::cout << "\nOptions:\n";
-    std::cout << "  -o, --output <file>  Output file name (default: a.out, stdout for emit-ir)\n";
+    std::cout << "\nCommands:\n";
     std::cout << "  -b, -c, --build, --compile  Compile a source file (default)\n";
     std::cout << "  -r, --run            Compile and run a source file\n";
     std::cout << "  -l, --lex, --tokens  Print lexer tokens\n";
@@ -748,14 +747,38 @@ void printUsage(const char* progName) {
     std::cout << "  -e, -i, --emit-ir, --ir     Emit LLVM IR\n";
     std::cout << "  -C, --clean          Remove outputs\n";
     std::cout << "  -h, --help           Show this help message\n";
-    std::cout << "  -k, --keep-temps     Keep temporary outputs when running\n";
     std::cout << "  -v, --version        Show compiler version\n";
+    std::cout << "\nGeneral Options:\n";
+    std::cout << "  -o, --output <file>  Output file name (default: a.out, stdout for emit-ir)\n";
+    std::cout << "  -k, --keep-temps     Keep temporary outputs when running\n";
     std::cout << "  -V, --verbose        Show detailed compilation output (IR, progress)\n";
+    std::cout << "\nOptimization Levels:\n";
     std::cout << "  -O0                  No optimization\n";
     std::cout << "  -O1                  Basic optimization\n";
     std::cout << "  -O2                  Moderate optimization (default)\n";
     std::cout << "  -O3                  Aggressive optimization\n";
     std::cout << "  -Ofast               Maximum runtime optimization (alias for -O3)\n";
+    std::cout << "\nTarget Options:\n";
+    std::cout << "  -march=<cpu>         Target CPU architecture (default: native)\n";
+    std::cout << "                       Examples: native, x86-64, skylake, znver3, cortex-a72\n";
+    std::cout << "  -mtune=<cpu>         CPU to optimize for (scheduling and tuning)\n";
+    std::cout << "                       Default: same as -march\n";
+    std::cout << "\nFeature Flags:\n";
+    std::cout << "  -flto                Enable link-time optimization\n";
+    std::cout << "  -fno-lto             Disable link-time optimization (default)\n";
+    std::cout << "  -fpic                Generate position-independent code (default)\n";
+    std::cout << "  -fno-pic             Disable position-independent code\n";
+    std::cout << "  -ffast-math          Enable unsafe floating-point optimizations\n";
+    std::cout << "  -fno-fast-math       Disable unsafe floating-point optimizations (default)\n";
+    std::cout << "  -foptmax             Enable OPTMAX block optimization (default)\n";
+    std::cout << "  -fno-optmax          Disable OPTMAX block optimization\n";
+    std::cout << "  -fjit                Enable hybrid bytecode/JIT compilation (default)\n";
+    std::cout << "  -fno-jit             Disable JIT; compile all functions to native code\n";
+    std::cout << "  -fstack-protector    Enable stack protection\n";
+    std::cout << "  -fno-stack-protector Disable stack protection (default)\n";
+    std::cout << "\nLinker Options:\n";
+    std::cout << "  -static              Use static linking\n";
+    std::cout << "  -s, --strip          Strip symbols from output binary\n";
     std::cout << "\nInstallation:\n";
     std::cout << "  " << progName << " install        Add to PATH (first run or update)\n";
     std::cout << "  " << progName << " uninstall      Remove installed binary and PATH entry\n";
@@ -978,6 +1001,16 @@ int main(int argc, char* argv[]) {
     int argIndex = 1;
     bool verbose = false;
     omscript::OptimizationLevel optLevel = omscript::OptimizationLevel::O2;
+    std::string marchCpu;
+    std::string mtuneCpu;
+    bool flagLTO = false;
+    bool flagPIC = true;
+    bool flagFastMath = false;
+    bool flagOptMax = true;
+    bool flagJIT = true;
+    bool flagStatic = false;
+    bool flagStrip = false;
+    bool flagStackProtector = false;
     const auto tryParseOptimizationFlag = [](const std::string& arg) -> std::optional<omscript::OptimizationLevel> {
         if (arg == "-Ofast") {
             return omscript::OptimizationLevel::O3;
@@ -991,6 +1024,34 @@ int main(int argc, char* argv[]) {
         return std::nullopt;
     };
 
+    // Try to parse -march=<cpu>, -mtune=<cpu>, and feature flags.
+    // Returns true if the argument was consumed.
+    const auto tryParseTargetOrFeatureFlag = [&](const std::string& arg) -> bool {
+        if (arg.rfind("-march=", 0) == 0) {
+            marchCpu = arg.substr(7);
+            return true;
+        }
+        if (arg.rfind("-mtune=", 0) == 0) {
+            mtuneCpu = arg.substr(7);
+            return true;
+        }
+        if (arg == "-flto") { flagLTO = true; return true; }
+        if (arg == "-fno-lto") { flagLTO = false; return true; }
+        if (arg == "-fpic") { flagPIC = true; return true; }
+        if (arg == "-fno-pic") { flagPIC = false; return true; }
+        if (arg == "-ffast-math") { flagFastMath = true; return true; }
+        if (arg == "-fno-fast-math") { flagFastMath = false; return true; }
+        if (arg == "-foptmax") { flagOptMax = true; return true; }
+        if (arg == "-fno-optmax") { flagOptMax = false; return true; }
+        if (arg == "-fjit") { flagJIT = true; return true; }
+        if (arg == "-fno-jit") { flagJIT = false; return true; }
+        if (arg == "-fstack-protector") { flagStackProtector = true; return true; }
+        if (arg == "-fno-stack-protector") { flagStackProtector = false; return true; }
+        if (arg == "-static") { flagStatic = true; return true; }
+        if (arg == "-s" || arg == "--strip") { flagStrip = true; return true; }
+        return false;
+    };
+
     // Allow global options before commands/input (e.g. `omsc -V parse file.om`).
     while (argIndex < argc) {
         std::string arg = argv[argIndex];
@@ -1001,6 +1062,10 @@ int main(int argc, char* argv[]) {
         }
         if (auto parsedOpt = tryParseOptimizationFlag(arg)) {
             optLevel = *parsedOpt;
+            argIndex++;
+            continue;
+        }
+        if (tryParseTargetOrFeatureFlag(arg)) {
             argIndex++;
             continue;
         }
@@ -1125,6 +1190,9 @@ int main(int argc, char* argv[]) {
                 continue;
             }
         }
+        if (!parsingRunArgs && tryParseTargetOrFeatureFlag(arg)) {
+            continue;
+        }
         if (!parsingRunArgs && (arg == "-o" || arg == "--output")) {
             if (!supportsOutputOption) {
                 std::cerr << "Error: -o/--output is only supported for compile/run/emit-ir/clean commands\n";
@@ -1226,6 +1294,16 @@ int main(int argc, char* argv[]) {
         omscript::Compiler compiler;
         compiler.setVerbose(verbose);
         compiler.setOptimizationLevel(optLevel);
+        compiler.setMarch(marchCpu);
+        compiler.setMtune(mtuneCpu);
+        compiler.setLTO(flagLTO);
+        compiler.setPIC(flagPIC);
+        compiler.setFastMath(flagFastMath);
+        compiler.setOptMax(flagOptMax);
+        compiler.setJIT(flagJIT);
+        compiler.setStaticLinking(flagStatic);
+        compiler.setStrip(flagStrip);
+        compiler.setStackProtector(flagStackProtector);
         compiler.compile(sourceFile, outputFile);
         if (command == Command::Run) {
             // Register temp files for cleanup on signal (Ctrl+C during program run).
