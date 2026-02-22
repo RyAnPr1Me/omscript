@@ -12,6 +12,10 @@
 #include <unordered_set>
 #include <vector>
 
+namespace llvm {
+class TargetMachine;
+} // namespace llvm
+
 namespace omscript {
 
 // Returns true if the given name is a stdlib built-in function.
@@ -161,7 +165,7 @@ class CodeGenerator {
 
     uint8_t allocReg() {
         if (bytecodeNextReg_ == 255)
-            throw std::runtime_error("Register file overflow (max 256 registers)");
+            throw std::runtime_error("Register file overflow (max 255 registers)");
         return bytecodeNextReg_++;
     }
 
@@ -259,9 +263,39 @@ class CodeGenerator {
     bool useFastMath_ = false; // -ffast-math / -fno-fast-math
     bool enableOptMax_ = true; // -foptmax / -fno-optmax
 
+    /// Counter for generating unique bytecode switch temp-variable names.
+    /// Member variable (not function-local static) for thread-safety and
+    /// deterministic output across independent CodeGenerator instances.
+    int bytecodeSwitchCounter_ = 0;
+
     /// Resolve the effective CPU name and feature string for LLVM target machine
     /// construction based on the current -march / -mtune settings.
     void resolveTargetCPU(std::string& cpu, std::string& features) const;
+
+    /// Create a configured TargetMachine for the current target triple and
+    /// CPU settings.  Shared by runOptimizationPasses() and writeObjectFile()
+    /// to eliminate duplicated setup code.
+    std::unique_ptr<llvm::TargetMachine> createTargetMachine() const;
+
+    // Lazy-declaration helpers for C library functions.  Each method returns
+    // the existing declaration if one has already been added to the module,
+    // or creates a new external declaration on first use.  This removes
+    // duplicated getFunction()/Create() blocks that were scattered across
+    // multiple built-in handlers.
+    llvm::Function* getOrDeclareStrlen();
+    llvm::Function* getOrDeclareMalloc();
+    llvm::Function* getOrDeclareStrcpy();
+    llvm::Function* getOrDeclareStrcat();
+    llvm::Function* getOrDeclareStrcmp();
+    llvm::Function* getOrDeclarePutchar();
+    llvm::Function* getOrDeclareScanf();
+    llvm::Function* getOrDeclareExit();
+    llvm::Function* getOrDeclareAbort();
+
+    /// Shared implementation for prefix and postfix increment/decrement.
+    /// Returns the *old* value for postfix and the *new* value for prefix.
+    llvm::Value* generateIncDec(Expression* operandExpr, const std::string& op,
+                                bool returnOld, const ASTNode* errorNode);
 
     // Optimization methods
     void runOptimizationPasses();
