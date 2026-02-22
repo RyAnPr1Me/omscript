@@ -1621,7 +1621,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         }
         llvm::Value* truncated = builder->CreateTrunc(arg, llvm::Type::getInt32Ty(*context), "charval");
         builder->CreateCall(putcharFn, {truncated});
-        return llvm::ConstantInt::get(getDefaultType(), 0);
+        return arg; // return the character code as documented
     }
 
     if (expr->callee == "input") {
@@ -1784,6 +1784,32 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* j = generateExpression(expr->arguments[2].get());
 
         llvm::Value* arrPtr = builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "swap.arrptr");
+        llvm::Value* length = builder->CreateLoad(getDefaultType(), arrPtr, "swap.len");
+
+        // Bounds check both indices: 0 <= i < length and 0 <= j < length
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
+        llvm::Value* iInBounds = builder->CreateICmpSLT(i, length, "swap.i.inbounds");
+        llvm::Value* iNotNeg = builder->CreateICmpSGE(i, zero, "swap.i.notneg");
+        llvm::Value* iValid = builder->CreateAnd(iInBounds, iNotNeg, "swap.i.valid");
+        llvm::Value* jInBounds = builder->CreateICmpSLT(j, length, "swap.j.inbounds");
+        llvm::Value* jNotNeg = builder->CreateICmpSGE(j, zero, "swap.j.notneg");
+        llvm::Value* jValid = builder->CreateAnd(jInBounds, jNotNeg, "swap.j.valid");
+        llvm::Value* bothValid = builder->CreateAnd(iValid, jValid, "swap.valid");
+
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "swap.ok", function);
+        llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "swap.fail", function);
+        builder->CreateCondBr(bothValid, okBB, failBB);
+
+        builder->SetInsertPoint(failBB);
+        llvm::Value* errMsg =
+            builder->CreateGlobalString("Runtime error: swap index out of bounds\n", "swap_oob_msg");
+        builder->CreateCall(getPrintfFunction(), {errMsg});
+        builder->CreateCall(
+            module->getOrInsertFunction("abort", llvm::FunctionType::get(llvm::Type::getVoidTy(*context), false)));
+        builder->CreateUnreachable();
+
+        builder->SetInsertPoint(okBB);
         // Elements are at offset (index + 1)
         llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
         llvm::Value* offI = builder->CreateAdd(i, one, "swap.offi");
@@ -1966,6 +1992,34 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         idxArg = toDefaultType(idxArg);
         // Convert to pointer
         llvm::Value* strPtr = builder->CreateIntToPtr(strArg, llvm::PointerType::getUnqual(*context), "charat.ptr");
+
+        // Bounds check: 0 <= index < str_len(s)
+        llvm::Function* strlenFn = module->getFunction("strlen");
+        if (!strlenFn) {
+            llvm::FunctionType* strlenTy =
+                llvm::FunctionType::get(getDefaultType(), {llvm::PointerType::getUnqual(*context)}, false);
+            strlenFn = llvm::Function::Create(strlenTy, llvm::Function::ExternalLinkage, "strlen", module.get());
+        }
+        llvm::Value* strLen = builder->CreateCall(strlenFn, {strPtr}, "charat.strlen");
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
+        llvm::Value* inBounds = builder->CreateICmpSLT(idxArg, strLen, "charat.inbounds");
+        llvm::Value* notNeg = builder->CreateICmpSGE(idxArg, zero, "charat.notneg");
+        llvm::Value* valid = builder->CreateAnd(inBounds, notNeg, "charat.valid");
+
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "charat.ok", function);
+        llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "charat.fail", function);
+        builder->CreateCondBr(valid, okBB, failBB);
+
+        builder->SetInsertPoint(failBB);
+        llvm::Value* errMsg =
+            builder->CreateGlobalString("Runtime error: char_at index out of bounds\n", "charat_oob_msg");
+        builder->CreateCall(getPrintfFunction(), {errMsg});
+        builder->CreateCall(
+            module->getOrInsertFunction("abort", llvm::FunctionType::get(llvm::Type::getVoidTy(*context), false)));
+        builder->CreateUnreachable();
+
+        builder->SetInsertPoint(okBB);
         // Load char via GEP
         llvm::Value* charPtr = builder->CreateGEP(llvm::Type::getInt8Ty(*context), strPtr, idxArg, "charat.gep");
         llvm::Value* charVal = builder->CreateLoad(llvm::Type::getInt8Ty(*context), charPtr, "charat.char");
@@ -2652,10 +2706,13 @@ void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
             }
         } else {
             llvm::Value* caseVal = generateExpression(sc.value.get());
+            if (caseVal->getType()->isDoubleTy()) {
+                codegenError("case value must be an integer constant, not a float", sc.value.get());
+            }
             caseVal = toDefaultType(caseVal);
             auto* caseConst = llvm::dyn_cast<llvm::ConstantInt>(caseVal);
             if (!caseConst) {
-                codegenError("case value must be a compile-time constant", sc.value.get());
+                codegenError("case value must be a compile-time integer constant", sc.value.get());
             }
 
             llvm::BasicBlock* caseBB = llvm::BasicBlock::Create(*context, "switch.case", function, mergeBB);

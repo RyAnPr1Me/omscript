@@ -1,0 +1,8 @@
+// case with a float literal should be a compile error, not a silent truncation
+fn main() {
+    switch (1) {
+        case 1.5:
+            return 10;
+    }
+    return 0;
+}

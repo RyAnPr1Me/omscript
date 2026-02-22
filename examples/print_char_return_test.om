@@ -1,0 +1,11 @@
+// Test that print_char returns the character code it printed
+fn main() {
+    var r1 = print_char(65);   // prints 'A', should return 65
+    print_char(10);            // newline
+    var r2 = print_char(48);   // prints '0', should return 48
+    print_char(10);            // newline
+    if (r1 == 65 && r2 == 48) {
+        return 1;
+    }
+    return 0;
+}

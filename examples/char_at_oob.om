@@ -1,0 +1,6 @@
+// char_at() with an out-of-bounds index should abort with a runtime error
+fn main() {
+    var s = "hello";
+    var c = char_at(s, 100);  // index 100 is out of bounds for "hello" (len 5)
+    return c;
+}

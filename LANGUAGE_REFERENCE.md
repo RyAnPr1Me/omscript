@@ -41,7 +41,7 @@ OmScript is a **low-level, C-like programming language** featuring:
 - **Reference-counted memory management** — Automatic deterministic deallocation via malloc/free with reference counting on strings.
 - **Hybrid architecture** — A bytecode VM exists as an alternative backend for future dynamic compilation scenarios. The primary path is always native code.
 - **Aggressive optimization** — Four optimization levels (O0–O3) plus a special OPTMAX directive that applies exhaustive multi-pass optimization to marked functions.
-- **19 built-in standard library functions** — Math, array manipulation, character classification, and I/O, all compiled to native machine code.
+- **24 built-in standard library functions** — Math, array manipulation, string, character classification, and I/O, all compiled to native machine code.
 
 ### Design Philosophy
 
@@ -747,7 +747,7 @@ In the bytecode/VM runtime, strings are fully dynamic:
 
 ## 11. Standard Library
 
-OmScript provides **19 built-in functions**. All stdlib functions are compiled directly to native machine code via LLVM IR — they never go through the bytecode interpreter.
+OmScript provides **24 built-in functions**. All stdlib functions are compiled directly to native machine code via LLVM IR — they never go through the bytecode interpreter.
 
 ### 11.1 I/O Functions
 
@@ -757,7 +757,7 @@ Prints a value followed by a newline.
 
 - **Integer argument:** Prints using `%lld\n` format via `printf`.
 - **String literal argument:** Prints using `%s\n` format via `printf`.
-- **Returns:** The printed value (for integers) or `0` (for strings).
+- **Returns:** `0` for all argument types.
 
 ```javascript
 print(42);              // Output: 42
@@ -973,11 +973,64 @@ is_digit(57)    // 1  ('9')
 is_digit(65)    // 0  ('A')
 ```
 
-### 11.5 Stdlib Summary Table
+### 11.5 String Functions
+
+#### `str_len(s)`
+
+Returns the number of characters in string `s` (equivalent to C `strlen`).
+
+```javascript
+var s = "hello";
+str_len(s)    // 5
+str_len("")   // 0
+```
+
+#### `char_at(s, index)`
+
+Returns the ASCII character code of the character at position `index` in string `s`. Aborts with a runtime error if `index` is negative or out of range.
+
+```javascript
+var s = "hello";
+char_at(s, 0)    // 104  ('h')
+char_at(s, 4)    // 111  ('o')
+```
+
+#### `str_eq(a, b)`
+
+Returns `1` if strings `a` and `b` have identical contents, `0` otherwise. Uses `strcmp` internally. Use this instead of `==` when comparing string variables, since `==` compares pointer values.
+
+```javascript
+str_eq("hello", "hello")    // 1
+str_eq("hello", "world")    // 0
+```
+
+### 11.6 Utility Functions
+
+#### `typeof(x)`
+
+Returns a type tag for `x`. In the native LLVM compilation path, all values are represented as `i64`, so `typeof` always returns `1` (integer).
+
+```javascript
+typeof(42)         // 1  (integer)
+typeof(3.14)       // 1  (always 1 in native path)
+typeof("hello")    // 1  (always 1 in native path)
+```
+
+#### `assert(condition)`
+
+Aborts the program with a runtime error message if `condition` is falsy (zero). Returns `1` if the assertion passes.
+
+```javascript
+assert(1);          // passes, returns 1
+assert(x > 0);      // passes if x > 0, otherwise aborts
+assert(0);          // always aborts: "Runtime error: assertion failed"
+```
+
+### 11.7 Stdlib Summary Table
 
 | Function | Args | Returns | Description |
 |----------|:----:|---------|-------------|
-| `print(x)` | 1 | value/0 | Print integer or string |
+| `print(x)` | 1 | 0 | Print integer or string |
 | `print_char(c)` | 1 | c | Print single ASCII character |
 | `input()` | 0 | integer | Read integer from stdin |
 | `abs(x)` | 1 | \|x\| | Absolute value |
@@ -996,6 +1049,11 @@ is_digit(65)    // 0  ('A')
 | `to_char(code)` | 1 | code | Identity (semantic alias) |
 | `is_alpha(code)` | 1 | 0/1 | Alphabetic check |
 | `is_digit(code)` | 1 | 0/1 | Digit check |
+| `str_len(s)` | 1 | length | Length of a string |
+| `char_at(s, i)` | 2 | code | ASCII code of character at index `i` |
+| `str_eq(a, b)` | 2 | 0/1 | String equality (1 if equal, 0 otherwise) |
+| `typeof(x)` | 1 | 1 | Type tag (always 1/integer in native path) |
+| `assert(cond)` | 1 | 1 | Abort with error if `cond` is falsy |
 
 ---
 
