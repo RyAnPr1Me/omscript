@@ -1,5 +1,5 @@
-#include <gtest/gtest.h>
 #include "lexer.h"
+#include <gtest/gtest.h>
 
 using namespace omscript;
 
@@ -488,9 +488,12 @@ TEST(LexerTest, BoolKeywordsInContext) {
     auto tokens = lex("var x = true; var y = false; var z = null;");
     int trueCount = 0, falseCount = 0, nullCount = 0;
     for (const auto& t : tokens) {
-        if (t.type == TokenType::TRUE) trueCount++;
-        if (t.type == TokenType::FALSE) falseCount++;
-        if (t.type == TokenType::NULL_LITERAL) nullCount++;
+        if (t.type == TokenType::TRUE)
+            trueCount++;
+        if (t.type == TokenType::FALSE)
+            falseCount++;
+        if (t.type == TokenType::NULL_LITERAL)
+            nullCount++;
     }
     EXPECT_EQ(trueCount, 1);
     EXPECT_EQ(falseCount, 1);
@@ -542,9 +545,12 @@ TEST(LexerTest, BitwiseAssignDoesNotConflict) {
     auto tokens = lex("a & b && c &= d");
     int ampCount = 0, andCount = 0, ampAssignCount = 0;
     for (const auto& t : tokens) {
-        if (t.type == TokenType::AMPERSAND) ampCount++;
-        if (t.type == TokenType::AND) andCount++;
-        if (t.type == TokenType::AMPERSAND_ASSIGN) ampAssignCount++;
+        if (t.type == TokenType::AMPERSAND)
+            ampCount++;
+        if (t.type == TokenType::AND)
+            andCount++;
+        if (t.type == TokenType::AMPERSAND_ASSIGN)
+            ampAssignCount++;
     }
     EXPECT_EQ(ampCount, 1);
     EXPECT_EQ(andCount, 1);

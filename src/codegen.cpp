@@ -593,9 +593,8 @@ void CodeGenerator::codegenError(const std::string& message, const ASTNode* node
 // String type inference helpers
 // ---------------------------------------------------------------------------
 
-bool CodeGenerator::isPreAnalysisStringExpr(Expression* expr,
-                                              const std::unordered_set<size_t>& paramStringIndices,
-                                              const FunctionDecl* func) const {
+bool CodeGenerator::isPreAnalysisStringExpr(Expression* expr, const std::unordered_set<size_t>& paramStringIndices,
+                                            const FunctionDecl* func) const {
     if (!expr)
         return false;
     if (auto* lit = dynamic_cast<LiteralExpr*>(expr))
@@ -610,9 +609,8 @@ bool CodeGenerator::isPreAnalysisStringExpr(Expression* expr,
         return false;
     }
     if (auto* bin = dynamic_cast<BinaryExpr*>(expr)) {
-        return bin->op == "+" &&
-               (isPreAnalysisStringExpr(bin->left.get(), paramStringIndices, func) ||
-                isPreAnalysisStringExpr(bin->right.get(), paramStringIndices, func));
+        return bin->op == "+" && (isPreAnalysisStringExpr(bin->left.get(), paramStringIndices, func) ||
+                                  isPreAnalysisStringExpr(bin->right.get(), paramStringIndices, func));
     }
     if (auto* tern = dynamic_cast<TernaryExpr*>(expr)) {
         return isPreAnalysisStringExpr(tern->thenExpr.get(), paramStringIndices, func) ||
@@ -623,9 +621,8 @@ bool CodeGenerator::isPreAnalysisStringExpr(Expression* expr,
     return false;
 }
 
-bool CodeGenerator::scanStmtForStringReturns(Statement* stmt,
-                                              const std::unordered_set<size_t>& paramStringIndices,
-                                              const FunctionDecl* func) const {
+bool CodeGenerator::scanStmtForStringReturns(Statement* stmt, const std::unordered_set<size_t>& paramStringIndices,
+                                             const FunctionDecl* func) const {
     if (!stmt)
         return false;
     if (auto* ret = dynamic_cast<ReturnStmt*>(stmt))
@@ -701,9 +698,12 @@ void CodeGenerator::scanStmtForStringCalls(Statement* stmt) {
             self(self, doS->body.get());
             scanExpr(scanExpr, doS->condition.get());
         } else if (auto* forS = dynamic_cast<ForStmt*>(s)) {
-            if (forS->start)  scanExpr(scanExpr, forS->start.get());
-            if (forS->end)    scanExpr(scanExpr, forS->end.get());
-            if (forS->step)   scanExpr(scanExpr, forS->step.get());
+            if (forS->start)
+                scanExpr(scanExpr, forS->start.get());
+            if (forS->end)
+                scanExpr(scanExpr, forS->end.get());
+            if (forS->step)
+                scanExpr(scanExpr, forS->step.get());
             self(self, forS->body.get());
         } else if (auto* forEachS = dynamic_cast<ForEachStmt*>(s)) {
             scanExpr(scanExpr, forEachS->collection.get());
@@ -770,8 +770,7 @@ bool CodeGenerator::isStringExpr(Expression* expr) const {
         return stringVars_.count(id->name) > 0;
     }
     if (auto* bin = dynamic_cast<BinaryExpr*>(expr)) {
-        return bin->op == "+" &&
-               (isStringExpr(bin->left.get()) || isStringExpr(bin->right.get()));
+        return bin->op == "+" && (isStringExpr(bin->left.get()) || isStringExpr(bin->right.get()));
     }
     if (auto* tern = dynamic_cast<TernaryExpr*>(expr)) {
         return isStringExpr(tern->thenExpr.get()) || isStringExpr(tern->elseExpr.get());
@@ -1115,7 +1114,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
 
     // String concatenation path: either operand is a string (ptr or i64-as-string).
     if (expr->op == "+") {
-        bool leftIsStr  = left->getType()->isPointerTy()  || isStringExpr(expr->left.get());
+        bool leftIsStr = left->getType()->isPointerTy() || isStringExpr(expr->left.get());
         bool rightIsStr = right->getType()->isPointerTy() || isStringExpr(expr->right.get());
         if (leftIsStr && rightIsStr) {
             // Convert i64 string values back to ptr if necessary.
@@ -1142,16 +1141,14 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 auto strcpyType = llvm::FunctionType::get(
                     llvm::PointerType::getUnqual(*context),
                     {llvm::PointerType::getUnqual(*context), llvm::PointerType::getUnqual(*context)}, false);
-                strcpyFn =
-                    llvm::Function::Create(strcpyType, llvm::Function::ExternalLinkage, "strcpy", module.get());
+                strcpyFn = llvm::Function::Create(strcpyType, llvm::Function::ExternalLinkage, "strcpy", module.get());
             }
             llvm::Function* strcatFn = module->getFunction("strcat");
             if (!strcatFn) {
                 auto strcatType = llvm::FunctionType::get(
                     llvm::PointerType::getUnqual(*context),
                     {llvm::PointerType::getUnqual(*context), llvm::PointerType::getUnqual(*context)}, false);
-                strcatFn =
-                    llvm::Function::Create(strcatType, llvm::Function::ExternalLinkage, "strcat", module.get());
+                strcatFn = llvm::Function::Create(strcatType, llvm::Function::ExternalLinkage, "strcat", module.get());
             }
 
             llvm::Value* len1 = builder->CreateCall(strlenFn, {left}, "len1");
@@ -2307,8 +2304,7 @@ void CodeGenerator::generateReturn(ReturnStmt* stmt) {
         // callers can use isStringExpr() on the CallExpr and track the result.
         if (retValue->getType()->isPointerTy() || isStringExpr(stmt->value.get())) {
             if (builder->GetInsertBlock() && builder->GetInsertBlock()->getParent())
-                stringReturningFunctions_.insert(
-                    std::string(builder->GetInsertBlock()->getParent()->getName()));
+                stringReturningFunctions_.insert(std::string(builder->GetInsertBlock()->getParent()->getName()));
         }
         // Function return type is i64, so convert if needed
         retValue = toDefaultType(retValue);

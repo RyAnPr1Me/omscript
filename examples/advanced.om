@@ -1,6 +1,5 @@
 // Advanced example demonstrating multiple features
 // Computing greatest common divisor (GCD) using Euclidean algorithm
-print("hello this is shit that is working")
 
 fn gcd(a, b) {
     while (b != 0) {

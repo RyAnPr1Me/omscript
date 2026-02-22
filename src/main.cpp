@@ -20,10 +20,8 @@ namespace {
 
 constexpr const char* kCompilerVersion = "OmScript Compiler v0.9.3";
 constexpr const char* kPathConfigMarker = "# omsc-path-auto";
-constexpr const char* kGitHubReleasesApiUrl =
-    "https://api.github.com/repos/RyAnPr1Me/omscript/releases/latest";
-constexpr const char* kGitHubReleasesDownloadBase =
-    "https://github.com/RyAnPr1Me/omscript/releases/download";
+constexpr const char* kGitHubReleasesApiUrl = "https://api.github.com/repos/RyAnPr1Me/omscript/releases/latest";
+constexpr const char* kGitHubReleasesDownloadBase = "https://github.com/RyAnPr1Me/omscript/releases/download";
 constexpr int kApiTimeoutSeconds = 10;
 constexpr int kDownloadTimeoutSeconds = 120;
 
@@ -107,12 +105,18 @@ std::string fetchLatestReleaseTag() {
     std::string tmpFile(tmpBuf.data());
 
     std::string timeoutStr = std::to_string(kApiTimeoutSeconds);
-    std::vector<std::string> args = {
-        curlBin, "-s", "-L", "--max-time", timeoutStr,
-        "-H", "Accept: application/vnd.github.v3+json",
-        "-H", "User-Agent: omsc-updater",
-        "-o", tmpFile,
-        kGitHubReleasesApiUrl};
+    std::vector<std::string> args = {curlBin,
+                                     "-s",
+                                     "-L",
+                                     "--max-time",
+                                     timeoutStr,
+                                     "-H",
+                                     "Accept: application/vnd.github.v3+json",
+                                     "-H",
+                                     "User-Agent: omsc-updater",
+                                     "-o",
+                                     tmpFile,
+                                     kGitHubReleasesApiUrl};
     llvm::SmallVector<llvm::StringRef, 14> argRefs;
     for (const auto& a : args) {
         argRefs.push_back(a);
@@ -170,8 +174,7 @@ bool downloadAndInstallRelease(const std::string& tagName, const std::string& in
         version = version.substr(1);
     }
     std::string assetName = "omsc-" + version + "-" + platformArch + ".tar.gz";
-    std::string downloadUrl =
-        std::string(kGitHubReleasesDownloadBase) + "/" + tagName + "/" + assetName;
+    std::string downloadUrl = std::string(kGitHubReleasesDownloadBase) + "/" + tagName + "/" + assetName;
 
     // Create a secure temporary file for the tarball using mkstemp.
     std::string tmpBase = std::filesystem::temp_directory_path().string();
@@ -203,9 +206,7 @@ bool downloadAndInstallRelease(const std::string& tagName, const std::string& in
     // Download tarball
     std::string downloadTimeout = std::to_string(kDownloadTimeoutSeconds);
     std::vector<std::string> dlArgs = {
-        curlBin, "-L", "--max-time", downloadTimeout,
-        "-H", "User-Agent: omsc-updater",
-        "-o", tmpTarball, downloadUrl};
+        curlBin, "-L", "--max-time", downloadTimeout, "-H", "User-Agent: omsc-updater", "-o", tmpTarball, downloadUrl};
     llvm::SmallVector<llvm::StringRef, 10> dlArgRefs;
     for (const auto& a : dlArgs) {
         dlArgRefs.push_back(a);
@@ -258,14 +259,12 @@ bool downloadAndInstallRelease(const std::string& tagName, const std::string& in
     // Install the binary
     std::string targetPath = installDir + "/omsc";
     try {
-        std::filesystem::copy_file(binaryPath, targetPath,
-                                   std::filesystem::copy_options::overwrite_existing);
-        std::filesystem::permissions(
-            targetPath,
-            std::filesystem::perms::owner_exec | std::filesystem::perms::group_exec |
-                std::filesystem::perms::others_exec | std::filesystem::perms::owner_read |
-                std::filesystem::perms::group_read | std::filesystem::perms::others_read,
-            std::filesystem::perm_options::add);
+        std::filesystem::copy_file(binaryPath, targetPath, std::filesystem::copy_options::overwrite_existing);
+        std::filesystem::permissions(targetPath,
+                                     std::filesystem::perms::owner_exec | std::filesystem::perms::group_exec |
+                                         std::filesystem::perms::others_exec | std::filesystem::perms::owner_read |
+                                         std::filesystem::perms::group_read | std::filesystem::perms::others_read,
+                                     std::filesystem::perm_options::add);
     } catch (const std::exception& e) {
         std::cerr << "Error installing update: " << e.what() << "\n";
         std::filesystem::remove_all(tmpDir, ec);
@@ -445,8 +444,7 @@ void doInstall() {
         Version latestVer = parseVersion(latestTag);
 
         if (currentVer.valid && latestVer.valid && versionGreaterThan(latestVer, currentVer)) {
-            std::cout << "New version available: " << latestTag
-                      << " (current: " << currentTag << ")\n";
+            std::cout << "New version available: " << latestTag << " (current: " << currentTag << ")\n";
             if (!fileExists(installDir)) {
                 std::filesystem::create_directories(installDir);
             }
@@ -454,8 +452,7 @@ void doInstall() {
                 std::cout << "\nOmScript has been updated to " << latestTag << "!\n";
                 if (!isRoot() && !isInPath(installDir)) {
                     std::cout << "\nIMPORTANT: Add " << installDir << " to your PATH:\n";
-                    std::cout << "    echo 'export PATH=\"" << installDir
-                              << ":$PATH\"' >> ~/.bashrc\n";
+                    std::cout << "    echo 'export PATH=\"" << installDir << ":$PATH\"' >> ~/.bashrc\n";
                     std::cout << "    source ~/.bashrc\n";
                 }
                 return;

@@ -1,5 +1,5 @@
-#include <gtest/gtest.h>
 #include "ast.h"
+#include <gtest/gtest.h>
 
 using namespace omscript;
 
