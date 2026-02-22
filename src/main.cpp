@@ -21,6 +21,207 @@ namespace {
 constexpr const char* kCompilerVersion = "OmScript Compiler v0.4.0";
 constexpr const char* kPathConfigMarker = "# omsc-path-auto";
 
+bool isRoot() {
+    return geteuid() == 0;
+}
+
+std::string detectDistro() {
+    std::ifstream osRelease("/etc/os-release");
+    if (!osRelease.is_open()) {
+        return "unknown";
+    }
+    std::string line;
+    while (std::getline(osRelease, line)) {
+        if (line.find("ID=") == 0) {
+            if (line.find("arch") != std::string::npos || line.find("manjaro") != std::string::npos ||
+                line.find(" EndeavourOS") != std::string::npos) {
+                return "arch";
+            } else if (line.find("ubuntu") != std::string::npos || line.find("debian") != std::string::npos ||
+                       line.find("linuxmint") != std::string::npos) {
+                return "debian";
+            }
+        }
+    }
+    return "linux";
+}
+
+std::string getInstallPrefix(bool system) {
+    if (system) {
+        return "/usr/local";
+    }
+    std::string home = getenv("HOME") ? getenv("HOME") : "";
+    return home + "/.local";
+}
+
+std::string getInstallBinDir(bool system) {
+    return getInstallPrefix(system) + "/bin";
+}
+
+bool fileExists(const std::string& path) {
+    return std::filesystem::exists(path);
+}
+
+bool isInPath(const std::string& binDir) {
+    std::string pathEnv = getenv("PATH") ? getenv("PATH") : "";
+    size_t pos = 0;
+    std::string token;
+    while ((pos = pathEnv.find(':')) != std::string::npos) {
+        token = pathEnv.substr(0, pos);
+        if (token == binDir) {
+            return true;
+        }
+        pathEnv.erase(0, pos + 1);
+    }
+    return pathEnv == binDir;
+}
+
+bool isSymlinkOrCopy(const std::string& path, const std::string& target) {
+    if (!fileExists(path)) {
+        return false;
+    }
+    try {
+        auto canonicalTarget = std::filesystem::canonical(target);
+        if (std::filesystem::is_symlink(path)) {
+            return std::filesystem::read_symlink(path) == canonicalTarget;
+        }
+        return std::filesystem::canonical(path) == canonicalTarget;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool installToSystem(const std::string& targetDir, bool force) {
+    std::string exePath;
+    const char* envPath = getenv("OMSC_BINARY_PATH");
+    if (envPath) {
+        exePath = envPath;
+    } else {
+        exePath = std::filesystem::read_symlink("/proc/self/exe").string();
+    }
+
+    if (!fileExists(exePath)) {
+        std::cerr << "Error: Cannot determine own executable path\n";
+        return false;
+    }
+
+    if (!fileExists(targetDir)) {
+        std::cerr << "Error: Target directory does not exist: " << targetDir << "\n";
+        return false;
+    }
+
+    std::string targetPath = targetDir + "/omsc";
+
+    if (!force && isSymlinkOrCopy(targetPath, exePath)) {
+        std::cout << "OmScript is already installed at " << targetPath << "\n";
+        return true;
+    }
+
+    std::filesystem::copy_options opts = std::filesystem::copy_options::overwrite_existing;
+    if (std::filesystem::is_symlink(exePath)) {
+        opts |= std::filesystem::copy_options::copy_symlinks;
+    }
+
+    try {
+        std::filesystem::copy_file(exePath, targetPath, opts);
+        std::filesystem::permissions(targetPath, std::filesystem::perms::owner_exec |
+                                                     std::filesystem::perms::group_exec |
+                                                     std::filesystem::perms::others_exec);
+    } catch (const std::exception& e) {
+        std::cerr << "Error copying file: " << e.what() << "\n";
+        return false;
+    }
+
+    std::cout << "Installed OmScript to " << targetPath << "\n";
+    return true;
+}
+
+void printInstallHelp(const std::string& distro) {
+    std::cout << "\nOmScript Installation Options:\n\n";
+
+    std::string userBinDir = getInstallBinDir(false);
+    std::cout << "1. User installation (" << userBinDir << "):\n";
+    std::cout << "   mkdir -p " << userBinDir << "\n";
+    std::cout << "   cp " << userBinDir << "/omsc " << userBinDir << "/omsc-new || true\n";
+    std::cout << "   # Then copy this binary to " << userBinDir << "/omsc\n\n";
+
+    std::cout << "2. System-wide installation (requires sudo):\n";
+    std::cout << "   sudo cp omsc /usr/local/bin/omsc\n";
+    std::cout << "   # or\n";
+    std::cout << "   sudo cp omsc /usr/bin/omsc\n\n";
+
+    if (distro == "arch") {
+        std::cout << "3. Arch Linux PKGBUILD (create /tmp/omscript/PKGBUILD):\n";
+        std::cout << "   pkgname=omscript\n";
+        std::cout << "   pkgver=VERSION\n";
+        std::cout << "   pkgrel=1\n";
+        std::cout << "   pkgdesc='OmScript programming language compiler'\n";
+        std::cout << "   arch=('x86_64')\n";
+        std::cout << "   source=('omsc')\n";
+        std::cout << "   package() { install -Dm755 omsc \"$pkgdir/usr/bin/omsc\" }\n\n";
+    } else if (distro == "debian") {
+        std::cout << "3. Debian/Ubuntu .deb package:\n";
+        std::cout << "   # Create debian package using alien or dpkg-deb\n";
+        std::cout << "   dpkg-deb --build omscript_VERSION_amd64.deb\n\n";
+    }
+
+    std::cout << "For automatic installation, run: sudo " << kCompilerVersion << " install\n";
+}
+
+void doInstall() {
+    std::string distro = detectDistro();
+    std::cout << "Detected distribution: " << distro << "\n";
+
+    const char* envPath = getenv("OMSC_BINARY_PATH");
+    std::string exePath = envPath ? envPath : std::filesystem::read_symlink("/proc/self/exe").string();
+
+    if (!fileExists(exePath)) {
+        std::cerr << "Error: Cannot determine own executable path\n";
+        return;
+    }
+
+    std::string binDir = getInstallBinDir(false);
+    std::string userPath = binDir + "/omsc";
+
+    if (isRoot()) {
+        std::string sysPath = "/usr/local/bin/omsc";
+        if (fileExists(sysPath)) {
+            std::cout << "Updating system installation at " << sysPath << "...\n";
+        } else {
+            std::cout << "Installing to system location " << sysPath << "...\n";
+        }
+        installToSystem("/usr/local/bin", true);
+        std::cout << "\nOmScript has been installed system-wide!\n";
+        return;
+    }
+
+    std::cout << "Not running as root. Attempting user installation...\n";
+
+    if (!fileExists(binDir)) {
+        std::cout << "Creating " << binDir << "...\n";
+        std::filesystem::create_directories(binDir);
+    }
+
+    if (isInPath(binDir)) {
+        std::cout << binDir << " is already in PATH.\n";
+    } else {
+        std::cout << "\nWARNING: " << binDir << " is not in your PATH!\n";
+        std::cout << "Add this to your ~/.bashrc or ~/.profile:\n";
+        std::cout << "    export PATH=\"" << binDir << ":$PATH\"\n\n";
+    }
+
+    std::cout << "Installing to user location " << userPath << "...\n";
+    installToSystem(binDir, true);
+
+    std::cout << "\nInstallation complete!\n";
+    std::cout << "Run 'omsc --version' to verify.\n";
+
+    if (!isInPath(binDir)) {
+        std::cout << "\nIMPORTANT: Add " << binDir << " to your PATH:\n";
+        std::cout << "    echo 'export PATH=\"" << binDir << ":$PATH\"' >> ~/.bashrc\n";
+        std::cout << "    source ~/.bashrc\n";
+    }
+}
+
 void ensureInPath() {
     const char* binaryPath = getenv("OMSC_BINARY_PATH");
     if (!binaryPath) {
@@ -440,7 +641,7 @@ int main(int argc, char* argv[]) {
         return 0;
     }
     if (command == Command::Install) {
-        ensureInPath();
+        doInstall();
         return 0;
     }
 
