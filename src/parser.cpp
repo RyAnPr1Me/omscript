@@ -60,20 +60,15 @@ void Parser::error(const std::string& message) {
 void Parser::synchronize() {
     advance();
     while (!isAtEnd()) {
-        // After a semicolon, we're likely at a new statement.
-        if (current > 0 && tokens[current - 1].type == TokenType::SEMICOLON)
-            return;
-        // Before a keyword that starts a new statement/declaration.
+        // Stop only at tokens that begin a top-level declaration so that
+        // statement-level keywords (var, if, for, return, …) inside a broken
+        // function body do not cause cascading "Expected 'fn'" errors, and so
+        // that OPTMAX_END is never accidentally consumed (which would leave the
+        // optMaxTagActive flag set and produce "Unterminated OPTMAX block").
         switch (peek().type) {
         case TokenType::FN:
-        case TokenType::VAR:
-        case TokenType::CONST:
-        case TokenType::IF:
-        case TokenType::WHILE:
-        case TokenType::DO:
-        case TokenType::FOR:
-        case TokenType::RETURN:
-        case TokenType::SWITCH:
+        case TokenType::OPTMAX_START:
+        case TokenType::OPTMAX_END:
             return;
         default:
             break;
