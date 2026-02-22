@@ -69,6 +69,33 @@ class CodeGenerator {
         optimizationLevel = level;
     }
 
+    /// Set the target CPU architecture for instruction selection.
+    /// Use "native" or "" for host auto-detection (default).
+    void setMarch(const std::string& cpu) {
+        marchCpu_ = cpu;
+    }
+
+    /// Set the CPU model for scheduling/micro-architecture tuning.
+    /// Defaults to the same value as -march when empty.
+    void setMtune(const std::string& cpu) {
+        mtuneCpu_ = cpu;
+    }
+
+    /// Enable or disable position-independent code generation (default: true).
+    void setPIC(bool enable) {
+        usePIC_ = enable;
+    }
+
+    /// Enable or disable unsafe floating-point optimizations (default: false).
+    void setFastMath(bool enable) {
+        useFastMath_ = enable;
+    }
+
+    /// Enable or disable OPTMAX block optimization (default: true).
+    void setOptMax(bool enable) {
+        enableOptMax_ = enable;
+    }
+
   private:
     std::unique_ptr<llvm::LLVMContext> context;
     std::unique_ptr<llvm::IRBuilder<>> builder;
@@ -224,6 +251,17 @@ class CodeGenerator {
     // scanStmtForStringCalls: walks a statement subtree and records which
     //   function parameters receive string arguments at call sites.
     void scanStmtForStringCalls(Statement* stmt);
+
+    // Target CPU configuration for LLVM code generation.
+    std::string marchCpu_;   // -march: CPU arch for instruction selection ("" = native)
+    std::string mtuneCpu_;   // -mtune: CPU for scheduling tuning ("" = same as march)
+    bool usePIC_ = true;     // -fpic / -fno-pic
+    bool useFastMath_ = false; // -ffast-math / -fno-fast-math
+    bool enableOptMax_ = true; // -foptmax / -fno-optmax
+
+    /// Resolve the effective CPU name and feature string for LLVM target machine
+    /// construction based on the current -march / -mtune settings.
+    void resolveTargetCPU(std::string& cpu, std::string& features) const;
 
     // Optimization methods
     void runOptimizationPasses();

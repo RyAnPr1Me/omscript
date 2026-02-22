@@ -100,12 +100,21 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
         std::cout << "  Generating code..." << std::endl;
     }
     CodeGenerator codegen(optLevel_);
+    codegen.setMarch(march_);
+    codegen.setMtune(mtune_);
+    codegen.setPIC(pic_);
+    codegen.setFastMath(fastMath_);
+    codegen.setOptMax(optMax_);
     try {
         // Use hybrid compilation to produce both LLVM IR (for AOT-tier
         // functions) and bytecode (for Interpreted-tier functions).
         // This enables compiled binaries to contain bytecode that the
         // embedded JIT runtime can recompile with type specialization.
-        codegen.generateHybrid(program.get());
+        if (jit_) {
+            codegen.generateHybrid(program.get());
+        } else {
+            codegen.generate(program.get());
+        }
     } catch (const std::runtime_error& e) {
         throw std::runtime_error(sourceFile + ": " + e.what());
     }
@@ -159,6 +168,18 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
             throw std::runtime_error("Failed to locate a C linker (tried gcc, cc, clang)");
         }
         std::vector<std::string> linkArgs = {objFile, "-o", outputFile};
+        if (lto_) {
+            linkArgs.push_back("-flto");
+        }
+        if (staticLink_) {
+            linkArgs.push_back("-static");
+        }
+        if (strip_) {
+            linkArgs.push_back("-s");
+        }
+        if (stackProtector_) {
+            linkArgs.push_back("-fstack-protector-strong");
+        }
         llvm::SmallVector<llvm::StringRef, 8> argRefs;
         argRefs.push_back(linkerProgram);
         for (const auto& arg : linkArgs) {

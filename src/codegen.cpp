@@ -845,7 +845,7 @@ void CodeGenerator::generate(Program* program) {
         runOptimizationPasses();
     }
 
-    if (hasOptMaxFunctions) {
+    if (hasOptMaxFunctions && enableOptMax_) {
         optimizeOptMaxFunctions();
     }
 
@@ -1265,22 +1265,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         return builder->CreateNSWMul(left, right, "multmp");
     } else if (expr->op == "/" || expr->op == "%") {
         bool isDivision = expr->op == "/";
-        // Strength reduction: signed division by power of 2 → arithmetic right shift.
-        // This is safe because we know the divisor is a non-zero constant.
-        if (isDivision) {
-            if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
-                int64_t val = ci->getSExtValue();
-                if (val > 0 && (val & (val - 1)) == 0) {
-                    unsigned shift = 0;
-                    int64_t tmp = val;
-                    while (tmp > 1) {
-                        tmp >>= 1;
-                        shift++;
-                    }
-                    return builder->CreateAShr(left, llvm::ConstantInt::get(getDefaultType(), shift), "divshrtmp");
-                }
-            }
-        }
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
         llvm::Value* isZero = builder->CreateICmpEQ(right, zero, "divzero");
         llvm::Function* function = builder->GetInsertBlock()->getParent();
@@ -2737,6 +2721,36 @@ void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
     builder->SetInsertPoint(mergeBB);
 }
 
+void CodeGenerator::resolveTargetCPU(std::string& cpu, std::string& features) const {
+    bool isNative = marchCpu_.empty() || marchCpu_ == "native";
+    if (isNative) {
+        cpu = llvm::sys::getHostCPUName().str();
+        llvm::SubtargetFeatures featureSet;
+#if LLVM_VERSION_MAJOR >= 19
+        llvm::StringMap<bool> hostFeatures = llvm::sys::getHostCPUFeatures();
+#else
+        llvm::StringMap<bool> hostFeatures;
+        llvm::sys::getHostCPUFeatures(hostFeatures);
+#endif
+        for (auto& feature : hostFeatures) {
+            featureSet.AddFeature(feature.first(), feature.second);
+        }
+        features = featureSet.getString();
+    } else {
+        // Use the specified CPU; LLVM derives features from the CPU name.
+        cpu = marchCpu_;
+        features = "";
+    }
+
+    // -mtune overrides the CPU used for scheduling when -march is native or
+    // unset.  When an explicit -march is given, it takes precedence because
+    // LLVM's createTargetMachine uses a single CPU parameter for both
+    // instruction selection and scheduling.
+    if (!mtuneCpu_.empty() && isNative) {
+        cpu = mtuneCpu_;
+    }
+}
+
 void CodeGenerator::runOptimizationPasses() {
     // Add target-specific data layout
     std::string targetTripleStr = llvm::sys::getDefaultTargetTriple();
@@ -2758,22 +2772,15 @@ void CodeGenerator::runOptimizationPasses() {
     std::string featureStr;
     if (target) {
         llvm::TargetOptions opt;
-        // Use PIC to support default PIE linking on modern toolchains.
-        std::optional<llvm::Reloc::Model> RM = llvm::Reloc::PIC_;
-        // Use native CPU features (SSE, AVX, etc.) instead of "generic"
-        // for maximum codegen quality on the build host.
-        cpu = llvm::sys::getHostCPUName().str();
-        llvm::SubtargetFeatures features;
-#if LLVM_VERSION_MAJOR >= 19
-        llvm::StringMap<bool> hostFeatures = llvm::sys::getHostCPUFeatures();
-#else
-        llvm::StringMap<bool> hostFeatures;
-        llvm::sys::getHostCPUFeatures(hostFeatures);
-#endif
-        for (auto& feature : hostFeatures) {
-            features.AddFeature(feature.first(), feature.second);
+        if (useFastMath_) {
+            opt.UnsafeFPMath = true;
+            opt.NoInfsFPMath = true;
+            opt.NoNaNsFPMath = true;
+            opt.NoSignedZerosFPMath = true;
         }
-        featureStr = features.getString();
+        std::optional<llvm::Reloc::Model> RM =
+            usePIC_ ? llvm::Reloc::PIC_ : llvm::Reloc::Static;
+        resolveTargetCPU(cpu, featureStr);
 #if LLVM_VERSION_MAJOR >= 19
         targetMachine.reset(target->createTargetMachine(targetTriple, cpu, featureStr, opt, RM));
 #else
@@ -2918,22 +2925,19 @@ void CodeGenerator::writeObjectFile(const std::string& filename) {
         throw std::runtime_error("Failed to lookup target: " + error);
     }
 
-    auto CPU = llvm::sys::getHostCPUName().str();
-    llvm::SubtargetFeatures featureSet;
-#if LLVM_VERSION_MAJOR >= 19
-    llvm::StringMap<bool> hostFeatures = llvm::sys::getHostCPUFeatures();
-#else
-    llvm::StringMap<bool> hostFeatures;
-    llvm::sys::getHostCPUFeatures(hostFeatures);
-#endif
-    for (auto& feature : hostFeatures) {
-        featureSet.AddFeature(feature.first(), feature.second);
-    }
-    auto features = featureSet.getString();
+    std::string CPU;
+    std::string features;
+    resolveTargetCPU(CPU, features);
 
     llvm::TargetOptions opt;
-    // Use PIC to support default PIE linking on modern toolchains.
-    std::optional<llvm::Reloc::Model> RM = llvm::Reloc::PIC_;
+    if (useFastMath_) {
+        opt.UnsafeFPMath = true;
+        opt.NoInfsFPMath = true;
+        opt.NoNaNsFPMath = true;
+        opt.NoSignedZerosFPMath = true;
+    }
+    std::optional<llvm::Reloc::Model> RM =
+        usePIC_ ? llvm::Reloc::PIC_ : llvm::Reloc::Static;
 #if LLVM_VERSION_MAJOR >= 19
     std::unique_ptr<llvm::TargetMachine> targetMachine(
         target->createTargetMachine(targetTriple, CPU, features, opt, RM));

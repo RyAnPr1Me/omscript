@@ -225,6 +225,7 @@ echo "--------------------------------------------"
 test_program "examples/factorial.om" 120
 test_program "examples/fibonacci.om" 55
 test_program "examples/arithmetic.om" 240
+test_program "examples/neg_div_test.om" 6
 test_program "examples/test.om" 84
 test_program "examples/optimized_loops.om" 5040
 test_program "examples/descending_range.om" 15
@@ -330,6 +331,68 @@ else
     echo -e "${RED}✗ O3 compilation failed${NC}"
     FAILURES=$((FAILURES + 1))
 fi
+
+echo ""
+echo "============================================"
+echo "Target & Feature Flag Tests"
+echo "============================================"
+echo ""
+
+# Test -march and -mtune flags
+test_cli_output "march-native" "Compilation successful!" 0 ./build/omsc -march=native examples/exit_zero.om -o /tmp/test_march_native
+rm -f /tmp/test_march_native /tmp/test_march_native.o
+test_cli_output "march-x86-64" "Compilation successful!" 0 ./build/omsc -march=x86-64 examples/exit_zero.om -o /tmp/test_march_x86
+rm -f /tmp/test_march_x86 /tmp/test_march_x86.o
+test_cli_output "mtune-generic" "Compilation successful!" 0 ./build/omsc -mtune=generic examples/exit_zero.om -o /tmp/test_mtune_gen
+rm -f /tmp/test_mtune_gen /tmp/test_mtune_gen.o
+test_cli_output "march-mtune-combined" "Compilation successful!" 0 ./build/omsc -march=x86-64 -mtune=generic examples/exit_zero.om -o /tmp/test_march_mtune
+rm -f /tmp/test_march_mtune /tmp/test_march_mtune.o
+
+# Test feature toggle flags
+test_cli_output "fno-pic" "Compilation successful!" 0 ./build/omsc -fno-pic examples/exit_zero.om -o /tmp/test_nopic
+rm -f /tmp/test_nopic /tmp/test_nopic.o
+test_cli_output "fpic" "Compilation successful!" 0 ./build/omsc -fpic examples/exit_zero.om -o /tmp/test_pic
+rm -f /tmp/test_pic /tmp/test_pic.o
+test_cli_output "ffast-math" "Compilation successful!" 0 ./build/omsc -ffast-math examples/exit_zero.om -o /tmp/test_fastmath
+rm -f /tmp/test_fastmath /tmp/test_fastmath.o
+test_cli_output "fno-fast-math" "Compilation successful!" 0 ./build/omsc -fno-fast-math examples/exit_zero.om -o /tmp/test_nofastmath
+rm -f /tmp/test_nofastmath /tmp/test_nofastmath.o
+test_cli_output "fno-optmax" "Compilation successful!" 0 ./build/omsc -fno-optmax examples/optmax.om -o /tmp/test_nooptmax
+rm -f /tmp/test_nooptmax /tmp/test_nooptmax.o
+test_cli_output "foptmax" "Compilation successful!" 0 ./build/omsc -foptmax examples/optmax.om -o /tmp/test_optmax
+rm -f /tmp/test_optmax /tmp/test_optmax.o
+test_cli_output "fno-jit" "Compilation successful!" 0 ./build/omsc -fno-jit examples/exit_zero.om -o /tmp/test_nojit
+rm -f /tmp/test_nojit /tmp/test_nojit.o
+test_cli_output "fjit" "Compilation successful!" 0 ./build/omsc -fjit examples/exit_zero.om -o /tmp/test_jit
+rm -f /tmp/test_jit /tmp/test_jit.o
+test_cli_output "flto" "Compilation successful!" 0 ./build/omsc -flto examples/exit_zero.om -o /tmp/test_lto
+rm -f /tmp/test_lto /tmp/test_lto.o
+test_cli_output "fno-lto" "Compilation successful!" 0 ./build/omsc -fno-lto examples/exit_zero.om -o /tmp/test_nolto
+rm -f /tmp/test_nolto /tmp/test_nolto.o
+test_cli_output "fstack-protector" "Compilation successful!" 0 ./build/omsc -fstack-protector examples/exit_zero.om -o /tmp/test_sp
+rm -f /tmp/test_sp /tmp/test_sp.o
+test_cli_output "fno-stack-protector" "Compilation successful!" 0 ./build/omsc -fno-stack-protector examples/exit_zero.om -o /tmp/test_nosp
+rm -f /tmp/test_nosp /tmp/test_nosp.o
+test_cli_output "strip-long" "Compilation successful!" 0 ./build/omsc --strip examples/exit_zero.om -o /tmp/test_strip
+rm -f /tmp/test_strip /tmp/test_strip.o
+test_cli_output "strip-short" "Compilation successful!" 0 ./build/omsc -s examples/exit_zero.om -o /tmp/test_strip_s
+rm -f /tmp/test_strip_s /tmp/test_strip_s.o
+
+# Test combined flags with run
+test_cli_output "run-march-fno-jit" "Compilation successful!" 0 ./build/omsc run -march=native -fno-jit examples/exit_zero.om
+test_cli_output "run-combined-flags" "Compilation successful!" 0 ./build/omsc run -O3 -march=x86-64 -ffast-math examples/exit_zero.om
+
+# Test help output includes new flags
+test_cli_output "help-shows-march" "-march=" 0 ./build/omsc --help
+test_cli_output "help-shows-mtune" "-mtune=" 0 ./build/omsc --help
+test_cli_output "help-shows-flto" "-flto" 0 ./build/omsc --help
+test_cli_output "help-shows-fpic" "-fpic" 0 ./build/omsc --help
+test_cli_output "help-shows-ffast-math" "-ffast-math" 0 ./build/omsc --help
+test_cli_output "help-shows-foptmax" "-foptmax" 0 ./build/omsc --help
+test_cli_output "help-shows-fjit" "-fjit" 0 ./build/omsc --help
+test_cli_output "help-shows-static" "-static" 0 ./build/omsc --help
+test_cli_output "help-shows-strip" "--strip" 0 ./build/omsc --help
+test_cli_output "help-shows-fstack-protector" "-fstack-protector" 0 ./build/omsc --help
 
 echo ""
 echo "============================================"

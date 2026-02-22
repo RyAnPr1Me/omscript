@@ -1,0 +1,13 @@
+// Test that signed division by powers of 2 rounds toward zero,
+// not toward negative infinity (which is what arithmetic shift does).
+// -7 / 2 should be -3 (truncation toward zero), not -4 (floor).
+fn main() {
+    var a = -7;
+    var b = a / 2;     // should be -3
+    var c = a / 4;     // should be -1
+    var d = -1;
+    var e = d / 2;     // should be 0
+    // Sum: -3 + (-1) + 0 = -4
+    // Return as positive for exit code: add 10
+    return b + c + e + 10;
+}
