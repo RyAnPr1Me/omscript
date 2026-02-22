@@ -412,7 +412,7 @@ CodeGenerator::CodeGenerator(OptimizationLevel optLevel)
     setupPrintfDeclaration();
 }
 
-CodeGenerator::~CodeGenerator() {}
+CodeGenerator::~CodeGenerator() = default;
 
 // ---------------------------------------------------------------------------
 // Execution-tier classification
@@ -587,6 +587,81 @@ void CodeGenerator::codegenError(const std::string& message, const ASTNode* node
                                  std::to_string(node->column) + ": " + message);
     }
     throw std::runtime_error(message);
+}
+
+// ---------------------------------------------------------------------------
+// Lazy C library function declarations
+// ---------------------------------------------------------------------------
+// These helpers ensure each C library function is declared at most once in
+// the LLVM module, eliminating duplicated getFunction()/Create() blocks
+// that were previously scattered across multiple built-in handlers.
+
+llvm::Function* CodeGenerator::getOrDeclareStrlen() {
+    if (auto* fn = module->getFunction("strlen"))
+        return fn;
+    auto* ty = llvm::FunctionType::get(getDefaultType(), {llvm::PointerType::getUnqual(*context)}, false);
+    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strlen", module.get());
+}
+
+llvm::Function* CodeGenerator::getOrDeclareMalloc() {
+    if (auto* fn = module->getFunction("malloc"))
+        return fn;
+    auto* ty = llvm::FunctionType::get(llvm::PointerType::getUnqual(*context), {getDefaultType()}, false);
+    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "malloc", module.get());
+}
+
+llvm::Function* CodeGenerator::getOrDeclareStrcpy() {
+    if (auto* fn = module->getFunction("strcpy"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy, ptrTy}, false);
+    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strcpy", module.get());
+}
+
+llvm::Function* CodeGenerator::getOrDeclareStrcat() {
+    if (auto* fn = module->getFunction("strcat"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy, ptrTy}, false);
+    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strcat", module.get());
+}
+
+llvm::Function* CodeGenerator::getOrDeclareStrcmp() {
+    if (auto* fn = module->getFunction("strcmp"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(builder->getInt32Ty(), {ptrTy, ptrTy}, false);
+    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strcmp", module.get());
+}
+
+llvm::Function* CodeGenerator::getOrDeclarePutchar() {
+    if (auto* fn = module->getFunction("putchar"))
+        return fn;
+    auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {llvm::Type::getInt32Ty(*context)}, false);
+    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "putchar", module.get());
+}
+
+llvm::Function* CodeGenerator::getOrDeclareScanf() {
+    if (auto* fn = module->getFunction("scanf"))
+        return fn;
+    auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context),
+                                       {llvm::PointerType::getUnqual(*context)}, true);
+    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "scanf", module.get());
+}
+
+llvm::Function* CodeGenerator::getOrDeclareExit() {
+    if (auto* fn = module->getFunction("exit"))
+        return fn;
+    auto* ty = llvm::FunctionType::get(llvm::Type::getVoidTy(*context),
+                                       {llvm::Type::getInt32Ty(*context)}, false);
+    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "exit", module.get());
+}
+
+llvm::Function* CodeGenerator::getOrDeclareAbort() {
+    if (auto* fn = module->getFunction("abort"))
+        return fn;
+    auto* ty = llvm::FunctionType::get(llvm::Type::getVoidTy(*context), false);
+    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "abort", module.get());
 }
 
 // ---------------------------------------------------------------------------
@@ -1135,42 +1210,14 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             if (!right->getType()->isPointerTy())
                 right = builder->CreateIntToPtr(right, llvm::PointerType::getUnqual(*context), "str.r.ptr");
 
-            // Declare C library functions for string concatenation
-            llvm::Function* strlenFn = module->getFunction("strlen");
-            if (!strlenFn) {
-                auto strlenType =
-                    llvm::FunctionType::get(getDefaultType(), {llvm::PointerType::getUnqual(*context)}, false);
-                strlenFn = llvm::Function::Create(strlenType, llvm::Function::ExternalLinkage, "strlen", module.get());
-            }
-            llvm::Function* mallocFn = module->getFunction("malloc");
-            if (!mallocFn) {
-                auto mallocType =
-                    llvm::FunctionType::get(llvm::PointerType::getUnqual(*context), {getDefaultType()}, false);
-                mallocFn = llvm::Function::Create(mallocType, llvm::Function::ExternalLinkage, "malloc", module.get());
-            }
-            llvm::Function* strcpyFn = module->getFunction("strcpy");
-            if (!strcpyFn) {
-                auto strcpyType = llvm::FunctionType::get(
-                    llvm::PointerType::getUnqual(*context),
-                    {llvm::PointerType::getUnqual(*context), llvm::PointerType::getUnqual(*context)}, false);
-                strcpyFn = llvm::Function::Create(strcpyType, llvm::Function::ExternalLinkage, "strcpy", module.get());
-            }
-            llvm::Function* strcatFn = module->getFunction("strcat");
-            if (!strcatFn) {
-                auto strcatType = llvm::FunctionType::get(
-                    llvm::PointerType::getUnqual(*context),
-                    {llvm::PointerType::getUnqual(*context), llvm::PointerType::getUnqual(*context)}, false);
-                strcatFn = llvm::Function::Create(strcatType, llvm::Function::ExternalLinkage, "strcat", module.get());
-            }
-
-            llvm::Value* len1 = builder->CreateCall(strlenFn, {left}, "len1");
-            llvm::Value* len2 = builder->CreateCall(strlenFn, {right}, "len2");
+            llvm::Value* len1 = builder->CreateCall(getOrDeclareStrlen(), {left}, "len1");
+            llvm::Value* len2 = builder->CreateCall(getOrDeclareStrlen(), {right}, "len2");
             llvm::Value* totalLen = builder->CreateAdd(len1, len2, "totallen");
             llvm::Value* allocSize =
                 builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "allocsize");
-            llvm::Value* buf = builder->CreateCall(mallocFn, {allocSize}, "strbuf");
-            builder->CreateCall(strcpyFn, {buf, left});
-            builder->CreateCall(strcatFn, {buf, right});
+            llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {allocSize}, "strbuf");
+            builder->CreateCall(getOrDeclareStrcpy(), {buf, left});
+            builder->CreateCall(getOrDeclareStrcat(), {buf, right});
             return buf;
         }
     }
@@ -1279,13 +1326,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         const char* messageName = isDivision ? "divzero_msg" : "modzero_msg";
         llvm::Value* message = builder->CreateGlobalString(messageText, messageName);
         builder->CreateCall(getPrintfFunction(), {message});
-        llvm::Function* exitFunction = module->getFunction("exit");
-        if (!exitFunction) {
-            auto exitType =
-                llvm::FunctionType::get(llvm::Type::getVoidTy(*context), {llvm::Type::getInt32Ty(*context)}, false);
-            exitFunction = llvm::Function::Create(exitType, llvm::Function::ExternalLinkage, "exit", module.get());
-        }
-        builder->CreateCall(exitFunction, {llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 1)});
+        builder->CreateCall(getOrDeclareExit(), {llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 1)});
         builder->CreateUnreachable();
 
         builder->SetInsertPoint(opBB);
@@ -1597,14 +1638,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         if (arg->getType()->isDoubleTy()) {
             arg = builder->CreateFPToSI(arg, getDefaultType(), "ftoi");
         }
-        llvm::Function* putcharFn = module->getFunction("putchar");
-        if (!putcharFn) {
-            auto putcharType =
-                llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {llvm::Type::getInt32Ty(*context)}, false);
-            putcharFn = llvm::Function::Create(putcharType, llvm::Function::ExternalLinkage, "putchar", module.get());
-        }
         llvm::Value* truncated = builder->CreateTrunc(arg, llvm::Type::getInt32Ty(*context), "charval");
-        builder->CreateCall(putcharFn, {truncated});
+        builder->CreateCall(getOrDeclarePutchar(), {truncated});
         return arg; // return the character code as documented
     }
 
@@ -1614,12 +1649,6 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                              std::to_string(expr->arguments.size()) + " provided",
                          expr);
         }
-        llvm::Function* scanfFn = module->getFunction("scanf");
-        if (!scanfFn) {
-            auto scanfType = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context),
-                                                     {llvm::PointerType::getUnqual(*context)}, true);
-            scanfFn = llvm::Function::Create(scanfType, llvm::Function::ExternalLinkage, "scanf", module.get());
-        }
         llvm::Function* function = builder->GetInsertBlock()->getParent();
         llvm::AllocaInst* inputAlloca = createEntryBlockAlloca(function, "input_val");
         builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 0), inputAlloca);
@@ -1627,7 +1656,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         if (!scanfFmt) {
             scanfFmt = builder->CreateGlobalString("%lld", "scanf_fmt");
         }
-        builder->CreateCall(scanfFn, {scanfFmt, inputAlloca});
+        builder->CreateCall(getOrDeclareScanf(), {scanfFmt, inputAlloca});
         return builder->CreateLoad(getDefaultType(), inputAlloca, "input_read");
     }
 
@@ -1789,8 +1818,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* errMsg =
             builder->CreateGlobalString("Runtime error: swap index out of bounds\n", "swap_oob_msg");
         builder->CreateCall(getPrintfFunction(), {errMsg});
-        builder->CreateCall(
-            module->getOrInsertFunction("abort", llvm::FunctionType::get(llvm::Type::getVoidTy(*context), false)));
+        builder->CreateCall(getOrDeclareAbort());
         builder->CreateUnreachable();
 
         builder->SetInsertPoint(okBB);
@@ -1938,8 +1966,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(failBB);
         llvm::Value* errMsg = builder->CreateGlobalString("Runtime error: assertion failed\n", "assert_fail_msg");
         builder->CreateCall(getPrintfFunction(), {errMsg});
-        builder->CreateCall(
-            module->getOrInsertFunction("abort", llvm::FunctionType::get(llvm::Type::getVoidTy(*context), false)));
+        builder->CreateCall(getOrDeclareAbort());
         builder->CreateUnreachable();
 
         builder->SetInsertPoint(okBB);
@@ -1955,14 +1982,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         // String is stored as an i64 holding a pointer to a C string
         llvm::Value* strPtr = builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "strlen.ptr");
-        // Declare strlen if not already declared
-        llvm::Function* strlenFn = module->getFunction("strlen");
-        if (!strlenFn) {
-            llvm::FunctionType* strlenTy =
-                llvm::FunctionType::get(getDefaultType(), {llvm::PointerType::getUnqual(*context)}, false);
-            strlenFn = llvm::Function::Create(strlenTy, llvm::Function::ExternalLinkage, "strlen", module.get());
-        }
-        return builder->CreateCall(strlenFn, {strPtr}, "strlen.result");
+        return builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "strlen.result");
     }
 
     if (expr->callee == "char_at") {
@@ -1978,13 +1998,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* strPtr = builder->CreateIntToPtr(strArg, llvm::PointerType::getUnqual(*context), "charat.ptr");
 
         // Bounds check: 0 <= index < str_len(s)
-        llvm::Function* strlenFn = module->getFunction("strlen");
-        if (!strlenFn) {
-            llvm::FunctionType* strlenTy =
-                llvm::FunctionType::get(getDefaultType(), {llvm::PointerType::getUnqual(*context)}, false);
-            strlenFn = llvm::Function::Create(strlenTy, llvm::Function::ExternalLinkage, "strlen", module.get());
-        }
-        llvm::Value* strLen = builder->CreateCall(strlenFn, {strPtr}, "charat.strlen");
+        llvm::Value* strLen = builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "charat.strlen");
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
         llvm::Value* inBounds = builder->CreateICmpSLT(idxArg, strLen, "charat.inbounds");
         llvm::Value* notNeg = builder->CreateICmpSGE(idxArg, zero, "charat.notneg");
@@ -1999,8 +2013,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* errMsg =
             builder->CreateGlobalString("Runtime error: char_at index out of bounds\n", "charat_oob_msg");
         builder->CreateCall(getPrintfFunction(), {errMsg});
-        builder->CreateCall(
-            module->getOrInsertFunction("abort", llvm::FunctionType::get(llvm::Type::getVoidTy(*context), false)));
+        builder->CreateCall(getOrDeclareAbort());
         builder->CreateUnreachable();
 
         builder->SetInsertPoint(okBB);
@@ -2022,15 +2035,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Convert i64 to pointers to C strings
         llvm::Value* lhsPtr = builder->CreateIntToPtr(lhsArg, llvm::PointerType::getUnqual(*context), "streq.lhs");
         llvm::Value* rhsPtr = builder->CreateIntToPtr(rhsArg, llvm::PointerType::getUnqual(*context), "streq.rhs");
-        // Declare strcmp if not already declared
-        llvm::Function* strcmpFn = module->getFunction("strcmp");
-        if (!strcmpFn) {
-            llvm::FunctionType* strcmpTy = llvm::FunctionType::get(
-                builder->getInt32Ty(), {llvm::PointerType::getUnqual(*context), llvm::PointerType::getUnqual(*context)},
-                false);
-            strcmpFn = llvm::Function::Create(strcmpTy, llvm::Function::ExternalLinkage, "strcmp", module.get());
-        }
-        llvm::Value* cmpResult = builder->CreateCall(strcmpFn, {lhsPtr, rhsPtr}, "streq.cmp");
+        llvm::Value* cmpResult = builder->CreateCall(getOrDeclareStrcmp(), {lhsPtr, rhsPtr}, "streq.cmp");
         // strcmp returns 0 on equality; convert to boolean (1 if equal, 0 otherwise)
         llvm::Value* isEqual = builder->CreateICmpEQ(cmpResult, builder->getInt32(0), "streq.eq");
         return builder->CreateZExt(isEqual, getDefaultType(), "streq.result");
@@ -2103,70 +2108,54 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
     return value;
 }
 
-llvm::Value* CodeGenerator::generatePostfix(PostfixExpr* expr) {
-    auto* identifier = dynamic_cast<IdentifierExpr*>(expr->operand.get());
+// ---------------------------------------------------------------------------
+// Shared prefix/postfix increment/decrement helper
+// ---------------------------------------------------------------------------
+// Factored out of generatePostfix() and generatePrefix() which were ~90%
+// identical.  The only semantic difference is the return value: postfix
+// returns the value *before* the update, prefix returns the value *after*.
+
+llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::string& op,
+                                           bool isPostfix, const ASTNode* errorNode) {
+    auto* identifier = dynamic_cast<IdentifierExpr*>(operandExpr);
     if (!identifier) {
-        codegenError("Postfix operators require an identifier", expr);
+        codegenError("Increment/decrement operators require an identifier", errorNode);
     }
 
     auto it = namedValues.find(identifier->name);
     if (it == namedValues.end() || !it->second) {
-        codegenError("Unknown variable: " + identifier->name, expr);
+        codegenError("Unknown variable: " + identifier->name, errorNode);
     }
     checkConstModification(identifier->name, "modify");
 
     auto* allocaInst = llvm::dyn_cast<llvm::AllocaInst>(it->second);
     llvm::Type* loadType = allocaInst ? allocaInst->getAllocatedType() : getDefaultType();
     llvm::Value* current = builder->CreateLoad(loadType, it->second, identifier->name.c_str());
-    if (expr->op != "++" && expr->op != "--") {
-        codegenError("Unknown postfix operator: " + expr->op, expr);
+    if (op != "++" && op != "--") {
+        codegenError("Unknown increment/decrement operator: " + op, errorNode);
     }
+
     llvm::Value* updated;
     if (current->getType()->isDoubleTy()) {
         llvm::Value* one = llvm::ConstantFP::get(getFloatType(), 1.0);
-        updated = (expr->op == "++") ? builder->CreateFAdd(current, one, "fpostinc")
-                                     : builder->CreateFSub(current, one, "fpostdec");
+        updated = (op == "++") ? builder->CreateFAdd(current, one, "finc")
+                               : builder->CreateFSub(current, one, "fdec");
     } else {
         llvm::Value* delta = llvm::ConstantInt::get(getDefaultType(), 1, true);
-        updated = (expr->op == "++") ? builder->CreateAdd(current, delta, "postinc")
-                                     : builder->CreateSub(current, delta, "postdec");
+        updated = (op == "++") ? builder->CreateAdd(current, delta, "inc")
+                               : builder->CreateSub(current, delta, "dec");
     }
 
     builder->CreateStore(updated, it->second);
-    return current;
+    return isPostfix ? current : updated;
+}
+
+llvm::Value* CodeGenerator::generatePostfix(PostfixExpr* expr) {
+    return generateIncDec(expr->operand.get(), expr->op, /*isPostfix=*/true, expr);
 }
 
 llvm::Value* CodeGenerator::generatePrefix(PrefixExpr* expr) {
-    auto* identifier = dynamic_cast<IdentifierExpr*>(expr->operand.get());
-    if (!identifier) {
-        codegenError("Prefix operators require an identifier", expr);
-    }
-
-    auto it = namedValues.find(identifier->name);
-    if (it == namedValues.end() || !it->second) {
-        codegenError("Unknown variable: " + identifier->name, expr);
-    }
-    checkConstModification(identifier->name, "modify");
-
-    auto* allocaInst = llvm::dyn_cast<llvm::AllocaInst>(it->second);
-    llvm::Type* loadType = allocaInst ? allocaInst->getAllocatedType() : getDefaultType();
-    llvm::Value* current = builder->CreateLoad(loadType, it->second, identifier->name.c_str());
-    if (expr->op != "++" && expr->op != "--") {
-        codegenError("Unknown prefix operator: " + expr->op, expr);
-    }
-    llvm::Value* updated;
-    if (current->getType()->isDoubleTy()) {
-        llvm::Value* one = llvm::ConstantFP::get(getFloatType(), 1.0);
-        updated = (expr->op == "++") ? builder->CreateFAdd(current, one, "fpreinc")
-                                     : builder->CreateFSub(current, one, "fpredec");
-    } else {
-        llvm::Value* delta = llvm::ConstantInt::get(getDefaultType(), 1, true);
-        updated = (expr->op == "++") ? builder->CreateAdd(current, delta, "preinc")
-                                     : builder->CreateSub(current, delta, "predec");
-    }
-
-    builder->CreateStore(updated, it->second);
-    return updated;
+    return generateIncDec(expr->operand.get(), expr->op, /*isPostfix=*/false, expr);
 }
 
 llvm::Value* CodeGenerator::generateTernary(TernaryExpr* expr) {
@@ -2267,8 +2256,7 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
     builder->SetInsertPoint(failBB);
     llvm::Value* errMsg = builder->CreateGlobalString("Runtime error: array index out of bounds\n", "idx_oob_msg");
     builder->CreateCall(getPrintfFunction(), {errMsg});
-    builder->CreateCall(
-        module->getOrInsertFunction("abort", llvm::FunctionType::get(llvm::Type::getVoidTy(*context), false)));
+    builder->CreateCall(getOrDeclareAbort());
     builder->CreateUnreachable();
 
     // Success path: load element at offset (index + 1)
@@ -2303,8 +2291,7 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
     builder->SetInsertPoint(failBB);
     llvm::Value* errMsg = builder->CreateGlobalString("Runtime error: array index out of bounds\n", "idx_oob_msg");
     builder->CreateCall(getPrintfFunction(), {errMsg});
-    builder->CreateCall(
-        module->getOrInsertFunction("abort", llvm::FunctionType::get(llvm::Type::getVoidTy(*context), false)));
+    builder->CreateCall(getOrDeclareAbort());
     builder->CreateUnreachable();
 
     // Success path: store element at offset (index + 1)
@@ -2537,8 +2524,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     llvm::Constant* message =
         llvm::ConstantExpr::getInBoundsGetElementPtr(messageVar->getValueType(), messageVar, indices);
     builder->CreateCall(getPrintfFunction(), {message});
-    builder->CreateCall(
-        module->getOrInsertFunction("abort", llvm::FunctionType::get(llvm::Type::getVoidTy(*context), false)));
+    builder->CreateCall(getOrDeclareAbort());
     builder->CreateUnreachable();
     builder->SetInsertPoint(condBB);
     llvm::Value* curVal = builder->CreateLoad(getDefaultType(), iterAlloca, stmt->iteratorVar.c_str());
@@ -2751,8 +2737,54 @@ void CodeGenerator::resolveTargetCPU(std::string& cpu, std::string& features) co
     }
 }
 
+// ---------------------------------------------------------------------------
+// Shared TargetMachine construction
+// ---------------------------------------------------------------------------
+// Both runOptimizationPasses() and writeObjectFile() need a configured
+// TargetMachine.  This helper consolidates the duplicated triple setup,
+// target lookup, TargetOptions configuration, and version-conditional
+// createTargetMachine() call into a single place.
+
+std::unique_ptr<llvm::TargetMachine> CodeGenerator::createTargetMachine() const {
+    std::string targetTripleStr = llvm::sys::getDefaultTargetTriple();
+#if LLVM_VERSION_MAJOR >= 19
+    llvm::Triple targetTriple(targetTripleStr);
+#endif
+
+    std::string error;
+#if LLVM_VERSION_MAJOR >= 19
+    auto* target = llvm::TargetRegistry::lookupTarget(targetTriple, error);
+#else
+    auto* target = llvm::TargetRegistry::lookupTarget(targetTripleStr, error);
+#endif
+    if (!target)
+        return nullptr;
+
+    llvm::TargetOptions opt;
+    if (useFastMath_) {
+        opt.UnsafeFPMath = true;
+        opt.NoInfsFPMath = true;
+        opt.NoNaNsFPMath = true;
+        opt.NoSignedZerosFPMath = true;
+    }
+    std::optional<llvm::Reloc::Model> RM =
+        usePIC_ ? llvm::Reloc::PIC_ : llvm::Reloc::Static;
+
+    std::string cpu;
+    std::string features;
+    resolveTargetCPU(cpu, features);
+
+#if LLVM_VERSION_MAJOR >= 19
+    return std::unique_ptr<llvm::TargetMachine>(
+        target->createTargetMachine(targetTriple, cpu, features, opt, RM));
+#else
+    return std::unique_ptr<llvm::TargetMachine>(
+        target->createTargetMachine(targetTripleStr, cpu, features, opt, RM));
+#endif
+}
+
 void CodeGenerator::runOptimizationPasses() {
-    // Add target-specific data layout
+    // Set the target triple on the module.
     std::string targetTripleStr = llvm::sys::getDefaultTargetTriple();
 #if LLVM_VERSION_MAJOR >= 19
     llvm::Triple targetTriple(targetTripleStr);
@@ -2761,34 +2793,9 @@ void CodeGenerator::runOptimizationPasses() {
     module->setTargetTriple(targetTripleStr);
 #endif
 
-    std::string error;
-#if LLVM_VERSION_MAJOR >= 19
-    auto target = llvm::TargetRegistry::lookupTarget(targetTriple, error);
-#else
-    auto target = llvm::TargetRegistry::lookupTarget(targetTripleStr, error);
-#endif
-    std::unique_ptr<llvm::TargetMachine> targetMachine;
-    std::string cpu;
-    std::string featureStr;
-    if (target) {
-        llvm::TargetOptions opt;
-        if (useFastMath_) {
-            opt.UnsafeFPMath = true;
-            opt.NoInfsFPMath = true;
-            opt.NoNaNsFPMath = true;
-            opt.NoSignedZerosFPMath = true;
-        }
-        std::optional<llvm::Reloc::Model> RM =
-            usePIC_ ? llvm::Reloc::PIC_ : llvm::Reloc::Static;
-        resolveTargetCPU(cpu, featureStr);
-#if LLVM_VERSION_MAJOR >= 19
-        targetMachine.reset(target->createTargetMachine(targetTriple, cpu, featureStr, opt, RM));
-#else
-        targetMachine.reset(target->createTargetMachine(targetTripleStr, cpu, featureStr, opt, RM));
-#endif
-        if (targetMachine) {
-            module->setDataLayout(targetMachine->createDataLayout());
-        }
+    auto targetMachine = createTargetMachine();
+    if (targetMachine) {
+        module->setDataLayout(targetMachine->createDataLayout());
     }
 
     if (optimizationLevel == OptimizationLevel::O0) {
@@ -2914,38 +2921,7 @@ void CodeGenerator::writeObjectFile(const std::string& filename) {
     module->setTargetTriple(targetTripleStr);
 #endif
 
-    std::string error;
-#if LLVM_VERSION_MAJOR >= 19
-    auto target = llvm::TargetRegistry::lookupTarget(targetTriple, error);
-#else
-    auto target = llvm::TargetRegistry::lookupTarget(targetTripleStr, error);
-#endif
-
-    if (!target) {
-        throw std::runtime_error("Failed to lookup target: " + error);
-    }
-
-    std::string CPU;
-    std::string features;
-    resolveTargetCPU(CPU, features);
-
-    llvm::TargetOptions opt;
-    if (useFastMath_) {
-        opt.UnsafeFPMath = true;
-        opt.NoInfsFPMath = true;
-        opt.NoNaNsFPMath = true;
-        opt.NoSignedZerosFPMath = true;
-    }
-    std::optional<llvm::Reloc::Model> RM =
-        usePIC_ ? llvm::Reloc::PIC_ : llvm::Reloc::Static;
-#if LLVM_VERSION_MAJOR >= 19
-    std::unique_ptr<llvm::TargetMachine> targetMachine(
-        target->createTargetMachine(targetTriple, CPU, features, opt, RM));
-#else
-    std::unique_ptr<llvm::TargetMachine> targetMachine(
-        target->createTargetMachine(targetTripleStr, CPU, features, opt, RM));
-#endif
-
+    auto targetMachine = createTargetMachine();
     if (!targetMachine) {
         throw std::runtime_error("Failed to create target machine");
     }
@@ -3534,8 +3510,9 @@ void CodeGenerator::emitBytecodeStatement(Statement* stmt) {
     }
     case ASTNodeType::SWITCH_STMT: {
         auto* switchStmt = static_cast<SwitchStmt*>(stmt);
-        static int switchCounter = 0;
-        std::string tempVar = "__switch_cond_" + std::to_string(switchCounter++) + "__";
+        // Use member variable instead of function-local static for
+        // thread-safety and deterministic output across instances.
+        std::string tempVar = "__switch_cond_" + std::to_string(bytecodeSwitchCounter_++) + "__";
         if (isInBytecodeFunctionContext()) {
             bytecodeLocals_[tempVar] = bytecodeNextLocal_++;
         }
