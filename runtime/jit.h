@@ -31,9 +31,9 @@ enum class JITSpecialization {
 /// at each call site and the JIT uses this profile to select the best
 /// specialization when compiling or recompiling.
 struct TypeProfile {
-    size_t intCalls = 0;    // Calls where all args were INTEGER
-    size_t floatCalls = 0;  // Calls where all args were FLOAT
-    size_t mixedCalls = 0;  // Calls with mixed or other types
+    size_t intCalls = 0;   // Calls where all args were INTEGER
+    size_t floatCalls = 0; // Calls where all args were FLOAT
+    size_t mixedCalls = 0; // Calls with mixed or other types
 
     /// Determine the best specialization from observed data.
     JITSpecialization bestSpecialization() const {
@@ -64,7 +64,7 @@ struct TypeProfile {
 /// After additional calls, recompile() can switch to a better specialization
 /// if the profile has changed (e.g., initially int, later mostly float).
 class BytecodeJIT {
-public:
+  public:
     /// Integer-specialized native function signature.
     using JITFnPtr = int64_t (*)(int64_t*, int);
 
@@ -87,8 +87,7 @@ public:
 
     /// Try to JIT-compile @p func with the given specialization.
     /// If @p spec is Unknown, defaults to IntOnly.  Returns true on success.
-    bool compile(const BytecodeFunction& func,
-                 JITSpecialization spec = JITSpecialization::IntOnly);
+    bool compile(const BytecodeFunction& func, JITSpecialization spec = JITSpecialization::IntOnly);
 
     /// Recompile a previously-compiled function with the specialization
     /// determined by its current type profile.  Returns true on success.
@@ -124,7 +123,7 @@ public:
     /// Get the type profile for @p name.
     const TypeProfile& getTypeProfile(const std::string& name) const;
 
-private:
+  private:
     /// Keep LLVM execution engines alive so compiled code remains valid.
     struct JITModule {
         std::unique_ptr<llvm::LLVMContext> context;
