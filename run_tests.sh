@@ -451,6 +451,8 @@ else
     FAILURES=$((FAILURES + 1))
 fi
 rm -f /tmp/omsc_obj_test.o
+test_cli_output "emit-obj-default-name" "exit_zero.o" 0 ./build/omsc --emit-obj examples/exit_zero.om
+rm -f exit_zero.o
 
 # help output includes new features
 test_cli_output "help-shows-check" "--check" 0 ./build/omsc --help

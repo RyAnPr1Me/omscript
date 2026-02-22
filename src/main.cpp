@@ -1786,7 +1786,8 @@ int main(int argc, char* argv[]) {
                 codegen.generate(program.get());
             }
 
-            std::string objFile = outputSpecified ? outputFile : (outputFile + ".o");
+            std::string objFile =
+                outputSpecified ? outputFile : (std::filesystem::path(sourceFile).stem().string() + ".o");
             codegen.writeObjectFile(objFile);
             if (!quiet) {
                 std::cout << "Object file written: " << objFile << "\n";
