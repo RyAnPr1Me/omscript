@@ -2740,6 +2740,49 @@ TEST(CodegenTest, DivisionStrengthReduction) {
     EXPECT_TRUE(hasAShr);
 }
 
+TEST(CodegenTest, ModuloStrengthReduction) {
+    // n % 8 should be converted to n & 7 (bitwise AND) when the divisor is a
+    // power of 2, avoiding the more expensive SRem instruction.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn mod_by_eight(n) { return n % 8; }\n"
+                           "fn main() { return mod_by_eight(17); }",
+                           codegen);
+    auto* func = mod->getFunction("mod_by_eight");
+    ASSERT_NE(func, nullptr);
+    EXPECT_FALSE(func->empty());
+    // Verify the function contains an AND instruction (strength reduction)
+    bool hasAnd = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::And) {
+                hasAnd = true;
+            }
+        }
+    }
+    EXPECT_TRUE(hasAnd);
+}
+
+TEST(CodegenTest, MultiplyStrengthReduction) {
+    // n * 8 should be converted to n << 3 (left shift) when the multiplier
+    // is a power of 2.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn mul_by_eight(n) { return n * 8; }\n"
+                           "fn main() { return mul_by_eight(3); }",
+                           codegen);
+    auto* func = mod->getFunction("mul_by_eight");
+    ASSERT_NE(func, nullptr);
+    EXPECT_FALSE(func->empty());
+    bool hasShl = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::Shl) {
+                hasShl = true;
+            }
+        }
+    }
+    EXPECT_TRUE(hasShl);
+}
+
 // ===========================================================================
 // Execution-tier classification
 // ===========================================================================

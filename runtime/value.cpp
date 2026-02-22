@@ -25,11 +25,8 @@ Value Value::operator+(const Value& other) const {
     if (type == Type::INTEGER && other.type == Type::INTEGER) {
         return Value(intValue + other.intValue);
     }
-    if ((type == Type::FLOAT || other.type == Type::FLOAT) && (type == Type::INTEGER || type == Type::FLOAT) &&
-        (other.type == Type::INTEGER || other.type == Type::FLOAT)) {
-        double a = (type == Type::FLOAT) ? floatValue : static_cast<double>(intValue);
-        double b = (other.type == Type::FLOAT) ? other.floatValue : static_cast<double>(other.intValue);
-        return Value(a + b);
+    if (needsFloatPromotion(other)) {
+        return Value(toDouble() + other.toDouble());
     }
     if (type == Type::STRING || other.type == Type::STRING) {
         // String concatenation using reference counted strings
@@ -55,11 +52,8 @@ Value Value::operator-(const Value& other) const {
     if (type == Type::INTEGER && other.type == Type::INTEGER) {
         return Value(intValue - other.intValue);
     }
-    if ((type == Type::FLOAT || other.type == Type::FLOAT) && (type == Type::INTEGER || type == Type::FLOAT) &&
-        (other.type == Type::INTEGER || other.type == Type::FLOAT)) {
-        double a = (type == Type::FLOAT) ? floatValue : static_cast<double>(intValue);
-        double b = (other.type == Type::FLOAT) ? other.floatValue : static_cast<double>(other.intValue);
-        return Value(a - b);
+    if (needsFloatPromotion(other)) {
+        return Value(toDouble() - other.toDouble());
     }
     throw std::runtime_error("Invalid operands for -");
 }
@@ -68,11 +62,8 @@ Value Value::operator*(const Value& other) const {
     if (type == Type::INTEGER && other.type == Type::INTEGER) {
         return Value(intValue * other.intValue);
     }
-    if ((type == Type::FLOAT || other.type == Type::FLOAT) && (type == Type::INTEGER || type == Type::FLOAT) &&
-        (other.type == Type::INTEGER || other.type == Type::FLOAT)) {
-        double a = (type == Type::FLOAT) ? floatValue : static_cast<double>(intValue);
-        double b = (other.type == Type::FLOAT) ? other.floatValue : static_cast<double>(other.intValue);
-        return Value(a * b);
+    if (needsFloatPromotion(other)) {
+        return Value(toDouble() * other.toDouble());
     }
     throw std::runtime_error("Invalid operands for *");
 }
@@ -83,13 +74,11 @@ Value Value::operator/(const Value& other) const {
             throw std::runtime_error("Division by zero");
         return Value(intValue / other.intValue);
     }
-    if ((type == Type::FLOAT || other.type == Type::FLOAT) && (type == Type::INTEGER || type == Type::FLOAT) &&
-        (other.type == Type::INTEGER || other.type == Type::FLOAT)) {
-        double a = (type == Type::FLOAT) ? floatValue : static_cast<double>(intValue);
-        double b = (other.type == Type::FLOAT) ? other.floatValue : static_cast<double>(other.intValue);
+    if (needsFloatPromotion(other)) {
+        double b = other.toDouble();
         if (b == 0.0)
             throw std::runtime_error("Division by zero");
-        return Value(a / b);
+        return Value(toDouble() / b);
     }
     throw std::runtime_error("Invalid operands for /");
 }
@@ -116,9 +105,7 @@ Value Value::operator-() const {
 bool Value::operator==(const Value& other) const {
     // Allow numeric type coercion for equality
     if ((type == Type::INTEGER || type == Type::FLOAT) && (other.type == Type::INTEGER || other.type == Type::FLOAT)) {
-        double a = (type == Type::FLOAT) ? floatValue : static_cast<double>(intValue);
-        double b = (other.type == Type::FLOAT) ? other.floatValue : static_cast<double>(other.intValue);
-        return a == b;
+        return toDouble() == other.toDouble();
     }
 
     if (type != other.type)
@@ -142,11 +129,8 @@ bool Value::operator<(const Value& other) const {
     if (type == Type::INTEGER && other.type == Type::INTEGER) {
         return intValue < other.intValue;
     }
-    if ((type == Type::FLOAT || other.type == Type::FLOAT) && (type == Type::INTEGER || type == Type::FLOAT) &&
-        (other.type == Type::INTEGER || other.type == Type::FLOAT)) {
-        double a = (type == Type::FLOAT) ? floatValue : static_cast<double>(intValue);
-        double b = (other.type == Type::FLOAT) ? other.floatValue : static_cast<double>(other.intValue);
-        return a < b;
+    if (needsFloatPromotion(other)) {
+        return toDouble() < other.toDouble();
     }
     if (type == Type::STRING && other.type == Type::STRING) {
         return stringValue < other.stringValue;
