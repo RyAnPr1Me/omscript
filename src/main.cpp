@@ -256,17 +256,30 @@ bool downloadAndInstallRelease(const std::string& tagName, const std::string& in
         return false;
     }
 
-    // Install the binary
+    // Install the binary atomically: copy to temp file then rename.
     std::string targetPath = installDir + "/omsc";
+    std::string tmpTemplate = installDir + "/omsc_update_XXXXXX";
+    std::vector<char> installTmpBuf(tmpTemplate.begin(), tmpTemplate.end());
+    installTmpBuf.push_back('\0');
+    int installTmpFd = mkstemp(installTmpBuf.data());
+    if (installTmpFd == -1) {
+        std::cerr << "Error: failed to create temporary file for installation in " << installDir << "\n";
+        std::filesystem::remove_all(tmpDir, ec);
+        return false;
+    }
+    close(installTmpFd);
+    std::string installTmpPath(installTmpBuf.data());
     try {
-        std::filesystem::copy_file(binaryPath, targetPath, std::filesystem::copy_options::overwrite_existing);
-        std::filesystem::permissions(targetPath,
-                                     std::filesystem::perms::owner_exec | std::filesystem::perms::group_exec |
-                                         std::filesystem::perms::others_exec | std::filesystem::perms::owner_read |
-                                         std::filesystem::perms::group_read | std::filesystem::perms::others_read,
-                                     std::filesystem::perm_options::add);
+        std::filesystem::copy_file(binaryPath, installTmpPath, std::filesystem::copy_options::overwrite_existing);
+        std::filesystem::permissions(installTmpPath,
+                                     std::filesystem::perms::owner_read | std::filesystem::perms::owner_exec |
+                                         std::filesystem::perms::group_read | std::filesystem::perms::group_exec |
+                                         std::filesystem::perms::others_read | std::filesystem::perms::others_exec,
+                                     std::filesystem::perm_options::replace);
+        std::filesystem::rename(installTmpPath, targetPath);
     } catch (const std::exception& e) {
         std::cerr << "Error installing update: " << e.what() << "\n";
+        std::filesystem::remove(installTmpPath, ec);
         std::filesystem::remove_all(tmpDir, ec);
         return false;
     }
@@ -288,7 +301,7 @@ std::string detectDistro() {
     while (std::getline(osRelease, line)) {
         if (line.find("ID=") == 0) {
             if (line.find("arch") != std::string::npos || line.find("manjaro") != std::string::npos ||
-                line.find(" EndeavourOS") != std::string::npos) {
+                line.find("endeavouros") != std::string::npos) {
                 return "arch";
             } else if (line.find("ubuntu") != std::string::npos || line.find("debian") != std::string::npos ||
                        line.find("linuxmint") != std::string::npos) {
@@ -370,18 +383,31 @@ bool installToSystem(const std::string& targetDir, bool force) {
         return true;
     }
 
-    std::filesystem::copy_options opts = std::filesystem::copy_options::overwrite_existing;
-    if (std::filesystem::is_symlink(exePath)) {
-        opts |= std::filesystem::copy_options::copy_symlinks;
+    // Write to a temp file in the target directory, then atomically rename so
+    // the in-place replace is safe even if the copy fails partway through.
+    std::string tmpTemplate = targetDir + "/omsc_install_XXXXXX";
+    std::vector<char> tmpBuf(tmpTemplate.begin(), tmpTemplate.end());
+    tmpBuf.push_back('\0');
+    int tmpFd = mkstemp(tmpBuf.data());
+    if (tmpFd == -1) {
+        std::cerr << "Error: failed to create temporary file in " << targetDir << "\n";
+        return false;
     }
+    close(tmpFd);
+    std::string tmpPath(tmpBuf.data());
 
     try {
-        std::filesystem::copy_file(exePath, targetPath, opts);
-        std::filesystem::permissions(targetPath, std::filesystem::perms::owner_exec |
-                                                     std::filesystem::perms::group_exec |
-                                                     std::filesystem::perms::others_exec);
+        std::filesystem::copy_file(exePath, tmpPath, std::filesystem::copy_options::overwrite_existing);
+        std::filesystem::permissions(tmpPath,
+                                     std::filesystem::perms::owner_read | std::filesystem::perms::owner_exec |
+                                         std::filesystem::perms::group_read | std::filesystem::perms::group_exec |
+                                         std::filesystem::perms::others_read | std::filesystem::perms::others_exec,
+                                     std::filesystem::perm_options::replace);
+        std::filesystem::rename(tmpPath, targetPath);
     } catch (const std::exception& e) {
-        std::cerr << "Error copying file: " << e.what() << "\n";
+        std::cerr << "Error installing binary: " << e.what() << "\n";
+        std::error_code ec;
+        std::filesystem::remove(tmpPath, ec);
         return false;
     }
 
@@ -516,6 +542,113 @@ void doInstall() {
     }
 }
 
+void doUninstall() {
+    // Candidate paths to check, in priority order.
+    std::vector<std::string> candidates;
+    if (isRoot()) {
+        candidates.push_back("/usr/local/bin/omsc");
+        candidates.push_back("/usr/bin/omsc");
+    } else {
+        candidates.push_back(getInstallBinDir(false) + "/omsc");
+        candidates.push_back("/usr/local/bin/omsc");
+        candidates.push_back("/usr/bin/omsc");
+    }
+
+    bool removedAny = false;
+    for (const auto& path : candidates) {
+        std::error_code ec;
+        if (!std::filesystem::exists(path, ec)) {
+            continue;
+        }
+        if (std::filesystem::remove(path, ec)) {
+            std::cout << "Removed " << path << "\n";
+            removedAny = true;
+        } else {
+            std::cerr << "Error: failed to remove " << path << ": " << ec.message() << "\n";
+        }
+    }
+
+    if (!removedAny) {
+        std::cout << "OmScript is not installed in any known location.\n";
+        return;
+    }
+
+    // Remove PATH entries added by omsc install from shell config files.
+    const char* homeDir = getenv("HOME");
+    if (!homeDir) {
+        return;
+    }
+    std::vector<std::string> shellConfigs = {std::string(homeDir) + "/.bashrc",
+                                             std::string(homeDir) + "/.profile",
+                                             std::string(homeDir) + "/.zshrc"};
+    for (const auto& configPath : shellConfigs) {
+        std::ifstream in(configPath);
+        if (!in.is_open()) {
+            continue;
+        }
+        std::vector<std::string> lines;
+        std::string line;
+        bool changed = false;
+        while (std::getline(in, line)) {
+            lines.push_back(line);
+        }
+        in.close();
+
+        // Remove lines that contain the omsc PATH marker and the PATH export added by omsc.
+        // The marker is a unique sentinel written exclusively by omsc install.
+        std::vector<std::string> filtered;
+        for (size_t i = 0; i < lines.size(); ++i) {
+            if (lines[i].find(kPathConfigMarker) != std::string::npos) {
+                // Skip the marker line and the following export line if it was written by omsc.
+                changed = true;
+                if (i + 1 < lines.size() && lines[i + 1].find("export PATH=") != std::string::npos) {
+                    ++i; // skip the export line too
+                }
+                continue;
+            }
+            filtered.push_back(lines[i]);
+        }
+
+        if (!changed) {
+            continue;
+        }
+
+        // Write atomically: write to a temp file then rename.
+        std::string tmpTemplate = configPath + ".omsc_XXXXXX";
+        std::vector<char> cfgTmpBuf(tmpTemplate.begin(), tmpTemplate.end());
+        cfgTmpBuf.push_back('\0');
+        int cfgTmpFd = mkstemp(cfgTmpBuf.data());
+        if (cfgTmpFd == -1) {
+            std::cerr << "Warning: could not create temp file to update " << configPath << "\n";
+            continue;
+        }
+        close(cfgTmpFd);
+        std::string cfgTmpPath(cfgTmpBuf.data());
+        {
+            std::ofstream out(cfgTmpPath, std::ios::trunc);
+            if (!out.is_open()) {
+                std::cerr << "Warning: could not update " << configPath << "\n";
+                std::error_code ec;
+                std::filesystem::remove(cfgTmpPath, ec);
+                continue;
+            }
+            for (const auto& l : filtered) {
+                out << l << "\n";
+            }
+        }
+        std::error_code ec;
+        std::filesystem::rename(cfgTmpPath, configPath, ec);
+        if (ec) {
+            std::cerr << "Warning: could not update " << configPath << ": " << ec.message() << "\n";
+            std::filesystem::remove(cfgTmpPath, ec);
+            continue;
+        }
+        std::cout << "Removed PATH entry from " << configPath << "\n";
+    }
+
+    std::cout << "\nOmScript has been uninstalled.\n";
+}
+
 void ensureInPath() {
     const char* binaryPath = getenv("OMSC_BINARY_PATH");
     if (!binaryPath) {
@@ -604,6 +737,7 @@ void printUsage(const char* progName) {
     std::cout << "  " << progName << " clean [-o output]\n";
     std::cout << "  " << progName << " version\n";
     std::cout << "  " << progName << " install\n";
+    std::cout << "  " << progName << " uninstall\n";
     std::cout << "  " << progName << " help\n";
     std::cout << "\nOptions:\n";
     std::cout << "  -o, --output <file>  Output file name (default: a.out, stdout for emit-ir)\n";
@@ -624,6 +758,7 @@ void printUsage(const char* progName) {
     std::cout << "  -Ofast               Maximum runtime optimization (alias for -O3)\n";
     std::cout << "\nInstallation:\n";
     std::cout << "  " << progName << " install        Add to PATH (first run or update)\n";
+    std::cout << "  " << progName << " uninstall      Remove installed binary and PATH entry\n";
 }
 
 std::string readSourceFile(const std::string& filename) {
@@ -838,7 +973,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    enum class Command { Compile, Run, Lex, Parse, EmitIR, Clean, Help, Version, Install };
+    enum class Command { Compile, Run, Lex, Parse, EmitIR, Clean, Help, Version, Install, Uninstall };
 
     int argIndex = 1;
     bool verbose = false;
@@ -887,6 +1022,9 @@ int main(int argc, char* argv[]) {
         commandMatched = true;
     } else if (firstArg == "install" || firstArg == "update" || firstArg == "--install" || firstArg == "--update") {
         command = Command::Install;
+        commandMatched = true;
+    } else if (firstArg == "uninstall" || firstArg == "--uninstall") {
+        command = Command::Uninstall;
         commandMatched = true;
     } else if (firstArg == "compile" || firstArg == "build" || firstArg == "-c" || firstArg == "-b" ||
                firstArg == "--compile" || firstArg == "--build") {
@@ -938,6 +1076,10 @@ int main(int argc, char* argv[]) {
     }
     if (command == Command::Install) {
         doInstall();
+        return 0;
+    }
+    if (command == Command::Uninstall) {
+        doUninstall();
         return 0;
     }
 

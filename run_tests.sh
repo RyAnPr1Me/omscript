@@ -154,6 +154,9 @@ if [ ! -f emit_ir_flag.ll ] || ! grep -q "i64 @main" emit_ir_flag.ll; then
 fi
 rm -f emit_ir_flag.ll
 test_cli_output "unknown-command" "Error: unknown command" 1 ./build/omsc frob
+test_cli_output "uninstall-not-installed" "not installed" 0 ./build/omsc uninstall
+test_cli_output "uninstall-alias" "not installed" 0 ./build/omsc --uninstall
+test_cli_output "help-shows-uninstall" "uninstall" 0 ./build/omsc --help
 test_cli_output "unknown-option" "Error: unknown option '--bad-flag'" 1 ./build/omsc run examples/exit_zero.om --bad-flag
 test_cli_output "output-unsupported-for-lex" "Error: -o/--output is only supported for compile/run/emit-ir/clean commands" 1 ./build/omsc lex examples/test.om -o /tmp/lex_out
 test_cli_output "output-empty" "Error: -o/--output requires a valid output file name" 1 ./build/omsc run examples/exit_zero.om -o ""
