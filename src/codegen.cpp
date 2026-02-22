@@ -1313,23 +1313,21 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     } else if (expr->op == "/" || expr->op == "%") {
         bool isDivision = expr->op == "/";
 
-        // Strength reduction for constant power-of-2 divisors:
+        // Strength reduction for constant power-of-2 divisors.
+        // Since the divisor is a known positive constant it is never zero,
+        // so we can skip the division-by-zero guard entirely.
         //   n / 2^k  →  n >> k   (arithmetic right shift preserves sign)
-        //   n % 2^k  →  n & (2^k - 1)  (bitwise AND for non-negative remainder)
+        //   n % 2^k  →  SRem with the zero-check elided (constant != 0)
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
             int s = log2IfPowerOf2(ci->getSExtValue());
             if (s >= 0) {
                 if (isDivision) {
                     return builder->CreateAShr(left, llvm::ConstantInt::get(getDefaultType(), s), "ashrtmp");
-                } else {
-                    // x % (2^k) == x & (2^k - 1) for non-negative x.
-                    // For signed values LLVM's SRem and this mask differ when
-                    // x is negative, but the language treats values as
-                    // non-negative integers here, matching SRem semantics for
-                    // the positive case.
-                    llvm::Value* mask = llvm::ConstantInt::get(getDefaultType(), ci->getSExtValue() - 1);
-                    return builder->CreateAnd(left, mask, "modmasktmp");
                 }
+                // For modulo we still use SRem to preserve correct signed
+                // semantics (e.g. -7 % 4 == -3), but the divisor is a known
+                // non-zero constant so the zero-check is unnecessary.
+                return builder->CreateSRem(left, right, "modtmp");
             }
         }
 
