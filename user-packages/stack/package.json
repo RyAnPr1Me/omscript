@@ -1,0 +1,7 @@
+{
+  "name": "stack",
+  "version": "1.0.0",
+  "description": "Stack data structure operations: size, is_empty, push, pop, peek, clear",
+  "entry": "stack.om",
+  "files": ["stack.om"]
+}

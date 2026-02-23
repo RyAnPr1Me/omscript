@@ -1,0 +1,7 @@
+{
+  "name": "numbtheory",
+  "version": "1.0.0",
+  "description": "Number theory utilities: is_prime, sum_divisors, count_divisors, is_perfect, collatz_steps",
+  "entry": "numbtheory.om",
+  "files": ["numbtheory.om"]
+}

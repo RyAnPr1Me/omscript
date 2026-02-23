@@ -1,0 +1,67 @@
+// search package - search algorithms for sorted and unsorted arrays
+
+fn search_linear(arr, target) {
+    var n = len(arr);
+    for (i in 0...n) {
+        if (arr[i] == target) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+fn search_binary(arr, target) {
+    var lo = 0;
+    var hi = len(arr) - 1;
+    while (lo <= hi) {
+        var mid = lo + (hi - lo) / 2;
+        if (arr[mid] == target) {
+            return mid;
+        }
+        if (arr[mid] < target) {
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    return -1;
+}
+
+fn search_count(arr, target) {
+    var n = len(arr);
+    var count = 0;
+    for (i in 0...n) {
+        if (arr[i] == target) {
+            count = count + 1;
+        }
+    }
+    return count;
+}
+
+fn search_min_index(arr) {
+    var n = len(arr);
+    if (n == 0) {
+        return -1;
+    }
+    var idx = 0;
+    for (i in 1...n) {
+        if (arr[i] < arr[idx]) {
+            idx = i;
+        }
+    }
+    return idx;
+}
+
+fn search_max_index(arr) {
+    var n = len(arr);
+    if (n == 0) {
+        return -1;
+    }
+    var idx = 0;
+    for (i in 1...n) {
+        if (arr[i] > arr[idx]) {
+            idx = i;
+        }
+    }
+    return idx;
+}
