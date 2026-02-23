@@ -1,0 +1,7 @@
+{
+  "name": "matrix",
+  "version": "1.0.0",
+  "description": "2D matrix operations using flat arrays: get, set, add, scale, trace, is_identity, transpose",
+  "entry": "matrix.om",
+  "files": ["matrix.om"]
+}

@@ -1,0 +1,59 @@
+// matrix package - 2D matrix operations using flat arrays
+// Matrices are stored as flat arrays with dimensions passed separately.
+// Index (row, col) in a matrix with 'cols' columns = row * cols + col.
+
+fn mat_get(mat, cols, row, col) {
+    return mat[row * cols + col];
+}
+
+fn mat_set(mat, cols, row, col, val) {
+    mat[row * cols + col] = val;
+}
+
+fn mat_add(a, b, result, rows, cols) {
+    var size = rows * cols;
+    for (i in 0...size) {
+        result[i] = a[i] + b[i];
+    }
+}
+
+fn mat_scale(mat, result, rows, cols, scalar) {
+    var size = rows * cols;
+    for (i in 0...size) {
+        result[i] = mat[i] * scalar;
+    }
+}
+
+fn mat_trace(mat, n) {
+    var total = 0;
+    for (i in 0...n) {
+        total = total + mat[i * n + i];
+    }
+    return total;
+}
+
+fn mat_is_identity(mat, n) {
+    for (r in 0...n) {
+        for (c in 0...n) {
+            var val = mat[r * n + c];
+            if (r == c) {
+                if (val != 1) {
+                    return 0;
+                }
+            } else {
+                if (val != 0) {
+                    return 0;
+                }
+            }
+        }
+    }
+    return 1;
+}
+
+fn mat_transpose(mat, result, rows, cols) {
+    for (r in 0...rows) {
+        for (c in 0...cols) {
+            result[c * rows + r] = mat[r * cols + c];
+        }
+    }
+}

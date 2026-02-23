@@ -24,8 +24,7 @@ constexpr const char* kCompilerVersion = "OmScript Compiler v" OMSC_VERSION;
 constexpr const char* kPathConfigMarker = "# omsc-path-auto";
 constexpr const char* kGitHubReleasesApiUrl = "https://api.github.com/repos/RyAnPr1Me/omscript/releases/latest";
 constexpr const char* kGitHubReleasesDownloadBase = "https://github.com/RyAnPr1Me/omscript/releases/download";
-constexpr const char* kDefaultRegistryUrl =
-    "https://raw.githubusercontent.com/RyAnPr1Me/omscript/main/user-packages";
+constexpr const char* kDefaultRegistryUrl = "https://raw.githubusercontent.com/RyAnPr1Me/omscript/main/user-packages";
 constexpr const char* kLocalPackagesDir = "om_packages";
 constexpr int kApiTimeoutSeconds = 10;
 constexpr int kDownloadTimeoutSeconds = 120;
@@ -820,9 +819,8 @@ bool downloadFile(const std::string& url, const std::string& destPath) {
     }
     std::string curlBin = *curlPathOrErr;
     std::string timeoutStr = std::to_string(kDownloadTimeoutSeconds);
-    std::vector<std::string> args = {curlBin,       "-s",    "-f",          "-L",
-                                     "--max-redirs", "5",    "--max-time",  timeoutStr,
-                                     "-o",           destPath, url};
+    std::vector<std::string> args = {curlBin,    "-s", "-f",     "-L", "--max-redirs", "5", "--max-time",
+                                     timeoutStr, "-o", destPath, url};
     llvm::SmallVector<llvm::StringRef, 12> argRefs;
     for (const auto& a : args) {
         argRefs.push_back(a);
@@ -852,9 +850,8 @@ std::string downloadString(const std::string& url) {
     std::string tmpFile(tmpBuf.data());
 
     std::string timeoutStr = std::to_string(kApiTimeoutSeconds);
-    std::vector<std::string> args = {curlBin,       "-s",   "-f",          "-L",
-                                     "--max-redirs", "5",   "--max-time",  timeoutStr,
-                                     "-o",           tmpFile, url};
+    std::vector<std::string> args = {curlBin,    "-s", "-f",    "-L", "--max-redirs", "5", "--max-time",
+                                     timeoutStr, "-o", tmpFile, url};
     llvm::SmallVector<llvm::StringRef, 12> argRefs;
     for (const auto& a : args) {
         argRefs.push_back(a);
@@ -2174,8 +2171,7 @@ int main(int argc, char* argv[]) {
                 std::cout << "Dry run: IR generation successful for " << sourceFile << "\n";
             }
             if (showTiming) {
-                auto lexMs =
-                    std::chrono::duration_cast<std::chrono::microseconds>(lexEnd - lexStart).count() / 1000.0;
+                auto lexMs = std::chrono::duration_cast<std::chrono::microseconds>(lexEnd - lexStart).count() / 1000.0;
                 auto parseMs =
                     std::chrono::duration_cast<std::chrono::microseconds>(parseEnd - parseStart).count() / 1000.0;
                 auto codegenMs =
@@ -2217,16 +2213,15 @@ int main(int argc, char* argv[]) {
                 std::cout << "Dry run: compilation successful for " << sourceFile << "\n";
             }
             if (showTiming) {
-                auto lexMs =
-                    std::chrono::duration_cast<std::chrono::microseconds>(lexEnd - lexStart).count() / 1000.0;
+                auto lexMs = std::chrono::duration_cast<std::chrono::microseconds>(lexEnd - lexStart).count() / 1000.0;
                 auto parseMs =
                     std::chrono::duration_cast<std::chrono::microseconds>(parseEnd - parseStart).count() / 1000.0;
                 auto codegenMs =
                     std::chrono::duration_cast<std::chrono::microseconds>(codegenEnd - codegenStart).count() / 1000.0;
-                auto totalMs = std::chrono::duration_cast<std::chrono::microseconds>(
-                                   std::chrono::steady_clock::now() - totalStart)
-                                   .count() /
-                               1000.0;
+                auto totalMs =
+                    std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - totalStart)
+                        .count() /
+                    1000.0;
                 std::cerr << "Timing: lex " << lexMs << "ms, parse " << parseMs << "ms, codegen " << codegenMs
                           << "ms, total " << totalMs << "ms\n";
             }
@@ -2260,10 +2255,10 @@ int main(int argc, char* argv[]) {
                 std::cout << "Object file written: " << objFile << "\n";
             }
             if (showTiming) {
-                auto totalMs = std::chrono::duration_cast<std::chrono::microseconds>(
-                                   std::chrono::steady_clock::now() - totalStart)
-                                   .count() /
-                               1000.0;
+                auto totalMs =
+                    std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - totalStart)
+                        .count() /
+                    1000.0;
                 std::cerr << "Timing: total " << totalMs << "ms\n";
             }
             return 0;
@@ -2288,10 +2283,10 @@ int main(int argc, char* argv[]) {
         compiler.compile(sourceFile, outputFile);
 
         if (showTiming) {
-            auto totalMs = std::chrono::duration_cast<std::chrono::microseconds>(
-                               std::chrono::steady_clock::now() - totalStart)
-                               .count() /
-                           1000.0;
+            auto totalMs =
+                std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - totalStart)
+                    .count() /
+                1000.0;
             std::cerr << "Timing: total " << totalMs << "ms\n";
         }
 

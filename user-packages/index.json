@@ -76,6 +76,34 @@
       "description": "Functional-style array operations: reduce_sum, reduce_product, any_positive, all_positive, count_if_positive, count_if_even, count_if_odd",
       "entry": "functional.om",
       "files": ["functional.om"]
+    },
+    {
+      "name": "matrix",
+      "version": "1.0.0",
+      "description": "2D matrix operations using flat arrays: get, set, add, scale, trace, is_identity, transpose",
+      "entry": "matrix.om",
+      "files": ["matrix.om"]
+    },
+    {
+      "name": "search",
+      "version": "1.0.0",
+      "description": "Search algorithms: linear_search, binary_search, count, min_index, max_index",
+      "entry": "search.om",
+      "files": ["search.om"]
+    },
+    {
+      "name": "stack",
+      "version": "1.0.0",
+      "description": "Stack data structure operations: size, is_empty, push, pop, peek, clear",
+      "entry": "stack.om",
+      "files": ["stack.om"]
+    },
+    {
+      "name": "numbtheory",
+      "version": "1.0.0",
+      "description": "Number theory utilities: is_prime, sum_divisors, count_divisors, is_perfect, collatz_steps",
+      "entry": "numbtheory.om",
+      "files": ["numbtheory.om"]
     }
   ]
 }

@@ -1,0 +1,7 @@
+{
+  "name": "search",
+  "version": "1.0.0",
+  "description": "Search algorithms: linear_search, binary_search, count, min_index, max_index",
+  "entry": "search.om",
+  "files": ["search.om"]
+}
