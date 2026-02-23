@@ -720,12 +720,24 @@ std::unique_ptr<Expression> Parser::parseAddition() {
 }
 
 std::unique_ptr<Expression> Parser::parseMultiplication() {
-    auto left = parseUnary();
+    auto left = parsePower();
 
     while (match(TokenType::STAR) || match(TokenType::SLASH) || match(TokenType::PERCENT)) {
         std::string op = tokens[current - 1].lexeme;
-        auto right = parseUnary();
+        auto right = parsePower();
         left = std::make_unique<BinaryExpr>(op, std::move(left), std::move(right));
+    }
+
+    return left;
+}
+
+std::unique_ptr<Expression> Parser::parsePower() {
+    auto left = parseUnary();
+
+    if (match(TokenType::STAR_STAR)) {
+        // Right-associative: 2 ** 3 ** 2 = 2 ** (3 ** 2) = 2 ** 9 = 512
+        auto right = parsePower();
+        left = std::make_unique<BinaryExpr>("**", std::move(left), std::move(right));
     }
 
     return left;

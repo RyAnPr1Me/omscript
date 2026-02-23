@@ -756,6 +756,24 @@ vm_exit:
             }
             break;
         }
+        case OpCode::POW: {
+            uint8_t rd = readByte(bytecode, ip);
+            uint8_t rs1 = readByte(bytecode, ip);
+            uint8_t rs2 = readByte(bytecode, ip);
+            // Integer exponentiation: base ** exp
+            Value base = registers[rs1];
+            Value exp = registers[rs2];
+            if (exp.type == Value::Type::INTEGER && exp.intValue < 0) {
+                registers[rd] = Value(static_cast<int64_t>(0));
+            } else {
+                Value result(static_cast<int64_t>(1));
+                int64_t n = exp.intValue;
+                for (int64_t i = 0; i < n; i++)
+                    result = result * base;
+                registers[rd] = result;
+            }
+            break;
+        }
         case OpCode::NEG: {
             uint8_t rd = readByte(bytecode, ip);
             uint8_t rs = readByte(bytecode, ip);

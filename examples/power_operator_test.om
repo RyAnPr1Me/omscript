@@ -1,0 +1,30 @@
+// Test the ** (exponentiation) operator
+fn main() {
+    var result = 0;
+
+    // Basic integer exponentiation
+    result = result + (2 ** 8);     // 256
+    result = result + (3 ** 3);     // 27
+    result = result + (5 ** 0);     // 1
+    result = result + (10 ** 1);    // 10
+
+    // Right-associativity: 2 ** 3 ** 2 = 2 ** (3 ** 2) = 2 ** 9 = 512
+    var rassoc = 2 ** 3 ** 2;
+    var explicit_val = 2 ** (3 ** 2);
+    result = result + (rassoc - explicit_val); // 0 (they should be equal)
+
+    // Negative exponent returns 0 for integer power
+    result = result + (2 ** -1);    // 0
+
+    // Power with expressions
+    result = result + ((1 + 1) ** (2 + 1)); // 2 ** 3 = 8
+
+    // Power with variables
+    var base = 4;
+    var exp = 3;
+    result = result + (base ** exp); // 64
+
+    // 256 + 27 + 1 + 10 + 0 + 0 + 8 + 64 = 366
+    // 366 % 256 = 110
+    return result;
+}

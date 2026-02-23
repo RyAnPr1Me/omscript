@@ -1,0 +1,38 @@
+// Test returning arrays from functions (heap-allocated, not stack)
+fn makeArray() {
+    return [10, 20, 30];
+}
+
+fn makeRange(n) {
+    var arr = [0, 0, 0, 0, 0];
+    for (i in 0...5) {
+        arr[i] = i * n;
+    }
+    return arr;
+}
+
+fn sumArray(arr) {
+    var total = 0;
+    var l = len(arr);
+    for (i in 0...l) {
+        total = total + arr[i];
+    }
+    return total;
+}
+
+fn main() {
+    var result = 0;
+
+    // Basic array return
+    var arr = makeArray();
+    result = result + arr[0] + arr[1] + arr[2]; // 10 + 20 + 30 = 60
+
+    // Array return with modification
+    var range = makeRange(3); // [0, 3, 6, 9, 12]
+    result = result + sumArray(range); // 60 + 30 = 90
+
+    // Direct indexing of function call return
+    result = result + makeArray()[1]; // 90 + 20 = 110
+
+    return result; // 110
+}

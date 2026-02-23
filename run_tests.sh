@@ -143,6 +143,7 @@ test_cli_output "lex-octal-literal" "INTEGER '0o77'" 0 ./build/omsc lex examples
 test_cli_output "lex-binary-literal" "INTEGER '0b1111'" 0 ./build/omsc lex examples/hex_oct_bin_test.om
 test_cli_output "lex-underscore-decimal" "INTEGER '1000000'" 0 ./build/omsc lex examples/underscore_num_test.om
 test_cli_output "lex-underscore-hex" "INTEGER '0xFF00'" 0 ./build/omsc lex examples/underscore_num_test.om
+test_cli_output "lex-power-operator" "STAR_STAR '**'" 0 ./build/omsc lex examples/power_operator_test.om
 test_cli_output "tokens-flag" "FN" 0 ./build/omsc --tokens examples/test.om
 test_cli_output "parse" "Parsed program" 0 ./build/omsc parse examples/test.om
 test_cli_output "emit-ast-command" "Parsed program" 0 ./build/omsc emit-ast examples/test.om
@@ -284,6 +285,8 @@ test_program "examples/hex_oct_bin_test.om" 543
 test_program "examples/array_incdec_test.om" 162
 test_program "examples/hex_escape_test.om" 0
 test_program "examples/underscore_num_test.om" 178
+test_program "examples/array_return_test.om" 110
+test_program "examples/power_operator_test.om" 366
 test_program "examples/swap_oob.om" 134
 test_program "examples/char_at_oob.om" 134
 test_compile_fail "examples/const_fail.om"

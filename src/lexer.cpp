@@ -393,7 +393,10 @@ std::vector<Token> Lexer::tokenize() {
             }
             break;
         case '*':
-            if (peek() == '=') {
+            if (peek() == '*') {
+                advance();
+                tokens.push_back(makeToken(TokenType::STAR_STAR, "**"));
+            } else if (peek() == '=') {
                 advance();
                 tokens.push_back(makeToken(TokenType::STAR_ASSIGN, "*="));
             } else {

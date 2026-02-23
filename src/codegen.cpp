@@ -178,6 +178,16 @@ std::unique_ptr<Expression> optimizeOptMaxBinary(const std::string& op, std::uni
             return std::make_unique<LiteralExpr>(lval << rval);
         if (op == ">>" && rval >= 0 && rval < 64)
             return std::make_unique<LiteralExpr>(lval >> rval);
+        if (op == "**") {
+            if (rval >= 0) {
+                long long result = 1;
+                for (long long i = 0; i < rval; i++)
+                    result *= lval;
+                return std::make_unique<LiteralExpr>(result);
+            } else {
+                return std::make_unique<LiteralExpr>(static_cast<long long>(0));
+            }
+        }
     } else if (leftLiteral->literalType == LiteralExpr::LiteralType::FLOAT &&
                rightLiteral->literalType == LiteralExpr::LiteralType::FLOAT) {
         double lval = leftLiteral->floatValue;
@@ -208,6 +218,8 @@ std::unique_ptr<Expression> optimizeOptMaxBinary(const std::string& op, std::uni
             return std::make_unique<LiteralExpr>(static_cast<long long>((lval != 0.0) && (rval != 0.0)));
         if (op == "||")
             return std::make_unique<LiteralExpr>(static_cast<long long>((lval != 0.0) || (rval != 0.0)));
+        if (op == "**")
+            return std::make_unique<LiteralExpr>(std::pow(lval, rval));
     } else {
         // Mixed int/float constant folding: promote the integer operand to double
         double leftDouble = (leftLiteral->literalType == LiteralExpr::LiteralType::FLOAT)
@@ -238,6 +250,8 @@ std::unique_ptr<Expression> optimizeOptMaxBinary(const std::string& op, std::uni
             return std::make_unique<LiteralExpr>(static_cast<long long>(leftDouble > rightDouble));
         if (op == ">=")
             return std::make_unique<LiteralExpr>(static_cast<long long>(leftDouble >= rightDouble));
+        if (op == "**")
+            return std::make_unique<LiteralExpr>(std::pow(leftDouble, rightDouble));
     }
 
     return std::make_unique<BinaryExpr>(op, std::move(left), std::move(right));
@@ -1213,6 +1227,12 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             auto cmp = builder->CreateFCmpOGE(left, right, "fcmptmp");
             return builder->CreateZExt(cmp, getDefaultType(), "booltmp");
         }
+        if (expr->op == "**") {
+            // Float exponentiation: use llvm.pow intrinsic
+            llvm::Function* powFn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::pow,
+                                                                     {llvm::Type::getDoubleTy(*context)});
+            return builder->CreateCall(powFn, {left, right}, "fpowtmp");
+        }
 
         codegenError("Invalid binary operator for float operands: " + expr->op, expr);
     }
@@ -1293,6 +1313,15 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         } else if (expr->op == ">>") {
             if (rval >= 0 && rval < 64)
                 return llvm::ConstantInt::get(*context, llvm::APInt(64, lval >> rval));
+        } else if (expr->op == "**") {
+            if (rval >= 0) {
+                int64_t result = 1;
+                for (int64_t i = 0; i < rval; i++)
+                    result *= lval;
+                return llvm::ConstantInt::get(*context, llvm::APInt(64, result));
+            } else {
+                return llvm::ConstantInt::get(*context, llvm::APInt(64, 0));
+            }
         }
     }
 
@@ -1388,6 +1417,48 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         llvm::Value* mask = llvm::ConstantInt::get(getDefaultType(), 63);
         llvm::Value* safeShift = builder->CreateAnd(right, mask, "shrmask");
         return builder->CreateAShr(left, safeShift, "ashrtmp");
+    } else if (expr->op == "**") {
+        // Exponentiation operator: base ** exponent
+        // Uses iterative multiplication loop (same algorithm as pow() stdlib).
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* negExpBB = llvm::BasicBlock::Create(*context, "pow.negexp", function);
+        llvm::BasicBlock* posExpBB = llvm::BasicBlock::Create(*context, "pow.posexp", function);
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "pow.loop", function);
+        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "pow.body", function);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "pow.done", function);
+
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
+        llvm::Value* isNegExp = builder->CreateICmpSLT(right, zero, "pow.isneg");
+        builder->CreateCondBr(isNegExp, negExpBB, posExpBB);
+
+        builder->SetInsertPoint(negExpBB);
+        builder->CreateBr(doneBB);
+
+        builder->SetInsertPoint(posExpBB);
+        builder->CreateBr(loopBB);
+
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "pow.result");
+        llvm::PHINode* counter = builder->CreatePHI(getDefaultType(), 2, "pow.counter");
+        result->addIncoming(llvm::ConstantInt::get(getDefaultType(), 1), posExpBB);
+        counter->addIncoming(right, posExpBB);
+
+        llvm::Value* done = builder->CreateICmpSLE(counter, zero, "pow.done.cmp");
+        builder->CreateCondBr(done, doneBB, bodyBB);
+
+        builder->SetInsertPoint(bodyBB);
+        llvm::Value* newResult = builder->CreateMul(result, left, "pow.mul");
+        llvm::Value* newCounter =
+            builder->CreateSub(counter, llvm::ConstantInt::get(getDefaultType(), 1), "pow.dec");
+        result->addIncoming(newResult, bodyBB);
+        counter->addIncoming(newCounter, bodyBB);
+        builder->CreateBr(loopBB);
+
+        builder->SetInsertPoint(doneBB);
+        llvm::PHINode* finalResult = builder->CreatePHI(getDefaultType(), 2, "pow.final");
+        finalResult->addIncoming(zero, negExpBB);
+        finalResult->addIncoming(result, loopBB);
+        return finalResult;
     }
 
     codegenError("Unknown binary operator: " + expr->op, expr);
@@ -2277,26 +2348,29 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
     size_t numElements = expr->elements.size();
     // Allocate space for (1 + numElements) i64 slots: [length, elem0, elem1, ...]
     size_t totalSlots = 1 + numElements;
-    llvm::Value* allocSize = llvm::ConstantInt::get(getDefaultType(), totalSlots);
-    llvm::Function* function = builder->GetInsertBlock()->getParent();
-    llvm::IRBuilder<> entryBuilder(&function->getEntryBlock(), function->getEntryBlock().begin());
-    llvm::AllocaInst* arrAlloca = entryBuilder.CreateAlloca(getDefaultType(), allocSize, "arr");
 
-    // Store the length in slot 0 (arrAlloca points to slot 0)
-    builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), numElements), arrAlloca);
+    // Use heap allocation (malloc) so that arrays survive function returns.
+    // Stack allocation (alloca) would be invalidated when the enclosing
+    // function returns, causing use-after-free when the caller accesses the
+    // array through the returned pointer-as-i64.
+    llvm::Value* byteSize = llvm::ConstantInt::get(getDefaultType(), totalSlots * 8);
+    llvm::Value* arrPtr = builder->CreateCall(getOrDeclareMalloc(), {byteSize}, "arr");
+
+    // Store the length in slot 0 (arrPtr points to slot 0)
+    builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), numElements), arrPtr);
 
     // Store each element in slots 1..N
     for (size_t i = 0; i < numElements; i++) {
         llvm::Value* elemVal = generateExpression(expr->elements[i].get());
         // Array slots are i64, so convert if needed
         elemVal = toDefaultType(elemVal);
-        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrAlloca,
+        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrPtr,
                                                   llvm::ConstantInt::get(getDefaultType(), i + 1), "arr.elem.ptr");
         builder->CreateStore(elemVal, elemPtr);
     }
 
     // Return the array pointer as an i64 for the dynamic type system
-    return builder->CreatePtrToInt(arrAlloca, getDefaultType(), "arr.int");
+    return builder->CreatePtrToInt(arrPtr, getDefaultType(), "arr.int");
 }
 
 llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
@@ -3194,7 +3268,15 @@ uint8_t CodeGenerator::emitBytecodeExpression(Expression* expr) {
                 result = lv << rv;
             else if (bin->op == ">>" && rv >= 0 && rv < 64)
                 result = lv >> rv;
-            else if (bin->op == "==")
+            else if (bin->op == "**") {
+                if (rv >= 0) {
+                    result = 1;
+                    for (long long i = 0; i < rv; i++)
+                        result *= lv;
+                } else {
+                    result = 0;
+                }
+            } else if (bin->op == "==")
                 result = static_cast<long long>(lv == rv);
             else if (bin->op == "!=")
                 result = static_cast<long long>(lv != rv);
@@ -3259,6 +3341,8 @@ uint8_t CodeGenerator::emitBytecodeExpression(Expression* expr) {
             bytecodeEmitter.emit(OpCode::SHL);
         else if (bin->op == ">>")
             bytecodeEmitter.emit(OpCode::SHR);
+        else if (bin->op == "**")
+            bytecodeEmitter.emit(OpCode::POW);
         else {
             throw std::runtime_error("Unsupported binary operator in bytecode: " + bin->op);
         }

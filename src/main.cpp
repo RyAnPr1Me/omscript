@@ -1290,6 +1290,8 @@ const char* tokenTypeToString(omscript::TokenType type) {
         return "MINUS";
     case omscript::TokenType::STAR:
         return "STAR";
+    case omscript::TokenType::STAR_STAR:
+        return "STAR_STAR";
     case omscript::TokenType::SLASH:
         return "SLASH";
     case omscript::TokenType::PERCENT:
