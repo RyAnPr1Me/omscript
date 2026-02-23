@@ -5,6 +5,19 @@ All notable changes to the OmScript compiler will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-02-23
+
+### Added
+- Hexadecimal integer literals (`0xFF`, `0x1A`)
+- Octal integer literals (`0o77`, `0o10`)
+- Binary integer literals (`0b1010`, `0b11111111`)
+- Clear error messages for malformed number literals (e.g. `0x` with no digits)
+
+### Fixed
+- Constant folding of `INT64_MIN / -1` and `INT64_MIN % -1` no longer causes undefined behavior (both AST and LLVM IR paths)
+- Constant folding of unary negation on `INT64_MIN` no longer causes undefined behavior (both AST and LLVM IR paths)
+- Shift operations (`<<`, `>>`) with out-of-range amounts (≥ 64) no longer cause undefined behavior in compiled code; shift amount is now masked to [0, 63]
+
 ## [1.0.0] - 2026-02-22
 
 ### Fixed

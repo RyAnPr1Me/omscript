@@ -62,6 +62,9 @@ fn functionName(param1, param2) {
 var x = 10;           // mutable variable
 const y = 20;         // constant (immutable)
 var z: int = 30;      // optional type annotation
+var h = 0xFF;         // hex literal (255)
+var o = 0o17;         // octal literal (15)
+var b = 0b1010;       // binary literal (10)
 ```
 Type annotations are optional in general but required inside `OPTMAX` blocks.
 

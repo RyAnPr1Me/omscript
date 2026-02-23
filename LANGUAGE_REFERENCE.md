@@ -224,6 +224,19 @@ Decimal integer literals:
 -7          // Unary minus applied to 7
 ```
 
+Hexadecimal, octal, and binary literals are also supported:
+
+```javascript
+0xFF        // Hex: 255
+0x1A        // Hex: 26
+0o77        // Octal: 63
+0o10        // Octal: 8
+0b1010      // Binary: 10
+0b11111111  // Binary: 255
+```
+
+The prefix is case-insensitive (`0x` and `0X` are equivalent, likewise for `0o`/`0O` and `0b`/`0B`). At least one digit must follow the prefix.
+
 #### Float Literals
 
 Floating-point literals with a decimal point:
