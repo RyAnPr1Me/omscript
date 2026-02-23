@@ -1,0 +1,25 @@
+{
+  "packages": [
+    {
+      "name": "math",
+      "version": "1.0.0",
+      "description": "Math utility functions: factorial, fibonacci, gcd, lcm, power",
+      "entry": "math.om",
+      "files": ["math.om"]
+    },
+    {
+      "name": "strings",
+      "version": "1.0.0",
+      "description": "String utility functions: repeat, is_empty, char counting",
+      "entry": "strings.om",
+      "files": ["strings.om"]
+    },
+    {
+      "name": "algorithms",
+      "version": "1.0.0",
+      "description": "Common algorithms: bubble sort, binary search, sum, min/max of arrays",
+      "entry": "algorithms.om",
+      "files": ["algorithms.om"]
+    }
+  ]
+}

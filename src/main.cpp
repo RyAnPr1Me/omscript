@@ -4,6 +4,7 @@
 #include "parser.h"
 #include <chrono>
 #include <csignal>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -23,10 +24,22 @@ constexpr const char* kCompilerVersion = "OmScript Compiler v" OMSC_VERSION;
 constexpr const char* kPathConfigMarker = "# omsc-path-auto";
 constexpr const char* kGitHubReleasesApiUrl = "https://api.github.com/repos/RyAnPr1Me/omscript/releases/latest";
 constexpr const char* kGitHubReleasesDownloadBase = "https://github.com/RyAnPr1Me/omscript/releases/download";
-constexpr const char* kGitHubRawBase = "https://raw.githubusercontent.com/RyAnPr1Me/omscript/main/user-packages";
+constexpr const char* kDefaultRegistryUrl =
+    "https://raw.githubusercontent.com/RyAnPr1Me/omscript/main/user-packages";
 constexpr const char* kLocalPackagesDir = "om_packages";
 constexpr int kApiTimeoutSeconds = 10;
 constexpr int kDownloadTimeoutSeconds = 120;
+
+/// Return the base URL for the remote package registry.
+/// Defaults to the GitHub raw URL for the main branch of omscript.
+/// Can be overridden via the OMSC_REGISTRY_URL environment variable.
+std::string getRegistryBaseUrl() {
+    const char* env = std::getenv("OMSC_REGISTRY_URL");
+    if (env && env[0] != '\0') {
+        return env;
+    }
+    return kDefaultRegistryUrl;
+}
 
 struct Version {
     int major = 0;
@@ -702,32 +715,6 @@ void signalHandler(int sig) {
 // Package manager
 // ---------------------------------------------------------------------------
 
-/// Resolve the path to the user-packages registry directory.
-/// First checks next to the running binary (source tree layout), then
-/// falls back to the compiled-in repo location, then empty string.
-std::string findUserPackagesDir() {
-    // Try relative to the executable (works when running from the build tree).
-    try {
-        auto exePath = std::filesystem::read_symlink("/proc/self/exe");
-        // build/omsc -> look for ../user-packages
-        auto candidate = exePath.parent_path().parent_path() / "user-packages";
-        if (std::filesystem::is_directory(candidate)) {
-            return std::filesystem::canonical(candidate).string();
-        }
-        // Also try same directory as exe (installed layout)
-        candidate = exePath.parent_path() / "user-packages";
-        if (std::filesystem::is_directory(candidate)) {
-            return std::filesystem::canonical(candidate).string();
-        }
-    } catch (...) {
-    }
-    // Try current working directory
-    if (std::filesystem::is_directory("user-packages")) {
-        return std::filesystem::canonical("user-packages").string();
-    }
-    return "";
-}
-
 /// Minimal JSON string field extractor (reuse the existing pattern).
 /// Extracts a simple "key":"value" or "key": "value" pair.
 std::string jsonField(const std::string& json, const std::string& key) {
@@ -795,14 +782,9 @@ struct PackageInfo {
     bool valid = false;
 };
 
-PackageInfo readPackageManifest(const std::string& manifestPath) {
+/// Parse a PackageInfo from a JSON string (e.g. the contents of package.json).
+PackageInfo parsePackageManifest(const std::string& json) {
     PackageInfo info;
-    std::ifstream f(manifestPath);
-    if (!f.is_open()) {
-        return info;
-    }
-    std::string json((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-    f.close();
     info.name = jsonField(json, "name");
     info.version = jsonField(json, "version");
     info.description = jsonField(json, "description");
@@ -812,23 +794,121 @@ PackageInfo readPackageManifest(const std::string& manifestPath) {
     return info;
 }
 
-/// List all packages available in the user-packages registry.
-std::vector<PackageInfo> listAvailablePackages(const std::string& registryDir) {
+/// Read a PackageInfo from a local file on disk.
+PackageInfo readPackageManifest(const std::string& manifestPath) {
+    std::ifstream f(manifestPath);
+    if (!f.is_open()) {
+        return PackageInfo{};
+    }
+    std::string json((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    f.close();
+    return parsePackageManifest(json);
+}
+
+/// Download a URL to a local file using curl.  Returns true on success.
+bool downloadFile(const std::string& url, const std::string& destPath) {
+    auto curlPathOrErr = llvm::sys::findProgramByName("curl");
+    if (!curlPathOrErr) {
+        std::cerr << "Error: curl is required for package downloads but was not found\n";
+        return false;
+    }
+    std::string curlBin = *curlPathOrErr;
+    std::string timeoutStr = std::to_string(kDownloadTimeoutSeconds);
+    std::vector<std::string> args = {curlBin,  "-s",    "-f",        "-L",
+                                     "--max-time", timeoutStr, "-o", destPath,
+                                     url};
+    llvm::SmallVector<llvm::StringRef, 10> argRefs;
+    for (const auto& a : args) {
+        argRefs.push_back(a);
+    }
+    int rc = llvm::sys::ExecuteAndWait(curlBin, argRefs);
+    return rc == 0;
+}
+
+/// Download a URL and return its contents as a string.
+/// Returns an empty string on failure.
+std::string downloadString(const std::string& url) {
+    auto curlPathOrErr = llvm::sys::findProgramByName("curl");
+    if (!curlPathOrErr) {
+        return "";
+    }
+    std::string curlBin = *curlPathOrErr;
+
+    // Create a secure temporary file
+    std::string tmpTemplate = std::filesystem::temp_directory_path().string() + "/omsc_pkg_XXXXXX";
+    std::vector<char> tmpBuf(tmpTemplate.begin(), tmpTemplate.end());
+    tmpBuf.push_back('\0');
+    int fd = mkstemp(tmpBuf.data());
+    if (fd == -1) {
+        return "";
+    }
+    close(fd);
+    std::string tmpFile(tmpBuf.data());
+
+    std::string timeoutStr = std::to_string(kApiTimeoutSeconds);
+    std::vector<std::string> args = {curlBin,      "-s",   "-f",   "-L",
+                                     "--max-time",  timeoutStr, "-o", tmpFile,
+                                     url};
+    llvm::SmallVector<llvm::StringRef, 10> argRefs;
+    for (const auto& a : args) {
+        argRefs.push_back(a);
+    }
+    int rc = llvm::sys::ExecuteAndWait(curlBin, argRefs);
+    if (rc != 0) {
+        std::error_code ec;
+        std::filesystem::remove(tmpFile, ec);
+        return "";
+    }
+    std::ifstream f(tmpFile);
+    if (!f.is_open()) {
+        std::error_code ec;
+        std::filesystem::remove(tmpFile, ec);
+        return "";
+    }
+    std::string content((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    f.close();
+    std::error_code ec;
+    std::filesystem::remove(tmpFile, ec);
+    return content;
+}
+
+/// Parse the remote index.json into a list of PackageInfo objects.
+/// The index is a JSON file with a top-level "packages" array where each
+/// element has the same fields as a package.json manifest.
+std::vector<PackageInfo> parseRegistryIndex(const std::string& json) {
     std::vector<PackageInfo> packages;
-    if (registryDir.empty() || !std::filesystem::is_directory(registryDir)) {
+    // Find the "packages" array
+    std::string key = "\"packages\"";
+    size_t pos = json.find(key);
+    if (pos == std::string::npos) {
         return packages;
     }
-    for (const auto& entry : std::filesystem::directory_iterator(registryDir)) {
-        if (!entry.is_directory()) {
-            continue;
-        }
-        auto manifest = entry.path() / "package.json";
-        if (!std::filesystem::exists(manifest)) {
-            continue;
-        }
-        auto info = readPackageManifest(manifest.string());
-        if (info.valid) {
-            packages.push_back(info);
+    pos = json.find('[', pos);
+    if (pos == std::string::npos) {
+        return packages;
+    }
+    // Find each object {...} inside the array
+    size_t depth = 0;
+    size_t objStart = std::string::npos;
+    for (size_t i = pos + 1; i < json.size(); ++i) {
+        char c = json[i];
+        if (c == '{') {
+            if (depth == 0) {
+                objStart = i;
+            }
+            depth++;
+        } else if (c == '}') {
+            depth--;
+            if (depth == 0 && objStart != std::string::npos) {
+                std::string obj = json.substr(objStart, i - objStart + 1);
+                auto info = parsePackageManifest(obj);
+                if (info.valid) {
+                    packages.push_back(info);
+                }
+                objStart = std::string::npos;
+            }
+        } else if (c == ']' && depth == 0) {
+            break;
         }
     }
     // Sort by name for consistent output
@@ -837,23 +917,36 @@ std::vector<PackageInfo> listAvailablePackages(const std::string& registryDir) {
     return packages;
 }
 
-int doPkgInstall(const std::string& pkgName, bool quiet) {
-    std::string registryDir = findUserPackagesDir();
-    if (registryDir.empty()) {
-        std::cerr << "Error: cannot locate user-packages registry\n";
-        return 1;
+/// Fetch the remote package registry index from GitHub.
+std::vector<PackageInfo> fetchRegistryIndex() {
+    std::string url = getRegistryBaseUrl() + "/index.json";
+    std::string json = downloadString(url);
+    if (json.empty()) {
+        return {};
     }
-    std::string pkgDir = registryDir + "/" + pkgName;
-    if (!std::filesystem::is_directory(pkgDir)) {
+    return parseRegistryIndex(json);
+}
+
+int doPkgInstall(const std::string& pkgName, bool quiet) {
+    if (!quiet) {
+        std::cout << "Fetching package '" << pkgName << "'...\n";
+    }
+
+    // Download the package manifest from GitHub
+    std::string registryBase = getRegistryBaseUrl();
+    std::string manifestUrl = registryBase + "/" + pkgName + "/package.json";
+    std::string manifestJson = downloadString(manifestUrl);
+    if (manifestJson.empty()) {
         std::cerr << "Error: package '" << pkgName << "' not found in registry\n";
         return 1;
     }
-    auto manifest = readPackageManifest(pkgDir + "/package.json");
+    auto manifest = parsePackageManifest(manifestJson);
     if (!manifest.valid) {
         std::cerr << "Error: invalid package manifest for '" << pkgName << "'\n";
         return 1;
     }
-    // Determine files to copy
+
+    // Determine files to download
     std::vector<std::string> files = manifest.files;
     if (files.empty() && !manifest.entry.empty()) {
         files.push_back(manifest.entry);
@@ -862,22 +955,32 @@ int doPkgInstall(const std::string& pkgName, bool quiet) {
         std::cerr << "Error: package '" << pkgName << "' has no files to install\n";
         return 1;
     }
+
     // Create local install directory
     std::string localDir = std::string(kLocalPackagesDir) + "/" + pkgName;
     std::filesystem::create_directories(localDir);
-    // Copy files
+
+    // Download each file from GitHub
     for (const auto& file : files) {
-        std::string src = pkgDir + "/" + file;
+        std::string fileUrl = registryBase + "/" + pkgName + "/" + file;
         std::string dst = localDir + "/" + file;
-        if (!std::filesystem::exists(src)) {
-            std::cerr << "Warning: file '" << file << "' listed in manifest but not found\n";
-            continue;
+        if (!downloadFile(fileUrl, dst)) {
+            std::cerr << "Error: failed to download '" << file << "'\n";
+            // Clean up partial install
+            std::error_code ec;
+            std::filesystem::remove_all(localDir, ec);
+            return 1;
         }
-        std::filesystem::copy_file(src, dst, std::filesystem::copy_options::overwrite_existing);
     }
-    // Also copy the manifest
-    std::filesystem::copy_file(pkgDir + "/package.json", localDir + "/package.json",
-                               std::filesystem::copy_options::overwrite_existing);
+
+    // Write the manifest locally
+    {
+        std::ofstream mf(localDir + "/package.json");
+        if (mf.is_open()) {
+            mf << manifestJson;
+        }
+    }
+
     if (!quiet) {
         std::cout << "Installed " << pkgName << "@" << manifest.version << " (" << files.size() << " file(s))\n";
     }
@@ -934,15 +1037,10 @@ int doPkgList(bool quiet) {
 }
 
 int doPkgSearch(const std::string& query, bool quiet) {
-    std::string registryDir = findUserPackagesDir();
-    if (registryDir.empty()) {
-        std::cerr << "Error: cannot locate user-packages registry\n";
-        return 1;
-    }
-    auto packages = listAvailablePackages(registryDir);
+    auto packages = fetchRegistryIndex();
     if (packages.empty()) {
         if (!quiet) {
-            std::cout << "No packages available.\n";
+            std::cout << "No packages available (could not reach registry).\n";
         }
         return 0;
     }
@@ -972,18 +1070,16 @@ int doPkgInfo(const std::string& pkgName) {
     std::string localManifest = std::string(kLocalPackagesDir) + "/" + pkgName + "/package.json";
     bool installed = std::filesystem::exists(localManifest);
 
-    // Then check registry
-    std::string registryDir = findUserPackagesDir();
-    std::string registryManifest;
-    if (!registryDir.empty()) {
-        registryManifest = registryDir + "/" + pkgName + "/package.json";
-    }
-
     PackageInfo info;
     if (installed) {
         info = readPackageManifest(localManifest);
-    } else if (!registryManifest.empty() && std::filesystem::exists(registryManifest)) {
-        info = readPackageManifest(registryManifest);
+    } else {
+        // Download manifest from remote registry
+        std::string manifestUrl = getRegistryBaseUrl() + "/" + pkgName + "/package.json";
+        std::string manifestJson = downloadString(manifestUrl);
+        if (!manifestJson.empty()) {
+            info = parsePackageManifest(manifestJson);
+        }
     }
 
     if (!info.valid) {
@@ -1120,10 +1216,10 @@ void printUsage(const char* progName) {
     std::cout << "  " << progName << " install        Add to PATH (first run or update)\n";
     std::cout << "  " << progName << " uninstall      Remove installed binary and PATH entry\n";
     std::cout << "\nPackage Manager:\n";
-    std::cout << "  " << progName << " pkg install <name>    Install a package from the registry\n";
+    std::cout << "  " << progName << " pkg install <name>    Download and install a package\n";
     std::cout << "  " << progName << " pkg remove <name>     Remove an installed package\n";
     std::cout << "  " << progName << " pkg list              List installed packages\n";
-    std::cout << "  " << progName << " pkg search [query]    Search available packages\n";
+    std::cout << "  " << progName << " pkg search [query]    Search available packages online\n";
     std::cout << "  " << progName << " pkg info <name>       Show package details\n";
 }
 
