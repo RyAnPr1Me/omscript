@@ -52,6 +52,7 @@ fn conv_is_palindrome_num(n) {
 }
 
 fn conv_to_upper(c) {
+    // 97 = 'a', 122 = 'z'
     if (c >= 97) {
         if (c <= 122) {
             return c - 32;
@@ -61,6 +62,7 @@ fn conv_to_upper(c) {
 }
 
 fn conv_to_lower(c) {
+    // 65 = 'A', 90 = 'Z'
     if (c >= 65) {
         if (c <= 90) {
             return c + 32;
