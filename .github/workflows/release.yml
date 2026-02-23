@@ -15,8 +15,29 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    runs-on: ubuntu-latest
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x86_64
+            binary: omsc
+            archive_ext: tar.gz
+          - os: macos-latest
+            platform: macos-arm64
+            binary: omsc
+            archive_ext: tar.gz
+          - os: macos-13
+            platform: macos-x86_64
+            binary: omsc
+            archive_ext: tar.gz
+          - os: windows-latest
+            platform: windows-x86_64
+            binary: omsc.exe
+            archive_ext: zip
+
+    runs-on: ${{ matrix.os }}
 
     steps:
       - name: Checkout repository
@@ -24,6 +45,7 @@ jobs:
 
       - name: Extract version from tag
         id: version
+        shell: bash
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             VERSION="${GITHUB_REF#refs/tags/v}"
@@ -39,7 +61,8 @@ jobs:
           fi
           echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Install dependencies
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -49,25 +72,86 @@ jobs:
             libgtest-dev \
             gcc
 
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install cmake llvm
+          echo "LLVM_DIR=$(brew --prefix llvm)/lib/cmake/llvm" >> "$GITHUB_ENV"
+
+      - name: Install dependencies (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          choco install llvm --version=18.1.8 -y
+          echo "LLVM_DIR=C:/Program Files/LLVM/lib/cmake/llvm" >> "$GITHUB_ENV"
+
       - name: Configure CMake
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release "-DOMSC_VERSION=${{ steps.version.outputs.VERSION }}"
+        shell: bash
+        run: |
+          CMAKE_ARGS="-DCMAKE_BUILD_TYPE=Release -DOMSC_VERSION=${{ steps.version.outputs.VERSION }}"
+          if [ -n "${LLVM_DIR:-}" ]; then
+            CMAKE_ARGS="$CMAKE_ARGS -DLLVM_DIR=$LLVM_DIR"
+          fi
+          cmake -B build $CMAKE_ARGS
 
       - name: Build compiler
-        run: cmake --build build --parallel $(nproc)
+        shell: bash
+        run: cmake --build build --config Release --parallel 4
 
-      - name: Run unit tests
+      - name: Run unit tests (Linux)
+        if: runner.os == 'Linux'
         run: cd build && ctest --output-on-failure
 
-      - name: Run integration tests
+      - name: Run integration tests (Linux)
+        if: runner.os == 'Linux'
         run: bash run_tests.sh
 
-      - name: Package binary
+      - name: Package binary (Unix)
+        if: runner.os != 'Windows'
         run: |
           mkdir -p release
-          cp build/omsc release/omsc-linux-x86_64
-          chmod +x release/omsc-linux-x86_64
-          tar -czf release/omsc-${{ steps.version.outputs.VERSION }}-linux-x86_64.tar.gz \
-            -C release omsc-linux-x86_64
+          cp build/${{ matrix.binary }} release/omsc-${{ matrix.platform }}
+          chmod +x release/omsc-${{ matrix.platform }}
+          tar -czf release/omsc-${{ steps.version.outputs.VERSION }}-${{ matrix.platform }}.tar.gz \
+            -C release omsc-${{ matrix.platform }}
+
+      - name: Package binary (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          mkdir -p release
+          cp build/Release/${{ matrix.binary }} release/omsc-${{ matrix.platform }}.exe
+          cd release && 7z a omsc-${{ steps.version.outputs.VERSION }}-${{ matrix.platform }}.zip omsc-${{ matrix.platform }}.exe
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: omsc-${{ matrix.platform }}
+          path: release/omsc-${{ steps.version.outputs.VERSION }}-${{ matrix.platform }}.${{ matrix.archive_ext }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Extract version
+        id: version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          else
+            VERSION="${{ github.event.inputs.version }}"
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+
+      - name: List release files
+        run: ls -la release/
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -77,17 +161,37 @@ jobs:
           body: |
             ## OmScript v${{ steps.version.outputs.VERSION }}
 
+            ### Downloads
+
+            | Platform | Architecture | File |
+            |----------|-------------|------|
+            | Linux | x86_64 | `omsc-${{ steps.version.outputs.VERSION }}-linux-x86_64.tar.gz` |
+            | macOS | ARM64 (Apple Silicon) | `omsc-${{ steps.version.outputs.VERSION }}-macos-arm64.tar.gz` |
+            | macOS | x86_64 (Intel) | `omsc-${{ steps.version.outputs.VERSION }}-macos-x86_64.tar.gz` |
+            | Windows | x86_64 | `omsc-${{ steps.version.outputs.VERSION }}-windows-x86_64.zip` |
+
             ### Installation
+
+            **Linux / macOS:**
             ```bash
-            tar -xzf omsc-${{ steps.version.outputs.VERSION }}-linux-x86_64.tar.gz
-            chmod +x omsc-linux-x86_64
-            sudo mv omsc-linux-x86_64 /usr/local/bin/omsc
+            tar -xzf omsc-${{ steps.version.outputs.VERSION }}-<platform>.tar.gz
+            chmod +x omsc-<platform>
+            sudo mv omsc-<platform> /usr/local/bin/omsc
+            ```
+
+            **Windows:**
+            1. Extract `omsc-${{ steps.version.outputs.VERSION }}-windows-x86_64.zip`
+            2. Add the extracted directory to your PATH
+
+            Or use the built-in installer on any platform:
+            ```bash
+            ./omsc install
             ```
 
             ### Requirements
-            - LLVM 17 runtime libraries
-            - GCC (for linking)
+            - LLVM 18 runtime libraries
+            - GCC (Linux) / Clang (macOS) / MSVC (Windows) for linking
           files: |
-            release/omsc-${{ steps.version.outputs.VERSION }}-linux-x86_64.tar.gz
+            release/*
           draft: false
           prerelease: false
