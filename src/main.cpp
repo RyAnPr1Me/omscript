@@ -92,16 +92,20 @@ std::string getExecutablePath() {
         return envPath;
     }
 #if defined(_WIN32)
-    char buf[MAX_PATH];
-    DWORD len = GetModuleFileNameA(nullptr, buf, MAX_PATH);
-    if (len > 0 && len < MAX_PATH) {
+    char buf[32768]; // Use large buffer to avoid truncation
+    DWORD len = GetModuleFileNameA(nullptr, buf, sizeof(buf));
+    if (len > 0 && len < sizeof(buf) && GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
         return std::string(buf, len);
     }
 #elif defined(__APPLE__)
     char buf[4096];
     uint32_t size = sizeof(buf);
     if (_NSGetExecutablePath(buf, &size) == 0) {
-        return std::filesystem::canonical(buf).string();
+        try {
+            return std::filesystem::canonical(buf).string();
+        } catch (...) {
+            return buf;
+        }
     }
 #else
     // Linux: /proc/self/exe
@@ -159,7 +163,7 @@ std::string getPlatformArch() {
     return "windows-x86_64";
 #endif
 #elif defined(__APPLE__)
-#if defined(__aarch64__)
+#if defined(__arm64__) || defined(__aarch64__)
     return "macos-arm64";
 #else
     return "macos-x86_64";
