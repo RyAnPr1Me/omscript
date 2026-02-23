@@ -837,7 +837,9 @@ void ensureInPath() {
     std::string exePath;
     try {
         exePath = std::filesystem::canonical(binaryPath);
-    } catch (const std::filesystem::filesystem_error&) {
+    } catch (const std::filesystem::filesystem_error& e) {
+        // Binary path does not exist or is inaccessible; skip PATH setup.
+        (void)e;
         return;
     }
 

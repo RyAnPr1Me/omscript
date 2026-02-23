@@ -15,6 +15,9 @@ using BytecodeIteratorDiff = std::vector<uint8_t>::difference_type;
 // Maximum valid shift amount for 64-bit integers (0-63).
 static constexpr int64_t kInt64BitWidth = 64;
 
+// Maximum exponent value for the ** operator to prevent resource exhaustion.
+static constexpr int64_t kMaxExponent = 1000;
+
 VM::VM() : lastReturn(), jit_(std::make_unique<BytecodeJIT>()) {
     locals.reserve(16);
     std::fill_n(registers, kMaxRegisters, Value());
@@ -338,8 +341,8 @@ op_POW: {
     if (n < 0) {
         registers[rd] = Value(static_cast<int64_t>(0));
     } else {
-        if (n > 1000) {
-            throw std::runtime_error("Exponent too large for ** operator (max 1000)");
+        if (n > kMaxExponent) {
+            throw std::runtime_error("Exponent too large for ** operator (max " + std::to_string(kMaxExponent) + ")");
         }
         Value result(static_cast<int64_t>(1));
         for (int64_t i = 0; i < n; i++)
@@ -794,8 +797,8 @@ vm_exit:
             if (n < 0) {
                 registers[rd] = Value(static_cast<int64_t>(0));
             } else {
-                if (n > 1000) {
-                    throw std::runtime_error("Exponent too large for ** operator (max 1000)");
+                if (n > kMaxExponent) {
+                    throw std::runtime_error("Exponent too large for ** operator (max " + std::to_string(kMaxExponent) + ")");
                 }
                 Value result(static_cast<int64_t>(1));
                 for (int64_t i = 0; i < n; i++)
