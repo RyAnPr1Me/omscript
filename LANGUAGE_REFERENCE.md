@@ -237,6 +237,16 @@ Hexadecimal, octal, and binary literals are also supported:
 
 The prefix is case-insensitive (`0x` and `0X` are equivalent, likewise for `0o`/`0O` and `0b`/`0B`). At least one digit must follow the prefix.
 
+All numeric literals (decimal, hex, octal, binary, and float) support **underscore separators** for readability. Underscores are stripped during lexing and do not affect the value:
+
+```javascript
+1_000_000     // Decimal: 1000000
+0xFF_FF       // Hex: 65535
+0b1010_0101   // Binary: 165
+0o7_7         // Octal: 63
+3.14_159      // Float: 3.14159
+```
+
 #### Float Literals
 
 Floating-point literals with a decimal point:
@@ -266,8 +276,13 @@ Double-quoted strings with escape sequence support:
 | `\n` | Newline (0x0A) |
 | `\t` | Tab (0x09) |
 | `\r` | Carriage return (0x0D) |
+| `\0` | Null (0x00) |
+| `\b` | Backspace (0x08) |
+| `\f` | Form feed (0x0C) |
+| `\v` | Vertical tab (0x0B) |
 | `\\` | Backslash |
 | `\"` | Double quote |
+| `\xHH` | Hex escape (exactly two hex digits, e.g. `\x41` → `A`) |
 
 Unterminated strings and unterminated escape sequences (backslash at end of string) produce compile errors.
 
@@ -517,6 +532,15 @@ var a = 5;
 var b = ++a;    // a = 6, b = 6  (prefix: new value)
 var c = 10;
 var d = c++;    // c = 11, d = 10 (postfix: old value)
+```
+
+Increment and decrement operators also work on **array elements**:
+
+```javascript
+var arr = [10, 20, 30];
+arr[0]++;           // arr[0] = 11
+var old = arr[1]--; // old = 20, arr[1] = 19
+var val = ++arr[2]; // val = 31, arr[2] = 31
 ```
 
 ### 7.7 Ternary Operator
