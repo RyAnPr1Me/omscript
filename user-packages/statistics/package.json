@@ -1,0 +1,7 @@
+{
+  "name": "statistics",
+  "version": "1.0.0",
+  "description": "Statistical functions: mean, variance, range, min_val, max_val, sum_of_squares",
+  "entry": "statistics.om",
+  "files": ["statistics.om"]
+}

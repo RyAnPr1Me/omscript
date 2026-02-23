@@ -1,0 +1,68 @@
+// statistics package - statistical functions for arrays of integers
+
+fn stat_mean(arr) {
+    var n = len(arr);
+    if (n == 0) {
+        return 0;
+    }
+    var total = 0;
+    for (i in 0...n) {
+        total = total + arr[i];
+    }
+    return total / n;
+}
+
+fn stat_min_val(arr) {
+    var n = len(arr);
+    if (n == 0) {
+        return 0;
+    }
+    var best = arr[0];
+    for (i in 1...n) {
+        if (arr[i] < best) {
+            best = arr[i];
+        }
+    }
+    return best;
+}
+
+fn stat_max_val(arr) {
+    var n = len(arr);
+    if (n == 0) {
+        return 0;
+    }
+    var best = arr[0];
+    for (i in 1...n) {
+        if (arr[i] > best) {
+            best = arr[i];
+        }
+    }
+    return best;
+}
+
+fn stat_range(arr) {
+    return stat_max_val(arr) - stat_min_val(arr);
+}
+
+fn stat_sum_of_squares(arr) {
+    var n = len(arr);
+    var total = 0;
+    for (i in 0...n) {
+        total = total + arr[i] * arr[i];
+    }
+    return total;
+}
+
+fn stat_variance(arr) {
+    var n = len(arr);
+    if (n == 0) {
+        return 0;
+    }
+    var m = stat_mean(arr);
+    var total = 0;
+    for (i in 0...n) {
+        var diff = arr[i] - m;
+        total = total + diff * diff;
+    }
+    return total / n;
+}

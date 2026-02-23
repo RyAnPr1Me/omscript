@@ -1,0 +1,61 @@
+// sorting package - sorting algorithms for arrays
+
+fn sort_bubble(arr) {
+    var n = len(arr);
+    for (i in 0...n) {
+        for (j in 0...n - 1 - i) {
+            if (arr[j] > arr[j + 1]) {
+                swap(arr, j, j + 1);
+            }
+        }
+    }
+    return 0;
+}
+
+fn sort_selection(arr) {
+    var n = len(arr);
+    for (i in 0...n) {
+        var min_idx = i;
+        for (j in i + 1...n) {
+            if (arr[j] < arr[min_idx]) {
+                min_idx = j;
+            }
+        }
+        if (min_idx != i) {
+            swap(arr, i, min_idx);
+        }
+    }
+    return 0;
+}
+
+fn sort_insertion(arr) {
+    var n = len(arr);
+    for (i in 1...n) {
+        var key = arr[i];
+        var j = i - 1;
+        while (j >= 0 && arr[j] > key) {
+            arr[j + 1] = arr[j];
+            j = j - 1;
+        }
+        arr[j + 1] = key;
+    }
+    return 0;
+}
+
+fn sort_is_sorted(arr) {
+    var n = len(arr);
+    if (n <= 1) {
+        return 1;
+    }
+    for (i in 1...n) {
+        if (arr[i] < arr[i - 1]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+fn sort_reverse(arr) {
+    reverse(arr);
+    return 0;
+}

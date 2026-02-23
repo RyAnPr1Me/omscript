@@ -1,0 +1,7 @@
+{
+  "name": "geometry",
+  "version": "1.0.0",
+  "description": "2D geometry calculations: distance_sq, area_rect, area_triangle, perimeter_rect, manhattan_dist",
+  "entry": "geometry.om",
+  "files": ["geometry.om"]
+}

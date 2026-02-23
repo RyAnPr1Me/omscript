@@ -1,0 +1,7 @@
+{
+  "name": "functional",
+  "version": "1.0.0",
+  "description": "Functional-style array operations: reduce_sum, reduce_product, any_positive, all_positive, count_if_positive, count_if_even, count_if_odd",
+  "entry": "functional.om",
+  "files": ["functional.om"]
+}
