@@ -2146,9 +2146,51 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
 
 llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::string& op, bool isPostfix,
                                            const ASTNode* errorNode) {
+    if (op != "++" && op != "--") {
+        codegenError("Unknown increment/decrement operator: " + op, errorNode);
+    }
+
+    // Handle array element increment/decrement: arr[i]++ / ++arr[i]
+    auto* indexExpr = dynamic_cast<IndexExpr*>(operandExpr);
+    if (indexExpr) {
+        llvm::Value* arrVal = generateExpression(indexExpr->array.get());
+        llvm::Value* idxVal = generateExpression(indexExpr->index.get());
+
+        llvm::Value* arrPtr = builder->CreateIntToPtr(arrVal, llvm::PointerType::getUnqual(*context), "incdec.arrptr");
+
+        // Bounds check
+        llvm::Value* lenVal = builder->CreateLoad(getDefaultType(), arrPtr, "incdec.len");
+        llvm::Value* inBounds = builder->CreateICmpSLT(idxVal, lenVal, "incdec.inbounds");
+        llvm::Value* notNeg = builder->CreateICmpSGE(idxVal, llvm::ConstantInt::get(getDefaultType(), 0), "incdec.notneg");
+        llvm::Value* valid = builder->CreateAnd(inBounds, notNeg, "incdec.valid");
+
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "incdec.ok", function);
+        llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "incdec.fail", function);
+        builder->CreateCondBr(valid, okBB, failBB);
+
+        builder->SetInsertPoint(failBB);
+        llvm::Value* errMsg = builder->CreateGlobalString("Runtime error: array index out of bounds\n", "idx_oob_msg");
+        builder->CreateCall(getPrintfFunction(), {errMsg});
+        builder->CreateCall(getOrDeclareAbort());
+        builder->CreateUnreachable();
+
+        builder->SetInsertPoint(okBB);
+        llvm::Value* offset = builder->CreateAdd(idxVal, llvm::ConstantInt::get(getDefaultType(), 1), "incdec.offset");
+        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrPtr, offset, "incdec.elem.ptr");
+        llvm::Value* current = builder->CreateLoad(getDefaultType(), elemPtr, "incdec.elem");
+
+        llvm::Value* delta = llvm::ConstantInt::get(getDefaultType(), 1, true);
+        llvm::Value* updated = (op == "++") ? builder->CreateAdd(current, delta, "inc")
+                                            : builder->CreateSub(current, delta, "dec");
+        builder->CreateStore(updated, elemPtr);
+        return isPostfix ? current : updated;
+    }
+
+    // Handle simple variable increment/decrement
     auto* identifier = dynamic_cast<IdentifierExpr*>(operandExpr);
     if (!identifier) {
-        codegenError("Increment/decrement operators require an identifier", errorNode);
+        codegenError("Increment/decrement operators require an lvalue operand", errorNode);
     }
 
     auto it = namedValues.find(identifier->name);
@@ -2160,9 +2202,6 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
     auto* allocaInst = llvm::dyn_cast<llvm::AllocaInst>(it->second);
     llvm::Type* loadType = allocaInst ? allocaInst->getAllocatedType() : getDefaultType();
     llvm::Value* current = builder->CreateLoad(loadType, it->second, identifier->name.c_str());
-    if (op != "++" && op != "--") {
-        codegenError("Unknown increment/decrement operator: " + op, errorNode);
-    }
 
     llvm::Value* updated;
     if (current->getType()->isDoubleTy()) {

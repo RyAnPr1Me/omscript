@@ -116,8 +116,9 @@ Token Lexer::scanNumber() {
                 throw std::runtime_error("Expected hex digit after '0x' at line " + std::to_string(line) +
                                          ", column " + std::to_string(column));
             }
-            while (!isAtEnd() && isHexDigit(peek())) {
-                num += advance();
+            while (!isAtEnd() && (isHexDigit(peek()) || peek() == '_')) {
+                char c = advance();
+                if (c != '_') num += c;
             }
             Token token = makeToken(TokenType::INTEGER, num);
             try {
@@ -135,8 +136,9 @@ Token Lexer::scanNumber() {
                 throw std::runtime_error("Expected octal digit after '0o' at line " + std::to_string(line) +
                                          ", column " + std::to_string(column));
             }
-            while (!isAtEnd() && peek() >= '0' && peek() <= '7') {
-                num += advance();
+            while (!isAtEnd() && ((peek() >= '0' && peek() <= '7') || peek() == '_')) {
+                char c = advance();
+                if (c != '_') num += c;
             }
             Token token = makeToken(TokenType::INTEGER, num);
             try {
@@ -154,8 +156,9 @@ Token Lexer::scanNumber() {
                 throw std::runtime_error("Expected binary digit after '0b' at line " + std::to_string(line) +
                                          ", column " + std::to_string(column));
             }
-            while (!isAtEnd() && (peek() == '0' || peek() == '1')) {
-                num += advance();
+            while (!isAtEnd() && (peek() == '0' || peek() == '1' || peek() == '_')) {
+                char c = advance();
+                if (c != '_') num += c;
             }
             Token token = makeToken(TokenType::INTEGER, num);
             try {
@@ -168,7 +171,11 @@ Token Lexer::scanNumber() {
         }
     }
 
-    while (!isAtEnd() && (isDigit(peek()) || peek() == '.')) {
+    while (!isAtEnd() && (isDigit(peek()) || peek() == '.' || peek() == '_')) {
+        if (peek() == '_') {
+            advance(); // consume underscore but don't add to num
+            continue;
+        }
         if (peek() == '.') {
             // Don't consume the dot if it's part of a range operator (...)
             if (peek(1) == '.' && peek(2) == '.') {
@@ -257,6 +264,22 @@ Token Lexer::scanString() {
             case '"':
                 str += '"';
                 break;
+            case 'x': {
+                // Hex escape: \xHH (exactly two hex digits)
+                if (isAtEnd() || !isHexDigit(peek())) {
+                    throw std::runtime_error("Expected hex digit after '\\x' in string at line " +
+                                             std::to_string(line) + ", column " + std::to_string(column));
+                }
+                char h1 = advance();
+                if (isAtEnd() || !isHexDigit(peek())) {
+                    throw std::runtime_error("Expected two hex digits after '\\x' in string at line " +
+                                             std::to_string(line) + ", column " + std::to_string(column));
+                }
+                char h2 = advance();
+                std::string hex{h1, h2};
+                str += static_cast<char>(std::stoi(hex, nullptr, 16));
+                break;
+            }
             default:
                 throw std::runtime_error("Unknown escape sequence '\\" + std::string(1, escaped) +
                                          "' in string at line " + std::to_string(line) + ", column " +

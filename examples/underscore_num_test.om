@@ -1,0 +1,23 @@
+// Test underscore separators in numeric literals
+fn main() {
+    var result = 0;
+    
+    // Decimal with underscores
+    var million = 1_000_000;
+    result = result + (million / 10000); // 100
+    
+    // Hex with underscores
+    var hex = 0xFF_00;
+    result = result + (hex / 256); // 100 + 255 = 355
+    
+    // Binary with underscores
+    var bin = 0b1111_0000;
+    result = result + (bin / 16); // 355 + 15 = 370
+    
+    // Octal with underscores
+    var oct = 0o1_00;
+    result = result + oct; // 370 + 64 = 434
+    
+    // 434 % 256 = 178
+    return result;
+}

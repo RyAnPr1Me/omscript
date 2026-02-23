@@ -1,0 +1,20 @@
+// Test hex escape sequences in strings
+fn main() {
+    // \x41 = 'A', \x42 = 'B', \x43 = 'C'
+    var s = "\x41\x42\x43";
+    print(s);
+    
+    // Mixed with regular characters
+    var s2 = "Hello\x21";
+    print(s2);
+    
+    // \x48\x69 = "Hi"
+    var s3 = "\x48\x69";
+    print(s3);
+    
+    // Hex escape for non-printable: \x09 = tab
+    var s4 = "a\x09b";
+    print(s4);
+    
+    return 0;
+}

@@ -744,8 +744,8 @@ std::unique_ptr<Expression> Parser::parseUnary() {
     if (match(TokenType::PLUSPLUS) || match(TokenType::MINUSMINUS)) {
         Token opToken = tokens[current - 1];
         auto operand = parseUnary();
-        if (operand->type != ASTNodeType::IDENTIFIER_EXPR) {
-            error("Prefix " + opToken.lexeme + " requires an identifier operand");
+        if (operand->type != ASTNodeType::IDENTIFIER_EXPR && operand->type != ASTNodeType::INDEX_EXPR) {
+            error("Prefix " + opToken.lexeme + " requires an lvalue operand");
         }
         auto node = std::make_unique<PrefixExpr>(opToken.lexeme, std::move(operand));
         node->line = opToken.line;
@@ -763,8 +763,8 @@ std::unique_ptr<Expression> Parser::parsePostfix() {
         // Handle postfix operators
         if (match(TokenType::PLUSPLUS) || match(TokenType::MINUSMINUS)) {
             Token opToken = tokens[current - 1];
-            if (expr->type != ASTNodeType::IDENTIFIER_EXPR) {
-                error("Postfix " + opToken.lexeme + " requires an identifier operand");
+            if (expr->type != ASTNodeType::IDENTIFIER_EXPR && expr->type != ASTNodeType::INDEX_EXPR) {
+                error("Postfix " + opToken.lexeme + " requires an lvalue operand");
             }
             expr = std::make_unique<PostfixExpr>(opToken.lexeme, std::move(expr));
             expr->line = opToken.line;
