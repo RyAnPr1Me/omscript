@@ -1,0 +1,7 @@
+{
+  "name": "strings",
+  "version": "1.0.0",
+  "description": "String utility functions: repeat, is_empty, char counting",
+  "entry": "strings.om",
+  "files": ["strings.om"]
+}

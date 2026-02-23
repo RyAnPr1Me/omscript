@@ -87,7 +87,7 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
     if (verbose_) {
         std::cout << "  Parsing..." << std::endl;
     }
-    Parser parser(tokens);
+    Parser parser(std::move(tokens));
     std::unique_ptr<Program> program;
     try {
         program = parser.parse();

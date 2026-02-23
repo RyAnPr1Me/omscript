@@ -1,0 +1,46 @@
+// math package - utility functions for mathematical operations
+
+fn math_factorial(n) {
+    if (n <= 1) {
+        return 1;
+    }
+    return n * math_factorial(n - 1);
+}
+
+fn math_fibonacci(n) {
+    if (n <= 0) {
+        return 0;
+    }
+    if (n == 1) {
+        return 1;
+    }
+    var a = 0;
+    var b = 1;
+    for (i in 2...n + 1) {
+        var temp = a + b;
+        a = b;
+        b = temp;
+    }
+    return b;
+}
+
+fn math_gcd(a, b) {
+    while (b != 0) {
+        var temp = b;
+        b = a % temp;
+        a = temp;
+    }
+    return a;
+}
+
+fn math_lcm(a, b) {
+    return a / math_gcd(a, b) * b;
+}
+
+fn math_power(base, exp) {
+    var result = 1;
+    for (i in 0...exp) {
+        result = result * base;
+    }
+    return result;
+}

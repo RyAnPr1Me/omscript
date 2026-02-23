@@ -396,6 +396,191 @@ test_cli_output "help-shows-fstack-protector" "-fstack-protector" 0 ./build/omsc
 
 echo ""
 echo "============================================"
+echo "New CLI Feature Tests"
+echo "============================================"
+echo ""
+
+# check command
+test_cli_output "check-valid" "OK" 0 ./build/omsc check examples/factorial.om
+test_cli_output "check-syntax-error" "Expected ';'" 1 ./build/omsc check examples/missing_semicolon.om
+test_cli_output "check-flag" "OK" 0 ./build/omsc --check examples/exit_zero.om
+
+# --quiet flag
+test_cli_output "quiet-check" "" 0 ./build/omsc -q check examples/factorial.om
+test_cli_output "quiet-long" "" 0 ./build/omsc --quiet check examples/factorial.om
+
+# --time flag
+test_cli_output "time-check" "Timing:" 0 ./build/omsc check examples/factorial.om --time
+test_cli_output "time-lex" "Timing:" 0 ./build/omsc lex examples/exit_zero.om --time
+test_cli_output "time-parse" "Timing:" 0 ./build/omsc parse examples/exit_zero.om --time
+test_cli_output "time-compile" "Timing:" 0 ./build/omsc --time examples/exit_zero.om -o /tmp/omsc_time_test
+rm -f /tmp/omsc_time_test /tmp/omsc_time_test.o
+
+# --dump-ast flag
+test_cli_output "dump-ast" "FunctionDecl" 0 ./build/omsc parse examples/exit_zero.om --dump-ast
+test_cli_output "dump-ast-shows-return" "ReturnStmt" 0 ./build/omsc parse examples/exit_zero.om --dump-ast
+test_cli_output "dump-ast-shows-block" "Block" 0 ./build/omsc parse examples/exit_zero.om --dump-ast
+
+# --dump-tokens alias
+test_cli_output "dump-tokens-alias" "FN" 0 ./build/omsc --dump-tokens examples/test.om
+
+# --dry-run flag
+test_cli_output "dry-run-compile" "Dry run" 0 ./build/omsc --dry-run examples/factorial.om
+test_cli_output "dry-run-no-output-file" "" 0 ./build/omsc --dry-run examples/exit_zero.om
+TOTAL=$((TOTAL + 1))
+echo -n "Testing dry-run-no-binary-created... "
+./build/omsc --dry-run examples/exit_zero.om > /dev/null 2>&1
+if [ ! -f a.out ]; then
+    echo -e "${GREEN}✓ Passed${NC}"
+else
+    echo -e "${RED}✗ Failed (binary should not be created in dry-run mode)${NC}"
+    rm -f a.out
+    FAILURES=$((FAILURES + 1))
+fi
+test_cli_output "dry-run-invalid" "Unknown variable" 1 ./build/omsc --dry-run examples/undefined_var.om
+test_cli_output "dry-run-emit-ir" "Dry run" 0 ./build/omsc --dry-run emit-ir examples/exit_zero.om
+
+# --emit-obj flag
+test_cli_output "emit-obj" "Object file written" 0 ./build/omsc --emit-obj examples/exit_zero.om -o /tmp/omsc_obj_test.o
+TOTAL=$((TOTAL + 1))
+echo -n "Testing emit-obj-file-exists... "
+if [ -f /tmp/omsc_obj_test.o ]; then
+    echo -e "${GREEN}✓ Passed${NC}"
+else
+    echo -e "${RED}✗ Failed (object file should exist)${NC}"
+    FAILURES=$((FAILURES + 1))
+fi
+rm -f /tmp/omsc_obj_test.o
+test_cli_output "emit-obj-default-name" "exit_zero.o" 0 ./build/omsc --emit-obj examples/exit_zero.om
+rm -f exit_zero.o
+
+# help output includes new features
+test_cli_output "help-shows-check" "--check" 0 ./build/omsc --help
+test_cli_output "help-shows-time" "--time" 0 ./build/omsc --help
+test_cli_output "help-shows-dump-ast" "--dump-ast" 0 ./build/omsc --help
+test_cli_output "help-shows-dump-tokens" "--dump-tokens" 0 ./build/omsc --help
+test_cli_output "help-shows-emit-obj" "--emit-obj" 0 ./build/omsc --help
+test_cli_output "help-shows-dry-run" "--dry-run" 0 ./build/omsc --help
+test_cli_output "help-shows-quiet" "--quiet" 0 ./build/omsc --help
+
+# Version shows full semver
+test_cli_output "version-full-semver" "v1.0.0" 0 ./build/omsc --version
+
+echo ""
+echo "============================================"
+echo "Package Manager Tests"
+echo "============================================"
+echo ""
+
+# Clean up any leftover packages
+rm -rf om_packages
+
+# Start a local HTTP server to serve user-packages/ for testing.
+# This exercises the real download path without requiring internet access.
+PKG_SERVER_PORT=18923
+PKG_SERVER_PID=""
+if command -v python3 > /dev/null 2>&1; then
+    python3 -m http.server $PKG_SERVER_PORT --directory user-packages > /dev/null 2>&1 &
+    PKG_SERVER_PID=$!
+    sleep 1
+    export OMSC_REGISTRY_URL="http://127.0.0.1:${PKG_SERVER_PORT}"
+    echo "Registry served at $OMSC_REGISTRY_URL (PID $PKG_SERVER_PID)"
+else
+    echo "Warning: python3 not found, using GitHub URLs for pkg tests"
+fi
+
+cleanup_pkg_server() {
+    if [ -n "$PKG_SERVER_PID" ]; then
+        kill $PKG_SERVER_PID 2>/dev/null
+        wait $PKG_SERVER_PID 2>/dev/null
+    fi
+}
+trap cleanup_pkg_server EXIT
+
+# Help text shows package manager
+test_cli_output "help-shows-pkg" "pkg install" 0 ./build/omsc --help
+test_cli_output "help-shows-pkg-search" "pkg search" 0 ./build/omsc --help
+
+# pkg search - list all packages
+test_cli_output "pkg-search-all" "math@" 0 ./build/omsc pkg search
+test_cli_output "pkg-search-algorithms" "algorithms@" 0 ./build/omsc pkg search
+test_cli_output "pkg-search-strings" "strings@" 0 ./build/omsc pkg search
+
+# pkg search with query
+test_cli_output "pkg-search-query" "math@" 0 ./build/omsc pkg search math
+test_cli_output "pkg-search-no-match" "No packages matching" 0 ./build/omsc pkg search zzzznonexistent
+
+# pkg info
+test_cli_output "pkg-info-math" "math" 0 ./build/omsc pkg info math
+test_cli_output "pkg-info-version" "1.0.0" 0 ./build/omsc pkg info math
+test_cli_output "pkg-info-not-installed" "Installed:   no" 0 ./build/omsc pkg info math
+test_cli_output "pkg-info-nonexistent" "not found" 1 ./build/omsc pkg info nonexistent
+
+# pkg list empty
+test_cli_output "pkg-list-empty" "No packages installed" 0 ./build/omsc pkg list
+
+# pkg install (downloads from local server)
+test_cli_output "pkg-install-math" "Installed math@1.0.0" 0 ./build/omsc pkg install math
+TOTAL=$((TOTAL + 1))
+echo -n "Testing pkg-install-creates-files... "
+if [ -f om_packages/math/math.om ] && [ -f om_packages/math/package.json ]; then
+    echo -e "${GREEN}✓ Passed${NC}"
+else
+    echo -e "${RED}✗ Failed (package files not created)${NC}"
+    FAILURES=$((FAILURES + 1))
+fi
+
+# pkg list after install
+test_cli_output "pkg-list-installed" "math@1.0.0" 0 ./build/omsc pkg list
+
+# pkg info shows installed
+test_cli_output "pkg-info-installed" "Installed:   yes" 0 ./build/omsc pkg info math
+
+# pkg install another
+test_cli_output "pkg-install-algorithms" "Installed algorithms@1.0.0" 0 ./build/omsc pkg install algorithms
+
+# pkg list shows both
+test_cli_output "pkg-list-multiple" "algorithms@" 0 ./build/omsc pkg list
+
+# pkg remove
+test_cli_output "pkg-remove-math" "Removed math" 0 ./build/omsc pkg remove math
+TOTAL=$((TOTAL + 1))
+echo -n "Testing pkg-remove-deletes-files... "
+if [ ! -d om_packages/math ]; then
+    echo -e "${GREEN}✓ Passed${NC}"
+else
+    echo -e "${RED}✗ Failed (package directory still exists)${NC}"
+    FAILURES=$((FAILURES + 1))
+fi
+
+# pkg remove nonexistent
+test_cli_output "pkg-remove-not-installed" "not installed" 1 ./build/omsc pkg remove nonexistent
+
+# Error cases
+test_cli_output "pkg-no-subcommand" "missing pkg subcommand" 1 ./build/omsc pkg
+test_cli_output "pkg-unknown-subcommand" "unknown pkg subcommand" 1 ./build/omsc pkg frob
+test_cli_output "pkg-install-no-name" "requires a package name" 1 ./build/omsc pkg install
+test_cli_output "pkg-remove-no-name" "requires a package name" 1 ./build/omsc pkg remove
+test_cli_output "pkg-info-no-name" "requires a package name" 1 ./build/omsc pkg info
+test_cli_output "pkg-install-nonexistent" "not found" 1 ./build/omsc pkg install nonexistent
+
+# Aliases
+test_cli_output "pkg-add-alias" "Installed strings@" 0 ./build/omsc pkg add strings
+test_cli_output "pkg-ls-alias" "strings@" 0 ./build/omsc pkg ls
+test_cli_output "pkg-rm-alias" "Removed" 0 ./build/omsc pkg rm strings
+test_cli_output "pkg-find-alias" "math@" 0 ./build/omsc pkg find math
+test_cli_output "pkg-show-alias" "math" 0 ./build/omsc pkg show math
+test_cli_output "package-command-alias" "algorithms@" 0 ./build/omsc package list
+
+# Quiet mode
+test_cli_output "pkg-install-quiet" "" 0 ./build/omsc -q pkg install strings
+test_cli_output "pkg-remove-quiet" "" 0 ./build/omsc -q pkg remove strings
+
+# Clean up
+rm -rf om_packages
+
+echo ""
+echo "============================================"
 if [ $FAILURES -eq 0 ]; then
     echo -e "${GREEN}All $TOTAL tests passed!${NC}"
 else

@@ -1,0 +1,7 @@
+{
+  "name": "algorithms",
+  "version": "1.0.0",
+  "description": "Common algorithms: bubble sort, binary search, sum, min/max of arrays",
+  "entry": "algorithms.om",
+  "files": ["algorithms.om"]
+}

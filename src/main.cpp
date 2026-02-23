@@ -2,7 +2,9 @@
 #include "compiler.h"
 #include "lexer.h"
 #include "parser.h"
+#include <chrono>
 #include <csignal>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -22,8 +24,22 @@ constexpr const char* kCompilerVersion = "OmScript Compiler v" OMSC_VERSION;
 constexpr const char* kPathConfigMarker = "# omsc-path-auto";
 constexpr const char* kGitHubReleasesApiUrl = "https://api.github.com/repos/RyAnPr1Me/omscript/releases/latest";
 constexpr const char* kGitHubReleasesDownloadBase = "https://github.com/RyAnPr1Me/omscript/releases/download";
+constexpr const char* kDefaultRegistryUrl =
+    "https://raw.githubusercontent.com/RyAnPr1Me/omscript/main/user-packages";
+constexpr const char* kLocalPackagesDir = "om_packages";
 constexpr int kApiTimeoutSeconds = 10;
 constexpr int kDownloadTimeoutSeconds = 120;
+
+/// Return the base URL for the remote package registry.
+/// Defaults to the GitHub raw URL for the main branch of omscript.
+/// Can be overridden via the OMSC_REGISTRY_URL environment variable.
+std::string getRegistryBaseUrl() {
+    const char* env = std::getenv("OMSC_REGISTRY_URL");
+    if (env && env[0] != '\0') {
+        return env;
+    }
+    return kDefaultRegistryUrl;
+}
 
 struct Version {
     int major = 0;
@@ -695,12 +711,451 @@ void signalHandler(int sig) {
     raise(sig);
 }
 
+// ---------------------------------------------------------------------------
+// Package manager
+// ---------------------------------------------------------------------------
+
+/// Minimal JSON string field extractor (reuse the existing pattern).
+/// Extracts a simple "key":"value" or "key": "value" pair.
+std::string jsonField(const std::string& json, const std::string& key) {
+    // Try with no space: "key":"value"
+    std::string pattern1 = "\"" + key + "\":\"";
+    size_t pos = json.find(pattern1);
+    if (pos != std::string::npos) {
+        pos += pattern1.size();
+        size_t end = json.find('"', pos);
+        if (end != std::string::npos) {
+            return json.substr(pos, end - pos);
+        }
+    }
+    // Try with space: "key": "value"
+    std::string pattern2 = "\"" + key + "\": \"";
+    pos = json.find(pattern2);
+    if (pos != std::string::npos) {
+        pos += pattern2.size();
+        size_t end = json.find('"', pos);
+        if (end != std::string::npos) {
+            return json.substr(pos, end - pos);
+        }
+    }
+    return "";
+}
+
+/// Extract a JSON array of strings, e.g. "files": ["a.om", "b.om"]
+std::vector<std::string> jsonArrayField(const std::string& json, const std::string& key) {
+    std::vector<std::string> result;
+    std::string pattern = "\"" + key + "\"";
+    size_t pos = json.find(pattern);
+    if (pos == std::string::npos) {
+        return result;
+    }
+    pos = json.find('[', pos);
+    if (pos == std::string::npos) {
+        return result;
+    }
+    size_t end = json.find(']', pos);
+    if (end == std::string::npos) {
+        return result;
+    }
+    std::string arr = json.substr(pos + 1, end - pos - 1);
+    // Parse simple quoted strings from the array
+    size_t i = 0;
+    while (i < arr.size()) {
+        size_t q1 = arr.find('"', i);
+        if (q1 == std::string::npos)
+            break;
+        size_t q2 = arr.find('"', q1 + 1);
+        if (q2 == std::string::npos)
+            break;
+        result.push_back(arr.substr(q1 + 1, q2 - q1 - 1));
+        i = q2 + 1;
+    }
+    return result;
+}
+
+struct PackageInfo {
+    std::string name;
+    std::string version;
+    std::string description;
+    std::string entry;
+    std::vector<std::string> files;
+    bool valid = false;
+};
+
+/// Parse a PackageInfo from a JSON string (e.g. the contents of package.json).
+PackageInfo parsePackageManifest(const std::string& json) {
+    PackageInfo info;
+    info.name = jsonField(json, "name");
+    info.version = jsonField(json, "version");
+    info.description = jsonField(json, "description");
+    info.entry = jsonField(json, "entry");
+    info.files = jsonArrayField(json, "files");
+    info.valid = !info.name.empty();
+    return info;
+}
+
+/// Read a PackageInfo from a local file on disk.
+PackageInfo readPackageManifest(const std::string& manifestPath) {
+    std::ifstream f(manifestPath);
+    if (!f.is_open()) {
+        return PackageInfo{};
+    }
+    std::string json((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    f.close();
+    return parsePackageManifest(json);
+}
+
+/// Download a URL to a local file using curl.  Returns true on success.
+bool downloadFile(const std::string& url, const std::string& destPath) {
+    // Reject paths containing ".." to prevent path traversal
+    if (destPath.find("..") != std::string::npos) {
+        std::cerr << "Error: invalid destination path\n";
+        return false;
+    }
+    auto curlPathOrErr = llvm::sys::findProgramByName("curl");
+    if (!curlPathOrErr) {
+        std::cerr << "Error: curl is required for package downloads but was not found\n";
+        std::cerr << "  Install with: apt-get install curl (Debian/Ubuntu) or brew install curl (macOS)\n";
+        return false;
+    }
+    std::string curlBin = *curlPathOrErr;
+    std::string timeoutStr = std::to_string(kDownloadTimeoutSeconds);
+    std::vector<std::string> args = {curlBin,       "-s",    "-f",          "-L",
+                                     "--max-redirs", "5",    "--max-time",  timeoutStr,
+                                     "-o",           destPath, url};
+    llvm::SmallVector<llvm::StringRef, 12> argRefs;
+    for (const auto& a : args) {
+        argRefs.push_back(a);
+    }
+    int rc = llvm::sys::ExecuteAndWait(curlBin, argRefs);
+    return rc == 0;
+}
+
+/// Download a URL and return its contents as a string.
+/// Returns an empty string on failure.
+std::string downloadString(const std::string& url) {
+    auto curlPathOrErr = llvm::sys::findProgramByName("curl");
+    if (!curlPathOrErr) {
+        return "";
+    }
+    std::string curlBin = *curlPathOrErr;
+
+    // Create a secure temporary file
+    std::string tmpTemplate = std::filesystem::temp_directory_path().string() + "/omsc_pkg_XXXXXX";
+    std::vector<char> tmpBuf(tmpTemplate.begin(), tmpTemplate.end());
+    tmpBuf.push_back('\0');
+    int fd = mkstemp(tmpBuf.data());
+    if (fd == -1) {
+        return "";
+    }
+    close(fd);
+    std::string tmpFile(tmpBuf.data());
+
+    std::string timeoutStr = std::to_string(kApiTimeoutSeconds);
+    std::vector<std::string> args = {curlBin,       "-s",   "-f",          "-L",
+                                     "--max-redirs", "5",   "--max-time",  timeoutStr,
+                                     "-o",           tmpFile, url};
+    llvm::SmallVector<llvm::StringRef, 12> argRefs;
+    for (const auto& a : args) {
+        argRefs.push_back(a);
+    }
+    int rc = llvm::sys::ExecuteAndWait(curlBin, argRefs);
+    if (rc != 0) {
+        std::error_code ec;
+        std::filesystem::remove(tmpFile, ec);
+        return "";
+    }
+    std::ifstream f(tmpFile);
+    if (!f.is_open()) {
+        std::error_code ec;
+        std::filesystem::remove(tmpFile, ec);
+        return "";
+    }
+    std::string content((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    f.close();
+    std::error_code ec;
+    std::filesystem::remove(tmpFile, ec);
+    return content;
+}
+
+/// Parse the remote index.json into a list of PackageInfo objects.
+/// The index is a JSON file with a top-level "packages" array where each
+/// element has the same fields as a package.json manifest.
+std::vector<PackageInfo> parseRegistryIndex(const std::string& json) {
+    std::vector<PackageInfo> packages;
+    // Find the "packages" array
+    std::string key = "\"packages\"";
+    size_t pos = json.find(key);
+    if (pos == std::string::npos) {
+        return packages;
+    }
+    pos = json.find('[', pos);
+    if (pos == std::string::npos) {
+        return packages;
+    }
+    // Find each object {...} inside the array
+    size_t depth = 0;
+    size_t objStart = std::string::npos;
+    for (size_t i = pos + 1; i < json.size(); ++i) {
+        char c = json[i];
+        if (c == '{') {
+            if (depth == 0) {
+                objStart = i;
+            }
+            depth++;
+        } else if (c == '}') {
+            depth--;
+            if (depth == 0 && objStart != std::string::npos) {
+                std::string obj = json.substr(objStart, i - objStart + 1);
+                auto info = parsePackageManifest(obj);
+                if (info.valid) {
+                    packages.push_back(info);
+                }
+                objStart = std::string::npos;
+            }
+        } else if (c == ']' && depth == 0) {
+            break;
+        }
+    }
+    // Sort by name for consistent output
+    std::sort(packages.begin(), packages.end(),
+              [](const PackageInfo& a, const PackageInfo& b) { return a.name < b.name; });
+    return packages;
+}
+
+int doPkgInstall(const std::string& pkgName, bool quiet) {
+    if (!quiet) {
+        std::cout << "Fetching package '" << pkgName << "'...\n";
+    }
+
+    // Download the package manifest from GitHub
+    std::string registryBase = getRegistryBaseUrl();
+    std::string manifestUrl = registryBase + "/" + pkgName + "/package.json";
+    std::string manifestJson = downloadString(manifestUrl);
+    if (manifestJson.empty()) {
+        std::cerr << "Error: package '" << pkgName << "' not found in registry\n";
+        return 1;
+    }
+    auto manifest = parsePackageManifest(manifestJson);
+    if (!manifest.valid) {
+        std::cerr << "Error: invalid package manifest for '" << pkgName << "'\n";
+        return 1;
+    }
+
+    // Determine files to download
+    std::vector<std::string> files = manifest.files;
+    if (files.empty() && !manifest.entry.empty()) {
+        files.push_back(manifest.entry);
+    }
+    if (files.empty()) {
+        std::cerr << "Error: package '" << pkgName << "' has no files to install\n";
+        return 1;
+    }
+
+    // Create local install directory
+    std::string localDir = std::string(kLocalPackagesDir) + "/" + pkgName;
+    std::filesystem::create_directories(localDir);
+
+    // Download each file from GitHub
+    for (const auto& file : files) {
+        std::string fileUrl = registryBase + "/" + pkgName + "/" + file;
+        std::string dst = localDir + "/" + file;
+        if (!downloadFile(fileUrl, dst)) {
+            std::cerr << "Error: failed to download '" << file << "'\n";
+            // Clean up partial install
+            std::error_code ec;
+            std::filesystem::remove_all(localDir, ec);
+            return 1;
+        }
+    }
+
+    // Write the manifest locally
+    {
+        std::ofstream mf(localDir + "/package.json");
+        if (mf.is_open()) {
+            mf << manifestJson;
+        }
+    }
+
+    if (!quiet) {
+        std::cout << "Installed " << pkgName << "@" << manifest.version << " (" << files.size() << " file(s))\n";
+    }
+    return 0;
+}
+
+int doPkgRemove(const std::string& pkgName, bool quiet) {
+    std::string localDir = std::string(kLocalPackagesDir) + "/" + pkgName;
+    if (!std::filesystem::is_directory(localDir)) {
+        std::cerr << "Error: package '" << pkgName << "' is not installed\n";
+        return 1;
+    }
+    std::error_code ec;
+    std::filesystem::remove_all(localDir, ec);
+    if (ec) {
+        std::cerr << "Error: failed to remove package '" << pkgName << "': " << ec.message() << "\n";
+        return 1;
+    }
+    if (!quiet) {
+        std::cout << "Removed " << pkgName << "\n";
+    }
+    return 0;
+}
+
+int doPkgList(bool quiet) {
+    if (!std::filesystem::is_directory(kLocalPackagesDir)) {
+        if (!quiet) {
+            std::cout << "No packages installed.\n";
+        }
+        return 0;
+    }
+    bool found = false;
+    for (const auto& entry : std::filesystem::directory_iterator(kLocalPackagesDir)) {
+        if (!entry.is_directory()) {
+            continue;
+        }
+        auto manifest = entry.path() / "package.json";
+        if (std::filesystem::exists(manifest)) {
+            auto info = readPackageManifest(manifest.string());
+            if (info.valid) {
+                std::cout << info.name << "@" << info.version;
+                if (!info.description.empty()) {
+                    std::cout << " - " << info.description;
+                }
+                std::cout << "\n";
+                found = true;
+            }
+        }
+    }
+    if (!found && !quiet) {
+        std::cout << "No packages installed.\n";
+    }
+    return 0;
+}
+
+int doPkgSearch(const std::string& query, bool quiet) {
+    std::string indexJson = downloadString(getRegistryBaseUrl() + "/index.json");
+    if (indexJson.empty()) {
+        std::cerr << "Error: failed to fetch package registry (check your internet connection)\n";
+        return 1;
+    }
+    auto packages = parseRegistryIndex(indexJson);
+    if (packages.empty()) {
+        if (!quiet) {
+            std::cout << "No packages available.\n";
+        }
+        return 0;
+    }
+    bool found = false;
+    for (const auto& pkg : packages) {
+        // If query is empty, show all; otherwise filter by name or description
+        if (!query.empty()) {
+            if (pkg.name.find(query) == std::string::npos && pkg.description.find(query) == std::string::npos) {
+                continue;
+            }
+        }
+        std::cout << pkg.name << "@" << pkg.version;
+        if (!pkg.description.empty()) {
+            std::cout << " - " << pkg.description;
+        }
+        std::cout << "\n";
+        found = true;
+    }
+    if (!found && !quiet) {
+        std::cout << "No packages matching '" << query << "'.\n";
+    }
+    return 0;
+}
+
+int doPkgInfo(const std::string& pkgName) {
+    // First check installed packages
+    std::string localManifest = std::string(kLocalPackagesDir) + "/" + pkgName + "/package.json";
+    bool installed = std::filesystem::exists(localManifest);
+
+    PackageInfo info;
+    if (installed) {
+        info = readPackageManifest(localManifest);
+    } else {
+        // Download manifest from remote registry
+        std::string manifestUrl = getRegistryBaseUrl() + "/" + pkgName + "/package.json";
+        std::string manifestJson = downloadString(manifestUrl);
+        if (!manifestJson.empty()) {
+            info = parsePackageManifest(manifestJson);
+        }
+    }
+
+    if (!info.valid) {
+        std::cerr << "Error: package '" << pkgName << "' not found\n";
+        return 1;
+    }
+
+    std::cout << "Name:        " << info.name << "\n";
+    std::cout << "Version:     " << info.version << "\n";
+    std::cout << "Description: " << info.description << "\n";
+    std::cout << "Entry:       " << info.entry << "\n";
+    if (!info.files.empty()) {
+        std::cout << "Files:       ";
+        for (size_t i = 0; i < info.files.size(); ++i) {
+            if (i > 0)
+                std::cout << ", ";
+            std::cout << info.files[i];
+        }
+        std::cout << "\n";
+    }
+    std::cout << "Installed:   " << (installed ? "yes" : "no") << "\n";
+    return 0;
+}
+
+/// Entry point for `omsc pkg <subcommand> [args...]`.
+/// Returns the exit code.
+int doPkg(int argc, char* argv[], int startIndex, bool quiet) {
+    if (startIndex >= argc) {
+        std::cerr << "Error: missing pkg subcommand (install, remove, list, search, info)\n";
+        return 1;
+    }
+    std::string sub = argv[startIndex];
+    if (sub == "install" || sub == "add") {
+        if (startIndex + 1 >= argc) {
+            std::cerr << "Error: pkg install requires a package name\n";
+            return 1;
+        }
+        return doPkgInstall(argv[startIndex + 1], quiet);
+    }
+    if (sub == "remove" || sub == "uninstall" || sub == "rm") {
+        if (startIndex + 1 >= argc) {
+            std::cerr << "Error: pkg remove requires a package name\n";
+            return 1;
+        }
+        return doPkgRemove(argv[startIndex + 1], quiet);
+    }
+    if (sub == "list" || sub == "ls") {
+        return doPkgList(quiet);
+    }
+    if (sub == "search" || sub == "find") {
+        std::string query;
+        if (startIndex + 1 < argc) {
+            query = argv[startIndex + 1];
+        }
+        return doPkgSearch(query, quiet);
+    }
+    if (sub == "info" || sub == "show") {
+        if (startIndex + 1 >= argc) {
+            std::cerr << "Error: pkg info requires a package name\n";
+            return 1;
+        }
+        return doPkgInfo(argv[startIndex + 1]);
+    }
+    std::cerr << "Error: unknown pkg subcommand '" << sub << "'\n";
+    std::cerr << "Available subcommands: install, remove, list, search, info\n";
+    return 1;
+}
+
 void printUsage(const char* progName) {
     std::cout << kCompilerVersion << "\n";
     std::cout << "Usage:\n";
     std::cout << "  " << progName << " <source.om> [-o output]\n";
     std::cout << "  " << progName << " compile <source.om> [-o output]\n";
     std::cout << "  " << progName << " run <source.om> [-o output] [-- args...]\n";
+    std::cout << "  " << progName << " check <source.om>\n";
     std::cout << "  " << progName << " lex <source.om>\n";
     std::cout << "  " << progName << " parse <source.om>\n";
     std::cout << "  " << progName << " emit-ast <source.om>\n";
@@ -709,10 +1164,12 @@ void printUsage(const char* progName) {
     std::cout << "  " << progName << " version\n";
     std::cout << "  " << progName << " install\n";
     std::cout << "  " << progName << " uninstall\n";
+    std::cout << "  " << progName << " pkg <subcommand> [args]\n";
     std::cout << "  " << progName << " help\n";
     std::cout << "\nCommands:\n";
     std::cout << "  -b, -c, --build, --compile  Compile a source file (default)\n";
     std::cout << "  -r, --run            Compile and run a source file\n";
+    std::cout << "  --check              Parse and validate a source file without generating code\n";
     std::cout << "  -l, --lex, --tokens  Print lexer tokens\n";
     std::cout << "  -a, -p, --ast, --parse, --emit-ast  Parse and summarize the AST\n";
     std::cout << "  -e, -i, --emit-ir, --ir     Emit LLVM IR\n";
@@ -723,6 +1180,12 @@ void printUsage(const char* progName) {
     std::cout << "  -o, --output <file>  Output file name (default: a.out, stdout for emit-ir)\n";
     std::cout << "  -k, --keep-temps     Keep temporary outputs when running\n";
     std::cout << "  -V, --verbose        Show detailed compilation output (IR, progress)\n";
+    std::cout << "  -q, --quiet          Suppress all non-error output\n";
+    std::cout << "  --time               Show compilation timing breakdown\n";
+    std::cout << "  --dump-ast           Print the full AST tree (with parse/emit-ast command)\n";
+    std::cout << "  --dump-tokens        Alias for the lex command\n";
+    std::cout << "  --emit-obj           Emit object file only (skip linking)\n";
+    std::cout << "  --dry-run            Validate and compile without writing output files\n";
     std::cout << "\nOptimization Levels:\n";
     std::cout << "  -O0                  No optimization\n";
     std::cout << "  -O1                  Basic optimization\n";
@@ -753,6 +1216,12 @@ void printUsage(const char* progName) {
     std::cout << "\nInstallation:\n";
     std::cout << "  " << progName << " install        Add to PATH (first run or update)\n";
     std::cout << "  " << progName << " uninstall      Remove installed binary and PATH entry\n";
+    std::cout << "\nPackage Manager:\n";
+    std::cout << "  " << progName << " pkg install <name>    Download and install a package\n";
+    std::cout << "  " << progName << " pkg remove <name>     Remove an installed package\n";
+    std::cout << "  " << progName << " pkg list              List installed packages\n";
+    std::cout << "  " << progName << " pkg search [query]    Search available packages online\n";
+    std::cout << "  " << progName << " pkg info <name>       Show package details\n";
 }
 
 std::string readSourceFile(const std::string& filename) {
@@ -952,6 +1421,293 @@ void printProgramSummary(const omscript::Program* program) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// AST dump helpers — recursive pretty-printer for --dump-ast
+// ---------------------------------------------------------------------------
+
+void dumpExpression(const omscript::Expression* expr, int indent);
+void dumpStatement(const omscript::Statement* stmt, int indent);
+
+void printIndent(int indent) {
+    for (int i = 0; i < indent; ++i) {
+        std::cout << "  ";
+    }
+}
+
+void dumpExpression(const omscript::Expression* expr, int indent) {
+    if (!expr) {
+        printIndent(indent);
+        std::cout << "(null)\n";
+        return;
+    }
+    printIndent(indent);
+    switch (expr->type) {
+    case omscript::ASTNodeType::LITERAL_EXPR: {
+        auto* lit = static_cast<const omscript::LiteralExpr*>(expr);
+        std::cout << "LiteralExpr";
+        if (lit->literalType == omscript::LiteralExpr::LiteralType::INTEGER) {
+            std::cout << " int=" << lit->intValue;
+        } else if (lit->literalType == omscript::LiteralExpr::LiteralType::FLOAT) {
+            std::cout << " float=" << lit->floatValue;
+        } else {
+            std::cout << " str=\"" << lit->stringValue << "\"";
+        }
+        std::cout << "\n";
+        break;
+    }
+    case omscript::ASTNodeType::IDENTIFIER_EXPR: {
+        auto* id = static_cast<const omscript::IdentifierExpr*>(expr);
+        std::cout << "IdentifierExpr '" << id->name << "'\n";
+        break;
+    }
+    case omscript::ASTNodeType::BINARY_EXPR: {
+        auto* bin = static_cast<const omscript::BinaryExpr*>(expr);
+        std::cout << "BinaryExpr op='" << bin->op << "'\n";
+        dumpExpression(bin->left.get(), indent + 1);
+        dumpExpression(bin->right.get(), indent + 1);
+        break;
+    }
+    case omscript::ASTNodeType::UNARY_EXPR: {
+        auto* un = static_cast<const omscript::UnaryExpr*>(expr);
+        std::cout << "UnaryExpr op='" << un->op << "'\n";
+        dumpExpression(un->operand.get(), indent + 1);
+        break;
+    }
+    case omscript::ASTNodeType::CALL_EXPR: {
+        auto* call = static_cast<const omscript::CallExpr*>(expr);
+        std::cout << "CallExpr '" << call->callee << "' args=" << call->arguments.size() << "\n";
+        for (const auto& arg : call->arguments) {
+            dumpExpression(arg.get(), indent + 1);
+        }
+        break;
+    }
+    case omscript::ASTNodeType::ASSIGN_EXPR: {
+        auto* assign = static_cast<const omscript::AssignExpr*>(expr);
+        std::cout << "AssignExpr '" << assign->name << "'\n";
+        dumpExpression(assign->value.get(), indent + 1);
+        break;
+    }
+    case omscript::ASTNodeType::POSTFIX_EXPR: {
+        auto* pf = static_cast<const omscript::PostfixExpr*>(expr);
+        std::cout << "PostfixExpr op='" << pf->op << "'\n";
+        dumpExpression(pf->operand.get(), indent + 1);
+        break;
+    }
+    case omscript::ASTNodeType::PREFIX_EXPR: {
+        auto* pf = static_cast<const omscript::PrefixExpr*>(expr);
+        std::cout << "PrefixExpr op='" << pf->op << "'\n";
+        dumpExpression(pf->operand.get(), indent + 1);
+        break;
+    }
+    case omscript::ASTNodeType::TERNARY_EXPR: {
+        auto* tern = static_cast<const omscript::TernaryExpr*>(expr);
+        std::cout << "TernaryExpr\n";
+        printIndent(indent + 1);
+        std::cout << "condition:\n";
+        dumpExpression(tern->condition.get(), indent + 2);
+        printIndent(indent + 1);
+        std::cout << "then:\n";
+        dumpExpression(tern->thenExpr.get(), indent + 2);
+        printIndent(indent + 1);
+        std::cout << "else:\n";
+        dumpExpression(tern->elseExpr.get(), indent + 2);
+        break;
+    }
+    case omscript::ASTNodeType::ARRAY_EXPR: {
+        auto* arr = static_cast<const omscript::ArrayExpr*>(expr);
+        std::cout << "ArrayExpr elements=" << arr->elements.size() << "\n";
+        for (const auto& el : arr->elements) {
+            dumpExpression(el.get(), indent + 1);
+        }
+        break;
+    }
+    case omscript::ASTNodeType::INDEX_EXPR: {
+        auto* idx = static_cast<const omscript::IndexExpr*>(expr);
+        std::cout << "IndexExpr\n";
+        dumpExpression(idx->array.get(), indent + 1);
+        dumpExpression(idx->index.get(), indent + 1);
+        break;
+    }
+    case omscript::ASTNodeType::INDEX_ASSIGN_EXPR: {
+        auto* ia = static_cast<const omscript::IndexAssignExpr*>(expr);
+        std::cout << "IndexAssignExpr\n";
+        dumpExpression(ia->array.get(), indent + 1);
+        dumpExpression(ia->index.get(), indent + 1);
+        dumpExpression(ia->value.get(), indent + 1);
+        break;
+    }
+    default:
+        std::cout << "Expression(unknown)\n";
+        break;
+    }
+}
+
+void dumpStatement(const omscript::Statement* stmt, int indent) {
+    if (!stmt) {
+        printIndent(indent);
+        std::cout << "(null)\n";
+        return;
+    }
+    printIndent(indent);
+    switch (stmt->type) {
+    case omscript::ASTNodeType::VAR_DECL: {
+        auto* vd = static_cast<const omscript::VarDecl*>(stmt);
+        std::cout << "VarDecl '" << vd->name << "'";
+        if (vd->isConst)
+            std::cout << " const";
+        if (!vd->typeName.empty())
+            std::cout << " type=" << vd->typeName;
+        std::cout << "\n";
+        if (vd->initializer) {
+            dumpExpression(vd->initializer.get(), indent + 1);
+        }
+        break;
+    }
+    case omscript::ASTNodeType::RETURN_STMT: {
+        auto* ret = static_cast<const omscript::ReturnStmt*>(stmt);
+        std::cout << "ReturnStmt\n";
+        if (ret->value) {
+            dumpExpression(ret->value.get(), indent + 1);
+        }
+        break;
+    }
+    case omscript::ASTNodeType::IF_STMT: {
+        auto* ifs = static_cast<const omscript::IfStmt*>(stmt);
+        std::cout << "IfStmt\n";
+        printIndent(indent + 1);
+        std::cout << "condition:\n";
+        dumpExpression(ifs->condition.get(), indent + 2);
+        printIndent(indent + 1);
+        std::cout << "then:\n";
+        dumpStatement(ifs->thenBranch.get(), indent + 2);
+        if (ifs->elseBranch) {
+            printIndent(indent + 1);
+            std::cout << "else:\n";
+            dumpStatement(ifs->elseBranch.get(), indent + 2);
+        }
+        break;
+    }
+    case omscript::ASTNodeType::WHILE_STMT: {
+        auto* ws = static_cast<const omscript::WhileStmt*>(stmt);
+        std::cout << "WhileStmt\n";
+        printIndent(indent + 1);
+        std::cout << "condition:\n";
+        dumpExpression(ws->condition.get(), indent + 2);
+        printIndent(indent + 1);
+        std::cout << "body:\n";
+        dumpStatement(ws->body.get(), indent + 2);
+        break;
+    }
+    case omscript::ASTNodeType::DO_WHILE_STMT: {
+        auto* dw = static_cast<const omscript::DoWhileStmt*>(stmt);
+        std::cout << "DoWhileStmt\n";
+        printIndent(indent + 1);
+        std::cout << "body:\n";
+        dumpStatement(dw->body.get(), indent + 2);
+        printIndent(indent + 1);
+        std::cout << "condition:\n";
+        dumpExpression(dw->condition.get(), indent + 2);
+        break;
+    }
+    case omscript::ASTNodeType::FOR_STMT: {
+        auto* fs = static_cast<const omscript::ForStmt*>(stmt);
+        std::cout << "ForStmt iter='" << fs->iteratorVar << "'";
+        if (!fs->iteratorType.empty())
+            std::cout << " type=" << fs->iteratorType;
+        std::cout << "\n";
+        printIndent(indent + 1);
+        std::cout << "start:\n";
+        dumpExpression(fs->start.get(), indent + 2);
+        printIndent(indent + 1);
+        std::cout << "end:\n";
+        dumpExpression(fs->end.get(), indent + 2);
+        if (fs->step) {
+            printIndent(indent + 1);
+            std::cout << "step:\n";
+            dumpExpression(fs->step.get(), indent + 2);
+        }
+        printIndent(indent + 1);
+        std::cout << "body:\n";
+        dumpStatement(fs->body.get(), indent + 2);
+        break;
+    }
+    case omscript::ASTNodeType::FOR_EACH_STMT: {
+        auto* fe = static_cast<const omscript::ForEachStmt*>(stmt);
+        std::cout << "ForEachStmt iter='" << fe->iteratorVar << "'\n";
+        printIndent(indent + 1);
+        std::cout << "collection:\n";
+        dumpExpression(fe->collection.get(), indent + 2);
+        printIndent(indent + 1);
+        std::cout << "body:\n";
+        dumpStatement(fe->body.get(), indent + 2);
+        break;
+    }
+    case omscript::ASTNodeType::BREAK_STMT:
+        std::cout << "BreakStmt\n";
+        break;
+    case omscript::ASTNodeType::CONTINUE_STMT:
+        std::cout << "ContinueStmt\n";
+        break;
+    case omscript::ASTNodeType::SWITCH_STMT: {
+        auto* sw = static_cast<const omscript::SwitchStmt*>(stmt);
+        std::cout << "SwitchStmt cases=" << sw->cases.size() << "\n";
+        printIndent(indent + 1);
+        std::cout << "condition:\n";
+        dumpExpression(sw->condition.get(), indent + 2);
+        for (size_t ci = 0; ci < sw->cases.size(); ++ci) {
+            const auto& sc = sw->cases[ci];
+            printIndent(indent + 1);
+            if (sc.isDefault) {
+                std::cout << "default:\n";
+            } else {
+                std::cout << "case:\n";
+                dumpExpression(sc.value.get(), indent + 2);
+            }
+            for (const auto& s : sc.body) {
+                dumpStatement(s.get(), indent + 2);
+            }
+        }
+        break;
+    }
+    case omscript::ASTNodeType::BLOCK: {
+        auto* block = static_cast<const omscript::BlockStmt*>(stmt);
+        std::cout << "Block stmts=" << block->statements.size() << "\n";
+        for (const auto& s : block->statements) {
+            dumpStatement(s.get(), indent + 1);
+        }
+        break;
+    }
+    case omscript::ASTNodeType::EXPR_STMT: {
+        auto* es = static_cast<const omscript::ExprStmt*>(stmt);
+        std::cout << "ExprStmt\n";
+        dumpExpression(es->expression.get(), indent + 1);
+        break;
+    }
+    default:
+        std::cout << "Statement(unknown)\n";
+        break;
+    }
+}
+
+void dumpAST(const omscript::Program* program) {
+    std::cout << "Program functions=" << program->functions.size() << "\n";
+    for (const auto& fn : program->functions) {
+        std::cout << "  FunctionDecl '" << fn->name << "' params=" << fn->parameters.size();
+        if (fn->isOptMax)
+            std::cout << " [OPTMAX]";
+        std::cout << "\n";
+        for (const auto& p : fn->parameters) {
+            std::cout << "    Param '" << p.name << "'";
+            if (!p.typeName.empty())
+                std::cout << " type=" << p.typeName;
+            std::cout << "\n";
+        }
+        if (fn->body) {
+            dumpStatement(fn->body.get(), 2);
+        }
+    }
+}
+
 } // namespace
 
 int main(int argc, char* argv[]) {
@@ -967,10 +1723,15 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    enum class Command { Compile, Run, Lex, Parse, EmitIR, Clean, Help, Version, Install, Uninstall };
+    enum class Command { Compile, Run, Lex, Parse, EmitIR, Clean, Help, Version, Install, Uninstall, Check, Pkg };
 
     int argIndex = 1;
     bool verbose = false;
+    bool quiet = false;
+    bool showTiming = false;
+    bool dumpAstFull = false;
+    bool emitObjOnly = false;
+    bool dryRun = false;
     omscript::OptimizationLevel optLevel = omscript::OptimizationLevel::O2;
     std::string marchCpu;
     std::string mtuneCpu;
@@ -1073,6 +1834,31 @@ int main(int argc, char* argv[]) {
             argIndex++;
             continue;
         }
+        if (arg == "-q" || arg == "--quiet") {
+            quiet = true;
+            argIndex++;
+            continue;
+        }
+        if (arg == "--time") {
+            showTiming = true;
+            argIndex++;
+            continue;
+        }
+        if (arg == "--dump-ast") {
+            dumpAstFull = true;
+            argIndex++;
+            continue;
+        }
+        if (arg == "--emit-obj") {
+            emitObjOnly = true;
+            argIndex++;
+            continue;
+        }
+        if (arg == "--dry-run") {
+            dryRun = true;
+            argIndex++;
+            continue;
+        }
         if (auto parsedOpt = tryParseOptimizationFlag(arg)) {
             optLevel = *parsedOpt;
             argIndex++;
@@ -1104,6 +1890,10 @@ int main(int argc, char* argv[]) {
     } else if (firstArg == "uninstall" || firstArg == "--uninstall") {
         command = Command::Uninstall;
         commandMatched = true;
+    } else if (firstArg == "pkg" || firstArg == "--pkg" || firstArg == "package") {
+        command = Command::Pkg;
+        argIndex++;
+        commandMatched = true;
     } else if (firstArg == "compile" || firstArg == "build" || firstArg == "-c" || firstArg == "-b" ||
                firstArg == "--compile" || firstArg == "--build") {
         command = Command::Compile;
@@ -1113,8 +1903,12 @@ int main(int argc, char* argv[]) {
         command = Command::Run;
         argIndex++;
         commandMatched = true;
+    } else if (firstArg == "check" || firstArg == "--check") {
+        command = Command::Check;
+        argIndex++;
+        commandMatched = true;
     } else if (firstArg == "lex" || firstArg == "tokens" || firstArg == "-l" || firstArg == "--lex" ||
-               firstArg == "--tokens") {
+               firstArg == "--tokens" || firstArg == "--dump-tokens") {
         command = Command::Lex;
         argIndex++;
         commandMatched = true;
@@ -1160,6 +1954,9 @@ int main(int argc, char* argv[]) {
         doUninstall();
         return 0;
     }
+    if (command == Command::Pkg) {
+        return doPkg(argc, argv, argIndex, quiet);
+    }
 
     std::string sourceFile;
     std::string outputFile = command == Command::EmitIR ? "" : "a.out";
@@ -1195,6 +1992,26 @@ int main(int argc, char* argv[]) {
         }
         if (!parsingRunArgs && (arg == "-V" || arg == "--verbose")) {
             verbose = true;
+            continue;
+        }
+        if (!parsingRunArgs && (arg == "-q" || arg == "--quiet")) {
+            quiet = true;
+            continue;
+        }
+        if (!parsingRunArgs && arg == "--time") {
+            showTiming = true;
+            continue;
+        }
+        if (!parsingRunArgs && arg == "--dump-ast") {
+            dumpAstFull = true;
+            continue;
+        }
+        if (!parsingRunArgs && arg == "--emit-obj") {
+            emitObjOnly = true;
+            continue;
+        }
+        if (!parsingRunArgs && arg == "--dry-run") {
+            dryRun = true;
             continue;
         }
         if (!parsingRunArgs) {
@@ -1275,35 +2092,183 @@ int main(int argc, char* argv[]) {
     }
 
     try {
-        if (command == Command::Lex || command == Command::Parse || command == Command::EmitIR) {
+        auto totalStart = std::chrono::steady_clock::now();
+
+        if (command == Command::Lex || command == Command::Parse || command == Command::EmitIR ||
+            command == Command::Check) {
+            auto lexStart = std::chrono::steady_clock::now();
             std::string source = readSourceFile(sourceFile);
             omscript::Lexer lexer(source);
             auto tokens = lexer.tokenize();
+            auto lexEnd = std::chrono::steady_clock::now();
+
             if (command == Command::Lex) {
                 printTokens(tokens);
+                if (showTiming) {
+                    auto lexMs =
+                        std::chrono::duration_cast<std::chrono::microseconds>(lexEnd - lexStart).count() / 1000.0;
+                    std::cerr << "Timing: lex " << lexMs << "ms\n";
+                }
                 return 0;
             }
+
+            auto parseStart = std::chrono::steady_clock::now();
             omscript::Parser parser(tokens);
             auto program = parser.parse();
-            if (command == Command::Parse) {
-                printProgramSummary(program.get());
+            auto parseEnd = std::chrono::steady_clock::now();
+
+            if (command == Command::Check) {
+                if (!quiet) {
+                    std::cout << sourceFile << ": OK (" << program->functions.size() << " function(s))\n";
+                }
+                if (showTiming) {
+                    auto lexMs =
+                        std::chrono::duration_cast<std::chrono::microseconds>(lexEnd - lexStart).count() / 1000.0;
+                    auto parseMs =
+                        std::chrono::duration_cast<std::chrono::microseconds>(parseEnd - parseStart).count() / 1000.0;
+                    auto totalMs = std::chrono::duration_cast<std::chrono::microseconds>(
+                                       std::chrono::steady_clock::now() - totalStart)
+                                       .count() /
+                                   1000.0;
+                    std::cerr << "Timing: lex " << lexMs << "ms, parse " << parseMs << "ms, total " << totalMs
+                              << "ms\n";
+                }
                 return 0;
             }
+
+            if (command == Command::Parse) {
+                if (dumpAstFull) {
+                    dumpAST(program.get());
+                } else {
+                    printProgramSummary(program.get());
+                }
+                if (showTiming) {
+                    auto lexMs =
+                        std::chrono::duration_cast<std::chrono::microseconds>(lexEnd - lexStart).count() / 1000.0;
+                    auto parseMs =
+                        std::chrono::duration_cast<std::chrono::microseconds>(parseEnd - parseStart).count() / 1000.0;
+                    std::cerr << "Timing: lex " << lexMs << "ms, parse " << parseMs << "ms\n";
+                }
+                return 0;
+            }
+
+            // EmitIR
+            auto codegenStart = std::chrono::steady_clock::now();
             omscript::CodeGenerator codegen(optLevel);
             codegen.generate(program.get());
-            if (outputFile.empty()) {
-                codegen.getModule()->print(llvm::outs(), nullptr);
-                llvm::outs().flush();
-                return 0;
+            auto codegenEnd = std::chrono::steady_clock::now();
+
+            if (!dryRun) {
+                if (outputFile.empty()) {
+                    codegen.getModule()->print(llvm::outs(), nullptr);
+                    llvm::outs().flush();
+                } else {
+                    std::error_code ec;
+                    llvm::raw_fd_ostream out(outputFile, ec, llvm::sys::fs::OF_None);
+                    if (ec) {
+                        throw std::runtime_error("Could not write IR to file: " + ec.message());
+                    }
+                    codegen.getModule()->print(out, nullptr);
+                }
+            } else if (!quiet) {
+                std::cout << "Dry run: IR generation successful for " << sourceFile << "\n";
             }
-            std::error_code ec;
-            llvm::raw_fd_ostream out(outputFile, ec, llvm::sys::fs::OF_None);
-            if (ec) {
-                throw std::runtime_error("Could not write IR to file: " + ec.message());
+            if (showTiming) {
+                auto lexMs =
+                    std::chrono::duration_cast<std::chrono::microseconds>(lexEnd - lexStart).count() / 1000.0;
+                auto parseMs =
+                    std::chrono::duration_cast<std::chrono::microseconds>(parseEnd - parseStart).count() / 1000.0;
+                auto codegenMs =
+                    std::chrono::duration_cast<std::chrono::microseconds>(codegenEnd - codegenStart).count() / 1000.0;
+                std::cerr << "Timing: lex " << lexMs << "ms, parse " << parseMs << "ms, codegen " << codegenMs
+                          << "ms\n";
             }
-            codegen.getModule()->print(out, nullptr);
             return 0;
         }
+
+        if (dryRun) {
+            // For compile/run with --dry-run: lex, parse, codegen but don't write files.
+            auto lexStart = std::chrono::steady_clock::now();
+            std::string source = readSourceFile(sourceFile);
+            omscript::Lexer lexer(source);
+            auto tokens = lexer.tokenize();
+            auto lexEnd = std::chrono::steady_clock::now();
+
+            auto parseStart = std::chrono::steady_clock::now();
+            omscript::Parser parser(tokens);
+            auto program = parser.parse();
+            auto parseEnd = std::chrono::steady_clock::now();
+
+            auto codegenStart = std::chrono::steady_clock::now();
+            omscript::CodeGenerator codegen(optLevel);
+            codegen.setMarch(marchCpu);
+            codegen.setMtune(mtuneCpu);
+            codegen.setPIC(flagPIC);
+            codegen.setFastMath(flagFastMath);
+            codegen.setOptMax(flagOptMax);
+            if (flagJIT) {
+                codegen.generateHybrid(program.get());
+            } else {
+                codegen.generate(program.get());
+            }
+            auto codegenEnd = std::chrono::steady_clock::now();
+
+            if (!quiet) {
+                std::cout << "Dry run: compilation successful for " << sourceFile << "\n";
+            }
+            if (showTiming) {
+                auto lexMs =
+                    std::chrono::duration_cast<std::chrono::microseconds>(lexEnd - lexStart).count() / 1000.0;
+                auto parseMs =
+                    std::chrono::duration_cast<std::chrono::microseconds>(parseEnd - parseStart).count() / 1000.0;
+                auto codegenMs =
+                    std::chrono::duration_cast<std::chrono::microseconds>(codegenEnd - codegenStart).count() / 1000.0;
+                auto totalMs = std::chrono::duration_cast<std::chrono::microseconds>(
+                                   std::chrono::steady_clock::now() - totalStart)
+                                   .count() /
+                               1000.0;
+                std::cerr << "Timing: lex " << lexMs << "ms, parse " << parseMs << "ms, codegen " << codegenMs
+                          << "ms, total " << totalMs << "ms\n";
+            }
+            return 0;
+        }
+
+        if (emitObjOnly) {
+            // Compile to object file only (no linking).
+            std::string source = readSourceFile(sourceFile);
+            omscript::Lexer lexer(source);
+            auto tokens = lexer.tokenize();
+            omscript::Parser parser(tokens);
+            auto program = parser.parse();
+
+            omscript::CodeGenerator codegen(optLevel);
+            codegen.setMarch(marchCpu);
+            codegen.setMtune(mtuneCpu);
+            codegen.setPIC(flagPIC);
+            codegen.setFastMath(flagFastMath);
+            codegen.setOptMax(flagOptMax);
+            if (flagJIT) {
+                codegen.generateHybrid(program.get());
+            } else {
+                codegen.generate(program.get());
+            }
+
+            std::string objFile =
+                outputSpecified ? outputFile : (std::filesystem::path(sourceFile).stem().string() + ".o");
+            codegen.writeObjectFile(objFile);
+            if (!quiet) {
+                std::cout << "Object file written: " << objFile << "\n";
+            }
+            if (showTiming) {
+                auto totalMs = std::chrono::duration_cast<std::chrono::microseconds>(
+                                   std::chrono::steady_clock::now() - totalStart)
+                                   .count() /
+                               1000.0;
+                std::cerr << "Timing: total " << totalMs << "ms\n";
+            }
+            return 0;
+        }
+
         omscript::Compiler compiler;
         compiler.setVerbose(verbose);
         compiler.setOptimizationLevel(optLevel);
@@ -1317,7 +2282,19 @@ int main(int argc, char* argv[]) {
         compiler.setStaticLinking(flagStatic);
         compiler.setStrip(flagStrip);
         compiler.setStackProtector(flagStackProtector);
+        if (quiet) {
+            compiler.setVerbose(false);
+        }
         compiler.compile(sourceFile, outputFile);
+
+        if (showTiming) {
+            auto totalMs = std::chrono::duration_cast<std::chrono::microseconds>(
+                               std::chrono::steady_clock::now() - totalStart)
+                               .count() /
+                           1000.0;
+            std::cerr << "Timing: total " << totalMs << "ms\n";
+        }
+
         if (command == Command::Run) {
             // Register temp files for cleanup on signal (Ctrl+C during program run).
             if (!outputSpecified && !keepTemps) {
