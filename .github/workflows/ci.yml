@@ -22,8 +22,7 @@ jobs:
 
       - name: Check code formatting
         run: |
-          find . -name '*.cpp' -o -name '*.h' | xargs clang-format --dry-run -Werror | grep -q . && exit 1 || true
-          # Actually format and check for differences
+          # Format and check for differences
           for f in $(find src runtime include -name '*.cpp' -o -name '*.h' 2>/dev/null); do
             clang-format "$f" > /tmp/formatted.cpp
             if ! diff -q "$f" /tmp/formatted.cpp > /dev/null 2>&1; then

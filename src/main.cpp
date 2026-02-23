@@ -331,7 +331,8 @@ std::string getInstallPrefix(bool system) {
     if (system) {
         return "/usr/local";
     }
-    std::string home = getenv("HOME") ? getenv("HOME") : "";
+    const char* homeEnv = getenv("HOME");
+    std::string home = homeEnv ? homeEnv : "";
     return home + "/.local";
 }
 
@@ -344,7 +345,8 @@ bool fileExists(const std::string& path) {
 }
 
 bool isInPath(const std::string& binDir) {
-    std::string pathEnv = getenv("PATH") ? getenv("PATH") : "";
+    const char* pathPtr = getenv("PATH");
+    std::string pathEnv = pathPtr ? pathPtr : "";
     size_t pos = 0;
     std::string token;
     while ((pos = pathEnv.find(':')) != std::string::npos) {
@@ -2295,7 +2297,9 @@ int main(int argc, char* argv[]) {
             if (!outputSpecified && !keepTemps) {
                 std::string objPath = outputFile + ".o";
                 std::strncpy(g_tempOutputFile, outputFile.c_str(), kMaxTempPathLen - 1);
+                g_tempOutputFile[kMaxTempPathLen - 1] = '\0';
                 std::strncpy(g_tempObjectFile, objPath.c_str(), kMaxTempPathLen - 1);
+                g_tempObjectFile[kMaxTempPathLen - 1] = '\0';
             }
             std::filesystem::path runPath = std::filesystem::absolute(outputFile);
             std::string runProgram = runPath.string();
