@@ -1,6 +1,7 @@
 # OmScript User Packages
 
-This directory contains the package registry for the OmScript package manager.
+This directory is the remote package registry for the OmScript package manager.
+Packages listed here are downloaded on demand when users run `omsc pkg install`.
 
 ## Package Structure
 
@@ -11,6 +12,9 @@ package-name/
 ├── package.json    # Package manifest (name, version, description, entry)
 └── *.om            # OmScript source files
 ```
+
+The top-level `index.json` lists all available packages and must be updated
+when packages are added or removed.
 
 ## Package Manifest (package.json)
 
@@ -29,18 +33,19 @@ package-name/
 1. Create a new directory under `user-packages/` with your package name
 2. Add a `package.json` manifest
 3. Add your `.om` source files
-4. Submit a pull request
+4. Add the package entry to `index.json`
+5. Submit a pull request
 
 ## Using Packages
 
 ```bash
-# Search available packages
+# Search available packages (downloads index from GitHub)
 omsc pkg search
 
-# Install a package
+# Install a package (downloads files from GitHub)
 omsc pkg install math
 
-# List installed packages
+# List installed packages (local only)
 omsc pkg list
 
 # Get package info
@@ -51,3 +56,13 @@ omsc pkg remove math
 ```
 
 Installed packages are stored in `om_packages/` in the current working directory.
+
+## Custom Registry
+
+Set the `OMSC_REGISTRY_URL` environment variable to use a different package
+registry (e.g. a local server or a fork):
+
+```bash
+export OMSC_REGISTRY_URL="https://example.com/my-packages"
+omsc pkg search
+```

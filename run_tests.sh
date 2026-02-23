@@ -475,6 +475,28 @@ echo ""
 # Clean up any leftover packages
 rm -rf om_packages
 
+# Start a local HTTP server to serve user-packages/ for testing.
+# This exercises the real download path without requiring internet access.
+PKG_SERVER_PORT=18923
+PKG_SERVER_PID=""
+if command -v python3 > /dev/null 2>&1; then
+    python3 -m http.server $PKG_SERVER_PORT --directory user-packages > /dev/null 2>&1 &
+    PKG_SERVER_PID=$!
+    sleep 1
+    export OMSC_REGISTRY_URL="http://127.0.0.1:${PKG_SERVER_PORT}"
+    echo "Registry served at $OMSC_REGISTRY_URL (PID $PKG_SERVER_PID)"
+else
+    echo "Warning: python3 not found, using GitHub URLs for pkg tests"
+fi
+
+cleanup_pkg_server() {
+    if [ -n "$PKG_SERVER_PID" ]; then
+        kill $PKG_SERVER_PID 2>/dev/null
+        wait $PKG_SERVER_PID 2>/dev/null
+    fi
+}
+trap cleanup_pkg_server EXIT
+
 # Help text shows package manager
 test_cli_output "help-shows-pkg" "pkg install" 0 ./build/omsc --help
 test_cli_output "help-shows-pkg-search" "pkg search" 0 ./build/omsc --help
@@ -497,7 +519,7 @@ test_cli_output "pkg-info-nonexistent" "not found" 1 ./build/omsc pkg info nonex
 # pkg list empty
 test_cli_output "pkg-list-empty" "No packages installed" 0 ./build/omsc pkg list
 
-# pkg install
+# pkg install (downloads from local server)
 test_cli_output "pkg-install-math" "Installed math@1.0.0" 0 ./build/omsc pkg install math
 TOTAL=$((TOTAL + 1))
 echo -n "Testing pkg-install-creates-files... "
