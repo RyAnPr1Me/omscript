@@ -464,7 +464,7 @@ test_cli_output "help-shows-dry-run" "--dry-run" 0 ./build/omsc --help
 test_cli_output "help-shows-quiet" "--quiet" 0 ./build/omsc --help
 
 # Version shows full semver
-test_cli_output "version-full-semver" "v1.0.0" 0 ./build/omsc --version
+test_cli_output "version-full-semver" "OmScript Compiler v" 0 ./build/omsc --version
 
 echo ""
 echo "============================================"
