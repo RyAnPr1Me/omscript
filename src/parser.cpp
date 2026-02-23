@@ -720,12 +720,24 @@ std::unique_ptr<Expression> Parser::parseAddition() {
 }
 
 std::unique_ptr<Expression> Parser::parseMultiplication() {
-    auto left = parseUnary();
+    auto left = parsePower();
 
     while (match(TokenType::STAR) || match(TokenType::SLASH) || match(TokenType::PERCENT)) {
         std::string op = tokens[current - 1].lexeme;
-        auto right = parseUnary();
+        auto right = parsePower();
         left = std::make_unique<BinaryExpr>(op, std::move(left), std::move(right));
+    }
+
+    return left;
+}
+
+std::unique_ptr<Expression> Parser::parsePower() {
+    auto left = parseUnary();
+
+    if (match(TokenType::STAR_STAR)) {
+        // Right-associative: 2 ** 3 ** 2 = 2 ** (3 ** 2) = 2 ** 9 = 512
+        auto right = parsePower();
+        left = std::make_unique<BinaryExpr>("**", std::move(left), std::move(right));
     }
 
     return left;
@@ -744,8 +756,8 @@ std::unique_ptr<Expression> Parser::parseUnary() {
     if (match(TokenType::PLUSPLUS) || match(TokenType::MINUSMINUS)) {
         Token opToken = tokens[current - 1];
         auto operand = parseUnary();
-        if (operand->type != ASTNodeType::IDENTIFIER_EXPR) {
-            error("Prefix " + opToken.lexeme + " requires an identifier operand");
+        if (operand->type != ASTNodeType::IDENTIFIER_EXPR && operand->type != ASTNodeType::INDEX_EXPR) {
+            error("Prefix " + opToken.lexeme + " requires an lvalue operand");
         }
         auto node = std::make_unique<PrefixExpr>(opToken.lexeme, std::move(operand));
         node->line = opToken.line;
@@ -763,8 +775,8 @@ std::unique_ptr<Expression> Parser::parsePostfix() {
         // Handle postfix operators
         if (match(TokenType::PLUSPLUS) || match(TokenType::MINUSMINUS)) {
             Token opToken = tokens[current - 1];
-            if (expr->type != ASTNodeType::IDENTIFIER_EXPR) {
-                error("Postfix " + opToken.lexeme + " requires an identifier operand");
+            if (expr->type != ASTNodeType::IDENTIFIER_EXPR && expr->type != ASTNodeType::INDEX_EXPR) {
+                error("Postfix " + opToken.lexeme + " requires an lvalue operand");
             }
             expr = std::make_unique<PostfixExpr>(opToken.lexeme, std::move(expr));
             expr->line = opToken.line;

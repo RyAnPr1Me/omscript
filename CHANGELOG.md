@@ -5,6 +5,38 @@ All notable changes to the OmScript compiler will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-02-23
+
+### Added
+- Exponentiation operator `**` (right-associative: `2 ** 3 ** 2` = `2 ** 9` = `512`) with constant folding, float support, and bytecode backend
+- `str_concat(a, b)` stdlib function for explicit string concatenation
+
+### Fixed
+- Arrays returned from functions no longer cause use-after-free; `generateArray()` now uses heap allocation (`malloc`) instead of stack allocation (`alloca`), so arrays survive cross-function returns
+
+## [1.2.0] - 2026-02-23
+
+### Added
+- Prefix/postfix increment/decrement on array elements (`arr[i]++`, `++arr[i]`, `arr[i]--`, `--arr[i]`) with bounds checking
+- Hex escape sequences in string literals (`"\x41"` → `"A"`)
+- Underscore separators in numeric literals for readability (`1_000_000`, `0xFF_FF`, `0b1010_0101`, `0o7_7`)
+
+### Fixed
+- `arr[0]++` and `++arr[0]` no longer produce a parse error ("requires an identifier operand"); prefix/postfix operators now accept any lvalue including array element expressions
+
+## [1.1.0] - 2026-02-23
+
+### Added
+- Hexadecimal integer literals (`0xFF`, `0x1A`)
+- Octal integer literals (`0o77`, `0o10`)
+- Binary integer literals (`0b1010`, `0b11111111`)
+- Clear error messages for malformed number literals (e.g. `0x` with no digits)
+
+### Fixed
+- Constant folding of `INT64_MIN / -1` and `INT64_MIN % -1` no longer causes undefined behavior (both AST and LLVM IR paths)
+- Constant folding of unary negation on `INT64_MIN` no longer causes undefined behavior (both AST and LLVM IR paths)
+- Shift operations (`<<`, `>>`) with out-of-range amounts (≥ 64) no longer cause undefined behavior in compiled code; shift amount is now masked to [0, 63]
+
 ## [1.0.0] - 2026-02-22
 
 ### Fixed

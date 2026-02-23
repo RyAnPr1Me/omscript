@@ -1,0 +1,32 @@
+// Test prefix/postfix increment/decrement on array elements
+fn main() {
+    var result = 0;
+    
+    // Postfix increment on array element
+    var arr = [10, 20, 30];
+    var old = arr[0]++;    // old = 10, arr[0] = 11
+    result = result + old; // 10
+    result = result + arr[0]; // 10 + 11 = 21
+    
+    // Postfix decrement on array element
+    old = arr[1]--;        // old = 20, arr[1] = 19
+    result = result + old; // 21 + 20 = 41
+    result = result + arr[1]; // 41 + 19 = 60
+    
+    // Prefix increment on array element
+    var val = ++arr[2];    // arr[2] = 31, val = 31
+    result = result + val; // 60 + 31 = 91
+    result = result + arr[2]; // 91 + 31 = 122
+    
+    // Prefix decrement on array element
+    val = --arr[0];        // arr[0] = 10, val = 10
+    result = result + val; // 122 + 10 = 132
+    result = result + arr[0]; // 132 + 10 = 142
+    
+    // Increment with variable index
+    var i = 1;
+    arr[i]++;              // arr[1] = 20
+    result = result + arr[i]; // 142 + 20 = 162
+    
+    return result; // 162
+}

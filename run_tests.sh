@@ -138,6 +138,12 @@ test_cli_output "lex-bool-true" "TRUE" 0 ./build/omsc lex examples/bool_test.om
 test_cli_output "lex-bool-false" "FALSE" 0 ./build/omsc lex examples/bool_test.om
 test_cli_output "lex-null" "NULL_LITERAL" 0 ./build/omsc lex examples/bool_test.om
 test_cli_output "lex-bitwise-assign" "AMPERSAND_ASSIGN" 0 ./build/omsc lex examples/bitwise_assign_test.om
+test_cli_output "lex-hex-literal" "INTEGER '0xFF'" 0 ./build/omsc lex examples/hex_oct_bin_test.om
+test_cli_output "lex-octal-literal" "INTEGER '0o77'" 0 ./build/omsc lex examples/hex_oct_bin_test.om
+test_cli_output "lex-binary-literal" "INTEGER '0b1111'" 0 ./build/omsc lex examples/hex_oct_bin_test.om
+test_cli_output "lex-underscore-decimal" "INTEGER '1000000'" 0 ./build/omsc lex examples/underscore_num_test.om
+test_cli_output "lex-underscore-hex" "INTEGER '0xFF00'" 0 ./build/omsc lex examples/underscore_num_test.om
+test_cli_output "lex-power-operator" "STAR_STAR '**'" 0 ./build/omsc lex examples/power_operator_test.om
 test_cli_output "tokens-flag" "FN" 0 ./build/omsc --tokens examples/test.om
 test_cli_output "parse" "Parsed program" 0 ./build/omsc parse examples/test.om
 test_cli_output "emit-ast-command" "Parsed program" 0 ./build/omsc emit-ast examples/test.om
@@ -275,6 +281,13 @@ test_program "examples/bool_test.om" 73
 test_program "examples/bitwise_assign_test.om" 55
 test_program "examples/array_compound_test.om" 164
 test_program "examples/print_char_return_test.om" 1
+test_program "examples/hex_oct_bin_test.om" 543
+test_program "examples/array_incdec_test.om" 162
+test_program "examples/hex_escape_test.om" 0
+test_program "examples/underscore_num_test.om" 178
+test_program "examples/array_return_test.om" 110
+test_program "examples/power_operator_test.om" 366
+test_program "examples/str_concat_test.om" 22
 test_program "examples/swap_oob.om" 134
 test_program "examples/char_at_oob.om" 134
 test_compile_fail "examples/const_fail.om"
@@ -288,6 +301,9 @@ test_compile_fail "examples/no_main.om"
 test_compile_fail "examples/dup_func.om"
 test_compile_fail "examples/dup_param.om"
 test_compile_fail "examples/missing_semicolon.om"
+test_compile_fail "examples/invalid_hex.om"
+test_compile_fail "examples/invalid_binary.om"
+test_compile_fail "examples/invalid_octal.om"
 test_cli_output "error-line-info" "line" 1 ./build/omsc examples/undefined_var.om -o /tmp/test_err
 test_cli_output "error-includes-filename" "undefined_var.om" 1 ./build/omsc examples/undefined_var.om -o /tmp/test_err
 test_cli_output "missing-semicolon-msg" "Expected ';'" 1 ./build/omsc examples/missing_semicolon.om -o /tmp/test_semicolon
@@ -296,6 +312,9 @@ test_cli_output "no-main-msg" "No 'main' function defined" 1 ./build/omsc exampl
 test_cli_output "dup-func-msg" "Duplicate function definition" 1 ./build/omsc examples/dup_func.om -o /tmp/test_dupfunc
 test_cli_output "dup-param-msg" "Duplicate parameter name" 1 ./build/omsc examples/dup_param.om -o /tmp/test_dupparam
 test_cli_output "switch-float-case-msg" "case value must be an integer constant, not a float" 1 ./build/omsc examples/switch_float_case.om -o /tmp/test_sfcase
+test_cli_output "invalid-hex-msg" "Expected hex digit after" 1 ./build/omsc examples/invalid_hex.om -o /tmp/test_hex_err
+test_cli_output "invalid-binary-msg" "Expected binary digit after" 1 ./build/omsc examples/invalid_binary.om -o /tmp/test_bin_err
+test_cli_output "invalid-octal-msg" "Expected octal digit after" 1 ./build/omsc examples/invalid_octal.om -o /tmp/test_oct_err
 
 echo ""
 echo "============================================"

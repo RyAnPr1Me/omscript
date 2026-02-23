@@ -21,6 +21,7 @@ enum class OpCode : uint8_t {
     DIV,
     MOD,
     NEG,
+    POW,
 
     // Comparison
     EQ,
