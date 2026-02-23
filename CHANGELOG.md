@@ -5,6 +5,15 @@ All notable changes to the OmScript compiler will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-02-23
+
+### Added
+- Exponentiation operator `**` (right-associative: `2 ** 3 ** 2` = `2 ** 9` = `512`) with constant folding, float support, and bytecode backend
+- `str_concat(a, b)` stdlib function for explicit string concatenation
+
+### Fixed
+- Arrays returned from functions no longer cause use-after-free; `generateArray()` now uses heap allocation (`malloc`) instead of stack allocation (`alloca`), so arrays survive cross-function returns
+
 ## [1.2.0] - 2026-02-23
 
 ### Added

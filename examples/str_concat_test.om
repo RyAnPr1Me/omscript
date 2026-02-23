@@ -1,0 +1,28 @@
+// Test str_concat built-in function
+fn main() {
+    var result = 0;
+
+    // Basic concatenation
+    var a = str_concat("hello", " world");
+    result = result + str_len(a); // 11
+
+    // Concatenation with variables
+    var x = "foo";
+    var y = "bar";
+    var b = str_concat(x, y);
+    result = result + str_len(b); // 11 + 6 = 17
+
+    // Chained concatenation
+    var c = str_concat(str_concat("a", "b"), "c");
+    result = result + str_len(c); // 17 + 3 = 20
+
+    // Equality check after concatenation
+    var d = str_concat("test", "ing");
+    result = result + str_eq(d, "testing"); // 20 + 1 = 21
+
+    // Concatenation with empty string
+    var e = str_concat("hello", "");
+    result = result + str_eq(e, "hello"); // 21 + 1 = 22
+
+    return result; // 22
+}

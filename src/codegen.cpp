@@ -430,7 +430,7 @@ namespace omscript {
 static const std::unordered_set<std::string> stdlibFunctions = {
     "abs",    "assert", "char_at", "clamp",   "input", "is_alpha", "is_digit",   "is_even",
     "is_odd", "len",    "max",     "min",     "pow",   "print",    "print_char", "reverse",
-    "sign",   "sqrt",   "str_eq",  "str_len", "sum",   "swap",     "to_char",    "typeof"};
+    "sign",   "sqrt",   "str_concat", "str_eq",  "str_len", "sum",   "swap",     "to_char",    "typeof"};
 
 bool isStdlibFunction(const std::string& name) {
     return stdlibFunctions.find(name) != stdlibFunctions.end();
@@ -2139,6 +2139,29 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // strcmp returns 0 on equality; convert to boolean (1 if equal, 0 otherwise)
         llvm::Value* isEqual = builder->CreateICmpEQ(cmpResult, builder->getInt32(0), "streq.eq");
         return builder->CreateZExt(isEqual, getDefaultType(), "streq.result");
+    }
+
+    if (expr->callee == "str_concat") {
+        if (expr->arguments.size() != 2) {
+            codegenError("Built-in function 'str_concat' expects 2 arguments, but " +
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
+        }
+        llvm::Value* lhsArg = generateExpression(expr->arguments[0].get());
+        llvm::Value* rhsArg = generateExpression(expr->arguments[1].get());
+        llvm::Value* lhsPtr = builder->CreateIntToPtr(lhsArg, llvm::PointerType::getUnqual(*context), "concat.lhs");
+        llvm::Value* rhsPtr = builder->CreateIntToPtr(rhsArg, llvm::PointerType::getUnqual(*context), "concat.rhs");
+        llvm::Value* len1 = builder->CreateCall(getOrDeclareStrlen(), {lhsPtr}, "concat.len1");
+        llvm::Value* len2 = builder->CreateCall(getOrDeclareStrlen(), {rhsPtr}, "concat.len2");
+        llvm::Value* totalLen = builder->CreateAdd(len1, len2, "concat.totallen");
+        llvm::Value* allocSize =
+            builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "concat.allocsize");
+        llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {allocSize}, "concat.buf");
+        builder->CreateCall(getOrDeclareStrcpy(), {buf, lhsPtr});
+        builder->CreateCall(getOrDeclareStrcat(), {buf, rhsPtr});
+        // Mark return as string-returning so callers can track it
+        stringReturningFunctions_.insert("str_concat");
+        return buf;
     }
 
     if (inOptMaxFunction) {

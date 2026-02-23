@@ -25,6 +25,6 @@ fn main() {
     result = result + (base ** exp); // 64
 
     // 256 + 27 + 1 + 10 + 0 + 0 + 8 + 64 = 366
-    // 366 % 256 = 110
-    return result;
+    // Exit code: 366 % 256 = 110
+    return result; // 366
 }

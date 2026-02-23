@@ -41,7 +41,7 @@ OmScript is a **low-level, C-like programming language** featuring:
 - **Reference-counted memory management** — Automatic deterministic deallocation via malloc/free with reference counting on strings.
 - **Hybrid architecture** — A bytecode VM exists as an alternative backend for future dynamic compilation scenarios. The primary path is always native code.
 - **Aggressive optimization** — Four optimization levels (O0–O3) plus a special OPTMAX directive that applies exhaustive multi-pass optimization to marked functions.
-- **24 built-in standard library functions** — Math, array manipulation, string, character classification, and I/O, all compiled to native machine code.
+- **25 built-in standard library functions** — Math, array manipulation, string, character classification, and I/O, all compiled to native machine code.
 
 ### Design Philosophy
 
@@ -436,18 +436,19 @@ Operators are listed from **highest** to **lowest** precedence:
 | 1 | `()` `[]` | Left | Grouping, array indexing |
 | 2 | `x++` `x--` | Left | Postfix increment/decrement |
 | 3 | `++x` `--x` `-x` `!` `~` | Right | Prefix increment/decrement, unary minus, logical NOT, bitwise NOT |
-| 4 | `*` `/` `%` | Left | Multiplication, division, modulo |
-| 5 | `+` `-` | Left | Addition, subtraction |
-| 6 | `<<` `>>` | Left | Bitwise left shift, arithmetic right shift |
-| 7 | `<` `<=` `>` `>=` | Left | Relational comparison |
-| 8 | `==` `!=` | Left | Equality comparison |
-| 9 | `&` | Left | Bitwise AND |
-| 10 | `^` | Left | Bitwise XOR |
-| 11 | `\|` | Left | Bitwise OR |
-| 12 | `&&` | Left | Logical AND (short-circuit) |
-| 13 | `\|\|` | Left | Logical OR (short-circuit) |
-| 14 | `? :` | Right | Ternary conditional |
-| 15 | `=` `+=` `-=` `*=` `/=` `%=` | Right | Assignment |
+| 4 | `**` | Right | Exponentiation |
+| 5 | `*` `/` `%` | Left | Multiplication, division, modulo |
+| 6 | `+` `-` | Left | Addition, subtraction |
+| 7 | `<<` `>>` | Left | Bitwise left shift, arithmetic right shift |
+| 8 | `<` `<=` `>` `>=` | Left | Relational comparison |
+| 9 | `==` `!=` | Left | Equality comparison |
+| 10 | `&` | Left | Bitwise AND |
+| 11 | `^` | Left | Bitwise XOR |
+| 12 | `\|` | Left | Bitwise OR |
+| 13 | `&&` | Left | Logical AND (short-circuit) |
+| 14 | `\|\|` | Left | Logical OR (short-circuit) |
+| 15 | `? :` | Right | Ternary conditional |
+| 16 | `=` `+=` `-=` `*=` `/=` `%=` | Right | Assignment |
 
 ### 7.2 Arithmetic Operators
 
@@ -458,7 +459,15 @@ Operators are listed from **highest** to **lowest** precedence:
 | `*` | `a * b` | Multiplication |
 | `/` | `a / b` | Integer division (truncates toward zero) |
 | `%` | `a % b` | Modulo (remainder) |
+| `**` | `a ** b` | Exponentiation (right-associative) |
 | `-` (unary) | `-a` | Negation |
+
+```javascript
+2 ** 8        // 256
+3 ** 3        // 27
+2 ** 3 ** 2   // 512 (right-associative: 2 ** (3 ** 2) = 2 ** 9)
+2 ** -1       // 0 (negative exponent → 0 for integer power)
+```
 
 **Division and modulo by zero** are detected in the generated machine code at runtime. They print an error and terminate the program with exit code 1:
 
@@ -784,7 +793,7 @@ In the bytecode/VM runtime, strings are fully dynamic:
 
 ## 11. Standard Library
 
-OmScript provides **24 built-in functions**. All stdlib functions are compiled directly to native machine code via LLVM IR — they never go through the bytecode interpreter.
+OmScript provides **25 built-in functions**. All stdlib functions are compiled directly to native machine code via LLVM IR — they never go through the bytecode interpreter.
 
 ### 11.1 I/O Functions
 
@@ -1041,6 +1050,16 @@ str_eq("hello", "hello")    // 1
 str_eq("hello", "world")    // 0
 ```
 
+#### `str_concat(a, b)`
+
+Returns a new string that is the concatenation of strings `a` and `b`. This is equivalent to `a + b` for strings but provides an explicit function interface.
+
+```javascript
+str_concat("hello", " world")   // "hello world"
+str_concat("foo", "bar")        // "foobar"
+str_concat("test", "")          // "test"
+```
+
 ### 11.6 Utility Functions
 
 #### `typeof(x)`
@@ -1089,6 +1108,7 @@ assert(0);          // always aborts: "Runtime error: assertion failed"
 | `str_len(s)` | 1 | length | Length of a string |
 | `char_at(s, i)` | 2 | code | ASCII code of character at index `i` |
 | `str_eq(a, b)` | 2 | 0/1 | String equality (1 if equal, 0 otherwise) |
+| `str_concat(a, b)` | 2 | string | Concatenation of strings `a` and `b` |
 | `typeof(x)` | 1 | 1 | Type tag (always 1/integer in native path) |
 | `assert(cond)` | 1 | 1 | Abort with error if `cond` is falsy |
 
@@ -1738,7 +1758,8 @@ equality       = comparison { ( "==" | "!=" ) comparison } ;
 comparison     = shift { ( "<" | "<=" | ">" | ">=" ) shift } ;
 shift          = additive { ( "<<" | ">>" ) additive } ;
 additive       = multiplicative { ( "+" | "-" ) multiplicative } ;
-multiplicative = unary { ( "*" | "/" | "%" ) unary } ;
+multiplicative = power { ( "*" | "/" | "%" ) power } ;
+power          = unary [ "**" power ] ;
 unary          = ( "-" | "!" | "~" | "++" | "--" ) unary | postfix ;
 postfix        = primary { "++" | "--" | "[" expression "]" | "(" [ arg_list ] ")" } ;
 primary        = INTEGER | FLOAT | STRING

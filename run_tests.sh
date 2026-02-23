@@ -287,6 +287,7 @@ test_program "examples/hex_escape_test.om" 0
 test_program "examples/underscore_num_test.om" 178
 test_program "examples/array_return_test.om" 110
 test_program "examples/power_operator_test.om" 366
+test_program "examples/str_concat_test.om" 22
 test_program "examples/swap_oob.om" 134
 test_program "examples/char_at_oob.om" 134
 test_compile_fail "examples/const_fail.om"
