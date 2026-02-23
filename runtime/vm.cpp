@@ -15,6 +15,9 @@ using BytecodeIteratorDiff = std::vector<uint8_t>::difference_type;
 // Maximum valid shift amount for 64-bit integers (0-63).
 static constexpr int64_t kInt64BitWidth = 64;
 
+// Maximum exponent value for the ** operator to prevent resource exhaustion.
+static constexpr int64_t kMaxExponent = 1000;
+
 VM::VM() : lastReturn(), jit_(std::make_unique<BytecodeJIT>()) {
     locals.reserve(16);
     std::fill_n(registers, kMaxRegisters, Value());
@@ -331,11 +334,17 @@ op_POW: {
     uint8_t rs2 = readByte(bytecode, ip);
     Value base = registers[rs1];
     Value exp = registers[rs2];
-    if (exp.getType() == Value::Type::INTEGER && exp.unsafeAsInt() < 0) {
+    if (exp.getType() != Value::Type::INTEGER) {
+        throw std::runtime_error("Exponent must be an integer for ** operator");
+    }
+    int64_t n = exp.unsafeAsInt();
+    if (n < 0) {
         registers[rd] = Value(static_cast<int64_t>(0));
     } else {
+        if (n > kMaxExponent) {
+            throw std::runtime_error("Exponent too large for ** operator (max " + std::to_string(kMaxExponent) + ")");
+        }
         Value result(static_cast<int64_t>(1));
-        int64_t n = exp.unsafeAsInt();
         for (int64_t i = 0; i < n; i++)
             result = result * base;
         registers[rd] = result;
@@ -781,11 +790,17 @@ vm_exit:
             // Integer exponentiation: base ** exp
             Value base = registers[rs1];
             Value exp = registers[rs2];
-            if (exp.type == Value::Type::INTEGER && exp.intValue < 0) {
+            if (exp.type != Value::Type::INTEGER) {
+                throw std::runtime_error("Exponent must be an integer for ** operator");
+            }
+            int64_t n = exp.intValue;
+            if (n < 0) {
                 registers[rd] = Value(static_cast<int64_t>(0));
             } else {
+                if (n > kMaxExponent) {
+                    throw std::runtime_error("Exponent too large for ** operator (max " + std::to_string(kMaxExponent) + ")");
+                }
                 Value result(static_cast<int64_t>(1));
-                int64_t n = exp.intValue;
                 for (int64_t i = 0; i < n; i++)
                     result = result * base;
                 registers[rd] = result;

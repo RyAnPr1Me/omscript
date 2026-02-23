@@ -15,8 +15,19 @@
 #include <llvm/Support/raw_ostream.h>
 #include <optional>
 #include <sstream>
-#include <unistd.h>
 #include <vector>
+
+#ifdef _WIN32
+#include <io.h>
+#include <process.h>
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
+
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
 
 namespace {
 
@@ -28,6 +39,170 @@ constexpr const char* kDefaultRegistryUrl = "https://raw.githubusercontent.com/R
 constexpr const char* kLocalPackagesDir = "om_packages";
 constexpr int kApiTimeoutSeconds = 10;
 constexpr int kDownloadTimeoutSeconds = 120;
+
+// ---------------------------------------------------------------------------
+// Cross-platform helpers
+// ---------------------------------------------------------------------------
+
+/// Create a unique temporary file from a template ending in XXXXXX.
+/// On success the file is created and its fd is returned; the template buffer
+/// is modified in-place to contain the actual path.  Returns -1 on failure.
+int portableMkstemp(std::vector<char>& templateBuf) {
+#ifdef _WIN32
+    // _mktemp_s modifies the template in place, then we open the file.
+    if (_mktemp_s(templateBuf.data(), templateBuf.size()) != 0) {
+        return -1;
+    }
+    int fd = -1;
+    _sopen_s(&fd, templateBuf.data(), _O_CREAT | _O_EXCL | _O_RDWR, _SH_DENYNO, _S_IREAD | _S_IWRITE);
+    return fd;
+#else
+    return mkstemp(templateBuf.data());
+#endif
+}
+
+/// Close a file descriptor portably.
+void portableClose(int fd) {
+#ifdef _WIN32
+    _close(fd);
+#else
+    close(fd);
+#endif
+}
+
+/// Create a unique temporary directory from a template ending in XXXXXX.
+/// Returns true on success; the template buffer is modified in-place.
+bool portableMkdtemp(std::vector<char>& templateBuf) {
+#ifdef _WIN32
+    if (_mktemp_s(templateBuf.data(), templateBuf.size()) != 0) {
+        return false;
+    }
+    std::error_code ec;
+    std::filesystem::create_directories(templateBuf.data(), ec);
+    return !ec;
+#else
+    return mkdtemp(templateBuf.data()) != nullptr;
+#endif
+}
+
+/// Return the path to the currently running executable.
+std::string getExecutablePath() {
+    const char* envPath = std::getenv("OMSC_BINARY_PATH");
+    if (envPath) {
+        return envPath;
+    }
+#if defined(_WIN32)
+    char buf[32768]; // Use large buffer to avoid truncation
+    DWORD len = GetModuleFileNameA(nullptr, buf, sizeof(buf));
+    if (len > 0 && len < sizeof(buf) && GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
+        return std::string(buf, len);
+    }
+#elif defined(__APPLE__)
+    char buf[4096];
+    uint32_t size = sizeof(buf);
+    if (_NSGetExecutablePath(buf, &size) == 0) {
+        try {
+            return std::filesystem::canonical(buf).string();
+        } catch (...) {
+            return buf;
+        }
+    }
+#else
+    // Linux: /proc/self/exe
+    try {
+        return std::filesystem::read_symlink("/proc/self/exe").string();
+    } catch (...) {
+    }
+#endif
+    return "";
+}
+
+/// Return the PATH separator character for the current platform.
+constexpr char kPathSeparator =
+#ifdef _WIN32
+    ';';
+#else
+    ':';
+#endif
+
+/// Return the binary filename for the compiler on this platform.
+constexpr const char* kBinaryName =
+#ifdef _WIN32
+    "omsc.exe";
+#else
+    "omsc";
+#endif
+
+/// Return true if the current process has root/administrator privileges.
+bool isPrivileged() {
+#ifdef _WIN32
+    // On Windows, check if the process is elevated.
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+        return false;
+    }
+    TOKEN_ELEVATION elevation;
+    DWORD size = sizeof(elevation);
+    bool elevated = false;
+    if (GetTokenInformation(token, TokenElevation, &elevation, sizeof(elevation), &size)) {
+        elevated = elevation.TokenIsElevated != 0;
+    }
+    CloseHandle(token);
+    return elevated;
+#else
+    return geteuid() == 0;
+#endif
+}
+
+/// Return the platform-architecture string used in release asset names.
+std::string getPlatformArch() {
+#if defined(_WIN32)
+#if defined(_M_ARM64)
+    return "windows-arm64";
+#else
+    return "windows-x86_64";
+#endif
+#elif defined(__APPLE__)
+#if defined(__arm64__) || defined(__aarch64__)
+    return "macos-arm64";
+#else
+    return "macos-x86_64";
+#endif
+#else
+#if defined(__aarch64__) || defined(_M_ARM64)
+    return "linux-aarch64";
+#else
+    return "linux-x86_64";
+#endif
+#endif
+}
+
+/// Return the archive extension for the current platform.
+constexpr const char* kArchiveExtension =
+#ifdef _WIN32
+    ".zip";
+#else
+    ".tar.gz";
+#endif
+
+/// Return the user home directory.
+std::string getHomeDir() {
+#ifdef _WIN32
+    const char* userProfile = std::getenv("USERPROFILE");
+    if (userProfile) {
+        return userProfile;
+    }
+    const char* homeDrive = std::getenv("HOMEDRIVE");
+    const char* homePath = std::getenv("HOMEPATH");
+    if (homeDrive && homePath) {
+        return std::string(homeDrive) + homePath;
+    }
+    return "";
+#else
+    const char* home = std::getenv("HOME");
+    return home ? home : "";
+#endif
+}
 
 /// Return the base URL for the remote package registry.
 /// Defaults to the GitHub raw URL for the main branch of omscript.
@@ -108,15 +283,15 @@ std::string fetchLatestReleaseTag() {
     }
     std::string curlBin = *curlPathOrErr;
 
-    // Create a secure temporary file using mkstemp.
+    // Create a secure temporary file.
     std::string tmpTemplate = std::filesystem::temp_directory_path().string() + "/omsc_release_XXXXXX";
     std::vector<char> tmpBuf(tmpTemplate.begin(), tmpTemplate.end());
     tmpBuf.push_back('\0');
-    int fd = mkstemp(tmpBuf.data());
+    int fd = portableMkstemp(tmpBuf);
     if (fd == -1) {
         return "";
     }
-    close(fd);
+    portableClose(fd);
     std::string tmpFile(tmpBuf.data());
 
     std::string timeoutStr = std::to_string(kApiTimeoutSeconds);
@@ -177,38 +352,34 @@ bool downloadAndInstallRelease(const std::string& tagName, const std::string& in
     std::string tarBin = *tarPathOrErr;
 
     // Detect platform/architecture for the asset name.
-#if defined(__aarch64__) || defined(_M_ARM64)
-    std::string platformArch = "linux-aarch64";
-#else
-    std::string platformArch = "linux-x86_64";
-#endif
+    std::string platformArch = getPlatformArch();
 
     // Build the download URL: e.g. .../download/v0.9.4/omsc-0.9.4-linux-x86_64.tar.gz
     std::string version = tagName;
     if (!version.empty() && version[0] == 'v') {
         version = version.substr(1);
     }
-    std::string assetName = "omsc-" + version + "-" + platformArch + ".tar.gz";
+    std::string assetName = "omsc-" + version + "-" + platformArch + std::string(kArchiveExtension);
     std::string downloadUrl = std::string(kGitHubReleasesDownloadBase) + "/" + tagName + "/" + assetName;
 
-    // Create a secure temporary file for the tarball using mkstemp.
+    // Create a secure temporary file for the tarball.
     std::string tmpBase = std::filesystem::temp_directory_path().string();
     std::string tarTemplate = tmpBase + "/omsc_update_XXXXXX";
     std::vector<char> tarBuf(tarTemplate.begin(), tarTemplate.end());
     tarBuf.push_back('\0');
-    int tarFd = mkstemp(tarBuf.data());
+    int tarFd = portableMkstemp(tarBuf);
     if (tarFd == -1) {
         std::cerr << "Error: failed to create temporary file for download\n";
         return false;
     }
-    close(tarFd);
+    portableClose(tarFd);
     std::string tmpTarball(tarBuf.data());
 
-    // Create a secure temporary directory for extraction using mkdtemp.
+    // Create a secure temporary directory for extraction.
     std::string dirTemplate = tmpBase + "/omsc_extract_XXXXXX";
     std::vector<char> dirBuf(dirTemplate.begin(), dirTemplate.end());
     dirBuf.push_back('\0');
-    if (mkdtemp(dirBuf.data()) == nullptr) {
+    if (!portableMkdtemp(dirBuf)) {
         std::cerr << "Error: failed to create temporary directory for extraction\n";
         std::error_code ec;
         std::filesystem::remove(tmpTarball, ec);
@@ -276,13 +447,13 @@ bool downloadAndInstallRelease(const std::string& tagName, const std::string& in
     std::string tmpTemplate = installDir + "/omsc_update_XXXXXX";
     std::vector<char> installTmpBuf(tmpTemplate.begin(), tmpTemplate.end());
     installTmpBuf.push_back('\0');
-    int installTmpFd = mkstemp(installTmpBuf.data());
+    int installTmpFd = portableMkstemp(installTmpBuf);
     if (installTmpFd == -1) {
         std::cerr << "Error: failed to create temporary file for installation in " << installDir << "\n";
         std::filesystem::remove_all(tmpDir, ec);
         return false;
     }
-    close(installTmpFd);
+    portableClose(installTmpFd);
     std::string installTmpPath(installTmpBuf.data());
     try {
         std::filesystem::copy_file(binaryPath, installTmpPath, std::filesystem::copy_options::overwrite_existing);
@@ -304,10 +475,15 @@ bool downloadAndInstallRelease(const std::string& tagName, const std::string& in
 }
 
 bool isRoot() {
-    return geteuid() == 0;
+    return isPrivileged();
 }
 
 std::string detectDistro() {
+#if defined(_WIN32)
+    return "windows";
+#elif defined(__APPLE__)
+    return "macos";
+#else
     std::ifstream osRelease("/etc/os-release");
     if (!osRelease.is_open()) {
         return "unknown";
@@ -325,19 +501,32 @@ std::string detectDistro() {
         }
     }
     return "linux";
+#endif
 }
 
 std::string getInstallPrefix(bool system) {
+#ifdef _WIN32
+    if (system) {
+        const char* pf = std::getenv("ProgramFiles");
+        return pf ? std::string(pf) + "\\OmScript" : "C:\\Program Files\\OmScript";
+    }
+    std::string home = getHomeDir();
+    return home + "\\.omscript";
+#else
     if (system) {
         return "/usr/local";
     }
-    const char* homeEnv = getenv("HOME");
-    std::string home = homeEnv ? homeEnv : "";
+    std::string home = getHomeDir();
     return home + "/.local";
+#endif
 }
 
 std::string getInstallBinDir(bool system) {
+#ifdef _WIN32
+    return getInstallPrefix(system);
+#else
     return getInstallPrefix(system) + "/bin";
+#endif
 }
 
 bool fileExists(const std::string& path) {
@@ -349,7 +538,7 @@ bool isInPath(const std::string& binDir) {
     std::string pathEnv = pathPtr ? pathPtr : "";
     size_t pos = 0;
     std::string token;
-    while ((pos = pathEnv.find(':')) != std::string::npos) {
+    while ((pos = pathEnv.find(kPathSeparator)) != std::string::npos) {
         token = pathEnv.substr(0, pos);
         if (token == binDir) {
             return true;
@@ -375,15 +564,9 @@ bool isSymlinkOrCopy(const std::string& path, const std::string& target) {
 }
 
 bool installToSystem(const std::string& targetDir, bool force) {
-    std::string exePath;
-    const char* envPath = getenv("OMSC_BINARY_PATH");
-    if (envPath) {
-        exePath = envPath;
-    } else {
-        exePath = std::filesystem::read_symlink("/proc/self/exe").string();
-    }
+    std::string exePath = getExecutablePath();
 
-    if (!fileExists(exePath)) {
+    if (exePath.empty() || !fileExists(exePath)) {
         std::cerr << "Error: Cannot determine own executable path\n";
         return false;
     }
@@ -393,7 +576,7 @@ bool installToSystem(const std::string& targetDir, bool force) {
         return false;
     }
 
-    std::string targetPath = targetDir + "/omsc";
+    std::string targetPath = targetDir + "/" + std::string(kBinaryName);
 
     if (!force && isSymlinkOrCopy(targetPath, exePath)) {
         std::cout << "OmScript is already installed at " << targetPath << "\n";
@@ -405,12 +588,12 @@ bool installToSystem(const std::string& targetDir, bool force) {
     std::string tmpTemplate = targetDir + "/omsc_install_XXXXXX";
     std::vector<char> tmpBuf(tmpTemplate.begin(), tmpTemplate.end());
     tmpBuf.push_back('\0');
-    int tmpFd = mkstemp(tmpBuf.data());
+    int tmpFd = portableMkstemp(tmpBuf);
     if (tmpFd == -1) {
         std::cerr << "Error: failed to create temporary file in " << targetDir << "\n";
         return false;
     }
-    close(tmpFd);
+    portableClose(tmpFd);
     std::string tmpPath(tmpBuf.data());
 
     try {
@@ -476,25 +659,25 @@ void doInstall() {
         std::cout << "Could not check for updates (network unavailable or curl not found).\n";
     }
 
-    const char* envPath = getenv("OMSC_BINARY_PATH");
-    std::string exePath = envPath ? envPath : std::filesystem::read_symlink("/proc/self/exe").string();
+    std::string exePath = getExecutablePath();
 
-    if (!fileExists(exePath)) {
+    if (exePath.empty() || !fileExists(exePath)) {
         std::cerr << "Error: Cannot determine own executable path\n";
         return;
     }
 
     std::string binDir = getInstallBinDir(false);
-    std::string userPath = binDir + "/omsc";
+    std::string userPath = binDir + "/" + std::string(kBinaryName);
 
     if (isRoot()) {
-        std::string sysPath = "/usr/local/bin/omsc";
+        std::string sysBinDir = getInstallBinDir(true);
+        std::string sysPath = sysBinDir + "/" + std::string(kBinaryName);
         if (fileExists(sysPath)) {
             std::cout << "Updating system installation at " << sysPath << "...\n";
         } else {
             std::cout << "Installing to system location " << sysPath << "...\n";
         }
-        installToSystem("/usr/local/bin", true);
+        installToSystem(sysBinDir, true);
         std::cout << "\nOmScript has been installed system-wide!\n";
         return;
     }
@@ -530,13 +713,18 @@ void doInstall() {
 void doUninstall() {
     // Candidate paths to check, in priority order.
     std::vector<std::string> candidates;
+    std::string bn(kBinaryName);
     if (isRoot()) {
-        candidates.push_back("/usr/local/bin/omsc");
-        candidates.push_back("/usr/bin/omsc");
+        candidates.push_back(getInstallBinDir(true) + "/" + bn);
+#ifndef _WIN32
+        candidates.push_back("/usr/bin/" + bn);
+#endif
     } else {
-        candidates.push_back(getInstallBinDir(false) + "/omsc");
-        candidates.push_back("/usr/local/bin/omsc");
-        candidates.push_back("/usr/bin/omsc");
+        candidates.push_back(getInstallBinDir(false) + "/" + bn);
+#ifndef _WIN32
+        candidates.push_back("/usr/local/bin/" + bn);
+        candidates.push_back("/usr/bin/" + bn);
+#endif
     }
 
     bool removedAny = false;
@@ -559,12 +747,11 @@ void doUninstall() {
     }
 
     // Remove PATH entries added by omsc install from shell config files.
-    const char* homeDir = getenv("HOME");
-    if (!homeDir) {
-        return;
-    }
-    std::vector<std::string> shellConfigs = {std::string(homeDir) + "/.bashrc", std::string(homeDir) + "/.profile",
-                                             std::string(homeDir) + "/.zshrc"};
+#ifndef _WIN32
+    std::string home = getHomeDir();
+    if (!home.empty()) {
+    std::vector<std::string> shellConfigs = {home + "/.bashrc", home + "/.profile",
+                                             home + "/.zshrc"};
     for (const auto& configPath : shellConfigs) {
         std::ifstream in(configPath);
         if (!in.is_open()) {
@@ -601,12 +788,12 @@ void doUninstall() {
         std::string tmpTemplate = configPath + ".omsc_XXXXXX";
         std::vector<char> cfgTmpBuf(tmpTemplate.begin(), tmpTemplate.end());
         cfgTmpBuf.push_back('\0');
-        int cfgTmpFd = mkstemp(cfgTmpBuf.data());
+        int cfgTmpFd = portableMkstemp(cfgTmpBuf);
         if (cfgTmpFd == -1) {
             std::cerr << "Warning: could not create temp file to update " << configPath << "\n";
             continue;
         }
-        close(cfgTmpFd);
+        portableClose(cfgTmpFd);
         std::string cfgTmpPath(cfgTmpBuf.data());
         {
             std::ofstream out(cfgTmpPath, std::ios::trunc);
@@ -629,27 +816,41 @@ void doUninstall() {
         }
         std::cout << "Removed PATH entry from " << configPath << "\n";
     }
+    }
+#endif
 
     std::cout << "\nOmScript has been uninstalled.\n";
 }
 
 void ensureInPath() {
+#ifdef _WIN32
+    // On Windows, PATH management is handled differently (e.g. via setx).
+    // Skip automatic shell config modifications.
+    return;
+#else
     const char* binaryPath = getenv("OMSC_BINARY_PATH");
     if (!binaryPath) {
         return;
     }
 
     std::string binaryDir = std::filesystem::path(binaryPath).parent_path();
-    std::string exePath = std::filesystem::canonical(binaryPath);
-
-    const char* homeDir = getenv("HOME");
-    if (!homeDir) {
+    std::string exePath;
+    try {
+        exePath = std::filesystem::canonical(binaryPath);
+    } catch (const std::filesystem::filesystem_error& e) {
+        // Binary path does not exist or is inaccessible; skip PATH setup.
+        (void)e;
         return;
     }
-    std::string shellConfig = std::string(homeDir) + "/.bashrc";
+
+    std::string home = getHomeDir();
+    if (home.empty()) {
+        return;
+    }
+    std::string shellConfig = home + "/.bashrc";
     std::ifstream checkConfig(shellConfig);
     if (!checkConfig.is_open()) {
-        shellConfig = std::string(homeDir) + "/.profile";
+        shellConfig = home + "/.profile";
     }
     checkConfig.close();
 
@@ -688,6 +889,7 @@ void ensureInPath() {
             std::cerr << "Warning: could not create symlink " << linkPath << ": " << ec.message() << "\n";
         }
     }
+#endif
 }
 
 // Paths of temporary files to clean up on abnormal exit (signal).
@@ -702,10 +904,18 @@ static char g_tempObjectFile[kMaxTempPathLen] = {};
 // Uses only async-signal-safe operations (unlink, _exit, signal, raise).
 void signalHandler(int sig) {
     if (g_tempOutputFile[0] != '\0') {
+#ifdef _WIN32
+        _unlink(g_tempOutputFile);
+#else
         unlink(g_tempOutputFile);
+#endif
     }
     if (g_tempObjectFile[0] != '\0') {
+#ifdef _WIN32
+        _unlink(g_tempObjectFile);
+#else
         unlink(g_tempObjectFile);
+#endif
     }
     // Re-raise the signal with default action so the exit status reflects it.
     signal(sig, SIG_DFL);
@@ -844,11 +1054,11 @@ std::string downloadString(const std::string& url) {
     std::string tmpTemplate = std::filesystem::temp_directory_path().string() + "/omsc_pkg_XXXXXX";
     std::vector<char> tmpBuf(tmpTemplate.begin(), tmpTemplate.end());
     tmpBuf.push_back('\0');
-    int fd = mkstemp(tmpBuf.data());
+    int fd = portableMkstemp(tmpBuf);
     if (fd == -1) {
         return "";
     }
-    close(fd);
+    portableClose(fd);
     std::string tmpFile(tmpBuf.data());
 
     std::string timeoutStr = std::to_string(kApiTimeoutSeconds);
