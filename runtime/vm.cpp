@@ -331,11 +331,17 @@ op_POW: {
     uint8_t rs2 = readByte(bytecode, ip);
     Value base = registers[rs1];
     Value exp = registers[rs2];
-    if (exp.getType() == Value::Type::INTEGER && exp.unsafeAsInt() < 0) {
+    if (exp.getType() != Value::Type::INTEGER) {
+        throw std::runtime_error("Exponent must be an integer for ** operator");
+    }
+    int64_t n = exp.unsafeAsInt();
+    if (n < 0) {
         registers[rd] = Value(static_cast<int64_t>(0));
     } else {
+        if (n > 1000) {
+            throw std::runtime_error("Exponent too large for ** operator (max 1000)");
+        }
         Value result(static_cast<int64_t>(1));
-        int64_t n = exp.unsafeAsInt();
         for (int64_t i = 0; i < n; i++)
             result = result * base;
         registers[rd] = result;
@@ -781,11 +787,17 @@ vm_exit:
             // Integer exponentiation: base ** exp
             Value base = registers[rs1];
             Value exp = registers[rs2];
-            if (exp.type == Value::Type::INTEGER && exp.intValue < 0) {
+            if (exp.type != Value::Type::INTEGER) {
+                throw std::runtime_error("Exponent must be an integer for ** operator");
+            }
+            int64_t n = exp.intValue;
+            if (n < 0) {
                 registers[rd] = Value(static_cast<int64_t>(0));
             } else {
+                if (n > 1000) {
+                    throw std::runtime_error("Exponent too large for ** operator (max 1000)");
+                }
                 Value result(static_cast<int64_t>(1));
-                int64_t n = exp.intValue;
                 for (int64_t i = 0; i < n; i++)
                     result = result * base;
                 registers[rd] = result;

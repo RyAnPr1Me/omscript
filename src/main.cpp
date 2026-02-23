@@ -834,7 +834,12 @@ void ensureInPath() {
     }
 
     std::string binaryDir = std::filesystem::path(binaryPath).parent_path();
-    std::string exePath = std::filesystem::canonical(binaryPath);
+    std::string exePath;
+    try {
+        exePath = std::filesystem::canonical(binaryPath);
+    } catch (const std::filesystem::filesystem_error&) {
+        return;
+    }
 
     std::string home = getHomeDir();
     if (home.empty()) {

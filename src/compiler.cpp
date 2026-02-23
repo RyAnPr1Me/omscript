@@ -144,6 +144,7 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
                 std::cerr << "Warning: failed to clean up temporary object file '" << objFile << "': " << ec.message()
                           << "\n";
             }
+            objectFileCreated = false;
         }
     };
 
