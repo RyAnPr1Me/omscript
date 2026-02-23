@@ -807,17 +807,23 @@ PackageInfo readPackageManifest(const std::string& manifestPath) {
 
 /// Download a URL to a local file using curl.  Returns true on success.
 bool downloadFile(const std::string& url, const std::string& destPath) {
+    // Reject paths containing ".." to prevent path traversal
+    if (destPath.find("..") != std::string::npos) {
+        std::cerr << "Error: invalid destination path\n";
+        return false;
+    }
     auto curlPathOrErr = llvm::sys::findProgramByName("curl");
     if (!curlPathOrErr) {
         std::cerr << "Error: curl is required for package downloads but was not found\n";
+        std::cerr << "  Install with: apt-get install curl (Debian/Ubuntu) or brew install curl (macOS)\n";
         return false;
     }
     std::string curlBin = *curlPathOrErr;
     std::string timeoutStr = std::to_string(kDownloadTimeoutSeconds);
-    std::vector<std::string> args = {curlBin,  "-s",    "-f",        "-L",
-                                     "--max-time", timeoutStr, "-o", destPath,
-                                     url};
-    llvm::SmallVector<llvm::StringRef, 10> argRefs;
+    std::vector<std::string> args = {curlBin,       "-s",    "-f",          "-L",
+                                     "--max-redirs", "5",    "--max-time",  timeoutStr,
+                                     "-o",           destPath, url};
+    llvm::SmallVector<llvm::StringRef, 12> argRefs;
     for (const auto& a : args) {
         argRefs.push_back(a);
     }
@@ -846,10 +852,10 @@ std::string downloadString(const std::string& url) {
     std::string tmpFile(tmpBuf.data());
 
     std::string timeoutStr = std::to_string(kApiTimeoutSeconds);
-    std::vector<std::string> args = {curlBin,      "-s",   "-f",   "-L",
-                                     "--max-time",  timeoutStr, "-o", tmpFile,
-                                     url};
-    llvm::SmallVector<llvm::StringRef, 10> argRefs;
+    std::vector<std::string> args = {curlBin,       "-s",   "-f",          "-L",
+                                     "--max-redirs", "5",   "--max-time",  timeoutStr,
+                                     "-o",           tmpFile, url};
+    llvm::SmallVector<llvm::StringRef, 12> argRefs;
     for (const auto& a : args) {
         argRefs.push_back(a);
     }
@@ -915,16 +921,6 @@ std::vector<PackageInfo> parseRegistryIndex(const std::string& json) {
     std::sort(packages.begin(), packages.end(),
               [](const PackageInfo& a, const PackageInfo& b) { return a.name < b.name; });
     return packages;
-}
-
-/// Fetch the remote package registry index from GitHub.
-std::vector<PackageInfo> fetchRegistryIndex() {
-    std::string url = getRegistryBaseUrl() + "/index.json";
-    std::string json = downloadString(url);
-    if (json.empty()) {
-        return {};
-    }
-    return parseRegistryIndex(json);
 }
 
 int doPkgInstall(const std::string& pkgName, bool quiet) {
@@ -1037,10 +1033,15 @@ int doPkgList(bool quiet) {
 }
 
 int doPkgSearch(const std::string& query, bool quiet) {
-    auto packages = fetchRegistryIndex();
+    std::string indexJson = downloadString(getRegistryBaseUrl() + "/index.json");
+    if (indexJson.empty()) {
+        std::cerr << "Error: failed to fetch package registry (check your internet connection)\n";
+        return 1;
+    }
+    auto packages = parseRegistryIndex(indexJson);
     if (packages.empty()) {
         if (!quiet) {
-            std::cout << "No packages available (could not reach registry).\n";
+            std::cout << "No packages available.\n";
         }
         return 0;
     }
