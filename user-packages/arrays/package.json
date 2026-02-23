@@ -1,0 +1,7 @@
+{
+  "name": "arrays",
+  "version": "1.0.0",
+  "description": "Array utility functions: average, product, index_of, last_index_of, is_sorted",
+  "entry": "arrays.om",
+  "files": ["arrays.om"]
+}

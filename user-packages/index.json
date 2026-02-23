@@ -20,6 +20,27 @@
       "description": "Common algorithms: bubble sort, binary search, sum, min/max of arrays",
       "entry": "algorithms.om",
       "files": ["algorithms.om"]
+    },
+    {
+      "name": "arrays",
+      "version": "1.0.0",
+      "description": "Array utility functions: average, product, index_of, last_index_of, is_sorted",
+      "entry": "arrays.om",
+      "files": ["arrays.om"]
+    },
+    {
+      "name": "conversion",
+      "version": "1.0.0",
+      "description": "Number and character conversion utilities: is_prime, digit_count, to_upper, to_lower, is_palindrome_num",
+      "entry": "conversion.om",
+      "files": ["conversion.om"]
+    },
+    {
+      "name": "bitwise",
+      "version": "1.0.0",
+      "description": "Bitwise utility functions: count_ones, is_power_of_two, next_power_of_two, lowest_set, highest_bit_pos",
+      "entry": "bitwise.om",
+      "files": ["bitwise.om"]
     }
   ]
 }
