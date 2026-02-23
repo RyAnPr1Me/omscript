@@ -178,33 +178,34 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
         &&op_DIV,           // 7
         &&op_MOD,           // 8
         &&op_NEG,           // 9
-        &&op_EQ,            // 10
-        &&op_NE,            // 11
-        &&op_LT,            // 12
-        &&op_LE,            // 13
-        &&op_GT,            // 14
-        &&op_GE,            // 15
-        &&op_AND,           // 16
-        &&op_OR,            // 17
-        &&op_NOT,           // 18
-        &&op_BIT_AND,       // 19
-        &&op_BIT_OR,        // 20
-        &&op_BIT_XOR,       // 21
-        &&op_BIT_NOT,       // 22
-        &&op_SHL,           // 23
-        &&op_SHR,           // 24
-        &&op_LOAD_VAR,      // 25
-        &&op_STORE_VAR,     // 26
-        &&op_LOAD_LOCAL,    // 27
-        &&op_STORE_LOCAL,   // 28
-        &&op_JUMP,          // 29
-        &&op_JUMP_IF_FALSE, // 30
-        &&op_CALL,          // 31
-        &&op_RETURN,        // 32
-        &&op_PRINT,         // 33
-        &&op_DUP,           // 34
-        &&op_HALT,          // 35
-        &&op_MOV,           // 36
+        &&op_POW,           // 10
+        &&op_EQ,            // 11
+        &&op_NE,            // 12
+        &&op_LT,            // 13
+        &&op_LE,            // 14
+        &&op_GT,            // 15
+        &&op_GE,            // 16
+        &&op_AND,           // 17
+        &&op_OR,            // 18
+        &&op_NOT,           // 19
+        &&op_BIT_AND,       // 20
+        &&op_BIT_OR,        // 21
+        &&op_BIT_XOR,       // 22
+        &&op_BIT_NOT,       // 23
+        &&op_SHL,           // 24
+        &&op_SHR,           // 25
+        &&op_LOAD_VAR,      // 26
+        &&op_STORE_VAR,     // 27
+        &&op_LOAD_LOCAL,    // 28
+        &&op_STORE_LOCAL,   // 29
+        &&op_JUMP,          // 30
+        &&op_JUMP_IF_FALSE, // 31
+        &&op_CALL,          // 32
+        &&op_RETURN,        // 33
+        &&op_PRINT,         // 34
+        &&op_DUP,           // 35
+        &&op_HALT,          // 36
+        &&op_MOV,           // 37
     };
 
     static constexpr size_t kDispatchTableSize = sizeof(dispatchTable) / sizeof(dispatchTable[0]);
@@ -322,6 +323,23 @@ op_NEG: {
         }
     }
     registers[rd] = -registers[rs];
+    DISPATCH();
+}
+op_POW: {
+    uint8_t rd = readByte(bytecode, ip);
+    uint8_t rs1 = readByte(bytecode, ip);
+    uint8_t rs2 = readByte(bytecode, ip);
+    Value base = registers[rs1];
+    Value exp = registers[rs2];
+    if (exp.getType() == Value::Type::INTEGER && exp.unsafeAsInt() < 0) {
+        registers[rd] = Value(static_cast<int64_t>(0));
+    } else {
+        Value result(static_cast<int64_t>(1));
+        int64_t n = exp.unsafeAsInt();
+        for (int64_t i = 0; i < n; i++)
+            result = result * base;
+        registers[rd] = result;
+    }
     DISPATCH();
 }
 op_EQ: {
