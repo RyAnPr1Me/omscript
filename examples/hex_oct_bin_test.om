@@ -1,0 +1,25 @@
+// Test hex, octal, and binary integer literals
+fn main() {
+    // Hex literals
+    var h1 = 0xFF;        // 255
+    var h2 = 0x0A;        // 10
+    var h3 = 0x10;        // 16
+
+    // Octal literals
+    var o1 = 0o77;        // 63
+    var o2 = 0o10;        // 8
+
+    // Binary literals
+    var b1 = 0b1111;      // 15
+    var b2 = 0b10000000;  // 128
+
+    // Mixed arithmetic
+    var sum = h2 + o2 + b1;  // 10 + 8 + 15 = 33
+
+    // Use in expressions
+    var masked = h1 & 0x0F;  // 255 & 15 = 15
+
+    // 255 + 10 + 16 + 63 + 8 + 15 + 128 + 33 + 15 = 543
+    // 543 % 256 = 31
+    return h1 + h2 + h3 + o1 + o2 + b1 + b2 + sum + masked;
+}

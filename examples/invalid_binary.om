@@ -1,0 +1,5 @@
+// Invalid binary literal (no digits after 0b)
+fn main() {
+    var x = 0b;
+    return 0;
+}

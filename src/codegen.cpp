@@ -1,5 +1,7 @@
 #include "codegen.h"
+#include <climits>
 #include <cmath>
+#include <cstdint>
 #include <iostream>
 #include <llvm/ADT/StringMap.h>
 #include <llvm/Analysis/TargetTransformInfo.h>
@@ -82,6 +84,8 @@ std::unique_ptr<Expression> optimizeOptMaxUnary(const std::string& op, std::uniq
     if (literal->literalType == LiteralExpr::LiteralType::INTEGER) {
         long long value = literal->intValue;
         if (op == "-") {
+            if (value == LLONG_MIN)
+                return std::make_unique<UnaryExpr>(op, std::move(operand));
             return std::make_unique<LiteralExpr>(-value);
         }
         if (op == "!") {
@@ -144,9 +148,9 @@ std::unique_ptr<Expression> optimizeOptMaxBinary(const std::string& op, std::uni
             return std::make_unique<LiteralExpr>(lval - rval);
         if (op == "*")
             return std::make_unique<LiteralExpr>(lval * rval);
-        if (op == "/" && rval != 0)
+        if (op == "/" && rval != 0 && !(lval == LLONG_MIN && rval == -1))
             return std::make_unique<LiteralExpr>(lval / rval);
-        if (op == "%" && rval != 0)
+        if (op == "%" && rval != 0 && !(lval == LLONG_MIN && rval == -1))
             return std::make_unique<LiteralExpr>(lval % rval);
         if (op == "==")
             return std::make_unique<LiteralExpr>(static_cast<long long>(lval == rval));
@@ -1258,11 +1262,11 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         } else if (expr->op == "*") {
             return llvm::ConstantInt::get(*context, llvm::APInt(64, lval * rval));
         } else if (expr->op == "/") {
-            if (rval != 0) {
+            if (rval != 0 && !(lval == INT64_MIN && rval == -1)) {
                 return llvm::ConstantInt::get(*context, llvm::APInt(64, lval / rval));
             }
         } else if (expr->op == "%") {
-            if (rval != 0) {
+            if (rval != 0 && !(lval == INT64_MIN && rval == -1)) {
                 return llvm::ConstantInt::get(*context, llvm::APInt(64, lval % rval));
             }
         } else if (expr->op == "==") {
@@ -1375,9 +1379,15 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     } else if (expr->op == "^") {
         return builder->CreateXor(left, right, "xortmp");
     } else if (expr->op == "<<") {
-        return builder->CreateShl(left, right, "shltmp");
+        // Mask shift amount to [0, 63] to prevent undefined behavior
+        llvm::Value* mask = llvm::ConstantInt::get(getDefaultType(), 63);
+        llvm::Value* safeShift = builder->CreateAnd(right, mask, "shlmask");
+        return builder->CreateShl(left, safeShift, "shltmp");
     } else if (expr->op == ">>") {
-        return builder->CreateAShr(left, right, "ashrtmp");
+        // Mask shift amount to [0, 63] to prevent undefined behavior
+        llvm::Value* mask = llvm::ConstantInt::get(getDefaultType(), 63);
+        llvm::Value* safeShift = builder->CreateAnd(right, mask, "shrmask");
+        return builder->CreateAShr(left, safeShift, "ashrtmp");
     }
 
     codegenError("Unknown binary operator: " + expr->op, expr);
@@ -1390,7 +1400,8 @@ llvm::Value* CodeGenerator::generateUnary(UnaryExpr* expr) {
     if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(operand)) {
         int64_t val = ci->getSExtValue();
         if (expr->op == "-") {
-            return llvm::ConstantInt::get(*context, llvm::APInt(64, -val));
+            if (val != INT64_MIN)
+                return llvm::ConstantInt::get(*context, llvm::APInt(64, -val));
         } else if (expr->op == "!") {
             return llvm::ConstantInt::get(*context, llvm::APInt(64, val == 0 ? 1 : 0));
         } else if (expr->op == "~") {
