@@ -1,0 +1,72 @@
+// conversion package - number and character conversion utilities
+
+fn conv_is_prime(n) {
+    if (n <= 1) {
+        return 0;
+    }
+    if (n <= 3) {
+        return 1;
+    }
+    if (n % 2 == 0) {
+        return 0;
+    }
+    var i = 3;
+    while (i * i <= n) {
+        if (n % i == 0) {
+            return 0;
+        }
+        i = i + 2;
+    }
+    return 1;
+}
+
+fn conv_digit_count(n) {
+    if (n < 0) {
+        n = abs(n);
+    }
+    if (n == 0) {
+        return 1;
+    }
+    var count = 0;
+    while (n > 0) {
+        n = n / 10;
+        count = count + 1;
+    }
+    return count;
+}
+
+fn conv_is_palindrome_num(n) {
+    if (n < 0) {
+        return 0;
+    }
+    var original = n;
+    var reversed = 0;
+    while (n > 0) {
+        reversed = reversed * 10 + n % 10;
+        n = n / 10;
+    }
+    if (reversed == original) {
+        return 1;
+    }
+    return 0;
+}
+
+fn conv_to_upper(c) {
+    // 97 = 'a', 122 = 'z'
+    if (c >= 97) {
+        if (c <= 122) {
+            return c - 32;
+        }
+    }
+    return c;
+}
+
+fn conv_to_lower(c) {
+    // 65 = 'A', 90 = 'Z'
+    if (c >= 65) {
+        if (c <= 90) {
+            return c + 32;
+        }
+    }
+    return c;
+}

@@ -1,0 +1,7 @@
+{
+  "name": "conversion",
+  "version": "1.0.0",
+  "description": "Number and character conversion utilities: is_prime, digit_count, to_upper, to_lower, is_palindrome_num",
+  "entry": "conversion.om",
+  "files": ["conversion.om"]
+}

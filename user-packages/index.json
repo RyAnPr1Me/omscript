@@ -20,6 +20,62 @@
       "description": "Common algorithms: bubble sort, binary search, sum, min/max of arrays",
       "entry": "algorithms.om",
       "files": ["algorithms.om"]
+    },
+    {
+      "name": "arrays",
+      "version": "1.0.0",
+      "description": "Array utility functions: average, product, index_of, last_index_of, is_sorted",
+      "entry": "arrays.om",
+      "files": ["arrays.om"]
+    },
+    {
+      "name": "conversion",
+      "version": "1.0.0",
+      "description": "Number and character conversion utilities: is_prime, digit_count, to_upper, to_lower, is_palindrome_num",
+      "entry": "conversion.om",
+      "files": ["conversion.om"]
+    },
+    {
+      "name": "bitwise",
+      "version": "1.0.0",
+      "description": "Bitwise utility functions: count_ones, is_power_of_two, next_power_of_two, lowest_set, highest_bit_pos",
+      "entry": "bitwise.om",
+      "files": ["bitwise.om"]
+    },
+    {
+      "name": "random",
+      "version": "1.0.0",
+      "description": "Pseudo-random number generation: seed, next, rand_range, rand_bool, shuffle",
+      "entry": "random.om",
+      "files": ["random.om"]
+    },
+    {
+      "name": "statistics",
+      "version": "1.0.0",
+      "description": "Statistical functions: mean, variance, range, min_val, max_val, sum_of_squares",
+      "entry": "statistics.om",
+      "files": ["statistics.om"]
+    },
+    {
+      "name": "geometry",
+      "version": "1.0.0",
+      "description": "2D geometry calculations: distance_sq, area_rect, area_triangle, perimeter_rect, manhattan_dist",
+      "entry": "geometry.om",
+      "files": ["geometry.om"]
+    },
+    {
+      "name": "sorting",
+      "version": "1.0.0",
+      "description": "Sorting algorithms: bubble_sort, selection_sort, insertion_sort, is_sorted, reverse_arr",
+      "entry": "sorting.om",
+      "files": ["sorting.om"]
+    },
+    {
+      "name": "functional",
+      "version": "1.0.0",
+      "description": "Functional-style array operations: reduce_sum, reduce_product, any_positive, all_positive, count_if_positive, count_if_even, count_if_odd",
+      "entry": "functional.om",
+      "files": ["functional.om"]
     }
   ]
 }

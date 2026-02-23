@@ -1,0 +1,78 @@
+// functional package - functional-style array operations
+
+fn func_reduce_sum(arr) {
+    var n = len(arr);
+    var acc = 0;
+    for (i in 0...n) {
+        acc = acc + arr[i];
+    }
+    return acc;
+}
+
+fn func_reduce_product(arr) {
+    var n = len(arr);
+    if (n == 0) {
+        return 0;
+    }
+    var acc = 1;
+    for (i in 0...n) {
+        acc = acc * arr[i];
+    }
+    return acc;
+}
+
+fn func_any_positive(arr) {
+    var n = len(arr);
+    for (i in 0...n) {
+        if (arr[i] > 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+fn func_all_positive(arr) {
+    var n = len(arr);
+    if (n == 0) {
+        return 0;
+    }
+    for (i in 0...n) {
+        if (arr[i] <= 0) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+fn func_count_if_positive(arr) {
+    var n = len(arr);
+    var count = 0;
+    for (i in 0...n) {
+        if (arr[i] > 0) {
+            count = count + 1;
+        }
+    }
+    return count;
+}
+
+fn func_count_if_even(arr) {
+    var n = len(arr);
+    var count = 0;
+    for (i in 0...n) {
+        if (is_even(arr[i])) {
+            count = count + 1;
+        }
+    }
+    return count;
+}
+
+fn func_count_if_odd(arr) {
+    var n = len(arr);
+    var count = 0;
+    for (i in 0...n) {
+        if (is_odd(arr[i])) {
+            count = count + 1;
+        }
+    }
+    return count;
+}
