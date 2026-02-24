@@ -1,0 +1,9 @@
+// This should fail compilation: duplicate case value in switch
+fn main() {
+    var x = 1;
+    switch(x) {
+        case 1: return 10;
+        case 1: return 20;
+    }
+    return 0;
+}

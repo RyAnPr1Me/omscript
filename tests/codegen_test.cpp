@@ -2040,6 +2040,21 @@ TEST(CodegenTest, SwitchInOptmax) {
     ASSERT_NE(mod, nullptr);
 }
 
+TEST(CodegenTest, SwitchDuplicateCaseError) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    EXPECT_THROW(
+        generateIR("fn main() {"
+                   "  var x = 1;"
+                   "  switch (x) {"
+                   "    case 1: return 10;"
+                   "    case 1: return 20;"
+                   "  }"
+                   "  return 0;"
+                   "}",
+                   codegen),
+        std::runtime_error);
+}
+
 // ===========================================================================
 // Array element assignment: arr[i] = value
 // ===========================================================================
@@ -3441,4 +3456,140 @@ TEST(CodegenTest, BytecodeAlgebraicIdentityPowZero) {
             hasPow = true;
     }
     EXPECT_FALSE(hasPow);
+}
+
+// ===========================================================================
+// Bytecode algebraic identity: side-effect preservation
+// ===========================================================================
+
+TEST(CodegenTest, BytecodeAlgebraicMulZeroPreservesSideEffects) {
+    // x * 0 in bytecode should still emit a LOAD_LOCAL for x to preserve
+    // any potential side effects from evaluating the left operand.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto program = parseSource("fn mul_zero(x) { return x * 0; }\n"
+                               "fn main() { return 0; }");
+    codegen.generateHybrid(program.get());
+    auto& bcFuncs = codegen.getBytecodeFunctions();
+    ASSERT_GE(bcFuncs.size(), 1u);
+    auto& code = bcFuncs[0].bytecode;
+    // Should have a LOAD_LOCAL for x even though result is constant 0
+    bool hasLoad = false;
+    for (uint8_t byte : code) {
+        if (byte == static_cast<uint8_t>(OpCode::LOAD_LOCAL) ||
+            byte == static_cast<uint8_t>(OpCode::LOAD_VAR))
+            hasLoad = true;
+    }
+    EXPECT_TRUE(hasLoad);
+}
+
+TEST(CodegenTest, BytecodeAlgebraicPowZeroPreservesSideEffects) {
+    // x ** 0 in bytecode should still emit a LOAD_LOCAL for x to preserve
+    // any potential side effects from evaluating the left operand.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto program = parseSource("fn pow_zero(x) { return x ** 0; }\n"
+                               "fn main() { return 0; }");
+    codegen.generateHybrid(program.get());
+    auto& bcFuncs = codegen.getBytecodeFunctions();
+    ASSERT_GE(bcFuncs.size(), 1u);
+    auto& code = bcFuncs[0].bytecode;
+    bool hasLoad = false;
+    for (uint8_t byte : code) {
+        if (byte == static_cast<uint8_t>(OpCode::LOAD_LOCAL) ||
+            byte == static_cast<uint8_t>(OpCode::LOAD_VAR))
+            hasLoad = true;
+    }
+    EXPECT_TRUE(hasLoad);
+}
+
+TEST(CodegenTest, BytecodeAlgebraicZeroMulPreservesSideEffects) {
+    // 0 * x in bytecode should still emit a LOAD_LOCAL for x.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto program = parseSource("fn zero_mul(x) { return 0 * x; }\n"
+                               "fn main() { return 0; }");
+    codegen.generateHybrid(program.get());
+    auto& bcFuncs = codegen.getBytecodeFunctions();
+    ASSERT_GE(bcFuncs.size(), 1u);
+    auto& code = bcFuncs[0].bytecode;
+    bool hasLoad = false;
+    for (uint8_t byte : code) {
+        if (byte == static_cast<uint8_t>(OpCode::LOAD_LOCAL) ||
+            byte == static_cast<uint8_t>(OpCode::LOAD_VAR))
+            hasLoad = true;
+    }
+    EXPECT_TRUE(hasLoad);
+}
+
+// ===========================================================================
+// OPTMAX algebraic identity: side-effect preservation
+// ===========================================================================
+
+TEST(CodegenTest, OptmaxMulZeroPreservesSideEffects) {
+    // In OPTMAX, func() * 0 should NOT be optimized to 0 because the
+    // function call may have side effects. The multiplication should remain.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "OPTMAX=:\n"
+        "fn helper(x: int) { return x; }\n"
+        "fn mul_zero(x: int) { return helper(x) * 0; }\n"
+        "OPTMAX!:\n"
+        "fn main() { return mul_zero(42); }",
+        codegen);
+    auto* func = mod->getFunction("mul_zero");
+    ASSERT_NE(func, nullptr);
+    // The function should contain a call to helper() even though
+    // the result is multiplied by 0
+    bool hasCall = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (llvm::isa<llvm::CallInst>(inst))
+                hasCall = true;
+        }
+    }
+    EXPECT_TRUE(hasCall);
+}
+
+TEST(CodegenTest, OptmaxPowZeroPreservesSideEffects) {
+    // In OPTMAX, func() ** 0 should NOT be optimized to 1 because the
+    // function call may have side effects.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "OPTMAX=:\n"
+        "fn helper(x: int) { return x; }\n"
+        "fn pow_zero(x: int) { return helper(x) ** 0; }\n"
+        "OPTMAX!:\n"
+        "fn main() { return pow_zero(42); }",
+        codegen);
+    auto* func = mod->getFunction("pow_zero");
+    ASSERT_NE(func, nullptr);
+    bool hasCall = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (llvm::isa<llvm::CallInst>(inst))
+                hasCall = true;
+        }
+    }
+    EXPECT_TRUE(hasCall);
+}
+
+TEST(CodegenTest, OptmaxMulZeroPureStillOptimized) {
+    // In OPTMAX, x * 0 where x is a simple variable should still be
+    // optimized to 0 (no multiply instruction emitted).
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "OPTMAX=:\n"
+        "fn mul_zero(x: int) { return x * 0; }\n"
+        "OPTMAX!:\n"
+        "fn main() { return mul_zero(42); }",
+        codegen);
+    auto* func = mod->getFunction("mul_zero");
+    ASSERT_NE(func, nullptr);
+    bool hasMul = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::Mul ||
+                inst.getOpcode() == llvm::Instruction::Shl)
+                hasMul = true;
+        }
+    }
+    EXPECT_FALSE(hasMul);
 }

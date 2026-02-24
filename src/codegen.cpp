@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <set>
 #include <llvm/ADT/StringMap.h>
 #include <llvm/Analysis/TargetTransformInfo.h>
 #include <llvm/Config/llvm-config.h>
@@ -2887,6 +2888,9 @@ void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
     // (matching C/C++ semantics where break leaves the nearest switch or loop).
     loopStack.push_back({mergeBB, nullptr});
 
+    // Track seen case values to detect duplicates.
+    std::set<int64_t> seenCaseValues;
+
     for (auto& sc : stmt->cases) {
         if (sc.isDefault) {
             // Generate default block body.
@@ -2910,6 +2914,11 @@ void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
             auto* caseConst = llvm::dyn_cast<llvm::ConstantInt>(caseVal);
             if (!caseConst) {
                 codegenError("case value must be a compile-time integer constant", sc.value.get());
+            }
+
+            int64_t cv = caseConst->getSExtValue();
+            if (!seenCaseValues.insert(cv).second) {
+                codegenError("duplicate case value " + std::to_string(cv) + " in switch statement", sc.value.get());
             }
 
             llvm::BasicBlock* caseBB = llvm::BasicBlock::Create(*context, "switch.case", function, mergeBB);
