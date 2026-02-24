@@ -2040,6 +2040,21 @@ TEST(CodegenTest, SwitchInOptmax) {
     ASSERT_NE(mod, nullptr);
 }
 
+TEST(CodegenTest, SwitchDuplicateCaseError) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    EXPECT_THROW(
+        generateIR("fn main() {"
+                   "  var x = 1;"
+                   "  switch (x) {"
+                   "    case 1: return 10;"
+                   "    case 1: return 20;"
+                   "  }"
+                   "  return 0;"
+                   "}",
+                   codegen),
+        std::runtime_error);
+}
+
 // ===========================================================================
 // Array element assignment: arr[i] = value
 // ===========================================================================
@@ -3030,4 +3045,551 @@ TEST(CodegenTest, HybridBytecodeContainsReturn) {
         }
     }
     EXPECT_TRUE(hasReturn);
+}
+
+// ===========================================================================
+// IR-level algebraic identity optimizations
+// ===========================================================================
+
+TEST(CodegenTest, AlgebraicIdentityMultiplyByZero) {
+    // x * 0 should fold to 0 (no multiply instruction emitted)
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn mul_zero(n) { return n * 0; }\n"
+                           "fn main() { return mul_zero(42); }",
+                           codegen);
+    auto* func = mod->getFunction("mul_zero");
+    ASSERT_NE(func, nullptr);
+    bool hasMul = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::Mul ||
+                inst.getOpcode() == llvm::Instruction::Shl)
+                hasMul = true;
+        }
+    }
+    EXPECT_FALSE(hasMul);
+}
+
+TEST(CodegenTest, AlgebraicIdentityAddZero) {
+    // x + 0 should fold to x (no add instruction emitted)
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn add_zero(n) { return n + 0; }\n"
+                           "fn main() { return add_zero(42); }",
+                           codegen);
+    auto* func = mod->getFunction("add_zero");
+    ASSERT_NE(func, nullptr);
+    bool hasAdd = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::Add)
+                hasAdd = true;
+        }
+    }
+    EXPECT_FALSE(hasAdd);
+}
+
+TEST(CodegenTest, AlgebraicIdentityZeroPlusX) {
+    // 0 + x should fold to x
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn zero_plus(n) { return 0 + n; }\n"
+                           "fn main() { return zero_plus(42); }",
+                           codegen);
+    auto* func = mod->getFunction("zero_plus");
+    ASSERT_NE(func, nullptr);
+    bool hasAdd = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::Add)
+                hasAdd = true;
+        }
+    }
+    EXPECT_FALSE(hasAdd);
+}
+
+TEST(CodegenTest, AlgebraicIdentityBitwiseAndZero) {
+    // x & 0 should fold to 0
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn and_zero(n) { return n & 0; }\n"
+                           "fn main() { return and_zero(42); }",
+                           codegen);
+    auto* func = mod->getFunction("and_zero");
+    ASSERT_NE(func, nullptr);
+    bool hasAnd = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::And)
+                hasAnd = true;
+        }
+    }
+    EXPECT_FALSE(hasAnd);
+}
+
+TEST(CodegenTest, AlgebraicIdentityBitwiseOrZero) {
+    // x | 0 should fold to x
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn or_zero(n) { return n | 0; }\n"
+                           "fn main() { return or_zero(42); }",
+                           codegen);
+    auto* func = mod->getFunction("or_zero");
+    ASSERT_NE(func, nullptr);
+    bool hasOr = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::Or)
+                hasOr = true;
+        }
+    }
+    EXPECT_FALSE(hasOr);
+}
+
+TEST(CodegenTest, AlgebraicIdentityXorZero) {
+    // x ^ 0 should fold to x
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn xor_zero(n) { return n ^ 0; }\n"
+                           "fn main() { return xor_zero(42); }",
+                           codegen);
+    auto* func = mod->getFunction("xor_zero");
+    ASSERT_NE(func, nullptr);
+    bool hasXor = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::Xor)
+                hasXor = true;
+        }
+    }
+    EXPECT_FALSE(hasXor);
+}
+
+TEST(CodegenTest, AlgebraicIdentityShlZero) {
+    // x << 0 should fold to x
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn shl_zero(n) { return n << 0; }\n"
+                           "fn main() { return shl_zero(42); }",
+                           codegen);
+    auto* func = mod->getFunction("shl_zero");
+    ASSERT_NE(func, nullptr);
+    bool hasShl = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::Shl)
+                hasShl = true;
+        }
+    }
+    EXPECT_FALSE(hasShl);
+}
+
+TEST(CodegenTest, AlgebraicIdentityShrZero) {
+    // x >> 0 should fold to x
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn shr_zero(n) { return n >> 0; }\n"
+                           "fn main() { return shr_zero(42); }",
+                           codegen);
+    auto* func = mod->getFunction("shr_zero");
+    ASSERT_NE(func, nullptr);
+    bool hasShr = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::AShr)
+                hasShr = true;
+        }
+    }
+    EXPECT_FALSE(hasShr);
+}
+
+TEST(CodegenTest, AlgebraicIdentityPowZero) {
+    // x ** 0 should fold to 1 (no loop)
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn pow_zero(n) { return n ** 0; }\n"
+                           "fn main() { return pow_zero(42); }",
+                           codegen);
+    auto* func = mod->getFunction("pow_zero");
+    ASSERT_NE(func, nullptr);
+    // Should be a single basic block with a constant return of 1
+    int bbCount = 0;
+    for (auto& bb : *func) {
+        (void)bb;
+        bbCount++;
+    }
+    EXPECT_LE(bbCount, 2);
+}
+
+TEST(CodegenTest, AlgebraicIdentityPowOne) {
+    // x ** 1 should fold to x (no loop)
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn pow_one(n) { return n ** 1; }\n"
+                           "fn main() { return pow_one(42); }",
+                           codegen);
+    auto* func = mod->getFunction("pow_one");
+    ASSERT_NE(func, nullptr);
+    int bbCount = 0;
+    for (auto& bb : *func) {
+        (void)bb;
+        bbCount++;
+    }
+    EXPECT_LE(bbCount, 2);
+}
+
+TEST(CodegenTest, AlgebraicIdentityOnePowX) {
+    // 1 ** x should fold to 1
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn one_pow(n) { return 1 ** n; }\n"
+                           "fn main() { return one_pow(42); }",
+                           codegen);
+    auto* func = mod->getFunction("one_pow");
+    ASSERT_NE(func, nullptr);
+    int bbCount = 0;
+    for (auto& bb : *func) {
+        (void)bb;
+        bbCount++;
+    }
+    EXPECT_LE(bbCount, 2);
+}
+
+// ===========================================================================
+// OPTMAX algebraic identity optimizations
+// ===========================================================================
+
+TEST(CodegenTest, OptmaxMultiplyByZero) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "OPTMAX=: fn mul_zero(x: int) { return x * 0; } OPTMAX!:\n"
+        "fn main() { return mul_zero(42); }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    EXPECT_NE(mod->getFunction("mul_zero"), nullptr);
+}
+
+TEST(CodegenTest, OptmaxBitwiseAndZero) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "OPTMAX=: fn and_zero(x: int) { return x & 0; } OPTMAX!:\n"
+        "fn main() { return and_zero(42); }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    EXPECT_NE(mod->getFunction("and_zero"), nullptr);
+}
+
+TEST(CodegenTest, OptmaxBitwiseOrZero) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "OPTMAX=: fn or_zero(x: int) { return x | 0; } OPTMAX!:\n"
+        "fn main() { return or_zero(42); }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    EXPECT_NE(mod->getFunction("or_zero"), nullptr);
+}
+
+TEST(CodegenTest, OptmaxXorZero) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "OPTMAX=: fn xor_zero(x: int) { return x ^ 0; } OPTMAX!:\n"
+        "fn main() { return xor_zero(42); }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    EXPECT_NE(mod->getFunction("xor_zero"), nullptr);
+}
+
+TEST(CodegenTest, OptmaxPowZero) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "OPTMAX=: fn pow_zero(x: int) { return x ** 0; } OPTMAX!:\n"
+        "fn main() { return pow_zero(42); }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    EXPECT_NE(mod->getFunction("pow_zero"), nullptr);
+}
+
+TEST(CodegenTest, OptmaxPowOne) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "OPTMAX=: fn pow_one(x: int) { return x ** 1; } OPTMAX!:\n"
+        "fn main() { return pow_one(42); }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    EXPECT_NE(mod->getFunction("pow_one"), nullptr);
+}
+
+TEST(CodegenTest, OptmaxShlZero) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "OPTMAX=: fn shl_zero(x: int) { return x << 0; } OPTMAX!:\n"
+        "fn main() { return shl_zero(42); }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    EXPECT_NE(mod->getFunction("shl_zero"), nullptr);
+}
+
+TEST(CodegenTest, OptmaxShrZero) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "OPTMAX=: fn shr_zero(x: int) { return x >> 0; } OPTMAX!:\n"
+        "fn main() { return shr_zero(42); }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    EXPECT_NE(mod->getFunction("shr_zero"), nullptr);
+}
+
+TEST(CodegenTest, OptmaxOnePowX) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "OPTMAX=: fn one_pow(x: int) { return 1 ** x; } OPTMAX!:\n"
+        "fn main() { return one_pow(42); }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    EXPECT_NE(mod->getFunction("one_pow"), nullptr);
+}
+
+// ===========================================================================
+// OPTMAX double-negation folding
+// ===========================================================================
+
+TEST(CodegenTest, OptmaxDoubleNegation) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "OPTMAX=: fn double_neg(x: int) { return -(-x); } OPTMAX!:\n"
+        "fn main() { return double_neg(42); }",
+        codegen);
+    auto* func = mod->getFunction("double_neg");
+    ASSERT_NE(func, nullptr);
+    // After double-negation folding, there should be no Neg instructions
+    bool hasNeg = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::Sub) {
+                // Check if it's a negation (sub 0, x)
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(0))) {
+                    if (ci->isZero())
+                        hasNeg = true;
+                }
+            }
+        }
+    }
+    EXPECT_FALSE(hasNeg);
+}
+
+TEST(CodegenTest, OptmaxDoubleBitwiseNot) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "OPTMAX=: fn double_bitnot(x: int) { return ~(~x); } OPTMAX!:\n"
+        "fn main() { return double_bitnot(42); }",
+        codegen);
+    auto* func = mod->getFunction("double_bitnot");
+    ASSERT_NE(func, nullptr);
+    // After double-bitwise-not folding, there should be no Xor instructions
+    bool hasXor = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::Xor)
+                hasXor = true;
+        }
+    }
+    EXPECT_FALSE(hasXor);
+}
+
+// ===========================================================================
+// Bytecode algebraic identity optimizations
+// ===========================================================================
+
+TEST(CodegenTest, BytecodeAlgebraicIdentityAddZero) {
+    // x + 0 in bytecode should not emit an ADD opcode
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto program = parseSource("fn add_zero(x) { return x + 0; }\n"
+                               "fn main() { return 0; }");
+    codegen.generateHybrid(program.get());
+    auto& bcFuncs = codegen.getBytecodeFunctions();
+    ASSERT_GE(bcFuncs.size(), 1u);
+    auto& code = bcFuncs[0].bytecode;
+    bool hasAdd = false;
+    for (uint8_t byte : code) {
+        if (byte == static_cast<uint8_t>(OpCode::ADD))
+            hasAdd = true;
+    }
+    EXPECT_FALSE(hasAdd);
+}
+
+TEST(CodegenTest, BytecodeAlgebraicIdentityMulZero) {
+    // x * 0 in bytecode should not emit a MUL opcode
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto program = parseSource("fn mul_zero(x) { return x * 0; }\n"
+                               "fn main() { return 0; }");
+    codegen.generateHybrid(program.get());
+    auto& bcFuncs = codegen.getBytecodeFunctions();
+    ASSERT_GE(bcFuncs.size(), 1u);
+    auto& code = bcFuncs[0].bytecode;
+    bool hasMul = false;
+    for (uint8_t byte : code) {
+        if (byte == static_cast<uint8_t>(OpCode::MUL))
+            hasMul = true;
+    }
+    EXPECT_FALSE(hasMul);
+}
+
+TEST(CodegenTest, BytecodeAlgebraicIdentityMulOne) {
+    // x * 1 in bytecode should not emit a MUL opcode
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto program = parseSource("fn mul_one(x) { return x * 1; }\n"
+                               "fn main() { return 0; }");
+    codegen.generateHybrid(program.get());
+    auto& bcFuncs = codegen.getBytecodeFunctions();
+    ASSERT_GE(bcFuncs.size(), 1u);
+    auto& code = bcFuncs[0].bytecode;
+    bool hasMul = false;
+    for (uint8_t byte : code) {
+        if (byte == static_cast<uint8_t>(OpCode::MUL))
+            hasMul = true;
+    }
+    EXPECT_FALSE(hasMul);
+}
+
+TEST(CodegenTest, BytecodeAlgebraicIdentityPowZero) {
+    // x ** 0 in bytecode should emit PUSH_INT 1 instead of POW
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto program = parseSource("fn pow_zero(x) { return x ** 0; }\n"
+                               "fn main() { return 0; }");
+    codegen.generateHybrid(program.get());
+    auto& bcFuncs = codegen.getBytecodeFunctions();
+    ASSERT_GE(bcFuncs.size(), 1u);
+    auto& code = bcFuncs[0].bytecode;
+    bool hasPow = false;
+    for (uint8_t byte : code) {
+        if (byte == static_cast<uint8_t>(OpCode::POW))
+            hasPow = true;
+    }
+    EXPECT_FALSE(hasPow);
+}
+
+// ===========================================================================
+// Bytecode algebraic identity: side-effect preservation
+// ===========================================================================
+
+TEST(CodegenTest, BytecodeAlgebraicMulZeroPreservesSideEffects) {
+    // x * 0 in bytecode should still emit a LOAD_LOCAL for x to preserve
+    // any potential side effects from evaluating the left operand.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto program = parseSource("fn mul_zero(x) { return x * 0; }\n"
+                               "fn main() { return 0; }");
+    codegen.generateHybrid(program.get());
+    auto& bcFuncs = codegen.getBytecodeFunctions();
+    ASSERT_GE(bcFuncs.size(), 1u);
+    auto& code = bcFuncs[0].bytecode;
+    // Should have a LOAD_LOCAL for x even though result is constant 0
+    bool hasLoad = false;
+    for (uint8_t byte : code) {
+        if (byte == static_cast<uint8_t>(OpCode::LOAD_LOCAL) ||
+            byte == static_cast<uint8_t>(OpCode::LOAD_VAR))
+            hasLoad = true;
+    }
+    EXPECT_TRUE(hasLoad);
+}
+
+TEST(CodegenTest, BytecodeAlgebraicPowZeroPreservesSideEffects) {
+    // x ** 0 in bytecode should still emit a LOAD_LOCAL for x to preserve
+    // any potential side effects from evaluating the left operand.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto program = parseSource("fn pow_zero(x) { return x ** 0; }\n"
+                               "fn main() { return 0; }");
+    codegen.generateHybrid(program.get());
+    auto& bcFuncs = codegen.getBytecodeFunctions();
+    ASSERT_GE(bcFuncs.size(), 1u);
+    auto& code = bcFuncs[0].bytecode;
+    bool hasLoad = false;
+    for (uint8_t byte : code) {
+        if (byte == static_cast<uint8_t>(OpCode::LOAD_LOCAL) ||
+            byte == static_cast<uint8_t>(OpCode::LOAD_VAR))
+            hasLoad = true;
+    }
+    EXPECT_TRUE(hasLoad);
+}
+
+TEST(CodegenTest, BytecodeAlgebraicZeroMulPreservesSideEffects) {
+    // 0 * x in bytecode should still emit a LOAD_LOCAL for x.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto program = parseSource("fn zero_mul(x) { return 0 * x; }\n"
+                               "fn main() { return 0; }");
+    codegen.generateHybrid(program.get());
+    auto& bcFuncs = codegen.getBytecodeFunctions();
+    ASSERT_GE(bcFuncs.size(), 1u);
+    auto& code = bcFuncs[0].bytecode;
+    bool hasLoad = false;
+    for (uint8_t byte : code) {
+        if (byte == static_cast<uint8_t>(OpCode::LOAD_LOCAL) ||
+            byte == static_cast<uint8_t>(OpCode::LOAD_VAR))
+            hasLoad = true;
+    }
+    EXPECT_TRUE(hasLoad);
+}
+
+// ===========================================================================
+// OPTMAX algebraic identity: side-effect preservation
+// ===========================================================================
+
+TEST(CodegenTest, OptmaxMulZeroPreservesSideEffects) {
+    // In OPTMAX, func() * 0 should NOT be optimized to 0 because the
+    // function call may have side effects. The multiplication should remain.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "OPTMAX=:\n"
+        "fn helper(x: int) { return x; }\n"
+        "fn mul_zero(x: int) { return helper(x) * 0; }\n"
+        "OPTMAX!:\n"
+        "fn main() { return mul_zero(42); }",
+        codegen);
+    auto* func = mod->getFunction("mul_zero");
+    ASSERT_NE(func, nullptr);
+    // The function should contain a call to helper() even though
+    // the result is multiplied by 0
+    bool hasCall = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (llvm::isa<llvm::CallInst>(inst))
+                hasCall = true;
+        }
+    }
+    EXPECT_TRUE(hasCall);
+}
+
+TEST(CodegenTest, OptmaxPowZeroPreservesSideEffects) {
+    // In OPTMAX, func() ** 0 should NOT be optimized to 1 because the
+    // function call may have side effects.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "OPTMAX=:\n"
+        "fn helper(x: int) { return x; }\n"
+        "fn pow_zero(x: int) { return helper(x) ** 0; }\n"
+        "OPTMAX!:\n"
+        "fn main() { return pow_zero(42); }",
+        codegen);
+    auto* func = mod->getFunction("pow_zero");
+    ASSERT_NE(func, nullptr);
+    bool hasCall = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (llvm::isa<llvm::CallInst>(inst))
+                hasCall = true;
+        }
+    }
+    EXPECT_TRUE(hasCall);
+}
+
+TEST(CodegenTest, OptmaxMulZeroPureStillOptimized) {
+    // In OPTMAX, x * 0 where x is a simple variable should still be
+    // optimized to 0 (no multiply instruction emitted).
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "OPTMAX=:\n"
+        "fn mul_zero(x: int) { return x * 0; }\n"
+        "OPTMAX!:\n"
+        "fn main() { return mul_zero(42); }",
+        codegen);
+    auto* func = mod->getFunction("mul_zero");
+    ASSERT_NE(func, nullptr);
+    bool hasMul = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::Mul ||
+                inst.getOpcode() == llvm::Instruction::Shl)
+                hasMul = true;
+        }
+    }
+    EXPECT_FALSE(hasMul);
 }

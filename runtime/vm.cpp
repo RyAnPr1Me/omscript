@@ -257,6 +257,10 @@ op_ADD: {
         registers[rd] = Value(registers[rs1].unsafeAsInt() + registers[rs2].unsafeAsInt());
         DISPATCH();
     }
+    if (registers[rs1].getType() == Value::Type::FLOAT && registers[rs2].getType() == Value::Type::FLOAT) {
+        registers[rd] = Value(registers[rs1].unsafeAsFloat() + registers[rs2].unsafeAsFloat());
+        DISPATCH();
+    }
     registers[rd] = registers[rs1] + registers[rs2];
     DISPATCH();
 }
@@ -268,6 +272,10 @@ op_SUB: {
         registers[rd] = Value(registers[rs1].unsafeAsInt() - registers[rs2].unsafeAsInt());
         DISPATCH();
     }
+    if (registers[rs1].getType() == Value::Type::FLOAT && registers[rs2].getType() == Value::Type::FLOAT) {
+        registers[rd] = Value(registers[rs1].unsafeAsFloat() - registers[rs2].unsafeAsFloat());
+        DISPATCH();
+    }
     registers[rd] = registers[rs1] - registers[rs2];
     DISPATCH();
 }
@@ -277,6 +285,10 @@ op_MUL: {
     uint8_t rs2 = readByte(bytecode, ip);
     if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
         registers[rd] = Value(registers[rs1].unsafeAsInt() * registers[rs2].unsafeAsInt());
+        DISPATCH();
+    }
+    if (registers[rs1].getType() == Value::Type::FLOAT && registers[rs2].getType() == Value::Type::FLOAT) {
+        registers[rd] = Value(registers[rs1].unsafeAsFloat() * registers[rs2].unsafeAsFloat());
         DISPATCH();
     }
     registers[rd] = registers[rs1] * registers[rs2];
@@ -292,6 +304,13 @@ op_DIV: {
         // Guard against division by zero AND INT64_MIN / -1 overflow (UB).
         if (bv != 0 && !(av == INT64_MIN && bv == -1)) {
             registers[rd] = Value(av / bv);
+            DISPATCH();
+        }
+    }
+    if (registers[rs1].getType() == Value::Type::FLOAT && registers[rs2].getType() == Value::Type::FLOAT) {
+        double bv = registers[rs2].unsafeAsFloat();
+        if (bv != 0.0) {
+            registers[rd] = Value(registers[rs1].unsafeAsFloat() / bv);
             DISPATCH();
         }
     }
@@ -326,6 +345,10 @@ op_NEG: {
             registers[rd] = Value(-val);
             DISPATCH();
         }
+    }
+    if (registers[rs].getType() == Value::Type::FLOAT) {
+        registers[rd] = Value(-registers[rs].unsafeAsFloat());
+        DISPATCH();
     }
     registers[rd] = -registers[rs];
     DISPATCH();

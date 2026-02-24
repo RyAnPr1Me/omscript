@@ -2637,3 +2637,103 @@ TEST(VMTest, FloatPlusInt) {
     vm.execute(code);
     EXPECT_DOUBLE_EQ(vm.getLastReturn().asFloat(), 5.5);
 }
+
+// ===========================================================================
+// Float fast paths for arithmetic operations
+// ===========================================================================
+
+TEST(VMTest, FloatFastPathAdd) {
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_FLOAT);
+        e.emitReg(0);
+        e.emitFloat(1.5);
+        e.emit(OpCode::PUSH_FLOAT);
+        e.emitReg(1);
+        e.emitFloat(2.5);
+        e.emit(OpCode::ADD);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
+    });
+    VM vm;
+    vm.execute(code);
+    EXPECT_DOUBLE_EQ(vm.getLastReturn().asFloat(), 4.0);
+}
+
+TEST(VMTest, FloatFastPathSub) {
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_FLOAT);
+        e.emitReg(0);
+        e.emitFloat(5.5);
+        e.emit(OpCode::PUSH_FLOAT);
+        e.emitReg(1);
+        e.emitFloat(2.0);
+        e.emit(OpCode::SUB);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
+    });
+    VM vm;
+    vm.execute(code);
+    EXPECT_DOUBLE_EQ(vm.getLastReturn().asFloat(), 3.5);
+}
+
+TEST(VMTest, FloatFastPathMul) {
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_FLOAT);
+        e.emitReg(0);
+        e.emitFloat(3.0);
+        e.emit(OpCode::PUSH_FLOAT);
+        e.emitReg(1);
+        e.emitFloat(4.0);
+        e.emit(OpCode::MUL);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
+    });
+    VM vm;
+    vm.execute(code);
+    EXPECT_DOUBLE_EQ(vm.getLastReturn().asFloat(), 12.0);
+}
+
+TEST(VMTest, FloatFastPathDiv) {
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_FLOAT);
+        e.emitReg(0);
+        e.emitFloat(10.0);
+        e.emit(OpCode::PUSH_FLOAT);
+        e.emitReg(1);
+        e.emitFloat(4.0);
+        e.emit(OpCode::DIV);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
+    });
+    VM vm;
+    vm.execute(code);
+    EXPECT_DOUBLE_EQ(vm.getLastReturn().asFloat(), 2.5);
+}
+
+TEST(VMTest, FloatFastPathNeg) {
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_FLOAT);
+        e.emitReg(0);
+        e.emitFloat(3.14);
+        e.emit(OpCode::NEG);
+        e.emitReg(1);
+        e.emitReg(0);
+        e.emit(OpCode::RETURN);
+        e.emitReg(1);
+    });
+    VM vm;
+    vm.execute(code);
+    EXPECT_DOUBLE_EQ(vm.getLastReturn().asFloat(), -3.14);
+}

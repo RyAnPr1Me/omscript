@@ -300,6 +300,7 @@ test_compile_fail "examples/int_overflow.om"
 test_compile_fail "examples/no_main.om"
 test_compile_fail "examples/dup_func.om"
 test_compile_fail "examples/dup_param.om"
+test_compile_fail "examples/dup_case.om"
 test_compile_fail "examples/missing_semicolon.om"
 test_compile_fail "examples/invalid_hex.om"
 test_compile_fail "examples/invalid_binary.om"
@@ -311,6 +312,7 @@ test_cli_output "int-overflow-msg" "Integer literal out of range" 1 ./build/omsc
 test_cli_output "no-main-msg" "No 'main' function defined" 1 ./build/omsc examples/no_main.om -o /tmp/test_nomain
 test_cli_output "dup-func-msg" "Duplicate function definition" 1 ./build/omsc examples/dup_func.om -o /tmp/test_dupfunc
 test_cli_output "dup-param-msg" "Duplicate parameter name" 1 ./build/omsc examples/dup_param.om -o /tmp/test_dupparam
+test_cli_output "dup-case-msg" "duplicate case value" 1 ./build/omsc examples/dup_case.om -o /tmp/test_dupcase
 test_cli_output "switch-float-case-msg" "case value must be an integer constant, not a float" 1 ./build/omsc examples/switch_float_case.om -o /tmp/test_sfcase
 test_cli_output "invalid-hex-msg" "Expected hex digit after" 1 ./build/omsc examples/invalid_hex.om -o /tmp/test_hex_err
 test_cli_output "invalid-binary-msg" "Expected binary digit after" 1 ./build/omsc examples/invalid_binary.om -o /tmp/test_bin_err
