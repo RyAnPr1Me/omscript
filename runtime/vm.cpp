@@ -239,8 +239,10 @@ op_PUSH_FLOAT: {
 }
 op_PUSH_STRING: {
     uint8_t rd = readByte(bytecode, ip);
-    std::string value = readString(bytecode, ip);
-    registers[rd] = Value(value);
+    {
+        std::string value = readString(bytecode, ip);
+        registers[rd] = Value(value);
+    }
     DISPATCH();
 }
 op_POP: {
@@ -332,22 +334,25 @@ op_POW: {
     uint8_t rd = readByte(bytecode, ip);
     uint8_t rs1 = readByte(bytecode, ip);
     uint8_t rs2 = readByte(bytecode, ip);
-    Value base = registers[rs1];
-    Value exp = registers[rs2];
-    if (exp.getType() != Value::Type::INTEGER) {
-        throw std::runtime_error("Exponent must be an integer for ** operator");
-    }
-    int64_t n = exp.unsafeAsInt();
-    if (n < 0) {
-        registers[rd] = Value(static_cast<int64_t>(0));
-    } else {
-        if (n > kMaxExponent) {
-            throw std::runtime_error("Exponent too large for ** operator (max " + std::to_string(kMaxExponent) + ")");
+    {
+        Value base = registers[rs1];
+        Value exp = registers[rs2];
+        if (exp.getType() != Value::Type::INTEGER) {
+            throw std::runtime_error("Exponent must be an integer for ** operator");
         }
-        Value result(static_cast<int64_t>(1));
-        for (int64_t i = 0; i < n; i++)
-            result = result * base;
-        registers[rd] = result;
+        int64_t n = exp.unsafeAsInt();
+        if (n < 0) {
+            registers[rd] = Value(static_cast<int64_t>(0));
+        } else {
+            if (n > kMaxExponent) {
+                throw std::runtime_error("Exponent too large for ** operator (max " + std::to_string(kMaxExponent) +
+                                         ")");
+            }
+            Value result(static_cast<int64_t>(1));
+            for (int64_t i = 0; i < n; i++)
+                result = result * base;
+            registers[rd] = result;
+        }
     }
     DISPATCH();
 }
@@ -524,14 +529,18 @@ op_SHR: {
 }
 op_LOAD_VAR: {
     uint8_t rd = readByte(bytecode, ip);
-    std::string name = readString(bytecode, ip);
-    registers[rd] = getGlobal(name);
+    {
+        std::string name = readString(bytecode, ip);
+        registers[rd] = getGlobal(name);
+    }
     DISPATCH();
 }
 op_STORE_VAR: {
     uint8_t rs = readByte(bytecode, ip);
-    std::string name = readString(bytecode, ip);
-    setGlobal(name, registers[rs]);
+    {
+        std::string name = readString(bytecode, ip);
+        setGlobal(name, registers[rs]);
+    }
     DISPATCH();
 }
 op_LOAD_LOCAL: {
@@ -609,113 +618,115 @@ op_MOV: {
     DISPATCH();
 }
 op_CALL: {
-    uint8_t rd = readByte(bytecode, ip);
-    std::string funcName = readString(bytecode, ip);
-    uint8_t argCount = readByte(bytecode, ip);
-    uint8_t argRegs[256];
-    for (uint8_t i = 0; i < argCount; i++) {
-        argRegs[i] = readByte(bytecode, ip);
-    }
+    do {
+        uint8_t rd = readByte(bytecode, ip);
+        std::string funcName = readString(bytecode, ip);
+        uint8_t argCount = readByte(bytecode, ip);
+        uint8_t argRegs[256];
+        for (uint8_t i = 0; i < argCount; i++) {
+            argRegs[i] = readByte(bytecode, ip);
+        }
 
-    // ---- Record argument types for type-profiled JIT ----
-    if (jit_ && argCount > 0) {
-        bool allInt, allFloat;
-        classifyArgTypes(argCount, argRegs, allInt, allFloat);
-        jit_->recordTypes(funcName, allInt, allFloat);
-    }
+        // ---- Record argument types for type-profiled JIT ----
+        if (jit_ && argCount > 0) {
+            bool allInt, allFloat;
+            classifyArgTypes(argCount, argRegs, allInt, allFloat);
+            jit_->recordTypes(funcName, allInt, allFloat);
+        }
 
-    // ---- JIT fast path: float-specialized ----
-    {
-        auto floatIt = jitFloatCache_.find(funcName);
-        if (floatIt != jitFloatCache_.end()) {
-            if (invokeJITFloat(floatIt->second, argCount, argRegs, rd)) {
-                if (jit_)
-                    jit_->recordPostJITCall(funcName);
-                DISPATCH();
+        // ---- JIT fast path: float-specialized ----
+        {
+            auto floatIt = jitFloatCache_.find(funcName);
+            if (floatIt != jitFloatCache_.end()) {
+                if (invokeJITFloat(floatIt->second, argCount, argRegs, rd)) {
+                    if (jit_)
+                        jit_->recordPostJITCall(funcName);
+                    break;
+                }
             }
         }
-    }
 
-    // ---- JIT fast path: int-specialized ----
-    {
-        auto cacheIt = jitCache_.find(funcName);
-        if (cacheIt != jitCache_.end()) {
-            if (invokeJIT(cacheIt->second, argCount, argRegs, rd)) {
-                if (jit_ && jit_->recordPostJITCall(funcName)) {
-                    auto fit = functions.find(funcName);
-                    if (fit != functions.end()) {
-                        jit_->recompile(fit->second);
-                        auto newIntPtr = jit_->getCompiled(funcName);
-                        auto newFloatPtr = jit_->getCompiledFloat(funcName);
-                        if (newIntPtr)
-                            jitCache_[funcName] = newIntPtr;
-                        if (newFloatPtr)
-                            jitFloatCache_[funcName] = newFloatPtr;
+        // ---- JIT fast path: int-specialized ----
+        {
+            auto cacheIt = jitCache_.find(funcName);
+            if (cacheIt != jitCache_.end()) {
+                if (invokeJIT(cacheIt->second, argCount, argRegs, rd)) {
+                    if (jit_ && jit_->recordPostJITCall(funcName)) {
+                        auto fit = functions.find(funcName);
+                        if (fit != functions.end()) {
+                            jit_->recompile(fit->second);
+                            auto newIntPtr = jit_->getCompiled(funcName);
+                            auto newFloatPtr = jit_->getCompiledFloat(funcName);
+                            if (newIntPtr)
+                                jitCache_[funcName] = newIntPtr;
+                            if (newFloatPtr)
+                                jitFloatCache_[funcName] = newFloatPtr;
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+
+        // ---- JIT compilation trigger ----
+        if (jit_) {
+            if (jit_->recordCall(funcName)) {
+                auto fit = functions.find(funcName);
+                if (fit != functions.end()) {
+                    auto spec = jit_->getTypeProfile(funcName).bestSpecialization();
+                    if (jit_->compile(fit->second, spec)) {
+                        auto intPtr = jit_->getCompiled(funcName);
+                        auto floatPtr = jit_->getCompiledFloat(funcName);
+                        if (intPtr)
+                            jitCache_[funcName] = intPtr;
+                        if (floatPtr)
+                            jitFloatCache_[funcName] = floatPtr;
                     }
                 }
-                DISPATCH();
             }
         }
-    }
 
-    // ---- JIT compilation trigger ----
-    if (jit_) {
-        if (jit_->recordCall(funcName)) {
-            auto fit = functions.find(funcName);
-            if (fit != functions.end()) {
-                auto spec = jit_->getTypeProfile(funcName).bestSpecialization();
-                if (jit_->compile(fit->second, spec)) {
-                    auto intPtr = jit_->getCompiled(funcName);
-                    auto floatPtr = jit_->getCompiledFloat(funcName);
-                    if (intPtr)
-                        jitCache_[funcName] = intPtr;
-                    if (floatPtr)
-                        jitFloatCache_[funcName] = floatPtr;
-                }
-            }
+        auto it = functions.find(funcName);
+        if (it == functions.end()) {
+            throw std::runtime_error("Undefined function: " + funcName);
         }
-    }
+        const BytecodeFunction& func = it->second;
+        if (argCount != func.arity) {
+            throw std::runtime_error("Function '" + funcName + "' expects " + std::to_string(func.arity) +
+                                     " arguments but got " + std::to_string(argCount));
+        }
 
-    auto it = functions.find(funcName);
-    if (it == functions.end()) {
-        throw std::runtime_error("Undefined function: " + funcName);
-    }
-    const BytecodeFunction& func = it->second;
-    if (argCount != func.arity) {
-        throw std::runtime_error("Function '" + funcName + "' expects " + std::to_string(func.arity) +
-                                 " arguments but got " + std::to_string(argCount));
-    }
+        if (callStack.size() >= kMaxCallDepth) {
+            throw std::runtime_error("Call stack overflow: exceeded maximum call depth of " +
+                                     std::to_string(kMaxCallDepth));
+        }
 
-    if (callStack.size() >= kMaxCallDepth) {
-        throw std::runtime_error("Call stack overflow: exceeded maximum call depth of " +
-                                 std::to_string(kMaxCallDepth));
-    }
+        CallFrame frame;
+        frame.function = &func;
+        frame.returnIp = ip;
+        frame.returnBytecode = &bytecode;
+        frame.savedLocals = std::move(locals);
+        frame.savedRegisters.assign(registers, registers + kMaxRegisters);
+        frame.returnReg = rd;
+        callStack.push_back(std::move(frame));
 
-    CallFrame frame;
-    frame.function = &func;
-    frame.returnIp = ip;
-    frame.returnBytecode = &bytecode;
-    frame.savedLocals = std::move(locals);
-    frame.savedRegisters.assign(registers, registers + kMaxRegisters);
-    frame.returnReg = rd;
-    callStack.push_back(std::move(frame));
+        locals.clear();
+        locals.resize(argCount);
+        for (uint8_t i = 0; i < argCount; i++) {
+            locals[i] = callStack.back().savedRegisters[argRegs[i]];
+        }
 
-    locals.clear();
-    locals.resize(argCount);
-    for (uint8_t i = 0; i < argCount; i++) {
-        locals[i] = callStack.back().savedRegisters[argRegs[i]];
-    }
+        execute(func.bytecode);
 
-    execute(func.bytecode);
+        Value returnValue = lastReturn;
+        CallFrame& top = callStack.back();
+        locals = std::move(top.savedLocals);
+        std::copy(top.savedRegisters.begin(), top.savedRegisters.end(), registers);
+        uint8_t retReg = top.returnReg;
+        callStack.pop_back();
 
-    Value returnValue = lastReturn;
-    CallFrame& top = callStack.back();
-    locals = std::move(top.savedLocals);
-    std::copy(top.savedRegisters.begin(), top.savedRegisters.end(), registers);
-    uint8_t retReg = top.returnReg;
-    callStack.pop_back();
-
-    registers[retReg] = returnValue;
+        registers[retReg] = returnValue;
+    } while (0);
     DISPATCH();
 }
 
