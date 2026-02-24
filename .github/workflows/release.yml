@@ -86,9 +86,17 @@ jobs:
             $installerUrl = "https://github.com/llvm/llvm-project/releases/download/llvmorg-$llvmVersion/LLVM-$llvmVersion-win64.exe"
             $installerPath = Join-Path $env:RUNNER_TEMP "LLVM-installer.exe"
             Write-Host "Downloading LLVM $llvmVersion..."
-            curl.exe -L -o $installerPath $installerUrl
+            curl.exe --fail -L -o $installerPath $installerUrl
+            if (-not (Test-Path $installerPath)) {
+              Write-Error "Failed to download LLVM installer"
+              exit 1
+            }
             Write-Host "Installing LLVM $llvmVersion..."
-            Start-Process -FilePath $installerPath -ArgumentList "/S" -Wait -NoNewWindow
+            $proc = Start-Process -FilePath $installerPath -ArgumentList "/S" -Wait -NoNewWindow -PassThru
+            if ($proc.ExitCode -ne 0) {
+              Write-Error "LLVM installer failed with exit code $($proc.ExitCode)"
+              exit 1
+            }
             if (-not (Test-Path (Join-Path $llvmDir "LLVMConfig.cmake"))) {
               Write-Error "LLVMConfig.cmake not found after installation"
               exit 1
