@@ -72,6 +72,13 @@ inline int log2IfPowerOf2(int64_t val) {
     return shift;
 }
 
+/// Returns true if the expression is a simple value with no side effects
+/// (literal or identifier).  Used by algebraic identity optimizations to
+/// determine if an operand can be safely dropped.
+inline bool isPureExpression(const Expression* expr) {
+    return expr->type == ASTNodeType::LITERAL_EXPR || expr->type == ASTNodeType::IDENTIFIER_EXPR;
+}
+
 std::unique_ptr<Expression> optimizeOptMaxExpression(std::unique_ptr<Expression> expr);
 
 std::unique_ptr<Expression> optimizeOptMaxUnary(const std::string& op, std::unique_ptr<Expression> operand) {
@@ -123,17 +130,20 @@ std::unique_ptr<Expression> optimizeOptMaxBinary(const std::string& op, std::uni
     auto* rightLiteral = dynamic_cast<LiteralExpr*>(right.get());
 
     // Algebraic identity optimizations (one side is a literal)
+    // Note: when the result is a constant that drops the non-literal operand
+    // (e.g. 0*x→0, x*0→0, 1**x→1, x**0→1), we only apply the optimization
+    // if the dropped operand is pure (no side effects like function calls).
     if (leftLiteral && leftLiteral->literalType == LiteralExpr::LiteralType::INTEGER) {
         long long lval = leftLiteral->intValue;
         if (lval == 0 && op == "+")
             return right; // 0 + x → x
-        if (lval == 0 && (op == "*" || op == "&"))
+        if (lval == 0 && (op == "*" || op == "&") && isPureExpression(right.get()))
             return std::make_unique<LiteralExpr>(static_cast<long long>(0)); // 0 * x, 0 & x → 0
         if (lval == 0 && (op == "|" || op == "^"))
             return right; // 0 | x, 0 ^ x → x
         if (lval == 1 && op == "*")
             return right; // 1 * x → x
-        if (lval == 1 && op == "**")
+        if (lval == 1 && op == "**" && isPureExpression(right.get()))
             return std::make_unique<LiteralExpr>(static_cast<long long>(1)); // 1 ** x → 1
     }
     if (rightLiteral && rightLiteral->literalType == LiteralExpr::LiteralType::INTEGER) {
@@ -142,7 +152,7 @@ std::unique_ptr<Expression> optimizeOptMaxBinary(const std::string& op, std::uni
             return left; // x + 0 → x
         if (rval == 0 && op == "-")
             return left; // x - 0 → x
-        if (rval == 0 && (op == "*" || op == "&"))
+        if (rval == 0 && (op == "*" || op == "&") && isPureExpression(left.get()))
             return std::make_unique<LiteralExpr>(static_cast<long long>(0)); // x * 0, x & 0 → 0
         if (rval == 0 && (op == "|" || op == "^" || op == "<<" || op == ">>"))
             return left; // x | 0, x ^ 0, x << 0, x >> 0 → x
@@ -152,7 +162,7 @@ std::unique_ptr<Expression> optimizeOptMaxBinary(const std::string& op, std::uni
             return left; // x / 1 → x
         if (rval == 1 && op == "**")
             return left; // x ** 1 → x
-        if (rval == 0 && op == "**")
+        if (rval == 0 && op == "**" && isPureExpression(left.get()))
             return std::make_unique<LiteralExpr>(static_cast<long long>(1)); // x ** 0 → 1
     }
 
@@ -3382,11 +3392,14 @@ uint8_t CodeGenerator::emitBytecodeExpression(Expression* expr) {
         // Bytecode algebraic identity: when exactly one operand is a literal
         // integer with a known identity value, emit the other operand directly
         // instead of generating an unnecessary arithmetic instruction.
+        // Note: when the result is a constant (e.g. x*0→0), we still evaluate
+        // the non-literal operand to preserve any side effects it may have.
         if (leftLit && leftLit->literalType == LiteralExpr::LiteralType::INTEGER) {
             long long lv = leftLit->intValue;
             if (lv == 0 && (bin->op == "+" || bin->op == "|" || bin->op == "^"))
                 return emitBytecodeExpression(bin->right.get()); // 0+x, 0|x, 0^x → x
             if ((lv == 0) && (bin->op == "*" || bin->op == "&")) {
+                emitBytecodeExpression(bin->right.get()); // evaluate for side effects
                 uint8_t rd = allocReg();  // 0*x, 0&x → 0
                 bytecodeEmitter.emit(OpCode::PUSH_INT);
                 bytecodeEmitter.emitReg(rd);
@@ -3402,6 +3415,7 @@ uint8_t CodeGenerator::emitBytecodeExpression(Expression* expr) {
                             || bin->op == "^" || bin->op == "<<" || bin->op == ">>"))
                 return emitBytecodeExpression(bin->left.get()); // x+0, x-0, x|0, x^0, x<<0, x>>0 → x
             if ((rv == 0) && (bin->op == "*" || bin->op == "&")) {
+                emitBytecodeExpression(bin->left.get()); // evaluate for side effects
                 uint8_t rd = allocReg();  // x*0, x&0 → 0
                 bytecodeEmitter.emit(OpCode::PUSH_INT);
                 bytecodeEmitter.emitReg(rd);
@@ -3411,6 +3425,7 @@ uint8_t CodeGenerator::emitBytecodeExpression(Expression* expr) {
             if (rv == 1 && (bin->op == "*" || bin->op == "/" || bin->op == "**"))
                 return emitBytecodeExpression(bin->left.get()); // x*1, x/1, x**1 → x
             if (rv == 0 && bin->op == "**") {
+                emitBytecodeExpression(bin->left.get()); // evaluate for side effects
                 uint8_t rd = allocReg();  // x**0 → 1
                 bytecodeEmitter.emit(OpCode::PUSH_INT);
                 bytecodeEmitter.emitReg(rd);
