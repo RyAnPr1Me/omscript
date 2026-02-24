@@ -28,10 +28,6 @@ jobs:
             platform: macos-arm64
             binary: omsc
             archive_ext: tar.gz
-          - os: macos-13
-            platform: macos-x86_64
-            binary: omsc
-            archive_ext: tar.gz
           - os: windows-latest
             platform: windows-x86_64
             binary: omsc.exe
@@ -82,8 +78,8 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          if [ ! -d "C:/Program Files/LLVM" ]; then
-            choco install llvm -y
+          if [ ! -f "C:/Program Files/LLVM/lib/cmake/llvm/LLVMConfig.cmake" ]; then
+            choco install llvm -y --force
           fi
           echo "LLVM_DIR=C:/Program Files/LLVM/lib/cmake/llvm" >> "$GITHUB_ENV"
 
@@ -169,7 +165,6 @@ jobs:
             |----------|-------------|------|
             | Linux | x86_64 | `omsc-${{ steps.version.outputs.VERSION }}-linux-x86_64.tar.gz` |
             | macOS | ARM64 (Apple Silicon) | `omsc-${{ steps.version.outputs.VERSION }}-macos-arm64.tar.gz` |
-            | macOS | x86_64 (Intel) | `omsc-${{ steps.version.outputs.VERSION }}-macos-x86_64.tar.gz` |
             | Windows | x86_64 | `omsc-${{ steps.version.outputs.VERSION }}-windows-x86_64.zip` |
 
             ### Installation

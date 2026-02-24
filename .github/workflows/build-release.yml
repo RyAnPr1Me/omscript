@@ -109,7 +109,7 @@ jobs:
           cmake --build build --parallel $(nproc)
           
           # Run tests
-          cd build && ctest --output-on-failure
+          ctest --test-dir build --output-on-failure
           
           # Create release
           mkdir -p release
