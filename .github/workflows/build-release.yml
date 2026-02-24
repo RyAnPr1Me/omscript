@@ -97,10 +97,10 @@ jobs:
           echo "New version: $NEW_VERSION"
           
           # Update version header
-          sed -i "s/OMSCRIPT_VERSION_MAJOR \K\d+/$NEW_MAJOR/" include/version.h
-          sed -i "s/OMSCRIPT_VERSION_MINOR \K\d+/$NEW_MINOR/" include/version.h
-          sed -i "s/OMSCRIPT_VERSION_PATCH \K\d+/$NEW_PATCH/" include/version.h
-          sed -i "s/OMSCRIPT_VERSION_STRING \"\K[^\"]+/$NEW_VERSION/" include/version.h
+          sed -i "s/\(#define OMSCRIPT_VERSION_MAJOR \)[0-9]*/\1$NEW_MAJOR/" include/version.h
+          sed -i "s/\(#define OMSCRIPT_VERSION_MINOR \)[0-9]*/\1$NEW_MINOR/" include/version.h
+          sed -i "s/\(#define OMSCRIPT_VERSION_PATCH \)[0-9]*/\1$NEW_PATCH/" include/version.h
+          sed -i "s/\(#define OMSCRIPT_VERSION_STRING \"\)[^\"]*/\1$NEW_VERSION/" include/version.h
           
           cat include/version.h
           

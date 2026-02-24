@@ -90,11 +90,11 @@ jobs:
       - name: Configure CMake
         shell: bash
         run: |
-          CMAKE_ARGS="-DCMAKE_BUILD_TYPE=Release -DOMSC_VERSION=${{ steps.version.outputs.VERSION }}"
+          cmake_args=(-DCMAKE_BUILD_TYPE=Release "-DOMSC_VERSION=${{ steps.version.outputs.VERSION }}")
           if [ -n "${LLVM_DIR:-}" ]; then
-            CMAKE_ARGS="$CMAKE_ARGS -DLLVM_DIR=$LLVM_DIR"
+            cmake_args+=("-DLLVM_DIR=$LLVM_DIR")
           fi
-          cmake -B build $CMAKE_ARGS
+          cmake -B build "${cmake_args[@]}"
 
       - name: Build compiler
         shell: bash
