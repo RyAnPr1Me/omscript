@@ -76,6 +76,14 @@ std::unique_ptr<Expression> optimizeOptMaxExpression(std::unique_ptr<Expression>
 
 std::unique_ptr<Expression> optimizeOptMaxUnary(const std::string& op, std::unique_ptr<Expression> operand) {
     operand = optimizeOptMaxExpression(std::move(operand));
+
+    // Double-negation elimination: -(-x) → x, !(! x) → bool(x), ~(~x) → x
+    auto* innerUnary = dynamic_cast<UnaryExpr*>(operand.get());
+    if (innerUnary && innerUnary->op == op) {
+        if (op == "-" || op == "~")
+            return std::move(innerUnary->operand);
+    }
+
     auto* literal = dynamic_cast<LiteralExpr*>(operand.get());
     if (!literal) {
         return std::make_unique<UnaryExpr>(op, std::move(operand));
@@ -119,8 +127,14 @@ std::unique_ptr<Expression> optimizeOptMaxBinary(const std::string& op, std::uni
         long long lval = leftLiteral->intValue;
         if (lval == 0 && op == "+")
             return right; // 0 + x → x
+        if (lval == 0 && (op == "*" || op == "&"))
+            return std::make_unique<LiteralExpr>(static_cast<long long>(0)); // 0 * x, 0 & x → 0
+        if (lval == 0 && (op == "|" || op == "^"))
+            return right; // 0 | x, 0 ^ x → x
         if (lval == 1 && op == "*")
             return right; // 1 * x → x
+        if (lval == 1 && op == "**")
+            return std::make_unique<LiteralExpr>(static_cast<long long>(1)); // 1 ** x → 1
     }
     if (rightLiteral && rightLiteral->literalType == LiteralExpr::LiteralType::INTEGER) {
         long long rval = rightLiteral->intValue;
@@ -128,10 +142,18 @@ std::unique_ptr<Expression> optimizeOptMaxBinary(const std::string& op, std::uni
             return left; // x + 0 → x
         if (rval == 0 && op == "-")
             return left; // x - 0 → x
+        if (rval == 0 && (op == "*" || op == "&"))
+            return std::make_unique<LiteralExpr>(static_cast<long long>(0)); // x * 0, x & 0 → 0
+        if (rval == 0 && (op == "|" || op == "^" || op == "<<" || op == ">>"))
+            return left; // x | 0, x ^ 0, x << 0, x >> 0 → x
         if (rval == 1 && op == "*")
             return left; // x * 1 → x
         if (rval == 1 && op == "/")
             return left; // x / 1 → x
+        if (rval == 1 && op == "**")
+            return left; // x ** 1 → x
+        if (rval == 0 && op == "**")
+            return std::make_unique<LiteralExpr>(static_cast<long long>(1)); // x ** 0 → 1
     }
 
     if (!leftLiteral || !rightLiteral) {
@@ -1323,6 +1345,38 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 return llvm::ConstantInt::get(*context, llvm::APInt(64, 0));
             }
         }
+    }
+
+    // Algebraic identity optimizations — when one operand is a known constant,
+    // many operations can be simplified without emitting any instruction.
+    if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
+        int64_t rv = ci->getSExtValue();
+        if (rv == 0) {
+            if (expr->op == "+" || expr->op == "-" || expr->op == "|"
+                || expr->op == "^" || expr->op == "<<" || expr->op == ">>")
+                return left;                                       // x+0, x-0, x|0, x^0, x<<0, x>>0 → x
+            if (expr->op == "*" || expr->op == "&")
+                return llvm::ConstantInt::get(getDefaultType(), 0); // x*0, x&0 → 0
+            if (expr->op == "**")
+                return llvm::ConstantInt::get(getDefaultType(), 1); // x**0 → 1
+        }
+        if (rv == 1) {
+            if (expr->op == "*" || expr->op == "/" || expr->op == "**")
+                return left;                                       // x*1, x/1, x**1 → x
+        }
+    }
+    if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left)) {
+        int64_t lv = ci->getSExtValue();
+        if (lv == 0) {
+            if (expr->op == "+" || expr->op == "|" || expr->op == "^")
+                return right;                                      // 0+x, 0|x, 0^x → x
+            if (expr->op == "*" || expr->op == "&")
+                return llvm::ConstantInt::get(getDefaultType(), 0); // 0*x, 0&x → 0
+        }
+        if (lv == 1 && expr->op == "*")
+            return right;                                          // 1*x → x
+        if (lv == 1 && expr->op == "**")
+            return llvm::ConstantInt::get(getDefaultType(), 1);     // 1**x → 1
     }
 
     // Regular code generation for non-constant expressions
@@ -3322,6 +3376,45 @@ uint8_t CodeGenerator::emitBytecodeExpression(Expression* expr) {
                 bytecodeEmitter.emit(OpCode::PUSH_INT);
                 bytecodeEmitter.emitReg(rd);
                 bytecodeEmitter.emitInt(result);
+                return rd;
+            }
+        }
+        // Bytecode algebraic identity: when exactly one operand is a literal
+        // integer with a known identity value, emit the other operand directly
+        // instead of generating an unnecessary arithmetic instruction.
+        if (leftLit && leftLit->literalType == LiteralExpr::LiteralType::INTEGER) {
+            long long lv = leftLit->intValue;
+            if (lv == 0 && (bin->op == "+" || bin->op == "|" || bin->op == "^"))
+                return emitBytecodeExpression(bin->right.get()); // 0+x, 0|x, 0^x → x
+            if ((lv == 0) && (bin->op == "*" || bin->op == "&")) {
+                uint8_t rd = allocReg();  // 0*x, 0&x → 0
+                bytecodeEmitter.emit(OpCode::PUSH_INT);
+                bytecodeEmitter.emitReg(rd);
+                bytecodeEmitter.emitInt(0);
+                return rd;
+            }
+            if (lv == 1 && bin->op == "*")
+                return emitBytecodeExpression(bin->right.get()); // 1*x → x
+        }
+        if (rightLit && rightLit->literalType == LiteralExpr::LiteralType::INTEGER) {
+            long long rv = rightLit->intValue;
+            if (rv == 0 && (bin->op == "+" || bin->op == "-" || bin->op == "|"
+                            || bin->op == "^" || bin->op == "<<" || bin->op == ">>"))
+                return emitBytecodeExpression(bin->left.get()); // x+0, x-0, x|0, x^0, x<<0, x>>0 → x
+            if ((rv == 0) && (bin->op == "*" || bin->op == "&")) {
+                uint8_t rd = allocReg();  // x*0, x&0 → 0
+                bytecodeEmitter.emit(OpCode::PUSH_INT);
+                bytecodeEmitter.emitReg(rd);
+                bytecodeEmitter.emitInt(0);
+                return rd;
+            }
+            if (rv == 1 && (bin->op == "*" || bin->op == "/" || bin->op == "**"))
+                return emitBytecodeExpression(bin->left.get()); // x*1, x/1, x**1 → x
+            if (rv == 0 && bin->op == "**") {
+                uint8_t rd = allocReg();  // x**0 → 1
+                bytecodeEmitter.emit(OpCode::PUSH_INT);
+                bytecodeEmitter.emitReg(rd);
+                bytecodeEmitter.emitInt(1);
                 return rd;
             }
         }
