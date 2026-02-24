@@ -76,12 +76,26 @@ jobs:
 
       - name: Install dependencies (Windows)
         if: runner.os == 'Windows'
-        shell: bash
+        shell: pwsh
         run: |
-          if [ ! -f "C:/Program Files/LLVM/lib/cmake/llvm/LLVMConfig.cmake" ]; then
-            choco install llvm -y --force
-          fi
-          echo "LLVM_DIR=C:/Program Files/LLVM/lib/cmake/llvm" >> "$GITHUB_ENV"
+          $llvmDir = "C:\Program Files\LLVM\lib\cmake\llvm"
+          if (Test-Path (Join-Path $llvmDir "LLVMConfig.cmake")) {
+            Write-Host "LLVM cmake config already available at: $llvmDir"
+          } else {
+            $llvmVersion = "18.1.8"
+            $installerUrl = "https://github.com/llvm/llvm-project/releases/download/llvmorg-$llvmVersion/LLVM-$llvmVersion-win64.exe"
+            $installerPath = Join-Path $env:RUNNER_TEMP "LLVM-installer.exe"
+            Write-Host "Downloading LLVM $llvmVersion..."
+            curl.exe -L -o $installerPath $installerUrl
+            Write-Host "Installing LLVM $llvmVersion..."
+            Start-Process -FilePath $installerPath -ArgumentList "/S" -Wait -NoNewWindow
+            if (-not (Test-Path (Join-Path $llvmDir "LLVMConfig.cmake"))) {
+              Write-Error "LLVMConfig.cmake not found after installation"
+              exit 1
+            }
+          }
+          $llvmDirFwd = $llvmDir -replace '\\','/'
+          echo "LLVM_DIR=$llvmDirFwd" >> $env:GITHUB_ENV
 
       - name: Configure CMake
         shell: bash
