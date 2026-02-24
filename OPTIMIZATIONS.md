@@ -258,11 +258,24 @@ Based on the ultimate_optimization.om example:
 
 ### Algebraic Simplification
 ```omscript
-x + 0  →  x
-x * 1  →  x
-x * 0  →  0
-x - x  →  0
+x + 0  →  x       0 + x  →  x
+x - 0  →  x
+x * 1  →  x       1 * x  →  x
+x * 0  →  0       0 * x  →  0
 x / 1  →  x
+x - x  →  0
+x & 0  →  0       0 & x  →  0
+x | 0  →  x       0 | x  →  x
+x ^ 0  →  x       0 ^ x  →  x
+x << 0 →  x       x >> 0 →  x
+x ** 0 →  1       x ** 1 →  x       1 ** x → 1
+```
+
+### Double-Negation Elimination (OPTMAX)
+Consecutive unary operations on the same operand cancel out:
+```omscript
+-(-x)  →  x       // arithmetic double-negation
+~(~x)  →  x       // bitwise double-complement
 ```
 
 ### Boolean Short-Circuiting
@@ -316,6 +329,12 @@ Instead of emitting `PUSH_INT, PUSH_INT, ADD`, the compiler emits a single `PUSH
 pre-computed result. This applies to all arithmetic, comparison, logical, and bitwise operations
 on integer literals, as well as unary operations (`-`, `!`, `~`).
 
+### Bytecode Algebraic Identity Elimination
+When emitting bytecode, operations with a single literal operand that match an algebraic
+identity are eliminated entirely. For example, `x + 0`, `x * 1`, `x << 0`, and `x ** 1`
+emit only the non-constant operand without the arithmetic instruction. Similarly, `x * 0`
+and `x & 0` emit a constant `0`, and `x ** 0` emits a constant `1`.
+
 ### Computed-Goto VM Dispatch
 On GCC/Clang, the bytecode VM uses a computed-goto dispatch table instead of a `switch`
 statement. This eliminates branch prediction overhead and indirect jump penalties, resulting
@@ -327,6 +346,11 @@ When both operands on the VM stack are integers, arithmetic and comparison opera
 (ADD, SUB, MUL, EQ, NE, LT, LE, GT, GE) bypass the full `Value` operator dispatch.
 The fast path reads the raw `int64_t` values directly, avoiding type-checking overhead,
 temporary `Value` construction, and bounds-checked `pop()`/`push()` calls.
+
+### Float Fast Paths
+When both operands on the VM stack are floats, arithmetic operations (ADD, SUB, MUL, DIV)
+and unary negation (NEG) bypass the full `Value` operator dispatch. The fast path reads the
+raw `double` values directly, avoiding type promotion logic and operator overload overhead.
 
 ### Bytecode JIT Compiler
 The VM includes a lightweight JIT compiler that automatically translates hot bytecode
@@ -504,6 +528,10 @@ OmScript's optimization infrastructure provides:
 - ✅ Per-function local variable tracking in hybrid bytecode emission
 - ✅ Optimized VM runtime with move semantics and pre-allocated storage
 - ✅ Inline hot-path functions (isTruthy) for better VM throughput
+- ✅ IR-level algebraic identity elimination (x*0→0, x+0→x, x&0→0, x|0→x, x^0→x, x**0→1, etc.)
+- ✅ OPTMAX double-negation/complement folding (-(-x)→x, ~(~x)→x)
+- ✅ Bytecode algebraic identity elimination for single-literal operands
+- ✅ Float-specialized fast paths for VM arithmetic (ADD, SUB, MUL, DIV, NEG)
 - ✅ Measurable, significant improvements
 
 The compiler transforms high-level OmScript code into highly optimized machine code that rivals hand-written assembly in many cases, while maintaining code readability and developer productivity.
