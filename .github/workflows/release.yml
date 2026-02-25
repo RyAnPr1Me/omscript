@@ -74,47 +74,20 @@ jobs:
           brew install cmake llvm
           echo "LLVM_DIR=$(brew --prefix llvm)/lib/cmake/llvm" >> "$GITHUB_ENV"
 
-      - name: Install dependencies (Windows)
+      - name: Setup MSYS2 (Windows)
         if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $llvmDir = "C:\Program Files\LLVM\lib\cmake\llvm"
-          if (Test-Path (Join-Path $llvmDir "LLVMConfig.cmake")) {
-            Write-Host "LLVM cmake config already available at: $llvmDir"
-          } else {
-            $llvmVersion = "18.1.8"
-            $installerUrl = "https://github.com/llvm/llvm-project/releases/download/llvmorg-$llvmVersion/LLVM-$llvmVersion-win64.exe"
-            $installerPath = Join-Path $env:RUNNER_TEMP "LLVM-installer.exe"
-            Write-Host "Downloading LLVM $llvmVersion..."
-            curl.exe --fail -L -o $installerPath $installerUrl
-            if (-not (Test-Path $installerPath)) {
-              Write-Error "Failed to download LLVM installer"
-              exit 1
-            }
-            # Extract with 7z instead of running the NSIS installer so that
-            # cmake development files (LLVMConfig.cmake) are always present.
-            $llvmRoot = "C:\LLVM"
-            Write-Host "Extracting LLVM $llvmVersion to $llvmRoot..."
-            & 7z x $installerPath "-o$llvmRoot" -y > $null
-            if ($LASTEXITCODE -ne 0) {
-              Write-Error "Failed to extract LLVM installer with 7z (exit code $LASTEXITCODE)"
-              exit 1
-            }
-            $configFile = Get-ChildItem -Path $llvmRoot -Recurse -Filter "LLVMConfig.cmake" -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($configFile) {
-              $llvmDir = $configFile.DirectoryName
-              Write-Host "Found LLVMConfig.cmake at: $llvmDir"
-            } else {
-              Write-Host "Contents of ${llvmRoot}:"
-              Get-ChildItem -Path $llvmRoot -Recurse -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_.FullName }
-              Write-Error "LLVMConfig.cmake not found in LLVM package"
-              exit 1
-            }
-          }
-          $llvmDirFwd = $llvmDir -replace '\\','/'
-          echo "LLVM_DIR=$llvmDirFwd" >> $env:GITHUB_ENV
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          install: >-
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-llvm
+            mingw-w64-x86_64-ninja
 
       - name: Configure CMake
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           cmake_args=(-DCMAKE_BUILD_TYPE=Release "-DOMSC_VERSION=${{ steps.version.outputs.VERSION }}")
@@ -123,9 +96,23 @@ jobs:
           fi
           cmake -B build "${cmake_args[@]}"
 
+      - name: Configure CMake (Windows)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          cmake -G Ninja -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            "-DOMSC_VERSION=${{ steps.version.outputs.VERSION }}"
+
       - name: Build compiler
+        if: runner.os != 'Windows'
         shell: bash
         run: cmake --build build --config Release --parallel 4
+
+      - name: Build compiler (Windows)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: cmake --build build --parallel 4
 
       - name: Run unit tests (Linux)
         if: runner.os == 'Linux'
@@ -149,7 +136,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p release
-          cp build/Release/${{ matrix.binary }} release/omsc-${{ matrix.platform }}.exe
+          cp build/${{ matrix.binary }} release/omsc-${{ matrix.platform }}.exe
           cd release && 7z a omsc-${{ steps.version.outputs.VERSION }}-${{ matrix.platform }}.zip omsc-${{ matrix.platform }}.exe
 
       - name: Upload artifact
