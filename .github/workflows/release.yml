@@ -95,7 +95,7 @@ jobs:
             # cmake development files (LLVMConfig.cmake) are always present.
             $llvmRoot = "C:\LLVM"
             Write-Host "Extracting LLVM $llvmVersion to $llvmRoot..."
-            & 7z x $installerPath "-o$llvmRoot" -y | Out-Null
+            & 7z x $installerPath "-o$llvmRoot" -y > $null
             if ($LASTEXITCODE -ne 0) {
               Write-Error "Failed to extract LLVM installer with 7z (exit code $LASTEXITCODE)"
               exit 1
@@ -106,7 +106,7 @@ jobs:
               Write-Host "Found LLVMConfig.cmake at: $llvmDir"
             } else {
               Write-Host "Contents of ${llvmRoot}:"
-              Get-ChildItem -Path $llvmRoot -Depth 3 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_.FullName }
+              Get-ChildItem -Path $llvmRoot -Recurse -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_.FullName }
               Write-Error "LLVMConfig.cmake not found in LLVM package"
               exit 1
             }
