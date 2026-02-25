@@ -91,14 +91,23 @@ jobs:
               Write-Error "Failed to download LLVM installer"
               exit 1
             }
-            Write-Host "Installing LLVM $llvmVersion..."
-            $proc = Start-Process -FilePath $installerPath -ArgumentList "/S" -Wait -NoNewWindow -PassThru
-            if ($proc.ExitCode -ne 0) {
-              Write-Error "LLVM installer failed with exit code $($proc.ExitCode)"
+            # Extract with 7z instead of running the NSIS installer so that
+            # cmake development files (LLVMConfig.cmake) are always present.
+            $llvmRoot = "C:\LLVM"
+            Write-Host "Extracting LLVM $llvmVersion to $llvmRoot..."
+            & 7z x $installerPath "-o$llvmRoot" -y > $null
+            if ($LASTEXITCODE -ne 0) {
+              Write-Error "Failed to extract LLVM installer with 7z (exit code $LASTEXITCODE)"
               exit 1
             }
-            if (-not (Test-Path (Join-Path $llvmDir "LLVMConfig.cmake"))) {
-              Write-Error "LLVMConfig.cmake not found after installation"
+            $configFile = Get-ChildItem -Path $llvmRoot -Recurse -Filter "LLVMConfig.cmake" -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($configFile) {
+              $llvmDir = $configFile.DirectoryName
+              Write-Host "Found LLVMConfig.cmake at: $llvmDir"
+            } else {
+              Write-Host "Contents of ${llvmRoot}:"
+              Get-ChildItem -Path $llvmRoot -Recurse -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_.FullName }
+              Write-Error "LLVMConfig.cmake not found in LLVM package"
               exit 1
             }
           }
