@@ -16,6 +16,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
   build-and-release:
@@ -124,27 +125,27 @@ jobs:
           echo "Created archives: $ARCHIVE_NAME"
           
           # Create release body
-          RELEASE_BODY="## OmScript v${NEW_VERSION}
-
-**Version bump:** $BUMP_TYPE
-
-### Installation
-
-Run: \`./omsc install\` for user install or \`sudo ./omsc install\` for system-wide.
-
-### Quick Start
-
-\`\`\`bash
-# Compile a file
-omsc script.om
-
-# Show version
-omsc --version
-\`\`\`
-"
-          echo "$RELEASE_BODY" > /tmp/release_body.txt
+          {
+            echo "## OmScript v${NEW_VERSION}"
+            echo ""
+            echo "**Version bump:** $BUMP_TYPE"
+            echo ""
+            echo "### Installation"
+            echo ""
+            echo "Run: \`./omsc install\` for user install or \`sudo ./omsc install\` for system-wide."
+            echo ""
+            echo "### Quick Start"
+            echo ""
+            echo "\`\`\`bash"
+            echo "# Compile a file"
+            echo "omsc script.om"
+            echo ""
+            echo "# Show version"
+            echo "omsc --version"
+            echo "\`\`\`"
+          } > /tmp/release_body.txt
           
-          # Commit version update and push tag to trigger release workflow
+          # Commit version update and push tag
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           git add include/version.h
@@ -156,3 +157,13 @@ omsc --version
           echo "VERSION=$NEW_VERSION" >> "$GITHUB_OUTPUT"
           echo "BUMP_TYPE=$BUMP_TYPE" >> "$GITHUB_OUTPUT"
           echo "ARCHIVE_NAME=$ARCHIVE_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Trigger release workflow
+        run: |
+          # GITHUB_TOKEN push events don't trigger other workflows, so we
+          # explicitly dispatch the release workflow via the API.
+          curl -s -X POST \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/release.yml/dispatches" \
+            -d "{\"ref\":\"main\",\"inputs\":{\"version\":\"${{ steps.version.outputs.VERSION }}\"}}"
