@@ -18,9 +18,17 @@
 #include <vector>
 
 #ifdef _WIN32
+#include <fcntl.h>
 #include <io.h>
 #include <process.h>
+#include <share.h>
+#include <sys/stat.h>
 #include <windows.h>
+// Windows headers define macros that conflict with our enum values.
+#undef CONST
+#undef IN
+#undef TRUE
+#undef FALSE
 #else
 #include <unistd.h>
 #endif

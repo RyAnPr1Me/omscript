@@ -106,7 +106,7 @@ jobs:
           cat include/version.h
           
           # Configure and build
-          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DLLVM_DIR=/usr/lib/llvm-18/cmake
           cmake --build build --parallel $(nproc)
           
           # Run tests
