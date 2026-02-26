@@ -67,6 +67,7 @@ jobs:
             llvm-18-dev \
             libgtest-dev \
             gcc
+          echo "LLVM_DIR=/usr/lib/llvm-18/cmake" >> "$GITHUB_ENV"
 
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
