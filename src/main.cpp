@@ -24,7 +24,7 @@
 #include <share.h>
 #include <sys/stat.h>
 #include <windows.h>
-// Windows headers define macros that conflict with our enum values.
+// Windows headers define macros that conflict with TokenType enum values.
 #undef CONST
 #undef IN
 #undef TRUE
