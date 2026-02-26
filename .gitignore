@@ -46,3 +46,6 @@ release/
 
 # Installed packages (local)
 om_packages/
+
+# Clangd cache
+.cache/
