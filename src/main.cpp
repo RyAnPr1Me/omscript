@@ -267,14 +267,31 @@ bool versionGreaterThan(const Version& a, const Version& b) {
     return a.patch > b.patch;
 }
 
-// Extract the value of a simple JSON string field (e.g. "tag_name":"v0.9.4").
+// Extract the value of a simple JSON string field.
+// Handles both compact ("key":"value") and pretty ("key": "value") JSON.
 std::string extractJsonStringField(const std::string& json, const std::string& key) {
-    std::string searchKey = "\"" + key + "\":\"";
+    std::string searchKey = "\"" + key + "\"";
     size_t pos = json.find(searchKey);
     if (pos == std::string::npos) {
         return "";
     }
     pos += searchKey.size();
+    // Skip optional whitespace, then expect ':'.
+    while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t' || json[pos] == '\n' || json[pos] == '\r')) {
+        ++pos;
+    }
+    if (pos >= json.size() || json[pos] != ':') {
+        return "";
+    }
+    ++pos;
+    // Skip optional whitespace after ':'.
+    while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t' || json[pos] == '\n' || json[pos] == '\r')) {
+        ++pos;
+    }
+    if (pos >= json.size() || json[pos] != '"') {
+        return "";
+    }
+    ++pos;
     size_t end = json.find('"', pos);
     if (end == std::string::npos) {
         return "";
@@ -344,20 +361,31 @@ std::string fetchLatestReleaseTag() {
     return extractJsonStringField(json, "tag_name");
 }
 
-// Download the release tarball for `tagName` and install the binary to `installDir`.
+// Download the release archive for `tagName` and install the binary to `installDir`.
 bool downloadAndInstallRelease(const std::string& tagName, const std::string& installDir) {
     auto curlPathOrErr = llvm::sys::findProgramByName("curl");
     if (!curlPathOrErr) {
         std::cerr << "Error: curl is required to download updates but was not found\n";
         return false;
     }
+    std::string curlBin = *curlPathOrErr;
+
+#ifdef _WIN32
+    // On Windows, use PowerShell to extract .zip archives.
+    auto psPathOrErr = llvm::sys::findProgramByName("powershell");
+    if (!psPathOrErr) {
+        std::cerr << "Error: powershell is required to extract updates but was not found\n";
+        return false;
+    }
+    std::string extractBin = *psPathOrErr;
+#else
     auto tarPathOrErr = llvm::sys::findProgramByName("tar");
     if (!tarPathOrErr) {
         std::cerr << "Error: tar is required to extract updates but was not found\n";
         return false;
     }
-    std::string curlBin = *curlPathOrErr;
-    std::string tarBin = *tarPathOrErr;
+    std::string extractBin = *tarPathOrErr;
+#endif
 
     // Detect platform/architecture for the asset name.
     std::string platformArch = getPlatformArch();
@@ -414,13 +442,19 @@ bool downloadAndInstallRelease(const std::string& tagName, const std::string& in
         return false;
     }
 
-    // Extract tarball
-    std::vector<std::string> tarArgs = {tarBin, "-xzf", tmpTarball, "-C", tmpDir};
+    // Extract archive
+#ifdef _WIN32
+    // Use PowerShell Expand-Archive for .zip files on Windows.
+    std::string psCmd = "Expand-Archive -Path '" + tmpTarball + "' -DestinationPath '" + tmpDir + "' -Force";
+    std::vector<std::string> extractArgs = {extractBin, "-NoProfile", "-Command", psCmd};
+#else
+    std::vector<std::string> extractArgs = {extractBin, "-xzf", tmpTarball, "-C", tmpDir};
+#endif
     llvm::SmallVector<llvm::StringRef, 6> tarArgRefs;
-    for (const auto& a : tarArgs) {
+    for (const auto& a : extractArgs) {
         tarArgRefs.push_back(a);
     }
-    rc = llvm::sys::ExecuteAndWait(tarBin, tarArgRefs);
+    rc = llvm::sys::ExecuteAndWait(extractBin, tarArgRefs);
     std::error_code ec;
     std::filesystem::remove(tmpTarball, ec);
     if (rc != 0) {
@@ -434,7 +468,8 @@ bool downloadAndInstallRelease(const std::string& tagName, const std::string& in
     try {
         for (const auto& entry : std::filesystem::recursive_directory_iterator(tmpDir)) {
             std::string name = entry.path().filename().string();
-            if (name == "omsc" || name == "omsc-" + platformArch) {
+            if (name == kBinaryName || name == "omsc-" + platformArch ||
+                name == std::string("omsc-") + platformArch + ".exe") {
                 binaryPath = entry.path().string();
                 break;
             }
@@ -451,7 +486,7 @@ bool downloadAndInstallRelease(const std::string& tagName, const std::string& in
     }
 
     // Install the binary atomically: copy to temp file then rename.
-    std::string targetPath = installDir + "/omsc";
+    std::string targetPath = installDir + "/" + std::string(kBinaryName);
     std::string tmpTemplate = installDir + "/omsc_update_XXXXXX";
     std::vector<char> installTmpBuf(tmpTemplate.begin(), tmpTemplate.end());
     installTmpBuf.push_back('\0');
