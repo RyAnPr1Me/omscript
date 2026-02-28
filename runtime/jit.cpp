@@ -172,7 +172,10 @@ bool BytecodeJIT::recompile(const BytecodeFunction& func) {
             compiledFloat_[func.name] = oldFloatPtr;
         if (oldSpec != JITSpecialization::Unknown)
             specializations_[func.name] = oldSpec;
-        failedCompilations_.erase(func.name);
+        // Only clear the failed-compilation marker when we actually
+        // restored a previous working compilation.
+        if (oldIntPtr || oldFloatPtr)
+            failedCompilations_.erase(func.name);
     }
     return ok;
 }

@@ -1969,7 +1969,9 @@ void dumpAST(const omscript::Program* program) {
 } // namespace
 
 int main(int argc, char* argv[]) {
-    // Disable C/C++ I/O synchronization for faster output.
+    // Disable C/C++ I/O synchronization for faster output.  This is safe
+    // because the codebase uses only C++ streams (std::cout / std::cerr);
+    // no C-style printf/scanf is mixed after this point.
     std::ios_base::sync_with_stdio(false);
     std::cin.tie(nullptr);
 
