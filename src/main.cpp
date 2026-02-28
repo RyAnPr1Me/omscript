@@ -1415,80 +1415,69 @@ int doPkg(int argc, char* argv[], int startIndex, bool quiet) {
 }
 
 void printUsage(const char* progName) {
-    std::cout << kCompilerVersion << "\n";
-    std::cout << "Usage:\n";
-    std::cout << "  " << progName << " <source.om> [-o output]\n";
-    std::cout << "  " << progName << " compile <source.om> [-o output]\n";
-    std::cout << "  " << progName << " run <source.om> [-o output] [-- args...]\n";
-    std::cout << "  " << progName << " check <source.om>\n";
-    std::cout << "  " << progName << " lex <source.om>\n";
-    std::cout << "  " << progName << " parse <source.om>\n";
-    std::cout << "  " << progName << " emit-ast <source.om>\n";
-    std::cout << "  " << progName << " emit-ir <source.om> [-o output.ll]\n";
-    std::cout << "  " << progName << " clean [-o output]\n";
-    std::cout << "  " << progName << " version\n";
-    std::cout << "  " << progName << " install\n";
-    std::cout << "  " << progName << " update\n";
-    std::cout << "  " << progName << " uninstall\n";
-    std::cout << "  " << progName << " pkg <subcommand> [args]\n";
-    std::cout << "  " << progName << " help\n";
-    std::cout << "\nCommands:\n";
-    std::cout << "  -b, -c, --build, --compile  Compile a source file (default)\n";
-    std::cout << "  -r, --run            Compile and run a source file\n";
-    std::cout << "  --check              Parse and validate a source file without generating code\n";
-    std::cout << "  -l, --lex, --tokens  Print lexer tokens\n";
-    std::cout << "  -a, -p, --ast, --parse, --emit-ast  Parse and summarize the AST\n";
-    std::cout << "  -e, -i, --emit-ir, --ir     Emit LLVM IR\n";
-    std::cout << "  -C, --clean          Remove outputs\n";
-    std::cout << "  -h, --help           Show this help message\n";
-    std::cout << "  -v, --version        Show compiler version\n";
-    std::cout << "\nGeneral Options:\n";
-    std::cout << "  -o, --output <file>  Output file name (default: a.out, stdout for emit-ir)\n";
-    std::cout << "  -k, --keep-temps     Keep temporary outputs when running\n";
-    std::cout << "  -V, --verbose        Show detailed compilation output (IR, progress)\n";
-    std::cout << "  -q, --quiet          Suppress all non-error output\n";
-    std::cout << "  --time               Show compilation timing breakdown\n";
-    std::cout << "  --dump-ast           Print the full AST tree (with parse/emit-ast command)\n";
-    std::cout << "  --dump-tokens        Alias for the lex command\n";
-    std::cout << "  --emit-obj           Emit object file only (skip linking)\n";
-    std::cout << "  --dry-run            Validate and compile without writing output files\n";
-    std::cout << "\nOptimization Levels:\n";
-    std::cout << "  -O0                  No optimization\n";
-    std::cout << "  -O1                  Basic optimization\n";
-    std::cout << "  -O2                  Moderate optimization (default)\n";
-    std::cout << "  -O3                  Aggressive optimization\n";
-    std::cout << "  -Ofast               Maximum runtime optimization (alias for -O3)\n";
-    std::cout << "\nTarget Options:\n";
-    std::cout << "  -march=<cpu>         Target CPU architecture (default: native)\n";
-    std::cout << "                       Examples: native, x86-64, skylake, znver3, cortex-a72\n";
-    std::cout << "  -mtune=<cpu>         CPU to optimize for (scheduling and tuning)\n";
-    std::cout << "                       Default: same as -march\n";
-    std::cout << "\nFeature Flags:\n";
-    std::cout << "  -flto                Enable link-time optimization\n";
-    std::cout << "  -fno-lto             Disable link-time optimization (default)\n";
-    std::cout << "  -fpic                Generate position-independent code (default)\n";
-    std::cout << "  -fno-pic             Disable position-independent code\n";
-    std::cout << "  -ffast-math          Enable unsafe floating-point optimizations\n";
-    std::cout << "  -fno-fast-math       Disable unsafe floating-point optimizations (default)\n";
-    std::cout << "  -foptmax             Enable OPTMAX block optimization (default)\n";
-    std::cout << "  -fno-optmax          Disable OPTMAX block optimization\n";
-    std::cout << "  -fjit                Enable hybrid bytecode/JIT compilation (default)\n";
-    std::cout << "  -fno-jit             Disable JIT; compile all functions to native code\n";
-    std::cout << "  -fstack-protector    Enable stack protection\n";
-    std::cout << "  -fno-stack-protector Disable stack protection (default)\n";
-    std::cout << "\nLinker Options:\n";
-    std::cout << "  -static              Use static linking\n";
-    std::cout << "  -s, --strip          Strip symbols from output binary\n";
-    std::cout << "\nInstallation:\n";
-    std::cout << "  " << progName << " install        Add to PATH (first run)\n";
-    std::cout << "  " << progName << " update         Check for and install latest version\n";
-    std::cout << "  " << progName << " uninstall      Remove installed binary and PATH entry\n";
-    std::cout << "\nPackage Manager:\n";
-    std::cout << "  " << progName << " pkg install <name>    Download and install a package\n";
-    std::cout << "  " << progName << " pkg remove <name>     Remove an installed package\n";
-    std::cout << "  " << progName << " pkg list              List installed packages\n";
-    std::cout << "  " << progName << " pkg search [query]    Search available packages online\n";
-    std::cout << "  " << progName << " pkg info <name>       Show package details\n";
+    std::cout <<
+        kCompilerVersion << "\n"
+        "\n"
+        "USAGE:\n"
+        "  " << progName << " <source.om> [options]          Compile (default)\n"
+        "  " << progName << " <command> <source.om> [options]\n"
+        "\n"
+        "COMMANDS:\n"
+        "  compile, build        Compile a source file (default)\n"
+        "  run                   Compile and run a source file\n"
+        "  check                 Parse and validate without generating code\n"
+        "  lex, tokens           Print lexer tokens\n"
+        "  parse, emit-ast       Parse and summarize the AST\n"
+        "  emit-ir               Emit LLVM IR\n"
+        "  clean                 Remove build outputs\n"
+        "  version               Show compiler version\n"
+        "  help                  Show this help message\n"
+        "\n"
+        "GENERAL OPTIONS:\n"
+        "  -o, --output <file>   Output file name (default: a.out)\n"
+        "  -V, --verbose         Show detailed compilation output\n"
+        "  -q, --quiet           Suppress all non-error output\n"
+        "  -k, --keep-temps      Keep temporary outputs when running\n"
+        "  --time                Show compilation timing breakdown\n"
+        "  --dump-ast            Print the full AST tree\n"
+        "  --dump-tokens         Alias for the lex command\n"
+        "  --emit-obj            Emit object file only (skip linking)\n"
+        "  --dry-run             Validate without writing output files\n"
+        "\n"
+        "OPTIMIZATION:\n"
+        "  -O0                   No optimization\n"
+        "  -O1                   Basic optimization\n"
+        "  -O2                   Moderate optimization (default)\n"
+        "  -O3                   Aggressive optimization\n"
+        "  -Ofast                Alias for -O3\n"
+        "\n"
+        "TARGET OPTIONS:\n"
+        "  -march=<cpu>          Target CPU (default: native)\n"
+        "  -mtune=<cpu>          CPU scheduling tuning (default: same as -march)\n"
+        "\n"
+        "FEATURE FLAGS:\n"
+        "  -flto / -fno-lto                  Link-time optimization (default: off)\n"
+        "  -fpic / -fno-pic                  Position-independent code (default: on)\n"
+        "  -ffast-math / -fno-fast-math      Unsafe FP optimizations (default: off)\n"
+        "  -foptmax / -fno-optmax            OPTMAX block optimization (default: on)\n"
+        "  -fjit / -fno-jit                  Hybrid bytecode/JIT mode (default: on)\n"
+        "  -fstack-protector / -fno-stack-protector  Stack protection (default: off)\n"
+        "\n"
+        "LINKER OPTIONS:\n"
+        "  -static               Use static linking\n"
+        "  -s, --strip           Strip symbols from output binary\n"
+        "\n"
+        "INSTALLATION:\n"
+        "  install               Add to PATH (first run)\n"
+        "  update                Check for and install latest version\n"
+        "  uninstall             Remove installed binary and PATH entry\n"
+        "\n"
+        "PACKAGE MANAGER:\n"
+        "  pkg install <name>    Download and install a package\n"
+        "  pkg remove <name>     Remove an installed package\n"
+        "  pkg list              List installed packages\n"
+        "  pkg search [query]    Search available packages online\n"
+        "  pkg info <name>       Show package details\n";
 }
 
 std::string readSourceFile(const std::string& filename) {
@@ -1980,6 +1969,10 @@ void dumpAST(const omscript::Program* program) {
 } // namespace
 
 int main(int argc, char* argv[]) {
+    // Disable C/C++ I/O synchronization for faster output.
+    std::ios_base::sync_with_stdio(false);
+    std::cin.tie(nullptr);
+
     // Install signal handlers for graceful cleanup of temporary files.
     std::signal(SIGINT, signalHandler);
     std::signal(SIGTERM, signalHandler);
