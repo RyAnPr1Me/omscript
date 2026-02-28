@@ -113,12 +113,13 @@ Token Lexer::scanNumber() {
             num += advance(); // '0'
             num += advance(); // 'x'/'X'
             if (!isHexDigit(peek())) {
-                throw std::runtime_error("Expected hex digit after '0x' at line " + std::to_string(line) +
-                                         ", column " + std::to_string(column));
+                throw std::runtime_error("Expected hex digit after '0x' at line " + std::to_string(line) + ", column " +
+                                         std::to_string(column));
             }
             while (!isAtEnd() && (isHexDigit(peek()) || peek() == '_')) {
                 char c = advance();
-                if (c != '_') num += c;
+                if (c != '_')
+                    num += c;
             }
             Token token = makeToken(TokenType::INTEGER, num);
             try {
@@ -138,7 +139,8 @@ Token Lexer::scanNumber() {
             }
             while (!isAtEnd() && ((peek() >= '0' && peek() <= '7') || peek() == '_')) {
                 char c = advance();
-                if (c != '_') num += c;
+                if (c != '_')
+                    num += c;
             }
             Token token = makeToken(TokenType::INTEGER, num);
             try {
@@ -158,7 +160,8 @@ Token Lexer::scanNumber() {
             }
             while (!isAtEnd() && (peek() == '0' || peek() == '1' || peek() == '_')) {
                 char c = advance();
-                if (c != '_') num += c;
+                if (c != '_')
+                    num += c;
             }
             Token token = makeToken(TokenType::INTEGER, num);
             try {
