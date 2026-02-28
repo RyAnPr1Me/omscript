@@ -2,6 +2,7 @@
 #define VALUE_H
 
 #include "refcounted.h"
+#include <cstdint>
 #include <stdexcept>
 #include <string>
 #include <variant>
