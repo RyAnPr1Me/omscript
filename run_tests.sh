@@ -124,8 +124,8 @@ test_cli_output() {
 # Run tests
 echo "Running CLI tests:"
 echo "--------------------------------------------"
-test_cli_output "help" "Usage:" 0 ./build/omsc --help
-test_cli_output "help-command" "Usage:" 0 ./build/omsc help
+test_cli_output "help" "USAGE:" 0 ./build/omsc --help
+test_cli_output "help-command" "USAGE:" 0 ./build/omsc help
 test_cli_output "parse-leading-verbose" "Parsed program" 0 ./build/omsc -V parse examples/test.om
 test_cli_output "emit-ir-leading-opt" "i64 @main" 0 ./build/omsc -O3 emit-ir examples/exit_zero.om
 test_cli_output "lex" "FN" 0 ./build/omsc lex examples/test.om
@@ -481,7 +481,7 @@ test_cli_output "emit-obj-default-name" "exit_zero.o" 0 ./build/omsc --emit-obj 
 rm -f exit_zero.o
 
 # help output includes new features
-test_cli_output "help-shows-check" "--check" 0 ./build/omsc --help
+test_cli_output "help-shows-check" "check" 0 ./build/omsc --help
 test_cli_output "help-shows-time" "--time" 0 ./build/omsc --help
 test_cli_output "help-shows-dump-ast" "--dump-ast" 0 ./build/omsc --help
 test_cli_output "help-shows-dump-tokens" "--dump-tokens" 0 ./build/omsc --help

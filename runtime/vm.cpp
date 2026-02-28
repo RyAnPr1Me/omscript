@@ -832,7 +832,8 @@ vm_exit:
                 registers[rd] = Value(static_cast<int64_t>(0));
             } else {
                 if (n > kMaxExponent) {
-                    throw std::runtime_error("Exponent too large for ** operator (max " + std::to_string(kMaxExponent) + ")");
+                    throw std::runtime_error("Exponent too large for ** operator (max " + std::to_string(kMaxExponent) +
+                                             ")");
                 }
                 Value result(static_cast<int64_t>(1));
                 for (int64_t i = 0; i < n; i++)

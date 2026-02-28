@@ -3,7 +3,6 @@
 #include <cmath>
 #include <cstdint>
 #include <iostream>
-#include <set>
 #include <llvm/ADT/StringMap.h>
 #include <llvm/Analysis/TargetTransformInfo.h>
 #include <llvm/Config/llvm-config.h>
@@ -30,6 +29,7 @@
 #include <llvm/Transforms/Scalar/GVN.h>
 #include <llvm/Transforms/Utils.h>
 #include <optional>
+#include <set>
 #include <stdexcept>
 
 namespace {
@@ -461,9 +461,9 @@ namespace omscript {
 // These functions are always compiled to native machine code via LLVM IR,
 // never through the bytecode/dynamic compilation path.
 static const std::unordered_set<std::string> stdlibFunctions = {
-    "abs",    "assert", "char_at", "clamp",   "input", "is_alpha", "is_digit",   "is_even",
-    "is_odd", "len",    "max",     "min",     "pow",   "print",    "print_char", "reverse",
-    "sign",   "sqrt",   "str_concat", "str_eq",  "str_len", "sum",   "swap",     "to_char",    "typeof"};
+    "abs",        "assert", "char_at", "clamp", "input", "is_alpha",   "is_digit", "is_even", "is_odd",
+    "len",        "max",    "min",     "pow",   "print", "print_char", "reverse",  "sign",    "sqrt",
+    "str_concat", "str_eq", "str_len", "sum",   "swap",  "to_char",    "typeof"};
 
 bool isStdlibFunction(const std::string& name) {
     return stdlibFunctions.find(name) != stdlibFunctions.end();
@@ -1267,7 +1267,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                                                                             {llvm::Type::getDoubleTy(*context)});
 #else
             llvm::Function* powFn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::pow,
-                                                                     {llvm::Type::getDoubleTy(*context)});
+                                                                    {llvm::Type::getDoubleTy(*context)});
 #endif
             return builder->CreateCall(powFn, {left, right}, "fpowtmp");
         }
@@ -1368,9 +1368,9 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
         int64_t rv = ci->getSExtValue();
         if (rv == 0) {
-            if (expr->op == "+" || expr->op == "-" || expr->op == "|"
-                || expr->op == "^" || expr->op == "<<" || expr->op == ">>")
-                return left;                                       // x+0, x-0, x|0, x^0, x<<0, x>>0 → x
+            if (expr->op == "+" || expr->op == "-" || expr->op == "|" || expr->op == "^" || expr->op == "<<" ||
+                expr->op == ">>")
+                return left; // x+0, x-0, x|0, x^0, x<<0, x>>0 → x
             if (expr->op == "*" || expr->op == "&")
                 return llvm::ConstantInt::get(getDefaultType(), 0); // x*0, x&0 → 0
             if (expr->op == "**")
@@ -1378,21 +1378,21 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         }
         if (rv == 1) {
             if (expr->op == "*" || expr->op == "/" || expr->op == "**")
-                return left;                                       // x*1, x/1, x**1 → x
+                return left; // x*1, x/1, x**1 → x
         }
     }
     if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left)) {
         int64_t lv = ci->getSExtValue();
         if (lv == 0) {
             if (expr->op == "+" || expr->op == "|" || expr->op == "^")
-                return right;                                      // 0+x, 0|x, 0^x → x
+                return right; // 0+x, 0|x, 0^x → x
             if (expr->op == "*" || expr->op == "&")
                 return llvm::ConstantInt::get(getDefaultType(), 0); // 0*x, 0&x → 0
         }
         if (lv == 1 && expr->op == "*")
-            return right;                                          // 1*x → x
+            return right; // 1*x → x
         if (lv == 1 && expr->op == "**")
-            return llvm::ConstantInt::get(getDefaultType(), 1);     // 1**x → 1
+            return llvm::ConstantInt::get(getDefaultType(), 1); // 1**x → 1
     }
 
     // Regular code generation for non-constant expressions
@@ -1518,8 +1518,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
 
         builder->SetInsertPoint(bodyBB);
         llvm::Value* newResult = builder->CreateMul(result, left, "pow.mul");
-        llvm::Value* newCounter =
-            builder->CreateSub(counter, llvm::ConstantInt::get(getDefaultType(), 1), "pow.dec");
+        llvm::Value* newCounter = builder->CreateSub(counter, llvm::ConstantInt::get(getDefaultType(), 1), "pow.dec");
         result->addIncoming(newResult, bodyBB);
         counter->addIncoming(newCounter, bodyBB);
         builder->CreateBr(loopBB);
@@ -2167,9 +2166,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* idxArg = generateExpression(expr->arguments[1].get());
         idxArg = toDefaultType(idxArg);
         // String may be a raw pointer or an i64 holding a pointer.
-        llvm::Value* strPtr = strArg->getType()->isPointerTy()
-                                  ? strArg
-                                  : builder->CreateIntToPtr(strArg, llvm::PointerType::getUnqual(*context), "charat.ptr");
+        llvm::Value* strPtr =
+            strArg->getType()->isPointerTy()
+                ? strArg
+                : builder->CreateIntToPtr(strArg, llvm::PointerType::getUnqual(*context), "charat.ptr");
 
         // Bounds check: 0 <= index < str_len(s)
         llvm::Value* strLen = builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "charat.strlen");
@@ -2207,12 +2207,14 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* lhsArg = generateExpression(expr->arguments[0].get());
         llvm::Value* rhsArg = generateExpression(expr->arguments[1].get());
         // Convert to pointers; the value may already be a pointer (literal/local).
-        llvm::Value* lhsPtr = lhsArg->getType()->isPointerTy()
-                                  ? lhsArg
-                                  : builder->CreateIntToPtr(lhsArg, llvm::PointerType::getUnqual(*context), "streq.lhs");
-        llvm::Value* rhsPtr = rhsArg->getType()->isPointerTy()
-                                  ? rhsArg
-                                  : builder->CreateIntToPtr(rhsArg, llvm::PointerType::getUnqual(*context), "streq.rhs");
+        llvm::Value* lhsPtr =
+            lhsArg->getType()->isPointerTy()
+                ? lhsArg
+                : builder->CreateIntToPtr(lhsArg, llvm::PointerType::getUnqual(*context), "streq.lhs");
+        llvm::Value* rhsPtr =
+            rhsArg->getType()->isPointerTy()
+                ? rhsArg
+                : builder->CreateIntToPtr(rhsArg, llvm::PointerType::getUnqual(*context), "streq.rhs");
         llvm::Value* cmpResult = builder->CreateCall(getOrDeclareStrcmp(), {lhsPtr, rhsPtr}, "streq.cmp");
         // strcmp returns 0 on equality; convert to boolean (1 if equal, 0 otherwise)
         llvm::Value* isEqual = builder->CreateICmpEQ(cmpResult, builder->getInt32(0), "streq.eq");
@@ -2227,12 +2229,14 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         }
         llvm::Value* lhsArg = generateExpression(expr->arguments[0].get());
         llvm::Value* rhsArg = generateExpression(expr->arguments[1].get());
-        llvm::Value* lhsPtr = lhsArg->getType()->isPointerTy()
-                                  ? lhsArg
-                                  : builder->CreateIntToPtr(lhsArg, llvm::PointerType::getUnqual(*context), "concat.lhs");
-        llvm::Value* rhsPtr = rhsArg->getType()->isPointerTy()
-                                  ? rhsArg
-                                  : builder->CreateIntToPtr(rhsArg, llvm::PointerType::getUnqual(*context), "concat.rhs");
+        llvm::Value* lhsPtr =
+            lhsArg->getType()->isPointerTy()
+                ? lhsArg
+                : builder->CreateIntToPtr(lhsArg, llvm::PointerType::getUnqual(*context), "concat.lhs");
+        llvm::Value* rhsPtr =
+            rhsArg->getType()->isPointerTy()
+                ? rhsArg
+                : builder->CreateIntToPtr(rhsArg, llvm::PointerType::getUnqual(*context), "concat.rhs");
         llvm::Value* len1 = builder->CreateCall(getOrDeclareStrlen(), {lhsPtr}, "concat.len1");
         llvm::Value* len2 = builder->CreateCall(getOrDeclareStrlen(), {rhsPtr}, "concat.len2");
         llvm::Value* totalLen = builder->CreateAdd(len1, len2, "concat.totallen");
@@ -2337,7 +2341,8 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
         // Bounds check
         llvm::Value* lenVal = builder->CreateLoad(getDefaultType(), arrPtr, "incdec.len");
         llvm::Value* inBounds = builder->CreateICmpSLT(idxVal, lenVal, "incdec.inbounds");
-        llvm::Value* notNeg = builder->CreateICmpSGE(idxVal, llvm::ConstantInt::get(getDefaultType(), 0), "incdec.notneg");
+        llvm::Value* notNeg =
+            builder->CreateICmpSGE(idxVal, llvm::ConstantInt::get(getDefaultType(), 0), "incdec.notneg");
         llvm::Value* valid = builder->CreateAnd(inBounds, notNeg, "incdec.valid");
 
         llvm::Function* function = builder->GetInsertBlock()->getParent();
@@ -2357,8 +2362,8 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
         llvm::Value* current = builder->CreateLoad(getDefaultType(), elemPtr, "incdec.elem");
 
         llvm::Value* delta = llvm::ConstantInt::get(getDefaultType(), 1, true);
-        llvm::Value* updated = (op == "++") ? builder->CreateAdd(current, delta, "inc")
-                                            : builder->CreateSub(current, delta, "dec");
+        llvm::Value* updated =
+            (op == "++") ? builder->CreateAdd(current, delta, "inc") : builder->CreateSub(current, delta, "dec");
         builder->CreateStore(updated, elemPtr);
         return isPostfix ? current : updated;
     }
@@ -3426,7 +3431,7 @@ uint8_t CodeGenerator::emitBytecodeExpression(Expression* expr) {
                 return emitBytecodeExpression(bin->right.get()); // 0+x, 0|x, 0^x → x
             if ((lv == 0) && (bin->op == "*" || bin->op == "&")) {
                 emitBytecodeExpression(bin->right.get()); // evaluate for side effects
-                uint8_t rd = allocReg();  // 0*x, 0&x → 0
+                uint8_t rd = allocReg();                  // 0*x, 0&x → 0
                 bytecodeEmitter.emit(OpCode::PUSH_INT);
                 bytecodeEmitter.emitReg(rd);
                 bytecodeEmitter.emitInt(0);
@@ -3437,12 +3442,12 @@ uint8_t CodeGenerator::emitBytecodeExpression(Expression* expr) {
         }
         if (rightLit && rightLit->literalType == LiteralExpr::LiteralType::INTEGER) {
             long long rv = rightLit->intValue;
-            if (rv == 0 && (bin->op == "+" || bin->op == "-" || bin->op == "|"
-                            || bin->op == "^" || bin->op == "<<" || bin->op == ">>"))
+            if (rv == 0 && (bin->op == "+" || bin->op == "-" || bin->op == "|" || bin->op == "^" || bin->op == "<<" ||
+                            bin->op == ">>"))
                 return emitBytecodeExpression(bin->left.get()); // x+0, x-0, x|0, x^0, x<<0, x>>0 → x
             if ((rv == 0) && (bin->op == "*" || bin->op == "&")) {
                 emitBytecodeExpression(bin->left.get()); // evaluate for side effects
-                uint8_t rd = allocReg();  // x*0, x&0 → 0
+                uint8_t rd = allocReg();                 // x*0, x&0 → 0
                 bytecodeEmitter.emit(OpCode::PUSH_INT);
                 bytecodeEmitter.emitReg(rd);
                 bytecodeEmitter.emitInt(0);
@@ -3452,7 +3457,7 @@ uint8_t CodeGenerator::emitBytecodeExpression(Expression* expr) {
                 return emitBytecodeExpression(bin->left.get()); // x*1, x/1, x**1 → x
             if (rv == 0 && bin->op == "**") {
                 emitBytecodeExpression(bin->left.get()); // evaluate for side effects
-                uint8_t rd = allocReg();  // x**0 → 1
+                uint8_t rd = allocReg();                 // x**0 → 1
                 bytecodeEmitter.emit(OpCode::PUSH_INT);
                 bytecodeEmitter.emitReg(rd);
                 bytecodeEmitter.emitInt(1);

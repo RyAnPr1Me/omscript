@@ -806,72 +806,71 @@ void doUninstall() {
 #ifndef _WIN32
     std::string home = getHomeDir();
     if (!home.empty()) {
-    std::vector<std::string> shellConfigs = {home + "/.bashrc", home + "/.profile",
-                                             home + "/.zshrc"};
-    for (const auto& configPath : shellConfigs) {
-        std::ifstream in(configPath);
-        if (!in.is_open()) {
-            continue;
-        }
-        std::vector<std::string> lines;
-        std::string line;
-        bool changed = false;
-        while (std::getline(in, line)) {
-            lines.push_back(line);
-        }
-        in.close();
-
-        // Remove lines that contain the omsc PATH marker and the PATH export added by omsc.
-        // The marker is a unique sentinel written exclusively by omsc install.
-        std::vector<std::string> filtered;
-        for (size_t i = 0; i < lines.size(); ++i) {
-            if (lines[i].find(kPathConfigMarker) != std::string::npos) {
-                // Skip the marker line and the following export line if it was written by omsc.
-                changed = true;
-                if (i + 1 < lines.size() && lines[i + 1].find("export PATH=") != std::string::npos) {
-                    ++i; // skip the export line too
-                }
+        std::vector<std::string> shellConfigs = {home + "/.bashrc", home + "/.profile", home + "/.zshrc"};
+        for (const auto& configPath : shellConfigs) {
+            std::ifstream in(configPath);
+            if (!in.is_open()) {
                 continue;
             }
-            filtered.push_back(lines[i]);
-        }
+            std::vector<std::string> lines;
+            std::string line;
+            bool changed = false;
+            while (std::getline(in, line)) {
+                lines.push_back(line);
+            }
+            in.close();
 
-        if (!changed) {
-            continue;
-        }
+            // Remove lines that contain the omsc PATH marker and the PATH export added by omsc.
+            // The marker is a unique sentinel written exclusively by omsc install.
+            std::vector<std::string> filtered;
+            for (size_t i = 0; i < lines.size(); ++i) {
+                if (lines[i].find(kPathConfigMarker) != std::string::npos) {
+                    // Skip the marker line and the following export line if it was written by omsc.
+                    changed = true;
+                    if (i + 1 < lines.size() && lines[i + 1].find("export PATH=") != std::string::npos) {
+                        ++i; // skip the export line too
+                    }
+                    continue;
+                }
+                filtered.push_back(lines[i]);
+            }
 
-        // Write atomically: write to a temp file then rename.
-        std::string tmpTemplate = configPath + ".omsc_XXXXXX";
-        std::vector<char> cfgTmpBuf(tmpTemplate.begin(), tmpTemplate.end());
-        cfgTmpBuf.push_back('\0');
-        int cfgTmpFd = portableMkstemp(cfgTmpBuf);
-        if (cfgTmpFd == -1) {
-            std::cerr << "Warning: could not create temp file to update " << configPath << "\n";
-            continue;
-        }
-        portableClose(cfgTmpFd);
-        std::string cfgTmpPath(cfgTmpBuf.data());
-        {
-            std::ofstream out(cfgTmpPath, std::ios::trunc);
-            if (!out.is_open()) {
-                std::cerr << "Warning: could not update " << configPath << "\n";
-                std::error_code ec;
+            if (!changed) {
+                continue;
+            }
+
+            // Write atomically: write to a temp file then rename.
+            std::string tmpTemplate = configPath + ".omsc_XXXXXX";
+            std::vector<char> cfgTmpBuf(tmpTemplate.begin(), tmpTemplate.end());
+            cfgTmpBuf.push_back('\0');
+            int cfgTmpFd = portableMkstemp(cfgTmpBuf);
+            if (cfgTmpFd == -1) {
+                std::cerr << "Warning: could not create temp file to update " << configPath << "\n";
+                continue;
+            }
+            portableClose(cfgTmpFd);
+            std::string cfgTmpPath(cfgTmpBuf.data());
+            {
+                std::ofstream out(cfgTmpPath, std::ios::trunc);
+                if (!out.is_open()) {
+                    std::cerr << "Warning: could not update " << configPath << "\n";
+                    std::error_code ec;
+                    std::filesystem::remove(cfgTmpPath, ec);
+                    continue;
+                }
+                for (const auto& l : filtered) {
+                    out << l << "\n";
+                }
+            }
+            std::error_code ec;
+            std::filesystem::rename(cfgTmpPath, configPath, ec);
+            if (ec) {
+                std::cerr << "Warning: could not update " << configPath << ": " << ec.message() << "\n";
                 std::filesystem::remove(cfgTmpPath, ec);
                 continue;
             }
-            for (const auto& l : filtered) {
-                out << l << "\n";
-            }
+            std::cout << "Removed PATH entry from " << configPath << "\n";
         }
-        std::error_code ec;
-        std::filesystem::rename(cfgTmpPath, configPath, ec);
-        if (ec) {
-            std::cerr << "Warning: could not update " << configPath << ": " << ec.message() << "\n";
-            std::filesystem::remove(cfgTmpPath, ec);
-            continue;
-        }
-        std::cout << "Removed PATH entry from " << configPath << "\n";
-    }
     }
 #endif
 
@@ -1415,69 +1414,73 @@ int doPkg(int argc, char* argv[], int startIndex, bool quiet) {
 }
 
 void printUsage(const char* progName) {
-    std::cout <<
-        kCompilerVersion << "\n"
-        "\n"
-        "USAGE:\n"
-        "  " << progName << " <source.om> [options]          Compile (default)\n"
-        "  " << progName << " <command> <source.om> [options]\n"
-        "\n"
-        "COMMANDS:\n"
-        "  compile, build        Compile a source file (default)\n"
-        "  run                   Compile and run a source file\n"
-        "  check                 Parse and validate without generating code\n"
-        "  lex, tokens           Print lexer tokens\n"
-        "  parse, emit-ast       Parse and summarize the AST\n"
-        "  emit-ir               Emit LLVM IR\n"
-        "  clean                 Remove build outputs\n"
-        "  version               Show compiler version\n"
-        "  help                  Show this help message\n"
-        "\n"
-        "GENERAL OPTIONS:\n"
-        "  -o, --output <file>   Output file name (default: a.out)\n"
-        "  -V, --verbose         Show detailed compilation output\n"
-        "  -q, --quiet           Suppress all non-error output\n"
-        "  -k, --keep-temps      Keep temporary outputs when running\n"
-        "  --time                Show compilation timing breakdown\n"
-        "  --dump-ast            Print the full AST tree\n"
-        "  --dump-tokens         Alias for the lex command\n"
-        "  --emit-obj            Emit object file only (skip linking)\n"
-        "  --dry-run             Validate without writing output files\n"
-        "\n"
-        "OPTIMIZATION:\n"
-        "  -O0                   No optimization\n"
-        "  -O1                   Basic optimization\n"
-        "  -O2                   Moderate optimization (default)\n"
-        "  -O3                   Aggressive optimization\n"
-        "  -Ofast                Alias for -O3\n"
-        "\n"
-        "TARGET OPTIONS:\n"
-        "  -march=<cpu>          Target CPU (default: native)\n"
-        "  -mtune=<cpu>          CPU scheduling tuning (default: same as -march)\n"
-        "\n"
-        "FEATURE FLAGS:\n"
-        "  -flto / -fno-lto                  Link-time optimization (default: off)\n"
-        "  -fpic / -fno-pic                  Position-independent code (default: on)\n"
-        "  -ffast-math / -fno-fast-math      Unsafe FP optimizations (default: off)\n"
-        "  -foptmax / -fno-optmax            OPTMAX block optimization (default: on)\n"
-        "  -fjit / -fno-jit                  Hybrid bytecode/JIT mode (default: on)\n"
-        "  -fstack-protector / -fno-stack-protector  Stack protection (default: off)\n"
-        "\n"
-        "LINKER OPTIONS:\n"
-        "  -static               Use static linking\n"
-        "  -s, --strip           Strip symbols from output binary\n"
-        "\n"
-        "INSTALLATION:\n"
-        "  install               Add to PATH (first run)\n"
-        "  update                Check for and install latest version\n"
-        "  uninstall             Remove installed binary and PATH entry\n"
-        "\n"
-        "PACKAGE MANAGER:\n"
-        "  pkg install <name>    Download and install a package\n"
-        "  pkg remove <name>     Remove an installed package\n"
-        "  pkg list              List installed packages\n"
-        "  pkg search [query]    Search available packages online\n"
-        "  pkg info <name>       Show package details\n";
+    std::cout << kCompilerVersion
+              << "\n"
+                 "\n"
+                 "USAGE:\n"
+                 "  "
+              << progName
+              << " <source.om> [options]          Compile (default)\n"
+                 "  "
+              << progName
+              << " <command> <source.om> [options]\n"
+                 "\n"
+                 "COMMANDS:\n"
+                 "  compile, build        Compile a source file (default)\n"
+                 "  run                   Compile and run a source file\n"
+                 "  check                 Parse and validate without generating code\n"
+                 "  lex, tokens           Print lexer tokens\n"
+                 "  parse, emit-ast       Parse and summarize the AST\n"
+                 "  emit-ir               Emit LLVM IR\n"
+                 "  clean                 Remove build outputs\n"
+                 "  version               Show compiler version\n"
+                 "  help                  Show this help message\n"
+                 "\n"
+                 "GENERAL OPTIONS:\n"
+                 "  -o, --output <file>   Output file name (default: a.out)\n"
+                 "  -V, --verbose         Show detailed compilation output\n"
+                 "  -q, --quiet           Suppress all non-error output\n"
+                 "  -k, --keep-temps      Keep temporary outputs when running\n"
+                 "  --time                Show compilation timing breakdown\n"
+                 "  --dump-ast            Print the full AST tree\n"
+                 "  --dump-tokens         Alias for the lex command\n"
+                 "  --emit-obj            Emit object file only (skip linking)\n"
+                 "  --dry-run             Validate without writing output files\n"
+                 "\n"
+                 "OPTIMIZATION:\n"
+                 "  -O0                   No optimization\n"
+                 "  -O1                   Basic optimization\n"
+                 "  -O2                   Moderate optimization (default)\n"
+                 "  -O3                   Aggressive optimization\n"
+                 "  -Ofast                Alias for -O3\n"
+                 "\n"
+                 "TARGET OPTIONS:\n"
+                 "  -march=<cpu>          Target CPU (default: native)\n"
+                 "  -mtune=<cpu>          CPU scheduling tuning (default: same as -march)\n"
+                 "\n"
+                 "FEATURE FLAGS:\n"
+                 "  -flto / -fno-lto                  Link-time optimization (default: off)\n"
+                 "  -fpic / -fno-pic                  Position-independent code (default: on)\n"
+                 "  -ffast-math / -fno-fast-math      Unsafe FP optimizations (default: off)\n"
+                 "  -foptmax / -fno-optmax            OPTMAX block optimization (default: on)\n"
+                 "  -fjit / -fno-jit                  Hybrid bytecode/JIT mode (default: on)\n"
+                 "  -fstack-protector / -fno-stack-protector  Stack protection (default: off)\n"
+                 "\n"
+                 "LINKER OPTIONS:\n"
+                 "  -static               Use static linking\n"
+                 "  -s, --strip           Strip symbols from output binary\n"
+                 "\n"
+                 "INSTALLATION:\n"
+                 "  install               Add to PATH (first run)\n"
+                 "  update                Check for and install latest version\n"
+                 "  uninstall             Remove installed binary and PATH entry\n"
+                 "\n"
+                 "PACKAGE MANAGER:\n"
+                 "  pkg install <name>    Download and install a package\n"
+                 "  pkg remove <name>     Remove an installed package\n"
+                 "  pkg list              List installed packages\n"
+                 "  pkg search [query]    Search available packages online\n"
+                 "  pkg info <name>       Show package details\n";
 }
 
 std::string readSourceFile(const std::string& filename) {
