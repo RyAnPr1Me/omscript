@@ -353,7 +353,7 @@ bool BytecodeJIT::compileInt(const BytecodeFunction& func) {
 
     auto* int64Ty = llvm::Type::getInt64Ty(*ctx);
     auto* int32Ty = llvm::Type::getInt32Ty(*ctx);
-    auto* int64PtrTy = llvm::PointerType::getUnqual(int64Ty);
+    auto* int64PtrTy = llvm::PointerType::getUnqual(*ctx);
 
     llvm::FunctionType* fnType = llvm::FunctionType::get(int64Ty, {int64PtrTy, int32Ty}, false);
 
@@ -704,7 +704,7 @@ bool BytecodeJIT::compileInt(const BytecodeFunction& func) {
     llvm::EngineBuilder engineBuilder(std::move(mod));
     engineBuilder.setErrorStr(&engineError);
     engineBuilder.setEngineKind(llvm::EngineKind::JIT);
-    engineBuilder.setOptLevel(llvm::CodeGenOpt::Aggressive);
+    engineBuilder.setOptLevel(llvm::CodeGenOptLevel::Aggressive);
     llvm::ExecutionEngine* engine = engineBuilder.create();
     if (!engine) {
         failedCompilations_.insert(func.name);
@@ -833,7 +833,7 @@ bool BytecodeJIT::compileFloat(const BytecodeFunction& func) {
 
     auto* doubleTy = llvm::Type::getDoubleTy(*ctx);
     auto* int32Ty = llvm::Type::getInt32Ty(*ctx);
-    auto* doublePtrTy = llvm::PointerType::getUnqual(doubleTy);
+    auto* doublePtrTy = llvm::PointerType::getUnqual(*ctx);
 
     llvm::FunctionType* fnType = llvm::FunctionType::get(doubleTy, {doublePtrTy, int32Ty}, false);
 
@@ -1125,7 +1125,7 @@ bool BytecodeJIT::compileFloat(const BytecodeFunction& func) {
     llvm::EngineBuilder engineBuilder(std::move(mod));
     engineBuilder.setErrorStr(&engineError);
     engineBuilder.setEngineKind(llvm::EngineKind::JIT);
-    engineBuilder.setOptLevel(llvm::CodeGenOpt::Aggressive);
+    engineBuilder.setOptLevel(llvm::CodeGenOptLevel::Aggressive);
     llvm::ExecutionEngine* engine = engineBuilder.create();
     if (!engine) {
         failedCompilations_.insert(func.name);
