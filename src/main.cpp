@@ -445,7 +445,20 @@ bool downloadAndInstallRelease(const std::string& tagName, const std::string& in
     // Extract archive
 #ifdef _WIN32
     // Use PowerShell Expand-Archive for .zip files on Windows.
-    std::string psCmd = "Expand-Archive -Path '" + tmpTarball + "' -DestinationPath '" + tmpDir + "' -Force";
+    // Escape single quotes in paths for PowerShell single-quoted strings.
+    auto psEscape = [](const std::string& s) {
+        std::string out;
+        for (char c : s) {
+            if (c == '\'') {
+                out += "''";
+            } else {
+                out += c;
+            }
+        }
+        return out;
+    };
+    std::string psCmd =
+        "Expand-Archive -Path '" + psEscape(tmpTarball) + "' -DestinationPath '" + psEscape(tmpDir) + "' -Force";
     std::vector<std::string> extractArgs = {extractBin, "-NoProfile", "-Command", psCmd};
 #else
     std::vector<std::string> extractArgs = {extractBin, "-xzf", tmpTarball, "-C", tmpDir};
