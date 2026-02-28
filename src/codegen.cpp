@@ -1262,8 +1262,13 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         }
         if (expr->op == "**") {
             // Float exponentiation: use llvm.pow intrinsic
+#if LLVM_VERSION_MAJOR >= 19
+            llvm::Function* powFn = llvm::Intrinsic::getOrInsertDeclaration(module.get(), llvm::Intrinsic::pow,
+                                                                            {llvm::Type::getDoubleTy(*context)});
+#else
             llvm::Function* powFn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::pow,
                                                                      {llvm::Type::getDoubleTy(*context)});
+#endif
             return builder->CreateCall(powFn, {left, right}, "fpowtmp");
         }
 
