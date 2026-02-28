@@ -824,10 +824,10 @@ vm_exit:
             // Integer exponentiation: base ** exp
             Value base = registers[rs1];
             Value exp = registers[rs2];
-            if (exp.type != Value::Type::INTEGER) {
+            if (exp.getType() != Value::Type::INTEGER) {
                 throw std::runtime_error("Exponent must be an integer for ** operator");
             }
-            int64_t n = exp.intValue;
+            int64_t n = exp.unsafeAsInt();
             if (n < 0) {
                 registers[rd] = Value(static_cast<int64_t>(0));
             } else {

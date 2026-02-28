@@ -163,6 +163,11 @@ test_cli_output "unknown-command" "Error: unknown command" 1 ./build/omsc frob
 test_cli_output "uninstall-not-installed" "not installed" 0 ./build/omsc uninstall
 test_cli_output "uninstall-alias" "not installed" 0 ./build/omsc --uninstall
 test_cli_output "help-shows-uninstall" "uninstall" 0 ./build/omsc --help
+test_cli_output "help-shows-update" "update" 0 ./build/omsc --help
+test_cli_output "update-command" "Detected distribution:" 0 ./build/omsc update
+test_cli_output "update-flag" "Detected distribution:" 0 ./build/omsc --update
+# Clean up any binary installed by the update tests so future runs start clean.
+rm -f "$HOME/.local/bin/omsc"
 test_cli_output "unknown-option" "Error: unknown option '--bad-flag'" 1 ./build/omsc run examples/exit_zero.om --bad-flag
 test_cli_output "output-unsupported-for-lex" "Error: -o/--output is only supported for compile/run/emit-ir/clean commands" 1 ./build/omsc lex examples/test.om -o /tmp/lex_out
 test_cli_output "output-empty" "Error: -o/--output requires a valid output file name" 1 ./build/omsc run examples/exit_zero.om -o ""
