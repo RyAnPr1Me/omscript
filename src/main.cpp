@@ -1380,6 +1380,7 @@ void printUsage(const char* progName) {
     std::cout << "  " << progName << " clean [-o output]\n";
     std::cout << "  " << progName << " version\n";
     std::cout << "  " << progName << " install\n";
+    std::cout << "  " << progName << " update\n";
     std::cout << "  " << progName << " uninstall\n";
     std::cout << "  " << progName << " pkg <subcommand> [args]\n";
     std::cout << "  " << progName << " help\n";
@@ -1431,7 +1432,8 @@ void printUsage(const char* progName) {
     std::cout << "  -static              Use static linking\n";
     std::cout << "  -s, --strip          Strip symbols from output binary\n";
     std::cout << "\nInstallation:\n";
-    std::cout << "  " << progName << " install        Add to PATH (first run or update)\n";
+    std::cout << "  " << progName << " install        Add to PATH (first run)\n";
+    std::cout << "  " << progName << " update         Check for and install latest version\n";
     std::cout << "  " << progName << " uninstall      Remove installed binary and PATH entry\n";
     std::cout << "\nPackage Manager:\n";
     std::cout << "  " << progName << " pkg install <name>    Download and install a package\n";
