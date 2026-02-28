@@ -2150,8 +2150,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                          expr);
         }
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
-        // String is stored as an i64 holding a pointer to a C string
-        llvm::Value* strPtr = builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "strlen.ptr");
+        // String may be a raw pointer (from a literal/local) or an i64 holding a pointer.
+        llvm::Value* strPtr = arg->getType()->isPointerTy()
+                                  ? arg
+                                  : builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "strlen.ptr");
         return builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "strlen.result");
     }
 
@@ -2164,8 +2166,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* idxArg = generateExpression(expr->arguments[1].get());
         idxArg = toDefaultType(idxArg);
-        // Convert to pointer
-        llvm::Value* strPtr = builder->CreateIntToPtr(strArg, llvm::PointerType::getUnqual(*context), "charat.ptr");
+        // String may be a raw pointer or an i64 holding a pointer.
+        llvm::Value* strPtr = strArg->getType()->isPointerTy()
+                                  ? strArg
+                                  : builder->CreateIntToPtr(strArg, llvm::PointerType::getUnqual(*context), "charat.ptr");
 
         // Bounds check: 0 <= index < str_len(s)
         llvm::Value* strLen = builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "charat.strlen");
@@ -2202,9 +2206,13 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         }
         llvm::Value* lhsArg = generateExpression(expr->arguments[0].get());
         llvm::Value* rhsArg = generateExpression(expr->arguments[1].get());
-        // Convert i64 to pointers to C strings
-        llvm::Value* lhsPtr = builder->CreateIntToPtr(lhsArg, llvm::PointerType::getUnqual(*context), "streq.lhs");
-        llvm::Value* rhsPtr = builder->CreateIntToPtr(rhsArg, llvm::PointerType::getUnqual(*context), "streq.rhs");
+        // Convert to pointers; the value may already be a pointer (literal/local).
+        llvm::Value* lhsPtr = lhsArg->getType()->isPointerTy()
+                                  ? lhsArg
+                                  : builder->CreateIntToPtr(lhsArg, llvm::PointerType::getUnqual(*context), "streq.lhs");
+        llvm::Value* rhsPtr = rhsArg->getType()->isPointerTy()
+                                  ? rhsArg
+                                  : builder->CreateIntToPtr(rhsArg, llvm::PointerType::getUnqual(*context), "streq.rhs");
         llvm::Value* cmpResult = builder->CreateCall(getOrDeclareStrcmp(), {lhsPtr, rhsPtr}, "streq.cmp");
         // strcmp returns 0 on equality; convert to boolean (1 if equal, 0 otherwise)
         llvm::Value* isEqual = builder->CreateICmpEQ(cmpResult, builder->getInt32(0), "streq.eq");
@@ -2219,8 +2227,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         }
         llvm::Value* lhsArg = generateExpression(expr->arguments[0].get());
         llvm::Value* rhsArg = generateExpression(expr->arguments[1].get());
-        llvm::Value* lhsPtr = builder->CreateIntToPtr(lhsArg, llvm::PointerType::getUnqual(*context), "concat.lhs");
-        llvm::Value* rhsPtr = builder->CreateIntToPtr(rhsArg, llvm::PointerType::getUnqual(*context), "concat.rhs");
+        llvm::Value* lhsPtr = lhsArg->getType()->isPointerTy()
+                                  ? lhsArg
+                                  : builder->CreateIntToPtr(lhsArg, llvm::PointerType::getUnqual(*context), "concat.lhs");
+        llvm::Value* rhsPtr = rhsArg->getType()->isPointerTy()
+                                  ? rhsArg
+                                  : builder->CreateIntToPtr(rhsArg, llvm::PointerType::getUnqual(*context), "concat.rhs");
         llvm::Value* len1 = builder->CreateCall(getOrDeclareStrlen(), {lhsPtr}, "concat.len1");
         llvm::Value* len2 = builder->CreateCall(getOrDeclareStrlen(), {rhsPtr}, "concat.len2");
         llvm::Value* totalLen = builder->CreateAdd(len1, len2, "concat.totallen");
@@ -3757,27 +3769,8 @@ void CodeGenerator::emitBytecodeStatement(Statement* stmt) {
                 bytecodeLocals_[forStmt->iteratorVar] = bytecodeNextLocal_++;
             }
         }
-        uint8_t startReg = emitBytecodeExpression(forStmt->start.get());
-        emitBytecodeStore(forStmt->iteratorVar, startReg);
 
-        size_t loopStart = bytecodeEmitter.currentOffset();
-
-        uint8_t iterReg = emitBytecodeLoad(forStmt->iteratorVar);
-        uint8_t endReg = emitBytecodeExpression(forStmt->end.get());
-        uint8_t cmpReg = allocReg();
-        bytecodeEmitter.emit(OpCode::LT);
-        bytecodeEmitter.emitReg(cmpReg);
-        bytecodeEmitter.emitReg(iterReg);
-        bytecodeEmitter.emitReg(endReg);
-
-        bytecodeEmitter.emit(OpCode::JUMP_IF_FALSE);
-        bytecodeEmitter.emitReg(cmpReg);
-        size_t exitPatch = bytecodeEmitter.currentOffset();
-        bytecodeEmitter.emitShort(0);
-
-        emitBytecodeStatement(forStmt->body.get());
-
-        uint8_t curReg = emitBytecodeLoad(forStmt->iteratorVar);
+        // Evaluate step before the loop so the direction check can use it.
         uint8_t stepReg;
         if (forStmt->step) {
             stepReg = emitBytecodeExpression(forStmt->step.get());
@@ -3787,11 +3780,86 @@ void CodeGenerator::emitBytecodeStatement(Statement* stmt) {
             bytecodeEmitter.emitReg(stepReg);
             bytecodeEmitter.emitInt(1);
         }
+        // Store the step in a hidden variable so it's available each iteration.
+        std::string stepVar = "__for_step_" + forStmt->iteratorVar + "__";
+        if (isInBytecodeFunctionContext()) {
+            if (bytecodeLocals_.find(stepVar) == bytecodeLocals_.end()) {
+                bytecodeLocals_[stepVar] = bytecodeNextLocal_++;
+            }
+        }
+        emitBytecodeStore(stepVar, stepReg);
+
+        uint8_t startReg = emitBytecodeExpression(forStmt->start.get());
+        emitBytecodeStore(forStmt->iteratorVar, startReg);
+
+        size_t loopStart = bytecodeEmitter.currentOffset();
+
+        uint8_t iterReg = emitBytecodeLoad(forStmt->iteratorVar);
+        uint8_t endReg = emitBytecodeExpression(forStmt->end.get());
+
+        // Direction-aware condition: use LT for positive step, GT for negative.
+        // Compute: (step > 0 && iter < end) || (step <= 0 && iter > end)
+        uint8_t loadedStep = emitBytecodeLoad(stepVar);
+        uint8_t zeroReg = allocReg();
+        bytecodeEmitter.emit(OpCode::PUSH_INT);
+        bytecodeEmitter.emitReg(zeroReg);
+        bytecodeEmitter.emitInt(0);
+
+        uint8_t stepPosReg = allocReg();
+        bytecodeEmitter.emit(OpCode::GT);
+        bytecodeEmitter.emitReg(stepPosReg);
+        bytecodeEmitter.emitReg(loadedStep);
+        bytecodeEmitter.emitReg(zeroReg);
+
+        uint8_t fwdReg = allocReg();
+        bytecodeEmitter.emit(OpCode::LT);
+        bytecodeEmitter.emitReg(fwdReg);
+        bytecodeEmitter.emitReg(iterReg);
+        bytecodeEmitter.emitReg(endReg);
+
+        uint8_t bwdReg = allocReg();
+        bytecodeEmitter.emit(OpCode::GT);
+        bytecodeEmitter.emitReg(bwdReg);
+        bytecodeEmitter.emitReg(iterReg);
+        bytecodeEmitter.emitReg(endReg);
+
+        uint8_t fwdMasked = allocReg();
+        bytecodeEmitter.emit(OpCode::AND);
+        bytecodeEmitter.emitReg(fwdMasked);
+        bytecodeEmitter.emitReg(stepPosReg);
+        bytecodeEmitter.emitReg(fwdReg);
+
+        uint8_t notStepPos = allocReg();
+        bytecodeEmitter.emit(OpCode::NOT);
+        bytecodeEmitter.emitReg(notStepPos);
+        bytecodeEmitter.emitReg(stepPosReg);
+
+        uint8_t bwdMasked = allocReg();
+        bytecodeEmitter.emit(OpCode::AND);
+        bytecodeEmitter.emitReg(bwdMasked);
+        bytecodeEmitter.emitReg(notStepPos);
+        bytecodeEmitter.emitReg(bwdReg);
+
+        uint8_t cmpReg = allocReg();
+        bytecodeEmitter.emit(OpCode::OR);
+        bytecodeEmitter.emitReg(cmpReg);
+        bytecodeEmitter.emitReg(fwdMasked);
+        bytecodeEmitter.emitReg(bwdMasked);
+
+        bytecodeEmitter.emit(OpCode::JUMP_IF_FALSE);
+        bytecodeEmitter.emitReg(cmpReg);
+        size_t exitPatch = bytecodeEmitter.currentOffset();
+        bytecodeEmitter.emitShort(0);
+
+        emitBytecodeStatement(forStmt->body.get());
+
+        uint8_t curReg = emitBytecodeLoad(forStmt->iteratorVar);
+        uint8_t curStep = emitBytecodeLoad(stepVar);
         uint8_t newIterReg = allocReg();
         bytecodeEmitter.emit(OpCode::ADD);
         bytecodeEmitter.emitReg(newIterReg);
         bytecodeEmitter.emitReg(curReg);
-        bytecodeEmitter.emitReg(stepReg);
+        bytecodeEmitter.emitReg(curStep);
         emitBytecodeStore(forStmt->iteratorVar, newIterReg);
 
         bytecodeEmitter.emit(OpCode::JUMP);
