@@ -97,7 +97,7 @@ JITSpecialization BytecodeJIT::getSpecialization(const std::string& name) const 
 }
 
 bool BytecodeJIT::recordCall(const std::string& name) {
-    if (compiled_.count(name) || failedCompilations_.count(name))
+    if (compiled_.count(name) || compiledFloat_.count(name) || failedCompilations_.count(name))
         return false;
     auto& count = callCounts_[name];
     ++count;
@@ -105,7 +105,7 @@ bool BytecodeJIT::recordCall(const std::string& name) {
 }
 
 bool BytecodeJIT::recordPostJITCall(const std::string& name) {
-    if (!compiled_.count(name) || recompiled_.count(name))
+    if ((!compiled_.count(name) && !compiledFloat_.count(name)) || recompiled_.count(name))
         return false;
     auto& count = postJITCallCounts_[name];
     ++count;
@@ -150,11 +150,12 @@ bool BytecodeJIT::recompile(const BytecodeFunction& func) {
     if (curSpec == spec)
         return true;
 
-    // Save old pointers so we can restore on failure.
+    // Save old pointers and specialization so we can restore on failure.
     auto oldIntIt = compiled_.find(func.name);
     auto oldFloatIt = compiledFloat_.find(func.name);
     JITFnPtr oldIntPtr = oldIntIt != compiled_.end() ? oldIntIt->second : nullptr;
     JITFloatFnPtr oldFloatPtr = oldFloatIt != compiledFloat_.end() ? oldFloatIt->second : nullptr;
+    JITSpecialization oldSpec = curSpec;
 
     // Remove old entries so compile() can proceed.
     compiled_.erase(func.name);
@@ -164,11 +165,17 @@ bool BytecodeJIT::recompile(const BytecodeFunction& func) {
 
     bool ok = compile(func, spec);
     if (!ok) {
-        // Restore old pointers if recompilation failed.
+        // Restore old pointers and specialization if recompilation failed.
         if (oldIntPtr)
             compiled_[func.name] = oldIntPtr;
         if (oldFloatPtr)
             compiledFloat_[func.name] = oldFloatPtr;
+        if (oldSpec != JITSpecialization::Unknown)
+            specializations_[func.name] = oldSpec;
+        // Only clear the failed-compilation marker when we actually
+        // restored a previous working compilation.
+        if (oldIntPtr || oldFloatPtr)
+            failedCompilations_.erase(func.name);
     }
     return ok;
 }
@@ -339,8 +346,9 @@ bool BytecodeJIT::compileInt(const BytecodeFunction& func) {
             failedCompilations_.insert(func.name);
             return false;
         default:
-            // Unknown opcode - skip it (will fail at runtime)
-            break;
+            // Unknown/unsupported opcode — reject the function.
+            failedCompilations_.insert(func.name);
+            return false;
         }
     }
 
@@ -439,6 +447,7 @@ bool BytecodeJIT::compileInt(const BytecodeFunction& func) {
             }
             case OpCode::POP:
             case OpCode::DUP:
+            case OpCode::HALT:
                 break;
             case OpCode::MOV: {
                 uint8_t rd = code[ip++];
@@ -704,7 +713,7 @@ bool BytecodeJIT::compileInt(const BytecodeFunction& func) {
     llvm::EngineBuilder engineBuilder(std::move(mod));
     engineBuilder.setErrorStr(&engineError);
     engineBuilder.setEngineKind(llvm::EngineKind::JIT);
-    engineBuilder.setOptLevel(llvm::CodeGenOptLevel::Aggressive);
+    engineBuilder.setOptLevel(llvm::CodeGenOpt::Aggressive);
     llvm::ExecutionEngine* engine = engineBuilder.create();
     if (!engine) {
         failedCompilations_.insert(func.name);
@@ -1125,7 +1134,7 @@ bool BytecodeJIT::compileFloat(const BytecodeFunction& func) {
     llvm::EngineBuilder engineBuilder(std::move(mod));
     engineBuilder.setErrorStr(&engineError);
     engineBuilder.setEngineKind(llvm::EngineKind::JIT);
-    engineBuilder.setOptLevel(llvm::CodeGenOptLevel::Aggressive);
+    engineBuilder.setOptLevel(llvm::CodeGenOpt::Aggressive);
     llvm::ExecutionEngine* engine = engineBuilder.create();
     if (!engine) {
         failedCompilations_.insert(func.name);
