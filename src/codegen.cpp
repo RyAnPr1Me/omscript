@@ -1247,10 +1247,8 @@ void CodeGenerator::generate(Program* program) {
         generateFunction(func.get());
     }
 
-    // Run optimization passes
-    if (optimizationLevel != OptimizationLevel::O0) {
-        runOptimizationPasses();
-    }
+    // Run optimization passes (also sets target triple and data layout)
+    runOptimizationPasses();
 
     if (hasOptMaxFunctions && enableOptMax_) {
         optimizeOptMaxFunctions();
@@ -1278,10 +1276,12 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     // Hint small helper functions for inlining at O2+.  OPTMAX functions
     // already get aggressive optimization; non-main functions with few
     // statements benefit from being inlined into their callers.
-    // 8 statements covers most simple accessors and arithmetic helpers.
     static constexpr size_t kMaxInlineHintStatements = 8;
+    static constexpr size_t kMaxInlineHintStatementsO3 = 16;
+    size_t inlineThreshold =
+        (optimizationLevel >= OptimizationLevel::O3) ? kMaxInlineHintStatementsO3 : kMaxInlineHintStatements;
     if (func->name != "main" && optimizationLevel >= OptimizationLevel::O2 && func->body &&
-        func->body->statements.size() <= kMaxInlineHintStatements) {
+        func->body->statements.size() <= inlineThreshold) {
         function->addFnAttr(llvm::Attribute::InlineHint);
     }
 
@@ -2061,15 +2061,19 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 lo = ensureFloat(lo);
             if (!hi->getType()->isDoubleTy())
                 hi = ensureFloat(hi);
-            llvm::Value* cmpHi = builder->CreateFCmpOLT(val, hi, "fclamphi");
-            llvm::Value* minVH = builder->CreateSelect(cmpHi, val, hi, "fclampmin");
-            llvm::Value* cmpLo = builder->CreateFCmpOGT(minVH, lo, "fclamplo");
-            return builder->CreateSelect(cmpLo, minVH, lo, "fclampval");
+            llvm::Function* fminIntrinsic =
+                llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::minnum, {getFloatType()});
+            llvm::Function* fmaxIntrinsic =
+                llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::maxnum, {getFloatType()});
+            llvm::Value* minVH = builder->CreateCall(fminIntrinsic, {val, hi}, "fclampmin");
+            return builder->CreateCall(fmaxIntrinsic, {minVH, lo}, "fclampval");
         }
-        llvm::Value* cmpHi = builder->CreateICmpSLT(val, hi, "clamphi");
-        llvm::Value* minVH = builder->CreateSelect(cmpHi, val, hi, "clampmin");
-        llvm::Value* cmpLo = builder->CreateICmpSGT(minVH, lo, "clamplo");
-        return builder->CreateSelect(cmpLo, minVH, lo, "clampval");
+        llvm::Function* sminIntrinsic =
+            llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::smin, {getDefaultType()});
+        llvm::Function* smaxIntrinsic =
+            llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::smax, {getDefaultType()});
+        llvm::Value* minVH = builder->CreateCall(sminIntrinsic, {val, hi}, "clampmin");
+        return builder->CreateCall(smaxIntrinsic, {minVH, lo}, "clampval");
     }
 
     if (expr->callee == "pow") {
