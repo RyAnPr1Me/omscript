@@ -1769,39 +1769,55 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         llvm::Value* safeShift = builder->CreateAnd(right, mask, "shrmask");
         return builder->CreateAShr(left, safeShift, "ashrtmp");
     } else if (expr->op == "**") {
-        // Exponentiation operator: base ** exponent
-        // Uses iterative multiplication loop (same algorithm as pow() stdlib).
+        // Integer exponentiation via binary exponentiation (exponentiation by
+        // squaring).  This is O(log n) in the exponent vs. the naive O(n) loop.
         llvm::Function* function = builder->GetInsertBlock()->getParent();
         llvm::BasicBlock* negExpBB = llvm::BasicBlock::Create(*context, "pow.negexp", function);
         llvm::BasicBlock* posExpBB = llvm::BasicBlock::Create(*context, "pow.posexp", function);
         llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "pow.loop", function);
-        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "pow.body", function);
+        llvm::BasicBlock* oddBB = llvm::BasicBlock::Create(*context, "pow.odd", function);
+        llvm::BasicBlock* squareBB = llvm::BasicBlock::Create(*context, "pow.square", function);
         llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "pow.done", function);
 
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1, true);
         llvm::Value* isNegExp = builder->CreateICmpSLT(right, zero, "pow.isneg");
         builder->CreateCondBr(isNegExp, negExpBB, posExpBB);
 
+        // Negative exponent: integer result is 0 for |base| > 1
         builder->SetInsertPoint(negExpBB);
         builder->CreateBr(doneBB);
 
         builder->SetInsertPoint(posExpBB);
         builder->CreateBr(loopBB);
 
+        // Loop: result *= base when exponent is odd; base *= base; exp >>= 1
         builder->SetInsertPoint(loopBB);
-        llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "pow.result");
-        llvm::PHINode* counter = builder->CreatePHI(getDefaultType(), 2, "pow.counter");
-        result->addIncoming(llvm::ConstantInt::get(getDefaultType(), 1), posExpBB);
-        counter->addIncoming(right, posExpBB);
+        llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 3, "pow.result");
+        llvm::PHINode* base = builder->CreatePHI(getDefaultType(), 3, "pow.base");
+        llvm::PHINode* exp = builder->CreatePHI(getDefaultType(), 3, "pow.exp");
+        result->addIncoming(one, posExpBB);
+        base->addIncoming(left, posExpBB);
+        exp->addIncoming(right, posExpBB);
 
-        llvm::Value* done = builder->CreateICmpSLE(counter, zero, "pow.done.cmp");
-        builder->CreateCondBr(done, doneBB, bodyBB);
+        llvm::Value* done = builder->CreateICmpSLE(exp, zero, "pow.done.cmp");
+        builder->CreateCondBr(done, doneBB, oddBB);
 
-        builder->SetInsertPoint(bodyBB);
-        llvm::Value* newResult = builder->CreateMul(result, left, "pow.mul");
-        llvm::Value* newCounter = builder->CreateSub(counter, llvm::ConstantInt::get(getDefaultType(), 1), "pow.dec");
-        result->addIncoming(newResult, bodyBB);
-        counter->addIncoming(newCounter, bodyBB);
+        // Check if exponent is odd
+        builder->SetInsertPoint(oddBB);
+        llvm::Value* expBit = builder->CreateAnd(exp, one, "pow.bit");
+        llvm::Value* isOdd = builder->CreateICmpNE(expBit, zero, "pow.isodd");
+        llvm::Value* newResult = builder->CreateMul(result, base, "pow.mul");
+        llvm::Value* resultSel = builder->CreateSelect(isOdd, newResult, result, "pow.rsel");
+        builder->CreateBr(squareBB);
+
+        // Square the base and halve the exponent
+        builder->SetInsertPoint(squareBB);
+        llvm::Value* newBase = builder->CreateMul(base, base, "pow.sq");
+        llvm::Value* newExp = builder->CreateAShr(exp, one, "pow.halve");
+        result->addIncoming(resultSel, squareBB);
+        base->addIncoming(newBase, squareBB);
+        exp->addIncoming(newExp, squareBB);
         builder->CreateBr(loopBB);
 
         builder->SetInsertPoint(doneBB);
@@ -1928,16 +1944,16 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         }
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         if (arg->getType()->isDoubleTy()) {
-            llvm::Value* fzero = llvm::ConstantFP::get(getFloatType(), 0.0);
-            llvm::Value* isNeg = builder->CreateFCmpOLT(arg, fzero, "fisneg");
-            llvm::Value* negVal = builder->CreateFNeg(arg, "fnegval");
-            return builder->CreateSelect(isNeg, negVal, arg, "fabsval");
+            // Use llvm.fabs intrinsic for native hardware abs on floats
+            llvm::Function* fabsIntrinsic =
+                llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::fabs, {getFloatType()});
+            return builder->CreateCall(fabsIntrinsic, {arg}, "fabsval");
         }
-        // abs(x) = x >= 0 ? x : -x
-        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
-        llvm::Value* isNeg = builder->CreateICmpSLT(arg, zero, "isneg");
-        llvm::Value* negVal = builder->CreateNeg(arg, "negval");
-        return builder->CreateSelect(isNeg, negVal, arg, "absval");
+        // Use llvm.abs.i64 intrinsic for native hardware abs on integers
+        llvm::Function* absIntrinsic =
+            llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::abs, {getDefaultType()});
+        // The second argument (is_int_min_poison) is false for safe behavior
+        return builder->CreateCall(absIntrinsic, {arg, builder->getFalse()}, "absval");
     }
 
     if (expr->callee == "len") {
@@ -1967,11 +1983,15 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 a = ensureFloat(a);
             if (!b->getType()->isDoubleTy())
                 b = ensureFloat(b);
-            llvm::Value* cmp = builder->CreateFCmpOLT(a, b, "fmincmp");
-            return builder->CreateSelect(cmp, a, b, "fminval");
+            // Use llvm.minnum intrinsic for native hardware fmin
+            llvm::Function* fminIntrinsic =
+                llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::minnum, {getFloatType()});
+            return builder->CreateCall(fminIntrinsic, {a, b}, "fminval");
         }
-        llvm::Value* cmp = builder->CreateICmpSLT(a, b, "mincmp");
-        return builder->CreateSelect(cmp, a, b, "minval");
+        // Use llvm.smin intrinsic for native hardware signed integer min
+        llvm::Function* sminIntrinsic =
+            llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::smin, {getDefaultType()});
+        return builder->CreateCall(sminIntrinsic, {a, b}, "minval");
     }
 
     if (expr->callee == "max") {
@@ -1987,11 +2007,15 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 a = ensureFloat(a);
             if (!b->getType()->isDoubleTy())
                 b = ensureFloat(b);
-            llvm::Value* cmp = builder->CreateFCmpOGT(a, b, "fmaxcmp");
-            return builder->CreateSelect(cmp, a, b, "fmaxval");
+            // Use llvm.maxnum intrinsic for native hardware fmax
+            llvm::Function* fmaxIntrinsic =
+                llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::maxnum, {getFloatType()});
+            return builder->CreateCall(fmaxIntrinsic, {a, b}, "fmaxval");
         }
-        llvm::Value* cmp = builder->CreateICmpSGT(a, b, "maxcmp");
-        return builder->CreateSelect(cmp, a, b, "maxval");
+        // Use llvm.smax intrinsic for native hardware signed integer max
+        llvm::Function* smaxIntrinsic =
+            llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::smax, {getDefaultType()});
+        return builder->CreateCall(smaxIntrinsic, {a, b}, "maxval");
     }
 
     if (expr->callee == "sign") {
@@ -2062,14 +2086,16 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         llvm::Function* function = builder->GetInsertBlock()->getParent();
 
-        // Handle negative exponents: pow(base, negative) = 0 for |base| > 1
+        // Binary exponentiation (exponentiation by squaring): O(log n) in the exponent
         llvm::BasicBlock* negExpBB = llvm::BasicBlock::Create(*context, "pow.negexp", function);
         llvm::BasicBlock* posExpBB = llvm::BasicBlock::Create(*context, "pow.posexp", function);
         llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "pow.loop", function);
-        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "pow.body", function);
+        llvm::BasicBlock* oddBB = llvm::BasicBlock::Create(*context, "pow.odd", function);
+        llvm::BasicBlock* squareBB = llvm::BasicBlock::Create(*context, "pow.square", function);
         llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "pow.done", function);
 
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1, true);
         llvm::Value* isNegExp = builder->CreateICmpSLT(exp, zero, "pow.isneg");
         builder->CreateCondBr(isNegExp, negExpBB, posExpBB);
 
@@ -2080,20 +2106,33 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(posExpBB);
         builder->CreateBr(loopBB);
 
+        // Loop: result *= base when exponent is odd; base *= base; exp >>= 1
         builder->SetInsertPoint(loopBB);
-        llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "pow.result");
-        llvm::PHINode* counter = builder->CreatePHI(getDefaultType(), 2, "pow.counter");
-        result->addIncoming(llvm::ConstantInt::get(getDefaultType(), 1), posExpBB);
+        llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 3, "pow.result");
+        llvm::PHINode* curBase = builder->CreatePHI(getDefaultType(), 3, "pow.base");
+        llvm::PHINode* counter = builder->CreatePHI(getDefaultType(), 3, "pow.counter");
+        result->addIncoming(one, posExpBB);
+        curBase->addIncoming(base, posExpBB);
         counter->addIncoming(exp, posExpBB);
 
         llvm::Value* done = builder->CreateICmpSLE(counter, zero, "pow.done.cmp");
-        builder->CreateCondBr(done, doneBB, bodyBB);
+        builder->CreateCondBr(done, doneBB, oddBB);
 
-        builder->SetInsertPoint(bodyBB);
-        llvm::Value* newResult = builder->CreateMul(result, base, "pow.mul");
-        llvm::Value* newCounter = builder->CreateSub(counter, llvm::ConstantInt::get(getDefaultType(), 1), "pow.dec");
-        result->addIncoming(newResult, bodyBB);
-        counter->addIncoming(newCounter, bodyBB);
+        // Check if exponent is odd
+        builder->SetInsertPoint(oddBB);
+        llvm::Value* expBit = builder->CreateAnd(counter, one, "pow.bit");
+        llvm::Value* isOdd = builder->CreateICmpNE(expBit, zero, "pow.isodd");
+        llvm::Value* newResult = builder->CreateMul(result, curBase, "pow.mul");
+        llvm::Value* resultSel = builder->CreateSelect(isOdd, newResult, result, "pow.rsel");
+        builder->CreateBr(squareBB);
+
+        // Square the base and halve the exponent
+        builder->SetInsertPoint(squareBB);
+        llvm::Value* newBase = builder->CreateMul(curBase, curBase, "pow.sq");
+        llvm::Value* newCounter = builder->CreateAShr(counter, one, "pow.halve");
+        result->addIncoming(resultSel, squareBB);
+        curBase->addIncoming(newBase, squareBB);
+        counter->addIncoming(newCounter, squareBB);
         builder->CreateBr(loopBB);
 
         builder->SetInsertPoint(doneBB);
@@ -2142,50 +2181,14 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                          expr);
         }
         llvm::Value* x = generateExpression(expr->arguments[0].get());
-        // Convert float to integer since sqrt() is an integer square root
-        x = toDefaultType(x);
-        // Integer square root via Newton's method: guess = x, while (guess*guess > x) guess = (guess + x/guess) / 2
-        llvm::Function* function = builder->GetInsertBlock()->getParent();
-        llvm::BasicBlock* entryBB = builder->GetInsertBlock();
-        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "sqrt.loop", function);
-        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "sqrt.body", function);
-        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "sqrt.done", function);
-
-        // Handle x <= 0: return 0
-        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
-        llvm::Value* isNonPositive = builder->CreateICmpSLE(x, zero, "sqrt.nonpos");
-        llvm::BasicBlock* positiveBB = llvm::BasicBlock::Create(*context, "sqrt.positive", function);
-        builder->CreateCondBr(isNonPositive, doneBB, positiveBB);
-
-        builder->SetInsertPoint(positiveBB);
-        builder->CreateBr(loopBB);
-
-        builder->SetInsertPoint(loopBB);
-        llvm::PHINode* guess = builder->CreatePHI(getDefaultType(), 2, "sqrt.guess");
-        guess->addIncoming(x, positiveBB);
-
-        llvm::Value* sq = builder->CreateMul(guess, guess, "sqrt.sq");
-        llvm::Value* tooBig = builder->CreateICmpSGT(sq, x, "sqrt.toobig");
-        builder->CreateCondBr(tooBig, bodyBB, doneBB);
-
-        builder->SetInsertPoint(bodyBB);
-        llvm::Value* div = builder->CreateSDiv(x, guess, "sqrt.div");
-        llvm::Value* sum = builder->CreateAdd(guess, div, "sqrt.sum");
-        llvm::Value* two = llvm::ConstantInt::get(getDefaultType(), 2);
-        llvm::Value* newGuess = builder->CreateSDiv(sum, two, "sqrt.newguess");
-        // Ensure progress: if newGuess >= guess, force guess - 1
-        llvm::Value* noProgress = builder->CreateICmpSGE(newGuess, guess, "sqrt.noprogress");
-        llvm::Value* forcedGuess =
-            builder->CreateSub(guess, llvm::ConstantInt::get(getDefaultType(), 1), "sqrt.forced");
-        llvm::Value* nextGuess = builder->CreateSelect(noProgress, forcedGuess, newGuess, "sqrt.next");
-        guess->addIncoming(nextGuess, bodyBB);
-        builder->CreateBr(loopBB);
-
-        builder->SetInsertPoint(doneBB);
-        llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "sqrt.result");
-        result->addIncoming(zero, entryBB);
-        result->addIncoming(guess, loopBB);
-        return result;
+        // Use the llvm.sqrt intrinsic which maps directly to hardware sqrtsd/sqrtss
+        // instructions on x86, producing results in a single cycle on modern CPUs.
+        // Convert to double, compute sqrt, then truncate back to integer.
+        llvm::Value* fval = ensureFloat(x);
+        llvm::Function* sqrtIntrinsic =
+            llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::sqrt, {getFloatType()});
+        llvm::Value* result = builder->CreateCall(sqrtIntrinsic, {fval}, "sqrt.result");
+        return builder->CreateFPToSI(result, getDefaultType(), "sqrt.int");
     }
 
     if (expr->callee == "is_even") {
@@ -2716,7 +2719,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         }
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         llvm::Value* fval = ensureFloat(arg);
-        llvm::Value* result = builder->CreateCall(getOrDeclareFloor(), {fval}, "floor.result");
+        // Use llvm.floor intrinsic for native hardware rounding
+        llvm::Function* floorIntrinsic =
+            llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::floor, {getFloatType()});
+        llvm::Value* result = builder->CreateCall(floorIntrinsic, {fval}, "floor.result");
         return builder->CreateFPToSI(result, getDefaultType(), "floor.int");
     }
 
@@ -2728,7 +2734,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         }
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         llvm::Value* fval = ensureFloat(arg);
-        llvm::Value* result = builder->CreateCall(getOrDeclareCeil(), {fval}, "ceil.result");
+        // Use llvm.ceil intrinsic for native hardware rounding
+        llvm::Function* ceilIntrinsic =
+            llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::ceil, {getFloatType()});
+        llvm::Value* result = builder->CreateCall(ceilIntrinsic, {fval}, "ceil.result");
         return builder->CreateFPToSI(result, getDefaultType(), "ceil.int");
     }
 
@@ -2740,7 +2749,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         }
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         llvm::Value* fval = ensureFloat(arg);
-        llvm::Value* result = builder->CreateCall(getOrDeclareRound(), {fval}, "round.result");
+        // Use llvm.round intrinsic for native hardware rounding
+        llvm::Function* roundIntrinsic =
+            llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::round, {getFloatType()});
+        llvm::Value* result = builder->CreateCall(roundIntrinsic, {fval}, "round.result");
         return builder->CreateFPToSI(result, getDefaultType(), "round.int");
     }
 
@@ -4870,10 +4882,31 @@ std::unique_ptr<llvm::TargetMachine> CodeGenerator::createTargetMachine() const 
     std::string features;
     resolveTargetCPU(cpu, features);
 
+    // Map the compiler's optimization level to LLVM's backend CodeGenOptLevel
+    // so that instruction selection, scheduling, and register allocation use
+    // the appropriate aggressiveness.
+    llvm::CodeGenOptLevel cgOpt = llvm::CodeGenOptLevel::Default;
+    switch (optimizationLevel) {
+    case OptimizationLevel::O0:
+        cgOpt = llvm::CodeGenOptLevel::None;
+        break;
+    case OptimizationLevel::O1:
+        cgOpt = llvm::CodeGenOptLevel::Less;
+        break;
+    case OptimizationLevel::O2:
+        cgOpt = llvm::CodeGenOptLevel::Default;
+        break;
+    case OptimizationLevel::O3:
+        cgOpt = llvm::CodeGenOptLevel::Aggressive;
+        break;
+    }
+
 #if LLVM_VERSION_MAJOR >= 19
-    return std::unique_ptr<llvm::TargetMachine>(target->createTargetMachine(targetTriple, cpu, features, opt, RM));
+    return std::unique_ptr<llvm::TargetMachine>(
+        target->createTargetMachine(targetTriple, cpu, features, opt, RM, std::nullopt, cgOpt));
 #else
-    return std::unique_ptr<llvm::TargetMachine>(target->createTargetMachine(targetTripleStr, cpu, features, opt, RM));
+    return std::unique_ptr<llvm::TargetMachine>(
+        target->createTargetMachine(targetTripleStr, cpu, features, opt, RM, std::nullopt, cgOpt));
 #endif
 }
 
@@ -4896,29 +4929,11 @@ void CodeGenerator::runOptimizationPasses() {
         return;
     }
 
-    // O1 uses a lightweight legacy function pass pipeline (no IPO).
-    if (optimizationLevel == OptimizationLevel::O1) {
-        llvm::legacy::FunctionPassManager fpm(module.get());
-        fpm.add(llvm::createPromoteMemoryToRegisterPass());
-        fpm.add(llvm::createInstructionCombiningPass());
-        fpm.add(llvm::createReassociatePass());
-        fpm.add(llvm::createGVNPass());
-        fpm.add(llvm::createCFGSimplificationPass());
-        fpm.add(llvm::createDeadCodeEliminationPass());
-        fpm.doInitialization();
-        for (auto& func : module->functions()) {
-            if (!func.isDeclaration()) {
-                fpm.run(func);
-            }
-        }
-        fpm.doFinalization();
-        return;
-    }
-
-    // O2 and O3 use the new pass manager's standard pipeline which includes
-    // interprocedural optimizations: function inlining, IPSCCP (sparse
-    // conditional constant propagation), GlobalDCE (dead function removal),
-    // jump threading, correlated value propagation, and more.
+    // All optimization levels (O1, O2, O3) use the new pass manager's
+    // standard pipeline which includes interprocedural optimizations such as
+    // function inlining, IPSCCP (sparse conditional constant propagation),
+    // GlobalDCE (dead function removal), jump threading, correlated value
+    // propagation, loop vectorization (O2+), SLP vectorization (O2+), and more.
     llvm::PassBuilder PB(targetMachine.get());
     llvm::LoopAnalysisManager LAM;
     llvm::FunctionAnalysisManager FAM;
@@ -4930,8 +4945,18 @@ void CodeGenerator::runOptimizationPasses() {
     PB.registerLoopAnalyses(LAM);
     PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
 
-    llvm::OptimizationLevel newPMLevel =
-        (optimizationLevel == OptimizationLevel::O3) ? llvm::OptimizationLevel::O3 : llvm::OptimizationLevel::O2;
+    llvm::OptimizationLevel newPMLevel;
+    switch (optimizationLevel) {
+    case OptimizationLevel::O1:
+        newPMLevel = llvm::OptimizationLevel::O1;
+        break;
+    case OptimizationLevel::O3:
+        newPMLevel = llvm::OptimizationLevel::O3;
+        break;
+    default:
+        newPMLevel = llvm::OptimizationLevel::O2;
+        break;
+    }
     llvm::ModulePassManager MPM = PB.buildPerModuleDefaultPipeline(newPMLevel);
     MPM.run(*module, MAM);
 }
@@ -4943,10 +4968,14 @@ void CodeGenerator::optimizeFunction(llvm::Function* func) {
     // the full module-wide optimization pipeline.
     llvm::legacy::FunctionPassManager fpm(module.get());
 
+    fpm.add(llvm::createSROAPass());
+    fpm.add(llvm::createEarlyCSEPass());
     fpm.add(llvm::createPromoteMemoryToRegisterPass());
     fpm.add(llvm::createInstructionCombiningPass());
     fpm.add(llvm::createReassociatePass());
+    fpm.add(llvm::createGVNPass());
     fpm.add(llvm::createCFGSimplificationPass());
+    fpm.add(llvm::createDeadCodeEliminationPass());
 
     fpm.doInitialization();
     fpm.run(*func);
