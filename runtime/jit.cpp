@@ -2,6 +2,7 @@
 #include "../include/bytecode.h"
 #include "vm.h"
 
+#include <llvm/Config/llvm-config.h>
 #include <llvm/ExecutionEngine/ExecutionEngine.h>
 #include <llvm/ExecutionEngine/MCJIT.h>
 #include <llvm/IR/IRBuilder.h>
@@ -727,7 +728,11 @@ bool BytecodeJIT::compileInt(const BytecodeFunction& func) {
     llvm::EngineBuilder engineBuilder(std::move(mod));
     engineBuilder.setErrorStr(&engineError);
     engineBuilder.setEngineKind(llvm::EngineKind::JIT);
+#if LLVM_VERSION_MAJOR >= 18
+    engineBuilder.setOptLevel(llvm::CodeGenOptLevel::Aggressive);
+#else
     engineBuilder.setOptLevel(llvm::CodeGenOpt::Aggressive);
+#endif
     llvm::ExecutionEngine* engine = engineBuilder.create();
     if (!engine) {
         failedCompilations_.insert(func.name);
@@ -1152,7 +1157,11 @@ bool BytecodeJIT::compileFloat(const BytecodeFunction& func) {
     llvm::EngineBuilder engineBuilder(std::move(mod));
     engineBuilder.setErrorStr(&engineError);
     engineBuilder.setEngineKind(llvm::EngineKind::JIT);
+#if LLVM_VERSION_MAJOR >= 18
+    engineBuilder.setOptLevel(llvm::CodeGenOptLevel::Aggressive);
+#else
     engineBuilder.setOptLevel(llvm::CodeGenOpt::Aggressive);
+#endif
     llvm::ExecutionEngine* engine = engineBuilder.create();
     if (!engine) {
         failedCompilations_.insert(func.name);

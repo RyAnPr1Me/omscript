@@ -2225,8 +2225,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
         llvm::GlobalVariable* stdinVar = module->getGlobalVariable("stdin");
         if (!stdinVar) {
-            stdinVar = new llvm::GlobalVariable(*module, ptrTy, false, llvm::GlobalValue::ExternalLinkage, nullptr,
-                                                "stdin");
+            stdinVar =
+                new llvm::GlobalVariable(*module, ptrTy, false, llvm::GlobalValue::ExternalLinkage, nullptr, "stdin");
         }
         llvm::Value* stdinVal = builder->CreateLoad(ptrTy, stdinVar, "inputln.stdin");
         // Call fgets(buf, 1024, stdin)
@@ -3731,8 +3731,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* idxArg = generateExpression(expr->arguments[1].get());
         arrArg = toDefaultType(arrArg);
         idxArg = toDefaultType(idxArg);
-        llvm::Value* arrPtr =
-            builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "aremove.arrptr");
+        llvm::Value* arrPtr = builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "aremove.arrptr");
         llvm::Value* arrLen = builder->CreateLoad(getDefaultType(), arrPtr, "aremove.len");
         // Bounds check: 0 <= idx < length
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
@@ -3758,9 +3757,11 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrPtr, elemOffset, "aremove.elemptr");
         llvm::Value* removedVal = builder->CreateLoad(getDefaultType(), elemPtr, "aremove.removed");
         // memmove(&arr[idx+1], &arr[idx+2], (length - idx - 1) * 8)
-        llvm::Value* srcOffset = builder->CreateAdd(idxArg, llvm::ConstantInt::get(getDefaultType(), 2), "aremove.srcoff");
+        llvm::Value* srcOffset =
+            builder->CreateAdd(idxArg, llvm::ConstantInt::get(getDefaultType(), 2), "aremove.srcoff");
         llvm::Value* srcPtr = builder->CreateGEP(getDefaultType(), arrPtr, srcOffset, "aremove.srcptr");
-        llvm::Value* shiftCount = builder->CreateSub(arrLen, builder->CreateAdd(idxArg, one, "aremove.idxp1"), "aremove.shiftcnt");
+        llvm::Value* shiftCount =
+            builder->CreateSub(arrLen, builder->CreateAdd(idxArg, one, "aremove.idxp1"), "aremove.shiftcnt");
         llvm::Value* shiftBytes = builder->CreateMul(shiftCount, eight, "aremove.shiftbytes");
         builder->CreateCall(getOrDeclareMemmove(), {elemPtr, srcPtr, shiftBytes});
         // Decrement length
@@ -3952,7 +3953,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         }
         llvm::Function* reduceFn = calleeIt->second;
         if (reduceFn->arg_size() < 2) {
-            codegenError("array_reduce: function '" + fnName + "' must accept at least 2 arguments (accumulator, element)", expr);
+            codegenError("array_reduce: function '" + fnName +
+                             "' must accept at least 2 arguments (accumulator, element)",
+                         expr);
         }
 
         llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
@@ -4414,11 +4417,11 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
     if (expr->arguments.size() < requiredArgs || expr->arguments.size() > callee->arg_size()) {
         codegenError("Function '" + expr->callee + "' expects " +
-                          (requiredArgs < callee->arg_size()
-                               ? std::to_string(requiredArgs) + " to " + std::to_string(callee->arg_size())
-                               : std::to_string(callee->arg_size())) +
-                          " argument(s), but " + std::to_string(expr->arguments.size()) + " provided",
-                      expr);
+                         (requiredArgs < callee->arg_size()
+                              ? std::to_string(requiredArgs) + " to " + std::to_string(callee->arg_size())
+                              : std::to_string(callee->arg_size())) +
+                         " argument(s), but " + std::to_string(expr->arguments.size()) + " provided",
+                     expr);
     }
 
     std::vector<llvm::Value*> args;
@@ -4651,9 +4654,9 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
     // We need to evaluate spread source arrays to get their lengths
     // Store evaluated values so we don't evaluate twice
     struct ElemInfo {
-        llvm::Value* val;    // Evaluated value (element or array ptr)
-        bool isSpread;       // Whether this is a spread element
-        llvm::Value* len;    // Length of spread array (if isSpread)
+        llvm::Value* val; // Evaluated value (element or array ptr)
+        bool isSpread;    // Whether this is a spread element
+        llvm::Value* len; // Length of spread array (if isSpread)
     };
     std::vector<ElemInfo> evalElems;
 
@@ -4662,7 +4665,8 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
             auto* spread = static_cast<SpreadExpr*>(elem.get());
             llvm::Value* arrVal = generateExpression(spread->operand.get());
             arrVal = toDefaultType(arrVal);
-            llvm::Value* arrPtr = builder->CreateIntToPtr(arrVal, llvm::PointerType::getUnqual(*context), "spread.arrptr");
+            llvm::Value* arrPtr =
+                builder->CreateIntToPtr(arrVal, llvm::PointerType::getUnqual(*context), "spread.arrptr");
             llvm::Value* arrLen = builder->CreateLoad(getDefaultType(), arrPtr, "spread.len");
             totalLen = builder->CreateAdd(totalLen, arrLen, "spread.addlen");
             evalElems.push_back({arrVal, true, arrLen});
