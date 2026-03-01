@@ -694,13 +694,6 @@ op_CALL: {
             argRegs[i] = readByte(bytecode, ip);
         }
 
-        // ---- Record argument types for type-profiled JIT ----
-        if (jit_ && argCount > 0) {
-            bool allInt, allFloat;
-            classifyArgTypes(argCount, argRegs, allInt, allFloat);
-            jit_->recordTypes(funcName, allInt, allFloat);
-        }
-
         // ---- JIT fast path: float-specialized ----
         {
             auto floatIt = jitFloatCache_.find(funcName);
@@ -733,6 +726,15 @@ op_CALL: {
                     break;
                 }
             }
+        }
+
+        // ---- Record argument types for type-profiled JIT ----
+        // Only profile when not already JIT-cached (the fast paths above
+        // would have taken a break if execution was handled by JIT).
+        if (jit_ && argCount > 0) {
+            bool allInt, allFloat;
+            classifyArgTypes(argCount, argRegs, allInt, allFloat);
+            jit_->recordTypes(funcName, allInt, allFloat);
         }
 
         auto it = functions.find(funcName);
@@ -788,7 +790,7 @@ op_CALL: {
         Value returnValue = lastReturn;
         CallFrame& top = callStack.back();
         locals = std::move(top.savedLocals);
-        std::copy(top.savedRegisters.begin(), top.savedRegisters.end(), registers);
+        std::move(top.savedRegisters.begin(), top.savedRegisters.end(), registers);
         uint8_t retReg = top.returnReg;
         callStack.pop_back();
 

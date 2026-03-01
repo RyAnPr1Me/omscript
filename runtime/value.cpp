@@ -1,6 +1,7 @@
 #include "value.h"
+#include <charconv>
 #include <cstdint>
-#include <sstream>
+#include <cstdio>
 #include <stdexcept>
 
 namespace omscript {
@@ -10,9 +11,12 @@ std::string Value::toString() const {
     case Type::INTEGER:
         return std::to_string(intValue);
     case Type::FLOAT: {
-        std::ostringstream oss;
-        oss << floatValue;
-        return oss.str();
+        // Use snprintf instead of std::ostringstream to avoid dynamic memory
+        // allocation overhead. The buffer is large enough for any double in
+        // default '%g' formatting.
+        char buf[32];
+        int len = std::snprintf(buf, sizeof(buf), "%g", floatValue);
+        return std::string(buf, static_cast<size_t>(len));
     }
     case Type::STRING:
         return std::string(stringValue.c_str());
@@ -113,6 +117,9 @@ Value Value::operator-() const {
 }
 
 bool Value::operator==(const Value& other) const {
+    if (type == Type::INTEGER && other.type == Type::INTEGER) {
+        return intValue == other.intValue;
+    }
     // Allow numeric type coercion for equality
     if ((type == Type::INTEGER || type == Type::FLOAT) && (other.type == Type::INTEGER || other.type == Type::FLOAT)) {
         return toDouble() == other.toDouble();
