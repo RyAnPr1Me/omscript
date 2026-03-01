@@ -1276,6 +1276,8 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     // Hint small helper functions for inlining at O2+.  OPTMAX functions
     // already get aggressive optimization; non-main functions with few
     // statements benefit from being inlined into their callers.
+    // 8 statements covers most simple accessors and arithmetic helpers;
+    // O3 doubles the threshold to capture larger helpers.
     static constexpr size_t kMaxInlineHintStatements = 8;
     static constexpr size_t kMaxInlineHintStatementsO3 = 16;
     size_t inlineThreshold =
