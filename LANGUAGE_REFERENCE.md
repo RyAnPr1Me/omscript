@@ -41,7 +41,7 @@ OmScript is a **low-level, C-like programming language** featuring:
 - **Reference-counted memory management** — Automatic deterministic deallocation via malloc/free with reference counting on strings.
 - **Hybrid architecture** — A bytecode VM exists as an alternative backend for future dynamic compilation scenarios. The primary path is always native code.
 - **Aggressive optimization** — Four optimization levels (O0–O3) plus a special OPTMAX directive that applies exhaustive multi-pass optimization to marked functions.
-- **66 built-in standard library functions** — Math, array manipulation, string, character classification, type conversion, system, and I/O, all compiled to native machine code.
+- **69 built-in standard library functions** — Math, array manipulation, string, character classification, type conversion, system, and I/O, all compiled to native machine code.
 
 ### Design Philosophy
 
@@ -501,8 +501,9 @@ Operators are listed from **highest** to **lowest** precedence:
 | 12 | `\|` | Left | Bitwise OR |
 | 13 | `&&` | Left | Logical AND (short-circuit) |
 | 14 | `\|\|` | Left | Logical OR (short-circuit) |
-| 15 | `? :` | Right | Ternary conditional |
 | 14.5 | `??` | Left | Null coalescing |
+| 15 | `? :` | Right | Ternary conditional |
+| 15.5 | `\|>` | Left | Pipe forward |
 | 16 | `=` `+=` `-=` `*=` `/=` `%=` | Right | Assignment |
 
 ### 7.2 Arithmetic Operators
@@ -643,6 +644,58 @@ var x = a ?? b ?? c;  // First non-zero value, or c
 | `x *= y` | `x = x * y` |
 | `x /= y` | `x = x / y` |
 | `x %= y` | `x = x % y` |
+
+### 7.10 Pipe Operator
+
+The pipe operator `|>` passes the left operand as the argument to the function on the right. It is syntactic sugar for a function call and supports both user-defined and standard library functions.
+
+```javascript
+// expr |> fn  is equivalent to  fn(expr)
+var result = [1, 2, 3] |> len;           // len([1, 2, 3]) → 3
+
+fn double(x) { return x * 2; }
+var y = 5 |> double;                      // double(5) → 10
+
+// Chaining: left-associative, evaluated left to right
+var n = [1, 2, 3, 4, 5, 6] |> len;       // 6
+```
+
+### 7.11 Lambda Expressions
+
+Lambda expressions create anonymous functions inline. They are desugared at parse time into named helper functions, so they can be used wherever a function name string literal is expected (such as `array_map`, `array_filter`, `array_reduce`).
+
+**Syntax:** `|params| body_expression`
+
+```javascript
+// Single parameter
+var doubled = array_map([1, 2, 3], |x| x * 2);    // [2, 4, 6]
+
+// Multiple parameters
+var sum = array_reduce([1, 2, 3], |acc, x| acc + x, 0);  // 6
+
+// Filter with lambda predicate
+var evens = array_filter([1, 2, 3, 4], |x| x % 2 == 0);  // [2, 4]
+
+// Zero parameters
+var always42 = || 42;
+```
+
+> **Note:** Lambdas are compile-time constructs. They do not capture variables from the enclosing scope — they are pure functions of their parameters.
+
+### 7.12 Spread Operator
+
+The spread operator `...` unpacks array elements into a new array literal. It can appear anywhere inside `[...]` brackets alongside regular elements.
+
+```javascript
+var a = [1, 2, 3];
+var b = [4, 5, 6];
+
+var combined = [...a, ...b];           // [1, 2, 3, 4, 5, 6]
+var prepended = [0, ...a];             // [0, 1, 2, 3]
+var sandwiched = [0, ...a, 99, ...b];  // [0, 1, 2, 3, 99, 4, 5, 6]
+```
+
+The spread operator computes the total length at runtime and allocates a single result array.
 
 ---
 
@@ -926,7 +979,7 @@ In the bytecode/VM runtime, strings are fully dynamic:
 
 ## 11. Standard Library
 
-OmScript provides **66 built-in functions**. All stdlib functions are compiled directly to native machine code via LLVM IR — they never go through the bytecode interpreter.
+OmScript provides **69 built-in functions**. All stdlib functions are compiled directly to native machine code via LLVM IR — they never go through the bytecode interpreter.
 
 ### 11.1 I/O Functions
 
@@ -1344,6 +1397,60 @@ var removed = array_remove(arr, 2);  // removed == 30
 // arr == [10, 20, 40, 50], len(arr) == 4
 ```
 
+#### `array_map(array, "function_name")`
+
+Applies a named function to each element of the array and returns a new array with the results. The function name must be a string literal (resolved at compile time) and the function must accept at least one argument. Lambda expressions can also be used.
+
+```javascript
+fn double(x) { return x * 2; }
+fn main() {
+    var arr = [1, 2, 3, 4, 5];
+    var doubled = array_map(arr, "double");
+    // doubled == [2, 4, 6, 8, 10]
+
+    // With lambda:
+    var tripled = array_map(arr, |x| x * 3);
+    // tripled == [3, 6, 9, 12, 15]
+    return 0;
+}
+```
+
+#### `array_filter(array, "function_name")`
+
+Returns a new array containing only the elements for which the named predicate function returns a non-zero value. The function name must be a string literal and the function must accept at least one argument. Lambda expressions can also be used.
+
+```javascript
+fn is_even(x) { return x % 2 == 0; }
+fn main() {
+    var arr = [1, 2, 3, 4, 5, 6];
+    var evens = array_filter(arr, "is_even");
+    // evens == [2, 4, 6]
+
+    // With lambda:
+    var odds = array_filter(arr, |x| x % 2 != 0);
+    // odds == [1, 3, 5]
+    return 0;
+}
+```
+
+#### `array_reduce(array, "function_name", initial)`
+
+Reduces an array to a single value by applying a named two-argument function `(accumulator, element)` across all elements, starting with the given initial value. The function name must be a string literal and the function must accept at least two arguments. Lambda expressions can also be used.
+
+```javascript
+fn add(acc, x) { return acc + x; }
+fn multiply(acc, x) { return acc * x; }
+fn main() {
+    var arr = [1, 2, 3, 4, 5];
+    var total = array_reduce(arr, "add", 0);      // 15
+    var product = array_reduce(arr, "multiply", 1); // 120
+
+    // With lambda:
+    var sum = array_reduce(arr, |a, b| a + b, 0);  // 15
+    return 0;
+}
+```
+
 ### 11.4 Character Functions
 
 #### `to_char(code)`
@@ -1682,6 +1789,9 @@ assert(0);          // always aborts: "Runtime error: assertion failed"
 | `array_slice(arr, s, e)` | 3 | array | Slice array from index `s` to `e` (exclusive) |
 | `array_copy(arr)` | 1 | array | Create a deep copy of an array |
 | `array_remove(arr, i)` | 2 | value | Remove element at index `i` and return it |
+| `array_map(arr, "fn")` | 2 | array | Apply named function to each element |
+| `array_filter(arr, "fn")` | 2 | array | Keep elements where named function returns non-zero |
+| `array_reduce(arr, "fn", init)` | 3 | value | Reduce array using named 2-arg function |
 | `typeof(x)` | 1 | 1 | Type tag (always 1/integer in native path) |
 | `assert(cond)` | 1 | 1 | Abort with error if `cond` is falsy |
 | `println(x)` | 1 | 0 | Print value with newline (alias for print) |

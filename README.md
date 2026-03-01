@@ -116,7 +116,7 @@ var m = min(3, 7);       // minimum: m = 3
 var p = pow(2, 8);       // integer exponentiation: p = 256
 var s = sqrt(16);        // integer square root: s = 4
 ```
-See [LANGUAGE_REFERENCE.md](LANGUAGE_REFERENCE.md) for the full list of 63 built-in functions.
+See [LANGUAGE_REFERENCE.md](LANGUAGE_REFERENCE.md) for the full list of 69 built-in functions.
 
 ### OPTMAX Blocks
 Use `OPTMAX=:` and `OPTMAX!:` to tag functions that require maximal optimization. Inside these functions:

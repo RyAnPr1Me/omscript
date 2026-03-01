@@ -465,6 +465,9 @@ static const std::unordered_set<std::string> stdlibFunctions = {"abs",
                                                                 "array_contains",
                                                                 "array_copy",
                                                                 "array_fill",
+                                                                "array_filter",
+                                                                "array_map",
+                                                                "array_reduce",
                                                                 "array_remove",
                                                                 "array_slice",
                                                                 "assert",
@@ -1446,6 +1449,23 @@ llvm::Value* CodeGenerator::generateExpression(Expression* expr) {
         return generateIndex(static_cast<IndexExpr*>(expr));
     case ASTNodeType::INDEX_ASSIGN_EXPR:
         return generateIndexAssign(static_cast<IndexAssignExpr*>(expr));
+    case ASTNodeType::PIPE_EXPR: {
+        // Desugar: expr |> fn  =>  fn(expr)
+        auto* pipe = static_cast<PipeExpr*>(expr);
+        // Create a synthetic CallExpr and generate it
+        std::vector<std::unique_ptr<Expression>> args;
+        args.push_back(std::move(pipe->left));
+        auto callExpr = std::make_unique<CallExpr>(pipe->functionName, std::move(args));
+        callExpr->line = pipe->line;
+        callExpr->column = pipe->column;
+        return generateCall(callExpr.get());
+    }
+    case ASTNodeType::LAMBDA_EXPR:
+        // Lambdas are desugared by the parser to string literals
+        codegenError("Lambda expression should have been desugared by parser", expr);
+    case ASTNodeType::SPREAD_EXPR:
+        // Spread expressions are only valid inside array literals
+        codegenError("Spread operator '...' is only valid inside array literals", expr);
     default:
         codegenError("Unknown expression type", expr);
     }
@@ -3750,6 +3770,236 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     // -----------------------------------------------------------------------
+    // array_map(arr, "fn_name") — apply named function to each element, return new array
+    // -----------------------------------------------------------------------
+    if (expr->callee == "array_map") {
+        if (expr->arguments.size() != 2) {
+            codegenError("Built-in function 'array_map' expects 2 arguments (array, function_name), but " +
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
+        }
+        // The second argument must be a string literal (function name)
+        auto* fnNameLit = dynamic_cast<LiteralExpr*>(expr->arguments[1].get());
+        if (!fnNameLit || fnNameLit->literalType != LiteralExpr::LiteralType::STRING) {
+            codegenError("array_map: second argument must be a string literal (function name)", expr);
+        }
+        std::string fnName = fnNameLit->stringValue;
+        // Look up the target function in the LLVM module
+        auto calleeIt = functions.find(fnName);
+        if (calleeIt == functions.end() || !calleeIt->second) {
+            codegenError("array_map: unknown function '" + fnName + "'", expr);
+        }
+        llvm::Function* mapFn = calleeIt->second;
+        if (mapFn->arg_size() < 1) {
+            codegenError("array_map: function '" + fnName + "' must accept at least 1 argument", expr);
+        }
+
+        llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
+        arrArg = toDefaultType(arrArg);
+        llvm::Value* arrPtr = builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "amap.arrptr");
+        llvm::Value* arrLen = builder->CreateLoad(getDefaultType(), arrPtr, "amap.len");
+
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
+
+        // Allocate result array: (arrLen + 1) * 8
+        llvm::Value* slots = builder->CreateAdd(arrLen, one, "amap.slots");
+        llvm::Value* bytes = builder->CreateMul(slots, eight, "amap.bytes");
+        llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "amap.buf");
+        builder->CreateStore(arrLen, buf);
+
+        // Loop: for each element, call mapFn and store result
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* preheader = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "amap.loop", function);
+        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "amap.body", function);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "amap.done", function);
+        builder->CreateBr(loopBB);
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "amap.idx");
+        idx->addIncoming(zero, preheader);
+        llvm::Value* cond = builder->CreateICmpSLT(idx, arrLen, "amap.cond");
+        builder->CreateCondBr(cond, bodyBB, doneBB);
+        builder->SetInsertPoint(bodyBB);
+        // Load element from source: arrPtr[idx + 1]
+        llvm::Value* elemIdx = builder->CreateAdd(idx, one, "amap.elemidx");
+        llvm::Value* srcPtr = builder->CreateGEP(getDefaultType(), arrPtr, elemIdx, "amap.srcptr");
+        llvm::Value* elem = builder->CreateLoad(getDefaultType(), srcPtr, "amap.elem");
+        // Call the map function with the element
+        llvm::Value* mapped = builder->CreateCall(mapFn, {elem}, "amap.mapped");
+        mapped = toDefaultType(mapped);
+        // Store into result: buf[idx + 1]
+        llvm::Value* dstPtr = builder->CreateGEP(getDefaultType(), buf, elemIdx, "amap.dstptr");
+        builder->CreateStore(mapped, dstPtr);
+        llvm::Value* nextIdx = builder->CreateAdd(idx, one, "amap.next");
+        idx->addIncoming(nextIdx, bodyBB);
+        builder->CreateBr(loopBB);
+        builder->SetInsertPoint(doneBB);
+        return builder->CreatePtrToInt(buf, getDefaultType(), "amap.result");
+    }
+
+    // -----------------------------------------------------------------------
+    // array_filter(arr, "fn_name") — return new array of elements where fn returns non-zero
+    // -----------------------------------------------------------------------
+    if (expr->callee == "array_filter") {
+        if (expr->arguments.size() != 2) {
+            codegenError("Built-in function 'array_filter' expects 2 arguments (array, function_name), but " +
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
+        }
+        auto* fnNameLit = dynamic_cast<LiteralExpr*>(expr->arguments[1].get());
+        if (!fnNameLit || fnNameLit->literalType != LiteralExpr::LiteralType::STRING) {
+            codegenError("array_filter: second argument must be a string literal (function name)", expr);
+        }
+        std::string fnName = fnNameLit->stringValue;
+        auto calleeIt = functions.find(fnName);
+        if (calleeIt == functions.end() || !calleeIt->second) {
+            codegenError("array_filter: unknown function '" + fnName + "'", expr);
+        }
+        llvm::Function* filterFn = calleeIt->second;
+        if (filterFn->arg_size() < 1) {
+            codegenError("array_filter: function '" + fnName + "' must accept at least 1 argument", expr);
+        }
+
+        llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
+        arrArg = toDefaultType(arrArg);
+        llvm::Value* arrPtr = builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "afilt.arrptr");
+        llvm::Value* arrLen = builder->CreateLoad(getDefaultType(), arrPtr, "afilt.len");
+
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
+
+        // Allocate result array with max possible size: (arrLen + 1) * 8
+        llvm::Value* slots = builder->CreateAdd(arrLen, one, "afilt.slots");
+        llvm::Value* bytes = builder->CreateMul(slots, eight, "afilt.bytes");
+        llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "afilt.buf");
+        // Initialize length to 0 (will be updated as we add elements)
+        builder->CreateStore(zero, buf);
+
+        // Loop: for each element, call filterFn; if non-zero, add to result
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* preheader = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "afilt.loop", function);
+        llvm::BasicBlock* testBB = llvm::BasicBlock::Create(*context, "afilt.test", function);
+        llvm::BasicBlock* addBB = llvm::BasicBlock::Create(*context, "afilt.add", function);
+        llvm::BasicBlock* incBB = llvm::BasicBlock::Create(*context, "afilt.inc", function);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "afilt.done", function);
+        builder->CreateBr(loopBB);
+
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "afilt.idx");
+        idx->addIncoming(zero, preheader);
+        llvm::PHINode* outIdx = builder->CreatePHI(getDefaultType(), 2, "afilt.outidx");
+        outIdx->addIncoming(zero, preheader);
+        llvm::Value* cond = builder->CreateICmpSLT(idx, arrLen, "afilt.cond");
+        builder->CreateCondBr(cond, testBB, doneBB);
+
+        builder->SetInsertPoint(testBB);
+        // Load element from source
+        llvm::Value* elemIdx = builder->CreateAdd(idx, one, "afilt.elemidx");
+        llvm::Value* srcPtr = builder->CreateGEP(getDefaultType(), arrPtr, elemIdx, "afilt.srcptr");
+        llvm::Value* elem = builder->CreateLoad(getDefaultType(), srcPtr, "afilt.elem");
+        // Call the filter function
+        llvm::Value* result = builder->CreateCall(filterFn, {elem}, "afilt.result");
+        result = toDefaultType(result);
+        llvm::Value* keep = builder->CreateICmpNE(result, zero, "afilt.keep");
+        builder->CreateCondBr(keep, addBB, incBB);
+
+        // Add element to result
+        builder->SetInsertPoint(addBB);
+        llvm::Value* dstIdx = builder->CreateAdd(outIdx, one, "afilt.dstidx");
+        llvm::Value* dstPtr = builder->CreateGEP(getDefaultType(), buf, dstIdx, "afilt.dstptr");
+        builder->CreateStore(elem, dstPtr);
+        llvm::Value* newOutIdx = builder->CreateAdd(outIdx, one, "afilt.newoutidx");
+        builder->CreateBr(incBB);
+
+        // Increment loop counter
+        builder->SetInsertPoint(incBB);
+        llvm::PHINode* outIdxMerge = builder->CreatePHI(getDefaultType(), 2, "afilt.outmerge");
+        outIdxMerge->addIncoming(outIdx, testBB);
+        outIdxMerge->addIncoming(newOutIdx, addBB);
+        llvm::Value* nextIdx = builder->CreateAdd(idx, one, "afilt.next");
+        idx->addIncoming(nextIdx, incBB);
+        outIdx->addIncoming(outIdxMerge, incBB);
+        builder->CreateBr(loopBB);
+
+        // Done: store final length
+        builder->SetInsertPoint(doneBB);
+        builder->CreateStore(outIdx, buf);
+        return builder->CreatePtrToInt(buf, getDefaultType(), "afilt.result");
+    }
+
+    // -----------------------------------------------------------------------
+    // array_reduce(arr, "fn_name", initial) — reduce array to single value
+    //   fn_name must be a function that takes 2 arguments: (accumulator, element)
+    // -----------------------------------------------------------------------
+    if (expr->callee == "array_reduce") {
+        if (expr->arguments.size() != 3) {
+            codegenError("Built-in function 'array_reduce' expects 3 arguments (array, function_name, initial), but " +
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
+        }
+        auto* fnNameLit = dynamic_cast<LiteralExpr*>(expr->arguments[1].get());
+        if (!fnNameLit || fnNameLit->literalType != LiteralExpr::LiteralType::STRING) {
+            codegenError("array_reduce: second argument must be a string literal (function name)", expr);
+        }
+        std::string fnName = fnNameLit->stringValue;
+        auto calleeIt = functions.find(fnName);
+        if (calleeIt == functions.end() || !calleeIt->second) {
+            codegenError("array_reduce: unknown function '" + fnName + "'", expr);
+        }
+        llvm::Function* reduceFn = calleeIt->second;
+        if (reduceFn->arg_size() < 2) {
+            codegenError("array_reduce: function '" + fnName + "' must accept at least 2 arguments (accumulator, element)", expr);
+        }
+
+        llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
+        llvm::Value* initVal = generateExpression(expr->arguments[2].get());
+        arrArg = toDefaultType(arrArg);
+        initVal = toDefaultType(initVal);
+        llvm::Value* arrPtr = builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "areduce.arrptr");
+        llvm::Value* arrLen = builder->CreateLoad(getDefaultType(), arrPtr, "areduce.len");
+
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+
+        // Loop: accumulate with fn(acc, element)
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* preheader = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "areduce.loop", function);
+        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "areduce.body", function);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "areduce.done", function);
+        builder->CreateBr(loopBB);
+
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "areduce.idx");
+        idx->addIncoming(zero, preheader);
+        llvm::PHINode* acc = builder->CreatePHI(getDefaultType(), 2, "areduce.acc");
+        acc->addIncoming(initVal, preheader);
+        llvm::Value* cond = builder->CreateICmpSLT(idx, arrLen, "areduce.cond");
+        builder->CreateCondBr(cond, bodyBB, doneBB);
+
+        builder->SetInsertPoint(bodyBB);
+        // Load element from source: arrPtr[idx + 1]
+        llvm::Value* elemIdx = builder->CreateAdd(idx, one, "areduce.elemidx");
+        llvm::Value* srcPtr = builder->CreateGEP(getDefaultType(), arrPtr, elemIdx, "areduce.srcptr");
+        llvm::Value* elem = builder->CreateLoad(getDefaultType(), srcPtr, "areduce.elem");
+        // Call reduce function: fn(accumulator, element)
+        llvm::Value* newAcc = builder->CreateCall(reduceFn, {acc, elem}, "areduce.newacc");
+        newAcc = toDefaultType(newAcc);
+        llvm::Value* nextIdx = builder->CreateAdd(idx, one, "areduce.next");
+        idx->addIncoming(nextIdx, bodyBB);
+        acc->addIncoming(newAcc, bodyBB);
+        builder->CreateBr(loopBB);
+
+        // Done: return final accumulator
+        builder->SetInsertPoint(doneBB);
+        return acc;
+    }
+
+    // -----------------------------------------------------------------------
     // println(x) — print value followed by newline (same as print but explicit)
     // -----------------------------------------------------------------------
     if (expr->callee == "println") {
@@ -4361,32 +4611,132 @@ llvm::Value* CodeGenerator::generateTernary(TernaryExpr* expr) {
 }
 
 llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
-    size_t numElements = expr->elements.size();
-    // Allocate space for (1 + numElements) i64 slots: [length, elem0, elem1, ...]
-    size_t totalSlots = 1 + numElements;
-
-    // Use heap allocation (malloc) so that arrays survive function returns.
-    // Stack allocation (alloca) would be invalidated when the enclosing
-    // function returns, causing use-after-free when the caller accesses the
-    // array through the returned pointer-as-i64.
-    llvm::Value* byteSize = llvm::ConstantInt::get(getDefaultType(), totalSlots * 8);
-    llvm::Value* arrPtr = builder->CreateCall(getOrDeclareMalloc(), {byteSize}, "arr");
-
-    // Store the length in slot 0 (arrPtr points to slot 0)
-    builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), numElements), arrPtr);
-
-    // Store each element in slots 1..N
-    for (size_t i = 0; i < numElements; i++) {
-        llvm::Value* elemVal = generateExpression(expr->elements[i].get());
-        // Array slots are i64, so convert if needed
-        elemVal = toDefaultType(elemVal);
-        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrPtr,
-                                                  llvm::ConstantInt::get(getDefaultType(), i + 1), "arr.elem.ptr");
-        builder->CreateStore(elemVal, elemPtr);
+    // Check if any elements are spread expressions
+    bool hasSpread = false;
+    for (const auto& elem : expr->elements) {
+        if (elem->type == ASTNodeType::SPREAD_EXPR) {
+            hasSpread = true;
+            break;
+        }
     }
 
-    // Return the array pointer as an i64 for the dynamic type system
-    return builder->CreatePtrToInt(arrPtr, getDefaultType(), "arr.int");
+    if (!hasSpread) {
+        // Original fast path: all elements are plain expressions with known count
+        size_t numElements = expr->elements.size();
+        size_t totalSlots = 1 + numElements;
+
+        llvm::Value* byteSize = llvm::ConstantInt::get(getDefaultType(), totalSlots * 8);
+        llvm::Value* arrPtr = builder->CreateCall(getOrDeclareMalloc(), {byteSize}, "arr");
+
+        builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), numElements), arrPtr);
+
+        for (size_t i = 0; i < numElements; i++) {
+            llvm::Value* elemVal = generateExpression(expr->elements[i].get());
+            elemVal = toDefaultType(elemVal);
+            llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrPtr,
+                                                      llvm::ConstantInt::get(getDefaultType(), i + 1), "arr.elem.ptr");
+            builder->CreateStore(elemVal, elemPtr);
+        }
+
+        return builder->CreatePtrToInt(arrPtr, getDefaultType(), "arr.int");
+    }
+
+    // Spread path: compute total length dynamically
+    // First pass: compute total number of elements
+    llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+    llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+    llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
+    llvm::Value* totalLen = zero;
+
+    // We need to evaluate spread source arrays to get their lengths
+    // Store evaluated values so we don't evaluate twice
+    struct ElemInfo {
+        llvm::Value* val;    // Evaluated value (element or array ptr)
+        bool isSpread;       // Whether this is a spread element
+        llvm::Value* len;    // Length of spread array (if isSpread)
+    };
+    std::vector<ElemInfo> evalElems;
+
+    for (const auto& elem : expr->elements) {
+        if (elem->type == ASTNodeType::SPREAD_EXPR) {
+            auto* spread = static_cast<SpreadExpr*>(elem.get());
+            llvm::Value* arrVal = generateExpression(spread->operand.get());
+            arrVal = toDefaultType(arrVal);
+            llvm::Value* arrPtr = builder->CreateIntToPtr(arrVal, llvm::PointerType::getUnqual(*context), "spread.arrptr");
+            llvm::Value* arrLen = builder->CreateLoad(getDefaultType(), arrPtr, "spread.len");
+            totalLen = builder->CreateAdd(totalLen, arrLen, "spread.addlen");
+            evalElems.push_back({arrVal, true, arrLen});
+        } else {
+            llvm::Value* elemVal = generateExpression(elem.get());
+            elemVal = toDefaultType(elemVal);
+            totalLen = builder->CreateAdd(totalLen, one, "spread.addone");
+            evalElems.push_back({elemVal, false, nullptr});
+        }
+    }
+
+    // Allocate result array: (totalLen + 1) * 8
+    llvm::Value* slots = builder->CreateAdd(totalLen, one, "spread.slots");
+    llvm::Value* bytes = builder->CreateMul(slots, eight, "spread.bytes");
+    llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "spread.buf");
+    builder->CreateStore(totalLen, buf);
+
+    // Second pass: copy elements into the result array
+    // We use an alloca to track the current write index
+    llvm::Function* function = builder->GetInsertBlock()->getParent();
+    llvm::AllocaInst* writeIdx = createEntryBlockAlloca(function, "_spread_idx");
+    builder->CreateStore(zero, writeIdx);
+
+    for (const auto& ei : evalElems) {
+        if (ei.isSpread) {
+            // Copy all elements from the spread array
+            llvm::Value* srcVal = ei.val;
+            llvm::Value* srcPtr = builder->CreateIntToPtr(srcVal, llvm::PointerType::getUnqual(*context), "spread.src");
+            llvm::Value* srcLen = ei.len;
+
+            // Loop: copy srcLen elements
+            llvm::BasicBlock* preheader = builder->GetInsertBlock();
+            llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "spread.copy.loop", function);
+            llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "spread.copy.body", function);
+            llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "spread.copy.done", function);
+
+            builder->CreateBr(loopBB);
+            builder->SetInsertPoint(loopBB);
+            llvm::PHINode* i = builder->CreatePHI(getDefaultType(), 2, "spread.i");
+            i->addIncoming(zero, preheader);
+            llvm::Value* cond = builder->CreateICmpSLT(i, srcLen, "spread.cond");
+            builder->CreateCondBr(cond, bodyBB, doneBB);
+
+            builder->SetInsertPoint(bodyBB);
+            // Load element from source: srcPtr[i + 1]
+            llvm::Value* srcIdx = builder->CreateAdd(i, one, "spread.srcidx");
+            llvm::Value* srcElemPtr = builder->CreateGEP(getDefaultType(), srcPtr, srcIdx, "spread.srcelem");
+            llvm::Value* elem = builder->CreateLoad(getDefaultType(), srcElemPtr, "spread.elem");
+            // Store in dest: buf[writeIdx + 1]
+            llvm::Value* curIdx = builder->CreateLoad(getDefaultType(), writeIdx, "spread.curidx");
+            llvm::Value* dstIdx = builder->CreateAdd(curIdx, one, "spread.dstidx");
+            llvm::Value* dstPtr = builder->CreateGEP(getDefaultType(), buf, dstIdx, "spread.dstptr");
+            builder->CreateStore(elem, dstPtr);
+            // Increment write index
+            llvm::Value* newIdx = builder->CreateAdd(curIdx, one, "spread.newidx");
+            builder->CreateStore(newIdx, writeIdx);
+            // Increment loop counter
+            llvm::Value* nextI = builder->CreateAdd(i, one, "spread.nexti");
+            i->addIncoming(nextI, bodyBB);
+            builder->CreateBr(loopBB);
+
+            builder->SetInsertPoint(doneBB);
+        } else {
+            // Single element: store at buf[writeIdx + 1]
+            llvm::Value* curIdx = builder->CreateLoad(getDefaultType(), writeIdx, "spread.curidx");
+            llvm::Value* dstIdx = builder->CreateAdd(curIdx, one, "spread.dstidx");
+            llvm::Value* dstPtr = builder->CreateGEP(getDefaultType(), buf, dstIdx, "spread.dstptr");
+            builder->CreateStore(ei.val, dstPtr);
+            llvm::Value* newIdx = builder->CreateAdd(curIdx, one, "spread.newidx");
+            builder->CreateStore(newIdx, writeIdx);
+        }
+    }
+
+    return builder->CreatePtrToInt(buf, getDefaultType(), "spread.result");
 }
 
 llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
@@ -5032,9 +5382,10 @@ std::unique_ptr<llvm::TargetMachine> CodeGenerator::createTargetMachine() const 
     std::string features;
     resolveTargetCPU(cpu, features);
 
-    // Map the compiler's optimization level to LLVM's backend CodeGenOptLevel
+    // Map the compiler's optimization level to LLVM's backend CodeGenOpt level
     // so that instruction selection, scheduling, and register allocation use
     // the appropriate aggressiveness.
+#if LLVM_VERSION_MAJOR >= 18
     llvm::CodeGenOptLevel cgOpt = llvm::CodeGenOptLevel::Default;
     switch (optimizationLevel) {
     case OptimizationLevel::O0:
@@ -5050,6 +5401,23 @@ std::unique_ptr<llvm::TargetMachine> CodeGenerator::createTargetMachine() const 
         cgOpt = llvm::CodeGenOptLevel::Aggressive;
         break;
     }
+#else
+    llvm::CodeGenOpt::Level cgOpt = llvm::CodeGenOpt::Default;
+    switch (optimizationLevel) {
+    case OptimizationLevel::O0:
+        cgOpt = llvm::CodeGenOpt::None;
+        break;
+    case OptimizationLevel::O1:
+        cgOpt = llvm::CodeGenOpt::Less;
+        break;
+    case OptimizationLevel::O2:
+        cgOpt = llvm::CodeGenOpt::Default;
+        break;
+    case OptimizationLevel::O3:
+        cgOpt = llvm::CodeGenOpt::Aggressive;
+        break;
+    }
+#endif
 
 #if LLVM_VERSION_MAJOR >= 19
     return std::unique_ptr<llvm::TargetMachine>(

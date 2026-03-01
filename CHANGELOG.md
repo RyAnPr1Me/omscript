@@ -5,6 +5,53 @@ All notable changes to the OmScript compiler will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-03-01
+
+### Added
+- **Lambda expressions**: `|x| x * 2` syntax for anonymous functions — desugared at parse time to named functions; works seamlessly with `array_map`, `array_filter`, and `array_reduce`
+  - Single parameter: `|x| x * 2`
+  - Multiple parameters: `|a, b| a + b`
+  - Zero parameters: `|| 42`
+- **Pipe operator** (`|>`): left-to-right function chaining — `expr |> fn` desugars to `fn(expr)`; supports both stdlib and user-defined functions; left-associative for chaining: `x |> f |> g`
+- **Spread operator** (`...`): array unpacking in array literals — `[1, ...arr, 2]` creates a new array with elements from `arr` spliced in; supports multiple spreads and dynamic runtime length computation
+- New lexer tokens: `PIPE_FORWARD` (`|>`), `FAT_ARROW` (`=>`), `SPREAD` (reserved)
+- New AST node types: `LAMBDA_EXPR`, `SPREAD_EXPR`, `PIPE_EXPR`
+- 21 new unit tests (6 lexer, 7 parser, 8 codegen)
+- Integration test: `examples/lambda_pipe_spread_test.om`
+
+## [1.9.0] - 2026-03-01
+
+### Added
+- **`array_map(arr, "fn_name")`** built-in — applies a named function to each element and returns a new array; the function name must be a string literal resolved at compile time
+- **`array_filter(arr, "fn_name")`** built-in — returns a new array containing only elements for which the named predicate function returns a non-zero value
+- **`array_reduce(arr, "fn_name", initial)`** built-in — reduces an array to a single value by applying a named two-argument function (accumulator, element) across all elements
+- Standard library count increased from 66 to 69 built-in functions
+
+### Fixed
+- **LLVM 17 compatibility**: `CodeGenOpt::Level` vs `CodeGenOptLevel` API difference now handled via `#if LLVM_VERSION_MAJOR >= 18` guards in `src/codegen.cpp` and `runtime/jit.cpp`
+
+## [1.8.0] - 2026-03-01
+
+### Added
+- **LLVM intrinsics for math builtins**: `abs`, `sqrt`, `min`, `max`, `floor`, `ceil`, `round`, and `clamp` now emit native LLVM intrinsics (e.g. `llvm.abs.i64`, `llvm.sqrt.f64`, `llvm.smin`, `llvm.maxnum`) instead of manual compare-and-select or loop-based implementations
+- **Binary exponentiation**: `**` operator and `pow()` builtin use O(log n) exponentiation by squaring instead of O(n) linear multiply loop
+- **O1 pipeline upgrade**: replaced legacy `FunctionPassManager` (6 local passes, no IPO) with `PassBuilder::buildPerModuleDefaultPipeline(O1)`, gaining inlining, IPSCCP, GlobalDCE, and jump threading
+- **CodeGenOptLevel mapping**: `createTargetMachine()` now passes the correct `llvm::CodeGenOptLevel` so backend instruction selection, scheduling, and register allocation match the requested `-O` level
+- **JIT passes**: added SROA, EarlyCSE, DCE, and TailCallElimination to JIT optimization pipeline
+- Target triple and data layout are now always set on the LLVM module (previously skipped at O0)
+- Inline hint threshold increased from 8 to 16 statements at O3
+- Linker now receives `-O` level and `-lm` flags
+
+### Changed
+- **VM CALL handler**: deferred type profiling after JIT cache checks so hot JIT paths skip `classifyArgTypes` + `recordTypes` overhead; eliminated redundant `functions.find()` hash-map lookup by reusing a single iterator
+- **`Value::toString()` float path**: replaced `std::ostringstream` (heap-allocating) with `snprintf` into a stack buffer
+- **`Value::operator==` int fast path**: direct `intValue` comparison when both operands are INTEGER, avoiding `toDouble()` promotion
+- **`JITCompiler::recordCall()` hot path**: single `find()` on `callCounts_` for repeat calls instead of three `.count()` lookups per invocation
+- **Register restore**: `std::move` instead of `std::copy` when restoring registers from call frames, avoiding refcount churn on string Values
+
+### Fixed
+- `CodegenTest.NoInliningAtO1` test updated to `InliningAtO1` — O1 standard pipeline now includes inlining, so the assertion was corrected to match actual behavior
+
 ## [1.7.0] - 2026-03-01
 
 ### Added

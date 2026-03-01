@@ -495,6 +495,9 @@ std::vector<Token> Lexer::tokenize() {
             if (peek() == '=') {
                 advance();
                 tokens.push_back(makeToken(TokenType::EQ, "=="));
+            } else if (peek() == '>') {
+                advance();
+                tokens.push_back(makeToken(TokenType::FAT_ARROW, "=>"));
             } else {
                 tokens.push_back(makeToken(TokenType::ASSIGN, "="));
             }
@@ -559,6 +562,9 @@ std::vector<Token> Lexer::tokenize() {
             if (peek() == '|') {
                 advance();
                 tokens.push_back(makeToken(TokenType::OR, "||"));
+            } else if (peek() == '>') {
+                advance();
+                tokens.push_back(makeToken(TokenType::PIPE_FORWARD, "|>"));
             } else if (peek() == '=') {
                 advance();
                 tokens.push_back(makeToken(TokenType::PIPE_ASSIGN, "|="));

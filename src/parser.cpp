@@ -130,6 +130,12 @@ std::unique_ptr<Program> Parser::parse() {
         throw std::runtime_error(combined);
     }
 
+    // Append generated lambda functions to the program
+    for (auto& lf : lambdaFunctions_) {
+        functions.push_back(std::move(lf));
+    }
+    lambdaFunctions_.clear();
+
     return std::make_unique<Program>(std::move(functions), std::move(enums));
 }
 
@@ -512,7 +518,7 @@ std::unique_ptr<Expression> Parser::parseExpression() {
 }
 
 std::unique_ptr<Expression> Parser::parseAssignment() {
-    auto expr = parseTernary();
+    auto expr = parsePipe();
 
     if (match(TokenType::ASSIGN)) {
         // Check if left side is an identifier
@@ -980,6 +986,42 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
         return arrayExpr;
     }
 
+    // Lambda expression: |params| body
+    if (match(TokenType::PIPE)) {
+        return parseLambda();
+    }
+
+    // Lambda with || (empty params): || body
+    if (match(TokenType::OR)) {
+        // || is the empty-parameter lambda: || expr
+        Token orToken = tokens[current - 1];
+        auto body = parseExpression();
+        auto node = std::make_unique<LambdaExpr>(std::vector<std::string>{}, std::move(body));
+        node->line = orToken.line;
+        node->column = orToken.column;
+
+        // Desugar to named function
+        std::string lambdaName = "__lambda_" + std::to_string(lambdaCounter_++);
+        std::vector<Parameter> fnParams;
+        auto returnStmt = std::make_unique<ReturnStmt>(std::move(node->body));
+        returnStmt->line = orToken.line;
+        returnStmt->column = orToken.column;
+        std::vector<std::unique_ptr<Statement>> stmts;
+        stmts.push_back(std::move(returnStmt));
+        auto block = std::make_unique<BlockStmt>(std::move(stmts));
+        block->line = orToken.line;
+        block->column = orToken.column;
+        auto fnDecl = std::make_unique<FunctionDecl>(lambdaName, std::move(fnParams), std::move(block));
+        fnDecl->line = orToken.line;
+        fnDecl->column = orToken.column;
+        lambdaFunctions_.push_back(std::move(fnDecl));
+
+        auto nameLit = std::make_unique<LiteralExpr>(lambdaName);
+        nameLit->line = orToken.line;
+        nameLit->column = orToken.column;
+        return nameLit;
+    }
+
     error("Expected expression");
     return nullptr;
 }
@@ -989,13 +1031,88 @@ std::unique_ptr<Expression> Parser::parseArrayLiteral() {
 
     if (!check(TokenType::RBRACKET)) {
         do {
-            elements.push_back(parseExpression());
+            // Handle spread operator: ...expr
+            if (match(TokenType::RANGE)) {
+                Token spreadToken = tokens[current - 1];
+                auto operand = parseExpression();
+                auto node = std::make_unique<SpreadExpr>(std::move(operand));
+                node->line = spreadToken.line;
+                node->column = spreadToken.column;
+                elements.push_back(std::move(node));
+            } else {
+                elements.push_back(parseExpression());
+            }
         } while (match(TokenType::COMMA));
     }
 
     consume(TokenType::RBRACKET, "Expected ']' after array elements");
 
     return std::make_unique<ArrayExpr>(std::move(elements));
+}
+
+std::unique_ptr<Expression> Parser::parsePipe() {
+    auto expr = parseTernary();
+
+    while (match(TokenType::PIPE_FORWARD)) {
+        Token pipeToken = tokens[current - 1];
+        Token fnName = consume(TokenType::IDENTIFIER, "Expected function name after '|>'");
+        auto node = std::make_unique<PipeExpr>(std::move(expr), fnName.lexeme);
+        node->line = pipeToken.line;
+        node->column = pipeToken.column;
+        expr = std::move(node);
+    }
+
+    return expr;
+}
+
+std::unique_ptr<Expression> Parser::parseLambda() {
+    Token pipeToken = tokens[current - 1]; // the opening |
+    std::vector<std::string> params;
+
+    // Parse lambda parameters: |x| or |x, y| or ||
+    if (!check(TokenType::PIPE)) {
+        do {
+            Token paramName = consume(TokenType::IDENTIFIER, "Expected parameter name in lambda");
+            params.push_back(paramName.lexeme);
+        } while (match(TokenType::COMMA));
+    }
+
+    consume(TokenType::PIPE, "Expected '|' after lambda parameters");
+
+    // Parse the lambda body expression
+    auto body = parseExpression();
+
+    auto node = std::make_unique<LambdaExpr>(std::move(params), std::move(body));
+    node->line = pipeToken.line;
+    node->column = pipeToken.column;
+
+    // Desugar: generate a named function and return its name as a string literal
+    std::string lambdaName = "__lambda_" + std::to_string(lambdaCounter_++);
+
+    // Create the function: fn __lambda_N(params...) { return body; }
+    std::vector<Parameter> fnParams;
+    for (const auto& p : node->params) {
+        fnParams.push_back(Parameter(p));
+    }
+    auto returnStmt = std::make_unique<ReturnStmt>(std::move(node->body));
+    returnStmt->line = pipeToken.line;
+    returnStmt->column = pipeToken.column;
+    std::vector<std::unique_ptr<Statement>> stmts;
+    stmts.push_back(std::move(returnStmt));
+    auto block = std::make_unique<BlockStmt>(std::move(stmts));
+    block->line = pipeToken.line;
+    block->column = pipeToken.column;
+    auto fnDecl = std::make_unique<FunctionDecl>(lambdaName, std::move(fnParams), std::move(block));
+    fnDecl->line = pipeToken.line;
+    fnDecl->column = pipeToken.column;
+
+    lambdaFunctions_.push_back(std::move(fnDecl));
+
+    // Return the lambda name as a string literal (for use with array_map, etc.)
+    auto nameLit = std::make_unique<LiteralExpr>(lambdaName);
+    nameLit->line = pipeToken.line;
+    nameLit->column = pipeToken.column;
+    return nameLit;
 }
 
 } // namespace omscript

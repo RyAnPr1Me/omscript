@@ -1628,6 +1628,12 @@ const char* tokenTypeToString(omscript::TokenType type) {
         return "RANGE";
     case omscript::TokenType::ARROW:
         return "ARROW";
+    case omscript::TokenType::FAT_ARROW:
+        return "FAT_ARROW";
+    case omscript::TokenType::PIPE_FORWARD:
+        return "PIPE_FORWARD";
+    case omscript::TokenType::SPREAD:
+        return "SPREAD";
     case omscript::TokenType::LPAREN:
         return "LPAREN";
     case omscript::TokenType::RPAREN:

@@ -24,6 +24,10 @@ class Parser {
     size_t current;
     bool inOptMaxFunction;
     std::vector<std::string> errors_;
+    int lambdaCounter_ = 0;
+
+    /// Generated lambda functions to be appended to the program.
+    std::vector<std::unique_ptr<FunctionDecl>> lambdaFunctions_;
 
     Token peek(int offset = 0) const;
     Token advance();
@@ -73,6 +77,8 @@ class Parser {
     std::unique_ptr<Expression> parseCall();
     std::unique_ptr<Expression> parsePrimary();
     std::unique_ptr<Expression> parseArrayLiteral();
+    std::unique_ptr<Expression> parseLambda();
+    std::unique_ptr<Expression> parsePipe();
 
     [[noreturn]] void error(const std::string& message);
 };
