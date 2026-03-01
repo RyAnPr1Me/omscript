@@ -34,6 +34,10 @@ enum class TokenType {
     SWITCH,
     CASE,
     DEFAULT,
+    TRY,
+    CATCH,
+    THROW,
+    ENUM,
 
     // Operators
     PLUS,

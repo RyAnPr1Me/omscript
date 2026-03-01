@@ -462,14 +462,16 @@ namespace omscript {
 // never through the bytecode/dynamic compilation path.
 static const std::unordered_set<std::string> stdlibFunctions = {
     "abs",          "array_concat", "array_contains", "array_fill",   "array_slice",  "assert",
-    "ceil",         "char_at",      "clamp",          "floor",        "gcd",          "index_of",
-    "input",        "is_alpha",     "is_digit",       "is_even",      "is_odd",       "len",
-    "log2",         "max",          "min",            "pop",          "pow",          "print",
-    "print_char",   "push",         "reverse",        "round",        "sign",         "sort",
-    "sqrt",         "str_concat",   "str_contains",   "str_ends_with","str_eq",       "str_find",
-    "str_index_of", "str_len",      "str_lower",      "str_repeat",   "str_replace",  "str_reverse",
-    "str_starts_with","str_substr", "str_trim",       "str_upper",    "sum",          "swap",
-    "to_char",      "to_float",     "to_int",         "to_string",    "typeof"};
+    "ceil",         "char_at",      "clamp",          "exit_program",  "floor",        "gcd",
+    "index_of",     "input",        "is_alpha",       "is_digit",     "is_even",      "is_odd",
+    "len",          "log2",         "max",            "min",          "pop",          "pow",
+    "print",        "print_char",   "println",        "push",         "random",       "reverse",
+    "round",        "sign",         "sleep",          "sort",         "sqrt",         "str_chars",
+    "str_concat",   "str_contains", "str_ends_with",  "str_eq",       "str_find",     "str_index_of",
+    "str_len",      "str_lower",    "str_repeat",     "str_replace",  "str_reverse",  "str_split",
+    "str_starts_with","str_substr", "str_to_float",   "str_to_int",   "str_trim",     "str_upper",
+    "sum",          "swap",         "time",           "to_char",      "to_float",     "to_int",
+    "to_string",    "typeof",       "write"};
 
 bool isStdlibFunction(const std::string& name) {
     return stdlibFunctions.find(name) != stdlibFunctions.end();
@@ -849,6 +851,93 @@ llvm::Function* CodeGenerator::getOrDeclareQsort() {
     return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "qsort", module.get());
 }
 
+llvm::Function* CodeGenerator::getOrDeclareRand() {
+    if (auto* fn = module->getFunction("rand"))
+        return fn;
+    auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), false);
+    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "rand", module.get());
+}
+
+llvm::Function* CodeGenerator::getOrDeclareSrand() {
+    if (auto* fn = module->getFunction("srand"))
+        return fn;
+    auto* ty =
+        llvm::FunctionType::get(llvm::Type::getVoidTy(*context), {llvm::Type::getInt32Ty(*context)}, false);
+    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "srand", module.get());
+}
+
+llvm::Function* CodeGenerator::getOrDeclareTimeFunc() {
+    if (auto* fn = module->getFunction("time"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(getDefaultType(), {ptrTy}, false);
+    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "time", module.get());
+}
+
+llvm::Function* CodeGenerator::getOrDeclareUsleep() {
+    if (auto* fn = module->getFunction("usleep"))
+        return fn;
+    auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context),
+                                       {llvm::Type::getInt32Ty(*context)}, false);
+    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "usleep", module.get());
+}
+
+llvm::Function* CodeGenerator::getOrDeclareStrchr() {
+    if (auto* fn = module->getFunction("strchr"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy, llvm::Type::getInt32Ty(*context)}, false);
+    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strchr", module.get());
+}
+
+llvm::Function* CodeGenerator::getOrDeclareStrndup() {
+    if (auto* fn = module->getFunction("strndup"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy, getDefaultType()}, false);
+    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strndup", module.get());
+}
+
+llvm::Function* CodeGenerator::getOrDeclareRealloc() {
+    if (auto* fn = module->getFunction("realloc"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy, getDefaultType()}, false);
+    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "realloc", module.get());
+}
+
+llvm::Function* CodeGenerator::getOrDeclareAtoi() {
+    if (auto* fn = module->getFunction("atoi"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {ptrTy}, false);
+    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "atoi", module.get());
+}
+
+llvm::Function* CodeGenerator::getOrDeclareAtof() {
+    if (auto* fn = module->getFunction("atof"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(llvm::Type::getDoubleTy(*context), {ptrTy}, false);
+    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "atof", module.get());
+}
+
+llvm::Function* CodeGenerator::getOrDeclareFwrite() {
+    if (auto* fn = module->getFunction("fwrite"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(getDefaultType(), {ptrTy, getDefaultType(), getDefaultType(), ptrTy}, false);
+    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "fwrite", module.get());
+}
+
+llvm::Function* CodeGenerator::getOrDeclareFflush() {
+    if (auto* fn = module->getFunction("fflush"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {ptrTy}, false);
+    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "fflush", module.get());
+}
+
 // ---------------------------------------------------------------------------
 // String type inference helpers
 // ---------------------------------------------------------------------------
@@ -1090,6 +1179,14 @@ void CodeGenerator::generate(Program* program) {
         functions[func->name] = function;
     }
 
+    // Process enum declarations: store constant values for identifier resolution.
+    for (auto& enumDecl : program->enums) {
+        for (auto& [memberName, memberValue] : enumDecl->members) {
+            std::string fullName = enumDecl->name + "_" + memberName;
+            enumConstants_[fullName] = memberValue;
+        }
+    }
+
     // Pre-analyze string types: determine which functions return strings and
     // which parameters receive string arguments, so that print/concat/etc.
     // work correctly when strings cross function boundaries.
@@ -1245,6 +1342,15 @@ void CodeGenerator::generateStatement(Statement* stmt) {
     case ASTNodeType::SWITCH_STMT:
         generateSwitch(static_cast<SwitchStmt*>(stmt));
         break;
+    case ASTNodeType::TRY_CATCH_STMT:
+        generateTryCatch(static_cast<TryCatchStmt*>(stmt));
+        break;
+    case ASTNodeType::THROW_STMT:
+        generateThrow(static_cast<ThrowStmt*>(stmt));
+        break;
+    case ASTNodeType::ENUM_DECL:
+        // Enums are handled at program level, nothing to do here
+        break;
     default:
         codegenError("Unknown statement type", stmt);
     }
@@ -1296,6 +1402,11 @@ llvm::Value* CodeGenerator::generateLiteral(LiteralExpr* expr) {
 llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
     auto it = namedValues.find(expr->name);
     if (it == namedValues.end() || !it->second) {
+        // Check if this is an enum constant
+        auto enumIt = enumConstants_.find(expr->name);
+        if (enumIt != enumConstants_.end()) {
+            return llvm::ConstantInt::get(getDefaultType(), enumIt->second);
+        }
         codegenError("Unknown variable: " + expr->name, expr);
     }
     auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(it->second);
@@ -3428,6 +3539,395 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         return builder->CreatePtrToInt(buf, getDefaultType(), "slice.result");
     }
 
+    // -----------------------------------------------------------------------
+    // println(x) — print value followed by newline (same as print but explicit)
+    // -----------------------------------------------------------------------
+    if (expr->callee == "println") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'println' expects 1 argument, but " +
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
+        }
+        Expression* argExpr = expr->arguments[0].get();
+        llvm::Value* arg = generateExpression(argExpr);
+        if (arg->getType()->isDoubleTy()) {
+            llvm::GlobalVariable* floatFmt = module->getGlobalVariable("println_float_fmt", true);
+            if (!floatFmt) {
+                floatFmt = builder->CreateGlobalString("%g\n", "println_float_fmt");
+            }
+            builder->CreateCall(getPrintfFunction(), {floatFmt, arg});
+        } else if (arg->getType()->isPointerTy() || isStringExpr(argExpr)) {
+            if (!arg->getType()->isPointerTy()) {
+                arg = builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "println.str.ptr");
+            }
+            llvm::GlobalVariable* strFmt = module->getGlobalVariable("println_str_fmt", true);
+            if (!strFmt) {
+                strFmt = builder->CreateGlobalString("%s\n", "println_str_fmt");
+            }
+            builder->CreateCall(getPrintfFunction(), {strFmt, arg});
+        } else {
+            llvm::GlobalVariable* formatStr = module->getGlobalVariable("println_fmt", true);
+            if (!formatStr) {
+                formatStr = builder->CreateGlobalString("%lld\n", "println_fmt");
+            }
+            builder->CreateCall(getPrintfFunction(), {formatStr, arg});
+        }
+        return llvm::ConstantInt::get(getDefaultType(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // write(x) — print without trailing newline
+    // -----------------------------------------------------------------------
+    if (expr->callee == "write") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'write' expects 1 argument, but " +
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
+        }
+        Expression* argExpr = expr->arguments[0].get();
+        llvm::Value* arg = generateExpression(argExpr);
+        if (arg->getType()->isDoubleTy()) {
+            llvm::GlobalVariable* floatFmt = module->getGlobalVariable("write_float_fmt", true);
+            if (!floatFmt) {
+                floatFmt = builder->CreateGlobalString("%g", "write_float_fmt");
+            }
+            builder->CreateCall(getPrintfFunction(), {floatFmt, arg});
+        } else if (arg->getType()->isPointerTy() || isStringExpr(argExpr)) {
+            if (!arg->getType()->isPointerTy()) {
+                arg = builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "write.str.ptr");
+            }
+            llvm::GlobalVariable* strFmt = module->getGlobalVariable("write_str_fmt", true);
+            if (!strFmt) {
+                strFmt = builder->CreateGlobalString("%s", "write_str_fmt");
+            }
+            builder->CreateCall(getPrintfFunction(), {strFmt, arg});
+        } else {
+            llvm::GlobalVariable* formatStr = module->getGlobalVariable("write_fmt", true);
+            if (!formatStr) {
+                formatStr = builder->CreateGlobalString("%lld", "write_fmt");
+            }
+            builder->CreateCall(getPrintfFunction(), {formatStr, arg});
+        }
+        return llvm::ConstantInt::get(getDefaultType(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // exit_program(code) — terminate the process with the given exit code
+    // -----------------------------------------------------------------------
+    if (expr->callee == "exit_program") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'exit_program' expects 1 argument, but " +
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
+        }
+        llvm::Value* code = generateExpression(expr->arguments[0].get());
+        code = toDefaultType(code);
+        llvm::Value* code32 = builder->CreateTrunc(code, llvm::Type::getInt32Ty(*context), "exit.code");
+        builder->CreateCall(getOrDeclareExit(), {code32});
+        builder->CreateUnreachable();
+        // Create a dead block so subsequent IR generation still has an insert point.
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* deadBB = llvm::BasicBlock::Create(*context, "exit.dead", function);
+        builder->SetInsertPoint(deadBB);
+        return llvm::ConstantInt::get(getDefaultType(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // random() — returns a pseudo-random integer (seeds once automatically)
+    // -----------------------------------------------------------------------
+    if (expr->callee == "random") {
+        if (!expr->arguments.empty()) {
+            codegenError("Built-in function 'random' expects 0 arguments, but " +
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
+        }
+        // Seed on first call via a global flag
+        llvm::GlobalVariable* seeded = module->getGlobalVariable("__om_rand_seeded", true);
+        if (!seeded) {
+            seeded = new llvm::GlobalVariable(*module, llvm::Type::getInt32Ty(*context), false,
+                                              llvm::GlobalValue::InternalLinkage,
+                                              llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0),
+                                              "__om_rand_seeded");
+        }
+        llvm::Value* flag = builder->CreateLoad(llvm::Type::getInt32Ty(*context), seeded, "rand.flag");
+        llvm::Value* isZero = builder->CreateICmpEQ(flag, llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0), "rand.cmp");
+
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* seedBB = llvm::BasicBlock::Create(*context, "rand.seed", function);
+        llvm::BasicBlock* callBB = llvm::BasicBlock::Create(*context, "rand.call", function);
+
+        builder->CreateCondBr(isZero, seedBB, callBB);
+
+        builder->SetInsertPoint(seedBB);
+        llvm::Value* nullPtr = llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context));
+        llvm::Value* t = builder->CreateCall(getOrDeclareTimeFunc(), {nullPtr}, "rand.time");
+        llvm::Value* t32 = builder->CreateTrunc(t, llvm::Type::getInt32Ty(*context), "rand.time32");
+        builder->CreateCall(getOrDeclareSrand(), {t32});
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 1), seeded);
+        builder->CreateBr(callBB);
+
+        builder->SetInsertPoint(callBB);
+        llvm::Value* r = builder->CreateCall(getOrDeclareRand(), {}, "rand.val");
+        return builder->CreateSExt(r, getDefaultType(), "rand.ext");
+    }
+
+    // -----------------------------------------------------------------------
+    // time() — returns current Unix timestamp in seconds
+    // -----------------------------------------------------------------------
+    if (expr->callee == "time") {
+        if (!expr->arguments.empty()) {
+            codegenError("Built-in function 'time' expects 0 arguments, but " +
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
+        }
+        llvm::Value* nullPtr = llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context));
+        return builder->CreateCall(getOrDeclareTimeFunc(), {nullPtr}, "time.val");
+    }
+
+    // -----------------------------------------------------------------------
+    // sleep(ms) — sleep for given milliseconds
+    // -----------------------------------------------------------------------
+    if (expr->callee == "sleep") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'sleep' expects 1 argument (milliseconds), but " +
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
+        }
+        llvm::Value* ms = generateExpression(expr->arguments[0].get());
+        ms = toDefaultType(ms);
+        // usleep takes microseconds, so multiply by 1000
+        llvm::Value* us = builder->CreateMul(ms, llvm::ConstantInt::get(getDefaultType(), 1000), "sleep.us");
+        llvm::Value* us32 = builder->CreateTrunc(us, llvm::Type::getInt32Ty(*context), "sleep.us32");
+        builder->CreateCall(getOrDeclareUsleep(), {us32});
+        return llvm::ConstantInt::get(getDefaultType(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // str_to_int(s) — parse string to integer
+    // -----------------------------------------------------------------------
+    if (expr->callee == "str_to_int") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'str_to_int' expects 1 argument, but " +
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
+        }
+        llvm::Value* strArg = generateExpression(expr->arguments[0].get());
+        llvm::Value* strPtr =
+            strArg->getType()->isPointerTy()
+                ? strArg
+                : builder->CreateIntToPtr(strArg, llvm::PointerType::getUnqual(*context), "strtoi.ptr");
+        llvm::Value* nullPtr = llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context));
+        llvm::Value* base10 = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 10);
+        return builder->CreateCall(getOrDeclareStrtoll(), {strPtr, nullPtr, base10}, "strtoi.val");
+    }
+
+    // -----------------------------------------------------------------------
+    // str_to_float(s) — parse string to float
+    // -----------------------------------------------------------------------
+    if (expr->callee == "str_to_float") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'str_to_float' expects 1 argument, but " +
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
+        }
+        llvm::Value* strArg = generateExpression(expr->arguments[0].get());
+        llvm::Value* strPtr =
+            strArg->getType()->isPointerTy()
+                ? strArg
+                : builder->CreateIntToPtr(strArg, llvm::PointerType::getUnqual(*context), "strtof.ptr");
+        llvm::Value* nullPtr = llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context));
+        return builder->CreateCall(getOrDeclareStrtod(), {strPtr, nullPtr}, "strtof.val");
+    }
+
+    // -----------------------------------------------------------------------
+    // str_split(s, delim) — split string by delimiter, returns array of strings
+    // -----------------------------------------------------------------------
+    if (expr->callee == "str_split") {
+        if (expr->arguments.size() != 2) {
+            codegenError("Built-in function 'str_split' expects 2 arguments (string, delimiter), but " +
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
+        }
+        llvm::Value* strArg = generateExpression(expr->arguments[0].get());
+        llvm::Value* delimArg = generateExpression(expr->arguments[1].get());
+
+        llvm::Value* strPtr =
+            strArg->getType()->isPointerTy()
+                ? strArg
+                : builder->CreateIntToPtr(strArg, llvm::PointerType::getUnqual(*context), "split.str");
+        llvm::Value* delimPtr =
+            delimArg->getType()->isPointerTy()
+                ? delimArg
+                : builder->CreateIntToPtr(delimArg, llvm::PointerType::getUnqual(*context), "split.delim");
+
+        // Get the delimiter character (first char of delimiter string)
+        llvm::Value* delimChar = builder->CreateLoad(llvm::Type::getInt8Ty(*context), delimPtr, "split.delimch");
+        llvm::Value* delimChar32 = builder->CreateZExt(delimChar, llvm::Type::getInt32Ty(*context), "split.delimch32");
+
+        // Count delimiters to know array size
+        llvm::Value* strLen = builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "split.strlen");
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+
+        // Count pass
+        llvm::BasicBlock* preheader = builder->GetInsertBlock();
+        llvm::BasicBlock* countLoopBB = llvm::BasicBlock::Create(*context, "split.countloop", function);
+        llvm::BasicBlock* countBodyBB = llvm::BasicBlock::Create(*context, "split.countbody", function);
+        llvm::BasicBlock* countIncBB = llvm::BasicBlock::Create(*context, "split.countinc", function);
+        llvm::BasicBlock* countDoneBB = llvm::BasicBlock::Create(*context, "split.countdone", function);
+
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
+        builder->CreateBr(countLoopBB);
+
+        builder->SetInsertPoint(countLoopBB);
+        llvm::PHINode* ci = builder->CreatePHI(getDefaultType(), 2, "split.ci");
+        ci->addIncoming(zero, preheader);
+        llvm::PHINode* cnt = builder->CreatePHI(getDefaultType(), 2, "split.cnt");
+        cnt->addIncoming(one, preheader); // at least 1 part
+        llvm::Value* ccond = builder->CreateICmpSLT(ci, strLen, "split.ccond");
+        builder->CreateCondBr(ccond, countBodyBB, countDoneBB);
+
+        builder->SetInsertPoint(countBodyBB);
+        llvm::Value* charPtr = builder->CreateGEP(llvm::Type::getInt8Ty(*context), strPtr, ci, "split.cptr");
+        llvm::Value* ch = builder->CreateLoad(llvm::Type::getInt8Ty(*context), charPtr, "split.ch");
+        llvm::Value* ch32 = builder->CreateZExt(ch, llvm::Type::getInt32Ty(*context), "split.ch32");
+        llvm::Value* isDelim = builder->CreateICmpEQ(ch32, delimChar32, "split.isdelim");
+        llvm::Value* inc = builder->CreateSelect(isDelim, one, zero, "split.inc");
+        llvm::Value* newCnt = builder->CreateAdd(cnt, inc, "split.newcnt");
+        builder->CreateBr(countIncBB);
+
+        builder->SetInsertPoint(countIncBB);
+        llvm::Value* nextCi = builder->CreateAdd(ci, one, "split.nextci");
+        ci->addIncoming(nextCi, countIncBB);
+        cnt->addIncoming(newCnt, countIncBB);
+        builder->CreateBr(countLoopBB);
+
+        builder->SetInsertPoint(countDoneBB);
+        // cnt now holds the number of parts
+
+        // Allocate result array: (cnt + 1) * 8 bytes (length + elements)
+        llvm::Value* slots = builder->CreateAdd(cnt, one, "split.slots");
+        llvm::Value* bytes = builder->CreateMul(slots, eight, "split.bytes");
+        llvm::Value* arrBuf = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "split.arr");
+        builder->CreateStore(cnt, arrBuf);
+
+        // Split pass: iterate and create substrings
+        llvm::BasicBlock* splitPreBB = builder->GetInsertBlock();
+        llvm::BasicBlock* splitLoopBB = llvm::BasicBlock::Create(*context, "split.loop", function);
+        llvm::BasicBlock* splitBodyBB = llvm::BasicBlock::Create(*context, "split.body", function);
+        llvm::BasicBlock* splitDelimBB = llvm::BasicBlock::Create(*context, "split.delim", function);
+        llvm::BasicBlock* splitContBB = llvm::BasicBlock::Create(*context, "split.cont", function);
+        llvm::BasicBlock* splitDoneBB = llvm::BasicBlock::Create(*context, "split.done", function);
+
+        builder->CreateBr(splitLoopBB);
+
+        builder->SetInsertPoint(splitLoopBB);
+        llvm::PHINode* si = builder->CreatePHI(getDefaultType(), 2, "split.si");
+        si->addIncoming(zero, splitPreBB);
+        llvm::PHINode* partIdx = builder->CreatePHI(getDefaultType(), 2, "split.pidx");
+        partIdx->addIncoming(zero, splitPreBB);
+        llvm::PHINode* partStart = builder->CreatePHI(getDefaultType(), 2, "split.pstart");
+        partStart->addIncoming(zero, splitPreBB);
+        llvm::Value* scond = builder->CreateICmpSLE(si, strLen, "split.scond");
+        builder->CreateCondBr(scond, splitBodyBB, splitDoneBB);
+
+        builder->SetInsertPoint(splitBodyBB);
+        // Check if at end of string or at delimiter
+        llvm::Value* atEnd = builder->CreateICmpEQ(si, strLen, "split.atend");
+        llvm::Value* bodyCharPtr = builder->CreateGEP(llvm::Type::getInt8Ty(*context), strPtr, si, "split.bptr");
+        llvm::Value* bodyCh = builder->CreateLoad(llvm::Type::getInt8Ty(*context), bodyCharPtr, "split.bch");
+        llvm::Value* bodyCh32 = builder->CreateZExt(bodyCh, llvm::Type::getInt32Ty(*context), "split.bch32");
+        llvm::Value* bodyIsDelim = builder->CreateICmpEQ(bodyCh32, delimChar32, "split.bisdelim");
+        llvm::Value* shouldSplit = builder->CreateOr(atEnd, bodyIsDelim, "split.shouldsplit");
+        builder->CreateCondBr(shouldSplit, splitDelimBB, splitContBB);
+
+        builder->SetInsertPoint(splitDelimBB);
+        // Create substring from partStart to si
+        llvm::Value* partLen = builder->CreateSub(si, partStart, "split.plen");
+        llvm::Value* srcStart = builder->CreateGEP(llvm::Type::getInt8Ty(*context), strPtr, partStart, "split.srcstart");
+        llvm::Value* sub = builder->CreateCall(getOrDeclareStrndup(), {srcStart, partLen}, "split.sub");
+        llvm::Value* subInt = builder->CreatePtrToInt(sub, getDefaultType(), "split.subint");
+        // Store in array at (partIdx + 1) position
+        llvm::Value* arrSlot = builder->CreateAdd(partIdx, one, "split.slot");
+        llvm::Value* arrSlotPtr = builder->CreateGEP(getDefaultType(), arrBuf, arrSlot, "split.slotptr");
+        builder->CreateStore(subInt, arrSlotPtr);
+        llvm::Value* nextPartIdx = builder->CreateAdd(partIdx, one, "split.npidx");
+        llvm::Value* nextPartStart = builder->CreateAdd(si, one, "split.npstart");
+        builder->CreateBr(splitContBB);
+
+        builder->SetInsertPoint(splitContBB);
+        llvm::PHINode* mergedIdx = builder->CreatePHI(getDefaultType(), 2, "split.midx");
+        mergedIdx->addIncoming(partIdx, splitBodyBB);
+        mergedIdx->addIncoming(nextPartIdx, splitDelimBB);
+        llvm::PHINode* mergedStart = builder->CreatePHI(getDefaultType(), 2, "split.mstart");
+        mergedStart->addIncoming(partStart, splitBodyBB);
+        mergedStart->addIncoming(nextPartStart, splitDelimBB);
+        llvm::Value* nextSi = builder->CreateAdd(si, one, "split.nextsi");
+        si->addIncoming(nextSi, splitContBB);
+        partIdx->addIncoming(mergedIdx, splitContBB);
+        partStart->addIncoming(mergedStart, splitContBB);
+        builder->CreateBr(splitLoopBB);
+
+        builder->SetInsertPoint(splitDoneBB);
+        return builder->CreatePtrToInt(arrBuf, getDefaultType(), "split.result");
+    }
+
+    // -----------------------------------------------------------------------
+    // str_chars(s) — convert string into array of character codes
+    // -----------------------------------------------------------------------
+    if (expr->callee == "str_chars") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'str_chars' expects 1 argument, but " +
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
+        }
+        llvm::Value* strArg = generateExpression(expr->arguments[0].get());
+        llvm::Value* strPtr =
+            strArg->getType()->isPointerTy()
+                ? strArg
+                : builder->CreateIntToPtr(strArg, llvm::PointerType::getUnqual(*context), "chars.ptr");
+        llvm::Value* strLen = builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "chars.len");
+
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+
+        // Allocate array: (len + 1) * 8
+        llvm::Value* slots = builder->CreateAdd(strLen, one, "chars.slots");
+        llvm::Value* bytes = builder->CreateMul(slots, eight, "chars.bytes");
+        llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "chars.buf");
+        builder->CreateStore(strLen, buf);
+
+        // Fill loop
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* preBB = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "chars.loop", function);
+        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "chars.body", function);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "chars.done", function);
+        builder->CreateBr(loopBB);
+
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "chars.idx");
+        idx->addIncoming(zero, preBB);
+        llvm::Value* cond = builder->CreateICmpSLT(idx, strLen, "chars.cond");
+        builder->CreateCondBr(cond, bodyBB, doneBB);
+
+        builder->SetInsertPoint(bodyBB);
+        llvm::Value* charP = builder->CreateGEP(llvm::Type::getInt8Ty(*context), strPtr, idx, "chars.cptr");
+        llvm::Value* ch = builder->CreateLoad(llvm::Type::getInt8Ty(*context), charP, "chars.ch");
+        llvm::Value* chExt = builder->CreateZExt(ch, getDefaultType(), "chars.chext");
+        llvm::Value* arrSlot = builder->CreateAdd(idx, one, "chars.slot");
+        llvm::Value* arrSlotPtr = builder->CreateGEP(getDefaultType(), buf, arrSlot, "chars.slotptr");
+        builder->CreateStore(chExt, arrSlotPtr);
+        llvm::Value* nextIdx = builder->CreateAdd(idx, one, "chars.next");
+        idx->addIncoming(nextIdx, bodyBB);
+        builder->CreateBr(loopBB);
+
+        builder->SetInsertPoint(doneBB);
+        return builder->CreatePtrToInt(buf, getDefaultType(), "chars.result");
+    }
+
     if (inOptMaxFunction) {
         // Stdlib functions are always native machine code, so they're safe to call from OPTMAX
         if (!isStdlibFunction(expr->callee) && optMaxFunctions.find(expr->callee) == optMaxFunctions.end()) {
@@ -4141,6 +4641,105 @@ void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
     loopStack.pop_back();
 
     builder->SetInsertPoint(mergeBB);
+}
+
+void CodeGenerator::generateTryCatch(TryCatchStmt* stmt) {
+    // Implementation uses a global error flag/value approach:
+    // 1. Save old error state
+    // 2. Clear error flag
+    // 3. Execute try block
+    // 4. If error flag is set, execute catch block with error value
+    // 5. Restore old error state
+
+    // Get or create global error flag and value
+    llvm::GlobalVariable* errFlag = module->getGlobalVariable("__om_error_flag", true);
+    if (!errFlag) {
+        errFlag = new llvm::GlobalVariable(*module, getDefaultType(), false,
+                                           llvm::GlobalValue::InternalLinkage,
+                                           llvm::ConstantInt::get(getDefaultType(), 0),
+                                           "__om_error_flag");
+    }
+    llvm::GlobalVariable* errVal = module->getGlobalVariable("__om_error_value", true);
+    if (!errVal) {
+        errVal = new llvm::GlobalVariable(*module, getDefaultType(), false,
+                                          llvm::GlobalValue::InternalLinkage,
+                                          llvm::ConstantInt::get(getDefaultType(), 0),
+                                          "__om_error_value");
+    }
+
+    llvm::Function* function = builder->GetInsertBlock()->getParent();
+
+    // Save old error state
+    llvm::Value* oldFlag = builder->CreateLoad(getDefaultType(), errFlag, "try.oldflag");
+    llvm::Value* oldVal = builder->CreateLoad(getDefaultType(), errVal, "try.oldval");
+
+    // Clear error flag
+    builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 0), errFlag);
+
+    // Generate try block
+    beginScope();
+    for (auto& s : stmt->tryBlock->statements) {
+        generateStatement(s.get());
+        // After each statement, check if error was thrown
+    }
+    endScope();
+
+    // Check if error was thrown
+    llvm::Value* thrown = builder->CreateLoad(getDefaultType(), errFlag, "try.thrown");
+    llvm::Value* wasThrown = builder->CreateICmpNE(thrown, llvm::ConstantInt::get(getDefaultType(), 0), "try.wasthrown");
+
+    llvm::BasicBlock* catchBB = llvm::BasicBlock::Create(*context, "catch.body", function);
+    llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "try.end", function);
+
+    builder->CreateCondBr(wasThrown, catchBB, endBB);
+
+    // Catch block
+    builder->SetInsertPoint(catchBB);
+    beginScope();
+    // Bind the error value to the catch variable
+    llvm::Value* errValLoaded = builder->CreateLoad(getDefaultType(), errVal, "catch.errval");
+    llvm::AllocaInst* catchVar = createEntryBlockAlloca(function, stmt->catchVar);
+    builder->CreateStore(errValLoaded, catchVar);
+    bindVariable(stmt->catchVar, catchVar);
+
+    // Clear error flag so catch block can execute normally
+    builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 0), errFlag);
+
+    for (auto& s : stmt->catchBlock->statements) {
+        generateStatement(s.get());
+    }
+    endScope();
+
+    // Restore old error state
+    builder->CreateStore(oldFlag, errFlag);
+    builder->CreateStore(oldVal, errVal);
+    builder->CreateBr(endBB);
+
+    // End
+    builder->SetInsertPoint(endBB);
+}
+
+void CodeGenerator::generateThrow(ThrowStmt* stmt) {
+    // Set global error flag and value
+    llvm::GlobalVariable* errFlag = module->getGlobalVariable("__om_error_flag", true);
+    if (!errFlag) {
+        errFlag = new llvm::GlobalVariable(*module, getDefaultType(), false,
+                                           llvm::GlobalValue::InternalLinkage,
+                                           llvm::ConstantInt::get(getDefaultType(), 0),
+                                           "__om_error_flag");
+    }
+    llvm::GlobalVariable* errVal = module->getGlobalVariable("__om_error_value", true);
+    if (!errVal) {
+        errVal = new llvm::GlobalVariable(*module, getDefaultType(), false,
+                                          llvm::GlobalValue::InternalLinkage,
+                                          llvm::ConstantInt::get(getDefaultType(), 0),
+                                          "__om_error_value");
+    }
+
+    llvm::Value* val = generateExpression(stmt->value.get());
+    val = toDefaultType(val);
+    builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 1), errFlag);
+    builder->CreateStore(val, errVal);
 }
 
 void CodeGenerator::resolveTargetCPU(std::string& cpu, std::string& features) const {

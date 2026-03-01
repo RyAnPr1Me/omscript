@@ -26,7 +26,9 @@ static const std::unordered_map<std::string, TokenType> keywords = {
     {"for", TokenType::FOR},       {"var", TokenType::VAR},           {"const", TokenType::CONST},
     {"break", TokenType::BREAK},   {"continue", TokenType::CONTINUE}, {"in", TokenType::IN},
     {"true", TokenType::TRUE},     {"false", TokenType::FALSE},       {"null", TokenType::NULL_LITERAL},
-    {"switch", TokenType::SWITCH}, {"case", TokenType::CASE},         {"default", TokenType::DEFAULT}};
+    {"switch", TokenType::SWITCH}, {"case", TokenType::CASE},         {"default", TokenType::DEFAULT},
+    {"try", TokenType::TRY},       {"catch", TokenType::CATCH},       {"throw", TokenType::THROW},
+    {"enum", TokenType::ENUM}};
 
 Lexer::Lexer(const std::string& source) : source(source), pos(0), line(1), column(1) {}
 

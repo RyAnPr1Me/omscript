@@ -1,0 +1,88 @@
+// Test new production features: try/catch/throw, enum, println, write,
+// exit_program, random, time, sleep, str_split, str_to_int, str_to_float,
+// str_chars
+
+fn main() {
+    var total = 0;
+
+    // Test println (prints value with newline)
+    println("=== Production Feature Tests ===");
+
+    // Test write (prints without newline)
+    write("test: ");
+    println("write works");
+
+    // Test try/catch/throw
+    try {
+        var x = 10;
+        throw 42;
+        x = 99; // should not execute
+    } catch (err) {
+        total = total + (err == 42);  // 1
+    }
+    // total = 1
+
+    // Test nested try/catch
+    try {
+        try {
+            throw 7;
+        } catch (inner) {
+            total = total + (inner == 7);  // 1
+        }
+        // outer should continue normally
+        total = total + 1;  // 1
+    } catch (outer) {
+        // should not reach here
+    }
+    // total = 3
+
+    // Test try with no throw
+    try {
+        var safe = 100;
+        total = total + (safe == 100);  // 1
+    } catch (err) {
+        // should not reach here
+    }
+    // total = 4
+
+    // Test str_to_int
+    var num = str_to_int("42");
+    total = total + (num == 42);  // 1
+    // total = 5
+
+    var neg = str_to_int("-10");
+    total = total + (neg == -10);  // 1
+    // total = 6
+
+    // Test str_to_float
+    var f = str_to_float("3.14");
+    var rounded = round(f);
+    total = total + (rounded == 3);  // 1
+    // total = 7
+
+    // Test str_split
+    var parts = str_split("hello,world,test", ",");
+    total = total + (len(parts) == 3);  // 1
+    // total = 8
+
+    // Test str_chars
+    var chars = str_chars("ABC");
+    total = total + (len(chars) == 3);  // 1
+    total = total + (chars[0] == 65);   // 'A' = 65, 1
+    total = total + (chars[1] == 66);   // 'B' = 66, 1
+    total = total + (chars[2] == 67);   // 'C' = 67, 1
+    // total = 12
+
+    // Test time() returns a reasonable value (> 0)
+    var t = time();
+    total = total + (t > 0);  // 1
+    // total = 13
+
+    // Test random() returns a value
+    var r = random();
+    total = total + (r >= 0);  // 1
+    // total = 14
+
+    println(total);
+    return total;
+}

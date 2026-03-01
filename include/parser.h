@@ -48,6 +48,9 @@ class Parser {
     std::unique_ptr<Statement> parseBreakStmt();
     std::unique_ptr<Statement> parseContinueStmt();
     std::unique_ptr<Statement> parseSwitchStmt();
+    std::unique_ptr<Statement> parseTryCatchStmt();
+    std::unique_ptr<Statement> parseThrowStmt();
+    std::unique_ptr<EnumDecl> parseEnumDecl();
     std::unique_ptr<Statement> parseExprStmt();
 
     std::unique_ptr<Expression> parseExpression();

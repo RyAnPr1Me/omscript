@@ -1,0 +1,61 @@
+// Test enum declarations
+enum Color {
+    RED,
+    GREEN = 10,
+    BLUE
+}
+
+enum Status {
+    OK = 0,
+    ERROR = 1,
+    PENDING = 2
+}
+
+fn main() {
+    var total = 0;
+
+    // Test auto-incrementing enum values
+    total = total + (Color_RED == 0);     // 1
+    total = total + (Color_GREEN == 10);  // 1
+    total = total + (Color_BLUE == 11);   // 1
+    // total = 3
+
+    // Test explicit enum values
+    total = total + (Status_OK == 0);      // 1
+    total = total + (Status_ERROR == 1);   // 1
+    total = total + (Status_PENDING == 2); // 1
+    // total = 6
+
+    // Use enum in expressions
+    var color = Color_GREEN;
+    total = total + (color == 10);  // 1
+    // total = 7
+
+    // Use enum in switch
+    switch (color) {
+        case 0: {
+            // RED
+            break;
+        }
+        case 10: {
+            // GREEN
+            total = total + 1;  // 1
+            break;
+        }
+        case 11: {
+            // BLUE
+            break;
+        }
+    }
+    // total = 8
+
+    // Use enum in comparison
+    var status = Status_ERROR;
+    if (status == Status_ERROR) {
+        total = total + 1;  // 1
+    }
+    // total = 9
+
+    println(total);
+    return total;
+}
