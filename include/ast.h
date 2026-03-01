@@ -198,8 +198,7 @@ class SpreadExpr : public Expression {
   public:
     std::unique_ptr<Expression> operand;
 
-    SpreadExpr(std::unique_ptr<Expression> op)
-        : Expression(ASTNodeType::SPREAD_EXPR), operand(std::move(op)) {}
+    SpreadExpr(std::unique_ptr<Expression> op) : Expression(ASTNodeType::SPREAD_EXPR), operand(std::move(op)) {}
 };
 
 class PipeExpr : public Expression {
@@ -361,7 +360,7 @@ class Parameter {
   public:
     std::string name;
     std::string typeName;
-    std::unique_ptr<Expression> defaultValue;  // nullptr if no default
+    std::unique_ptr<Expression> defaultValue; // nullptr if no default
 
     Parameter(const std::string& n, const std::string& t = "", std::unique_ptr<Expression> def = nullptr)
         : name(n), typeName(t), defaultValue(std::move(def)) {}
@@ -382,7 +381,8 @@ class FunctionDecl : public ASTNode {
     size_t requiredParameters() const {
         size_t count = 0;
         for (const auto& p : parameters) {
-            if (!p.defaultValue) ++count;
+            if (!p.defaultValue)
+                ++count;
         }
         return count;
     }
