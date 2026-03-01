@@ -10,7 +10,9 @@ A low-level, C-like programming language with dynamic typing, featuring a **heav
 - **Reference Counted Memory**: Automatic memory management using malloc/free with deterministic deallocation
 - **For Loops with Ranges**: Modern range-based iteration with `for (i in start...end...step)`
 - **Do-While Loops**: Execute body at least once with `do { ... } while (cond);`
-- **51 Built-in Functions**: Math, array manipulation, strings, character classification, type conversion, and I/O
+- **63 Built-in Functions**: Math, array manipulation, strings, character classification, type conversion, system, and I/O
+- **Error Handling**: `try`/`catch`/`throw` for structured error handling
+- **Enum Declarations**: Named integer constants with auto-increment
 - **Null Coalescing Operator**: `??` for concise null/zero fallback expressions
 - **Multi-line Strings**: Triple-quoted `"""..."""` strings with embedded newlines
 - **Bytecode Runtime**: Interprets dynamically typed sections at runtime
@@ -114,7 +116,7 @@ var m = min(3, 7);       // minimum: m = 3
 var p = pow(2, 8);       // integer exponentiation: p = 256
 var s = sqrt(16);        // integer square root: s = 4
 ```
-See [LANGUAGE_REFERENCE.md](LANGUAGE_REFERENCE.md) for the full list of 51 built-in functions.
+See [LANGUAGE_REFERENCE.md](LANGUAGE_REFERENCE.md) for the full list of 63 built-in functions.
 
 ### OPTMAX Blocks
 Use `OPTMAX=:` and `OPTMAX!:` to tag functions that require maximal optimization. Inside these functions:

@@ -41,7 +41,7 @@ OmScript is a **low-level, C-like programming language** featuring:
 - **Reference-counted memory management** — Automatic deterministic deallocation via malloc/free with reference counting on strings.
 - **Hybrid architecture** — A bytecode VM exists as an alternative backend for future dynamic compilation scenarios. The primary path is always native code.
 - **Aggressive optimization** — Four optimization levels (O0–O3) plus a special OPTMAX directive that applies exhaustive multi-pass optimization to marked functions.
-- **51 built-in standard library functions** — Math, array manipulation, string, character classification, type conversion, and I/O, all compiled to native machine code.
+- **63 built-in standard library functions** — Math, array manipulation, string, character classification, type conversion, system, and I/O, all compiled to native machine code.
 
 ### Design Philosophy
 
@@ -194,7 +194,7 @@ identifier := [a-zA-Z_][a-zA-Z0-9_]*
 
 ### 4.4 Keywords
 
-The following 12 words are reserved:
+The following 20 words are reserved:
 
 | Keyword | Purpose |
 |---------|---------|
@@ -210,6 +210,14 @@ The following 12 words are reserved:
 | `break` | Break out of loop |
 | `continue` | Skip to next iteration |
 | `in` | Range iteration keyword |
+| `switch` | Multi-way branch |
+| `case` | Switch case label |
+| `default` | Switch default label |
+| `try` | Error handling block |
+| `catch` | Error handler |
+| `throw` | Throw an error value |
+| `enum` | Enum declaration |
+| `null` | Null literal |
 
 ### 4.5 Literals
 
@@ -726,6 +734,69 @@ Braces `{ }` introduce a new scope:
 // x is not accessible here
 ```
 
+### 8.7 Try / Catch / Throw
+
+OmScript supports structured error handling via `try`, `catch`, and `throw`:
+
+```javascript
+try {
+    // Code that may throw an error
+    if (x < 0) {
+        throw 42;  // throw an integer error code
+    }
+    var result = risky_operation();
+} catch (err) {
+    // err contains the thrown value (42 in this case)
+    println(err);
+}
+```
+
+**Key points:**
+- `throw` accepts any integer expression as an error value.
+- The `catch` block binds the thrown value to the named variable.
+- If no `throw` occurs in the `try` block, the `catch` block is skipped.
+- Try/catch blocks can be nested.
+
+```javascript
+try {
+    try {
+        throw 1;
+    } catch (inner) {
+        // inner == 1
+    }
+    // Execution continues here after inner catch
+    throw 2;
+} catch (outer) {
+    // outer == 2
+}
+```
+
+### 8.8 Enums
+
+Enums declare named integer constants at the top level of a program:
+
+```javascript
+enum Color {
+    RED,        // 0 (auto-incremented from 0)
+    GREEN = 10, // explicit value
+    BLUE        // 11 (auto-incremented from previous)
+}
+
+fn main() {
+    var c = Color_GREEN;  // accessed as EnumName_MemberName
+    if (c == Color_GREEN) {
+        println("green!");
+    }
+    return 0;
+}
+```
+
+**Key points:**
+- Members default to 0 for the first value and auto-increment by 1.
+- Explicit values can be assigned with `= value`.
+- Enum members are accessed as `EnumName_MemberName` (e.g., `Color_RED`).
+- Enums are compile-time constants — they produce no runtime overhead.
+
 ---
 
 ## 9. Arrays
@@ -822,7 +893,7 @@ In the bytecode/VM runtime, strings are fully dynamic:
 
 ## 11. Standard Library
 
-OmScript provides **51 built-in functions**. All stdlib functions are compiled directly to native machine code via LLVM IR — they never go through the bytecode interpreter.
+OmScript provides **63 built-in functions**. All stdlib functions are compiled directly to native machine code via LLVM IR — they never go through the bytecode interpreter.
 
 ### 11.1 I/O Functions
 
@@ -862,6 +933,41 @@ Reads an integer from standard input using `scanf("%lld")`.
 ```javascript
 var n = input();
 print(n);
+```
+
+#### `println(value)`
+
+Prints a value followed by a newline. Functionally identical to `print()` — provided as an explicit alias for clarity.
+
+- **Returns:** `0`.
+
+```javascript
+println(42);           // Output: 42
+println("hello");      // Output: hello
+```
+
+#### `write(value)`
+
+Prints a value **without** a trailing newline. Useful for building output incrementally.
+
+- **Returns:** `0`.
+
+```javascript
+write("hello ");
+write("world");    // Output: hello world (on same line)
+```
+
+#### `exit_program(code)`
+
+Terminates the program immediately with the given exit code.
+
+- **Parameter:** `code` — integer exit code.
+- **Returns:** Never returns (process terminates).
+
+```javascript
+if (error) {
+    exit_program(1);
+}
 ```
 
 ### 11.2 Math Functions
@@ -1367,6 +1473,68 @@ str_reverse("hello")  // "olleh"
 str_reverse("abc")    // "cba"
 ```
 
+#### `str_split(s, delimiter)`
+
+Splits a string by a single-character delimiter, returning an array of substring values.
+
+```javascript
+var parts = str_split("a,b,c", ",");
+// parts == ["a", "b", "c"], len(parts) == 3
+```
+
+#### `str_to_int(s)`
+
+Parses a string as a base-10 integer. Returns the parsed value.
+
+```javascript
+str_to_int("42")     // 42
+str_to_int("-10")    // -10
+```
+
+#### `str_to_float(s)`
+
+Parses a string as a floating-point number.
+
+```javascript
+str_to_float("3.14")   // 3.14
+str_to_float("-2.5")   // -2.5
+```
+
+#### `str_chars(s)`
+
+Converts a string into an array of integer character codes (ASCII values).
+
+```javascript
+var chars = str_chars("ABC");
+// chars == [65, 66, 67]
+```
+
+### 11.5.1 System Functions
+
+#### `random()`
+
+Returns a pseudo-random non-negative integer. Automatically seeds the random number generator on first call using `time()`.
+
+```javascript
+var r = random();  // e.g. 1804289383
+```
+
+#### `time()`
+
+Returns the current Unix timestamp (seconds since January 1, 1970).
+
+```javascript
+var t = time();  // e.g. 1709258765
+```
+
+#### `sleep(ms)`
+
+Pauses execution for the specified number of milliseconds.
+
+```javascript
+sleep(1000);  // sleep for 1 second
+```
+
 ### 11.6 Utility Functions
 
 #### `typeof(x)`
@@ -1446,6 +1614,16 @@ assert(0);          // always aborts: "Runtime error: assertion failed"
 | `array_slice(arr, s, e)` | 3 | array | Slice array from index `s` to `e` (exclusive) |
 | `typeof(x)` | 1 | 1 | Type tag (always 1/integer in native path) |
 | `assert(cond)` | 1 | 1 | Abort with error if `cond` is falsy |
+| `println(x)` | 1 | 0 | Print value with newline (alias for print) |
+| `write(x)` | 1 | 0 | Print value without trailing newline |
+| `exit_program(code)` | 1 | — | Terminate process with exit code |
+| `random()` | 0 | int | Pseudo-random integer (auto-seeded) |
+| `time()` | 0 | int | Current Unix timestamp (seconds) |
+| `sleep(ms)` | 1 | 0 | Sleep for given milliseconds |
+| `str_to_int(s)` | 1 | int | Parse string as base-10 integer |
+| `str_to_float(s)` | 1 | float | Parse string as float |
+| `str_split(s, delim)` | 2 | array | Split string by delimiter into array |
+| `str_chars(s)` | 1 | array | Convert string to array of char codes |
 
 ---
 

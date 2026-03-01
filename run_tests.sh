@@ -277,6 +277,8 @@ test_program "examples/math_builtins_test.om" 52
 test_program "examples/string_builtins_test.om" 12
 test_program "examples/array_builtins_test.om" 20
 test_program "examples/null_coalesce_test.om" 5
+test_program "examples/production_features_test.om" 14
+test_program "examples/enum_test.om" 9
 test_program "examples/float_test.om" 5
 test_program "examples/string_var_test.om" 0
 test_program "examples/string_param_test.om" 0

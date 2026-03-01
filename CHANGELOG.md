@@ -5,6 +5,17 @@ All notable changes to the OmScript compiler will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-03-01
+
+### Added
+- **Error handling**: `try`/`catch`/`throw` statements — structured error handling with integer error codes
+- **Enum declarations**: `enum Name { A, B = 10, C }` — named integer constants with auto-increment, accessed as `Name_A`, `Name_B`, `Name_C`
+- **I/O built-ins**: `println(x)` (print with newline), `write(x)` (print without newline)
+- **System built-ins**: `exit_program(code)`, `random()` (auto-seeded), `time()` (Unix timestamp), `sleep(ms)` (milliseconds)
+- **String parsing**: `str_to_int(s)`, `str_to_float(s)` — convert strings to numeric values
+- **String/Array utilities**: `str_split(s, delim)` (split into array), `str_chars(s)` (string to char code array)
+- Standard library count increased from 51 to 63 built-in functions
+
 ## [1.5.0] - 2026-03-01
 
 ### Added
