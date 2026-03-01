@@ -37,7 +37,10 @@ enum class ASTNodeType {
     TERNARY_EXPR,
     ARRAY_EXPR,
     INDEX_EXPR,
-    INDEX_ASSIGN_EXPR
+    INDEX_ASSIGN_EXPR,
+    LAMBDA_EXPR,
+    SPREAD_EXPR,
+    PIPE_EXPR
 };
 
 class ASTNode {
@@ -180,6 +183,32 @@ class IndexAssignExpr : public Expression {
     IndexAssignExpr(std::unique_ptr<Expression> arr, std::unique_ptr<Expression> idx, std::unique_ptr<Expression> val)
         : Expression(ASTNodeType::INDEX_ASSIGN_EXPR), array(std::move(arr)), index(std::move(idx)),
           value(std::move(val)) {}
+};
+
+class LambdaExpr : public Expression {
+  public:
+    std::vector<std::string> params;
+    std::unique_ptr<Expression> body;
+
+    LambdaExpr(std::vector<std::string> p, std::unique_ptr<Expression> b)
+        : Expression(ASTNodeType::LAMBDA_EXPR), params(std::move(p)), body(std::move(b)) {}
+};
+
+class SpreadExpr : public Expression {
+  public:
+    std::unique_ptr<Expression> operand;
+
+    SpreadExpr(std::unique_ptr<Expression> op)
+        : Expression(ASTNodeType::SPREAD_EXPR), operand(std::move(op)) {}
+};
+
+class PipeExpr : public Expression {
+  public:
+    std::unique_ptr<Expression> left;
+    std::string functionName;
+
+    PipeExpr(std::unique_ptr<Expression> l, const std::string& fn)
+        : Expression(ASTNodeType::PIPE_EXPR), left(std::move(l)), functionName(fn) {}
 };
 
 // Statements

@@ -1449,6 +1449,23 @@ llvm::Value* CodeGenerator::generateExpression(Expression* expr) {
         return generateIndex(static_cast<IndexExpr*>(expr));
     case ASTNodeType::INDEX_ASSIGN_EXPR:
         return generateIndexAssign(static_cast<IndexAssignExpr*>(expr));
+    case ASTNodeType::PIPE_EXPR: {
+        // Desugar: expr |> fn  =>  fn(expr)
+        auto* pipe = static_cast<PipeExpr*>(expr);
+        // Create a synthetic CallExpr and generate it
+        std::vector<std::unique_ptr<Expression>> args;
+        args.push_back(std::move(pipe->left));
+        auto callExpr = std::make_unique<CallExpr>(pipe->functionName, std::move(args));
+        callExpr->line = pipe->line;
+        callExpr->column = pipe->column;
+        return generateCall(callExpr.get());
+    }
+    case ASTNodeType::LAMBDA_EXPR:
+        // Lambdas are desugared by the parser to string literals
+        codegenError("Lambda expression should have been desugared by parser", expr);
+    case ASTNodeType::SPREAD_EXPR:
+        // Spread expressions are only valid inside array literals
+        codegenError("Spread operator '...' is only valid inside array literals", expr);
     default:
         codegenError("Unknown expression type", expr);
     }
@@ -4594,32 +4611,132 @@ llvm::Value* CodeGenerator::generateTernary(TernaryExpr* expr) {
 }
 
 llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
-    size_t numElements = expr->elements.size();
-    // Allocate space for (1 + numElements) i64 slots: [length, elem0, elem1, ...]
-    size_t totalSlots = 1 + numElements;
-
-    // Use heap allocation (malloc) so that arrays survive function returns.
-    // Stack allocation (alloca) would be invalidated when the enclosing
-    // function returns, causing use-after-free when the caller accesses the
-    // array through the returned pointer-as-i64.
-    llvm::Value* byteSize = llvm::ConstantInt::get(getDefaultType(), totalSlots * 8);
-    llvm::Value* arrPtr = builder->CreateCall(getOrDeclareMalloc(), {byteSize}, "arr");
-
-    // Store the length in slot 0 (arrPtr points to slot 0)
-    builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), numElements), arrPtr);
-
-    // Store each element in slots 1..N
-    for (size_t i = 0; i < numElements; i++) {
-        llvm::Value* elemVal = generateExpression(expr->elements[i].get());
-        // Array slots are i64, so convert if needed
-        elemVal = toDefaultType(elemVal);
-        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrPtr,
-                                                  llvm::ConstantInt::get(getDefaultType(), i + 1), "arr.elem.ptr");
-        builder->CreateStore(elemVal, elemPtr);
+    // Check if any elements are spread expressions
+    bool hasSpread = false;
+    for (const auto& elem : expr->elements) {
+        if (elem->type == ASTNodeType::SPREAD_EXPR) {
+            hasSpread = true;
+            break;
+        }
     }
 
-    // Return the array pointer as an i64 for the dynamic type system
-    return builder->CreatePtrToInt(arrPtr, getDefaultType(), "arr.int");
+    if (!hasSpread) {
+        // Original fast path: all elements are plain expressions with known count
+        size_t numElements = expr->elements.size();
+        size_t totalSlots = 1 + numElements;
+
+        llvm::Value* byteSize = llvm::ConstantInt::get(getDefaultType(), totalSlots * 8);
+        llvm::Value* arrPtr = builder->CreateCall(getOrDeclareMalloc(), {byteSize}, "arr");
+
+        builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), numElements), arrPtr);
+
+        for (size_t i = 0; i < numElements; i++) {
+            llvm::Value* elemVal = generateExpression(expr->elements[i].get());
+            elemVal = toDefaultType(elemVal);
+            llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrPtr,
+                                                      llvm::ConstantInt::get(getDefaultType(), i + 1), "arr.elem.ptr");
+            builder->CreateStore(elemVal, elemPtr);
+        }
+
+        return builder->CreatePtrToInt(arrPtr, getDefaultType(), "arr.int");
+    }
+
+    // Spread path: compute total length dynamically
+    // First pass: compute total number of elements
+    llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+    llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+    llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
+    llvm::Value* totalLen = zero;
+
+    // We need to evaluate spread source arrays to get their lengths
+    // Store evaluated values so we don't evaluate twice
+    struct ElemInfo {
+        llvm::Value* val;    // Evaluated value (element or array ptr)
+        bool isSpread;       // Whether this is a spread element
+        llvm::Value* len;    // Length of spread array (if isSpread)
+    };
+    std::vector<ElemInfo> evalElems;
+
+    for (const auto& elem : expr->elements) {
+        if (elem->type == ASTNodeType::SPREAD_EXPR) {
+            auto* spread = static_cast<SpreadExpr*>(elem.get());
+            llvm::Value* arrVal = generateExpression(spread->operand.get());
+            arrVal = toDefaultType(arrVal);
+            llvm::Value* arrPtr = builder->CreateIntToPtr(arrVal, llvm::PointerType::getUnqual(*context), "spread.arrptr");
+            llvm::Value* arrLen = builder->CreateLoad(getDefaultType(), arrPtr, "spread.len");
+            totalLen = builder->CreateAdd(totalLen, arrLen, "spread.addlen");
+            evalElems.push_back({arrVal, true, arrLen});
+        } else {
+            llvm::Value* elemVal = generateExpression(elem.get());
+            elemVal = toDefaultType(elemVal);
+            totalLen = builder->CreateAdd(totalLen, one, "spread.addone");
+            evalElems.push_back({elemVal, false, nullptr});
+        }
+    }
+
+    // Allocate result array: (totalLen + 1) * 8
+    llvm::Value* slots = builder->CreateAdd(totalLen, one, "spread.slots");
+    llvm::Value* bytes = builder->CreateMul(slots, eight, "spread.bytes");
+    llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "spread.buf");
+    builder->CreateStore(totalLen, buf);
+
+    // Second pass: copy elements into the result array
+    // We use an alloca to track the current write index
+    llvm::Function* function = builder->GetInsertBlock()->getParent();
+    llvm::AllocaInst* writeIdx = createEntryBlockAlloca(function, "_spread_idx");
+    builder->CreateStore(zero, writeIdx);
+
+    for (const auto& ei : evalElems) {
+        if (ei.isSpread) {
+            // Copy all elements from the spread array
+            llvm::Value* srcVal = ei.val;
+            llvm::Value* srcPtr = builder->CreateIntToPtr(srcVal, llvm::PointerType::getUnqual(*context), "spread.src");
+            llvm::Value* srcLen = ei.len;
+
+            // Loop: copy srcLen elements
+            llvm::BasicBlock* preheader = builder->GetInsertBlock();
+            llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "spread.copy.loop", function);
+            llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "spread.copy.body", function);
+            llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "spread.copy.done", function);
+
+            builder->CreateBr(loopBB);
+            builder->SetInsertPoint(loopBB);
+            llvm::PHINode* i = builder->CreatePHI(getDefaultType(), 2, "spread.i");
+            i->addIncoming(zero, preheader);
+            llvm::Value* cond = builder->CreateICmpSLT(i, srcLen, "spread.cond");
+            builder->CreateCondBr(cond, bodyBB, doneBB);
+
+            builder->SetInsertPoint(bodyBB);
+            // Load element from source: srcPtr[i + 1]
+            llvm::Value* srcIdx = builder->CreateAdd(i, one, "spread.srcidx");
+            llvm::Value* srcElemPtr = builder->CreateGEP(getDefaultType(), srcPtr, srcIdx, "spread.srcelem");
+            llvm::Value* elem = builder->CreateLoad(getDefaultType(), srcElemPtr, "spread.elem");
+            // Store in dest: buf[writeIdx + 1]
+            llvm::Value* curIdx = builder->CreateLoad(getDefaultType(), writeIdx, "spread.curidx");
+            llvm::Value* dstIdx = builder->CreateAdd(curIdx, one, "spread.dstidx");
+            llvm::Value* dstPtr = builder->CreateGEP(getDefaultType(), buf, dstIdx, "spread.dstptr");
+            builder->CreateStore(elem, dstPtr);
+            // Increment write index
+            llvm::Value* newIdx = builder->CreateAdd(curIdx, one, "spread.newidx");
+            builder->CreateStore(newIdx, writeIdx);
+            // Increment loop counter
+            llvm::Value* nextI = builder->CreateAdd(i, one, "spread.nexti");
+            i->addIncoming(nextI, bodyBB);
+            builder->CreateBr(loopBB);
+
+            builder->SetInsertPoint(doneBB);
+        } else {
+            // Single element: store at buf[writeIdx + 1]
+            llvm::Value* curIdx = builder->CreateLoad(getDefaultType(), writeIdx, "spread.curidx");
+            llvm::Value* dstIdx = builder->CreateAdd(curIdx, one, "spread.dstidx");
+            llvm::Value* dstPtr = builder->CreateGEP(getDefaultType(), buf, dstIdx, "spread.dstptr");
+            builder->CreateStore(ei.val, dstPtr);
+            llvm::Value* newIdx = builder->CreateAdd(curIdx, one, "spread.newidx");
+            builder->CreateStore(newIdx, writeIdx);
+        }
+    }
+
+    return builder->CreatePtrToInt(buf, getDefaultType(), "spread.result");
 }
 
 llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {

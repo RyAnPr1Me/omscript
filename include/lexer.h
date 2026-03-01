@@ -78,6 +78,9 @@ enum class TokenType {
     RSHIFT,
     RANGE,
     ARROW,
+    FAT_ARROW,
+    PIPE_FORWARD,
+    SPREAD,
 
     // Delimiters
     LPAREN,

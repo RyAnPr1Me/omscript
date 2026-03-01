@@ -1,0 +1,69 @@
+// Test lambda expressions, pipe operator, and spread operator
+
+fn double(x) {
+    return x * 2;
+}
+
+fn add(acc, x) {
+    return acc + x;
+}
+
+fn main() {
+    var arr = [1, 2, 3, 4, 5];
+    
+    // Test 1: Lambda with array_map
+    var doubled = array_map(arr, |x| x * 2);
+    var sum = 0;
+    for (i in 0...len(doubled)) {
+        sum = sum + doubled[i];
+    }
+    assert(sum == 30); // 2+4+6+8+10
+    
+    // Test 2: Lambda with array_filter
+    var evens = array_filter(arr, |x| x % 2 == 0);
+    assert(len(evens) == 2);
+    assert(evens[0] == 2);
+    assert(evens[1] == 4);
+    
+    // Test 3: Lambda with array_reduce
+    var total = array_reduce(arr, |acc, x| acc + x, 0);
+    assert(total == 15);
+    
+    // Test 4: Pipe operator
+    var result = arr |> len;
+    assert(result == 5);
+    
+    // Test 5: Spread operator in array literals
+    var a = [1, 2, 3];
+    var b = [4, 5, 6];
+    var c = [...a, ...b];
+    assert(len(c) == 6);
+    assert(c[0] == 1);
+    assert(c[1] == 2);
+    assert(c[2] == 3);
+    assert(c[3] == 4);
+    assert(c[4] == 5);
+    assert(c[5] == 6);
+    
+    // Test 6: Spread with normal elements
+    var d = [0, ...a, 99];
+    assert(len(d) == 5);
+    assert(d[0] == 0);
+    assert(d[1] == 1);
+    assert(d[2] == 2);
+    assert(d[3] == 3);
+    assert(d[4] == 99);
+    
+    // Test 7: Pipe chaining
+    var nums = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    var even_count = array_filter(nums, |x| x % 2 == 0) |> len;
+    assert(even_count == 5);
+    
+    // Test 8: Lambda with complex expressions
+    var squares = array_map(arr, |x| x * x);
+    var sum_sq = array_reduce(squares, |a, b| a + b, 0);
+    assert(sum_sq == 55); // 1+4+9+16+25
+    
+    print(sum_sq);
+    return 0;
+}
