@@ -735,13 +735,14 @@ op_CALL: {
             }
         }
 
+        auto it = functions.find(funcName);
+
         // ---- JIT compilation trigger ----
         if (jit_) {
             if (jit_->recordCall(funcName)) {
-                auto fit = functions.find(funcName);
-                if (fit != functions.end()) {
+                if (it != functions.end()) {
                     auto spec = jit_->getTypeProfile(funcName).bestSpecialization();
-                    if (jit_->compile(fit->second, spec)) {
+                    if (jit_->compile(it->second, spec)) {
                         auto intPtr = jit_->getCompiled(funcName);
                         auto floatPtr = jit_->getCompiledFloat(funcName);
                         if (intPtr)
@@ -753,7 +754,6 @@ op_CALL: {
             }
         }
 
-        auto it = functions.find(funcName);
         if (it == functions.end()) {
             throw std::runtime_error("Undefined function: " + funcName);
         }
