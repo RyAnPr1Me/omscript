@@ -5,6 +5,20 @@ All notable changes to the OmScript compiler will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-03-01
+
+### Added
+- **Lambda expressions**: `|x| x * 2` syntax for anonymous functions — desugared at parse time to named functions; works seamlessly with `array_map`, `array_filter`, and `array_reduce`
+  - Single parameter: `|x| x * 2`
+  - Multiple parameters: `|a, b| a + b`
+  - Zero parameters: `|| 42`
+- **Pipe operator** (`|>`): left-to-right function chaining — `expr |> fn` desugars to `fn(expr)`; supports both stdlib and user-defined functions; left-associative for chaining: `x |> f |> g`
+- **Spread operator** (`...`): array unpacking in array literals — `[1, ...arr, 2]` creates a new array with elements from `arr` spliced in; supports multiple spreads and dynamic runtime length computation
+- New lexer tokens: `PIPE_FORWARD` (`|>`), `FAT_ARROW` (`=>`), `SPREAD` (reserved)
+- New AST node types: `LAMBDA_EXPR`, `SPREAD_EXPR`, `PIPE_EXPR`
+- 21 new unit tests (6 lexer, 7 parser, 8 codegen)
+- Integration test: `examples/lambda_pipe_spread_test.om`
+
 ## [1.9.0] - 2026-03-01
 
 ### Added

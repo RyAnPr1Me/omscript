@@ -1075,3 +1075,110 @@ TEST(ParserTest, DefaultParameterNonDefaultAfterDefaultError) {
     Parser parser(tokens);
     EXPECT_THROW(parser.parse(), std::runtime_error);
 }
+
+// ===========================================================================
+// Lambda expression tests
+// ===========================================================================
+
+TEST(ParserTest, LambdaDesugaredToFunction) {
+    // Lambda |x| x * 2 should be desugared into a generated function
+    auto program = parse("fn main() { var f = |x| x * 2; return 0; }");
+    // The program should have main + 1 generated lambda function
+    ASSERT_GE(program->functions.size(), 2u);
+    // The last function should be the lambda
+    bool foundLambda = false;
+    for (const auto& func : program->functions) {
+        if (func->name.find("__lambda_") == 0) {
+            foundLambda = true;
+            EXPECT_EQ(func->parameters.size(), 1u);
+            EXPECT_EQ(func->parameters[0].name, "x");
+        }
+    }
+    EXPECT_TRUE(foundLambda);
+}
+
+TEST(ParserTest, LambdaTwoParams) {
+    auto program = parse("fn main() { var f = |a, b| a + b; return 0; }");
+    ASSERT_GE(program->functions.size(), 2u);
+    bool foundLambda = false;
+    for (const auto& func : program->functions) {
+        if (func->name.find("__lambda_") == 0) {
+            foundLambda = true;
+            EXPECT_EQ(func->parameters.size(), 2u);
+            EXPECT_EQ(func->parameters[0].name, "a");
+            EXPECT_EQ(func->parameters[1].name, "b");
+        }
+    }
+    EXPECT_TRUE(foundLambda);
+}
+
+TEST(ParserTest, LambdaResultIsStringLiteral) {
+    // Lambda should be desugared into a string literal (the function name)
+    auto program = parse("fn main() { var f = |x| x; return 0; }");
+    auto* varDecl = dynamic_cast<VarDecl*>(program->functions[0]->body->statements[0].get());
+    ASSERT_NE(varDecl, nullptr);
+    auto* lit = dynamic_cast<LiteralExpr*>(varDecl->initializer.get());
+    ASSERT_NE(lit, nullptr);
+    EXPECT_EQ(lit->literalType, LiteralExpr::LiteralType::STRING);
+    EXPECT_TRUE(lit->stringValue.find("__lambda_") == 0);
+}
+
+// ===========================================================================
+// Pipe operator tests
+// ===========================================================================
+
+TEST(ParserTest, PipeOperator) {
+    auto program = parse("fn main() { var x = 5 |> double; return 0; }");
+    auto* varDecl = dynamic_cast<VarDecl*>(program->functions[0]->body->statements[0].get());
+    ASSERT_NE(varDecl, nullptr);
+    auto* pipe = dynamic_cast<PipeExpr*>(varDecl->initializer.get());
+    ASSERT_NE(pipe, nullptr);
+    EXPECT_EQ(pipe->functionName, "double");
+}
+
+TEST(ParserTest, PipeOperatorChain) {
+    auto program = parse("fn main() { var x = 5 |> f |> g; return 0; }");
+    auto* varDecl = dynamic_cast<VarDecl*>(program->functions[0]->body->statements[0].get());
+    ASSERT_NE(varDecl, nullptr);
+    auto* pipe = dynamic_cast<PipeExpr*>(varDecl->initializer.get());
+    ASSERT_NE(pipe, nullptr);
+    EXPECT_EQ(pipe->functionName, "g");
+    // The left side should also be a PipeExpr
+    auto* innerPipe = dynamic_cast<PipeExpr*>(pipe->left.get());
+    ASSERT_NE(innerPipe, nullptr);
+    EXPECT_EQ(innerPipe->functionName, "f");
+}
+
+// ===========================================================================
+// Spread operator tests
+// ===========================================================================
+
+TEST(ParserTest, SpreadInArrayLiteral) {
+    auto program = parse("fn main() { var a = [1, 2]; var b = [...a, 3]; return 0; }");
+    auto* varDecl = dynamic_cast<VarDecl*>(program->functions[0]->body->statements[1].get());
+    ASSERT_NE(varDecl, nullptr);
+    auto* arr = dynamic_cast<ArrayExpr*>(varDecl->initializer.get());
+    ASSERT_NE(arr, nullptr);
+    ASSERT_EQ(arr->elements.size(), 2u);
+    // First element should be a SpreadExpr
+    auto* spread = dynamic_cast<SpreadExpr*>(arr->elements[0].get());
+    ASSERT_NE(spread, nullptr);
+    auto* spreadId = dynamic_cast<IdentifierExpr*>(spread->operand.get());
+    ASSERT_NE(spreadId, nullptr);
+    EXPECT_EQ(spreadId->name, "a");
+    // Second element should be a LiteralExpr
+    auto* lit = dynamic_cast<LiteralExpr*>(arr->elements[1].get());
+    ASSERT_NE(lit, nullptr);
+    EXPECT_EQ(lit->intValue, 3);
+}
+
+TEST(ParserTest, MultipleSpreadInArray) {
+    auto program = parse("fn main() { var a = [1]; var b = [2]; var c = [...a, ...b]; return 0; }");
+    auto* varDecl = dynamic_cast<VarDecl*>(program->functions[0]->body->statements[2].get());
+    ASSERT_NE(varDecl, nullptr);
+    auto* arr = dynamic_cast<ArrayExpr*>(varDecl->initializer.get());
+    ASSERT_NE(arr, nullptr);
+    ASSERT_EQ(arr->elements.size(), 2u);
+    EXPECT_NE(dynamic_cast<SpreadExpr*>(arr->elements[0].get()), nullptr);
+    EXPECT_NE(dynamic_cast<SpreadExpr*>(arr->elements[1].get()), nullptr);
+}

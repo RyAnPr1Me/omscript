@@ -576,3 +576,68 @@ TEST(LexerTest, BitwiseAssignDoesNotConflict) {
     EXPECT_EQ(andCount, 1);
     EXPECT_EQ(ampAssignCount, 1);
 }
+
+// ===========================================================================
+// New token tests: pipe forward, fat arrow
+// ===========================================================================
+
+TEST(LexerTest, PipeForward) {
+    auto tokens = lex("a |> b");
+    ASSERT_GE(tokens.size(), 4u);
+    EXPECT_EQ(tokens[0].type, TokenType::IDENTIFIER);
+    EXPECT_EQ(tokens[1].type, TokenType::PIPE_FORWARD);
+    EXPECT_EQ(tokens[1].lexeme, "|>");
+    EXPECT_EQ(tokens[2].type, TokenType::IDENTIFIER);
+}
+
+TEST(LexerTest, FatArrow) {
+    auto tokens = lex("x => y");
+    ASSERT_GE(tokens.size(), 4u);
+    EXPECT_EQ(tokens[1].type, TokenType::FAT_ARROW);
+    EXPECT_EQ(tokens[1].lexeme, "=>");
+}
+
+TEST(LexerTest, PipeForwardDoesNotConflict) {
+    // |> should not conflict with | or ||
+    auto tokens = lex("a | b || c |> d");
+    int pipeCount = 0, orCount = 0, pipeForwardCount = 0;
+    for (const auto& t : tokens) {
+        if (t.type == TokenType::PIPE) pipeCount++;
+        if (t.type == TokenType::OR) orCount++;
+        if (t.type == TokenType::PIPE_FORWARD) pipeForwardCount++;
+    }
+    EXPECT_EQ(pipeCount, 1);
+    EXPECT_EQ(orCount, 1);
+    EXPECT_EQ(pipeForwardCount, 1);
+}
+
+TEST(LexerTest, FatArrowDoesNotConflict) {
+    // => should not conflict with = or ==
+    auto tokens = lex("a = b == c => d");
+    int assignCount = 0, eqCount = 0, fatArrowCount = 0;
+    for (const auto& t : tokens) {
+        if (t.type == TokenType::ASSIGN) assignCount++;
+        if (t.type == TokenType::EQ) eqCount++;
+        if (t.type == TokenType::FAT_ARROW) fatArrowCount++;
+    }
+    EXPECT_EQ(assignCount, 1);
+    EXPECT_EQ(eqCount, 1);
+    EXPECT_EQ(fatArrowCount, 1);
+}
+
+TEST(LexerTest, RangeTokenInArray) {
+    auto tokens = lex("[...arr]");
+    ASSERT_GE(tokens.size(), 4u);
+    EXPECT_EQ(tokens[0].type, TokenType::LBRACKET);
+    EXPECT_EQ(tokens[1].type, TokenType::RANGE);
+    EXPECT_EQ(tokens[1].lexeme, "...");
+    EXPECT_EQ(tokens[2].type, TokenType::IDENTIFIER);
+    EXPECT_EQ(tokens[3].type, TokenType::RBRACKET);
+}
+
+TEST(LexerTest, PipeForwardChain) {
+    auto tokens = lex("x |> f |> g");
+    ASSERT_GE(tokens.size(), 6u);
+    EXPECT_EQ(tokens[1].type, TokenType::PIPE_FORWARD);
+    EXPECT_EQ(tokens[3].type, TokenType::PIPE_FORWARD);
+}

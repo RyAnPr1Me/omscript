@@ -3636,3 +3636,79 @@ TEST(CodegenTest, ArrayReduceGeneration) {
         codegen);
     ASSERT_NE(mod, nullptr);
 }
+
+// ===========================================================================
+// Lambda, pipe, and spread operator tests
+// ===========================================================================
+
+TEST(CodegenTest, LambdaWithArrayMap) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() { var a = [1, 2, 3]; var b = array_map(a, |x| x * 2); return 0; }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    // The lambda should be desugared into a __lambda_ function
+    bool foundLambda = false;
+    for (auto& fn : *mod) {
+        if (fn.getName().str().find("__lambda_") == 0) {
+            foundLambda = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(foundLambda);
+}
+
+TEST(CodegenTest, LambdaWithArrayFilter) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() { var a = [1, 2, 3, 4]; var b = array_filter(a, |x| x % 2 == 0); return 0; }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, LambdaWithArrayReduce) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() { var a = [1, 2, 3]; var s = array_reduce(a, |acc, x| acc + x, 0); return 0; }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, PipeOperator) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn double(x) { return x * 2; }\n"
+        "fn main() { var x = 5 |> double; return 0; }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, PipeOperatorWithStdlib) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() { var a = [1, 2, 3]; var n = a |> len; return 0; }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, SpreadOperatorInArray) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() { var a = [1, 2]; var b = [3, 4]; var c = [...a, ...b]; return 0; }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, SpreadWithPlainElements) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn main() { var a = [1, 2]; var b = [0, ...a, 99]; return 0; }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, IsStdlibFunctionArrayMapFilterReduce) {
+    EXPECT_TRUE(isStdlibFunction("array_map"));
+    EXPECT_TRUE(isStdlibFunction("array_filter"));
+    EXPECT_TRUE(isStdlibFunction("array_reduce"));
+}

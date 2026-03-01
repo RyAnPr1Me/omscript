@@ -501,8 +501,9 @@ Operators are listed from **highest** to **lowest** precedence:
 | 12 | `\|` | Left | Bitwise OR |
 | 13 | `&&` | Left | Logical AND (short-circuit) |
 | 14 | `\|\|` | Left | Logical OR (short-circuit) |
-| 15 | `? :` | Right | Ternary conditional |
 | 14.5 | `??` | Left | Null coalescing |
+| 15 | `? :` | Right | Ternary conditional |
+| 15.5 | `\|>` | Left | Pipe forward |
 | 16 | `=` `+=` `-=` `*=` `/=` `%=` | Right | Assignment |
 
 ### 7.2 Arithmetic Operators
@@ -643,6 +644,58 @@ var x = a ?? b ?? c;  // First non-zero value, or c
 | `x *= y` | `x = x * y` |
 | `x /= y` | `x = x / y` |
 | `x %= y` | `x = x % y` |
+
+### 7.10 Pipe Operator
+
+The pipe operator `|>` passes the left operand as the argument to the function on the right. It is syntactic sugar for a function call and supports both user-defined and standard library functions.
+
+```javascript
+// expr |> fn  is equivalent to  fn(expr)
+var result = [1, 2, 3] |> len;           // len([1, 2, 3]) → 3
+
+fn double(x) { return x * 2; }
+var y = 5 |> double;                      // double(5) → 10
+
+// Chaining: left-associative, evaluated left to right
+var n = [1, 2, 3, 4, 5, 6] |> len;       // 6
+```
+
+### 7.11 Lambda Expressions
+
+Lambda expressions create anonymous functions inline. They are desugared at parse time into named helper functions, so they can be used wherever a function name string literal is expected (such as `array_map`, `array_filter`, `array_reduce`).
+
+**Syntax:** `|params| body_expression`
+
+```javascript
+// Single parameter
+var doubled = array_map([1, 2, 3], |x| x * 2);    // [2, 4, 6]
+
+// Multiple parameters
+var sum = array_reduce([1, 2, 3], |acc, x| acc + x, 0);  // 6
+
+// Filter with lambda predicate
+var evens = array_filter([1, 2, 3, 4], |x| x % 2 == 0);  // [2, 4]
+
+// Zero parameters
+var always42 = || 42;
+```
+
+> **Note:** Lambdas are compile-time constructs. They do not capture variables from the enclosing scope — they are pure functions of their parameters.
+
+### 7.12 Spread Operator
+
+The spread operator `...` unpacks array elements into a new array literal. It can appear anywhere inside `[...]` brackets alongside regular elements.
+
+```javascript
+var a = [1, 2, 3];
+var b = [4, 5, 6];
+
+var combined = [...a, ...b];           // [1, 2, 3, 4, 5, 6]
+var prepended = [0, ...a];             // [0, 1, 2, 3]
+var sandwiched = [0, ...a, 99, ...b];  // [0, 1, 2, 3, 99, 4, 5, 6]
+```
+
+The spread operator computes the total length at runtime and allocates a single result array.
 
 ---
 
@@ -1346,7 +1399,7 @@ var removed = array_remove(arr, 2);  // removed == 30
 
 #### `array_map(array, "function_name")`
 
-Applies a named function to each element of the array and returns a new array with the results. The function name must be a string literal (resolved at compile time) and the function must accept at least one argument.
+Applies a named function to each element of the array and returns a new array with the results. The function name must be a string literal (resolved at compile time) and the function must accept at least one argument. Lambda expressions can also be used.
 
 ```javascript
 fn double(x) { return x * 2; }
@@ -1354,13 +1407,17 @@ fn main() {
     var arr = [1, 2, 3, 4, 5];
     var doubled = array_map(arr, "double");
     // doubled == [2, 4, 6, 8, 10]
+
+    // With lambda:
+    var tripled = array_map(arr, |x| x * 3);
+    // tripled == [3, 6, 9, 12, 15]
     return 0;
 }
 ```
 
 #### `array_filter(array, "function_name")`
 
-Returns a new array containing only the elements for which the named predicate function returns a non-zero value. The function name must be a string literal and the function must accept at least one argument.
+Returns a new array containing only the elements for which the named predicate function returns a non-zero value. The function name must be a string literal and the function must accept at least one argument. Lambda expressions can also be used.
 
 ```javascript
 fn is_even(x) { return x % 2 == 0; }
@@ -1368,13 +1425,17 @@ fn main() {
     var arr = [1, 2, 3, 4, 5, 6];
     var evens = array_filter(arr, "is_even");
     // evens == [2, 4, 6]
+
+    // With lambda:
+    var odds = array_filter(arr, |x| x % 2 != 0);
+    // odds == [1, 3, 5]
     return 0;
 }
 ```
 
 #### `array_reduce(array, "function_name", initial)`
 
-Reduces an array to a single value by applying a named two-argument function `(accumulator, element)` across all elements, starting with the given initial value. The function name must be a string literal and the function must accept at least two arguments.
+Reduces an array to a single value by applying a named two-argument function `(accumulator, element)` across all elements, starting with the given initial value. The function name must be a string literal and the function must accept at least two arguments. Lambda expressions can also be used.
 
 ```javascript
 fn add(acc, x) { return acc + x; }
@@ -1383,6 +1444,9 @@ fn main() {
     var arr = [1, 2, 3, 4, 5];
     var total = array_reduce(arr, "add", 0);      // 15
     var product = array_reduce(arr, "multiply", 1); // 120
+
+    // With lambda:
+    var sum = array_reduce(arr, |a, b| a + b, 0);  // 15
     return 0;
 }
 ```
