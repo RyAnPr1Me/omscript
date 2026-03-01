@@ -375,7 +375,7 @@ std::vector<Token> Lexer::tokenize() {
 
         // String literals (check triple-quote first for multi-line strings)
         if (c == '"') {
-            if (peek() == '"' && peek(1) == '"') {
+            if (peek(1) == '"' && peek(2) == '"') {
                 tokens.push_back(scanMultiLineString());
             } else {
                 tokens.push_back(scanString());
