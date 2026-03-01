@@ -156,7 +156,7 @@ bool Value::operator<=(const Value& other) const {
         return toDouble() <= other.toDouble();
     }
     if (type == Type::STRING && other.type == Type::STRING) {
-        return stringValue < other.stringValue || stringValue == other.stringValue;
+        return !(other.stringValue < stringValue);
     }
     throw std::runtime_error("Invalid operands for <=");
 }
