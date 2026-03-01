@@ -746,6 +746,104 @@ llvm::Function* CodeGenerator::getOrDeclareMemchr() {
     return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "memchr", module.get());
 }
 
+llvm::Function* CodeGenerator::getOrDeclareFree() {
+    if (auto* fn = module->getFunction("free"))
+        return fn;
+    auto* ty = llvm::FunctionType::get(llvm::Type::getVoidTy(*context), {llvm::PointerType::getUnqual(*context)}, false);
+    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "free", module.get());
+}
+
+llvm::Function* CodeGenerator::getOrDeclareStrstr() {
+    if (auto* fn = module->getFunction("strstr"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy, ptrTy}, false);
+    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strstr", module.get());
+}
+
+llvm::Function* CodeGenerator::getOrDeclareMemcpy() {
+    if (auto* fn = module->getFunction("memcpy"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy, ptrTy, getDefaultType()}, false);
+    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "memcpy", module.get());
+}
+
+llvm::Function* CodeGenerator::getOrDeclareMemmove() {
+    if (auto* fn = module->getFunction("memmove"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy, ptrTy, getDefaultType()}, false);
+    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "memmove", module.get());
+}
+
+llvm::Function* CodeGenerator::getOrDeclareToupper() {
+    if (auto* fn = module->getFunction("toupper"))
+        return fn;
+    auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {llvm::Type::getInt32Ty(*context)}, false);
+    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "toupper", module.get());
+}
+
+llvm::Function* CodeGenerator::getOrDeclareTolower() {
+    if (auto* fn = module->getFunction("tolower"))
+        return fn;
+    auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {llvm::Type::getInt32Ty(*context)}, false);
+    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "tolower", module.get());
+}
+
+llvm::Function* CodeGenerator::getOrDeclareIsspace() {
+    if (auto* fn = module->getFunction("isspace"))
+        return fn;
+    auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {llvm::Type::getInt32Ty(*context)}, false);
+    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "isspace", module.get());
+}
+
+llvm::Function* CodeGenerator::getOrDeclareStrtoll() {
+    if (auto* fn = module->getFunction("strtoll"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(getDefaultType(), {ptrTy, ptrTy, llvm::Type::getInt32Ty(*context)}, false);
+    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strtoll", module.get());
+}
+
+llvm::Function* CodeGenerator::getOrDeclareStrtod() {
+    if (auto* fn = module->getFunction("strtod"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(getFloatType(), {ptrTy, ptrTy}, false);
+    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strtod", module.get());
+}
+
+llvm::Function* CodeGenerator::getOrDeclareFloor() {
+    if (auto* fn = module->getFunction("floor"))
+        return fn;
+    auto* ty = llvm::FunctionType::get(getFloatType(), {getFloatType()}, false);
+    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "floor", module.get());
+}
+
+llvm::Function* CodeGenerator::getOrDeclareCeil() {
+    if (auto* fn = module->getFunction("ceil"))
+        return fn;
+    auto* ty = llvm::FunctionType::get(getFloatType(), {getFloatType()}, false);
+    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "ceil", module.get());
+}
+
+llvm::Function* CodeGenerator::getOrDeclareRound() {
+    if (auto* fn = module->getFunction("round"))
+        return fn;
+    auto* ty = llvm::FunctionType::get(getFloatType(), {getFloatType()}, false);
+    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "round", module.get());
+}
+
+llvm::Function* CodeGenerator::getOrDeclareQsort() {
+    if (auto* fn = module->getFunction("qsort"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(llvm::Type::getVoidTy(*context),
+        {ptrTy, getDefaultType(), getDefaultType(), ptrTy}, false);
+    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "qsort", module.get());
+}
+
 // ---------------------------------------------------------------------------
 // String type inference helpers
 // ---------------------------------------------------------------------------

@@ -296,6 +296,19 @@ class CodeGenerator {
     llvm::Function* getOrDeclareAbort();
     llvm::Function* getOrDeclareSnprintf();
     llvm::Function* getOrDeclareMemchr();
+    llvm::Function* getOrDeclareFree();
+    llvm::Function* getOrDeclareStrstr();
+    llvm::Function* getOrDeclareMemcpy();
+    llvm::Function* getOrDeclareMemmove();
+    llvm::Function* getOrDeclareToupper();
+    llvm::Function* getOrDeclareTolower();
+    llvm::Function* getOrDeclareIsspace();
+    llvm::Function* getOrDeclareStrtoll();
+    llvm::Function* getOrDeclareStrtod();
+    llvm::Function* getOrDeclareFloor();
+    llvm::Function* getOrDeclareCeil();
+    llvm::Function* getOrDeclareRound();
+    llvm::Function* getOrDeclareQsort();
 
     /// Shared implementation for prefix and postfix increment/decrement.
     /// Returns the *old* value for postfix (isPostfix=true) and the *new*
