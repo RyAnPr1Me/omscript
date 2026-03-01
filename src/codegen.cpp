@@ -460,18 +460,69 @@ namespace omscript {
 // Canonical set of all stdlib built-in function names.
 // These functions are always compiled to native machine code via LLVM IR,
 // never through the bytecode/dynamic compilation path.
-static const std::unordered_set<std::string> stdlibFunctions = {
-    "abs",          "array_concat", "array_contains", "array_fill",   "array_slice",  "assert",
-    "ceil",         "char_at",      "clamp",          "exit_program",  "floor",        "gcd",
-    "index_of",     "input",        "is_alpha",       "is_digit",     "is_even",      "is_odd",
-    "len",          "log2",         "max",            "min",          "pop",          "pow",
-    "print",        "print_char",   "println",        "push",         "random",       "reverse",
-    "round",        "sign",         "sleep",          "sort",         "sqrt",         "str_chars",
-    "str_concat",   "str_contains", "str_ends_with",  "str_eq",       "str_find",     "str_index_of",
-    "str_len",      "str_lower",    "str_repeat",     "str_replace",  "str_reverse",  "str_split",
-    "str_starts_with","str_substr", "str_to_float",   "str_to_int",   "str_trim",     "str_upper",
-    "sum",          "swap",         "time",           "to_char",      "to_float",     "to_int",
-    "to_string",    "typeof",       "write"};
+static const std::unordered_set<std::string> stdlibFunctions = {"abs",
+                                                                "array_concat",
+                                                                "array_contains",
+                                                                "array_fill",
+                                                                "array_slice",
+                                                                "assert",
+                                                                "ceil",
+                                                                "char_at",
+                                                                "clamp",
+                                                                "exit_program",
+                                                                "floor",
+                                                                "gcd",
+                                                                "index_of",
+                                                                "input",
+                                                                "is_alpha",
+                                                                "is_digit",
+                                                                "is_even",
+                                                                "is_odd",
+                                                                "len",
+                                                                "log2",
+                                                                "max",
+                                                                "min",
+                                                                "pop",
+                                                                "pow",
+                                                                "print",
+                                                                "print_char",
+                                                                "println",
+                                                                "push",
+                                                                "random",
+                                                                "reverse",
+                                                                "round",
+                                                                "sign",
+                                                                "sleep",
+                                                                "sort",
+                                                                "sqrt",
+                                                                "str_chars",
+                                                                "str_concat",
+                                                                "str_contains",
+                                                                "str_ends_with",
+                                                                "str_eq",
+                                                                "str_find",
+                                                                "str_index_of",
+                                                                "str_len",
+                                                                "str_lower",
+                                                                "str_repeat",
+                                                                "str_replace",
+                                                                "str_reverse",
+                                                                "str_split",
+                                                                "str_starts_with",
+                                                                "str_substr",
+                                                                "str_to_float",
+                                                                "str_to_int",
+                                                                "str_trim",
+                                                                "str_upper",
+                                                                "sum",
+                                                                "swap",
+                                                                "time",
+                                                                "to_char",
+                                                                "to_float",
+                                                                "to_int",
+                                                                "to_string",
+                                                                "typeof",
+                                                                "write"};
 
 bool isStdlibFunction(const std::string& name) {
     return stdlibFunctions.find(name) != stdlibFunctions.end();
@@ -756,7 +807,8 @@ llvm::Function* CodeGenerator::getOrDeclareMemchr() {
 llvm::Function* CodeGenerator::getOrDeclareFree() {
     if (auto* fn = module->getFunction("free"))
         return fn;
-    auto* ty = llvm::FunctionType::get(llvm::Type::getVoidTy(*context), {llvm::PointerType::getUnqual(*context)}, false);
+    auto* ty =
+        llvm::FunctionType::get(llvm::Type::getVoidTy(*context), {llvm::PointerType::getUnqual(*context)}, false);
     return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "free", module.get());
 }
 
@@ -847,7 +899,7 @@ llvm::Function* CodeGenerator::getOrDeclareQsort() {
         return fn;
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     auto* ty = llvm::FunctionType::get(llvm::Type::getVoidTy(*context),
-        {ptrTy, getDefaultType(), getDefaultType(), ptrTy}, false);
+                                       {ptrTy, getDefaultType(), getDefaultType(), ptrTy}, false);
     return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "qsort", module.get());
 }
 
@@ -861,8 +913,7 @@ llvm::Function* CodeGenerator::getOrDeclareRand() {
 llvm::Function* CodeGenerator::getOrDeclareSrand() {
     if (auto* fn = module->getFunction("srand"))
         return fn;
-    auto* ty =
-        llvm::FunctionType::get(llvm::Type::getVoidTy(*context), {llvm::Type::getInt32Ty(*context)}, false);
+    auto* ty = llvm::FunctionType::get(llvm::Type::getVoidTy(*context), {llvm::Type::getInt32Ty(*context)}, false);
     return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "srand", module.get());
 }
 
@@ -877,8 +928,7 @@ llvm::Function* CodeGenerator::getOrDeclareTimeFunc() {
 llvm::Function* CodeGenerator::getOrDeclareUsleep() {
     if (auto* fn = module->getFunction("usleep"))
         return fn;
-    auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context),
-                                       {llvm::Type::getInt32Ty(*context)}, false);
+    auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {llvm::Type::getInt32Ty(*context)}, false);
     return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "usleep", module.get());
 }
 
@@ -2507,8 +2557,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (expr->callee == "log2") {
         if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'log2' expects 1 argument, but " +
-                             std::to_string(expr->arguments.size()) + " provided",
+            codegenError("Built-in function 'log2' expects 1 argument, but " + std::to_string(expr->arguments.size()) +
+                             " provided",
                          expr);
         }
         llvm::Value* n = generateExpression(expr->arguments[0].get());
@@ -2559,8 +2609,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (expr->callee == "gcd") {
         if (expr->arguments.size() != 2) {
-            codegenError("Built-in function 'gcd' expects 2 arguments, but " +
-                             std::to_string(expr->arguments.size()) + " provided",
+            codegenError("Built-in function 'gcd' expects 2 arguments, but " + std::to_string(expr->arguments.size()) +
+                             " provided",
                          expr);
         }
         llvm::Value* a = generateExpression(expr->arguments[0].get());
@@ -2660,8 +2710,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (expr->callee == "floor") {
         if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'floor' expects 1 argument, but " +
-                             std::to_string(expr->arguments.size()) + " provided",
+            codegenError("Built-in function 'floor' expects 1 argument, but " + std::to_string(expr->arguments.size()) +
+                             " provided",
                          expr);
         }
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
@@ -2672,8 +2722,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (expr->callee == "ceil") {
         if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'ceil' expects 1 argument, but " +
-                             std::to_string(expr->arguments.size()) + " provided",
+            codegenError("Built-in function 'ceil' expects 1 argument, but " + std::to_string(expr->arguments.size()) +
+                             " provided",
                          expr);
         }
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
@@ -2684,8 +2734,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (expr->callee == "round") {
         if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'round' expects 1 argument, but " +
-                             std::to_string(expr->arguments.size()) + " provided",
+            codegenError("Built-in function 'round' expects 1 argument, but " + std::to_string(expr->arguments.size()) +
+                             " provided",
                          expr);
         }
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
@@ -2743,7 +2793,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 ? strArg
                 : builder->CreateIntToPtr(strArg, llvm::PointerType::getUnqual(*context), "substr.ptr");
         // Allocate buffer: len + 1
-        llvm::Value* allocSize = builder->CreateAdd(lenArg, llvm::ConstantInt::get(getDefaultType(), 1), "substr.alloc");
+        llvm::Value* allocSize =
+            builder->CreateAdd(lenArg, llvm::ConstantInt::get(getDefaultType(), 1), "substr.alloc");
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {allocSize}, "substr.buf");
         // memcpy(buf, strPtr + start, len)
         llvm::Value* srcPtr = builder->CreateGEP(llvm::Type::getInt8Ty(*context), strPtr, startArg, "substr.src");
@@ -2927,31 +2978,40 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Not found: return a copy of the original string
         builder->SetInsertPoint(notFoundBB);
         llvm::Value* origLen = builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "replace.origlen");
-        llvm::Value* copySize = builder->CreateAdd(origLen, llvm::ConstantInt::get(getDefaultType(), 1), "replace.copysize");
+        llvm::Value* copySize =
+            builder->CreateAdd(origLen, llvm::ConstantInt::get(getDefaultType(), 1), "replace.copysize");
         llvm::Value* copyBuf = builder->CreateCall(getOrDeclareMalloc(), {copySize}, "replace.copybuf");
         builder->CreateCall(getOrDeclareStrcpy(), {copyBuf, strPtr});
         builder->CreateBr(mergeBB);
 
         // Found: construct prefix + new + suffix
         builder->SetInsertPoint(foundBB);
-        llvm::Value* prefixLen = builder->CreatePtrDiff(llvm::Type::getInt8Ty(*context), found, strPtr, "replace.prefixlen");
+        llvm::Value* prefixLen =
+            builder->CreatePtrDiff(llvm::Type::getInt8Ty(*context), found, strPtr, "replace.prefixlen");
         llvm::Value* oldLen = builder->CreateCall(getOrDeclareStrlen(), {oldPtr}, "replace.oldlen");
         llvm::Value* newLen = builder->CreateCall(getOrDeclareStrlen(), {newPtr}, "replace.newlen");
         llvm::Value* totalOrigLen = builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "replace.totallen");
         // result len = prefixLen + newLen + (totalOrigLen - prefixLen - oldLen) + 1
-        llvm::Value* suffixLen = builder->CreateSub(totalOrigLen, builder->CreateAdd(prefixLen, oldLen, "replace.prold"), "replace.suffixlen");
-        llvm::Value* resultLen = builder->CreateAdd(builder->CreateAdd(prefixLen, newLen, "replace.prnew"), suffixLen, "replace.resultlen");
-        llvm::Value* resultSize = builder->CreateAdd(resultLen, llvm::ConstantInt::get(getDefaultType(), 1), "replace.resultsize");
+        llvm::Value* suffixLen = builder->CreateSub(
+            totalOrigLen, builder->CreateAdd(prefixLen, oldLen, "replace.prold"), "replace.suffixlen");
+        llvm::Value* resultLen =
+            builder->CreateAdd(builder->CreateAdd(prefixLen, newLen, "replace.prnew"), suffixLen, "replace.resultlen");
+        llvm::Value* resultSize =
+            builder->CreateAdd(resultLen, llvm::ConstantInt::get(getDefaultType(), 1), "replace.resultsize");
         llvm::Value* resultBuf = builder->CreateCall(getOrDeclareMalloc(), {resultSize}, "replace.resultbuf");
         // Copy prefix
         builder->CreateCall(getOrDeclareMemcpy(), {resultBuf, strPtr, prefixLen});
         // Copy new string
-        llvm::Value* afterPrefix = builder->CreateGEP(llvm::Type::getInt8Ty(*context), resultBuf, prefixLen, "replace.afterprefix");
+        llvm::Value* afterPrefix =
+            builder->CreateGEP(llvm::Type::getInt8Ty(*context), resultBuf, prefixLen, "replace.afterprefix");
         builder->CreateCall(getOrDeclareMemcpy(), {afterPrefix, newPtr, newLen});
         // Copy suffix (after old in original)
-        llvm::Value* afterNew = builder->CreateGEP(llvm::Type::getInt8Ty(*context), afterPrefix, newLen, "replace.afternew");
-        llvm::Value* suffixSrc = builder->CreateGEP(llvm::Type::getInt8Ty(*context), found, oldLen, "replace.suffixsrc");
-        llvm::Value* suffixCopyLen = builder->CreateAdd(suffixLen, llvm::ConstantInt::get(getDefaultType(), 1), "replace.suffixcopylen");
+        llvm::Value* afterNew =
+            builder->CreateGEP(llvm::Type::getInt8Ty(*context), afterPrefix, newLen, "replace.afternew");
+        llvm::Value* suffixSrc =
+            builder->CreateGEP(llvm::Type::getInt8Ty(*context), found, oldLen, "replace.suffixsrc");
+        llvm::Value* suffixCopyLen =
+            builder->CreateAdd(suffixLen, llvm::ConstantInt::get(getDefaultType(), 1), "replace.suffixcopylen");
         builder->CreateCall(getOrDeclareMemcpy(), {afterNew, suffixSrc, suffixCopyLen});
         builder->CreateBr(mergeBB);
 
@@ -2970,10 +3030,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                          expr);
         }
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
-        llvm::Value* strPtr =
-            strArg->getType()->isPointerTy()
-                ? strArg
-                : builder->CreateIntToPtr(strArg, llvm::PointerType::getUnqual(*context), "trim.ptr");
+        llvm::Value* strPtr = strArg->getType()->isPointerTy()
+                                  ? strArg
+                                  : builder->CreateIntToPtr(strArg, llvm::PointerType::getUnqual(*context), "trim.ptr");
         llvm::Value* strLen = builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "trim.len");
 
         llvm::Function* function = builder->GetInsertBlock()->getParent();
@@ -2994,7 +3053,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateCondBr(startCond, startBodyBB, startDoneBB);
 
         builder->SetInsertPoint(startBodyBB);
-        llvm::Value* startCharPtr = builder->CreateGEP(llvm::Type::getInt8Ty(*context), strPtr, startIdx, "trim.startcharptr");
+        llvm::Value* startCharPtr =
+            builder->CreateGEP(llvm::Type::getInt8Ty(*context), strPtr, startIdx, "trim.startcharptr");
         llvm::Value* startChar = builder->CreateLoad(llvm::Type::getInt8Ty(*context), startCharPtr, "trim.startchar");
         llvm::Value* startChar32 = builder->CreateZExt(startChar, llvm::Type::getInt32Ty(*context), "trim.startchar32");
         llvm::Value* isStartSpace = builder->CreateCall(getOrDeclareIsspace(), {startChar32}, "trim.isspace");
@@ -3012,8 +3072,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         builder->SetInsertPoint(startDoneBB);
         llvm::PHINode* trimStart = builder->CreatePHI(getDefaultType(), 2, "trim.start");
-        trimStart->addIncoming(startIdx, startLoopBB);   // reached end of string
-        trimStart->addIncoming(startIdx, startBodyBB);    // found non-space
+        trimStart->addIncoming(startIdx, startLoopBB); // reached end of string
+        trimStart->addIncoming(startIdx, startBodyBB); // found non-space
 
         // Find end (skip trailing whitespace)
         llvm::BasicBlock* endPreBB = builder->GetInsertBlock();
@@ -3030,7 +3090,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         builder->SetInsertPoint(endBodyBB);
         llvm::Value* prevEndIdx = builder->CreateSub(endIdx, one, "trim.prevendidx");
-        llvm::Value* endCharPtr = builder->CreateGEP(llvm::Type::getInt8Ty(*context), strPtr, prevEndIdx, "trim.endcharptr");
+        llvm::Value* endCharPtr =
+            builder->CreateGEP(llvm::Type::getInt8Ty(*context), strPtr, prevEndIdx, "trim.endcharptr");
         llvm::Value* endChar = builder->CreateLoad(llvm::Type::getInt8Ty(*context), endCharPtr, "trim.endchar");
         llvm::Value* endChar32 = builder->CreateZExt(endChar, llvm::Type::getInt32Ty(*context), "trim.endchar32");
         llvm::Value* isEndSpace = builder->CreateCall(getOrDeclareIsspace(), {endChar32}, "trim.isendspace");
@@ -3043,8 +3104,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         builder->SetInsertPoint(endDoneBB);
         llvm::PHINode* trimEnd = builder->CreatePHI(getDefaultType(), 2, "trim.end");
-        trimEnd->addIncoming(endIdx, endLoopBB);   // empty result
-        trimEnd->addIncoming(endIdx, endBodyBB);    // found non-space
+        trimEnd->addIncoming(endIdx, endLoopBB); // empty result
+        trimEnd->addIncoming(endIdx, endBodyBB); // found non-space
 
         // Build trimmed string
         llvm::Value* trimLen = builder->CreateSub(trimEnd, trimStart, "trim.len2");
@@ -3137,7 +3198,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 : builder->CreateIntToPtr(strArg, llvm::PointerType::getUnqual(*context), "repeat.ptr");
         llvm::Value* strLen = builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "repeat.len");
         llvm::Value* totalLen = builder->CreateMul(strLen, countArg, "repeat.total");
-        llvm::Value* allocSize = builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "repeat.alloc");
+        llvm::Value* allocSize =
+            builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "repeat.alloc");
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {allocSize}, "repeat.buf");
         // Null-terminate first byte so strcat works from empty
         llvm::Value* zeroByte = llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0);
@@ -3178,7 +3240,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 ? strArg
                 : builder->CreateIntToPtr(strArg, llvm::PointerType::getUnqual(*context), "strrev.ptr");
         llvm::Value* strLen = builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "strrev.len");
-        llvm::Value* allocSize = builder->CreateAdd(strLen, llvm::ConstantInt::get(getDefaultType(), 1), "strrev.alloc");
+        llvm::Value* allocSize =
+            builder->CreateAdd(strLen, llvm::ConstantInt::get(getDefaultType(), 1), "strrev.alloc");
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {allocSize}, "strrev.buf");
         // Loop: buf[i] = str[len-1-i]
         llvm::Function* function = builder->GetInsertBlock()->getParent();
@@ -3231,19 +3294,20 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* oldLen = builder->CreateLoad(getDefaultType(), arrPtr, "push.oldlen");
         llvm::Value* newLen = builder->CreateAdd(oldLen, llvm::ConstantInt::get(getDefaultType(), 1), "push.newlen");
         // Realloc: new size = (newLen + 1) * 8 bytes
-        llvm::Value* newSize = builder->CreateMul(
-            builder->CreateAdd(newLen, llvm::ConstantInt::get(getDefaultType(), 1), "push.slots"),
-            llvm::ConstantInt::get(getDefaultType(), 8), "push.bytes");
+        llvm::Value* newSize =
+            builder->CreateMul(builder->CreateAdd(newLen, llvm::ConstantInt::get(getDefaultType(), 1), "push.slots"),
+                               llvm::ConstantInt::get(getDefaultType(), 8), "push.bytes");
         llvm::Value* newBuf = builder->CreateCall(getOrDeclareMalloc(), {newSize}, "push.newbuf");
         // Copy old data: (oldLen + 1) * 8 bytes
-        llvm::Value* oldSize = builder->CreateMul(
-            builder->CreateAdd(oldLen, llvm::ConstantInt::get(getDefaultType(), 1), "push.oldslots"),
-            llvm::ConstantInt::get(getDefaultType(), 8), "push.oldbytes");
+        llvm::Value* oldSize =
+            builder->CreateMul(builder->CreateAdd(oldLen, llvm::ConstantInt::get(getDefaultType(), 1), "push.oldslots"),
+                               llvm::ConstantInt::get(getDefaultType(), 8), "push.oldbytes");
         builder->CreateCall(getOrDeclareMemcpy(), {newBuf, arrPtr, oldSize});
         // Update length
         builder->CreateStore(newLen, newBuf);
         // Store new value at index oldLen + 1 (after header)
-        llvm::Value* newElemIdx = builder->CreateAdd(oldLen, llvm::ConstantInt::get(getDefaultType(), 1), "push.elemidx");
+        llvm::Value* newElemIdx =
+            builder->CreateAdd(oldLen, llvm::ConstantInt::get(getDefaultType(), 1), "push.elemidx");
         llvm::Value* newElemPtr = builder->CreateGEP(getDefaultType(), newBuf, newElemIdx, "push.elemptr");
         builder->CreateStore(valArg, newElemPtr);
         // Return new array pointer as i64
@@ -3261,9 +3325,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* arrPtr = builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "pop.arrptr");
         llvm::Value* oldLen = builder->CreateLoad(getDefaultType(), arrPtr, "pop.oldlen");
         // Return the last element
-        llvm::Value* lastIdx = builder->CreateAdd(
-            builder->CreateSub(oldLen, llvm::ConstantInt::get(getDefaultType(), 1), "pop.lastoff"),
-            llvm::ConstantInt::get(getDefaultType(), 1), "pop.lastidx");
+        llvm::Value* lastIdx =
+            builder->CreateAdd(builder->CreateSub(oldLen, llvm::ConstantInt::get(getDefaultType(), 1), "pop.lastoff"),
+                               llvm::ConstantInt::get(getDefaultType(), 1), "pop.lastidx");
         llvm::Value* lastPtr = builder->CreateGEP(getDefaultType(), arrPtr, lastIdx, "pop.lastptr");
         llvm::Value* lastVal = builder->CreateLoad(getDefaultType(), lastPtr, "pop.lastval");
         // Decrease length in-place
@@ -3330,7 +3394,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* valArg = generateExpression(expr->arguments[1].get());
         arrArg = toDefaultType(arrArg);
         valArg = toDefaultType(valArg);
-        llvm::Value* arrPtr = builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "contains.arrptr");
+        llvm::Value* arrPtr =
+            builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "contains.arrptr");
         llvm::Value* arrLen = builder->CreateLoad(getDefaultType(), arrPtr, "contains.len");
 
         llvm::Function* function = builder->GetInsertBlock()->getParent();
@@ -3580,8 +3645,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // -----------------------------------------------------------------------
     if (expr->callee == "write") {
         if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'write' expects 1 argument, but " +
-                             std::to_string(expr->arguments.size()) + " provided",
+            codegenError("Built-in function 'write' expects 1 argument, but " + std::to_string(expr->arguments.size()) +
+                             " provided",
                          expr);
         }
         Expression* argExpr = expr->arguments[0].get();
@@ -3644,13 +3709,13 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Seed on first call via a global flag
         llvm::GlobalVariable* seeded = module->getGlobalVariable("__om_rand_seeded", true);
         if (!seeded) {
-            seeded = new llvm::GlobalVariable(*module, llvm::Type::getInt32Ty(*context), false,
-                                              llvm::GlobalValue::InternalLinkage,
-                                              llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0),
-                                              "__om_rand_seeded");
+            seeded = new llvm::GlobalVariable(
+                *module, llvm::Type::getInt32Ty(*context), false, llvm::GlobalValue::InternalLinkage,
+                llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0), "__om_rand_seeded");
         }
         llvm::Value* flag = builder->CreateLoad(llvm::Type::getInt32Ty(*context), seeded, "rand.flag");
-        llvm::Value* isZero = builder->CreateICmpEQ(flag, llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0), "rand.cmp");
+        llvm::Value* isZero =
+            builder->CreateICmpEQ(flag, llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0), "rand.cmp");
 
         llvm::Function* function = builder->GetInsertBlock()->getParent();
         llvm::BasicBlock* seedBB = llvm::BasicBlock::Create(*context, "rand.seed", function);
@@ -3676,8 +3741,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // -----------------------------------------------------------------------
     if (expr->callee == "time") {
         if (!expr->arguments.empty()) {
-            codegenError("Built-in function 'time' expects 0 arguments, but " +
-                             std::to_string(expr->arguments.size()) + " provided",
+            codegenError("Built-in function 'time' expects 0 arguments, but " + std::to_string(expr->arguments.size()) +
+                             " provided",
                          expr);
         }
         llvm::Value* nullPtr = llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context));
@@ -3845,7 +3910,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(splitDelimBB);
         // Create substring from partStart to si
         llvm::Value* partLen = builder->CreateSub(si, partStart, "split.plen");
-        llvm::Value* srcStart = builder->CreateGEP(llvm::Type::getInt8Ty(*context), strPtr, partStart, "split.srcstart");
+        llvm::Value* srcStart =
+            builder->CreateGEP(llvm::Type::getInt8Ty(*context), strPtr, partStart, "split.srcstart");
         llvm::Value* sub = builder->CreateCall(getOrDeclareStrndup(), {srcStart, partLen}, "split.sub");
         llvm::Value* subInt = builder->CreatePtrToInt(sub, getDefaultType(), "split.subint");
         // Store in array at (partIdx + 1) position
@@ -4654,17 +4720,13 @@ void CodeGenerator::generateTryCatch(TryCatchStmt* stmt) {
     // Get or create global error flag and value
     llvm::GlobalVariable* errFlag = module->getGlobalVariable("__om_error_flag", true);
     if (!errFlag) {
-        errFlag = new llvm::GlobalVariable(*module, getDefaultType(), false,
-                                           llvm::GlobalValue::InternalLinkage,
-                                           llvm::ConstantInt::get(getDefaultType(), 0),
-                                           "__om_error_flag");
+        errFlag = new llvm::GlobalVariable(*module, getDefaultType(), false, llvm::GlobalValue::InternalLinkage,
+                                           llvm::ConstantInt::get(getDefaultType(), 0), "__om_error_flag");
     }
     llvm::GlobalVariable* errVal = module->getGlobalVariable("__om_error_value", true);
     if (!errVal) {
-        errVal = new llvm::GlobalVariable(*module, getDefaultType(), false,
-                                          llvm::GlobalValue::InternalLinkage,
-                                          llvm::ConstantInt::get(getDefaultType(), 0),
-                                          "__om_error_value");
+        errVal = new llvm::GlobalVariable(*module, getDefaultType(), false, llvm::GlobalValue::InternalLinkage,
+                                          llvm::ConstantInt::get(getDefaultType(), 0), "__om_error_value");
     }
 
     llvm::Function* function = builder->GetInsertBlock()->getParent();
@@ -4685,7 +4747,8 @@ void CodeGenerator::generateTryCatch(TryCatchStmt* stmt) {
 
     // Check if error was thrown
     llvm::Value* thrown = builder->CreateLoad(getDefaultType(), errFlag, "try.thrown");
-    llvm::Value* wasThrown = builder->CreateICmpNE(thrown, llvm::ConstantInt::get(getDefaultType(), 0), "try.wasthrown");
+    llvm::Value* wasThrown =
+        builder->CreateICmpNE(thrown, llvm::ConstantInt::get(getDefaultType(), 0), "try.wasthrown");
 
     llvm::BasicBlock* catchBB = llvm::BasicBlock::Create(*context, "catch.body", function);
     llvm::BasicBlock* restoreBB = llvm::BasicBlock::Create(*context, "try.restore", function);
@@ -4726,17 +4789,13 @@ void CodeGenerator::generateThrow(ThrowStmt* stmt) {
     // Set global error flag and value
     llvm::GlobalVariable* errFlag = module->getGlobalVariable("__om_error_flag", true);
     if (!errFlag) {
-        errFlag = new llvm::GlobalVariable(*module, getDefaultType(), false,
-                                           llvm::GlobalValue::InternalLinkage,
-                                           llvm::ConstantInt::get(getDefaultType(), 0),
-                                           "__om_error_flag");
+        errFlag = new llvm::GlobalVariable(*module, getDefaultType(), false, llvm::GlobalValue::InternalLinkage,
+                                           llvm::ConstantInt::get(getDefaultType(), 0), "__om_error_flag");
     }
     llvm::GlobalVariable* errVal = module->getGlobalVariable("__om_error_value", true);
     if (!errVal) {
-        errVal = new llvm::GlobalVariable(*module, getDefaultType(), false,
-                                          llvm::GlobalValue::InternalLinkage,
-                                          llvm::ConstantInt::get(getDefaultType(), 0),
-                                          "__om_error_value");
+        errVal = new llvm::GlobalVariable(*module, getDefaultType(), false, llvm::GlobalValue::InternalLinkage,
+                                          llvm::ConstantInt::get(getDefaultType(), 0), "__om_error_value");
     }
 
     llvm::Value* val = generateExpression(stmt->value.get());
