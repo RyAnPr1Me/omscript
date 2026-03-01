@@ -5,6 +5,28 @@ All notable changes to the OmScript compiler will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0] - 2026-03-01
+
+### Added
+- **LLVM intrinsics for math builtins**: `abs`, `sqrt`, `min`, `max`, `floor`, `ceil`, `round`, and `clamp` now emit native LLVM intrinsics (e.g. `llvm.abs.i64`, `llvm.sqrt.f64`, `llvm.smin`, `llvm.maxnum`) instead of manual compare-and-select or loop-based implementations
+- **Binary exponentiation**: `**` operator and `pow()` builtin use O(log n) exponentiation by squaring instead of O(n) linear multiply loop
+- **O1 pipeline upgrade**: replaced legacy `FunctionPassManager` (6 local passes, no IPO) with `PassBuilder::buildPerModuleDefaultPipeline(O1)`, gaining inlining, IPSCCP, GlobalDCE, and jump threading
+- **CodeGenOptLevel mapping**: `createTargetMachine()` now passes the correct `llvm::CodeGenOptLevel` so backend instruction selection, scheduling, and register allocation match the requested `-O` level
+- **JIT passes**: added SROA, EarlyCSE, DCE, and TailCallElimination to JIT optimization pipeline
+- Target triple and data layout are now always set on the LLVM module (previously skipped at O0)
+- Inline hint threshold increased from 8 to 16 statements at O3
+- Linker now receives `-O` level and `-lm` flags
+
+### Changed
+- **VM CALL handler**: deferred type profiling after JIT cache checks so hot JIT paths skip `classifyArgTypes` + `recordTypes` overhead; eliminated redundant `functions.find()` hash-map lookup by reusing a single iterator
+- **`Value::toString()` float path**: replaced `std::ostringstream` (heap-allocating) with `snprintf` into a stack buffer
+- **`Value::operator==` int fast path**: direct `intValue` comparison when both operands are INTEGER, avoiding `toDouble()` promotion
+- **`JITCompiler::recordCall()` hot path**: single `find()` on `callCounts_` for repeat calls instead of three `.count()` lookups per invocation
+- **Register restore**: `std::move` instead of `std::copy` when restoring registers from call frames, avoiding refcount churn on string Values
+
+### Fixed
+- `CodegenTest.NoInliningAtO1` test updated to `InliningAtO1` — O1 standard pipeline now includes inlining, so the assertion was corrected to match actual behavior
+
 ## [1.7.0] - 2026-03-01
 
 ### Added
