@@ -2373,8 +2373,8 @@ TEST(CodegenTest, InliningAtO3) {
     EXPECT_FALSE(hasCall) << "double_it() should be inlined at O3";
 }
 
-TEST(CodegenTest, NoInliningAtO1) {
-    // O1 uses the lightweight legacy pipeline which doesn't include inlining.
+TEST(CodegenTest, InliningAtO1) {
+    // O1 uses the new pass manager's standard pipeline which includes inlining.
     CodeGenerator codegen(OptimizationLevel::O1);
     auto* mod = generateIR("fn helper(x) { return x * 2; }"
                            "fn main() { return helper(10); }",
@@ -2391,7 +2391,7 @@ TEST(CodegenTest, NoInliningAtO1) {
             }
         }
     }
-    EXPECT_TRUE(hasCall) << "helper() should NOT be inlined at O1";
+    EXPECT_FALSE(hasCall) << "helper() should be inlined at O1";
 }
 
 TEST(CodegenTest, ConstantPropagationThroughInline) {
