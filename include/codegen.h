@@ -294,6 +294,8 @@ class CodeGenerator {
     llvm::Function* getOrDeclareScanf();
     llvm::Function* getOrDeclareExit();
     llvm::Function* getOrDeclareAbort();
+    llvm::Function* getOrDeclareSnprintf();
+    llvm::Function* getOrDeclareMemchr();
 
     /// Shared implementation for prefix and postfix increment/decrement.
     /// Returns the *old* value for postfix (isPostfix=true) and the *new*

@@ -194,6 +194,7 @@ test_cli_output "float-print" "3.5" 5 ./build/omsc run examples/float_test.om
 test_cli_output "string-var-print" "hello from variable" 0 ./build/omsc run examples/string_var_test.om
 test_cli_output "string-param-print" "from param" 0 ./build/omsc run examples/string_param_test.om
 test_cli_output "string-return-print" "hello world" 0 ./build/omsc run examples/string_param_test.om
+test_cli_output "to-string-print" "12345" 87 ./build/omsc run examples/new_builtins_test.om
 TOTAL=$((TOTAL + 1))
 if [ -f a.out ] || [ -f a.out.o ]; then
     echo -e "${RED}✗ Failed (temporary output files not cleaned)${NC}"
@@ -269,6 +270,7 @@ test_program "examples/foreach_break_test.om" 12
 test_program "examples/string_func_test.om" 178
 test_program "examples/stdlib_test.om" 66
 test_program "examples/stdlib2_test.om" 255
+test_program "examples/new_builtins_test.om" 87
 test_program "examples/float_test.om" 5
 test_program "examples/string_var_test.om" 0
 test_program "examples/string_param_test.om" 0

@@ -5,6 +5,15 @@ All notable changes to the OmScript compiler will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-03-01
+
+### Added
+- `log2(n)` stdlib function — integer base-2 logarithm (floor), returns -1 for n ≤ 0
+- `gcd(a, b)` stdlib function — greatest common divisor using Euclidean algorithm, works with negative numbers
+- `to_string(n)` stdlib function — converts integer to heap-allocated string representation
+- `str_find(s, ch)` stdlib function — finds first occurrence of character code in string, returns index or -1
+- Standard library count increased from 25 to 29 built-in functions
+
 ## [1.3.0] - 2026-02-23
 
 ### Added

@@ -1,0 +1,55 @@
+// Test new built-in functions: log2, gcd, to_string, str_find
+fn main() {
+    var total = 0;
+
+    // Test log2(n)
+    total = total + log2(1);       // 0
+    total = total + log2(2);       // 1
+    total = total + log2(4);       // 2
+    total = total + log2(8);       // 3
+    total = total + log2(16);      // 4
+    total = total + log2(1024);    // 10
+    // total = 0 + 1 + 2 + 3 + 4 + 10 = 20
+
+    // log2 edge cases
+    total = total + log2(0) + 1;   // -1 + 1 = 0
+    total = total + log2(-5) + 1;  // -1 + 1 = 0
+    total = total + log2(3);       // 1 (floor of log2(3))
+    total = total + log2(7);       // 2 (floor of log2(7))
+    total = total + log2(15);      // 3 (floor of log2(15))
+    // total = 20 + 0 + 0 + 1 + 2 + 3 = 26
+
+    // Test gcd(a, b)
+    total = total + gcd(12, 8);    // 4
+    total = total + gcd(100, 75);  // 25
+    total = total + gcd(7, 13);    // 1
+    total = total + gcd(0, 5);     // 5
+    total = total + gcd(5, 0);     // 5
+    total = total + gcd(-12, 8);   // 4
+    // total = 26 + 4 + 25 + 1 + 5 + 5 + 4 = 70
+
+    // Test to_string(n)
+    var s1 = to_string(42);
+    total = total + str_len(s1);   // 2 ("42")
+    var s2 = to_string(-100);
+    total = total + str_len(s2);   // 4 ("-100")
+    var s3 = to_string(0);
+    total = total + str_len(s3);   // 1 ("0")
+    // total = 70 + 2 + 4 + 1 = 77
+
+    // Test str_find(s, ch)
+    var hello = "hello world";
+    total = total + str_find(hello, 104);  // 0 ('h' at index 0)
+    total = total + str_find(hello, 111);  // 4 ('o' at index 4)
+    total = total + str_find(hello, 119);  // 6 ('w' at index 6)
+    // total = 77 + 0 + 4 + 6 = 87
+
+    // str_find not found
+    total = total + str_find(hello, 122) + 1;  // -1 + 1 = 0 ('z' not found)
+    // total = 87 + 0 = 87
+
+    // Test to_string + print to verify string content
+    print(to_string(12345));  // Should print: 12345
+
+    return total;
+}

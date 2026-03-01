@@ -41,7 +41,7 @@ OmScript is a **low-level, C-like programming language** featuring:
 - **Reference-counted memory management** — Automatic deterministic deallocation via malloc/free with reference counting on strings.
 - **Hybrid architecture** — A bytecode VM exists as an alternative backend for future dynamic compilation scenarios. The primary path is always native code.
 - **Aggressive optimization** — Four optimization levels (O0–O3) plus a special OPTMAX directive that applies exhaustive multi-pass optimization to marked functions.
-- **25 built-in standard library functions** — Math, array manipulation, string, character classification, and I/O, all compiled to native machine code.
+- **29 built-in standard library functions** — Math, array manipulation, string, character classification, and I/O, all compiled to native machine code.
 
 ### Design Philosophy
 
@@ -793,7 +793,7 @@ In the bytecode/VM runtime, strings are fully dynamic:
 
 ## 11. Standard Library
 
-OmScript provides **25 built-in functions**. All stdlib functions are compiled directly to native machine code via LLVM IR — they never go through the bytecode interpreter.
+OmScript provides **29 built-in functions**. All stdlib functions are compiled directly to native machine code via LLVM IR — they never go through the bytecode interpreter.
 
 ### 11.1 I/O Functions
 
@@ -940,6 +940,36 @@ is_odd(3)     // 1
 is_odd(8)     // 0
 ```
 
+#### `log2(n)`
+
+Returns the integer base-2 logarithm (floor) of `n`. Returns `-1` for `n <= 0`.
+
+- **Implementation:** Loop counting right-shifts until zero.
+
+```javascript
+log2(1)       // 0
+log2(2)       // 1
+log2(8)       // 3
+log2(1024)    // 10
+log2(7)       // 2  (floor)
+log2(0)       // -1
+log2(-5)      // -1
+```
+
+#### `gcd(a, b)`
+
+Returns the greatest common divisor of `a` and `b` using the Euclidean algorithm. Works with negative numbers (uses absolute values internally).
+
+- **Implementation:** Iterative Euclidean algorithm with `abs()` preprocessing.
+
+```javascript
+gcd(12, 8)    // 4
+gcd(100, 75)  // 25
+gcd(7, 13)    // 1
+gcd(0, 5)     // 5
+gcd(-12, 8)   // 4
+```
+
 ### 11.3 Array Functions
 
 #### `len(array)`
@@ -1060,6 +1090,31 @@ str_concat("foo", "bar")        // "foobar"
 str_concat("test", "")          // "test"
 ```
 
+#### `to_string(n)`
+
+Converts an integer to its string representation. Returns a heap-allocated string.
+
+- **Implementation:** Uses `snprintf` with a 21-byte buffer (enough for any 64-bit signed integer).
+
+```javascript
+to_string(42)       // "42"
+to_string(-100)     // "-100"
+to_string(0)        // "0"
+print(to_string(12345));  // Output: 12345
+```
+
+#### `str_find(s, ch)`
+
+Finds the first occurrence of a character code `ch` in string `s`. Returns the zero-based index, or `-1` if not found.
+
+- **Implementation:** Uses `memchr` for efficient single-character search.
+
+```javascript
+str_find("hello", 104)    // 0  ('h' at index 0)
+str_find("hello", 111)    // 4  ('o' at index 4)
+str_find("hello", 122)    // -1 ('z' not found)
+```
+
 ### 11.6 Utility Functions
 
 #### `typeof(x)`
@@ -1098,6 +1153,8 @@ assert(0);          // always aborts: "Runtime error: assertion failed"
 | `sqrt(x)` | 1 | floor(√x) | Integer square root |
 | `is_even(x)` | 1 | 0/1 | Even check |
 | `is_odd(x)` | 1 | 0/1 | Odd check |
+| `log2(n)` | 1 | floor(log₂n) | Integer base-2 logarithm (-1 if n ≤ 0) |
+| `gcd(a, b)` | 2 | gcd | Greatest common divisor |
 | `len(arr)` | 1 | length | Array length |
 | `sum(arr)` | 1 | total | Sum of array elements |
 | `swap(arr, i, j)` | 3 | 0 | Swap array elements |
@@ -1109,6 +1166,8 @@ assert(0);          // always aborts: "Runtime error: assertion failed"
 | `char_at(s, i)` | 2 | code | ASCII code of character at index `i` |
 | `str_eq(a, b)` | 2 | 0/1 | String equality (1 if equal, 0 otherwise) |
 | `str_concat(a, b)` | 2 | string | Concatenation of strings `a` and `b` |
+| `to_string(n)` | 1 | string | Convert integer to string representation |
+| `str_find(s, ch)` | 2 | index | Index of first occurrence of char (-1 if not found) |
 | `typeof(x)` | 1 | 1 | Type tag (always 1/integer in native path) |
 | `assert(cond)` | 1 | 1 | Abort with error if `cond` is falsy |
 

@@ -461,9 +461,10 @@ namespace omscript {
 // These functions are always compiled to native machine code via LLVM IR,
 // never through the bytecode/dynamic compilation path.
 static const std::unordered_set<std::string> stdlibFunctions = {
-    "abs",        "assert", "char_at", "clamp", "input", "is_alpha",   "is_digit", "is_even", "is_odd",
-    "len",        "max",    "min",     "pow",   "print", "print_char", "reverse",  "sign",    "sqrt",
-    "str_concat", "str_eq", "str_len", "sum",   "swap",  "to_char",    "typeof"};
+    "abs",        "assert",    "char_at", "clamp",    "gcd",    "input", "is_alpha",   "is_digit",
+    "is_even",    "is_odd",    "len",     "log2",     "max",    "min",   "pow",        "print",
+    "print_char", "reverse",   "sign",    "sqrt",     "str_concat",      "str_eq",     "str_find",
+    "str_len",    "sum",       "swap",    "to_char",  "to_string",       "typeof"};
 
 bool isStdlibFunction(const std::string& name) {
     return stdlibFunctions.find(name) != stdlibFunctions.end();
@@ -727,6 +728,22 @@ llvm::Function* CodeGenerator::getOrDeclareAbort() {
         return fn;
     auto* ty = llvm::FunctionType::get(llvm::Type::getVoidTy(*context), false);
     return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "abort", module.get());
+}
+
+llvm::Function* CodeGenerator::getOrDeclareSnprintf() {
+    if (auto* fn = module->getFunction("snprintf"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {ptrTy, getDefaultType(), ptrTy}, true);
+    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "snprintf", module.get());
+}
+
+llvm::Function* CodeGenerator::getOrDeclareMemchr() {
+    if (auto* fn = module->getFunction("memchr"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy, llvm::Type::getInt32Ty(*context), getDefaultType()}, false);
+    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "memchr", module.get());
 }
 
 // ---------------------------------------------------------------------------
@@ -2248,6 +2265,159 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Mark return as string-returning so callers can track it
         stringReturningFunctions_.insert("str_concat");
         return buf;
+    }
+
+    if (expr->callee == "log2") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'log2' expects 1 argument, but " +
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
+        }
+        llvm::Value* n = generateExpression(expr->arguments[0].get());
+        n = toDefaultType(n);
+        // Integer log2 via loop: count how many times we can right-shift before reaching 0.
+        // Returns -1 for n <= 0.
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* entryBB = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "log2.loop", function);
+        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "log2.body", function);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "log2.done", function);
+
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* negOne = llvm::ConstantInt::get(getDefaultType(), -1, true);
+
+        // n <= 0 → return -1
+        llvm::Value* isNonPositive = builder->CreateICmpSLE(n, zero, "log2.nonpos");
+        llvm::BasicBlock* startBB = llvm::BasicBlock::Create(*context, "log2.start", function);
+        builder->CreateCondBr(isNonPositive, doneBB, startBB);
+
+        builder->SetInsertPoint(startBB);
+        builder->CreateBr(loopBB);
+
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* val = builder->CreatePHI(getDefaultType(), 2, "log2.val");
+        val->addIncoming(n, startBB);
+        llvm::PHINode* count = builder->CreatePHI(getDefaultType(), 2, "log2.count");
+        count->addIncoming(negOne, startBB);
+
+        // while val > 0: val >>= 1, count++
+        llvm::Value* stillPositive = builder->CreateICmpSGT(val, zero, "log2.pos");
+        builder->CreateCondBr(stillPositive, bodyBB, doneBB);
+
+        builder->SetInsertPoint(bodyBB);
+        llvm::Value* newVal = builder->CreateLShr(val, one, "log2.shr");
+        llvm::Value* newCount = builder->CreateAdd(count, one, "log2.inc");
+        val->addIncoming(newVal, bodyBB);
+        count->addIncoming(newCount, bodyBB);
+        builder->CreateBr(loopBB);
+
+        builder->SetInsertPoint(doneBB);
+        llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "log2.result");
+        result->addIncoming(negOne, entryBB);
+        result->addIncoming(count, loopBB);
+        return result;
+    }
+
+    if (expr->callee == "gcd") {
+        if (expr->arguments.size() != 2) {
+            codegenError("Built-in function 'gcd' expects 2 arguments, but " +
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
+        }
+        llvm::Value* a = generateExpression(expr->arguments[0].get());
+        llvm::Value* b = generateExpression(expr->arguments[1].get());
+        a = toDefaultType(a);
+        b = toDefaultType(b);
+        // Use absolute values
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
+        llvm::Value* aNeg = builder->CreateICmpSLT(a, zero, "gcd.aneg");
+        llvm::Value* aNegVal = builder->CreateNeg(a, "gcd.anegval");
+        a = builder->CreateSelect(aNeg, aNegVal, a, "gcd.aabs");
+        llvm::Value* bNeg = builder->CreateICmpSLT(b, zero, "gcd.bneg");
+        llvm::Value* bNegVal = builder->CreateNeg(b, "gcd.bnegval");
+        b = builder->CreateSelect(bNeg, bNegVal, b, "gcd.babs");
+
+        // Euclidean algorithm: while (b != 0) { temp = b; b = a % b; a = temp; }
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* preheaderBB = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "gcd.loop", function);
+        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "gcd.body", function);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "gcd.done", function);
+
+        builder->CreateBr(loopBB);
+
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* phiA = builder->CreatePHI(getDefaultType(), 2, "gcd.a");
+        phiA->addIncoming(a, preheaderBB);
+        llvm::PHINode* phiB = builder->CreatePHI(getDefaultType(), 2, "gcd.b");
+        phiB->addIncoming(b, preheaderBB);
+
+        llvm::Value* bIsZero = builder->CreateICmpEQ(phiB, zero, "gcd.bzero");
+        builder->CreateCondBr(bIsZero, doneBB, bodyBB);
+
+        builder->SetInsertPoint(bodyBB);
+        llvm::Value* remainder = builder->CreateSRem(phiA, phiB, "gcd.rem");
+        // Ensure non-negative remainder
+        llvm::Value* remNeg = builder->CreateICmpSLT(remainder, zero, "gcd.remneg");
+        llvm::Value* remNegVal = builder->CreateNeg(remainder, "gcd.remnegval");
+        remainder = builder->CreateSelect(remNeg, remNegVal, remainder, "gcd.remabs");
+        phiA->addIncoming(phiB, bodyBB);
+        phiB->addIncoming(remainder, bodyBB);
+        builder->CreateBr(loopBB);
+
+        builder->SetInsertPoint(doneBB);
+        return phiA;
+    }
+
+    if (expr->callee == "to_string") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'to_string' expects 1 argument, but " +
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
+        }
+        llvm::Value* val = generateExpression(expr->arguments[0].get());
+        val = toDefaultType(val);
+        // Allocate buffer (21 bytes is enough for any 64-bit signed integer)
+        llvm::Value* bufSize = llvm::ConstantInt::get(getDefaultType(), 21);
+        llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bufSize}, "tostr.buf");
+        // snprintf(buf, 21, "%lld", val)
+        llvm::GlobalVariable* fmtStr = module->getGlobalVariable("tostr_fmt", true);
+        if (!fmtStr) {
+            fmtStr = builder->CreateGlobalString("%lld", "tostr_fmt");
+        }
+        builder->CreateCall(getOrDeclareSnprintf(), {buf, bufSize, fmtStr, val});
+        stringReturningFunctions_.insert("to_string");
+        return buf;
+    }
+
+    if (expr->callee == "str_find") {
+        if (expr->arguments.size() != 2) {
+            codegenError("Built-in function 'str_find' expects 2 arguments (string, char_code), but " +
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
+        }
+        llvm::Value* strArg = generateExpression(expr->arguments[0].get());
+        llvm::Value* chArg = generateExpression(expr->arguments[1].get());
+        chArg = toDefaultType(chArg);
+        // String may be a raw pointer or an i64 holding a pointer.
+        llvm::Value* strPtr =
+            strArg->getType()->isPointerTy()
+                ? strArg
+                : builder->CreateIntToPtr(strArg, llvm::PointerType::getUnqual(*context), "strfind.ptr");
+        // Get string length
+        llvm::Value* strLen = builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "strfind.len");
+        // memchr(strPtr, ch, strLen)
+        llvm::Value* chTrunc = builder->CreateTrunc(chArg, llvm::Type::getInt32Ty(*context), "strfind.ch32");
+        llvm::Value* found = builder->CreateCall(getOrDeclareMemchr(), {strPtr, chTrunc, strLen}, "strfind.found");
+        // If memchr returns null, return -1; otherwise return (found - strPtr)
+        llvm::Value* nullPtr = llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context));
+        llvm::Value* isNull = builder->CreateICmpEQ(found, nullPtr, "strfind.isnull");
+        llvm::Value* foundInt = builder->CreatePtrToInt(found, getDefaultType(), "strfind.foundint");
+        llvm::Value* baseInt = builder->CreatePtrToInt(strPtr, getDefaultType(), "strfind.baseint");
+        llvm::Value* offset = builder->CreateSub(foundInt, baseInt, "strfind.offset");
+        llvm::Value* negOne = llvm::ConstantInt::get(getDefaultType(), -1, true);
+        return builder->CreateSelect(isNull, negOne, offset, "strfind.result");
     }
 
     if (inOptMaxFunction) {
