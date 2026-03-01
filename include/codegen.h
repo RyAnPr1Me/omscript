@@ -128,6 +128,9 @@ class CodeGenerator {
     std::vector<std::unordered_map<std::string, ConstBinding>> constScopeStack;
     std::unordered_map<std::string, llvm::Function*> functions;
 
+    // Store AST function declarations for default parameter lookup at call sites.
+    std::unordered_map<std::string, const FunctionDecl*> functionDecls_;
+
     // Enum constant values (name → integer value), populated from enum declarations.
     std::unordered_map<std::string, long long> enumConstants_;
 

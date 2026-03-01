@@ -332,8 +332,10 @@ class Parameter {
   public:
     std::string name;
     std::string typeName;
+    std::unique_ptr<Expression> defaultValue;  // nullptr if no default
 
-    Parameter(const std::string& n, const std::string& t = "") : name(n), typeName(t) {}
+    Parameter(const std::string& n, const std::string& t = "", std::unique_ptr<Expression> def = nullptr)
+        : name(n), typeName(t), defaultValue(std::move(def)) {}
 };
 
 class FunctionDecl : public ASTNode {
@@ -345,6 +347,15 @@ class FunctionDecl : public ASTNode {
 
     FunctionDecl(const std::string& n, std::vector<Parameter> params, std::unique_ptr<BlockStmt> b, bool optMax = false)
         : ASTNode(ASTNodeType::FUNCTION), name(n), parameters(std::move(params)), body(std::move(b)), isOptMax(optMax) {
+    }
+
+    /// Returns the number of parameters that have no default value.
+    size_t requiredParameters() const {
+        size_t count = 0;
+        for (const auto& p : parameters) {
+            if (!p.defaultValue) ++count;
+        }
+        return count;
     }
 
     /// Returns true if every parameter has a type annotation.

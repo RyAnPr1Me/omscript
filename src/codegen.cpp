@@ -1227,6 +1227,7 @@ void CodeGenerator::generate(Program* program) {
         llvm::Function* function =
             llvm::Function::Create(funcType, llvm::Function::ExternalLinkage, func->name, module.get());
         functions[func->name] = function;
+        functionDecls_[func->name] = func.get();
     }
 
     // Process enum declarations: store constant values for identifier resolution.
@@ -4030,18 +4031,35 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
     llvm::Function* callee = calleeIt->second;
 
-    if (callee->arg_size() != expr->arguments.size()) {
-        codegenError("Function '" + expr->callee + "' expects " + std::to_string(callee->arg_size()) +
-                         " argument(s), but " + std::to_string(expr->arguments.size()) + " provided",
-                     expr);
+    auto declIt = functionDecls_.find(expr->callee);
+    size_t requiredArgs = callee->arg_size();
+    if (declIt != functionDecls_.end()) {
+        requiredArgs = declIt->second->requiredParameters();
+    }
+    if (expr->arguments.size() < requiredArgs || expr->arguments.size() > callee->arg_size()) {
+        codegenError("Function '" + expr->callee + "' expects " +
+                          (requiredArgs < callee->arg_size()
+                               ? std::to_string(requiredArgs) + " to " + std::to_string(callee->arg_size())
+                               : std::to_string(callee->arg_size())) +
+                          " argument(s), but " + std::to_string(expr->arguments.size()) + " provided",
+                      expr);
     }
 
     std::vector<llvm::Value*> args;
-    for (auto& arg : expr->arguments) {
-        llvm::Value* argVal = generateExpression(arg.get());
-        // Function parameters are i64, convert if needed
-        argVal = toDefaultType(argVal);
-        args.push_back(argVal);
+    for (size_t i = 0; i < callee->arg_size(); ++i) {
+        if (i < expr->arguments.size()) {
+            llvm::Value* argVal = generateExpression(expr->arguments[i].get());
+            // Function parameters are i64, convert if needed
+            argVal = toDefaultType(argVal);
+            args.push_back(argVal);
+        } else if (declIt != functionDecls_.end()) {
+            auto& param = declIt->second->parameters[i];
+            if (param.defaultValue) {
+                llvm::Value* argVal = generateExpression(param.defaultValue.get());
+                argVal = toDefaultType(argVal);
+                args.push_back(argVal);
+            }
+        }
     }
 
     return builder->CreateCall(callee, args, "calltmp");
@@ -4888,22 +4906,22 @@ std::unique_ptr<llvm::TargetMachine> CodeGenerator::createTargetMachine() const 
     std::string features;
     resolveTargetCPU(cpu, features);
 
-    // Map the compiler's optimization level to LLVM's backend CodeGenOptLevel
+    // Map the compiler's optimization level to LLVM's backend CodeGenOpt::Level
     // so that instruction selection, scheduling, and register allocation use
     // the appropriate aggressiveness.
-    llvm::CodeGenOptLevel cgOpt = llvm::CodeGenOptLevel::Default;
+    llvm::CodeGenOpt::Level cgOpt = llvm::CodeGenOpt::Default;
     switch (optimizationLevel) {
     case OptimizationLevel::O0:
-        cgOpt = llvm::CodeGenOptLevel::None;
+        cgOpt = llvm::CodeGenOpt::None;
         break;
     case OptimizationLevel::O1:
-        cgOpt = llvm::CodeGenOptLevel::Less;
+        cgOpt = llvm::CodeGenOpt::Less;
         break;
     case OptimizationLevel::O2:
-        cgOpt = llvm::CodeGenOptLevel::Default;
+        cgOpt = llvm::CodeGenOpt::Default;
         break;
     case OptimizationLevel::O3:
-        cgOpt = llvm::CodeGenOptLevel::Aggressive;
+        cgOpt = llvm::CodeGenOpt::Aggressive;
         break;
     }
 
@@ -5456,11 +5474,22 @@ uint8_t CodeGenerator::emitBytecodeExpression(Expression* expr) {
         for (auto& arg : call->arguments) {
             argRegs.push_back(emitBytecodeExpression(arg.get()));
         }
+        // Fill in default parameter values for omitted arguments.
+        auto declIt = functionDecls_.find(call->callee);
+        if (declIt != functionDecls_.end()) {
+            size_t totalParams = declIt->second->parameters.size();
+            for (size_t i = call->arguments.size(); i < totalParams; ++i) {
+                auto& param = declIt->second->parameters[i];
+                if (param.defaultValue) {
+                    argRegs.push_back(emitBytecodeExpression(param.defaultValue.get()));
+                }
+            }
+        }
         uint8_t rd = allocReg();
         bytecodeEmitter.emit(OpCode::CALL);
         bytecodeEmitter.emitReg(rd);
         bytecodeEmitter.emitString(call->callee);
-        bytecodeEmitter.emitByte(static_cast<uint8_t>(call->arguments.size()));
+        bytecodeEmitter.emitByte(static_cast<uint8_t>(argRegs.size()));
         for (uint8_t reg : argRegs) {
             bytecodeEmitter.emitReg(reg);
         }
