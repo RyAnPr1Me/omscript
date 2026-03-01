@@ -1,0 +1,72 @@
+// counter package - frequency counting and array utilities
+
+fn counter_count_value(arr, target) {
+    var n = len(arr);
+    var count = 0;
+    for (i in 0...n) {
+        if (arr[i] == target) {
+            count = count + 1;
+        }
+    }
+    return count;
+}
+
+fn counter_count_unique(arr) {
+    var n = len(arr);
+    if (n == 0) {
+        return 0;
+    }
+    var count = 0;
+    for (i in 0...n) {
+        var found = 0;
+        for (j in 0...i) {
+            if (arr[j] == arr[i]) {
+                found = 1;
+                break;
+            }
+        }
+        if (found == 0) {
+            count = count + 1;
+        }
+    }
+    return count;
+}
+
+fn counter_most_frequent(arr) {
+    // Returns the value that appears most often (first occurrence wins ties)
+    var n = len(arr);
+    if (n == 0) {
+        return 0;
+    }
+    var best_val = arr[0];
+    var best_count = 0;
+    for (i in 0...n) {
+        var c = 0;
+        for (j in 0...n) {
+            if (arr[j] == arr[i]) {
+                c = c + 1;
+            }
+        }
+        if (c > best_count) {
+            best_count = c;
+            best_val = arr[i];
+        }
+    }
+    return best_val;
+}
+
+fn counter_fill(arr, val) {
+    var n = len(arr);
+    for (i in 0...n) {
+        arr[i] = val;
+    }
+    return 0;
+}
+
+fn counter_copy_arr(src, dst) {
+    var n = len(src);
+    for (i in 0...n) {
+        dst[i] = src[i];
+    }
+    return 0;
+}

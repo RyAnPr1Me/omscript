@@ -1,0 +1,7 @@
+{
+  "name": "combinatorics",
+  "version": "1.0.0",
+  "description": "Combinatorial math utilities: factorial, permutations, combinations, catalan, derangements",
+  "entry": "combinatorics.om",
+  "files": ["combinatorics.om"]
+}

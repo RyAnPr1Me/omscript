@@ -1,0 +1,7 @@
+{
+  "name": "counter",
+  "version": "1.0.0",
+  "description": "Frequency counting and array utilities: count_value, count_unique, most_frequent, fill, copy_arr",
+  "entry": "counter.om",
+  "files": ["counter.om"]
+}
