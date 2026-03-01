@@ -97,11 +97,21 @@ JITSpecialization BytecodeJIT::getSpecialization(const std::string& name) const 
 }
 
 bool BytecodeJIT::recordCall(const std::string& name) {
+    // Use a single lookup into callCounts_ first — this is the most
+    // frequently exercised path. The find avoids creating an entry
+    // for functions that are already compiled or have failed.
+    auto ccIt = callCounts_.find(name);
+    if (ccIt != callCounts_.end()) {
+        // Already tracking this function.
+        ++ccIt->second;
+        return ccIt->second == kJITThreshold;
+    }
+    // First call for this function — check whether compilation already
+    // happened or previously failed before creating an entry.
     if (compiled_.count(name) || compiledFloat_.count(name) || failedCompilations_.count(name))
         return false;
-    auto& count = callCounts_[name];
-    ++count;
-    return count == kJITThreshold;
+    callCounts_[name] = 1;
+    return kJITThreshold == 1;
 }
 
 bool BytecodeJIT::recordPostJITCall(const std::string& name) {
@@ -713,7 +723,7 @@ bool BytecodeJIT::compileInt(const BytecodeFunction& func) {
     llvm::EngineBuilder engineBuilder(std::move(mod));
     engineBuilder.setErrorStr(&engineError);
     engineBuilder.setEngineKind(llvm::EngineKind::JIT);
-    engineBuilder.setOptLevel(llvm::CodeGenOpt::Aggressive);
+    engineBuilder.setOptLevel(llvm::CodeGenOptLevel::Aggressive);
     llvm::ExecutionEngine* engine = engineBuilder.create();
     if (!engine) {
         failedCompilations_.insert(func.name);
@@ -1134,7 +1144,7 @@ bool BytecodeJIT::compileFloat(const BytecodeFunction& func) {
     llvm::EngineBuilder engineBuilder(std::move(mod));
     engineBuilder.setErrorStr(&engineError);
     engineBuilder.setEngineKind(llvm::EngineKind::JIT);
-    engineBuilder.setOptLevel(llvm::CodeGenOpt::Aggressive);
+    engineBuilder.setOptLevel(llvm::CodeGenOptLevel::Aggressive);
     llvm::ExecutionEngine* engine = engineBuilder.create();
     if (!engine) {
         failedCompilations_.insert(func.name);
