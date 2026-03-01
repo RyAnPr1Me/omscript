@@ -104,6 +104,41 @@
       "description": "Number theory utilities: is_prime, sum_divisors, count_divisors, is_perfect, collatz_steps",
       "entry": "numbtheory.om",
       "files": ["numbtheory.om"]
+    },
+    {
+      "name": "queue",
+      "version": "1.0.0",
+      "description": "Queue data structure operations: enqueue, dequeue, peek, size, is_empty, clear",
+      "entry": "queue.om",
+      "files": ["queue.om"]
+    },
+    {
+      "name": "hash",
+      "version": "1.0.0",
+      "description": "Simple hashing utilities: hash_int, hash_combine, hash_array, hash_string, hash_mod",
+      "entry": "hash.om",
+      "files": ["hash.om"]
+    },
+    {
+      "name": "combinatorics",
+      "version": "1.0.0",
+      "description": "Combinatorial math utilities: factorial, permutations, combinations, catalan, derangements",
+      "entry": "combinatorics.om",
+      "files": ["combinatorics.om"]
+    },
+    {
+      "name": "physics",
+      "version": "1.0.0",
+      "description": "Basic physics formulas: kinetic_energy, momentum, displacement, force, density, work, power",
+      "entry": "physics.om",
+      "files": ["physics.om"]
+    },
+    {
+      "name": "counter",
+      "version": "1.0.0",
+      "description": "Frequency counting and array utilities: count_value, count_unique, most_frequent, fill, copy_arr",
+      "entry": "counter.om",
+      "files": ["counter.om"]
     }
   ]
 }

@@ -1,0 +1,45 @@
+// queue package - queue data structure operations using arrays
+// A queue is represented as an array where index 0 holds the current size.
+// Elements are stored starting at index 1 (front of queue at index 1).
+
+fn queue_size(q) {
+    return q[0];
+}
+
+fn queue_is_empty(q) {
+    if (q[0] == 0) {
+        return 1;
+    }
+    return 0;
+}
+
+fn queue_enqueue(q, val) {
+    var sz = q[0] + 1;
+    q[sz] = val;
+    q[0] = sz;
+}
+
+fn queue_dequeue(q) {
+    var sz = q[0];
+    if (sz == 0) {
+        return -1;
+    }
+    var val = q[1];
+    // Shift elements left
+    for (i in 1...sz) {
+        q[i] = q[i + 1];
+    }
+    q[0] = sz - 1;
+    return val;
+}
+
+fn queue_peek(q) {
+    if (q[0] == 0) {
+        return -1;
+    }
+    return q[1];
+}
+
+fn queue_clear(q) {
+    q[0] = 0;
+}

@@ -1,0 +1,7 @@
+{
+  "name": "hash",
+  "version": "1.0.0",
+  "description": "Simple hashing utilities: hash_int, hash_combine, hash_array, hash_string, hash_mod",
+  "entry": "hash.om",
+  "files": ["hash.om"]
+}

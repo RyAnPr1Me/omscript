@@ -1,0 +1,7 @@
+{
+  "name": "physics",
+  "version": "1.0.0",
+  "description": "Basic physics formulas: kinetic_energy, momentum, displacement, force, density, work, power",
+  "entry": "physics.om",
+  "files": ["physics.om"]
+}

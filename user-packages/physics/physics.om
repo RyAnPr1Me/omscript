@@ -1,0 +1,42 @@
+// physics package - basic physics formulas using integer arithmetic
+
+fn phys_kinetic_energy(mass, velocity) {
+    // KE = (1/2) * m * v^2 (integer approximation)
+    return mass * velocity * velocity / 2;
+}
+
+fn phys_momentum(mass, velocity) {
+    // p = m * v
+    return mass * velocity;
+}
+
+fn phys_displacement(velocity, time) {
+    // d = v * t (constant velocity)
+    return velocity * time;
+}
+
+fn phys_force(mass, acceleration) {
+    // F = m * a
+    return mass * acceleration;
+}
+
+fn phys_density(mass, volume) {
+    // density = mass / volume
+    if (volume == 0) {
+        return 0;
+    }
+    return mass / volume;
+}
+
+fn phys_work(force, distance) {
+    // W = F * d
+    return force * distance;
+}
+
+fn phys_power(work, time) {
+    // P = W / t
+    if (time == 0) {
+        return 0;
+    }
+    return work / time;
+}

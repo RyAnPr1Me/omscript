@@ -128,6 +128,9 @@ class CodeGenerator {
     std::vector<std::unordered_map<std::string, ConstBinding>> constScopeStack;
     std::unordered_map<std::string, llvm::Function*> functions;
 
+    // Enum constant values (name → integer value), populated from enum declarations.
+    std::unordered_map<std::string, long long> enumConstants_;
+
     // Bytecode emitter for dynamic/interpreted code (user-defined functions only;
     // stdlib built-ins are always compiled to native machine code via LLVM IR).
     BytecodeEmitter bytecodeEmitter;
@@ -219,6 +222,8 @@ class CodeGenerator {
     void generateBlock(BlockStmt* stmt);
     void generateExprStmt(ExprStmt* stmt);
     void generateSwitch(SwitchStmt* stmt);
+    void generateTryCatch(TryCatchStmt* stmt);
+    void generateThrow(ThrowStmt* stmt);
 
     // Helper methods
     llvm::Type* getDefaultType();
@@ -294,6 +299,32 @@ class CodeGenerator {
     llvm::Function* getOrDeclareScanf();
     llvm::Function* getOrDeclareExit();
     llvm::Function* getOrDeclareAbort();
+    llvm::Function* getOrDeclareSnprintf();
+    llvm::Function* getOrDeclareMemchr();
+    llvm::Function* getOrDeclareFree();
+    llvm::Function* getOrDeclareStrstr();
+    llvm::Function* getOrDeclareMemcpy();
+    llvm::Function* getOrDeclareMemmove();
+    llvm::Function* getOrDeclareToupper();
+    llvm::Function* getOrDeclareTolower();
+    llvm::Function* getOrDeclareIsspace();
+    llvm::Function* getOrDeclareStrtoll();
+    llvm::Function* getOrDeclareStrtod();
+    llvm::Function* getOrDeclareFloor();
+    llvm::Function* getOrDeclareCeil();
+    llvm::Function* getOrDeclareRound();
+    llvm::Function* getOrDeclareQsort();
+    llvm::Function* getOrDeclareRand();
+    llvm::Function* getOrDeclareSrand();
+    llvm::Function* getOrDeclareTimeFunc();
+    llvm::Function* getOrDeclareUsleep();
+    llvm::Function* getOrDeclareStrchr();
+    llvm::Function* getOrDeclareStrndup();
+    llvm::Function* getOrDeclareRealloc();
+    llvm::Function* getOrDeclareAtoi();
+    llvm::Function* getOrDeclareAtof();
+    llvm::Function* getOrDeclareFwrite();
+    llvm::Function* getOrDeclareFflush();
 
     /// Shared implementation for prefix and postfix increment/decrement.
     /// Returns the *old* value for postfix (isPostfix=true) and the *new*

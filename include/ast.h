@@ -22,6 +22,9 @@ enum class ASTNodeType {
     CONTINUE_STMT,
     SWITCH_STMT,
     FOR_EACH_STMT,
+    TRY_CATCH_STMT,
+    THROW_STMT,
+    ENUM_DECL,
     EXPR_STMT,
     BINARY_EXPR,
     UNARY_EXPR,
@@ -297,6 +300,33 @@ class BlockStmt : public Statement {
         : Statement(ASTNodeType::BLOCK), statements(std::move(stmts)) {}
 };
 
+class TryCatchStmt : public Statement {
+  public:
+    std::unique_ptr<BlockStmt> tryBlock;
+    std::string catchVar;  // variable name for the error code in catch block
+    std::unique_ptr<BlockStmt> catchBlock;
+
+    TryCatchStmt(std::unique_ptr<BlockStmt> tryB, const std::string& var, std::unique_ptr<BlockStmt> catchB)
+        : Statement(ASTNodeType::TRY_CATCH_STMT), tryBlock(std::move(tryB)), catchVar(var),
+          catchBlock(std::move(catchB)) {}
+};
+
+class ThrowStmt : public Statement {
+  public:
+    std::unique_ptr<Expression> value;
+
+    ThrowStmt(std::unique_ptr<Expression> val) : Statement(ASTNodeType::THROW_STMT), value(std::move(val)) {}
+};
+
+class EnumDecl : public Statement {
+  public:
+    std::string name;
+    std::vector<std::pair<std::string, long long>> members; // name → value
+
+    EnumDecl(const std::string& n, std::vector<std::pair<std::string, long long>> m)
+        : Statement(ASTNodeType::ENUM_DECL), name(n), members(std::move(m)) {}
+};
+
 // Top-level
 class Parameter {
   public:
@@ -332,9 +362,11 @@ class FunctionDecl : public ASTNode {
 class Program : public ASTNode {
   public:
     std::vector<std::unique_ptr<FunctionDecl>> functions;
+    std::vector<std::unique_ptr<EnumDecl>> enums;
 
-    Program(std::vector<std::unique_ptr<FunctionDecl>> funcs)
-        : ASTNode(ASTNodeType::PROGRAM), functions(std::move(funcs)) {}
+    Program(std::vector<std::unique_ptr<FunctionDecl>> funcs,
+            std::vector<std::unique_ptr<EnumDecl>> enms = {})
+        : ASTNode(ASTNodeType::PROGRAM), functions(std::move(funcs)), enums(std::move(enms)) {}
 };
 
 } // namespace omscript

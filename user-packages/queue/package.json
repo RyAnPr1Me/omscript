@@ -1,0 +1,7 @@
+{
+  "name": "queue",
+  "version": "1.0.0",
+  "description": "Queue data structure operations: enqueue, dequeue, peek, size, is_empty, clear",
+  "entry": "queue.om",
+  "files": ["queue.om"]
+}

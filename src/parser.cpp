@@ -81,6 +81,7 @@ void Parser::synchronize() {
 
 std::unique_ptr<Program> Parser::parse() {
     std::vector<std::unique_ptr<FunctionDecl>> functions;
+    std::vector<std::unique_ptr<EnumDecl>> enums;
     bool optMaxTagActive = false;
 
     while (!isAtEnd()) {
@@ -96,6 +97,15 @@ std::unique_ptr<Program> Parser::parse() {
                 error("OPTMAX end tag without matching start tag");
             }
             optMaxTagActive = false;
+            continue;
+        }
+        if (match(TokenType::ENUM)) {
+            try {
+                enums.push_back(parseEnumDecl());
+            } catch (const std::runtime_error& e) {
+                errors_.push_back(e.what());
+                synchronize();
+            }
             continue;
         }
         try {
@@ -120,7 +130,7 @@ std::unique_ptr<Program> Parser::parse() {
         throw std::runtime_error(combined);
     }
 
-    return std::make_unique<Program>(std::move(functions));
+    return std::make_unique<Program>(std::move(functions), std::move(enums));
 }
 
 std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
@@ -233,6 +243,20 @@ std::unique_ptr<Statement> Parser::parseStatement() {
     if (check(TokenType::LBRACE)) {
         Token kw = peek();
         auto stmt = parseBlock();
+        stmt->line = kw.line;
+        stmt->column = kw.column;
+        return stmt;
+    }
+    if (match(TokenType::TRY)) {
+        Token kw = tokens[current - 1];
+        auto stmt = parseTryCatchStmt();
+        stmt->line = kw.line;
+        stmt->column = kw.column;
+        return stmt;
+    }
+    if (match(TokenType::THROW)) {
+        Token kw = tokens[current - 1];
+        auto stmt = parseThrowStmt();
         stmt->line = kw.line;
         stmt->column = kw.column;
         return stmt;
@@ -421,6 +445,46 @@ std::unique_ptr<Statement> Parser::parseReturnStmt() {
     return std::make_unique<ReturnStmt>(std::move(value));
 }
 
+std::unique_ptr<Statement> Parser::parseTryCatchStmt() {
+    auto tryBlock = parseBlock();
+    consume(TokenType::CATCH, "Expected 'catch' after try block");
+    consume(TokenType::LPAREN, "Expected '(' after 'catch'");
+    Token varToken = consume(TokenType::IDENTIFIER, "Expected error variable name in catch");
+    consume(TokenType::RPAREN, "Expected ')' after catch variable");
+    auto catchBlock = parseBlock();
+    return std::make_unique<TryCatchStmt>(std::move(tryBlock), varToken.lexeme, std::move(catchBlock));
+}
+
+std::unique_ptr<Statement> Parser::parseThrowStmt() {
+    auto value = parseExpression();
+    consume(TokenType::SEMICOLON, "Expected ';' after throw expression");
+    return std::make_unique<ThrowStmt>(std::move(value));
+}
+
+std::unique_ptr<EnumDecl> Parser::parseEnumDecl() {
+    Token nameToken = consume(TokenType::IDENTIFIER, "Expected enum name");
+    consume(TokenType::LBRACE, "Expected '{' after enum name");
+
+    std::vector<std::pair<std::string, long long>> members;
+    long long nextValue = 0;
+
+    while (!check(TokenType::RBRACE) && !isAtEnd()) {
+        Token memberToken = consume(TokenType::IDENTIFIER, "Expected enum member name");
+        long long memberValue = nextValue;
+        if (match(TokenType::ASSIGN)) {
+            Token valToken = consume(TokenType::INTEGER, "Expected integer value for enum member");
+            memberValue = valToken.intValue;
+        }
+        members.push_back({memberToken.lexeme, memberValue});
+        nextValue = memberValue + 1;
+        // Allow optional trailing comma
+        match(TokenType::COMMA);
+    }
+
+    consume(TokenType::RBRACE, "Expected '}' after enum body");
+    return std::make_unique<EnumDecl>(nameToken.lexeme, std::move(members));
+}
+
 std::unique_ptr<Statement> Parser::parseExprStmt() {
     Token start = peek();
     auto expr = parseExpression();
@@ -595,7 +659,7 @@ std::unique_ptr<Expression> Parser::parseAssignment() {
 }
 
 std::unique_ptr<Expression> Parser::parseTernary() {
-    auto expr = parseLogicalOr();
+    auto expr = parseNullCoalesce();
 
     if (match(TokenType::QUESTION)) {
         Token questionToken = tokens[current - 1];
@@ -609,6 +673,20 @@ std::unique_ptr<Expression> Parser::parseTernary() {
     }
 
     return expr;
+}
+
+std::unique_ptr<Expression> Parser::parseNullCoalesce() {
+    auto left = parseLogicalOr();
+
+    while (match(TokenType::NULL_COALESCE)) {
+        auto right = parseLogicalOr();
+        // x ?? y  desugars to  x != 0 ? x : y  (ternary expression)
+        // We clone the left expression by re-wrapping it
+        auto node = std::make_unique<BinaryExpr>("??", std::move(left), std::move(right));
+        left = std::move(node);
+    }
+
+    return left;
 }
 
 std::unique_ptr<Expression> Parser::parseLogicalOr() {

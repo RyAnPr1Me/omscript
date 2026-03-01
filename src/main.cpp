@@ -1544,6 +1544,14 @@ const char* tokenTypeToString(omscript::TokenType type) {
         return "CASE";
     case omscript::TokenType::DEFAULT:
         return "DEFAULT";
+    case omscript::TokenType::TRY:
+        return "TRY";
+    case omscript::TokenType::CATCH:
+        return "CATCH";
+    case omscript::TokenType::THROW:
+        return "THROW";
+    case omscript::TokenType::ENUM:
+        return "ENUM";
     case omscript::TokenType::PLUS:
         return "PLUS";
     case omscript::TokenType::MINUS:
@@ -1602,6 +1610,8 @@ const char* tokenTypeToString(omscript::TokenType type) {
         return "RSHIFT_ASSIGN";
     case omscript::TokenType::QUESTION:
         return "QUESTION";
+    case omscript::TokenType::NULL_COALESCE:
+        return "NULL_COALESCE";
     case omscript::TokenType::AMPERSAND:
         return "AMPERSAND";
     case omscript::TokenType::PIPE:
