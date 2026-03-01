@@ -2357,11 +2357,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateCondBr(bIsZero, doneBB, bodyBB);
 
         builder->SetInsertPoint(bodyBB);
-        llvm::Value* remainder = builder->CreateSRem(phiA, phiB, "gcd.rem");
-        // Ensure non-negative remainder
-        llvm::Value* remNeg = builder->CreateICmpSLT(remainder, zero, "gcd.remneg");
-        llvm::Value* remNegVal = builder->CreateNeg(remainder, "gcd.remnegval");
-        remainder = builder->CreateSelect(remNeg, remNegVal, remainder, "gcd.remabs");
+        llvm::Value* remainder = builder->CreateURem(phiA, phiB, "gcd.rem");
         phiA->addIncoming(phiB, bodyBB);
         phiB->addIncoming(remainder, bodyBB);
         builder->CreateBr(loopBB);
@@ -2378,7 +2374,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         }
         llvm::Value* val = generateExpression(expr->arguments[0].get());
         val = toDefaultType(val);
-        // Allocate buffer (21 bytes is enough for any 64-bit signed integer)
+        // Allocate buffer (21 bytes is enough for any 64-bit signed decimal integer including sign and null terminator)
         llvm::Value* bufSize = llvm::ConstantInt::get(getDefaultType(), 21);
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bufSize}, "tostr.buf");
         // snprintf(buf, 21, "%lld", val)
