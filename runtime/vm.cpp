@@ -371,10 +371,30 @@ op_POW: {
                 throw std::runtime_error("Exponent too large for ** operator (max " + std::to_string(kMaxExponent) +
                                          ")");
             }
-            Value result(static_cast<int64_t>(1));
-            for (int64_t i = 0; i < n; i++)
-                result = result * base;
-            registers[rd] = result;
+            // Fast path: integer base — use exponentiation by squaring O(log n)
+            if (base.getType() == Value::Type::INTEGER) {
+                int64_t b = base.unsafeAsInt();
+                int64_t result = 1;
+                int64_t e = n;
+                while (e > 0) {
+                    if (e & 1)
+                        result *= b;
+                    b *= b;
+                    e >>= 1;
+                }
+                registers[rd] = Value(result);
+            } else {
+                Value result(static_cast<int64_t>(1));
+                Value b = base;
+                int64_t e = n;
+                while (e > 0) {
+                    if (e & 1)
+                        result = result * b;
+                    b = b * b;
+                    e >>= 1;
+                }
+                registers[rd] = result;
+            }
         }
     }
     DISPATCH();
@@ -385,6 +405,10 @@ op_EQ: {
     uint8_t rs2 = readByte(bytecode, ip);
     if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
         registers[rd] = Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() == registers[rs2].unsafeAsInt()));
+        DISPATCH();
+    }
+    if (registers[rs1].getType() == Value::Type::FLOAT && registers[rs2].getType() == Value::Type::FLOAT) {
+        registers[rd] = Value(static_cast<int64_t>(registers[rs1].unsafeAsFloat() == registers[rs2].unsafeAsFloat()));
         DISPATCH();
     }
     registers[rd] = Value(static_cast<int64_t>(registers[rs1] == registers[rs2]));
@@ -398,6 +422,10 @@ op_NE: {
         registers[rd] = Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() != registers[rs2].unsafeAsInt()));
         DISPATCH();
     }
+    if (registers[rs1].getType() == Value::Type::FLOAT && registers[rs2].getType() == Value::Type::FLOAT) {
+        registers[rd] = Value(static_cast<int64_t>(registers[rs1].unsafeAsFloat() != registers[rs2].unsafeAsFloat()));
+        DISPATCH();
+    }
     registers[rd] = Value(static_cast<int64_t>(registers[rs1] != registers[rs2]));
     DISPATCH();
 }
@@ -407,6 +435,10 @@ op_LT: {
     uint8_t rs2 = readByte(bytecode, ip);
     if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
         registers[rd] = Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() < registers[rs2].unsafeAsInt()));
+        DISPATCH();
+    }
+    if (registers[rs1].getType() == Value::Type::FLOAT && registers[rs2].getType() == Value::Type::FLOAT) {
+        registers[rd] = Value(static_cast<int64_t>(registers[rs1].unsafeAsFloat() < registers[rs2].unsafeAsFloat()));
         DISPATCH();
     }
     registers[rd] = Value(static_cast<int64_t>(registers[rs1] < registers[rs2]));
@@ -420,6 +452,10 @@ op_LE: {
         registers[rd] = Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() <= registers[rs2].unsafeAsInt()));
         DISPATCH();
     }
+    if (registers[rs1].getType() == Value::Type::FLOAT && registers[rs2].getType() == Value::Type::FLOAT) {
+        registers[rd] = Value(static_cast<int64_t>(registers[rs1].unsafeAsFloat() <= registers[rs2].unsafeAsFloat()));
+        DISPATCH();
+    }
     registers[rd] = Value(static_cast<int64_t>(registers[rs1] <= registers[rs2]));
     DISPATCH();
 }
@@ -431,6 +467,10 @@ op_GT: {
         registers[rd] = Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() > registers[rs2].unsafeAsInt()));
         DISPATCH();
     }
+    if (registers[rs1].getType() == Value::Type::FLOAT && registers[rs2].getType() == Value::Type::FLOAT) {
+        registers[rd] = Value(static_cast<int64_t>(registers[rs1].unsafeAsFloat() > registers[rs2].unsafeAsFloat()));
+        DISPATCH();
+    }
     registers[rd] = Value(static_cast<int64_t>(registers[rs1] > registers[rs2]));
     DISPATCH();
 }
@@ -440,6 +480,10 @@ op_GE: {
     uint8_t rs2 = readByte(bytecode, ip);
     if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
         registers[rd] = Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() >= registers[rs2].unsafeAsInt()));
+        DISPATCH();
+    }
+    if (registers[rs1].getType() == Value::Type::FLOAT && registers[rs2].getType() == Value::Type::FLOAT) {
+        registers[rd] = Value(static_cast<int64_t>(registers[rs1].unsafeAsFloat() >= registers[rs2].unsafeAsFloat()));
         DISPATCH();
     }
     registers[rd] = Value(static_cast<int64_t>(registers[rs1] >= registers[rs2]));
@@ -835,10 +879,30 @@ vm_exit:
                     throw std::runtime_error("Exponent too large for ** operator (max " + std::to_string(kMaxExponent) +
                                              ")");
                 }
-                Value result(static_cast<int64_t>(1));
-                for (int64_t i = 0; i < n; i++)
-                    result = result * base;
-                registers[rd] = result;
+                // Exponentiation by squaring: O(log n) instead of O(n)
+                if (base.getType() == Value::Type::INTEGER) {
+                    int64_t b = base.unsafeAsInt();
+                    int64_t result = 1;
+                    int64_t e = n;
+                    while (e > 0) {
+                        if (e & 1)
+                            result *= b;
+                        b *= b;
+                        e >>= 1;
+                    }
+                    registers[rd] = Value(result);
+                } else {
+                    Value result(static_cast<int64_t>(1));
+                    Value b = base;
+                    int64_t e = n;
+                    while (e > 0) {
+                        if (e & 1)
+                            result = result * b;
+                        b = b * b;
+                        e >>= 1;
+                    }
+                    registers[rd] = result;
+                }
             }
             break;
         }
