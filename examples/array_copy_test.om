@@ -1,0 +1,56 @@
+// Test array_copy and array_remove built-in functions
+fn main() {
+    var total = 0;
+
+    // Test array_copy
+    var arr = [10, 20, 30, 40, 50];
+    var copy = array_copy(arr);
+    total = total + (len(copy) == 5);      // 1
+    total = total + (copy[0] == 10);       // 1
+    total = total + (copy[4] == 50);       // 1
+    // total = 3
+
+    // Modify original - copy should be unaffected
+    arr[0] = 999;
+    total = total + (arr[0] == 999);       // 1
+    total = total + (copy[0] == 10);       // 1
+    // total = 5
+
+    // Test array_remove
+    var arr2 = [10, 20, 30, 40, 50];
+    var removed = array_remove(arr2, 2);
+    total = total + (removed == 30);       // 1
+    total = total + (len(arr2) == 4);      // 1
+    total = total + (arr2[0] == 10);       // 1
+    total = total + (arr2[1] == 20);       // 1
+    total = total + (arr2[2] == 40);       // 1
+    total = total + (arr2[3] == 50);       // 1
+    // total = 11
+
+    // Test array_remove first element
+    var arr3 = [100, 200, 300];
+    var r2 = array_remove(arr3, 0);
+    total = total + (r2 == 100);           // 1
+    total = total + (len(arr3) == 2);      // 1
+    total = total + (arr3[0] == 200);      // 1
+    total = total + (arr3[1] == 300);      // 1
+    // total = 15
+
+    // Test array_remove last element
+    var arr4 = [1, 2, 3];
+    var r3 = array_remove(arr4, 2);
+    total = total + (r3 == 3);             // 1
+    total = total + (len(arr4) == 2);      // 1
+    total = total + (arr4[0] == 1);        // 1
+    total = total + (arr4[1] == 2);        // 1
+    // total = 19
+
+    // Test copy of empty-ish array
+    var arr5 = [42];
+    var copy2 = array_copy(arr5);
+    total = total + (len(copy2) == 1);     // 1
+    total = total + (copy2[0] == 42);      // 1
+    // total = 21
+
+    return total;
+}

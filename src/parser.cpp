@@ -142,6 +142,7 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
     consume(TokenType::LPAREN, "Expected '(' after function name");
 
     std::vector<Parameter> parameters;
+    bool hasDefault = false;
     if (!check(TokenType::RPAREN)) {
         do {
             Token paramName = consume(TokenType::IDENTIFIER, "Expected parameter name");
@@ -151,7 +152,17 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
             } else if (inOptMaxFunction) {
                 error("OPTMAX parameters must include type annotations");
             }
-            parameters.push_back(Parameter(paramName.lexeme, typeName));
+            std::unique_ptr<Expression> defaultVal = nullptr;
+            if (match(TokenType::ASSIGN)) {
+                defaultVal = parsePrimary();
+                if (!dynamic_cast<LiteralExpr*>(defaultVal.get())) {
+                    error("Default parameter value must be a literal (integer, float, or string)");
+                }
+                hasDefault = true;
+            } else if (hasDefault) {
+                error("Non-default parameter '" + paramName.lexeme + "' cannot follow a default parameter");
+            }
+            parameters.push_back(Parameter(paramName.lexeme, typeName, std::move(defaultVal)));
         } while (match(TokenType::COMMA));
     }
 

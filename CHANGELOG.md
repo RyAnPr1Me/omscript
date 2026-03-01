@@ -5,6 +5,15 @@ All notable changes to the OmScript compiler will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] - 2026-03-01
+
+### Added
+- **Default function parameters**: `fn foo(a, b = 10) { ... }` — parameters with default values can be omitted at call sites; non-default parameters must precede default ones; defaults must be literal expressions (integer, float, or string)
+- **`array_copy(arr)`** built-in — creates a heap-allocated deep copy of an array, leaving the original unmodified
+- **`array_remove(arr, idx)`** built-in — removes the element at the given index, shifts remaining elements left, decrements length, and returns the removed value; includes bounds checking
+- **`input_line()`** built-in — reads a full line from stdin as a heap-allocated string (strips trailing newline); returns empty string on EOF
+- Standard library count increased from 63 to 66 built-in functions
+
 ## [1.6.0] - 2026-03-01
 
 ### Added

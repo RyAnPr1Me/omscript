@@ -463,7 +463,9 @@ namespace omscript {
 static const std::unordered_set<std::string> stdlibFunctions = {"abs",
                                                                 "array_concat",
                                                                 "array_contains",
+                                                                "array_copy",
                                                                 "array_fill",
+                                                                "array_remove",
                                                                 "array_slice",
                                                                 "assert",
                                                                 "ceil",
@@ -474,6 +476,7 @@ static const std::unordered_set<std::string> stdlibFunctions = {"abs",
                                                                 "gcd",
                                                                 "index_of",
                                                                 "input",
+                                                                "input_line",
                                                                 "is_alpha",
                                                                 "is_digit",
                                                                 "is_even",
@@ -988,6 +991,14 @@ llvm::Function* CodeGenerator::getOrDeclareFflush() {
     return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "fflush", module.get());
 }
 
+llvm::Function* CodeGenerator::getOrDeclareFgets() {
+    if (auto* fn = module->getFunction("fgets"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy, llvm::Type::getInt32Ty(*context), ptrTy}, false);
+    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "fgets", module.get());
+}
+
 // ---------------------------------------------------------------------------
 // String type inference helpers
 // ---------------------------------------------------------------------------
@@ -1227,6 +1238,7 @@ void CodeGenerator::generate(Program* program) {
         llvm::Function* function =
             llvm::Function::Create(funcType, llvm::Function::ExternalLinkage, func->name, module.get());
         functions[func->name] = function;
+        functionDecls_[func->name] = func.get();
     }
 
     // Process enum declarations: store constant values for identifier resolution.
@@ -2178,6 +2190,52 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         }
         builder->CreateCall(getOrDeclareScanf(), {scanfFmt, inputAlloca});
         return builder->CreateLoad(getDefaultType(), inputAlloca, "input_read");
+    }
+
+    if (expr->callee == "input_line") {
+        if (!expr->arguments.empty()) {
+            codegenError("Built-in function 'input_line' expects 0 arguments, but " +
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
+        }
+        // Allocate a 1024-byte buffer
+        llvm::Value* bufSize = llvm::ConstantInt::get(getDefaultType(), 1024);
+        llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bufSize}, "inputln.buf");
+        // Declare stdin as external global
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::GlobalVariable* stdinVar = module->getGlobalVariable("stdin");
+        if (!stdinVar) {
+            stdinVar = new llvm::GlobalVariable(*module, ptrTy, false, llvm::GlobalValue::ExternalLinkage, nullptr,
+                                                "stdin");
+        }
+        llvm::Value* stdinVal = builder->CreateLoad(ptrTy, stdinVar, "inputln.stdin");
+        // Call fgets(buf, 1024, stdin)
+        llvm::Value* intSize = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 1024);
+        llvm::Value* fgetsRet = builder->CreateCall(getOrDeclareFgets(), {buf, intSize, stdinVal}, "inputln.fgets");
+        // If fgets returns NULL (EOF/error), store empty string in buffer
+        llvm::Value* fgetsNull = builder->CreateICmpEQ(fgetsRet, llvm::ConstantPointerNull::get(ptrTy), "inputln.eof");
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* eofBB = llvm::BasicBlock::Create(*context, "inputln.eof", function);
+        llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "inputln.ok", function);
+        llvm::BasicBlock* stripBB = llvm::BasicBlock::Create(*context, "inputln.strip", function);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "inputln.done", function);
+        builder->CreateCondBr(fgetsNull, eofBB, okBB);
+        // EOF path: store '\0' at start of buffer
+        builder->SetInsertPoint(eofBB);
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), buf);
+        builder->CreateBr(doneBB);
+        // OK path: strip trailing newline
+        builder->SetInsertPoint(okBB);
+        llvm::Value* nlChar = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 10);
+        llvm::Value* nlPtr = builder->CreateCall(getOrDeclareStrchr(), {buf, nlChar}, "inputln.nl");
+        llvm::Value* isNull = builder->CreateICmpEQ(nlPtr, llvm::ConstantPointerNull::get(ptrTy), "inputln.isnull");
+        builder->CreateCondBr(isNull, doneBB, stripBB);
+        builder->SetInsertPoint(stripBB);
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), nlPtr);
+        builder->CreateBr(doneBB);
+        builder->SetInsertPoint(doneBB);
+        stringReturningFunctions_.insert("input_line");
+        return buf;
     }
 
     if (expr->callee == "sqrt") {
@@ -3622,6 +3680,75 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         return builder->CreatePtrToInt(buf, getDefaultType(), "slice.result");
     }
 
+    if (expr->callee == "array_copy") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'array_copy' expects 1 argument (array), but " +
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
+        }
+        llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
+        arrArg = toDefaultType(arrArg);
+        llvm::Value* arrPtr = builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "acopy.arrptr");
+        llvm::Value* arrLen = builder->CreateLoad(getDefaultType(), arrPtr, "acopy.len");
+        // Allocate: (length + 1) * 8 bytes
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
+        llvm::Value* slots = builder->CreateAdd(arrLen, one, "acopy.slots");
+        llvm::Value* bytes = builder->CreateMul(slots, eight, "acopy.bytes");
+        llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "acopy.buf");
+        // Copy all data: (length + 1) * 8 bytes
+        builder->CreateCall(getOrDeclareMemcpy(), {buf, arrPtr, bytes});
+        return builder->CreatePtrToInt(buf, getDefaultType(), "acopy.result");
+    }
+
+    if (expr->callee == "array_remove") {
+        if (expr->arguments.size() != 2) {
+            codegenError("Built-in function 'array_remove' expects 2 arguments (array, index), but " +
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
+        }
+        llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
+        llvm::Value* idxArg = generateExpression(expr->arguments[1].get());
+        arrArg = toDefaultType(arrArg);
+        idxArg = toDefaultType(idxArg);
+        llvm::Value* arrPtr =
+            builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "aremove.arrptr");
+        llvm::Value* arrLen = builder->CreateLoad(getDefaultType(), arrPtr, "aremove.len");
+        // Bounds check: 0 <= idx < length
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
+        llvm::Value* inBounds = builder->CreateICmpSLT(idxArg, arrLen, "aremove.inbounds");
+        llvm::Value* notNeg = builder->CreateICmpSGE(idxArg, zero, "aremove.notneg");
+        llvm::Value* valid = builder->CreateAnd(inBounds, notNeg, "aremove.valid");
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "aremove.ok", function);
+        llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "aremove.fail", function);
+        builder->CreateCondBr(valid, okBB, failBB);
+        // Out-of-bounds: print error and abort
+        builder->SetInsertPoint(failBB);
+        llvm::Value* errMsg =
+            builder->CreateGlobalString("Runtime error: array_remove index out of bounds\n", "aremove_oob_msg");
+        builder->CreateCall(getPrintfFunction(), {errMsg});
+        builder->CreateCall(getOrDeclareAbort());
+        builder->CreateUnreachable();
+        // In-bounds: save removed value, shift elements left, decrement length
+        builder->SetInsertPoint(okBB);
+        llvm::Value* elemOffset = builder->CreateAdd(idxArg, one, "aremove.elemoff");
+        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrPtr, elemOffset, "aremove.elemptr");
+        llvm::Value* removedVal = builder->CreateLoad(getDefaultType(), elemPtr, "aremove.removed");
+        // memmove(&arr[idx+1], &arr[idx+2], (length - idx - 1) * 8)
+        llvm::Value* srcOffset = builder->CreateAdd(idxArg, llvm::ConstantInt::get(getDefaultType(), 2), "aremove.srcoff");
+        llvm::Value* srcPtr = builder->CreateGEP(getDefaultType(), arrPtr, srcOffset, "aremove.srcptr");
+        llvm::Value* shiftCount = builder->CreateSub(arrLen, builder->CreateAdd(idxArg, one, "aremove.idxp1"), "aremove.shiftcnt");
+        llvm::Value* shiftBytes = builder->CreateMul(shiftCount, eight, "aremove.shiftbytes");
+        builder->CreateCall(getOrDeclareMemmove(), {elemPtr, srcPtr, shiftBytes});
+        // Decrement length
+        llvm::Value* newLen = builder->CreateSub(arrLen, one, "aremove.newlen");
+        builder->CreateStore(newLen, arrPtr);
+        return removedVal;
+    }
+
     // -----------------------------------------------------------------------
     // println(x) — print value followed by newline (same as print but explicit)
     // -----------------------------------------------------------------------
@@ -4030,18 +4157,35 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
     llvm::Function* callee = calleeIt->second;
 
-    if (callee->arg_size() != expr->arguments.size()) {
-        codegenError("Function '" + expr->callee + "' expects " + std::to_string(callee->arg_size()) +
-                         " argument(s), but " + std::to_string(expr->arguments.size()) + " provided",
-                     expr);
+    auto declIt = functionDecls_.find(expr->callee);
+    size_t requiredArgs = callee->arg_size();
+    if (declIt != functionDecls_.end()) {
+        requiredArgs = declIt->second->requiredParameters();
+    }
+    if (expr->arguments.size() < requiredArgs || expr->arguments.size() > callee->arg_size()) {
+        codegenError("Function '" + expr->callee + "' expects " +
+                          (requiredArgs < callee->arg_size()
+                               ? std::to_string(requiredArgs) + " to " + std::to_string(callee->arg_size())
+                               : std::to_string(callee->arg_size())) +
+                          " argument(s), but " + std::to_string(expr->arguments.size()) + " provided",
+                      expr);
     }
 
     std::vector<llvm::Value*> args;
-    for (auto& arg : expr->arguments) {
-        llvm::Value* argVal = generateExpression(arg.get());
-        // Function parameters are i64, convert if needed
-        argVal = toDefaultType(argVal);
-        args.push_back(argVal);
+    for (size_t i = 0; i < callee->arg_size(); ++i) {
+        if (i < expr->arguments.size()) {
+            llvm::Value* argVal = generateExpression(expr->arguments[i].get());
+            // Function parameters are i64, convert if needed
+            argVal = toDefaultType(argVal);
+            args.push_back(argVal);
+        } else if (declIt != functionDecls_.end()) {
+            auto& param = declIt->second->parameters[i];
+            if (param.defaultValue) {
+                llvm::Value* argVal = generateExpression(param.defaultValue.get());
+                argVal = toDefaultType(argVal);
+                args.push_back(argVal);
+            }
+        }
     }
 
     return builder->CreateCall(callee, args, "calltmp");
@@ -5456,11 +5600,22 @@ uint8_t CodeGenerator::emitBytecodeExpression(Expression* expr) {
         for (auto& arg : call->arguments) {
             argRegs.push_back(emitBytecodeExpression(arg.get()));
         }
+        // Fill in default parameter values for omitted arguments.
+        auto declIt = functionDecls_.find(call->callee);
+        if (declIt != functionDecls_.end()) {
+            size_t totalParams = declIt->second->parameters.size();
+            for (size_t i = call->arguments.size(); i < totalParams; ++i) {
+                auto& param = declIt->second->parameters[i];
+                if (param.defaultValue) {
+                    argRegs.push_back(emitBytecodeExpression(param.defaultValue.get()));
+                }
+            }
+        }
         uint8_t rd = allocReg();
         bytecodeEmitter.emit(OpCode::CALL);
         bytecodeEmitter.emitReg(rd);
         bytecodeEmitter.emitString(call->callee);
-        bytecodeEmitter.emitByte(static_cast<uint8_t>(call->arguments.size()));
+        bytecodeEmitter.emitByte(static_cast<uint8_t>(argRegs.size()));
         for (uint8_t reg : argRegs) {
             bytecodeEmitter.emitReg(reg);
         }
