@@ -14,9 +14,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`input_line()`** built-in — reads a full line from stdin as a heap-allocated string (strips trailing newline); returns empty string on EOF
 - Standard library count increased from 63 to 66 built-in functions
 
-### Fixed
-- **LLVM 17 compatibility**: replaced `llvm::CodeGenOptLevel` (LLVM 18+) with `llvm::CodeGenOpt::Level` for correct compilation on LLVM 17
-
 ## [1.6.0] - 2026-03-01
 
 ### Added

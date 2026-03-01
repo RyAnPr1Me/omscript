@@ -5032,22 +5032,22 @@ std::unique_ptr<llvm::TargetMachine> CodeGenerator::createTargetMachine() const 
     std::string features;
     resolveTargetCPU(cpu, features);
 
-    // Map the compiler's optimization level to LLVM's backend CodeGenOpt::Level
+    // Map the compiler's optimization level to LLVM's backend CodeGenOptLevel
     // so that instruction selection, scheduling, and register allocation use
     // the appropriate aggressiveness.
-    llvm::CodeGenOpt::Level cgOpt = llvm::CodeGenOpt::Default;
+    llvm::CodeGenOptLevel cgOpt = llvm::CodeGenOptLevel::Default;
     switch (optimizationLevel) {
     case OptimizationLevel::O0:
-        cgOpt = llvm::CodeGenOpt::None;
+        cgOpt = llvm::CodeGenOptLevel::None;
         break;
     case OptimizationLevel::O1:
-        cgOpt = llvm::CodeGenOpt::Less;
+        cgOpt = llvm::CodeGenOptLevel::Less;
         break;
     case OptimizationLevel::O2:
-        cgOpt = llvm::CodeGenOpt::Default;
+        cgOpt = llvm::CodeGenOptLevel::Default;
         break;
     case OptimizationLevel::O3:
-        cgOpt = llvm::CodeGenOpt::Aggressive;
+        cgOpt = llvm::CodeGenOptLevel::Aggressive;
         break;
     }
 
