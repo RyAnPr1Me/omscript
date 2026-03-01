@@ -169,6 +169,21 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
             throw std::runtime_error("Failed to locate a C linker (tried gcc, cc, clang)");
         }
         std::vector<std::string> linkArgs = {objFile, "-o", outputFile};
+        // Pass optimization level to the linker for better code layout,
+        // dead code elimination, and link-time optimizations.
+        switch (optLevel_) {
+        case OptimizationLevel::O1:
+            linkArgs.push_back("-O1");
+            break;
+        case OptimizationLevel::O2:
+            linkArgs.push_back("-O2");
+            break;
+        case OptimizationLevel::O3:
+            linkArgs.push_back("-O3");
+            break;
+        default:
+            break;
+        }
         if (lto_) {
             linkArgs.push_back("-flto");
         }
@@ -181,6 +196,8 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
         if (stackProtector_) {
             linkArgs.push_back("-fstack-protector-strong");
         }
+        // Link against libm for math intrinsic fallbacks (sqrt, floor, etc.)
+        linkArgs.push_back("-lm");
         llvm::SmallVector<llvm::StringRef, 8> argRefs;
         argRefs.push_back(linkerProgram);
         for (const auto& arg : linkArgs) {

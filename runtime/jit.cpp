@@ -709,11 +709,15 @@ bool BytecodeJIT::compileInt(const BytecodeFunction& func) {
     // to native code.
     {
         llvm::legacy::FunctionPassManager fpm(mod.get());
+        fpm.add(llvm::createSROAPass());
+        fpm.add(llvm::createEarlyCSEPass());
         fpm.add(llvm::createPromoteMemoryToRegisterPass());
         fpm.add(llvm::createInstructionCombiningPass());
         fpm.add(llvm::createReassociatePass());
         fpm.add(llvm::createGVNPass());
         fpm.add(llvm::createCFGSimplificationPass());
+        fpm.add(llvm::createDeadCodeEliminationPass());
+        fpm.add(llvm::createTailCallEliminationPass());
         fpm.doInitialization();
         fpm.run(*fn);
         fpm.doFinalization();
@@ -1130,11 +1134,15 @@ bool BytecodeJIT::compileFloat(const BytecodeFunction& func) {
 
     {
         llvm::legacy::FunctionPassManager fpm(mod.get());
+        fpm.add(llvm::createSROAPass());
+        fpm.add(llvm::createEarlyCSEPass());
         fpm.add(llvm::createPromoteMemoryToRegisterPass());
         fpm.add(llvm::createInstructionCombiningPass());
         fpm.add(llvm::createReassociatePass());
         fpm.add(llvm::createGVNPass());
         fpm.add(llvm::createCFGSimplificationPass());
+        fpm.add(llvm::createDeadCodeEliminationPass());
+        fpm.add(llvm::createTailCallEliminationPass());
         fpm.doInitialization();
         fpm.run(*fn);
         fpm.doFinalization();
