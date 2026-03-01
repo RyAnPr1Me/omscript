@@ -303,7 +303,7 @@ class BlockStmt : public Statement {
 class TryCatchStmt : public Statement {
   public:
     std::unique_ptr<BlockStmt> tryBlock;
-    std::string catchVar;  // variable name for the error code in catch block
+    std::string catchVar; // variable name for the error code in catch block
     std::unique_ptr<BlockStmt> catchBlock;
 
     TryCatchStmt(std::unique_ptr<BlockStmt> tryB, const std::string& var, std::unique_ptr<BlockStmt> catchB)
@@ -364,8 +364,7 @@ class Program : public ASTNode {
     std::vector<std::unique_ptr<FunctionDecl>> functions;
     std::vector<std::unique_ptr<EnumDecl>> enums;
 
-    Program(std::vector<std::unique_ptr<FunctionDecl>> funcs,
-            std::vector<std::unique_ptr<EnumDecl>> enms = {})
+    Program(std::vector<std::unique_ptr<FunctionDecl>> funcs, std::vector<std::unique_ptr<EnumDecl>> enms = {})
         : ASTNode(ASTNodeType::PROGRAM), functions(std::move(funcs)), enums(std::move(enms)) {}
 };
 

@@ -713,7 +713,7 @@ bool BytecodeJIT::compileInt(const BytecodeFunction& func) {
     llvm::EngineBuilder engineBuilder(std::move(mod));
     engineBuilder.setErrorStr(&engineError);
     engineBuilder.setEngineKind(llvm::EngineKind::JIT);
-    engineBuilder.setOptLevel(llvm::CodeGenOpt::Aggressive);
+    engineBuilder.setOptLevel(llvm::CodeGenOptLevel::Aggressive);
     llvm::ExecutionEngine* engine = engineBuilder.create();
     if (!engine) {
         failedCompilations_.insert(func.name);
@@ -1134,7 +1134,7 @@ bool BytecodeJIT::compileFloat(const BytecodeFunction& func) {
     llvm::EngineBuilder engineBuilder(std::move(mod));
     engineBuilder.setErrorStr(&engineError);
     engineBuilder.setEngineKind(llvm::EngineKind::JIT);
-    engineBuilder.setOptLevel(llvm::CodeGenOpt::Aggressive);
+    engineBuilder.setOptLevel(llvm::CodeGenOptLevel::Aggressive);
     llvm::ExecutionEngine* engine = engineBuilder.create();
     if (!engine) {
         failedCompilations_.insert(func.name);
