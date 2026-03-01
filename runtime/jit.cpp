@@ -111,7 +111,7 @@ bool BytecodeJIT::recordCall(const std::string& name) {
     if (compiled_.count(name) || compiledFloat_.count(name) || failedCompilations_.count(name))
         return false;
     callCounts_[name] = 1;
-    return 1 == kJITThreshold;
+    return kJITThreshold == 1;
 }
 
 bool BytecodeJIT::recordPostJITCall(const std::string& name) {
