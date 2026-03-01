@@ -65,6 +65,7 @@ enum class TokenType {
     LSHIFT_ASSIGN,
     RSHIFT_ASSIGN,
     QUESTION,
+    NULL_COALESCE,
     AMPERSAND,
     PIPE,
     CARET,
@@ -129,6 +130,7 @@ class Lexer {
     Token scanNumber();
     Token scanIdentifier();
     Token scanString();
+    Token scanMultiLineString();
 };
 
 } // namespace omscript

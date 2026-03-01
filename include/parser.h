@@ -53,6 +53,7 @@ class Parser {
     std::unique_ptr<Expression> parseExpression();
     std::unique_ptr<Expression> parseAssignment();
     std::unique_ptr<Expression> parseTernary();
+    std::unique_ptr<Expression> parseNullCoalesce();
     std::unique_ptr<Expression> parseLogicalOr();
     std::unique_ptr<Expression> parseLogicalAnd();
     std::unique_ptr<Expression> parseBitwiseOr();

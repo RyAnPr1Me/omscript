@@ -304,6 +304,30 @@ Token Lexer::scanString() {
     return token;
 }
 
+Token Lexer::scanMultiLineString() {
+    std::string str;
+    int startLine = line;
+    int startColumn = column;
+    // Skip opening """
+    advance(); // first "
+    advance(); // second "
+    advance(); // third "
+
+    while (!isAtEnd()) {
+        if (peek() == '"' && peek(1) == '"' && peek(2) == '"') {
+            advance(); // first "
+            advance(); // second "
+            advance(); // third "
+            Token token(TokenType::STRING, str, startLine, startColumn);
+            return token;
+        }
+        str += advance();
+    }
+
+    throw std::runtime_error("Unterminated multi-line string literal at line " + std::to_string(startLine) +
+                             ", column " + std::to_string(startColumn));
+}
+
 std::vector<Token> Lexer::tokenize() {
     std::vector<Token> tokens;
     // Heuristic pre-allocation: most source characters produce roughly
@@ -347,9 +371,13 @@ std::vector<Token> Lexer::tokenize() {
             continue;
         }
 
-        // String literals
+        // String literals (check triple-quote first for multi-line strings)
         if (c == '"') {
-            tokens.push_back(scanString());
+            if (peek() == '"' && peek(1) == '"') {
+                tokens.push_back(scanMultiLineString());
+            } else {
+                tokens.push_back(scanString());
+            }
             continue;
         }
 
@@ -450,7 +478,12 @@ std::vector<Token> Lexer::tokenize() {
             tokens.push_back(makeToken(TokenType::COLON, ":"));
             break;
         case '?':
-            tokens.push_back(makeToken(TokenType::QUESTION, "?"));
+            if (peek() == '?') {
+                advance();
+                tokens.push_back(makeToken(TokenType::NULL_COALESCE, "??"));
+            } else {
+                tokens.push_back(makeToken(TokenType::QUESTION, "?"));
+            }
             break;
         case '.':
             tokens.push_back(makeToken(TokenType::DOT, "."));

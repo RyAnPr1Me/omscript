@@ -595,7 +595,7 @@ std::unique_ptr<Expression> Parser::parseAssignment() {
 }
 
 std::unique_ptr<Expression> Parser::parseTernary() {
-    auto expr = parseLogicalOr();
+    auto expr = parseNullCoalesce();
 
     if (match(TokenType::QUESTION)) {
         Token questionToken = tokens[current - 1];
@@ -609,6 +609,20 @@ std::unique_ptr<Expression> Parser::parseTernary() {
     }
 
     return expr;
+}
+
+std::unique_ptr<Expression> Parser::parseNullCoalesce() {
+    auto left = parseLogicalOr();
+
+    while (match(TokenType::NULL_COALESCE)) {
+        auto right = parseLogicalOr();
+        // x ?? y  desugars to  x != 0 ? x : y  (ternary expression)
+        // We clone the left expression by re-wrapping it
+        auto node = std::make_unique<BinaryExpr>("??", std::move(left), std::move(right));
+        left = std::move(node);
+    }
+
+    return left;
 }
 
 std::unique_ptr<Expression> Parser::parseLogicalOr() {

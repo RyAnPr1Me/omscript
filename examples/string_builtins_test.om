@@ -1,0 +1,63 @@
+// Test new string built-in functions
+fn main() {
+    var total = 0;
+
+    // Test str_upper
+    var upper = str_upper("hello");
+    total = total + str_eq(upper, "HELLO");    // 1
+    // total = 1
+
+    // Test str_lower
+    var lower = str_lower("WORLD");
+    total = total + str_eq(lower, "world");    // 1
+    // total = 2
+
+    // Test str_contains
+    total = total + str_contains("hello world", "world"); // 1
+    total = total + str_contains("hello world", "xyz");   // 0
+    // total = 3
+
+    // Test str_starts_with
+    total = total + str_starts_with("hello world", "hello"); // 1
+    total = total + str_starts_with("hello world", "world"); // 0
+    // total = 4
+
+    // Test str_ends_with
+    total = total + str_ends_with("hello world", "world"); // 1
+    total = total + str_ends_with("hello world", "hello"); // 0
+    // total = 5
+
+    // Test str_index_of
+    var idx = str_index_of("hello world", "world");
+    total = total + (idx == 6);  // 1 (world starts at index 6)
+    var idx2 = str_index_of("hello world", "xyz");
+    total = total + (idx2 == -1); // 1 (not found)
+    // total = 7
+
+    // Test str_substr
+    var sub = str_substr("hello world", 6, 5);
+    total = total + str_eq(sub, "world");  // 1
+    // total = 8
+
+    // Test str_repeat
+    var rep = str_repeat("ab", 3);
+    total = total + str_eq(rep, "ababab"); // 1
+    // total = 9
+
+    // Test str_reverse
+    var rev = str_reverse("hello");
+    total = total + str_eq(rev, "olleh"); // 1
+    // total = 10
+
+    // Test str_replace
+    var replaced = str_replace("hello world", "world", "there");
+    total = total + str_eq(replaced, "hello there"); // 1
+    // total = 11
+
+    // Test str_trim
+    var trimmed = str_trim("  hello  ");
+    total = total + str_eq(trimmed, "hello"); // 1
+    // total = 12
+
+    return total;
+}

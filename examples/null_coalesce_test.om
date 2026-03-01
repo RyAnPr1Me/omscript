@@ -1,0 +1,39 @@
+// Test null coalescing operator (??) and multi-line strings
+fn main() {
+    var total = 0;
+
+    // Test ?? operator: non-zero ?? y returns left
+    var a = 42;
+    var result = a ?? 99;
+    total = total + (result == 42);   // 1
+    // total = 1
+
+    // Test ?? operator: zero ?? y returns right
+    var b = 0;
+    result = b ?? 99;
+    total = total + (result == 99);   // 1
+    // total = 2
+
+    // Test ?? chaining: 0 ?? 0 ?? 7
+    result = 0 ?? 0 ?? 7;
+    total = total + (result == 7);    // 1
+    // total = 3
+
+    // Test multi-line strings
+    var ml = """hello
+world""";
+    total = total + (str_len(ml) == 11);  // 1 ("hello\nworld" = 11 chars)
+    // total = 4
+
+    // Test multi-line string with print
+    print("""multi-line works""");
+
+    // Test ?? with expressions
+    var x = 5;
+    var y = 0;
+    result = y ?? (x + 10);
+    total = total + (result == 15);   // 1
+    // total = 5
+
+    return total;
+}

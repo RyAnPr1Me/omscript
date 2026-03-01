@@ -1,0 +1,62 @@
+// Test new array built-in functions
+fn main() {
+    var total = 0;
+
+    // Test array_fill
+    var arr = array_fill(5, 42);
+    total = total + (len(arr) == 5);   // 1
+    total = total + (arr[0] == 42);    // 1
+    total = total + (arr[4] == 42);    // 1
+    // total = 3
+
+    // Test push
+    var arr2 = [10, 20, 30];
+    arr2 = push(arr2, 40);
+    total = total + (len(arr2) == 4);  // 1
+    total = total + (arr2[3] == 40);   // 1
+    // total = 5
+
+    // Test pop
+    var popped = pop(arr2);
+    total = total + (popped == 40);    // 1
+    total = total + (len(arr2) == 3);  // 1
+    // total = 7
+
+    // Test index_of
+    var arr3 = [10, 20, 30, 40, 50];
+    total = total + (index_of(arr3, 30) == 2);  // 1
+    total = total + (index_of(arr3, 99) == -1); // 1
+    // total = 9
+
+    // Test array_contains
+    total = total + array_contains(arr3, 40);   // 1
+    total = total + (1 - array_contains(arr3, 99)); // 1 (not found)
+    // total = 11
+
+    // Test sort
+    var arr4 = [50, 10, 30, 20, 40];
+    sort(arr4);
+    total = total + (arr4[0] == 10);   // 1
+    total = total + (arr4[1] == 20);   // 1
+    total = total + (arr4[4] == 50);   // 1
+    // total = 14
+
+    // Test array_slice
+    var arr5 = [10, 20, 30, 40, 50];
+    var sliced = array_slice(arr5, 1, 4);
+    total = total + (len(sliced) == 3); // 1
+    total = total + (sliced[0] == 20);  // 1
+    total = total + (sliced[2] == 40);  // 1
+    // total = 17
+
+    // Test array_concat
+    var a1 = [1, 2, 3];
+    var a2 = [4, 5, 6];
+    var merged = array_concat(a1, a2);
+    total = total + (len(merged) == 6); // 1
+    total = total + (merged[0] == 1);   // 1
+    total = total + (merged[5] == 6);   // 1
+    // total = 20
+
+    return total;
+}

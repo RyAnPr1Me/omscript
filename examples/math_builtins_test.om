@@ -1,0 +1,35 @@
+// Test new math built-in functions: floor, ceil, round, to_int, to_float
+fn main() {
+    var total = 0;
+
+    // Test floor
+    total = total + floor(3.7);    // 3
+    total = total + floor(3.2);    // 3
+    total = total + floor(5.0);    // 5
+    // total = 11
+
+    // Test ceil  
+    total = total + ceil(3.2);     // 4
+    total = total + ceil(3.7);     // 4
+    total = total + ceil(5.0);     // 5
+    // total = 24
+
+    // Test round
+    total = total + round(3.4);    // 3
+    total = total + round(3.5);    // 4  (rounds to even or up depending on impl)
+    total = total + round(3.7);    // 4
+    // total = 35
+
+    // Test to_int (float to integer)
+    total = total + to_int(7.9);   // 7 (truncation)
+    // total = 42
+
+    // Test to_float (identity for int - should return 5.0 as float then truncate back)
+    // Since to_float returns double, operations will stay in float domain
+    var f = to_float(10);
+    // f is 10.0 as a float - we can add it  
+    total = total + to_int(f);      // 10
+    // total = 52
+
+    return total;
+}

@@ -1602,6 +1602,8 @@ const char* tokenTypeToString(omscript::TokenType type) {
         return "RSHIFT_ASSIGN";
     case omscript::TokenType::QUESTION:
         return "QUESTION";
+    case omscript::TokenType::NULL_COALESCE:
+        return "NULL_COALESCE";
     case omscript::TokenType::AMPERSAND:
         return "AMPERSAND";
     case omscript::TokenType::PIPE:
