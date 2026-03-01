@@ -149,15 +149,42 @@ bool Value::operator<(const Value& other) const {
 }
 
 bool Value::operator<=(const Value& other) const {
-    return *this < other || *this == other;
+    if (type == Type::INTEGER && other.type == Type::INTEGER) {
+        return intValue <= other.intValue;
+    }
+    if (needsFloatPromotion(other)) {
+        return toDouble() <= other.toDouble();
+    }
+    if (type == Type::STRING && other.type == Type::STRING) {
+        return stringValue < other.stringValue || stringValue == other.stringValue;
+    }
+    throw std::runtime_error("Invalid operands for <=");
 }
 
 bool Value::operator>(const Value& other) const {
-    return !(*this <= other);
+    if (type == Type::INTEGER && other.type == Type::INTEGER) {
+        return intValue > other.intValue;
+    }
+    if (needsFloatPromotion(other)) {
+        return toDouble() > other.toDouble();
+    }
+    if (type == Type::STRING && other.type == Type::STRING) {
+        return other.stringValue < stringValue;
+    }
+    throw std::runtime_error("Invalid operands for >");
 }
 
 bool Value::operator>=(const Value& other) const {
-    return !(*this < other);
+    if (type == Type::INTEGER && other.type == Type::INTEGER) {
+        return intValue >= other.intValue;
+    }
+    if (needsFloatPromotion(other)) {
+        return toDouble() >= other.toDouble();
+    }
+    if (type == Type::STRING && other.type == Type::STRING) {
+        return !(stringValue < other.stringValue);
+    }
+    throw std::runtime_error("Invalid operands for >=");
 }
 
 Value Value::operator&(const Value& other) const {

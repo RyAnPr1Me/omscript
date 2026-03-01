@@ -351,6 +351,21 @@ temporary `Value` construction, and bounds-checked `pop()`/`push()` calls.
 When both operands on the VM stack are floats, arithmetic operations (ADD, SUB, MUL, DIV)
 and unary negation (NEG) bypass the full `Value` operator dispatch. The fast path reads the
 raw `double` values directly, avoiding type promotion logic and operator overload overhead.
+Float fast paths also cover comparison operations (EQ, NE, LT, LE, GT, GE), eliminating
+the overhead of float promotion checks for pure-float comparisons.
+
+### Exponentiation by Squaring
+The `**` (POW) operator uses binary exponentiation (exponentiation by squaring) to compute
+`base ** exp` in O(log n) multiplications instead of O(n). For integer bases, the fast path
+operates directly on raw `int64_t` values without `Value` operator dispatch. This provides
+significant speedup for large exponents (e.g., `2 ** 100` requires ~7 multiplications
+instead of 100).
+
+### Optimized Comparison Operators
+The `Value` comparison operators (`<=`, `>`, `>=`) use direct single-dispatch comparisons
+instead of composing multiple lower-level operators. For example, `operator<=` performs a
+single comparison rather than calling both `operator<` and `operator==`, eliminating
+redundant type-checking and dispatch overhead.
 
 ### Bytecode JIT Compiler
 The VM includes a lightweight JIT compiler that automatically translates hot bytecode
@@ -532,6 +547,9 @@ OmScript's optimization infrastructure provides:
 - ✅ OPTMAX double-negation/complement folding (-(-x)→x, ~(~x)→x)
 - ✅ Bytecode algebraic identity elimination for single-literal operands
 - ✅ Float-specialized fast paths for VM arithmetic (ADD, SUB, MUL, DIV, NEG)
+- ✅ Float-specialized fast paths for VM comparisons (EQ, NE, LT, LE, GT, GE)
+- ✅ Exponentiation by squaring for O(log n) POW operations
+- ✅ Single-dispatch comparison operators (<=, >, >=) eliminating redundant type checks
 - ✅ Measurable, significant improvements
 
 The compiler transforms high-level OmScript code into highly optimized machine code that rivals hand-written assembly in many cases, while maintaining code readability and developer productivity.
