@@ -5,6 +5,17 @@ All notable changes to the OmScript compiler will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.0] - 2026-03-01
+
+### Added
+- **`array_map(arr, "fn_name")`** built-in — applies a named function to each element and returns a new array; the function name must be a string literal resolved at compile time
+- **`array_filter(arr, "fn_name")`** built-in — returns a new array containing only elements for which the named predicate function returns a non-zero value
+- **`array_reduce(arr, "fn_name", initial)`** built-in — reduces an array to a single value by applying a named two-argument function (accumulator, element) across all elements
+- Standard library count increased from 66 to 69 built-in functions
+
+### Fixed
+- **LLVM 17 compatibility**: `CodeGenOpt::Level` vs `CodeGenOptLevel` API difference now handled via `#if LLVM_VERSION_MAJOR >= 18` guards in `src/codegen.cpp` and `runtime/jit.cpp`
+
 ## [1.8.0] - 2026-03-01
 
 ### Added

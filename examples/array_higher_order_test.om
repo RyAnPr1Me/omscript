@@ -1,0 +1,93 @@
+// Test array_map, array_filter, and array_reduce built-in functions
+
+fn double(x) {
+    return x * 2;
+}
+
+fn square(x) {
+    return x * x;
+}
+
+fn is_positive(x) {
+    return x > 0;
+}
+
+fn is_even(x) {
+    return x % 2 == 0;
+}
+
+fn add(acc, x) {
+    return acc + x;
+}
+
+fn multiply(acc, x) {
+    return acc * x;
+}
+
+fn main() {
+    var arr = [1, 2, 3, 4, 5];
+
+    // Test array_map with double
+    var doubled = array_map(arr, "double");
+    // Expected: [2, 4, 6, 8, 10]
+    var sum_doubled = 0;
+    for (i in 0...len(doubled)) {
+        sum_doubled = sum_doubled + doubled[i];
+    }
+    assert(sum_doubled == 30); // 2+4+6+8+10 = 30
+
+    // Test array_map with square
+    var squared = array_map(arr, "square");
+    // Expected: [1, 4, 9, 16, 25]
+    var sum_squared = 0;
+    for (i in 0...len(squared)) {
+        sum_squared = sum_squared + squared[i];
+    }
+    assert(sum_squared == 55); // 1+4+9+16+25 = 55
+
+    // Test array_filter with is_even
+    var evens = array_filter(arr, "is_even");
+    // Expected: [2, 4]
+    assert(len(evens) == 2);
+    assert(evens[0] == 2);
+    assert(evens[1] == 4);
+
+    // Test array_filter with is_positive (mixed array)
+    var mixed = [-3, -1, 0, 2, 5];
+    var positives = array_filter(mixed, "is_positive");
+    // Expected: [2, 5]
+    assert(len(positives) == 2);
+    assert(positives[0] == 2);
+    assert(positives[1] == 5);
+
+    // Test array_reduce with add
+    var total = array_reduce(arr, "add", 0);
+    assert(total == 15); // 1+2+3+4+5 = 15
+
+    // Test array_reduce with multiply
+    var product = array_reduce(arr, "multiply", 1);
+    assert(product == 120); // 1*2*3*4*5 = 120
+
+    // Test with empty array
+    var empty = array_fill(0, 0);
+    var empty_mapped = array_map(empty, "double");
+    assert(len(empty_mapped) == 0);
+
+    var empty_filtered = array_filter(empty, "is_even");
+    assert(len(empty_filtered) == 0);
+
+    var empty_reduced = array_reduce(empty, "add", 42);
+    assert(empty_reduced == 42); // Returns initial value
+
+    // Test chaining: filter then map
+    var nums = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    var even_nums = array_filter(nums, "is_even");
+    var doubled_evens = array_map(even_nums, "double");
+    // even_nums = [2, 4, 6, 8, 10]
+    // doubled_evens = [4, 8, 12, 16, 20]
+    var chain_sum = array_reduce(doubled_evens, "add", 0);
+    assert(chain_sum == 60); // 4+8+12+16+20 = 60
+
+    print(chain_sum);
+    return 0;
+}

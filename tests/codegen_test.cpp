@@ -3593,3 +3593,46 @@ TEST(CodegenTest, OptmaxMulZeroPureStillOptimized) {
     }
     EXPECT_FALSE(hasMul);
 }
+
+// ===========================================================================
+// Higher-order array functions
+// ===========================================================================
+
+TEST(CodegenTest, IsStdlibFunctionArrayMap) {
+    EXPECT_TRUE(isStdlibFunction("array_map"));
+}
+
+TEST(CodegenTest, IsStdlibFunctionArrayFilter) {
+    EXPECT_TRUE(isStdlibFunction("array_filter"));
+}
+
+TEST(CodegenTest, IsStdlibFunctionArrayReduce) {
+    EXPECT_TRUE(isStdlibFunction("array_reduce"));
+}
+
+TEST(CodegenTest, ArrayMapGeneration) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn double(x) { return x * 2; }\n"
+        "fn main() { var a = [1, 2, 3]; var b = array_map(a, \"double\"); return 0; }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, ArrayFilterGeneration) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn is_pos(x) { return x > 0; }\n"
+        "fn main() { var a = [1, -2, 3]; var b = array_filter(a, \"is_pos\"); return 0; }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, ArrayReduceGeneration) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn add(acc, x) { return acc + x; }\n"
+        "fn main() { var a = [1, 2, 3]; var s = array_reduce(a, \"add\", 0); return 0; }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+}

@@ -41,7 +41,7 @@ OmScript is a **low-level, C-like programming language** featuring:
 - **Reference-counted memory management** — Automatic deterministic deallocation via malloc/free with reference counting on strings.
 - **Hybrid architecture** — A bytecode VM exists as an alternative backend for future dynamic compilation scenarios. The primary path is always native code.
 - **Aggressive optimization** — Four optimization levels (O0–O3) plus a special OPTMAX directive that applies exhaustive multi-pass optimization to marked functions.
-- **66 built-in standard library functions** — Math, array manipulation, string, character classification, type conversion, system, and I/O, all compiled to native machine code.
+- **69 built-in standard library functions** — Math, array manipulation, string, character classification, type conversion, system, and I/O, all compiled to native machine code.
 
 ### Design Philosophy
 
@@ -926,7 +926,7 @@ In the bytecode/VM runtime, strings are fully dynamic:
 
 ## 11. Standard Library
 
-OmScript provides **66 built-in functions**. All stdlib functions are compiled directly to native machine code via LLVM IR — they never go through the bytecode interpreter.
+OmScript provides **69 built-in functions**. All stdlib functions are compiled directly to native machine code via LLVM IR — they never go through the bytecode interpreter.
 
 ### 11.1 I/O Functions
 
@@ -1344,6 +1344,49 @@ var removed = array_remove(arr, 2);  // removed == 30
 // arr == [10, 20, 40, 50], len(arr) == 4
 ```
 
+#### `array_map(array, "function_name")`
+
+Applies a named function to each element of the array and returns a new array with the results. The function name must be a string literal (resolved at compile time) and the function must accept at least one argument.
+
+```javascript
+fn double(x) { return x * 2; }
+fn main() {
+    var arr = [1, 2, 3, 4, 5];
+    var doubled = array_map(arr, "double");
+    // doubled == [2, 4, 6, 8, 10]
+    return 0;
+}
+```
+
+#### `array_filter(array, "function_name")`
+
+Returns a new array containing only the elements for which the named predicate function returns a non-zero value. The function name must be a string literal and the function must accept at least one argument.
+
+```javascript
+fn is_even(x) { return x % 2 == 0; }
+fn main() {
+    var arr = [1, 2, 3, 4, 5, 6];
+    var evens = array_filter(arr, "is_even");
+    // evens == [2, 4, 6]
+    return 0;
+}
+```
+
+#### `array_reduce(array, "function_name", initial)`
+
+Reduces an array to a single value by applying a named two-argument function `(accumulator, element)` across all elements, starting with the given initial value. The function name must be a string literal and the function must accept at least two arguments.
+
+```javascript
+fn add(acc, x) { return acc + x; }
+fn multiply(acc, x) { return acc * x; }
+fn main() {
+    var arr = [1, 2, 3, 4, 5];
+    var total = array_reduce(arr, "add", 0);      // 15
+    var product = array_reduce(arr, "multiply", 1); // 120
+    return 0;
+}
+```
+
 ### 11.4 Character Functions
 
 #### `to_char(code)`
@@ -1682,6 +1725,9 @@ assert(0);          // always aborts: "Runtime error: assertion failed"
 | `array_slice(arr, s, e)` | 3 | array | Slice array from index `s` to `e` (exclusive) |
 | `array_copy(arr)` | 1 | array | Create a deep copy of an array |
 | `array_remove(arr, i)` | 2 | value | Remove element at index `i` and return it |
+| `array_map(arr, "fn")` | 2 | array | Apply named function to each element |
+| `array_filter(arr, "fn")` | 2 | array | Keep elements where named function returns non-zero |
+| `array_reduce(arr, "fn", init)` | 3 | value | Reduce array using named 2-arg function |
 | `typeof(x)` | 1 | 1 | Type tag (always 1/integer in native path) |
 | `assert(cond)` | 1 | 1 | Abort with error if `cond` is falsy |
 | `println(x)` | 1 | 0 | Print value with newline (alias for print) |

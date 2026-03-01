@@ -465,6 +465,9 @@ static const std::unordered_set<std::string> stdlibFunctions = {"abs",
                                                                 "array_contains",
                                                                 "array_copy",
                                                                 "array_fill",
+                                                                "array_filter",
+                                                                "array_map",
+                                                                "array_reduce",
                                                                 "array_remove",
                                                                 "array_slice",
                                                                 "assert",
@@ -3747,6 +3750,236 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* newLen = builder->CreateSub(arrLen, one, "aremove.newlen");
         builder->CreateStore(newLen, arrPtr);
         return removedVal;
+    }
+
+    // -----------------------------------------------------------------------
+    // array_map(arr, "fn_name") — apply named function to each element, return new array
+    // -----------------------------------------------------------------------
+    if (expr->callee == "array_map") {
+        if (expr->arguments.size() != 2) {
+            codegenError("Built-in function 'array_map' expects 2 arguments (array, function_name), but " +
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
+        }
+        // The second argument must be a string literal (function name)
+        auto* fnNameLit = dynamic_cast<LiteralExpr*>(expr->arguments[1].get());
+        if (!fnNameLit || fnNameLit->literalType != LiteralExpr::LiteralType::STRING) {
+            codegenError("array_map: second argument must be a string literal (function name)", expr);
+        }
+        std::string fnName = fnNameLit->stringValue;
+        // Look up the target function in the LLVM module
+        auto calleeIt = functions.find(fnName);
+        if (calleeIt == functions.end() || !calleeIt->second) {
+            codegenError("array_map: unknown function '" + fnName + "'", expr);
+        }
+        llvm::Function* mapFn = calleeIt->second;
+        if (mapFn->arg_size() < 1) {
+            codegenError("array_map: function '" + fnName + "' must accept at least 1 argument", expr);
+        }
+
+        llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
+        arrArg = toDefaultType(arrArg);
+        llvm::Value* arrPtr = builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "amap.arrptr");
+        llvm::Value* arrLen = builder->CreateLoad(getDefaultType(), arrPtr, "amap.len");
+
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
+
+        // Allocate result array: (arrLen + 1) * 8
+        llvm::Value* slots = builder->CreateAdd(arrLen, one, "amap.slots");
+        llvm::Value* bytes = builder->CreateMul(slots, eight, "amap.bytes");
+        llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "amap.buf");
+        builder->CreateStore(arrLen, buf);
+
+        // Loop: for each element, call mapFn and store result
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* preheader = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "amap.loop", function);
+        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "amap.body", function);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "amap.done", function);
+        builder->CreateBr(loopBB);
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "amap.idx");
+        idx->addIncoming(zero, preheader);
+        llvm::Value* cond = builder->CreateICmpSLT(idx, arrLen, "amap.cond");
+        builder->CreateCondBr(cond, bodyBB, doneBB);
+        builder->SetInsertPoint(bodyBB);
+        // Load element from source: arrPtr[idx + 1]
+        llvm::Value* elemIdx = builder->CreateAdd(idx, one, "amap.elemidx");
+        llvm::Value* srcPtr = builder->CreateGEP(getDefaultType(), arrPtr, elemIdx, "amap.srcptr");
+        llvm::Value* elem = builder->CreateLoad(getDefaultType(), srcPtr, "amap.elem");
+        // Call the map function with the element
+        llvm::Value* mapped = builder->CreateCall(mapFn, {elem}, "amap.mapped");
+        mapped = toDefaultType(mapped);
+        // Store into result: buf[idx + 1]
+        llvm::Value* dstPtr = builder->CreateGEP(getDefaultType(), buf, elemIdx, "amap.dstptr");
+        builder->CreateStore(mapped, dstPtr);
+        llvm::Value* nextIdx = builder->CreateAdd(idx, one, "amap.next");
+        idx->addIncoming(nextIdx, bodyBB);
+        builder->CreateBr(loopBB);
+        builder->SetInsertPoint(doneBB);
+        return builder->CreatePtrToInt(buf, getDefaultType(), "amap.result");
+    }
+
+    // -----------------------------------------------------------------------
+    // array_filter(arr, "fn_name") — return new array of elements where fn returns non-zero
+    // -----------------------------------------------------------------------
+    if (expr->callee == "array_filter") {
+        if (expr->arguments.size() != 2) {
+            codegenError("Built-in function 'array_filter' expects 2 arguments (array, function_name), but " +
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
+        }
+        auto* fnNameLit = dynamic_cast<LiteralExpr*>(expr->arguments[1].get());
+        if (!fnNameLit || fnNameLit->literalType != LiteralExpr::LiteralType::STRING) {
+            codegenError("array_filter: second argument must be a string literal (function name)", expr);
+        }
+        std::string fnName = fnNameLit->stringValue;
+        auto calleeIt = functions.find(fnName);
+        if (calleeIt == functions.end() || !calleeIt->second) {
+            codegenError("array_filter: unknown function '" + fnName + "'", expr);
+        }
+        llvm::Function* filterFn = calleeIt->second;
+        if (filterFn->arg_size() < 1) {
+            codegenError("array_filter: function '" + fnName + "' must accept at least 1 argument", expr);
+        }
+
+        llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
+        arrArg = toDefaultType(arrArg);
+        llvm::Value* arrPtr = builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "afilt.arrptr");
+        llvm::Value* arrLen = builder->CreateLoad(getDefaultType(), arrPtr, "afilt.len");
+
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
+
+        // Allocate result array with max possible size: (arrLen + 1) * 8
+        llvm::Value* slots = builder->CreateAdd(arrLen, one, "afilt.slots");
+        llvm::Value* bytes = builder->CreateMul(slots, eight, "afilt.bytes");
+        llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "afilt.buf");
+        // Initialize length to 0 (will be updated as we add elements)
+        builder->CreateStore(zero, buf);
+
+        // Loop: for each element, call filterFn; if non-zero, add to result
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* preheader = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "afilt.loop", function);
+        llvm::BasicBlock* testBB = llvm::BasicBlock::Create(*context, "afilt.test", function);
+        llvm::BasicBlock* addBB = llvm::BasicBlock::Create(*context, "afilt.add", function);
+        llvm::BasicBlock* incBB = llvm::BasicBlock::Create(*context, "afilt.inc", function);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "afilt.done", function);
+        builder->CreateBr(loopBB);
+
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "afilt.idx");
+        idx->addIncoming(zero, preheader);
+        llvm::PHINode* outIdx = builder->CreatePHI(getDefaultType(), 2, "afilt.outidx");
+        outIdx->addIncoming(zero, preheader);
+        llvm::Value* cond = builder->CreateICmpSLT(idx, arrLen, "afilt.cond");
+        builder->CreateCondBr(cond, testBB, doneBB);
+
+        builder->SetInsertPoint(testBB);
+        // Load element from source
+        llvm::Value* elemIdx = builder->CreateAdd(idx, one, "afilt.elemidx");
+        llvm::Value* srcPtr = builder->CreateGEP(getDefaultType(), arrPtr, elemIdx, "afilt.srcptr");
+        llvm::Value* elem = builder->CreateLoad(getDefaultType(), srcPtr, "afilt.elem");
+        // Call the filter function
+        llvm::Value* result = builder->CreateCall(filterFn, {elem}, "afilt.result");
+        result = toDefaultType(result);
+        llvm::Value* keep = builder->CreateICmpNE(result, zero, "afilt.keep");
+        builder->CreateCondBr(keep, addBB, incBB);
+
+        // Add element to result
+        builder->SetInsertPoint(addBB);
+        llvm::Value* dstIdx = builder->CreateAdd(outIdx, one, "afilt.dstidx");
+        llvm::Value* dstPtr = builder->CreateGEP(getDefaultType(), buf, dstIdx, "afilt.dstptr");
+        builder->CreateStore(elem, dstPtr);
+        llvm::Value* newOutIdx = builder->CreateAdd(outIdx, one, "afilt.newoutidx");
+        builder->CreateBr(incBB);
+
+        // Increment loop counter
+        builder->SetInsertPoint(incBB);
+        llvm::PHINode* outIdxMerge = builder->CreatePHI(getDefaultType(), 2, "afilt.outmerge");
+        outIdxMerge->addIncoming(outIdx, testBB);
+        outIdxMerge->addIncoming(newOutIdx, addBB);
+        llvm::Value* nextIdx = builder->CreateAdd(idx, one, "afilt.next");
+        idx->addIncoming(nextIdx, incBB);
+        outIdx->addIncoming(outIdxMerge, incBB);
+        builder->CreateBr(loopBB);
+
+        // Done: store final length
+        builder->SetInsertPoint(doneBB);
+        builder->CreateStore(outIdx, buf);
+        return builder->CreatePtrToInt(buf, getDefaultType(), "afilt.result");
+    }
+
+    // -----------------------------------------------------------------------
+    // array_reduce(arr, "fn_name", initial) — reduce array to single value
+    //   fn_name must be a function that takes 2 arguments: (accumulator, element)
+    // -----------------------------------------------------------------------
+    if (expr->callee == "array_reduce") {
+        if (expr->arguments.size() != 3) {
+            codegenError("Built-in function 'array_reduce' expects 3 arguments (array, function_name, initial), but " +
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
+        }
+        auto* fnNameLit = dynamic_cast<LiteralExpr*>(expr->arguments[1].get());
+        if (!fnNameLit || fnNameLit->literalType != LiteralExpr::LiteralType::STRING) {
+            codegenError("array_reduce: second argument must be a string literal (function name)", expr);
+        }
+        std::string fnName = fnNameLit->stringValue;
+        auto calleeIt = functions.find(fnName);
+        if (calleeIt == functions.end() || !calleeIt->second) {
+            codegenError("array_reduce: unknown function '" + fnName + "'", expr);
+        }
+        llvm::Function* reduceFn = calleeIt->second;
+        if (reduceFn->arg_size() < 2) {
+            codegenError("array_reduce: function '" + fnName + "' must accept at least 2 arguments (accumulator, element)", expr);
+        }
+
+        llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
+        llvm::Value* initVal = generateExpression(expr->arguments[2].get());
+        arrArg = toDefaultType(arrArg);
+        initVal = toDefaultType(initVal);
+        llvm::Value* arrPtr = builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "areduce.arrptr");
+        llvm::Value* arrLen = builder->CreateLoad(getDefaultType(), arrPtr, "areduce.len");
+
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+
+        // Loop: accumulate with fn(acc, element)
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* preheader = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "areduce.loop", function);
+        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "areduce.body", function);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "areduce.done", function);
+        builder->CreateBr(loopBB);
+
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "areduce.idx");
+        idx->addIncoming(zero, preheader);
+        llvm::PHINode* acc = builder->CreatePHI(getDefaultType(), 2, "areduce.acc");
+        acc->addIncoming(initVal, preheader);
+        llvm::Value* cond = builder->CreateICmpSLT(idx, arrLen, "areduce.cond");
+        builder->CreateCondBr(cond, bodyBB, doneBB);
+
+        builder->SetInsertPoint(bodyBB);
+        // Load element from source: arrPtr[idx + 1]
+        llvm::Value* elemIdx = builder->CreateAdd(idx, one, "areduce.elemidx");
+        llvm::Value* srcPtr = builder->CreateGEP(getDefaultType(), arrPtr, elemIdx, "areduce.srcptr");
+        llvm::Value* elem = builder->CreateLoad(getDefaultType(), srcPtr, "areduce.elem");
+        // Call reduce function: fn(accumulator, element)
+        llvm::Value* newAcc = builder->CreateCall(reduceFn, {acc, elem}, "areduce.newacc");
+        newAcc = toDefaultType(newAcc);
+        llvm::Value* nextIdx = builder->CreateAdd(idx, one, "areduce.next");
+        idx->addIncoming(nextIdx, bodyBB);
+        acc->addIncoming(newAcc, bodyBB);
+        builder->CreateBr(loopBB);
+
+        // Done: return final accumulator
+        builder->SetInsertPoint(doneBB);
+        return acc;
     }
 
     // -----------------------------------------------------------------------
