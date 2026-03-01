@@ -477,9 +477,8 @@ std::unique_ptr<EnumDecl> Parser::parseEnumDecl() {
         }
         members.push_back({memberToken.lexeme, memberValue});
         nextValue = memberValue + 1;
-        if (!check(TokenType::RBRACE)) {
-            consume(TokenType::COMMA, "Expected ',' or '}' in enum body");
-        }
+        // Allow optional trailing comma
+        match(TokenType::COMMA);
     }
 
     consume(TokenType::RBRACE, "Expected '}' after enum body");

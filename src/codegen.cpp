@@ -4649,7 +4649,7 @@ void CodeGenerator::generateTryCatch(TryCatchStmt* stmt) {
     // 2. Clear error flag
     // 3. Execute try block
     // 4. If error flag is set, execute catch block with error value
-    // 5. Restore old error state
+    // 5. Restore old error state at end of both paths
 
     // Get or create global error flag and value
     llvm::GlobalVariable* errFlag = module->getGlobalVariable("__om_error_flag", true);
@@ -4680,7 +4680,6 @@ void CodeGenerator::generateTryCatch(TryCatchStmt* stmt) {
     beginScope();
     for (auto& s : stmt->tryBlock->statements) {
         generateStatement(s.get());
-        // After each statement, check if error was thrown
     }
     endScope();
 
@@ -4689,9 +4688,10 @@ void CodeGenerator::generateTryCatch(TryCatchStmt* stmt) {
     llvm::Value* wasThrown = builder->CreateICmpNE(thrown, llvm::ConstantInt::get(getDefaultType(), 0), "try.wasthrown");
 
     llvm::BasicBlock* catchBB = llvm::BasicBlock::Create(*context, "catch.body", function);
+    llvm::BasicBlock* restoreBB = llvm::BasicBlock::Create(*context, "try.restore", function);
     llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "try.end", function);
 
-    builder->CreateCondBr(wasThrown, catchBB, endBB);
+    builder->CreateCondBr(wasThrown, catchBB, restoreBB);
 
     // Catch block
     builder->SetInsertPoint(catchBB);
@@ -4704,13 +4704,16 @@ void CodeGenerator::generateTryCatch(TryCatchStmt* stmt) {
 
     // Clear error flag so catch block can execute normally
     builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 0), errFlag);
+    builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 0), errVal);
 
     for (auto& s : stmt->catchBlock->statements) {
         generateStatement(s.get());
     }
     endScope();
+    builder->CreateBr(restoreBB);
 
-    // Restore old error state
+    // Restore old error state (reached from both normal try and after catch)
+    builder->SetInsertPoint(restoreBB);
     builder->CreateStore(oldFlag, errFlag);
     builder->CreateStore(oldVal, errVal);
     builder->CreateBr(endBB);
