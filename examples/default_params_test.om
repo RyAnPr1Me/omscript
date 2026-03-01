@@ -1,0 +1,41 @@
+// Test default function parameters
+fn add(a, b = 10) {
+    return a + b;
+}
+
+fn greet(x = 42) {
+    return x;
+}
+
+fn multi_defaults(a, b = 5, c = 100) {
+    return a + b + c;
+}
+
+fn main() {
+    var total = 0;
+
+    // Test with all args provided
+    total = total + (add(5, 3) == 8);           // 1
+    // total = 1
+
+    // Test with default value used
+    total = total + (add(5) == 15);             // 1
+    // total = 2
+
+    // Test single default param
+    total = total + (greet() == 42);            // 1
+    total = total + (greet(100) == 100);        // 1
+    // total = 4
+
+    // Test multiple default params
+    total = total + (multi_defaults(1) == 106);       // 1 (1+5+100)
+    total = total + (multi_defaults(1, 2) == 103);    // 1 (1+2+100)
+    total = total + (multi_defaults(1, 2, 3) == 6);   // 1 (1+2+3)
+    // total = 7
+
+    // Test default in recursive function
+    total = total + (add(add(1), 5) == 16);     // 1 (add(1)=11, add(11,5)=16)
+    // total = 8
+
+    return total;
+}

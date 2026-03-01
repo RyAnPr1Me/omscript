@@ -1012,3 +1012,66 @@ TEST(ParserTest, FunctionCallAsArrayIndex) {
     auto program = parse("fn getIdx() { return 0; } fn main() { var arr = [10]; return arr[getIdx()]; }");
     ASSERT_EQ(program->functions.size(), 2u);
 }
+
+// ---------------------------------------------------------------------------
+// Default function parameters
+// ---------------------------------------------------------------------------
+
+TEST(ParserTest, DefaultParameterInteger) {
+    auto program = parse("fn foo(a, b = 10) { return a + b; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    ASSERT_EQ(program->functions[0]->parameters.size(), 2u);
+    EXPECT_EQ(program->functions[0]->parameters[0].name, "a");
+    EXPECT_EQ(program->functions[0]->parameters[1].name, "b");
+    EXPECT_FALSE(program->functions[0]->parameters[0].defaultValue);
+    ASSERT_TRUE(program->functions[0]->parameters[1].defaultValue != nullptr);
+    auto* lit = dynamic_cast<LiteralExpr*>(program->functions[0]->parameters[1].defaultValue.get());
+    ASSERT_NE(lit, nullptr);
+    EXPECT_EQ(lit->literalType, LiteralExpr::LiteralType::INTEGER);
+    EXPECT_EQ(lit->intValue, 10);
+}
+
+TEST(ParserTest, DefaultParameterString) {
+    auto program = parse("fn greet(name, msg = \"Hello\") { return 0; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    ASSERT_EQ(program->functions[0]->parameters.size(), 2u);
+    ASSERT_TRUE(program->functions[0]->parameters[1].defaultValue != nullptr);
+    auto* lit = dynamic_cast<LiteralExpr*>(program->functions[0]->parameters[1].defaultValue.get());
+    ASSERT_NE(lit, nullptr);
+    EXPECT_EQ(lit->literalType, LiteralExpr::LiteralType::STRING);
+    EXPECT_EQ(lit->stringValue, "Hello");
+}
+
+TEST(ParserTest, MultipleDefaultParameters) {
+    auto program = parse("fn foo(a, b = 5, c = 100) { return a; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    ASSERT_EQ(program->functions[0]->parameters.size(), 3u);
+    EXPECT_FALSE(program->functions[0]->parameters[0].defaultValue);
+    EXPECT_TRUE(program->functions[0]->parameters[1].defaultValue != nullptr);
+    EXPECT_TRUE(program->functions[0]->parameters[2].defaultValue != nullptr);
+    EXPECT_EQ(program->functions[0]->requiredParameters(), 1u);
+}
+
+TEST(ParserTest, AllDefaultParameters) {
+    auto program = parse("fn foo(a = 1, b = 2) { return a + b; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    ASSERT_EQ(program->functions[0]->parameters.size(), 2u);
+    EXPECT_TRUE(program->functions[0]->parameters[0].defaultValue != nullptr);
+    EXPECT_TRUE(program->functions[0]->parameters[1].defaultValue != nullptr);
+    EXPECT_EQ(program->functions[0]->requiredParameters(), 0u);
+}
+
+TEST(ParserTest, DefaultParameterWithType) {
+    auto program = parse("fn foo(a: int, b: int = 10) { return a; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    ASSERT_EQ(program->functions[0]->parameters.size(), 2u);
+    EXPECT_EQ(program->functions[0]->parameters[1].typeName, "int");
+    ASSERT_TRUE(program->functions[0]->parameters[1].defaultValue != nullptr);
+}
+
+TEST(ParserTest, DefaultParameterNonDefaultAfterDefaultError) {
+    Lexer lexer("fn foo(a = 10, b) { return 0; }");
+    auto tokens = lexer.tokenize();
+    Parser parser(tokens);
+    EXPECT_THROW(parser.parse(), std::runtime_error);
+}

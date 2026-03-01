@@ -41,7 +41,7 @@ OmScript is a **low-level, C-like programming language** featuring:
 - **Reference-counted memory management** — Automatic deterministic deallocation via malloc/free with reference counting on strings.
 - **Hybrid architecture** — A bytecode VM exists as an alternative backend for future dynamic compilation scenarios. The primary path is always native code.
 - **Aggressive optimization** — Four optimization levels (O0–O3) plus a special OPTMAX directive that applies exhaustive multi-pass optimization to marked functions.
-- **63 built-in standard library functions** — Math, array manipulation, string, character classification, type conversion, system, and I/O, all compiled to native machine code.
+- **66 built-in standard library functions** — Math, array manipulation, string, character classification, type conversion, system, and I/O, all compiled to native machine code.
 
 ### Design Philosophy
 
@@ -420,7 +420,40 @@ print(result);
 
 Functions must be declared before they are called (single-pass compilation). Recursive calls are supported.
 
-### 6.4 Return Values
+### 6.4 Default Parameters
+
+Parameters can have default values. When a function is called with fewer arguments than parameters, the missing arguments use their default values. Default values must be literal expressions (integer, float, or string). Non-default parameters must come before default parameters.
+
+```javascript
+fn greet(name, greeting = "Hello") {
+    println(greeting);
+    println(name);
+    return 0;
+}
+
+fn main() {
+    greet("Alice");           // Uses default: greeting = "Hello"
+    greet("Bob", "Hi");      // Overrides: greeting = "Hi"
+    return 0;
+}
+```
+
+Multiple default parameters are supported:
+
+```javascript
+fn create(x, y = 0, z = 0) {
+    return x + y + z;
+}
+
+fn main() {
+    print(create(1));         // 1  (y=0, z=0)
+    print(create(1, 2));      // 3  (z=0)
+    print(create(1, 2, 3));   // 6
+    return 0;
+}
+```
+
+### 6.5 Return Values
 
 All functions return an `i64` value. If no `return` statement is reached, the function returns `0` by default.
 
@@ -431,7 +464,7 @@ fn nothing() {
 // nothing() returns 0
 ```
 
-### 6.5 Recursion
+### 6.6 Recursion
 
 OmScript supports recursion:
 
@@ -893,7 +926,7 @@ In the bytecode/VM runtime, strings are fully dynamic:
 
 ## 11. Standard Library
 
-OmScript provides **63 built-in functions**. All stdlib functions are compiled directly to native machine code via LLVM IR — they never go through the bytecode interpreter.
+OmScript provides **66 built-in functions**. All stdlib functions are compiled directly to native machine code via LLVM IR — they never go through the bytecode interpreter.
 
 ### 11.1 I/O Functions
 
@@ -933,6 +966,18 @@ Reads an integer from standard input using `scanf("%lld")`.
 ```javascript
 var n = input();
 print(n);
+```
+
+#### `input_line()`
+
+Reads a full line from standard input as a string. Strips the trailing newline character. Returns an empty string on EOF.
+
+- **Parameters:** None.
+- **Returns:** A heap-allocated string containing the line read from stdin.
+
+```javascript
+var line = input_line();
+println(line);
 ```
 
 #### `println(value)`
@@ -1277,6 +1322,28 @@ var sliced = array_slice([10, 20, 30, 40, 50], 1, 4);
 // sliced == [20, 30, 40]
 ```
 
+#### `array_copy(array)`
+
+Returns a new heap-allocated copy of an array. Modifications to the copy do not affect the original.
+
+```javascript
+var original = [1, 2, 3];
+var copy = array_copy(original);
+copy[0] = 99;
+print(original[0]);  // 1 (unaffected)
+print(copy[0]);      // 99
+```
+
+#### `array_remove(array, index)`
+
+Removes the element at the given index, shifts remaining elements left, decrements the array length, and returns the removed value. Aborts with an error if the index is out of bounds.
+
+```javascript
+var arr = [10, 20, 30, 40, 50];
+var removed = array_remove(arr, 2);  // removed == 30
+// arr == [10, 20, 40, 50], len(arr) == 4
+```
+
 ### 11.4 Character Functions
 
 #### `to_char(code)`
@@ -1564,6 +1631,7 @@ assert(0);          // always aborts: "Runtime error: assertion failed"
 | `print(x)` | 1 | 0 | Print integer or string |
 | `print_char(c)` | 1 | c | Print single ASCII character |
 | `input()` | 0 | integer | Read integer from stdin |
+| `input_line()` | 0 | string | Read a line from stdin as string |
 | `abs(x)` | 1 | \|x\| | Absolute value |
 | `min(a, b)` | 2 | min | Minimum of two values |
 | `max(a, b)` | 2 | max | Maximum of two values |
@@ -1612,6 +1680,8 @@ assert(0);          // always aborts: "Runtime error: assertion failed"
 | `array_fill(n, val)` | 2 | array | Create array of `n` elements all set to `val` |
 | `array_concat(a, b)` | 2 | array | Concatenate two arrays |
 | `array_slice(arr, s, e)` | 3 | array | Slice array from index `s` to `e` (exclusive) |
+| `array_copy(arr)` | 1 | array | Create a deep copy of an array |
+| `array_remove(arr, i)` | 2 | value | Remove element at index `i` and return it |
 | `typeof(x)` | 1 | 1 | Type tag (always 1/integer in native path) |
 | `assert(cond)` | 1 | 1 | Abort with error if `cond` is falsy |
 | `println(x)` | 1 | 0 | Print value with newline (alias for print) |
