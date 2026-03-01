@@ -41,7 +41,7 @@ OmScript is a **low-level, C-like programming language** featuring:
 - **Reference-counted memory management** — Automatic deterministic deallocation via malloc/free with reference counting on strings.
 - **Hybrid architecture** — A bytecode VM exists as an alternative backend for future dynamic compilation scenarios. The primary path is always native code.
 - **Aggressive optimization** — Four optimization levels (O0–O3) plus a special OPTMAX directive that applies exhaustive multi-pass optimization to marked functions.
-- **29 built-in standard library functions** — Math, array manipulation, string, character classification, and I/O, all compiled to native machine code.
+- **51 built-in standard library functions** — Math, array manipulation, string, character classification, type conversion, and I/O, all compiled to native machine code.
 
 ### Design Philosophy
 
@@ -286,6 +286,19 @@ Double-quoted strings with escape sequence support:
 
 Unterminated strings and unterminated escape sequences (backslash at end of string) produce compile errors.
 
+#### Multi-line String Literals
+
+Triple-quoted strings (`"""..."""`) support embedded newlines without escape sequences:
+
+```javascript
+var poem = """Roses are red,
+Violets are blue,
+OmScript is fast,
+And so are you.""";
+```
+
+Multi-line strings preserve all characters between the opening and closing `"""` exactly as written, including newlines and spaces. They do **not** process escape sequences.
+
 ### 4.6 Special Tokens
 
 | Token | Meaning |
@@ -448,6 +461,7 @@ Operators are listed from **highest** to **lowest** precedence:
 | 13 | `&&` | Left | Logical AND (short-circuit) |
 | 14 | `\|\|` | Left | Logical OR (short-circuit) |
 | 15 | `? :` | Right | Ternary conditional |
+| 14.5 | `??` | Left | Null coalescing |
 | 16 | `=` `+=` `-=` `*=` `/=` `%=` | Right | Assignment |
 
 ### 7.2 Arithmetic Operators
@@ -564,7 +578,22 @@ Ternary expressions can be nested:
 var sign = (x > 0) ? 1 : ((x < 0) ? -1 : 0);
 ```
 
-### 7.8 Compound Assignment
+### 7.8 Null Coalescing Operator
+
+The `??` operator returns the left operand if it is non-zero (truthy), otherwise the right operand:
+
+```javascript
+var result = value ?? defaultValue;
+// Equivalent to: value != 0 ? value : defaultValue
+```
+
+The right operand is only evaluated if the left operand is zero (short-circuit evaluation). `??` is left-associative and can be chained:
+
+```javascript
+var x = a ?? b ?? c;  // First non-zero value, or c
+```
+
+### 7.9 Compound Assignment
 
 | Operator | Equivalent |
 |----------|------------|
@@ -793,7 +822,7 @@ In the bytecode/VM runtime, strings are fully dynamic:
 
 ## 11. Standard Library
 
-OmScript provides **29 built-in functions**. All stdlib functions are compiled directly to native machine code via LLVM IR — they never go through the bytecode interpreter.
+OmScript provides **51 built-in functions**. All stdlib functions are compiled directly to native machine code via LLVM IR — they never go through the bytecode interpreter.
 
 ### 11.1 I/O Functions
 
@@ -970,6 +999,55 @@ gcd(0, 5)     // 5
 gcd(-12, 8)   // 4
 ```
 
+#### `floor(x)`
+
+Returns the largest integer less than or equal to `x`. Converts float to integer.
+
+```javascript
+floor(3.7)    // 3
+floor(3.2)    // 3
+floor(-1.5)   // -2
+```
+
+#### `ceil(x)`
+
+Returns the smallest integer greater than or equal to `x`. Converts float to integer.
+
+```javascript
+ceil(3.2)     // 4
+ceil(3.7)     // 4
+ceil(-1.5)    // -1
+```
+
+#### `round(x)`
+
+Returns the nearest integer to `x`, rounding half away from zero.
+
+```javascript
+round(3.4)    // 3
+round(3.5)    // 4
+round(3.7)    // 4
+```
+
+#### `to_int(x)`
+
+Converts a float to an integer by truncation (towards zero).
+
+```javascript
+to_int(7.9)   // 7
+to_int(-3.7)  // -3
+to_int(42)    // 42  (identity for integers)
+```
+
+#### `to_float(x)`
+
+Converts an integer to a floating-point value.
+
+```javascript
+to_float(10)  // 10.0
+to_float(-3)  // -3.0
+```
+
 ### 11.3 Array Functions
 
 #### `len(array)`
@@ -1016,6 +1094,81 @@ Reverses the array in-place using a two-pointer approach.
 var arr = [1, 2, 3, 4, 5];
 reverse(arr);
 // arr is now [5, 4, 3, 2, 1]
+```
+
+#### `push(array, value)`
+
+Returns a new array with `value` appended to the end. The original array is not modified; the variable must be reassigned.
+
+```javascript
+var arr = [1, 2, 3];
+arr = push(arr, 4);
+// arr is now [1, 2, 3, 4], len(arr) == 4
+```
+
+#### `pop(array)`
+
+Removes and returns the last element of the array. The array length is decreased in-place.
+
+```javascript
+var arr = [10, 20, 30];
+var last = pop(arr);
+// last == 30, len(arr) == 2
+```
+
+#### `index_of(array, value)`
+
+Returns the zero-based index of the first occurrence of `value` in the array, or `-1` if not found.
+
+```javascript
+index_of([10, 20, 30], 20)   // 1
+index_of([10, 20, 30], 99)   // -1
+```
+
+#### `array_contains(array, value)`
+
+Returns `1` if `value` exists in the array, `0` otherwise.
+
+```javascript
+array_contains([10, 20, 30], 20)  // 1
+array_contains([10, 20, 30], 99)  // 0
+```
+
+#### `sort(array)`
+
+Sorts the array in-place in ascending order using bubble sort.
+
+```javascript
+var arr = [50, 10, 30, 20, 40];
+sort(arr);
+// arr is now [10, 20, 30, 40, 50]
+```
+
+#### `array_fill(size, value)`
+
+Creates a new array of `size` elements, all initialized to `value`.
+
+```javascript
+var arr = array_fill(5, 42);
+// arr == [42, 42, 42, 42, 42]
+```
+
+#### `array_concat(array1, array2)`
+
+Returns a new array containing all elements of `array1` followed by all elements of `array2`.
+
+```javascript
+var merged = array_concat([1, 2, 3], [4, 5, 6]);
+// merged == [1, 2, 3, 4, 5, 6]
+```
+
+#### `array_slice(array, start, end)`
+
+Returns a new array containing elements from index `start` (inclusive) to `end` (exclusive).
+
+```javascript
+var sliced = array_slice([10, 20, 30, 40, 50], 1, 4);
+// sliced == [20, 30, 40]
 ```
 
 ### 11.4 Character Functions
@@ -1115,6 +1268,105 @@ str_find("hello", 111)    // 4  ('o' at index 4)
 str_find("hello", 122)    // -1 ('z' not found)
 ```
 
+#### `str_substr(s, start, length)`
+
+Returns a new string that is a substring of `s` starting at index `start` with the given `length`.
+
+```javascript
+str_substr("hello world", 6, 5)  // "world"
+str_substr("abcdef", 0, 3)       // "abc"
+```
+
+#### `str_upper(s)`
+
+Returns a new string with all characters converted to uppercase.
+
+```javascript
+str_upper("hello")    // "HELLO"
+str_upper("Hello!")   // "HELLO!"
+```
+
+#### `str_lower(s)`
+
+Returns a new string with all characters converted to lowercase.
+
+```javascript
+str_lower("WORLD")    // "world"
+str_lower("Hello!")   // "hello!"
+```
+
+#### `str_contains(s, substring)`
+
+Returns `1` if `substring` is found within `s`, `0` otherwise.
+
+```javascript
+str_contains("hello world", "world")  // 1
+str_contains("hello world", "xyz")    // 0
+```
+
+#### `str_index_of(s, substring)`
+
+Returns the zero-based index of the first occurrence of `substring` in `s`, or `-1` if not found.
+
+```javascript
+str_index_of("hello world", "world")  // 6
+str_index_of("hello world", "xyz")    // -1
+```
+
+#### `str_replace(s, old, new)`
+
+Returns a new string with the first occurrence of `old` replaced by `new`. If `old` is not found, returns a copy of the original string.
+
+```javascript
+str_replace("hello world", "world", "there")  // "hello there"
+str_replace("abcabc", "b", "x")               // "axcabc"
+```
+
+#### `str_trim(s)`
+
+Returns a new string with leading and trailing whitespace removed.
+
+```javascript
+str_trim("  hello  ")     // "hello"
+str_trim("\t text \n")    // "text"
+```
+
+#### `str_starts_with(s, prefix)`
+
+Returns `1` if `s` starts with `prefix`, `0` otherwise.
+
+```javascript
+str_starts_with("hello world", "hello")  // 1
+str_starts_with("hello world", "world")  // 0
+```
+
+#### `str_ends_with(s, suffix)`
+
+Returns `1` if `s` ends with `suffix`, `0` otherwise.
+
+```javascript
+str_ends_with("hello world", "world")  // 1
+str_ends_with("hello world", "hello")  // 0
+```
+
+#### `str_repeat(s, count)`
+
+Returns a new string that is `s` repeated `count` times.
+
+```javascript
+str_repeat("ab", 3)   // "ababab"
+str_repeat("x", 5)    // "xxxxx"
+```
+
+#### `str_reverse(s)`
+
+Returns a new string with the characters of `s` in reverse order.
+
+```javascript
+str_reverse("hello")  // "olleh"
+str_reverse("abc")    // "cba"
+```
+
 ### 11.6 Utility Functions
 
 #### `typeof(x)`
@@ -1168,6 +1420,30 @@ assert(0);          // always aborts: "Runtime error: assertion failed"
 | `str_concat(a, b)` | 2 | string | Concatenation of strings `a` and `b` |
 | `to_string(n)` | 1 | string | Convert integer to string representation |
 | `str_find(s, ch)` | 2 | index | Index of first occurrence of char (-1 if not found) |
+| `floor(x)` | 1 | int | Floor of float value |
+| `ceil(x)` | 1 | int | Ceiling of float value |
+| `round(x)` | 1 | int | Round float to nearest integer |
+| `to_int(x)` | 1 | int | Convert float to integer (truncation) |
+| `to_float(x)` | 1 | float | Convert integer to float |
+| `str_substr(s, i, n)` | 3 | string | Substring from index `i` of length `n` |
+| `str_upper(s)` | 1 | string | Uppercase version of string |
+| `str_lower(s)` | 1 | string | Lowercase version of string |
+| `str_contains(s, sub)` | 2 | 0/1 | Whether string contains substring |
+| `str_index_of(s, sub)` | 2 | index | Index of substring (-1 if not found) |
+| `str_replace(s, old, new)` | 3 | string | Replace first occurrence of `old` with `new` |
+| `str_trim(s)` | 1 | string | Remove leading/trailing whitespace |
+| `str_starts_with(s, p)` | 2 | 0/1 | Whether string starts with prefix |
+| `str_ends_with(s, p)` | 2 | 0/1 | Whether string ends with suffix |
+| `str_repeat(s, n)` | 2 | string | Repeat string `n` times |
+| `str_reverse(s)` | 1 | string | Reverse string characters |
+| `push(arr, val)` | 2 | array | Append value to array (returns new array) |
+| `pop(arr)` | 1 | value | Remove and return last element |
+| `index_of(arr, val)` | 2 | index | Index of value in array (-1 if not found) |
+| `array_contains(arr, v)` | 2 | 0/1 | Whether array contains value |
+| `sort(arr)` | 1 | arr | Sort array in-place (ascending) |
+| `array_fill(n, val)` | 2 | array | Create array of `n` elements all set to `val` |
+| `array_concat(a, b)` | 2 | array | Concatenate two arrays |
+| `array_slice(arr, s, e)` | 3 | array | Slice array from index `s` to `e` (exclusive) |
 | `typeof(x)` | 1 | 1 | Type tag (always 1/integer in native path) |
 | `assert(cond)` | 1 | 1 | Abort with error if `cond` is falsy |
 

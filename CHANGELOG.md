@@ -5,6 +5,17 @@ All notable changes to the OmScript compiler will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-03-01
+
+### Added
+- **Null coalescing operator** `??` — returns left operand if non-zero, otherwise right operand (e.g., `x ?? default_value`)
+- **Multi-line string literals** via triple-quoted strings (`"""..."""`) — supports embedded newlines without escape sequences
+- **Math built-ins**: `floor(x)`, `ceil(x)`, `round(x)` — rounding operations returning integers
+- **Type conversion built-ins**: `to_int(x)` (float→int truncation), `to_float(x)` (int→float)
+- **String built-ins**: `str_substr(s, start, len)`, `str_upper(s)`, `str_lower(s)`, `str_contains(s, sub)`, `str_replace(s, old, new)`, `str_trim(s)`, `str_starts_with(s, prefix)`, `str_ends_with(s, suffix)`, `str_index_of(s, sub)`, `str_repeat(s, n)`, `str_reverse(s)`
+- **Array built-ins**: `push(arr, val)`, `pop(arr)`, `index_of(arr, val)`, `array_contains(arr, val)`, `sort(arr)`, `array_fill(n, val)`, `array_concat(a, b)`, `array_slice(arr, start, end)`
+- Standard library count increased from 29 to 51 built-in functions
+
 ## [1.4.0] - 2026-03-01
 
 ### Added

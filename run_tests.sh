@@ -195,6 +195,8 @@ test_cli_output "string-var-print" "hello from variable" 0 ./build/omsc run exam
 test_cli_output "string-param-print" "from param" 0 ./build/omsc run examples/string_param_test.om
 test_cli_output "string-return-print" "hello world" 0 ./build/omsc run examples/string_param_test.om
 test_cli_output "to-string-print" "12345" 87 ./build/omsc run examples/new_builtins_test.om
+test_cli_output "null-coalesce-multiline" "multi-line works" 5 ./build/omsc run examples/null_coalesce_test.om
+test_cli_output "lex-null-coalesce" "NULL_COALESCE" 0 ./build/omsc lex examples/null_coalesce_test.om
 TOTAL=$((TOTAL + 1))
 if [ -f a.out ] || [ -f a.out.o ]; then
     echo -e "${RED}✗ Failed (temporary output files not cleaned)${NC}"
@@ -271,6 +273,10 @@ test_program "examples/string_func_test.om" 178
 test_program "examples/stdlib_test.om" 66
 test_program "examples/stdlib2_test.om" 255
 test_program "examples/new_builtins_test.om" 87
+test_program "examples/math_builtins_test.om" 52
+test_program "examples/string_builtins_test.om" 12
+test_program "examples/array_builtins_test.om" 20
+test_program "examples/null_coalesce_test.om" 5
 test_program "examples/float_test.om" 5
 test_program "examples/string_var_test.om" 0
 test_program "examples/string_param_test.om" 0
