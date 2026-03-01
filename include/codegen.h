@@ -328,6 +328,7 @@ class CodeGenerator {
     llvm::Function* getOrDeclareAtof();
     llvm::Function* getOrDeclareFwrite();
     llvm::Function* getOrDeclareFflush();
+    llvm::Function* getOrDeclareFgets();
 
     /// Shared implementation for prefix and postfix increment/decrement.
     /// Returns the *old* value for postfix (isPostfix=true) and the *new*
