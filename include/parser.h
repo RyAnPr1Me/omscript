@@ -54,7 +54,7 @@ class Parser {
     /// Generated lambda functions to be appended to the program.
     std::vector<std::unique_ptr<FunctionDecl>> lambdaFunctions_;
 
-    Token peek(int offset = 0) const;
+    const Token& peek(int offset = 0) const;
     Token advance();
     bool check(TokenType type) const;
     bool match(TokenType type);

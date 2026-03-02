@@ -3,6 +3,7 @@
 #include "jit.h"
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
@@ -97,6 +98,8 @@ bool VM::isJITCompiled(const std::string& name) const {
 }
 
 bool VM::invokeJIT(JITFnPtr fn, uint8_t argCount, const uint8_t* argRegs, uint8_t rd) {
+    if (rd >= kMaxRegisters)
+        return false;
     for (size_t i = 0; i < argCount; i++) {
         if (argRegs[i] >= kMaxRegisters)
             return false;
@@ -118,6 +121,8 @@ bool VM::invokeJIT(JITFnPtr fn, uint8_t argCount, const uint8_t* argRegs, uint8_
 }
 
 bool VM::invokeJITFloat(JITFloatFnPtr fn, uint8_t argCount, const uint8_t* argRegs, uint8_t rd) {
+    if (rd >= kMaxRegisters)
+        return false;
     for (size_t i = 0; i < argCount; i++) {
         if (argRegs[i] >= kMaxRegisters)
             return false;
@@ -377,10 +382,26 @@ op_POW: {
                 int64_t result = 1;
                 int64_t e = n;
                 while (e > 0) {
-                    if (e & 1)
+                    if (e & 1) {
+                        if (b != 0 && b != 1 && b != -1) {
+                            // Use unsigned abs to avoid UB on INT64_MIN
+                            uint64_t ab = (b < 0) ? static_cast<uint64_t>(-static_cast<uint64_t>(b))
+                                                   : static_cast<uint64_t>(b);
+                            uint64_t ar = (result < 0) ? static_cast<uint64_t>(-static_cast<uint64_t>(result))
+                                                       : static_cast<uint64_t>(result);
+                            if (ar > static_cast<uint64_t>(INT64_MAX) / ab)
+                                throw std::runtime_error("Integer overflow in ** operator");
+                        }
                         result *= b;
-                    b *= b;
+                    }
                     e >>= 1;
+                    if (e > 0 && b != 0 && b != 1 && b != -1) {
+                        uint64_t ab = (b < 0) ? static_cast<uint64_t>(-static_cast<uint64_t>(b))
+                                               : static_cast<uint64_t>(b);
+                        if (ab > static_cast<uint64_t>(INT64_MAX) / ab)
+                            throw std::runtime_error("Integer overflow in ** operator");
+                        b *= b;
+                    }
                 }
                 registers[rd] = Value(result);
             } else {
@@ -887,10 +908,25 @@ vm_exit:
                     int64_t result = 1;
                     int64_t e = n;
                     while (e > 0) {
-                        if (e & 1)
+                        if (e & 1) {
+                            if (b != 0 && b != 1 && b != -1) {
+                                uint64_t ab = (b < 0) ? static_cast<uint64_t>(-static_cast<uint64_t>(b))
+                                                       : static_cast<uint64_t>(b);
+                                uint64_t ar = (result < 0) ? static_cast<uint64_t>(-static_cast<uint64_t>(result))
+                                                           : static_cast<uint64_t>(result);
+                                if (ar > static_cast<uint64_t>(INT64_MAX) / ab)
+                                    throw std::runtime_error("Integer overflow in ** operator");
+                            }
                             result *= b;
-                        b *= b;
+                        }
                         e >>= 1;
+                        if (e > 0 && b != 0 && b != 1 && b != -1) {
+                            uint64_t ab = (b < 0) ? static_cast<uint64_t>(-static_cast<uint64_t>(b))
+                                                   : static_cast<uint64_t>(b);
+                            if (ab > static_cast<uint64_t>(INT64_MAX) / ab)
+                                throw std::runtime_error("Integer overflow in ** operator");
+                            b *= b;
+                        }
                     }
                     registers[rd] = Value(result);
                 } else {

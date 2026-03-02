@@ -75,7 +75,7 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
     if (verbose_) {
         std::cout << "  Lexing..." << std::endl;
     }
-    Lexer lexer(source);
+    Lexer lexer(std::move(source));
     std::vector<Token> tokens;
     try {
         tokens = lexer.tokenize();

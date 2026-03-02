@@ -38,6 +38,8 @@ static const std::unordered_map<std::string, TokenType> keywords = {
 
 Lexer::Lexer(const std::string& source) : source(source), pos(0), line(1), column(1) {}
 
+Lexer::Lexer(std::string&& source) : source(std::move(source)), pos(0), line(1), column(1) {}
+
 char Lexer::peek(int offset) const {
     size_t index = pos + offset;
     if (index >= source.length()) {

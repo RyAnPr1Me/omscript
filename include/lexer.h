@@ -118,6 +118,7 @@ struct Token {
 class Lexer {
   public:
     Lexer(const std::string& source);
+    Lexer(std::string&& source);
     std::vector<Token> tokenize();
 
   private:
