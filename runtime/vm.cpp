@@ -19,6 +19,18 @@ static constexpr int64_t kInt64BitWidth = 64;
 // Maximum exponent value for the ** operator to prevent resource exhaustion.
 static constexpr int64_t kMaxExponent = 1000;
 
+/// Return true if multiplying a * b would overflow int64_t.
+/// Uses unsigned arithmetic to avoid undefined behavior.
+static inline bool wouldMultiplyOverflow(int64_t a, int64_t b) {
+    if (a == 0 || a == 1 || a == -1 || b == 0 || b == 1 || b == -1)
+        return false;
+    uint64_t ua = (a < 0) ? static_cast<uint64_t>(-static_cast<uint64_t>(a))
+                           : static_cast<uint64_t>(a);
+    uint64_t ub = (b < 0) ? static_cast<uint64_t>(-static_cast<uint64_t>(b))
+                           : static_cast<uint64_t>(b);
+    return ua > static_cast<uint64_t>(INT64_MAX) / ub;
+}
+
 VM::VM() : lastReturn(), jit_(std::make_unique<BytecodeJIT>()) {
     locals.reserve(16);
     std::fill_n(registers, kMaxRegisters, Value());
@@ -383,22 +395,13 @@ op_POW: {
                 int64_t e = n;
                 while (e > 0) {
                     if (e & 1) {
-                        if (b != 0 && b != 1 && b != -1) {
-                            // Use unsigned abs to avoid UB on INT64_MIN
-                            uint64_t ab = (b < 0) ? static_cast<uint64_t>(-static_cast<uint64_t>(b))
-                                                   : static_cast<uint64_t>(b);
-                            uint64_t ar = (result < 0) ? static_cast<uint64_t>(-static_cast<uint64_t>(result))
-                                                       : static_cast<uint64_t>(result);
-                            if (ar > static_cast<uint64_t>(INT64_MAX) / ab)
-                                throw std::runtime_error("Integer overflow in ** operator");
-                        }
+                        if (wouldMultiplyOverflow(result, b))
+                            throw std::runtime_error("Integer overflow in ** operator");
                         result *= b;
                     }
                     e >>= 1;
-                    if (e > 0 && b != 0 && b != 1 && b != -1) {
-                        uint64_t ab = (b < 0) ? static_cast<uint64_t>(-static_cast<uint64_t>(b))
-                                               : static_cast<uint64_t>(b);
-                        if (ab > static_cast<uint64_t>(INT64_MAX) / ab)
+                    if (e > 0) {
+                        if (wouldMultiplyOverflow(b, b))
                             throw std::runtime_error("Integer overflow in ** operator");
                         b *= b;
                     }
@@ -909,21 +912,13 @@ vm_exit:
                     int64_t e = n;
                     while (e > 0) {
                         if (e & 1) {
-                            if (b != 0 && b != 1 && b != -1) {
-                                uint64_t ab = (b < 0) ? static_cast<uint64_t>(-static_cast<uint64_t>(b))
-                                                       : static_cast<uint64_t>(b);
-                                uint64_t ar = (result < 0) ? static_cast<uint64_t>(-static_cast<uint64_t>(result))
-                                                           : static_cast<uint64_t>(result);
-                                if (ar > static_cast<uint64_t>(INT64_MAX) / ab)
-                                    throw std::runtime_error("Integer overflow in ** operator");
-                            }
+                            if (wouldMultiplyOverflow(result, b))
+                                throw std::runtime_error("Integer overflow in ** operator");
                             result *= b;
                         }
                         e >>= 1;
-                        if (e > 0 && b != 0 && b != 1 && b != -1) {
-                            uint64_t ab = (b < 0) ? static_cast<uint64_t>(-static_cast<uint64_t>(b))
-                                                   : static_cast<uint64_t>(b);
-                            if (ab > static_cast<uint64_t>(INT64_MAX) / ab)
+                        if (e > 0) {
+                            if (wouldMultiplyOverflow(b, b))
                                 throw std::runtime_error("Integer overflow in ** operator");
                             b *= b;
                         }
