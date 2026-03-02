@@ -14,19 +14,15 @@ void BytecodeEmitter::emitByte(uint8_t byte) {
 }
 
 void BytecodeEmitter::emitInt(int64_t value) {
-    uint64_t raw = 0;
-    std::memcpy(&raw, &value, sizeof(value));
-    for (int i = 0; i < 8; i++) {
-        code.push_back(static_cast<uint8_t>((raw >> (i * 8)) & 0xFF));
-    }
+    size_t pos = code.size();
+    code.resize(pos + sizeof(value));
+    std::memcpy(code.data() + pos, &value, sizeof(value));
 }
 
 void BytecodeEmitter::emitFloat(double value) {
-    uint64_t raw = 0;
-    std::memcpy(&raw, &value, sizeof(value));
-    for (int i = 0; i < 8; i++) {
-        code.push_back(static_cast<uint8_t>((raw >> (i * 8)) & 0xFF));
-    }
+    size_t pos = code.size();
+    code.resize(pos + sizeof(value));
+    std::memcpy(code.data() + pos, &value, sizeof(value));
 }
 
 void BytecodeEmitter::emitString(const std::string& str) {
@@ -34,14 +30,15 @@ void BytecodeEmitter::emitString(const std::string& str) {
         throw std::runtime_error("String literal too long for bytecode encoding");
     }
     emitShort(static_cast<uint16_t>(str.length()));
-    for (char c : str) {
-        code.push_back(static_cast<uint8_t>(c));
-    }
+    size_t pos = code.size();
+    code.resize(pos + str.length());
+    std::memcpy(code.data() + pos, str.data(), str.length());
 }
 
 void BytecodeEmitter::emitShort(uint16_t value) {
-    code.push_back(static_cast<uint8_t>(value & 0xFF));
-    code.push_back(static_cast<uint8_t>((value >> 8) & 0xFF));
+    size_t pos = code.size();
+    code.resize(pos + sizeof(value));
+    std::memcpy(code.data() + pos, &value, sizeof(value));
 }
 
 size_t BytecodeEmitter::currentOffset() const {
