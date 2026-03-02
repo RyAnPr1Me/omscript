@@ -1429,7 +1429,7 @@ void printUsage(const char* progName) {
                  "  parse            Print AST\n"
                  "  clean            Remove build artifacts\n"
                  "  pkg              Package manager (install, remove, list, search, info)\n"
-                 "  install          Install omsc to PATH\n"
+                 "  install          Install omsc to your PATH\n"
                  "  update           Update to latest version\n"
                  "\n"
                  "Options:\n"

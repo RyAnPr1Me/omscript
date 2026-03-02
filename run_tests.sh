@@ -402,9 +402,9 @@ rm -f /tmp/test_nojit /tmp/test_nojit.o
 test_cli_output "fjit" "compiled" 0 ./build/omsc -fjit examples/exit_zero.om -o /tmp/test_jit
 rm -f /tmp/test_jit /tmp/test_jit.o
 test_cli_output "flto" "compiled" 0 ./build/omsc -flto examples/exit_zero.om -o /tmp/test_lto
-rm -f /tmp/test_lto /tmp/test_lto.o
+rm -f /tmp/test_lto /tmp/test_lto.o /tmp/test_lto.bc
 test_cli_output "fno-lto" "compiled" 0 ./build/omsc -fno-lto examples/exit_zero.om -o /tmp/test_nolto
-rm -f /tmp/test_nolto /tmp/test_nolto.o
+rm -f /tmp/test_nolto /tmp/test_nolto.o /tmp/test_nolto.bc
 test_cli_output "fstack-protector" "compiled" 0 ./build/omsc -fstack-protector examples/exit_zero.om -o /tmp/test_sp
 rm -f /tmp/test_sp /tmp/test_sp.o
 test_cli_output "fno-stack-protector" "compiled" 0 ./build/omsc -fno-stack-protector examples/exit_zero.om -o /tmp/test_nosp
