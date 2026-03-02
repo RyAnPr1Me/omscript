@@ -3712,3 +3712,65 @@ TEST(CodegenTest, IsStdlibFunctionArrayMapFilterReduce) {
     EXPECT_TRUE(isStdlibFunction("array_filter"));
     EXPECT_TRUE(isStdlibFunction("array_reduce"));
 }
+
+// ===========================================================================
+// Vectorization and loop optimization flag tests
+// ===========================================================================
+
+TEST(CodegenTest, VectorizeFlagDefaultOn) {
+    // Vectorize is on by default — generating a for-loop at O2 should succeed.
+    CodeGenerator codegen(OptimizationLevel::O2);
+    codegen.setVectorize(true);
+    auto* mod = generateIR(
+        "fn main() { var s = 0; for (i in 0...10) { s = s + i; } return s; }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, VectorizeFlagOff) {
+    // Disabling vectorize should still compile successfully.
+    CodeGenerator codegen(OptimizationLevel::O2);
+    codegen.setVectorize(false);
+    auto* mod = generateIR(
+        "fn main() { var s = 0; for (i in 0...10) { s = s + i; } return s; }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, UnrollLoopsFlagOff) {
+    CodeGenerator codegen(OptimizationLevel::O2);
+    codegen.setUnrollLoops(false);
+    auto* mod = generateIR(
+        "fn main() { var s = 0; for (i in 0...10) { s = s + i; } return s; }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, LoopOptimizeFlagOff) {
+    CodeGenerator codegen(OptimizationLevel::O3);
+    codegen.setLoopOptimize(false);
+    auto* mod = generateIR(
+        "fn main() { var s = 0; for (i in 0...10) { s = s + i; } return s; }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, LoopOptimizeFlagOnO3) {
+    // At O3 with loop-optimize on, the polyhedral LoopDistribute pass runs.
+    CodeGenerator codegen(OptimizationLevel::O3);
+    codegen.setLoopOptimize(true);
+    auto* mod = generateIR(
+        "fn main() { var s = 0; for (i in 0...10) { s = s + i; } return s; }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, WhileLoopWithVectorizeHints) {
+    // While loops should also get vectorization metadata at O2+.
+    CodeGenerator codegen(OptimizationLevel::O2);
+    codegen.setVectorize(true);
+    auto* mod = generateIR(
+        "fn main() { var i = 0; var s = 0; while (i < 10) { s = s + i; i = i + 1; } return s; }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+}

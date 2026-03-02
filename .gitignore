@@ -52,3 +52,4 @@ om_packages/
 
 # Clangd cache
 .cache/
+build_san

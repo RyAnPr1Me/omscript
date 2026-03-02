@@ -70,6 +70,10 @@ class CodeGenerator {
 
     void generate(Program* program);
     void writeObjectFile(const std::string& filename);
+    /// Write the module as LLVM bitcode for full link-time optimization (FLTO).
+    /// The linker (gcc/clang with -flto) reads bitcode and performs whole-program
+    /// optimization across translation units at link time.
+    void writeBitcodeFile(const std::string& filename);
     llvm::Module* getModule() {
         return module.get();
     }
@@ -102,6 +106,21 @@ class CodeGenerator {
     /// Enable or disable OPTMAX block optimization (default: true).
     void setOptMax(bool enable) {
         enableOptMax_ = enable;
+    }
+
+    /// Enable or disable explicit loop vectorization hints (default: true at O2+).
+    void setVectorize(bool enable) {
+        enableVectorize_ = enable;
+    }
+
+    /// Enable or disable loop unrolling hints (default: true at O2+).
+    void setUnrollLoops(bool enable) {
+        enableUnrollLoops_ = enable;
+    }
+
+    /// Enable or disable polyhedral-style loop optimizations (default: true at O3).
+    void setLoopOptimize(bool enable) {
+        enableLoopOptimize_ = enable;
     }
 
   private:
@@ -287,11 +306,14 @@ class CodeGenerator {
     void scanStmtForStringCalls(Statement* stmt);
 
     // Target CPU configuration for LLVM code generation.
-    std::string marchCpu_;     // -march: CPU arch for instruction selection ("" = native)
-    std::string mtuneCpu_;     // -mtune: CPU for scheduling tuning ("" = same as march)
-    bool usePIC_ = true;       // -fpic / -fno-pic
-    bool useFastMath_ = false; // -ffast-math / -fno-fast-math
-    bool enableOptMax_ = true; // -foptmax / -fno-optmax
+    std::string marchCpu_;           // -march: CPU arch for instruction selection ("" = native)
+    std::string mtuneCpu_;           // -mtune: CPU for scheduling tuning ("" = same as march)
+    bool usePIC_ = true;             // -fpic / -fno-pic
+    bool useFastMath_ = false;       // -ffast-math / -fno-fast-math
+    bool enableOptMax_ = true;       // -foptmax / -fno-optmax
+    bool enableVectorize_ = true;    // -fvectorize / -fno-vectorize
+    bool enableUnrollLoops_ = true;  // -funroll-loops / -fno-unroll-loops
+    bool enableLoopOptimize_ = true; // -floop-optimize / -fno-loop-optimize
 
     /// Compile-time resource budget — limits to prevent DoS via oversized inputs.
     /// Checked during code generation to abort compilation if the program

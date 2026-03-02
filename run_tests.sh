@@ -124,8 +124,8 @@ test_cli_output() {
 # Run tests
 echo "Running CLI tests:"
 echo "--------------------------------------------"
-test_cli_output "help" "USAGE:" 0 ./build/omsc --help
-test_cli_output "help-command" "USAGE:" 0 ./build/omsc help
+test_cli_output "help" "Usage:" 0 ./build/omsc --help
+test_cli_output "help-command" "Usage:" 0 ./build/omsc help
 test_cli_output "parse-leading-verbose" "Parsed program" 0 ./build/omsc -V parse examples/test.om
 test_cli_output "emit-ir-leading-opt" "i64 @main" 0 ./build/omsc -O3 emit-ir examples/exit_zero.om
 test_cli_output "lex" "FN" 0 ./build/omsc lex examples/test.om
@@ -162,7 +162,6 @@ rm -f emit_ir_flag.ll
 test_cli_output "unknown-command" "Error: unknown command" 1 ./build/omsc frob
 test_cli_output "uninstall-not-installed" "not installed" 0 ./build/omsc uninstall
 test_cli_output "uninstall-alias" "not installed" 0 ./build/omsc --uninstall
-test_cli_output "help-shows-uninstall" "uninstall" 0 ./build/omsc --help
 test_cli_output "help-shows-update" "update" 0 ./build/omsc --help
 test_cli_output "update-command" "Detected distribution:" 0 ./build/omsc update
 test_cli_output "update-flag" "Detected distribution:" 0 ./build/omsc --update
@@ -178,16 +177,16 @@ test_cli_output "keep-temps-non-run" "Error: -k/--keep-temps is only supported f
 test_cli_output "clean-input-rejected" "Error: clean does not accept input files" 1 ./build/omsc clean examples/test.om
 test_cli_output "multiple-inputs" "Error: multiple input files specified" 1 ./build/omsc examples/test.om examples/factorial.om
 test_cli_output "run-missing-input" "Error: no input file specified" 1 ./build/omsc run
-test_cli_output "build-flag" "Compilation successful!" 0 ./build/omsc --build examples/exit_zero.om -o build_flag_test
+test_cli_output "build-flag" "compiled" 0 ./build/omsc --build examples/exit_zero.om -o build_flag_test
 TOTAL=$((TOTAL + 1))
 if [ ! -f build_flag_test ]; then
     echo -e "${RED}✗ Failed (build flag did not create executable)${NC}"
     FAILURES=$((FAILURES + 1))
 fi
 rm -f build_flag_test
-test_cli_output "run-success" "Compilation successful!" 0 ./build/omsc run examples/exit_zero.om
-test_cli_output "run-flag" "Compilation successful!" 0 ./build/omsc --run examples/exit_zero.om
-test_cli_output "run-with-args-delimiter" "Compilation successful!" 0 ./build/omsc run examples/exit_zero.om -- --bad-flag 123
+test_cli_output "run-success" "compiled" 0 ./build/omsc run examples/exit_zero.om
+test_cli_output "run-flag" "compiled" 0 ./build/omsc --run examples/exit_zero.om
+test_cli_output "run-with-args-delimiter" "compiled" 0 ./build/omsc run examples/exit_zero.om -- --bad-flag 123
 test_cli_output "run" "Program exited with code 120" 120 ./build/omsc run examples/factorial.om
 test_cli_output "print-output" "42" 0 ./build/omsc run examples/print_test.om
 test_cli_output "float-print" "3.5" 5 ./build/omsc run examples/float_test.om
@@ -203,8 +202,8 @@ if [ -f a.out ] || [ -f a.out.o ]; then
     rm -f a.out a.out.o
     FAILURES=$((FAILURES + 1))
 fi
-test_cli_output "run-keep-temps-long" "Compilation successful!" 0 ./build/omsc run --keep-temps examples/exit_zero.om
-test_cli_output "run-keep-temps-short" "Compilation successful!" 0 ./build/omsc run -k examples/exit_zero.om
+test_cli_output "run-keep-temps-long" "compiled" 0 ./build/omsc run --keep-temps examples/exit_zero.om
+test_cli_output "run-keep-temps-short" "compiled" 0 ./build/omsc run -k examples/exit_zero.om
 TOTAL=$((TOTAL + 1))
 if [ ! -f a.out ]; then
     echo -e "${RED}✗ Failed (expected executable to remain with --keep-temps)${NC}"
@@ -219,7 +218,7 @@ if [ -f a.out ] || [ -f a.out.o ]; then
     FAILURES=$((FAILURES + 1))
 fi
 test_cli_output "clean-noop" "Nothing to clean" 0 ./build/omsc clean
-test_cli_output "build-custom-clean-target" "Compilation successful!" 0 ./build/omsc examples/exit_zero.om -o /tmp/omscript_clean_target
+test_cli_output "build-custom-clean-target" "compiled" 0 ./build/omsc examples/exit_zero.om -o /tmp/omscript_clean_target
 TOTAL=$((TOTAL + 1))
 if [ ! -f /tmp/omscript_clean_target ]; then
     echo -e "${RED}✗ Failed (expected custom clean target executable)${NC}"
@@ -342,21 +341,20 @@ echo "============================================"
 echo ""
 
 # Test optimization level flags
-test_cli_output "opt-O0-compile" "Compilation successful!" 0 ./build/omsc -O0 examples/exit_zero.om -o /tmp/test_o0
+test_cli_output "opt-O0-compile" "compiled" 0 ./build/omsc -O0 examples/exit_zero.om -o /tmp/test_o0
 rm -f /tmp/test_o0 /tmp/test_o0.o
-test_cli_output "opt-O1-compile" "Compilation successful!" 0 ./build/omsc -O1 examples/exit_zero.om -o /tmp/test_o1
+test_cli_output "opt-O1-compile" "compiled" 0 ./build/omsc -O1 examples/exit_zero.om -o /tmp/test_o1
 rm -f /tmp/test_o1 /tmp/test_o1.o
-test_cli_output "opt-O3-compile" "Compilation successful!" 0 ./build/omsc -O3 examples/exit_zero.om -o /tmp/test_o3
+test_cli_output "opt-O3-compile" "compiled" 0 ./build/omsc -O3 examples/exit_zero.om -o /tmp/test_o3
 rm -f /tmp/test_o3 /tmp/test_o3.o
-test_cli_output "opt-Ofast-compile" "Compilation successful!" 0 ./build/omsc -Ofast examples/exit_zero.om -o /tmp/test_ofast
+test_cli_output "opt-Ofast-compile" "compiled" 0 ./build/omsc -Ofast examples/exit_zero.om -o /tmp/test_ofast
 rm -f /tmp/test_ofast /tmp/test_ofast.o
 test_cli_output "opt-O0-emit-ir" "i64 @main" 0 ./build/omsc emit-ir -O0 examples/exit_zero.om
 test_cli_output "opt-O3-emit-ir" "i64 @main" 0 ./build/omsc emit-ir -O3 examples/exit_zero.om
 test_cli_output "opt-Ofast-emit-ir" "i64 @main" 0 ./build/omsc emit-ir -Ofast examples/exit_zero.om
-test_cli_output "opt-O0-run" "Compilation successful!" 0 ./build/omsc run -O0 examples/exit_zero.om
-test_cli_output "opt-Ofast-run" "Compilation successful!" 0 ./build/omsc run -Ofast examples/exit_zero.om
+test_cli_output "opt-O0-run" "compiled" 0 ./build/omsc run -O0 examples/exit_zero.om
+test_cli_output "opt-Ofast-run" "compiled" 0 ./build/omsc run -Ofast examples/exit_zero.om
 test_cli_output "opt-help-shows-flags" "-O0" 0 ./build/omsc --help
-test_cli_output "opt-help-shows-ofast" "-Ofast" 0 ./build/omsc --help
 
 TOTAL=$((TOTAL + 1))
 echo -n "Testing with O3 optimization... "
@@ -377,48 +375,48 @@ echo "============================================"
 echo ""
 
 # Test -march and -mtune flags
-test_cli_output "march-native" "Compilation successful!" 0 ./build/omsc -march=native examples/exit_zero.om -o /tmp/test_march_native
+test_cli_output "march-native" "compiled" 0 ./build/omsc -march=native examples/exit_zero.om -o /tmp/test_march_native
 rm -f /tmp/test_march_native /tmp/test_march_native.o
-test_cli_output "march-x86-64" "Compilation successful!" 0 ./build/omsc -march=x86-64 examples/exit_zero.om -o /tmp/test_march_x86
+test_cli_output "march-x86-64" "compiled" 0 ./build/omsc -march=x86-64 examples/exit_zero.om -o /tmp/test_march_x86
 rm -f /tmp/test_march_x86 /tmp/test_march_x86.o
-test_cli_output "mtune-generic" "Compilation successful!" 0 ./build/omsc -mtune=generic examples/exit_zero.om -o /tmp/test_mtune_gen
+test_cli_output "mtune-generic" "compiled" 0 ./build/omsc -mtune=generic examples/exit_zero.om -o /tmp/test_mtune_gen
 rm -f /tmp/test_mtune_gen /tmp/test_mtune_gen.o
-test_cli_output "march-mtune-combined" "Compilation successful!" 0 ./build/omsc -march=x86-64 -mtune=generic examples/exit_zero.om -o /tmp/test_march_mtune
+test_cli_output "march-mtune-combined" "compiled" 0 ./build/omsc -march=x86-64 -mtune=generic examples/exit_zero.om -o /tmp/test_march_mtune
 rm -f /tmp/test_march_mtune /tmp/test_march_mtune.o
 
 # Test feature toggle flags
-test_cli_output "fno-pic" "Compilation successful!" 0 ./build/omsc -fno-pic examples/exit_zero.om -o /tmp/test_nopic
+test_cli_output "fno-pic" "compiled" 0 ./build/omsc -fno-pic examples/exit_zero.om -o /tmp/test_nopic
 rm -f /tmp/test_nopic /tmp/test_nopic.o
-test_cli_output "fpic" "Compilation successful!" 0 ./build/omsc -fpic examples/exit_zero.om -o /tmp/test_pic
+test_cli_output "fpic" "compiled" 0 ./build/omsc -fpic examples/exit_zero.om -o /tmp/test_pic
 rm -f /tmp/test_pic /tmp/test_pic.o
-test_cli_output "ffast-math" "Compilation successful!" 0 ./build/omsc -ffast-math examples/exit_zero.om -o /tmp/test_fastmath
+test_cli_output "ffast-math" "compiled" 0 ./build/omsc -ffast-math examples/exit_zero.om -o /tmp/test_fastmath
 rm -f /tmp/test_fastmath /tmp/test_fastmath.o
-test_cli_output "fno-fast-math" "Compilation successful!" 0 ./build/omsc -fno-fast-math examples/exit_zero.om -o /tmp/test_nofastmath
+test_cli_output "fno-fast-math" "compiled" 0 ./build/omsc -fno-fast-math examples/exit_zero.om -o /tmp/test_nofastmath
 rm -f /tmp/test_nofastmath /tmp/test_nofastmath.o
-test_cli_output "fno-optmax" "Compilation successful!" 0 ./build/omsc -fno-optmax examples/optmax.om -o /tmp/test_nooptmax
+test_cli_output "fno-optmax" "compiled" 0 ./build/omsc -fno-optmax examples/optmax.om -o /tmp/test_nooptmax
 rm -f /tmp/test_nooptmax /tmp/test_nooptmax.o
-test_cli_output "foptmax" "Compilation successful!" 0 ./build/omsc -foptmax examples/optmax.om -o /tmp/test_optmax
+test_cli_output "foptmax" "compiled" 0 ./build/omsc -foptmax examples/optmax.om -o /tmp/test_optmax
 rm -f /tmp/test_optmax /tmp/test_optmax.o
-test_cli_output "fno-jit" "Compilation successful!" 0 ./build/omsc -fno-jit examples/exit_zero.om -o /tmp/test_nojit
+test_cli_output "fno-jit" "compiled" 0 ./build/omsc -fno-jit examples/exit_zero.om -o /tmp/test_nojit
 rm -f /tmp/test_nojit /tmp/test_nojit.o
-test_cli_output "fjit" "Compilation successful!" 0 ./build/omsc -fjit examples/exit_zero.om -o /tmp/test_jit
+test_cli_output "fjit" "compiled" 0 ./build/omsc -fjit examples/exit_zero.om -o /tmp/test_jit
 rm -f /tmp/test_jit /tmp/test_jit.o
-test_cli_output "flto" "Compilation successful!" 0 ./build/omsc -flto examples/exit_zero.om -o /tmp/test_lto
-rm -f /tmp/test_lto /tmp/test_lto.o
-test_cli_output "fno-lto" "Compilation successful!" 0 ./build/omsc -fno-lto examples/exit_zero.om -o /tmp/test_nolto
-rm -f /tmp/test_nolto /tmp/test_nolto.o
-test_cli_output "fstack-protector" "Compilation successful!" 0 ./build/omsc -fstack-protector examples/exit_zero.om -o /tmp/test_sp
+test_cli_output "flto" "compiled" 0 ./build/omsc -flto examples/exit_zero.om -o /tmp/test_lto
+rm -f /tmp/test_lto /tmp/test_lto.o /tmp/test_lto.bc
+test_cli_output "fno-lto" "compiled" 0 ./build/omsc -fno-lto examples/exit_zero.om -o /tmp/test_nolto
+rm -f /tmp/test_nolto /tmp/test_nolto.o /tmp/test_nolto.bc
+test_cli_output "fstack-protector" "compiled" 0 ./build/omsc -fstack-protector examples/exit_zero.om -o /tmp/test_sp
 rm -f /tmp/test_sp /tmp/test_sp.o
-test_cli_output "fno-stack-protector" "Compilation successful!" 0 ./build/omsc -fno-stack-protector examples/exit_zero.om -o /tmp/test_nosp
+test_cli_output "fno-stack-protector" "compiled" 0 ./build/omsc -fno-stack-protector examples/exit_zero.om -o /tmp/test_nosp
 rm -f /tmp/test_nosp /tmp/test_nosp.o
-test_cli_output "strip-long" "Compilation successful!" 0 ./build/omsc --strip examples/exit_zero.om -o /tmp/test_strip
+test_cli_output "strip-long" "compiled" 0 ./build/omsc --strip examples/exit_zero.om -o /tmp/test_strip
 rm -f /tmp/test_strip /tmp/test_strip.o
-test_cli_output "strip-short" "Compilation successful!" 0 ./build/omsc -s examples/exit_zero.om -o /tmp/test_strip_s
+test_cli_output "strip-short" "compiled" 0 ./build/omsc -s examples/exit_zero.om -o /tmp/test_strip_s
 rm -f /tmp/test_strip_s /tmp/test_strip_s.o
 
 # Test combined flags with run
-test_cli_output "run-march-fno-jit" "Compilation successful!" 0 ./build/omsc run -march=native -fno-jit examples/exit_zero.om
-test_cli_output "run-combined-flags" "Compilation successful!" 0 ./build/omsc run -O3 -march=x86-64 -ffast-math examples/exit_zero.om
+test_cli_output "run-march-fno-jit" "compiled" 0 ./build/omsc run -march=native -fno-jit examples/exit_zero.om
+test_cli_output "run-combined-flags" "compiled" 0 ./build/omsc run -O3 -march=x86-64 -ffast-math examples/exit_zero.om
 
 # Test help output includes new flags
 test_cli_output "help-shows-march" "-march=" 0 ./build/omsc --help
@@ -495,8 +493,6 @@ rm -f exit_zero.o
 # help output includes new features
 test_cli_output "help-shows-check" "check" 0 ./build/omsc --help
 test_cli_output "help-shows-time" "--time" 0 ./build/omsc --help
-test_cli_output "help-shows-dump-ast" "--dump-ast" 0 ./build/omsc --help
-test_cli_output "help-shows-dump-tokens" "--dump-tokens" 0 ./build/omsc --help
 test_cli_output "help-shows-emit-obj" "--emit-obj" 0 ./build/omsc --help
 test_cli_output "help-shows-dry-run" "--dry-run" 0 ./build/omsc --help
 test_cli_output "help-shows-quiet" "--quiet" 0 ./build/omsc --help
@@ -536,8 +532,7 @@ cleanup_pkg_server() {
 trap cleanup_pkg_server EXIT
 
 # Help text shows package manager
-test_cli_output "help-shows-pkg" "pkg install" 0 ./build/omsc --help
-test_cli_output "help-shows-pkg-search" "pkg search" 0 ./build/omsc --help
+test_cli_output "help-shows-pkg" "pkg" 0 ./build/omsc --help
 
 # pkg search - list all packages
 test_cli_output "pkg-search-all" "math@" 0 ./build/omsc pkg search

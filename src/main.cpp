@@ -1415,72 +1415,50 @@ int doPkg(int argc, char* argv[], int startIndex, bool quiet) {
 
 void printUsage(const char* progName) {
     std::cout << kCompilerVersion
-              << "\n"
-                 "\n"
-                 "USAGE:\n"
-                 "  "
+              << "\n\n"
+                 "Usage: "
               << progName
-              << " <source.om> [options]          Compile (default)\n"
-                 "  "
-              << progName
-              << " <command> <source.om> [options]\n"
+              << " [command] <file.om> [options]\n"
                  "\n"
-                 "COMMANDS:\n"
-                 "  compile, build        Compile a source file (default)\n"
-                 "  run                   Compile and run a source file\n"
-                 "  check                 Parse and validate without generating code\n"
-                 "  lex, tokens           Print lexer tokens\n"
-                 "  parse, emit-ast       Parse and summarize the AST\n"
-                 "  emit-ir               Emit LLVM IR\n"
-                 "  clean                 Remove build outputs\n"
-                 "  version               Show compiler version\n"
-                 "  help                  Show this help message\n"
+                 "Commands:\n"
+                 "  build, compile   Compile to executable (default)\n"
+                 "  run              Compile and run\n"
+                 "  check            Validate syntax\n"
+                 "  emit-ir          Print LLVM IR\n"
+                 "  lex              Print tokens\n"
+                 "  parse            Print AST\n"
+                 "  clean            Remove build artifacts\n"
+                 "  pkg              Package manager (install, remove, list, search, info)\n"
+                 "  install          Install omsc to your PATH\n"
+                 "  update           Update to latest version\n"
                  "\n"
-                 "GENERAL OPTIONS:\n"
-                 "  -o, --output <file>   Output file name (default: a.out)\n"
-                 "  -V, --verbose         Show detailed compilation output\n"
-                 "  -q, --quiet           Suppress all non-error output\n"
-                 "  -k, --keep-temps      Keep temporary outputs when running\n"
-                 "  --time                Show compilation timing breakdown\n"
-                 "  --dump-ast            Print the full AST tree\n"
-                 "  --dump-tokens         Alias for the lex command\n"
-                 "  --emit-obj            Emit object file only (skip linking)\n"
-                 "  --dry-run             Validate without writing output files\n"
+                 "Options:\n"
+                 "  -o <file>        Output file (default: a.out)\n"
+                 "  -O0/1/2/3       Optimization level (default: -O2)\n"
+                 "  -V, --verbose    Verbose output\n"
+                 "  -q, --quiet      Suppress non-error output\n"
+                 "  --emit-obj       Emit object file only\n"
+                 "  --dry-run        Validate without writing files\n"
+                 "  --time           Show timing breakdown\n"
                  "\n"
-                 "OPTIMIZATION:\n"
-                 "  -O0                   No optimization\n"
-                 "  -O1                   Basic optimization\n"
-                 "  -O2                   Moderate optimization (default)\n"
-                 "  -O3                   Aggressive optimization\n"
-                 "  -Ofast                Alias for -O3\n"
+                 "Codegen:\n"
+                 "  -march=<cpu>     Target CPU (default: native)\n"
+                 "  -mtune=<cpu>     Tuning CPU (default: -march)\n"
+                 "  -flto            Full link-time optimization\n"
+                 "  -ffast-math      Unsafe FP optimizations\n"
+                 "  -fvectorize      SIMD vectorization hints (default: on)\n"
+                 "  -funroll-loops   Loop unrolling (default: on)\n"
+                 "  -floop-optimize  Polyhedral loop opts (default: on)\n"
+                 "  -fpic            Position-independent code (default: on)\n"
+                 "  -foptmax         OPTMAX block optimization (default: on)\n"
+                 "  -fjit            Hybrid JIT mode (default: on)\n"
+                 "  -fstack-protector Stack protection\n"
                  "\n"
-                 "TARGET OPTIONS:\n"
-                 "  -march=<cpu>          Target CPU (default: native)\n"
-                 "  -mtune=<cpu>          CPU scheduling tuning (default: same as -march)\n"
+                 "Linker:\n"
+                 "  -static          Static linking\n"
+                 "  -s, --strip      Strip symbols\n"
                  "\n"
-                 "FEATURE FLAGS:\n"
-                 "  -flto / -fno-lto                  Link-time optimization (default: off)\n"
-                 "  -fpic / -fno-pic                  Position-independent code (default: on)\n"
-                 "  -ffast-math / -fno-fast-math      Unsafe FP optimizations (default: off)\n"
-                 "  -foptmax / -fno-optmax            OPTMAX block optimization (default: on)\n"
-                 "  -fjit / -fno-jit                  Hybrid bytecode/JIT mode (default: on)\n"
-                 "  -fstack-protector / -fno-stack-protector  Stack protection (default: off)\n"
-                 "\n"
-                 "LINKER OPTIONS:\n"
-                 "  -static               Use static linking\n"
-                 "  -s, --strip           Strip symbols from output binary\n"
-                 "\n"
-                 "INSTALLATION:\n"
-                 "  install               Add to PATH (first run)\n"
-                 "  update                Check for and install latest version\n"
-                 "  uninstall             Remove installed binary and PATH entry\n"
-                 "\n"
-                 "PACKAGE MANAGER:\n"
-                 "  pkg install <name>    Download and install a package\n"
-                 "  pkg remove <name>     Remove an installed package\n"
-                 "  pkg list              List installed packages\n"
-                 "  pkg search [query]    Search available packages online\n"
-                 "  pkg info <name>       Show package details\n";
+                 "Use -fno-<flag> to disable any -f flag (e.g. -fno-lto, -fno-vectorize).\n";
 }
 
 std::string readSourceFile(const std::string& filename) {
@@ -2026,6 +2004,9 @@ int main(int argc, char* argv[]) {
     bool flagStatic = false;
     bool flagStrip = false;
     bool flagStackProtector = false;
+    bool flagVectorize = true;
+    bool flagUnrollLoops = true;
+    bool flagLoopOptimize = true;
     const auto tryParseOptimizationFlag = [](const std::string& arg) -> std::optional<omscript::OptimizationLevel> {
         if (arg == "-Ofast") {
             return omscript::OptimizationLevel::O3;
@@ -2096,6 +2077,30 @@ int main(int argc, char* argv[]) {
         }
         if (arg == "-fno-stack-protector") {
             flagStackProtector = false;
+            return true;
+        }
+        if (arg == "-fvectorize") {
+            flagVectorize = true;
+            return true;
+        }
+        if (arg == "-fno-vectorize") {
+            flagVectorize = false;
+            return true;
+        }
+        if (arg == "-funroll-loops") {
+            flagUnrollLoops = true;
+            return true;
+        }
+        if (arg == "-fno-unroll-loops") {
+            flagUnrollLoops = false;
+            return true;
+        }
+        if (arg == "-floop-optimize") {
+            flagLoopOptimize = true;
+            return true;
+        }
+        if (arg == "-fno-loop-optimize") {
+            flagLoopOptimize = false;
             return true;
         }
         if (arg == "-static") {
@@ -2360,6 +2365,7 @@ int main(int argc, char* argv[]) {
         };
         removeIfPresent(outputFile);
         removeIfPresent(outputFile + ".o");
+        removeIfPresent(outputFile + ".bc");
         if (removedAny) {
             std::cout << "Cleaned outputs for " << outputFile << "\n";
         } else {
@@ -2488,6 +2494,9 @@ int main(int argc, char* argv[]) {
             codegen.setPIC(flagPIC);
             codegen.setFastMath(flagFastMath);
             codegen.setOptMax(flagOptMax);
+            codegen.setVectorize(flagVectorize);
+            codegen.setUnrollLoops(flagUnrollLoops);
+            codegen.setLoopOptimize(flagLoopOptimize);
             if (flagJIT) {
                 codegen.generateHybrid(program.get());
             } else {
@@ -2528,6 +2537,9 @@ int main(int argc, char* argv[]) {
             codegen.setPIC(flagPIC);
             codegen.setFastMath(flagFastMath);
             codegen.setOptMax(flagOptMax);
+            codegen.setVectorize(flagVectorize);
+            codegen.setUnrollLoops(flagUnrollLoops);
+            codegen.setLoopOptimize(flagLoopOptimize);
             if (flagJIT) {
                 codegen.generateHybrid(program.get());
             } else {
@@ -2563,6 +2575,9 @@ int main(int argc, char* argv[]) {
         compiler.setStaticLinking(flagStatic);
         compiler.setStrip(flagStrip);
         compiler.setStackProtector(flagStackProtector);
+        compiler.setVectorize(flagVectorize);
+        compiler.setUnrollLoops(flagUnrollLoops);
+        compiler.setLoopOptimize(flagLoopOptimize);
         if (quiet) {
             compiler.setVerbose(false);
         }
@@ -2578,8 +2593,9 @@ int main(int argc, char* argv[]) {
 
         if (command == Command::Run) {
             // Register temp files for cleanup on signal (Ctrl+C during program run).
+            std::string objExt = flagLTO ? ".bc" : ".o";
             if (!outputSpecified && !keepTemps) {
-                std::string objPath = outputFile + ".o";
+                std::string objPath = outputFile + objExt;
                 std::strncpy(g_tempOutputFile, outputFile.c_str(), kMaxTempPathLen - 1);
                 g_tempOutputFile[kMaxTempPathLen - 1] = '\0';
                 std::strncpy(g_tempObjectFile, objPath.c_str(), kMaxTempPathLen - 1);
@@ -2599,7 +2615,7 @@ int main(int argc, char* argv[]) {
                 if (!outputSpecified && !keepTemps) {
                     std::error_code ec;
                     std::filesystem::remove(outputFile, ec);
-                    std::filesystem::remove(outputFile + ".o", ec);
+                    std::filesystem::remove(outputFile + objExt, ec);
                 }
                 return 128 + (-result); // Follow shell convention for signal exits
             }
@@ -2613,10 +2629,10 @@ int main(int argc, char* argv[]) {
                     std::cerr << "Warning: failed to remove temporary output file '" << outputFile
                               << "': " << ec.message() << "\n";
                 }
-                std::filesystem::remove(outputFile + ".o", ec);
+                std::filesystem::remove(outputFile + objExt, ec);
                 if (ec) {
-                    std::cerr << "Warning: failed to remove temporary object file '" << outputFile
-                              << ".o': " << ec.message() << "\n";
+                    std::cerr << "Warning: failed to remove temporary object file '" << outputFile << objExt
+                              << "': " << ec.message() << "\n";
                 }
             }
             return result;

@@ -105,6 +105,9 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
     codegen.setPIC(pic_);
     codegen.setFastMath(fastMath_);
     codegen.setOptMax(optMax_);
+    codegen.setVectorize(vectorize_);
+    codegen.setUnrollLoops(unrollLoops_);
+    codegen.setLoopOptimize(loopOptimize_);
     try {
         // Use hybrid compilation to produce both LLVM IR (for AOT-tier
         // functions) and bytecode (for Interpreted-tier functions).
@@ -130,10 +133,14 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
         codegen.getModule()->print(llvm::outs(), nullptr);
     }
 
-    // Write object file
-    std::string objFile = outputFile + ".o";
+    // Write object file (or bitcode for FLTO)
+    std::string objFile = outputFile + (lto_ ? ".bc" : ".o");
     if (verbose_) {
-        std::cout << "  Writing object file to " << objFile << "..." << std::endl;
+        if (lto_) {
+            std::cout << "  Writing bitcode to " << objFile << " (FLTO enabled)..." << std::endl;
+        } else {
+            std::cout << "  Writing object file to " << objFile << "..." << std::endl;
+        }
     }
     bool objectFileCreated = false;
     auto cleanupObject = [&]() {
@@ -141,24 +148,30 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
             std::error_code ec;
             std::filesystem::remove(objFile, ec);
             if (ec) {
-                std::cerr << "Warning: failed to clean up temporary object file '" << objFile << "': " << ec.message()
-                          << "\n";
+                std::cerr << "Warning: failed to clean up temporary file '" << objFile << "': " << ec.message() << "\n";
             }
             objectFileCreated = false;
         }
     };
 
     try {
-        codegen.writeObjectFile(objFile);
+        if (lto_) {
+            codegen.writeBitcodeFile(objFile);
+        } else {
+            codegen.writeObjectFile(objFile);
+        }
         objectFileCreated = true;
 
         // Link to create executable
         if (verbose_) {
             std::cout << "  Linking..." << std::endl;
         }
-        // Try gcc first, then cc (POSIX standard), then clang for portability.
+        // When LTO is enabled, prefer clang which can link LLVM bitcode files.
+        // Otherwise try gcc first, then cc (POSIX standard), then clang.
         std::string linkerProgram;
-        for (const char* candidate : {"gcc", "cc", "clang"}) {
+        auto ltoLinkers = {"clang", "gcc", "cc"};
+        auto defaultLinkers = {"gcc", "cc", "clang"};
+        for (const char* candidate : (lto_ ? ltoLinkers : defaultLinkers)) {
             auto path = llvm::sys::findProgramByName(candidate);
             if (path) {
                 linkerProgram = *path;
@@ -220,7 +233,7 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
         throw;
     }
 
-    std::cout << "Compilation successful! Output: " << outputFile << std::endl;
+    std::cout << "compiled " << outputFile << std::endl;
 }
 
 } // namespace omscript

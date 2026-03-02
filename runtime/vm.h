@@ -62,10 +62,12 @@ class VM {
     bool isJITCompiled(const std::string& name) const;
 
   private:
-    Value registers[kMaxRegisters];
-    std::unordered_map<std::string, Value> globals;
-    std::vector<Value> locals;
-    Value lastReturn;
+    // --- Hot data: cache-line aligned for dispatch loop locality ---
+    // The register file is the most frequently accessed data structure in the
+    // dispatch loop.  Aligning it to a 64-byte cache line boundary ensures
+    // that sequential register accesses (r0, r1, r2, ...) hit the same or
+    // adjacent cache lines, minimising L1d misses during tight bytecode loops.
+    alignas(64) Value registers[kMaxRegisters];
 
     // High-water mark for the register file — tracks the highest register
     // index written during execution.  Used to save/restore only the
@@ -73,11 +75,20 @@ class VM {
     // copying all 256 Values.
     uint8_t maxRegUsed_ = 0;
 
-    // Registered bytecode functions keyed by name.
-    std::unordered_map<std::string, BytecodeFunction> functions;
+    // Local variables are the second most accessed structure (LOAD_LOCAL /
+    // STORE_LOCAL).  Keeping them adjacent to the register file in the object
+    // layout improves spatial locality.
+    std::vector<Value> locals;
+    Value lastReturn;
 
     // Call-frame stack for nested function calls.
     std::vector<CallFrame> callStack;
+
+    // --- Cold data: accessed infrequently (function lookup, globals) ---
+    std::unordered_map<std::string, Value> globals;
+
+    // Registered bytecode functions keyed by name.
+    std::unordered_map<std::string, BytecodeFunction> functions;
 
     // JIT compiler for hot bytecode functions.
     std::unique_ptr<BytecodeJIT> jit_;

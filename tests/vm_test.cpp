@@ -2737,3 +2737,228 @@ TEST(VMTest, FloatFastPathNeg) {
     vm.execute(code);
     EXPECT_DOUBLE_EQ(vm.getLastReturn().asFloat(), -3.14);
 }
+
+// ===========================================================================
+// Mixed int/float fast paths
+// ===========================================================================
+
+TEST(VMTest, MixedIntFloatAdd) {
+    // int + float → float (mixed fast path)
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(3);
+        e.emit(OpCode::PUSH_FLOAT);
+        e.emitReg(1);
+        e.emitFloat(1.5);
+        e.emit(OpCode::ADD);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
+    });
+    VM vm;
+    vm.execute(code);
+    EXPECT_EQ(vm.getLastReturn().getType(), Value::Type::FLOAT);
+    EXPECT_DOUBLE_EQ(vm.getLastReturn().asFloat(), 4.5);
+}
+
+TEST(VMTest, MixedFloatIntAdd) {
+    // float + int → float (mixed fast path, reversed operand order)
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_FLOAT);
+        e.emitReg(0);
+        e.emitFloat(2.5);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(1);
+        e.emitInt(7);
+        e.emit(OpCode::ADD);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
+    });
+    VM vm;
+    vm.execute(code);
+    EXPECT_EQ(vm.getLastReturn().getType(), Value::Type::FLOAT);
+    EXPECT_DOUBLE_EQ(vm.getLastReturn().asFloat(), 9.5);
+}
+
+TEST(VMTest, MixedIntFloatSub) {
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(10);
+        e.emit(OpCode::PUSH_FLOAT);
+        e.emitReg(1);
+        e.emitFloat(3.5);
+        e.emit(OpCode::SUB);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
+    });
+    VM vm;
+    vm.execute(code);
+    EXPECT_EQ(vm.getLastReturn().getType(), Value::Type::FLOAT);
+    EXPECT_DOUBLE_EQ(vm.getLastReturn().asFloat(), 6.5);
+}
+
+TEST(VMTest, MixedFloatIntSub) {
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_FLOAT);
+        e.emitReg(0);
+        e.emitFloat(10.5);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(1);
+        e.emitInt(3);
+        e.emit(OpCode::SUB);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
+    });
+    VM vm;
+    vm.execute(code);
+    EXPECT_EQ(vm.getLastReturn().getType(), Value::Type::FLOAT);
+    EXPECT_DOUBLE_EQ(vm.getLastReturn().asFloat(), 7.5);
+}
+
+TEST(VMTest, MixedIntFloatMul) {
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(4);
+        e.emit(OpCode::PUSH_FLOAT);
+        e.emitReg(1);
+        e.emitFloat(2.5);
+        e.emit(OpCode::MUL);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
+    });
+    VM vm;
+    vm.execute(code);
+    EXPECT_EQ(vm.getLastReturn().getType(), Value::Type::FLOAT);
+    EXPECT_DOUBLE_EQ(vm.getLastReturn().asFloat(), 10.0);
+}
+
+TEST(VMTest, MixedFloatIntMul) {
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_FLOAT);
+        e.emitReg(0);
+        e.emitFloat(3.0);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(1);
+        e.emitInt(5);
+        e.emit(OpCode::MUL);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
+    });
+    VM vm;
+    vm.execute(code);
+    EXPECT_EQ(vm.getLastReturn().getType(), Value::Type::FLOAT);
+    EXPECT_DOUBLE_EQ(vm.getLastReturn().asFloat(), 15.0);
+}
+
+TEST(VMTest, MixedIntFloatDiv) {
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(7);
+        e.emit(OpCode::PUSH_FLOAT);
+        e.emitReg(1);
+        e.emitFloat(2.0);
+        e.emit(OpCode::DIV);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
+    });
+    VM vm;
+    vm.execute(code);
+    EXPECT_EQ(vm.getLastReturn().getType(), Value::Type::FLOAT);
+    EXPECT_DOUBLE_EQ(vm.getLastReturn().asFloat(), 3.5);
+}
+
+TEST(VMTest, MixedFloatIntDiv) {
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_FLOAT);
+        e.emitReg(0);
+        e.emitFloat(15.0);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(1);
+        e.emitInt(4);
+        e.emit(OpCode::DIV);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
+    });
+    VM vm;
+    vm.execute(code);
+    EXPECT_EQ(vm.getLastReturn().getType(), Value::Type::FLOAT);
+    EXPECT_DOUBLE_EQ(vm.getLastReturn().asFloat(), 3.75);
+}
+
+// ===========================================================================
+// CALL with direct register read (verifies args survive frame push)
+// ===========================================================================
+
+TEST(VMTest, CallArgDirectRegisterRead) {
+    // Register a function that returns its first argument + second argument.
+    BytecodeFunction addFunc;
+    addFunc.name = "add";
+    addFunc.arity = 2;
+    {
+        BytecodeEmitter e;
+        // Load locals (arguments) into registers
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitReg(0);
+        e.emitByte(0);
+        e.emit(OpCode::LOAD_LOCAL);
+        e.emitReg(1);
+        e.emitByte(1);
+        // Add them
+        e.emit(OpCode::ADD);
+        e.emitReg(2);
+        e.emitReg(0);
+        e.emitReg(1);
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
+        addFunc.bytecode = e.getCode();
+    }
+
+    // Main: push 10, 20, call add, return result
+    auto code = buildBytecode([](BytecodeEmitter& e) {
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(0);
+        e.emitInt(10);
+        e.emit(OpCode::PUSH_INT);
+        e.emitReg(1);
+        e.emitInt(20);
+        e.emit(OpCode::CALL);
+        e.emitReg(2); // destination register
+        e.emitString("add");
+        e.emitByte(2); // argCount
+        e.emitReg(0);  // arg0
+        e.emitReg(1);  // arg1
+        e.emit(OpCode::RETURN);
+        e.emitReg(2);
+    });
+    VM vm;
+    vm.registerFunction(std::move(addFunc));
+    vm.execute(code);
+    EXPECT_EQ(vm.getLastReturn().asInt(), 30);
+}
