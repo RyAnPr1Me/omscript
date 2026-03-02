@@ -127,6 +127,9 @@ std::unique_ptr<Program> Parser::parse() {
                 combined += "\n";
             combined += errors_[i];
         }
+        // Errors already contain formatted location information from individual
+        // DiagnosticError exceptions; wrap in a plain runtime_error to avoid
+        // double-formatting when the caller adds a "file: " prefix.
         throw std::runtime_error(combined);
     }
 

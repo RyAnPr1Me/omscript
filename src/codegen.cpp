@@ -1302,8 +1302,8 @@ void CodeGenerator::generate(Program* program) {
     std::string errorStr;
     llvm::raw_string_ostream errorStream(errorStr);
     if (llvm::verifyModule(*module, &errorStream)) {
-        std::cerr << "Module verification failed:\n" << errorStr << std::endl;
-        throw std::runtime_error("Module verification failed");
+        throw DiagnosticError(
+            Diagnostic{DiagnosticSeverity::Error, {0, 0}, "Module verification failed: " + errorStr});
     }
 }
 
@@ -1372,9 +1372,10 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     std::string errorStr;
     llvm::raw_string_ostream errorStream(errorStr);
     if (llvm::verifyFunction(*function, &errorStream)) {
-        std::cerr << "Function verification failed:\n" << errorStr << std::endl;
         function->print(llvm::errs());
-        throw std::runtime_error("Function verification failed");
+        throw DiagnosticError(Diagnostic{DiagnosticSeverity::Error,
+                                         {func->line, func->column},
+                                         "Function verification failed for '" + func->name + "': " + errorStr});
     }
 
     inOptMaxFunction = false;
@@ -5670,7 +5671,7 @@ void CodeGenerator::writeObjectFile(const std::string& filename) {
 
     auto targetMachine = createTargetMachine();
     if (!targetMachine) {
-        throw std::runtime_error("Failed to create target machine");
+        throw DiagnosticError(Diagnostic{DiagnosticSeverity::Error, {0, 0}, "Failed to create target machine"});
     }
 
     module->setDataLayout(targetMachine->createDataLayout());
@@ -5679,7 +5680,8 @@ void CodeGenerator::writeObjectFile(const std::string& filename) {
     llvm::raw_fd_ostream dest(filename, EC, llvm::sys::fs::OF_None);
 
     if (EC) {
-        throw std::runtime_error("Could not open file: " + EC.message());
+        throw DiagnosticError(
+            Diagnostic{DiagnosticSeverity::Error, {0, 0}, "Could not open file '" + filename + "': " + EC.message()});
     }
 
     llvm::legacy::PassManager pass;
@@ -5690,16 +5692,17 @@ void CodeGenerator::writeObjectFile(const std::string& filename) {
 #endif
 
     if (targetMachine->addPassesToEmitFile(pass, dest, nullptr, fileType)) {
-        throw std::runtime_error("TargetMachine can't emit a file of this type");
+        throw DiagnosticError(
+            Diagnostic{DiagnosticSeverity::Error, {0, 0}, "TargetMachine can't emit a file of this type"});
     }
 
     pass.run(*module);
     dest.flush();
     // Detect errors during close (e.g. I/O errors that occurred during write).
     if (dest.has_error()) {
-        std::string errMsg = "Error writing object file: " + dest.error().message();
+        std::string errMsg = "Error writing object file '" + filename + "': " + dest.error().message();
         dest.clear_error();
-        throw std::runtime_error(errMsg);
+        throw DiagnosticError(Diagnostic{DiagnosticSeverity::Error, {0, 0}, errMsg});
     }
 }
 
@@ -5723,15 +5726,16 @@ void CodeGenerator::writeBitcodeFile(const std::string& filename) {
     std::error_code EC;
     llvm::raw_fd_ostream dest(filename, EC, llvm::sys::fs::OF_None);
     if (EC) {
-        throw std::runtime_error("Could not open file: " + EC.message());
+        throw DiagnosticError(
+            Diagnostic{DiagnosticSeverity::Error, {0, 0}, "Could not open file '" + filename + "': " + EC.message()});
     }
 
     llvm::WriteBitcodeToFile(*module, dest);
     dest.flush();
     if (dest.has_error()) {
-        std::string errMsg = "Error writing bitcode file: " + dest.error().message();
+        std::string errMsg = "Error writing bitcode file '" + filename + "': " + dest.error().message();
         dest.clear_error();
-        throw std::runtime_error(errMsg);
+        throw DiagnosticError(Diagnostic{DiagnosticSeverity::Error, {0, 0}, errMsg});
     }
 }
 
@@ -6030,7 +6034,7 @@ uint8_t CodeGenerator::emitBytecodeExpression(Expression* expr) {
         else if (bin->op == "**")
             bytecodeEmitter.emit(OpCode::POW);
         else {
-            throw std::runtime_error("Unsupported binary operator in bytecode: " + bin->op);
+            codegenError("Unsupported binary operator in bytecode: " + bin->op, bin);
         }
         bytecodeEmitter.emitReg(rd);
         bytecodeEmitter.emitReg(rs1);
@@ -6072,7 +6076,7 @@ uint8_t CodeGenerator::emitBytecodeExpression(Expression* expr) {
         else if (unary->op == "~")
             bytecodeEmitter.emit(OpCode::BIT_NOT);
         else {
-            throw std::runtime_error("Unsupported unary operator in bytecode: " + unary->op);
+            codegenError("Unsupported unary operator in bytecode: " + unary->op, unary);
         }
         bytecodeEmitter.emitReg(rd);
         bytecodeEmitter.emitReg(rs);
@@ -6099,8 +6103,8 @@ uint8_t CodeGenerator::emitBytecodeExpression(Expression* expr) {
             return rd;
         }
         if (isStdlibFunction(call->callee)) {
-            throw std::runtime_error("Stdlib function '" + call->callee +
-                                     "' must be compiled to native code, not bytecode");
+            codegenError("Stdlib function '" + call->callee +
+                         "' must be compiled to native code, not bytecode", call);
         }
         std::vector<uint8_t> argRegs;
         for (auto& arg : call->arguments) {
@@ -6131,7 +6135,7 @@ uint8_t CodeGenerator::emitBytecodeExpression(Expression* expr) {
         auto* postfix = static_cast<PostfixExpr*>(expr);
         auto* id = dynamic_cast<IdentifierExpr*>(postfix->operand.get());
         if (!id) {
-            throw std::runtime_error("Postfix operator requires an identifier in bytecode");
+            codegenError("Postfix operator requires an identifier in bytecode", postfix);
         }
         uint8_t origReg = emitBytecodeLoad(id->name);
         uint8_t oneReg = allocReg();
@@ -6150,7 +6154,7 @@ uint8_t CodeGenerator::emitBytecodeExpression(Expression* expr) {
         auto* prefix = static_cast<PrefixExpr*>(expr);
         auto* id = dynamic_cast<IdentifierExpr*>(prefix->operand.get());
         if (!id) {
-            throw std::runtime_error("Prefix operator requires an identifier in bytecode");
+            codegenError("Prefix operator requires an identifier in bytecode", prefix);
         }
         uint8_t origReg = emitBytecodeLoad(id->name);
         uint8_t oneReg = allocReg();
@@ -6190,9 +6194,9 @@ uint8_t CodeGenerator::emitBytecodeExpression(Expression* expr) {
         return resultReg;
     }
     case ASTNodeType::INDEX_ASSIGN_EXPR:
-        throw std::runtime_error("Array index assignment is not supported in bytecode mode");
+        codegenError("Array index assignment is not supported in bytecode mode", expr);
     default:
-        throw std::runtime_error("Unsupported expression type in bytecode generation");
+        codegenError("Unsupported expression type in bytecode generation", expr);
     }
 }
 
@@ -6225,7 +6229,7 @@ void CodeGenerator::emitBytecodeStatement(Statement* stmt) {
         }
         if (isInBytecodeFunctionContext()) {
             if (bytecodeNextLocal_ == 255) {
-                throw std::runtime_error("Too many local variables in function (max 255)");
+                codegenError("Too many local variables in function (max 255)", varDecl);
             }
             uint8_t idx = bytecodeNextLocal_++;
             bytecodeLocals_[varDecl->name] = idx;
@@ -6480,9 +6484,9 @@ void CodeGenerator::emitBytecodeStatement(Statement* stmt) {
         break;
     }
     case ASTNodeType::FOR_EACH_STMT:
-        throw std::runtime_error("For-each loops are not supported in bytecode mode");
+        codegenError("For-each loops are not supported in bytecode mode", stmt);
     default:
-        throw std::runtime_error("Unsupported statement type in bytecode generation");
+        codegenError("Unsupported statement type in bytecode generation", stmt);
     }
 }
 
