@@ -1,5 +1,6 @@
 #include "compiler.h"
 #include "codegen.h"
+#include "diagnostic.h"
 #include "lexer.h"
 #include "parser.h"
 #include <filesystem>
@@ -79,6 +80,8 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
     std::vector<Token> tokens;
     try {
         tokens = lexer.tokenize();
+    } catch (const DiagnosticError&) {
+        throw; // Preserves source location; main.cpp adds filename prefix
     } catch (const std::runtime_error& e) {
         throw std::runtime_error(sourceFile + ": " + e.what());
     }
@@ -91,6 +94,8 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
     std::unique_ptr<Program> program;
     try {
         program = parser.parse();
+    } catch (const DiagnosticError&) {
+        throw;
     } catch (const std::runtime_error& e) {
         throw std::runtime_error(sourceFile + ": " + e.what());
     }
@@ -118,6 +123,8 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
         } else {
             codegen.generate(program.get());
         }
+    } catch (const DiagnosticError&) {
+        throw;
     } catch (const std::runtime_error& e) {
         throw std::runtime_error(sourceFile + ": " + e.what());
     }

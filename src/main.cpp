@@ -1,5 +1,6 @@
 #include "codegen.h"
 #include "compiler.h"
+#include "diagnostic.h"
 #include "lexer.h"
 #include "parser.h"
 #include <chrono>
@@ -2444,6 +2445,14 @@ int main(int argc, char* argv[]) {
             // EmitIR
             auto codegenStart = std::chrono::steady_clock::now();
             omscript::CodeGenerator codegen(optLevel);
+            codegen.setMarch(marchCpu);
+            codegen.setMtune(mtuneCpu);
+            codegen.setPIC(flagPIC);
+            codegen.setFastMath(flagFastMath);
+            codegen.setOptMax(flagOptMax);
+            codegen.setVectorize(flagVectorize);
+            codegen.setUnrollLoops(flagUnrollLoops);
+            codegen.setLoopOptimize(flagLoopOptimize);
             codegen.generate(program.get());
             auto codegenEnd = std::chrono::steady_clock::now();
 
@@ -2638,6 +2647,14 @@ int main(int argc, char* argv[]) {
             return result;
         }
         return 0;
+    } catch (const omscript::DiagnosticError& e) {
+        // Structured diagnostic: include source file path for context.
+        if (!sourceFile.empty()) {
+            std::cerr << sourceFile << ": " << e.what() << std::endl;
+        } else {
+            std::cerr << e.what() << std::endl;
+        }
+        return 1;
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << std::endl;
         return 1;
