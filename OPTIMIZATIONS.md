@@ -422,6 +422,49 @@ between the save and the argument read, so both produce identical values. The di
 avoids an extra level of vector indirection, a potential data-cache miss on the
 heap-allocated vector, and the `callStack.back()` lookup on every argument copy.
 
+### Cache-Line Aligned VM Data Layout
+The VM's register file is the most frequently accessed data structure in the dispatch loop.
+It is aligned to 64-byte cache-line boundaries with `alignas(64)` to ensure that sequential
+register accesses (r0, r1, r2, ...) hit the same or adjacent cache lines, minimising L1d
+misses during tight bytecode loops. The VM's private fields are also reordered: hot data
+(registers, maxRegUsed, locals, callStack) is grouped before cold data (globals, functions,
+JIT caches) for improved spatial locality.
+
+### Bytecode Prefetch Hints
+The computed-goto dispatch loop issues `__builtin_prefetch` on the next bytecode bytes
+after reading each opcode. This brings operand data into L1 cache before it is needed,
+hiding memory latency on bytecode streams that span multiple cache lines.
+
+### Polyhedral-Style Loop Optimizations
+At O3 with `-floop-optimize`, the compiler appends LLVM's `LoopDistributePass` to the
+new-PM module pipeline. Loop distribution splits a single loop with multiple independent
+memory access streams into separate loops, each with a smaller working set. This is the
+key transformation in polyhedral loop optimisation that improves data-cache utilisation
+and enables downstream vectorisation of the simpler resulting loops. The OPTMAX pipeline
+also includes `LoopDataPrefetchPass` for software prefetch insertion in loops with
+predictable array access patterns.
+
+### SIMD Vectorization Hints
+At O2+ with `-fvectorize`, the compiler attaches LLVM loop metadata to generated loop
+back-edges:
+- `llvm.loop.vectorize.enable = true` — enables the loop vectoriser for each loop
+- `llvm.loop.interleave.count = 4` — requests 4-way interleaving for wider SIMD
+  utilisation and better instruction-level parallelism
+- `llvm.loop.unroll.enable` (when `-funroll-loops` is on) — enables loop unrolling
+
+These metadata hints guide LLVM's LoopVectorize and LoopUnroll passes, complementing
+the existing auto-vectorisation at O3 by explicitly marking every user-written loop as
+a vectorisation candidate.
+
+### Bytecode Register Reclamation
+The bytecode emitter now calls `resetTempRegs()` at statement boundaries (after expression
+statements, after if-branches, and around loop bodies). This reclaims temporary registers
+allocated during expression evaluation once the expression result is dead. Previously,
+temporaries accumulated across all statements within a function body, leading to register
+exhaustion (hitting the 255-register limit) in functions with many sequential statements.
+With reclamation, register pressure tracks the depth of the deepest single expression
+rather than the total number of expressions.
+
 ### Bytecode JIT Compiler
 The VM includes a lightweight JIT compiler that automatically translates hot bytecode
 functions to native machine code via LLVM MCJIT:
@@ -573,7 +616,6 @@ var result = n << 1;  // Less readable, same performance
 Planned additions:
 - Profile-Guided Optimization (PGO)
 - Link-Time Optimization (LTO)
-- Polyhedral loop optimization
 - Devirtualization for dynamic dispatch
 
 ## Conclusion
@@ -619,6 +661,12 @@ OmScript's optimization infrastructure provides:
 - ✅ Float-specialized fast paths for switch-dispatch comparisons (EQ, NE, LT, LE, GT, GE)
 - ✅ Lexer `scanNumber` uses `substr()` fast path for decimal numbers without underscores
 - ✅ Move-semantics `Token` constructor avoids string copies for temporary lexemes
+- ✅ Cache-line aligned VM register file (`alignas(64)`) and hot/cold field reordering
+- ✅ Bytecode prefetch hints (`__builtin_prefetch`) in computed-goto dispatch loop
+- ✅ Polyhedral-style loop distribution (LoopDistributePass) at O3 for cache locality
+- ✅ SIMD vectorization metadata (vectorize.enable, interleave.count) on generated loops at O2+
+- ✅ Bytecode register reclamation (`resetTempRegs`) at statement boundaries
+- ✅ CLI flags `-fvectorize`, `-funroll-loops`, `-floop-optimize` for fine-grained control
 - ✅ Measurable, significant improvements
 
 The compiler transforms high-level OmScript code into highly optimized machine code that rivals hand-written assembly in many cases, while maintaining code readability and developer productivity.
