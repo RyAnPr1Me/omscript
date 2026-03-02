@@ -9,9 +9,10 @@ Parser::Parser(const std::vector<Token>& tokens) : tokens(tokens), current(0), i
 
 Parser::Parser(std::vector<Token>&& tokens) : tokens(std::move(tokens)), current(0), inOptMaxFunction(false) {}
 
-Token Parser::peek(int offset) const {
+const Token& Parser::peek(int offset) const {
+    static const Token eofToken(TokenType::END_OF_FILE, "", 0, 0);
     if (tokens.empty()) {
-        return Token(TokenType::END_OF_FILE, "", 0, 0);
+        return eofToken;
     }
     size_t index = current + offset;
     if (index >= tokens.size()) {

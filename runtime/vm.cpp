@@ -3,14 +3,14 @@
 #include "jit.h"
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 
 namespace omscript {
-
-using BytecodeIteratorDiff = std::vector<uint8_t>::difference_type;
 
 // Maximum valid shift amount for 64-bit integers (0-63).
 static constexpr int64_t kInt64BitWidth = 64;
@@ -18,8 +18,21 @@ static constexpr int64_t kInt64BitWidth = 64;
 // Maximum exponent value for the ** operator to prevent resource exhaustion.
 static constexpr int64_t kMaxExponent = 1000;
 
+/// Return true if multiplying a * b would overflow int64_t.
+/// Uses unsigned arithmetic to avoid undefined behavior.
+static inline bool wouldMultiplyOverflow(int64_t a, int64_t b) {
+    if (a == 0 || a == 1 || a == -1 || b == 0 || b == 1 || b == -1)
+        return false;
+    uint64_t ua = (a < 0) ? static_cast<uint64_t>(-static_cast<uint64_t>(a))
+                           : static_cast<uint64_t>(a);
+    uint64_t ub = (b < 0) ? static_cast<uint64_t>(-static_cast<uint64_t>(b))
+                           : static_cast<uint64_t>(b);
+    return ua > static_cast<uint64_t>(INT64_MAX) / ub;
+}
+
 VM::VM() : lastReturn(), jit_(std::make_unique<BytecodeJIT>()) {
     locals.reserve(16);
+    callStack.reserve(16);
     std::fill_n(registers, kMaxRegisters, Value());
 }
 
@@ -38,42 +51,42 @@ uint8_t VM::readByte(const std::vector<uint8_t>& code, size_t& ip) {
 
 uint16_t VM::readShort(const std::vector<uint8_t>& code, size_t& ip) {
     ensureReadable(code, ip, 2);
-    uint8_t low = code[ip++];
-    uint8_t high = code[ip++];
-    return static_cast<uint16_t>(low) | (static_cast<uint16_t>(high) << 8);
+    uint16_t value = 0;
+    std::memcpy(&value, code.data() + ip, sizeof(value));
+    ip += 2;
+    return value;
 }
 
 int64_t VM::readInt(const std::vector<uint8_t>& code, size_t& ip) {
     ensureReadable(code, ip, 8);
-    uint64_t raw = 0;
-    for (int i = 0; i < 8; i++) {
-        raw |= (static_cast<uint64_t>(code[ip++]) << (i * 8));
-    }
     int64_t value = 0;
-    std::memcpy(&value, &raw, sizeof(value));
+    std::memcpy(&value, code.data() + ip, sizeof(value));
+    ip += 8;
     return value;
 }
 
 double VM::readFloat(const std::vector<uint8_t>& code, size_t& ip) {
     ensureReadable(code, ip, 8);
-    uint64_t raw = 0;
-    for (int i = 0; i < 8; i++) {
-        raw |= (static_cast<uint64_t>(code[ip++]) << (i * 8));
-    }
     double value = 0.0;
-    std::memcpy(&value, &raw, sizeof(value));
+    std::memcpy(&value, code.data() + ip, sizeof(value));
+    ip += 8;
     return value;
 }
 
 std::string VM::readString(const std::vector<uint8_t>& code, size_t& ip) {
     uint16_t length = readShort(code, ip);
     ensureReadable(code, ip, length);
-    auto offset = static_cast<BytecodeIteratorDiff>(ip);
-    auto begin = code.begin() + offset;
-    auto end = begin + static_cast<BytecodeIteratorDiff>(length);
-    std::string str(begin, end);
+    const char* ptr = reinterpret_cast<const char*>(code.data() + ip);
     ip += length;
-    return str;
+    return std::string(ptr, length);
+}
+
+std::string_view VM::readStringView(const std::vector<uint8_t>& code, size_t& ip) {
+    uint16_t length = readShort(code, ip);
+    ensureReadable(code, ip, length);
+    const char* ptr = reinterpret_cast<const char*>(code.data() + ip);
+    ip += length;
+    return std::string_view(ptr, length);
 }
 
 void VM::setGlobal(const std::string& name, const Value& value) {
@@ -92,11 +105,17 @@ void VM::registerFunction(const BytecodeFunction& func) {
     functions[func.name] = func;
 }
 
+void VM::registerFunction(BytecodeFunction&& func) {
+    functions[func.name] = std::move(func);
+}
+
 bool VM::isJITCompiled(const std::string& name) const {
     return jit_ && jit_->isCompiled(name);
 }
 
 bool VM::invokeJIT(JITFnPtr fn, uint8_t argCount, const uint8_t* argRegs, uint8_t rd) {
+    if (rd >= kMaxRegisters)
+        return false;
     for (size_t i = 0; i < argCount; i++) {
         if (argRegs[i] >= kMaxRegisters)
             return false;
@@ -114,10 +133,13 @@ bool VM::invokeJIT(JITFnPtr fn, uint8_t argCount, const uint8_t* argRegs, uint8_
         args[i] = registers[argRegs[i]].unsafeAsInt();
     int64_t result = fn(args, static_cast<int>(argCount));
     registers[rd] = Value(result);
+    if (rd > maxRegUsed_) maxRegUsed_ = rd;
     return true;
 }
 
 bool VM::invokeJITFloat(JITFloatFnPtr fn, uint8_t argCount, const uint8_t* argRegs, uint8_t rd) {
+    if (rd >= kMaxRegisters)
+        return false;
     for (size_t i = 0; i < argCount; i++) {
         if (argRegs[i] >= kMaxRegisters)
             return false;
@@ -135,6 +157,7 @@ bool VM::invokeJITFloat(JITFloatFnPtr fn, uint8_t argCount, const uint8_t* argRe
         args[i] = registers[argRegs[i]].unsafeAsFloat();
     double result = fn(args, static_cast<int>(argCount));
     registers[rd] = Value(result);
+    if (rd > maxRegUsed_) maxRegUsed_ = rd;
     return true;
 }
 
@@ -158,7 +181,17 @@ void VM::classifyArgTypes(uint8_t argCount, const uint8_t* argRegs, bool& allInt
 void VM::execute(const std::vector<uint8_t>& bytecode) {
     size_t ip = 0;
     lastReturn = Value();
-    std::fill_n(registers, kMaxRegisters, Value());
+
+    // Use a mutable pointer so CALL/RETURN can switch bytecode streams
+    // without recursive execute() calls.
+    const std::vector<uint8_t>* curBytecode = &bytecode;
+    // Track the initial call depth so RETURN knows when we've returned
+    // from the top-level invocation vs. a nested bytecode call.
+    const size_t baseCallDepth = callStack.size();
+
+    // Branchless high-water-mark update for register writes.
+    // Uses conditional move (cmov) on x86 — no branch misprediction.
+#define TRACK_REG(r) do { if ((r) > maxRegUsed_) maxRegUsed_ = (r); } while (0)
 
 // Use computed-goto dispatch on GCC/Clang for faster opcode dispatch.
 #if defined(__GNUC__) || defined(__clang__)
@@ -215,9 +248,9 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
 
 #define DISPATCH()                                                                                                     \
     do {                                                                                                               \
-        if (ip >= bytecode.size())                                                                                     \
+        if (ip >= curBytecode->size())                                                                                 \
             goto vm_exit;                                                                                              \
-        uint8_t opByte = readByte(bytecode, ip);                                                                       \
+        uint8_t opByte = readByte(*curBytecode, ip);                                                                   \
         if (opByte >= kDispatchTableSize)                                                                              \
             goto op_UNKNOWN;                                                                                           \
         goto* dispatchTable[opByte];                                                                                   \
@@ -226,21 +259,24 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
     DISPATCH();
 
 op_PUSH_INT: {
-    uint8_t rd = readByte(bytecode, ip);
-    int64_t value = readInt(bytecode, ip);
+    uint8_t rd = readByte(*curBytecode, ip);
+    TRACK_REG(rd);
+    int64_t value = readInt(*curBytecode, ip);
     registers[rd] = Value(value);
     DISPATCH();
 }
 op_PUSH_FLOAT: {
-    uint8_t rd = readByte(bytecode, ip);
-    double value = readFloat(bytecode, ip);
+    uint8_t rd = readByte(*curBytecode, ip);
+    TRACK_REG(rd);
+    double value = readFloat(*curBytecode, ip);
     registers[rd] = Value(value);
     DISPATCH();
 }
 op_PUSH_STRING: {
-    uint8_t rd = readByte(bytecode, ip);
+    uint8_t rd = readByte(*curBytecode, ip);
+    TRACK_REG(rd);
     {
-        std::string value = readString(bytecode, ip);
+        std::string value = readString(*curBytecode, ip);
         registers[rd] = Value(value);
     }
     DISPATCH();
@@ -250,9 +286,10 @@ op_POP: {
     DISPATCH();
 }
 op_ADD: {
-    uint8_t rd = readByte(bytecode, ip);
-    uint8_t rs1 = readByte(bytecode, ip);
-    uint8_t rs2 = readByte(bytecode, ip);
+    uint8_t rd = readByte(*curBytecode, ip);
+    TRACK_REG(rd);
+    uint8_t rs1 = readByte(*curBytecode, ip);
+    uint8_t rs2 = readByte(*curBytecode, ip);
     if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
         registers[rd] = Value(registers[rs1].unsafeAsInt() + registers[rs2].unsafeAsInt());
         DISPATCH();
@@ -265,9 +302,10 @@ op_ADD: {
     DISPATCH();
 }
 op_SUB: {
-    uint8_t rd = readByte(bytecode, ip);
-    uint8_t rs1 = readByte(bytecode, ip);
-    uint8_t rs2 = readByte(bytecode, ip);
+    uint8_t rd = readByte(*curBytecode, ip);
+    TRACK_REG(rd);
+    uint8_t rs1 = readByte(*curBytecode, ip);
+    uint8_t rs2 = readByte(*curBytecode, ip);
     if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
         registers[rd] = Value(registers[rs1].unsafeAsInt() - registers[rs2].unsafeAsInt());
         DISPATCH();
@@ -280,9 +318,10 @@ op_SUB: {
     DISPATCH();
 }
 op_MUL: {
-    uint8_t rd = readByte(bytecode, ip);
-    uint8_t rs1 = readByte(bytecode, ip);
-    uint8_t rs2 = readByte(bytecode, ip);
+    uint8_t rd = readByte(*curBytecode, ip);
+    TRACK_REG(rd);
+    uint8_t rs1 = readByte(*curBytecode, ip);
+    uint8_t rs2 = readByte(*curBytecode, ip);
     if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
         registers[rd] = Value(registers[rs1].unsafeAsInt() * registers[rs2].unsafeAsInt());
         DISPATCH();
@@ -295,9 +334,10 @@ op_MUL: {
     DISPATCH();
 }
 op_DIV: {
-    uint8_t rd = readByte(bytecode, ip);
-    uint8_t rs1 = readByte(bytecode, ip);
-    uint8_t rs2 = readByte(bytecode, ip);
+    uint8_t rd = readByte(*curBytecode, ip);
+    TRACK_REG(rd);
+    uint8_t rs1 = readByte(*curBytecode, ip);
+    uint8_t rs2 = readByte(*curBytecode, ip);
     if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
         int64_t av = registers[rs1].unsafeAsInt();
         int64_t bv = registers[rs2].unsafeAsInt();
@@ -318,9 +358,10 @@ op_DIV: {
     DISPATCH();
 }
 op_MOD: {
-    uint8_t rd = readByte(bytecode, ip);
-    uint8_t rs1 = readByte(bytecode, ip);
-    uint8_t rs2 = readByte(bytecode, ip);
+    uint8_t rd = readByte(*curBytecode, ip);
+    TRACK_REG(rd);
+    uint8_t rs1 = readByte(*curBytecode, ip);
+    uint8_t rs2 = readByte(*curBytecode, ip);
     if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
         int64_t av = registers[rs1].unsafeAsInt();
         int64_t bv = registers[rs2].unsafeAsInt();
@@ -335,8 +376,9 @@ op_MOD: {
     DISPATCH();
 }
 op_NEG: {
-    uint8_t rd = readByte(bytecode, ip);
-    uint8_t rs = readByte(bytecode, ip);
+    uint8_t rd = readByte(*curBytecode, ip);
+    TRACK_REG(rd);
+    uint8_t rs = readByte(*curBytecode, ip);
     if (registers[rs].getType() == Value::Type::INTEGER) {
         int64_t val = registers[rs].unsafeAsInt();
         // Guard against -INT64_MIN overflow; fall through to Value::operator-
@@ -354,9 +396,10 @@ op_NEG: {
     DISPATCH();
 }
 op_POW: {
-    uint8_t rd = readByte(bytecode, ip);
-    uint8_t rs1 = readByte(bytecode, ip);
-    uint8_t rs2 = readByte(bytecode, ip);
+    uint8_t rd = readByte(*curBytecode, ip);
+    TRACK_REG(rd);
+    uint8_t rs1 = readByte(*curBytecode, ip);
+    uint8_t rs2 = readByte(*curBytecode, ip);
     {
         Value base = registers[rs1];
         Value exp = registers[rs2];
@@ -377,10 +420,17 @@ op_POW: {
                 int64_t result = 1;
                 int64_t e = n;
                 while (e > 0) {
-                    if (e & 1)
+                    if (e & 1) {
+                        if (wouldMultiplyOverflow(result, b))
+                            throw std::runtime_error("Integer overflow in ** operator");
                         result *= b;
-                    b *= b;
+                    }
                     e >>= 1;
+                    if (e > 0) {
+                        if (wouldMultiplyOverflow(b, b))
+                            throw std::runtime_error("Integer overflow in ** operator");
+                        b *= b;
+                    }
                 }
                 registers[rd] = Value(result);
             } else {
@@ -400,9 +450,10 @@ op_POW: {
     DISPATCH();
 }
 op_EQ: {
-    uint8_t rd = readByte(bytecode, ip);
-    uint8_t rs1 = readByte(bytecode, ip);
-    uint8_t rs2 = readByte(bytecode, ip);
+    uint8_t rd = readByte(*curBytecode, ip);
+    TRACK_REG(rd);
+    uint8_t rs1 = readByte(*curBytecode, ip);
+    uint8_t rs2 = readByte(*curBytecode, ip);
     if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
         registers[rd] = Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() == registers[rs2].unsafeAsInt()));
         DISPATCH();
@@ -415,9 +466,10 @@ op_EQ: {
     DISPATCH();
 }
 op_NE: {
-    uint8_t rd = readByte(bytecode, ip);
-    uint8_t rs1 = readByte(bytecode, ip);
-    uint8_t rs2 = readByte(bytecode, ip);
+    uint8_t rd = readByte(*curBytecode, ip);
+    TRACK_REG(rd);
+    uint8_t rs1 = readByte(*curBytecode, ip);
+    uint8_t rs2 = readByte(*curBytecode, ip);
     if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
         registers[rd] = Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() != registers[rs2].unsafeAsInt()));
         DISPATCH();
@@ -430,9 +482,10 @@ op_NE: {
     DISPATCH();
 }
 op_LT: {
-    uint8_t rd = readByte(bytecode, ip);
-    uint8_t rs1 = readByte(bytecode, ip);
-    uint8_t rs2 = readByte(bytecode, ip);
+    uint8_t rd = readByte(*curBytecode, ip);
+    TRACK_REG(rd);
+    uint8_t rs1 = readByte(*curBytecode, ip);
+    uint8_t rs2 = readByte(*curBytecode, ip);
     if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
         registers[rd] = Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() < registers[rs2].unsafeAsInt()));
         DISPATCH();
@@ -445,9 +498,10 @@ op_LT: {
     DISPATCH();
 }
 op_LE: {
-    uint8_t rd = readByte(bytecode, ip);
-    uint8_t rs1 = readByte(bytecode, ip);
-    uint8_t rs2 = readByte(bytecode, ip);
+    uint8_t rd = readByte(*curBytecode, ip);
+    TRACK_REG(rd);
+    uint8_t rs1 = readByte(*curBytecode, ip);
+    uint8_t rs2 = readByte(*curBytecode, ip);
     if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
         registers[rd] = Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() <= registers[rs2].unsafeAsInt()));
         DISPATCH();
@@ -460,9 +514,10 @@ op_LE: {
     DISPATCH();
 }
 op_GT: {
-    uint8_t rd = readByte(bytecode, ip);
-    uint8_t rs1 = readByte(bytecode, ip);
-    uint8_t rs2 = readByte(bytecode, ip);
+    uint8_t rd = readByte(*curBytecode, ip);
+    TRACK_REG(rd);
+    uint8_t rs1 = readByte(*curBytecode, ip);
+    uint8_t rs2 = readByte(*curBytecode, ip);
     if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
         registers[rd] = Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() > registers[rs2].unsafeAsInt()));
         DISPATCH();
@@ -475,9 +530,10 @@ op_GT: {
     DISPATCH();
 }
 op_GE: {
-    uint8_t rd = readByte(bytecode, ip);
-    uint8_t rs1 = readByte(bytecode, ip);
-    uint8_t rs2 = readByte(bytecode, ip);
+    uint8_t rd = readByte(*curBytecode, ip);
+    TRACK_REG(rd);
+    uint8_t rs1 = readByte(*curBytecode, ip);
+    uint8_t rs2 = readByte(*curBytecode, ip);
     if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
         registers[rd] = Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() >= registers[rs2].unsafeAsInt()));
         DISPATCH();
@@ -490,9 +546,10 @@ op_GE: {
     DISPATCH();
 }
 op_AND: {
-    uint8_t rd = readByte(bytecode, ip);
-    uint8_t rs1 = readByte(bytecode, ip);
-    uint8_t rs2 = readByte(bytecode, ip);
+    uint8_t rd = readByte(*curBytecode, ip);
+    TRACK_REG(rd);
+    uint8_t rs1 = readByte(*curBytecode, ip);
+    uint8_t rs2 = readByte(*curBytecode, ip);
     if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
         registers[rd] =
             Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() != 0 && registers[rs2].unsafeAsInt() != 0));
@@ -502,9 +559,10 @@ op_AND: {
     DISPATCH();
 }
 op_OR: {
-    uint8_t rd = readByte(bytecode, ip);
-    uint8_t rs1 = readByte(bytecode, ip);
-    uint8_t rs2 = readByte(bytecode, ip);
+    uint8_t rd = readByte(*curBytecode, ip);
+    TRACK_REG(rd);
+    uint8_t rs1 = readByte(*curBytecode, ip);
+    uint8_t rs2 = readByte(*curBytecode, ip);
     if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
         registers[rd] =
             Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() != 0 || registers[rs2].unsafeAsInt() != 0));
@@ -514,8 +572,9 @@ op_OR: {
     DISPATCH();
 }
 op_NOT: {
-    uint8_t rd = readByte(bytecode, ip);
-    uint8_t rs = readByte(bytecode, ip);
+    uint8_t rd = readByte(*curBytecode, ip);
+    TRACK_REG(rd);
+    uint8_t rs = readByte(*curBytecode, ip);
     if (registers[rs].getType() == Value::Type::INTEGER) {
         registers[rd] = Value(static_cast<int64_t>(registers[rs].unsafeAsInt() == 0));
         DISPATCH();
@@ -524,9 +583,10 @@ op_NOT: {
     DISPATCH();
 }
 op_BIT_AND: {
-    uint8_t rd = readByte(bytecode, ip);
-    uint8_t rs1 = readByte(bytecode, ip);
-    uint8_t rs2 = readByte(bytecode, ip);
+    uint8_t rd = readByte(*curBytecode, ip);
+    TRACK_REG(rd);
+    uint8_t rs1 = readByte(*curBytecode, ip);
+    uint8_t rs2 = readByte(*curBytecode, ip);
     if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
         registers[rd] = Value(registers[rs1].unsafeAsInt() & registers[rs2].unsafeAsInt());
         DISPATCH();
@@ -535,9 +595,10 @@ op_BIT_AND: {
     DISPATCH();
 }
 op_BIT_OR: {
-    uint8_t rd = readByte(bytecode, ip);
-    uint8_t rs1 = readByte(bytecode, ip);
-    uint8_t rs2 = readByte(bytecode, ip);
+    uint8_t rd = readByte(*curBytecode, ip);
+    TRACK_REG(rd);
+    uint8_t rs1 = readByte(*curBytecode, ip);
+    uint8_t rs2 = readByte(*curBytecode, ip);
     if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
         registers[rd] = Value(registers[rs1].unsafeAsInt() | registers[rs2].unsafeAsInt());
         DISPATCH();
@@ -546,9 +607,10 @@ op_BIT_OR: {
     DISPATCH();
 }
 op_BIT_XOR: {
-    uint8_t rd = readByte(bytecode, ip);
-    uint8_t rs1 = readByte(bytecode, ip);
-    uint8_t rs2 = readByte(bytecode, ip);
+    uint8_t rd = readByte(*curBytecode, ip);
+    TRACK_REG(rd);
+    uint8_t rs1 = readByte(*curBytecode, ip);
+    uint8_t rs2 = readByte(*curBytecode, ip);
     if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
         registers[rd] = Value(registers[rs1].unsafeAsInt() ^ registers[rs2].unsafeAsInt());
         DISPATCH();
@@ -557,8 +619,9 @@ op_BIT_XOR: {
     DISPATCH();
 }
 op_BIT_NOT: {
-    uint8_t rd = readByte(bytecode, ip);
-    uint8_t rs = readByte(bytecode, ip);
+    uint8_t rd = readByte(*curBytecode, ip);
+    TRACK_REG(rd);
+    uint8_t rs = readByte(*curBytecode, ip);
     if (registers[rs].getType() == Value::Type::INTEGER) {
         registers[rd] = Value(~registers[rs].unsafeAsInt());
         DISPATCH();
@@ -567,9 +630,10 @@ op_BIT_NOT: {
     DISPATCH();
 }
 op_SHL: {
-    uint8_t rd = readByte(bytecode, ip);
-    uint8_t rs1 = readByte(bytecode, ip);
-    uint8_t rs2 = readByte(bytecode, ip);
+    uint8_t rd = readByte(*curBytecode, ip);
+    TRACK_REG(rd);
+    uint8_t rs1 = readByte(*curBytecode, ip);
+    uint8_t rs2 = readByte(*curBytecode, ip);
     if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
         int64_t bv = registers[rs2].unsafeAsInt();
         if (bv >= 0 && bv < kInt64BitWidth) {
@@ -581,9 +645,10 @@ op_SHL: {
     DISPATCH();
 }
 op_SHR: {
-    uint8_t rd = readByte(bytecode, ip);
-    uint8_t rs1 = readByte(bytecode, ip);
-    uint8_t rs2 = readByte(bytecode, ip);
+    uint8_t rd = readByte(*curBytecode, ip);
+    TRACK_REG(rd);
+    uint8_t rs1 = readByte(*curBytecode, ip);
+    uint8_t rs2 = readByte(*curBytecode, ip);
     if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
         int64_t bv = registers[rs2].unsafeAsInt();
         if (bv >= 0 && bv < kInt64BitWidth) {
@@ -595,24 +660,26 @@ op_SHR: {
     DISPATCH();
 }
 op_LOAD_VAR: {
-    uint8_t rd = readByte(bytecode, ip);
+    uint8_t rd = readByte(*curBytecode, ip);
+    TRACK_REG(rd);
     {
-        std::string name = readString(bytecode, ip);
+        std::string name = readString(*curBytecode, ip);
         registers[rd] = getGlobal(name);
     }
     DISPATCH();
 }
 op_STORE_VAR: {
-    uint8_t rs = readByte(bytecode, ip);
+    uint8_t rs = readByte(*curBytecode, ip);
     {
-        std::string name = readString(bytecode, ip);
+        std::string name = readString(*curBytecode, ip);
         setGlobal(name, registers[rs]);
     }
     DISPATCH();
 }
 op_LOAD_LOCAL: {
-    uint8_t rd = readByte(bytecode, ip);
-    uint8_t index = readByte(bytecode, ip);
+    uint8_t rd = readByte(*curBytecode, ip);
+    TRACK_REG(rd);
+    uint8_t index = readByte(*curBytecode, ip);
     if (index >= locals.size()) {
         throw std::runtime_error("Local variable index out of range: " + std::to_string(index) + " at ip " +
                                  std::to_string(ip - 1));
@@ -621,8 +688,8 @@ op_LOAD_LOCAL: {
     DISPATCH();
 }
 op_STORE_LOCAL: {
-    uint8_t index = readByte(bytecode, ip);
-    uint8_t rs = readByte(bytecode, ip);
+    uint8_t index = readByte(*curBytecode, ip);
+    uint8_t rs = readByte(*curBytecode, ip);
     if (index >= locals.size()) {
         if (static_cast<size_t>(index) + 1 > kMaxLocals) {
             throw std::runtime_error("Local variable index exceeds maximum (" + std::to_string(kMaxLocals) + ")");
@@ -633,19 +700,19 @@ op_STORE_LOCAL: {
     DISPATCH();
 }
 op_JUMP: {
-    uint16_t offset = readShort(bytecode, ip);
-    if (offset >= bytecode.size()) {
+    uint16_t offset = readShort(*curBytecode, ip);
+    if (offset >= curBytecode->size()) {
         throw std::runtime_error("Jump offset out of bounds at ip " + std::to_string(ip - 2));
     }
     ip = offset;
     DISPATCH();
 }
 op_JUMP_IF_FALSE: {
-    uint8_t rs = readByte(bytecode, ip);
-    uint16_t offset = readShort(bytecode, ip);
+    uint8_t rs = readByte(*curBytecode, ip);
+    uint16_t offset = readShort(*curBytecode, ip);
     if (registers[rs].getType() == Value::Type::INTEGER) {
         if (registers[rs].unsafeAsInt() == 0) {
-            if (offset >= bytecode.size()) {
+            if (offset >= curBytecode->size()) {
                 throw std::runtime_error("Jump offset out of bounds at ip " + std::to_string(ip - 2));
             }
             ip = offset;
@@ -653,7 +720,7 @@ op_JUMP_IF_FALSE: {
         DISPATCH();
     }
     if (!registers[rs].isTruthy()) {
-        if (offset >= bytecode.size()) {
+        if (offset >= curBytecode->size()) {
             throw std::runtime_error("Jump offset out of bounds at ip " + std::to_string(ip - 2));
         }
         ip = offset;
@@ -661,12 +728,27 @@ op_JUMP_IF_FALSE: {
     DISPATCH();
 }
 op_RETURN: {
-    uint8_t rs = readByte(bytecode, ip);
+    uint8_t rs = readByte(*curBytecode, ip);
     lastReturn = registers[rs];
+    // If there's a caller frame, restore it and continue iteratively.
+    if (callStack.size() > baseCallDepth) {
+        CallFrame& top = callStack.back();
+        locals = std::move(top.savedLocals);
+        // Restore only the registers that were actually saved (partial restore).
+        std::copy(top.savedRegisters.begin(), top.savedRegisters.end(), registers);
+        maxRegUsed_ = top.savedMaxReg;
+        uint8_t retReg = top.returnReg;
+        ip = top.returnIp;
+        curBytecode = top.returnBytecode;
+        callStack.pop_back();
+        registers[retReg] = lastReturn;
+        TRACK_REG(retReg);
+        DISPATCH();
+    }
     return;
 }
 op_PRINT: {
-    uint8_t rs = readByte(bytecode, ip);
+    uint8_t rs = readByte(*curBytecode, ip);
     std::cout << registers[rs].toString() << std::endl;
     DISPATCH();
 }
@@ -679,19 +761,21 @@ op_HALT: {
     return;
 }
 op_MOV: {
-    uint8_t rd = readByte(bytecode, ip);
-    uint8_t rs = readByte(bytecode, ip);
+    uint8_t rd = readByte(*curBytecode, ip);
+    TRACK_REG(rd);
+    uint8_t rs = readByte(*curBytecode, ip);
     registers[rd] = registers[rs];
     DISPATCH();
 }
 op_CALL: {
     do {
-        uint8_t rd = readByte(bytecode, ip);
-        std::string funcName = readString(bytecode, ip);
-        uint8_t argCount = readByte(bytecode, ip);
+        uint8_t rd = readByte(*curBytecode, ip);
+    TRACK_REG(rd);
+        std::string funcName = readString(*curBytecode, ip);
+        uint8_t argCount = readByte(*curBytecode, ip);
         uint8_t argRegs[256];
         for (uint8_t i = 0; i < argCount; i++) {
-            argRegs[i] = readByte(bytecode, ip);
+            argRegs[i] = readByte(*curBytecode, ip);
         }
 
         // ---- JIT fast path: float-specialized ----
@@ -773,10 +857,15 @@ op_CALL: {
         CallFrame frame;
         frame.function = &func;
         frame.returnIp = ip;
-        frame.returnBytecode = &bytecode;
+        frame.returnBytecode = curBytecode;
         frame.savedLocals = std::move(locals);
-        frame.savedRegisters.assign(registers, registers + kMaxRegisters);
+        // Save only the registers actually used (high-water mark), not all 256.
+        {
+            size_t saveCount = static_cast<size_t>(maxRegUsed_) + 1;
+            frame.savedRegisters.assign(registers, registers + saveCount);
+        }
         frame.returnReg = rd;
+        frame.savedMaxReg = maxRegUsed_;
         callStack.push_back(std::move(frame));
 
         locals.clear();
@@ -785,22 +874,16 @@ op_CALL: {
             locals[i] = callStack.back().savedRegisters[argRegs[i]];
         }
 
-        execute(func.bytecode);
-
-        Value returnValue = lastReturn;
-        CallFrame& top = callStack.back();
-        locals = std::move(top.savedLocals);
-        std::move(top.savedRegisters.begin(), top.savedRegisters.end(), registers);
-        uint8_t retReg = top.returnReg;
-        callStack.pop_back();
-
-        registers[retReg] = returnValue;
+        // Switch to callee's bytecode iteratively (no recursive execute()).
+        curBytecode = &func.bytecode;
+        ip = 0;
+        maxRegUsed_ = 0;
     } while (0);
     DISPATCH();
 }
 
 op_UNKNOWN:
-    throw std::runtime_error("Unknown opcode " + std::to_string(bytecode[ip - 1]) + " at ip " + std::to_string(ip - 1));
+    throw std::runtime_error("Unknown opcode " + std::to_string((*curBytecode)[ip - 1]) + " at ip " + std::to_string(ip - 1));
 
 vm_exit:
     return;
@@ -810,63 +893,118 @@ vm_exit:
 
 #else  // Fallback: standard switch dispatch
 
-    while (ip < bytecode.size()) {
-        OpCode op = static_cast<OpCode>(readByte(bytecode, ip));
+    while (ip < curBytecode->size()) {
+        OpCode op = static_cast<OpCode>(readByte(*curBytecode, ip));
 
         switch (op) {
         case OpCode::PUSH_INT: {
-            uint8_t rd = readByte(bytecode, ip);
-            int64_t value = readInt(bytecode, ip);
+            uint8_t rd = readByte(*curBytecode, ip);
+            TRACK_REG(rd);
+            int64_t value = readInt(*curBytecode, ip);
             registers[rd] = Value(value);
             break;
         }
         case OpCode::PUSH_FLOAT: {
-            uint8_t rd = readByte(bytecode, ip);
-            double value = readFloat(bytecode, ip);
+            uint8_t rd = readByte(*curBytecode, ip);
+            TRACK_REG(rd);
+            double value = readFloat(*curBytecode, ip);
             registers[rd] = Value(value);
             break;
         }
         case OpCode::PUSH_STRING: {
-            uint8_t rd = readByte(bytecode, ip);
-            std::string value = readString(bytecode, ip);
+            uint8_t rd = readByte(*curBytecode, ip);
+            TRACK_REG(rd);
+            std::string value = readString(*curBytecode, ip);
             registers[rd] = Value(value);
             break;
         }
         case OpCode::POP:
             break;
-        case OpCode::ADD:
-        case OpCode::SUB:
-        case OpCode::MUL:
-        case OpCode::DIV:
-        case OpCode::MOD: {
-            uint8_t rd = readByte(bytecode, ip);
-            uint8_t rs1 = readByte(bytecode, ip);
-            uint8_t rs2 = readByte(bytecode, ip);
-            switch (op) {
-            case OpCode::ADD:
+        case OpCode::ADD: {
+            uint8_t rd = readByte(*curBytecode, ip);
+            TRACK_REG(rd);
+            uint8_t rs1 = readByte(*curBytecode, ip);
+            uint8_t rs2 = readByte(*curBytecode, ip);
+            if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
+                registers[rd] = Value(registers[rs1].unsafeAsInt() + registers[rs2].unsafeAsInt());
+            } else if (registers[rs1].getType() == Value::Type::FLOAT && registers[rs2].getType() == Value::Type::FLOAT) {
+                registers[rd] = Value(registers[rs1].unsafeAsFloat() + registers[rs2].unsafeAsFloat());
+            } else {
                 registers[rd] = registers[rs1] + registers[rs2];
-                break;
-            case OpCode::SUB:
-                registers[rd] = registers[rs1] - registers[rs2];
-                break;
-            case OpCode::MUL:
-                registers[rd] = registers[rs1] * registers[rs2];
-                break;
-            case OpCode::DIV:
-                registers[rd] = registers[rs1] / registers[rs2];
-                break;
-            case OpCode::MOD:
-                registers[rd] = registers[rs1] % registers[rs2];
-                break;
-            default:
-                break;
             }
             break;
         }
+        case OpCode::SUB: {
+            uint8_t rd = readByte(*curBytecode, ip);
+            TRACK_REG(rd);
+            uint8_t rs1 = readByte(*curBytecode, ip);
+            uint8_t rs2 = readByte(*curBytecode, ip);
+            if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
+                registers[rd] = Value(registers[rs1].unsafeAsInt() - registers[rs2].unsafeAsInt());
+            } else if (registers[rs1].getType() == Value::Type::FLOAT && registers[rs2].getType() == Value::Type::FLOAT) {
+                registers[rd] = Value(registers[rs1].unsafeAsFloat() - registers[rs2].unsafeAsFloat());
+            } else {
+                registers[rd] = registers[rs1] - registers[rs2];
+            }
+            break;
+        }
+        case OpCode::MUL: {
+            uint8_t rd = readByte(*curBytecode, ip);
+            TRACK_REG(rd);
+            uint8_t rs1 = readByte(*curBytecode, ip);
+            uint8_t rs2 = readByte(*curBytecode, ip);
+            if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
+                registers[rd] = Value(registers[rs1].unsafeAsInt() * registers[rs2].unsafeAsInt());
+            } else if (registers[rs1].getType() == Value::Type::FLOAT && registers[rs2].getType() == Value::Type::FLOAT) {
+                registers[rd] = Value(registers[rs1].unsafeAsFloat() * registers[rs2].unsafeAsFloat());
+            } else {
+                registers[rd] = registers[rs1] * registers[rs2];
+            }
+            break;
+        }
+        case OpCode::DIV: {
+            uint8_t rd = readByte(*curBytecode, ip);
+            TRACK_REG(rd);
+            uint8_t rs1 = readByte(*curBytecode, ip);
+            uint8_t rs2 = readByte(*curBytecode, ip);
+            if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
+                int64_t av = registers[rs1].unsafeAsInt();
+                int64_t bv = registers[rs2].unsafeAsInt();
+                if (bv != 0 && !(av == INT64_MIN && bv == -1)) {
+                    registers[rd] = Value(av / bv);
+                    break;
+                }
+            } else if (registers[rs1].getType() == Value::Type::FLOAT && registers[rs2].getType() == Value::Type::FLOAT) {
+                double bv = registers[rs2].unsafeAsFloat();
+                if (bv != 0.0) {
+                    registers[rd] = Value(registers[rs1].unsafeAsFloat() / bv);
+                    break;
+                }
+            }
+            registers[rd] = registers[rs1] / registers[rs2];
+            break;
+        }
+        case OpCode::MOD: {
+            uint8_t rd = readByte(*curBytecode, ip);
+            TRACK_REG(rd);
+            uint8_t rs1 = readByte(*curBytecode, ip);
+            uint8_t rs2 = readByte(*curBytecode, ip);
+            if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
+                int64_t av = registers[rs1].unsafeAsInt();
+                int64_t bv = registers[rs2].unsafeAsInt();
+                if (bv != 0 && !(av == INT64_MIN && bv == -1)) {
+                    registers[rd] = Value(av % bv);
+                    break;
+                }
+            }
+            registers[rd] = registers[rs1] % registers[rs2];
+            break;
+        }
         case OpCode::POW: {
-            uint8_t rd = readByte(bytecode, ip);
-            uint8_t rs1 = readByte(bytecode, ip);
-            uint8_t rs2 = readByte(bytecode, ip);
+            uint8_t rd = readByte(*curBytecode, ip);
+            TRACK_REG(rd);
+            uint8_t rs1 = readByte(*curBytecode, ip);
+            uint8_t rs2 = readByte(*curBytecode, ip);
             // Integer exponentiation: base ** exp
             Value base = registers[rs1];
             Value exp = registers[rs2];
@@ -887,10 +1025,17 @@ vm_exit:
                     int64_t result = 1;
                     int64_t e = n;
                     while (e > 0) {
-                        if (e & 1)
+                        if (e & 1) {
+                            if (wouldMultiplyOverflow(result, b))
+                                throw std::runtime_error("Integer overflow in ** operator");
                             result *= b;
-                        b *= b;
+                        }
                         e >>= 1;
+                        if (e > 0) {
+                            if (wouldMultiplyOverflow(b, b))
+                                throw std::runtime_error("Integer overflow in ** operator");
+                            b *= b;
+                        }
                     }
                     registers[rd] = Value(result);
                 } else {
@@ -909,114 +1054,223 @@ vm_exit:
             break;
         }
         case OpCode::NEG: {
-            uint8_t rd = readByte(bytecode, ip);
-            uint8_t rs = readByte(bytecode, ip);
+            uint8_t rd = readByte(*curBytecode, ip);
+            TRACK_REG(rd);
+            uint8_t rs = readByte(*curBytecode, ip);
+            if (registers[rs].getType() == Value::Type::INTEGER) {
+                int64_t val = registers[rs].unsafeAsInt();
+                if (val != INT64_MIN) {
+                    registers[rd] = Value(-val);
+                    break;
+                }
+            } else if (registers[rs].getType() == Value::Type::FLOAT) {
+                registers[rd] = Value(-registers[rs].unsafeAsFloat());
+                break;
+            }
             registers[rd] = -registers[rs];
             break;
         }
-        case OpCode::EQ:
-        case OpCode::NE:
-        case OpCode::LT:
-        case OpCode::LE:
-        case OpCode::GT:
-        case OpCode::GE: {
-            uint8_t rd = readByte(bytecode, ip);
-            uint8_t rs1 = readByte(bytecode, ip);
-            uint8_t rs2 = readByte(bytecode, ip);
-            switch (op) {
-            case OpCode::EQ:
+        case OpCode::EQ: {
+            uint8_t rd = readByte(*curBytecode, ip);
+            TRACK_REG(rd);
+            uint8_t rs1 = readByte(*curBytecode, ip);
+            uint8_t rs2 = readByte(*curBytecode, ip);
+            if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
+                registers[rd] = Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() == registers[rs2].unsafeAsInt()));
+            } else {
                 registers[rd] = Value(static_cast<int64_t>(registers[rs1] == registers[rs2]));
-                break;
-            case OpCode::NE:
+            }
+            break;
+        }
+        case OpCode::NE: {
+            uint8_t rd = readByte(*curBytecode, ip);
+            TRACK_REG(rd);
+            uint8_t rs1 = readByte(*curBytecode, ip);
+            uint8_t rs2 = readByte(*curBytecode, ip);
+            if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
+                registers[rd] = Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() != registers[rs2].unsafeAsInt()));
+            } else {
                 registers[rd] = Value(static_cast<int64_t>(registers[rs1] != registers[rs2]));
-                break;
-            case OpCode::LT:
+            }
+            break;
+        }
+        case OpCode::LT: {
+            uint8_t rd = readByte(*curBytecode, ip);
+            TRACK_REG(rd);
+            uint8_t rs1 = readByte(*curBytecode, ip);
+            uint8_t rs2 = readByte(*curBytecode, ip);
+            if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
+                registers[rd] = Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() < registers[rs2].unsafeAsInt()));
+            } else {
                 registers[rd] = Value(static_cast<int64_t>(registers[rs1] < registers[rs2]));
-                break;
-            case OpCode::LE:
+            }
+            break;
+        }
+        case OpCode::LE: {
+            uint8_t rd = readByte(*curBytecode, ip);
+            TRACK_REG(rd);
+            uint8_t rs1 = readByte(*curBytecode, ip);
+            uint8_t rs2 = readByte(*curBytecode, ip);
+            if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
+                registers[rd] = Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() <= registers[rs2].unsafeAsInt()));
+            } else {
                 registers[rd] = Value(static_cast<int64_t>(registers[rs1] <= registers[rs2]));
-                break;
-            case OpCode::GT:
+            }
+            break;
+        }
+        case OpCode::GT: {
+            uint8_t rd = readByte(*curBytecode, ip);
+            TRACK_REG(rd);
+            uint8_t rs1 = readByte(*curBytecode, ip);
+            uint8_t rs2 = readByte(*curBytecode, ip);
+            if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
+                registers[rd] = Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() > registers[rs2].unsafeAsInt()));
+            } else {
                 registers[rd] = Value(static_cast<int64_t>(registers[rs1] > registers[rs2]));
-                break;
-            case OpCode::GE:
+            }
+            break;
+        }
+        case OpCode::GE: {
+            uint8_t rd = readByte(*curBytecode, ip);
+            TRACK_REG(rd);
+            uint8_t rs1 = readByte(*curBytecode, ip);
+            uint8_t rs2 = readByte(*curBytecode, ip);
+            if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
+                registers[rd] = Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() >= registers[rs2].unsafeAsInt()));
+            } else {
                 registers[rd] = Value(static_cast<int64_t>(registers[rs1] >= registers[rs2]));
-                break;
-            default:
-                break;
             }
             break;
         }
         case OpCode::AND: {
-            uint8_t rd = readByte(bytecode, ip);
-            uint8_t rs1 = readByte(bytecode, ip);
-            uint8_t rs2 = readByte(bytecode, ip);
-            registers[rd] = Value(static_cast<int64_t>(registers[rs1].isTruthy() && registers[rs2].isTruthy()));
-            break;
-        }
-        case OpCode::OR: {
-            uint8_t rd = readByte(bytecode, ip);
-            uint8_t rs1 = readByte(bytecode, ip);
-            uint8_t rs2 = readByte(bytecode, ip);
-            registers[rd] = Value(static_cast<int64_t>(registers[rs1].isTruthy() || registers[rs2].isTruthy()));
-            break;
-        }
-        case OpCode::NOT: {
-            uint8_t rd = readByte(bytecode, ip);
-            uint8_t rs = readByte(bytecode, ip);
-            registers[rd] = Value(static_cast<int64_t>(!registers[rs].isTruthy()));
-            break;
-        }
-        case OpCode::BIT_AND:
-        case OpCode::BIT_OR:
-        case OpCode::BIT_XOR:
-        case OpCode::SHL:
-        case OpCode::SHR: {
-            uint8_t rd = readByte(bytecode, ip);
-            uint8_t rs1 = readByte(bytecode, ip);
-            uint8_t rs2 = readByte(bytecode, ip);
-            switch (op) {
-            case OpCode::BIT_AND:
-                registers[rd] = registers[rs1] & registers[rs2];
-                break;
-            case OpCode::BIT_OR:
-                registers[rd] = registers[rs1] | registers[rs2];
-                break;
-            case OpCode::BIT_XOR:
-                registers[rd] = registers[rs1] ^ registers[rs2];
-                break;
-            case OpCode::SHL:
-                registers[rd] = registers[rs1] << registers[rs2];
-                break;
-            case OpCode::SHR:
-                registers[rd] = registers[rs1] >> registers[rs2];
-                break;
-            default:
-                break;
+            uint8_t rd = readByte(*curBytecode, ip);
+            TRACK_REG(rd);
+            uint8_t rs1 = readByte(*curBytecode, ip);
+            uint8_t rs2 = readByte(*curBytecode, ip);
+            if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
+                registers[rd] = Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() != 0 && registers[rs2].unsafeAsInt() != 0));
+            } else {
+                registers[rd] = Value(static_cast<int64_t>(registers[rs1].isTruthy() && registers[rs2].isTruthy()));
             }
             break;
         }
+        case OpCode::OR: {
+            uint8_t rd = readByte(*curBytecode, ip);
+            TRACK_REG(rd);
+            uint8_t rs1 = readByte(*curBytecode, ip);
+            uint8_t rs2 = readByte(*curBytecode, ip);
+            if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
+                registers[rd] = Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() != 0 || registers[rs2].unsafeAsInt() != 0));
+            } else {
+                registers[rd] = Value(static_cast<int64_t>(registers[rs1].isTruthy() || registers[rs2].isTruthy()));
+            }
+            break;
+        }
+        case OpCode::NOT: {
+            uint8_t rd = readByte(*curBytecode, ip);
+            TRACK_REG(rd);
+            uint8_t rs = readByte(*curBytecode, ip);
+            if (registers[rs].getType() == Value::Type::INTEGER) {
+                registers[rd] = Value(static_cast<int64_t>(registers[rs].unsafeAsInt() == 0));
+            } else {
+                registers[rd] = Value(static_cast<int64_t>(!registers[rs].isTruthy()));
+            }
+            break;
+        }
+        case OpCode::BIT_AND: {
+            uint8_t rd = readByte(*curBytecode, ip);
+            TRACK_REG(rd);
+            uint8_t rs1 = readByte(*curBytecode, ip);
+            uint8_t rs2 = readByte(*curBytecode, ip);
+            if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
+                registers[rd] = Value(registers[rs1].unsafeAsInt() & registers[rs2].unsafeAsInt());
+            } else {
+                registers[rd] = registers[rs1] & registers[rs2];
+            }
+            break;
+        }
+        case OpCode::BIT_OR: {
+            uint8_t rd = readByte(*curBytecode, ip);
+            TRACK_REG(rd);
+            uint8_t rs1 = readByte(*curBytecode, ip);
+            uint8_t rs2 = readByte(*curBytecode, ip);
+            if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
+                registers[rd] = Value(registers[rs1].unsafeAsInt() | registers[rs2].unsafeAsInt());
+            } else {
+                registers[rd] = registers[rs1] | registers[rs2];
+            }
+            break;
+        }
+        case OpCode::BIT_XOR: {
+            uint8_t rd = readByte(*curBytecode, ip);
+            TRACK_REG(rd);
+            uint8_t rs1 = readByte(*curBytecode, ip);
+            uint8_t rs2 = readByte(*curBytecode, ip);
+            if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
+                registers[rd] = Value(registers[rs1].unsafeAsInt() ^ registers[rs2].unsafeAsInt());
+            } else {
+                registers[rd] = registers[rs1] ^ registers[rs2];
+            }
+            break;
+        }
+        case OpCode::SHL: {
+            uint8_t rd = readByte(*curBytecode, ip);
+            TRACK_REG(rd);
+            uint8_t rs1 = readByte(*curBytecode, ip);
+            uint8_t rs2 = readByte(*curBytecode, ip);
+            if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
+                int64_t bv = registers[rs2].unsafeAsInt();
+                if (bv >= 0 && bv < kInt64BitWidth) {
+                    registers[rd] = Value(registers[rs1].unsafeAsInt() << bv);
+                    break;
+                }
+            }
+            registers[rd] = registers[rs1] << registers[rs2];
+            break;
+        }
+        case OpCode::SHR: {
+            uint8_t rd = readByte(*curBytecode, ip);
+            TRACK_REG(rd);
+            uint8_t rs1 = readByte(*curBytecode, ip);
+            uint8_t rs2 = readByte(*curBytecode, ip);
+            if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
+                int64_t bv = registers[rs2].unsafeAsInt();
+                if (bv >= 0 && bv < kInt64BitWidth) {
+                    registers[rd] = Value(registers[rs1].unsafeAsInt() >> bv);
+                    break;
+                }
+            }
+            registers[rd] = registers[rs1] >> registers[rs2];
+            break;
+        }
         case OpCode::BIT_NOT: {
-            uint8_t rd = readByte(bytecode, ip);
-            uint8_t rs = readByte(bytecode, ip);
-            registers[rd] = ~registers[rs];
+            uint8_t rd = readByte(*curBytecode, ip);
+            TRACK_REG(rd);
+            uint8_t rs = readByte(*curBytecode, ip);
+            if (registers[rs].getType() == Value::Type::INTEGER) {
+                registers[rd] = Value(~registers[rs].unsafeAsInt());
+            } else {
+                registers[rd] = ~registers[rs];
+            }
             break;
         }
         case OpCode::LOAD_VAR: {
-            uint8_t rd = readByte(bytecode, ip);
-            std::string name = readString(bytecode, ip);
+            uint8_t rd = readByte(*curBytecode, ip);
+            TRACK_REG(rd);
+            std::string name = readString(*curBytecode, ip);
             registers[rd] = getGlobal(name);
             break;
         }
         case OpCode::STORE_VAR: {
-            uint8_t rs = readByte(bytecode, ip);
-            std::string name = readString(bytecode, ip);
+            uint8_t rs = readByte(*curBytecode, ip);
+            std::string name = readString(*curBytecode, ip);
             setGlobal(name, registers[rs]);
             break;
         }
         case OpCode::LOAD_LOCAL: {
-            uint8_t rd = readByte(bytecode, ip);
-            uint8_t index = readByte(bytecode, ip);
+            uint8_t rd = readByte(*curBytecode, ip);
+            TRACK_REG(rd);
+            uint8_t index = readByte(*curBytecode, ip);
             if (index >= locals.size()) {
                 throw std::runtime_error("Local variable index out of range: " + std::to_string(index) + " at ip " +
                                          std::to_string(ip - 1));
@@ -1025,8 +1279,8 @@ vm_exit:
             break;
         }
         case OpCode::STORE_LOCAL: {
-            uint8_t index = readByte(bytecode, ip);
-            uint8_t rs = readByte(bytecode, ip);
+            uint8_t index = readByte(*curBytecode, ip);
+            uint8_t rs = readByte(*curBytecode, ip);
             if (index >= locals.size()) {
                 if (static_cast<size_t>(index) + 1 > kMaxLocals) {
                     throw std::runtime_error("Local variable index exceeds maximum (" + std::to_string(kMaxLocals) +
@@ -1038,18 +1292,24 @@ vm_exit:
             break;
         }
         case OpCode::JUMP: {
-            uint16_t offset = readShort(bytecode, ip);
-            if (offset >= bytecode.size()) {
+            uint16_t offset = readShort(*curBytecode, ip);
+            if (offset >= curBytecode->size()) {
                 throw std::runtime_error("Jump offset out of bounds at ip " + std::to_string(ip - 2));
             }
             ip = offset;
             break;
         }
         case OpCode::JUMP_IF_FALSE: {
-            uint8_t rs = readByte(bytecode, ip);
-            uint16_t offset = readShort(bytecode, ip);
-            if (!registers[rs].isTruthy()) {
-                if (offset >= bytecode.size()) {
+            uint8_t rs = readByte(*curBytecode, ip);
+            uint16_t offset = readShort(*curBytecode, ip);
+            bool isFalse;
+            if (registers[rs].getType() == Value::Type::INTEGER) {
+                isFalse = registers[rs].unsafeAsInt() == 0;
+            } else {
+                isFalse = !registers[rs].isTruthy();
+            }
+            if (isFalse) {
+                if (offset >= curBytecode->size()) {
                     throw std::runtime_error("Jump offset out of bounds at ip " + std::to_string(ip - 2));
                 }
                 ip = offset;
@@ -1057,12 +1317,27 @@ vm_exit:
             break;
         }
         case OpCode::RETURN: {
-            uint8_t rs = readByte(bytecode, ip);
+            uint8_t rs = readByte(*curBytecode, ip);
             lastReturn = registers[rs];
+            // If there's a caller frame, restore it and continue iteratively.
+            if (callStack.size() > baseCallDepth) {
+                CallFrame& top = callStack.back();
+                locals = std::move(top.savedLocals);
+                // Restore only the registers that were actually saved (partial restore).
+                std::copy(top.savedRegisters.begin(), top.savedRegisters.end(), registers);
+                maxRegUsed_ = top.savedMaxReg;
+                uint8_t retReg = top.returnReg;
+                ip = top.returnIp;
+                curBytecode = top.returnBytecode;
+                callStack.pop_back();
+                registers[retReg] = lastReturn;
+                TRACK_REG(retReg);
+                break;
+            }
             return;
         }
         case OpCode::PRINT: {
-            uint8_t rs = readByte(bytecode, ip);
+            uint8_t rs = readByte(*curBytecode, ip);
             std::cout << registers[rs].toString() << std::endl;
             break;
         }
@@ -1072,18 +1347,20 @@ vm_exit:
             lastReturn = Value();
             return;
         case OpCode::MOV: {
-            uint8_t rd = readByte(bytecode, ip);
-            uint8_t rs = readByte(bytecode, ip);
+            uint8_t rd = readByte(*curBytecode, ip);
+            TRACK_REG(rd);
+            uint8_t rs = readByte(*curBytecode, ip);
             registers[rd] = registers[rs];
             break;
         }
         case OpCode::CALL: {
-            uint8_t rd = readByte(bytecode, ip);
-            std::string funcName = readString(bytecode, ip);
-            uint8_t argCount = readByte(bytecode, ip);
+            uint8_t rd = readByte(*curBytecode, ip);
+            TRACK_REG(rd);
+            std::string funcName = readString(*curBytecode, ip);
+            uint8_t argCount = readByte(*curBytecode, ip);
             uint8_t argRegs[256];
             for (uint8_t i = 0; i < argCount; i++) {
-                argRegs[i] = readByte(bytecode, ip);
+                argRegs[i] = readByte(*curBytecode, ip);
             }
 
             if (jit_ && argCount > 0) {
@@ -1156,10 +1433,15 @@ vm_exit:
             CallFrame frame;
             frame.function = &func;
             frame.returnIp = ip;
-            frame.returnBytecode = &bytecode;
+            frame.returnBytecode = curBytecode;
             frame.savedLocals = std::move(locals);
-            frame.savedRegisters.assign(registers, registers + kMaxRegisters);
+            // Save only the registers actually used (high-water mark), not all 256.
+            {
+                size_t saveCount = static_cast<size_t>(maxRegUsed_) + 1;
+                frame.savedRegisters.assign(registers, registers + saveCount);
+            }
             frame.returnReg = rd;
+            frame.savedMaxReg = maxRegUsed_;
             callStack.push_back(std::move(frame));
 
             locals.clear();
@@ -1168,16 +1450,10 @@ vm_exit:
                 locals[i] = callStack.back().savedRegisters[argRegs[i]];
             }
 
-            execute(func.bytecode);
-
-            Value returnValue = lastReturn;
-            CallFrame& top = callStack.back();
-            locals = std::move(top.savedLocals);
-            std::copy(top.savedRegisters.begin(), top.savedRegisters.end(), registers);
-            uint8_t retReg = top.returnReg;
-            callStack.pop_back();
-
-            registers[retReg] = returnValue;
+            // Switch to callee's bytecode iteratively (no recursive execute()).
+            curBytecode = &func.bytecode;
+            ip = 0;
+            maxRegUsed_ = 0;
             break;
         }
         default:
@@ -1186,6 +1462,7 @@ vm_exit:
         }
     }
 #endif // USE_COMPUTED_GOTO
+#undef TRACK_REG
 }
 
 } // namespace omscript

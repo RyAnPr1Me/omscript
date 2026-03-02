@@ -65,6 +65,9 @@ enum class OpCode : uint8_t {
 
 class BytecodeEmitter {
   public:
+    BytecodeEmitter() {
+        code.reserve(256);
+    }
     void emit(OpCode op);
     void emitByte(uint8_t byte);
     // Bytecode is encoded in little-endian order for cross-platform stability.

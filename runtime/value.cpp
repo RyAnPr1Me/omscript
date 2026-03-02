@@ -34,19 +34,17 @@ Value Value::operator+(const Value& other) const {
     }
     if (type == Type::STRING || other.type == Type::STRING) {
         // String concatenation using reference counted strings
-        RefCountedString result;
-        if (type == Type::STRING && other.type == Type::STRING) {
-            result = stringValue + other.stringValue;
-        } else if (type == Type::STRING) {
-            RefCountedString otherStr(other.toString().c_str());
-            result = stringValue + otherStr;
-        } else {
-            RefCountedString thisStr(toString().c_str());
-            result = thisStr + other.stringValue;
-        }
         Value v;
         v.type = Type::STRING;
-        new (&v.stringValue) RefCountedString(std::move(result));
+        if (type == Type::STRING && other.type == Type::STRING) {
+            new (&v.stringValue) RefCountedString(stringValue + other.stringValue);
+        } else if (type == Type::STRING) {
+            RefCountedString otherStr(other.toString().c_str());
+            new (&v.stringValue) RefCountedString(stringValue + otherStr);
+        } else {
+            RefCountedString thisStr(toString().c_str());
+            new (&v.stringValue) RefCountedString(thisStr + other.stringValue);
+        }
         return v;
     }
     throw std::runtime_error("Invalid operands for +");

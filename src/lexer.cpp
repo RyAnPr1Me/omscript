@@ -38,6 +38,8 @@ static const std::unordered_map<std::string, TokenType> keywords = {
 
 Lexer::Lexer(const std::string& source) : source(source), pos(0), line(1), column(1) {}
 
+Lexer::Lexer(std::string&& source) : source(std::move(source)), pos(0), line(1), column(1) {}
+
 char Lexer::peek(int offset) const {
     size_t index = pos + offset;
     if (index >= source.length()) {
@@ -175,8 +177,14 @@ Token Lexer::scanNumber() {
         }
     }
 
+    // Fast path for common decimal numbers: record start position and
+    // try to scan all digits/dots without underscores in one pass.
+    size_t numStart = pos;
+    bool hasUnderscore = false;
+
     while (!isAtEnd() && (isDigit(peek()) || peek() == '.' || peek() == '_')) {
         if (peek() == '_') {
+            hasUnderscore = true;
             advance(); // consume underscore but don't add to num
             continue;
         }
@@ -189,7 +197,17 @@ Token Lexer::scanNumber() {
                 break; // Second dot, stop
             isFloat = true;
         }
-        num += advance();
+        advance();
+    }
+
+    if (!hasUnderscore) {
+        num = source.substr(numStart, pos - numStart);
+    } else {
+        // Slow path: rebuild string skipping underscores
+        for (size_t i = numStart; i < pos; i++) {
+            if (source[i] != '_')
+                num += source[i];
+        }
     }
 
     Token token = makeToken(isFloat ? TokenType::FLOAT : TokenType::INTEGER, num);
@@ -210,11 +228,13 @@ Token Lexer::scanNumber() {
 }
 
 Token Lexer::scanIdentifier() {
-    std::string id;
+    size_t start = pos;
 
     while (!isAtEnd() && (isAlnum(peek()) || peek() == '_')) {
-        id += advance();
+        advance();
     }
+
+    std::string id = source.substr(start, pos - start);
 
     auto it = keywords.find(id);
     if (it != keywords.end()) {

@@ -2,6 +2,7 @@
 #include <climits>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <iostream>
 #include <llvm/ADT/StringMap.h>
 #include <llvm/Analysis/TargetTransformInfo.h>
@@ -216,9 +217,23 @@ std::unique_ptr<Expression> optimizeOptMaxBinary(const std::string& op, std::uni
         if (op == "**") {
             if (rval >= 0) {
                 long long result = 1;
-                for (long long i = 0; i < rval; i++)
+                bool overflow = false;
+                for (long long i = 0; i < rval; i++) {
+                    if (lval != 0 && lval != 1 && lval != -1) {
+                        uint64_t ab = (lval < 0) ? static_cast<uint64_t>(-static_cast<uint64_t>(lval))
+                                                  : static_cast<uint64_t>(lval);
+                        uint64_t ar = (result < 0) ? static_cast<uint64_t>(-static_cast<uint64_t>(result))
+                                                   : static_cast<uint64_t>(result);
+                        if (ar > static_cast<uint64_t>(LLONG_MAX) / ab) {
+                            overflow = true;
+                            break;
+                        }
+                    }
                     result *= lval;
-                return std::make_unique<LiteralExpr>(result);
+                }
+                if (!overflow)
+                    return std::make_unique<LiteralExpr>(result);
+                // Fall through to emit a runtime BinaryExpr on overflow.
             } else {
                 return std::make_unique<LiteralExpr>(static_cast<long long>(0));
             }

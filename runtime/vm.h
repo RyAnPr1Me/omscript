@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -29,6 +30,7 @@ struct CallFrame {
     std::vector<Value> savedLocals;             // caller's locals snapshot
     std::vector<Value> savedRegisters;          // caller's register file snapshot
     uint8_t returnReg;                          // destination register for return value
+    uint8_t savedMaxReg;                        // caller's maxRegUsed_ for partial restore
 };
 
 class VM {
@@ -48,12 +50,13 @@ class VM {
     void execute(const std::vector<uint8_t>& bytecode);
     void setGlobal(const std::string& name, const Value& value);
     Value getGlobal(const std::string& name);
-    Value getLastReturn() const {
+    const Value& getLastReturn() const {
         return lastReturn;
     }
 
     // Register a bytecode function that can be invoked via the CALL opcode.
     void registerFunction(const BytecodeFunction& func);
+    void registerFunction(BytecodeFunction&& func);
 
     /// Return true if the named function has been JIT-compiled.
     bool isJITCompiled(const std::string& name) const;
@@ -63,6 +66,12 @@ class VM {
     std::unordered_map<std::string, Value> globals;
     std::vector<Value> locals;
     Value lastReturn;
+
+    // High-water mark for the register file — tracks the highest register
+    // index written during execution.  Used to save/restore only the
+    // registers actually in use on CALL/RETURN, avoiding the cost of
+    // copying all 256 Values.
+    uint8_t maxRegUsed_ = 0;
 
     // Registered bytecode functions keyed by name.
     std::unordered_map<std::string, BytecodeFunction> functions;
@@ -101,6 +110,11 @@ class VM {
     inline int64_t readInt(const std::vector<uint8_t>& code, size_t& ip) __attribute__((always_inline));
     inline double readFloat(const std::vector<uint8_t>& code, size_t& ip) __attribute__((always_inline));
     std::string readString(const std::vector<uint8_t>& code, size_t& ip);
+    /// Zero-copy string read: returns a view into the bytecode buffer.
+    /// The returned view is valid as long as the underlying bytecode vector
+    /// is not modified or destroyed.
+    inline std::string_view readStringView(const std::vector<uint8_t>& code, size_t& ip)
+        __attribute__((always_inline));
 };
 
 } // namespace omscript
