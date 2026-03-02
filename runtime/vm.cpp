@@ -256,7 +256,7 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
             goto vm_exit;                                                                                              \
         /* Prefetch the next few bytecode bytes into L1 cache to reduce          */                                    \
         /* stalls when the dispatch loop reads operands after the opcode.        */                                    \
-        __builtin_prefetch(curBytecode->data() + ip + 1, 0, 3);                                                       \
+        __builtin_prefetch(curBytecode->data() + ip + 1, 0, 3);                                                        \
         uint8_t opByte = readByte(*curBytecode, ip);                                                                   \
         if (opByte >= kDispatchTableSize)                                                                              \
             goto op_UNKNOWN;                                                                                           \
@@ -982,10 +982,12 @@ vm_exit:
                 registers[rd] = Value(registers[rs1].unsafeAsFloat() + registers[rs2].unsafeAsFloat());
             } else if (registers[rs1].getType() == Value::Type::INTEGER &&
                        registers[rs2].getType() == Value::Type::FLOAT) {
-                registers[rd] = Value(static_cast<double>(registers[rs1].unsafeAsInt()) + registers[rs2].unsafeAsFloat());
+                registers[rd] =
+                    Value(static_cast<double>(registers[rs1].unsafeAsInt()) + registers[rs2].unsafeAsFloat());
             } else if (registers[rs1].getType() == Value::Type::FLOAT &&
                        registers[rs2].getType() == Value::Type::INTEGER) {
-                registers[rd] = Value(registers[rs1].unsafeAsFloat() + static_cast<double>(registers[rs2].unsafeAsInt()));
+                registers[rd] =
+                    Value(registers[rs1].unsafeAsFloat() + static_cast<double>(registers[rs2].unsafeAsInt()));
             } else {
                 registers[rd] = registers[rs1] + registers[rs2];
             }
@@ -1003,10 +1005,12 @@ vm_exit:
                 registers[rd] = Value(registers[rs1].unsafeAsFloat() - registers[rs2].unsafeAsFloat());
             } else if (registers[rs1].getType() == Value::Type::INTEGER &&
                        registers[rs2].getType() == Value::Type::FLOAT) {
-                registers[rd] = Value(static_cast<double>(registers[rs1].unsafeAsInt()) - registers[rs2].unsafeAsFloat());
+                registers[rd] =
+                    Value(static_cast<double>(registers[rs1].unsafeAsInt()) - registers[rs2].unsafeAsFloat());
             } else if (registers[rs1].getType() == Value::Type::FLOAT &&
                        registers[rs2].getType() == Value::Type::INTEGER) {
-                registers[rd] = Value(registers[rs1].unsafeAsFloat() - static_cast<double>(registers[rs2].unsafeAsInt()));
+                registers[rd] =
+                    Value(registers[rs1].unsafeAsFloat() - static_cast<double>(registers[rs2].unsafeAsInt()));
             } else {
                 registers[rd] = registers[rs1] - registers[rs2];
             }
@@ -1024,10 +1028,12 @@ vm_exit:
                 registers[rd] = Value(registers[rs1].unsafeAsFloat() * registers[rs2].unsafeAsFloat());
             } else if (registers[rs1].getType() == Value::Type::INTEGER &&
                        registers[rs2].getType() == Value::Type::FLOAT) {
-                registers[rd] = Value(static_cast<double>(registers[rs1].unsafeAsInt()) * registers[rs2].unsafeAsFloat());
+                registers[rd] =
+                    Value(static_cast<double>(registers[rs1].unsafeAsInt()) * registers[rs2].unsafeAsFloat());
             } else if (registers[rs1].getType() == Value::Type::FLOAT &&
                        registers[rs2].getType() == Value::Type::INTEGER) {
-                registers[rd] = Value(registers[rs1].unsafeAsFloat() * static_cast<double>(registers[rs2].unsafeAsInt()));
+                registers[rd] =
+                    Value(registers[rs1].unsafeAsFloat() * static_cast<double>(registers[rs2].unsafeAsInt()));
             } else {
                 registers[rd] = registers[rs1] * registers[rs2];
             }
@@ -1164,7 +1170,8 @@ vm_exit:
             if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
                 registers[rd] =
                     Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() == registers[rs2].unsafeAsInt()));
-            } else if (registers[rs1].getType() == Value::Type::FLOAT && registers[rs2].getType() == Value::Type::FLOAT) {
+            } else if (registers[rs1].getType() == Value::Type::FLOAT &&
+                       registers[rs2].getType() == Value::Type::FLOAT) {
                 registers[rd] =
                     Value(static_cast<int64_t>(registers[rs1].unsafeAsFloat() == registers[rs2].unsafeAsFloat()));
             } else {
@@ -1180,7 +1187,8 @@ vm_exit:
             if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
                 registers[rd] =
                     Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() != registers[rs2].unsafeAsInt()));
-            } else if (registers[rs1].getType() == Value::Type::FLOAT && registers[rs2].getType() == Value::Type::FLOAT) {
+            } else if (registers[rs1].getType() == Value::Type::FLOAT &&
+                       registers[rs2].getType() == Value::Type::FLOAT) {
                 registers[rd] =
                     Value(static_cast<int64_t>(registers[rs1].unsafeAsFloat() != registers[rs2].unsafeAsFloat()));
             } else {
@@ -1196,7 +1204,8 @@ vm_exit:
             if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
                 registers[rd] =
                     Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() < registers[rs2].unsafeAsInt()));
-            } else if (registers[rs1].getType() == Value::Type::FLOAT && registers[rs2].getType() == Value::Type::FLOAT) {
+            } else if (registers[rs1].getType() == Value::Type::FLOAT &&
+                       registers[rs2].getType() == Value::Type::FLOAT) {
                 registers[rd] =
                     Value(static_cast<int64_t>(registers[rs1].unsafeAsFloat() < registers[rs2].unsafeAsFloat()));
             } else {
@@ -1212,7 +1221,8 @@ vm_exit:
             if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
                 registers[rd] =
                     Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() <= registers[rs2].unsafeAsInt()));
-            } else if (registers[rs1].getType() == Value::Type::FLOAT && registers[rs2].getType() == Value::Type::FLOAT) {
+            } else if (registers[rs1].getType() == Value::Type::FLOAT &&
+                       registers[rs2].getType() == Value::Type::FLOAT) {
                 registers[rd] =
                     Value(static_cast<int64_t>(registers[rs1].unsafeAsFloat() <= registers[rs2].unsafeAsFloat()));
             } else {
@@ -1228,7 +1238,8 @@ vm_exit:
             if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
                 registers[rd] =
                     Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() > registers[rs2].unsafeAsInt()));
-            } else if (registers[rs1].getType() == Value::Type::FLOAT && registers[rs2].getType() == Value::Type::FLOAT) {
+            } else if (registers[rs1].getType() == Value::Type::FLOAT &&
+                       registers[rs2].getType() == Value::Type::FLOAT) {
                 registers[rd] =
                     Value(static_cast<int64_t>(registers[rs1].unsafeAsFloat() > registers[rs2].unsafeAsFloat()));
             } else {
@@ -1244,7 +1255,8 @@ vm_exit:
             if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
                 registers[rd] =
                     Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() >= registers[rs2].unsafeAsInt()));
-            } else if (registers[rs1].getType() == Value::Type::FLOAT && registers[rs2].getType() == Value::Type::FLOAT) {
+            } else if (registers[rs1].getType() == Value::Type::FLOAT &&
+                       registers[rs2].getType() == Value::Type::FLOAT) {
                 registers[rd] =
                     Value(static_cast<int64_t>(registers[rs1].unsafeAsFloat() >= registers[rs2].unsafeAsFloat()));
             } else {

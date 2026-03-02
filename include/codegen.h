@@ -306,11 +306,11 @@ class CodeGenerator {
     void scanStmtForStringCalls(Statement* stmt);
 
     // Target CPU configuration for LLVM code generation.
-    std::string marchCpu_;     // -march: CPU arch for instruction selection ("" = native)
-    std::string mtuneCpu_;     // -mtune: CPU for scheduling tuning ("" = same as march)
-    bool usePIC_ = true;       // -fpic / -fno-pic
-    bool useFastMath_ = false; // -ffast-math / -fno-fast-math
-    bool enableOptMax_ = true; // -foptmax / -fno-optmax
+    std::string marchCpu_;           // -march: CPU arch for instruction selection ("" = native)
+    std::string mtuneCpu_;           // -mtune: CPU for scheduling tuning ("" = same as march)
+    bool usePIC_ = true;             // -fpic / -fno-pic
+    bool useFastMath_ = false;       // -ffast-math / -fno-fast-math
+    bool enableOptMax_ = true;       // -foptmax / -fno-optmax
     bool enableVectorize_ = true;    // -fvectorize / -fno-vectorize
     bool enableUnrollLoops_ = true;  // -funroll-loops / -fno-unroll-loops
     bool enableLoopOptimize_ = true; // -floop-optimize / -fno-loop-optimize

@@ -4962,20 +4962,19 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
 
     // Attach SIMD vectorization and unroll hints at O2+ when enabled.
     if (optimizationLevel >= OptimizationLevel::O2 && enableVectorize_) {
-        llvm::MDNode* vecEnable = llvm::MDNode::get(
-            *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
-                       llvm::ConstantAsMetadata::get(llvm::ConstantInt::getTrue(*context))});
+        llvm::MDNode* vecEnable =
+            llvm::MDNode::get(*context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
+                                         llvm::ConstantAsMetadata::get(llvm::ConstantInt::getTrue(*context))});
         llvm::MDNode* interleave = llvm::MDNode::get(
             *context, {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
-                       llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
-                           llvm::Type::getInt32Ty(*context), 4))});
+                       llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))});
         llvm::SmallVector<llvm::Metadata*, 4> loopMDs;
         loopMDs.push_back(nullptr); // self-reference placeholder
         loopMDs.push_back(vecEnable);
         loopMDs.push_back(interleave);
         if (enableUnrollLoops_) {
-            llvm::MDNode* unrollEnable = llvm::MDNode::get(
-                *context, {llvm::MDString::get(*context, "llvm.loop.unroll.enable")});
+            llvm::MDNode* unrollEnable =
+                llvm::MDNode::get(*context, {llvm::MDString::get(*context, "llvm.loop.unroll.enable")});
             loopMDs.push_back(unrollEnable);
         }
         llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
@@ -5112,19 +5111,18 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
 
     // Attach SIMD vectorization and unroll hints to the for-loop back-edge.
     if (optimizationLevel >= OptimizationLevel::O2 && enableVectorize_) {
-        llvm::MDNode* vecEnable = llvm::MDNode::get(
-            *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
-                       llvm::ConstantAsMetadata::get(llvm::ConstantInt::getTrue(*context))});
+        llvm::MDNode* vecEnable =
+            llvm::MDNode::get(*context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
+                                         llvm::ConstantAsMetadata::get(llvm::ConstantInt::getTrue(*context))});
         llvm::MDNode* interleave = llvm::MDNode::get(
             *context, {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
-                       llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
-                           llvm::Type::getInt32Ty(*context), 4))});
+                       llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))});
         llvm::SmallVector<llvm::Metadata*, 4> loopMDs;
         loopMDs.push_back(nullptr); // self-reference placeholder (fixed below)        loopMDs.push_back(vecEnable);
         loopMDs.push_back(interleave);
         if (enableUnrollLoops_) {
-            llvm::MDNode* unrollEnable = llvm::MDNode::get(
-                *context, {llvm::MDString::get(*context, "llvm.loop.unroll.enable")});
+            llvm::MDNode* unrollEnable =
+                llvm::MDNode::get(*context, {llvm::MDString::get(*context, "llvm.loop.unroll.enable")});
             loopMDs.push_back(unrollEnable);
         }
         llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
@@ -5535,12 +5533,11 @@ void CodeGenerator::runOptimizationPasses() {
     // without building a fully custom pass list.
     if (!enableVectorize_) {
         // Disable loop and SLP vectorization when -fno-vectorize is given.
-        PB.registerPipelineStartEPCallback(
-            [](llvm::ModulePassManager&, llvm::OptimizationLevel) {
-                // The PassBuilder honours TargetMachine options; we inject
-                // a pipeline-start callback only to document the intent.
-                // Actual disabling happens via per-loop metadata below.
-            });
+        PB.registerPipelineStartEPCallback([](llvm::ModulePassManager&, llvm::OptimizationLevel) {
+            // The PassBuilder honours TargetMachine options; we inject
+            // a pipeline-start callback only to document the intent.
+            // Actual disabling happens via per-loop metadata below.
+        });
     }
 
     llvm::LoopAnalysisManager LAM;

@@ -2631,8 +2631,8 @@ int main(int argc, char* argv[]) {
                 }
                 std::filesystem::remove(outputFile + objExt, ec);
                 if (ec) {
-                    std::cerr << "Warning: failed to remove temporary object file '" << outputFile
-                              << objExt << "': " << ec.message() << "\n";
+                    std::cerr << "Warning: failed to remove temporary object file '" << outputFile << objExt
+                              << "': " << ec.message() << "\n";
                 }
             }
             return result;

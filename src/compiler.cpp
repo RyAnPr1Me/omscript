@@ -148,8 +148,7 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
             std::error_code ec;
             std::filesystem::remove(objFile, ec);
             if (ec) {
-                std::cerr << "Warning: failed to clean up temporary file '" << objFile << "': " << ec.message()
-                          << "\n";
+                std::cerr << "Warning: failed to clean up temporary file '" << objFile << "': " << ec.message() << "\n";
             }
             objectFileCreated = false;
         }
