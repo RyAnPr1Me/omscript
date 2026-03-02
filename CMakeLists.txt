@@ -91,13 +91,18 @@ set(RUNTIME_SOURCES
 add_executable(omsc ${COMPILER_SOURCES} ${RUNTIME_SOURCES})
 
 # Link LLVM libraries
+# Only components actually used by the compiler and JIT runtime are listed.
+# - core, support: fundamental LLVM infrastructure
+# - executionengine, mcjit, interpreter: JIT execution (runtime/jit.cpp)
+# - native: host target auto-detection
+# - passes, transformutils, analysis: optimization pipeline
+# - target, codegen, mc, mcparser, asmparser: machine code emission
 set(LLVM_COMPONENTS
     core
     executionengine
     mcjit
     interpreter
     native
-    irreader
     support
     passes
     target
@@ -107,8 +112,6 @@ set(LLVM_COMPONENTS
     codegen
     mc
     mcparser
-    orcjit
-    linker
 )
 
 # Conditionally add target-specific components based on available LLVM targets

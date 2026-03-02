@@ -1198,6 +1198,14 @@ bool CodeGenerator::isStringExpr(Expression* expr) const {
 void CodeGenerator::generate(Program* program) {
     hasOptMaxFunctions = false;
     optMaxFunctions.clear();
+    irInstructionCount_ = 0;
+
+    // Resource budget: limit number of functions to prevent DoS.
+    if (program->functions.size() > kMaxFunctions) {
+        throw std::runtime_error(
+            "Compilation aborted: function count limit exceeded (" +
+            std::to_string(kMaxFunctions) + "). Input program is too large.");
+    }
 
     // Validate: check for duplicate function names and duplicate parameters.
     bool hasMain = false;
@@ -1356,6 +1364,7 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
 }
 
 void CodeGenerator::generateStatement(Statement* stmt) {
+    checkIRBudget();
     switch (stmt->type) {
     case ASTNodeType::VAR_DECL:
         generateVarDecl(static_cast<VarDecl*>(stmt));
@@ -1426,6 +1435,7 @@ void CodeGenerator::generateStatement(Statement* stmt) {
 }
 
 llvm::Value* CodeGenerator::generateExpression(Expression* expr) {
+    checkIRBudget();
     switch (expr->type) {
     case ASTNodeType::LITERAL_EXPR:
         return generateLiteral(static_cast<LiteralExpr*>(expr));

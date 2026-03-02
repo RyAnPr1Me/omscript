@@ -292,6 +292,23 @@ class CodeGenerator {
     bool useFastMath_ = false; // -ffast-math / -fno-fast-math
     bool enableOptMax_ = true; // -foptmax / -fno-optmax
 
+    /// Compile-time resource budget — limits to prevent DoS via oversized inputs.
+    /// Checked during code generation to abort compilation if the program
+    /// exceeds reasonable complexity bounds.
+    static constexpr size_t kMaxFunctions = 10000;
+    static constexpr size_t kMaxIRInstructions = 1000000;
+    size_t irInstructionCount_ = 0;
+
+    /// Increment the IR instruction counter and abort if the budget is exceeded.
+    void checkIRBudget() {
+        if (++irInstructionCount_ > kMaxIRInstructions) {
+            throw std::runtime_error(
+                "Compilation aborted: IR instruction limit exceeded (" +
+                std::to_string(kMaxIRInstructions) +
+                "). Input program is too large or complex.");
+        }
+    }
+
     /// Counter for generating unique bytecode switch temp-variable names.
     /// Member variable (not function-local static) for thread-safety and
     /// deterministic output across independent CodeGenerator instances.
