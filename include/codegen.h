@@ -3,6 +3,7 @@
 
 #include "ast.h"
 #include "bytecode.h"
+#include "diagnostic.h"
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
@@ -295,6 +296,7 @@ class CodeGenerator {
     /// Compile-time resource budget — limits to prevent DoS via oversized inputs.
     /// Checked during code generation to abort compilation if the program
     /// exceeds reasonable complexity bounds.
+    /// Note: not atomic — CodeGenerator instances are not shared across threads.
     static constexpr size_t kMaxFunctions = 10000;
     static constexpr size_t kMaxIRInstructions = 1000000;
     size_t irInstructionCount_ = 0;
@@ -302,10 +304,11 @@ class CodeGenerator {
     /// Increment the IR instruction counter and abort if the budget is exceeded.
     void checkIRBudget() {
         if (++irInstructionCount_ > kMaxIRInstructions) {
-            throw std::runtime_error(
+            throw DiagnosticError(Diagnostic{
+                DiagnosticSeverity::Error, {0, 0},
                 "Compilation aborted: IR instruction limit exceeded (" +
-                std::to_string(kMaxIRInstructions) +
-                "). Input program is too large or complex.");
+                    std::to_string(kMaxIRInstructions) +
+                    "). Input program is too large or complex."});
         }
     }
 

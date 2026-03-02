@@ -696,7 +696,8 @@ void CodeGenerator::bindVariable(const std::string& name, llvm::Value* value, bo
 void CodeGenerator::checkConstModification(const std::string& name, const std::string& action) {
     auto constIt = constValues.find(name);
     if (constIt != constValues.end() && constIt->second) {
-        throw std::runtime_error("Cannot " + action + " const variable: " + name);
+        throw DiagnosticError(
+            Diagnostic{DiagnosticSeverity::Error, {0, 0}, "Cannot " + action + " const variable: " + name});
     }
 }
 
@@ -1202,9 +1203,10 @@ void CodeGenerator::generate(Program* program) {
 
     // Resource budget: limit number of functions to prevent DoS.
     if (program->functions.size() > kMaxFunctions) {
-        throw std::runtime_error(
+        throw DiagnosticError(Diagnostic{
+            DiagnosticSeverity::Error, {0, 0},
             "Compilation aborted: function count limit exceeded (" +
-            std::to_string(kMaxFunctions) + "). Input program is too large.");
+                std::to_string(kMaxFunctions) + "). Input program is too large."});
     }
 
     // Validate: check for duplicate function names and duplicate parameters.
@@ -1240,7 +1242,8 @@ void CodeGenerator::generate(Program* program) {
     }
     if (!hasMain) {
         // Program-level error — no specific AST node to reference for location.
-        throw std::runtime_error("No 'main' function defined");
+        throw DiagnosticError(
+            Diagnostic{DiagnosticSeverity::Error, {0, 0}, "No 'main' function defined"});
     }
 
     // Forward-declare all functions so that any function can reference any
