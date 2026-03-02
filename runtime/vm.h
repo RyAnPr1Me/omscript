@@ -30,6 +30,7 @@ struct CallFrame {
     std::vector<Value> savedLocals;             // caller's locals snapshot
     std::vector<Value> savedRegisters;          // caller's register file snapshot
     uint8_t returnReg;                          // destination register for return value
+    uint8_t savedMaxReg;                        // caller's maxRegUsed_ for partial restore
 };
 
 class VM {
@@ -65,6 +66,12 @@ class VM {
     std::unordered_map<std::string, Value> globals;
     std::vector<Value> locals;
     Value lastReturn;
+
+    // High-water mark for the register file — tracks the highest register
+    // index written during execution.  Used to save/restore only the
+    // registers actually in use on CALL/RETURN, avoiding the cost of
+    // copying all 256 Values.
+    uint8_t maxRegUsed_ = 0;
 
     // Registered bytecode functions keyed by name.
     std::unordered_map<std::string, BytecodeFunction> functions;
