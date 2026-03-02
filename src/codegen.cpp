@@ -5119,8 +5119,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
                        llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
                            llvm::Type::getInt32Ty(*context), 4))});
         llvm::SmallVector<llvm::Metadata*, 4> loopMDs;
-        loopMDs.push_back(nullptr);
-        loopMDs.push_back(vecEnable);
+        loopMDs.push_back(nullptr); // self-reference placeholder (fixed below)        loopMDs.push_back(vecEnable);
         loopMDs.push_back(interleave);
         if (enableUnrollLoops_) {
             llvm::MDNode* unrollEnable = llvm::MDNode::get(
@@ -5572,12 +5571,10 @@ void CodeGenerator::runOptimizationPasses() {
     // Loop distribution splits a loop with multiple independent memory
     // access patterns into separate loops, each touching a smaller working
     // set — this is the key transformation in polyhedral loop optimization
-    // that improves data-cache utilisation and enables downstream
-    // vectorisation of the resulting simpler loops.
+    // that improves data-cache utilization and enables downstream
+    // vectorization of the resulting simpler loops.
     if (optimizationLevel == OptimizationLevel::O3 && enableLoopOptimize_) {
-        llvm::FunctionPassManager loopFPM;
-        loopFPM.addPass(llvm::LoopDistributePass());
-        MPM.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(loopFPM)));
+        MPM.addPass(llvm::createModuleToFunctionPassAdaptor(llvm::LoopDistributePass()));
     }
 
     MPM.run(*module, MAM);

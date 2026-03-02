@@ -439,8 +439,8 @@ hiding memory latency on bytecode streams that span multiple cache lines.
 At O3 with `-floop-optimize`, the compiler appends LLVM's `LoopDistributePass` to the
 new-PM module pipeline. Loop distribution splits a single loop with multiple independent
 memory access streams into separate loops, each with a smaller working set. This is the
-key transformation in polyhedral loop optimisation that improves data-cache utilisation
-and enables downstream vectorisation of the simpler resulting loops. The OPTMAX pipeline
+key transformation in polyhedral loop optimization that improves data-cache utilization
+and enables downstream vectorization of the simpler resulting loops. The OPTMAX pipeline
 also includes `LoopDataPrefetchPass` for software prefetch insertion in loops with
 predictable array access patterns.
 
@@ -449,12 +449,12 @@ At O2+ with `-fvectorize`, the compiler attaches LLVM loop metadata to generated
 back-edges:
 - `llvm.loop.vectorize.enable = true` — enables the loop vectoriser for each loop
 - `llvm.loop.interleave.count = 4` — requests 4-way interleaving for wider SIMD
-  utilisation and better instruction-level parallelism
+  utilization and better instruction-level parallelism
 - `llvm.loop.unroll.enable` (when `-funroll-loops` is on) — enables loop unrolling
 
 These metadata hints guide LLVM's LoopVectorize and LoopUnroll passes, complementing
-the existing auto-vectorisation at O3 by explicitly marking every user-written loop as
-a vectorisation candidate.
+the existing auto-vectorization at O3 by explicitly marking every user-written loop as
+a vectorization candidate.
 
 ### Bytecode Register Reclamation
 The bytecode emitter now calls `resetTempRegs()` at statement boundaries (after expression
