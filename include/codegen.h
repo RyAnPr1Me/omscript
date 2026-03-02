@@ -70,6 +70,10 @@ class CodeGenerator {
 
     void generate(Program* program);
     void writeObjectFile(const std::string& filename);
+    /// Write the module as LLVM bitcode for full link-time optimization (FLTO).
+    /// The linker (gcc/clang with -flto) reads bitcode and performs whole-program
+    /// optimization across translation units at link time.
+    void writeBitcodeFile(const std::string& filename);
     llvm::Module* getModule() {
         return module.get();
     }

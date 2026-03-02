@@ -6,6 +6,7 @@
 #include <iostream>
 #include <llvm/ADT/StringMap.h>
 #include <llvm/Analysis/TargetTransformInfo.h>
+#include <llvm/Bitcode/BitcodeWriter.h>
 #include <llvm/Config/llvm-config.h>
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/LegacyPassManager.h>
@@ -5699,6 +5700,38 @@ void CodeGenerator::writeObjectFile(const std::string& filename) {
     // Detect errors during close (e.g. I/O errors that occurred during write).
     if (dest.has_error()) {
         std::string errMsg = "Error writing object file: " + dest.error().message();
+        dest.clear_error();
+        throw std::runtime_error(errMsg);
+    }
+}
+
+void CodeGenerator::writeBitcodeFile(const std::string& filename) {
+    // Initialize native target so the data layout can be set correctly.
+    llvm::InitializeNativeTarget();
+
+    std::string targetTripleStr = llvm::sys::getDefaultTargetTriple();
+#if LLVM_VERSION_MAJOR >= 19
+    llvm::Triple targetTriple(targetTripleStr);
+    module->setTargetTriple(targetTriple);
+#else
+    module->setTargetTriple(targetTripleStr);
+#endif
+
+    auto targetMachine = createTargetMachine();
+    if (targetMachine) {
+        module->setDataLayout(targetMachine->createDataLayout());
+    }
+
+    std::error_code EC;
+    llvm::raw_fd_ostream dest(filename, EC, llvm::sys::fs::OF_None);
+    if (EC) {
+        throw std::runtime_error("Could not open file: " + EC.message());
+    }
+
+    llvm::WriteBitcodeToFile(*module, dest);
+    dest.flush();
+    if (dest.has_error()) {
+        std::string errMsg = "Error writing bitcode file: " + dest.error().message();
         dest.clear_error();
         throw std::runtime_error(errMsg);
     }
