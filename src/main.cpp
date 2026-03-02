@@ -2444,6 +2444,14 @@ int main(int argc, char* argv[]) {
             // EmitIR
             auto codegenStart = std::chrono::steady_clock::now();
             omscript::CodeGenerator codegen(optLevel);
+            codegen.setMarch(marchCpu);
+            codegen.setMtune(mtuneCpu);
+            codegen.setPIC(flagPIC);
+            codegen.setFastMath(flagFastMath);
+            codegen.setOptMax(flagOptMax);
+            codegen.setVectorize(flagVectorize);
+            codegen.setUnrollLoops(flagUnrollLoops);
+            codegen.setLoopOptimize(flagLoopOptimize);
             codegen.generate(program.get());
             auto codegenEnd = std::chrono::steady_clock::now();
 

@@ -5118,7 +5118,8 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             *context, {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
                        llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))});
         llvm::SmallVector<llvm::Metadata*, 4> loopMDs;
-        loopMDs.push_back(nullptr); // self-reference placeholder (fixed below)        loopMDs.push_back(vecEnable);
+        loopMDs.push_back(nullptr); // self-reference placeholder (fixed below)
+        loopMDs.push_back(vecEnable);
         loopMDs.push_back(interleave);
         if (enableUnrollLoops_) {
             llvm::MDNode* unrollEnable =
