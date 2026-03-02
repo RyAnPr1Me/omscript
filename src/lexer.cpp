@@ -212,11 +212,13 @@ Token Lexer::scanNumber() {
 }
 
 Token Lexer::scanIdentifier() {
-    std::string id;
+    size_t start = pos;
 
     while (!isAtEnd() && (isAlnum(peek()) || peek() == '_')) {
-        id += advance();
+        advance();
     }
+
+    std::string id = source.substr(start, pos - start);
 
     auto it = keywords.find(id);
     if (it != keywords.end()) {

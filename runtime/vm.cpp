@@ -862,33 +862,79 @@ vm_exit:
         }
         case OpCode::POP:
             break;
-        case OpCode::ADD:
-        case OpCode::SUB:
-        case OpCode::MUL:
-        case OpCode::DIV:
+        case OpCode::ADD: {
+            uint8_t rd = readByte(bytecode, ip);
+            uint8_t rs1 = readByte(bytecode, ip);
+            uint8_t rs2 = readByte(bytecode, ip);
+            if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
+                registers[rd] = Value(registers[rs1].unsafeAsInt() + registers[rs2].unsafeAsInt());
+            } else if (registers[rs1].getType() == Value::Type::FLOAT && registers[rs2].getType() == Value::Type::FLOAT) {
+                registers[rd] = Value(registers[rs1].unsafeAsFloat() + registers[rs2].unsafeAsFloat());
+            } else {
+                registers[rd] = registers[rs1] + registers[rs2];
+            }
+            break;
+        }
+        case OpCode::SUB: {
+            uint8_t rd = readByte(bytecode, ip);
+            uint8_t rs1 = readByte(bytecode, ip);
+            uint8_t rs2 = readByte(bytecode, ip);
+            if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
+                registers[rd] = Value(registers[rs1].unsafeAsInt() - registers[rs2].unsafeAsInt());
+            } else if (registers[rs1].getType() == Value::Type::FLOAT && registers[rs2].getType() == Value::Type::FLOAT) {
+                registers[rd] = Value(registers[rs1].unsafeAsFloat() - registers[rs2].unsafeAsFloat());
+            } else {
+                registers[rd] = registers[rs1] - registers[rs2];
+            }
+            break;
+        }
+        case OpCode::MUL: {
+            uint8_t rd = readByte(bytecode, ip);
+            uint8_t rs1 = readByte(bytecode, ip);
+            uint8_t rs2 = readByte(bytecode, ip);
+            if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
+                registers[rd] = Value(registers[rs1].unsafeAsInt() * registers[rs2].unsafeAsInt());
+            } else if (registers[rs1].getType() == Value::Type::FLOAT && registers[rs2].getType() == Value::Type::FLOAT) {
+                registers[rd] = Value(registers[rs1].unsafeAsFloat() * registers[rs2].unsafeAsFloat());
+            } else {
+                registers[rd] = registers[rs1] * registers[rs2];
+            }
+            break;
+        }
+        case OpCode::DIV: {
+            uint8_t rd = readByte(bytecode, ip);
+            uint8_t rs1 = readByte(bytecode, ip);
+            uint8_t rs2 = readByte(bytecode, ip);
+            if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
+                int64_t av = registers[rs1].unsafeAsInt();
+                int64_t bv = registers[rs2].unsafeAsInt();
+                if (bv != 0 && !(av == INT64_MIN && bv == -1)) {
+                    registers[rd] = Value(av / bv);
+                    break;
+                }
+            } else if (registers[rs1].getType() == Value::Type::FLOAT && registers[rs2].getType() == Value::Type::FLOAT) {
+                double bv = registers[rs2].unsafeAsFloat();
+                if (bv != 0.0) {
+                    registers[rd] = Value(registers[rs1].unsafeAsFloat() / bv);
+                    break;
+                }
+            }
+            registers[rd] = registers[rs1] / registers[rs2];
+            break;
+        }
         case OpCode::MOD: {
             uint8_t rd = readByte(bytecode, ip);
             uint8_t rs1 = readByte(bytecode, ip);
             uint8_t rs2 = readByte(bytecode, ip);
-            switch (op) {
-            case OpCode::ADD:
-                registers[rd] = registers[rs1] + registers[rs2];
-                break;
-            case OpCode::SUB:
-                registers[rd] = registers[rs1] - registers[rs2];
-                break;
-            case OpCode::MUL:
-                registers[rd] = registers[rs1] * registers[rs2];
-                break;
-            case OpCode::DIV:
-                registers[rd] = registers[rs1] / registers[rs2];
-                break;
-            case OpCode::MOD:
-                registers[rd] = registers[rs1] % registers[rs2];
-                break;
-            default:
-                break;
+            if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
+                int64_t av = registers[rs1].unsafeAsInt();
+                int64_t bv = registers[rs2].unsafeAsInt();
+                if (bv != 0 && !(av == INT64_MIN && bv == -1)) {
+                    registers[rd] = Value(av % bv);
+                    break;
+                }
             }
+            registers[rd] = registers[rs1] % registers[rs2];
             break;
         }
         case OpCode::POW: {
@@ -946,39 +992,82 @@ vm_exit:
         case OpCode::NEG: {
             uint8_t rd = readByte(bytecode, ip);
             uint8_t rs = readByte(bytecode, ip);
+            if (registers[rs].getType() == Value::Type::INTEGER) {
+                int64_t val = registers[rs].unsafeAsInt();
+                if (val != INT64_MIN) {
+                    registers[rd] = Value(-val);
+                    break;
+                }
+            } else if (registers[rs].getType() == Value::Type::FLOAT) {
+                registers[rd] = Value(-registers[rs].unsafeAsFloat());
+                break;
+            }
             registers[rd] = -registers[rs];
             break;
         }
-        case OpCode::EQ:
-        case OpCode::NE:
-        case OpCode::LT:
-        case OpCode::LE:
-        case OpCode::GT:
+        case OpCode::EQ: {
+            uint8_t rd = readByte(bytecode, ip);
+            uint8_t rs1 = readByte(bytecode, ip);
+            uint8_t rs2 = readByte(bytecode, ip);
+            if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
+                registers[rd] = Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() == registers[rs2].unsafeAsInt()));
+            } else {
+                registers[rd] = Value(static_cast<int64_t>(registers[rs1] == registers[rs2]));
+            }
+            break;
+        }
+        case OpCode::NE: {
+            uint8_t rd = readByte(bytecode, ip);
+            uint8_t rs1 = readByte(bytecode, ip);
+            uint8_t rs2 = readByte(bytecode, ip);
+            if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
+                registers[rd] = Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() != registers[rs2].unsafeAsInt()));
+            } else {
+                registers[rd] = Value(static_cast<int64_t>(registers[rs1] != registers[rs2]));
+            }
+            break;
+        }
+        case OpCode::LT: {
+            uint8_t rd = readByte(bytecode, ip);
+            uint8_t rs1 = readByte(bytecode, ip);
+            uint8_t rs2 = readByte(bytecode, ip);
+            if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
+                registers[rd] = Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() < registers[rs2].unsafeAsInt()));
+            } else {
+                registers[rd] = Value(static_cast<int64_t>(registers[rs1] < registers[rs2]));
+            }
+            break;
+        }
+        case OpCode::LE: {
+            uint8_t rd = readByte(bytecode, ip);
+            uint8_t rs1 = readByte(bytecode, ip);
+            uint8_t rs2 = readByte(bytecode, ip);
+            if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
+                registers[rd] = Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() <= registers[rs2].unsafeAsInt()));
+            } else {
+                registers[rd] = Value(static_cast<int64_t>(registers[rs1] <= registers[rs2]));
+            }
+            break;
+        }
+        case OpCode::GT: {
+            uint8_t rd = readByte(bytecode, ip);
+            uint8_t rs1 = readByte(bytecode, ip);
+            uint8_t rs2 = readByte(bytecode, ip);
+            if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
+                registers[rd] = Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() > registers[rs2].unsafeAsInt()));
+            } else {
+                registers[rd] = Value(static_cast<int64_t>(registers[rs1] > registers[rs2]));
+            }
+            break;
+        }
         case OpCode::GE: {
             uint8_t rd = readByte(bytecode, ip);
             uint8_t rs1 = readByte(bytecode, ip);
             uint8_t rs2 = readByte(bytecode, ip);
-            switch (op) {
-            case OpCode::EQ:
-                registers[rd] = Value(static_cast<int64_t>(registers[rs1] == registers[rs2]));
-                break;
-            case OpCode::NE:
-                registers[rd] = Value(static_cast<int64_t>(registers[rs1] != registers[rs2]));
-                break;
-            case OpCode::LT:
-                registers[rd] = Value(static_cast<int64_t>(registers[rs1] < registers[rs2]));
-                break;
-            case OpCode::LE:
-                registers[rd] = Value(static_cast<int64_t>(registers[rs1] <= registers[rs2]));
-                break;
-            case OpCode::GT:
-                registers[rd] = Value(static_cast<int64_t>(registers[rs1] > registers[rs2]));
-                break;
-            case OpCode::GE:
+            if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
+                registers[rd] = Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() >= registers[rs2].unsafeAsInt()));
+            } else {
                 registers[rd] = Value(static_cast<int64_t>(registers[rs1] >= registers[rs2]));
-                break;
-            default:
-                break;
             }
             break;
         }
@@ -986,55 +1075,103 @@ vm_exit:
             uint8_t rd = readByte(bytecode, ip);
             uint8_t rs1 = readByte(bytecode, ip);
             uint8_t rs2 = readByte(bytecode, ip);
-            registers[rd] = Value(static_cast<int64_t>(registers[rs1].isTruthy() && registers[rs2].isTruthy()));
+            if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
+                registers[rd] = Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() != 0 && registers[rs2].unsafeAsInt() != 0));
+            } else {
+                registers[rd] = Value(static_cast<int64_t>(registers[rs1].isTruthy() && registers[rs2].isTruthy()));
+            }
             break;
         }
         case OpCode::OR: {
             uint8_t rd = readByte(bytecode, ip);
             uint8_t rs1 = readByte(bytecode, ip);
             uint8_t rs2 = readByte(bytecode, ip);
-            registers[rd] = Value(static_cast<int64_t>(registers[rs1].isTruthy() || registers[rs2].isTruthy()));
+            if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
+                registers[rd] = Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() != 0 || registers[rs2].unsafeAsInt() != 0));
+            } else {
+                registers[rd] = Value(static_cast<int64_t>(registers[rs1].isTruthy() || registers[rs2].isTruthy()));
+            }
             break;
         }
         case OpCode::NOT: {
             uint8_t rd = readByte(bytecode, ip);
             uint8_t rs = readByte(bytecode, ip);
-            registers[rd] = Value(static_cast<int64_t>(!registers[rs].isTruthy()));
+            if (registers[rs].getType() == Value::Type::INTEGER) {
+                registers[rd] = Value(static_cast<int64_t>(registers[rs].unsafeAsInt() == 0));
+            } else {
+                registers[rd] = Value(static_cast<int64_t>(!registers[rs].isTruthy()));
+            }
             break;
         }
-        case OpCode::BIT_AND:
-        case OpCode::BIT_OR:
-        case OpCode::BIT_XOR:
-        case OpCode::SHL:
+        case OpCode::BIT_AND: {
+            uint8_t rd = readByte(bytecode, ip);
+            uint8_t rs1 = readByte(bytecode, ip);
+            uint8_t rs2 = readByte(bytecode, ip);
+            if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
+                registers[rd] = Value(registers[rs1].unsafeAsInt() & registers[rs2].unsafeAsInt());
+            } else {
+                registers[rd] = registers[rs1] & registers[rs2];
+            }
+            break;
+        }
+        case OpCode::BIT_OR: {
+            uint8_t rd = readByte(bytecode, ip);
+            uint8_t rs1 = readByte(bytecode, ip);
+            uint8_t rs2 = readByte(bytecode, ip);
+            if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
+                registers[rd] = Value(registers[rs1].unsafeAsInt() | registers[rs2].unsafeAsInt());
+            } else {
+                registers[rd] = registers[rs1] | registers[rs2];
+            }
+            break;
+        }
+        case OpCode::BIT_XOR: {
+            uint8_t rd = readByte(bytecode, ip);
+            uint8_t rs1 = readByte(bytecode, ip);
+            uint8_t rs2 = readByte(bytecode, ip);
+            if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
+                registers[rd] = Value(registers[rs1].unsafeAsInt() ^ registers[rs2].unsafeAsInt());
+            } else {
+                registers[rd] = registers[rs1] ^ registers[rs2];
+            }
+            break;
+        }
+        case OpCode::SHL: {
+            uint8_t rd = readByte(bytecode, ip);
+            uint8_t rs1 = readByte(bytecode, ip);
+            uint8_t rs2 = readByte(bytecode, ip);
+            if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
+                int64_t bv = registers[rs2].unsafeAsInt();
+                if (bv >= 0 && bv < kInt64BitWidth) {
+                    registers[rd] = Value(registers[rs1].unsafeAsInt() << bv);
+                    break;
+                }
+            }
+            registers[rd] = registers[rs1] << registers[rs2];
+            break;
+        }
         case OpCode::SHR: {
             uint8_t rd = readByte(bytecode, ip);
             uint8_t rs1 = readByte(bytecode, ip);
             uint8_t rs2 = readByte(bytecode, ip);
-            switch (op) {
-            case OpCode::BIT_AND:
-                registers[rd] = registers[rs1] & registers[rs2];
-                break;
-            case OpCode::BIT_OR:
-                registers[rd] = registers[rs1] | registers[rs2];
-                break;
-            case OpCode::BIT_XOR:
-                registers[rd] = registers[rs1] ^ registers[rs2];
-                break;
-            case OpCode::SHL:
-                registers[rd] = registers[rs1] << registers[rs2];
-                break;
-            case OpCode::SHR:
-                registers[rd] = registers[rs1] >> registers[rs2];
-                break;
-            default:
-                break;
+            if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
+                int64_t bv = registers[rs2].unsafeAsInt();
+                if (bv >= 0 && bv < kInt64BitWidth) {
+                    registers[rd] = Value(registers[rs1].unsafeAsInt() >> bv);
+                    break;
+                }
             }
+            registers[rd] = registers[rs1] >> registers[rs2];
             break;
         }
         case OpCode::BIT_NOT: {
             uint8_t rd = readByte(bytecode, ip);
             uint8_t rs = readByte(bytecode, ip);
-            registers[rd] = ~registers[rs];
+            if (registers[rs].getType() == Value::Type::INTEGER) {
+                registers[rd] = Value(~registers[rs].unsafeAsInt());
+            } else {
+                registers[rd] = ~registers[rs];
+            }
             break;
         }
         case OpCode::LOAD_VAR: {
@@ -1083,7 +1220,13 @@ vm_exit:
         case OpCode::JUMP_IF_FALSE: {
             uint8_t rs = readByte(bytecode, ip);
             uint16_t offset = readShort(bytecode, ip);
-            if (!registers[rs].isTruthy()) {
+            bool isFalse;
+            if (registers[rs].getType() == Value::Type::INTEGER) {
+                isFalse = registers[rs].unsafeAsInt() == 0;
+            } else {
+                isFalse = !registers[rs].isTruthy();
+            }
+            if (isFalse) {
                 if (offset >= bytecode.size()) {
                     throw std::runtime_error("Jump offset out of bounds at ip " + std::to_string(ip - 2));
                 }
