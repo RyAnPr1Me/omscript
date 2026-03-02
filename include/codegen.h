@@ -304,11 +304,11 @@ class CodeGenerator {
     /// Increment the IR instruction counter and abort if the budget is exceeded.
     void checkIRBudget() {
         if (++irInstructionCount_ > kMaxIRInstructions) {
-            throw DiagnosticError(Diagnostic{
-                DiagnosticSeverity::Error, {0, 0},
-                "Compilation aborted: IR instruction limit exceeded (" +
-                    std::to_string(kMaxIRInstructions) +
-                    "). Input program is too large or complex."});
+            throw DiagnosticError(Diagnostic{DiagnosticSeverity::Error,
+                                             {0, 0},
+                                             "Compilation aborted: IR instruction limit exceeded (" +
+                                                 std::to_string(kMaxIRInstructions) +
+                                                 "). Input program is too large or complex."});
         }
     }
 

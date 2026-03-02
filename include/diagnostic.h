@@ -58,8 +58,7 @@ struct Diagnostic {
 /// can catch DiagnosticError specifically.
 class DiagnosticError : public std::runtime_error {
   public:
-    explicit DiagnosticError(const Diagnostic& diag)
-        : std::runtime_error(diag.format()), diagnostic_(diag) {}
+    explicit DiagnosticError(const Diagnostic& diag) : std::runtime_error(diag.format()), diagnostic_(diag) {}
 
     const Diagnostic& diagnostic() const noexcept {
         return diagnostic_;
