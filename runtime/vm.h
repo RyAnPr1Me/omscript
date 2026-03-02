@@ -113,8 +113,7 @@ class VM {
     /// Zero-copy string read: returns a view into the bytecode buffer.
     /// The returned view is valid as long as the underlying bytecode vector
     /// is not modified or destroyed.
-    inline std::string_view readStringView(const std::vector<uint8_t>& code, size_t& ip)
-        __attribute__((always_inline));
+    inline std::string_view readStringView(const std::vector<uint8_t>& code, size_t& ip) __attribute__((always_inline));
 };
 
 } // namespace omscript

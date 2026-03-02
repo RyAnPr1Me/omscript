@@ -23,10 +23,8 @@ static constexpr int64_t kMaxExponent = 1000;
 static inline bool wouldMultiplyOverflow(int64_t a, int64_t b) {
     if (a == 0 || a == 1 || a == -1 || b == 0 || b == 1 || b == -1)
         return false;
-    uint64_t ua = (a < 0) ? static_cast<uint64_t>(-static_cast<uint64_t>(a))
-                           : static_cast<uint64_t>(a);
-    uint64_t ub = (b < 0) ? static_cast<uint64_t>(-static_cast<uint64_t>(b))
-                           : static_cast<uint64_t>(b);
+    uint64_t ua = (a < 0) ? static_cast<uint64_t>(-static_cast<uint64_t>(a)) : static_cast<uint64_t>(a);
+    uint64_t ub = (b < 0) ? static_cast<uint64_t>(-static_cast<uint64_t>(b)) : static_cast<uint64_t>(b);
     return ua > static_cast<uint64_t>(INT64_MAX) / ub;
 }
 
@@ -133,7 +131,8 @@ bool VM::invokeJIT(JITFnPtr fn, uint8_t argCount, const uint8_t* argRegs, uint8_
         args[i] = registers[argRegs[i]].unsafeAsInt();
     int64_t result = fn(args, static_cast<int>(argCount));
     registers[rd] = Value(result);
-    if (rd > maxRegUsed_) maxRegUsed_ = rd;
+    if (rd > maxRegUsed_)
+        maxRegUsed_ = rd;
     return true;
 }
 
@@ -157,7 +156,8 @@ bool VM::invokeJITFloat(JITFloatFnPtr fn, uint8_t argCount, const uint8_t* argRe
         args[i] = registers[argRegs[i]].unsafeAsFloat();
     double result = fn(args, static_cast<int>(argCount));
     registers[rd] = Value(result);
-    if (rd > maxRegUsed_) maxRegUsed_ = rd;
+    if (rd > maxRegUsed_)
+        maxRegUsed_ = rd;
     return true;
 }
 
@@ -191,7 +191,11 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
 
     // Branchless high-water-mark update for register writes.
     // Uses conditional move (cmov) on x86 — no branch misprediction.
-#define TRACK_REG(r) do { if ((r) > maxRegUsed_) maxRegUsed_ = (r); } while (0)
+#define TRACK_REG(r)                                                                                                   \
+    do {                                                                                                               \
+        if ((r) > maxRegUsed_)                                                                                         \
+            maxRegUsed_ = (r);                                                                                         \
+    } while (0)
 
 // Use computed-goto dispatch on GCC/Clang for faster opcode dispatch.
 #if defined(__GNUC__) || defined(__clang__)
@@ -770,7 +774,7 @@ op_MOV: {
 op_CALL: {
     do {
         uint8_t rd = readByte(*curBytecode, ip);
-    TRACK_REG(rd);
+        TRACK_REG(rd);
         std::string funcName = readString(*curBytecode, ip);
         uint8_t argCount = readByte(*curBytecode, ip);
         uint8_t argRegs[256];
@@ -883,7 +887,8 @@ op_CALL: {
 }
 
 op_UNKNOWN:
-    throw std::runtime_error("Unknown opcode " + std::to_string((*curBytecode)[ip - 1]) + " at ip " + std::to_string(ip - 1));
+    throw std::runtime_error("Unknown opcode " + std::to_string((*curBytecode)[ip - 1]) + " at ip " +
+                             std::to_string(ip - 1));
 
 vm_exit:
     return;
@@ -927,7 +932,8 @@ vm_exit:
             uint8_t rs2 = readByte(*curBytecode, ip);
             if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
                 registers[rd] = Value(registers[rs1].unsafeAsInt() + registers[rs2].unsafeAsInt());
-            } else if (registers[rs1].getType() == Value::Type::FLOAT && registers[rs2].getType() == Value::Type::FLOAT) {
+            } else if (registers[rs1].getType() == Value::Type::FLOAT &&
+                       registers[rs2].getType() == Value::Type::FLOAT) {
                 registers[rd] = Value(registers[rs1].unsafeAsFloat() + registers[rs2].unsafeAsFloat());
             } else {
                 registers[rd] = registers[rs1] + registers[rs2];
@@ -941,7 +947,8 @@ vm_exit:
             uint8_t rs2 = readByte(*curBytecode, ip);
             if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
                 registers[rd] = Value(registers[rs1].unsafeAsInt() - registers[rs2].unsafeAsInt());
-            } else if (registers[rs1].getType() == Value::Type::FLOAT && registers[rs2].getType() == Value::Type::FLOAT) {
+            } else if (registers[rs1].getType() == Value::Type::FLOAT &&
+                       registers[rs2].getType() == Value::Type::FLOAT) {
                 registers[rd] = Value(registers[rs1].unsafeAsFloat() - registers[rs2].unsafeAsFloat());
             } else {
                 registers[rd] = registers[rs1] - registers[rs2];
@@ -955,7 +962,8 @@ vm_exit:
             uint8_t rs2 = readByte(*curBytecode, ip);
             if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
                 registers[rd] = Value(registers[rs1].unsafeAsInt() * registers[rs2].unsafeAsInt());
-            } else if (registers[rs1].getType() == Value::Type::FLOAT && registers[rs2].getType() == Value::Type::FLOAT) {
+            } else if (registers[rs1].getType() == Value::Type::FLOAT &&
+                       registers[rs2].getType() == Value::Type::FLOAT) {
                 registers[rd] = Value(registers[rs1].unsafeAsFloat() * registers[rs2].unsafeAsFloat());
             } else {
                 registers[rd] = registers[rs1] * registers[rs2];
@@ -974,7 +982,8 @@ vm_exit:
                     registers[rd] = Value(av / bv);
                     break;
                 }
-            } else if (registers[rs1].getType() == Value::Type::FLOAT && registers[rs2].getType() == Value::Type::FLOAT) {
+            } else if (registers[rs1].getType() == Value::Type::FLOAT &&
+                       registers[rs2].getType() == Value::Type::FLOAT) {
                 double bv = registers[rs2].unsafeAsFloat();
                 if (bv != 0.0) {
                     registers[rd] = Value(registers[rs1].unsafeAsFloat() / bv);
@@ -1076,7 +1085,8 @@ vm_exit:
             uint8_t rs1 = readByte(*curBytecode, ip);
             uint8_t rs2 = readByte(*curBytecode, ip);
             if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
-                registers[rd] = Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() == registers[rs2].unsafeAsInt()));
+                registers[rd] =
+                    Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() == registers[rs2].unsafeAsInt()));
             } else {
                 registers[rd] = Value(static_cast<int64_t>(registers[rs1] == registers[rs2]));
             }
@@ -1088,7 +1098,8 @@ vm_exit:
             uint8_t rs1 = readByte(*curBytecode, ip);
             uint8_t rs2 = readByte(*curBytecode, ip);
             if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
-                registers[rd] = Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() != registers[rs2].unsafeAsInt()));
+                registers[rd] =
+                    Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() != registers[rs2].unsafeAsInt()));
             } else {
                 registers[rd] = Value(static_cast<int64_t>(registers[rs1] != registers[rs2]));
             }
@@ -1100,7 +1111,8 @@ vm_exit:
             uint8_t rs1 = readByte(*curBytecode, ip);
             uint8_t rs2 = readByte(*curBytecode, ip);
             if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
-                registers[rd] = Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() < registers[rs2].unsafeAsInt()));
+                registers[rd] =
+                    Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() < registers[rs2].unsafeAsInt()));
             } else {
                 registers[rd] = Value(static_cast<int64_t>(registers[rs1] < registers[rs2]));
             }
@@ -1112,7 +1124,8 @@ vm_exit:
             uint8_t rs1 = readByte(*curBytecode, ip);
             uint8_t rs2 = readByte(*curBytecode, ip);
             if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
-                registers[rd] = Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() <= registers[rs2].unsafeAsInt()));
+                registers[rd] =
+                    Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() <= registers[rs2].unsafeAsInt()));
             } else {
                 registers[rd] = Value(static_cast<int64_t>(registers[rs1] <= registers[rs2]));
             }
@@ -1124,7 +1137,8 @@ vm_exit:
             uint8_t rs1 = readByte(*curBytecode, ip);
             uint8_t rs2 = readByte(*curBytecode, ip);
             if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
-                registers[rd] = Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() > registers[rs2].unsafeAsInt()));
+                registers[rd] =
+                    Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() > registers[rs2].unsafeAsInt()));
             } else {
                 registers[rd] = Value(static_cast<int64_t>(registers[rs1] > registers[rs2]));
             }
@@ -1136,7 +1150,8 @@ vm_exit:
             uint8_t rs1 = readByte(*curBytecode, ip);
             uint8_t rs2 = readByte(*curBytecode, ip);
             if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
-                registers[rd] = Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() >= registers[rs2].unsafeAsInt()));
+                registers[rd] =
+                    Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() >= registers[rs2].unsafeAsInt()));
             } else {
                 registers[rd] = Value(static_cast<int64_t>(registers[rs1] >= registers[rs2]));
             }
@@ -1148,7 +1163,8 @@ vm_exit:
             uint8_t rs1 = readByte(*curBytecode, ip);
             uint8_t rs2 = readByte(*curBytecode, ip);
             if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
-                registers[rd] = Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() != 0 && registers[rs2].unsafeAsInt() != 0));
+                registers[rd] =
+                    Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() != 0 && registers[rs2].unsafeAsInt() != 0));
             } else {
                 registers[rd] = Value(static_cast<int64_t>(registers[rs1].isTruthy() && registers[rs2].isTruthy()));
             }
@@ -1160,7 +1176,8 @@ vm_exit:
             uint8_t rs1 = readByte(*curBytecode, ip);
             uint8_t rs2 = readByte(*curBytecode, ip);
             if (registers[rs1].getType() == Value::Type::INTEGER && registers[rs2].getType() == Value::Type::INTEGER) {
-                registers[rd] = Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() != 0 || registers[rs2].unsafeAsInt() != 0));
+                registers[rd] =
+                    Value(static_cast<int64_t>(registers[rs1].unsafeAsInt() != 0 || registers[rs2].unsafeAsInt() != 0));
             } else {
                 registers[rd] = Value(static_cast<int64_t>(registers[rs1].isTruthy() || registers[rs2].isTruthy()));
             }

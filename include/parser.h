@@ -37,8 +37,7 @@ class Parser {
       public:
         explicit RecursionGuard(Parser& p) : parser_(p) {
             if (++parser_.recursionDepth_ > kMaxRecursionDepth) {
-                parser_.error("Maximum nesting depth exceeded (limit " +
-                              std::to_string(kMaxRecursionDepth) + ")");
+                parser_.error("Maximum nesting depth exceeded (limit " + std::to_string(kMaxRecursionDepth) + ")");
             }
         }
         ~RecursionGuard() {

@@ -221,7 +221,7 @@ std::unique_ptr<Expression> optimizeOptMaxBinary(const std::string& op, std::uni
                 for (long long i = 0; i < rval; i++) {
                     if (lval != 0 && lval != 1 && lval != -1) {
                         uint64_t ab = (lval < 0) ? static_cast<uint64_t>(-static_cast<uint64_t>(lval))
-                                                  : static_cast<uint64_t>(lval);
+                                                 : static_cast<uint64_t>(lval);
                         uint64_t ar = (result < 0) ? static_cast<uint64_t>(-static_cast<uint64_t>(result))
                                                    : static_cast<uint64_t>(result);
                         if (ar > static_cast<uint64_t>(LLONG_MAX) / ab) {
@@ -1218,10 +1218,10 @@ void CodeGenerator::generate(Program* program) {
 
     // Resource budget: limit number of functions to prevent DoS.
     if (program->functions.size() > kMaxFunctions) {
-        throw DiagnosticError(Diagnostic{
-            DiagnosticSeverity::Error, {0, 0},
-            "Compilation aborted: function count limit exceeded (" +
-                std::to_string(kMaxFunctions) + "). Input program is too large."});
+        throw DiagnosticError(Diagnostic{DiagnosticSeverity::Error,
+                                         {0, 0},
+                                         "Compilation aborted: function count limit exceeded (" +
+                                             std::to_string(kMaxFunctions) + "). Input program is too large."});
     }
 
     // Validate: check for duplicate function names and duplicate parameters.
@@ -1257,8 +1257,7 @@ void CodeGenerator::generate(Program* program) {
     }
     if (!hasMain) {
         // Program-level error — no specific AST node to reference for location.
-        throw DiagnosticError(
-            Diagnostic{DiagnosticSeverity::Error, {0, 0}, "No 'main' function defined"});
+        throw DiagnosticError(Diagnostic{DiagnosticSeverity::Error, {0, 0}, "No 'main' function defined"});
     }
 
     // Forward-declare all functions so that any function can reference any
