@@ -32,6 +32,8 @@
 #include <set>
 #include <stdexcept>
 
+#include "diagnostic.h"
+
 namespace {
 
 using omscript::ArrayExpr;
@@ -713,11 +715,11 @@ llvm::AllocaInst* CodeGenerator::createEntryBlockAlloca(llvm::Function* function
 }
 
 void CodeGenerator::codegenError(const std::string& message, const ASTNode* node) {
+    SourceLocation loc;
     if (node && node->line > 0) {
-        throw std::runtime_error("Error at line " + std::to_string(node->line) + ", column " +
-                                 std::to_string(node->column) + ": " + message);
+        loc = {node->line, node->column};
     }
-    throw std::runtime_error(message);
+    throw DiagnosticError(Diagnostic{DiagnosticSeverity::Error, loc, message});
 }
 
 // ---------------------------------------------------------------------------

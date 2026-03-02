@@ -1,4 +1,5 @@
 #include "lexer.h"
+#include "diagnostic.h"
 #include <cctype>
 #include <stdexcept>
 #include <unordered_map>
@@ -29,6 +30,11 @@ static const std::unordered_map<std::string, TokenType> keywords = {
     {"switch", TokenType::SWITCH}, {"case", TokenType::CASE},         {"default", TokenType::DEFAULT},
     {"try", TokenType::TRY},       {"catch", TokenType::CATCH},       {"throw", TokenType::THROW},
     {"enum", TokenType::ENUM}};
+
+/// Throw a DiagnosticError with the given message and source location.
+[[noreturn]] static void lexError(const std::string& msg, int ln, int col) {
+    throw DiagnosticError(Diagnostic{DiagnosticSeverity::Error, {ln, col}, msg});
+}
 
 Lexer::Lexer(const std::string& source) : source(source), pos(0), line(1), column(1) {}
 
@@ -95,8 +101,7 @@ void Lexer::skipBlockComment() {
         }
         advance();
     }
-    throw std::runtime_error("Unterminated block comment starting at line " + std::to_string(startLine) + ", column " +
-                             std::to_string(startColumn));
+    lexError("Unterminated block comment", startLine, startColumn);
 }
 
 Token Lexer::makeToken(TokenType type, const std::string& lexeme) {
@@ -115,8 +120,7 @@ Token Lexer::scanNumber() {
             num += advance(); // '0'
             num += advance(); // 'x'/'X'
             if (!isHexDigit(peek())) {
-                throw std::runtime_error("Expected hex digit after '0x' at line " + std::to_string(line) + ", column " +
-                                         std::to_string(column));
+                lexError("Expected hex digit after '0x'", line, column);
             }
             while (!isAtEnd() && (isHexDigit(peek()) || peek() == '_')) {
                 char c = advance();
@@ -127,8 +131,7 @@ Token Lexer::scanNumber() {
             try {
                 token.intValue = std::stoll(num, nullptr, 16);
             } catch (const std::out_of_range&) {
-                throw std::runtime_error("Integer literal out of range at line " + std::to_string(token.line) +
-                                         ", column " + std::to_string(token.column) + ": " + num);
+                lexError("Integer literal out of range: " + num, token.line, token.column);
             }
             return token;
         } else if (prefix == 'o' || prefix == 'O') {
@@ -136,8 +139,7 @@ Token Lexer::scanNumber() {
             num += advance(); // '0'
             num += advance(); // 'o'/'O'
             if (isAtEnd() || peek() < '0' || peek() > '7') {
-                throw std::runtime_error("Expected octal digit after '0o' at line " + std::to_string(line) +
-                                         ", column " + std::to_string(column));
+                lexError("Expected octal digit after '0o'", line, column);
             }
             while (!isAtEnd() && ((peek() >= '0' && peek() <= '7') || peek() == '_')) {
                 char c = advance();
@@ -148,8 +150,7 @@ Token Lexer::scanNumber() {
             try {
                 token.intValue = std::stoll(num.substr(2), nullptr, 8);
             } catch (const std::out_of_range&) {
-                throw std::runtime_error("Integer literal out of range at line " + std::to_string(token.line) +
-                                         ", column " + std::to_string(token.column) + ": " + num);
+                lexError("Integer literal out of range: " + num, token.line, token.column);
             }
             return token;
         } else if (prefix == 'b' || prefix == 'B') {
@@ -157,8 +158,7 @@ Token Lexer::scanNumber() {
             num += advance(); // '0'
             num += advance(); // 'b'/'B'
             if (isAtEnd() || (peek() != '0' && peek() != '1')) {
-                throw std::runtime_error("Expected binary digit after '0b' at line " + std::to_string(line) +
-                                         ", column " + std::to_string(column));
+                lexError("Expected binary digit after '0b'", line, column);
             }
             while (!isAtEnd() && (peek() == '0' || peek() == '1' || peek() == '_')) {
                 char c = advance();
@@ -169,8 +169,7 @@ Token Lexer::scanNumber() {
             try {
                 token.intValue = std::stoll(num.substr(2), nullptr, 2);
             } catch (const std::out_of_range&) {
-                throw std::runtime_error("Integer literal out of range at line " + std::to_string(token.line) +
-                                         ", column " + std::to_string(token.column) + ": " + num);
+                lexError("Integer literal out of range: " + num, token.line, token.column);
             }
             return token;
         }
@@ -198,15 +197,13 @@ Token Lexer::scanNumber() {
         try {
             token.floatValue = std::stod(num);
         } catch (const std::out_of_range&) {
-            throw std::runtime_error("Float literal out of range at line " + std::to_string(token.line) + ", column " +
-                                     std::to_string(token.column) + ": " + num);
+            lexError("Float literal out of range: " + num, token.line, token.column);
         }
     } else {
         try {
             token.intValue = std::stoll(num);
         } catch (const std::out_of_range&) {
-            throw std::runtime_error("Integer literal out of range at line " + std::to_string(token.line) +
-                                     ", column " + std::to_string(token.column) + ": " + num);
+            lexError("Integer literal out of range: " + num, token.line, token.column);
         }
     }
     return token;
@@ -237,8 +234,7 @@ Token Lexer::scanString() {
         if (peek() == '\\') {
             advance();
             if (isAtEnd()) {
-                throw std::runtime_error("Unterminated escape sequence in string at line " + std::to_string(startLine) +
-                                         ", column " + std::to_string(startColumn));
+                lexError("Unterminated escape sequence in string", startLine, startColumn);
             }
             char escaped = advance();
             switch (escaped) {
@@ -272,13 +268,11 @@ Token Lexer::scanString() {
             case 'x': {
                 // Hex escape: \xHH (exactly two hex digits)
                 if (isAtEnd() || !isHexDigit(peek())) {
-                    throw std::runtime_error("Expected hex digit after '\\x' in string at line " +
-                                             std::to_string(line) + ", column " + std::to_string(column));
+                    lexError("Expected hex digit after '\\x' in string", line, column);
                 }
                 char h1 = advance();
                 if (isAtEnd() || !isHexDigit(peek())) {
-                    throw std::runtime_error("Expected two hex digits after '\\x' in string at line " +
-                                             std::to_string(line) + ", column " + std::to_string(column));
+                    lexError("Expected two hex digits after '\\x' in string", line, column);
                 }
                 char h2 = advance();
                 std::string hex{h1, h2};
@@ -286,9 +280,7 @@ Token Lexer::scanString() {
                 break;
             }
             default:
-                throw std::runtime_error("Unknown escape sequence '\\" + std::string(1, escaped) +
-                                         "' in string at line " + std::to_string(line) + ", column " +
-                                         std::to_string(column));
+                lexError("Unknown escape sequence '\\" + std::string(1, escaped) + "' in string", line, column);
             }
         } else {
             str += advance();
@@ -296,8 +288,7 @@ Token Lexer::scanString() {
     }
 
     if (isAtEnd()) {
-        throw std::runtime_error("Unterminated string literal at line " + std::to_string(startLine) + ", column " +
-                                 std::to_string(startColumn));
+        lexError("Unterminated string literal", startLine, startColumn);
     }
 
     advance(); // Skip closing quote
@@ -326,8 +317,7 @@ Token Lexer::scanMultiLineString() {
         str += advance();
     }
 
-    throw std::runtime_error("Unterminated multi-line string literal at line " + std::to_string(startLine) +
-                             ", column " + std::to_string(startColumn));
+    lexError("Unterminated multi-line string literal", startLine, startColumn);
 }
 
 std::vector<Token> Lexer::tokenize() {
@@ -587,8 +577,7 @@ std::vector<Token> Lexer::tokenize() {
             break;
 
         default:
-            throw std::runtime_error("Unexpected character '" + std::string(1, c) + "' at line " +
-                                     std::to_string(tokenLine) + ", column " + std::to_string(tokenColumn));
+            lexError("Unexpected character '" + std::string(1, c) + "'", tokenLine, tokenColumn);
             break;
         }
     }

@@ -245,6 +245,24 @@ class CodeGenerator {
                                              llvm::Type* type = nullptr);
     [[noreturn]] void codegenError(const std::string& message, const ASTNode* node);
 
+    /// RAII guard that calls beginScope() on construction and endScope()
+    /// on destruction, ensuring scope stacks are always balanced even
+    /// when exceptions interrupt code generation.
+    class ScopeGuard {
+      public:
+        explicit ScopeGuard(CodeGenerator& cg) : cg_(cg) {
+            cg_.beginScope();
+        }
+        ~ScopeGuard() {
+            cg_.endScope();
+        }
+        ScopeGuard(const ScopeGuard&) = delete;
+        ScopeGuard& operator=(const ScopeGuard&) = delete;
+
+      private:
+        CodeGenerator& cg_;
+    };
+
     // String type inference helpers.
     // isStringExpr: returns true if the given AST expression is known to
     //   produce a string value at the current codegen point (uses namedValues
