@@ -1302,6 +1302,10 @@ void CodeGenerator::generate(Program* program) {
     std::string errorStr;
     llvm::raw_string_ostream errorStream(errorStr);
     if (llvm::verifyModule(*module, &errorStream)) {
+        // Trim trailing whitespace from LLVM's verification output.
+        while (!errorStr.empty() && (errorStr.back() == '\n' || errorStr.back() == ' ')) {
+            errorStr.pop_back();
+        }
         throw DiagnosticError(
             Diagnostic{DiagnosticSeverity::Error, {0, 0}, "Module verification failed: " + errorStr});
     }
@@ -1373,6 +1377,10 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     llvm::raw_string_ostream errorStream(errorStr);
     if (llvm::verifyFunction(*function, &errorStream)) {
         function->print(llvm::errs());
+        // Trim trailing whitespace from LLVM's verification output.
+        while (!errorStr.empty() && (errorStr.back() == '\n' || errorStr.back() == ' ')) {
+            errorStr.pop_back();
+        }
         throw DiagnosticError(Diagnostic{DiagnosticSeverity::Error,
                                          {func->line, func->column},
                                          "Function verification failed for '" + func->name + "': " + errorStr});
