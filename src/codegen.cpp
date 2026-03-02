@@ -4917,7 +4917,7 @@ void CodeGenerator::generateIf(IfStmt* stmt) {
 void CodeGenerator::generateWhile(WhileStmt* stmt) {
     llvm::Function* function = builder->GetInsertBlock()->getParent();
 
-    beginScope();
+    ScopeGuard scope(*this);
 
     llvm::BasicBlock* condBB = llvm::BasicBlock::Create(*context, "whilecond", function);
     llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "whilebody", function);
@@ -4942,14 +4942,12 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
 
     // End block
     builder->SetInsertPoint(endBB);
-
-    endScope();
 }
 
 void CodeGenerator::generateDoWhile(DoWhileStmt* stmt) {
     llvm::Function* function = builder->GetInsertBlock()->getParent();
 
-    beginScope();
+    ScopeGuard scope(*this);
 
     llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "dowhilebody", function);
     llvm::BasicBlock* condBB = llvm::BasicBlock::Create(*context, "dowhilecond", function);
@@ -4975,8 +4973,6 @@ void CodeGenerator::generateDoWhile(DoWhileStmt* stmt) {
 
     // End block
     builder->SetInsertPoint(endBB);
-
-    endScope();
 }
 
 void CodeGenerator::generateFor(ForStmt* stmt) {
@@ -4985,7 +4981,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         codegenError("For loop outside of function", stmt);
     }
 
-    beginScope();
+    ScopeGuard scope(*this);
 
     // Allocate iterator variable
     llvm::AllocaInst* iterAlloca = createEntryBlockAlloca(function, stmt->iteratorVar);
@@ -5064,8 +5060,6 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
 
     // End block
     builder->SetInsertPoint(endBB);
-
-    endScope();
 }
 
 void CodeGenerator::generateForEach(ForEachStmt* stmt) {
@@ -5074,7 +5068,7 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
         codegenError("For-each loop outside of function", stmt);
     }
 
-    beginScope();
+    ScopeGuard scope(*this);
 
     // Evaluate the collection (array)
     llvm::Value* collVal = generateExpression(stmt->collection.get());
@@ -5131,19 +5125,16 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
 
     // End
     builder->SetInsertPoint(endBB);
-
-    endScope();
 }
 
 void CodeGenerator::generateBlock(BlockStmt* stmt) {
-    beginScope();
+    ScopeGuard scope(*this);
     for (auto& statement : stmt->statements) {
         if (builder->GetInsertBlock()->getTerminator()) {
             break; // Don't generate unreachable code
         }
         generateStatement(statement.get());
     }
-    endScope();
 }
 
 void CodeGenerator::generateExprStmt(ExprStmt* stmt) {
@@ -5179,13 +5170,14 @@ void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
         if (sc.isDefault) {
             // Generate default block body.
             builder->SetInsertPoint(defaultBB);
-            beginScope();
-            for (auto& s : sc.body) {
-                generateStatement(s.get());
-                if (builder->GetInsertBlock()->getTerminator())
-                    break;
+            {
+                ScopeGuard scope(*this);
+                for (auto& s : sc.body) {
+                    generateStatement(s.get());
+                    if (builder->GetInsertBlock()->getTerminator())
+                        break;
+                }
             }
-            endScope();
             if (!builder->GetInsertBlock()->getTerminator()) {
                 builder->CreateBr(mergeBB);
             }
@@ -5209,13 +5201,14 @@ void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
             switchInst->addCase(caseConst, caseBB);
 
             builder->SetInsertPoint(caseBB);
-            beginScope();
-            for (auto& s : sc.body) {
-                generateStatement(s.get());
-                if (builder->GetInsertBlock()->getTerminator())
-                    break;
+            {
+                ScopeGuard scope(*this);
+                for (auto& s : sc.body) {
+                    generateStatement(s.get());
+                    if (builder->GetInsertBlock()->getTerminator())
+                        break;
+                }
             }
-            endScope();
             if (!builder->GetInsertBlock()->getTerminator()) {
                 builder->CreateBr(mergeBB);
             }
@@ -5257,11 +5250,12 @@ void CodeGenerator::generateTryCatch(TryCatchStmt* stmt) {
     builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 0), errFlag);
 
     // Generate try block
-    beginScope();
-    for (auto& s : stmt->tryBlock->statements) {
-        generateStatement(s.get());
+    {
+        ScopeGuard scope(*this);
+        for (auto& s : stmt->tryBlock->statements) {
+            generateStatement(s.get());
+        }
     }
-    endScope();
 
     // Check if error was thrown
     llvm::Value* thrown = builder->CreateLoad(getDefaultType(), errFlag, "try.thrown");
@@ -5276,21 +5270,22 @@ void CodeGenerator::generateTryCatch(TryCatchStmt* stmt) {
 
     // Catch block
     builder->SetInsertPoint(catchBB);
-    beginScope();
-    // Bind the error value to the catch variable
-    llvm::Value* errValLoaded = builder->CreateLoad(getDefaultType(), errVal, "catch.errval");
-    llvm::AllocaInst* catchVar = createEntryBlockAlloca(function, stmt->catchVar);
-    builder->CreateStore(errValLoaded, catchVar);
-    bindVariable(stmt->catchVar, catchVar);
+    {
+        ScopeGuard scope(*this);
+        // Bind the error value to the catch variable
+        llvm::Value* errValLoaded = builder->CreateLoad(getDefaultType(), errVal, "catch.errval");
+        llvm::AllocaInst* catchVar = createEntryBlockAlloca(function, stmt->catchVar);
+        builder->CreateStore(errValLoaded, catchVar);
+        bindVariable(stmt->catchVar, catchVar);
 
-    // Clear error flag so catch block can execute normally
-    builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 0), errFlag);
-    builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 0), errVal);
+        // Clear error flag so catch block can execute normally
+        builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 0), errFlag);
+        builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 0), errVal);
 
-    for (auto& s : stmt->catchBlock->statements) {
-        generateStatement(s.get());
+        for (auto& s : stmt->catchBlock->statements) {
+            generateStatement(s.get());
+        }
     }
-    endScope();
     builder->CreateBr(restoreBB);
 
     // Restore old error state (reached from both normal try and after catch)
