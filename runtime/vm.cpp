@@ -106,8 +106,7 @@ void VM::registerFunction(const BytecodeFunction& func) {
 }
 
 void VM::registerFunction(BytecodeFunction&& func) {
-    std::string name = func.name;
-    functions[std::move(name)] = std::move(func);
+    functions[func.name] = std::move(func);
 }
 
 bool VM::isJITCompiled(const std::string& name) const {

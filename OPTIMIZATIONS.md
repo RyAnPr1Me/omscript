@@ -339,7 +339,14 @@ and `x & 0` emit a constant `0`, and `x ** 0` emits a constant `1`.
 On GCC/Clang, the bytecode VM uses a computed-goto dispatch table instead of a `switch`
 statement. This eliminates branch prediction overhead and indirect jump penalties, resulting
 in significantly faster opcode dispatch. A standard `switch` fallback is used on other
-compilers.
+compilers, with the same integer/float fast paths for consistent performance.
+
+### Direct Memcpy Bytecode Reads
+The VM's `readInt`, `readFloat`, and `readShort` functions use direct `memcpy` from the
+bytecode buffer instead of byte-by-byte reconstruction loops. On little-endian architectures
+(x86, ARM), this compiles to a single load instruction, eliminating loop overhead. A
+zero-copy `readStringView` provides `std::string_view` access into the bytecode buffer
+for operations that don't need an owning string.
 
 ### Integer Fast Paths
 When both operands on the VM stack are integers, arithmetic and comparison operations
@@ -550,6 +557,12 @@ OmScript's optimization infrastructure provides:
 - ✅ Float-specialized fast paths for VM comparisons (EQ, NE, LT, LE, GT, GE)
 - ✅ Exponentiation by squaring for O(log n) POW operations
 - ✅ Single-dispatch comparison operators (<=, >, >=) eliminating redundant type checks
+- ✅ Direct `memcpy` bytecode reads for `readInt`/`readFloat`/`readShort` (single-instruction loads)
+- ✅ Zero-copy `readStringView` for bytecode string reads
+- ✅ Integer/float fast paths in switch-dispatch fallback (parity with computed-goto path)
+- ✅ Pre-reserved call stack and bytecode emitter buffers to avoid dynamic reallocations
+- ✅ Move-semantics `registerFunction` overload for zero-copy function registration
+- ✅ Lexer `scanIdentifier` uses `substr()` instead of char-by-char string building
 - ✅ Measurable, significant improvements
 
 The compiler transforms high-level OmScript code into highly optimized machine code that rivals hand-written assembly in many cases, while maintaining code readability and developer productivity.
