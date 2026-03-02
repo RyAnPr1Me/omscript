@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -48,12 +49,13 @@ class VM {
     void execute(const std::vector<uint8_t>& bytecode);
     void setGlobal(const std::string& name, const Value& value);
     Value getGlobal(const std::string& name);
-    Value getLastReturn() const {
+    const Value& getLastReturn() const {
         return lastReturn;
     }
 
     // Register a bytecode function that can be invoked via the CALL opcode.
     void registerFunction(const BytecodeFunction& func);
+    void registerFunction(BytecodeFunction&& func);
 
     /// Return true if the named function has been JIT-compiled.
     bool isJITCompiled(const std::string& name) const;
@@ -101,6 +103,11 @@ class VM {
     inline int64_t readInt(const std::vector<uint8_t>& code, size_t& ip) __attribute__((always_inline));
     inline double readFloat(const std::vector<uint8_t>& code, size_t& ip) __attribute__((always_inline));
     std::string readString(const std::vector<uint8_t>& code, size_t& ip);
+    /// Zero-copy string read: returns a view into the bytecode buffer.
+    /// The returned view is valid as long as the underlying bytecode vector
+    /// is not modified or destroyed.
+    inline std::string_view readStringView(const std::vector<uint8_t>& code, size_t& ip)
+        __attribute__((always_inline));
 };
 
 } // namespace omscript

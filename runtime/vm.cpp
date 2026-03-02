@@ -8,10 +8,9 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 
 namespace omscript {
-
-using BytecodeIteratorDiff = std::vector<uint8_t>::difference_type;
 
 // Maximum valid shift amount for 64-bit integers (0-63).
 static constexpr int64_t kInt64BitWidth = 64;
@@ -33,6 +32,7 @@ static inline bool wouldMultiplyOverflow(int64_t a, int64_t b) {
 
 VM::VM() : lastReturn(), jit_(std::make_unique<BytecodeJIT>()) {
     locals.reserve(16);
+    callStack.reserve(16);
     std::fill_n(registers, kMaxRegisters, Value());
 }
 
@@ -51,42 +51,42 @@ uint8_t VM::readByte(const std::vector<uint8_t>& code, size_t& ip) {
 
 uint16_t VM::readShort(const std::vector<uint8_t>& code, size_t& ip) {
     ensureReadable(code, ip, 2);
-    uint8_t low = code[ip++];
-    uint8_t high = code[ip++];
-    return static_cast<uint16_t>(low) | (static_cast<uint16_t>(high) << 8);
+    uint16_t value = 0;
+    std::memcpy(&value, code.data() + ip, sizeof(value));
+    ip += 2;
+    return value;
 }
 
 int64_t VM::readInt(const std::vector<uint8_t>& code, size_t& ip) {
     ensureReadable(code, ip, 8);
-    uint64_t raw = 0;
-    for (int i = 0; i < 8; i++) {
-        raw |= (static_cast<uint64_t>(code[ip++]) << (i * 8));
-    }
     int64_t value = 0;
-    std::memcpy(&value, &raw, sizeof(value));
+    std::memcpy(&value, code.data() + ip, sizeof(value));
+    ip += 8;
     return value;
 }
 
 double VM::readFloat(const std::vector<uint8_t>& code, size_t& ip) {
     ensureReadable(code, ip, 8);
-    uint64_t raw = 0;
-    for (int i = 0; i < 8; i++) {
-        raw |= (static_cast<uint64_t>(code[ip++]) << (i * 8));
-    }
     double value = 0.0;
-    std::memcpy(&value, &raw, sizeof(value));
+    std::memcpy(&value, code.data() + ip, sizeof(value));
+    ip += 8;
     return value;
 }
 
 std::string VM::readString(const std::vector<uint8_t>& code, size_t& ip) {
     uint16_t length = readShort(code, ip);
     ensureReadable(code, ip, length);
-    auto offset = static_cast<BytecodeIteratorDiff>(ip);
-    auto begin = code.begin() + offset;
-    auto end = begin + static_cast<BytecodeIteratorDiff>(length);
-    std::string str(begin, end);
+    const char* ptr = reinterpret_cast<const char*>(code.data() + ip);
     ip += length;
-    return str;
+    return std::string(ptr, length);
+}
+
+std::string_view VM::readStringView(const std::vector<uint8_t>& code, size_t& ip) {
+    uint16_t length = readShort(code, ip);
+    ensureReadable(code, ip, length);
+    const char* ptr = reinterpret_cast<const char*>(code.data() + ip);
+    ip += length;
+    return std::string_view(ptr, length);
 }
 
 void VM::setGlobal(const std::string& name, const Value& value) {
@@ -103,6 +103,11 @@ Value VM::getGlobal(const std::string& name) {
 
 void VM::registerFunction(const BytecodeFunction& func) {
     functions[func.name] = func;
+}
+
+void VM::registerFunction(BytecodeFunction&& func) {
+    std::string name = func.name;
+    functions[std::move(name)] = std::move(func);
 }
 
 bool VM::isJITCompiled(const std::string& name) const {
@@ -175,7 +180,6 @@ void VM::classifyArgTypes(uint8_t argCount, const uint8_t* argRegs, bool& allInt
 void VM::execute(const std::vector<uint8_t>& bytecode) {
     size_t ip = 0;
     lastReturn = Value();
-    std::fill_n(registers, kMaxRegisters, Value());
 
 // Use computed-goto dispatch on GCC/Clang for faster opcode dispatch.
 #if defined(__GNUC__) || defined(__clang__)
