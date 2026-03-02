@@ -1,6 +1,7 @@
 #ifndef REFCOUNTED_H
 #define REFCOUNTED_H
 
+#include <atomic>
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
@@ -10,10 +11,8 @@ namespace omscript {
 
 // Reference counted string implementation using malloc/free.
 //
-// Thread safety: This class is NOT thread-safe. Reference count operations
-// (retain/release) are non-atomic. Instances must not be shared across threads
-// without external synchronization. This is acceptable for the OmScript runtime
-// which is single-threaded.
+// Thread safety: reference count operations use std::atomic for safe
+// concurrent retain/release across threads.
 class RefCountedString {
   public:
     RefCountedString() : data(nullptr) {}
@@ -121,7 +120,7 @@ class RefCountedString {
 
   private:
     struct StringData {
-        size_t refCount;
+        std::atomic<size_t> refCount;
         size_t length;
         char chars[1]; // Flexible array member
     };
@@ -136,7 +135,9 @@ class RefCountedString {
         if (!sd) {
             throw std::bad_alloc();
         }
-        sd->refCount = 1;
+        // Relaxed ordering is safe here: the object has not been shared
+        // with other threads yet (single-threaded construction context).
+        sd->refCount.store(1, std::memory_order_relaxed);
         sd->length = length;
         return sd;
     }
@@ -144,15 +145,14 @@ class RefCountedString {
     // Increment reference count
     void retain() {
         if (data) {
-            ++data->refCount;
+            data->refCount.fetch_add(1, std::memory_order_relaxed);
         }
     }
 
     // Decrement reference count and free if zero
     void release() {
         if (data) {
-            --data->refCount;
-            if (data->refCount == 0) {
+            if (data->refCount.fetch_sub(1, std::memory_order_acq_rel) == 1) {
                 std::free(data);
                 data = nullptr;
             }

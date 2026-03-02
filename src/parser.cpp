@@ -1,4 +1,5 @@
 #include "parser.h"
+#include "diagnostic.h"
 #include <iostream>
 #include <stdexcept>
 
@@ -54,9 +55,8 @@ Token Parser::consume(TokenType type, const std::string& message) {
 
 void Parser::error(const std::string& message) {
     Token token = peek();
-    std::string errorMsg = "Parse error at line " + std::to_string(token.line) + ", column " +
-                           std::to_string(token.column) + ": " + message;
-    throw std::runtime_error(errorMsg);
+    throw DiagnosticError(
+        Diagnostic{DiagnosticSeverity::Error, {token.line, token.column}, "Parse error: " + message});
 }
 
 void Parser::synchronize() {
@@ -190,6 +190,7 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
 }
 
 std::unique_ptr<Statement> Parser::parseStatement() {
+    RecursionGuard guard(*this);
     // Capture the keyword token position for source location tracking.
     if (match(TokenType::IF)) {
         Token kw = tokens[current - 1];
@@ -514,6 +515,7 @@ std::unique_ptr<Statement> Parser::parseExprStmt() {
 }
 
 std::unique_ptr<Expression> Parser::parseExpression() {
+    RecursionGuard guard(*this);
     return parseAssignment();
 }
 

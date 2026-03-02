@@ -3,6 +3,7 @@
 
 #include "ast.h"
 #include "bytecode.h"
+#include "diagnostic.h"
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
@@ -245,6 +246,24 @@ class CodeGenerator {
                                              llvm::Type* type = nullptr);
     [[noreturn]] void codegenError(const std::string& message, const ASTNode* node);
 
+    /// RAII guard that calls beginScope() on construction and endScope()
+    /// on destruction, ensuring scope stacks are always balanced even
+    /// when exceptions interrupt code generation.
+    class ScopeGuard {
+      public:
+        explicit ScopeGuard(CodeGenerator& cg) : cg_(cg) {
+            cg_.beginScope();
+        }
+        ~ScopeGuard() {
+            cg_.endScope();
+        }
+        ScopeGuard(const ScopeGuard&) = delete;
+        ScopeGuard& operator=(const ScopeGuard&) = delete;
+
+      private:
+        CodeGenerator& cg_;
+    };
+
     // String type inference helpers.
     // isStringExpr: returns true if the given AST expression is known to
     //   produce a string value at the current codegen point (uses namedValues
@@ -273,6 +292,25 @@ class CodeGenerator {
     bool usePIC_ = true;       // -fpic / -fno-pic
     bool useFastMath_ = false; // -ffast-math / -fno-fast-math
     bool enableOptMax_ = true; // -foptmax / -fno-optmax
+
+    /// Compile-time resource budget — limits to prevent DoS via oversized inputs.
+    /// Checked during code generation to abort compilation if the program
+    /// exceeds reasonable complexity bounds.
+    /// Note: not atomic — CodeGenerator instances are not shared across threads.
+    static constexpr size_t kMaxFunctions = 10000;
+    static constexpr size_t kMaxIRInstructions = 1000000;
+    size_t irInstructionCount_ = 0;
+
+    /// Increment the IR instruction counter and abort if the budget is exceeded.
+    void checkIRBudget() {
+        if (++irInstructionCount_ > kMaxIRInstructions) {
+            throw DiagnosticError(Diagnostic{
+                DiagnosticSeverity::Error, {0, 0},
+                "Compilation aborted: IR instruction limit exceeded (" +
+                    std::to_string(kMaxIRInstructions) +
+                    "). Input program is too large or complex."});
+        }
+    }
 
     /// Counter for generating unique bytecode switch temp-variable names.
     /// Member variable (not function-local static) for thread-safety and

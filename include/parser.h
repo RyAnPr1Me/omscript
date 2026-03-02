@@ -25,6 +25,31 @@ class Parser {
     bool inOptMaxFunction;
     std::vector<std::string> errors_;
     int lambdaCounter_ = 0;
+    int recursionDepth_ = 0;
+
+    /// Maximum allowed parser recursion depth to prevent stack overflow on
+    /// adversarial or deeply-nested input.
+    static constexpr int kMaxRecursionDepth = 256;
+
+    /// RAII guard that increments recursionDepth_ on construction and
+    /// decrements it on destruction.  Throws if the limit is exceeded.
+    class RecursionGuard {
+      public:
+        explicit RecursionGuard(Parser& p) : parser_(p) {
+            if (++parser_.recursionDepth_ > kMaxRecursionDepth) {
+                parser_.error("Maximum nesting depth exceeded (limit " +
+                              std::to_string(kMaxRecursionDepth) + ")");
+            }
+        }
+        ~RecursionGuard() {
+            --parser_.recursionDepth_;
+        }
+        RecursionGuard(const RecursionGuard&) = delete;
+        RecursionGuard& operator=(const RecursionGuard&) = delete;
+
+      private:
+        Parser& parser_;
+    };
 
     /// Generated lambda functions to be appended to the program.
     std::vector<std::unique_ptr<FunctionDecl>> lambdaFunctions_;

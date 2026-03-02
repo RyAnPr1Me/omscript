@@ -13,9 +13,9 @@ class Value {
   public:
     enum class Type { INTEGER, FLOAT, STRING, NONE };
 
-    Value() : type(Type::NONE), intValue(0) {}
-    Value(int64_t val) : type(Type::INTEGER), intValue(val) {}
-    Value(double val) : type(Type::FLOAT), floatValue(val) {}
+    Value() noexcept : type(Type::NONE), intValue(0) {}
+    Value(int64_t val) noexcept : type(Type::INTEGER), intValue(val) {}
+    Value(double val) noexcept : type(Type::FLOAT), floatValue(val) {}
 
     Value(const std::string& val) : type(Type::STRING) {
         new (&stringValue) RefCountedString(val.c_str());
@@ -65,7 +65,7 @@ class Value {
     }
 
     // Destructor
-    ~Value() {
+    ~Value() noexcept {
         if (type == Type::STRING) {
             stringValue.~RefCountedString();
         }
