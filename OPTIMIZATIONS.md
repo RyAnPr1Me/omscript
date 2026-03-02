@@ -374,6 +374,38 @@ instead of composing multiple lower-level operators. For example, `operator<=` p
 single comparison rather than calling both `operator<` and `operator==`, eliminating
 redundant type-checking and dispatch overhead.
 
+### Bulk Memcpy Bytecode Emission
+The bytecode emitter's `emitInt`, `emitFloat`, `emitShort`, and `emitString` functions use
+bulk `resize+memcpy` instead of byte-by-byte `push_back` loops. This eliminates per-byte
+vector bounds checks, reduces branch overhead, and allows the compiler to generate a single
+`memcpy` intrinsic for the entire payload. For `emitInt`/`emitFloat`, this replaces 8
+individual `push_back` calls with one `memcpy`. For `emitString`, the character loop is
+replaced with a single `memcpy` of the entire string payload.
+
+### Iterative CALL Dispatch
+The VM's CALL and RETURN opcodes use an iterative trampoline instead of recursive
+`execute()` calls. On CALL, the current execution context (instruction pointer, bytecode
+pointer, locals, registers) is saved to the call stack, and the dispatch loop switches
+to the callee's bytecode. On RETURN, the caller's context is restored from the call
+stack and execution continues without unwinding native stack frames.
+
+Benefits:
+- Eliminates native function call overhead on every bytecode-level function call
+- Reduces native stack usage from O(depth × frame_size) to O(1) per call
+- Avoids C++ stack overflow on deeply recursive bytecode programs
+- Enables the compiler to keep the dispatch loop's hot state (ip, bytecodePtr) in
+  registers across CALL/RETURN boundaries
+
+### Partial Register Save/Restore
+The VM tracks a `maxRegUsed_` high-water mark — the highest register index written during
+execution. On CALL, only `registers[0..maxRegUsed_]` are saved to the call frame instead
+of all 256 registers. On RETURN, only the saved subset is restored.
+
+Typical functions use 5–20 registers, so this optimization avoids copying ~230 unused
+`Value` objects on every function call. The tracking overhead is a single branchless
+`max()` update per register-writing opcode, which compiles to a conditional move (cmov)
+on x86 — no branch misprediction penalty.
+
 ### Bytecode JIT Compiler
 The VM includes a lightweight JIT compiler that automatically translates hot bytecode
 functions to native machine code via LLVM MCJIT:
@@ -563,6 +595,11 @@ OmScript's optimization infrastructure provides:
 - ✅ Pre-reserved call stack and bytecode emitter buffers to avoid dynamic reallocations
 - ✅ Move-semantics `registerFunction` overload for zero-copy function registration
 - ✅ Lexer `scanIdentifier` uses `substr()` instead of char-by-char string building
+- ✅ Bulk `memcpy` bytecode emission for `emitInt`/`emitFloat`/`emitShort`/`emitString`
+- ✅ Iterative CALL dispatch — eliminates recursive `execute()` calls on every function call
+- ✅ Partial register save/restore — tracks high-water mark, saves only used registers on CALL
+- ✅ Lexer `scanNumber` uses `substr()` fast path for decimal numbers without underscores
+- ✅ Move-semantics `Token` constructor avoids string copies for temporary lexemes
 - ✅ Measurable, significant improvements
 
 The compiler transforms high-level OmScript code into highly optimized machine code that rivals hand-written assembly in many cases, while maintaining code readability and developer productivity.

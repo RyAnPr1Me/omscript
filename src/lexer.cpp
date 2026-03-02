@@ -177,8 +177,14 @@ Token Lexer::scanNumber() {
         }
     }
 
+    // Fast path for common decimal numbers: record start position and
+    // try to scan all digits/dots without underscores in one pass.
+    size_t numStart = pos;
+    bool hasUnderscore = false;
+
     while (!isAtEnd() && (isDigit(peek()) || peek() == '.' || peek() == '_')) {
         if (peek() == '_') {
+            hasUnderscore = true;
             advance(); // consume underscore but don't add to num
             continue;
         }
@@ -191,7 +197,17 @@ Token Lexer::scanNumber() {
                 break; // Second dot, stop
             isFloat = true;
         }
-        num += advance();
+        advance();
+    }
+
+    if (!hasUnderscore) {
+        num = source.substr(numStart, pos - numStart);
+    } else {
+        // Slow path: rebuild string skipping underscores
+        for (size_t i = numStart; i < pos; i++) {
+            if (source[i] != '_')
+                num += source[i];
+        }
     }
 
     Token token = makeToken(isFloat ? TokenType::FLOAT : TokenType::INTEGER, num);
