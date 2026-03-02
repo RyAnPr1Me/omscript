@@ -135,6 +135,8 @@ class RefCountedString {
         if (!sd) {
             throw std::bad_alloc();
         }
+        // Relaxed ordering is safe here: the object has not been shared
+        // with other threads yet (single-threaded construction context).
         sd->refCount.store(1, std::memory_order_relaxed);
         sd->length = length;
         return sd;
