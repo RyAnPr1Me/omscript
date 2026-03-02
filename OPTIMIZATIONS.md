@@ -361,6 +361,14 @@ raw `double` values directly, avoiding type promotion logic and operator overloa
 Float fast paths also cover comparison operations (EQ, NE, LT, LE, GT, GE), eliminating
 the overhead of float promotion checks for pure-float comparisons.
 
+### Mixed Int/Float Fast Paths
+When one operand is an integer and the other is a float, arithmetic operations (ADD, SUB,
+MUL, DIV) promote the integer to `double` inline and perform the operation directly,
+bypassing the full `Value` operator dispatch and its `needsFloatPromotion()` check. Both
+operand orderings (int+float and float+int) are handled. For DIV, the fast path includes
+a zero-check on the divisor to preserve correct error semantics. This covers both the
+computed-goto and switch-dispatch paths.
+
 ### Exponentiation by Squaring
 The `**` (POW) operator uses binary exponentiation (exponentiation by squaring) to compute
 `base ** exp` in O(log n) multiplications instead of O(n). For integer bases, the fast path
@@ -405,6 +413,14 @@ Typical functions use 5–20 registers, so this optimization avoids copying ~230
 `Value` objects on every function call. The tracking overhead is a single branchless
 `max()` update per register-writing opcode, which compiles to a conditional move (cmov)
 on x86 — no branch misprediction penalty.
+
+### Direct Register Argument Read on CALL
+When dispatching a bytecode function call, the VM reads callee arguments directly from the
+register file (`registers[argRegs[i]]`) instead of from the saved registers vector
+(`callStack.back().savedRegisters[argRegs[i]]`). The register file has not been modified
+between the save and the argument read, so both produce identical values. The direct read
+avoids an extra level of vector indirection, a potential data-cache miss on the
+heap-allocated vector, and the `callStack.back()` lookup on every argument copy.
 
 ### Bytecode JIT Compiler
 The VM includes a lightweight JIT compiler that automatically translates hot bytecode
@@ -598,6 +614,9 @@ OmScript's optimization infrastructure provides:
 - ✅ Bulk `memcpy` bytecode emission for `emitInt`/`emitFloat`/`emitShort`/`emitString`
 - ✅ Iterative CALL dispatch — eliminates recursive `execute()` calls on every function call
 - ✅ Partial register save/restore — tracks high-water mark, saves only used registers on CALL
+- ✅ Direct register argument read on CALL — avoids vector indirection for argument passing
+- ✅ Mixed int/float fast paths for VM arithmetic (ADD, SUB, MUL, DIV) — inline promotion
+- ✅ Float-specialized fast paths for switch-dispatch comparisons (EQ, NE, LT, LE, GT, GE)
 - ✅ Lexer `scanNumber` uses `substr()` fast path for decimal numbers without underscores
 - ✅ Move-semantics `Token` constructor avoids string copies for temporary lexemes
 - ✅ Measurable, significant improvements
