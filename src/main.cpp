@@ -1465,6 +1465,9 @@ void printUsage(const char* progName) {
                  "  -foptmax / -fno-optmax            OPTMAX block optimization (default: on)\n"
                  "  -fjit / -fno-jit                  Hybrid bytecode/JIT mode (default: on)\n"
                  "  -fstack-protector / -fno-stack-protector  Stack protection (default: off)\n"
+                 "  -fvectorize / -fno-vectorize      SIMD vectorization hints (default: on)\n"
+                 "  -funroll-loops / -fno-unroll-loops Loop unrolling hints (default: on)\n"
+                 "  -floop-optimize / -fno-loop-optimize  Polyhedral loop opts (default: on)\n"
                  "\n"
                  "LINKER OPTIONS:\n"
                  "  -static               Use static linking\n"
@@ -2026,6 +2029,9 @@ int main(int argc, char* argv[]) {
     bool flagStatic = false;
     bool flagStrip = false;
     bool flagStackProtector = false;
+    bool flagVectorize = true;
+    bool flagUnrollLoops = true;
+    bool flagLoopOptimize = true;
     const auto tryParseOptimizationFlag = [](const std::string& arg) -> std::optional<omscript::OptimizationLevel> {
         if (arg == "-Ofast") {
             return omscript::OptimizationLevel::O3;
@@ -2096,6 +2102,30 @@ int main(int argc, char* argv[]) {
         }
         if (arg == "-fno-stack-protector") {
             flagStackProtector = false;
+            return true;
+        }
+        if (arg == "-fvectorize") {
+            flagVectorize = true;
+            return true;
+        }
+        if (arg == "-fno-vectorize") {
+            flagVectorize = false;
+            return true;
+        }
+        if (arg == "-funroll-loops") {
+            flagUnrollLoops = true;
+            return true;
+        }
+        if (arg == "-fno-unroll-loops") {
+            flagUnrollLoops = false;
+            return true;
+        }
+        if (arg == "-floop-optimize") {
+            flagLoopOptimize = true;
+            return true;
+        }
+        if (arg == "-fno-loop-optimize") {
+            flagLoopOptimize = false;
             return true;
         }
         if (arg == "-static") {
@@ -2488,6 +2518,9 @@ int main(int argc, char* argv[]) {
             codegen.setPIC(flagPIC);
             codegen.setFastMath(flagFastMath);
             codegen.setOptMax(flagOptMax);
+            codegen.setVectorize(flagVectorize);
+            codegen.setUnrollLoops(flagUnrollLoops);
+            codegen.setLoopOptimize(flagLoopOptimize);
             if (flagJIT) {
                 codegen.generateHybrid(program.get());
             } else {
@@ -2528,6 +2561,9 @@ int main(int argc, char* argv[]) {
             codegen.setPIC(flagPIC);
             codegen.setFastMath(flagFastMath);
             codegen.setOptMax(flagOptMax);
+            codegen.setVectorize(flagVectorize);
+            codegen.setUnrollLoops(flagUnrollLoops);
+            codegen.setLoopOptimize(flagLoopOptimize);
             if (flagJIT) {
                 codegen.generateHybrid(program.get());
             } else {
@@ -2563,6 +2599,9 @@ int main(int argc, char* argv[]) {
         compiler.setStaticLinking(flagStatic);
         compiler.setStrip(flagStrip);
         compiler.setStackProtector(flagStackProtector);
+        compiler.setVectorize(flagVectorize);
+        compiler.setUnrollLoops(flagUnrollLoops);
+        compiler.setLoopOptimize(flagLoopOptimize);
         if (quiet) {
             compiler.setVerbose(false);
         }

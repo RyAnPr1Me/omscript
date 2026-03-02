@@ -70,6 +70,18 @@ class Compiler {
     void setStackProtector(bool enable) {
         stackProtector_ = enable;
     }
+    /// Enable or disable SIMD vectorization hints (default: true).
+    void setVectorize(bool enable) {
+        vectorize_ = enable;
+    }
+    /// Enable or disable loop unrolling hints (default: true).
+    void setUnrollLoops(bool enable) {
+        unrollLoops_ = enable;
+    }
+    /// Enable or disable polyhedral-style loop optimizations (default: true).
+    void setLoopOptimize(bool enable) {
+        loopOptimize_ = enable;
+    }
 
   private:
     std::string readFile(const std::string& filename);
@@ -85,6 +97,9 @@ class Compiler {
     bool staticLink_ = false;
     bool strip_ = false;
     bool stackProtector_ = false;
+    bool vectorize_ = true;
+    bool unrollLoops_ = true;
+    bool loopOptimize_ = true;
 };
 
 } // namespace omscript

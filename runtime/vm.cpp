@@ -254,6 +254,9 @@ void VM::execute(const std::vector<uint8_t>& bytecode) {
     do {                                                                                                               \
         if (ip >= curBytecode->size())                                                                                 \
             goto vm_exit;                                                                                              \
+        /* Prefetch the next few bytecode bytes into L1 cache to reduce          */                                    \
+        /* stalls when the dispatch loop reads operands after the opcode.        */                                    \
+        __builtin_prefetch(curBytecode->data() + ip + 1, 0, 3);                                                       \
         uint8_t opByte = readByte(*curBytecode, ip);                                                                   \
         if (opByte >= kDispatchTableSize)                                                                              \
             goto op_UNKNOWN;                                                                                           \

@@ -104,6 +104,21 @@ class CodeGenerator {
         enableOptMax_ = enable;
     }
 
+    /// Enable or disable explicit loop vectorization hints (default: true at O2+).
+    void setVectorize(bool enable) {
+        enableVectorize_ = enable;
+    }
+
+    /// Enable or disable loop unrolling hints (default: true at O2+).
+    void setUnrollLoops(bool enable) {
+        enableUnrollLoops_ = enable;
+    }
+
+    /// Enable or disable polyhedral-style loop optimizations (default: true at O3).
+    void setLoopOptimize(bool enable) {
+        enableLoopOptimize_ = enable;
+    }
+
   private:
     std::unique_ptr<llvm::LLVMContext> context;
     std::unique_ptr<llvm::IRBuilder<>> builder;
@@ -292,6 +307,9 @@ class CodeGenerator {
     bool usePIC_ = true;       // -fpic / -fno-pic
     bool useFastMath_ = false; // -ffast-math / -fno-fast-math
     bool enableOptMax_ = true; // -foptmax / -fno-optmax
+    bool enableVectorize_ = true;    // -fvectorize / -fno-vectorize
+    bool enableUnrollLoops_ = true;  // -funroll-loops / -fno-unroll-loops
+    bool enableLoopOptimize_ = true; // -floop-optimize / -fno-loop-optimize
 
     /// Compile-time resource budget — limits to prevent DoS via oversized inputs.
     /// Checked during code generation to abort compilation if the program
