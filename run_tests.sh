@@ -124,8 +124,8 @@ test_cli_output() {
 # Run tests
 echo "Running CLI tests:"
 echo "--------------------------------------------"
-test_cli_output "help" "USAGE:" 0 ./build/omsc --help
-test_cli_output "help-command" "USAGE:" 0 ./build/omsc help
+test_cli_output "help" "Usage:" 0 ./build/omsc --help
+test_cli_output "help-command" "Usage:" 0 ./build/omsc help
 test_cli_output "parse-leading-verbose" "Parsed program" 0 ./build/omsc -V parse examples/test.om
 test_cli_output "emit-ir-leading-opt" "i64 @main" 0 ./build/omsc -O3 emit-ir examples/exit_zero.om
 test_cli_output "lex" "FN" 0 ./build/omsc lex examples/test.om
