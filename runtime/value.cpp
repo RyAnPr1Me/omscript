@@ -28,7 +28,7 @@ std::string Value::toString() const {
 }
 
 Value Value::operator+(const Value& other) const {
-    if (type == Type::INTEGER && other.type == Type::INTEGER) {
+    if (__builtin_expect(type == Type::INTEGER && other.type == Type::INTEGER, 1)) {
         return Value(intValue + other.intValue);
     }
     if (needsFloatPromotion(other)) {
@@ -57,7 +57,7 @@ Value Value::operator+(const Value& other) const {
 }
 
 Value Value::operator-(const Value& other) const {
-    if (type == Type::INTEGER && other.type == Type::INTEGER) {
+    if (__builtin_expect(type == Type::INTEGER && other.type == Type::INTEGER, 1)) {
         return Value(intValue - other.intValue);
     }
     if (needsFloatPromotion(other)) {
@@ -67,7 +67,7 @@ Value Value::operator-(const Value& other) const {
 }
 
 Value Value::operator*(const Value& other) const {
-    if (type == Type::INTEGER && other.type == Type::INTEGER) {
+    if (__builtin_expect(type == Type::INTEGER && other.type == Type::INTEGER, 1)) {
         return Value(intValue * other.intValue);
     }
     if (needsFloatPromotion(other)) {
@@ -77,11 +77,11 @@ Value Value::operator*(const Value& other) const {
 }
 
 Value Value::operator/(const Value& other) const {
-    if (type == Type::INTEGER && other.type == Type::INTEGER) {
-        if (other.intValue == 0)
+    if (__builtin_expect(type == Type::INTEGER && other.type == Type::INTEGER, 1)) {
+        if (__builtin_expect(other.intValue == 0, 0))
             throw std::runtime_error("Division by zero");
         // INT64_MIN / -1 overflows signed 64-bit; trap instead of UB.
-        if (intValue == INT64_MIN && other.intValue == -1)
+        if (__builtin_expect(intValue == INT64_MIN && other.intValue == -1, 0))
             throw std::runtime_error("Integer overflow in division (INT64_MIN / -1)");
         return Value(intValue / other.intValue);
     }
@@ -95,11 +95,11 @@ Value Value::operator/(const Value& other) const {
 }
 
 Value Value::operator%(const Value& other) const {
-    if (type == Type::INTEGER && other.type == Type::INTEGER) {
-        if (other.intValue == 0)
+    if (__builtin_expect(type == Type::INTEGER && other.type == Type::INTEGER, 1)) {
+        if (__builtin_expect(other.intValue == 0, 0))
             throw std::runtime_error("Modulo by zero");
         // INT64_MIN % -1 is UB (overflow); mathematically the result is 0.
-        if (intValue == INT64_MIN && other.intValue == -1)
+        if (__builtin_expect(intValue == INT64_MIN && other.intValue == -1, 0))
             return Value(static_cast<int64_t>(0));
         return Value(intValue % other.intValue);
     }
@@ -120,7 +120,7 @@ Value Value::operator-() const {
 }
 
 bool Value::operator==(const Value& other) const {
-    if (type == Type::INTEGER && other.type == Type::INTEGER) {
+    if (__builtin_expect(type == Type::INTEGER && other.type == Type::INTEGER, 1)) {
         return intValue == other.intValue;
     }
     // Allow numeric type coercion for equality
@@ -146,7 +146,7 @@ bool Value::operator!=(const Value& other) const {
 }
 
 bool Value::operator<(const Value& other) const {
-    if (type == Type::INTEGER && other.type == Type::INTEGER) {
+    if (__builtin_expect(type == Type::INTEGER && other.type == Type::INTEGER, 1)) {
         return intValue < other.intValue;
     }
     if (needsFloatPromotion(other)) {
@@ -159,7 +159,7 @@ bool Value::operator<(const Value& other) const {
 }
 
 bool Value::operator<=(const Value& other) const {
-    if (type == Type::INTEGER && other.type == Type::INTEGER) {
+    if (__builtin_expect(type == Type::INTEGER && other.type == Type::INTEGER, 1)) {
         return intValue <= other.intValue;
     }
     if (needsFloatPromotion(other)) {
@@ -172,7 +172,7 @@ bool Value::operator<=(const Value& other) const {
 }
 
 bool Value::operator>(const Value& other) const {
-    if (type == Type::INTEGER && other.type == Type::INTEGER) {
+    if (__builtin_expect(type == Type::INTEGER && other.type == Type::INTEGER, 1)) {
         return intValue > other.intValue;
     }
     if (needsFloatPromotion(other)) {
@@ -185,7 +185,7 @@ bool Value::operator>(const Value& other) const {
 }
 
 bool Value::operator>=(const Value& other) const {
-    if (type == Type::INTEGER && other.type == Type::INTEGER) {
+    if (__builtin_expect(type == Type::INTEGER && other.type == Type::INTEGER, 1)) {
         return intValue >= other.intValue;
     }
     if (needsFloatPromotion(other)) {
@@ -198,21 +198,21 @@ bool Value::operator>=(const Value& other) const {
 }
 
 Value Value::operator&(const Value& other) const {
-    if (type == Type::INTEGER && other.type == Type::INTEGER) {
+    if (__builtin_expect(type == Type::INTEGER && other.type == Type::INTEGER, 1)) {
         return Value(intValue & other.intValue);
     }
     throw std::runtime_error("Invalid operands for & (both must be integers)");
 }
 
 Value Value::operator|(const Value& other) const {
-    if (type == Type::INTEGER && other.type == Type::INTEGER) {
+    if (__builtin_expect(type == Type::INTEGER && other.type == Type::INTEGER, 1)) {
         return Value(intValue | other.intValue);
     }
     throw std::runtime_error("Invalid operands for | (both must be integers)");
 }
 
 Value Value::operator^(const Value& other) const {
-    if (type == Type::INTEGER && other.type == Type::INTEGER) {
+    if (__builtin_expect(type == Type::INTEGER && other.type == Type::INTEGER, 1)) {
         return Value(intValue ^ other.intValue);
     }
     throw std::runtime_error("Invalid operands for ^ (both must be integers)");
@@ -226,8 +226,8 @@ Value Value::operator~() const {
 }
 
 Value Value::operator<<(const Value& other) const {
-    if (type == Type::INTEGER && other.type == Type::INTEGER) {
-        if (other.intValue < 0 || other.intValue >= 64) {
+    if (__builtin_expect(type == Type::INTEGER && other.type == Type::INTEGER, 1)) {
+        if (__builtin_expect(other.intValue < 0 || other.intValue >= 64, 0)) {
             throw std::runtime_error("Shift amount out of range (0-63)");
         }
         // Cast to unsigned before shifting to avoid C++17 UB on negative values.
@@ -237,8 +237,8 @@ Value Value::operator<<(const Value& other) const {
 }
 
 Value Value::operator>>(const Value& other) const {
-    if (type == Type::INTEGER && other.type == Type::INTEGER) {
-        if (other.intValue < 0 || other.intValue >= 64) {
+    if (__builtin_expect(type == Type::INTEGER && other.type == Type::INTEGER, 1)) {
+        if (__builtin_expect(other.intValue < 0 || other.intValue >= 64, 0)) {
             throw std::runtime_error("Shift amount out of range (0-63)");
         }
         // Arithmetic right shift: sign bit is preserved.

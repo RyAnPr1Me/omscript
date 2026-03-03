@@ -20,10 +20,15 @@ DeoptManager& DeoptManager::instance() {
 
 void DeoptManager::onGuardFailure(const char* funcName, void** fnPtrSlot) {
     std::lock_guard<std::mutex> lk(mtx_);
+    // Fast path: if already deoptimized, nothing to do.
+    auto deoptIt = deoptimized_.find(funcName);
+    if (__builtin_expect(deoptIt != deoptimized_.end() && deoptIt->second, 0))
+        return;
+
     auto& count = failures_[funcName];
     count++;
 
-    if (count >= kDeoptThreshold && !deoptimized_[funcName]) {
+    if (count >= kDeoptThreshold) {
         // Revert to baseline: clear the hot-patch slot so the dispatch
         // prolog in the Tier-1 code falls through to the original body.
         if (fnPtrSlot) {

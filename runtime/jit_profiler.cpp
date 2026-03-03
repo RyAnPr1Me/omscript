@@ -27,7 +27,11 @@ JITProfiler& JITProfiler::instance() {
 }
 
 void JITProfiler::recordBranch(const char* funcName, uint32_t branchId, bool taken) {
-    std::lock_guard<std::mutex> lk(mtx_);
+    // Use try_lock to avoid blocking on the hot path — dropping a few samples
+    // has negligible impact on profile accuracy since profiling is statistical.
+    std::unique_lock<std::mutex> lk(mtx_, std::try_to_lock);
+    if (__builtin_expect(!lk.owns_lock(), 0))
+        return;
     auto& prof = profiles_[funcName];
     if (prof.name.empty())
         prof.name = funcName;
@@ -41,7 +45,9 @@ void JITProfiler::recordBranch(const char* funcName, uint32_t branchId, bool tak
 }
 
 void JITProfiler::recordArg(const char* funcName, uint32_t argIndex, ArgType type, int64_t value) {
-    std::lock_guard<std::mutex> lk(mtx_);
+    std::unique_lock<std::mutex> lk(mtx_, std::try_to_lock);
+    if (__builtin_expect(!lk.owns_lock(), 0))
+        return;
     auto& prof = profiles_[funcName];
     if (prof.name.empty())
         prof.name = funcName;
