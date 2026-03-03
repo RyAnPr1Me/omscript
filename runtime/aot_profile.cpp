@@ -150,14 +150,19 @@ void AdaptiveJITRunner::injectCounters(llvm::Module& mod) {
         auto* weights = mdB.createBranchWeights(99, 1);
         B.CreateCondBr(isHot, hotBB, countBB, weights);
 
-        // --- omsc.hot: tail-call the recompiled version ---
+        // --- omsc.hot: call the recompiled version and return its result ---
+        // NOTE: this must be a regular (non-tail) call.  A tail call would
+        // cause the Tier-2 native code to return directly to the dispatch
+        // prolog's caller, bypassing any Tier-1 stack frames that are
+        // currently mid-execution (e.g. the outer frames of a directly
+        // recursive function).  With a regular call the extra stack frame
+        // is trivial and correctness is preserved for all call patterns.
         B.SetInsertPoint(hotBB);
         {
             llvm::SmallVector<llvm::Value*, 8> args;
             for (auto& arg : fn->args())
                 args.push_back(&arg);
             auto* hotCall = B.CreateCall(fn->getFunctionType(), fp, args, "omsc.hot_r");
-            hotCall->setTailCall(true);
             B.CreateRet(hotCall);
         }
 

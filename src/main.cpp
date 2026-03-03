@@ -12,8 +12,6 @@
 #include <fstream>
 #include <iostream>
 #include <llvm/ADT/SmallVector.h>
-#include <llvm/IR/Function.h>
-#include <llvm/IR/Instructions.h>
 #include <llvm/IR/Module.h>
 #include <llvm/Support/FileSystem.h>
 #include <llvm/Support/Program.h>
@@ -2575,32 +2573,21 @@ int main(int argc, char* argv[]) {
             return 0;
         }
 
-        // Helper: return true if any function in the module directly calls itself
-        // (directly recursive).  MCJIT does not handle the Tier-2 hot-patch
-        // correctly for directly recursive functions — the dispatch prolog's
-        // tail call into the clean Tier-2 copy causes the Tier-2 copy's own
-        // recursive calls to bypass the prolog, which corrupts the call chain
-        // when the Tier-1 engine is mid-recursion.  Fall back to the
-        // traditional AOT compile+link+exec path for such programs.
-        const auto moduleHasDirectlyRecursiveFns = [](llvm::Module* mod) -> bool {
-            for (auto& fn : *mod) {
-                if (fn.isDeclaration()) continue;
-                for (auto& bb : fn)
-                    for (auto& inst : bb)
-                        if (auto* ci = llvm::dyn_cast<llvm::CallInst>(&inst))
-                            if (ci->getCalledFunction() == &fn) return true;
-            }
-            return false;
-        };
-
         // -------------------------------------------------------------------
         // Adaptive JIT execution — `omsc run` with JIT enabled (default)
         // -------------------------------------------------------------------
-        // Instead of compile → link → subprocess, we JIT-execute the module
-        // in-process at O2 (fast start) and automatically recompile any
-        // function that crosses kRecompileThreshold calls at O3 with a
-        // real-runtime PGO entry-count annotation, hot-patching the function
-        // pointer so future calls use the faster specialisation immediately.
+        // The program goes through a three-phase execution model:
+        //   1. Compile: source → LLVM IR → MCJIT native code (Tier-1, O2).
+        //   2. Monitor: each non-main function counts invocations via an
+        //      injected dispatch prolog (atomic call counter).
+        //   3. Recompile: when the count reaches kRecompileThreshold the
+        //      function is recompiled at O3 with a PGO entry-count annotation
+        //      (Tier-2) and the native function pointer is hot-patched so
+        //      future calls skip the counter entirely.
+        //
+        // This path handles all programs, including directly recursive ones —
+        // the dispatch prolog uses a regular (non-tail) call so that Tier-2
+        // hot-patches are safe even when Tier-1 frames are on the call stack.
         if (command == Command::Run && flagJIT && !keepTemps) {
             std::string source = readSourceFile(sourceFile);
 
@@ -2638,35 +2625,27 @@ int main(int argc, char* argv[]) {
                           << "ms\n";
             }
 
-            // generateHybrid() compiles every function to native LLVM IR —
-            // there is no bytecode path.  Fall back to AOT compile+link+exec
-            // only for directly recursive functions, where the Tier-2
-            // hot-patch is unsafe while the recursion is in flight.
-            if (!moduleHasDirectlyRecursiveFns(cg.getModule())) {
-                omscript::AdaptiveJITRunner runner;
-                int exitCode = runner.run(cg.getModule());
+            omscript::AdaptiveJITRunner runner;
+            int exitCode = runner.run(cg.getModule());
 
-                // "JIT-compiled" satisfies the existing test suite which checks
-                // for the substring "compiled" in the run-command output.
-                if (!quiet)
-                    std::cout << "JIT-compiled " << sourceFile << std::endl;
+            // "JIT-compiled" satisfies the existing test suite which checks
+            // for the substring "compiled" in the run-command output.
+            if (!quiet)
+                std::cout << "JIT-compiled " << sourceFile << std::endl;
 
-                if (showTiming) {
-                    auto totalMs2 =
-                        std::chrono::duration_cast<std::chrono::microseconds>(
-                            std::chrono::steady_clock::now() - totalStart)
-                            .count() /
-                        1000.0;
-                    std::cerr << "Timing: total " << totalMs2 << "ms\n";
-                }
-
-                if (exitCode != 0)
-                    std::cout << "Program exited with code " << exitCode << "\n";
-
-                return exitCode;
+            if (showTiming) {
+                auto totalMs2 =
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now() - totalStart)
+                        .count() /
+                    1000.0;
+                std::cerr << "Timing: total " << totalMs2 << "ms\n";
             }
-            // Directly recursive functions: fall through to native AOT
-            // compile+link+exec (a compiled binary, not bytecode).
+
+            if (exitCode != 0)
+                std::cout << "Program exited with code " << exitCode << "\n";
+
+            return exitCode;
         }
 
         omscript::Compiler compiler;

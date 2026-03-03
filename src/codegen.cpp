@@ -572,27 +572,13 @@ CodeGenerator::~CodeGenerator() = default;
 // ---------------------------------------------------------------------------
 
 ExecutionTier CodeGenerator::classifyFunction(const FunctionDecl* func) const {
-    // main is always AOT-compiled — it is the program entry point.
-    if (func->name == "main")
-        return ExecutionTier::AOT;
-
-    // OPTMAX functions are explicitly marked for aggressive AOT optimisation.
-    if (func->isOptMax)
-        return ExecutionTier::AOT;
-
-    // Stdlib built-ins are always native (handled separately, but classify
-    // them here for completeness).
-    if (isStdlibFunction(func->name))
-        return ExecutionTier::AOT;
-
-    // If every parameter carries a type annotation the function is
-    // statically typed and therefore eligible for AOT compilation.
-    if (func->hasFullTypeAnnotations())
-        return ExecutionTier::AOT;
-
-    // Everything else starts life as interpreted bytecode.
-    // The VM profiler may later promote it to JIT.
-    return ExecutionTier::Interpreted;
+    // All user-defined functions compile to native LLVM IR regardless of
+    // type-annotation coverage.  The adaptive JIT runtime (AdaptiveJITRunner)
+    // then monitors call counts at runtime and recompiles hot functions at O3
+    // with PGO guidance, replacing the running Tier-1 native code in-place.
+    // There is no bytecode or interpreter tier — every function is AOT.
+    (void)func;
+    return ExecutionTier::AOT;
 }
 
 void CodeGenerator::setupPrintfDeclaration() {

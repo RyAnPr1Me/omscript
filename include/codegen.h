@@ -35,19 +35,26 @@ enum class OptimizationLevel {
 
 /// Execution tier assigned to each function during compilation.
 ///
-///  - **AOT**: The function has full type annotations (or is OPTMAX / main /
-///    stdlib) and can be compiled to native machine code ahead of time via
-///    LLVM IR.
-///  - **Interpreted**: The function lacks type annotations or uses dynamic
-///    features.  It is compiled to bytecode and run by the VM interpreter.
-///  - **JIT**: An interpreted function that has been identified as hot by
-///    the VM profiler and was successfully JIT-compiled to native code.
-///    This tier also covers precompiled bytecode that is later recompiled
-///    with type-specialized native code when profiling data is available.
+/// All user-defined functions compile to native LLVM IR and are executed via
+/// the adaptive two-tier JIT:
+///
+///  - **AOT (Tier 1)**: Every function is compiled to native machine code
+///    ahead-of-time by LLVM MCJIT at O2.  The adaptive runtime injects
+///    call-counting dispatch prologs so hot functions can be promoted.
+///
+///  - **JIT (Tier 2)**: When a function's call count reaches
+///    kRecompileThreshold the runtime re-optimises it at O3 with a PGO
+///    entry-count annotation and hot-patches the function pointer so
+///    subsequent calls bypass the dispatch prolog entirely.
+///
+/// There is no bytecode or interpreter tier — every function produces
+/// native machine code from the first call.  `classifyFunction()` always
+/// returns `AOT`; the `Interpreted` and `JIT` enum values are retained for
+/// source compatibility.
 enum class ExecutionTier {
-    AOT,         // Compiled to native code via LLVM IR
-    Interpreted, // Compiled to bytecode, run by the VM
-    JIT          // Hot bytecode function JIT-compiled to native code
+    AOT,         // Compiled to native code via LLVM IR (Tier 1)
+    Interpreted, // Legacy — not used; all functions are AOT
+    JIT          // Hot Tier-1 function promoted to O3+PGO native code
 };
 
 /// Return a human-readable label for an ExecutionTier value.
@@ -430,18 +437,20 @@ class CodeGenerator {
     // Bytecode generation (alternative backend)
     void generateBytecode(Program* program);
 
-    /// Hybrid code generation: generates LLVM IR for AOT-tier functions and
-    /// bytecode for Interpreted-tier functions in a single pass.  AOT-tier
-    /// functions that call Interpreted-tier functions get IR stubs that
-    /// invoke the VM at runtime, enabling seamless cross-tier calls.
+    /// Compile all functions to native LLVM IR.  Equivalent to generate()
+    /// in the current single-tier model; retained as a separate entry point
+    /// so the adaptive JIT runner can use a distinct call site from the
+    /// traditional AOT compile path.
     void generateHybrid(Program* program);
 
-    /// Return true if hybrid compilation produced any bytecode functions.
+    /// Always returns false — no bytecode is produced in the current model.
+    /// Retained for source compatibility.
     bool hasHybridBytecodeFunctions() const {
         return !bytecodeFunctions_.empty();
     }
 
-    /// Return the list of bytecode functions produced by hybrid compilation.
+    /// Returns an empty list — no bytecode is produced in the current model.
+    /// Retained for source compatibility.
     const std::vector<CompiledBytecodeFunc>& getBytecodeFunctions() const {
         return bytecodeFunctions_;
     }
