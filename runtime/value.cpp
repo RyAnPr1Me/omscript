@@ -35,18 +35,22 @@ Value Value::operator+(const Value& other) const {
         return Value(toDouble() + other.toDouble());
     }
     if (type == Type::STRING || other.type == Type::STRING) {
-        // String concatenation using reference counted strings
-        Value v;
-        v.type = Type::STRING;
+        // Build the result string first; allocation may throw std::bad_alloc.
+        // Setting v.type before a successful construction would cause ~Value()
+        // to call ~RefCountedString() on uninitialised memory during unwinding.
+        RefCountedString result;
         if (type == Type::STRING && other.type == Type::STRING) {
-            new (&v.stringValue) RefCountedString(stringValue + other.stringValue);
+            result = stringValue + other.stringValue;
         } else if (type == Type::STRING) {
             RefCountedString otherStr(other.toString().c_str());
-            new (&v.stringValue) RefCountedString(stringValue + otherStr);
+            result = stringValue + otherStr;
         } else {
             RefCountedString thisStr(toString().c_str());
-            new (&v.stringValue) RefCountedString(thisStr + other.stringValue);
+            result = thisStr + other.stringValue;
         }
+        Value v;
+        v.type = Type::STRING;
+        new (&v.stringValue) RefCountedString(std::move(result));
         return v;
     }
     throw std::runtime_error("Invalid operands for +");
@@ -226,7 +230,8 @@ Value Value::operator<<(const Value& other) const {
         if (other.intValue < 0 || other.intValue >= 64) {
             throw std::runtime_error("Shift amount out of range (0-63)");
         }
-        return Value(intValue << other.intValue);
+        // Cast to unsigned before shifting to avoid C++17 UB on negative values.
+        return Value(static_cast<int64_t>(static_cast<uint64_t>(intValue) << other.intValue));
     }
     throw std::runtime_error("Invalid operands for << (both must be integers)");
 }

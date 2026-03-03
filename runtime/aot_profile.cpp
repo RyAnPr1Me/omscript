@@ -262,11 +262,14 @@ int AdaptiveJITRunner::run(llvm::Module* baseModule) {
 
     // Step 5: Execute main() in-process.
     // Register this runner as the active one so that the C-linkage callback
-    // can reach it during execution.
+    // can reach it during execution.  RAII guard ensures the pointer is
+    // cleared even if main() exits via an exception.
     g_activeRunner.store(this, std::memory_order_release);
+    struct RunnerGuard {
+        ~RunnerGuard() { g_activeRunner.store(nullptr, std::memory_order_release); }
+    } runnerGuard;
     using OmscMainFn = int64_t (*)();
     int64_t exitVal = reinterpret_cast<OmscMainFn>(mainAddr)();
-    g_activeRunner.store(nullptr, std::memory_order_release);
 
     // Mirror what a process exit code would look like (0-255).
     return static_cast<int>(exitVal & 0xFF);

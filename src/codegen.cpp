@@ -1794,6 +1794,29 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         return builder->CreateZExt(phi, getDefaultType(), "booltmp");
     }
 
+    // Null coalescing operator: x ?? y → x != 0 ? x : y (short-circuit)
+    if (expr->op == "??") {
+        left = toDefaultType(left);
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
+        llvm::Value* isNonZero = builder->CreateICmpNE(left, zero, "coalesce.nz");
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* nonZeroBB = llvm::BasicBlock::Create(*context, "coalesce.nonzero", function);
+        llvm::BasicBlock* zeroBB = llvm::BasicBlock::Create(*context, "coalesce.zero", function);
+        llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "coalesce.merge", function);
+        builder->CreateCondBr(isNonZero, nonZeroBB, zeroBB);
+        builder->SetInsertPoint(nonZeroBB);
+        builder->CreateBr(mergeBB);
+        builder->SetInsertPoint(zeroBB);
+        llvm::Value* right = generateExpression(expr->right.get());
+        right = toDefaultType(right);
+        builder->CreateBr(mergeBB);
+        builder->SetInsertPoint(mergeBB);
+        llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "coalesce.result");
+        result->addIncoming(left, nonZeroBB);
+        result->addIncoming(right, zeroBB);
+        return result;
+    }
+
     llvm::Value* right = generateExpression(expr->right.get());
 
     bool leftIsFloat = left->getType()->isDoubleTy();
@@ -1930,9 +1953,23 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         } else if (expr->op == "**") {
             if (rval >= 0) {
                 int64_t result = 1;
-                for (int64_t i = 0; i < rval; i++)
+                bool overflow = false;
+                for (int64_t i = 0; i < rval; i++) {
+                    if (lval != 0 && lval != 1 && lval != -1) {
+                        uint64_t ab = (lval < 0) ? static_cast<uint64_t>(-static_cast<uint64_t>(lval))
+                                                 : static_cast<uint64_t>(lval);
+                        uint64_t ar = (result < 0) ? static_cast<uint64_t>(-static_cast<uint64_t>(result))
+                                                   : static_cast<uint64_t>(result);
+                        if (ar > static_cast<uint64_t>(INT64_MAX) / ab) {
+                            overflow = true;
+                            break;
+                        }
+                    }
                     result *= lval;
-                return llvm::ConstantInt::get(*context, llvm::APInt(64, result));
+                }
+                if (!overflow)
+                    return llvm::ConstantInt::get(*context, llvm::APInt(64, result));
+                // Fall through to emit runtime power operation on overflow.
             } else {
                 return llvm::ConstantInt::get(*context, llvm::APInt(64, 0));
             }
@@ -2125,30 +2162,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         finalResult->addIncoming(zero, negExpBB);
         finalResult->addIncoming(result, loopBB);
         return finalResult;
-    }
-
-    // Null coalescing operator: x ?? y → x != 0 ? x : y
-    if (expr->op == "??") {
-        llvm::Value* left = generateExpression(expr->left.get());
-        left = toDefaultType(left);
-        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
-        llvm::Value* isNonZero = builder->CreateICmpNE(left, zero, "coalesce.nz");
-        llvm::Function* function = builder->GetInsertBlock()->getParent();
-        llvm::BasicBlock* nonZeroBB = llvm::BasicBlock::Create(*context, "coalesce.nonzero", function);
-        llvm::BasicBlock* zeroBB = llvm::BasicBlock::Create(*context, "coalesce.zero", function);
-        llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "coalesce.merge", function);
-        builder->CreateCondBr(isNonZero, nonZeroBB, zeroBB);
-        builder->SetInsertPoint(nonZeroBB);
-        builder->CreateBr(mergeBB);
-        builder->SetInsertPoint(zeroBB);
-        llvm::Value* right = generateExpression(expr->right.get());
-        right = toDefaultType(right);
-        builder->CreateBr(mergeBB);
-        builder->SetInsertPoint(mergeBB);
-        llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "coalesce.result");
-        result->addIncoming(left, nonZeroBB);
-        result->addIncoming(right, zeroBB);
-        return result;
     }
 
     codegenError("Unknown binary operator: " + expr->op, expr);
@@ -3152,6 +3165,22 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             strArg->getType()->isPointerTy()
                 ? strArg
                 : builder->CreateIntToPtr(strArg, llvm::PointerType::getUnqual(*context), "substr.ptr");
+
+        // Bounds checking: clamp start and length to valid range.
+        llvm::Value* strLen = builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "substr.strlen");
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        // Clamp start: max(0, min(start, strLen))
+        llvm::Value* startNeg = builder->CreateICmpSLT(startArg, zero, "substr.startneg");
+        startArg = builder->CreateSelect(startNeg, zero, startArg, "substr.startclamp");
+        llvm::Value* startOverflow = builder->CreateICmpSGT(startArg, strLen, "substr.startover");
+        startArg = builder->CreateSelect(startOverflow, strLen, startArg, "substr.startfinal");
+        // Clamp length: max(0, min(len, strLen - start))
+        llvm::Value* remaining = builder->CreateSub(strLen, startArg, "substr.remaining");
+        llvm::Value* lenNeg = builder->CreateICmpSLT(lenArg, zero, "substr.lenneg");
+        lenArg = builder->CreateSelect(lenNeg, zero, lenArg, "substr.lenclamp");
+        llvm::Value* lenOverflow = builder->CreateICmpSGT(lenArg, remaining, "substr.lenover");
+        lenArg = builder->CreateSelect(lenOverflow, remaining, lenArg, "substr.lenfinal");
+
         // Allocate buffer: len + 1
         llvm::Value* allocSize =
             builder->CreateAdd(lenArg, llvm::ConstantInt::get(getDefaultType(), 1), "substr.alloc");
@@ -3684,6 +3713,23 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         arrArg = toDefaultType(arrArg);
         llvm::Value* arrPtr = builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "pop.arrptr");
         llvm::Value* oldLen = builder->CreateLoad(getDefaultType(), arrPtr, "pop.oldlen");
+
+        // Guard against popping from an empty array.
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* isEmpty = builder->CreateICmpSLE(oldLen, zero, "pop.empty");
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "pop.ok", function);
+        llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "pop.fail", function);
+        builder->CreateCondBr(isEmpty, failBB, okBB);
+
+        builder->SetInsertPoint(failBB);
+        llvm::Value* errMsg =
+            builder->CreateGlobalString("Runtime error: pop from empty array\n", "pop_empty_msg");
+        builder->CreateCall(getPrintfFunction(), {errMsg});
+        builder->CreateCall(getOrDeclareAbort());
+        builder->CreateUnreachable();
+
+        builder->SetInsertPoint(okBB);
         // Return the last element
         llvm::Value* lastIdx =
             builder->CreateAdd(builder->CreateSub(oldLen, llvm::ConstantInt::get(getDefaultType(), 1), "pop.lastoff"),
@@ -3947,6 +3993,19 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         startArg = toDefaultType(startArg);
         endArg = toDefaultType(endArg);
         llvm::Value* arrPtr = builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "slice.arrptr");
+        llvm::Value* arrLen = builder->CreateLoad(getDefaultType(), arrPtr, "slice.arrlen");
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        // Clamp start: max(0, min(start, arrLen))
+        llvm::Value* startNeg = builder->CreateICmpSLT(startArg, zero, "slice.startneg");
+        startArg = builder->CreateSelect(startNeg, zero, startArg, "slice.startclamp");
+        llvm::Value* startOver = builder->CreateICmpSGT(startArg, arrLen, "slice.startover");
+        startArg = builder->CreateSelect(startOver, arrLen, startArg, "slice.startfinal");
+        // Clamp end: max(start, min(end, arrLen))
+        llvm::Value* endNeg = builder->CreateICmpSLT(endArg, startArg, "slice.endneg");
+        endArg = builder->CreateSelect(endNeg, startArg, endArg, "slice.endclamp");
+        llvm::Value* endOver = builder->CreateICmpSGT(endArg, arrLen, "slice.endover");
+        endArg = builder->CreateSelect(endOver, arrLen, endArg, "slice.endfinal");
+
         llvm::Value* sliceLen = builder->CreateSub(endArg, startArg, "slice.len");
         // Allocate: (sliceLen + 1) * 8
         llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
