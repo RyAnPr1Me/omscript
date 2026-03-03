@@ -3128,8 +3128,122 @@ TEST(CodegenTest, WhileLoopWithVectorizeHints) {
     // While loops should also get vectorization metadata at O2+.
     CodeGenerator codegen(OptimizationLevel::O2);
     codegen.setVectorize(true);
-    auto* mod = generateIR(
-        "fn main() { var i = 0; var s = 0; while (i < 10) { s = s + i; i = i + 1; } return s; }",
-        codegen);
+    auto* mod =
+        generateIR("fn main() { var i = 0; var s = 0; while (i < 10) { s = s + i; i = i + 1; } return s; }", codegen);
     ASSERT_NE(mod, nullptr);
+}
+
+// ===========================================================================
+// Production safety: wrapping arithmetic (no undefined behavior on overflow)
+// ===========================================================================
+
+TEST(CodegenTest, ArithmeticUsesWrapping) {
+    // Verify that the generated IR uses wrapping add/sub/mul (not NSW variants)
+    // to ensure defined two's-complement behavior on integer overflow.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn add(a, b) { return a + b; } fn main() { return add(1, 2); }", codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* addFn = mod->getFunction("add");
+    ASSERT_NE(addFn, nullptr);
+    // Walk instructions and verify no NSW flags on add/sub/mul
+    for (auto& BB : *addFn) {
+        for (auto& I : BB) {
+            if (auto* binOp = llvm::dyn_cast<llvm::BinaryOperator>(&I)) {
+                if (binOp->getOpcode() == llvm::Instruction::Add || binOp->getOpcode() == llvm::Instruction::Sub ||
+                    binOp->getOpcode() == llvm::Instruction::Mul) {
+                    EXPECT_FALSE(binOp->hasNoSignedWrap())
+                        << "Arithmetic operation should not have NSW flag for production safety";
+                }
+            }
+        }
+    }
+}
+
+TEST(CodegenTest, SubtractionWrapping) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn sub(a, b) { return a - b; } fn main() { return sub(3, 1); }", codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* subFn = mod->getFunction("sub");
+    ASSERT_NE(subFn, nullptr);
+    for (auto& BB : *subFn) {
+        for (auto& I : BB) {
+            if (auto* binOp = llvm::dyn_cast<llvm::BinaryOperator>(&I)) {
+                if (binOp->getOpcode() == llvm::Instruction::Sub) {
+                    EXPECT_FALSE(binOp->hasNoSignedWrap()) << "Subtraction should not have NSW flag";
+                }
+            }
+        }
+    }
+}
+
+TEST(CodegenTest, MultiplicationWrapping) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    // Use a non-power-of-2 constant to avoid strength-reduction to shl
+    auto* mod = generateIR("fn mul(a, b) { return a * b; } fn main() { return mul(3, 5); }", codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* mulFn = mod->getFunction("mul");
+    ASSERT_NE(mulFn, nullptr);
+    for (auto& BB : *mulFn) {
+        for (auto& I : BB) {
+            if (auto* binOp = llvm::dyn_cast<llvm::BinaryOperator>(&I)) {
+                if (binOp->getOpcode() == llvm::Instruction::Mul) {
+                    EXPECT_FALSE(binOp->hasNoSignedWrap()) << "Multiplication should not have NSW flag";
+                }
+            }
+        }
+    }
+}
+
+// ===========================================================================
+// Production safety: division by zero guard
+// ===========================================================================
+
+TEST(CodegenTest, DivisionByZeroGuard) {
+    // Verify that division generates a zero-check guard.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn div(a, b) { return a / b; } fn main() { return div(10, 2); }", codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* divFn = mod->getFunction("div");
+    ASSERT_NE(divFn, nullptr);
+    // Should have multiple basic blocks (at least: entry, zero-check, div-op)
+    EXPECT_GT(std::distance(divFn->begin(), divFn->end()), 1u)
+        << "Division function should have guard basic blocks for zero-check";
+}
+
+TEST(CodegenTest, ModuloByZeroGuard) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn mod_fn(a, b) { return a % b; } fn main() { return mod_fn(10, 3); }", codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* modFn = mod->getFunction("mod_fn");
+    ASSERT_NE(modFn, nullptr);
+    EXPECT_GT(std::distance(modFn->begin(), modFn->end()), 1u)
+        << "Modulo function should have guard basic blocks for zero-check";
+}
+
+// ===========================================================================
+// Production safety: array bounds checking
+// ===========================================================================
+
+TEST(CodegenTest, ArrayIndexBoundsCheck) {
+    // Verify that array indexing generates bounds-check guard blocks.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod =
+        generateIR("fn get(a, i) { return a[i]; } fn main() { var arr = [1,2,3]; return get(arr, 0); }", codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* getFn = mod->getFunction("get");
+    ASSERT_NE(getFn, nullptr);
+    // Bounds checking adds additional basic blocks (ok + fail paths)
+    EXPECT_GT(std::distance(getFn->begin(), getFn->end()), 1u)
+        << "Array index function should have bounds-check basic blocks";
+}
+
+TEST(CodegenTest, ArrayIndexAssignBoundsCheck) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "fn set(a, i, v) { a[i] = v; return 0; } fn main() { var arr = [1,2,3]; return set(arr, 0, 42); }", codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* setFn = mod->getFunction("set");
+    ASSERT_NE(setFn, nullptr);
+    EXPECT_GT(std::distance(setFn->begin(), setFn->end()), 1u)
+        << "Array index assign function should have bounds-check basic blocks";
 }
