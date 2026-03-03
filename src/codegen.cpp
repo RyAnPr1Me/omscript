@@ -1846,21 +1846,25 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         bool leftIsStr = left->getType()->isPointerTy() || isStringExpr(expr->left.get());
         bool rightIsStr = right->getType()->isPointerTy() || isStringExpr(expr->right.get());
 
-        // Helper: convert a non-string value (integer or float) to a heap-allocated
-        // decimal string ptr using snprintf(buf, 21, "%lld", val).
-        // Mirrors the to_string builtin.
-        auto intToStrPtr = [&](llvm::Value* val) -> llvm::Value* {
-            val = toDefaultType(val);
-            llvm::Value* bufSize = llvm::ConstantInt::get(getDefaultType(), 21);
-            llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bufSize}, "concat.numstr");
-            llvm::GlobalVariable* fmtStr = module->getGlobalVariable("tostr_fmt", true);
-            if (!fmtStr)
-                fmtStr = builder->CreateGlobalString("%lld", "tostr_fmt");
-            builder->CreateCall(getOrDeclareSnprintf(), {buf, bufSize, fmtStr, val});
-            return buf;
-        };
-
         if (leftIsStr || rightIsStr) {
+            // Retrieve (or lazily create) the "%lld" format string used when
+            // converting a non-string operand to its decimal representation via
+            // snprintf.  Hoisted here so it is created at most once even when
+            // both operands need conversion.
+            llvm::GlobalVariable* numFmt = module->getGlobalVariable("tostr_fmt", true);
+            if (!numFmt)
+                numFmt = builder->CreateGlobalString("%lld", "tostr_fmt");
+
+            // Helper: convert a non-string value (integer or float) to a
+            // heap-allocated decimal string ptr — mirrors the to_string builtin.
+            auto intToStrPtr = [&](llvm::Value* val) -> llvm::Value* {
+                val = toDefaultType(val);
+                llvm::Value* bufSize = llvm::ConstantInt::get(getDefaultType(), 21);
+                llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bufSize}, "concat.numstr");
+                builder->CreateCall(getOrDeclareSnprintf(), {buf, bufSize, numFmt, val});
+                return buf;
+            };
+
             // Ensure both operands are string pointers.
             // If one side is not a string, convert it to a decimal string representation.
             if (!left->getType()->isPointerTy()) {
