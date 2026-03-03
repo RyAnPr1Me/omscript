@@ -99,7 +99,9 @@ struct ArgProfile {
 
     /// Record an observed argument value.
     void record(ArgType type, int64_t value) {
-        typeCounts[static_cast<uint8_t>(type)]++;
+        auto idx = static_cast<uint8_t>(type);
+        if (idx < 6)
+            typeCounts[idx]++;
         totalCalls++;
         if (type == ArgType::Integer) {
             if (constantCount == 0 || value == observedConstant) {

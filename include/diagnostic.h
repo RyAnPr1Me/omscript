@@ -8,6 +8,7 @@ namespace omscript {
 
 /// Source location attached to every diagnostic.
 struct SourceLocation {
+    std::string filename;
     int line = 0;
     int column = 0;
 };
@@ -30,7 +31,7 @@ struct Diagnostic {
     SourceLocation location;
     std::string message;
 
-    /// Format as "error at line L, column C: message" (or "warning …").
+    /// Format as "file:L:C: error: message" (or "error at line L, column C: message" if no file).
     std::string format() const {
         std::string prefix;
         switch (severity) {
@@ -46,6 +47,10 @@ struct Diagnostic {
         case DiagnosticSeverity::Hint:
             prefix = "hint";
             break;
+        }
+        if (!location.filename.empty() && location.line > 0) {
+            return location.filename + ":" + std::to_string(location.line) + ":" + std::to_string(location.column) +
+                   ": " + prefix + ": " + message;
         }
         if (location.line > 0) {
             return prefix + " at line " + std::to_string(location.line) + ", column " +

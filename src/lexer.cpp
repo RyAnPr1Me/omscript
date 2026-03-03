@@ -33,7 +33,7 @@ static const std::unordered_map<std::string, TokenType> keywords = {
 
 /// Throw a DiagnosticError with the given message and source location.
 [[noreturn]] static void lexError(const std::string& msg, int ln, int col) {
-    throw DiagnosticError(Diagnostic{DiagnosticSeverity::Error, {ln, col}, msg});
+    throw DiagnosticError(Diagnostic{DiagnosticSeverity::Error, {"", ln, col}, msg});
 }
 
 Lexer::Lexer(const std::string& source) : source(source), pos(0), line(1), column(1) {}

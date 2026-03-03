@@ -108,6 +108,9 @@ void __omsc_profile_branch(const char* funcName, uint32_t branchId, int64_t take
 }
 
 void __omsc_profile_arg(const char* funcName, uint32_t argIndex, uint8_t type, int64_t value) {
+    // Clamp type to valid ArgType range to prevent out-of-bounds access.
+    if (type > static_cast<uint8_t>(omscript::ArgType::None))
+        type = static_cast<uint8_t>(omscript::ArgType::Unknown);
     omscript::JITProfiler::instance().recordArg(funcName, argIndex, static_cast<omscript::ArgType>(type), value);
 }
 
