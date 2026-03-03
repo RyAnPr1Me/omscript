@@ -1,0 +1,52 @@
+// Test automatic string + integer/float concatenation
+// Previously, "string" + int would cause pointer arithmetic instead of
+// concatenation, resulting in garbled output or SIGSEGV.
+
+fn test_str_int() {
+    var x: int = 42;
+    print("value: " + x);
+    return 1;
+}
+
+fn test_int_str() {
+    var x: int = 7;
+    print(x + " is the answer");
+    return 1;
+}
+
+fn test_str_expr() {
+    var a: int = 3;
+    var b: int = 4;
+    print("sum: " + (a + b));
+    return 1;
+}
+
+fn test_str_zero() {
+    print("zero: " + 0);
+    return 1;
+}
+
+fn test_str_negative() {
+    var n: int = -99;
+    print("neg: " + n);
+    return 1;
+}
+
+fn test_concat_in_loop() {
+    for (i in 0...3) {
+        print("iter: " + i);
+    }
+    return 1;
+}
+
+fn main() {
+    var total: int = 0;
+    total = total + test_str_int();
+    total = total + test_int_str();
+    total = total + test_str_expr();
+    total = total + test_str_zero();
+    total = total + test_str_negative();
+    total = total + test_concat_in_loop();
+    // 6 tests passed
+    return total;
+}

@@ -1895,12 +1895,31 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     if (expr->op == "+") {
         bool leftIsStr = left->getType()->isPointerTy() || isStringExpr(expr->left.get());
         bool rightIsStr = right->getType()->isPointerTy() || isStringExpr(expr->right.get());
-        if (leftIsStr && rightIsStr) {
-            // Convert i64 string values back to ptr if necessary.
-            if (!left->getType()->isPointerTy())
-                left = builder->CreateIntToPtr(left, llvm::PointerType::getUnqual(*context), "str.l.ptr");
-            if (!right->getType()->isPointerTy())
-                right = builder->CreateIntToPtr(right, llvm::PointerType::getUnqual(*context), "str.r.ptr");
+        if (leftIsStr || rightIsStr) {
+            // Auto-convert non-string operand to string via snprintf (like to_string builtin).
+            auto ensureStrPtr = [&](llvm::Value* val, bool isStr) -> llvm::Value* {
+                if (isStr) {
+                    if (!val->getType()->isPointerTy())
+                        val = builder->CreateIntToPtr(val, llvm::PointerType::getUnqual(*context), "str.cast.ptr");
+                    return val;
+                }
+                // Convert integer or float to string.
+                llvm::Value* bufSize = llvm::ConstantInt::get(getDefaultType(), 32);
+                llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bufSize}, "autostr.buf");
+                if (val->getType()->isDoubleTy()) {
+                    llvm::GlobalVariable* fmt = module->getGlobalVariable("autostr_float_fmt", true);
+                    if (!fmt) fmt = builder->CreateGlobalString("%g", "autostr_float_fmt");
+                    builder->CreateCall(getOrDeclareSnprintf(), {buf, bufSize, fmt, val});
+                } else {
+                    val = toDefaultType(val);
+                    llvm::GlobalVariable* fmt = module->getGlobalVariable("tostr_fmt", true);
+                    if (!fmt) fmt = builder->CreateGlobalString("%lld", "tostr_fmt");
+                    builder->CreateCall(getOrDeclareSnprintf(), {buf, bufSize, fmt, val});
+                }
+                return buf;
+            };
+            left = ensureStrPtr(left, leftIsStr);
+            right = ensureStrPtr(right, rightIsStr);
 
             llvm::Value* len1 = builder->CreateCall(getOrDeclareStrlen(), {left}, "len1");
             llvm::Value* len2 = builder->CreateCall(getOrDeclareStrlen(), {right}, "len2");

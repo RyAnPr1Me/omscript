@@ -304,6 +304,7 @@ test_program "examples/underscore_num_test.om" 178
 test_program "examples/array_return_test.om" 110
 test_program "examples/power_operator_test.om" 366
 test_program "examples/str_concat_test.om" 22
+test_program "examples/str_int_concat_test.om" 6
 test_program "examples/memory_stress_test.om" 36
 test_program "examples/constant_folding.om" 243
 test_program "examples/ultimate_optimization.om" 184
