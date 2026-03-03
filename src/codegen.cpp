@@ -878,7 +878,7 @@ llvm::Function* CodeGenerator::getOrDeclareMemcpy() {
     auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy, ptrTy, getDefaultType()}, false);
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "memcpy", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
-    fn->addRetAttr(llvm::Attribute::NoAlias); // destination pointer does not alias source
+    fn->addRetAttr(llvm::Attribute::NoAlias); // returned (destination) pointer does not alias any pointer visible to the caller before this call
     return fn;
 }
 
@@ -1302,11 +1302,11 @@ void CodeGenerator::generate(Program* program) {
     }
 
     // Set fast-math flags on the builder for all generated FP operations.
-    // This enables FMA fusion (a*b+c → fmadd), reassociation, reciprocal
-    // approximations, and better SIMD vectorisation of floating-point loops.
+    // This enables FMA fusion (a*b+c -> fmadd), reassociation, reciprocal
+    // approximations, and better SIMD vectorization of floating-point loops.
     if (useFastMath_) {
         llvm::FastMathFlags FMF;
-        FMF.setFast(); // enables all unsafe FP optimisations
+        FMF.setFast(); // enables all unsafe FP optimizations
         builder->setFastMathFlags(FMF);
     }
 
@@ -1322,7 +1322,7 @@ void CodeGenerator::generate(Program* program) {
         //              and turns calls into simpler instructions.
         // mustprogress – every function is required to make forward progress;
         //              unlocks loop-idiom recognition (auto-memset/memcpy detection).
-        // nosync     – no synchronisation primitives; enables load/store hoisting.
+        // nosync     – no synchronization primitives; enables load/store hoisting.
         function->addFnAttr(llvm::Attribute::NoUnwind);
         function->addFnAttr(llvm::Attribute::MustProgress);
         function->addFnAttr(llvm::Attribute::NoSync);
@@ -5600,7 +5600,7 @@ void CodeGenerator::runOptimizationPasses() {
     PTO.LoopUnrolling = enableUnrollLoops_;
     PTO.LoopInterleaving = enableVectorize_; // enable loop interleaving at O2+
     if (optimizationLevel == OptimizationLevel::O3) {
-        PTO.MergeFunctions = true;       // deduplicate identical functions → smaller icache footprint
+        PTO.MergeFunctions = true;       // deduplicate identical functions -> smaller icache footprint
         PTO.CallGraphProfile = true;     // use call-graph profile data for inlining decisions
         PTO.InlinerThreshold = 300;      // more aggressive inlining than the default ~225
     }
