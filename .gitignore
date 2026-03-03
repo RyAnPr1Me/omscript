@@ -1,5 +1,6 @@
 # Build artifacts
 build/
+build_*/
 *.o
 *.a
 *.so
@@ -52,4 +53,3 @@ om_packages/
 
 # Clangd cache
 .cache/
-build_san
