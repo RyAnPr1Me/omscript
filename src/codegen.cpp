@@ -4966,29 +4966,8 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
     builder->SetInsertPoint(condBB);
     llvm::Value* condition = generateExpression(stmt->condition.get());
     llvm::Value* condBool = toBool(condition);
-    auto* condBr = builder->CreateCondBr(condBool, bodyBB, endBB);
+    builder->CreateCondBr(condBool, bodyBB, endBB);
 
-    // Attach SIMD vectorization and unroll hints at O2+ when enabled.
-    if (optimizationLevel >= OptimizationLevel::O2 && enableVectorize_) {
-        llvm::MDNode* vecEnable =
-            llvm::MDNode::get(*context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
-                                         llvm::ConstantAsMetadata::get(llvm::ConstantInt::getTrue(*context))});
-        llvm::MDNode* interleave = llvm::MDNode::get(
-            *context, {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
-                       llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))});
-        llvm::SmallVector<llvm::Metadata*, 4> loopMDs;
-        loopMDs.push_back(nullptr); // self-reference placeholder
-        loopMDs.push_back(vecEnable);
-        loopMDs.push_back(interleave);
-        if (enableUnrollLoops_) {
-            llvm::MDNode* unrollEnable =
-                llvm::MDNode::get(*context, {llvm::MDString::get(*context, "llvm.loop.unroll.enable")});
-            loopMDs.push_back(unrollEnable);
-        }
-        llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
-        loopMD->replaceOperandWith(0, loopMD); // fix self-reference
-        condBr->setMetadata(llvm::LLVMContext::MD_loop, loopMD);
-    }
 
     // Body block
     builder->SetInsertPoint(bodyBB);
@@ -5117,23 +5096,18 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     builder->CreateStore(incVal, iterAlloca);
     auto* backBr = builder->CreateBr(condBB);
 
-    // Attach SIMD vectorization and unroll hints to the for-loop back-edge.
+    // Attach SIMD interleave hint to the for-loop back-edge at O2+.
+    // Vectorization and unrolling are controlled globally via PipelineTuningOptions
+    // in runOptimizationPasses(); per-loop forced enable hints are omitted to
+    // avoid "unable to perform the requested transformation" diagnostic warnings
+    // when the optimizer cannot satisfy them.
     if (optimizationLevel >= OptimizationLevel::O2 && enableVectorize_) {
-        llvm::MDNode* vecEnable =
-            llvm::MDNode::get(*context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
-                                         llvm::ConstantAsMetadata::get(llvm::ConstantInt::getTrue(*context))});
         llvm::MDNode* interleave = llvm::MDNode::get(
             *context, {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
                        llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))});
-        llvm::SmallVector<llvm::Metadata*, 4> loopMDs;
+        llvm::SmallVector<llvm::Metadata*, 2> loopMDs;
         loopMDs.push_back(nullptr); // self-reference placeholder (fixed below)
-        loopMDs.push_back(vecEnable);
         loopMDs.push_back(interleave);
-        if (enableUnrollLoops_) {
-            llvm::MDNode* unrollEnable =
-                llvm::MDNode::get(*context, {llvm::MDString::get(*context, "llvm.loop.unroll.enable")});
-            loopMDs.push_back(unrollEnable);
-        }
         llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
         loopMD->replaceOperandWith(0, loopMD);
         backBr->setMetadata(llvm::LLVMContext::MD_loop, loopMD);
@@ -5534,19 +5508,33 @@ void CodeGenerator::runOptimizationPasses() {
     // function inlining, IPSCCP (sparse conditional constant propagation),
     // GlobalDCE (dead function removal), jump threading, correlated value
     // propagation, loop vectorization (O2+), SLP vectorization (O2+), and more.
-    llvm::PassBuilder PB(targetMachine.get());
+    //
+    // PipelineTuningOptions controls vectorization and loop unrolling globally.
+    // This is the correct way to enable/disable these passes in the new PM;
+    // it replaces the previous approach of injecting per-loop metadata hints
+    // with llvm.loop.vectorize.enable/llvm.loop.unroll.enable, which caused
+    // "unable to perform the requested transformation" warnings when the
+    // optimizer could not satisfy the forced hints.
+    llvm::PipelineTuningOptions PTO;
+    PTO.LoopVectorization = enableVectorize_;
+    PTO.SLPVectorization = enableVectorize_;
+    PTO.LoopUnrolling = enableUnrollLoops_;
+    llvm::PassBuilder PB(targetMachine.get(), PTO);
 
-    // Register pipeline extension callbacks to inject vectorization and
-    // polyhedral-style loop optimization settings before the main pipeline
-    // runs.  This lets us influence the standard pipeline's loop passes
-    // without building a fully custom pass list.
-    if (!enableVectorize_) {
-        // Disable loop and SLP vectorization when -fno-vectorize is given.
-        PB.registerPipelineStartEPCallback([](llvm::ModulePassManager&, llvm::OptimizationLevel) {
-            // The PassBuilder honours TargetMachine options; we inject
-            // a pipeline-start callback only to document the intent.
-            // Actual disabling happens via per-loop metadata below.
-        });
+    // At O3 with -floop-optimize, register LoopDistributePass to run just
+    // before the vectorizer starts.  Loop distribution splits a loop with
+    // multiple independent memory access patterns into separate loops, each
+    // touching a smaller working set — this improves cache locality and
+    // enables downstream vectorization of the resulting simpler loops.
+    // Running it BEFORE vectorization (via registerVectorizerStartEPCallback)
+    // is critical; appending it after the full pipeline produced
+    // "unsupported transformation ordering" warnings because vectorization
+    // had already consumed and transformed the original loop structure.
+    if (optimizationLevel == OptimizationLevel::O3 && enableLoopOptimize_) {
+        PB.registerVectorizerStartEPCallback(
+            [](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) {
+                FPM.addPass(llvm::LoopDistributePass());
+            });
     }
 
     llvm::LoopAnalysisManager LAM;
@@ -5572,18 +5560,6 @@ void CodeGenerator::runOptimizationPasses() {
         break;
     }
     llvm::ModulePassManager MPM = PB.buildPerModuleDefaultPipeline(newPMLevel);
-
-    // At O3 with -floop-optimize, append polyhedral-style loop distribution
-    // to improve cache locality for loops with independent memory streams.
-    // Loop distribution splits a loop with multiple independent memory
-    // access patterns into separate loops, each touching a smaller working
-    // set — this is the key transformation in polyhedral loop optimization
-    // that improves data-cache utilization and enables downstream
-    // vectorization of the resulting simpler loops.
-    if (optimizationLevel == OptimizationLevel::O3 && enableLoopOptimize_) {
-        MPM.addPass(llvm::createModuleToFunctionPassAdaptor(llvm::LoopDistributePass()));
-    }
-
     MPM.run(*module, MAM);
 }
 
