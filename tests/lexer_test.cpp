@@ -1,3 +1,4 @@
+#include "diagnostic.h"
 #include "lexer.h"
 #include <gtest/gtest.h>
 
@@ -640,4 +641,39 @@ TEST(LexerTest, PipeForwardChain) {
     ASSERT_GE(tokens.size(), 6u);
     EXPECT_EQ(tokens[1].type, TokenType::PIPE_FORWARD);
     EXPECT_EQ(tokens[3].type, TokenType::PIPE_FORWARD);
+}
+
+// ---------------------------------------------------------------------------
+// Hex escape validation
+// ---------------------------------------------------------------------------
+
+TEST(LexerTest, HexEscapeValid) {
+    auto tokens = lex("\"\\x41\""); // 'A'
+    ASSERT_GE(tokens.size(), 2u);
+    EXPECT_EQ(tokens[0].type, TokenType::STRING);
+    EXPECT_EQ(tokens[0].lexeme, "A");
+}
+
+TEST(LexerTest, HexEscapeNullByteRejected) {
+    // \x00 must be rejected to prevent C-string corruption
+    EXPECT_THROW(lex("\"\\x00\""), std::runtime_error);
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostic severity formatting
+// ---------------------------------------------------------------------------
+
+TEST(DiagnosticTest, HintSeverityFormat) {
+    Diagnostic diag;
+    diag.severity = DiagnosticSeverity::Hint;
+    diag.location = {10, 5};
+    diag.message = "consider using a const";
+    EXPECT_EQ(diag.format(), "hint at line 10, column 5: consider using a const");
+}
+
+TEST(DiagnosticTest, HintSeverityNoLocation) {
+    Diagnostic diag;
+    diag.severity = DiagnosticSeverity::Hint;
+    diag.message = "suggestion";
+    EXPECT_EQ(diag.format(), "hint: suggestion");
 }
