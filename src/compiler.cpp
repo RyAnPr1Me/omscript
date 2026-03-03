@@ -243,7 +243,9 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
         throw;
     }
 
-    std::cout << "compiled " << outputFile << std::endl;
+    if (!quiet_) {
+        std::cout << "compiled " << outputFile << std::endl;
+    }
 }
 
 } // namespace omscript

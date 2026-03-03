@@ -231,7 +231,7 @@ var x = 10; /* inline block comment */
 ### Prerequisites
 - CMake 3.13 or higher
 - C++17 compatible compiler (GCC, Clang, MSVC)
-- LLVM 10+ development libraries
+- LLVM 17+ development libraries
 - GCC (for linking)
 
 ### Build Instructions

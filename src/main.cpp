@@ -2775,6 +2775,7 @@ int main(int argc, char* argv[]) {
         compiler.setLoopOptimize(flagLoopOptimize);
         if (quiet) {
             compiler.setVerbose(false);
+            compiler.setQuiet(true);
         }
         compiler.compile(sourceFile, outputFile);
 
