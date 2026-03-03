@@ -296,7 +296,13 @@ Token Lexer::scanString() {
                 }
                 char h2 = advance();
                 std::string hex{h1, h2};
-                str += static_cast<char>(std::stoi(hex, nullptr, 16));
+                int val = std::stoi(hex, nullptr, 16);
+                // Reject embedded null bytes — they would silently truncate
+                // C-strings at runtime, causing data loss or subtle bugs.
+                if (val == 0) {
+                    lexError("Null byte '\\x00' is not allowed in string literals", line, column);
+                }
+                str += static_cast<char>(val);
                 break;
             }
             default:

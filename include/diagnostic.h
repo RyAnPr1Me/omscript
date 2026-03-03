@@ -17,6 +17,7 @@ enum class DiagnosticSeverity {
     Error,
     Warning,
     Note,
+    Hint,
 };
 
 /// Structured compiler diagnostic with source location and severity.
@@ -41,6 +42,9 @@ struct Diagnostic {
             break;
         case DiagnosticSeverity::Note:
             prefix = "note";
+            break;
+        case DiagnosticSeverity::Hint:
+            prefix = "hint";
             break;
         }
         if (location.line > 0) {

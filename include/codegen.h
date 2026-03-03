@@ -260,7 +260,7 @@ class CodeGenerator {
         explicit ScopeGuard(CodeGenerator& cg) : cg_(cg) {
             cg_.beginScope();
         }
-        ~ScopeGuard() {
+        ~ScopeGuard() noexcept {
             cg_.endScope();
         }
         ScopeGuard(const ScopeGuard&) = delete;
