@@ -2667,7 +2667,13 @@ int main(int argc, char* argv[]) {
             }
 
             omscript::AdaptiveJITRunner runner;
-            int exitCode = runner.run(cg.getModule());
+            int exitCode = 1;
+            try {
+                exitCode = runner.run(cg.getModule());
+            } catch (const std::exception& e) {
+                std::cerr << "Error: JIT execution failed: " << e.what() << "\n";
+                return 1;
+            }
 
             // "JIT-compiled" satisfies the existing test suite which checks
             // for the substring "compiled" in the run-command output.

@@ -5725,6 +5725,12 @@ std::unique_ptr<llvm::TargetMachine> CodeGenerator::createTargetMachine() const 
 }
 
 void CodeGenerator::runOptimizationPasses() {
+    // Ensure the native target is initialized before we try to create a
+    // TargetMachine.  These calls are idempotent and fast after the first.
+    llvm::InitializeNativeTarget();
+    llvm::InitializeNativeTargetAsmPrinter();
+    llvm::InitializeNativeTargetAsmParser();
+
     // Set the target triple on the module.
     std::string targetTripleStr = llvm::sys::getDefaultTargetTriple();
 #if LLVM_VERSION_MAJOR >= 19
@@ -5737,6 +5743,10 @@ void CodeGenerator::runOptimizationPasses() {
     auto targetMachine = createTargetMachine();
     if (targetMachine) {
         module->setDataLayout(targetMachine->createDataLayout());
+    } else if (optimizationLevel != OptimizationLevel::O0) {
+        // Data layout is required for correct optimization; warn but continue.
+        llvm::errs() << "omsc: warning: could not create target machine; "
+                        "optimization passes may produce suboptimal code\n";
     }
 
     if (optimizationLevel == OptimizationLevel::O0) {
@@ -6012,16 +6022,14 @@ void CodeGenerator::writeBitcodeFile(const std::string& filename) {
 }
 
 // ---------------------------------------------------------------------------
-// Hybrid code generation
+// Code generation for the adaptive JIT execution path (omsc run)
 // ---------------------------------------------------------------------------
 
 void CodeGenerator::generateHybrid(Program* program) {
-    // All functions — regardless of type-annotation coverage — compile to
-    // native LLVM IR via the standard AOT pipeline.  The old "Phase 2"
-    // bytecode-emission step has been removed: there is no bytecode
-    // interpreter in the execution path.  The adaptive JIT executes the
-    // LLVM IR module in-process via MCJIT, giving every function native
-    // machine code from the first call.
+    // All functions compile to native LLVM IR via the standard AOT pipeline.
+    // The adaptive JIT runtime (AdaptiveJITRunner) then executes the module
+    // in-process via MCJIT, injects call counters, and recompiles hot
+    // functions at O3 with PGO guidance.
     generate(program);
 }
 

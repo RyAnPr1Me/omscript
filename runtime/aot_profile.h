@@ -99,8 +99,6 @@ class AdaptiveJITRunner {
     std::unordered_set<std::string> recompiled_;
     std::mutex recompiledMtx_; ///< Guards recompiled_ and modules_ across threads.
 
-    bool llvmInitialized_ = false;
-
     void ensureInitialized();
 
     /// Inject call-counting dispatch prologs into every non-main function

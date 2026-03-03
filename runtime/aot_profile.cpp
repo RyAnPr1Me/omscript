@@ -22,6 +22,7 @@
 #include <llvm/TargetParser/Host.h>
 #include <llvm/TargetParser/SubtargetFeature.h>
 
+#include <atomic>
 #include <cassert>
 #include <mutex>
 
@@ -30,19 +31,20 @@ namespace omscript {
 // ---------------------------------------------------------------------------
 // Process-wide active runner — set during AdaptiveJITRunner::run() so that
 // the C-linkage __omsc_adaptive_recompile callback can reach the runner.
+// Atomic to avoid data races when the callback fires from JIT-compiled code.
 // ---------------------------------------------------------------------------
-static AdaptiveJITRunner* g_activeRunner = nullptr;
+static std::atomic<AdaptiveJITRunner*> g_activeRunner{nullptr};
 
 AdaptiveJITRunner::AdaptiveJITRunner() = default;
 AdaptiveJITRunner::~AdaptiveJITRunner() = default;
 
 void AdaptiveJITRunner::ensureInitialized() {
-    if (!llvmInitialized_) {
+    static std::once_flag initFlag;
+    std::call_once(initFlag, [] {
         llvm::InitializeNativeTarget();
         llvm::InitializeNativeTargetAsmPrinter();
         llvm::InitializeNativeTargetAsmParser();
-        llvmInitialized_ = true;
-    }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -209,6 +211,12 @@ int AdaptiveJITRunner::run(llvm::Module* baseModule) {
     // Step 3: Inject call-counting dispatch prologs.
     injectCounters(*instrMod);
 
+    // Verify the instrumented IR is well-formed before handing it to MCJIT.
+    if (llvm::verifyModule(*instrMod, &llvm::errs())) {
+        llvm::errs() << "omsc: internal error: instrumented IR failed verification\n";
+        return 1;
+    }
+
     // Step 4: JIT-compile the instrumented module.
     // We skip a separate IR optimisation pass here — MCJIT's own backend
     // optimiser (CodeGenOpt::Default = O2) gives good initial code quality
@@ -228,8 +236,10 @@ int AdaptiveJITRunner::run(llvm::Module* baseModule) {
 #endif
 
     llvm::ExecutionEngine* rawEngine = builder.create();
-    if (!rawEngine)
+    if (!rawEngine) {
+        llvm::errs() << "omsc: JIT engine creation failed: " << engineErr << "\n";
         return 1;
+    }
     jm.engine.reset(rawEngine);
 
     // Register the C-linkage recompile callback so MCJIT can resolve it
@@ -244,15 +254,18 @@ int AdaptiveJITRunner::run(llvm::Module* baseModule) {
     if (!mainAddr)
         return 1;
 
-    modules_.push_back(std::move(jm));
+    {
+        std::lock_guard<std::mutex> lk(recompiledMtx_);
+        modules_.push_back(std::move(jm));
+    }
 
     // Step 5: Execute main() in-process.
     // Register this runner as the active one so that the C-linkage callback
     // can reach it during execution.
-    g_activeRunner = this;
+    g_activeRunner.store(this, std::memory_order_release);
     using OmscMainFn = int64_t (*)();
     int64_t exitVal = reinterpret_cast<OmscMainFn>(mainAddr)();
-    g_activeRunner = nullptr;
+    g_activeRunner.store(nullptr, std::memory_order_release);
 
     // Mirror what a process exit code would look like (0-255).
     return static_cast<int>(exitVal & 0xFF);
@@ -281,8 +294,11 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
     auto memBuf = llvm::MemoryBuffer::getMemBuffer(llvm::StringRef(cleanBitcode_.data(), cleanBitcode_.size()),
                                                    "omsc_pgo_bc", /*RequiresNullTerminator=*/false);
     auto modOrErr = llvm::parseBitcodeFile(memBuf->getMemBufferRef(), *newCtx);
-    if (!modOrErr)
+    if (!modOrErr) {
+        llvm::errs() << "omsc: Tier-2 recompile of '" << funcName
+                     << "' failed: could not parse bitcode\n";
         return;
+    }
     auto mod = std::move(*modOrErr);
 
     // --- Apply PGO entry-count annotation ---
@@ -293,8 +309,11 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
     // entry counts of 1, making the inliner aggressively inline them *into*
     // the hot function while avoiding the reverse.
     llvm::Function* fn = mod->getFunction(funcName);
-    if (!fn || fn->isDeclaration())
+    if (!fn || fn->isDeclaration()) {
+        llvm::errs() << "omsc: Tier-2 recompile of '" << funcName
+                     << "' failed: function not found in bitcode\n";
         return;
+    }
     fn->setEntryCount(static_cast<uint64_t>(callCount));
     for (auto& other : *mod) {
         if (!other.isDeclaration() && other.getName() != funcName && !other.getEntryCount())
@@ -331,13 +350,20 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
 
             std::string errStr;
             const llvm::Target* target = llvm::TargetRegistry::lookupTarget(triple, errStr);
-            if (target) {
-                llvm::TargetOptions opts;
-                opts.EnableFastISel = false; // force optimising ISel for best codegen
-                TM.reset(target->createTargetMachine(triple, cpu, features, opts, std::optional<llvm::Reloc::Model>()));
-                if (TM)
-                    mod->setDataLayout(TM->createDataLayout());
+            if (!target) {
+                llvm::errs() << "omsc: Tier-2 recompile of '" << funcName
+                             << "' failed: could not lookup target: " << errStr << "\n";
+                return;
             }
+            llvm::TargetOptions opts;
+            opts.EnableFastISel = false; // force optimising ISel for best codegen
+            TM.reset(target->createTargetMachine(triple, cpu, features, opts, std::optional<llvm::Reloc::Model>()));
+            if (!TM) {
+                llvm::errs() << "omsc: Tier-2 recompile of '" << funcName
+                             << "' failed: could not create target machine\n";
+                return;
+            }
+            mod->setDataLayout(TM->createDataLayout());
         }
 
         llvm::PassBuilder PB(TM.get(), PTO);
@@ -365,8 +391,11 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
 #endif
 
     std::unique_ptr<llvm::ExecutionEngine> engine(eb.create());
-    if (!engine)
+    if (!engine) {
+        llvm::errs() << "omsc: Tier-2 JIT compilation of '" << funcName
+                     << "' failed: " << engineErr << "\n";
         return;
+    }
     engine->finalizeObject();
 
     uint64_t addr = engine->getFunctionAddress(funcName);
@@ -391,8 +420,9 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
 extern "C" {
 
 void __omsc_adaptive_recompile(const char* name, int64_t callCount, void** fnPtrSlot) {
-    if (omscript::g_activeRunner)
-        omscript::g_activeRunner->onHotFunction(name, callCount, fnPtrSlot);
+    auto* runner = omscript::g_activeRunner.load(std::memory_order_acquire);
+    if (runner)
+        runner->onHotFunction(name, callCount, fnPtrSlot);
 }
 
 } // extern "C"
