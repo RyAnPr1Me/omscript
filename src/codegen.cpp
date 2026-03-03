@@ -6152,6 +6152,70 @@ void CodeGenerator::writeBitcodeFile(const std::string& filename) {
 }
 
 // ---------------------------------------------------------------------------
+// JIT baseline optimization — intra-procedural passes without IPO
+// ---------------------------------------------------------------------------
+
+void CodeGenerator::runJITBaselinePasses() {
+    // Apply intra-procedural (per-function) optimization passes to improve the
+    // baseline IR quality for the adaptive JIT execution pipeline.
+    //
+    // These passes run WITHOUT inter-procedural optimizations (inlining, IPSCCP,
+    // GlobalDCE) that would collapse function call boundaries and prevent the
+    // adaptive JIT runtime from hot-patching individual functions.
+    //
+    // The resulting optimized IR is saved as the "clean bitcode" by the JIT
+    // runner and serves as the starting point for both:
+    //   - Tier-1 execution: MCJIT machine-code generation (at CodeGenOpt::O2)
+    //   - Tier-2 recompilation: O3+PGO re-optimization of hot functions
+    //
+    // Without these passes the IR entering the JIT is completely unoptimized
+    // (O0), meaning MCJIT must do all work from scratch.  With these passes,
+    // Tier-2 performs incremental optimization of already-good IR rather than
+    // a full optimization pass over raw O0 IR.
+    llvm::legacy::FunctionPassManager fpm(module.get());
+
+    // Phase 1: Memory-to-register promotion and canonicalization.
+    // mem2reg is the highest-impact pass: it promotes alloca/load/store
+    // patterns emitted by the front-end into SSA values, eliminating most
+    // memory operations for scalar variables and dramatically improving
+    // downstream analysis and optimization quality.
+    fpm.add(llvm::createPromoteMemoryToRegisterPass());
+    fpm.add(llvm::createSROAPass());
+    fpm.add(llvm::createEarlyCSEPass(/*UseMemorySSA=*/true));
+    fpm.add(llvm::createInstructionCombiningPass());
+    fpm.add(llvm::createReassociatePass());
+    fpm.add(llvm::createCFGSimplificationPass());
+
+    // Phase 2: Value numbering and redundancy elimination.
+    fpm.add(llvm::createGVNPass());
+    fpm.add(llvm::createDeadCodeEliminationPass());
+
+    // Phase 3: Loop optimizations (intra-procedural only).
+    // LICM moves loop-invariant computations out of loop bodies, reducing
+    // work performed on each iteration.  LoopSimplify canonicalizes loop
+    // entry/exit structure for downstream passes.
+    fpm.add(llvm::createLICMPass());
+    fpm.add(llvm::createLoopSimplifyPass());
+    fpm.add(llvm::createLoopStrengthReducePass());
+
+    // Phase 4: Tail-call elimination converts tail-recursive calls to loops.
+    fpm.add(llvm::createTailCallEliminationPass());
+
+    // Phase 5: Final cleanup to remove instructions exposed by earlier passes.
+    fpm.add(llvm::createInstructionCombiningPass());
+    fpm.add(llvm::createCFGSimplificationPass());
+    fpm.add(llvm::createDeadCodeEliminationPass());
+
+    fpm.doInitialization();
+    for (auto& func : module->functions()) {
+        if (!func.isDeclaration()) {
+            fpm.run(func);
+        }
+    }
+    fpm.doFinalization();
+}
+
+// ---------------------------------------------------------------------------
 // Code generation for the adaptive JIT execution path (omsc run)
 // ---------------------------------------------------------------------------
 
@@ -6166,13 +6230,21 @@ void CodeGenerator::generateHybrid(Program* program) {
     // directly into its callers, making the function unreachable at runtime
     // so its call counter never increments and Tier-2 never fires.
     //
-    // Fix: generate IR at O0 (no IPO, no inlining).  MCJIT compiles the
-    // resulting module at its own O2 machine-code level, and Tier-2
-    // recompilation applies O3 + PGO to each hot function individually.
+    // Fix: generate IR at O0 (no IPO, no inlining) to preserve function
+    // boundaries, then apply intra-procedural optimization passes so the
+    // JIT operates on already-optimized IR rather than raw O0 code.
+    // MCJIT compiles the resulting module at its own O2 machine-code level,
+    // and Tier-2 recompilation applies O3+PGO to each hot function individually.
     auto savedLevel = optimizationLevel;
     optimizationLevel = OptimizationLevel::O0;
     generate(program);
     optimizationLevel = savedLevel;
+
+    // Apply intra-procedural optimization passes so the JIT operates on
+    // already-optimized IR rather than raw O0 code.  This improves both
+    // Tier-1 baseline code quality (via MCJIT's machine-code backend) and
+    // Tier-2 recompilation (which starts from this optimized clean bitcode).
+    runJITBaselinePasses();
 }
 
 } // namespace omscript
