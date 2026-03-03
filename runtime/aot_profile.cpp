@@ -28,6 +28,7 @@
 
 #include <atomic>
 #include <cassert>
+#include <climits>
 #include <mutex>
 
 namespace omscript {
@@ -197,7 +198,7 @@ void AdaptiveJITRunner::injectCounters(llvm::Module& mod) {
             // i64 for its dynamic value representation.
             B.CreateCall(argProfileTy, argProfileFn,
                          {nameGV, llvm::ConstantInt::get(i32Ty, argIdx),
-                          llvm::ConstantInt::get(i8Ty, static_cast<uint8_t>(1)), // ArgType::Integer
+                          llvm::ConstantInt::get(i8Ty, static_cast<uint8_t>(ArgType::Integer)),
                           &arg});
             argIdx++;
         }
@@ -379,8 +380,11 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
                     continue;
                 if (branchIdx < prof->branches.size()) {
                     const auto& bp = prof->branches[branchIdx];
-                    uint32_t taken = static_cast<uint32_t>(std::max(bp.takenCount, uint64_t{1}));
-                    uint32_t notTaken = static_cast<uint32_t>(std::max(bp.notTakenCount, uint64_t{1}));
+                    // Saturate to UINT32_MAX to avoid data loss from narrowing.
+                    uint64_t tRaw = std::max(bp.takenCount, uint64_t{1});
+                    uint64_t nRaw = std::max(bp.notTakenCount, uint64_t{1});
+                    uint32_t taken = static_cast<uint32_t>(std::min(tRaw, uint64_t{UINT32_MAX}));
+                    uint32_t notTaken = static_cast<uint32_t>(std::min(nRaw, uint64_t{UINT32_MAX}));
                     auto* bw = mdb.createBranchWeights(taken, notTaken);
                     br->setMetadata(llvm::LLVMContext::MD_prof, bw);
                 }
