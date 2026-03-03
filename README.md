@@ -409,7 +409,6 @@ When using `omsc run`, the program executes through a two-tier adaptive JIT:
 - **AST** (`include/ast.h`): Abstract Syntax Tree node definitions
 - **CodeGen** (`src/codegen.cpp`): LLVM IR generation
 - **Compiler** (`src/compiler.cpp`): Main compiler driver
-- **JIT** (`runtime/jit.cpp`): JIT compilation engine
 - **AOT Profile** (`runtime/aot_profile.cpp`): Adaptive recompilation of hot functions
 
 ## Type System
@@ -442,7 +441,6 @@ omscript/
 ├── CMakeLists.txt        # Build configuration
 ├── include/             # Header files
 │   ├── ast.h           # AST node definitions
-│   ├── bytecode.h      # Bytecode emitter
 │   ├── codegen.h       # LLVM code generator
 │   ├── compiler.h      # Compiler driver
 │   ├── diagnostic.h    # Diagnostic utilities
@@ -451,7 +449,6 @@ omscript/
 │   └── version.h       # Version constants
 ├── src/                # Implementation files
 │   ├── ast.cpp
-│   ├── bytecode.cpp
 │   ├── codegen.cpp
 │   ├── compiler.cpp
 │   ├── lexer.cpp
@@ -460,13 +457,9 @@ omscript/
 ├── runtime/            # Runtime system
 │   ├── aot_profile.cpp # Adaptive JIT / AOT profiling
 │   ├── aot_profile.h
-│   ├── jit.cpp         # JIT compiler
-│   ├── jit.h
 │   ├── refcounted.h    # Reference-counted types
 │   ├── value.cpp       # Dynamic values
-│   ├── value.h
-│   ├── vm.cpp          # VM runtime
-│   └── vm.h
+│   └── value.h
 ├── tests/             # Unit tests
 ├── examples/          # Example programs (90+ examples)
 └── user-packages/     # User-installable packages

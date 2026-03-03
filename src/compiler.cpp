@@ -58,6 +58,9 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
     if (!std::filesystem::exists(sourceFile)) {
         throw std::runtime_error("Source file does not exist: " + sourceFile);
     }
+    if (std::filesystem::is_directory(sourceFile)) {
+        throw std::runtime_error("'" + sourceFile + "' is a directory, not a source file");
+    }
 
     // Check file size to prevent memory exhaustion
     auto fileSize = std::filesystem::file_size(sourceFile);
