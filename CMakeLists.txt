@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.13)
-project(OmScript VERSION 1.0.0)
+project(OmScript VERSION 2.0.0)
 
 # Allow overriding the compiler version string at build time (e.g. -DOMSC_VERSION=1.2.3)
 if(NOT DEFINED OMSC_VERSION)
@@ -83,6 +83,8 @@ set(COMPILER_SOURCES
 set(RUNTIME_SOURCES
     runtime/value.cpp
     runtime/aot_profile.cpp
+    runtime/jit_profiler.cpp
+    runtime/deopt.cpp
 )
 
 # Compiler executable
@@ -147,6 +149,8 @@ if(GTest_FOUND)
         src/compiler.cpp
         runtime/value.cpp
         runtime/aot_profile.cpp
+        runtime/jit_profiler.cpp
+        runtime/deopt.cpp
     )
 
     add_library(omscript_lib STATIC ${LIB_SOURCES})
@@ -164,7 +168,7 @@ if(GTest_FOUND)
 endif()
 
 # CPack configuration for distribution packages
-include(CPack)
+# NOTE: CPACK_* variables must be set BEFORE include(CPack).
 set(CPACK_PACKAGE_NAME "OmScript")
 set(CPACK_PACKAGE_VENDOR "OmScript")
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "A low-level C-like programming language with LLVM AOT compilation")
@@ -188,3 +192,4 @@ set(CPACK_SOURCE_IGNORE_FILES
     "^/run_tests.sh$"
 )
 set(CPACK_BINARY_TGZ "ON")
+include(CPack)

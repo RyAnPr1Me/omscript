@@ -205,8 +205,7 @@ jobs:
             ```
 
             ### Requirements
-            - LLVM 18 runtime libraries
-            - GCC (Linux) / Clang (macOS) / MSVC (Windows) for linking
+            - GCC or Clang (for linking compiled programs)
           files: |
             release/*
           draft: false

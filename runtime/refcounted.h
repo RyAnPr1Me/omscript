@@ -11,8 +11,15 @@ namespace omscript {
 
 // Reference counted string implementation using malloc/free.
 //
-// Thread safety: reference count operations use std::atomic for safe
-// concurrent retain/release across threads.
+// Thread safety model:
+//   - The reference count is managed via std::atomic, making retain() and
+//     release() safe to call from concurrent threads.
+//   - Data access (c_str(), length(), operator+, comparison operators) is
+//     safe as long as the caller holds a live reference (i.e., the object
+//     has not been destroyed).  Callers must ensure a shared RefCountedString
+//     is not destroyed while another thread accesses its contents.
+//   - This is the same model as std::shared_ptr: the control block is
+//     thread-safe; the managed object must be externally synchronized.
 class RefCountedString {
   public:
     RefCountedString() : data(nullptr) {}
@@ -40,7 +47,7 @@ class RefCountedString {
     }
 
     // Destructor - decrement reference count
-    ~RefCountedString() {
+    ~RefCountedString() noexcept {
         release();
     }
 
@@ -143,14 +150,14 @@ class RefCountedString {
     }
 
     // Increment reference count
-    void retain() {
+    void retain() noexcept {
         if (data) {
             data->refCount.fetch_add(1, std::memory_order_relaxed);
         }
     }
 
     // Decrement reference count and free if zero
-    void release() {
+    void release() noexcept {
         if (data) {
             if (data->refCount.fetch_sub(1, std::memory_order_acq_rel) == 1) {
                 std::free(data);

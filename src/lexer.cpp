@@ -33,7 +33,7 @@ static const std::unordered_map<std::string, TokenType> keywords = {
 
 /// Throw a DiagnosticError with the given message and source location.
 [[noreturn]] static void lexError(const std::string& msg, int ln, int col) {
-    throw DiagnosticError(Diagnostic{DiagnosticSeverity::Error, {ln, col}, msg});
+    throw DiagnosticError(Diagnostic{DiagnosticSeverity::Error, {"", ln, col}, msg});
 }
 
 Lexer::Lexer(const std::string& source) : source(source), pos(0), line(1), column(1) {}
@@ -296,7 +296,13 @@ Token Lexer::scanString() {
                 }
                 char h2 = advance();
                 std::string hex{h1, h2};
-                str += static_cast<char>(std::stoi(hex, nullptr, 16));
+                int val = std::stoi(hex, nullptr, 16);
+                // Reject embedded null bytes — they would silently truncate
+                // C-strings at runtime, causing data loss or subtle bugs.
+                if (val == 0) {
+                    lexError("Null byte '\\x00' is not allowed in string literals", line, column);
+                }
+                str += static_cast<char>(val);
                 break;
             }
             default:

@@ -21,6 +21,14 @@ class Compiler {
         return verbose_;
     }
 
+    /// Control quiet mode — when true, suppresses non-error output.
+    void setQuiet(bool q) {
+        quiet_ = q;
+    }
+    bool isQuiet() const {
+        return quiet_;
+    }
+
     /// Set the LLVM optimization level used during code generation.
     void setOptimizationLevel(OptimizationLevel level) {
         optLevel_ = level;
@@ -95,6 +103,7 @@ class Compiler {
   private:
     std::string readFile(const std::string& filename);
     bool verbose_ = false;
+    bool quiet_ = false;
     OptimizationLevel optLevel_ = OptimizationLevel::O2;
     std::string march_;
     std::string mtune_;

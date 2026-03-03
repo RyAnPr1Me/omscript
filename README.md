@@ -231,7 +231,7 @@ var x = 10; /* inline block comment */
 ### Prerequisites
 - CMake 3.13 or higher
 - C++17 compatible compiler (GCC, Clang, MSVC)
-- LLVM 10+ development libraries
+- LLVM 17+ development libraries
 - GCC (for linking)
 
 ### Build Instructions
@@ -397,10 +397,18 @@ fn main() {
 
 ### Adaptive JIT Runtime
 
-When using `omsc run`, the program executes through a two-tier adaptive JIT:
+When using `omsc run`, the program executes through a hybrid AOT + tiered optimizing JIT:
+
+```
+Source Code → Compiler → Optimized IR (AOT) → Baseline Code
+    → Runtime Profiling → Hot Function Detected → Specialized IR
+    → Optimized Machine Code → Execution
+```
 
 - **Tier 1 (Initial JIT)**: The module is JIT-compiled at O2 via LLVM MCJIT and execution begins immediately.
-- **Tier 2 (Hot Recompile)**: Functions that exceed a call-count threshold are recompiled at O3 with profile-guided optimization hints, producing even faster native code for hot paths.
+- **Runtime Profiling**: Call frequency, branch probabilities, argument types, and observed constants are tracked during the warm-up phase.
+- **Tier 2 (Hot Recompile)**: Functions that exceed a call-count threshold are recompiled at O3 with profile-guided optimization hints (PGO entry counts, branch weights), producing even faster native code for hot paths.
+- **Deoptimization**: Guard-based fallback to baseline code when speculative assumptions fail.
 
 ### Components
 
@@ -409,8 +417,9 @@ When using `omsc run`, the program executes through a two-tier adaptive JIT:
 - **AST** (`include/ast.h`): Abstract Syntax Tree node definitions
 - **CodeGen** (`src/codegen.cpp`): LLVM IR generation
 - **Compiler** (`src/compiler.cpp`): Main compiler driver
-- **JIT** (`runtime/jit.cpp`): JIT compilation engine
 - **AOT Profile** (`runtime/aot_profile.cpp`): Adaptive recompilation of hot functions
+- **JIT Profiler** (`runtime/jit_profiler.cpp`): Runtime profiling data collection
+- **Deoptimization** (`runtime/deopt.cpp`): Guard-based fallback to baseline code
 
 ## Type System
 
@@ -427,13 +436,83 @@ Types are determined at runtime, allowing flexible code while maintaining perfor
 ## Testing
 
 ```bash
-# Run integration tests
+# Run unit tests (requires GTest)
+cd build && ctest --output-on-failure
+
+# Run integration tests (276 tests)
 bash run_tests.sh
+
+# Build with sanitizers for development
+cmake -B build -DCMAKE_BUILD_TYPE=Debug -DSANITIZE=address,undefined
+cmake --build build
 
 # Or run a single example manually
 ./build/omsc examples/factorial.om -o factorial
 ./factorial
 ```
+
+## Production Deployment
+
+### Building for Production
+
+```bash
+# Release build with LTO
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel $(nproc)
+
+# The omsc binary is at build/omsc
+# Install to PATH
+sudo cp build/omsc /usr/local/bin/
+# Or use the built-in install command:
+./build/omsc install
+```
+
+### Compiler Flags Reference
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `-O0` | No optimization | |
+| `-O1` | Basic optimization | |
+| `-O2` | Moderate optimization | ✓ |
+| `-O3` | Aggressive optimization | |
+| `-march=<cpu>` | Target CPU architecture | native |
+| `-mtune=<cpu>` | CPU scheduling tuning | same as march |
+| `-flto` | Link-time optimization | off |
+| `-ffast-math` | Unsafe FP optimizations | off |
+| `-fpic` / `-fno-pic` | Position-independent code | on |
+| `-fvectorize` / `-fno-vectorize` | SIMD vectorization | on |
+| `-funroll-loops` / `-fno-unroll-loops` | Loop unrolling | on |
+| `-floop-optimize` / `-fno-loop-optimize` | Loop optimizations | on |
+| `-fstack-protector` | Stack buffer overflow protection | off |
+| `-foptmax` / `-fno-optmax` | OPTMAX block optimization | on |
+| `-fjit` / `-fno-jit` | Adaptive JIT for `omsc run` | on |
+| `-static` | Static linking | off |
+| `-s` | Strip symbols | off |
+| `--pgo-gen=<path>` | Generate PGO instrumentation profile | |
+| `--pgo-use=<path>` | Use PGO profile for optimization | |
+| `-v` / `--verbose` | Show compilation details | off |
+| `-q` / `--quiet` | Suppress non-error output | off |
+| `--time` | Show timing breakdown | off |
+
+### Runtime Safety Features
+
+OmScript includes several runtime safety checks:
+
+- **Array bounds checking**: All array accesses are bounds-checked at runtime
+- **Division by zero**: Integer division and modulo operations check for zero divisor
+- **For-loop zero step**: Detects and aborts on zero-step for-loops
+- **Wrapping integer arithmetic**: Arithmetic operations use defined two's-complement wrapping semantics (no undefined behavior on overflow)
+- **Parser nesting limit**: Maximum recursion depth of 256 prevents stack overflow from deeply nested input
+- **IR instruction budget**: Compilation aborts if generated IR exceeds 1,000,000 instructions
+- **File size limit**: Source files larger than 100MB are rejected
+- **Reference counting**: Strings use reference-counted memory management
+
+### Cross-Platform Support
+
+OmScript builds on:
+- **Linux** (x86_64, AArch64, ARM) — primary platform
+- **macOS** (x86_64, Apple Silicon)
+- **Windows** (x86_64 via MSVC)
 
 ## Project Structure
 
@@ -442,7 +521,6 @@ omscript/
 ├── CMakeLists.txt        # Build configuration
 ├── include/             # Header files
 │   ├── ast.h           # AST node definitions
-│   ├── bytecode.h      # Bytecode emitter
 │   ├── codegen.h       # LLVM code generator
 │   ├── compiler.h      # Compiler driver
 │   ├── diagnostic.h    # Diagnostic utilities
@@ -451,7 +529,6 @@ omscript/
 │   └── version.h       # Version constants
 ├── src/                # Implementation files
 │   ├── ast.cpp
-│   ├── bytecode.cpp
 │   ├── codegen.cpp
 │   ├── compiler.cpp
 │   ├── lexer.cpp
@@ -460,13 +537,13 @@ omscript/
 ├── runtime/            # Runtime system
 │   ├── aot_profile.cpp # Adaptive JIT / AOT profiling
 │   ├── aot_profile.h
-│   ├── jit.cpp         # JIT compiler
-│   ├── jit.h
+│   ├── deopt.cpp       # Deoptimization / guard fallback
+│   ├── deopt.h
+│   ├── jit_profiler.cpp # Runtime profiling data collection
+│   ├── jit_profiler.h
 │   ├── refcounted.h    # Reference-counted types
 │   ├── value.cpp       # Dynamic values
-│   ├── value.h
-│   ├── vm.cpp          # VM runtime
-│   └── vm.h
+│   └── value.h
 ├── tests/             # Unit tests
 ├── examples/          # Example programs (90+ examples)
 └── user-packages/     # User-installable packages

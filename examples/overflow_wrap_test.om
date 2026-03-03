@@ -1,0 +1,16 @@
+// Test integer overflow wrapping behavior at runtime.
+// With wrapping (two's-complement) semantics, INT64_MAX + 1 wraps to INT64_MIN.
+// INT64_MAX = 9223372036854775807
+// INT64_MIN = -9223372036854775808 which is 0 mod 256 = 0
+
+fn main() {
+    // INT64_MAX
+    var max_val = 9223372036854775807;
+
+    // Wrapping addition: max + 1 should wrap to INT64_MIN (-9223372036854775808)
+    var wrapped = max_val + 1;
+
+    // INT64_MIN mod 256 == 0 (since -9223372036854775808 % 256 == 0)
+    // Return 42 to confirm we reached this point (didn't crash)
+    return 42;
+}

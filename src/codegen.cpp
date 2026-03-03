@@ -717,7 +717,7 @@ void CodeGenerator::checkConstModification(const std::string& name, const std::s
     auto constIt = constValues.find(name);
     if (constIt != constValues.end() && constIt->second) {
         throw DiagnosticError(
-            Diagnostic{DiagnosticSeverity::Error, {0, 0}, "Cannot " + action + " const variable: " + name});
+            Diagnostic{DiagnosticSeverity::Error, {"", 0, 0}, "Cannot " + action + " const variable: " + name});
     }
 }
 
@@ -738,7 +738,8 @@ llvm::AllocaInst* CodeGenerator::createEntryBlockAlloca(llvm::Function* function
 void CodeGenerator::codegenError(const std::string& message, const ASTNode* node) {
     SourceLocation loc;
     if (node && node->line > 0) {
-        loc = {node->line, node->column};
+        loc.line = node->line;
+        loc.column = node->column;
     }
     throw DiagnosticError(Diagnostic{DiagnosticSeverity::Error, loc, message});
 }
@@ -1355,7 +1356,7 @@ void CodeGenerator::generate(Program* program) {
     // Resource budget: limit number of functions to prevent DoS.
     if (program->functions.size() > kMaxFunctions) {
         throw DiagnosticError(Diagnostic{DiagnosticSeverity::Error,
-                                         {0, 0},
+                                         {"", 0, 0},
                                          "Compilation aborted: function count limit exceeded (" +
                                              std::to_string(kMaxFunctions) + "). Input program is too large."});
     }
@@ -1393,7 +1394,7 @@ void CodeGenerator::generate(Program* program) {
     }
     if (!hasMain) {
         // Program-level error — no specific AST node to reference for location.
-        throw DiagnosticError(Diagnostic{DiagnosticSeverity::Error, {0, 0}, "No 'main' function defined"});
+        throw DiagnosticError(Diagnostic{DiagnosticSeverity::Error, {"", 0, 0}, "No 'main' function defined"});
     }
 
     // Set fast-math flags on the builder for all generated FP operations.
@@ -1466,7 +1467,8 @@ void CodeGenerator::generate(Program* program) {
         while (!errorStr.empty() && (errorStr.back() == '\n' || errorStr.back() == ' ')) {
             errorStr.pop_back();
         }
-        throw DiagnosticError(Diagnostic{DiagnosticSeverity::Error, {0, 0}, "Module verification failed: " + errorStr});
+        throw DiagnosticError(
+            Diagnostic{DiagnosticSeverity::Error, {"", 0, 0}, "Module verification failed: " + errorStr});
     }
 }
 
@@ -1608,7 +1610,7 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
             errorStr.pop_back();
         }
         throw DiagnosticError(Diagnostic{DiagnosticSeverity::Error,
-                                         {func->line, func->column},
+                                         {"", func->line, func->column},
                                          "Function verification failed for '" + func->name + "': " + errorStr});
     }
 
@@ -2010,9 +2012,9 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
 
     // Regular code generation for non-constant expressions
     if (expr->op == "+") {
-        return builder->CreateNSWAdd(left, right, "addtmp");
+        return builder->CreateAdd(left, right, "addtmp");
     } else if (expr->op == "-") {
-        return builder->CreateNSWSub(left, right, "subtmp");
+        return builder->CreateSub(left, right, "subtmp");
     } else if (expr->op == "*") {
         // Strength reduction: multiply by power of 2 → left shift
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
@@ -2025,7 +2027,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             if (s >= 0)
                 return builder->CreateShl(right, llvm::ConstantInt::get(getDefaultType(), s), "shltmp");
         }
-        return builder->CreateNSWMul(left, right, "multmp");
+        return builder->CreateMul(left, right, "multmp");
     } else if (expr->op == "/" || expr->op == "%") {
         bool isDivision = expr->op == "/";
 
@@ -6007,7 +6009,7 @@ void CodeGenerator::writeObjectFile(const std::string& filename) {
 
     auto targetMachine = createTargetMachine();
     if (!targetMachine) {
-        throw DiagnosticError(Diagnostic{DiagnosticSeverity::Error, {0, 0}, "Failed to create target machine"});
+        throw DiagnosticError(Diagnostic{DiagnosticSeverity::Error, {"", 0, 0}, "Failed to create target machine"});
     }
 
     module->setDataLayout(targetMachine->createDataLayout());
@@ -6016,8 +6018,8 @@ void CodeGenerator::writeObjectFile(const std::string& filename) {
     llvm::raw_fd_ostream dest(filename, EC, llvm::sys::fs::OF_None);
 
     if (EC) {
-        throw DiagnosticError(
-            Diagnostic{DiagnosticSeverity::Error, {0, 0}, "Could not open file '" + filename + "': " + EC.message()});
+        throw DiagnosticError(Diagnostic{
+            DiagnosticSeverity::Error, {"", 0, 0}, "Could not open file '" + filename + "': " + EC.message()});
     }
 
     llvm::legacy::PassManager pass;
@@ -6029,7 +6031,7 @@ void CodeGenerator::writeObjectFile(const std::string& filename) {
 
     if (targetMachine->addPassesToEmitFile(pass, dest, nullptr, fileType)) {
         throw DiagnosticError(
-            Diagnostic{DiagnosticSeverity::Error, {0, 0}, "TargetMachine can't emit a file of this type"});
+            Diagnostic{DiagnosticSeverity::Error, {"", 0, 0}, "TargetMachine can't emit a file of this type"});
     }
 
     pass.run(*module);
@@ -6038,7 +6040,7 @@ void CodeGenerator::writeObjectFile(const std::string& filename) {
     if (dest.has_error()) {
         std::string errMsg = "Error writing object file '" + filename + "': " + dest.error().message();
         dest.clear_error();
-        throw DiagnosticError(Diagnostic{DiagnosticSeverity::Error, {0, 0}, errMsg});
+        throw DiagnosticError(Diagnostic{DiagnosticSeverity::Error, {"", 0, 0}, errMsg});
     }
 }
 
@@ -6062,8 +6064,8 @@ void CodeGenerator::writeBitcodeFile(const std::string& filename) {
     std::error_code EC;
     llvm::raw_fd_ostream dest(filename, EC, llvm::sys::fs::OF_None);
     if (EC) {
-        throw DiagnosticError(
-            Diagnostic{DiagnosticSeverity::Error, {0, 0}, "Could not open file '" + filename + "': " + EC.message()});
+        throw DiagnosticError(Diagnostic{
+            DiagnosticSeverity::Error, {"", 0, 0}, "Could not open file '" + filename + "': " + EC.message()});
     }
 
     llvm::WriteBitcodeToFile(*module, dest);
@@ -6071,7 +6073,7 @@ void CodeGenerator::writeBitcodeFile(const std::string& filename) {
     if (dest.has_error()) {
         std::string errMsg = "Error writing bitcode file '" + filename + "': " + dest.error().message();
         dest.clear_error();
-        throw DiagnosticError(Diagnostic{DiagnosticSeverity::Error, {0, 0}, errMsg});
+        throw DiagnosticError(Diagnostic{DiagnosticSeverity::Error, {"", 0, 0}, errMsg});
     }
 }
 

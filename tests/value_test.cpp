@@ -569,6 +569,12 @@ TEST(ValueTest, ShiftRightInvalidTypes) {
     EXPECT_THROW(Value(int64_t(1)) >> Value(1.0), std::runtime_error);
 }
 
+TEST(ValueTest, ArithmeticRightShiftNegative) {
+    // Verify arithmetic right-shift preserves sign bit for negative values
+    Value result = Value(int64_t(-16)) >> Value(int64_t(2));
+    EXPECT_EQ(result.asInt(), -4); // arithmetic shift: -16 >> 2 == -4
+}
+
 // ===========================================================================
 // Edge cases - integer limits
 // ===========================================================================

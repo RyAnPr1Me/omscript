@@ -241,6 +241,9 @@ Value Value::operator>>(const Value& other) const {
         if (other.intValue < 0 || other.intValue >= 64) {
             throw std::runtime_error("Shift amount out of range (0-63)");
         }
+        // Arithmetic right shift: sign bit is preserved.
+        // C++20 guarantees this for signed types; on C++17 all major compilers
+        // (GCC, Clang, MSVC) implement arithmetic right shift for int64_t.
         return Value(intValue >> other.intValue);
     }
     throw std::runtime_error("Invalid operands for >> (both must be integers)");

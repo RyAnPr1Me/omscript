@@ -56,7 +56,8 @@ Token Parser::consume(TokenType type, const std::string& message) {
 
 void Parser::error(const std::string& message) {
     Token token = peek();
-    throw DiagnosticError(Diagnostic{DiagnosticSeverity::Error, {token.line, token.column}, "Parse error: " + message});
+    throw DiagnosticError(
+        Diagnostic{DiagnosticSeverity::Error, {"", token.line, token.column}, "Parse error: " + message});
 }
 
 void Parser::synchronize() {

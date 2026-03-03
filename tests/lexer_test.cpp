@@ -641,3 +641,19 @@ TEST(LexerTest, PipeForwardChain) {
     EXPECT_EQ(tokens[1].type, TokenType::PIPE_FORWARD);
     EXPECT_EQ(tokens[3].type, TokenType::PIPE_FORWARD);
 }
+
+// ---------------------------------------------------------------------------
+// Hex escape validation
+// ---------------------------------------------------------------------------
+
+TEST(LexerTest, HexEscapeValid) {
+    auto tokens = lex("\"\\x41\""); // 'A'
+    ASSERT_GE(tokens.size(), 2u);
+    EXPECT_EQ(tokens[0].type, TokenType::STRING);
+    EXPECT_EQ(tokens[0].lexeme, "A");
+}
+
+TEST(LexerTest, HexEscapeNullByteRejected) {
+    // \x00 must be rejected to prevent C-string corruption
+    EXPECT_THROW(lex("\"\\x00\""), std::runtime_error);
+}

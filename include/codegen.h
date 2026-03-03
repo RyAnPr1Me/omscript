@@ -260,7 +260,7 @@ class CodeGenerator {
         explicit ScopeGuard(CodeGenerator& cg) : cg_(cg) {
             cg_.beginScope();
         }
-        ~ScopeGuard() {
+        ~ScopeGuard() noexcept {
             cg_.endScope();
         }
         ScopeGuard(const ScopeGuard&) = delete;
@@ -317,7 +317,7 @@ class CodeGenerator {
     void checkIRBudget() {
         if (++irInstructionCount_ > kMaxIRInstructions) {
             throw DiagnosticError(Diagnostic{DiagnosticSeverity::Error,
-                                             {0, 0},
+                                             {"", 0, 0},
                                              "Compilation aborted: IR instruction limit exceeded (" +
                                                  std::to_string(kMaxIRInstructions) +
                                                  "). Input program is too large or complex."});
