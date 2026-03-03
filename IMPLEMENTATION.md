@@ -5,8 +5,8 @@ OmScript is a complete, production-ready programming language implementation fea
 - C-like syntax for familiarity
 - Dynamic typing for flexibility
 - LLVM-based AOT compilation for performance
-- Bytecode VM runtime for dynamic code
-- Hybrid compilation strategy combining the best of both worlds
+- Adaptive JIT runtime that recompiles hot functions with aggressive optimizations
+- Reference-counted memory management
 
 ## Technical Architecture
 
@@ -21,52 +21,42 @@ OmScript is a complete, production-ready programming language implementation fea
 - Recursive descent parser
 - Generates Abstract Syntax Tree (AST)
 - Supports:
-  - Function declarations with parameters
-  - Variable declarations (var/const)
-  - Control flow (if/else, while loops)
+  - Function declarations with parameters and default values
+  - Variable declarations (var/const) with optional type annotations
+  - Control flow (if/else, while, do-while, for-range, for-each, switch/case)
+  - Error handling (try/catch/throw)
+  - Enums, lambdas, pipe operator, spread operator
   - Expressions (binary, unary, function calls, assignments)
   - Operator precedence handling
 
 ### 2. Middle-end (Code Generation)
 **Code Generator** (`src/codegen.cpp`)
-- Generates LLVM IR for statically analyzable code
+- Generates LLVM IR from the AST
 - Implements symbol tables for variable tracking
 - Scope management for local variables
 - Type inference for dynamic variables
 - Optimization-ready IR output
-
-**Bytecode Emitter** (`src/bytecode.cpp`)
-- Designed for dynamic code sections
-- Stack-based instruction set
-- Serialization format for bytecode
-- Support for arithmetic, logical, and control flow operations
+- 69 built-in stdlib functions compiled to native LLVM IR
 
 ### 3. Backend (Execution)
 
-OmScript uses a **tiered execution model** that automatically selects the best strategy
-for each function:
+OmScript is an **AOT-compiled language** — all code compiles to native machine code through LLVM.
 
-**Tier 1: AOT (Ahead-of-Time) — LLVM Native Compilation**
-- Functions with full type annotations, `OPTMAX`, `main`, or stdlib built-ins
-- Compiled to native machine code via LLVM IR with full optimization passes
-- Best performance — no runtime overhead
+**AOT Compilation** (default `omsc build` path)
+- All functions compiled to native machine code via LLVM IR
+- Four optimization levels (O0–O3) plus OPTMAX directive
+- Full LLVM optimization pipeline including inlining, vectorization, and loop optimizations
+- Profile-guided optimization (PGO) support
 
-**Tier 2: Interpreted — Bytecode VM** (`runtime/vm.cpp`)
-- Functions without type annotations (dynamic code)
-- Stack-based virtual machine with computed-goto dispatch
-- Integer fast paths for arithmetic/comparison operations
-- Runtime type checking and dynamic dispatch
-
-**Tier 3: JIT — Hot Function Compilation** (`runtime/jit.h`, `runtime/jit.cpp`)
-- Interpreted functions automatically promoted after 10 calls
-- Bytecode → LLVM IR → native code via LLVM MCJIT
-- Handles integer arithmetic, comparisons, locals, control flow
-- Post-JIT type-specialized recompilation after 50 additional calls
-- Graceful fallback for non-JIT-eligible functions
+**Adaptive JIT Runtime** (`runtime/aot_profile.cpp`, `runtime/jit.cpp`)
+- Used during `omsc run` for interactive/development workflows
+- Tier 1: Initial JIT compilation at O2 via LLVM MCJIT for fast startup
+- Tier 2: Hot functions (exceeding call-count threshold) are recompiled at O3 with profile-guided hints
+- Post-recompile fast path: one volatile load + direct call to optimized native code
 
 **Value System** (`runtime/value.cpp`)
 - Dynamic value representation
-- Supports integers, floats, strings, and none
+- Supports integers, floats, strings, arrays, and none
 - Automatic type coercion for numeric operations
 - Runtime type checking and conversion
 
@@ -123,10 +113,16 @@ var isValid = x > 0 && y < 100;
 - **Type Safety**: Runtime checks prevent type errors
 
 ### Supported Operations
-- **Arithmetic**: +, -, *, /, %
+- **Arithmetic**: +, -, *, /, %, **
 - **Comparison**: ==, !=, <, <=, >, >=
 - **Logical**: &&, ||, !
-- **Assignment**: =
+- **Bitwise**: &, |, ^, ~, <<, >>
+- **Assignment**: =, +=, -=, *=, /=, %=, &=, |=, ^=, <<=, >>=
+- **Increment/Decrement**: ++, --
+- **Ternary**: ? :
+- **Null Coalescing**: ??
+- **Pipe**: |>
+- **Spread**: ...
 
 ## Build System
 - **CMake**: Modern build configuration
@@ -160,9 +156,9 @@ All tests pass successfully ✓
 - Quick native code compilation
 
 ### Runtime Performance
-- Native machine code execution for static paths
-- Optimized by LLVM backend
-- Bytecode VM for dynamic sections
+- Native machine code execution via LLVM
+- Optimized by LLVM backend (O0–O3 + OPTMAX)
+- Adaptive JIT recompiles hot functions with O3 + PGO
 - Minimal runtime overhead
 
 ## Usage
@@ -193,8 +189,10 @@ omscript/
 │   ├── bytecode.h   # Bytecode emitter
 │   ├── codegen.h    # LLVM code generator
 │   ├── compiler.h   # Compiler driver
+│   ├── diagnostic.h # Diagnostic utilities
 │   ├── lexer.h      # Tokenizer
-│   └── parser.h     # Parser
+│   ├── parser.h     # Parser
+│   └── version.h    # Version constants
 ├── src/             # Implementation
 │   ├── ast.cpp
 │   ├── bytecode.cpp
@@ -204,18 +202,19 @@ omscript/
 │   ├── main.cpp
 │   └── parser.cpp
 ├── runtime/         # Runtime system
+│   ├── aot_profile.cpp  # Adaptive JIT / AOT profiling
+│   ├── aot_profile.h
+│   ├── jit.cpp      # JIT compiler
+│   ├── jit.h
+│   ├── refcounted.h # Reference-counted types
 │   ├── value.cpp    # Dynamic values
 │   ├── value.h
-│   ├── vm.cpp       # Bytecode VM
+│   ├── vm.cpp       # VM runtime
 │   └── vm.h
-├── examples/        # Example programs
-│   ├── advanced.om
-│   ├── arithmetic.om
-│   ├── factorial.om
-│   ├── fibonacci.om
-│   └── test.om
+├── examples/        # Example programs (90+)
+├── tests/           # Unit tests
+├── user-packages/   # User-installable packages
 ├── CMakeLists.txt   # Build configuration
-├── Makefile         # Convenience targets
 ├── README.md        # Documentation
 └── run_tests.sh     # Test suite
 ```
@@ -224,17 +223,15 @@ omscript/
 Potential areas for expansion:
 - Additional data types (structs, maps)
 - Module system for code organization
-- Garbage collection for memory management
-- ~~JIT compilation for dynamic code~~ ✅ Implemented (bytecode JIT with LLVM MCJIT)
 - Debugging support and REPL
-- Profile-Guided Optimization (PGO)
-- Link-Time Optimization (LTO)
+- Profile-Guided Optimization (PGO) improvements
+- Link-Time Optimization (LTO) improvements
 
 ## Conclusion
 OmScript is a complete, working programming language implementation that demonstrates:
 - Modern compiler design principles
 - Integration with LLVM infrastructure
-- Hybrid compilation strategies
+- AOT compilation with adaptive JIT recompilation
 - Clean, maintainable code architecture
 - Comprehensive testing and validation
 

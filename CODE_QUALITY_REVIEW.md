@@ -7,9 +7,9 @@ This is a full-repo audit, not a feel-good writeup. The code compiles and passes
 - **Module boundaries are acceptable, abstraction boundaries are not.**
   Directory split (`src/`, `runtime/`, `include/`) is sane. Internal layering is still leaky.
 - **`CodeGenerator` is a god object.**
-  `src/codegen.cpp` owns frontend semantics, LLVM lowering, runtime stubs, builtins, object emission, and bytecode generation fallback. That is several subsystems stuffed into one class and one translation unit.
-- **Dual backend strategy is half-realized.**
-  You have LLVM-native compilation *and* bytecode/JIT (`runtime/vm.cpp`, bytecode sections in `src/codegen.cpp`), but feature parity is incomplete. Example: `Array index assignment is not supported in bytecode mode` and `For-each loops are not supported in bytecode mode` (`src/codegen.cpp:2965`, `src/codegen.cpp:3180`). That is architectural debt disguised as optionality.
+  `src/codegen.cpp` owns frontend semantics, LLVM lowering, runtime stubs, builtins, and object emission. That is several subsystems stuffed into one class and one translation unit.
+- **AOT + adaptive JIT architecture is well-structured.**
+  The primary AOT compilation path produces native code via LLVM, while the adaptive JIT runtime (`runtime/aot_profile.cpp`) recompiles hot functions at higher optimization levels with profile-guided hints.
 - **Dependency direction is mostly correct, cohesion is mixed.**
   Parser → AST → Codegen is expected. But codegen also embeds runtime-facing concerns (printing, traps, libc calls), so every semantic tweak risks collateral damage in backend/runtime glue.
 - **Hidden complexity exists in scope/state handling.**
@@ -34,8 +34,8 @@ This is a full-repo audit, not a feel-good writeup. The code compiles and passes
   `Value` stores `RefCountedString` in a union (`runtime/value.h:194-198`) with explicit constructor/destructor dispatch. This is legal but brittle; one missed branch in copy/move/assignment is memory corruption territory.
 - **Parser performs semantic rewrites without a dedicated validation phase.**
   Assignment/postfix restrictions are enforced ad hoc inside parse routines (`src/parser.cpp:430+`, `729+`). This mixes syntax and semantic legality checks in ways that are easy to regress.
-- **Bytecode safety checks are good.**
-  VM bounds checks (`ensureReadable`) and jump target validation reduce crash risk. This is one area where paranoia is correctly applied.
+- **Runtime safety checks are good.**
+  Bounds checks and validation reduce crash risk. This is one area where paranoia is correctly applied.
 - **Error recovery exists but is shallow.**
   `synchronize()` exists (`src/parser.cpp:60`) and multi-error aggregation is an improvement, but there is no typed diagnostic model, so downstream tooling is handicapped.
 
@@ -63,7 +63,7 @@ This is a full-repo audit, not a feel-good writeup. The code compiles and passes
 
 ## 6. Engineering Smells
 
-- **Needless abstraction gap:** dual execution backends without full semantic parity.
+- **Needless complexity:** areas of the codebase retain legacy patterns from earlier bytecode-based designs.
 - **Cargo-cult “support everything” behavior:** linking against a wide LLVM component set in CMake increases build complexity for unclear gain.
 - **Smart code reducing clarity:** manual union lifetime management and explicit reference counting where safer standard facilities could reduce risk.
 - **Framework/library abuse:** not severe, but codegen directly wiring libc/runtime calls everywhere makes the backend harder to evolve.
@@ -71,16 +71,16 @@ This is a full-repo audit, not a feel-good writeup. The code compiles and passes
 
 ## 7. Security Concerns
 
-- **Input validation:** reasonable in lexer/parser/VM bounds handling.
+- **Input validation:** reasonable in lexer/parser/runtime bounds handling.
 - **Trust boundaries:** compiler invoking linker uses `llvm::sys::ExecuteAndWait` with separated args (`src/compiler.cpp:142`), avoiding shell injection. Good.
 - **Data exposure:** no obvious secret handling issues in repo code.
 - **Dependency/build risk:** heavy LLVM linkage surface increases supply-chain/build reproducibility complexity.
-- **Denial-of-service vectors:** parser/runtime can still be stressed with huge inputs; there is no explicit global compile-time resource budgeting beyond VM stack/depth limits.
+- **Denial-of-service vectors:** parser/runtime can still be stressed with huge inputs; there is no explicit global compile-time resource budgeting.
 
 ## 8. Top 10 Critical Problems (ranked by production risk)
 
 1. **Monolithic codegen architecture** (`src/codegen.cpp`) — high regression risk for any feature work.
-2. **Backend feature mismatch** (LLVM vs bytecode unsupported constructs) — inconsistent behavior paths.
+2. **Codegen scope is broad** — LLVM lowering, builtins, and runtime stubs all in one translation unit.
 3. **Manual tagged-union lifetime management in `Value`** — correctness is fragile under maintenance churn.
 4. **Hand-rolled non-atomic refcount string type** (`runtime/refcounted.h`) — unsafe for concurrency evolution.
 5. **Ad hoc semantic checks in parser** — syntax/semantics boundary is blurry and brittle.
@@ -93,11 +93,11 @@ This is a full-repo audit, not a feel-good writeup. The code compiles and passes
 ## 9. What Must Be Rewritten
 
 - **`CodeGenerator` decomposition is mandatory, not optional.**
-  Split IR lowering, builtin/runtime symbol wiring, object emission, and bytecode emission into separate units with explicit interfaces.
+  Split IR lowering, builtin/runtime symbol wiring, and object emission into separate units with explicit interfaces.
 - **`Value` representation should be redesigned.**
   Replace manual union lifecycle with a safer tagged representation (`std::variant`-style approach or equivalent) unless profiling proves this is a hard blocker.
-- **Backend strategy needs a decision.**
-  Either commit to parity between LLVM and bytecode paths or remove one path. Shipping two inconsistent semantics engines is worse than shipping one solid engine.
+- **Backend architecture is sound.**
+  The AOT-compiled primary path with adaptive JIT recompilation for hot functions is a clean design. Continue investing in this single execution model.
 - **Diagnostics pipeline should be rebuilt around structured errors.**
   Keep human-readable messages, add typed diagnostics for tooling and deterministic testing.
 

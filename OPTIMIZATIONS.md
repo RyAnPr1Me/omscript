@@ -490,79 +490,39 @@ functions to native machine code via LLVM MCJIT:
 
 ## Execution Model
 
-OmScript uses a **tiered execution model** that automatically selects the best execution
-strategy for each function based on static analysis:
+OmScript is an **AOT-compiled language** — all code compiles to native machine code through LLVM. When using `omsc run`, the program executes through a lightweight **adaptive JIT runtime** that automatically recompiles hot functions with even more aggressive optimizations.
 
-### Tier 1: AOT (Ahead-of-Time Compilation)
-Functions that can be fully statically analyzed are compiled directly to native machine code
-via LLVM IR.  A function qualifies for AOT compilation if any of the following are true:
-- It is `main` (the program entry point)
-- It is a stdlib built-in function (`print`, `abs`, `sqrt`, etc.)
-- It is marked with `OPTMAX=:` / `OPTMAX!:` for aggressive optimization
-- **All parameters have type annotations** (e.g. `fn add(a: int, b: int)`)
+### AOT Compilation (default)
+When compiling with `omsc build`, all functions are compiled to native machine code via LLVM IR with the selected optimization level (O0–O3). OPTMAX-marked functions receive additional exhaustive multi-pass optimization.
 
-AOT-compiled functions run at full native speed with LLVM optimizations applied.
+### Adaptive JIT Runtime (`omsc run`)
+When running interactively with `omsc run`, a two-tier adaptive JIT is used:
 
-### Tier 2: Interpreted (Bytecode VM)
-Functions without complete type annotations are compiled to bytecode and run by the
-stack-based VM interpreter:
-- No type annotations → dynamic typing at runtime
-- Partial annotations (e.g. `fn mixed(a: int, b)`) → treated as dynamic
-- Full access to dynamic features (string operations, dynamic dispatch)
+1. **Tier 1 — Initial JIT (fast startup)**: The module is JIT-compiled at O2 via LLVM MCJIT. Every non-`main` function receives a lightweight call-counting dispatch prolog. Execution begins immediately.
 
-The interpreter includes computed-goto dispatch and integer fast paths for performance.
+2. **Tier 2 — Hot Recompile**: Functions that exceed a call-count threshold are recompiled at O3 with profile-guided optimization hints. The LLVM inliner, branch layout, loop vectorizer, and unroller all see the function as hot and optimize accordingly. The new native function pointer is stored for all future calls.
 
-### Tier 3: JIT (Just-In-Time Compilation)
-Hot interpreted functions are automatically promoted to native code:
-1. The VM profiler tracks per-function call counts
-2. After 10 interpreted calls, the JIT attempts to compile the function
-3. Integer-only functions are translated to LLVM IR and compiled to native code
-4. Subsequent calls bypass the interpreter entirely
-5. After 50 additional post-JIT calls, type-specialized recompilation is attempted
+Post-recompile, calls take a fast path: one volatile load + a well-predicted branch, then a direct call to the O3-PGO-optimized native code with zero counter overhead.
 
-### Tier Selection Example
+### Example
 ```omscript
-// AOT — fully typed, compiled to native code
+// AOT compiled with full LLVM optimization
 fn add(a: int, b: int) { return a + b; }
 
-// AOT — OPTMAX block, compiled with aggressive optimization
+// OPTMAX — compiled with aggressive exhaustive optimization
 OPTMAX=:
 fn fast_compute(x: int) { return x * x + x; }
 OPTMAX!:
 
-// Interpreted → JIT — no type annotations, starts as bytecode
-// After 10 calls, JIT-compiled to native code if integer-only
-fn dynamic_add(a, b) { return a + b; }
+// During `omsc run`: initially JIT-compiled at O2, then
+// recompiled at O3 with PGO hints after becoming hot
+fn frequently_called(a, b) { return a + b; }
 
-// Always AOT — main is always compiled to native code
+// Always AOT — main is the program entry point
 fn main() {
-    return add(1, 2) + dynamic_add(3, 4);
+    return add(1, 2) + frequently_called(3, 4);
 }
 ```
-
-### Hybrid Compilation
-
-The `generateHybrid()` method enables all three execution tiers to coexist in a single
-program.  A single compilation pass:
-
-1. **Classifies** every function into its execution tier (AOT or Interpreted)
-2. **Generates LLVM IR** for all functions (AOT-tier functions get full optimization)
-3. **Emits bytecode** for each Interpreted-tier function into isolated `BytecodeFunction`
-   objects with proper local variable tracking
-
-At runtime the compiled program can seamlessly mix:
-- AOT-compiled native functions (maximum speed)
-- Bytecode-interpreted functions (dynamic flexibility)
-- JIT-compiled functions (hot bytecode promoted to native code by the VM profiler)
-
-The compiler automatically selects the fastest execution path for each function:
-
-| Function Characteristic | Tier | Runtime Path |
-|------------------------|------|-------------|
-| Full type annotations  | AOT  | Native code via LLVM |
-| OPTMAX / main / stdlib | AOT  | Native code with aggressive optimization |
-| No type annotations    | Interpreted → JIT | Bytecode → native after 10 hot calls |
-| Partial type annotations | Interpreted → JIT | Bytecode → native after profiling |
 
 ## Best Practices for Maximum Performance
 
