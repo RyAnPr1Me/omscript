@@ -465,7 +465,7 @@ omscript/
 │   ├── refcounted.h    # Reference-counted types
 │   ├── value.cpp       # Dynamic values
 │   ├── value.h
-│   ├── vm.cpp          # Bytecode VM
+│   ├── vm.cpp          # VM runtime
 │   └── vm.h
 ├── tests/             # Unit tests
 ├── examples/          # Example programs (90+ examples)

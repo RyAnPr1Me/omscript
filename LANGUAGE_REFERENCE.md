@@ -2205,7 +2205,7 @@ make -j$(nproc)
 |---------|-------|
 | C++ Standard | C++17 |
 | Target | `omsc` executable |
-| LLVM Components | core, executionengine, mcjit, interpreter, native, irreader, support, passes, target, transformutils, analysis, asmparser, codegen, mc, mcparser |
+| LLVM Components | core, executionengine, mcjit, interpreter, native, support, passes, target, transformutils, analysis, asmparser, codegen, mc, mcparser, bitreader |
 
 ### 17.4 Running Tests
 

@@ -323,51 +323,17 @@ Comparisons between compile-time constant integers are evaluated at IR generatio
 10 <= 10 → 1
 ```
 
-### Bytecode Constant Folding
-When targeting the bytecode backend, constant expressions are evaluated at compile time.
-Instead of emitting `PUSH_INT, PUSH_INT, ADD`, the compiler emits a single `PUSH_INT` with the
-pre-computed result. This applies to all arithmetic, comparison, logical, and bitwise operations
-on integer literals, as well as unary operations (`-`, `!`, `~`).
+### Constant Folding
+Constant expressions are evaluated at compile time. This applies to all arithmetic, comparison, logical, and bitwise operations on integer literals, as well as unary operations (`-`, `!`, `~`).
 
-### Bytecode Algebraic Identity Elimination
-When emitting bytecode, operations with a single literal operand that match an algebraic
-identity are eliminated entirely. For example, `x + 0`, `x * 1`, `x << 0`, and `x ** 1`
-emit only the non-constant operand without the arithmetic instruction. Similarly, `x * 0`
-and `x & 0` emit a constant `0`, and `x ** 0` emits a constant `1`.
+### Algebraic Identity Elimination
+Operations with a single literal operand that match an algebraic identity are eliminated entirely. For example, `x + 0`, `x * 1`, `x << 0`, and `x ** 1` emit only the non-constant operand without the arithmetic instruction. Similarly, `x * 0` and `x & 0` emit a constant `0`, and `x ** 0` emits a constant `1`.
 
-### Computed-Goto VM Dispatch
-On GCC/Clang, the bytecode VM uses a computed-goto dispatch table instead of a `switch`
-statement. This eliminates branch prediction overhead and indirect jump penalties, resulting
-in significantly faster opcode dispatch. A standard `switch` fallback is used on other
-compilers, with the same integer/float fast paths for consistent performance.
-
-### Direct Memcpy Bytecode Reads
-The VM's `readInt`, `readFloat`, and `readShort` functions use direct `memcpy` from the
-bytecode buffer instead of byte-by-byte reconstruction loops. On little-endian architectures
-(x86, ARM), this compiles to a single load instruction, eliminating loop overhead. A
-zero-copy `readStringView` provides `std::string_view` access into the bytecode buffer
-for operations that don't need an owning string.
-
-### Integer Fast Paths
-When both operands on the VM stack are integers, arithmetic and comparison operations
-(ADD, SUB, MUL, EQ, NE, LT, LE, GT, GE) bypass the full `Value` operator dispatch.
-The fast path reads the raw `int64_t` values directly, avoiding type-checking overhead,
-temporary `Value` construction, and bounds-checked `pop()`/`push()` calls.
-
-### Float Fast Paths
-When both operands on the VM stack are floats, arithmetic operations (ADD, SUB, MUL, DIV)
-and unary negation (NEG) bypass the full `Value` operator dispatch. The fast path reads the
-raw `double` values directly, avoiding type promotion logic and operator overload overhead.
-Float fast paths also cover comparison operations (EQ, NE, LT, LE, GT, GE), eliminating
-the overhead of float promotion checks for pure-float comparisons.
-
-### Mixed Int/Float Fast Paths
-When one operand is an integer and the other is a float, arithmetic operations (ADD, SUB,
-MUL, DIV) promote the integer to `double` inline and perform the operation directly,
-bypassing the full `Value` operator dispatch and its `needsFloatPromotion()` check. Both
-operand orderings (int+float and float+int) are handled. For DIV, the fast path includes
-a zero-check on the divisor to preserve correct error semantics. This covers both the
-computed-goto and switch-dispatch paths.
+### Adaptive JIT Recompilation
+When using `omsc run`, the adaptive JIT runtime monitors function call counts. Hot functions
+that exceed a threshold are recompiled with LLVM's O3 pipeline using profile-guided
+optimization hints. The recompiled function's entry count annotation guides the inliner,
+branch layout, loop vectorizer, and unroller to optimize for the hot path.
 
 ### Exponentiation by Squaring
 The `**` (POW) operator uses binary exponentiation (exponentiation by squaring) to compute
@@ -381,59 +347,6 @@ The `Value` comparison operators (`<=`, `>`, `>=`) use direct single-dispatch co
 instead of composing multiple lower-level operators. For example, `operator<=` performs a
 single comparison rather than calling both `operator<` and `operator==`, eliminating
 redundant type-checking and dispatch overhead.
-
-### Bulk Memcpy Bytecode Emission
-The bytecode emitter's `emitInt`, `emitFloat`, `emitShort`, and `emitString` functions use
-bulk `resize+memcpy` instead of byte-by-byte `push_back` loops. This eliminates per-byte
-vector bounds checks, reduces branch overhead, and allows the compiler to generate a single
-`memcpy` intrinsic for the entire payload. For `emitInt`/`emitFloat`, this replaces 8
-individual `push_back` calls with one `memcpy`. For `emitString`, the character loop is
-replaced with a single `memcpy` of the entire string payload.
-
-### Iterative CALL Dispatch
-The VM's CALL and RETURN opcodes use an iterative trampoline instead of recursive
-`execute()` calls. On CALL, the current execution context (instruction pointer, bytecode
-pointer, locals, registers) is saved to the call stack, and the dispatch loop switches
-to the callee's bytecode. On RETURN, the caller's context is restored from the call
-stack and execution continues without unwinding native stack frames.
-
-Benefits:
-- Eliminates native function call overhead on every bytecode-level function call
-- Reduces native stack usage from O(depth × frame_size) to O(1) per call
-- Avoids C++ stack overflow on deeply recursive bytecode programs
-- Enables the compiler to keep the dispatch loop's hot state (ip, bytecodePtr) in
-  registers across CALL/RETURN boundaries
-
-### Partial Register Save/Restore
-The VM tracks a `maxRegUsed_` high-water mark — the highest register index written during
-execution. On CALL, only `registers[0..maxRegUsed_]` are saved to the call frame instead
-of all 256 registers. On RETURN, only the saved subset is restored.
-
-Typical functions use 5–20 registers, so this optimization avoids copying ~230 unused
-`Value` objects on every function call. The tracking overhead is a single branchless
-`max()` update per register-writing opcode, which compiles to a conditional move (cmov)
-on x86 — no branch misprediction penalty.
-
-### Direct Register Argument Read on CALL
-When dispatching a bytecode function call, the VM reads callee arguments directly from the
-register file (`registers[argRegs[i]]`) instead of from the saved registers vector
-(`callStack.back().savedRegisters[argRegs[i]]`). The register file has not been modified
-between the save and the argument read, so both produce identical values. The direct read
-avoids an extra level of vector indirection, a potential data-cache miss on the
-heap-allocated vector, and the `callStack.back()` lookup on every argument copy.
-
-### Cache-Line Aligned VM Data Layout
-The VM's register file is the most frequently accessed data structure in the dispatch loop.
-It is aligned to 64-byte cache-line boundaries with `alignas(64)` to ensure that sequential
-register accesses (r0, r1, r2, ...) hit the same or adjacent cache lines, minimising L1d
-misses during tight bytecode loops. The VM's private fields are also reordered: hot data
-(registers, maxRegUsed, locals, callStack) is grouped before cold data (globals, functions,
-JIT caches) for improved spatial locality.
-
-### Bytecode Prefetch Hints
-The computed-goto dispatch loop issues `__builtin_prefetch` on the next bytecode bytes
-after reading each opcode. This brings operand data into L1 cache before it is needed,
-hiding memory latency on bytecode streams that span multiple cache lines.
 
 ### Polyhedral-Style Loop Optimizations
 At O3 with `-floop-optimize`, the compiler appends LLVM's `LoopDistributePass` to the
@@ -455,38 +368,6 @@ back-edges:
 These metadata hints guide LLVM's LoopVectorize and LoopUnroll passes, complementing
 the existing auto-vectorization at O3 by explicitly marking every user-written loop as
 a vectorization candidate.
-
-### Bytecode Register Reclamation
-The bytecode emitter now calls `resetTempRegs()` at statement boundaries (after expression
-statements, after if-branches, and around loop bodies). This reclaims temporary registers
-allocated during expression evaluation once the expression result is dead. Previously,
-temporaries accumulated across all statements within a function body, leading to register
-exhaustion (hitting the 255-register limit) in functions with many sequential statements.
-With reclamation, register pressure tracks the depth of the deepest single expression
-rather than the total number of expressions.
-
-### Bytecode JIT Compiler
-The VM includes a lightweight JIT compiler that automatically translates hot bytecode
-functions to native machine code via LLVM MCJIT:
-
-- **Hot function profiling**: each bytecode function's call count is tracked.  After
-  10 interpreted calls, the JIT attempts to compile the function.
-- **Bytecode → LLVM IR**: the JIT performs basic-block analysis, simulates the operand
-  stack at compile time, and emits SSA-form LLVM IR.  Local variables become `alloca`
-  instructions; stack operations become direct register operations.
-- **Supported opcodes**: `PUSH_INT`, arithmetic (`+`, `-`, `*`, `/`, `%`), comparisons,
-  logical/bitwise operations, `LOAD_LOCAL`/`STORE_LOCAL`, `JUMP`, `JUMP_IF_FALSE`, `RETURN`.
-- **Control flow**: if/else branches and while loops are handled via basic-block splitting
-  and LLVM conditional branches.
-- **Graceful fallback**: functions that use floats, strings, globals, `CALL`, or `PRINT`
-  remain interpreted.  Failed compilations are remembered so the JIT never retries.
-- **Native invocation**: JIT-compiled functions are called directly via native function
-  pointers, eliminating the overhead of recursive `execute()` calls, stack save/restore,
-  and opcode dispatch.
-- **Type-specialized recompilation**: after a function has been JIT-compiled, the profiler
-  continues to track calls.  After 50 additional post-JIT calls, the function is
-  recompiled with updated type specialization data.  This allows precompiled bytecode
-  to be progressively optimized as more runtime type information becomes available.
 
 ## Execution Model
 
@@ -590,42 +471,18 @@ OmScript's optimization infrastructure provides:
 - ✅ Compile-time constant folding for unary, binary, and comparison expressions
 - ✅ Dead branch elimination for constant conditions
 - ✅ IR-level strength reduction (multiply/divide by power-of-2 to shift)
-- ✅ Bytecode constant folding for the interpreter backend
-- ✅ Computed-goto VM dispatch for faster bytecode execution
-- ✅ Integer-specialized fast paths for common arithmetic/comparison ops
-- ✅ Bytecode JIT compiler with automatic hot-function detection
-- ✅ Type-specialized JIT recompilation for precompiled bytecode
-- ✅ Tiered execution model (AOT → Interpreted → JIT) with automatic tier selection
-- ✅ **Hybrid compilation** — AOT + bytecode in a single pass for cross-tier programs
-- ✅ Per-function local variable tracking in hybrid bytecode emission
-- ✅ Optimized VM runtime with move semantics and pre-allocated storage
-- ✅ Inline hot-path functions (isTruthy) for better VM throughput
+- ✅ Adaptive JIT runtime with automatic hot-function detection and O3 recompilation
+- ✅ Profile-guided recompilation with real call-count annotations
+- ✅ AOT compilation with full LLVM optimization pipeline (O0–O3 + OPTMAX)
 - ✅ IR-level algebraic identity elimination (x*0→0, x+0→x, x&0→0, x|0→x, x^0→x, x**0→1, etc.)
 - ✅ OPTMAX double-negation/complement folding (-(-x)→x, ~(~x)→x)
-- ✅ Bytecode algebraic identity elimination for single-literal operands
-- ✅ Float-specialized fast paths for VM arithmetic (ADD, SUB, MUL, DIV, NEG)
-- ✅ Float-specialized fast paths for VM comparisons (EQ, NE, LT, LE, GT, GE)
 - ✅ Exponentiation by squaring for O(log n) POW operations
 - ✅ Single-dispatch comparison operators (<=, >, >=) eliminating redundant type checks
-- ✅ Direct `memcpy` bytecode reads for `readInt`/`readFloat`/`readShort` (single-instruction loads)
-- ✅ Zero-copy `readStringView` for bytecode string reads
-- ✅ Integer/float fast paths in switch-dispatch fallback (parity with computed-goto path)
-- ✅ Pre-reserved call stack and bytecode emitter buffers to avoid dynamic reallocations
-- ✅ Move-semantics `registerFunction` overload for zero-copy function registration
 - ✅ Lexer `scanIdentifier` uses `substr()` instead of char-by-char string building
-- ✅ Bulk `memcpy` bytecode emission for `emitInt`/`emitFloat`/`emitShort`/`emitString`
-- ✅ Iterative CALL dispatch — eliminates recursive `execute()` calls on every function call
-- ✅ Partial register save/restore — tracks high-water mark, saves only used registers on CALL
-- ✅ Direct register argument read on CALL — avoids vector indirection for argument passing
-- ✅ Mixed int/float fast paths for VM arithmetic (ADD, SUB, MUL, DIV) — inline promotion
-- ✅ Float-specialized fast paths for switch-dispatch comparisons (EQ, NE, LT, LE, GT, GE)
 - ✅ Lexer `scanNumber` uses `substr()` fast path for decimal numbers without underscores
 - ✅ Move-semantics `Token` constructor avoids string copies for temporary lexemes
-- ✅ Cache-line aligned VM register file (`alignas(64)`) and hot/cold field reordering
-- ✅ Bytecode prefetch hints (`__builtin_prefetch`) in computed-goto dispatch loop
 - ✅ Polyhedral-style loop distribution (LoopDistributePass) at O3 for cache locality
 - ✅ SIMD vectorization metadata (vectorize.enable, interleave.count) on generated loops at O2+
-- ✅ Bytecode register reclamation (`resetTempRegs`) at statement boundaries
 - ✅ CLI flags `-fvectorize`, `-funroll-loops`, `-floop-optimize` for fine-grained control
 - ✅ Measurable, significant improvements
 
