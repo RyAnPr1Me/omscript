@@ -82,6 +82,15 @@ class Compiler {
     void setLoopOptimize(bool enable) {
         loopOptimize_ = enable;
     }
+    /// Enable PGO instrumentation generation.
+    /// The compiled binary will write a raw profile to @p path on exit.
+    void setPGOGen(const std::string& path) {
+        pgoGenPath_ = path;
+    }
+    /// Enable PGO profile-use optimizations from a previously-collected profile.
+    void setPGOUse(const std::string& path) {
+        pgoUsePath_ = path;
+    }
 
   private:
     std::string readFile(const std::string& filename);
@@ -100,6 +109,8 @@ class Compiler {
     bool vectorize_ = true;
     bool unrollLoops_ = true;
     bool loopOptimize_ = true;
+    std::string pgoGenPath_;
+    std::string pgoUsePath_;
 };
 
 } // namespace omscript

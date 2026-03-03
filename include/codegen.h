@@ -123,6 +123,21 @@ class CodeGenerator {
         enableLoopOptimize_ = enable;
     }
 
+    /// Enable PGO instrumentation generation mode.
+    /// When set, the AOT-compiled binary will write a raw profile (.profraw)
+    /// to @p profilePath at program exit, capturing branch and call counts.
+    void setPGOGen(const std::string& profilePath) {
+        pgoGenPath_ = profilePath;
+    }
+
+    /// Enable PGO profile-guided optimization use mode.
+    /// When set, the optimizer reads the .profdata file at @p profilePath
+    /// and uses its branch/call counts to improve inlining, branch layout,
+    /// and hot-path specialization decisions.
+    void setPGOUse(const std::string& profilePath) {
+        pgoUsePath_ = profilePath;
+    }
+
   private:
     std::unique_ptr<llvm::LLVMContext> context;
     std::unique_ptr<llvm::IRBuilder<>> builder;
@@ -314,6 +329,8 @@ class CodeGenerator {
     bool enableVectorize_ = true;    // -fvectorize / -fno-vectorize
     bool enableUnrollLoops_ = true;  // -funroll-loops / -fno-unroll-loops
     bool enableLoopOptimize_ = true; // -floop-optimize / -fno-loop-optimize
+    std::string pgoGenPath_;         // --pgo-gen=<path>: emit raw profile to this file
+    std::string pgoUsePath_;         // --pgo-use=<path>: read profile data from this file
 
     /// Compile-time resource budget — limits to prevent DoS via oversized inputs.
     /// Checked during code generation to abort compilation if the program

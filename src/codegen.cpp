@@ -17,7 +17,9 @@
 #include <llvm/Passes/PassBuilder.h>
 #include <llvm/Support/CodeGen.h>
 #include <llvm/Support/FileSystem.h>
+#include <llvm/Support/PGOOptions.h>
 #include <llvm/Support/TargetSelect.h>
+#include <llvm/Support/VirtualFileSystem.h>
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/Target/TargetMachine.h>
 #include <llvm/Target/TargetOptions.h>
@@ -5604,7 +5606,48 @@ void CodeGenerator::runOptimizationPasses() {
         PTO.CallGraphProfile = true;     // use call-graph profile data for inlining decisions
         PTO.InlinerThreshold = 300;      // more aggressive inlining than the default ~225
     }
-    llvm::PassBuilder PB(targetMachine.get(), PTO);
+
+    // ---------------------------------------------------------------------------
+    // PGO (Profile-Guided Optimization) support
+    // ---------------------------------------------------------------------------
+    // Two-phase workflow:
+    //
+    //   Phase 1 – Instrumentation generation (--pgo-gen=<path>):
+    //     The compiler inserts LLVM IR instrumentation counters into every
+    //     basic block and function entry.  At program exit the runtime writes
+    //     a raw profile file (.profraw) to the specified path.  Run the binary
+    //     with representative workloads to collect profile data, then convert:
+    //       llvm-profdata merge -output=prog.profdata prog.profraw
+    //
+    //   Phase 2 – Profile-use optimization (--pgo-use=<path>):
+    //     The optimizer reads the merged .profdata file and uses the branch
+    //     and call-count data to guide: function inlining decisions (hot
+    //     callees get larger inline budgets), branch layout (hot side goes
+    //     in the fall-through path to improve I-cache density), loop
+    //     trip-count estimation (enables better vectorization and unrolling),
+    //     and cold-code sinking (rare error paths moved out of hot regions).
+    std::optional<llvm::PGOOptions> pgoOpt;
+    if (!pgoGenPath_.empty()) {
+        // Instrumentation generation: insert counters, write .profraw on exit.
+        pgoOpt = llvm::PGOOptions(
+            pgoGenPath_,          // ProfileFile: output path for raw profile
+            "",                   // CSProfileGenFile: context-sensitive profile (unused)
+            "",                   // ProfileRemappingFile: symbol remapping (unused)
+            "",                   // MemoryProfile: memory profile (unused)
+            llvm::vfs::getRealFileSystem(),
+            llvm::PGOOptions::IRInstr); // Action: IR-level instrumentation
+    } else if (!pgoUsePath_.empty()) {
+        // Profile-use: feed collected data into the optimization pipeline.
+        pgoOpt = llvm::PGOOptions(
+            pgoUsePath_,          // ProfileFile: input .profdata path
+            "",                   // CSProfileGenFile: unused
+            "",                   // ProfileRemappingFile: unused
+            "",                   // MemoryProfile: unused
+            llvm::vfs::getRealFileSystem(),
+            llvm::PGOOptions::IRUse); // Action: apply IR-level profile
+    }
+
+    llvm::PassBuilder PB(targetMachine.get(), PTO, pgoOpt);
 
     // At O3 with -floop-optimize, register LoopDistributePass to run just
     // before the vectorizer starts.  Loop distribution splits a loop with

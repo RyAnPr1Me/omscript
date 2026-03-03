@@ -113,6 +113,12 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
     codegen.setVectorize(vectorize_);
     codegen.setUnrollLoops(unrollLoops_);
     codegen.setLoopOptimize(loopOptimize_);
+    if (!pgoGenPath_.empty()) {
+        codegen.setPGOGen(pgoGenPath_);
+    }
+    if (!pgoUsePath_.empty()) {
+        codegen.setPGOUse(pgoUsePath_);
+    }
     try {
         // Use hybrid compilation to produce both LLVM IR (for AOT-tier
         // functions) and bytecode (for Interpreted-tier functions).
