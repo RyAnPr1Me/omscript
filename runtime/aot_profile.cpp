@@ -295,8 +295,7 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
                                                    "omsc_pgo_bc", /*RequiresNullTerminator=*/false);
     auto modOrErr = llvm::parseBitcodeFile(memBuf->getMemBufferRef(), *newCtx);
     if (!modOrErr) {
-        llvm::errs() << "omsc: Tier-2 recompile of '" << funcName
-                     << "' failed: could not parse bitcode\n";
+        llvm::errs() << "omsc: Tier-2 recompile of '" << funcName << "' failed: could not parse bitcode\n";
         return;
     }
     auto mod = std::move(*modOrErr);
@@ -310,8 +309,7 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
     // the hot function while avoiding the reverse.
     llvm::Function* fn = mod->getFunction(funcName);
     if (!fn || fn->isDeclaration()) {
-        llvm::errs() << "omsc: Tier-2 recompile of '" << funcName
-                     << "' failed: function not found in bitcode\n";
+        llvm::errs() << "omsc: Tier-2 recompile of '" << funcName << "' failed: function not found in bitcode\n";
         return;
     }
     fn->setEntryCount(static_cast<uint64_t>(callCount));
@@ -392,8 +390,7 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
 
     std::unique_ptr<llvm::ExecutionEngine> engine(eb.create());
     if (!engine) {
-        llvm::errs() << "omsc: Tier-2 JIT compilation of '" << funcName
-                     << "' failed: " << engineErr << "\n";
+        llvm::errs() << "omsc: Tier-2 JIT compilation of '" << funcName << "' failed: " << engineErr << "\n";
         return;
     }
     engine->finalizeObject();

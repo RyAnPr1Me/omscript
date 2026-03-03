@@ -49,7 +49,9 @@ enum class OptimizationLevel {
 /// There is no bytecode or interpreter tier — every function produces
 /// native machine code from the first call.
 enum class ExecutionTier {
-    AOT // Compiled to native code via LLVM IR (Tier 1); hot functions promoted to O3+PGO (Tier 2)
+    AOT,         // Compiled to native code via LLVM IR (Tier 1); hot functions promoted to O3+PGO (Tier 2)
+    Interpreted, // Executed via tree-walking interpreter (no LLVM compilation)
+    JIT          // Just-in-time compiled at runtime
 };
 
 /// Return a human-readable label for an ExecutionTier value.
@@ -57,6 +59,10 @@ inline const char* executionTierName(ExecutionTier tier) {
     switch (tier) {
     case ExecutionTier::AOT:
         return "AOT";
+    case ExecutionTier::Interpreted:
+        return "Interpreted";
+    case ExecutionTier::JIT:
+        return "JIT";
     }
     return "Unknown";
 }
@@ -134,6 +140,16 @@ class CodeGenerator {
     /// and hot-path specialization decisions.
     void setPGOUse(const std::string& profilePath) {
         pgoUsePath_ = profilePath;
+    }
+
+    /// Check whether dynamic (JIT) compilation mode is enabled.
+    bool isDynamicCompilation() const {
+        return dynamicCompilation_;
+    }
+
+    /// Enable or disable dynamic (JIT) compilation mode.
+    void setDynamicCompilation(bool enable) {
+        dynamicCompilation_ = enable;
     }
 
   private:
@@ -277,16 +293,17 @@ class CodeGenerator {
     void scanStmtForStringCalls(Statement* stmt);
 
     // Target CPU configuration for LLVM code generation.
-    std::string marchCpu_;           // -march: CPU arch for instruction selection ("" = native)
-    std::string mtuneCpu_;           // -mtune: CPU for scheduling tuning ("" = same as march)
-    bool usePIC_ = true;             // -fpic / -fno-pic
-    bool useFastMath_ = false;       // -ffast-math / -fno-fast-math
-    bool enableOptMax_ = true;       // -foptmax / -fno-optmax
-    bool enableVectorize_ = true;    // -fvectorize / -fno-vectorize
-    bool enableUnrollLoops_ = true;  // -funroll-loops / -fno-unroll-loops
-    bool enableLoopOptimize_ = true; // -floop-optimize / -fno-loop-optimize
-    std::string pgoGenPath_;         // --pgo-gen=<path>: emit raw profile to this file
-    std::string pgoUsePath_;         // --pgo-use=<path>: read profile data from this file
+    std::string marchCpu_;            // -march: CPU arch for instruction selection ("" = native)
+    std::string mtuneCpu_;            // -mtune: CPU for scheduling tuning ("" = same as march)
+    bool usePIC_ = true;              // -fpic / -fno-pic
+    bool useFastMath_ = false;        // -ffast-math / -fno-fast-math
+    bool enableOptMax_ = true;        // -foptmax / -fno-optmax
+    bool enableVectorize_ = true;     // -fvectorize / -fno-vectorize
+    bool enableUnrollLoops_ = true;   // -funroll-loops / -fno-unroll-loops
+    bool enableLoopOptimize_ = true;  // -floop-optimize / -fno-loop-optimize
+    std::string pgoGenPath_;          // --pgo-gen=<path>: emit raw profile to this file
+    std::string pgoUsePath_;          // --pgo-use=<path>: read profile data from this file
+    bool dynamicCompilation_ = false; // Dynamic (JIT) compilation mode
 
     /// Compile-time resource budget — limits to prevent DoS via oversized inputs.
     /// Checked during code generation to abort compilation if the program
@@ -388,7 +405,6 @@ class CodeGenerator {
     const std::unordered_map<std::string, ExecutionTier>& getFunctionTiers() const {
         return functionTiers;
     }
-
 };
 
 } // namespace omscript
