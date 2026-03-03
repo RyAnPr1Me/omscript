@@ -88,8 +88,11 @@ struct BranchProfile {
 // ArgProfile — per-parameter type and constant statistics
 // ---------------------------------------------------------------------------
 struct ArgProfile {
+    /// Number of distinct ArgType values — must match the ArgType enum.
+    static constexpr size_t kNumArgTypes = 6;
+
     /// Counts of each observed type for this parameter position.
-    uint64_t typeCounts[6] = {}; // indexed by ArgType
+    uint64_t typeCounts[kNumArgTypes] = {}; // indexed by ArgType
 
     /// Track the most commonly observed integer constant.
     /// observedConstant is valid when constantCount > 0.
@@ -100,7 +103,7 @@ struct ArgProfile {
     /// Record an observed argument value.
     void record(ArgType type, int64_t value) {
         auto idx = static_cast<uint8_t>(type);
-        if (idx < 6)
+        if (idx < kNumArgTypes)
             typeCounts[idx]++;
         totalCalls++;
         if (type == ArgType::Integer) {
@@ -115,7 +118,7 @@ struct ArgProfile {
     ArgType dominantType() const {
         ArgType best = ArgType::Unknown;
         uint64_t bestCount = 0;
-        for (int i = 0; i < 6; i++) {
+        for (size_t i = 0; i < kNumArgTypes; i++) {
             if (typeCounts[i] > bestCount) {
                 bestCount = typeCounts[i];
                 best = static_cast<ArgType>(i);
