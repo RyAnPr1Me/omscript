@@ -101,12 +101,15 @@ jobs:
           sed -i "s/\(#define OMSCRIPT_VERSION_MAJOR \)[0-9]*/\1$NEW_MAJOR/" include/version.h
           sed -i "s/\(#define OMSCRIPT_VERSION_MINOR \)[0-9]*/\1$NEW_MINOR/" include/version.h
           sed -i "s/\(#define OMSCRIPT_VERSION_PATCH \)[0-9]*/\1$NEW_PATCH/" include/version.h
-          sed -i "s/\(#define OMSCRIPT_VERSION_STRING \"\)[^\"]*/\1$NEW_VERSION/" include/version.h
+          sed -i "s/\(#define OMSC_VERSION \"\)[^\"]*/\1$NEW_VERSION/" include/version.h
+          
+          # Update CMakeLists.txt project version to stay in sync
+          sed -i "s/\(project(OmScript VERSION \)[0-9]*\.[0-9]*\.[0-9]*/\1$NEW_VERSION/" CMakeLists.txt
           
           cat include/version.h
           
           # Configure and build
-          cmake -B build -DCMAKE_BUILD_TYPE=Release -DLLVM_DIR=/usr/lib/llvm-18/cmake
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DLLVM_DIR=/usr/lib/llvm-18/cmake "-DOMSC_VERSION=$NEW_VERSION"
           cmake --build build --parallel $(nproc)
           
           # Run tests
@@ -148,7 +151,7 @@ jobs:
           # Commit version update and push tag
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          git add include/version.h
+          git add include/version.h CMakeLists.txt
           git commit -m "Bump version to $NEW_VERSION"
           git tag "v${NEW_VERSION}"
           git push --follow-tags

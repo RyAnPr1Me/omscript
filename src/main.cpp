@@ -1507,9 +1507,11 @@ std::string readSourceFile(const std::string& filename) {
     if (std::filesystem::is_directory(filename)) {
         throw std::runtime_error("'" + filename + "' is a directory, not a source file");
     }
-    auto fileSize = std::filesystem::file_size(filename);
-    if (fileSize > size_t{100} * 1024 * 1024) { // 100MB limit
-        throw std::runtime_error("Source file too large (max 100MB): " + filename);
+    if (std::filesystem::is_regular_file(filename)) {
+        auto fileSize = std::filesystem::file_size(filename);
+        if (fileSize > size_t{100} * 1024 * 1024) { // 100MB limit
+            throw std::runtime_error("Source file too large (max 100MB): " + filename);
+        }
     }
     std::ifstream file(filename);
     if (!file.is_open()) {
