@@ -480,8 +480,7 @@ void optimizeOptMaxStatement(Statement* stmt) {
 namespace omscript {
 
 // Canonical set of all stdlib built-in function names.
-// These functions are always compiled to native machine code via LLVM IR,
-// never through the bytecode/dynamic compilation path.
+// These functions are always compiled to native machine code via LLVM IR.
 static const std::unordered_set<std::string> stdlibFunctions = {"abs",
                                                                 "array_concat",
                                                                 "array_contains",
@@ -2187,7 +2186,6 @@ llvm::Value* CodeGenerator::generateUnary(UnaryExpr* expr) {
 
 llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // All stdlib built-in functions are compiled to native machine code below.
-    // They never use dynamic variables or the bytecode path.
     if (expr->callee == "print") {
         if (expr->arguments.size() != 1) {
             codegenError("Built-in function 'print' expects 1 argument, but " + std::to_string(expr->arguments.size()) +
@@ -2750,8 +2748,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     // typeof(x) returns 1 for integer, 2 for float, 3 for string, 0 for none.
     // In the current LLVM compilation path, all values are represented as i64,
-    // so typeof() always returns 1 (integer).  In the bytecode VM path the
-    // runtime Value type would be inspected instead.
+    // so typeof() always returns 1 (integer).
     if (expr->callee == "typeof") {
         if (expr->arguments.size() != 1) {
             codegenError("Built-in function 'typeof' expects 1 argument, but " +
