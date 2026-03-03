@@ -1201,8 +1201,9 @@ std::vector<PackageInfo> parseRegistryIndex(const std::string& json) {
 
 /// Validate a package name to prevent path traversal attacks.
 /// Package names must only contain alphanumerics, hyphens, and underscores.
+constexpr size_t kMaxPackageNameLength = 128;
 bool isValidPackageName(const std::string& name) {
-    if (name.empty() || name.size() > 128) {
+    if (name.empty() || name.size() > kMaxPackageNameLength) {
         return false;
     }
     for (char c : name) {
