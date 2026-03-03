@@ -12,6 +12,9 @@
 #include <fstream>
 #include <iostream>
 #include <llvm/ADT/SmallVector.h>
+#include <llvm/IR/Function.h>
+#include <llvm/IR/Instructions.h>
+#include <llvm/IR/Module.h>
 #include <llvm/Support/FileSystem.h>
 #include <llvm/Support/Program.h>
 #include <llvm/Support/raw_ostream.h>
@@ -2572,6 +2575,24 @@ int main(int argc, char* argv[]) {
             return 0;
         }
 
+        // Helper: return true if any function in the module directly calls itself
+        // (directly recursive).  MCJIT does not handle the Tier-2 hot-patch
+        // correctly for directly recursive functions — the dispatch prolog's
+        // tail call into the clean Tier-2 copy causes the Tier-2 copy's own
+        // recursive calls to bypass the prolog, which corrupts the call chain
+        // when the Tier-1 engine is mid-recursion.  Fall back to the
+        // traditional AOT compile+link+exec path for such programs.
+        const auto moduleHasDirectlyRecursiveFns = [](llvm::Module* mod) -> bool {
+            for (auto& fn : *mod) {
+                if (fn.isDeclaration()) continue;
+                for (auto& bb : fn)
+                    for (auto& inst : bb)
+                        if (auto* ci = llvm::dyn_cast<llvm::CallInst>(&inst))
+                            if (ci->getCalledFunction() == &fn) return true;
+            }
+            return false;
+        };
+
         // -------------------------------------------------------------------
         // Adaptive JIT execution — `omsc run` with JIT enabled (default)
         // -------------------------------------------------------------------
@@ -2619,9 +2640,10 @@ int main(int argc, char* argv[]) {
 
             // If any function fell back to bytecode/VM (untyped functions with
             // string operations), the module contains VM-call stubs that MCJIT
-            // cannot execute without the full bytecode VM.  Fall through to the
-            // traditional compile+link+exec path in that case.
-            if (!cg.hasHybridBytecodeFunctions()) {
+            // cannot execute without the full bytecode VM.  Also fall back for
+            // modules with directly recursive functions (MCJIT Tier-2 hot-patch
+            // is not safe for in-flight recursion).
+            if (!cg.hasHybridBytecodeFunctions() && !moduleHasDirectlyRecursiveFns(cg.getModule())) {
                 omscript::AdaptiveJITRunner runner;
                 int exitCode = runner.run(cg.getModule());
 

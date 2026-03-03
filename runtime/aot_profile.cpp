@@ -7,6 +7,7 @@
 #include <llvm/ExecutionEngine/MCJIT.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/LLVMContext.h>
+#include <llvm/IR/MDBuilder.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Verifier.h>
 #include <llvm/MC/TargetRegistry.h>
@@ -19,8 +20,10 @@
 #include <llvm/Target/TargetMachine.h>
 #include <llvm/Target/TargetOptions.h>
 #include <llvm/TargetParser/Host.h>
+#include <llvm/TargetParser/SubtargetFeature.h>
 
 #include <cassert>
+#include <mutex>
 
 namespace omscript {
 
@@ -129,7 +132,15 @@ void AdaptiveJITRunner::injectCounters(llvm::Module& mod) {
         auto* isHot = B.CreateICmpNE(
             B.CreatePtrToInt(fp, i64Ty, "omsc.fp_int"),
             llvm::ConstantInt::get(i64Ty, 0), "omsc.is_hot");
-        B.CreateCondBr(isHot, hotBB, countBB);
+        // Branch weights: the hot path (isHot == true, 99%) is taken on every
+        // call after the Tier-2 recompile writes fnPtrSlot; the counter path
+        // (isHot == false, 1%) fires only during the warm-up phase before
+        // the threshold.  Marking the hot path as 99:1 causes the branch
+        // predictor and code layout to favour the direct-call fast path once
+        // steady state is reached.
+        llvm::MDBuilder mdB(ctx);
+        auto* weights = mdB.createBranchWeights(99, 1);
+        B.CreateCondBr(isHot, hotBB, countBB, weights);
 
         // --- omsc.hot: tail-call the recompiled version ---
         B.SetInsertPoint(hotBB);
@@ -237,16 +248,23 @@ int AdaptiveJITRunner::run(llvm::Module* baseModule) {
 }
 
 // ---------------------------------------------------------------------------
-// onHotFunction() — Tier-2 PGO recompilation
+// onHotFunction() — Tier-2 PGO recompilation (synchronous)
 // ---------------------------------------------------------------------------
+// Called from the dispatch prolog when a function's call count first reaches
+// kRecompileThreshold.  Runs synchronously (blocking the caller for the
+// duration of O3 compilation) because LLVM MCJIT is not safe to use from
+// a background thread while another MCJIT engine is executing code.
 void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount,
                                       void** fnPtrSlot) {
     const std::string funcName(name);
 
     // Recompile each function at most once.
-    if (recompiled_.count(funcName))
-        return;
-    recompiled_.insert(funcName);
+    {
+        std::lock_guard<std::mutex> lk(recompiledMtx_);
+        if (recompiled_.count(funcName))
+            return;
+        recompiled_.insert(funcName);
+    }
 
     // --- Parse clean bitcode into a fresh context ---
     auto newCtx = std::make_unique<llvm::LLVMContext>();
@@ -274,18 +292,7 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount,
             other.setEntryCount(1);
     }
 
-    // --- Re-optimise at O3 with PGO guidance and native TargetMachine ---
-    // PipelineTuningOptions match the original AOT compilation settings so we
-    // get identical pass selection, but with profile data steering all
-    // heuristics (inliner, branch layout, vectoriser, unroller).
-    //
-    // InlinerThreshold is set to 350 (vs. 300 in initial AOT compilation):
-    // hot functions have already proven their value, so we pay a slightly
-    // larger compile-time budget to inline their callees more aggressively.
-    //
-    // A native TargetMachine is created so that the optimiser can use
-    // target-specific cost models (e.g. SIMD register width, instruction
-    // latencies) when making vectorisation and scheduling decisions.
+    // --- Re-optimise at O3 with PGO guidance and full native CPU features ---
     {
         llvm::PipelineTuningOptions PTO;
         PTO.LoopVectorization = true;
@@ -294,20 +301,32 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount,
         PTO.LoopInterleaving  = true;
         PTO.MergeFunctions    = true;
         PTO.CallGraphProfile  = true;
-        PTO.InlinerThreshold  = 350; // more aggressive than AOT baseline (300)
+        PTO.InlinerThreshold  = 400;
 
-        // Build a native TargetMachine so target-specific cost models are
-        // available to the vectoriser and scheduler during hot recompilation.
+        // Build a native TargetMachine with ALL host CPU features exposed
+        // so the vectoriser and scheduler can use AVX2/AVX-512/NEON etc.
         std::unique_ptr<llvm::TargetMachine> TM;
         {
             std::string triple = llvm::sys::getDefaultTargetTriple();
             std::string cpu    = llvm::sys::getHostCPUName().str();
+            llvm::SubtargetFeatures featureSet;
+#if LLVM_VERSION_MAJOR >= 19
+            llvm::StringMap<bool> hostFeatures = llvm::sys::getHostCPUFeatures();
+#else
+            llvm::StringMap<bool> hostFeatures;
+            llvm::sys::getHostCPUFeatures(hostFeatures);
+#endif
+            for (auto& kv : hostFeatures)
+                featureSet.AddFeature(kv.first(), kv.second);
+            std::string features = featureSet.getString();
+
             std::string errStr;
             const llvm::Target* target = llvm::TargetRegistry::lookupTarget(triple, errStr);
             if (target) {
                 llvm::TargetOptions opts;
+                opts.EnableFastISel = false; // force optimising ISel for best codegen
                 TM.reset(target->createTargetMachine(
-                    triple, cpu, /*features=*/"", opts,
+                    triple, cpu, features, opts,
                     std::optional<llvm::Reloc::Model>()));
                 if (TM)
                     mod->setDataLayout(TM->createDataLayout());
@@ -328,9 +347,6 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount,
     }
 
     // --- JIT-compile the reoptimised module ---
-    JitModule jm;
-    jm.ctx = std::move(newCtx);
-
     std::string engineErr;
     llvm::EngineBuilder eb(std::move(mod));
     eb.setErrorStr(&engineErr);
@@ -341,17 +357,19 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount,
     eb.setOptLevel(llvm::CodeGenOpt::Aggressive);
 #endif
 
-    llvm::ExecutionEngine* rawEngine = eb.create();
-    if (!rawEngine)
+    std::unique_ptr<llvm::ExecutionEngine> engine(eb.create());
+    if (!engine)
         return;
-    jm.engine.reset(rawEngine);
-    rawEngine->finalizeObject();
+    engine->finalizeObject();
 
-    uint64_t addr = rawEngine->getFunctionAddress(funcName);
+    uint64_t addr = engine->getFunctionAddress(funcName);
     if (!addr)
         return;
 
-    modules_.push_back(std::move(jm));
+    {
+        std::lock_guard<std::mutex> lk(recompiledMtx_);
+        modules_.push_back({std::move(newCtx), std::move(engine)});
+    }
 
     // Hot-patch: the volatile load in the dispatch prolog will see this on
     // the very next call to this function.

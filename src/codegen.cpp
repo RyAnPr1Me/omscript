@@ -753,10 +753,16 @@ void CodeGenerator::codegenError(const std::string& message, const ASTNode* node
 llvm::Function* CodeGenerator::getOrDeclareStrlen() {
     if (auto* fn = module->getFunction("strlen"))
         return fn;
-    auto* ty = llvm::FunctionType::get(getDefaultType(), {llvm::PointerType::getUnqual(*context)}, false);
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(getDefaultType(), {ptrTy}, false);
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strlen", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    fn->addFnAttr(llvm::Attribute::NoSync);
+    fn->addParamAttr(0, llvm::Attribute::NoCapture); // does not capture its pointer arg
+    fn->addParamAttr(0, llvm::Attribute::ReadOnly);  // only reads through the pointer
+    fn->addParamAttr(0, llvm::Attribute::NonNull);   // never called with null
     return fn;
 }
 
@@ -766,6 +772,7 @@ llvm::Function* CodeGenerator::getOrDeclareMalloc() {
     auto* ty = llvm::FunctionType::get(llvm::PointerType::getUnqual(*context), {getDefaultType()}, false);
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "malloc", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addRetAttr(llvm::Attribute::NoAlias); // returned pointer does not alias any pointer visible to the caller
     return fn;
 }
@@ -777,6 +784,9 @@ llvm::Function* CodeGenerator::getOrDeclareStrcpy() {
     auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy, ptrTy}, false);
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strcpy", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addParamAttr(1, llvm::Attribute::ReadOnly);
+    fn->addParamAttr(1, llvm::Attribute::NoCapture);
     return fn;
 }
 
@@ -787,6 +797,9 @@ llvm::Function* CodeGenerator::getOrDeclareStrcat() {
     auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy, ptrTy}, false);
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strcat", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addParamAttr(1, llvm::Attribute::ReadOnly);
+    fn->addParamAttr(1, llvm::Attribute::NoCapture);
     return fn;
 }
 
@@ -798,6 +811,12 @@ llvm::Function* CodeGenerator::getOrDeclareStrcmp() {
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strcmp", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    fn->addFnAttr(llvm::Attribute::NoSync);
+    fn->addParamAttr(0, llvm::Attribute::ReadOnly);
+    fn->addParamAttr(0, llvm::Attribute::NoCapture);
+    fn->addParamAttr(1, llvm::Attribute::ReadOnly);
+    fn->addParamAttr(1, llvm::Attribute::NoCapture);
     return fn;
 }
 
@@ -805,7 +824,10 @@ llvm::Function* CodeGenerator::getOrDeclarePutchar() {
     if (auto* fn = module->getFunction("putchar"))
         return fn;
     auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {llvm::Type::getInt32Ty(*context)}, false);
-    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "putchar", module.get());
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "putchar", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
+    return fn;
 }
 
 llvm::Function* CodeGenerator::getOrDeclareScanf() {
@@ -852,6 +874,10 @@ llvm::Function* CodeGenerator::getOrDeclareMemchr() {
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "memchr", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    fn->addFnAttr(llvm::Attribute::NoSync);
+    fn->addParamAttr(0, llvm::Attribute::ReadOnly);
+    fn->addParamAttr(0, llvm::Attribute::NoCapture);
     return fn;
 }
 
@@ -862,6 +888,7 @@ llvm::Function* CodeGenerator::getOrDeclareFree() {
         llvm::FunctionType::get(llvm::Type::getVoidTy(*context), {llvm::PointerType::getUnqual(*context)}, false);
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "free", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
     return fn;
 }
 
@@ -870,7 +897,16 @@ llvm::Function* CodeGenerator::getOrDeclareStrstr() {
         return fn;
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy, ptrTy}, false);
-    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strstr", module.get());
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strstr", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    fn->addFnAttr(llvm::Attribute::NoSync);
+    fn->addParamAttr(0, llvm::Attribute::ReadOnly);
+    fn->addParamAttr(0, llvm::Attribute::NoCapture);
+    fn->addParamAttr(1, llvm::Attribute::ReadOnly);
+    fn->addParamAttr(1, llvm::Attribute::NoCapture);
+    return fn;
 }
 
 llvm::Function* CodeGenerator::getOrDeclareMemcpy() {
@@ -898,21 +934,36 @@ llvm::Function* CodeGenerator::getOrDeclareToupper() {
     if (auto* fn = module->getFunction("toupper"))
         return fn;
     auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {llvm::Type::getInt32Ty(*context)}, false);
-    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "toupper", module.get());
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "toupper", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    fn->addFnAttr(llvm::Attribute::NoSync);
+    return fn;
 }
 
 llvm::Function* CodeGenerator::getOrDeclareTolower() {
     if (auto* fn = module->getFunction("tolower"))
         return fn;
     auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {llvm::Type::getInt32Ty(*context)}, false);
-    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "tolower", module.get());
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "tolower", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    fn->addFnAttr(llvm::Attribute::NoSync);
+    return fn;
 }
 
 llvm::Function* CodeGenerator::getOrDeclareIsspace() {
     if (auto* fn = module->getFunction("isspace"))
         return fn;
     auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {llvm::Type::getInt32Ty(*context)}, false);
-    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "isspace", module.get());
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "isspace", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    fn->addFnAttr(llvm::Attribute::NoSync);
+    return fn;
 }
 
 llvm::Function* CodeGenerator::getOrDeclareStrtoll() {
@@ -920,7 +971,12 @@ llvm::Function* CodeGenerator::getOrDeclareStrtoll() {
         return fn;
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     auto* ty = llvm::FunctionType::get(getDefaultType(), {ptrTy, ptrTy, llvm::Type::getInt32Ty(*context)}, false);
-    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strtoll", module.get());
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strtoll", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addParamAttr(0, llvm::Attribute::ReadOnly);
+    fn->addParamAttr(0, llvm::Attribute::NoCapture);
+    return fn;
 }
 
 llvm::Function* CodeGenerator::getOrDeclareStrtod() {
@@ -928,7 +984,12 @@ llvm::Function* CodeGenerator::getOrDeclareStrtod() {
         return fn;
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     auto* ty = llvm::FunctionType::get(getFloatType(), {ptrTy, ptrTy}, false);
-    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strtod", module.get());
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strtod", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addParamAttr(0, llvm::Attribute::ReadOnly);
+    fn->addParamAttr(0, llvm::Attribute::NoCapture);
+    return fn;
 }
 
 llvm::Function* CodeGenerator::getOrDeclareFloor() {
@@ -1004,7 +1065,14 @@ llvm::Function* CodeGenerator::getOrDeclareStrchr() {
         return fn;
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy, llvm::Type::getInt32Ty(*context)}, false);
-    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strchr", module.get());
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strchr", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    fn->addFnAttr(llvm::Attribute::NoSync);
+    fn->addParamAttr(0, llvm::Attribute::ReadOnly);
+    fn->addParamAttr(0, llvm::Attribute::NoCapture);
+    return fn;
 }
 
 llvm::Function* CodeGenerator::getOrDeclareStrndup() {
@@ -1012,7 +1080,13 @@ llvm::Function* CodeGenerator::getOrDeclareStrndup() {
         return fn;
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy, getDefaultType()}, false);
-    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strndup", module.get());
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strndup", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addRetAttr(llvm::Attribute::NoAlias);
+    fn->addParamAttr(0, llvm::Attribute::ReadOnly);
+    fn->addParamAttr(0, llvm::Attribute::NoCapture);
+    return fn;
 }
 
 llvm::Function* CodeGenerator::getOrDeclareRealloc() {
@@ -1020,7 +1094,11 @@ llvm::Function* CodeGenerator::getOrDeclareRealloc() {
         return fn;
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy, getDefaultType()}, false);
-    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "realloc", module.get());
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "realloc", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addRetAttr(llvm::Attribute::NoAlias);
+    return fn;
 }
 
 llvm::Function* CodeGenerator::getOrDeclareAtoi() {
@@ -1028,7 +1106,14 @@ llvm::Function* CodeGenerator::getOrDeclareAtoi() {
         return fn;
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {ptrTy}, false);
-    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "atoi", module.get());
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "atoi", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    fn->addFnAttr(llvm::Attribute::NoSync);
+    fn->addParamAttr(0, llvm::Attribute::ReadOnly);
+    fn->addParamAttr(0, llvm::Attribute::NoCapture);
+    return fn;
 }
 
 llvm::Function* CodeGenerator::getOrDeclareAtof() {
@@ -1036,7 +1121,14 @@ llvm::Function* CodeGenerator::getOrDeclareAtof() {
         return fn;
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     auto* ty = llvm::FunctionType::get(llvm::Type::getDoubleTy(*context), {ptrTy}, false);
-    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "atof", module.get());
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "atof", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    fn->addFnAttr(llvm::Attribute::NoSync);
+    fn->addParamAttr(0, llvm::Attribute::ReadOnly);
+    fn->addParamAttr(0, llvm::Attribute::NoCapture);
+    return fn;
 }
 
 llvm::Function* CodeGenerator::getOrDeclareFwrite() {
@@ -1325,9 +1417,17 @@ void CodeGenerator::generate(Program* program) {
         // mustprogress – every function is required to make forward progress;
         //              unlocks loop-idiom recognition (auto-memset/memcpy detection).
         // nosync     – no synchronization primitives; enables load/store hoisting.
+        // nofree     – omscript user functions never call free(); lets the
+        //              optimizer eliminate dead malloc/free pairs and extend
+        //              the lifetime of heap-allocated values for reuse.
+        // willreturn – every function terminates (no infinite loops in user
+        //              code at the IR level); enables speculative execution
+        //              of calls and loop-invariant code motion across calls.
         function->addFnAttr(llvm::Attribute::NoUnwind);
         function->addFnAttr(llvm::Attribute::MustProgress);
         function->addFnAttr(llvm::Attribute::NoSync);
+        function->addFnAttr(llvm::Attribute::NoFree);
+        function->addFnAttr(llvm::Attribute::WillReturn);
         functions[func->name] = function;
         functionDecls_[func->name] = func.get();
     }
@@ -1384,13 +1484,77 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     // statements benefit from being inlined into their callers.
     // 8 statements covers most simple accessors and arithmetic helpers;
     // O3 doubles the threshold to capture larger helpers.
-    static constexpr size_t kMaxInlineHintStatements = 8;
-    static constexpr size_t kMaxInlineHintStatementsO3 = 16;
+    // At O3, functions at or below the kAlwaysInlineStatements threshold get
+    // the stronger alwaysinline attribute — the inliner will unconditionally
+    // inline them regardless of call-site weight, eliminating all call
+    // overhead for tiny predicates, accessors, and single-operation helpers.
+    // Recursive functions are explicitly excluded: alwaysinline on a directly
+    // recursive function causes the inliner to loop infinitely.
+    static constexpr size_t kMaxInlineHintStatements = 10;
+    static constexpr size_t kMaxInlineHintStatementsO3 = 20;
+    static constexpr size_t kAlwaysInlineStatements = 4;
     size_t inlineThreshold =
         (optimizationLevel >= OptimizationLevel::O3) ? kMaxInlineHintStatementsO3 : kMaxInlineHintStatements;
     if (func->name != "main" && optimizationLevel >= OptimizationLevel::O2 && func->body &&
         func->body->statements.size() <= inlineThreshold) {
-        function->addFnAttr(llvm::Attribute::InlineHint);
+        // Check for direct self-recursion before applying alwaysinline.
+        bool isSelfRecursive = false;
+        if (optimizationLevel >= OptimizationLevel::O3 &&
+            func->body->statements.size() <= kAlwaysInlineStatements) {
+            // exprCheck: walk an expression tree for a direct call to func->name.
+            std::function<bool(Expression*)> exprCheck = [&](Expression* e) -> bool {
+                if (!e) return false;
+                if (auto* call = dynamic_cast<CallExpr*>(e)) {
+                    if (call->callee == func->name) return true;
+                    for (auto& arg : call->arguments)
+                        if (exprCheck(arg.get())) return true;
+                }
+                if (auto* bin = dynamic_cast<BinaryExpr*>(e))
+                    return exprCheck(bin->left.get()) || exprCheck(bin->right.get());
+                if (auto* un = dynamic_cast<UnaryExpr*>(e))
+                    return exprCheck(un->operand.get());
+                if (auto* tern = dynamic_cast<TernaryExpr*>(e))
+                    return exprCheck(tern->condition.get()) || exprCheck(tern->thenExpr.get()) ||
+                           exprCheck(tern->elseExpr.get());
+                return false;
+            };
+            // hasSelfCall: walk all statement kinds that can contain expressions.
+            std::function<bool(Statement*)> hasSelfCall = [&](Statement* s) -> bool {
+                if (!s) return false;
+                if (auto* blk = dynamic_cast<BlockStmt*>(s)) {
+                    for (auto& st : blk->statements)
+                        if (hasSelfCall(st.get())) return true;
+                    return false;
+                }
+                if (auto* ret = dynamic_cast<ReturnStmt*>(s))
+                    return exprCheck(ret->value.get());
+                if (auto* exprS = dynamic_cast<ExprStmt*>(s))
+                    return exprCheck(exprS->expression.get());
+                if (auto* var = dynamic_cast<VarDecl*>(s))
+                    return exprCheck(var->initializer.get());
+                if (auto* ifS = dynamic_cast<IfStmt*>(s))
+                    return exprCheck(ifS->condition.get()) ||
+                           hasSelfCall(ifS->thenBranch.get()) ||
+                           hasSelfCall(ifS->elseBranch.get());
+                if (auto* wh = dynamic_cast<WhileStmt*>(s))
+                    return exprCheck(wh->condition.get()) || hasSelfCall(wh->body.get());
+                if (auto* dw = dynamic_cast<DoWhileStmt*>(s))
+                    return hasSelfCall(dw->body.get()) || exprCheck(dw->condition.get());
+                if (auto* fr = dynamic_cast<ForStmt*>(s))
+                    return exprCheck(fr->start.get()) || exprCheck(fr->end.get()) ||
+                           exprCheck(fr->step.get()) || hasSelfCall(fr->body.get());
+                if (auto* fe = dynamic_cast<ForEachStmt*>(s))
+                    return exprCheck(fe->collection.get()) || hasSelfCall(fe->body.get());
+                return false;
+            };
+            isSelfRecursive = hasSelfCall(func->body.get());
+        }
+        if (optimizationLevel >= OptimizationLevel::O3 &&
+            func->body->statements.size() <= kAlwaysInlineStatements && !isSelfRecursive) {
+            function->addFnAttr(llvm::Attribute::AlwaysInline);
+        } else {
+            function->addFnAttr(llvm::Attribute::InlineHint);
+        }
     }
 
     // Create entry basic block
@@ -5176,10 +5340,11 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     // when the optimizer cannot satisfy them.
     {
         // Loop metadata: mustprogress enables loop-idiom recognition (auto
-        // memset/memcpy detection); interleave.count improves SIMD throughput.
+        // memset/memcpy detection); interleave.count improves SIMD throughput;
+        // at O3, vectorize.width=4 requests 4-lane SIMD (SSE/NEON) explicitly.
         llvm::MDNode* mustProgress =
             llvm::MDNode::get(*context, {llvm::MDString::get(*context, "llvm.loop.mustprogress")});
-        llvm::SmallVector<llvm::Metadata*, 3> loopMDs;
+        llvm::SmallVector<llvm::Metadata*, 4> loopMDs;
         loopMDs.push_back(nullptr); // self-reference placeholder (fixed below)
         loopMDs.push_back(mustProgress);
         if (optimizationLevel >= OptimizationLevel::O2 && enableVectorize_) {
@@ -5188,6 +5353,15 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
                 {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
                  llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))});
             loopMDs.push_back(interleave);
+        }
+        if (optimizationLevel >= OptimizationLevel::O3 && enableVectorize_) {
+            // Suggest 4-lane SIMD vectorization to the back-end.  The optimizer
+            // will widen further if the target supports AVX2/AVX-512 (8/16 lanes).
+            llvm::MDNode* vecWidth = llvm::MDNode::get(
+                *context,
+                {llvm::MDString::get(*context, "llvm.loop.vectorize.width"),
+                 llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))});
+            loopMDs.push_back(vecWidth);
         }
         llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
         loopMD->replaceOperandWith(0, loopMD);
@@ -5601,10 +5775,16 @@ void CodeGenerator::runOptimizationPasses() {
     PTO.SLPVectorization = enableVectorize_;
     PTO.LoopUnrolling = enableUnrollLoops_;
     PTO.LoopInterleaving = enableVectorize_; // enable loop interleaving at O2+
+    // Enable cross-function optimizations at O2 and above:
+    // MergeFunctions deduplicates identical function bodies, shrinking
+    // I-cache footprint. CallGraphProfile biases the inliner toward
+    // functions on hot call-graph edges (useful even without explicit PGO).
+    if (optimizationLevel >= OptimizationLevel::O2) {
+        PTO.MergeFunctions = true;
+        PTO.CallGraphProfile = true;
+    }
     if (optimizationLevel == OptimizationLevel::O3) {
-        PTO.MergeFunctions = true;       // deduplicate identical functions -> smaller icache footprint
-        PTO.CallGraphProfile = true;     // use call-graph profile data for inlining decisions
-        PTO.InlinerThreshold = 300;      // more aggressive inlining than the default ~225
+        PTO.InlinerThreshold = 400;      // more aggressive inlining than the default ~225
     }
 
     // ---------------------------------------------------------------------------
@@ -5649,7 +5829,7 @@ void CodeGenerator::runOptimizationPasses() {
 
     llvm::PassBuilder PB(targetMachine.get(), PTO, pgoOpt);
 
-    // At O3 with -floop-optimize, register LoopDistributePass to run just
+    // At O2+ with -floop-optimize, register LoopDistributePass to run just
     // before the vectorizer starts.  Loop distribution splits a loop with
     // multiple independent memory access patterns into separate loops, each
     // touching a smaller working set — this improves cache locality and
@@ -5658,7 +5838,7 @@ void CodeGenerator::runOptimizationPasses() {
     // is critical; appending it after the full pipeline produced
     // "unsupported transformation ordering" warnings because vectorization
     // had already consumed and transformed the original loop structure.
-    if (optimizationLevel == OptimizationLevel::O3 && enableLoopOptimize_) {
+    if (optimizationLevel >= OptimizationLevel::O2 && enableLoopOptimize_) {
         PB.registerVectorizerStartEPCallback(
             [](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) {
                 FPM.addPass(llvm::LoopDistributePass());

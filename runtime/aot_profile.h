@@ -39,6 +39,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -96,6 +97,7 @@ class AdaptiveJITRunner {
 
     /// Functions that have already been recompiled (at most once each).
     std::unordered_set<std::string> recompiled_;
+    std::mutex recompiledMtx_; ///< Guards recompiled_ and modules_ across threads.
 
     bool llvmInitialized_ = false;
 
