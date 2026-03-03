@@ -436,13 +436,83 @@ Types are determined at runtime, allowing flexible code while maintaining perfor
 ## Testing
 
 ```bash
-# Run integration tests
+# Run unit tests (requires GTest)
+cd build && ctest --output-on-failure
+
+# Run integration tests (276 tests)
 bash run_tests.sh
+
+# Build with sanitizers for development
+cmake -B build -DCMAKE_BUILD_TYPE=Debug -DSANITIZE=address,undefined
+cmake --build build
 
 # Or run a single example manually
 ./build/omsc examples/factorial.om -o factorial
 ./factorial
 ```
+
+## Production Deployment
+
+### Building for Production
+
+```bash
+# Release build with LTO
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel $(nproc)
+
+# The omsc binary is at build/omsc
+# Install to PATH
+sudo cp build/omsc /usr/local/bin/
+# Or use the built-in install command:
+./build/omsc install
+```
+
+### Compiler Flags Reference
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `-O0` | No optimization | |
+| `-O1` | Basic optimization | |
+| `-O2` | Moderate optimization | ✓ |
+| `-O3` | Aggressive optimization | |
+| `-march=<cpu>` | Target CPU architecture | native |
+| `-mtune=<cpu>` | CPU scheduling tuning | same as march |
+| `-flto` | Link-time optimization | off |
+| `-ffast-math` | Unsafe FP optimizations | off |
+| `-fpic` / `-fno-pic` | Position-independent code | on |
+| `-fvectorize` / `-fno-vectorize` | SIMD vectorization | on |
+| `-funroll-loops` / `-fno-unroll-loops` | Loop unrolling | on |
+| `-floop-optimize` / `-fno-loop-optimize` | Loop optimizations | on |
+| `-fstack-protector` | Stack buffer overflow protection | off |
+| `-foptmax` / `-fno-optmax` | OPTMAX block optimization | on |
+| `-fjit` / `-fno-jit` | Adaptive JIT for `omsc run` | on |
+| `-static` | Static linking | off |
+| `-s` | Strip symbols | off |
+| `--pgo-gen=<path>` | Generate PGO instrumentation profile | |
+| `--pgo-use=<path>` | Use PGO profile for optimization | |
+| `-v` / `--verbose` | Show compilation details | off |
+| `-q` / `--quiet` | Suppress non-error output | off |
+| `--time` | Show timing breakdown | off |
+
+### Runtime Safety Features
+
+OmScript includes several runtime safety checks:
+
+- **Array bounds checking**: All array accesses are bounds-checked at runtime
+- **Division by zero**: Integer division and modulo operations check for zero divisor
+- **For-loop zero step**: Detects and aborts on zero-step for-loops
+- **Wrapping integer arithmetic**: Arithmetic operations use defined two's-complement wrapping semantics (no undefined behavior on overflow)
+- **Parser nesting limit**: Maximum recursion depth of 256 prevents stack overflow from deeply nested input
+- **IR instruction budget**: Compilation aborts if generated IR exceeds 1,000,000 instructions
+- **File size limit**: Source files larger than 100MB are rejected
+- **Reference counting**: Strings use reference-counted memory management
+
+### Cross-Platform Support
+
+OmScript builds on:
+- **Linux** (x86_64, AArch64, ARM) — primary platform
+- **macOS** (x86_64, Apple Silicon)
+- **Windows** (x86_64 via MSVC)
 
 ## Project Structure
 
