@@ -6095,26 +6095,13 @@ void CodeGenerator::emitBytecodeForFunction(FunctionDecl* func) {
 }
 
 void CodeGenerator::generateHybrid(Program* program) {
-    // Phase 1: Run the normal AOT pipeline which classifies all functions,
-    // forward-declares them in LLVM, and generates IR for every function.
+    // All functions — regardless of type-annotation coverage — compile to
+    // native LLVM IR via the standard AOT pipeline.  The old "Phase 2"
+    // bytecode-emission step has been removed: there is no bytecode
+    // interpreter in the execution path.  The adaptive JIT executes the
+    // LLVM IR module in-process via MCJIT, giving every function native
+    // machine code from the first call.
     generate(program);
-
-    // Phase 2: For each Interpreted-tier function, also emit bytecode so
-    // the VM can execute it (or later JIT-compile it).  If bytecode
-    // emission fails (e.g. unsupported statement type), the function
-    // remains AOT-only — no bytecode is produced for it.
-    for (auto& func : program->functions) {
-        if (functionTiers[func->name] == ExecutionTier::Interpreted) {
-            try {
-                emitBytecodeForFunction(func.get());
-            } catch (const std::runtime_error&) {
-                // Bytecode emission failed — keep function as AOT-only.
-                // This can happen for functions using features not yet
-                // supported in the bytecode emitter (e.g. break in switch).
-                functionTiers[func->name] = ExecutionTier::AOT;
-            }
-        }
-    }
 }
 
 // Helper: emit LOAD_LOCAL or LOAD_VAR depending on whether name is a known local.

@@ -2638,12 +2638,11 @@ int main(int argc, char* argv[]) {
                           << "ms\n";
             }
 
-            // If any function fell back to bytecode/VM (untyped functions with
-            // string operations), the module contains VM-call stubs that MCJIT
-            // cannot execute without the full bytecode VM.  Also fall back for
-            // modules with directly recursive functions (MCJIT Tier-2 hot-patch
-            // is not safe for in-flight recursion).
-            if (!cg.hasHybridBytecodeFunctions() && !moduleHasDirectlyRecursiveFns(cg.getModule())) {
+            // generateHybrid() compiles every function to native LLVM IR —
+            // there is no bytecode path.  Fall back to AOT compile+link+exec
+            // only for directly recursive functions, where the Tier-2
+            // hot-patch is unsafe while the recursion is in flight.
+            if (!moduleHasDirectlyRecursiveFns(cg.getModule())) {
                 omscript::AdaptiveJITRunner runner;
                 int exitCode = runner.run(cg.getModule());
 
@@ -2666,7 +2665,8 @@ int main(int argc, char* argv[]) {
 
                 return exitCode;
             }
-            // Has bytecode/VM functions — fall through to compile+link+exec.
+            // Directly recursive functions: fall through to native AOT
+            // compile+link+exec (a compiled binary, not bytecode).
         }
 
         omscript::Compiler compiler;

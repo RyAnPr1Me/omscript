@@ -103,7 +103,15 @@ void AdaptiveJITRunner::injectCounters(llvm::Module& mod) {
     for (auto* fn : toInstrument) {
         const std::string name = fn->getName().str();
 
-        // --- Globals ---
+        // The dispatch prolog adds volatile loads (fnPtrGV) and atomic
+        // read-modify-write instructions (call counter).  Strip function-level
+        // attributes that would contradict these new accesses and cause the
+        // backend to miscompile the instrumented function.
+        fn->removeFnAttr(llvm::Attribute::NoSync);    // atomicrmw is synchronising
+        fn->removeFnAttr(llvm::Attribute::Memory);    // we now read global memory
+        fn->removeFnAttr(llvm::Attribute::ReadNone);  // legacy alias
+        fn->removeFnAttr(llvm::Attribute::ReadOnly);  // legacy alias
+
         auto* counterGV = new llvm::GlobalVariable(
             mod, i64Ty, /*isConst=*/false, llvm::GlobalValue::InternalLinkage,
             llvm::ConstantInt::get(i64Ty, 0), "__omsc_calls_" + name);
@@ -226,6 +234,13 @@ int AdaptiveJITRunner::run(llvm::Module* baseModule) {
     if (!rawEngine)
         return 1;
     jm.engine.reset(rawEngine);
+
+    // Register the C-linkage recompile callback so MCJIT can resolve it
+    // without needing -rdynamic.  The symbol is in the executable but not
+    // in the dynamic symbol table unless the binary is built with -rdynamic,
+    // so we map it explicitly.
+    rawEngine->addGlobalMapping("__omsc_adaptive_recompile",
+                                reinterpret_cast<uint64_t>(&__omsc_adaptive_recompile));
 
     rawEngine->finalizeObject();
 
