@@ -397,10 +397,18 @@ fn main() {
 
 ### Adaptive JIT Runtime
 
-When using `omsc run`, the program executes through a two-tier adaptive JIT:
+When using `omsc run`, the program executes through a hybrid AOT + tiered optimizing JIT:
+
+```
+Source Code → Compiler → Optimized IR (AOT) → Baseline Code
+    → Runtime Profiling → Hot Function Detected → Specialized IR
+    → Optimized Machine Code → Execution
+```
 
 - **Tier 1 (Initial JIT)**: The module is JIT-compiled at O2 via LLVM MCJIT and execution begins immediately.
-- **Tier 2 (Hot Recompile)**: Functions that exceed a call-count threshold are recompiled at O3 with profile-guided optimization hints, producing even faster native code for hot paths.
+- **Runtime Profiling**: Call frequency, branch probabilities, argument types, and observed constants are tracked during the warm-up phase.
+- **Tier 2 (Hot Recompile)**: Functions that exceed a call-count threshold are recompiled at O3 with profile-guided optimization hints (PGO entry counts, branch weights), producing even faster native code for hot paths.
+- **Deoptimization**: Guard-based fallback to baseline code when speculative assumptions fail.
 
 ### Components
 
@@ -410,6 +418,8 @@ When using `omsc run`, the program executes through a two-tier adaptive JIT:
 - **CodeGen** (`src/codegen.cpp`): LLVM IR generation
 - **Compiler** (`src/compiler.cpp`): Main compiler driver
 - **AOT Profile** (`runtime/aot_profile.cpp`): Adaptive recompilation of hot functions
+- **JIT Profiler** (`runtime/jit_profiler.cpp`): Runtime profiling data collection
+- **Deoptimization** (`runtime/deopt.cpp`): Guard-based fallback to baseline code
 
 ## Type System
 
@@ -457,6 +467,10 @@ omscript/
 ├── runtime/            # Runtime system
 │   ├── aot_profile.cpp # Adaptive JIT / AOT profiling
 │   ├── aot_profile.h
+│   ├── deopt.cpp       # Deoptimization / guard fallback
+│   ├── deopt.h
+│   ├── jit_profiler.cpp # Runtime profiling data collection
+│   ├── jit_profiler.h
 │   ├── refcounted.h    # Reference-counted types
 │   ├── value.cpp       # Dynamic values
 │   └── value.h

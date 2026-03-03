@@ -48,10 +48,13 @@ OmScript is an **AOT-compiled language** — all code compiles to native machine
 - Full LLVM optimization pipeline including inlining, vectorization, and loop optimizations
 - Profile-guided optimization (PGO) support
 
-**Adaptive JIT Runtime** (`runtime/aot_profile.cpp`, `runtime/jit.cpp`)
+**Adaptive JIT Runtime** (`runtime/aot_profile.cpp`, `runtime/jit_profiler.cpp`, `runtime/deopt.cpp`)
 - Used during `omsc run` for interactive/development workflows
 - Tier 1: Initial JIT compilation at O2 via LLVM MCJIT for fast startup
+- Runtime Profiling: call counts, branch probabilities, argument types, observed constants
 - Tier 2: Hot functions (exceeding call-count threshold) are recompiled at O3 with profile-guided hints
+- Branch weight metadata from profiler applied during Tier-2 recompilation
+- Deoptimization: guard-based fallback to baseline code when assumptions fail
 - Post-recompile fast path: one volatile load + direct call to optimized native code
 
 **Value System** (`runtime/value.cpp`)

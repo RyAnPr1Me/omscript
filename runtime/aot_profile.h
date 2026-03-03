@@ -2,6 +2,66 @@
 #define AOT_PROFILE_H
 
 // ---------------------------------------------------------------------------
+// Hybrid AOT + Tiered Optimizing JIT — Execution Pipeline
+// ---------------------------------------------------------------------------
+//
+// PIPELINE DIAGRAM:
+//
+//   ┌────────────┐    ┌──────────┐    ┌──────────────────┐    ┌───────────────┐
+//   │ Source Code │───>│ Compiler │───>│ Optimized IR     │───>│ Baseline Code │
+//   │  (.om)     │    │ Frontend │    │ (AOT, SSA/LLVM)  │    │ (Tier-1, O2)  │
+//   └────────────┘    └──────────┘    └──────────────────┘    └───────┬───────┘
+//                                              │                      │
+//                                              │ (preserved bitcode)  │ execution
+//                                              ▼                      ▼
+//                                     ┌────────────────┐     ┌────────────────┐
+//                                     │ Clean IR Cache │     │    Runtime     │
+//                                     │ (bitcode blob) │     │   Profiling   │
+//                                     └───────┬────────┘     └───────┬────────┘
+//                                             │                      │
+//                                             │  ┌───────────────────┘
+//                                             │  │ call counts, branch probs,
+//                                             │  │ arg types, constants
+//                                             ▼  ▼
+//                                     ┌────────────────────┐
+//                                     │  Hot Function      │
+//                                     │  Detected          │
+//                                     │ (>= 500 calls)     │
+//                                     └────────┬───────────┘
+//                                              │
+//                                              ▼
+//                                     ┌────────────────────┐
+//                                     │  Specialized IR    │
+//                                     │  - PGO entry count │
+//                                     │  - Branch weights  │
+//                                     │  - Type hints      │
+//                                     └────────┬───────────┘
+//                                              │
+//                                              ▼
+//                                     ┌────────────────────┐
+//                                     │  O3 Optimization   │
+//                                     │  - Constant fold   │
+//                                     │  - Dead code elim  │
+//                                     │  - Inlining        │
+//                                     │  - Loop unrolling  │
+//                                     │  - Vectorization   │
+//                                     │  - Type specialize │
+//                                     └────────┬───────────┘
+//                                              │
+//                                              ▼
+//                                     ┌────────────────────┐
+//                                     │ Optimized Machine  │────> Execution
+//                                     │ Code (Tier-2, O3)  │    (hot-patched)
+//                                     └────────────────────┘
+//                                              │
+//                                              │ guard failure?
+//                                              ▼
+//                                     ┌────────────────────┐
+//                                     │  Deoptimization    │───> Baseline Code
+//                                     │  (revert to Tier-1)│
+//                                     └────────────────────┘
+//
+// ---------------------------------------------------------------------------
 // Adaptive JIT Runner — the dynamic execution model for `omsc run`
 // ---------------------------------------------------------------------------
 // When the user runs `omsc run file.om`, instead of compiling to a binary
@@ -14,6 +74,18 @@
 //     non-main function, and the result is JIT-compiled at O2 via LLVM
 //     MCJIT.  Execution begins immediately.
 //
+//   Runtime Profiling (during Tier 1):
+//     Each non-main function collects runtime data:
+//     - Call frequency: atomic counter incremented at each invocation.
+//     - Argument types: each parameter's type tag is recorded via
+//       __omsc_profile_arg() — feeds into type specialization.
+//     - Branch probabilities: conditional branch taken/not-taken counts
+//       recorded via __omsc_profile_branch() (reserved for future use).
+//     - Observed constants: frequently-passed constant values tracked
+//       for constant folding during recompilation.
+//     Overhead is minimal: one atomic increment + one callback per arg
+//     per call during the warm-up phase only.
+//
 //   Tier 2 — Adaptive recompile (hot):
 //     Every function counts its own invocations via an atomicrmw at entry.
 //     When the count first reaches kRecompileThreshold the function calls
@@ -22,12 +94,20 @@
 //       2. Annotates the target function with setEntryCount(callCount) —
 //          this is the PGO hint that shifts the LLVM optimizer from static
 //          heuristics to real runtime data.
-//       3. Re-runs the full LLVM O3 pipeline with that annotation in place:
+//       3. Applies collected branch weights from the JITProfiler to
+//          conditional branches as LLVM metadata.
+//       4. Re-runs the full LLVM O3 pipeline with those annotations:
 //          the inliner, branch-layout pass, loop vectorizer, and unroller
 //          all see the function as hot and optimize accordingly.
-//       4. JIT-compiles the result via MCJIT.
-//       5. Writes the new native function pointer into the function's
+//       5. JIT-compiles the result via MCJIT.
+//       6. Writes the new native function pointer into the function's
 //          @__omsc_fn_<name> slot.
+//
+//   Deoptimization:
+//     Specialized code may include guard checks (e.g. type assertions).
+//     If a guard fails at runtime, __omsc_deopt_guard_fail() increments
+//     a failure counter.  After kDeoptThreshold failures, the hot-patch
+//     slot is reset to nullptr — reverting to Tier-1 baseline code.
 //
 //   Future calls take the fast path at the top of the dispatch prolog:
 //     %fp = load volatile ptr, @__omsc_fn_<name>
