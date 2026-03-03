@@ -1,6 +1,6 @@
 # OmScript
 
-A low-level, C-like programming language with dynamic typing, featuring a **heavily optimized AOT compiler** using LLVM, a bytecode interpreter runtime, and **automatic reference counting memory management**.
+A low-level, C-like programming language with dynamic typing, featuring a **heavily optimized AOT compiler** using LLVM, a **lightweight adaptive JIT runtime** that recompiles hot functions with even more aggressive optimizations, and **automatic reference counting memory management**.
 
 ## Key Features
 
@@ -21,8 +21,7 @@ A low-level, C-like programming language with dynamic typing, featuring a **heav
 - **Default Parameters**: Optional function parameters with default values
 - **Null Coalescing Operator**: `??` for concise null/zero fallback expressions
 - **Multi-line Strings**: Triple-quoted `"""..."""` strings with embedded newlines
-- **Bytecode Runtime**: Interprets dynamically typed sections at runtime
-- **Hybrid Approach**: Compiles static code paths with LLVM, uses bytecode VM for dynamic behavior
+- **Adaptive JIT Runtime**: Hot functions are automatically recompiled at higher optimization levels using runtime profiling data
 
 ## Optimization Levels
 
@@ -392,11 +391,16 @@ fn main() {
 ### Compiler Pipeline
 1. **Lexer**: Tokenizes source code into tokens
 2. **Parser**: Builds Abstract Syntax Tree (AST) from tokens
-3. **Code Generator**: 
-   - Generates LLVM IR for statically analyzable code
-   - Emits bytecode for dynamic sections
+3. **Code Generator**: Generates LLVM IR from the AST
 4. **LLVM Backend**: Optimizes and compiles to native code
-5. **Runtime**: Bytecode VM for dynamic execution
+5. **Linker**: Links object files into a final executable
+
+### Adaptive JIT Runtime
+
+When using `omsc run`, the program executes through a two-tier adaptive JIT:
+
+- **Tier 1 (Initial JIT)**: The module is JIT-compiled at O2 via LLVM MCJIT and execution begins immediately.
+- **Tier 2 (Hot Recompile)**: Functions that exceed a call-count threshold are recompiled at O3 with profile-guided optimization hints, producing even faster native code for hot paths.
 
 ### Components
 
@@ -404,10 +408,9 @@ fn main() {
 - **Parser** (`src/parser.cpp`): Syntax analysis and AST construction
 - **AST** (`include/ast.h`): Abstract Syntax Tree node definitions
 - **CodeGen** (`src/codegen.cpp`): LLVM IR generation
-- **Bytecode** (`src/bytecode.cpp`): Bytecode emission
-- **VM** (`runtime/vm.cpp`): Bytecode interpreter
-- **Value** (`runtime/value.cpp`): Dynamic value representation
 - **Compiler** (`src/compiler.cpp`): Main compiler driver
+- **JIT** (`runtime/jit.cpp`): JIT compilation engine
+- **AOT Profile** (`runtime/aot_profile.cpp`): Adaptive recompilation of hot functions
 
 ## Type System
 

@@ -1,7 +1,7 @@
 # OmScript Language Reference
 
-> **Version:** 1.0  
-> **Compiler:** `omsc` — OmScript Compiler v1.0  
+> **Version:** 2.0.0  
+> **Compiler:** `omsc` — OmScript Compiler v2.0.0  
 > **Standard:** C++17 · LLVM Backend · Ahead-of-Time Compilation  
 > **License:** See repository root
 
@@ -22,7 +22,7 @@
 11. [Standard Library](#11-standard-library)
 12. [Optimization Levels](#12-optimization-levels)
 13. [OPTMAX Directive](#13-optmax-directive)
-14. [Bytecode VM and Runtime](#14-bytecode-vm-and-runtime)
+14. [Adaptive JIT Runtime](#14-adaptive-jit-runtime)
 15. [Memory Management](#15-memory-management)
 16. [CLI Reference](#16-cli-reference)
 17. [Building from Source](#17-building-from-source)
@@ -37,9 +37,9 @@
 OmScript is a **low-level, C-like programming language** featuring:
 
 - **Dynamic typing** — Variables do not require explicit type annotations (though optional type hints are supported for documentation and OPTMAX optimization).
-- **Ahead-of-Time (AOT) compilation** — All code compiles to native machine code through LLVM. There is no interpreter in the default compilation path.
+- **Ahead-of-Time (AOT) compilation** — All code compiles to native machine code through LLVM.
 - **Reference-counted memory management** — Automatic deterministic deallocation via malloc/free with reference counting on strings.
-- **Hybrid architecture** — A bytecode VM exists as an alternative backend for future dynamic compilation scenarios. The primary path is always native code.
+- **Adaptive JIT runtime** — A lightweight JIT runtime monitors function call counts and recompiles hot functions at higher optimization levels with profile-guided hints, producing even faster native code for performance-critical paths.
 - **Aggressive optimization** — Four optimization levels (O0–O3) plus a special OPTMAX directive that applies exhaustive multi-pass optimization to marked functions.
 - **69 built-in standard library functions** — Math, array manipulation, string, character classification, type conversion, system, and I/O, all compiled to native machine code.
 
@@ -139,12 +139,12 @@ OmScript is **dynamically typed**. At runtime, values are represented by a tagge
 
 ### 3.2 Compile-Time Representation
 
-In the LLVM compilation path, all values are represented as `i64` (64-bit integer). This is the "default type" used throughout code generation:
+All values are represented as `i64` (64-bit integer) in the LLVM IR. This is the "default type" used throughout code generation:
 
 - **Integers** are stored directly as `i64`.
 - **Booleans** are `i64` where `0` = false, nonzero = true.
 - **Pointers** (arrays, strings) are cast to `i64` via `PtrToInt` and back via `IntToPtr`.
-- **Floats** are not yet fully supported in the LLVM compilation path.
+- **Floats** use `double` for arithmetic and are bitcast to/from `i64` for uniform storage.
 
 ### 3.3 Truthiness
 
@@ -194,7 +194,7 @@ identifier := [a-zA-Z_][a-zA-Z0-9_]*
 
 ### 4.4 Keywords
 
-The following 20 words are reserved:
+The following 22 words are reserved:
 
 | Keyword | Purpose |
 |---------|---------|
@@ -204,12 +204,12 @@ The following 20 words are reserved:
 | `else` | Alternative branch |
 | `while` | While loop |
 | `do` | Do-while loop |
-| `for` | For loop (range-based) |
+| `for` | For loop (range-based and for-each) |
 | `var` | Variable declaration |
 | `const` | Constant declaration |
-| `break` | Break out of loop |
+| `break` | Break out of loop or switch case |
 | `continue` | Skip to next iteration |
-| `in` | Range iteration keyword |
+| `in` | Range/array iteration keyword |
 | `switch` | Multi-way branch |
 | `case` | Switch case label |
 | `default` | Switch default label |
@@ -217,6 +217,8 @@ The following 20 words are reserved:
 | `catch` | Error handler |
 | `throw` | Throw an error value |
 | `enum` | Enum declaration |
+| `true` | Boolean true (1) |
+| `false` | Boolean false (0) |
 | `null` | Null literal |
 
 ### 4.5 Literals
@@ -418,7 +420,7 @@ var result = factorial(5);
 print(result);
 ```
 
-Functions must be declared before they are called (single-pass compilation). Recursive calls are supported.
+Functions support forward references — a function may call another function defined later in the file. Recursive and mutually recursive calls are supported.
 
 ### 6.4 Default Parameters
 
@@ -644,6 +646,11 @@ var x = a ?? b ?? c;  // First non-zero value, or c
 | `x *= y` | `x = x * y` |
 | `x /= y` | `x = x / y` |
 | `x %= y` | `x = x % y` |
+| `x &= y` | `x = x & y` |
+| `x \|= y` | `x = x \| y` |
+| `x ^= y` | `x = x ^ y` |
+| `x <<= y` | `x = x << y` |
+| `x >>= y` | `x = x >> y` |
 
 ### 7.10 Pipe Operator
 
@@ -793,6 +800,21 @@ for (i in 5...0...-1) {
 - `step` defaults to `1` (or `-1` if `start > end`)
 - The iterator variable is loop-scoped
 
+#### For-Each Loop (Array Iteration)
+
+The `for...in` syntax also supports iterating over arrays:
+
+```javascript
+var arr = [10, 20, 30, 40, 50];
+var total = 0;
+for (x in arr) {
+    total = total + x;
+}
+// total = 150
+```
+
+When the right-hand side of `in` is an array (rather than a range with `...`), the loop iterates over each element.
+
 ### 8.5 Break and Continue
 
 ```javascript
@@ -883,6 +905,31 @@ fn main() {
 - Enum members are accessed as `EnumName_MemberName` (e.g., `Color_RED`).
 - Enums are compile-time constants — they produce no runtime overhead.
 
+### 8.9 Switch / Case / Default
+
+The `switch` statement provides multi-way branching on integer values:
+
+```javascript
+fn classify(x) {
+    switch (x) {
+        case 1:
+            return 10;
+        case 2:
+            return 20;
+        case 3:
+            return 30;
+        default:
+            return 0;
+    }
+}
+```
+
+**Key points:**
+- Case values must be integer constants (float literals produce a compile error).
+- Use `break` to exit a case (fall-through occurs without it).
+- The `default` case handles any value not matched by an explicit `case`.
+- `continue` inside a `switch` nested within a loop jumps to the enclosing loop's continue target.
+
 ---
 
 ## 9. Arrays
@@ -961,7 +1008,7 @@ print("line 1\nline 2");
 
 ### 10.2 String Support
 
-In the current LLVM compilation path, strings are supported as:
+Strings are supported as:
 
 - **Global string constants** — String literals are emitted as LLVM `CreateGlobalString` constants.
 - **Print argument** — `print("message")` detects string literal arguments and uses `%s\n` format.
@@ -969,7 +1016,7 @@ In the current LLVM compilation path, strings are supported as:
 
 ### 10.3 Runtime String Type
 
-In the bytecode/VM runtime, strings are fully dynamic:
+At runtime, strings are fully dynamic:
 
 - Reference-counted with `RefCountedString` (malloc-based).
 - Support concatenation (`+`), comparison (`==`, `<`), and conversion (`toString()`).
@@ -979,7 +1026,7 @@ In the bytecode/VM runtime, strings are fully dynamic:
 
 ## 11. Standard Library
 
-OmScript provides **69 built-in functions**. All stdlib functions are compiled directly to native machine code via LLVM IR — they never go through the bytecode interpreter.
+OmScript provides **69 built-in functions**. All stdlib functions are compiled directly to native machine code via LLVM IR.
 
 ### 11.1 I/O Functions
 
@@ -1713,7 +1760,7 @@ sleep(1000);  // sleep for 1 second
 
 #### `typeof(x)`
 
-Returns a type tag for `x`. In the native LLVM compilation path, all values are represented as `i64`, so `typeof` always returns `1` (integer).
+Returns a type tag for `x`. All values are represented as `i64` in the compiled output, so `typeof` always returns `1` (integer).
 
 ```javascript
 typeof(42)         // 1  (integer)
@@ -1917,75 +1964,56 @@ Each pass may expose new optimization opportunities that the next iteration can 
 
 ---
 
-## 14. Bytecode VM and Runtime
+## 14. Adaptive JIT Runtime
 
 ### 14.1 Overview
 
-OmScript includes a **stack-based bytecode virtual machine** as an alternative backend. The primary compilation path is LLVM-to-native; the bytecode VM exists for future dynamic compilation scenarios.
+OmScript is an **AOT-compiled language** — all code compiles to native machine code through LLVM. When using `omsc run`, the program executes through a lightweight **adaptive JIT runtime** that automatically recompiles hot functions with even more aggressive optimizations.
 
-### 14.2 Bytecode Opcodes
-
-| Opcode | Category | Description |
-|--------|----------|-------------|
-| `PUSH_INT` | Stack | Push 64-bit integer |
-| `PUSH_FLOAT` | Stack | Push 64-bit float |
-| `PUSH_STRING` | Stack | Push string (length-prefixed) |
-| `POP` | Stack | Discard top of stack |
-| `ADD` | Arithmetic | Pop two, push sum |
-| `SUB` | Arithmetic | Pop two, push difference |
-| `MUL` | Arithmetic | Pop two, push product |
-| `DIV` | Arithmetic | Pop two, push quotient |
-| `MOD` | Arithmetic | Pop two, push remainder |
-| `NEG` | Arithmetic | Negate top of stack |
-| `EQ` | Comparison | Pop two, push 1 if equal |
-| `NE` | Comparison | Pop two, push 1 if not equal |
-| `LT` | Comparison | Pop two, push 1 if less than |
-| `LE` | Comparison | Pop two, push 1 if less or equal |
-| `GT` | Comparison | Pop two, push 1 if greater than |
-| `GE` | Comparison | Pop two, push 1 if greater or equal |
-| `AND` | Logical | Pop two, push logical AND |
-| `OR` | Logical | Pop two, push logical OR |
-| `NOT` | Logical | Pop one, push logical NOT |
-| `LOAD_VAR` | Variables | Push variable by name |
-| `STORE_VAR` | Variables | Pop value, store to named variable |
-| `JUMP` | Control | Unconditional jump (absolute offset) |
-| `JUMP_IF_FALSE` | Control | Conditional jump if top is falsy |
-| `CALL` | Control | Call function by name |
-| `RETURN` | Control | Return from function |
-| `HALT` | Control | Stop execution |
-
-### 14.3 VM Architecture
+### 14.2 Two-Tier Execution Model
 
 ```
-┌─────────────────────┐
-│    Value Stack       │  ← Stack-based computation
-├─────────────────────┤
-│  Global Variables    │  ← unordered_map<string, Value>
-├─────────────────────┤
-│    Last Return       │  ← Most recent return value
-├─────────────────────┤
-│  Bytecode Stream     │  ← Instruction pointer (ip)
-└─────────────────────┘
+┌─────────────────────────────────────────────────────┐
+│  Tier 1 — Initial JIT (fast startup)                │
+│  • Module compiled at O2 via LLVM MCJIT             │
+│  • Call-counting dispatch prologs injected           │
+│  • Execution begins immediately                     │
+└────────────────────┬────────────────────────────────┘
+                     │  function call count reaches threshold
+                     ▼
+┌─────────────────────────────────────────────────────┐
+│  Tier 2 — Adaptive Recompile (hot path)             │
+│  • Clean IR parsed into fresh context               │
+│  • Function annotated with real call count (PGO)    │
+│  • Full O3 pipeline re-run with profile hints       │
+│  • JIT-compiled via MCJIT                           │
+│  • New native pointer stored for future calls       │
+└─────────────────────────────────────────────────────┘
 ```
 
-### 14.4 Bytecode Encoding
+### 14.3 How It Works
 
-All multi-byte values are encoded in **little-endian** order:
+1. **Initial compilation**: When `omsc run` is invoked, the module's LLVM IR is JIT-compiled at O2. Every non-`main` function receives a lightweight dispatch prolog that atomically increments a per-function call counter.
 
-- **Integers:** 8 bytes (int64_t)
-- **Floats:** 8 bytes (double, IEEE 754)
-- **Strings:** 2-byte length prefix (uint16_t) + UTF-8 bytes
-- **Shorts:** 2 bytes (uint16_t, used for jump offsets)
+2. **Hot function detection**: When a function's call count first reaches the recompile threshold, the runtime triggers adaptive recompilation.
 
-### 14.5 Stdlib in Bytecode Mode
+3. **Profile-guided recompilation**: The runtime:
+   - Loads a clean (counter-free) copy of the module's bitcode
+   - Annotates the hot function with its real call count as a PGO entry count
+   - Re-runs the full LLVM O3 pipeline — the inliner, branch layout, loop vectorizer, and unroller all see the function as hot and optimize accordingly
+   - JIT-compiles the result and stores the new native function pointer
 
-Stdlib built-in functions are **not available** in bytecode mode. Attempting to call a stdlib function from the bytecode path produces an error:
+4. **Fast path**: After recompilation, future calls to the function take a fast path — one volatile load and a well-predicted branch, then a direct call to the O3-PGO-optimized native code with zero counter overhead.
+
+### 14.4 AOT Compilation Path
+
+When compiling to an executable (the default `omsc build` path), all code is AOT-compiled through the standard LLVM pipeline:
 
 ```
-Stdlib function 'abs' must be compiled to native code, not bytecode
+Source → Lexer → Parser → AST → CodeGen (LLVM IR) → LLVM Optimizer → Native Object → Linker → Executable
 ```
 
-This is by design — stdlib functions always take the LLVM IR → native code path for maximum performance.
+The adaptive JIT runtime is only used during `omsc run` for interactive/development workflows.
 
 ---
 
@@ -2048,10 +2076,15 @@ omsc [command] <source.om> [options]
 |---------|---------|-------------|
 | *(default)* | `compile`, `build`, `-c`, `-b`, `--compile`, `--build` | Compile source to executable |
 | `run` | `-r`, `--run` | Compile and immediately run |
-| `lex` | `tokens`, `-l`, `--lex`, `--tokens` | Print lexer token stream |
-| `parse` | `-p`, `-a`, `--parse`, `--ast` | Print parsed AST |
+| `check` | `--check` | Validate syntax without compiling |
+| `lex` | `tokens`, `-l`, `--lex`, `--tokens`, `--dump-tokens` | Print lexer token stream |
+| `parse` | `emit-ast`, `-p`, `-a`, `--parse`, `--ast`, `--emit-ast` | Print parsed AST |
 | `emit-ir` | `-e`, `-i`, `--emit-ir`, `--ir` | Print LLVM IR |
 | `clean` | `-C`, `--clean` | Remove compiled outputs |
+| `pkg` | `--pkg`, `package` | Package manager (install, remove, list, search, info) |
+| `install` | `--install` | Install omsc to your PATH |
+| `update` | `--update` | Update to latest version |
+| `uninstall` | `--uninstall` | Uninstall omsc from PATH |
 | `help` | `-h`, `--help` | Show help message |
 | `version` | `-v`, `--version` | Show compiler version |
 
@@ -2060,8 +2093,35 @@ omsc [command] <source.om> [options]
 | Option | Description |
 |--------|-------------|
 | `-o <file>`, `--output <file>` | Set output filename (default: `a.out`) |
+| `-O0`, `-O1`, `-O2`, `-O3` | Optimization level (default: `-O2`) |
 | `-k`, `--keep-temps` | Keep temporary files when using `run` |
+| `-V`, `--verbose` | Verbose output |
+| `-q`, `--quiet` | Suppress non-error output |
+| `--time` | Show timing breakdown |
+| `--emit-obj` | Emit object file only |
+| `--dry-run` | Validate without writing files |
+| `--dump-ast` | Dump AST during compilation |
+| `-s`, `--strip` | Strip symbols from output |
+| `-static` | Static linking |
 | `--` | Separator between compiler args and runtime args |
+
+### 16.3.1 Codegen Options
+
+| Option | Description |
+|--------|-------------|
+| `-march=<cpu>` | Target CPU architecture (default: `native`) |
+| `-mtune=<cpu>` | Tuning CPU (default: same as `-march`) |
+| `-flto` | Full link-time optimization |
+| `-ffast-math` | Unsafe floating-point optimizations |
+| `-fvectorize` | SIMD vectorization hints (default: on) |
+| `-funroll-loops` | Loop unrolling (default: on) |
+| `-floop-optimize` | Polyhedral loop optimizations (default: on) |
+| `-fpic` | Position-independent code (default: on) |
+| `-foptmax` | OPTMAX block optimization (default: on) |
+| `-fjit` | Adaptive JIT runtime (default: on) |
+| `-fstack-protector` | Stack protection |
+
+Use `-fno-<flag>` to disable any `-f` flag (e.g., `-fno-lto`, `-fno-vectorize`).
 
 ### 16.4 Examples
 
@@ -2071,6 +2131,9 @@ omsc program.om -o myapp
 
 # Compile and run
 omsc run program.om
+
+# Validate syntax only
+omsc check program.om
 
 # View lexer output
 omsc lex program.om
@@ -2083,6 +2146,16 @@ omsc emit-ir program.om
 
 # Compile and run, keep temp files
 omsc run program.om --keep-temps
+
+# Compile with aggressive optimization
+omsc program.om -O3 -march=native -flto
+
+# Show timing breakdown
+omsc run program.om --time
+
+# Package management
+omsc pkg install <package>
+omsc pkg list
 
 # Clean up generated files
 omsc clean program.om
@@ -2408,10 +2481,12 @@ fn main() {
 ### 20.1 EBNF Grammar
 
 ```ebnf
-program        = { function_decl } ;
+program        = { enum_decl | function_decl } ;
+enum_decl      = "enum" IDENTIFIER "{" enum_member { "," enum_member } "}" ;
+enum_member    = IDENTIFIER [ "=" INTEGER ] ;
 function_decl  = "fn" IDENTIFIER "(" [ param_list ] ")" block ;
 param_list     = parameter { "," parameter } ;
-parameter      = IDENTIFIER [ ":" IDENTIFIER ] ;
+parameter      = IDENTIFIER [ ":" IDENTIFIER ] [ "=" literal ] ;
 
 block          = "{" { statement } "}" ;
 
@@ -2422,8 +2497,11 @@ statement      = var_decl
                | while_stmt
                | do_while_stmt
                | for_stmt
+               | switch_stmt
+               | try_stmt
                | break_stmt
                | continue_stmt
+               | throw_stmt
                | expr_stmt
                | block ;
 
@@ -2434,14 +2512,22 @@ if_stmt        = "if" "(" expression ")" statement [ "else" statement ] ;
 while_stmt     = "while" "(" expression ")" statement ;
 do_while_stmt  = "do" statement "while" "(" expression ")" ";" ;
 for_stmt       = "for" "(" IDENTIFIER [ ":" IDENTIFIER ] "in"
-                   expression "..." expression [ "..." expression ] ")" statement ;
+                   expression [ "..." expression [ "..." expression ] ] ")" statement ;
+switch_stmt    = "switch" "(" expression ")" "{" { case_clause } [ default_clause ] "}" ;
+case_clause    = "case" INTEGER ":" { statement } ;
+default_clause = "default" ":" { statement } ;
+try_stmt       = "try" block "catch" "(" IDENTIFIER ")" block ;
+throw_stmt     = "throw" expression ";" ;
 break_stmt     = "break" ";" ;
 continue_stmt  = "continue" ";" ;
 expr_stmt      = expression ";" ;
 
 expression     = assignment ;
-assignment     = ternary [ ( "=" | "+=" | "-=" | "*=" | "/=" | "%=" ) assignment ] ;
-ternary        = logical_or [ "?" expression ":" ternary ] ;
+assignment     = pipe [ ( "=" | "+=" | "-=" | "*=" | "/=" | "%="
+                        | "&=" | "|=" | "^=" | "<<=" | ">>=" ) assignment ] ;
+pipe           = ternary { "|>" IDENTIFIER } ;
+ternary        = null_coalesce [ "?" expression ":" ternary ] ;
+null_coalesce  = logical_or { "??" logical_or } ;
 logical_or     = logical_and { "||" logical_and } ;
 logical_and    = bitwise_or { "&&" bitwise_or } ;
 bitwise_or     = bitwise_xor { "|" bitwise_xor } ;
@@ -2456,9 +2542,13 @@ power          = unary [ "**" power ] ;
 unary          = ( "-" | "!" | "~" | "++" | "--" ) unary | postfix ;
 postfix        = primary { "++" | "--" | "[" expression "]" | "(" [ arg_list ] ")" } ;
 primary        = INTEGER | FLOAT | STRING
+               | "true" | "false" | "null"
                | IDENTIFIER
                | "(" expression ")"
-               | "[" [ expression { "," expression } ] "]" ;
+               | "[" [ spread_or_expr { "," spread_or_expr } ] "]"
+               | lambda ;
+spread_or_expr = [ "..." ] expression ;
+lambda         = "|" [ param_list ] "|" expression ;
 arg_list       = expression { "," expression } ;
 ```
 
@@ -2467,17 +2557,18 @@ arg_list       = expression { "," expression } ;
 | Category | Tokens |
 |----------|--------|
 | **Literals** | `INTEGER`, `FLOAT`, `STRING`, `IDENTIFIER` |
-| **Keywords** | `fn`, `return`, `if`, `else`, `while`, `do`, `for`, `var`, `const`, `break`, `continue`, `in` |
-| **Arithmetic** | `+`, `-`, `*`, `/`, `%` |
+| **Keywords** | `fn`, `return`, `if`, `else`, `while`, `do`, `for`, `var`, `const`, `break`, `continue`, `in`, `switch`, `case`, `default`, `try`, `catch`, `throw`, `enum`, `true`, `false`, `null` |
+| **Arithmetic** | `+`, `-`, `*`, `/`, `%`, `**` |
 | **Comparison** | `==`, `!=`, `<`, `<=`, `>`, `>=` |
 | **Logical** | `&&`, `\|\|`, `!` |
 | **Bitwise** | `&`, `\|`, `^`, `~`, `<<`, `>>` |
-| **Assignment** | `=`, `+=`, `-=`, `*=`, `/=`, `%=` |
+| **Assignment** | `=`, `+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `\|=`, `^=`, `<<=`, `>>=` |
 | **Inc/Dec** | `++`, `--` |
+| **Special** | `...` (range/spread), `?` (ternary), `??` (null coalesce), `\|>` (pipe), `=>` (fat arrow) |
 | **Delimiters** | `(`, `)`, `{`, `}`, `[`, `]`, `;`, `,`, `:`, `.` |
-| **Special** | `...` (range), `?` (ternary), `OPTMAX=:`, `OPTMAX!:` |
+| **Pragmas** | `OPTMAX=:`, `OPTMAX!:` |
 | **Meta** | `END_OF_FILE`, `INVALID` |
 
 ---
 
-*This document describes OmScript Compiler v1.0. For the latest updates, see the repository at [github.com/RyAnPr1Me/omscript](https://github.com/RyAnPr1Me/omscript).*
+*This document describes OmScript Compiler v2.0.0. For the latest updates, see the repository at [github.com/RyAnPr1Me/omscript](https://github.com/RyAnPr1Me/omscript).*
