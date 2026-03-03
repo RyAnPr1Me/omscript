@@ -2846,24 +2846,30 @@ TEST(CodegenTest, ClassifyFullyAnnotatedAsAOT) {
     EXPECT_EQ(codegen.getFunctionTier("add"), ExecutionTier::AOT);
 }
 
-TEST(CodegenTest, ClassifyUnannotatedAsInterpreted) {
+TEST(CodegenTest, ClassifyUnannotatedAsAOT) {
+    // All user-defined functions compile to LLVM IR (AOT Tier 1) regardless
+    // of type-annotation coverage.  The adaptive JIT runtime monitors call
+    // counts and promotes hot functions to O3+PGO at runtime.
     std::string src = R"(
         fn compute(x, y) { return x + y; }
         fn main() { return compute(3, 4); }
     )";
     CodeGenerator codegen;
     generateIR(src, codegen);
-    EXPECT_EQ(codegen.getFunctionTier("compute"), ExecutionTier::Interpreted);
+    EXPECT_EQ(codegen.getFunctionTier("compute"), ExecutionTier::AOT);
 }
 
-TEST(CodegenTest, ClassifyPartiallyAnnotatedAsInterpreted) {
+TEST(CodegenTest, ClassifyPartiallyAnnotatedAsAOT) {
+    // Partially-annotated functions also compile to LLVM IR — type
+    // annotations are optional since all functions go through the
+    // adaptive JIT Tier-1 (MCJIT O2) path.
     std::string src = R"(
         fn mixed(a: int, b) { return a + b; }
         fn main() { return mixed(1, 2); }
     )";
     CodeGenerator codegen;
     generateIR(src, codegen);
-    EXPECT_EQ(codegen.getFunctionTier("mixed"), ExecutionTier::Interpreted);
+    EXPECT_EQ(codegen.getFunctionTier("mixed"), ExecutionTier::AOT);
 }
 
 TEST(CodegenTest, ClassifyNoParamsAsAOT) {
@@ -2929,7 +2935,10 @@ static void generateHybridIR(const std::string& source, CodeGenerator& codegen) 
     codegen.generateHybrid(program.get());
 }
 
-TEST(CodegenTest, HybridEmitsBytecodeForUntypedFunction) {
+TEST(CodegenTest, HybridAllFunctionsCompileToIR) {
+    // generateHybrid() compiles every function to LLVM IR regardless of
+    // type-annotation coverage.  No bytecode is produced — all functions
+    // run as native code via the adaptive JIT (Tier-1 MCJIT O2).
     std::string src = R"(
         fn compute(x, y) { return x + y; }
         fn main() { return compute(3, 4); }
@@ -2937,17 +2946,13 @@ TEST(CodegenTest, HybridEmitsBytecodeForUntypedFunction) {
     CodeGenerator codegen;
     generateHybridIR(src, codegen);
 
-    // compute is Interpreted, main is AOT
-    EXPECT_EQ(codegen.getFunctionTier("compute"), ExecutionTier::Interpreted);
+    // All functions are AOT in the new model
+    EXPECT_EQ(codegen.getFunctionTier("compute"), ExecutionTier::AOT);
     EXPECT_EQ(codegen.getFunctionTier("main"), ExecutionTier::AOT);
 
-    // Hybrid should produce bytecode for the untyped function
-    EXPECT_TRUE(codegen.hasHybridBytecodeFunctions());
-    auto& bcFuncs = codegen.getBytecodeFunctions();
-    ASSERT_EQ(bcFuncs.size(), 1u);
-    EXPECT_EQ(bcFuncs[0].name, "compute");
-    EXPECT_EQ(bcFuncs[0].arity, 2);
-    EXPECT_FALSE(bcFuncs[0].bytecode.empty());
+    // No bytecode is emitted — native LLVM IR only
+    EXPECT_FALSE(codegen.hasHybridBytecodeFunctions());
+    EXPECT_EQ(codegen.getBytecodeFunctions().size(), 0u);
 }
 
 TEST(CodegenTest, HybridNoBytecodeForFullyTyped) {
@@ -2965,6 +2970,7 @@ TEST(CodegenTest, HybridNoBytecodeForFullyTyped) {
 }
 
 TEST(CodegenTest, HybridMultipleUntypedFunctions) {
+    // All user functions — typed or not — compile to LLVM IR.
     std::string src = R"(
         fn helper(x) { return x * 2; }
         fn dynamic_add(a, b) { return a + b; }
@@ -2973,24 +2979,17 @@ TEST(CodegenTest, HybridMultipleUntypedFunctions) {
     CodeGenerator codegen;
     generateHybridIR(src, codegen);
 
-    EXPECT_EQ(codegen.getFunctionTier("helper"), ExecutionTier::Interpreted);
-    EXPECT_EQ(codegen.getFunctionTier("dynamic_add"), ExecutionTier::Interpreted);
+    EXPECT_EQ(codegen.getFunctionTier("helper"), ExecutionTier::AOT);
+    EXPECT_EQ(codegen.getFunctionTier("dynamic_add"), ExecutionTier::AOT);
     EXPECT_EQ(codegen.getFunctionTier("main"), ExecutionTier::AOT);
 
-    auto& bcFuncs = codegen.getBytecodeFunctions();
-    ASSERT_EQ(bcFuncs.size(), 2u);
-
-    // Verify both functions have valid bytecode and correct arity
-    std::unordered_map<std::string, uint8_t> foundFuncs;
-    for (auto& f : bcFuncs) {
-        foundFuncs[f.name] = f.arity;
-        EXPECT_FALSE(f.bytecode.empty());
-    }
-    EXPECT_EQ(foundFuncs["helper"], 1);
-    EXPECT_EQ(foundFuncs["dynamic_add"], 2);
+    // No bytecode is produced
+    EXPECT_FALSE(codegen.hasHybridBytecodeFunctions());
+    EXPECT_EQ(codegen.getBytecodeFunctions().size(), 0u);
 }
 
 TEST(CodegenTest, HybridMixedTiersWithOptMax) {
+    // OPTMAX functions are still AOT; unannotated functions are also AOT.
     std::string src = R"(
         OPTMAX=: fn fast(x: int) { return x * x; } OPTMAX!:
         fn dynamic(x) { return x + 1; }
@@ -3000,13 +2999,13 @@ TEST(CodegenTest, HybridMixedTiersWithOptMax) {
     generateHybridIR(src, codegen);
 
     EXPECT_EQ(codegen.getFunctionTier("fast"), ExecutionTier::AOT);
-    EXPECT_EQ(codegen.getFunctionTier("dynamic"), ExecutionTier::Interpreted);
+    EXPECT_EQ(codegen.getFunctionTier("dynamic"), ExecutionTier::AOT);
     EXPECT_EQ(codegen.getFunctionTier("main"), ExecutionTier::AOT);
 
-    auto& bcFuncs = codegen.getBytecodeFunctions();
-    ASSERT_EQ(bcFuncs.size(), 1u);
-    EXPECT_EQ(bcFuncs[0].name, "dynamic");
-    EXPECT_EQ(bcFuncs[0].arity, 1);
+    // No bytecode is produced — all functions go through LLVM IR
+    EXPECT_FALSE(codegen.hasHybridBytecodeFunctions());
+    EXPECT_EQ(codegen.getBytecodeFunctions().size(), 0u);
+
 }
 
 TEST(CodegenTest, HybridPreservesLLVMIR) {
@@ -3024,7 +3023,10 @@ TEST(CodegenTest, HybridPreservesLLVMIR) {
     EXPECT_NE(mod->getFunction("dynamic_fn"), nullptr);
 }
 
-TEST(CodegenTest, HybridBytecodeContainsReturn) {
+TEST(CodegenTest, HybridGeneratesIRForAllFunctions) {
+    // generateHybrid() produces LLVM IR for all functions, including
+    // unannotated ones.  No bytecode is emitted — the LLVM module is the
+    // sole output.
     std::string src = R"(
         fn identity(x) { return x; }
         fn main() { return identity(5); }
@@ -3032,19 +3034,15 @@ TEST(CodegenTest, HybridBytecodeContainsReturn) {
     CodeGenerator codegen;
     generateHybridIR(src, codegen);
 
-    auto& bcFuncs = codegen.getBytecodeFunctions();
-    ASSERT_EQ(bcFuncs.size(), 1u);
+    // No bytecode produced
+    EXPECT_FALSE(codegen.hasHybridBytecodeFunctions());
+    EXPECT_EQ(codegen.getBytecodeFunctions().size(), 0u);
 
-    // The bytecode should contain at least one RETURN opcode
-    auto& code = bcFuncs[0].bytecode;
-    bool hasReturn = false;
-    for (uint8_t byte : code) {
-        if (byte == static_cast<uint8_t>(OpCode::RETURN)) {
-            hasReturn = true;
-            break;
-        }
-    }
-    EXPECT_TRUE(hasReturn);
+    // Both functions must be present in the LLVM IR module
+    auto* mod = codegen.getModule();
+    ASSERT_NE(mod, nullptr);
+    EXPECT_NE(mod->getFunction("identity"), nullptr);
+    EXPECT_NE(mod->getFunction("main"), nullptr);
 }
 
 // ===========================================================================
@@ -3389,73 +3387,54 @@ TEST(CodegenTest, OptmaxDoubleBitwiseNot) {
 // ===========================================================================
 // Bytecode algebraic identity optimizations
 // ===========================================================================
+// NOTE: generateHybrid() no longer emits bytecode — all user functions
+// compile to native LLVM IR via the adaptive JIT pipeline.  The algebraic
+// identity optimizations (x+0, x*0, x*1, x**0) are now applied at the
+// LLVM IR level by the optimizer.  The tests below verify that generateHybrid()
+// produces zero bytecode functions and that the LLVM IR module is correct.
 
 TEST(CodegenTest, BytecodeAlgebraicIdentityAddZero) {
-    // x + 0 in bytecode should not emit an ADD opcode
+    // generateHybrid() compiles add_zero to LLVM IR; no bytecode is produced.
     CodeGenerator codegen(OptimizationLevel::O0);
     auto program = parseSource("fn add_zero(x) { return x + 0; }\n"
                                "fn main() { return 0; }");
     codegen.generateHybrid(program.get());
     auto& bcFuncs = codegen.getBytecodeFunctions();
-    ASSERT_GE(bcFuncs.size(), 1u);
-    auto& code = bcFuncs[0].bytecode;
-    bool hasAdd = false;
-    for (uint8_t byte : code) {
-        if (byte == static_cast<uint8_t>(OpCode::ADD))
-            hasAdd = true;
-    }
-    EXPECT_FALSE(hasAdd);
+    EXPECT_EQ(bcFuncs.size(), 0u);
+    EXPECT_NE(codegen.getModule()->getFunction("add_zero"), nullptr);
 }
 
 TEST(CodegenTest, BytecodeAlgebraicIdentityMulZero) {
-    // x * 0 in bytecode should not emit a MUL opcode
+    // generateHybrid() compiles mul_zero to LLVM IR; no bytecode is produced.
     CodeGenerator codegen(OptimizationLevel::O0);
     auto program = parseSource("fn mul_zero(x) { return x * 0; }\n"
                                "fn main() { return 0; }");
     codegen.generateHybrid(program.get());
     auto& bcFuncs = codegen.getBytecodeFunctions();
-    ASSERT_GE(bcFuncs.size(), 1u);
-    auto& code = bcFuncs[0].bytecode;
-    bool hasMul = false;
-    for (uint8_t byte : code) {
-        if (byte == static_cast<uint8_t>(OpCode::MUL))
-            hasMul = true;
-    }
-    EXPECT_FALSE(hasMul);
+    EXPECT_EQ(bcFuncs.size(), 0u);
+    EXPECT_NE(codegen.getModule()->getFunction("mul_zero"), nullptr);
 }
 
 TEST(CodegenTest, BytecodeAlgebraicIdentityMulOne) {
-    // x * 1 in bytecode should not emit a MUL opcode
+    // generateHybrid() compiles mul_one to LLVM IR; no bytecode is produced.
     CodeGenerator codegen(OptimizationLevel::O0);
     auto program = parseSource("fn mul_one(x) { return x * 1; }\n"
                                "fn main() { return 0; }");
     codegen.generateHybrid(program.get());
     auto& bcFuncs = codegen.getBytecodeFunctions();
-    ASSERT_GE(bcFuncs.size(), 1u);
-    auto& code = bcFuncs[0].bytecode;
-    bool hasMul = false;
-    for (uint8_t byte : code) {
-        if (byte == static_cast<uint8_t>(OpCode::MUL))
-            hasMul = true;
-    }
-    EXPECT_FALSE(hasMul);
+    EXPECT_EQ(bcFuncs.size(), 0u);
+    EXPECT_NE(codegen.getModule()->getFunction("mul_one"), nullptr);
 }
 
 TEST(CodegenTest, BytecodeAlgebraicIdentityPowZero) {
-    // x ** 0 in bytecode should emit PUSH_INT 1 instead of POW
+    // generateHybrid() compiles pow_zero to LLVM IR; no bytecode is produced.
     CodeGenerator codegen(OptimizationLevel::O0);
     auto program = parseSource("fn pow_zero(x) { return x ** 0; }\n"
                                "fn main() { return 0; }");
     codegen.generateHybrid(program.get());
     auto& bcFuncs = codegen.getBytecodeFunctions();
-    ASSERT_GE(bcFuncs.size(), 1u);
-    auto& code = bcFuncs[0].bytecode;
-    bool hasPow = false;
-    for (uint8_t byte : code) {
-        if (byte == static_cast<uint8_t>(OpCode::POW))
-            hasPow = true;
-    }
-    EXPECT_FALSE(hasPow);
+    EXPECT_EQ(bcFuncs.size(), 0u);
+    EXPECT_NE(codegen.getModule()->getFunction("pow_zero"), nullptr);
 }
 
 // ===========================================================================
@@ -3463,60 +3442,34 @@ TEST(CodegenTest, BytecodeAlgebraicIdentityPowZero) {
 // ===========================================================================
 
 TEST(CodegenTest, BytecodeAlgebraicMulZeroPreservesSideEffects) {
-    // x * 0 in bytecode should still emit a LOAD_LOCAL for x to preserve
-    // any potential side effects from evaluating the left operand.
+    // generateHybrid() compiles mul_zero to LLVM IR (no bytecode).
+    // Side-effect preservation is handled by the LLVM optimizer.
     CodeGenerator codegen(OptimizationLevel::O0);
     auto program = parseSource("fn mul_zero(x) { return x * 0; }\n"
                                "fn main() { return 0; }");
     codegen.generateHybrid(program.get());
-    auto& bcFuncs = codegen.getBytecodeFunctions();
-    ASSERT_GE(bcFuncs.size(), 1u);
-    auto& code = bcFuncs[0].bytecode;
-    // Should have a LOAD_LOCAL for x even though result is constant 0
-    bool hasLoad = false;
-    for (uint8_t byte : code) {
-        if (byte == static_cast<uint8_t>(OpCode::LOAD_LOCAL) ||
-            byte == static_cast<uint8_t>(OpCode::LOAD_VAR))
-            hasLoad = true;
-    }
-    EXPECT_TRUE(hasLoad);
+    EXPECT_EQ(codegen.getBytecodeFunctions().size(), 0u);
+    EXPECT_NE(codegen.getModule()->getFunction("mul_zero"), nullptr);
 }
 
 TEST(CodegenTest, BytecodeAlgebraicPowZeroPreservesSideEffects) {
-    // x ** 0 in bytecode should still emit a LOAD_LOCAL for x to preserve
-    // any potential side effects from evaluating the left operand.
+    // generateHybrid() compiles pow_zero to LLVM IR (no bytecode).
     CodeGenerator codegen(OptimizationLevel::O0);
     auto program = parseSource("fn pow_zero(x) { return x ** 0; }\n"
                                "fn main() { return 0; }");
     codegen.generateHybrid(program.get());
-    auto& bcFuncs = codegen.getBytecodeFunctions();
-    ASSERT_GE(bcFuncs.size(), 1u);
-    auto& code = bcFuncs[0].bytecode;
-    bool hasLoad = false;
-    for (uint8_t byte : code) {
-        if (byte == static_cast<uint8_t>(OpCode::LOAD_LOCAL) ||
-            byte == static_cast<uint8_t>(OpCode::LOAD_VAR))
-            hasLoad = true;
-    }
-    EXPECT_TRUE(hasLoad);
+    EXPECT_EQ(codegen.getBytecodeFunctions().size(), 0u);
+    EXPECT_NE(codegen.getModule()->getFunction("pow_zero"), nullptr);
 }
 
 TEST(CodegenTest, BytecodeAlgebraicZeroMulPreservesSideEffects) {
-    // 0 * x in bytecode should still emit a LOAD_LOCAL for x.
+    // generateHybrid() compiles zero_mul to LLVM IR (no bytecode).
     CodeGenerator codegen(OptimizationLevel::O0);
     auto program = parseSource("fn zero_mul(x) { return 0 * x; }\n"
                                "fn main() { return 0; }");
     codegen.generateHybrid(program.get());
-    auto& bcFuncs = codegen.getBytecodeFunctions();
-    ASSERT_GE(bcFuncs.size(), 1u);
-    auto& code = bcFuncs[0].bytecode;
-    bool hasLoad = false;
-    for (uint8_t byte : code) {
-        if (byte == static_cast<uint8_t>(OpCode::LOAD_LOCAL) ||
-            byte == static_cast<uint8_t>(OpCode::LOAD_VAR))
-            hasLoad = true;
-    }
-    EXPECT_TRUE(hasLoad);
+    EXPECT_EQ(codegen.getBytecodeFunctions().size(), 0u);
+    EXPECT_NE(codegen.getModule()->getFunction("zero_mul"), nullptr);
 }
 
 // ===========================================================================

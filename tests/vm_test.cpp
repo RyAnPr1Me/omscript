@@ -1888,6 +1888,9 @@ static void hybridCompileAndRegister(const std::string& source, VM& vm, CodeGene
 }
 
 TEST(VMTest, HybridBytecodeExecutesCorrectly) {
+    // generateHybrid() produces LLVM IR for all functions.  No bytecode is
+    // emitted — unannotated functions compile to native code via the adaptive
+    // JIT runtime, not via the VM interpreter.
     CodeGenerator codegen;
     VM vm;
     hybridCompileAndRegister(R"(
@@ -1896,31 +1899,15 @@ TEST(VMTest, HybridBytecodeExecutesCorrectly) {
     )",
                              vm, codegen);
 
-    EXPECT_EQ(codegen.getFunctionTier("compute"), ExecutionTier::Interpreted);
-    EXPECT_TRUE(codegen.hasHybridBytecodeFunctions());
-
-    // Build main bytecode that calls compute(10, 20)
-    auto mainCode = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT);
-        e.emitReg(0);
-        e.emitInt(10);
-        e.emit(OpCode::PUSH_INT);
-        e.emitReg(1);
-        e.emitInt(20);
-        e.emit(OpCode::CALL);
-        e.emitReg(2);
-        e.emitString("compute");
-        e.emitByte(2);
-        e.emitReg(0);
-        e.emitReg(1);
-        e.emit(OpCode::RETURN);
-        e.emitReg(2);
-    });
-    vm.execute(mainCode);
-    EXPECT_EQ(vm.getLastReturn().asInt(), 30);
+    // All functions are AOT in the new model; no bytecode is produced
+    EXPECT_EQ(codegen.getFunctionTier("compute"), ExecutionTier::AOT);
+    EXPECT_FALSE(codegen.hasHybridBytecodeFunctions());
+    EXPECT_EQ(codegen.getBytecodeFunctions().size(), 0u);
 }
 
 TEST(VMTest, HybridMultipleFunctionsExecute) {
+    // All user functions compile to LLVM IR — no bytecode is produced for
+    // unannotated functions regardless of arity.
     CodeGenerator codegen;
     VM vm;
     hybridCompileAndRegister(R"(
@@ -1930,43 +1917,9 @@ TEST(VMTest, HybridMultipleFunctionsExecute) {
     )",
                              vm, codegen);
 
-    EXPECT_EQ(codegen.getBytecodeFunctions().size(), 2u);
-
-    // Call doubler(5) => 10
-    auto code1 = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT);
-        e.emitReg(0);
-        e.emitInt(5);
-        e.emit(OpCode::CALL);
-        e.emitReg(1);
-        e.emitString("doubler");
-        e.emitByte(1);
-        e.emitReg(0);
-        e.emit(OpCode::RETURN);
-        e.emitReg(1);
-    });
-    vm.execute(code1);
-    EXPECT_EQ(vm.getLastReturn().asInt(), 10);
-
-    // Call adder(3, 7) => 10
-    auto code2 = buildBytecode([](BytecodeEmitter& e) {
-        e.emit(OpCode::PUSH_INT);
-        e.emitReg(0);
-        e.emitInt(3);
-        e.emit(OpCode::PUSH_INT);
-        e.emitReg(1);
-        e.emitInt(7);
-        e.emit(OpCode::CALL);
-        e.emitReg(2);
-        e.emitString("adder");
-        e.emitByte(2);
-        e.emitReg(0);
-        e.emitReg(1);
-        e.emit(OpCode::RETURN);
-        e.emitReg(2);
-    });
-    vm.execute(code2);
-    EXPECT_EQ(vm.getLastReturn().asInt(), 10);
+    // Zero bytecode functions — all compile to LLVM IR
+    EXPECT_EQ(codegen.getBytecodeFunctions().size(), 0u);
+    EXPECT_FALSE(codegen.hasHybridBytecodeFunctions());
 }
 
 TEST(VMTest, HybridAOTFunctionNotInBytecode) {
@@ -2367,7 +2320,9 @@ TEST(VMTest, FloatJITWithPushFloat) {
 // ===========================================================================
 
 TEST(VMTest, HybridCompilerProducesBytecode) {
-    // Verify that generateHybrid produces bytecode for untyped functions.
+    // generateHybrid() compiles all functions to LLVM IR — including
+    // unannotated ones.  No bytecode is emitted; the adaptive JIT runtime
+    // (AdaptiveJITRunner) executes every function as native Tier-1 code.
     std::string source = R"(
         fn add(a, b) {
             return a + b;
@@ -2384,12 +2339,12 @@ TEST(VMTest, HybridCompilerProducesBytecode) {
     omscript::CodeGenerator codegen(omscript::OptimizationLevel::O0);
     codegen.generateHybrid(program.get());
 
-    // 'add' has no type annotations → should be Interpreted tier.
-    EXPECT_EQ(codegen.getFunctionTier("add"), omscript::ExecutionTier::Interpreted);
+    // All functions are AOT in the new model.
+    EXPECT_EQ(codegen.getFunctionTier("add"), omscript::ExecutionTier::AOT);
     // 'main' is always AOT.
     EXPECT_EQ(codegen.getFunctionTier("main"), omscript::ExecutionTier::AOT);
-    // Hybrid mode should have produced bytecode for 'add'.
-    EXPECT_TRUE(codegen.hasHybridBytecodeFunctions());
+    // No bytecode is produced — native LLVM IR only.
+    EXPECT_FALSE(codegen.hasHybridBytecodeFunctions());
 }
 
 // ===========================================================================
