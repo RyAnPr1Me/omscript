@@ -891,7 +891,10 @@ void ensureInPath() {
         return;
     }
 
-    std::string binaryDir = std::filesystem::path(binaryPath).parent_path();
+    std::string binaryDir = std::filesystem::path(binaryPath).parent_path().string();
+    if (binaryDir.empty()) {
+        return;
+    }
     std::string exePath;
     try {
         exePath = std::filesystem::canonical(binaryPath);
@@ -984,30 +987,36 @@ void signalHandler(int sig) {
 // Package manager
 // ---------------------------------------------------------------------------
 
-/// Minimal JSON string field extractor (reuse the existing pattern).
-/// Extracts a simple "key":"value" or "key": "value" pair.
+/// Minimal JSON string field extractor.
+/// Handles arbitrary whitespace between key, colon, and value.
 std::string jsonField(const std::string& json, const std::string& key) {
-    // Try with no space: "key":"value"
-    std::string pattern1 = "\"" + key + "\":\"";
-    size_t pos = json.find(pattern1);
-    if (pos != std::string::npos) {
-        pos += pattern1.size();
-        size_t end = json.find('"', pos);
-        if (end != std::string::npos) {
-            return json.substr(pos, end - pos);
-        }
+    std::string searchKey = "\"" + key + "\"";
+    size_t pos = json.find(searchKey);
+    if (pos == std::string::npos) {
+        return "";
     }
-    // Try with space: "key": "value"
-    std::string pattern2 = "\"" + key + "\": \"";
-    pos = json.find(pattern2);
-    if (pos != std::string::npos) {
-        pos += pattern2.size();
-        size_t end = json.find('"', pos);
-        if (end != std::string::npos) {
-            return json.substr(pos, end - pos);
-        }
+    pos += searchKey.size();
+    // Skip optional whitespace, then expect ':'.
+    while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t' || json[pos] == '\n' || json[pos] == '\r')) {
+        ++pos;
     }
-    return "";
+    if (pos >= json.size() || json[pos] != ':') {
+        return "";
+    }
+    ++pos;
+    // Skip optional whitespace after ':'.
+    while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t' || json[pos] == '\n' || json[pos] == '\r')) {
+        ++pos;
+    }
+    if (pos >= json.size() || json[pos] != '"') {
+        return "";
+    }
+    ++pos;
+    size_t end = json.find('"', pos);
+    if (end == std::string::npos) {
+        return "";
+    }
+    return json.substr(pos, end - pos);
 }
 
 /// Extract a JSON array of strings, e.g. "files": ["a.om", "b.om"]
@@ -1190,7 +1199,25 @@ std::vector<PackageInfo> parseRegistryIndex(const std::string& json) {
     return packages;
 }
 
+/// Validate a package name to prevent path traversal attacks.
+/// Package names must only contain alphanumerics, hyphens, and underscores.
+bool isValidPackageName(const std::string& name) {
+    if (name.empty() || name.size() > 128) {
+        return false;
+    }
+    for (char c : name) {
+        if (!std::isalnum(static_cast<unsigned char>(c)) && c != '-' && c != '_') {
+            return false;
+        }
+    }
+    return true;
+}
+
 int doPkgInstall(const std::string& pkgName, bool quiet) {
+    if (!isValidPackageName(pkgName)) {
+        std::cerr << "Error: invalid package name '" << pkgName << "'\n";
+        return 1;
+    }
     if (!quiet) {
         std::cout << "Fetching package '" << pkgName << "'...\n";
     }
@@ -1251,6 +1278,10 @@ int doPkgInstall(const std::string& pkgName, bool quiet) {
 }
 
 int doPkgRemove(const std::string& pkgName, bool quiet) {
+    if (!isValidPackageName(pkgName)) {
+        std::cerr << "Error: invalid package name '" << pkgName << "'\n";
+        return 1;
+    }
     std::string localDir = std::string(kLocalPackagesDir) + "/" + pkgName;
     if (!std::filesystem::is_directory(localDir)) {
         std::cerr << "Error: package '" << pkgName << "' is not installed\n";
@@ -1334,6 +1365,10 @@ int doPkgSearch(const std::string& query, bool quiet) {
 }
 
 int doPkgInfo(const std::string& pkgName) {
+    if (!isValidPackageName(pkgName)) {
+        std::cerr << "Error: invalid package name '" << pkgName << "'\n";
+        return 1;
+    }
     // First check installed packages
     std::string localManifest = std::string(kLocalPackagesDir) + "/" + pkgName + "/package.json";
     bool installed = std::filesystem::exists(localManifest);
@@ -2238,15 +2273,30 @@ int main(int argc, char* argv[]) {
         return 0;
     }
     if (command == Command::Install) {
-        doInstall();
+        try {
+            doInstall();
+        } catch (const std::exception& e) {
+            std::cerr << "Error: " << e.what() << "\n";
+            return 1;
+        }
         return 0;
     }
     if (command == Command::Uninstall) {
-        doUninstall();
+        try {
+            doUninstall();
+        } catch (const std::exception& e) {
+            std::cerr << "Error: " << e.what() << "\n";
+            return 1;
+        }
         return 0;
     }
     if (command == Command::Pkg) {
-        return doPkg(argc, argv, argIndex, quiet);
+        try {
+            return doPkg(argc, argv, argIndex, quiet);
+        } catch (const std::exception& e) {
+            std::cerr << "Error: " << e.what() << "\n";
+            return 1;
+        }
     }
 
     std::string sourceFile;
@@ -2767,6 +2817,9 @@ int main(int argc, char* argv[]) {
                               << "': " << ec.message() << "\n";
                 }
             }
+            // Clear signal handler globals so stale paths are not unlinked.
+            g_tempOutputFile[0] = '\0';
+            g_tempObjectFile[0] = '\0';
             return result;
         }
         return 0;
