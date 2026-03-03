@@ -1,6 +1,6 @@
 # OmScript
 
-A low-level, C-like programming language with dynamic typing, featuring a **heavily optimized AOT compiler** using LLVM, a **lightweight adaptive JIT runtime** that recompiles hot functions with even more aggressive optimizations, and **automatic reference counting memory management**.
+A low-level, C-like programming language with dynamic typing and **automatic reference counting memory management**. Features a **heavily optimized AOT compiler** using LLVM and a **lightweight adaptive JIT runtime** that recompiles hot functions with even more aggressive optimizations.
 
 ## Key Features
 
@@ -72,7 +72,7 @@ fn greet(name, greeting = "Hello") {
     return 0;
 }
 ```
-Functions support forward references — a function can call another function defined later in the file. Recursive and mutually recursive calls are also supported.
+Functions support forward references — a function can call another function defined later in the file. The compiler performs a two-pass approach: first collecting all function declarations, then generating code. Recursive and mutually recursive calls are also supported.
 
 ### Variables
 ```omscript

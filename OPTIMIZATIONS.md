@@ -331,9 +331,10 @@ Operations with a single literal operand that match an algebraic identity are el
 
 ### Adaptive JIT Recompilation
 When using `omsc run`, the adaptive JIT runtime monitors function call counts. Hot functions
-that exceed a threshold are recompiled with LLVM's O3 pipeline using profile-guided
-optimization hints. The recompiled function's entry count annotation guides the inliner,
-branch layout, loop vectorizer, and unroller to optimize for the hot path.
+that exceed a call-count threshold (500 calls by default) are recompiled with LLVM's O3
+pipeline using profile-guided optimization hints. The recompiled function's entry count
+annotation guides the inliner, branch layout, loop vectorizer, and unroller to optimize
+for the hot path.
 
 ### Exponentiation by Squaring
 The `**` (POW) operator uses binary exponentiation (exponentiation by squaring) to compute
