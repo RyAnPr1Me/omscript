@@ -1839,6 +1839,65 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     bool leftIsFloat = left->getType()->isDoubleTy();
     bool rightIsFloat = right->getType()->isDoubleTy();
 
+    // String concatenation path: either operand is a string (ptr or i64-as-string).
+    // This check must come BEFORE the float path so that expressions like
+    // "text" + 3.14 produce string concatenation rather than float arithmetic.
+    if (expr->op == "+") {
+        bool leftIsStr = left->getType()->isPointerTy() || isStringExpr(expr->left.get());
+        bool rightIsStr = right->getType()->isPointerTy() || isStringExpr(expr->right.get());
+
+        // Helper: convert a non-string value (integer or float) to a heap-allocated
+        // decimal string ptr using snprintf(buf, 21, "%lld", val).
+        // Mirrors the to_string builtin.
+        auto intToStrPtr = [&](llvm::Value* val) -> llvm::Value* {
+            val = toDefaultType(val);
+            llvm::Value* bufSize = llvm::ConstantInt::get(getDefaultType(), 21);
+            llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bufSize}, "concat.numstr");
+            llvm::GlobalVariable* fmtStr = module->getGlobalVariable("tostr_fmt", true);
+            if (!fmtStr)
+                fmtStr = builder->CreateGlobalString("%lld", "tostr_fmt");
+            builder->CreateCall(getOrDeclareSnprintf(), {buf, bufSize, fmtStr, val});
+            return buf;
+        };
+
+        if (leftIsStr || rightIsStr) {
+            // Ensure both operands are string pointers.
+            // If one side is not a string, convert it to a decimal string representation.
+            if (!left->getType()->isPointerTy()) {
+                if (leftIsStr) {
+                    // i64-encoded string pointer (crossed a function boundary via ptrtoint)
+                    left = builder->CreateIntToPtr(left, llvm::PointerType::getUnqual(*context), "str.l.ptr");
+                } else {
+                    // Non-string value: convert integer or float to string
+                    if (left->getType()->isDoubleTy())
+                        left = builder->CreateFPToSI(left, getDefaultType(), "concat.ftoi");
+                    left = intToStrPtr(left);
+                }
+            }
+            if (!right->getType()->isPointerTy()) {
+                if (rightIsStr) {
+                    // i64-encoded string pointer
+                    right = builder->CreateIntToPtr(right, llvm::PointerType::getUnqual(*context), "str.r.ptr");
+                } else {
+                    // Non-string value: convert integer or float to string
+                    if (right->getType()->isDoubleTy())
+                        right = builder->CreateFPToSI(right, getDefaultType(), "concat.ftoi");
+                    right = intToStrPtr(right);
+                }
+            }
+
+            llvm::Value* len1 = builder->CreateCall(getOrDeclareStrlen(), {left}, "len1");
+            llvm::Value* len2 = builder->CreateCall(getOrDeclareStrlen(), {right}, "len2");
+            llvm::Value* totalLen = builder->CreateAdd(len1, len2, "totallen");
+            llvm::Value* allocSize =
+                builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "allocsize");
+            llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {allocSize}, "strbuf");
+            builder->CreateCall(getOrDeclareStrcpy(), {buf, left});
+            builder->CreateCall(getOrDeclareStrcat(), {buf, right});
+            return buf;
+        }
+    }
+
     // Float operations path
     if (leftIsFloat || rightIsFloat) {
         if (!leftIsFloat)
@@ -1891,28 +1950,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         codegenError("Invalid binary operator for float operands: " + expr->op, expr);
     }
 
-    // String concatenation path: either operand is a string (ptr or i64-as-string).
-    if (expr->op == "+") {
-        bool leftIsStr = left->getType()->isPointerTy() || isStringExpr(expr->left.get());
-        bool rightIsStr = right->getType()->isPointerTy() || isStringExpr(expr->right.get());
-        if (leftIsStr && rightIsStr) {
-            // Convert i64 string values back to ptr if necessary.
-            if (!left->getType()->isPointerTy())
-                left = builder->CreateIntToPtr(left, llvm::PointerType::getUnqual(*context), "str.l.ptr");
-            if (!right->getType()->isPointerTy())
-                right = builder->CreateIntToPtr(right, llvm::PointerType::getUnqual(*context), "str.r.ptr");
 
-            llvm::Value* len1 = builder->CreateCall(getOrDeclareStrlen(), {left}, "len1");
-            llvm::Value* len2 = builder->CreateCall(getOrDeclareStrlen(), {right}, "len2");
-            llvm::Value* totalLen = builder->CreateAdd(len1, len2, "totallen");
-            llvm::Value* allocSize =
-                builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "allocsize");
-            llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {allocSize}, "strbuf");
-            builder->CreateCall(getOrDeclareStrcpy(), {buf, left});
-            builder->CreateCall(getOrDeclareStrcat(), {buf, right});
-            return buf;
-        }
-    }
 
     // Convert pointer types to i64 for integer operations (fallback)
     if (left->getType()->isPointerTy()) {

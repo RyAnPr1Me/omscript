@@ -120,13 +120,29 @@ void AdaptiveJITRunner::injectCounters(llvm::Module& mod) {
         const std::string name = fn->getName().str();
 
         // The dispatch prolog adds volatile loads (fnPtrGV) and atomic
-        // read-modify-write instructions (call counter).  Strip function-level
-        // attributes that would contradict these new accesses and cause the
-        // backend to miscompile the instrumented function.
+        // read-modify-write instructions (call counter), and calls
+        // __omsc_profile_arg (which uses std::unordered_map and may call
+        // free() via rehashing) and __omsc_adaptive_recompile (which does
+        // blocking LLVM compilation).  Strip function-level attributes that
+        // would contradict these new accesses and cause the backend to
+        // miscompile the instrumented function.
         fn->removeFnAttr(llvm::Attribute::NoSync);   // atomicrmw is synchronising
-        fn->removeFnAttr(llvm::Attribute::Memory);   // we now read global memory
+        fn->removeFnAttr(llvm::Attribute::Memory);   // we now read/write global memory
         fn->removeFnAttr(llvm::Attribute::ReadNone); // legacy alias
         fn->removeFnAttr(llvm::Attribute::ReadOnly); // legacy alias
+        // __omsc_profile_arg uses std::unordered_map which can call free()
+        // during rehashing — nofree no longer holds.
+        fn->removeFnAttr(llvm::Attribute::NoFree);
+        // __omsc_adaptive_recompile does blocking LLVM compilation; the
+        // function may not return in a bounded time — willreturn no longer holds.
+        fn->removeFnAttr(llvm::Attribute::WillReturn);
+        // mustprogress requires forward progress on every iteration; the
+        // dispatch prolog's recompile path may block — remove the attribute.
+        fn->removeFnAttr(llvm::Attribute::MustProgress);
+        // The hot path calls fn indirectly via a function pointer that may
+        // point back to this same function (after Tier-2 hot-patching), making
+        // the call graph potentially recursive — norecurse no longer holds.
+        fn->removeFnAttr(llvm::Attribute::NoRecurse);
 
         auto* counterGV = new llvm::GlobalVariable(mod, i64Ty, /*isConst=*/false, llvm::GlobalValue::InternalLinkage,
                                                    llvm::ConstantInt::get(i64Ty, 0), "__omsc_calls_" + name);

@@ -161,6 +161,12 @@ class AdaptiveJITRunner {
     /// then writes the new function pointer into *fnPtrSlot.
     void onHotFunction(const char* name, int64_t callCount, void** fnPtrSlot);
 
+    /// Inject call-counting dispatch prologs into every non-main function
+    /// in @p mod.  Adds @__omsc_calls_<name> and @__omsc_fn_<name> globals
+    /// and prepends a dispatch basic block to each function.
+    /// Exposed as public for unit testing.
+    void injectCounters(llvm::Module& mod);
+
   private:
     /// Serialised clean IR — preserved from the initial module before any
     /// counter instrumentation is added.  Used as the source for all
@@ -180,11 +186,6 @@ class AdaptiveJITRunner {
     std::mutex recompiledMtx_; ///< Guards recompiled_ and modules_ across threads.
 
     void ensureInitialized();
-
-    /// Inject call-counting dispatch prologs into every non-main function
-    /// in @p mod.  Adds @__omsc_calls_<name> and @__omsc_fn_<name> globals
-    /// and prepends a dispatch basic block to each function.
-    void injectCounters(llvm::Module& mod);
 };
 
 } // namespace omscript

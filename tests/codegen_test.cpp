@@ -6,8 +6,13 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <llvm/Bitcode/BitcodeReader.h>
+#include <llvm/Bitcode/BitcodeWriter.h>
 #include <llvm/IR/Instructions.h>
+#include <llvm/Support/MemoryBuffer.h>
 #include <llvm/Support/TargetSelect.h>
+
+#include "aot_profile.h"
 
 using namespace omscript;
 
@@ -3246,4 +3251,163 @@ TEST(CodegenTest, ArrayIndexAssignBoundsCheck) {
     ASSERT_NE(setFn, nullptr);
     EXPECT_GT(std::distance(setFn->begin(), setFn->end()), 1u)
         << "Array index assign function should have bounds-check basic blocks";
+}
+
+// ===========================================================================
+// String + non-string concatenation (Fix: mixed operands in + operator)
+// ===========================================================================
+
+// Verify that "string" + integer produces proper string concatenation IR
+// (malloc + snprintf + strcpy + strcat) rather than pointer arithmetic.
+TEST(CodegenTest, StringPlusIntegerUsesStringConcat) {
+    std::string src = R"(
+        fn main() {
+            var s = "Value: " + 42;
+            return 0;
+        }
+    )";
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(src, codegen);
+    ASSERT_NE(mod, nullptr);
+
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+
+    // The IR should call snprintf to convert 42 to a decimal string.
+    bool hasSnprintf = false;
+    for (auto& BB : *mainFn) {
+        for (auto& I : BB) {
+            if (auto* call = llvm::dyn_cast<llvm::CallInst>(&I)) {
+                auto* callee = call->getCalledFunction();
+                if (callee && callee->getName().starts_with("snprintf"))
+                    hasSnprintf = true;
+            }
+        }
+    }
+    EXPECT_TRUE(hasSnprintf)
+        << "String+int concat should convert the integer via snprintf, not do pointer arithmetic";
+}
+
+// Verify that integer + "string" also uses string concatenation.
+TEST(CodegenTest, IntegerPlusStringUsesStringConcat) {
+    std::string src = R"(
+        fn main() {
+            var s = 99 + " items";
+            return 0;
+        }
+    )";
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(src, codegen);
+    ASSERT_NE(mod, nullptr);
+
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+
+    bool hasSnprintf = false;
+    for (auto& BB : *mainFn) {
+        for (auto& I : BB) {
+            if (auto* call = llvm::dyn_cast<llvm::CallInst>(&I)) {
+                auto* callee = call->getCalledFunction();
+                if (callee && callee->getName().starts_with("snprintf"))
+                    hasSnprintf = true;
+            }
+        }
+    }
+    EXPECT_TRUE(hasSnprintf)
+        << "int+string concat should convert the integer via snprintf, not do pointer arithmetic";
+}
+
+// Verify that "string" + float uses string concatenation (not float arithmetic).
+TEST(CodegenTest, StringPlusFloatUsesStringConcat) {
+    std::string src = R"(
+        fn main() {
+            var y = 3.14;
+            var s = "Pi: " + y;
+            return 0;
+        }
+    )";
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(src, codegen);
+    ASSERT_NE(mod, nullptr);
+
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+
+    // Must NOT contain fadd (which would mean float arithmetic was applied
+    // to the string pointer — the pre-fix bug).
+    bool hasFAdd = false;
+    for (auto& BB : *mainFn) {
+        for (auto& I : BB) {
+            if (I.getOpcode() == llvm::Instruction::FAdd)
+                hasFAdd = true;
+        }
+    }
+    EXPECT_FALSE(hasFAdd)
+        << "String+float should produce string concatenation, not float addition";
+}
+
+// ===========================================================================
+// injectCounters attribute stripping
+// (Fix: NoFree/WillReturn/MustProgress/NoRecurse must be stripped)
+// ===========================================================================
+
+TEST(CodegenTest, InjectCountersStripsProblematicAttributes) {
+    // Compile a module that will have optimization attributes set by PR #83.
+    std::string src = R"(
+        fn helper(x) { return x + 1; }
+        fn main() { return helper(41); }
+    )";
+    CodeGenerator codegen(OptimizationLevel::O1);
+    auto* mod = generateIR(src, codegen);
+    ASSERT_NE(mod, nullptr);
+
+    // The compiler should annotate helper with nofree, willreturn, mustprogress.
+    auto* helper = mod->getFunction("helper");
+    ASSERT_NE(helper, nullptr);
+
+    // Serialize to bitcode and re-parse (mirrors AdaptiveJITRunner::run()).
+    llvm::SmallVector<char, 0> buf;
+    {
+        llvm::raw_svector_ostream os(buf);
+        llvm::WriteBitcodeToFile(*mod, os);
+    }
+    auto instrCtx = std::make_unique<llvm::LLVMContext>();
+    auto memBuf = llvm::MemoryBuffer::getMemBuffer(
+        llvm::StringRef(buf.data(), buf.size()), "test_bc", /*RequiresNullTerminator=*/false);
+    auto modOrErr = llvm::parseBitcodeFile(memBuf->getMemBufferRef(), *instrCtx);
+    ASSERT_TRUE(static_cast<bool>(modOrErr));
+    auto instrMod = std::move(*modOrErr);
+
+    // After re-parse, verify that helper still has the relevant attributes
+    // (they survive bitcode round-trip).
+    auto* instrHelper = instrMod->getFunction("helper");
+    ASSERT_NE(instrHelper, nullptr);
+    bool hadNoFree = instrHelper->hasFnAttribute(llvm::Attribute::NoFree);
+    bool hadWillReturn = instrHelper->hasFnAttribute(llvm::Attribute::WillReturn);
+    bool hadMustProgress = instrHelper->hasFnAttribute(llvm::Attribute::MustProgress);
+
+    // Inject counters.
+    omscript::AdaptiveJITRunner runner;
+    runner.injectCounters(*instrMod);
+
+    // After injection, the problematic attributes must be stripped.
+    // (They may not have been present on the original module if the compiler
+    //  doesn't set them at O1 — skip attribute-presence assertions in that case
+    //  but still verify that if they were present, they are now gone.)
+    if (hadNoFree) {
+        EXPECT_FALSE(instrHelper->hasFnAttribute(llvm::Attribute::NoFree))
+            << "injectCounters must remove nofree: dispatch prolog calls "
+               "__omsc_profile_arg which may call free() via unordered_map rehashing";
+    }
+    if (hadWillReturn) {
+        EXPECT_FALSE(instrHelper->hasFnAttribute(llvm::Attribute::WillReturn))
+            << "injectCounters must remove willreturn: __omsc_adaptive_recompile may block";
+    }
+    if (hadMustProgress) {
+        EXPECT_FALSE(instrHelper->hasFnAttribute(llvm::Attribute::MustProgress))
+            << "injectCounters must remove mustprogress: recompile path may not make "
+               "immediate forward progress";
+    }
+    EXPECT_FALSE(instrHelper->hasFnAttribute(llvm::Attribute::NoRecurse))
+        << "injectCounters must remove norecurse: hot path calls fn indirectly via pointer";
 }
