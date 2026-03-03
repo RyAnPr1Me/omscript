@@ -23,13 +23,16 @@ void DeoptManager::onGuardFailure(const char* funcName, void** fnPtrSlot) {
     auto& count = failures_[funcName];
     count++;
 
-    if (count >= kDeoptThreshold && !deoptimized_[funcName]) {
+    if (count >= kDeoptThreshold) {
+        auto [it, inserted] = deoptimized_.emplace(funcName, false);
+        if (__builtin_expect(it->second, 0))
+            return; // Already deoptimized — nothing to do.
         // Revert to baseline: clear the hot-patch slot so the dispatch
         // prolog in the Tier-1 code falls through to the original body.
         if (fnPtrSlot) {
             *fnPtrSlot = nullptr;
         }
-        deoptimized_[funcName] = true;
+        it->second = true;
         std::cerr << "omsc: deoptimized '" << funcName << "' after " << count << " guard failures\n";
     }
 }

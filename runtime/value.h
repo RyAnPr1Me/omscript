@@ -27,70 +27,44 @@ class Value {
 
     // Copy constructor
     Value(const Value& other) : type(other.type) {
-        switch (type) {
-        case Type::INTEGER:
+        if (__builtin_expect(type != Type::STRING, 1)) {
+            // Fast path: POD copy covers INTEGER, FLOAT, and NONE without branching.
             intValue = other.intValue;
-            break;
-        case Type::FLOAT:
-            floatValue = other.floatValue;
-            break;
-        case Type::STRING:
+        } else {
             new (&stringValue) RefCountedString(other.stringValue);
-            break;
-        case Type::NONE:
-            intValue = 0;
-            break;
         }
     }
 
     // Move constructor
     Value(Value&& other) noexcept : type(other.type) {
-        switch (type) {
-        case Type::INTEGER:
+        if (__builtin_expect(type != Type::STRING, 1)) {
             intValue = other.intValue;
-            break;
-        case Type::FLOAT:
-            floatValue = other.floatValue;
-            break;
-        case Type::STRING:
+        } else {
             new (&stringValue) RefCountedString(std::move(other.stringValue));
             other.stringValue.~RefCountedString();
             other.type = Type::NONE;
             other.intValue = 0;
-            break;
-        case Type::NONE:
-            intValue = 0;
-            break;
         }
     }
 
     // Destructor
     ~Value() noexcept {
-        if (type == Type::STRING) {
+        if (__builtin_expect(type == Type::STRING, 0)) {
             stringValue.~RefCountedString();
         }
     }
 
     // Copy assignment
     Value& operator=(const Value& other) {
-        if (this != &other) {
-            if (type == Type::STRING) {
+        if (__builtin_expect(this != &other, 1)) {
+            if (__builtin_expect(type == Type::STRING, 0)) {
                 stringValue.~RefCountedString();
             }
             type = other.type;
-            switch (type) {
-            case Type::INTEGER:
+            if (__builtin_expect(type != Type::STRING, 1)) {
                 intValue = other.intValue;
-                break;
-            case Type::FLOAT:
-                floatValue = other.floatValue;
-                break;
-            case Type::STRING:
+            } else {
                 new (&stringValue) RefCountedString(other.stringValue);
-                break;
-            case Type::NONE:
-                intValue = 0;
-                break;
             }
         }
         return *this;
@@ -98,27 +72,18 @@ class Value {
 
     // Move assignment
     Value& operator=(Value&& other) noexcept {
-        if (this != &other) {
-            if (type == Type::STRING) {
+        if (__builtin_expect(this != &other, 1)) {
+            if (__builtin_expect(type == Type::STRING, 0)) {
                 stringValue.~RefCountedString();
             }
             type = other.type;
-            switch (type) {
-            case Type::INTEGER:
+            if (__builtin_expect(type != Type::STRING, 1)) {
                 intValue = other.intValue;
-                break;
-            case Type::FLOAT:
-                floatValue = other.floatValue;
-                break;
-            case Type::STRING:
+            } else {
                 new (&stringValue) RefCountedString(std::move(other.stringValue));
                 other.stringValue.~RefCountedString();
                 other.type = Type::NONE;
                 other.intValue = 0;
-                break;
-            case Type::NONE:
-                intValue = 0;
-                break;
             }
         }
         return *this;
@@ -129,19 +94,19 @@ class Value {
     }
 
     int64_t asInt() const {
-        if (type != Type::INTEGER) {
+        if (__builtin_expect(type != Type::INTEGER, 0)) {
             throw std::runtime_error("Value is not an integer");
         }
         return intValue;
     }
     double asFloat() const {
-        if (type != Type::FLOAT) {
+        if (__builtin_expect(type != Type::FLOAT, 0)) {
             throw std::runtime_error("Value is not a float");
         }
         return floatValue;
     }
     const char* asString() const {
-        if (type != Type::STRING) {
+        if (__builtin_expect(type != Type::STRING, 0)) {
             throw std::runtime_error("Value is not a string");
         }
         return stringValue.c_str();

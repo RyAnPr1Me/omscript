@@ -323,19 +323,19 @@ int AdaptiveJITRunner::run(llvm::Module* baseModule) {
 void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void** fnPtrSlot) {
     const std::string funcName(name);
 
-    // Recompile each function at most once.
+    // Recompile each function at most once.  emplace() atomically checks and
+    // inserts in a single lookup; if the function was already present (not
+    // inserted), we return early.
     {
         std::lock_guard<std::mutex> lk(recompiledMtx_);
-        if (recompiled_.count(funcName))
+        if (!recompiled_.emplace(funcName).second)
             return;
-        // Mark as in-progress to prevent concurrent recompilation attempts.
-        // On failure this is rolled back by the RAII guard below.
-        recompiled_.insert(funcName);
     }
 
     // RAII scope guard: on early return (failure), automatically remove the
-    // function from recompiled_ so that it can be retried.  The guard is
-    // dismissed (via succeeded=true) only after a successful hot-patch write.
+    // function from recompiled_ so that a future hot threshold hit can retry.
+    // The guard is dismissed (via succeeded=true) only after a successful
+    // hot-patch write.
     bool succeeded = false;
     struct ScopeExit {
         bool& flag;
@@ -527,7 +527,7 @@ extern "C" {
 
 void __omsc_adaptive_recompile(const char* name, int64_t callCount, void** fnPtrSlot) {
     auto* runner = omscript::g_activeRunner.load(std::memory_order_acquire);
-    if (runner)
+    if (__builtin_expect(runner != nullptr, 1))
         runner->onHotFunction(name, callCount, fnPtrSlot);
 }
 

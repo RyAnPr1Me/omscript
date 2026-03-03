@@ -73,17 +73,17 @@ class RefCountedString {
 
     // Get C string
     const char* c_str() const {
-        return data ? data->chars : "";
+        return __builtin_expect(data != nullptr, 1) ? data->chars : "";
     }
 
     // Get length
     size_t length() const {
-        return data ? data->length : 0;
+        return __builtin_expect(data != nullptr, 1) ? data->length : 0;
     }
 
     // Check if empty
     bool empty() const {
-        return data == nullptr || data->length == 0;
+        return __builtin_expect(data == nullptr, 0) || data->length == 0;
     }
 
     // Concatenation
@@ -151,15 +151,15 @@ class RefCountedString {
 
     // Increment reference count
     void retain() noexcept {
-        if (data) {
+        if (__builtin_expect(data != nullptr, 1)) {
             data->refCount.fetch_add(1, std::memory_order_relaxed);
         }
     }
 
     // Decrement reference count and free if zero
     void release() noexcept {
-        if (data) {
-            if (data->refCount.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+        if (__builtin_expect(data != nullptr, 1)) {
+            if (__builtin_expect(data->refCount.fetch_sub(1, std::memory_order_acq_rel) == 1, 0)) {
                 std::free(data);
                 data = nullptr;
             }
