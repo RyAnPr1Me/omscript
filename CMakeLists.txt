@@ -85,6 +85,7 @@ set(RUNTIME_SOURCES
     runtime/vm.cpp
     runtime/value.cpp
     runtime/jit.cpp
+    runtime/aot_profile.cpp
 )
 
 # Compiler executable
@@ -112,6 +113,7 @@ set(LLVM_COMPONENTS
     codegen
     mc
     mcparser
+    bitreader
 )
 
 # Conditionally add target-specific components based on available LLVM targets
@@ -151,6 +153,7 @@ if(GTest_FOUND)
         runtime/vm.cpp
         runtime/value.cpp
         runtime/jit.cpp
+        runtime/aot_profile.cpp
     )
 
     add_library(omscript_lib STATIC ${LIB_SOURCES})
