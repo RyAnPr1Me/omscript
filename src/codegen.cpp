@@ -1430,6 +1430,14 @@ void CodeGenerator::generate(Program* program) {
         function->addFnAttr(llvm::Attribute::NoSync);
         function->addFnAttr(llvm::Attribute::NoFree);
         function->addFnAttr(llvm::Attribute::WillReturn);
+        // noundef on all parameters and the return value — omscript always
+        // initialises every variable, so the optimizer can assume no undef/
+        // poison values flow through function boundaries.  This strengthens
+        // SCEV, value-range propagation, and alias analysis.
+        for (unsigned i = 0; i < func->parameters.size(); ++i) {
+            function->addParamAttr(i, llvm::Attribute::NoUndef);
+        }
+        function->addRetAttr(llvm::Attribute::NoUndef);
         functions[func->name] = function;
         functionDecls_[func->name] = func.get();
     }
@@ -1482,6 +1490,68 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     // Retrieve the forward-declared function
     llvm::Function* function = functions[func->name];
 
+    // Detect direct self-recursion.  Used for:
+    //   - norecurse attribute (O1+): helps interprocedural alias analysis
+    //     and enables GlobalOpt to internalize/eliminate the function.
+    //   - alwaysinline guard (O3): prevents infinite inliner loops.
+    bool isSelfRecursive = false;
+    if (func->name != "main" && optimizationLevel >= OptimizationLevel::O1 && func->body) {
+        // exprCheck: walk an expression tree for a direct call to func->name.
+        std::function<bool(Expression*)> exprCheck = [&](Expression* e) -> bool {
+            if (!e)
+                return false;
+            if (auto* call = dynamic_cast<CallExpr*>(e)) {
+                if (call->callee == func->name)
+                    return true;
+                for (auto& arg : call->arguments)
+                    if (exprCheck(arg.get()))
+                        return true;
+            }
+            if (auto* bin = dynamic_cast<BinaryExpr*>(e))
+                return exprCheck(bin->left.get()) || exprCheck(bin->right.get());
+            if (auto* un = dynamic_cast<UnaryExpr*>(e))
+                return exprCheck(un->operand.get());
+            if (auto* tern = dynamic_cast<TernaryExpr*>(e))
+                return exprCheck(tern->condition.get()) || exprCheck(tern->thenExpr.get()) ||
+                       exprCheck(tern->elseExpr.get());
+            return false;
+        };
+        // hasSelfCall: walk all statement kinds that can contain expressions.
+        std::function<bool(Statement*)> hasSelfCall = [&](Statement* s) -> bool {
+            if (!s)
+                return false;
+            if (auto* blk = dynamic_cast<BlockStmt*>(s)) {
+                for (auto& st : blk->statements)
+                    if (hasSelfCall(st.get()))
+                        return true;
+                return false;
+            }
+            if (auto* ret = dynamic_cast<ReturnStmt*>(s))
+                return exprCheck(ret->value.get());
+            if (auto* exprS = dynamic_cast<ExprStmt*>(s))
+                return exprCheck(exprS->expression.get());
+            if (auto* var = dynamic_cast<VarDecl*>(s))
+                return exprCheck(var->initializer.get());
+            if (auto* ifS = dynamic_cast<IfStmt*>(s))
+                return exprCheck(ifS->condition.get()) || hasSelfCall(ifS->thenBranch.get()) ||
+                       hasSelfCall(ifS->elseBranch.get());
+            if (auto* wh = dynamic_cast<WhileStmt*>(s))
+                return exprCheck(wh->condition.get()) || hasSelfCall(wh->body.get());
+            if (auto* dw = dynamic_cast<DoWhileStmt*>(s))
+                return hasSelfCall(dw->body.get()) || exprCheck(dw->condition.get());
+            if (auto* fr = dynamic_cast<ForStmt*>(s))
+                return exprCheck(fr->start.get()) || exprCheck(fr->end.get()) || exprCheck(fr->step.get()) ||
+                       hasSelfCall(fr->body.get());
+            if (auto* fe = dynamic_cast<ForEachStmt*>(s))
+                return exprCheck(fe->collection.get()) || hasSelfCall(fe->body.get());
+            return false;
+        };
+        isSelfRecursive = hasSelfCall(func->body.get());
+        if (!isSelfRecursive) {
+            function->addFnAttr(llvm::Attribute::NoRecurse);
+        }
+    }
+
     // Hint small helper functions for inlining at O2+.  OPTMAX functions
     // already get aggressive optimization; non-main functions with few
     // statements benefit from being inlined into their callers.
@@ -1500,61 +1570,6 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         (optimizationLevel >= OptimizationLevel::O3) ? kMaxInlineHintStatementsO3 : kMaxInlineHintStatements;
     if (func->name != "main" && optimizationLevel >= OptimizationLevel::O2 && func->body &&
         func->body->statements.size() <= inlineThreshold) {
-        // Check for direct self-recursion before applying alwaysinline.
-        bool isSelfRecursive = false;
-        if (optimizationLevel >= OptimizationLevel::O3 && func->body->statements.size() <= kAlwaysInlineStatements) {
-            // exprCheck: walk an expression tree for a direct call to func->name.
-            std::function<bool(Expression*)> exprCheck = [&](Expression* e) -> bool {
-                if (!e)
-                    return false;
-                if (auto* call = dynamic_cast<CallExpr*>(e)) {
-                    if (call->callee == func->name)
-                        return true;
-                    for (auto& arg : call->arguments)
-                        if (exprCheck(arg.get()))
-                            return true;
-                }
-                if (auto* bin = dynamic_cast<BinaryExpr*>(e))
-                    return exprCheck(bin->left.get()) || exprCheck(bin->right.get());
-                if (auto* un = dynamic_cast<UnaryExpr*>(e))
-                    return exprCheck(un->operand.get());
-                if (auto* tern = dynamic_cast<TernaryExpr*>(e))
-                    return exprCheck(tern->condition.get()) || exprCheck(tern->thenExpr.get()) ||
-                           exprCheck(tern->elseExpr.get());
-                return false;
-            };
-            // hasSelfCall: walk all statement kinds that can contain expressions.
-            std::function<bool(Statement*)> hasSelfCall = [&](Statement* s) -> bool {
-                if (!s)
-                    return false;
-                if (auto* blk = dynamic_cast<BlockStmt*>(s)) {
-                    for (auto& st : blk->statements)
-                        if (hasSelfCall(st.get()))
-                            return true;
-                    return false;
-                }
-                if (auto* ret = dynamic_cast<ReturnStmt*>(s))
-                    return exprCheck(ret->value.get());
-                if (auto* exprS = dynamic_cast<ExprStmt*>(s))
-                    return exprCheck(exprS->expression.get());
-                if (auto* var = dynamic_cast<VarDecl*>(s))
-                    return exprCheck(var->initializer.get());
-                if (auto* ifS = dynamic_cast<IfStmt*>(s))
-                    return exprCheck(ifS->condition.get()) || hasSelfCall(ifS->thenBranch.get()) ||
-                           hasSelfCall(ifS->elseBranch.get());
-                if (auto* wh = dynamic_cast<WhileStmt*>(s))
-                    return exprCheck(wh->condition.get()) || hasSelfCall(wh->body.get());
-                if (auto* dw = dynamic_cast<DoWhileStmt*>(s))
-                    return hasSelfCall(dw->body.get()) || exprCheck(dw->condition.get());
-                if (auto* fr = dynamic_cast<ForStmt*>(s))
-                    return exprCheck(fr->start.get()) || exprCheck(fr->end.get()) || exprCheck(fr->step.get()) ||
-                           hasSelfCall(fr->body.get());
-                if (auto* fe = dynamic_cast<ForEachStmt*>(s))
-                    return exprCheck(fe->collection.get()) || hasSelfCall(fe->body.get());
-                return false;
-            };
-            isSelfRecursive = hasSelfCall(func->body.get());
-        }
         if (optimizationLevel >= OptimizationLevel::O3 && func->body->statements.size() <= kAlwaysInlineStatements &&
             !isSelfRecursive) {
             function->addFnAttr(llvm::Attribute::AlwaysInline);
@@ -2010,24 +2025,29 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             return llvm::ConstantInt::get(getDefaultType(), 1); // 1**x → 1
     }
 
-    // Regular code generation for non-constant expressions
+    // Regular code generation for non-constant expressions.
+    // NSW (No Signed Wrap) flags are set on integer arithmetic so LLVM can
+    // assume signed overflow does not occur — matching C/Rust semantics.
+    // This unlocks critical optimisations: SCEV trip-count computation for
+    // loop vectorisation, induction-variable simplification, and aggressive
+    // strength reduction that are otherwise impossible.
     if (expr->op == "+") {
-        return builder->CreateAdd(left, right, "addtmp");
+        return builder->CreateNSWAdd(left, right, "addtmp");
     } else if (expr->op == "-") {
-        return builder->CreateSub(left, right, "subtmp");
+        return builder->CreateNSWSub(left, right, "subtmp");
     } else if (expr->op == "*") {
         // Strength reduction: multiply by power of 2 → left shift
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
             int s = log2IfPowerOf2(ci->getSExtValue());
             if (s >= 0)
-                return builder->CreateShl(left, llvm::ConstantInt::get(getDefaultType(), s), "shltmp");
+                return builder->CreateShl(left, llvm::ConstantInt::get(getDefaultType(), s), "shltmp", /*HasNUW=*/false, /*HasNSW=*/true);
         }
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left)) {
             int s = log2IfPowerOf2(ci->getSExtValue());
             if (s >= 0)
-                return builder->CreateShl(right, llvm::ConstantInt::get(getDefaultType(), s), "shltmp");
+                return builder->CreateShl(right, llvm::ConstantInt::get(getDefaultType(), s), "shltmp", /*HasNUW=*/false, /*HasNSW=*/true);
         }
-        return builder->CreateMul(left, right, "multmp");
+        return builder->CreateNSWMul(left, right, "multmp");
     } else if (expr->op == "/" || expr->op == "%") {
         bool isDivision = expr->op == "/";
 
@@ -2040,12 +2060,32 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             int s = log2IfPowerOf2(ci->getSExtValue());
             if (s >= 0) {
                 if (isDivision) {
-                    return builder->CreateSDiv(left, right, "divtmp");
+                    // For division by a known power-of-2 constant, emit the
+                    // manual shift-based signed division sequence:
+                    //   sign = n >> 63  (arithmetic, all 0s or all 1s)
+                    //   n + (sign >>> (64 - k))  →  bias for negative values
+                    //   result = biased >> k
+                    // This matches what Clang/GCC emit for signed division by
+                    // power of 2 and avoids the costly hardware sdiv.
+                    llvm::Value* shift = llvm::ConstantInt::get(getDefaultType(), s);
+                    llvm::Value* sign = builder->CreateAShr(left, llvm::ConstantInt::get(getDefaultType(), 63), "div.sign");
+                    llvm::Value* bias = builder->CreateLShr(sign, llvm::ConstantInt::get(getDefaultType(), 64 - s), "div.bias");
+                    llvm::Value* biased = builder->CreateNSWAdd(left, bias, "div.biased");
+                    return builder->CreateAShr(biased, shift, "divtmp");
                 }
-                // For modulo we still use SRem to preserve correct signed
-                // semantics (e.g. -7 % 4 == -3), but the divisor is a known
-                // non-zero constant so the zero-check is unnecessary.
-                return builder->CreateSRem(left, right, "modtmp");
+                // For modulo by a known power-of-2 constant, compute:
+                //   bias  = (n >> 63) >>> (64 - k)
+                //   result = ((n + bias) & (2^k - 1)) - bias
+                // This preserves correct signed semantics (e.g. -7 % 4 == -3)
+                // while using cheap shifts + AND instead of hardware srem.
+                {
+                    llvm::Value* mask = llvm::ConstantInt::get(getDefaultType(), (1LL << s) - 1);
+                    llvm::Value* sign = builder->CreateAShr(left, llvm::ConstantInt::get(getDefaultType(), 63), "mod.sign");
+                    llvm::Value* bias = builder->CreateLShr(sign, llvm::ConstantInt::get(getDefaultType(), 64 - s), "mod.bias");
+                    llvm::Value* biased = builder->CreateNSWAdd(left, bias, "mod.biased");
+                    llvm::Value* masked = builder->CreateAnd(biased, mask, "mod.masked");
+                    return builder->CreateNSWSub(masked, bias, "modtmp");
+                }
             }
         }
 
@@ -2101,7 +2141,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         // Mask shift amount to [0, 63] to prevent undefined behavior
         llvm::Value* mask = llvm::ConstantInt::get(getDefaultType(), 63);
         llvm::Value* safeShift = builder->CreateAnd(right, mask, "shlmask");
-        return builder->CreateShl(left, safeShift, "shltmp");
+        return builder->CreateShl(left, safeShift, "shltmp", /*HasNUW=*/false, /*HasNSW=*/true);
     } else if (expr->op == ">>") {
         // Mask shift amount to [0, 63] to prevent undefined behavior
         llvm::Value* mask = llvm::ConstantInt::get(getDefaultType(), 63);
@@ -5247,12 +5287,26 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
     loopStack.pop_back();
     if (!builder->GetInsertBlock()->getTerminator()) {
         auto* backBrWhile = builder->CreateBr(condBB);
-        // mustprogress enables loop-idiom recognition (auto memset/memcpy).
+        // Attach loop metadata to the while-loop back-edge, matching for-loop
+        // hints: mustprogress for loop-idiom recognition, plus interleave/
+        // vectorize hints at O2+/O3 to improve SIMD throughput.
         llvm::MDNode* mustProgress =
             llvm::MDNode::get(*context, {llvm::MDString::get(*context, "llvm.loop.mustprogress")});
-        llvm::SmallVector<llvm::Metadata*, 2> loopMDs;
+        llvm::SmallVector<llvm::Metadata*, 4> loopMDs;
         loopMDs.push_back(nullptr);
         loopMDs.push_back(mustProgress);
+        if (optimizationLevel >= OptimizationLevel::O2 && enableVectorize_) {
+            llvm::MDNode* interleave = llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
+                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))});
+            loopMDs.push_back(interleave);
+        }
+        if (optimizationLevel >= OptimizationLevel::O3 && enableVectorize_) {
+            llvm::MDNode* vecWidth = llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.width"),
+                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))});
+            loopMDs.push_back(vecWidth);
+        }
         llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
         loopMD->replaceOperandWith(0, loopMD);
         backBrWhile->setMetadata(llvm::LLVMContext::MD_loop, loopMD);
@@ -5287,7 +5341,31 @@ void CodeGenerator::generateDoWhile(DoWhileStmt* stmt) {
     builder->SetInsertPoint(condBB);
     llvm::Value* condition = generateExpression(stmt->condition.get());
     llvm::Value* condBool = toBool(condition);
-    builder->CreateCondBr(condBool, bodyBB, endBB);
+    auto* backBrDoWhile = builder->CreateCondBr(condBool, bodyBB, endBB);
+    // Attach loop metadata to the do-while back-edge, matching for-loop and
+    // while-loop hints for consistent vectorization across all loop forms.
+    {
+        llvm::MDNode* mustProgress =
+            llvm::MDNode::get(*context, {llvm::MDString::get(*context, "llvm.loop.mustprogress")});
+        llvm::SmallVector<llvm::Metadata*, 4> loopMDs;
+        loopMDs.push_back(nullptr);
+        loopMDs.push_back(mustProgress);
+        if (optimizationLevel >= OptimizationLevel::O2 && enableVectorize_) {
+            llvm::MDNode* interleave = llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
+                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))});
+            loopMDs.push_back(interleave);
+        }
+        if (optimizationLevel >= OptimizationLevel::O3 && enableVectorize_) {
+            llvm::MDNode* vecWidth = llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.width"),
+                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))});
+            loopMDs.push_back(vecWidth);
+        }
+        llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
+        loopMD->replaceOperandWith(0, loopMD);
+        backBrDoWhile->setMetadata(llvm::LLVMContext::MD_loop, loopMD);
+    }
 
     // End block
     builder->SetInsertPoint(endBB);
@@ -5372,7 +5450,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     // Increment block
     builder->SetInsertPoint(incBB);
     llvm::Value* nextVal = builder->CreateLoad(getDefaultType(), iterAlloca, stmt->iteratorVar.c_str());
-    llvm::Value* incVal = builder->CreateAdd(nextVal, stepVal, "nextvar");
+    llvm::Value* incVal = builder->CreateNSWAdd(nextVal, stepVal, "nextvar");
     builder->CreateStore(incVal, iterAlloca);
     auto* backBr = builder->CreateBr(condBB);
 
