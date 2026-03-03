@@ -16,7 +16,7 @@ std::string Value::toString() const {
         char buf[32];
         int len = std::snprintf(buf, sizeof(buf), "%g", floatValue);
         if (len < 0 || static_cast<size_t>(len) >= sizeof(buf))
-            return "NaN";
+            return "<float>";
         return std::string(buf, static_cast<size_t>(len));
     }
     case Type::STRING:
