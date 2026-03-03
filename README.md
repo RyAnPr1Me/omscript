@@ -8,11 +8,17 @@ A low-level, C-like programming language with dynamic typing, featuring a **heav
 - **Dynamic Typing**: Variables are dynamically typed, no explicit type declarations needed
 - **Aggressive AOT Compilation**: Multi-level LLVM optimization (O0/O1/O2/O3) for maximum performance
 - **Reference Counted Memory**: Automatic memory management using malloc/free with deterministic deallocation
+- **Lambda Expressions**: Anonymous functions with `|x| x * 2` syntax for use with higher-order builtins
+- **Pipe Operator**: Left-to-right function chaining with `expr |> fn`
+- **Spread Operator**: Array unpacking in literals with `[1, ...arr, 2]`
 - **For Loops with Ranges**: Modern range-based iteration with `for (i in start...end...step)`
+- **For-Each Loops**: Iterate over arrays with `for (x in array)`
+- **Switch/Case**: Multi-way branching with `switch`/`case`/`default`
 - **Do-While Loops**: Execute body at least once with `do { ... } while (cond);`
-- **63 Built-in Functions**: Math, array manipulation, strings, character classification, type conversion, system, and I/O
+- **69 Built-in Functions**: Math, array manipulation, strings, character classification, type conversion, system, and I/O
 - **Error Handling**: `try`/`catch`/`throw` for structured error handling
 - **Enum Declarations**: Named integer constants with auto-increment
+- **Default Parameters**: Optional function parameters with default values
 - **Null Coalescing Operator**: `??` for concise null/zero fallback expressions
 - **Multi-line Strings**: Triple-quoted `"""..."""` strings with embedded newlines
 - **Bytecode Runtime**: Interprets dynamically typed sections at runtime
@@ -59,7 +65,15 @@ fn functionName(param1, param2) {
     // function body
     return value;
 }
+
+// Default parameters
+fn greet(name, greeting = "Hello") {
+    println(greeting);
+    println(name);
+    return 0;
+}
 ```
+Functions support forward references — a function can call another function defined later in the file. Recursive and mutually recursive calls are also supported.
 
 ### Variables
 ```omscript
@@ -69,6 +83,9 @@ var z: int = 30;      // optional type annotation
 var h = 0xFF;         // hex literal (255)
 var o = 0o17;         // octal literal (15)
 var b = 0b1010;       // binary literal (10)
+var n = null;         // null value
+var t = true;         // boolean true (1)
+var f = false;        // boolean false (0)
 ```
 Type annotations are optional in general but required inside `OPTMAX` blocks.
 
@@ -100,6 +117,31 @@ for (i in 0...100...5) {     // 0, 5, 10, ..., 95
     // step by 5
 }
 
+// For-each loop over arrays
+var arr = [10, 20, 30];
+for (x in arr) {
+    print(x);
+}
+
+// Switch/case
+switch (value) {
+    case 1:
+        print(1);
+        break;
+    case 2:
+        print(2);
+        break;
+    default:
+        print(0);
+}
+
+// Error handling
+try {
+    throw 42;
+} catch (err) {
+    print(err);  // 42
+}
+
 // Break and continue
 break;
 continue;
@@ -117,6 +159,32 @@ var p = pow(2, 8);       // integer exponentiation: p = 256
 var s = sqrt(16);        // integer square root: s = 4
 ```
 See [LANGUAGE_REFERENCE.md](LANGUAGE_REFERENCE.md) for the full list of 69 built-in functions.
+
+### Lambda Expressions
+```omscript
+// Single parameter
+var doubled = array_map([1, 2, 3], |x| x * 2);     // [2, 4, 6]
+
+// Multiple parameters
+var sum = array_reduce([1, 2, 3], |acc, x| acc + x, 0);  // 6
+
+// Filter with lambda predicate
+var evens = array_filter([1, 2, 3, 4], |x| x % 2 == 0);  // [2, 4]
+```
+
+### Pipe Operator
+```omscript
+// expr |> fn  is equivalent to  fn(expr)
+fn double(x) { return x * 2; }
+var result = 5 |> double;            // 10
+var length = [1, 2, 3] |> len;      // 3
+```
+
+### Spread Operator
+```omscript
+var a = [1, 2, 3];
+var b = [0, ...a, 4];    // [0, 1, 2, 3, 4]
+```
 
 ### OPTMAX Blocks
 Use `OPTMAX=:` and `OPTMAX!:` to tag functions that require maximal optimization. Inside these functions:
@@ -137,14 +205,17 @@ OPTMAX!:
 ```
 
 ### Expressions
-- Arithmetic: `+`, `-`, `*`, `/`, `%`
+- Arithmetic: `+`, `-`, `*`, `/`, `%`, `**` (exponentiation)
 - Comparison: `==`, `!=`, `<`, `<=`, `>`, `>=`
 - Logical: `&&`, `||`, `!`
 - Bitwise: `&`, `|`, `^`, `~`, `<<`, `>>`
 - Ternary: `condition ? then_expr : else_expr`
+- Null Coalescing: `value ?? fallback`
 - Assignment: `=`
-- Compound Assignment: `+=`, `-=`, `*=`, `/=`, `%=`
+- Compound Assignment: `+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `|=`, `^=`, `<<=`, `>>=`
 - Increment/Decrement: `++x`, `--x` (prefix), `x++`, `x--` (postfix)
+- Pipe: `expr |> fn`
+- Lambda: `|x| x * 2`
 
 ### Comments
 ```omscript
@@ -186,6 +257,9 @@ make
 # Run a source file (compile + execute)
 ./build/omsc run source.om
 
+# Validate syntax without compiling
+./build/omsc check source.om
+
 # Inspect tokens
 ./build/omsc lex source.om
 
@@ -199,8 +273,30 @@ make
 # Keep temporary outputs when running
 ./build/omsc run source.om --keep-temps
 
+# Show timing breakdown
+./build/omsc run source.om --time
+
 # Clean default outputs
 ./build/omsc clean
+
+# Package manager
+./build/omsc pkg install <package>
+./build/omsc pkg remove <package>
+./build/omsc pkg list
+./build/omsc pkg search <query>
+
+# Install/update omsc to PATH
+./build/omsc install
+./build/omsc update
+
+# Optimization levels
+./build/omsc run source.om -O0    # No optimization
+./build/omsc run source.om -O1    # Basic
+./build/omsc run source.om -O2    # Moderate (default)
+./build/omsc run source.om -O3    # Aggressive
+
+# Codegen options
+./build/omsc source.om -march=native -flto -ffast-math
 
 # Flag aliases (equivalent to the commands above)
 ./build/omsc --build source.om
@@ -209,8 +305,6 @@ make
 ./build/omsc --run source.om
 ./build/omsc --ast source.om
 ./build/omsc --ir source.om
-./build/omsc emit-ir source.om --output output.ll
-./build/omsc run source.om -k
 
 # Run the compiled program
 ./output
@@ -320,8 +414,10 @@ fn main() {
 OmScript uses dynamic typing with runtime type inference:
 - **Integer**: 64-bit signed integers
 - **Float**: 64-bit floating point numbers
-- **String**: UTF-8 strings
-- **None**: Absence of value
+- **String**: Reference-counted UTF-8 strings
+- **Array**: Dynamically-sized, heterogeneous arrays
+- **Boolean**: `true` (1) and `false` (0), represented as integers
+- **None/Null**: Absence of value (`null`)
 
 Types are determined at runtime, allowing flexible code while maintaining performance through LLVM compilation where possible.
 
@@ -341,14 +437,15 @@ bash run_tests.sh
 ```
 omscript/
 ├── CMakeLists.txt        # Build configuration
-├── Makefile             # Convenience build targets
 ├── include/             # Header files
 │   ├── ast.h           # AST node definitions
 │   ├── bytecode.h      # Bytecode emitter
 │   ├── codegen.h       # LLVM code generator
 │   ├── compiler.h      # Compiler driver
+│   ├── diagnostic.h    # Diagnostic utilities
 │   ├── lexer.h         # Lexer/tokenizer
-│   └── parser.h        # Parser
+│   ├── parser.h        # Parser
+│   └── version.h       # Version constants
 ├── src/                # Implementation files
 │   ├── ast.cpp
 │   ├── bytecode.cpp
@@ -358,15 +455,18 @@ omscript/
 │   ├── main.cpp
 │   └── parser.cpp
 ├── runtime/            # Runtime system
-│   ├── value.cpp      # Dynamic values
+│   ├── aot_profile.cpp # Adaptive JIT / AOT profiling
+│   ├── aot_profile.h
+│   ├── jit.cpp         # JIT compiler
+│   ├── jit.h
+│   ├── refcounted.h    # Reference-counted types
+│   ├── value.cpp       # Dynamic values
 │   ├── value.h
-│   ├── vm.cpp         # Bytecode VM
+│   ├── vm.cpp          # Bytecode VM
 │   └── vm.h
-└── examples/          # Example programs
-    ├── factorial.om
-    ├── fibonacci.om
-    ├── advanced.om
-    └── ...            # 40+ examples covering all language features
+├── tests/             # Unit tests
+├── examples/          # Example programs (90+ examples)
+└── user-packages/     # User-installable packages
 ```
 
 ## License
