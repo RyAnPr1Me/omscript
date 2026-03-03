@@ -10,6 +10,7 @@
 #include <llvm/Config/llvm-config.h>
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/LegacyPassManager.h>
+#include <llvm/IR/MDBuilder.h>
 #include <llvm/IR/Verifier.h>
 #include <llvm/MC/TargetRegistry.h>
 #include <llvm/Passes/OptimizationLevel.h>
@@ -751,14 +752,20 @@ llvm::Function* CodeGenerator::getOrDeclareStrlen() {
     if (auto* fn = module->getFunction("strlen"))
         return fn;
     auto* ty = llvm::FunctionType::get(getDefaultType(), {llvm::PointerType::getUnqual(*context)}, false);
-    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strlen", module.get());
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strlen", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
+    return fn;
 }
 
 llvm::Function* CodeGenerator::getOrDeclareMalloc() {
     if (auto* fn = module->getFunction("malloc"))
         return fn;
     auto* ty = llvm::FunctionType::get(llvm::PointerType::getUnqual(*context), {getDefaultType()}, false);
-    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "malloc", module.get());
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "malloc", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addRetAttr(llvm::Attribute::NoAlias); // returned pointer does not alias any pointer visible to the caller
+    return fn;
 }
 
 llvm::Function* CodeGenerator::getOrDeclareStrcpy() {
@@ -766,7 +773,9 @@ llvm::Function* CodeGenerator::getOrDeclareStrcpy() {
         return fn;
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy, ptrTy}, false);
-    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strcpy", module.get());
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strcpy", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    return fn;
 }
 
 llvm::Function* CodeGenerator::getOrDeclareStrcat() {
@@ -774,7 +783,9 @@ llvm::Function* CodeGenerator::getOrDeclareStrcat() {
         return fn;
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy, ptrTy}, false);
-    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strcat", module.get());
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strcat", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    return fn;
 }
 
 llvm::Function* CodeGenerator::getOrDeclareStrcmp() {
@@ -782,7 +793,10 @@ llvm::Function* CodeGenerator::getOrDeclareStrcmp() {
         return fn;
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     auto* ty = llvm::FunctionType::get(builder->getInt32Ty(), {ptrTy, ptrTy}, false);
-    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strcmp", module.get());
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strcmp", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
+    return fn;
 }
 
 llvm::Function* CodeGenerator::getOrDeclarePutchar() {
@@ -804,14 +818,20 @@ llvm::Function* CodeGenerator::getOrDeclareExit() {
     if (auto* fn = module->getFunction("exit"))
         return fn;
     auto* ty = llvm::FunctionType::get(llvm::Type::getVoidTy(*context), {llvm::Type::getInt32Ty(*context)}, false);
-    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "exit", module.get());
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "exit", module.get());
+    fn->addFnAttr(llvm::Attribute::NoReturn);
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    return fn;
 }
 
 llvm::Function* CodeGenerator::getOrDeclareAbort() {
     if (auto* fn = module->getFunction("abort"))
         return fn;
     auto* ty = llvm::FunctionType::get(llvm::Type::getVoidTy(*context), false);
-    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "abort", module.get());
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "abort", module.get());
+    fn->addFnAttr(llvm::Attribute::NoReturn);
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    return fn;
 }
 
 llvm::Function* CodeGenerator::getOrDeclareSnprintf() {
@@ -827,7 +847,10 @@ llvm::Function* CodeGenerator::getOrDeclareMemchr() {
         return fn;
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy, llvm::Type::getInt32Ty(*context), getDefaultType()}, false);
-    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "memchr", module.get());
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "memchr", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
+    return fn;
 }
 
 llvm::Function* CodeGenerator::getOrDeclareFree() {
@@ -835,7 +858,9 @@ llvm::Function* CodeGenerator::getOrDeclareFree() {
         return fn;
     auto* ty =
         llvm::FunctionType::get(llvm::Type::getVoidTy(*context), {llvm::PointerType::getUnqual(*context)}, false);
-    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "free", module.get());
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "free", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    return fn;
 }
 
 llvm::Function* CodeGenerator::getOrDeclareStrstr() {
@@ -851,7 +876,10 @@ llvm::Function* CodeGenerator::getOrDeclareMemcpy() {
         return fn;
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy, ptrTy, getDefaultType()}, false);
-    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "memcpy", module.get());
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "memcpy", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addRetAttr(llvm::Attribute::NoAlias); // destination pointer does not alias source
+    return fn;
 }
 
 llvm::Function* CodeGenerator::getOrDeclareMemmove() {
@@ -859,7 +887,9 @@ llvm::Function* CodeGenerator::getOrDeclareMemmove() {
         return fn;
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy, ptrTy, getDefaultType()}, false);
-    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "memmove", module.get());
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "memmove", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    return fn;
 }
 
 llvm::Function* CodeGenerator::getOrDeclareToupper() {
@@ -903,21 +933,30 @@ llvm::Function* CodeGenerator::getOrDeclareFloor() {
     if (auto* fn = module->getFunction("floor"))
         return fn;
     auto* ty = llvm::FunctionType::get(getFloatType(), {getFloatType()}, false);
-    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "floor", module.get());
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "floor", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
+    return fn;
 }
 
 llvm::Function* CodeGenerator::getOrDeclareCeil() {
     if (auto* fn = module->getFunction("ceil"))
         return fn;
     auto* ty = llvm::FunctionType::get(getFloatType(), {getFloatType()}, false);
-    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "ceil", module.get());
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "ceil", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
+    return fn;
 }
 
 llvm::Function* CodeGenerator::getOrDeclareRound() {
     if (auto* fn = module->getFunction("round"))
         return fn;
     auto* ty = llvm::FunctionType::get(getFloatType(), {getFloatType()}, false);
-    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "round", module.get());
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "round", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
+    return fn;
 }
 
 llvm::Function* CodeGenerator::getOrDeclareQsort() {
@@ -1262,6 +1301,15 @@ void CodeGenerator::generate(Program* program) {
         throw DiagnosticError(Diagnostic{DiagnosticSeverity::Error, {0, 0}, "No 'main' function defined"});
     }
 
+    // Set fast-math flags on the builder for all generated FP operations.
+    // This enables FMA fusion (a*b+c → fmadd), reassociation, reciprocal
+    // approximations, and better SIMD vectorisation of floating-point loops.
+    if (useFastMath_) {
+        llvm::FastMathFlags FMF;
+        FMF.setFast(); // enables all unsafe FP optimisations
+        builder->setFastMathFlags(FMF);
+    }
+
     // Forward-declare all functions so that any function can reference any
     // other regardless of source-file ordering (enables mutual recursion).
     for (auto& func : program->functions) {
@@ -1269,6 +1317,15 @@ void CodeGenerator::generate(Program* program) {
         llvm::FunctionType* funcType = llvm::FunctionType::get(getDefaultType(), paramTypes, false);
         llvm::Function* function =
             llvm::Function::Create(funcType, llvm::Function::ExternalLinkage, func->name, module.get());
+        // Optimization-enabling attributes for all user functions:
+        // nounwind   – omscript has no C++ exceptions; elides LSDA / unwind tables
+        //              and turns calls into simpler instructions.
+        // mustprogress – every function is required to make forward progress;
+        //              unlocks loop-idiom recognition (auto-memset/memcpy detection).
+        // nosync     – no synchronisation primitives; enables load/store hoisting.
+        function->addFnAttr(llvm::Attribute::NoUnwind);
+        function->addFnAttr(llvm::Attribute::MustProgress);
+        function->addFnAttr(llvm::Attribute::NoSync);
         functions[func->name] = function;
         functionDecls_[func->name] = func.get();
     }
@@ -1795,7 +1852,12 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         const char* opName = isDivision ? "div.op" : "mod.op";
         llvm::BasicBlock* zeroBB = llvm::BasicBlock::Create(*context, zeroName, function);
         llvm::BasicBlock* opBB = llvm::BasicBlock::Create(*context, opName, function);
-        builder->CreateCondBr(isZero, zeroBB, opBB);
+        // Branch weights: division by zero is extremely unlikely; mark the
+        // error path cold so the branch predictor favours the fast path and
+        // the code layout keeps the error stub out of the hot I-cache region.
+        llvm::MDBuilder mdBuilder(*context);
+        auto* brWeights = mdBuilder.createBranchWeights(1, 1000); // 1:1000 zero:nonzero
+        builder->CreateCondBr(isZero, zeroBB, opBB, brWeights);
 
         builder->SetInsertPoint(zeroBB);
         const char* messageText = isDivision ? "Runtime error: division by zero\n" : "Runtime error: modulo by zero\n";
@@ -4975,7 +5037,16 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
     generateStatement(stmt->body.get());
     loopStack.pop_back();
     if (!builder->GetInsertBlock()->getTerminator()) {
-        builder->CreateBr(condBB);
+        auto* backBrWhile = builder->CreateBr(condBB);
+        // mustprogress enables loop-idiom recognition (auto memset/memcpy).
+        llvm::MDNode* mustProgress =
+            llvm::MDNode::get(*context, {llvm::MDString::get(*context, "llvm.loop.mustprogress")});
+        llvm::SmallVector<llvm::Metadata*, 2> loopMDs;
+        loopMDs.push_back(nullptr);
+        loopMDs.push_back(mustProgress);
+        llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
+        loopMD->replaceOperandWith(0, loopMD);
+        backBrWhile->setMetadata(llvm::LLVMContext::MD_loop, loopMD);
     }
 
     // End block
@@ -5101,13 +5172,21 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     // in runOptimizationPasses(); per-loop forced enable hints are omitted to
     // avoid "unable to perform the requested transformation" diagnostic warnings
     // when the optimizer cannot satisfy them.
-    if (optimizationLevel >= OptimizationLevel::O2 && enableVectorize_) {
-        llvm::MDNode* interleave = llvm::MDNode::get(
-            *context, {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
-                       llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))});
-        llvm::SmallVector<llvm::Metadata*, 2> loopMDs;
+    {
+        // Loop metadata: mustprogress enables loop-idiom recognition (auto
+        // memset/memcpy detection); interleave.count improves SIMD throughput.
+        llvm::MDNode* mustProgress =
+            llvm::MDNode::get(*context, {llvm::MDString::get(*context, "llvm.loop.mustprogress")});
+        llvm::SmallVector<llvm::Metadata*, 3> loopMDs;
         loopMDs.push_back(nullptr); // self-reference placeholder (fixed below)
-        loopMDs.push_back(interleave);
+        loopMDs.push_back(mustProgress);
+        if (optimizationLevel >= OptimizationLevel::O2 && enableVectorize_) {
+            llvm::MDNode* interleave = llvm::MDNode::get(
+                *context,
+                {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
+                 llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))});
+            loopMDs.push_back(interleave);
+        }
         llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
         loopMD->replaceOperandWith(0, loopMD);
         backBr->setMetadata(llvm::LLVMContext::MD_loop, loopMD);
@@ -5519,6 +5598,12 @@ void CodeGenerator::runOptimizationPasses() {
     PTO.LoopVectorization = enableVectorize_;
     PTO.SLPVectorization = enableVectorize_;
     PTO.LoopUnrolling = enableUnrollLoops_;
+    PTO.LoopInterleaving = enableVectorize_; // enable loop interleaving at O2+
+    if (optimizationLevel == OptimizationLevel::O3) {
+        PTO.MergeFunctions = true;       // deduplicate identical functions → smaller icache footprint
+        PTO.CallGraphProfile = true;     // use call-graph profile data for inlining decisions
+        PTO.InlinerThreshold = 300;      // more aggressive inlining than the default ~225
+    }
     llvm::PassBuilder PB(targetMachine.get(), PTO);
 
     // At O3 with -floop-optimize, register LoopDistributePass to run just
