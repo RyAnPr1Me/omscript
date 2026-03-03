@@ -57,6 +57,5 @@ When adding a new language feature, update all relevant pipeline stages:
 2. **Parser** (`src/parser.cpp`, `include/parser.h`) — Grammar rules
 3. **AST** (`include/ast.h`) — New node types
 4. **Codegen** (`src/codegen.cpp`) — LLVM IR generation
-5. **Bytecode** (`src/codegen.cpp`) — Bytecode emission (if applicable)
-6. **Tests** — Unit tests in `tests/` and integration tests in `examples/`
-7. **Documentation** — Update `LANGUAGE_REFERENCE.md`
+5. **Tests** — Unit tests in `tests/` and integration tests in `examples/`
+6. **Documentation** — Update `LANGUAGE_REFERENCE.md`

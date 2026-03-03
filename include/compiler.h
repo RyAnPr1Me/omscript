@@ -50,7 +50,7 @@ class Compiler {
     void setOptMax(bool enable) {
         optMax_ = enable;
     }
-    /// Enable or disable hybrid bytecode/JIT compilation for untyped functions (default: true).
+    /// Enable or disable adaptive JIT runtime for hot function recompilation (default: true).
     void setJIT(bool enable) {
         jit_ = enable;
     }

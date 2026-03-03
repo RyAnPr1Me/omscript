@@ -1,7 +1,6 @@
 #include "codegen.h"
 #include "lexer.h"
 #include "parser.h"
-#include "vm.h"
 #include <gtest/gtest.h>
 
 #include <cstdio>
@@ -739,185 +738,8 @@ TEST(CodegenTest, ArrayExpressionError) {
 }
 
 // ===========================================================================
-// Dynamic compilation / Bytecode generation
 // ===========================================================================
 
-TEST(CodegenTest, BytecodeGeneration) {
-    CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer("fn main() { var x = 42; return x; }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    codegen.generateBytecode(program.get());
-    auto& emitter = codegen.getBytecodeEmitter();
-    EXPECT_GT(emitter.getCode().size(), 0u);
-}
-
-TEST(CodegenTest, BytecodeArithmetic) {
-    CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer("fn main() { return 1 + 2 * 3 - 4 / 2; }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    codegen.generateBytecode(program.get());
-    auto& emitter = codegen.getBytecodeEmitter();
-    EXPECT_GT(emitter.getCode().size(), 0u);
-}
-
-TEST(CodegenTest, BytecodeControlFlow) {
-    CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer("fn main() { if (1) { return 1; } return 0; }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    codegen.generateBytecode(program.get());
-    auto& emitter = codegen.getBytecodeEmitter();
-    EXPECT_GT(emitter.getCode().size(), 0u);
-}
-
-TEST(CodegenTest, BytecodeWhileLoop) {
-    CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer("fn main() { var x = 0; while (x < 10) { x = x + 1; } return x; }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    codegen.generateBytecode(program.get());
-    auto& emitter = codegen.getBytecodeEmitter();
-    EXPECT_GT(emitter.getCode().size(), 0u);
-}
-
-TEST(CodegenTest, BytecodeComparison) {
-    CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer("fn main() { var a = 1 == 1; var b = 1 != 2; var c = 1 < 2; var d = 1 <= 2; var e = 2 > 1; var f = 2 "
-                ">= 1; return 0; }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    codegen.generateBytecode(program.get());
-    auto& emitter = codegen.getBytecodeEmitter();
-    EXPECT_GT(emitter.getCode().size(), 0u);
-}
-
-TEST(CodegenTest, BytecodeLogical) {
-    CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer("fn main() { var a = 1 && 1; var b = 0 || 1; var c = !0; return 0; }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    codegen.generateBytecode(program.get());
-    auto& emitter = codegen.getBytecodeEmitter();
-    EXPECT_GT(emitter.getCode().size(), 0u);
-}
-
-TEST(CodegenTest, BytecodeString) {
-    CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer("fn main() { var s = \"hello\"; return 0; }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    codegen.generateBytecode(program.get());
-    auto& emitter = codegen.getBytecodeEmitter();
-    EXPECT_GT(emitter.getCode().size(), 0u);
-}
-
-TEST(CodegenTest, BytecodeFloat) {
-    CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer("fn main() { var x = 3.14; return 0; }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    codegen.generateBytecode(program.get());
-    auto& emitter = codegen.getBytecodeEmitter();
-    EXPECT_GT(emitter.getCode().size(), 0u);
-}
-
-TEST(CodegenTest, BytecodeCall) {
-    CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer("fn add(a, b) { return a; } fn main() { return add(1, 2); }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    codegen.generateBytecode(program.get());
-    auto& emitter = codegen.getBytecodeEmitter();
-    EXPECT_GT(emitter.getCode().size(), 0u);
-}
-
-TEST(CodegenTest, BytecodeDoWhile) {
-    CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer("fn main() { var x = 0; do { x = x + 1; } while (x < 5); return x; }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    codegen.generateBytecode(program.get());
-    auto& emitter = codegen.getBytecodeEmitter();
-    EXPECT_GT(emitter.getCode().size(), 0u);
-}
-
-TEST(CodegenTest, BytecodeUnaryNeg) {
-    CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer("fn main() { return -5; }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    codegen.generateBytecode(program.get());
-    auto& emitter = codegen.getBytecodeEmitter();
-    EXPECT_GT(emitter.getCode().size(), 0u);
-}
-
-TEST(CodegenTest, BytecodeUnaryNot) {
-    CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer("fn main() { return !0; }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    codegen.generateBytecode(program.get());
-    auto& emitter = codegen.getBytecodeEmitter();
-    EXPECT_GT(emitter.getCode().size(), 0u);
-}
-
-TEST(CodegenTest, BytecodeTernary) {
-    CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer("fn main() { return 1 ? 10 : 20; }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    codegen.generateBytecode(program.get());
-    auto& emitter = codegen.getBytecodeEmitter();
-    EXPECT_GT(emitter.getCode().size(), 0u);
-}
-
-TEST(CodegenTest, BytecodeModulo) {
-    CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer("fn main() { return 10 % 3; }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    codegen.generateBytecode(program.get());
-    auto& emitter = codegen.getBytecodeEmitter();
-    EXPECT_GT(emitter.getCode().size(), 0u);
-}
-
-TEST(CodegenTest, BytecodeVarNoInit) {
-    CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer("fn main() { var x; return 0; }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    codegen.generateBytecode(program.get());
-    auto& emitter = codegen.getBytecodeEmitter();
-    EXPECT_GT(emitter.getCode().size(), 0u);
-}
-
-TEST(CodegenTest, BytecodeIfElse) {
-    CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer("fn main() { if (1) { return 1; } else { return 0; } }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    codegen.generateBytecode(program.get());
-    auto& emitter = codegen.getBytecodeEmitter();
-    EXPECT_GT(emitter.getCode().size(), 0u);
-}
 
 // ===========================================================================
 // Float-specific stdlib functions
@@ -1034,85 +856,16 @@ TEST(CodegenTest, MinWrongArgs) {
 }
 
 // ===========================================================================
-// Bytecode for-loop generation (covers lines 2362-2406)
 // ===========================================================================
 
-TEST(CodegenTest, BytecodeForLoop) {
-    CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer("fn main() { var s = 0; for (i in 0...10) { s = s + i; } return s; }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    codegen.generateBytecode(program.get());
-    EXPECT_GT(codegen.getBytecodeEmitter().getCode().size(), 0u);
-}
-
-TEST(CodegenTest, BytecodeForLoopWithStep) {
-    CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer("fn main() { var s = 0; for (i in 0...10...2) { s = s + i; } return s; }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    codegen.generateBytecode(program.get());
-    EXPECT_GT(codegen.getBytecodeEmitter().getCode().size(), 0u);
-}
 
 // ===========================================================================
-// Bytecode break/continue
 // ===========================================================================
 
-TEST(CodegenTest, BytecodeBreak) {
-    CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer("fn main() { var x = 0; while (1) { x = x + 1; if (x == 5) { break; } } return x; }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    EXPECT_THROW(codegen.generateBytecode(program.get()), std::runtime_error);
-}
-
-TEST(CodegenTest, BytecodeContinue) {
-    CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer("fn main() { var s = 0; var x = 0; while (x < 10) { x = x + 1; if (x == 5) { continue; } s = s + x; } "
-                "return s; }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    EXPECT_THROW(codegen.generateBytecode(program.get()), std::runtime_error);
-}
 
 // ===========================================================================
-// Bytecode postfix/prefix/assignment
 // ===========================================================================
 
-TEST(CodegenTest, BytecodePostfixIncrement) {
-    CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer("fn main() { var x = 0; x++; return x; }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    codegen.generateBytecode(program.get());
-    EXPECT_GT(codegen.getBytecodeEmitter().getCode().size(), 0u);
-}
-
-TEST(CodegenTest, BytecodePrefixDecrement) {
-    CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer("fn main() { var x = 5; --x; return x; }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    codegen.generateBytecode(program.get());
-    EXPECT_GT(codegen.getBytecodeEmitter().getCode().size(), 0u);
-}
-
-TEST(CodegenTest, BytecodeAssignment) {
-    CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer("fn main() { var x = 0; x = 42; return x; }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    codegen.generateBytecode(program.get());
-    EXPECT_GT(codegen.getBytecodeEmitter().getCode().size(), 0u);
-}
 
 // ===========================================================================
 // Float operations in LLVM codegen
@@ -1438,19 +1191,8 @@ TEST(CodegenTest, NestedFunctionCalls) {
 }
 
 // ===========================================================================
-// Bytecode nested if-else
 // ===========================================================================
 
-TEST(CodegenTest, BytecodeNestedIfElse) {
-    CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer(
-        "fn main() { var x = 5; if (x > 0) { if (x > 10) { return 2; } else { return 1; } } else { return 0; } }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    codegen.generateBytecode(program.get());
-    EXPECT_GT(codegen.getBytecodeEmitter().getCode().size(), 0u);
-}
 
 // ===========================================================================
 // Multiple compound assignments
@@ -1463,18 +1205,8 @@ TEST(CodegenTest, AllCompoundAssignments) {
 }
 
 // ===========================================================================
-// Bytecode block statement
 // ===========================================================================
 
-TEST(CodegenTest, BytecodeBlock) {
-    CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer("fn main() { { var x = 1; } return 0; }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    codegen.generateBytecode(program.get());
-    EXPECT_GT(codegen.getBytecodeEmitter().getCode().size(), 0u);
-}
 
 // ===========================================================================
 // Float-specific stdlib calls
@@ -1687,154 +1419,40 @@ TEST(CodegenTest, FloatPrefixDecrement) {
 }
 
 // ===========================================================================
-// Bytecode for-loop variable load/store
 // ===========================================================================
 
-TEST(CodegenTest, BytecodeForLoopVariableOps) {
-    CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer("fn main() { var total = 0; for (i in 0...5) { total = total + i; } return total; }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    codegen.generateBytecode(program.get());
-    EXPECT_GT(codegen.getBytecodeEmitter().getCode().size(), 0u);
-}
 
 // ===========================================================================
-// Bytecode break/continue in while loops
 // ===========================================================================
 
-TEST(CodegenTest, BytecodeWhileBreak) {
-    CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer("fn main() { var x = 0; while (x < 100) { x = x + 1; if (x == 10) { break; } } return x; }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    EXPECT_THROW(codegen.generateBytecode(program.get()), std::runtime_error);
-}
-
-TEST(CodegenTest, BytecodeWhileContinue) {
-    CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer("fn main() { var s = 0; var x = 0; while (x < 10) { x = x + 1; if (x == 5) { continue; } s = s + x; } "
-                "return s; }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    EXPECT_THROW(codegen.generateBytecode(program.get()), std::runtime_error);
-}
 
 // ===========================================================================
-// Bytecode expression statement
 // ===========================================================================
 
-TEST(CodegenTest, BytecodeExpressionStatement) {
-    CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer("fn main() { 1 + 2; return 0; }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    codegen.generateBytecode(program.get());
-    EXPECT_GT(codegen.getBytecodeEmitter().getCode().size(), 0u);
-}
 
 // ===========================================================================
-// Bytecode identifier load
 // ===========================================================================
 
-TEST(CodegenTest, BytecodeIdentifier) {
-    CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer("fn main() { var x = 10; var y = x + 1; return y; }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    codegen.generateBytecode(program.get());
-    EXPECT_GT(codegen.getBytecodeEmitter().getCode().size(), 0u);
-}
 
 // ===========================================================================
-// Bytecode postfix decrement and prefix increment
 // ===========================================================================
 
-TEST(CodegenTest, BytecodePostfixDecrement) {
-    CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer("fn main() { var x = 5; x--; return x; }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    codegen.generateBytecode(program.get());
-    EXPECT_GT(codegen.getBytecodeEmitter().getCode().size(), 0u);
-}
-
-TEST(CodegenTest, BytecodePrefixIncrement) {
-    CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer("fn main() { var x = 5; ++x; return x; }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    codegen.generateBytecode(program.get());
-    EXPECT_GT(codegen.getBytecodeEmitter().getCode().size(), 0u);
-}
 
 // ===========================================================================
-// Bytecode return void
 // ===========================================================================
 
-TEST(CodegenTest, BytecodeReturnVoid) {
-    CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer("fn main() { return; }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    codegen.generateBytecode(program.get());
-    EXPECT_GT(codegen.getBytecodeEmitter().getCode().size(), 0u);
-}
 
 // ===========================================================================
-// Bytecode unsupported unary (~) error
 // ===========================================================================
 
-TEST(CodegenTest, BytecodeUnsupportedUnary) {
-    // The ~ operator is now supported in bytecode via the BIT_NOT opcode.
-    CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer("fn main() { return ~5; }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    codegen.generateBytecode(program.get());
-
-    VM vm;
-    vm.execute(codegen.getBytecodeEmitter().getCode());
-    EXPECT_EQ(vm.getLastReturn().asInt(), ~static_cast<int64_t>(5));
-}
 
 // ===========================================================================
-// Bytecode stdlib function error
 // ===========================================================================
 
-TEST(CodegenTest, BytecodeStdlibError) {
-    // print() is now supported in bytecode via the PRINT opcode.
-    // Other stdlib functions should still throw.
-    CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer("fn main() { var x = abs(5); return 0; }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    EXPECT_THROW(codegen.generateBytecode(program.get()), std::runtime_error);
-}
 
 // ===========================================================================
-// Bytecode variable declaration without init
 // ===========================================================================
 
-TEST(CodegenTest, BytecodeVarDeclNoInit) {
-    CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer("fn main() { var x; return 0; }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    codegen.generateBytecode(program.get());
-    EXPECT_GT(codegen.getBytecodeEmitter().getCode().size(), 0u);
-}
 
 // ===========================================================================
 // Optimization O1 (tests legacy pass manager path)
@@ -2225,106 +1843,12 @@ TEST(CodegenTest, StrEqWrongArgCount) {
 }
 
 // ===========================================================================
-// Bytecode bitwise operators
 // ===========================================================================
 
-TEST(CodegenTest, BytecodeBitwiseAnd) {
-    CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer("fn main() { return 255 & 15; }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    codegen.generateBytecode(program.get());
-
-    VM vm;
-    vm.execute(codegen.getBytecodeEmitter().getCode());
-    EXPECT_EQ(vm.getLastReturn().asInt(), 15);
-}
-
-TEST(CodegenTest, BytecodeBitwiseOr) {
-    CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer("fn main() { return 240 | 15; }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    codegen.generateBytecode(program.get());
-
-    VM vm;
-    vm.execute(codegen.getBytecodeEmitter().getCode());
-    EXPECT_EQ(vm.getLastReturn().asInt(), 255);
-}
-
-TEST(CodegenTest, BytecodeBitwiseXor) {
-    CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer("fn main() { return 255 ^ 15; }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    codegen.generateBytecode(program.get());
-
-    VM vm;
-    vm.execute(codegen.getBytecodeEmitter().getCode());
-    EXPECT_EQ(vm.getLastReturn().asInt(), 240);
-}
-
-TEST(CodegenTest, BytecodeShiftLeft) {
-    CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer("fn main() { return 1 << 4; }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    codegen.generateBytecode(program.get());
-
-    VM vm;
-    vm.execute(codegen.getBytecodeEmitter().getCode());
-    EXPECT_EQ(vm.getLastReturn().asInt(), 16);
-}
-
-TEST(CodegenTest, BytecodeShiftRight) {
-    CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer("fn main() { return 16 >> 4; }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    codegen.generateBytecode(program.get());
-
-    VM vm;
-    vm.execute(codegen.getBytecodeEmitter().getCode());
-    EXPECT_EQ(vm.getLastReturn().asInt(), 1);
-}
-
-TEST(CodegenTest, BytecodeBitwiseNot) {
-    CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer("fn main() { return ~0; }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    codegen.generateBytecode(program.get());
-
-    VM vm;
-    vm.execute(codegen.getBytecodeEmitter().getCode());
-    EXPECT_EQ(vm.getLastReturn().asInt(), ~static_cast<int64_t>(0));
-}
 
 // ===========================================================================
-// Bytecode print support
 // ===========================================================================
 
-TEST(CodegenTest, BytecodePrint) {
-    CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer("fn main() { print(42); return 0; }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    codegen.generateBytecode(program.get());
-
-    VM vm;
-    testing::internal::CaptureStdout();
-    vm.execute(codegen.getBytecodeEmitter().getCode());
-    std::string output = testing::internal::GetCapturedStdout();
-    EXPECT_EQ(output, "42\n");
-    EXPECT_EQ(vm.getLastReturn().asInt(), 0);
-}
 
 // ===========================================================================
 // New pass manager IPO optimizations (inlining, IPSCCP, GlobalDCE)
@@ -2632,89 +2156,8 @@ TEST(CodegenTest, ValidProgramAccepted) {
 }
 
 // ===========================================================================
-// Bytecode constant folding
 // ===========================================================================
 
-TEST(CodegenTest, BytecodeConstantFoldingAdd) {
-    // 10 + 20 should be folded to PUSH_INT 30 (not PUSH_INT 10, PUSH_INT 20, ADD)
-    CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer("fn main() { return 10 + 20; }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    codegen.generateBytecode(program.get());
-    auto& emitter = codegen.getBytecodeEmitter();
-    const auto& code = emitter.getCode();
-    // Execute and verify correct result
-    VM vm;
-    vm.execute(code);
-    EXPECT_EQ(vm.getLastReturn().asInt(), 30);
-    // The bytecode should be smaller with folding (no ADD opcode needed).
-    // Register-based format:
-    // Without folding: PUSH_INT(1+1+8) + PUSH_INT(1+1+8) + ADD(1+3) + RETURN(1+1) + HALT(1) = 27
-    // With folding:    PUSH_INT(1+1+8) + RETURN(1+1) + HALT(1) = 13
-    EXPECT_LT(code.size(), 27u);
-}
-
-TEST(CodegenTest, BytecodeConstantFoldingMul) {
-    CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer("fn main() { return 6 * 7; }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    codegen.generateBytecode(program.get());
-    VM vm;
-    vm.execute(codegen.getBytecodeEmitter().getCode());
-    EXPECT_EQ(vm.getLastReturn().asInt(), 42);
-}
-
-TEST(CodegenTest, BytecodeConstantFoldingComparison) {
-    CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer("fn main() { return 5 < 10; }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    codegen.generateBytecode(program.get());
-    VM vm;
-    vm.execute(codegen.getBytecodeEmitter().getCode());
-    EXPECT_EQ(vm.getLastReturn().asInt(), 1);
-}
-
-TEST(CodegenTest, BytecodeConstantFoldingUnaryNeg) {
-    CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer("fn main() { return -42; }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    codegen.generateBytecode(program.get());
-    VM vm;
-    vm.execute(codegen.getBytecodeEmitter().getCode());
-    EXPECT_EQ(vm.getLastReturn().asInt(), -42);
-}
-
-TEST(CodegenTest, BytecodeConstantFoldingLogicalNot) {
-    CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer("fn main() { return !0; }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    codegen.generateBytecode(program.get());
-    VM vm;
-    vm.execute(codegen.getBytecodeEmitter().getCode());
-    EXPECT_EQ(vm.getLastReturn().asInt(), 1);
-}
-
-TEST(CodegenTest, BytecodeConstantFoldingBitwiseNot) {
-    CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer("fn main() { return ~0; }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    codegen.generateBytecode(program.get());
-    VM vm;
-    vm.execute(codegen.getBytecodeEmitter().getCode());
-    EXPECT_EQ(vm.getLastReturn().asInt(), -1);
-}
 
 // ===========================================================================
 // IR-level constant comparison folding
@@ -2950,9 +2393,6 @@ TEST(CodegenTest, HybridAllFunctionsCompileToIR) {
     EXPECT_EQ(codegen.getFunctionTier("compute"), ExecutionTier::AOT);
     EXPECT_EQ(codegen.getFunctionTier("main"), ExecutionTier::AOT);
 
-    // No bytecode is emitted — native LLVM IR only
-    EXPECT_FALSE(codegen.hasHybridBytecodeFunctions());
-    EXPECT_EQ(codegen.getBytecodeFunctions().size(), 0u);
 }
 
 TEST(CodegenTest, HybridNoBytecodeForFullyTyped) {
@@ -2966,7 +2406,6 @@ TEST(CodegenTest, HybridNoBytecodeForFullyTyped) {
     // Both functions are AOT — no bytecode should be emitted
     EXPECT_EQ(codegen.getFunctionTier("add"), ExecutionTier::AOT);
     EXPECT_EQ(codegen.getFunctionTier("main"), ExecutionTier::AOT);
-    EXPECT_FALSE(codegen.hasHybridBytecodeFunctions());
 }
 
 TEST(CodegenTest, HybridMultipleUntypedFunctions) {
@@ -2983,9 +2422,6 @@ TEST(CodegenTest, HybridMultipleUntypedFunctions) {
     EXPECT_EQ(codegen.getFunctionTier("dynamic_add"), ExecutionTier::AOT);
     EXPECT_EQ(codegen.getFunctionTier("main"), ExecutionTier::AOT);
 
-    // No bytecode is produced
-    EXPECT_FALSE(codegen.hasHybridBytecodeFunctions());
-    EXPECT_EQ(codegen.getBytecodeFunctions().size(), 0u);
 }
 
 TEST(CodegenTest, HybridMixedTiersWithOptMax) {
@@ -3002,9 +2438,6 @@ TEST(CodegenTest, HybridMixedTiersWithOptMax) {
     EXPECT_EQ(codegen.getFunctionTier("dynamic"), ExecutionTier::AOT);
     EXPECT_EQ(codegen.getFunctionTier("main"), ExecutionTier::AOT);
 
-    // No bytecode is produced — all functions go through LLVM IR
-    EXPECT_FALSE(codegen.hasHybridBytecodeFunctions());
-    EXPECT_EQ(codegen.getBytecodeFunctions().size(), 0u);
 
 }
 
@@ -3034,9 +2467,6 @@ TEST(CodegenTest, HybridGeneratesIRForAllFunctions) {
     CodeGenerator codegen;
     generateHybridIR(src, codegen);
 
-    // No bytecode produced
-    EXPECT_FALSE(codegen.hasHybridBytecodeFunctions());
-    EXPECT_EQ(codegen.getBytecodeFunctions().size(), 0u);
 
     // Both functions must be present in the LLVM IR module
     auto* mod = codegen.getModule();
@@ -3385,90 +2815,66 @@ TEST(CodegenTest, OptmaxDoubleBitwiseNot) {
 }
 
 // ===========================================================================
-// Bytecode algebraic identity optimizations
+// Hybrid algebraic identity tests (generateHybrid → LLVM IR)
 // ===========================================================================
-// NOTE: generateHybrid() no longer emits bytecode — all user functions
-// compile to native LLVM IR via the adaptive JIT pipeline.  The algebraic
-// identity optimizations (x+0, x*0, x*1, x**0) are now applied at the
-// LLVM IR level by the optimizer.  The tests below verify that generateHybrid()
-// produces zero bytecode functions and that the LLVM IR module is correct.
 
 TEST(CodegenTest, BytecodeAlgebraicIdentityAddZero) {
-    // generateHybrid() compiles add_zero to LLVM IR; no bytecode is produced.
     CodeGenerator codegen(OptimizationLevel::O0);
     auto program = parseSource("fn add_zero(x) { return x + 0; }\n"
                                "fn main() { return 0; }");
     codegen.generateHybrid(program.get());
-    auto& bcFuncs = codegen.getBytecodeFunctions();
-    EXPECT_EQ(bcFuncs.size(), 0u);
     EXPECT_NE(codegen.getModule()->getFunction("add_zero"), nullptr);
 }
 
 TEST(CodegenTest, BytecodeAlgebraicIdentityMulZero) {
-    // generateHybrid() compiles mul_zero to LLVM IR; no bytecode is produced.
     CodeGenerator codegen(OptimizationLevel::O0);
     auto program = parseSource("fn mul_zero(x) { return x * 0; }\n"
                                "fn main() { return 0; }");
     codegen.generateHybrid(program.get());
-    auto& bcFuncs = codegen.getBytecodeFunctions();
-    EXPECT_EQ(bcFuncs.size(), 0u);
     EXPECT_NE(codegen.getModule()->getFunction("mul_zero"), nullptr);
 }
 
 TEST(CodegenTest, BytecodeAlgebraicIdentityMulOne) {
-    // generateHybrid() compiles mul_one to LLVM IR; no bytecode is produced.
     CodeGenerator codegen(OptimizationLevel::O0);
     auto program = parseSource("fn mul_one(x) { return x * 1; }\n"
                                "fn main() { return 0; }");
     codegen.generateHybrid(program.get());
-    auto& bcFuncs = codegen.getBytecodeFunctions();
-    EXPECT_EQ(bcFuncs.size(), 0u);
     EXPECT_NE(codegen.getModule()->getFunction("mul_one"), nullptr);
 }
 
 TEST(CodegenTest, BytecodeAlgebraicIdentityPowZero) {
-    // generateHybrid() compiles pow_zero to LLVM IR; no bytecode is produced.
     CodeGenerator codegen(OptimizationLevel::O0);
     auto program = parseSource("fn pow_zero(x) { return x ** 0; }\n"
                                "fn main() { return 0; }");
     codegen.generateHybrid(program.get());
-    auto& bcFuncs = codegen.getBytecodeFunctions();
-    EXPECT_EQ(bcFuncs.size(), 0u);
     EXPECT_NE(codegen.getModule()->getFunction("pow_zero"), nullptr);
 }
 
 // ===========================================================================
-// Bytecode algebraic identity: side-effect preservation
+// Side-effect preservation tests
 // ===========================================================================
 
 TEST(CodegenTest, BytecodeAlgebraicMulZeroPreservesSideEffects) {
-    // generateHybrid() compiles mul_zero to LLVM IR (no bytecode).
-    // Side-effect preservation is handled by the LLVM optimizer.
     CodeGenerator codegen(OptimizationLevel::O0);
     auto program = parseSource("fn mul_zero(x) { return x * 0; }\n"
                                "fn main() { return 0; }");
     codegen.generateHybrid(program.get());
-    EXPECT_EQ(codegen.getBytecodeFunctions().size(), 0u);
     EXPECT_NE(codegen.getModule()->getFunction("mul_zero"), nullptr);
 }
 
 TEST(CodegenTest, BytecodeAlgebraicPowZeroPreservesSideEffects) {
-    // generateHybrid() compiles pow_zero to LLVM IR (no bytecode).
     CodeGenerator codegen(OptimizationLevel::O0);
     auto program = parseSource("fn pow_zero(x) { return x ** 0; }\n"
                                "fn main() { return 0; }");
     codegen.generateHybrid(program.get());
-    EXPECT_EQ(codegen.getBytecodeFunctions().size(), 0u);
     EXPECT_NE(codegen.getModule()->getFunction("pow_zero"), nullptr);
 }
 
 TEST(CodegenTest, BytecodeAlgebraicZeroMulPreservesSideEffects) {
-    // generateHybrid() compiles zero_mul to LLVM IR (no bytecode).
     CodeGenerator codegen(OptimizationLevel::O0);
     auto program = parseSource("fn zero_mul(x) { return 0 * x; }\n"
                                "fn main() { return 0; }");
     codegen.generateHybrid(program.get());
-    EXPECT_EQ(codegen.getBytecodeFunctions().size(), 0u);
     EXPECT_NE(codegen.getModule()->getFunction("zero_mul"), nullptr);
 }
 

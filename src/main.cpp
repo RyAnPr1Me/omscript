@@ -1,9 +1,9 @@
+#include "aot_profile.h"
 #include "codegen.h"
 #include "compiler.h"
 #include "diagnostic.h"
 #include "lexer.h"
 #include "parser.h"
-#include "aot_profile.h"
 #include <chrono>
 #include <csignal>
 #include <cstdlib>
@@ -2667,7 +2667,13 @@ int main(int argc, char* argv[]) {
             }
 
             omscript::AdaptiveJITRunner runner;
-            int exitCode = runner.run(cg.getModule());
+            int exitCode = 1;
+            try {
+                exitCode = runner.run(cg.getModule());
+            } catch (const std::exception& e) {
+                std::cerr << "Error: JIT execution failed: " << e.what() << "\n";
+                return 1;
+            }
 
             // "JIT-compiled" satisfies the existing test suite which checks
             // for the substring "compiled" in the run-command output.
@@ -2676,8 +2682,7 @@ int main(int argc, char* argv[]) {
 
             if (showTiming) {
                 auto totalMs2 =
-                    std::chrono::duration_cast<std::chrono::microseconds>(
-                        std::chrono::steady_clock::now() - totalStart)
+                    std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - totalStart)
                         .count() /
                     1000.0;
                 std::cerr << "Timing: total " << totalMs2 << "ms\n";

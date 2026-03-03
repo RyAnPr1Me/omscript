@@ -22,6 +22,7 @@
 #include <llvm/TargetParser/Host.h>
 #include <llvm/TargetParser/SubtargetFeature.h>
 
+#include <atomic>
 #include <cassert>
 #include <mutex>
 
@@ -30,19 +31,20 @@ namespace omscript {
 // ---------------------------------------------------------------------------
 // Process-wide active runner — set during AdaptiveJITRunner::run() so that
 // the C-linkage __omsc_adaptive_recompile callback can reach the runner.
+// Atomic to avoid data races when the callback fires from JIT-compiled code.
 // ---------------------------------------------------------------------------
-static AdaptiveJITRunner* g_activeRunner = nullptr;
+static std::atomic<AdaptiveJITRunner*> g_activeRunner{nullptr};
 
 AdaptiveJITRunner::AdaptiveJITRunner() = default;
 AdaptiveJITRunner::~AdaptiveJITRunner() = default;
 
 void AdaptiveJITRunner::ensureInitialized() {
-    if (!llvmInitialized_) {
+    static std::once_flag initFlag;
+    std::call_once(initFlag, [] {
         llvm::InitializeNativeTarget();
         llvm::InitializeNativeTargetAsmPrinter();
         llvm::InitializeNativeTargetAsmParser();
-        llvmInitialized_ = true;
-    }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -85,8 +87,8 @@ void AdaptiveJITRunner::injectCounters(llvm::Module& mod) {
     // Declare the C++ callback (defined in this translation unit via
     // the extern "C" wrapper at the bottom of the file).
     auto* callbackTy = llvm::FunctionType::get(voidTy, {ptrTy, i64Ty, ptrTy}, false);
-    auto* callbackFn = llvm::cast<llvm::Function>(
-        mod.getOrInsertFunction("__omsc_adaptive_recompile", callbackTy).getCallee());
+    auto* callbackFn =
+        llvm::cast<llvm::Function>(mod.getOrInsertFunction("__omsc_adaptive_recompile", callbackTy).getCallee());
     callbackFn->addFnAttr(llvm::Attribute::NoUnwind);
 
     // Collect functions first to avoid iterator invalidation.
@@ -107,19 +109,17 @@ void AdaptiveJITRunner::injectCounters(llvm::Module& mod) {
         // read-modify-write instructions (call counter).  Strip function-level
         // attributes that would contradict these new accesses and cause the
         // backend to miscompile the instrumented function.
-        fn->removeFnAttr(llvm::Attribute::NoSync);    // atomicrmw is synchronising
-        fn->removeFnAttr(llvm::Attribute::Memory);    // we now read global memory
-        fn->removeFnAttr(llvm::Attribute::ReadNone);  // legacy alias
-        fn->removeFnAttr(llvm::Attribute::ReadOnly);  // legacy alias
+        fn->removeFnAttr(llvm::Attribute::NoSync);   // atomicrmw is synchronising
+        fn->removeFnAttr(llvm::Attribute::Memory);   // we now read global memory
+        fn->removeFnAttr(llvm::Attribute::ReadNone); // legacy alias
+        fn->removeFnAttr(llvm::Attribute::ReadOnly); // legacy alias
 
-        auto* counterGV = new llvm::GlobalVariable(
-            mod, i64Ty, /*isConst=*/false, llvm::GlobalValue::InternalLinkage,
-            llvm::ConstantInt::get(i64Ty, 0), "__omsc_calls_" + name);
+        auto* counterGV = new llvm::GlobalVariable(mod, i64Ty, /*isConst=*/false, llvm::GlobalValue::InternalLinkage,
+                                                   llvm::ConstantInt::get(i64Ty, 0), "__omsc_calls_" + name);
         counterGV->setAlignment(llvm::Align(8));
 
-        auto* fnPtrGV = new llvm::GlobalVariable(
-            mod, ptrTy, /*isConst=*/false, llvm::GlobalValue::InternalLinkage,
-            llvm::Constant::getNullValue(ptrTy), "__omsc_fn_" + name);
+        auto* fnPtrGV = new llvm::GlobalVariable(mod, ptrTy, /*isConst=*/false, llvm::GlobalValue::InternalLinkage,
+                                                 llvm::Constant::getNullValue(ptrTy), "__omsc_fn_" + name);
         fnPtrGV->setAlignment(llvm::Align(8));
 
         // Function-name string constant (used by the callback).
@@ -129,17 +129,16 @@ void AdaptiveJITRunner::injectCounters(llvm::Module& mod) {
 
         // --- New basic blocks (inserted before original entry) ---
         auto& origEntry = fn->getEntryBlock();
-        auto* dispatchBB   = llvm::BasicBlock::Create(ctx, "omsc.dispatch",   fn, &origEntry);
-        auto* hotBB        = llvm::BasicBlock::Create(ctx, "omsc.hot",        fn, &origEntry);
-        auto* countBB      = llvm::BasicBlock::Create(ctx, "omsc.count",      fn, &origEntry);
-        auto* recompileBB  = llvm::BasicBlock::Create(ctx, "omsc.recompile",  fn, &origEntry);
+        auto* dispatchBB = llvm::BasicBlock::Create(ctx, "omsc.dispatch", fn, &origEntry);
+        auto* hotBB = llvm::BasicBlock::Create(ctx, "omsc.hot", fn, &origEntry);
+        auto* countBB = llvm::BasicBlock::Create(ctx, "omsc.count", fn, &origEntry);
+        auto* recompileBB = llvm::BasicBlock::Create(ctx, "omsc.recompile", fn, &origEntry);
 
         // --- omsc.dispatch: volatile-load fn-ptr, branch on non-null ---
         llvm::IRBuilder<> B(dispatchBB);
         auto* fp = B.CreateAlignedLoad(ptrTy, fnPtrGV, llvm::Align(8), /*isVolatile=*/true, "omsc.fp");
-        auto* isHot = B.CreateICmpNE(
-            B.CreatePtrToInt(fp, i64Ty, "omsc.fp_int"),
-            llvm::ConstantInt::get(i64Ty, 0), "omsc.is_hot");
+        auto* isHot =
+            B.CreateICmpNE(B.CreatePtrToInt(fp, i64Ty, "omsc.fp_int"), llvm::ConstantInt::get(i64Ty, 0), "omsc.is_hot");
         // Branch weights: the hot path (isHot == true, 99%) is taken on every
         // call after the Tier-2 recompile writes fnPtrSlot; the counter path
         // (isHot == false, 1%) fires only during the warm-up phase before
@@ -168,16 +167,12 @@ void AdaptiveJITRunner::injectCounters(llvm::Module& mod) {
 
         // --- omsc.count: atomic increment, check threshold ---
         B.SetInsertPoint(countBB);
-        auto* oldCnt = B.CreateAtomicRMW(
-            llvm::AtomicRMWInst::Add, counterGV,
-            llvm::ConstantInt::get(i64Ty, 1),
-            llvm::MaybeAlign(), llvm::AtomicOrdering::Monotonic);
+        auto* oldCnt = B.CreateAtomicRMW(llvm::AtomicRMWInst::Add, counterGV, llvm::ConstantInt::get(i64Ty, 1),
+                                         llvm::MaybeAlign(), llvm::AtomicOrdering::Monotonic);
         oldCnt->setName("omsc.old");
         auto* newCnt = B.CreateAdd(oldCnt, llvm::ConstantInt::get(i64Ty, 1), "omsc.new");
-        auto* hitThresh = B.CreateICmpEQ(
-            newCnt,
-            llvm::ConstantInt::get(i64Ty, AdaptiveJITRunner::kRecompileThreshold),
-            "omsc.hit");
+        auto* hitThresh =
+            B.CreateICmpEQ(newCnt, llvm::ConstantInt::get(i64Ty, AdaptiveJITRunner::kRecompileThreshold), "omsc.hit");
         B.CreateCondBr(hitThresh, recompileBB, &origEntry);
 
         // --- omsc.recompile: call the C++ recompiler, then fall to body ---
@@ -206,9 +201,8 @@ int AdaptiveJITRunner::run(llvm::Module* baseModule) {
     // Step 2: Re-parse a working copy in a fresh context.
     // We do not modify baseModule so the caller's codegen stays intact.
     auto instrCtx = std::make_unique<llvm::LLVMContext>();
-    auto memBuf = llvm::MemoryBuffer::getMemBuffer(
-        llvm::StringRef(cleanBitcode_.data(), cleanBitcode_.size()),
-        "omsc_working_bc", /*RequiresNullTerminator=*/false);
+    auto memBuf = llvm::MemoryBuffer::getMemBuffer(llvm::StringRef(cleanBitcode_.data(), cleanBitcode_.size()),
+                                                   "omsc_working_bc", /*RequiresNullTerminator=*/false);
     auto modOrErr = llvm::parseBitcodeFile(memBuf->getMemBufferRef(), *instrCtx);
     if (!modOrErr)
         return 1;
@@ -216,6 +210,12 @@ int AdaptiveJITRunner::run(llvm::Module* baseModule) {
 
     // Step 3: Inject call-counting dispatch prologs.
     injectCounters(*instrMod);
+
+    // Verify the instrumented IR is well-formed before handing it to MCJIT.
+    if (llvm::verifyModule(*instrMod, &llvm::errs())) {
+        llvm::errs() << "omsc: internal error: instrumented IR failed verification\n";
+        return 1;
+    }
 
     // Step 4: JIT-compile the instrumented module.
     // We skip a separate IR optimisation pass here — MCJIT's own backend
@@ -236,16 +236,17 @@ int AdaptiveJITRunner::run(llvm::Module* baseModule) {
 #endif
 
     llvm::ExecutionEngine* rawEngine = builder.create();
-    if (!rawEngine)
+    if (!rawEngine) {
+        llvm::errs() << "omsc: JIT engine creation failed: " << engineErr << "\n";
         return 1;
+    }
     jm.engine.reset(rawEngine);
 
     // Register the C-linkage recompile callback so MCJIT can resolve it
     // without needing -rdynamic.  The symbol is in the executable but not
     // in the dynamic symbol table unless the binary is built with -rdynamic,
     // so we map it explicitly.
-    rawEngine->addGlobalMapping("__omsc_adaptive_recompile",
-                                reinterpret_cast<uint64_t>(&__omsc_adaptive_recompile));
+    rawEngine->addGlobalMapping("__omsc_adaptive_recompile", reinterpret_cast<uint64_t>(&__omsc_adaptive_recompile));
 
     rawEngine->finalizeObject();
 
@@ -253,15 +254,18 @@ int AdaptiveJITRunner::run(llvm::Module* baseModule) {
     if (!mainAddr)
         return 1;
 
-    modules_.push_back(std::move(jm));
+    {
+        std::lock_guard<std::mutex> lk(recompiledMtx_);
+        modules_.push_back(std::move(jm));
+    }
 
     // Step 5: Execute main() in-process.
     // Register this runner as the active one so that the C-linkage callback
     // can reach it during execution.
-    g_activeRunner = this;
+    g_activeRunner.store(this, std::memory_order_release);
     using OmscMainFn = int64_t (*)();
     int64_t exitVal = reinterpret_cast<OmscMainFn>(mainAddr)();
-    g_activeRunner = nullptr;
+    g_activeRunner.store(nullptr, std::memory_order_release);
 
     // Mirror what a process exit code would look like (0-255).
     return static_cast<int>(exitVal & 0xFF);
@@ -274,8 +278,7 @@ int AdaptiveJITRunner::run(llvm::Module* baseModule) {
 // kRecompileThreshold.  Runs synchronously (blocking the caller for the
 // duration of O3 compilation) because LLVM MCJIT is not safe to use from
 // a background thread while another MCJIT engine is executing code.
-void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount,
-                                      void** fnPtrSlot) {
+void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void** fnPtrSlot) {
     const std::string funcName(name);
 
     // Recompile each function at most once.
@@ -288,12 +291,14 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount,
 
     // --- Parse clean bitcode into a fresh context ---
     auto newCtx = std::make_unique<llvm::LLVMContext>();
-    auto memBuf = llvm::MemoryBuffer::getMemBuffer(
-        llvm::StringRef(cleanBitcode_.data(), cleanBitcode_.size()),
-        "omsc_pgo_bc", /*RequiresNullTerminator=*/false);
+    auto memBuf = llvm::MemoryBuffer::getMemBuffer(llvm::StringRef(cleanBitcode_.data(), cleanBitcode_.size()),
+                                                   "omsc_pgo_bc", /*RequiresNullTerminator=*/false);
     auto modOrErr = llvm::parseBitcodeFile(memBuf->getMemBufferRef(), *newCtx);
-    if (!modOrErr)
+    if (!modOrErr) {
+        llvm::errs() << "omsc: Tier-2 recompile of '" << funcName
+                     << "' failed: could not parse bitcode\n";
         return;
+    }
     auto mod = std::move(*modOrErr);
 
     // --- Apply PGO entry-count annotation ---
@@ -304,8 +309,11 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount,
     // entry counts of 1, making the inliner aggressively inline them *into*
     // the hot function while avoiding the reverse.
     llvm::Function* fn = mod->getFunction(funcName);
-    if (!fn || fn->isDeclaration())
+    if (!fn || fn->isDeclaration()) {
+        llvm::errs() << "omsc: Tier-2 recompile of '" << funcName
+                     << "' failed: function not found in bitcode\n";
         return;
+    }
     fn->setEntryCount(static_cast<uint64_t>(callCount));
     for (auto& other : *mod) {
         if (!other.isDeclaration() && other.getName() != funcName && !other.getEntryCount())
@@ -316,19 +324,19 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount,
     {
         llvm::PipelineTuningOptions PTO;
         PTO.LoopVectorization = true;
-        PTO.SLPVectorization  = true;
-        PTO.LoopUnrolling     = true;
-        PTO.LoopInterleaving  = true;
-        PTO.MergeFunctions    = true;
-        PTO.CallGraphProfile  = true;
-        PTO.InlinerThreshold  = 400;
+        PTO.SLPVectorization = true;
+        PTO.LoopUnrolling = true;
+        PTO.LoopInterleaving = true;
+        PTO.MergeFunctions = true;
+        PTO.CallGraphProfile = true;
+        PTO.InlinerThreshold = 400;
 
         // Build a native TargetMachine with ALL host CPU features exposed
         // so the vectoriser and scheduler can use AVX2/AVX-512/NEON etc.
         std::unique_ptr<llvm::TargetMachine> TM;
         {
             std::string triple = llvm::sys::getDefaultTargetTriple();
-            std::string cpu    = llvm::sys::getHostCPUName().str();
+            std::string cpu = llvm::sys::getHostCPUName().str();
             llvm::SubtargetFeatures featureSet;
 #if LLVM_VERSION_MAJOR >= 19
             llvm::StringMap<bool> hostFeatures = llvm::sys::getHostCPUFeatures();
@@ -342,22 +350,27 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount,
 
             std::string errStr;
             const llvm::Target* target = llvm::TargetRegistry::lookupTarget(triple, errStr);
-            if (target) {
-                llvm::TargetOptions opts;
-                opts.EnableFastISel = false; // force optimising ISel for best codegen
-                TM.reset(target->createTargetMachine(
-                    triple, cpu, features, opts,
-                    std::optional<llvm::Reloc::Model>()));
-                if (TM)
-                    mod->setDataLayout(TM->createDataLayout());
+            if (!target) {
+                llvm::errs() << "omsc: Tier-2 recompile of '" << funcName
+                             << "' failed: could not lookup target: " << errStr << "\n";
+                return;
             }
+            llvm::TargetOptions opts;
+            opts.EnableFastISel = false; // force optimising ISel for best codegen
+            TM.reset(target->createTargetMachine(triple, cpu, features, opts, std::optional<llvm::Reloc::Model>()));
+            if (!TM) {
+                llvm::errs() << "omsc: Tier-2 recompile of '" << funcName
+                             << "' failed: could not create target machine\n";
+                return;
+            }
+            mod->setDataLayout(TM->createDataLayout());
         }
 
         llvm::PassBuilder PB(TM.get(), PTO);
-        llvm::LoopAnalysisManager    LAM;
+        llvm::LoopAnalysisManager LAM;
         llvm::FunctionAnalysisManager FAM;
-        llvm::CGSCCAnalysisManager   CGAM;
-        llvm::ModuleAnalysisManager  MAM;
+        llvm::CGSCCAnalysisManager CGAM;
+        llvm::ModuleAnalysisManager MAM;
         PB.registerModuleAnalyses(MAM);
         PB.registerCGSCCAnalyses(CGAM);
         PB.registerFunctionAnalyses(FAM);
@@ -378,8 +391,11 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount,
 #endif
 
     std::unique_ptr<llvm::ExecutionEngine> engine(eb.create());
-    if (!engine)
+    if (!engine) {
+        llvm::errs() << "omsc: Tier-2 JIT compilation of '" << funcName
+                     << "' failed: " << engineErr << "\n";
         return;
+    }
     engine->finalizeObject();
 
     uint64_t addr = engine->getFunctionAddress(funcName);
@@ -403,10 +419,10 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount,
 // ---------------------------------------------------------------------------
 extern "C" {
 
-void __omsc_adaptive_recompile(const char* name, int64_t callCount,
-                                void** fnPtrSlot) {
-    if (omscript::g_activeRunner)
-        omscript::g_activeRunner->onHotFunction(name, callCount, fnPtrSlot);
+void __omsc_adaptive_recompile(const char* name, int64_t callCount, void** fnPtrSlot) {
+    auto* runner = omscript::g_activeRunner.load(std::memory_order_acquire);
+    if (runner)
+        runner->onHotFunction(name, callCount, fnPtrSlot);
 }
 
 } // extern "C"
