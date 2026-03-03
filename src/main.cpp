@@ -2588,7 +2588,7 @@ int main(int argc, char* argv[]) {
         // This path handles all programs, including directly recursive ones —
         // the dispatch prolog uses a regular (non-tail) call so that Tier-2
         // hot-patches are safe even when Tier-1 frames are on the call stack.
-        if (command == Command::Run && flagJIT && !keepTemps) {
+        if (command == Command::Run && flagJIT) {
             std::string source = readSourceFile(sourceFile);
 
             auto lexStart2 = std::chrono::steady_clock::now();
@@ -2623,6 +2623,47 @@ int main(int argc, char* argv[]) {
                     std::chrono::duration_cast<std::chrono::microseconds>(codegenEnd2 - codegenStart2).count() / 1000.0;
                 std::cerr << "Timing: lex " << lexMs2 << "ms, parse " << parseMs2 << "ms, codegen " << codegenMs2
                           << "ms\n";
+            }
+
+            // When --keep-temps is set, also write the AOT binary to disk so
+            // the user can inspect the compiled output.  We compile the already-
+            // generated LLVM IR to a native object file and link it.  The JIT
+            // still runs in-process from the same module — no recompilation.
+            if (keepTemps) {
+                std::string objFile = outputFile + ".o";
+                bool objWritten = false;
+                try {
+                    cg.writeObjectFile(objFile);
+                    objWritten = true;
+                    std::string linkerProgram;
+                    for (const char* candidate : {"gcc", "cc", "clang"}) {
+                        auto p = llvm::sys::findProgramByName(candidate);
+                        if (p) {
+                            linkerProgram = *p;
+                            break;
+                        }
+                    }
+                    if (linkerProgram.empty()) {
+                        std::cerr << "Warning: --keep-temps: no C linker found (tried gcc, cc, clang); "
+                                     "AOT binary not written\n";
+                    } else {
+                        std::vector<std::string> linkArgs = {objFile, "-o", outputFile, "-lm"};
+                        llvm::SmallVector<llvm::StringRef, 8> laRefs;
+                        laRefs.push_back(linkerProgram);
+                        for (const auto& a : linkArgs)
+                            laRefs.push_back(a);
+                        int linkResult = llvm::sys::ExecuteAndWait(linkerProgram, laRefs);
+                        if (linkResult != 0)
+                            std::cerr << "Warning: --keep-temps: linker exited with code " << linkResult
+                                      << "; AOT binary may be incomplete\n";
+                    }
+                } catch (const std::exception& ke) {
+                    std::cerr << "Warning: --keep-temps: failed to write AOT binary: " << ke.what() << "\n";
+                }
+                if (objWritten) {
+                    std::error_code ec;
+                    std::filesystem::remove(objFile, ec);
+                }
             }
 
             omscript::AdaptiveJITRunner runner;
