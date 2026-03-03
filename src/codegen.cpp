@@ -2045,66 +2045,38 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     }
 
     // Regular code generation for non-constant expressions.
-    // NSW (No Signed Wrap) flags are set on integer arithmetic so LLVM can
-    // assume signed overflow does not occur — matching C/Rust semantics.
-    // This unlocks critical optimizations: SCEV trip-count computation for
-    // loop vectorization, induction-variable simplification, and aggressive
-    // strength reduction that are otherwise impossible.
+    // Integer arithmetic uses wrapping (no NSW/NUW flags): NSW/NUW flags tell
+    // LLVM that overflow is undefined behavior, which can cause miscompilation
+    // when overflow actually occurs.  Omitting them guarantees defined
+    // two's-complement behavior on every overflow path.
     if (expr->op == "+") {
-        return builder->CreateNSWAdd(left, right, "addtmp");
+        return builder->CreateAdd(left, right, "addtmp");
     } else if (expr->op == "-") {
-        return builder->CreateNSWSub(left, right, "subtmp");
+        return builder->CreateSub(left, right, "subtmp");
     } else if (expr->op == "*") {
         // Strength reduction: multiply by power of 2 → left shift
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
             int s = log2IfPowerOf2(ci->getSExtValue());
             if (s >= 0)
-                return builder->CreateShl(left, llvm::ConstantInt::get(getDefaultType(), s), "shltmp", /*HasNUW=*/false, /*HasNSW=*/true);
+                return builder->CreateShl(left, llvm::ConstantInt::get(getDefaultType(), s), "shltmp");
         }
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left)) {
             int s = log2IfPowerOf2(ci->getSExtValue());
             if (s >= 0)
-                return builder->CreateShl(right, llvm::ConstantInt::get(getDefaultType(), s), "shltmp", /*HasNUW=*/false, /*HasNSW=*/true);
+                return builder->CreateShl(right, llvm::ConstantInt::get(getDefaultType(), s), "shltmp");
         }
-        return builder->CreateNSWMul(left, right, "multmp");
+        return builder->CreateMul(left, right, "multmp");
     } else if (expr->op == "/" || expr->op == "%") {
         bool isDivision = expr->op == "/";
 
-        // Strength reduction for constant power-of-2 divisors.
-        // Since the divisor is a known positive constant it is never zero,
-        // so we can skip the division-by-zero guard entirely.
-        //   n / 2^k  →  SDiv (truncation toward zero; AShr rounds toward -∞)
-        //   n % 2^k  →  SRem with the zero-check elided (constant != 0)
+        // Optimization for any non-zero constant divisor: the divisor can never
+        // be zero at runtime, so we can skip the division-by-zero guard and emit
+        // SDiv/SRem directly.  SDiv/SRem are used (not shift-based sequences)
+        // because signed division must truncate toward zero, not toward -infinity.
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
-            int s = log2IfPowerOf2(ci->getSExtValue());
-            if (s >= 0) {
-                if (isDivision) {
-                    // For division by a known power-of-2 constant, emit the
-                    // manual shift-based signed division sequence:
-                    //   sign = n >> 63  (arithmetic, all 0s or all 1s)
-                    //   n + (sign >>> (64 - k))  →  bias for negative values
-                    //   result = biased >> k
-                    // This matches what Clang/GCC emit for signed division by
-                    // power of 2 and avoids the costly hardware sdiv.
-                    llvm::Value* shift = llvm::ConstantInt::get(getDefaultType(), s);
-                    llvm::Value* sign = builder->CreateAShr(left, llvm::ConstantInt::get(getDefaultType(), 63), "div.sign");
-                    llvm::Value* bias = builder->CreateLShr(sign, llvm::ConstantInt::get(getDefaultType(), 64 - s), "div.bias");
-                    llvm::Value* biased = builder->CreateNSWAdd(left, bias, "div.biased");
-                    return builder->CreateAShr(biased, shift, "divtmp");
-                }
-                // For modulo by a known power-of-2 constant, compute:
-                //   bias  = (n >> 63) >>> (64 - k)
-                //   result = ((n + bias) & (2^k - 1)) - bias
-                // This preserves correct signed semantics (e.g. -7 % 4 == -3)
-                // while using cheap shifts + AND instead of hardware srem.
-                {
-                    llvm::Value* mask = llvm::ConstantInt::get(getDefaultType(), (1LL << s) - 1);
-                    llvm::Value* sign = builder->CreateAShr(left, llvm::ConstantInt::get(getDefaultType(), 63), "mod.sign");
-                    llvm::Value* bias = builder->CreateLShr(sign, llvm::ConstantInt::get(getDefaultType(), 64 - s), "mod.bias");
-                    llvm::Value* biased = builder->CreateNSWAdd(left, bias, "mod.biased");
-                    llvm::Value* masked = builder->CreateAnd(biased, mask, "mod.masked");
-                    return builder->CreateNSWSub(masked, bias, "modtmp");
-                }
+            if (!ci->isZero()) {
+                return isDivision ? builder->CreateSDiv(left, right, "divtmp")
+                                  : builder->CreateSRem(left, right, "modtmp");
             }
         }
 
