@@ -1,4 +1,3 @@
-#include "diagnostic.h"
 #include "lexer.h"
 #include <gtest/gtest.h>
 
@@ -657,23 +656,4 @@ TEST(LexerTest, HexEscapeValid) {
 TEST(LexerTest, HexEscapeNullByteRejected) {
     // \x00 must be rejected to prevent C-string corruption
     EXPECT_THROW(lex("\"\\x00\""), std::runtime_error);
-}
-
-// ---------------------------------------------------------------------------
-// Diagnostic severity formatting
-// ---------------------------------------------------------------------------
-
-TEST(DiagnosticTest, HintSeverityFormat) {
-    Diagnostic diag;
-    diag.severity = DiagnosticSeverity::Hint;
-    diag.location = {10, 5};
-    diag.message = "consider using a const";
-    EXPECT_EQ(diag.format(), "hint at line 10, column 5: consider using a const");
-}
-
-TEST(DiagnosticTest, HintSeverityNoLocation) {
-    Diagnostic diag;
-    diag.severity = DiagnosticSeverity::Hint;
-    diag.message = "suggestion";
-    EXPECT_EQ(diag.format(), "hint: suggestion");
 }

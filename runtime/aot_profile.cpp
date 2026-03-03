@@ -329,19 +329,26 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
         if (recompiled_.count(funcName))
             return;
         // Mark as in-progress to prevent concurrent recompilation attempts.
-        // On failure this is rolled back (see end of function).
+        // On failure this is rolled back by the RAII guard below.
         recompiled_.insert(funcName);
     }
 
-    // RAII guard: on early return (failure), remove the function from
-    // recompiled_ so that it can be retried on the next threshold hit.
+    // RAII scope guard: on early return (failure), automatically remove the
+    // function from recompiled_ so that it can be retried.  The guard is
+    // dismissed (via succeeded=true) only after a successful hot-patch write.
     bool succeeded = false;
-    auto rollback = [&]() {
-        if (!succeeded) {
-            std::lock_guard<std::mutex> lk(recompiledMtx_);
-            recompiled_.erase(funcName);
+    struct ScopeExit {
+        bool& flag;
+        std::mutex& mtx;
+        std::unordered_set<std::string>& set;
+        const std::string& key;
+        ~ScopeExit() {
+            if (!flag) {
+                std::lock_guard<std::mutex> lk(mtx);
+                set.erase(key);
+            }
         }
-    };
+    } rollbackGuard{succeeded, recompiledMtx_, recompiled_, funcName};
 
     // --- Parse clean bitcode into a fresh context ---
     auto newCtx = std::make_unique<llvm::LLVMContext>();
@@ -350,7 +357,6 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
     auto modOrErr = llvm::parseBitcodeFile(memBuf->getMemBufferRef(), *newCtx);
     if (!modOrErr) {
         llvm::errs() << "omsc: Tier-2 recompile of '" << funcName << "' failed: could not parse bitcode\n";
-        rollback();
         return;
     }
     auto mod = std::move(*modOrErr);
@@ -365,7 +371,6 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
     llvm::Function* fn = mod->getFunction(funcName);
     if (!fn || fn->isDeclaration()) {
         llvm::errs() << "omsc: Tier-2 recompile of '" << funcName << "' failed: function not found in bitcode\n";
-        rollback();
         return;
     }
     fn->setEntryCount(static_cast<uint64_t>(callCount));
@@ -439,7 +444,6 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
             if (!target) {
                 llvm::errs() << "omsc: Tier-2 recompile of '" << funcName
                              << "' failed: could not lookup target: " << errStr << "\n";
-                rollback();
                 return;
             }
             llvm::TargetOptions opts;
@@ -453,7 +457,6 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
             if (!TM) {
                 llvm::errs() << "omsc: Tier-2 recompile of '" << funcName
                              << "' failed: could not create target machine\n";
-                rollback();
                 return;
             }
             mod->setDataLayout(TM->createDataLayout());
@@ -476,7 +479,6 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
     // (the Tier-1 path already verifies at line 246; this mirrors it for Tier-2).
     if (llvm::verifyModule(*mod, &llvm::errs())) {
         llvm::errs() << "omsc: Tier-2 recompile of '" << funcName << "' failed: module verification after O3\n";
-        rollback();
         return;
     }
 
@@ -494,18 +496,16 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
     std::unique_ptr<llvm::ExecutionEngine> engine(eb.create());
     if (!engine) {
         llvm::errs() << "omsc: Tier-2 JIT compilation of '" << funcName << "' failed: " << engineErr << "\n";
-        rollback();
         return;
     }
     engine->finalizeObject();
 
     uint64_t addr = engine->getFunctionAddress(funcName);
     if (!addr) {
-        rollback();
         return;
     }
 
-    // Mark successful — prevents rollback() from clearing the recompiled flag.
+    // Mark successful — prevents the RAII scope guard from clearing the recompiled flag.
     succeeded = true;
 
     {
