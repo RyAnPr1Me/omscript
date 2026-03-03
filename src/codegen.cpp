@@ -42,7 +42,7 @@
 
 // LLVM 21 removed Attribute::NoCapture in favour of the captures(...) attribute.
 #if LLVM_VERSION_MAJOR >= 21
-#define OMSC_ADD_NOCAPTURE(fn, idx) \
+#define OMSC_ADD_NOCAPTURE(fn, idx)                                                                                    \
     (fn)->addParamAttr((idx), llvm::Attribute::getWithCaptureInfo((fn)->getContext(), llvm::CaptureInfo::none()))
 #else
 #define OMSC_ADD_NOCAPTURE(fn, idx) (fn)->addParamAttr((idx), llvm::Attribute::NoCapture)
@@ -760,9 +760,9 @@ llvm::Function* CodeGenerator::getOrDeclareStrlen() {
     fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addFnAttr(llvm::Attribute::NoFree);
     fn->addFnAttr(llvm::Attribute::NoSync);
-    OMSC_ADD_NOCAPTURE(fn, 0); // does not capture its pointer arg
-    fn->addParamAttr(0, llvm::Attribute::ReadOnly);  // only reads through the pointer
-    fn->addParamAttr(0, llvm::Attribute::NonNull);   // never called with null
+    OMSC_ADD_NOCAPTURE(fn, 0);                      // does not capture its pointer arg
+    fn->addParamAttr(0, llvm::Attribute::ReadOnly); // only reads through the pointer
+    fn->addParamAttr(0, llvm::Attribute::NonNull);  // never called with null
     return fn;
 }
 
@@ -1866,8 +1866,8 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         }
         if (expr->op == "**") {
             // Float exponentiation: use llvm.pow intrinsic
-            llvm::Function* powFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::pow,
-                                                       {llvm::Type::getDoubleTy(*context)});
+            llvm::Function* powFn =
+                OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::pow, {llvm::Type::getDoubleTy(*context)});
             return builder->CreateCall(powFn, {left, right}, "fpowtmp");
         }
 
@@ -2257,13 +2257,11 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         if (arg->getType()->isDoubleTy()) {
             // Use llvm.fabs intrinsic for native hardware abs on floats
-            llvm::Function* fabsIntrinsic =
-                OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::fabs, {getFloatType()});
+            llvm::Function* fabsIntrinsic = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::fabs, {getFloatType()});
             return builder->CreateCall(fabsIntrinsic, {arg}, "fabsval");
         }
         // Use llvm.abs.i64 intrinsic for native hardware abs on integers
-        llvm::Function* absIntrinsic =
-            OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::abs, {getDefaultType()});
+        llvm::Function* absIntrinsic = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::abs, {getDefaultType()});
         // The second argument (is_int_min_poison) is false for safe behavior
         return builder->CreateCall(absIntrinsic, {arg, builder->getFalse()}, "absval");
     }
@@ -2296,13 +2294,11 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             if (!b->getType()->isDoubleTy())
                 b = ensureFloat(b);
             // Use llvm.minnum intrinsic for native hardware fmin
-            llvm::Function* fminIntrinsic =
-                OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::minnum, {getFloatType()});
+            llvm::Function* fminIntrinsic = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::minnum, {getFloatType()});
             return builder->CreateCall(fminIntrinsic, {a, b}, "fminval");
         }
         // Use llvm.smin intrinsic for native hardware signed integer min
-        llvm::Function* sminIntrinsic =
-            OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::smin, {getDefaultType()});
+        llvm::Function* sminIntrinsic = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::smin, {getDefaultType()});
         return builder->CreateCall(sminIntrinsic, {a, b}, "minval");
     }
 
@@ -2320,13 +2316,11 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             if (!b->getType()->isDoubleTy())
                 b = ensureFloat(b);
             // Use llvm.maxnum intrinsic for native hardware fmax
-            llvm::Function* fmaxIntrinsic =
-                OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::maxnum, {getFloatType()});
+            llvm::Function* fmaxIntrinsic = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::maxnum, {getFloatType()});
             return builder->CreateCall(fmaxIntrinsic, {a, b}, "fmaxval");
         }
         // Use llvm.smax intrinsic for native hardware signed integer max
-        llvm::Function* smaxIntrinsic =
-            OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::smax, {getDefaultType()});
+        llvm::Function* smaxIntrinsic = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::smax, {getDefaultType()});
         return builder->CreateCall(smaxIntrinsic, {a, b}, "maxval");
     }
 
@@ -2373,17 +2367,13 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 lo = ensureFloat(lo);
             if (!hi->getType()->isDoubleTy())
                 hi = ensureFloat(hi);
-            llvm::Function* fminIntrinsic =
-                OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::minnum, {getFloatType()});
-            llvm::Function* fmaxIntrinsic =
-                OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::maxnum, {getFloatType()});
+            llvm::Function* fminIntrinsic = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::minnum, {getFloatType()});
+            llvm::Function* fmaxIntrinsic = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::maxnum, {getFloatType()});
             llvm::Value* minVH = builder->CreateCall(fminIntrinsic, {val, hi}, "fclampmin");
             return builder->CreateCall(fmaxIntrinsic, {minVH, lo}, "fclampval");
         }
-        llvm::Function* sminIntrinsic =
-            OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::smin, {getDefaultType()});
-        llvm::Function* smaxIntrinsic =
-            OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::smax, {getDefaultType()});
+        llvm::Function* sminIntrinsic = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::smin, {getDefaultType()});
+        llvm::Function* smaxIntrinsic = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::smax, {getDefaultType()});
         llvm::Value* minVH = builder->CreateCall(sminIntrinsic, {val, hi}, "clampmin");
         return builder->CreateCall(smaxIntrinsic, {minVH, lo}, "clampval");
     }
@@ -2547,8 +2537,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // instructions on x86, producing results in a single cycle on modern CPUs.
         // Convert to double, compute sqrt, then truncate back to integer.
         llvm::Value* fval = ensureFloat(x);
-        llvm::Function* sqrtIntrinsic =
-            OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::sqrt, {getFloatType()});
+        llvm::Function* sqrtIntrinsic = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::sqrt, {getFloatType()});
         llvm::Value* result = builder->CreateCall(sqrtIntrinsic, {fval}, "sqrt.result");
         return builder->CreateFPToSI(result, getDefaultType(), "sqrt.int");
     }
@@ -3081,8 +3070,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         llvm::Value* fval = ensureFloat(arg);
         // Use llvm.floor intrinsic for native hardware rounding
-        llvm::Function* floorIntrinsic =
-            OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::floor, {getFloatType()});
+        llvm::Function* floorIntrinsic = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::floor, {getFloatType()});
         llvm::Value* result = builder->CreateCall(floorIntrinsic, {fval}, "floor.result");
         return builder->CreateFPToSI(result, getDefaultType(), "floor.int");
     }
@@ -3096,8 +3084,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         llvm::Value* fval = ensureFloat(arg);
         // Use llvm.ceil intrinsic for native hardware rounding
-        llvm::Function* ceilIntrinsic =
-            OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::ceil, {getFloatType()});
+        llvm::Function* ceilIntrinsic = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::ceil, {getFloatType()});
         llvm::Value* result = builder->CreateCall(ceilIntrinsic, {fval}, "ceil.result");
         return builder->CreateFPToSI(result, getDefaultType(), "ceil.int");
     }
@@ -3111,8 +3098,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         llvm::Value* fval = ensureFloat(arg);
         // Use llvm.round intrinsic for native hardware rounding
-        llvm::Function* roundIntrinsic =
-            OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::round, {getFloatType()});
+        llvm::Function* roundIntrinsic = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::round, {getFloatType()});
         llvm::Value* result = builder->CreateCall(roundIntrinsic, {fval}, "round.result");
         return builder->CreateFPToSI(result, getDefaultType(), "round.int");
     }
@@ -3723,8 +3709,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateCondBr(isEmpty, failBB, okBB);
 
         builder->SetInsertPoint(failBB);
-        llvm::Value* errMsg =
-            builder->CreateGlobalString("Runtime error: pop from empty array\n", "pop_empty_msg");
+        llvm::Value* errMsg = builder->CreateGlobalString("Runtime error: pop from empty array\n", "pop_empty_msg");
         builder->CreateCall(getPrintfFunction(), {errMsg});
         builder->CreateCall(getOrDeclareAbort());
         builder->CreateUnreachable();

@@ -266,7 +266,9 @@ int AdaptiveJITRunner::run(llvm::Module* baseModule) {
     // cleared even if main() exits via an exception.
     g_activeRunner.store(this, std::memory_order_release);
     struct RunnerGuard {
-        ~RunnerGuard() { g_activeRunner.store(nullptr, std::memory_order_release); }
+        ~RunnerGuard() {
+            g_activeRunner.store(nullptr, std::memory_order_release);
+        }
     } runnerGuard;
     using OmscMainFn = int64_t (*)();
     int64_t exitVal = reinterpret_cast<OmscMainFn>(mainAddr)();
@@ -360,7 +362,8 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
             llvm::TargetOptions opts;
             opts.EnableFastISel = false; // force optimising ISel for best codegen
 #if LLVM_VERSION_MAJOR >= 21
-            TM.reset(target->createTargetMachine(llvm::Triple(triple), cpu, features, opts, std::optional<llvm::Reloc::Model>()));
+            TM.reset(target->createTargetMachine(llvm::Triple(triple), cpu, features, opts,
+                                                 std::optional<llvm::Reloc::Model>()));
 #else
             TM.reset(target->createTargetMachine(triple, cpu, features, opts, std::optional<llvm::Reloc::Model>()));
 #endif
