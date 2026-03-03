@@ -26,7 +26,7 @@ class Value {
     }
 
     // Copy constructor
-    Value(const Value& other) noexcept(false) : type(other.type) {
+    Value(const Value& other) : type(other.type) {
         if (__builtin_expect(type != Type::STRING, 1)) {
             // Fast path: POD copy covers INTEGER, FLOAT, and NONE without branching.
             intValue = other.intValue;
