@@ -2,7 +2,6 @@
 #define CODEGEN_H
 
 #include "ast.h"
-#include "bytecode.h"
 #include "diagnostic.h"
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/LLVMContext.h>
@@ -36,25 +35,21 @@ enum class OptimizationLevel {
 /// Execution tier assigned to each function during compilation.
 ///
 /// All user-defined functions compile to native LLVM IR and are executed via
-/// the adaptive two-tier JIT:
+/// the adaptive two-tier AOT pipeline:
 ///
 ///  - **AOT (Tier 1)**: Every function is compiled to native machine code
 ///    ahead-of-time by LLVM MCJIT at O2.  The adaptive runtime injects
 ///    call-counting dispatch prologs so hot functions can be promoted.
 ///
-///  - **JIT (Tier 2)**: When a function's call count reaches
-///    kRecompileThreshold the runtime re-optimises it at O3 with a PGO
-///    entry-count annotation and hot-patches the function pointer so
-///    subsequent calls bypass the dispatch prolog entirely.
+///  - **Tier 2**: When a function's call count reaches kRecompileThreshold
+///    the runtime re-optimises it at O3 with a PGO entry-count annotation
+///    and hot-patches the function pointer so subsequent calls bypass the
+///    dispatch prolog entirely.
 ///
 /// There is no bytecode or interpreter tier — every function produces
-/// native machine code from the first call.  `classifyFunction()` always
-/// returns `AOT`; the `Interpreted` and `JIT` enum values are retained for
-/// source compatibility.
+/// native machine code from the first call.
 enum class ExecutionTier {
-    AOT,         // Compiled to native code via LLVM IR (Tier 1)
-    Interpreted, // Legacy — not used; all functions are AOT
-    JIT          // Hot Tier-1 function promoted to O3+PGO native code
+    AOT // Compiled to native code via LLVM IR (Tier 1); hot functions promoted to O3+PGO (Tier 2)
 };
 
 /// Return a human-readable label for an ExecutionTier value.
@@ -62,10 +57,6 @@ inline const char* executionTierName(ExecutionTier tier) {
     switch (tier) {
     case ExecutionTier::AOT:
         return "AOT";
-    case ExecutionTier::Interpreted:
-        return "Interpreted";
-    case ExecutionTier::JIT:
-        return "JIT";
     }
     return "Unknown";
 }
@@ -176,10 +167,6 @@ class CodeGenerator {
     // Enum constant values (name → integer value), populated from enum declarations.
     std::unordered_map<std::string, long long> enumConstants_;
 
-    // Bytecode emitter for dynamic/interpreted code (user-defined functions only;
-    // stdlib built-ins are always compiled to native machine code via LLVM IR).
-    BytecodeEmitter bytecodeEmitter;
-    bool useDynamicCompilation;
     OptimizationLevel optimizationLevel;
 
     // Per-function execution tier decided during code generation.
@@ -195,47 +182,9 @@ class CodeGenerator {
     std::unordered_set<std::string> stringReturningFunctions_;
     std::unordered_map<std::string, std::unordered_set<size_t>> funcParamStringTypes_;
 
-    /// Compiled bytecode functions for Interpreted-tier functions.
-    /// Populated by generateHybrid() when the hybrid execution model is active.
-    struct CompiledBytecodeFunc {
-        std::string name;
-        uint8_t arity;
-        std::vector<uint8_t> bytecode;
-    };
-    std::vector<CompiledBytecodeFunc> bytecodeFunctions_;
-
-    /// Local variable name → index mapping for per-function bytecode emission.
-    /// Parameters are bound to indices 0..arity-1; additional locals are
-    /// allocated on demand during bytecode statement emission.
-    std::unordered_map<std::string, uint8_t> bytecodeLocals_;
-    uint8_t bytecodeNextLocal_ = 0;
-
-    /// Register allocator state for register-based bytecode.
-    uint8_t bytecodeNextReg_ = 0;
-    uint8_t bytecodeLocalBase_ = 0;
-
-    uint8_t allocReg() {
-        if (bytecodeNextReg_ == 255)
-            throw std::runtime_error("Register file overflow (max 255 registers)");
-        return bytecodeNextReg_++;
-    }
-
-    void resetTempRegs() {
-        bytecodeNextReg_ = bytecodeLocalBase_;
-    }
-
-    /// Return true when bytecode is being emitted for a function body
-    /// (as opposed to top-level / main code).
-    bool isInBytecodeFunctionContext() const {
-        return !bytecodeLocals_.empty() || bytecodeNextLocal_ > 0;
-    }
-
     /// Classify a function into its execution tier based on type annotations,
     /// OPTMAX status, and whether it is a special function (main/stdlib).
     ExecutionTier classifyFunction(const FunctionDecl* func) const;
-
-    /// Emit bytecode for a single function body (used by hybrid compilation).
-    void emitBytecodeForFunction(FunctionDecl* func);
 
     // Code generation methods
     llvm::Function* generateFunction(FunctionDecl* func);
@@ -358,11 +307,6 @@ class CodeGenerator {
         }
     }
 
-    /// Counter for generating unique bytecode switch temp-variable names.
-    /// Member variable (not function-local static) for thread-safety and
-    /// deterministic output across independent CodeGenerator instances.
-    int bytecodeSwitchCounter_ = 0;
-
     /// Resolve the effective CPU name and feature string for LLVM target machine
     /// construction based on the current -march / -mtune settings.
     void resolveTargetCPU(std::string& cpu, std::string& features) const;
@@ -424,36 +368,15 @@ class CodeGenerator {
     void runOptimizationPasses();
     void optimizeOptMaxFunctions();
 
-    uint8_t emitBytecodeExpression(Expression* expr);
-    void emitBytecodeStatement(Statement* stmt);
-    void emitBytecodeBlock(BlockStmt* stmt);
-    uint8_t emitBytecodeLoad(const std::string& name);
-    void emitBytecodeStore(const std::string& name, uint8_t rs);
-
   public:
     // Per-function optimization for targeted optimization of individual functions
     void optimizeFunction(llvm::Function* func);
-
-    // Bytecode generation (alternative backend)
-    void generateBytecode(Program* program);
 
     /// Compile all functions to native LLVM IR.  Equivalent to generate()
     /// in the current single-tier model; retained as a separate entry point
     /// so the adaptive JIT runner can use a distinct call site from the
     /// traditional AOT compile path.
     void generateHybrid(Program* program);
-
-    /// Always returns false — no bytecode is produced in the current model.
-    /// Retained for source compatibility.
-    bool hasHybridBytecodeFunctions() const {
-        return !bytecodeFunctions_.empty();
-    }
-
-    /// Returns an empty list — no bytecode is produced in the current model.
-    /// Retained for source compatibility.
-    const std::vector<CompiledBytecodeFunc>& getBytecodeFunctions() const {
-        return bytecodeFunctions_;
-    }
 
     /// Return the execution tier assigned to a function, or AOT if not found.
     ExecutionTier getFunctionTier(const std::string& name) const {
@@ -466,16 +389,6 @@ class CodeGenerator {
         return functionTiers;
     }
 
-    // Accessors for bytecode output
-    const BytecodeEmitter& getBytecodeEmitter() const {
-        return bytecodeEmitter;
-    }
-    bool isDynamicCompilation() const {
-        return useDynamicCompilation;
-    }
-    void setDynamicCompilation(bool enable) {
-        useDynamicCompilation = enable;
-    }
 };
 
 } // namespace omscript

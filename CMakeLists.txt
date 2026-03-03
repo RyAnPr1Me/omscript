@@ -75,16 +75,13 @@ set(COMPILER_SOURCES
     src/parser.cpp
     src/ast.cpp
     src/codegen.cpp
-    src/bytecode.cpp
     src/compiler.cpp
     src/main.cpp
 )
 
 # Runtime sources
 set(RUNTIME_SOURCES
-    runtime/vm.cpp
     runtime/value.cpp
-    runtime/jit.cpp
     runtime/aot_profile.cpp
 )
 
@@ -92,9 +89,9 @@ set(RUNTIME_SOURCES
 add_executable(omsc ${COMPILER_SOURCES} ${RUNTIME_SOURCES})
 
 # Link LLVM libraries
-# Only components actually used by the compiler and JIT runtime are listed.
+# Only components actually used by the compiler and AOT runtime are listed.
 # - core, support: fundamental LLVM infrastructure
-# - executionengine, mcjit, interpreter: JIT execution (runtime/jit.cpp)
+# - executionengine, mcjit: adaptive JIT execution (runtime/aot_profile.cpp)
 # - native: host target auto-detection
 # - passes, transformutils, analysis: optimization pipeline
 # - target, codegen, mc, mcparser, asmparser: machine code emission
@@ -102,7 +99,6 @@ set(LLVM_COMPONENTS
     core
     executionengine
     mcjit
-    interpreter
     native
     support
     passes
@@ -148,11 +144,8 @@ if(GTest_FOUND)
         src/parser.cpp
         src/ast.cpp
         src/codegen.cpp
-        src/bytecode.cpp
         src/compiler.cpp
-        runtime/vm.cpp
         runtime/value.cpp
-        runtime/jit.cpp
         runtime/aot_profile.cpp
     )
 
