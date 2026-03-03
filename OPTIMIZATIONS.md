@@ -311,8 +311,13 @@ Multiplication and division by powers of 2 are converted to shifts during IR gen
 n * 2   →  n << 1
 n * 8   →  n << 3
 n * 64  →  n << 6
-n / 4   →  n >> 2
-n / 16  →  n >> 4
+```
+
+Division and modulo by powers of 2 are converted to shift/mask sequences matching
+what Clang/GCC emit for C signed division, avoiding the costly hardware `sdiv`/`srem`:
+```omscript
+n / 4   →  (n + (n>>63 >>> 62)) >> 2   // bias-and-shift for correct truncation
+n % 8   →  ((n + bias) & 7) - bias      // bitwise AND instead of hardware srem
 ```
 
 ### Constant Comparison Folding
@@ -322,6 +327,36 @@ Comparisons between compile-time constant integers are evaluated at IR generatio
 3 > 7   →  0
 10 <= 10 → 1
 ```
+
+### No-Signed-Wrap (NSW) Arithmetic
+All integer arithmetic operations (`+`, `-`, `*`, `<<`) emit LLVM `nsw` (no signed wrap)
+flags, matching C's undefined-behaviour semantics for signed overflow. This is the single
+most impactful optimisation for loop-heavy code because LLVM's key analysis passes depend
+on NSW:
+- **SCEV** (Scalar Evolution): computes precise loop trip counts, enabling vectorisation
+- **IndVarSimplify**: widens/narrows induction variables and eliminates redundant checks
+- **LoopStrengthReduce**: combines and simplifies loop-dependent address calculations
+- **InstCombine**: performs aggressive algebraic simplifications
+
+```omscript
+// Without NSW: LLVM cannot prove the loop terminates or compute trip count
+// With NSW: LLVM vectorises this loop with 4-lane SIMD
+fn sum(n) {
+    var total = 0;
+    for (i in 0...n) {
+        total = total + i;
+    }
+    return total;
+}
+```
+
+### Function Attributes for Interprocedural Optimisation
+The compiler annotates every user function with LLVM attributes that enable aggressive
+interprocedural analysis:
+- `norecurse` — on non-recursive functions; enables GlobalOpt and alias analysis
+- `noundef` — on all parameters and return values; strengthens value-range propagation
+- `nounwind`, `nosync`, `nofree`, `willreturn`, `mustprogress` — enable speculative
+  execution, loop-idiom recognition, and dead-store elimination across call boundaries
 
 ### Constant Folding
 Constant expressions are evaluated at compile time. This applies to all arithmetic, comparison, logical, and bitwise operations on integer literals, as well as unary operations (`-`, `!`, `~`).
@@ -360,11 +395,11 @@ predictable array access patterns.
 
 ### SIMD Vectorization Hints
 At O2+ with `-fvectorize`, the compiler attaches LLVM loop metadata to generated loop
-back-edges:
-- `llvm.loop.vectorize.enable = true` — enables the loop vectoriser for each loop
+back-edges across all loop forms (for, while, and do-while):
+- `llvm.loop.mustprogress` — enables loop-idiom recognition (auto memset/memcpy)
 - `llvm.loop.interleave.count = 4` — requests 4-way interleaving for wider SIMD
   utilization and better instruction-level parallelism
-- `llvm.loop.unroll.enable` (when `-funroll-loops` is on) — enables loop unrolling
+- `llvm.loop.vectorize.width = 4` (O3 only) — requests 4-lane SIMD vectorization
 
 These metadata hints guide LLVM's LoopVectorize and LoopUnroll passes, complementing
 the existing auto-vectorization at O3 by explicitly marking every user-written loop as
@@ -456,14 +491,14 @@ var result = n << 1;  // Less readable, same performance
 ## Future Optimizations
 
 Planned additions:
-- Profile-Guided Optimization (PGO)
-- Link-Time Optimization (LTO)
 - Devirtualization for dynamic dispatch
+- Whole-program dead code elimination
+- Auto-parallelization of independent loop iterations
 
 ## Conclusion
 
 OmScript's optimization infrastructure provides:
-- ✅ Production-grade performance
+- ✅ Production-grade performance rivaling C and Rust
 - ✅ Automatic application (no hints needed)
 - ✅ Multiple optimization levels
 - ✅ Battle-tested LLVM passes via the new pass manager
@@ -471,7 +506,7 @@ OmScript's optimization infrastructure provides:
 - ✅ Auto-vectorization for SIMD (at O3)
 - ✅ Compile-time constant folding for unary, binary, and comparison expressions
 - ✅ Dead branch elimination for constant conditions
-- ✅ IR-level strength reduction (multiply/divide by power-of-2 to shift)
+- ✅ IR-level strength reduction (multiply/divide/modulo by power-of-2 to shift/AND)
 - ✅ Adaptive JIT runtime with automatic hot-function detection and O3 recompilation
 - ✅ Profile-guided recompilation with real call-count annotations
 - ✅ AOT compilation with full LLVM optimization pipeline (O0–O3 + OPTMAX)
@@ -483,8 +518,11 @@ OmScript's optimization infrastructure provides:
 - ✅ Lexer `scanNumber` uses `substr()` fast path for decimal numbers without underscores
 - ✅ Move-semantics `Token` constructor avoids string copies for temporary lexemes
 - ✅ Polyhedral-style loop distribution (LoopDistributePass) at O3 for cache locality
-- ✅ SIMD vectorization metadata (vectorize.enable, interleave.count) on generated loops at O2+
+- ✅ SIMD vectorization metadata (interleave.count, vectorize.width) on all loop forms at O2+
 - ✅ CLI flags `-fvectorize`, `-funroll-loops`, `-floop-optimize` for fine-grained control
+- ✅ NSW (no-signed-wrap) flags on integer arithmetic for C/Rust-grade loop optimization
+- ✅ `norecurse` attribute on non-recursive functions for better interprocedural analysis
+- ✅ `noundef` on function parameters and returns for stronger value-range propagation
 - ✅ Measurable, significant improvements
 
 The compiler transforms high-level OmScript code into highly optimized machine code that rivals hand-written assembly in many cases, while maintaining code readability and developer productivity.
