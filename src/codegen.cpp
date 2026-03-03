@@ -1306,8 +1306,7 @@ void CodeGenerator::generate(Program* program) {
         while (!errorStr.empty() && (errorStr.back() == '\n' || errorStr.back() == ' ')) {
             errorStr.pop_back();
         }
-        throw DiagnosticError(
-            Diagnostic{DiagnosticSeverity::Error, {0, 0}, "Module verification failed: " + errorStr});
+        throw DiagnosticError(Diagnostic{DiagnosticSeverity::Error, {0, 0}, "Module verification failed: " + errorStr});
     }
 }
 
@@ -6111,8 +6110,7 @@ uint8_t CodeGenerator::emitBytecodeExpression(Expression* expr) {
             return rd;
         }
         if (isStdlibFunction(call->callee)) {
-            codegenError("Stdlib function '" + call->callee +
-                         "' must be compiled to native code, not bytecode", call);
+            codegenError("Stdlib function '" + call->callee + "' must be compiled to native code, not bytecode", call);
         }
         std::vector<uint8_t> argRegs;
         for (auto& arg : call->arguments) {
