@@ -2010,9 +2010,9 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
 
     // Regular code generation for non-constant expressions
     if (expr->op == "+") {
-        return builder->CreateNSWAdd(left, right, "addtmp");
+        return builder->CreateAdd(left, right, "addtmp");
     } else if (expr->op == "-") {
-        return builder->CreateNSWSub(left, right, "subtmp");
+        return builder->CreateSub(left, right, "subtmp");
     } else if (expr->op == "*") {
         // Strength reduction: multiply by power of 2 → left shift
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
@@ -2025,7 +2025,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             if (s >= 0)
                 return builder->CreateShl(right, llvm::ConstantInt::get(getDefaultType(), s), "shltmp");
         }
-        return builder->CreateNSWMul(left, right, "multmp");
+        return builder->CreateMul(left, right, "multmp");
     } else if (expr->op == "/" || expr->op == "%") {
         bool isDivision = expr->op == "/";
 

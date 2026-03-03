@@ -198,8 +198,7 @@ void AdaptiveJITRunner::injectCounters(llvm::Module& mod) {
             // i64 for its dynamic value representation.
             B.CreateCall(argProfileTy, argProfileFn,
                          {nameGV, llvm::ConstantInt::get(i32Ty, argIdx),
-                          llvm::ConstantInt::get(i8Ty, static_cast<uint8_t>(ArgType::Integer)),
-                          &arg});
+                          llvm::ConstantInt::get(i8Ty, static_cast<uint8_t>(ArgType::Integer)), &arg});
             argIdx++;
         }
 
