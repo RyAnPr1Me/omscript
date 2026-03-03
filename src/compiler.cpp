@@ -62,10 +62,12 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
         throw std::runtime_error("'" + sourceFile + "' is a directory, not a source file");
     }
 
-    // Check file size to prevent memory exhaustion
-    auto fileSize = std::filesystem::file_size(sourceFile);
-    if (fileSize > size_t{100} * 1024 * 1024) { // 100MB limit
-        throw std::runtime_error("Source file too large (max 100MB): " + sourceFile);
+    // Check file size to prevent memory exhaustion (skip for non-regular files like pipes)
+    if (std::filesystem::is_regular_file(sourceFile)) {
+        auto fileSize = std::filesystem::file_size(sourceFile);
+        if (fileSize > size_t{100} * 1024 * 1024) { // 100MB limit
+            throw std::runtime_error("Source file too large (max 100MB): " + sourceFile);
+        }
     }
 
     if (verbose_) {
