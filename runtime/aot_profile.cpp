@@ -1,4 +1,6 @@
 #include "aot_profile.h"
+#include "deopt.h"
+#include "jit_profiler.h"
 
 #include <llvm/Bitcode/BitcodeReader.h>
 #include <llvm/Bitcode/BitcodeWriter.h>
@@ -6,6 +8,7 @@
 #include <llvm/ExecutionEngine/ExecutionEngine.h>
 #include <llvm/ExecutionEngine/MCJIT.h>
 #include <llvm/IR/IRBuilder.h>
+#include <llvm/IR/Instructions.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/MDBuilder.h>
 #include <llvm/IR/Module.h>
@@ -82,6 +85,8 @@ void AdaptiveJITRunner::ensureInitialized() {
 void AdaptiveJITRunner::injectCounters(llvm::Module& mod) {
     auto& ctx = mod.getContext();
     auto* i64Ty = llvm::Type::getInt64Ty(ctx);
+    auto* i32Ty = llvm::Type::getInt32Ty(ctx);
+    auto* i8Ty = llvm::Type::getInt8Ty(ctx);
     auto* ptrTy = llvm::PointerType::getUnqual(ctx);
     auto* voidTy = llvm::Type::getVoidTy(ctx);
 
@@ -91,6 +96,13 @@ void AdaptiveJITRunner::injectCounters(llvm::Module& mod) {
     auto* callbackFn =
         llvm::cast<llvm::Function>(mod.getOrInsertFunction("__omsc_adaptive_recompile", callbackTy).getCallee());
     callbackFn->addFnAttr(llvm::Attribute::NoUnwind);
+
+    // Declare the argument profiling callback.
+    // Signature: void __omsc_profile_arg(const char* name, uint32_t idx, uint8_t type, int64_t value)
+    auto* argProfileTy = llvm::FunctionType::get(voidTy, {ptrTy, i32Ty, i8Ty, i64Ty}, false);
+    auto* argProfileFn =
+        llvm::cast<llvm::Function>(mod.getOrInsertFunction("__omsc_profile_arg", argProfileTy).getCallee());
+    argProfileFn->addFnAttr(llvm::Attribute::NoUnwind);
 
     // Collect functions first to avoid iterator invalidation.
     llvm::SmallVector<llvm::Function*, 32> toInstrument;
@@ -166,12 +178,30 @@ void AdaptiveJITRunner::injectCounters(llvm::Module& mod) {
             B.CreateRet(hotCall);
         }
 
-        // --- omsc.count: atomic increment, check threshold ---
+        // --- omsc.count: atomic increment, check threshold, profile args ---
         B.SetInsertPoint(countBB);
         auto* oldCnt = B.CreateAtomicRMW(llvm::AtomicRMWInst::Add, counterGV, llvm::ConstantInt::get(i64Ty, 1),
                                          llvm::MaybeAlign(), llvm::AtomicOrdering::Monotonic);
         oldCnt->setName("omsc.old");
         auto* newCnt = B.CreateAdd(oldCnt, llvm::ConstantInt::get(i64Ty, 1), "omsc.new");
+
+        // Inject argument type profiling for each parameter.
+        // During the warm-up phase (before Tier-2 recompile) this records
+        // the runtime type of each argument, which feeds into type
+        // specialization during Tier-2 IR optimization.
+        // All OmScript values are i64 at the IR level; ArgType::Integer (1)
+        // is the default tag for the dynamically-typed representation.
+        uint32_t argIdx = 0;
+        for (auto& arg : fn->args()) {
+            // Default: treat all args as Integer type since OmScript uses
+            // i64 for its dynamic value representation.
+            B.CreateCall(argProfileTy, argProfileFn,
+                         {nameGV, llvm::ConstantInt::get(i32Ty, argIdx),
+                          llvm::ConstantInt::get(i8Ty, static_cast<uint8_t>(1)), // ArgType::Integer
+                          &arg});
+            argIdx++;
+        }
+
         auto* hitThresh =
             B.CreateICmpEQ(newCnt, llvm::ConstantInt::get(i64Ty, AdaptiveJITRunner::kRecompileThreshold), "omsc.hit");
         B.CreateCondBr(hitThresh, recompileBB, &origEntry);
@@ -249,6 +279,12 @@ int AdaptiveJITRunner::run(llvm::Module* baseModule) {
     // so we map it explicitly.
     rawEngine->addGlobalMapping("__omsc_adaptive_recompile", reinterpret_cast<uint64_t>(&__omsc_adaptive_recompile));
 
+    // Register the profiling and deoptimization callbacks so JIT-compiled
+    // code that calls them can be resolved by MCJIT.
+    rawEngine->addGlobalMapping("__omsc_profile_branch", reinterpret_cast<uint64_t>(&__omsc_profile_branch));
+    rawEngine->addGlobalMapping("__omsc_profile_arg", reinterpret_cast<uint64_t>(&__omsc_profile_arg));
+    rawEngine->addGlobalMapping("__omsc_deopt_guard_fail", reinterpret_cast<uint64_t>(&__omsc_deopt_guard_fail));
+
     rawEngine->finalizeObject();
 
     uint64_t mainAddr = rawEngine->getFunctionAddress("main");
@@ -322,6 +358,35 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
     for (auto& other : *mod) {
         if (!other.isDeclaration() && other.getName() != funcName && !other.getEntryCount())
             other.setEntryCount(1);
+    }
+
+    // --- Apply collected branch profile data as LLVM branch weights ---
+    // The JITProfiler records taken/not-taken counts for each branch site
+    // during the warm-up phase.  Attaching these as branch weight metadata
+    // guides the code layout, branch predictor hints, and LLVM's hot/cold
+    // splitting passes in the O3 pipeline.
+    {
+        const FunctionProfile* prof = JITProfiler::instance().getProfile(funcName);
+        if (prof && !prof->branches.empty()) {
+            llvm::MDBuilder mdb(fn->getContext());
+            uint32_t branchIdx = 0;
+            for (auto& bb : *fn) {
+                auto* term = bb.getTerminator();
+                if (!term)
+                    continue;
+                auto* br = llvm::dyn_cast<llvm::BranchInst>(term);
+                if (!br || !br->isConditional())
+                    continue;
+                if (branchIdx < prof->branches.size()) {
+                    const auto& bp = prof->branches[branchIdx];
+                    uint32_t taken = static_cast<uint32_t>(std::max(bp.takenCount, uint64_t{1}));
+                    uint32_t notTaken = static_cast<uint32_t>(std::max(bp.notTakenCount, uint64_t{1}));
+                    auto* bw = mdb.createBranchWeights(taken, notTaken);
+                    br->setMetadata(llvm::LLVMContext::MD_prof, bw);
+                }
+                branchIdx++;
+            }
+        }
     }
 
     // --- Re-optimise at O3 with PGO guidance and full native CPU features ---

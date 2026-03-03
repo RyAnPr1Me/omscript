@@ -83,6 +83,8 @@ set(COMPILER_SOURCES
 set(RUNTIME_SOURCES
     runtime/value.cpp
     runtime/aot_profile.cpp
+    runtime/jit_profiler.cpp
+    runtime/deopt.cpp
 )
 
 # Compiler executable
@@ -147,6 +149,8 @@ if(GTest_FOUND)
         src/compiler.cpp
         runtime/value.cpp
         runtime/aot_profile.cpp
+        runtime/jit_profiler.cpp
+        runtime/deopt.cpp
     )
 
     add_library(omscript_lib STATIC ${LIB_SOURCES})
