@@ -21,6 +21,7 @@
 #include <llvm/Target/TargetOptions.h>
 #include <llvm/TargetParser/Host.h>
 #include <llvm/TargetParser/SubtargetFeature.h>
+#include <llvm/TargetParser/Triple.h>
 
 #include <atomic>
 #include <cassert>
@@ -355,7 +356,11 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
             }
             llvm::TargetOptions opts;
             opts.EnableFastISel = false; // force optimising ISel for best codegen
+#if LLVM_VERSION_MAJOR >= 21
+            TM.reset(target->createTargetMachine(llvm::Triple(triple), cpu, features, opts, std::optional<llvm::Reloc::Model>()));
+#else
             TM.reset(target->createTargetMachine(triple, cpu, features, opts, std::optional<llvm::Reloc::Model>()));
+#endif
             if (!TM) {
                 llvm::errs() << "omsc: Tier-2 recompile of '" << funcName
                              << "' failed: could not create target machine\n";
