@@ -3,6 +3,7 @@
 #include "diagnostic.h"
 #include "lexer.h"
 #include "parser.h"
+#include "aot_profile.h"
 #include <chrono>
 #include <csignal>
 #include <cstdlib>
@@ -2569,6 +2570,81 @@ int main(int argc, char* argv[]) {
                 std::cerr << "Timing: total " << totalMs << "ms\n";
             }
             return 0;
+        }
+
+        // -------------------------------------------------------------------
+        // Adaptive JIT execution — `omsc run` with JIT enabled (default)
+        // -------------------------------------------------------------------
+        // Instead of compile → link → subprocess, we JIT-execute the module
+        // in-process at O2 (fast start) and automatically recompile any
+        // function that crosses kRecompileThreshold calls at O3 with a
+        // real-runtime PGO entry-count annotation, hot-patching the function
+        // pointer so future calls use the faster specialisation immediately.
+        if (command == Command::Run && flagJIT && !keepTemps) {
+            std::string source = readSourceFile(sourceFile);
+
+            auto lexStart2 = std::chrono::steady_clock::now();
+            omscript::Lexer lexer2(source);
+            auto tokens2 = lexer2.tokenize();
+            auto lexEnd2 = std::chrono::steady_clock::now();
+
+            auto parseStart2 = std::chrono::steady_clock::now();
+            omscript::Parser parser2(tokens2);
+            auto program2 = parser2.parse();
+            auto parseEnd2 = std::chrono::steady_clock::now();
+
+            auto codegenStart2 = std::chrono::steady_clock::now();
+            omscript::CodeGenerator cg(optLevel);
+            cg.setMarch(marchCpu);
+            cg.setMtune(mtuneCpu);
+            cg.setPIC(false); // not needed for in-process JIT
+            cg.setFastMath(flagFastMath);
+            cg.setOptMax(flagOptMax);
+            cg.setVectorize(flagVectorize);
+            cg.setUnrollLoops(flagUnrollLoops);
+            cg.setLoopOptimize(flagLoopOptimize);
+            cg.generateHybrid(program2.get());
+            auto codegenEnd2 = std::chrono::steady_clock::now();
+
+            if (showTiming) {
+                auto lexMs2 =
+                    std::chrono::duration_cast<std::chrono::microseconds>(lexEnd2 - lexStart2).count() / 1000.0;
+                auto parseMs2 =
+                    std::chrono::duration_cast<std::chrono::microseconds>(parseEnd2 - parseStart2).count() / 1000.0;
+                auto codegenMs2 =
+                    std::chrono::duration_cast<std::chrono::microseconds>(codegenEnd2 - codegenStart2).count() / 1000.0;
+                std::cerr << "Timing: lex " << lexMs2 << "ms, parse " << parseMs2 << "ms, codegen " << codegenMs2
+                          << "ms\n";
+            }
+
+            // If any function fell back to bytecode/VM (untyped functions with
+            // string operations), the module contains VM-call stubs that MCJIT
+            // cannot execute without the full bytecode VM.  Fall through to the
+            // traditional compile+link+exec path in that case.
+            if (!cg.hasHybridBytecodeFunctions()) {
+                omscript::AdaptiveJITRunner runner;
+                int exitCode = runner.run(cg.getModule());
+
+                // "JIT-compiled" satisfies the existing test suite which checks
+                // for the substring "compiled" in the run-command output.
+                if (!quiet)
+                    std::cout << "JIT-compiled " << sourceFile << std::endl;
+
+                if (showTiming) {
+                    auto totalMs2 =
+                        std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::steady_clock::now() - totalStart)
+                            .count() /
+                        1000.0;
+                    std::cerr << "Timing: total " << totalMs2 << "ms\n";
+                }
+
+                if (exitCode != 0)
+                    std::cout << "Program exited with code " << exitCode << "\n";
+
+                return exitCode;
+            }
+            // Has bytecode/VM functions — fall through to compile+link+exec.
         }
 
         omscript::Compiler compiler;
