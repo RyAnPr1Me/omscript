@@ -2654,16 +2654,24 @@ int main(int argc, char* argv[]) {
         if (command == Command::Run && flagJIT) {
             std::string source = readSourceFile(sourceFile);
 
+            if (verbose) {
+                std::cout << "Running " << sourceFile << " (JIT mode)..." << std::endl;
+                std::cout << "  Lexing..." << std::endl;
+            }
             auto lexStart2 = std::chrono::steady_clock::now();
             omscript::Lexer lexer2(source);
             auto tokens2 = lexer2.tokenize();
             auto lexEnd2 = std::chrono::steady_clock::now();
 
+            if (verbose)
+                std::cout << "  Parsing..." << std::endl;
             auto parseStart2 = std::chrono::steady_clock::now();
             omscript::Parser parser2(tokens2);
             auto program2 = parser2.parse();
             auto parseEnd2 = std::chrono::steady_clock::now();
 
+            if (verbose)
+                std::cout << "  Generating code..." << std::endl;
             auto codegenStart2 = std::chrono::steady_clock::now();
             omscript::CodeGenerator cg(optLevel);
             cg.setMarch(marchCpu);
@@ -2676,6 +2684,11 @@ int main(int argc, char* argv[]) {
             cg.setLoopOptimize(flagLoopOptimize);
             cg.generateHybrid(program2.get());
             auto codegenEnd2 = std::chrono::steady_clock::now();
+
+            if (verbose) {
+                std::cout << "  LLVM IR:" << std::endl;
+                cg.getModule()->print(llvm::outs(), nullptr);
+            }
 
             if (showTiming) {
                 auto lexMs2 =
@@ -2730,6 +2743,7 @@ int main(int argc, char* argv[]) {
             }
 
             omscript::AdaptiveJITRunner runner;
+            runner.setVerbose(verbose);
             int exitCode = 1;
             try {
                 exitCode = runner.run(cg.getModule());

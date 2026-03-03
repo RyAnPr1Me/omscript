@@ -1460,12 +1460,17 @@ void CodeGenerator::generate(Program* program) {
         generateFunction(func.get());
     }
 
-    // Run optimization passes (also sets target triple and data layout)
-    runOptimizationPasses();
-
+    // Apply OPTMAX per-function optimization passes BEFORE the module-wide IPO
+    // pipeline.  This ensures the aggressively-optimized OPTMAX function bodies
+    // feed into the inliner and constant-propagation passes in
+    // runOptimizationPasses(), rather than being optimized on already-inlined
+    // (and possibly dead) copies after IPO has run.
     if (hasOptMaxFunctions && enableOptMax_) {
         optimizeOptMaxFunctions();
     }
+
+    // Run optimization passes (also sets target triple and data layout)
+    runOptimizationPasses();
 
     // Verify the module
     std::string errorStr;
@@ -6151,11 +6156,23 @@ void CodeGenerator::writeBitcodeFile(const std::string& filename) {
 // ---------------------------------------------------------------------------
 
 void CodeGenerator::generateHybrid(Program* program) {
-    // All functions compile to native LLVM IR via the standard AOT pipeline.
-    // The adaptive JIT runtime (AdaptiveJITRunner) then executes the module
-    // in-process via MCJIT, injects call counters, and recompiles hot
-    // functions at O3 with PGO guidance.
+    // For the JIT execution path the module must preserve distinct, callable
+    // function bodies so that the AdaptiveJITRunner can inject per-function
+    // call-count dispatch prologs and hot-patch individual functions after
+    // Tier-2 recompilation.
+    //
+    // The standard AOT pipeline runs inter-procedural optimizations (IPO):
+    // inlining + constant propagation can fold all calls to a hot function
+    // directly into its callers, making the function unreachable at runtime
+    // so its call counter never increments and Tier-2 never fires.
+    //
+    // Fix: generate IR at O0 (no IPO, no inlining).  MCJIT compiles the
+    // resulting module at its own O2 machine-code level, and Tier-2
+    // recompilation applies O3 + PGO to each hot function individually.
+    auto savedLevel = optimizationLevel;
+    optimizationLevel = OptimizationLevel::O0;
     generate(program);
+    optimizationLevel = savedLevel;
 }
 
 } // namespace omscript

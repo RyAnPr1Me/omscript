@@ -29,6 +29,7 @@
 #include <atomic>
 #include <cassert>
 #include <climits>
+#include <iostream>
 #include <mutex>
 
 namespace omscript {
@@ -219,6 +220,9 @@ void AdaptiveJITRunner::injectCounters(llvm::Module& mod) {
 int AdaptiveJITRunner::run(llvm::Module* baseModule) {
     ensureInitialized();
 
+    if (verbose_)
+        std::cout << "JIT: serialising module to bitcode..." << std::endl;
+
     // Step 1: Serialise the CLEAN module to bitcode.
     // This bitcode has no dispatch prologs or counter globals — it is the
     // source used for Tier-2 PGO recompilation of hot functions.
@@ -240,6 +244,8 @@ int AdaptiveJITRunner::run(llvm::Module* baseModule) {
     auto instrMod = std::move(*modOrErr);
 
     // Step 3: Inject call-counting dispatch prologs.
+    if (verbose_)
+        std::cout << "JIT: injecting call-count dispatch prologs (Tier-1)..." << std::endl;
     injectCounters(*instrMod);
 
     // Verify the instrumented IR is well-formed before handing it to MCJIT.
@@ -253,6 +259,8 @@ int AdaptiveJITRunner::run(llvm::Module* baseModule) {
     // optimiser (CodeGenOpt::Default = O2) gives good initial code quality
     // while keeping Tier-1 compilation fast so execution starts promptly.
     // Hot functions will be individually recompiled at O3 in Tier 2.
+    if (verbose_)
+        std::cout << "JIT: compiling instrumented module (Tier-1, O2)..." << std::endl;
     JitModule jm;
     jm.ctx = std::move(instrCtx); // keep context alive with the engine
 
@@ -300,6 +308,8 @@ int AdaptiveJITRunner::run(llvm::Module* baseModule) {
     // Register this runner as the active one so that the C-linkage callback
     // can reach it during execution.  RAII guard ensures the pointer is
     // cleared even if main() exits via an exception.
+    if (verbose_)
+        std::cout << "JIT: executing program..." << std::endl;
     g_activeRunner.store(this, std::memory_order_release);
     struct RunnerGuard {
         ~RunnerGuard() {
@@ -331,6 +341,11 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
         if (!recompiled_.emplace(funcName).second)
             return;
     }
+
+    // Always print recompile events unconditionally — these are significant
+    // runtime events the user explicitly wants to see (recompilation is
+    // infrequent and marks the promotion to Tier-2 optimized native code).
+    std::cerr << "JIT: recompiling hot function '" << funcName << "' (calls: " << callCount << ") at O3+PGO\n";
 
     // RAII scope guard: on early return (failure), automatically remove the
     // function from recompiled_ so that a future hot threshold hit can retry.
@@ -516,6 +531,7 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
     // Hot-patch: the volatile load in the dispatch prolog will see this on
     // the very next call to this function.
     *fnPtrSlot = reinterpret_cast<void*>(addr);
+    std::cerr << "JIT: recompiled '" << funcName << "' successfully (Tier-2 active)\n"; // always printed
 }
 
 } // namespace omscript
