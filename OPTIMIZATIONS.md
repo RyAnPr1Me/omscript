@@ -331,9 +331,9 @@ Comparisons between compile-time constant integers are evaluated at IR generatio
 ### No-Signed-Wrap (NSW) Arithmetic
 All integer arithmetic operations (`+`, `-`, `*`, `<<`) emit LLVM `nsw` (no signed wrap)
 flags, matching C's undefined-behaviour semantics for signed overflow. This is the single
-most impactful optimisation for loop-heavy code because LLVM's key analysis passes depend
+most impactful optimization for loop-heavy code because LLVM's key analysis passes depend
 on NSW:
-- **SCEV** (Scalar Evolution): computes precise loop trip counts, enabling vectorisation
+- **SCEV** (Scalar Evolution): computes precise loop trip counts, enabling vectorization
 - **IndVarSimplify**: widens/narrows induction variables and eliminates redundant checks
 - **LoopStrengthReduce**: combines and simplifies loop-dependent address calculations
 - **InstCombine**: performs aggressive algebraic simplifications
@@ -350,7 +350,7 @@ fn sum(n) {
 }
 ```
 
-### Function Attributes for Interprocedural Optimisation
+### Function Attributes for Interprocedural Optimization
 The compiler annotates every user function with LLVM attributes that enable aggressive
 interprocedural analysis:
 - `norecurse` — on non-recursive functions; enables GlobalOpt and alias analysis

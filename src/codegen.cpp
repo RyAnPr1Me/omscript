@@ -1431,7 +1431,7 @@ void CodeGenerator::generate(Program* program) {
         function->addFnAttr(llvm::Attribute::NoFree);
         function->addFnAttr(llvm::Attribute::WillReturn);
         // noundef on all parameters and the return value — omscript always
-        // initialises every variable, so the optimizer can assume no undef/
+        // initializes every variable, so the optimizer can assume no undef/
         // poison values flow through function boundaries.  This strengthens
         // SCEV, value-range propagation, and alias analysis.
         for (unsigned i = 0; i < func->parameters.size(); ++i) {
@@ -2028,8 +2028,8 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     // Regular code generation for non-constant expressions.
     // NSW (No Signed Wrap) flags are set on integer arithmetic so LLVM can
     // assume signed overflow does not occur — matching C/Rust semantics.
-    // This unlocks critical optimisations: SCEV trip-count computation for
-    // loop vectorisation, induction-variable simplification, and aggressive
+    // This unlocks critical optimizations: SCEV trip-count computation for
+    // loop vectorization, induction-variable simplification, and aggressive
     // strength reduction that are otherwise impossible.
     if (expr->op == "+") {
         return builder->CreateNSWAdd(left, right, "addtmp");
