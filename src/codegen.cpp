@@ -902,7 +902,8 @@ llvm::Function* CodeGenerator::getOrDeclareMemcpy() {
     auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy, ptrTy, getDefaultType()}, false);
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "memcpy", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
-    fn->addRetAttr(llvm::Attribute::NoAlias); // returned (destination) pointer does not alias any pointer visible to the caller before this call
+    fn->addRetAttr(llvm::Attribute::NoAlias); // returned (destination) pointer does not alias any pointer visible to
+                                              // the caller before this call
     return fn;
 }
 
@@ -1485,15 +1486,17 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         func->body->statements.size() <= inlineThreshold) {
         // Check for direct self-recursion before applying alwaysinline.
         bool isSelfRecursive = false;
-        if (optimizationLevel >= OptimizationLevel::O3 &&
-            func->body->statements.size() <= kAlwaysInlineStatements) {
+        if (optimizationLevel >= OptimizationLevel::O3 && func->body->statements.size() <= kAlwaysInlineStatements) {
             // exprCheck: walk an expression tree for a direct call to func->name.
             std::function<bool(Expression*)> exprCheck = [&](Expression* e) -> bool {
-                if (!e) return false;
+                if (!e)
+                    return false;
                 if (auto* call = dynamic_cast<CallExpr*>(e)) {
-                    if (call->callee == func->name) return true;
+                    if (call->callee == func->name)
+                        return true;
                     for (auto& arg : call->arguments)
-                        if (exprCheck(arg.get())) return true;
+                        if (exprCheck(arg.get()))
+                            return true;
                 }
                 if (auto* bin = dynamic_cast<BinaryExpr*>(e))
                     return exprCheck(bin->left.get()) || exprCheck(bin->right.get());
@@ -1506,10 +1509,12 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
             };
             // hasSelfCall: walk all statement kinds that can contain expressions.
             std::function<bool(Statement*)> hasSelfCall = [&](Statement* s) -> bool {
-                if (!s) return false;
+                if (!s)
+                    return false;
                 if (auto* blk = dynamic_cast<BlockStmt*>(s)) {
                     for (auto& st : blk->statements)
-                        if (hasSelfCall(st.get())) return true;
+                        if (hasSelfCall(st.get()))
+                            return true;
                     return false;
                 }
                 if (auto* ret = dynamic_cast<ReturnStmt*>(s))
@@ -1519,24 +1524,23 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
                 if (auto* var = dynamic_cast<VarDecl*>(s))
                     return exprCheck(var->initializer.get());
                 if (auto* ifS = dynamic_cast<IfStmt*>(s))
-                    return exprCheck(ifS->condition.get()) ||
-                           hasSelfCall(ifS->thenBranch.get()) ||
+                    return exprCheck(ifS->condition.get()) || hasSelfCall(ifS->thenBranch.get()) ||
                            hasSelfCall(ifS->elseBranch.get());
                 if (auto* wh = dynamic_cast<WhileStmt*>(s))
                     return exprCheck(wh->condition.get()) || hasSelfCall(wh->body.get());
                 if (auto* dw = dynamic_cast<DoWhileStmt*>(s))
                     return hasSelfCall(dw->body.get()) || exprCheck(dw->condition.get());
                 if (auto* fr = dynamic_cast<ForStmt*>(s))
-                    return exprCheck(fr->start.get()) || exprCheck(fr->end.get()) ||
-                           exprCheck(fr->step.get()) || hasSelfCall(fr->body.get());
+                    return exprCheck(fr->start.get()) || exprCheck(fr->end.get()) || exprCheck(fr->step.get()) ||
+                           hasSelfCall(fr->body.get());
                 if (auto* fe = dynamic_cast<ForEachStmt*>(s))
                     return exprCheck(fe->collection.get()) || hasSelfCall(fe->body.get());
                 return false;
             };
             isSelfRecursive = hasSelfCall(func->body.get());
         }
-        if (optimizationLevel >= OptimizationLevel::O3 &&
-            func->body->statements.size() <= kAlwaysInlineStatements && !isSelfRecursive) {
+        if (optimizationLevel >= OptimizationLevel::O3 && func->body->statements.size() <= kAlwaysInlineStatements &&
+            !isSelfRecursive) {
             function->addFnAttr(llvm::Attribute::AlwaysInline);
         } else {
             function->addFnAttr(llvm::Attribute::InlineHint);
@@ -5335,18 +5339,16 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         loopMDs.push_back(mustProgress);
         if (optimizationLevel >= OptimizationLevel::O2 && enableVectorize_) {
             llvm::MDNode* interleave = llvm::MDNode::get(
-                *context,
-                {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
-                 llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))});
+                *context, {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
+                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))});
             loopMDs.push_back(interleave);
         }
         if (optimizationLevel >= OptimizationLevel::O3 && enableVectorize_) {
             // Suggest 4-lane SIMD vectorization to the back-end.  The optimizer
             // will widen further if the target supports AVX2/AVX-512 (8/16 lanes).
             llvm::MDNode* vecWidth = llvm::MDNode::get(
-                *context,
-                {llvm::MDString::get(*context, "llvm.loop.vectorize.width"),
-                 llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))});
+                *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.width"),
+                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))});
             loopMDs.push_back(vecWidth);
         }
         llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
@@ -5770,7 +5772,7 @@ void CodeGenerator::runOptimizationPasses() {
         PTO.CallGraphProfile = true;
     }
     if (optimizationLevel == OptimizationLevel::O3) {
-        PTO.InlinerThreshold = 400;      // more aggressive inlining than the default ~225
+        PTO.InlinerThreshold = 400; // more aggressive inlining than the default ~225
     }
 
     // ---------------------------------------------------------------------------
@@ -5795,22 +5797,20 @@ void CodeGenerator::runOptimizationPasses() {
     std::optional<llvm::PGOOptions> pgoOpt;
     if (!pgoGenPath_.empty()) {
         // Instrumentation generation: insert counters, write .profraw on exit.
-        pgoOpt = llvm::PGOOptions(
-            pgoGenPath_,          // ProfileFile: output path for raw profile
-            "",                   // CSProfileGenFile: context-sensitive profile (unused)
-            "",                   // ProfileRemappingFile: symbol remapping (unused)
-            "",                   // MemoryProfile: memory profile (unused)
-            llvm::vfs::getRealFileSystem(),
-            llvm::PGOOptions::IRInstr); // Action: IR-level instrumentation
+        pgoOpt = llvm::PGOOptions(pgoGenPath_, // ProfileFile: output path for raw profile
+                                  "",          // CSProfileGenFile: context-sensitive profile (unused)
+                                  "",          // ProfileRemappingFile: symbol remapping (unused)
+                                  "",          // MemoryProfile: memory profile (unused)
+                                  llvm::vfs::getRealFileSystem(),
+                                  llvm::PGOOptions::IRInstr); // Action: IR-level instrumentation
     } else if (!pgoUsePath_.empty()) {
         // Profile-use: feed collected data into the optimization pipeline.
-        pgoOpt = llvm::PGOOptions(
-            pgoUsePath_,          // ProfileFile: input .profdata path
-            "",                   // CSProfileGenFile: unused
-            "",                   // ProfileRemappingFile: unused
-            "",                   // MemoryProfile: unused
-            llvm::vfs::getRealFileSystem(),
-            llvm::PGOOptions::IRUse); // Action: apply IR-level profile
+        pgoOpt = llvm::PGOOptions(pgoUsePath_, // ProfileFile: input .profdata path
+                                  "",          // CSProfileGenFile: unused
+                                  "",          // ProfileRemappingFile: unused
+                                  "",          // MemoryProfile: unused
+                                  llvm::vfs::getRealFileSystem(),
+                                  llvm::PGOOptions::IRUse); // Action: apply IR-level profile
     }
 
     llvm::PassBuilder PB(targetMachine.get(), PTO, pgoOpt);
@@ -5826,9 +5826,7 @@ void CodeGenerator::runOptimizationPasses() {
     // had already consumed and transformed the original loop structure.
     if (optimizationLevel >= OptimizationLevel::O2 && enableLoopOptimize_) {
         PB.registerVectorizerStartEPCallback(
-            [](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) {
-                FPM.addPass(llvm::LoopDistributePass());
-            });
+            [](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) { FPM.addPass(llvm::LoopDistributePass()); });
     }
 
     llvm::LoopAnalysisManager LAM;

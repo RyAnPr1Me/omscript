@@ -1,9 +1,9 @@
+#include "aot_profile.h"
 #include "codegen.h"
 #include "compiler.h"
 #include "diagnostic.h"
 #include "lexer.h"
 #include "parser.h"
-#include "aot_profile.h"
 #include <chrono>
 #include <csignal>
 #include <cstdlib>
@@ -2676,8 +2676,7 @@ int main(int argc, char* argv[]) {
 
             if (showTiming) {
                 auto totalMs2 =
-                    std::chrono::duration_cast<std::chrono::microseconds>(
-                        std::chrono::steady_clock::now() - totalStart)
+                    std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - totalStart)
                         .count() /
                     1000.0;
                 std::cerr << "Timing: total " << totalMs2 << "ms\n";
