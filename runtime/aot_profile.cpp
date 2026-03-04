@@ -423,6 +423,11 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
         return;
     }
     fn->setEntryCount(static_cast<uint64_t>(callCount));
+    // Mark the hot function with the `hot` attribute so LLVM's inliner,
+    // branch layout, and code placement passes treat it with maximum priority.
+    // This enables hot/cold splitting (moving error paths out of the hot region),
+    // more aggressive inlining into this function, and better I-cache layout.
+    fn->addFnAttr(llvm::Attribute::Hot);
     for (auto& other : *mod) {
         if (!other.isDeclaration() && other.getName() != funcName && !other.getEntryCount())
             other.setEntryCount(1);
@@ -479,7 +484,7 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
                     // >90% integer → mark parameter as always-defined integer
                     // ap.totalCalls is guaranteed > 0 by the guard above.
                     double intRatio = static_cast<double>(ap.typeCounts[static_cast<uint8_t>(ArgType::Integer)]) /
-                                     static_cast<double>(ap.totalCalls);
+                                      static_cast<double>(ap.totalCalls);
                     if (intRatio > 0.9) {
                         fn->addParamAttr(static_cast<unsigned>(i), llvm::Attribute::NoUndef);
                         fn->addParamAttr(static_cast<unsigned>(i), llvm::Attribute::SExt);
@@ -498,7 +503,12 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
         PTO.LoopInterleaving = true;
         PTO.MergeFunctions = true;
         PTO.CallGraphProfile = true;
-        PTO.InlinerThreshold = 400;
+        // Tier-2 uses a higher inliner threshold (600) than the AOT pipeline
+        // (400) because we already know this function is hot — aggressive
+        // inlining of callees eliminates call overhead and exposes more
+        // optimization opportunities (constant propagation, loop fusion, etc.)
+        // within the hot function body.
+        PTO.InlinerThreshold = 600;
 
         // Build a native TargetMachine with ALL host CPU features exposed
         // so the vectoriser and scheduler can use AVX2/AVX-512/NEON etc.

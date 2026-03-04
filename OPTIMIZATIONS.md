@@ -446,16 +446,19 @@ When running interactively with `omsc run`, a two-tier adaptive JIT is used:
    level (O0–O3) with per-function optimization passes that scale accordingly:
    - **O0**: No passes for fastest startup
    - **O1**: mem2reg, instcombine, GVN, DCE
-   - **O2**: + loop optimizations (LICM, strength reduce, unroll, prefetch)
-   - **O3**: + aggressive passes (nary-reassociate, constant-hoisting, flatten-CFG),
-     two optimization iterations for maximum code quality
+   - **O2**: + loop optimizations (LICM, strength reduce, unroll, prefetch, merged-load-store-motion)
+   - **O3**: + aggressive passes (nary-reassociate, constant-hoisting, speculative-execution,
+     separate-const-offset-from-GEP, flatten-CFG), two optimization iterations for maximum code quality
 
    Every non-`main` function receives a call-counting dispatch prolog. The optimized IR
    is JIT-compiled via MCJIT and execution begins immediately.
 
 2. **Tier 2 — Hot Recompile**: Functions that exceed a call-count threshold are recompiled
    at O3 with profile-guided optimization hints including branch weights, entry counts,
-   argument-type annotations, and loop distribution. The LLVM inliner, branch layout, loop
+   argument-type annotations, the `hot` function attribute, and loop distribution. The
+   `hot` attribute tells LLVM to use maximum optimization effort: hot/cold splitting
+   (moving error paths out of the fast region), more aggressive inlining (threshold 600
+   vs 400 for AOT), and better I-cache layout. The LLVM inliner, branch layout, loop
    vectorizer, and unroller all see the function as hot and optimize accordingly.
 
 Post-recompile, calls take a fast path: one volatile load + a well-predicted branch, then a direct call to the O3-PGO-optimized native code with zero counter overhead.
@@ -548,8 +551,13 @@ OmScript's optimization infrastructure provides:
 - ✅ IR-level strength reduction (multiply/divide/modulo by power-of-2 to shift/AND)
 - ✅ Adaptive JIT runtime with level-aware baseline optimization (O0–O3 respected)
 - ✅ Profile-guided recompilation with real call-count annotations and branch weights
+- ✅ JIT Tier-2 `hot` function attribute for maximum optimization of hot code
+- ✅ JIT Tier-2 inliner threshold 600 (vs 400 AOT) for aggressive callee inlining
 - ✅ JIT Tier-2 LoopDistribute pass for cache-friendly loop splitting
 - ✅ JIT Tier-2 argument-type annotations (noundef, signext) from runtime profiling
+- ✅ MergedLoadStoreMotion at O2+ for eliminating redundant memory traffic across branches
+- ✅ SpeculativeExecution at O3 for hiding branch latency on wide-issue CPUs
+- ✅ SeparateConstOffsetFromGEP at O3 for better addressing mode selection in array loops
 - ✅ AOT compilation with full LLVM optimization pipeline (O0–O3 + OPTMAX)
 - ✅ IR-level algebraic identity elimination (x*0→0, x+0→x, x&0→0, x|0→x, x^0→x, x**0→1, etc.)
 - ✅ Same-value identity elimination (v^v→0, v-v→0, v&v→v, v|v→v) at IR and AST levels

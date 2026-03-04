@@ -6027,10 +6027,10 @@ void CodeGenerator::runOptimizationPasses() {
     if (!pgoGenPath_.empty()) {
         // Instrumentation generation: insert counters, write .profraw on exit.
 #if LLVM_VERSION_MAJOR >= 22
-        pgoOpt = llvm::PGOOptions(pgoGenPath_, // ProfileFile: output path for raw profile
-                                  "",          // CSProfileGenFile: context-sensitive profile (unused)
-                                  "",          // ProfileRemappingFile: symbol remapping (unused)
-                                  "",          // MemoryProfile: memory profile (unused)
+        pgoOpt = llvm::PGOOptions(pgoGenPath_,                // ProfileFile: output path for raw profile
+                                  "",                         // CSProfileGenFile: context-sensitive profile (unused)
+                                  "",                         // ProfileRemappingFile: symbol remapping (unused)
+                                  "",                         // MemoryProfile: memory profile (unused)
                                   llvm::PGOOptions::IRInstr); // Action: IR-level instrumentation
 #else
         pgoOpt = llvm::PGOOptions(pgoGenPath_, // ProfileFile: output path for raw profile
@@ -6043,10 +6043,10 @@ void CodeGenerator::runOptimizationPasses() {
     } else if (!pgoUsePath_.empty()) {
         // Profile-use: feed collected data into the optimization pipeline.
 #if LLVM_VERSION_MAJOR >= 22
-        pgoOpt = llvm::PGOOptions(pgoUsePath_, // ProfileFile: input .profdata path
-                                  "",          // CSProfileGenFile: unused
-                                  "",          // ProfileRemappingFile: unused
-                                  "",          // MemoryProfile: unused
+        pgoOpt = llvm::PGOOptions(pgoUsePath_,              // ProfileFile: input .profdata path
+                                  "",                       // CSProfileGenFile: unused
+                                  "",                       // ProfileRemappingFile: unused
+                                  "",                       // MemoryProfile: unused
                                   llvm::PGOOptions::IRUse); // Action: apply IR-level profile
 #else
         pgoOpt = llvm::PGOOptions(pgoUsePath_, // ProfileFile: input .profdata path
@@ -6151,11 +6151,14 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     fpm.add(llvm::createLoopStrengthReducePass());
     fpm.add(llvm::createLoopUnrollPass());
     // Phase 3: Post-loop optimizations
+    fpm.add(llvm::createMergedLoadStoreMotionPass());
     fpm.add(llvm::createSinkingPass());
     fpm.add(llvm::createStraightLineStrengthReducePass());
     fpm.add(llvm::createNaryReassociatePass());
     fpm.add(llvm::createTailCallEliminationPass());
     fpm.add(llvm::createConstantHoistingPass());
+    fpm.add(llvm::createSeparateConstOffsetFromGEPPass());
+    fpm.add(llvm::createSpeculativeExecutionPass());
     fpm.add(llvm::createFlattenCFGPass());
     // Phase 4: Final cleanup
     fpm.add(llvm::createInstSimplifyLegacyPass()); // lightweight complement to instcombine
@@ -6324,6 +6327,10 @@ void CodeGenerator::runJITBaselinePasses() {
         fpm.add(llvm::createLoopStrengthReducePass());
         fpm.add(llvm::createLoopUnrollPass());
         fpm.add(llvm::createLoopDataPrefetchPass());
+        // MergedLoadStoreMotion merges load/store pairs across diamond-shaped
+        // branches (if/else).  For long-running programs with array-heavy code
+        // this eliminates redundant memory traffic that dominates runtime.
+        fpm.add(llvm::createMergedLoadStoreMotionPass());
         fpm.add(llvm::createSinkingPass());
     }
 
@@ -6334,6 +6341,16 @@ void CodeGenerator::runJITBaselinePasses() {
         fpm.add(llvm::createStraightLineStrengthReducePass());
         fpm.add(llvm::createNaryReassociatePass());
         fpm.add(llvm::createConstantHoistingPass());
+        // SeparateConstOffsetFromGEP extracts constant offsets from GEP
+        // (GetElementPtr) address computations, enabling the backend to use
+        // base+offset addressing modes and share common base addresses across
+        // multiple array accesses in tight loops.
+        fpm.add(llvm::createSeparateConstOffsetFromGEPPass());
+        // SpeculativeExecution hoists cheap instructions (comparisons, shifts,
+        // selects) above branches to hide latency on wide-issue CPUs.
+        // Critical for compute-heavy inner loops where branch mispredictions
+        // would otherwise stall the pipeline.
+        fpm.add(llvm::createSpeculativeExecutionPass());
         fpm.add(llvm::createFlattenCFGPass());
     }
 

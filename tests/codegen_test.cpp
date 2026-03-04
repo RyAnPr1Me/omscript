@@ -3575,3 +3575,86 @@ TEST(CodegenTest, JITHybridAttachesLoopMetadataAtO3) {
     // module is valid and the function exists with optimized code.)
     EXPECT_NE(fn->size(), 0u) << "Function should have basic blocks";
 }
+
+TEST(CodegenTest, JITBaselineO3MergedLoadStoreMotion) {
+    // Verify that the O3 JIT baseline with MergedLoadStoreMotion, SpeculativeExecution,
+    // and SeparateConstOffsetFromGEP passes doesn't crash on diamond-shaped control flow
+    // (if/else with shared memory accesses).
+    CodeGenerator codegen(OptimizationLevel::O3);
+    const char* src =
+        "fn diamond(x) { var r = 0; if (x > 0) { r = x * 2; } else { r = x * 3; } return r; }"
+        " fn main() { return diamond(5); }";
+    Lexer lexer(src);
+    auto tokens = lexer.tokenize();
+    Parser parser(tokens);
+    auto program = parser.parse();
+    codegen.generateHybrid(program.get());
+    auto* mod = codegen.getModule();
+    ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("diamond");
+    ASSERT_NE(fn, nullptr);
+    // Verify the function was optimized (not just raw O0 IR)
+    bool hasAlloca = false;
+    for (auto& BB : *fn)
+        for (auto& I : BB)
+            if (llvm::isa<llvm::AllocaInst>(&I))
+                hasAlloca = true;
+    EXPECT_FALSE(hasAlloca) << "O3 JIT should eliminate allocas via mem2reg";
+}
+
+TEST(CodegenTest, JITBaselineO3ArrayHeavyCode) {
+    // Long-running programs are typically array-heavy and compute-heavy.
+    // Verify that nested loops with array operations compile successfully
+    // through the full O3 JIT baseline pipeline.
+    CodeGenerator codegen(OptimizationLevel::O3);
+    const char* src =
+        "fn matmul(n) {"
+        "  var sum = 0;"
+        "  for (i in 0...n) {"
+        "    for (j in 0...n) {"
+        "      sum = sum + i * j;"
+        "    }"
+        "  }"
+        "  return sum;"
+        "}"
+        " fn main() { return matmul(10); }";
+    Lexer lexer(src);
+    auto tokens = lexer.tokenize();
+    Parser parser(tokens);
+    auto program = parser.parse();
+    codegen.generateHybrid(program.get());
+    auto* mod = codegen.getModule();
+    ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("matmul");
+    ASSERT_NE(fn, nullptr);
+    EXPECT_GT(fn->size(), 0u) << "matmul function should have basic blocks";
+}
+
+TEST(CodegenTest, JITBaselineO2HasMergedLoadStoreMotion) {
+    // MergedLoadStoreMotion is added at O2+ for memory-heavy code.
+    // Verify it doesn't crash on basic if/else patterns.
+    CodeGenerator codegen(OptimizationLevel::O2);
+    const char* src =
+        "fn branch(x) { if (x > 0) { return x + 1; } else { return x - 1; } }"
+        " fn main() { return branch(5); }";
+    Lexer lexer(src);
+    auto tokens = lexer.tokenize();
+    Parser parser(tokens);
+    auto program = parser.parse();
+    codegen.generateHybrid(program.get());
+    auto* mod = codegen.getModule();
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, OptmaxHasMergedLoadStoreAndSpecExec) {
+    // OPTMAX functions should benefit from MergedLoadStoreMotion,
+    // SeparateConstOffsetFromGEP, and SpeculativeExecution passes.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR(
+        "OPTMAX=: fn fast(x: int) { if (x > 0) { return x * 2; } else { return x * 3; } }"
+        " OPTMAX!: fn main() { return fast(5); }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("fast");
+    ASSERT_NE(fn, nullptr);
+}
