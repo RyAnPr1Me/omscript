@@ -106,6 +106,14 @@ void AdaptiveJITRunner::injectCounters(llvm::Module& mod) {
         llvm::cast<llvm::Function>(mod.getOrInsertFunction("__omsc_profile_arg", argProfileTy).getCallee());
     argProfileFn->addFnAttr(llvm::Attribute::NoUnwind);
 
+    // Declare the branch profiling callback.
+    // Signature: void __omsc_profile_branch(const char* name, uint32_t branchId, int64_t taken)
+    // taken == 1 means the true branch was taken; 0 means the false branch.
+    auto* branchProfileTy = llvm::FunctionType::get(voidTy, {ptrTy, i32Ty, i64Ty}, false);
+    auto* branchProfileFn =
+        llvm::cast<llvm::Function>(mod.getOrInsertFunction("__omsc_profile_branch", branchProfileTy).getCallee());
+    branchProfileFn->addFnAttr(llvm::Attribute::NoUnwind);
+
     // Collect functions first to avoid iterator invalidation.
     llvm::SmallVector<llvm::Function*, 32> toInstrument;
     for (auto& fn : mod) {
@@ -141,6 +149,31 @@ void AdaptiveJITRunner::injectCounters(llvm::Module& mod) {
         // createGlobalString returns a ptr (GEP) to the string data.
         llvm::IRBuilder<> tmpB(ctx);
         auto* nameGV = tmpB.CreateGlobalString(name, "__omsc_name_" + name, 0, &mod);
+
+        // --- Inject branch-site profiling calls in the original function body ---
+        // We must collect and instrument conditional branches BEFORE adding the
+        // dispatch prolog blocks so our iteration only sees the original (clean)
+        // function structure.  The sequential branch IDs produced here must match
+        // the iteration order used in onHotFunction() when applying branch weight
+        // metadata during Tier-2 recompilation (both iterate blocks in order,
+        // counting conditional branch terminators from 0).
+        {
+            llvm::SmallVector<std::pair<llvm::BranchInst*, uint32_t>, 16> branchSites;
+            uint32_t brIdx = 0;
+            for (auto& bb : *fn) {
+                if (auto* br = llvm::dyn_cast<llvm::BranchInst>(bb.getTerminator()))
+                    if (br->isConditional())
+                        branchSites.push_back({br, brIdx++});
+            }
+            for (auto& [br, branchId] : branchSites) {
+                llvm::IRBuilder<> brB(br); // inserts immediately before the branch
+                // Widen the i1 condition to i64: 1 = branch taken (true edge),
+                // 0 = branch not taken (false edge).
+                auto* cond64 = brB.CreateZExt(br->getCondition(), i64Ty, "omsc.cond64");
+                brB.CreateCall(branchProfileTy, branchProfileFn,
+                               {nameGV, llvm::ConstantInt::get(i32Ty, branchId), cond64});
+            }
+        }
 
         // --- New basic blocks (inserted before original entry) ---
         auto& origEntry = fn->getEntryBlock();
