@@ -385,6 +385,11 @@ class CodeGenerator {
     void runOptimizationPasses();
     void optimizeOptMaxFunctions();
 
+    /// Apply intra-procedural optimization passes for the JIT baseline.
+    /// Improves IR quality (mem2reg, instcombine, GVN, LICM, etc.) without
+    /// IPO passes that would destroy function boundaries needed for hot-patching.
+    void runJITBaselinePasses();
+
   public:
     // Per-function optimization for targeted optimization of individual functions
     void optimizeFunction(llvm::Function* func);

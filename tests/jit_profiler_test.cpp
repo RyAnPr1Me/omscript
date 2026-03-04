@@ -232,3 +232,81 @@ TEST(ArgProfileTest, EmptyDominant) {
     EXPECT_EQ(ap.dominantType(), ArgType::Unknown);
     EXPECT_EQ(ap.totalCalls, 0u);
 }
+
+// ===========================================================================
+// C-linkage callback tests — verify the extern "C" entry points work
+// ===========================================================================
+
+TEST(JITProfilerCallbackTest, ProfileBranchCallback) {
+    JITProfiler::instance().reset();
+
+    // Simulate two taken and one not-taken observation via the C callback
+    __omsc_profile_branch("cb_br_fn", 0, 1); // taken
+    __omsc_profile_branch("cb_br_fn", 0, 1); // taken
+    __omsc_profile_branch("cb_br_fn", 0, 0); // not taken
+
+    const FunctionProfile* prof = JITProfiler::instance().getProfile("cb_br_fn");
+    ASSERT_NE(prof, nullptr);
+    ASSERT_GE(prof->branches.size(), 1u);
+    EXPECT_EQ(prof->branches[0].takenCount, 2u);
+    EXPECT_EQ(prof->branches[0].notTakenCount, 1u);
+
+    JITProfiler::instance().reset();
+}
+
+TEST(JITProfilerCallbackTest, ProfileBranchMultipleSites) {
+    JITProfiler::instance().reset();
+
+    __omsc_profile_branch("mb_fn", 0, 1);
+    __omsc_profile_branch("mb_fn", 1, 0);
+    __omsc_profile_branch("mb_fn", 2, 1);
+
+    const FunctionProfile* prof = JITProfiler::instance().getProfile("mb_fn");
+    ASSERT_NE(prof, nullptr);
+    ASSERT_GE(prof->branches.size(), 3u);
+    EXPECT_EQ(prof->branches[0].takenCount, 1u);
+    EXPECT_EQ(prof->branches[1].notTakenCount, 1u);
+    EXPECT_EQ(prof->branches[2].takenCount, 1u);
+
+    JITProfiler::instance().reset();
+}
+
+TEST(JITProfilerCallbackTest, ProfileArgCallback) {
+    JITProfiler::instance().reset();
+
+    __omsc_profile_arg("cb_arg_fn", 0, static_cast<uint8_t>(ArgType::Integer), 100);
+    __omsc_profile_arg("cb_arg_fn", 0, static_cast<uint8_t>(ArgType::Integer), 200);
+    __omsc_profile_arg("cb_arg_fn", 1, static_cast<uint8_t>(ArgType::Float), 0);
+
+    const FunctionProfile* prof = JITProfiler::instance().getProfile("cb_arg_fn");
+    ASSERT_NE(prof, nullptr);
+    ASSERT_GE(prof->args.size(), 2u);
+    EXPECT_EQ(prof->args[0].dominantType(), ArgType::Integer);
+    EXPECT_EQ(prof->args[0].totalCalls, 2u);
+    EXPECT_EQ(prof->args[1].dominantType(), ArgType::Float);
+
+    JITProfiler::instance().reset();
+}
+
+TEST(JITProfilerCallbackTest, ProfileArgOutOfRangeTypeClamped) {
+    JITProfiler::instance().reset();
+
+    // Type byte 255 is out of range — the callback should clamp to ArgType::Unknown
+    __omsc_profile_arg("clamp_fn", 0, 255, 0);
+
+    const FunctionProfile* prof = JITProfiler::instance().getProfile("clamp_fn");
+    ASSERT_NE(prof, nullptr);
+    ASSERT_GE(prof->args.size(), 1u);
+    EXPECT_EQ(prof->args[0].dominantType(), ArgType::Unknown);
+
+    JITProfiler::instance().reset();
+}
+
+TEST(JITProfilerTest, DumpDoesNotCrash) {
+    JITProfiler::instance().reset();
+    JITProfiler::instance().recordBranch("dump_fn", 0, true);
+    JITProfiler::instance().recordArg("dump_fn", 0, ArgType::Integer, 42);
+    // Redirect stderr to avoid polluting test output, just verify no crash
+    EXPECT_NO_FATAL_FAILURE(JITProfiler::instance().dump());
+    JITProfiler::instance().reset();
+}

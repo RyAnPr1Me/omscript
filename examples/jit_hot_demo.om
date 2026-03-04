@@ -14,8 +14,8 @@
 //   2. The adaptive JIT runner serializes the clean IR to bitcode.
 //   3. Call-counting dispatch prologs are injected into `compute`.
 //   4. Argument type profiling records that `compute` always receives
-//      integer arguments.
-//   5. After 500 calls (kRecompileThreshold), `compute` is recompiled:
+//      integer arguments; branch profiling records the loop condition.
+//   5. After 100 calls (kRecompileThreshold), `compute` is recompiled:
 //      - PGO entry-count annotation marks it as hot
 //      - Branch profiling data guides code layout
 //      - O3 optimization with full CPU feature detection
@@ -42,9 +42,9 @@ fn main() {
     var total = 0;
     var i = 0;
 
-    // Call compute() 1000 times — exceeds kRecompileThreshold (500).
-    // After 500 calls: Tier-2 recompilation triggers.
-    // Calls 501–1000: use the O3-optimized native code.
+    // Call compute() 1000 times — exceeds kRecompileThreshold (100).
+    // After 100 calls: Tier-2 recompilation triggers.
+    // Calls 101–1000: use the O3-optimized native code.
     while (i < 1000) {
         total = total + compute(10);
         i = i + 1;

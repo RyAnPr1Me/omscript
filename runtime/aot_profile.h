@@ -26,7 +26,7 @@
 //                                     ┌────────────────────┐
 //                                     │  Hot Function      │
 //                                     │  Detected          │
-//                                     │ (>= 500 calls)     │
+//                                     │ (>= 100 calls)     │
 //                                     └────────┬───────────┘
 //                                              │
 //                                              ▼
@@ -136,14 +136,14 @@ class AdaptiveJITRunner {
   public:
     /// Invocations before which a function is recompiled at O3 with PGO guidance.
     ///
-    /// 500 is chosen as a balance between:
-    ///  - Fast enough to capture hot functions early in short-lived programs.
-    ///  - High enough to accumulate a statistically stable type and branch
-    ///    profile before spending O3 compilation time.
-    /// For long-running server workloads a higher value (e.g. 5000) would give
-    /// richer data; for micro-benchmarks a lower value (e.g. 100) converges
-    /// faster.  500 is a reasonable general-purpose default.
-    static constexpr int64_t kRecompileThreshold = 500;
+    /// 100 strikes the right balance for typical short-to-medium OmScript programs:
+    ///  - Low enough to capture hot functions early and spend most execution time
+    ///    in Tier-2 O3+PGO native code rather than Tier-1 O2 baseline code.
+    ///  - High enough to accumulate a statistically useful type and branch profile
+    ///    before paying the O3 compilation cost.
+    /// For long-running server workloads a higher value (e.g. 1000) gives richer
+    /// profile data; for micro-benchmarks this is already optimal.
+    static constexpr int64_t kRecompileThreshold = 100;
 
     AdaptiveJITRunner();
     ~AdaptiveJITRunner();
@@ -152,8 +152,12 @@ class AdaptiveJITRunner {
     AdaptiveJITRunner& operator=(const AdaptiveJITRunner&) = delete;
 
     /// Enable or disable verbose JIT progress messages (default: false).
-    void setVerbose(bool v) { verbose_ = v; }
-    bool isVerbose() const { return verbose_; }
+    void setVerbose(bool v) {
+        verbose_ = v;
+    }
+    bool isVerbose() const {
+        return verbose_;
+    }
 
     /// Execute the program defined by @p module in-process.
     /// The module is NOT modified — a working copy is created internally.
@@ -182,7 +186,7 @@ class AdaptiveJITRunner {
     /// Functions that have already been recompiled (at most once each).
     std::unordered_set<std::string> recompiled_;
     std::mutex recompiledMtx_; ///< Guards recompiled_ and modules_ across threads.
-    bool verbose_ = false; ///< Print JIT recompile events when true.
+    bool verbose_ = false;     ///< Print JIT recompile events when true.
 
     void ensureInitialized();
 
