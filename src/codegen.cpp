@@ -19,7 +19,9 @@
 #include <llvm/Support/FileSystem.h>
 #include <llvm/Support/PGOOptions.h>
 #include <llvm/Support/TargetSelect.h>
+#if LLVM_VERSION_MAJOR < 22
 #include <llvm/Support/VirtualFileSystem.h>
+#endif
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/Target/TargetMachine.h>
 #include <llvm/Target/TargetOptions.h>
@@ -5799,7 +5801,9 @@ std::unique_ptr<llvm::TargetMachine> CodeGenerator::createTargetMachine() const 
 
     llvm::TargetOptions opt;
     if (useFastMath_) {
+#if LLVM_VERSION_MAJOR < 22
         opt.UnsafeFPMath = true;
+#endif
         opt.NoInfsFPMath = true;
         opt.NoNaNsFPMath = true;
         opt.NoSignedZerosFPMath = true;
@@ -5936,20 +5940,36 @@ void CodeGenerator::runOptimizationPasses() {
     std::optional<llvm::PGOOptions> pgoOpt;
     if (!pgoGenPath_.empty()) {
         // Instrumentation generation: insert counters, write .profraw on exit.
+#if LLVM_VERSION_MAJOR >= 22
+        pgoOpt = llvm::PGOOptions(pgoGenPath_, // ProfileFile: output path for raw profile
+                                  "",          // CSProfileGenFile: context-sensitive profile (unused)
+                                  "",          // ProfileRemappingFile: symbol remapping (unused)
+                                  "",          // MemoryProfile: memory profile (unused)
+                                  llvm::PGOOptions::IRInstr); // Action: IR-level instrumentation
+#else
         pgoOpt = llvm::PGOOptions(pgoGenPath_, // ProfileFile: output path for raw profile
                                   "",          // CSProfileGenFile: context-sensitive profile (unused)
                                   "",          // ProfileRemappingFile: symbol remapping (unused)
                                   "",          // MemoryProfile: memory profile (unused)
                                   llvm::vfs::getRealFileSystem(),
                                   llvm::PGOOptions::IRInstr); // Action: IR-level instrumentation
+#endif
     } else if (!pgoUsePath_.empty()) {
         // Profile-use: feed collected data into the optimization pipeline.
+#if LLVM_VERSION_MAJOR >= 22
+        pgoOpt = llvm::PGOOptions(pgoUsePath_, // ProfileFile: input .profdata path
+                                  "",          // CSProfileGenFile: unused
+                                  "",          // ProfileRemappingFile: unused
+                                  "",          // MemoryProfile: unused
+                                  llvm::PGOOptions::IRUse); // Action: apply IR-level profile
+#else
         pgoOpt = llvm::PGOOptions(pgoUsePath_, // ProfileFile: input .profdata path
                                   "",          // CSProfileGenFile: unused
                                   "",          // ProfileRemappingFile: unused
                                   "",          // MemoryProfile: unused
                                   llvm::vfs::getRealFileSystem(),
                                   llvm::PGOOptions::IRUse); // Action: apply IR-level profile
+#endif
     }
 
     llvm::PassBuilder PB(targetMachine.get(), PTO, pgoOpt);
@@ -6036,7 +6056,9 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     // LoopInstSimplify, LoopDataPrefetch, LoopStrengthReduce, and LoopUnroll
     // all benefit from the canonical form produced by the earlier passes.
     fpm.add(llvm::createLoopSimplifyPass());
+#if LLVM_VERSION_MAJOR < 19
     fpm.add(llvm::createLoopRotatePass());
+#endif
     fpm.add(llvm::createLICMPass());
     fpm.add(llvm::createInstSimplifyLegacyPass()); // simplify instructions in loop bodies
     fpm.add(llvm::createLoopDataPrefetchPass());
@@ -6203,7 +6225,9 @@ void CodeGenerator::runJITBaselinePasses() {
     // LoopRotate and LICM.  LoopRotate then puts the back-edge condition at
     // the bottom, enabling LICM to hoist invariants from the original header.
     fpm.add(llvm::createLoopSimplifyPass());
+#if LLVM_VERSION_MAJOR < 19
     fpm.add(llvm::createLoopRotatePass());
+#endif
     // LICM moves loop-invariant computations out of loop bodies.
     fpm.add(llvm::createLICMPass());
     // Simplify instructions inside loop bodies (uses canonical loop structure).
