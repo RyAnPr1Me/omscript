@@ -2,6 +2,7 @@
 #include "deopt.h"
 #include "jit_profiler.h"
 
+#include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/Bitcode/BitcodeReader.h>
 #include <llvm/Bitcode/BitcodeWriter.h>
 #include <llvm/Config/llvm-config.h>
@@ -506,7 +507,6 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
         const FunctionProfile* prof = JITProfiler::instance().getProfile(funcName);
         if (prof && !fn->empty()) {
             auto* i64Ty = llvm::Type::getInt64Ty(fn->getContext());
-            auto* i1Ty = llvm::Type::getInt1Ty(fn->getContext());
             // Declare @llvm.assume(i1) intrinsic.
 #if LLVM_VERSION_MAJOR >= 19
             llvm::Function* assumeFn =
@@ -518,13 +518,15 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
             llvm::IRBuilder<> asB(&fn->getEntryBlock().front());
             for (size_t i = 0; i < prof->args.size() && i < fn->arg_size(); i++) {
                 const auto& ap = prof->args[i];
+                // hasConstantSpecialization() checks profile data (>80% same
+                // value); the IR type check ensures the LLVM parameter is i64
+                // so we can safely emit an ICmpEQ + ConstantInt.
                 if (ap.hasConstantSpecialization() && fn->getArg(static_cast<unsigned>(i))->getType() == i64Ty) {
                     auto* cmp = asB.CreateICmpEQ(fn->getArg(static_cast<unsigned>(i)),
                                                  llvm::ConstantInt::get(i64Ty, ap.observedConstant), "omsc.const_spec");
                     asB.CreateCall(assumeFn, {cmp});
                 }
             }
-            (void)i1Ty; // suppress unused warning
         }
     }
 
@@ -551,32 +553,25 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
     // a SIMD candidate, matching the AOT code quality.
     {
         auto& ctx = fn->getContext();
+        // Build a set of blocks we've visited so far to detect back-edges in
+        // O(n) total time instead of O(n²) per-branch inner scan.
+        llvm::SmallPtrSet<llvm::BasicBlock*, 32> visited;
         for (auto& bb : *fn) {
+            visited.insert(&bb);
             auto* term = bb.getTerminator();
             if (!term)
                 continue;
             auto* br = llvm::dyn_cast<llvm::BranchInst>(term);
             if (!br)
                 continue;
-            // Detect loop back-edges: a branch whose target dominates the
-            // current block (i.e. the target appears earlier in the function).
-            // We use a simple heuristic — if any successor is a block that
-            // we've already iterated past, it's a back-edge.
+            // Detect loop back-edges: a branch to a block that appears
+            // earlier in the function's block list (already in visited set).
             bool isBackEdge = false;
             for (unsigned s = 0; s < br->getNumSuccessors(); s++) {
-                llvm::BasicBlock* succ = br->getSuccessor(s);
-                // A back-edge target is a block whose address is <= current
-                // block's address in the function's block list ordering.
-                for (auto it = fn->begin(), end = fn->end(); it != end; ++it) {
-                    if (&*it == succ) {
-                        isBackEdge = true;
-                        break;
-                    }
-                    if (&*it == &bb)
-                        break;
-                }
-                if (isBackEdge)
+                if (visited.count(br->getSuccessor(s))) {
+                    isBackEdge = true;
                     break;
+                }
             }
             if (!isBackEdge)
                 continue;
