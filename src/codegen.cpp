@@ -70,6 +70,7 @@ using omscript::Expression;
 using omscript::ExprStmt;
 using omscript::ForEachStmt;
 using omscript::ForStmt;
+using omscript::IdentifierExpr;
 using omscript::IfStmt;
 using omscript::IndexAssignExpr;
 using omscript::IndexExpr;
@@ -190,6 +191,22 @@ std::unique_ptr<Expression> optimizeOptMaxBinary(const std::string& op, std::uni
             return left; // x ** 1 → x
         if (rval == 0 && op == "**" && isPureExpression(left.get()))
             return std::make_unique<LiteralExpr>(static_cast<long long>(1)); // x ** 0 → 1
+    }
+
+    // Self-identifier optimizations: when both sides are the same identifier
+    // (pure, no side effects), several operations simplify to constants.
+    // x - x → 0, x ^ x → 0, x & x → x, x | x → x
+    {
+        auto* leftId = dynamic_cast<IdentifierExpr*>(left.get());
+        auto* rightId = dynamic_cast<IdentifierExpr*>(right.get());
+        if (leftId && rightId && leftId->name == rightId->name) {
+            if (op == "-" || op == "^")
+                return std::make_unique<LiteralExpr>(static_cast<long long>(0));
+            if (op == "&" || op == "|") {
+                auto result = std::make_unique<IdentifierExpr>(leftId->name);
+                return result;
+            }
+        }
     }
 
     if (!leftLiteral || !rightLiteral) {
@@ -1471,8 +1488,31 @@ void CodeGenerator::generate(Program* program) {
         optimizeOptMaxFunctions();
     }
 
-    // Run optimization passes (also sets target triple and data layout)
-    runOptimizationPasses();
+    if (dynamicCompilation_) {
+        // JIT mode: skip the module-wide IPO pipeline (inlining, IPSCCP,
+        // GlobalDCE) to preserve function boundaries for hot-patching.
+        // Still set target triple and data layout so MCJIT and the JIT
+        // baseline passes can reason about pointer sizes, alignment, and
+        // target-specific instruction selection.
+        llvm::InitializeNativeTarget();
+        llvm::InitializeNativeTargetAsmPrinter();
+        llvm::InitializeNativeTargetAsmParser();
+        std::string targetTripleStr = llvm::sys::getDefaultTargetTriple();
+#if LLVM_VERSION_MAJOR >= 19
+        llvm::Triple targetTriple(targetTripleStr);
+        module->setTargetTriple(targetTriple);
+#else
+        module->setTargetTriple(targetTripleStr);
+#endif
+        auto targetMachine = createTargetMachine();
+        if (targetMachine) {
+            module->setDataLayout(targetMachine->createDataLayout());
+        }
+    } else {
+        // AOT mode: run the full module-wide optimization pipeline including
+        // interprocedural optimizations (inlining, constant propagation, etc.).
+        runOptimizationPasses();
+    }
 
     // Verify the module
     std::string errorStr;
@@ -6237,15 +6277,23 @@ void CodeGenerator::runJITBaselinePasses() {
     // GlobalDCE) that would collapse function call boundaries and prevent the
     // adaptive JIT runtime from hot-patching individual functions.
     //
+    // The pass set scales with the user's optimization level:
+    //   O0: skip entirely for fastest JIT startup
+    //   O1: basic canonicalization (mem2reg, instcombine, GVN, DCE)
+    //   O2: O1 + loop optimizations (LICM, strength reduce, unroll)
+    //   O3: O2 + aggressive loop passes, nary reassociate, constant hoisting,
+    //       multiple iterations for maximum per-function optimization
+    //
     // The resulting optimized IR is saved as the "clean bitcode" by the JIT
     // runner and serves as the starting point for both:
-    //   - Tier-1 execution: MCJIT machine-code generation (at CodeGenOpt::O2)
+    //   - Tier-1 execution: MCJIT machine-code generation
     //   - Tier-2 recompilation: O3+PGO re-optimization of hot functions
-    //
-    // Without these passes the IR entering the JIT is completely unoptimized
-    // (O0), meaning MCJIT must do all work from scratch.  With these passes,
-    // Tier-2 performs incremental optimization of already-good IR rather than
-    // a full optimization pass over raw O0 IR.
+
+    if (optimizationLevel == OptimizationLevel::O0) {
+        // At O0, skip all optimization for fastest JIT startup.
+        return;
+    }
+
     llvm::legacy::FunctionPassManager fpm(module.get());
 
     // Phase 1: Memory-to-register promotion and canonicalization.
@@ -6257,7 +6305,7 @@ void CodeGenerator::runJITBaselinePasses() {
     fpm.add(llvm::createSROAPass());
     fpm.add(llvm::createEarlyCSEPass(/*UseMemorySSA=*/true));
     fpm.add(llvm::createInstructionCombiningPass());
-    fpm.add(llvm::createInstSimplifyLegacyPass()); // lightweight complement to instcombine
+    fpm.add(llvm::createInstSimplifyLegacyPass());
     fpm.add(llvm::createReassociatePass());
     fpm.add(llvm::createCFGSimplificationPass());
 
@@ -6265,22 +6313,29 @@ void CodeGenerator::runJITBaselinePasses() {
     fpm.add(llvm::createGVNPass());
     fpm.add(llvm::createDeadCodeEliminationPass());
 
-    // Phase 3: Loop optimizations (intra-procedural only).
-    // Standard LLVM pass ordering: LoopSimplify must run first to add a
-    // dedicated loop pre-header and exit blocks — these are required by both
-    // LoopRotate and LICM.  LoopRotate then puts the back-edge condition at
-    // the bottom, enabling LICM to hoist invariants from the original header.
-    fpm.add(llvm::createLoopSimplifyPass());
+    if (optimizationLevel >= OptimizationLevel::O2) {
+        // Phase 3: Loop optimizations (intra-procedural only).
+        fpm.add(llvm::createLoopSimplifyPass());
 #if LLVM_VERSION_MAJOR < 19
-    fpm.add(llvm::createLoopRotatePass());
+        fpm.add(llvm::createLoopRotatePass());
 #endif
-    // LICM moves loop-invariant computations out of loop bodies.
-    fpm.add(llvm::createLICMPass());
-    // Simplify instructions inside loop bodies (uses canonical loop structure).
-    fpm.add(llvm::createInstSimplifyLegacyPass());
-    fpm.add(llvm::createLoopStrengthReducePass());
-    // Sink loop-invariant computations to use sites that execute less frequently.
-    fpm.add(llvm::createSinkingPass());
+        fpm.add(llvm::createLICMPass());
+        fpm.add(llvm::createInstSimplifyLegacyPass());
+        fpm.add(llvm::createLoopStrengthReducePass());
+        fpm.add(llvm::createLoopUnrollPass());
+        fpm.add(llvm::createLoopDataPrefetchPass());
+        fpm.add(llvm::createSinkingPass());
+    }
+
+    if (optimizationLevel >= OptimizationLevel::O3) {
+        // Phase 3b: Aggressive O3 per-function passes.
+        // These provide significant speedups for compute-heavy code without
+        // crossing function boundaries (no IPO).
+        fpm.add(llvm::createStraightLineStrengthReducePass());
+        fpm.add(llvm::createNaryReassociatePass());
+        fpm.add(llvm::createConstantHoistingPass());
+        fpm.add(llvm::createFlattenCFGPass());
+    }
 
     // Phase 4: Tail-call elimination converts tail-recursive calls to loops.
     fpm.add(llvm::createTailCallEliminationPass());
@@ -6291,9 +6346,17 @@ void CodeGenerator::runJITBaselinePasses() {
     fpm.add(llvm::createDeadCodeEliminationPass());
 
     fpm.doInitialization();
+
+    // At O3, run the pass pipeline multiple times: each iteration can expose
+    // new optimization opportunities (e.g., strength reduction creates patterns
+    // that instcombine can simplify further).  Two iterations is the sweet spot
+    // for per-function JIT optimization without excessive compile time.
+    int iterations = (optimizationLevel >= OptimizationLevel::O3) ? 2 : 1;
     for (auto& func : module->functions()) {
         if (!func.isDeclaration()) {
-            fpm.run(func);
+            for (int i = 0; i < iterations; ++i) {
+                fpm.run(func);
+            }
         }
     }
     fpm.doFinalization();
@@ -6314,20 +6377,20 @@ void CodeGenerator::generateHybrid(Program* program) {
     // directly into its callers, making the function unreachable at runtime
     // so its call counter never increments and Tier-2 never fires.
     //
-    // Fix: generate IR at O0 (no IPO, no inlining) to preserve function
-    // boundaries, then apply intra-procedural optimization passes so the
-    // JIT operates on already-optimized IR rather than raw O0 code.
-    // MCJIT compiles the resulting module at its own O2 machine-code level,
-    // and Tier-2 recompilation applies O3+PGO to each hot function individually.
-    auto savedLevel = optimizationLevel;
-    optimizationLevel = OptimizationLevel::O0;
+    // Solution: generate IR at the USER'S requested optimization level so that
+    // codegen-time decisions (loop vectorization hints, SIMD metadata, strength
+    // reduction, constant folding) use the correct level.  Setting
+    // dynamicCompilation_ = true tells generate() to skip the module-wide IPO
+    // pipeline while still setting the target triple and data layout.
+    // Then runJITBaselinePasses() applies aggressive per-function optimization
+    // (without IPO) scaled to the user's optimization level.
+    dynamicCompilation_ = true;
     generate(program);
-    optimizationLevel = savedLevel;
 
-    // Apply intra-procedural optimization passes so the JIT operates on
-    // already-optimized IR rather than raw O0 code.  This improves both
-    // Tier-1 baseline code quality (via MCJIT's machine-code backend) and
-    // Tier-2 recompilation (which starts from this optimized clean bitcode).
+    // Apply intra-procedural optimization passes scaled to the user's
+    // optimization level.  These passes preserve function boundaries for
+    // JIT hot-patching while producing high-quality IR for both Tier-1
+    // (MCJIT backend) and Tier-2 (O3+PGO recompilation from clean bitcode).
     runJITBaselinePasses();
 }
 
