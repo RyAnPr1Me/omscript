@@ -1913,12 +1913,14 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bufSize}, "autostr.buf");
                 if (val->getType()->isDoubleTy()) {
                     llvm::GlobalVariable* fmt = module->getGlobalVariable("autostr_float_fmt", true);
-                    if (!fmt) fmt = builder->CreateGlobalString("%g", "autostr_float_fmt");
+                    if (!fmt)
+                        fmt = builder->CreateGlobalString("%g", "autostr_float_fmt");
                     builder->CreateCall(getOrDeclareSnprintf(), {buf, bufSize, fmt, val});
                 } else {
                     val = toDefaultType(val);
                     llvm::GlobalVariable* fmt = module->getGlobalVariable("tostr_fmt", true);
-                    if (!fmt) fmt = builder->CreateGlobalString("%lld", "tostr_fmt");
+                    if (!fmt)
+                        fmt = builder->CreateGlobalString("%lld", "tostr_fmt");
                     builder->CreateCall(getOrDeclareSnprintf(), {buf, bufSize, fmt, val});
                 }
                 return buf;
@@ -6036,7 +6038,7 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     fpm.add(llvm::createLoopSimplifyPass());
     fpm.add(llvm::createLoopRotatePass());
     fpm.add(llvm::createLICMPass());
-    fpm.add(llvm::createLoopInstSimplifyPass());
+    fpm.add(llvm::createInstSimplifyLegacyPass()); // simplify instructions in loop bodies
     fpm.add(llvm::createLoopDataPrefetchPass());
     fpm.add(llvm::createLoopStrengthReducePass());
     fpm.add(llvm::createLoopUnrollPass());
@@ -6205,16 +6207,15 @@ void CodeGenerator::runJITBaselinePasses() {
     // LICM moves loop-invariant computations out of loop bodies.
     fpm.add(llvm::createLICMPass());
     // Simplify instructions inside loop bodies (uses canonical loop structure).
-    fpm.add(llvm::createLoopInstSimplifyPass());
+    fpm.add(llvm::createInstSimplifyLegacyPass());
     fpm.add(llvm::createLoopStrengthReducePass());
-    // Sink loop invariants to use sites that execute less frequently.
-    fpm.add(llvm::createLoopSinkPass());
+    // Sink loop-invariant computations to use sites that execute less frequently.
+    fpm.add(llvm::createSinkingPass());
 
     // Phase 4: Tail-call elimination converts tail-recursive calls to loops.
     fpm.add(llvm::createTailCallEliminationPass());
 
     // Phase 5: Final cleanup to remove instructions exposed by earlier passes.
-    fpm.add(llvm::createMergedLoadStoreMotionPass()); // hoist loads / sink stores in diamonds
     fpm.add(llvm::createInstructionCombiningPass());
     fpm.add(llvm::createCFGSimplificationPass());
     fpm.add(llvm::createDeadCodeEliminationPass());

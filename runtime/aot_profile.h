@@ -152,8 +152,12 @@ class AdaptiveJITRunner {
     AdaptiveJITRunner& operator=(const AdaptiveJITRunner&) = delete;
 
     /// Enable or disable verbose JIT progress messages (default: false).
-    void setVerbose(bool v) { verbose_ = v; }
-    bool isVerbose() const { return verbose_; }
+    void setVerbose(bool v) {
+        verbose_ = v;
+    }
+    bool isVerbose() const {
+        return verbose_;
+    }
 
     /// Execute the program defined by @p module in-process.
     /// The module is NOT modified — a working copy is created internally.
@@ -182,7 +186,7 @@ class AdaptiveJITRunner {
     /// Functions that have already been recompiled (at most once each).
     std::unordered_set<std::string> recompiled_;
     std::mutex recompiledMtx_; ///< Guards recompiled_ and modules_ across threads.
-    bool verbose_ = false; ///< Print JIT recompile events when true.
+    bool verbose_ = false;     ///< Print JIT recompile events when true.
 
     void ensureInitialized();
 
