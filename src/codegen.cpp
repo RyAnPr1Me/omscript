@@ -6027,13 +6027,16 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     fpm.add(llvm::createCFGSimplificationPass());
     fpm.add(llvm::createDeadCodeEliminationPass());
     // Phase 2: Loop optimizations (polyhedral-style)
-    // Loop canonicalisation and data-prefetch for better cache locality:
-    // LoopSimplify normalises loop structure for downstream passes,
-    // LoopDataPrefetch inserts software prefetch instructions for
-    // predictable memory access patterns, and LoopSink moves
-    // invariant computations closer to their use sites.
-    fpm.add(llvm::createLICMPass());
+    // Standard LLVM ordering: LoopSimplify normalises loop structure first
+    // (adds pre-header, dedicated exit blocks) which is required before
+    // LoopRotate can work.  LoopRotate then puts the back-edge condition at
+    // the bottom, enabling LICM to hoist invariants from the loop header.
+    // LoopInstSimplify, LoopDataPrefetch, LoopStrengthReduce, and LoopUnroll
+    // all benefit from the canonical form produced by the earlier passes.
     fpm.add(llvm::createLoopSimplifyPass());
+    fpm.add(llvm::createLoopRotatePass());
+    fpm.add(llvm::createLICMPass());
+    fpm.add(llvm::createLoopInstSimplifyPass());
     fpm.add(llvm::createLoopDataPrefetchPass());
     fpm.add(llvm::createLoopStrengthReducePass());
     fpm.add(llvm::createLoopUnrollPass());
@@ -6045,6 +6048,7 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     fpm.add(llvm::createConstantHoistingPass());
     fpm.add(llvm::createFlattenCFGPass());
     // Phase 4: Final cleanup
+    fpm.add(llvm::createInstSimplifyLegacyPass()); // lightweight complement to instcombine
     fpm.add(llvm::createInstructionCombiningPass());
     fpm.add(llvm::createCFGSimplificationPass());
     fpm.add(llvm::createDeadCodeEliminationPass());
@@ -6183,6 +6187,7 @@ void CodeGenerator::runJITBaselinePasses() {
     fpm.add(llvm::createSROAPass());
     fpm.add(llvm::createEarlyCSEPass(/*UseMemorySSA=*/true));
     fpm.add(llvm::createInstructionCombiningPass());
+    fpm.add(llvm::createInstSimplifyLegacyPass()); // lightweight complement to instcombine
     fpm.add(llvm::createReassociatePass());
     fpm.add(llvm::createCFGSimplificationPass());
 
@@ -6191,17 +6196,25 @@ void CodeGenerator::runJITBaselinePasses() {
     fpm.add(llvm::createDeadCodeEliminationPass());
 
     // Phase 3: Loop optimizations (intra-procedural only).
-    // LICM moves loop-invariant computations out of loop bodies, reducing
-    // work performed on each iteration.  LoopSimplify canonicalizes loop
-    // entry/exit structure for downstream passes.
-    fpm.add(llvm::createLICMPass());
+    // Standard LLVM pass ordering: LoopSimplify must run first to add a
+    // dedicated loop pre-header and exit blocks — these are required by both
+    // LoopRotate and LICM.  LoopRotate then puts the back-edge condition at
+    // the bottom, enabling LICM to hoist invariants from the original header.
     fpm.add(llvm::createLoopSimplifyPass());
+    fpm.add(llvm::createLoopRotatePass());
+    // LICM moves loop-invariant computations out of loop bodies.
+    fpm.add(llvm::createLICMPass());
+    // Simplify instructions inside loop bodies (uses canonical loop structure).
+    fpm.add(llvm::createLoopInstSimplifyPass());
     fpm.add(llvm::createLoopStrengthReducePass());
+    // Sink loop invariants to use sites that execute less frequently.
+    fpm.add(llvm::createLoopSinkPass());
 
     // Phase 4: Tail-call elimination converts tail-recursive calls to loops.
     fpm.add(llvm::createTailCallEliminationPass());
 
     // Phase 5: Final cleanup to remove instructions exposed by earlier passes.
+    fpm.add(llvm::createMergedLoadStoreMotionPass()); // hoist loads / sink stores in diamonds
     fpm.add(llvm::createInstructionCombiningPass());
     fpm.add(llvm::createCFGSimplificationPass());
     fpm.add(llvm::createDeadCodeEliminationPass());
