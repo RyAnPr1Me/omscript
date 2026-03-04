@@ -397,6 +397,19 @@ The Tier-2 recompilation pipeline also includes:
   `signext` attributes, enabling stronger IPSCCP and instcombine in the O3 pipeline
 - **Branch weight metadata**: observed taken/not-taken counts from runtime profiling guide
   code layout and branch predictor hints
+- **Constant specialization via `llvm.assume`**: when profiling shows that >80% of calls pass
+  the same integer constant for a parameter, `llvm.assume(arg == constant)` is injected at
+  function entry.  LLVM's IPSCCP and instcombine propagate the assumed constant through the
+  function body, enabling dead-branch elimination, constant folding, and loop trip-count
+  computation without creating a separate specialized clone
+- **Cold function attributes**: non-hot functions in the module receive the `cold` attribute
+  during Tier-2 recompilation, telling LLVM's inliner to avoid inlining cold callees into
+  the hot function (saving I-cache space) and guiding the code layout pass to place cold code
+  away from the hot region, reducing I-TLB and I-cache pressure
+- **Loop vectorization metadata**: loop back-edges in the hot function receive
+  `llvm.loop.mustprogress`, `llvm.loop.interleave.count=4`, and `llvm.loop.vectorize.width=4`
+  metadata, matching the AOT pipeline's SIMD hints so the O3 vectorizer and unroller treat
+  every loop as a SIMD candidate
 
 ### Exponentiation by Squaring
 The `**` (POW) operator uses binary exponentiation (exponentiation by squaring) to compute
@@ -455,8 +468,9 @@ When running interactively with `omsc run`, a two-tier adaptive JIT is used:
 
 2. **Tier 2 — Hot Recompile**: Functions that exceed a call-count threshold are recompiled
    at O3 with profile-guided optimization hints including branch weights, entry counts,
-   argument-type annotations, the `hot` function attribute, and loop distribution. The
-   `hot` attribute tells LLVM to use maximum optimization effort: hot/cold splitting
+   argument-type annotations, the `hot` function attribute, loop distribution, constant
+   specialization via `llvm.assume`, cold function marking, and loop vectorization metadata.
+   The `hot` attribute tells LLVM to use maximum optimization effort: hot/cold splitting
    (moving error paths out of the fast region), more aggressive inlining (threshold 600
    vs 400 for AOT), and better I-cache layout. The LLVM inliner, branch layout, loop
    vectorizer, and unroller all see the function as hot and optimize accordingly.

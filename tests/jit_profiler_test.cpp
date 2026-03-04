@@ -310,3 +310,85 @@ TEST(JITProfilerTest, DumpDoesNotCrash) {
     EXPECT_NO_FATAL_FAILURE(JITProfiler::instance().dump());
     JITProfiler::instance().reset();
 }
+
+// ===========================================================================
+// Constant specialization boundary tests — validate the >80% threshold used
+// by Tier-2 llvm.assume injection
+// ===========================================================================
+
+TEST(ArgProfileTest, ConstantSpecExactThreshold) {
+    // Exactly 80% (8/10) should NOT trigger (threshold is >80%, i.e. strictly greater)
+    ArgProfile ap;
+    for (int i = 0; i < 8; i++)
+        ap.record(ArgType::Integer, 42);
+    ap.record(ArgType::Integer, 99);
+    ap.record(ArgType::Integer, 100);
+    EXPECT_FALSE(ap.hasConstantSpecialization());
+}
+
+TEST(ArgProfileTest, ConstantSpecAboveThreshold) {
+    // 81% (81/100) should trigger constant specialization
+    ArgProfile ap;
+    for (int i = 0; i < 81; i++)
+        ap.record(ArgType::Integer, 42);
+    for (int i = 0; i < 19; i++)
+        ap.record(ArgType::Integer, i + 100);
+    EXPECT_TRUE(ap.hasConstantSpecialization());
+    EXPECT_EQ(ap.observedConstant, 42);
+}
+
+TEST(ArgProfileTest, ConstantSpecNonIntegerType) {
+    // Float arguments should NOT trigger constant specialization
+    // (only integer constants are tracked)
+    ArgProfile ap;
+    for (int i = 0; i < 10; i++)
+        ap.record(ArgType::Float, 0);
+    EXPECT_FALSE(ap.hasConstantSpecialization());
+}
+
+TEST(ArgProfileTest, ConstantSpecSingleCall) {
+    // A single call with a constant should trigger (1/1 = 100% > 80%)
+    ArgProfile ap;
+    ap.record(ArgType::Integer, 7);
+    EXPECT_TRUE(ap.hasConstantSpecialization());
+    EXPECT_EQ(ap.observedConstant, 7);
+}
+
+TEST(JITProfilerTest, MultiParamConstantSpecialization) {
+    JITProfiler::instance().reset();
+
+    // Simulate a function with two parameters:
+    //   param 0: always receives constant 10
+    //   param 1: receives diverse values
+    for (int i = 0; i < 20; i++) {
+        JITProfiler::instance().recordArg("multi_param", 0, ArgType::Integer, 10);
+        JITProfiler::instance().recordArg("multi_param", 1, ArgType::Integer, i);
+    }
+
+    const FunctionProfile* prof = JITProfiler::instance().getProfile("multi_param");
+    ASSERT_NE(prof, nullptr);
+    ASSERT_EQ(prof->args.size(), 2u);
+    // param 0 should have constant specialization
+    EXPECT_TRUE(prof->args[0].hasConstantSpecialization());
+    EXPECT_EQ(prof->args[0].observedConstant, 10);
+    // param 1 should NOT have constant specialization (diverse values)
+    EXPECT_FALSE(prof->args[1].hasConstantSpecialization());
+
+    JITProfiler::instance().reset();
+}
+
+TEST(ArgProfileTest, ConstantSpecZeroCalls) {
+    // Zero calls should NOT trigger constant specialization
+    ArgProfile ap;
+    EXPECT_FALSE(ap.hasConstantSpecialization());
+    EXPECT_EQ(ap.totalCalls, 0u);
+}
+
+TEST(ArgProfileTest, NegativeConstantTracked) {
+    // Verify negative integer constants are properly tracked
+    ArgProfile ap;
+    for (int i = 0; i < 10; i++)
+        ap.record(ArgType::Integer, -42);
+    EXPECT_TRUE(ap.hasConstantSpecialization());
+    EXPECT_EQ(ap.observedConstant, -42);
+}

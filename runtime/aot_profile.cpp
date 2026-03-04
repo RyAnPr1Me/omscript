@@ -2,6 +2,7 @@
 #include "deopt.h"
 #include "jit_profiler.h"
 
+#include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/Bitcode/BitcodeReader.h>
 #include <llvm/Bitcode/BitcodeWriter.h>
 #include <llvm/Config/llvm-config.h>
@@ -9,6 +10,7 @@
 #include <llvm/ExecutionEngine/MCJIT.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Instructions.h>
+#include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/MDBuilder.h>
 #include <llvm/IR/Module.h>
@@ -491,6 +493,107 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
                     }
                 }
             }
+        }
+    }
+
+    // --- Constant specialization via llvm.assume ---
+    // When profiling shows that >80% of calls pass the same integer constant
+    // for a parameter, inject `llvm.assume(arg == constant)` at function entry.
+    // LLVM's IPSCCP and instcombine see the assumption and propagate the
+    // constant through the function body, enabling dead-branch elimination,
+    // constant folding in expressions, and loop trip-count computation — all
+    // without creating a separate specialized clone.
+    {
+        const FunctionProfile* prof = JITProfiler::instance().getProfile(funcName);
+        if (prof && !fn->empty()) {
+            auto* i64Ty = llvm::Type::getInt64Ty(fn->getContext());
+            // Declare @llvm.assume(i1) intrinsic.
+#if LLVM_VERSION_MAJOR >= 19
+            llvm::Function* assumeFn =
+                llvm::Intrinsic::getOrInsertDeclaration(mod.get(), llvm::Intrinsic::assume);
+#else
+            llvm::Function* assumeFn =
+                llvm::Intrinsic::getDeclaration(mod.get(), llvm::Intrinsic::assume);
+#endif
+            llvm::IRBuilder<> asB(&fn->getEntryBlock().front());
+            for (size_t i = 0; i < prof->args.size() && i < fn->arg_size(); i++) {
+                const auto& ap = prof->args[i];
+                // hasConstantSpecialization() checks profile data (>80% same
+                // value); the IR type check ensures the LLVM parameter is i64
+                // so we can safely emit an ICmpEQ + ConstantInt.
+                if (ap.hasConstantSpecialization() && fn->getArg(static_cast<unsigned>(i))->getType() == i64Ty) {
+                    auto* cmp = asB.CreateICmpEQ(fn->getArg(static_cast<unsigned>(i)),
+                                                 llvm::ConstantInt::get(i64Ty, ap.observedConstant), "omsc.const_spec");
+                    asB.CreateCall(assumeFn, {cmp});
+                }
+            }
+        }
+    }
+
+    // --- Mark non-hot functions as cold ---
+    // During Tier-2 recompilation, mark all other functions in the module
+    // with the `cold` attribute.  This tells LLVM's inliner to avoid
+    // inlining cold callees into the hot function (saving I-cache space)
+    // and guides the code layout pass to place cold code away from the hot
+    // region, reducing I-TLB and I-cache pressure.
+    for (auto& other : *mod) {
+        if (other.isDeclaration() || &other == fn)
+            continue;
+        if (!other.hasFnAttribute(llvm::Attribute::Hot))
+            other.addFnAttr(llvm::Attribute::Cold);
+    }
+
+    // --- Attach loop vectorization and interleaving metadata ---
+    // The AOT pipeline attaches llvm.loop.mustprogress, interleave.count=4,
+    // and vectorize.width=4 hints to every loop back-edge.  However, when
+    // Tier-2 re-parses the clean bitcode these metadata nodes are absent
+    // because the clean IR comes from the compiler frontend (which may have
+    // been compiled at < O2).  Re-injecting the hints here ensures the O3
+    // loop vectorizer and unroller treat every loop in the hot function as
+    // a SIMD candidate, matching the AOT code quality.
+    {
+        auto& ctx = fn->getContext();
+        // Build a set of blocks we've visited so far to detect back-edges in
+        // O(n) total time instead of O(n²) per-branch inner scan.
+        llvm::SmallPtrSet<llvm::BasicBlock*, 32> visited;
+        for (auto& bb : *fn) {
+            visited.insert(&bb);
+            auto* term = bb.getTerminator();
+            if (!term)
+                continue;
+            auto* br = llvm::dyn_cast<llvm::BranchInst>(term);
+            if (!br)
+                continue;
+            // Detect loop back-edges: a branch to a block that appears
+            // earlier in the function's block list (already in visited set).
+            bool isBackEdge = false;
+            for (unsigned s = 0; s < br->getNumSuccessors(); s++) {
+                if (visited.count(br->getSuccessor(s))) {
+                    isBackEdge = true;
+                    break;
+                }
+            }
+            if (!isBackEdge)
+                continue;
+            // Skip branches that already have loop metadata.
+            if (br->getMetadata(llvm::LLVMContext::MD_loop))
+                continue;
+            llvm::MDNode* mustProgress =
+                llvm::MDNode::get(ctx, {llvm::MDString::get(ctx, "llvm.loop.mustprogress")});
+            llvm::MDNode* interleave = llvm::MDNode::get(
+                ctx, {llvm::MDString::get(ctx, "llvm.loop.interleave.count"),
+                      llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), 4))});
+            llvm::MDNode* vecWidth = llvm::MDNode::get(
+                ctx, {llvm::MDString::get(ctx, "llvm.loop.vectorize.width"),
+                      llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), 4))});
+            llvm::SmallVector<llvm::Metadata*, 4> loopMDs;
+            loopMDs.push_back(nullptr); // self-reference placeholder
+            loopMDs.push_back(mustProgress);
+            loopMDs.push_back(interleave);
+            loopMDs.push_back(vecWidth);
+            llvm::MDNode* loopMD = llvm::MDNode::get(ctx, loopMDs);
+            loopMD->replaceOperandWith(0, loopMD);
+            br->setMetadata(llvm::LLVMContext::MD_loop, loopMD);
         }
     }
 

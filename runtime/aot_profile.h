@@ -96,11 +96,18 @@
 //          heuristics to real runtime data.
 //       3. Applies collected branch weights from the JITProfiler to
 //          conditional branches as LLVM metadata.
-//       4. Re-runs the full LLVM O3 pipeline with those annotations:
+//       4. Injects llvm.assume(arg == constant) for parameters where >80%
+//          of calls passed the same integer constant, enabling IPSCCP to
+//          propagate the constant through the function body.
+//       5. Marks non-hot functions with the `cold` attribute to improve
+//          inlining decisions and I-cache layout.
+//       6. Attaches loop vectorization metadata (mustprogress,
+//          interleave.count=4, vectorize.width=4) to loop back-edges.
+//       7. Re-runs the full LLVM O3 pipeline with those annotations:
 //          the inliner, branch-layout pass, loop vectorizer, and unroller
 //          all see the function as hot and optimize accordingly.
-//       5. JIT-compiles the result via MCJIT.
-//       6. Writes the new native function pointer into the function's
+//       8. JIT-compiles the result via MCJIT.
+//       9. Writes the new native function pointer into the function's
 //          @__omsc_fn_<name> slot.
 //
 //   Deoptimization:
