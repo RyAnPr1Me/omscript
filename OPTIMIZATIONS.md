@@ -271,6 +271,16 @@ x << 0 →  x       x >> 0 →  x
 x ** 0 →  1       x ** 1 →  x       1 ** x → 1
 ```
 
+### Same-Value Identity Optimizations
+When both operands are the same SSA value (or the same identifier in OPTMAX mode),
+these identities are applied at IR generation time without emitting any instructions:
+```omscript
+v ^ v  →  0       // XOR of identical value is always zero
+v - v  →  0       // subtraction of identical value is always zero
+v & v  →  v       // AND of identical value is identity
+v | v  →  v       // OR of identical value is identity
+```
+
 ### Double-Negation Elimination (OPTMAX)
 Consecutive unary operations on the same operand cancel out:
 ```omscript
@@ -311,6 +321,15 @@ Multiplication and division by powers of 2 are converted to shifts during IR gen
 n * 2   →  n << 1
 n * 8   →  n << 3
 n * 64  →  n << 6
+```
+
+Small non-power-of-2 constant multiplications are also strength-reduced to shift+add/sub sequences
+that avoid the hardware multiply unit:
+```omscript
+n * 3   →  (n << 1) + n
+n * 5   →  (n << 2) + n
+n * 7   →  (n << 3) - n
+n * 9   →  (n << 3) + n
 ```
 
 Division and modulo by powers of 2 are converted to shift/mask sequences matching
@@ -366,10 +385,18 @@ Operations with a single literal operand that match an algebraic identity are el
 
 ### Adaptive JIT Recompilation
 When using `omsc run`, the adaptive JIT runtime monitors function call counts. Hot functions
-that exceed a call-count threshold (500 calls by default) are recompiled with LLVM's O3
+that exceed a call-count threshold (100 calls) are recompiled with LLVM's O3
 pipeline using profile-guided optimization hints. The recompiled function's entry count
 annotation guides the inliner, branch layout, loop vectorizer, and unroller to optimize
 for the hot path.
+
+The Tier-2 recompilation pipeline also includes:
+- **LoopDistributePass**: splits loops with multiple independent memory streams for better
+  cache locality and vectorization (matching the AOT O3 pipeline)
+- **Argument-type annotations**: profiled integer-dominant parameters receive `noundef` and
+  `signext` attributes, enabling stronger IPSCCP and instcombine in the O3 pipeline
+- **Branch weight metadata**: observed taken/not-taken counts from runtime profiling guide
+  code layout and branch predictor hints
 
 ### Exponentiation by Squaring
 The `**` (POW) operator uses binary exponentiation (exponentiation by squaring) to compute
@@ -415,9 +442,24 @@ When compiling with `omsc build`, all functions are compiled to native machine c
 ### Adaptive JIT Runtime (`omsc run`)
 When running interactively with `omsc run`, a two-tier adaptive JIT is used:
 
-1. **Tier 1 — Initial JIT (fast startup)**: The module is JIT-compiled at O2 via LLVM MCJIT. Every non-`main` function receives a lightweight call-counting dispatch prolog. Execution begins immediately.
+1. **Tier 1 — Baseline JIT**: The module is generated at the user's requested optimization
+   level (O0–O3) with per-function optimization passes that scale accordingly:
+   - **O0**: No passes for fastest startup
+   - **O1**: mem2reg, instcombine, GVN, DCE
+   - **O2**: + loop optimizations (LICM, strength reduce, unroll, prefetch, merged-load-store-motion)
+   - **O3**: + aggressive passes (nary-reassociate, constant-hoisting, speculative-execution,
+     separate-const-offset-from-GEP, flatten-CFG), two optimization iterations for maximum code quality
 
-2. **Tier 2 — Hot Recompile**: Functions that exceed a call-count threshold are recompiled at O3 with profile-guided optimization hints. The LLVM inliner, branch layout, loop vectorizer, and unroller all see the function as hot and optimize accordingly. The new native function pointer is stored for all future calls.
+   Every non-`main` function receives a call-counting dispatch prolog. The optimized IR
+   is JIT-compiled via MCJIT and execution begins immediately.
+
+2. **Tier 2 — Hot Recompile**: Functions that exceed a call-count threshold are recompiled
+   at O3 with profile-guided optimization hints including branch weights, entry counts,
+   argument-type annotations, the `hot` function attribute, and loop distribution. The
+   `hot` attribute tells LLVM to use maximum optimization effort: hot/cold splitting
+   (moving error paths out of the fast region), more aggressive inlining (threshold 600
+   vs 400 for AOT), and better I-cache layout. The LLVM inliner, branch layout, loop
+   vectorizer, and unroller all see the function as hot and optimize accordingly.
 
 Post-recompile, calls take a fast path: one volatile load + a well-predicted branch, then a direct call to the O3-PGO-optimized native code with zero counter overhead.
 
@@ -507,11 +549,21 @@ OmScript's optimization infrastructure provides:
 - ✅ Compile-time constant folding for unary, binary, and comparison expressions
 - ✅ Dead branch elimination for constant conditions
 - ✅ IR-level strength reduction (multiply/divide/modulo by power-of-2 to shift/AND)
-- ✅ Adaptive JIT runtime with automatic hot-function detection and O3 recompilation
-- ✅ Profile-guided recompilation with real call-count annotations
+- ✅ Adaptive JIT runtime with level-aware baseline optimization (O0–O3 respected)
+- ✅ Profile-guided recompilation with real call-count annotations and branch weights
+- ✅ JIT Tier-2 `hot` function attribute for maximum optimization of hot code
+- ✅ JIT Tier-2 inliner threshold 600 (vs 400 AOT) for aggressive callee inlining
+- ✅ JIT Tier-2 LoopDistribute pass for cache-friendly loop splitting
+- ✅ JIT Tier-2 argument-type annotations (noundef, signext) from runtime profiling
+- ✅ MergedLoadStoreMotion at O2+ for eliminating redundant memory traffic across branches
+- ✅ SpeculativeExecution at O3 for hiding branch latency on wide-issue CPUs
+- ✅ SeparateConstOffsetFromGEP at O3 for better addressing mode selection in array loops
 - ✅ AOT compilation with full LLVM optimization pipeline (O0–O3 + OPTMAX)
 - ✅ IR-level algebraic identity elimination (x*0→0, x+0→x, x&0→0, x|0→x, x^0→x, x**0→1, etc.)
+- ✅ Same-value identity elimination (v^v→0, v-v→0, v&v→v, v|v→v) at IR and AST levels
+- ✅ Small-constant multiply strength reduction (n*3→shl+add, n*5→shl+add, n*7→shl-sub, n*9→shl+add)
 - ✅ OPTMAX double-negation/complement folding (-(-x)→x, ~(~x)→x)
+- ✅ OPTMAX self-identifier optimizations (x-x→0, x^x→0, x&x→x, x|x→x)
 - ✅ Exponentiation by squaring for O(log n) POW operations
 - ✅ Single-dispatch comparison operators (<=, >, >=) eliminating redundant type checks
 - ✅ Lexer `scanIdentifier` uses `substr()` instead of char-by-char string building

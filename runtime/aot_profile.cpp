@@ -25,6 +25,7 @@
 #include <llvm/TargetParser/Host.h>
 #include <llvm/TargetParser/SubtargetFeature.h>
 #include <llvm/TargetParser/Triple.h>
+#include <llvm/Transforms/Scalar/LoopDistribute.h>
 
 #include <atomic>
 #include <cassert>
@@ -422,6 +423,11 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
         return;
     }
     fn->setEntryCount(static_cast<uint64_t>(callCount));
+    // Mark the hot function with the `hot` attribute so LLVM's inliner,
+    // branch layout, and code placement passes treat it with maximum priority.
+    // This enables hot/cold splitting (moving error paths out of the hot region),
+    // more aggressive inlining into this function, and better I-cache layout.
+    fn->addFnAttr(llvm::Attribute::Hot);
     for (auto& other : *mod) {
         if (!other.isDeclaration() && other.getName() != funcName && !other.getEntryCount())
             other.setEntryCount(1);
@@ -459,6 +465,35 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
         }
     }
 
+    // --- Apply argument-type-driven function attributes ---
+    // When profiling shows that all observed argument values are integers
+    // (the dominant type), annotate parameters with LLVM attributes that
+    // enable stronger optimization:
+    //   - `noundef`: the value is always well-defined (not poison/undef),
+    //     enabling value-range propagation and dead-code elimination.
+    //   - `signext`: the value is sign-extended from a narrower type, which
+    //     helps the backend select better instruction sequences.
+    // These attributes feed into LLVM's IPSCCP, instcombine, and inliner
+    // to produce tighter specialized code for the hot path.
+    {
+        const FunctionProfile* prof = JITProfiler::instance().getProfile(funcName);
+        if (prof) {
+            for (size_t i = 0; i < prof->args.size() && i < fn->arg_size(); i++) {
+                const auto& ap = prof->args[i];
+                if (ap.dominantType() == ArgType::Integer && ap.totalCalls > 0) {
+                    // >90% integer → mark parameter as always-defined integer
+                    // ap.totalCalls is guaranteed > 0 by the guard above.
+                    double intRatio = static_cast<double>(ap.typeCounts[static_cast<uint8_t>(ArgType::Integer)]) /
+                                      static_cast<double>(ap.totalCalls);
+                    if (intRatio > 0.9) {
+                        fn->addParamAttr(static_cast<unsigned>(i), llvm::Attribute::NoUndef);
+                        fn->addParamAttr(static_cast<unsigned>(i), llvm::Attribute::SExt);
+                    }
+                }
+            }
+        }
+    }
+
     // --- Re-optimise at O3 with PGO guidance and full native CPU features ---
     {
         llvm::PipelineTuningOptions PTO;
@@ -468,7 +503,12 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
         PTO.LoopInterleaving = true;
         PTO.MergeFunctions = true;
         PTO.CallGraphProfile = true;
-        PTO.InlinerThreshold = 400;
+        // Tier-2 uses a higher inliner threshold (600) than the AOT pipeline
+        // (400) because we already know this function is hot — aggressive
+        // inlining of callees eliminates call overhead and exposes more
+        // optimization opportunities (constant propagation, loop fusion, etc.)
+        // within the hot function body.
+        PTO.InlinerThreshold = 600;
 
         // Build a native TargetMachine with ALL host CPU features exposed
         // so the vectoriser and scheduler can use AVX2/AVX-512/NEON etc.
@@ -511,6 +551,15 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
         }
 
         llvm::PassBuilder PB(TM.get(), PTO);
+
+        // Register LoopDistributePass to run just before vectorisation,
+        // matching the AOT O3 pipeline.  Loop distribution splits loops with
+        // multiple independent memory streams into separate loops with smaller
+        // working sets, improving cache locality and enabling downstream
+        // vectorisation of the resulting simpler loops.
+        PB.registerVectorizerStartEPCallback(
+            [](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) { FPM.addPass(llvm::LoopDistributePass()); });
+
         llvm::LoopAnalysisManager LAM;
         llvm::FunctionAnalysisManager FAM;
         llvm::CGSCCAnalysisManager CGAM;
