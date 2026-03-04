@@ -6151,7 +6151,9 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     fpm.add(llvm::createLoopStrengthReducePass());
     fpm.add(llvm::createLoopUnrollPass());
     // Phase 3: Post-loop optimizations
+#if LLVM_VERSION_MAJOR < 18
     fpm.add(llvm::createMergedLoadStoreMotionPass());
+#endif
     fpm.add(llvm::createSinkingPass());
     fpm.add(llvm::createStraightLineStrengthReducePass());
     fpm.add(llvm::createNaryReassociatePass());
@@ -6330,7 +6332,9 @@ void CodeGenerator::runJITBaselinePasses() {
         // MergedLoadStoreMotion merges load/store pairs across diamond-shaped
         // branches (if/else).  For long-running programs with array-heavy code
         // this eliminates redundant memory traffic that dominates runtime.
+#if LLVM_VERSION_MAJOR < 18
         fpm.add(llvm::createMergedLoadStoreMotionPass());
+#endif
         fpm.add(llvm::createSinkingPass());
     }
 
