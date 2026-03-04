@@ -7,7 +7,7 @@ on:
     branches: [ main ]
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   format-check:
@@ -16,22 +16,21 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
 
       - name: Install clang-format
         run: sudo apt-get install -y clang-format
 
-      - name: Check code formatting
+      - name: Run clang-format
         run: |
-          # Format and check for differences
-          for f in $(find src runtime include -name '*.cpp' -o -name '*.h' 2>/dev/null); do
-            clang-format "$f" > /tmp/formatted.cpp
-            if ! diff -q "$f" /tmp/formatted.cpp > /dev/null 2>&1; then
-              echo "Formatting issues found in $f"
-              clang-format --dry-run -Werror "$f"
-              exit 1
-            fi
-          done
-          echo "Code formatting OK"
+          find src runtime include \( -name '*.cpp' -o -name '*.h' \) 2>/dev/null | xargs -r clang-format -i
+
+      - name: Commit formatting fixes
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "style: auto-fix clang-format violations"
+          file_pattern: "src/**/*.cpp src/**/*.h runtime/**/*.cpp runtime/**/*.h include/**/*.cpp include/**/*.h"
 
   tidy-check:
     runs-on: ubuntu-latest
@@ -39,6 +38,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
 
       - name: Install dependencies
         run: |
@@ -51,16 +52,22 @@ jobs:
       - name: Build
         run: cmake --build build --parallel $(nproc)
 
-      - name: Run clang-tidy
+      - name: Run clang-tidy with auto-fix
         run: |
           cd build
-          find ../src ../runtime -name '*.cpp' | head -5 | xargs -I{} clang-tidy -p . {} 2>&1 | tee tidy.log || true
+          find ../src ../runtime -name '*.cpp' | head -5 | xargs -I{} clang-tidy -p . --fix {} 2>&1 | tee tidy.log || true
           if grep -E "^\.\./[a-z]+/[a-z]+\.cpp:[0-9]+:[0-9]+: error:" tidy.log; then
-            echo "clang-tidy errors found"
+            echo "clang-tidy errors found (could not auto-fix all issues)"
             cat tidy.log
             exit 1
           fi
           echo "clang-tidy check complete"
+
+      - name: Commit tidy fixes
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "style: auto-fix clang-tidy violations"
+          file_pattern: "src/**/*.cpp src/**/*.h runtime/**/*.cpp runtime/**/*.h include/**/*.cpp include/**/*.h"
 
   build-and-test:
     runs-on: ubuntu-latest

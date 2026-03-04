@@ -509,11 +509,9 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
             auto* i64Ty = llvm::Type::getInt64Ty(fn->getContext());
             // Declare @llvm.assume(i1) intrinsic.
 #if LLVM_VERSION_MAJOR >= 19
-            llvm::Function* assumeFn =
-                llvm::Intrinsic::getOrInsertDeclaration(mod.get(), llvm::Intrinsic::assume);
+            llvm::Function* assumeFn = llvm::Intrinsic::getOrInsertDeclaration(mod.get(), llvm::Intrinsic::assume);
 #else
-            llvm::Function* assumeFn =
-                llvm::Intrinsic::getDeclaration(mod.get(), llvm::Intrinsic::assume);
+            llvm::Function* assumeFn = llvm::Intrinsic::getDeclaration(mod.get(), llvm::Intrinsic::assume);
 #endif
             llvm::IRBuilder<> asB(&fn->getEntryBlock().front());
             for (size_t i = 0; i < prof->args.size() && i < fn->arg_size(); i++) {
@@ -578,8 +576,7 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
             // Skip branches that already have loop metadata.
             if (br->getMetadata(llvm::LLVMContext::MD_loop))
                 continue;
-            llvm::MDNode* mustProgress =
-                llvm::MDNode::get(ctx, {llvm::MDString::get(ctx, "llvm.loop.mustprogress")});
+            llvm::MDNode* mustProgress = llvm::MDNode::get(ctx, {llvm::MDString::get(ctx, "llvm.loop.mustprogress")});
             llvm::MDNode* interleave = llvm::MDNode::get(
                 ctx, {llvm::MDString::get(ctx, "llvm.loop.interleave.count"),
                       llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), 4))});
