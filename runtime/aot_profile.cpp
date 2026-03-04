@@ -477,6 +477,7 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
                 const auto& ap = prof->args[i];
                 if (ap.dominantType() == ArgType::Integer && ap.totalCalls > 0) {
                     // >90% integer → mark parameter as always-defined integer
+                    // ap.totalCalls is guaranteed > 0 by the guard above.
                     double intRatio = static_cast<double>(ap.typeCounts[static_cast<uint8_t>(ArgType::Integer)]) /
                                      static_cast<double>(ap.totalCalls);
                     if (intRatio > 0.9) {

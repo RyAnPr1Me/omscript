@@ -3253,29 +3253,58 @@ TEST(CodegenTest, ArrayIndexAssignBoundsCheck) {
 // ===========================================================================
 
 TEST(CodegenTest, SameValueXorZero) {
-    // v ^ v → 0: uses the same parameter directly, so at IR level both sides
-    // are the same LLVM Value*.
+    // v ^ v → 0: both sides are the same constant, so constant folding
+    // produces 0 directly.
     CodeGenerator codegen(OptimizationLevel::O0);
     auto* mod = generateIR("fn main() { return 5 ^ 5; }", codegen);
     ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("main");
+    ASSERT_NE(fn, nullptr);
+    // Should be constant-folded to 0 — no XOR instruction
+    bool hasXor = false;
+    for (auto& BB : *fn)
+        for (auto& I : BB)
+            if (I.getOpcode() == llvm::Instruction::Xor) hasXor = true;
+    EXPECT_FALSE(hasXor) << "5 ^ 5 should be constant-folded, no XOR instruction";
 }
 
 TEST(CodegenTest, SameValueSubZero) {
     CodeGenerator codegen(OptimizationLevel::O0);
     auto* mod = generateIR("fn main() { return 10 - 10; }", codegen);
     ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("main");
+    ASSERT_NE(fn, nullptr);
+    bool hasSub = false;
+    for (auto& BB : *fn)
+        for (auto& I : BB)
+            if (I.getOpcode() == llvm::Instruction::Sub) hasSub = true;
+    EXPECT_FALSE(hasSub) << "10 - 10 should be constant-folded, no SUB instruction";
 }
 
 TEST(CodegenTest, SameValueAndIdentity) {
     CodeGenerator codegen(OptimizationLevel::O0);
     auto* mod = generateIR("fn main() { return 7 & 7; }", codegen);
     ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("main");
+    ASSERT_NE(fn, nullptr);
+    bool hasAnd = false;
+    for (auto& BB : *fn)
+        for (auto& I : BB)
+            if (I.getOpcode() == llvm::Instruction::And) hasAnd = true;
+    EXPECT_FALSE(hasAnd) << "7 & 7 should be constant-folded, no AND instruction";
 }
 
 TEST(CodegenTest, SameValueOrIdentity) {
     CodeGenerator codegen(OptimizationLevel::O0);
     auto* mod = generateIR("fn main() { return 3 | 3; }", codegen);
     ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("main");
+    ASSERT_NE(fn, nullptr);
+    bool hasOr = false;
+    for (auto& BB : *fn)
+        for (auto& I : BB)
+            if (I.getOpcode() == llvm::Instruction::Or) hasOr = true;
+    EXPECT_FALSE(hasOr) << "3 | 3 should be constant-folded, no OR instruction";
 }
 
 // ===========================================================================
@@ -3377,27 +3406,56 @@ TEST(CodegenTest, MultiplyBy3Commutative) {
 // ===========================================================================
 
 TEST(CodegenTest, OptmaxSelfXor) {
+    // x ^ x → 0 at AST level when both sides are the same identifier
     CodeGenerator codegen(OptimizationLevel::O0);
     auto* mod = generateIR("OPTMAX=: fn opt(x: int) { return x ^ x; } OPTMAX!: fn main() { return opt(5); }", codegen);
     ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("opt");
+    ASSERT_NE(fn, nullptr);
+    bool hasXor = false;
+    for (auto& BB : *fn)
+        for (auto& I : BB)
+            if (I.getOpcode() == llvm::Instruction::Xor) hasXor = true;
+    EXPECT_FALSE(hasXor) << "OPTMAX x ^ x should be folded to 0, no XOR instruction";
 }
 
 TEST(CodegenTest, OptmaxSelfSub) {
     CodeGenerator codegen(OptimizationLevel::O0);
     auto* mod = generateIR("OPTMAX=: fn opt(x: int) { return x - x; } OPTMAX!: fn main() { return opt(5); }", codegen);
     ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("opt");
+    ASSERT_NE(fn, nullptr);
+    bool hasSub = false;
+    for (auto& BB : *fn)
+        for (auto& I : BB)
+            if (I.getOpcode() == llvm::Instruction::Sub) hasSub = true;
+    EXPECT_FALSE(hasSub) << "OPTMAX x - x should be folded to 0, no SUB instruction";
 }
 
 TEST(CodegenTest, OptmaxSelfAnd) {
     CodeGenerator codegen(OptimizationLevel::O0);
     auto* mod = generateIR("OPTMAX=: fn opt(x: int) { return x & x; } OPTMAX!: fn main() { return opt(5); }", codegen);
     ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("opt");
+    ASSERT_NE(fn, nullptr);
+    bool hasAnd = false;
+    for (auto& BB : *fn)
+        for (auto& I : BB)
+            if (I.getOpcode() == llvm::Instruction::And) hasAnd = true;
+    EXPECT_FALSE(hasAnd) << "OPTMAX x & x should simplify to x, no AND instruction";
 }
 
 TEST(CodegenTest, OptmaxSelfOr) {
     CodeGenerator codegen(OptimizationLevel::O0);
     auto* mod = generateIR("OPTMAX=: fn opt(x: int) { return x | x; } OPTMAX!: fn main() { return opt(5); }", codegen);
     ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("opt");
+    ASSERT_NE(fn, nullptr);
+    bool hasOr = false;
+    for (auto& BB : *fn)
+        for (auto& I : BB)
+            if (I.getOpcode() == llvm::Instruction::Or) hasOr = true;
+    EXPECT_FALSE(hasOr) << "OPTMAX x | x should simplify to x, no OR instruction";
 }
 
 // ===========================================================================
