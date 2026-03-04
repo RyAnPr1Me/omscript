@@ -2053,6 +2053,19 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             return llvm::ConstantInt::get(getDefaultType(), 1); // 1**x → 1
     }
 
+    // Same-value identity optimizations — when both operands are the exact
+    // same SSA value, several operations can be simplified without emitting
+    // any instruction.  This fires after mem2reg promotes allocas to SSA
+    // values and catches patterns like f(x) ^ f(x) where the call result
+    // is reused, or when both sides of an operator reference the same
+    // already-loaded variable value.
+    if (left == right) {
+        if (expr->op == "-" || expr->op == "^")
+            return llvm::ConstantInt::get(getDefaultType(), 0); // x-x→0, x^x→0
+        if (expr->op == "&" || expr->op == "|")
+            return left; // x&x→x, x|x→x
+    }
+
     // Regular code generation for non-constant expressions.
     // Integer arithmetic uses wrapping (no NSW/NUW flags): NSW/NUW flags tell
     // LLVM that overflow is undefined behavior, which can cause miscompilation
@@ -2073,6 +2086,39 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             int s = log2IfPowerOf2(ci->getSExtValue());
             if (s >= 0)
                 return builder->CreateShl(right, llvm::ConstantInt::get(getDefaultType(), s), "shltmp");
+        }
+        // Strength reduction: multiply by small non-power-of-2 constants
+        // to shift+add/sub sequences (faster on many microarchitectures).
+        // n*3 → (n<<1)+n, n*5 → (n<<2)+n, n*7 → (n<<3)-n, n*9 → (n<<3)+n
+        auto emitShiftAdd = [&](llvm::Value* base, int64_t multiplier) -> llvm::Value* {
+            switch (multiplier) {
+            case 3: {
+                auto* shl = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 1), "mul3.shl");
+                return builder->CreateAdd(shl, base, "mul3");
+            }
+            case 5: {
+                auto* shl = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 2), "mul5.shl");
+                return builder->CreateAdd(shl, base, "mul5");
+            }
+            case 7: {
+                auto* shl = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 3), "mul7.shl");
+                return builder->CreateSub(shl, base, "mul7");
+            }
+            case 9: {
+                auto* shl = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 3), "mul9.shl");
+                return builder->CreateAdd(shl, base, "mul9");
+            }
+            default:
+                return nullptr;
+            }
+        };
+        if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
+            if (auto* result = emitShiftAdd(left, ci->getSExtValue()))
+                return result;
+        }
+        if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left)) {
+            if (auto* result = emitShiftAdd(right, ci->getSExtValue()))
+                return result;
         }
         return builder->CreateMul(left, right, "multmp");
     } else if (expr->op == "/" || expr->op == "%") {
