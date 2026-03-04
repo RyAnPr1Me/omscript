@@ -24,7 +24,7 @@ jobs:
 
       - name: Run clang-format
         run: |
-          find src runtime include -name '*.cpp' -o -name '*.h' 2>/dev/null | xargs -r clang-format -i
+          find src runtime include \( -name '*.cpp' -o -name '*.h' \) 2>/dev/null | xargs -r clang-format -i
 
       - name: Commit formatting fixes
         uses: stefanzweifel/git-auto-commit-action@v5
