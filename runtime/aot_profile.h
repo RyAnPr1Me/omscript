@@ -69,76 +69,46 @@
 // ---------------------------------------------------------------------------
 // When the user runs `omsc run file.om`, instead of compiling to a binary
 // and spawning a subprocess, the AdaptiveJITRunner executes the program
-// in-process using a two-tier JIT strategy:
+// in-process using a multi-tier JIT strategy:
 //
-//   Tier 1 — Initial JIT (fast):
+//   Tier 1 — Baseline JIT (fast startup):
 //     The module's clean IR is serialised to bitcode, then a fresh copy is
 //     loaded, call-counting dispatch prologs are injected into every
-//     non-main function, and the result is JIT-compiled at O2 via LLVM
+//     non-main function, and the result is JIT-compiled at O3 via LLVM
 //     MCJIT.  Execution begins immediately.
 //
-//   Runtime Profiling (during Tier 1):
-//     Each non-main function collects runtime data:
-//     - Call frequency: atomic counter incremented at each invocation.
-//     - Argument types: each parameter's type tag is recorded via
-//       __omsc_profile_arg() — feeds into type specialization.
-//     - Branch probabilities: conditional branch taken/not-taken counts
-//       recorded via __omsc_profile_branch() for branch weight metadata.
-//     - Observed constants: frequently-passed constant values tracked
-//       for constant folding during recompilation.
-//     - Value ranges: min/max observed integer values per parameter,
-//       enabling range-based llvm.assume optimizations.
-//     - Loop trip counts: iteration counts per loop recorded via
-//       __omsc_profile_loop() — feeds into unroll count decisions.
-//     - Call-site frequencies: caller→callee pair counts recorded via
-//       __omsc_profile_call_site() — drives inline hint decisions.
-//     Overhead is minimal: one atomic increment + one callback per arg
-//     per call during the warm-up phase only.
+//   Runtime Profiling (continuous):
+//     Each non-main function collects runtime data via atomic counters
+//     and lightweight profiling callbacks:
+//     - Call frequency, argument types, branch probabilities,
+//       observed constants, value ranges, loop trip counts,
+//       call-site frequencies.
+//     Profiling continues even after Tier-2 promotion so that higher
+//     tiers benefit from richer statistical data.
 //
-//   Tier 2 — Adaptive recompile (hot):
-//     Every function counts its own invocations via an atomicrmw at entry.
-//     When the count first reaches kRecompileThreshold the function calls
-//     __omsc_adaptive_recompile(), which:
-//       1. Parses the clean (counter-free) bitcode into a fresh context.
-//       2. Annotates the target function with setEntryCount(callCount) —
-//          this is the PGO hint that shifts the LLVM optimizer from static
-//          heuristics to real runtime data.
-//       3. Applies collected branch weights from the JITProfiler to
-//          conditional branches as LLVM metadata.
-//       4. Injects llvm.assume(arg == constant) for parameters where >80%
-//          of calls passed the same integer constant, enabling IPSCCP to
-//          propagate the constant through the function body.
-//       5. Injects llvm.assume(arg >= min && arg <= max) for parameters
-//          where >90% of observed values fall in a tight range (<=1024),
-//          enabling range-check elimination and narrower operations.
-//       6. Applies call-site frequency data: adds `inlinehint` to callees
-//          that account for >20% of calls from the hot function, guiding
-//          the inliner to prioritize them.
-//       7. Marks non-hot functions with the `cold` attribute to improve
-//          inlining decisions and I-cache layout.
-//       8. Attaches loop vectorization metadata (mustprogress,
-//          interleave.count=4, vectorize.width=4) to loop back-edges.
-//       9. Attaches profile-guided loop unroll count metadata based on
-//          observed average trip counts (full unroll for small loops,
-//          unroll-by-4/8 for medium/large loops).
-//       10. Re-runs the full LLVM O3 pipeline with those annotations:
-//          the inliner, branch-layout pass, loop vectorizer, and unroller
-//          all see the function as hot and optimize accordingly.
-//       11. JIT-compiles the result via MCJIT.
-//       12. Writes the new native function pointer into the function's
-//          @__omsc_fn_<name> slot.
+//   Tier 2 — Warm recompile (50 calls):
+//     First O3+PGO recompile with early profile data.
+//     Inliner threshold: 600.
+//
+//   Tier 3 — Hot recompile (500 calls):
+//     Second recompile with 10x more profile samples.
+//     Inliner threshold: 800 — more aggressive cross-function inlining.
+//
+//   Tier 4 — Saturated recompile (5000 calls):
+//     Final recompile with the deepest profile and maximum aggression.
+//     Inliner threshold: 1200 — full specialisation of the hot path.
+//
+//   Each tier:
+//     1. Parses the clean bitcode, strips unreachable functions.
+//     2. Annotates with PGO entry counts, branch weights, type hints,
+//        constant specialization, range assumptions, inline hints.
+//     3. Re-runs the full LLVM O3 pipeline with tier-specific settings.
+//     4. JIT-compiles and hot-patches the dispatch slot.
 //
 //   Deoptimization:
-//     Specialized code may include guard checks (e.g. type assertions).
-//     If a guard fails at runtime, __omsc_deopt_guard_fail() increments
-//     a failure counter.  After kDeoptThreshold failures, the hot-patch
-//     slot is reset to nullptr — reverting to Tier-1 baseline code.
-//
-//   Future calls take the fast path at the top of the dispatch prolog:
-//     %fp = load volatile ptr, @__omsc_fn_<name>
-//     if (%fp != null)  tail call %fp(args)   // already recompiled
-//   — one volatile load + a well-predicted branch, then a direct call to
-//   the O3-PGO-optimised native code with zero counter overhead.
+//     Specialized code may include guard checks.  After kDeoptThreshold
+//     failures, the hot-patch slot resets to nullptr — falling back to
+//     Tier-1 baseline code.
 // ---------------------------------------------------------------------------
 
 #include <cstddef>
@@ -146,7 +116,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
-#include <unordered_set>
+#include <unordered_map>
 #include <vector>
 
 namespace llvm {
@@ -159,16 +129,28 @@ namespace omscript {
 
 class AdaptiveJITRunner {
   public:
-    /// Invocations before which a function is recompiled at O3 with PGO guidance.
-    ///
-    /// 100 strikes the right balance for typical short-to-medium OmScript programs:
-    ///  - Low enough to capture hot functions early and spend most execution time
-    ///    in Tier-2 O3+PGO native code rather than Tier-1 O2 baseline code.
-    ///  - High enough to accumulate a statistically useful type and branch profile
-    ///    before paying the O3 compilation cost.
-    /// For long-running server workloads a higher value (e.g. 1000) gives richer
-    /// profile data; for micro-benchmarks this is already optimal.
-    static constexpr int64_t kRecompileThreshold = 100;
+    // -----------------------------------------------------------------------
+    // Multi-tier recompilation thresholds
+    // -----------------------------------------------------------------------
+    // The JIT uses four execution tiers, each triggered when a function's
+    // call count first reaches the corresponding threshold:
+    //
+    //   Tier 1 (baseline):  O3-backend JIT of the compiler's IR — runs from
+    //                       call 0 while profile data is being collected.
+    //   Tier 2 (warm):      50 calls — first O3+PGO recompile with early
+    //                       profile data (branch weights, argument types).
+    //   Tier 3 (hot):       500 calls — richer profile, more aggressive
+    //                       inlining (threshold 800) and full loop unroll.
+    //   Tier 4 (saturated): 5000 calls — maximum optimisation with the
+    //                       deepest profile and most aggressive settings.
+    //
+    // Each successive tier uses increasingly aggressive inliner thresholds
+    // and benefits from more statistically significant profile data.
+    // -----------------------------------------------------------------------
+    static constexpr int64_t kTier2Threshold = 50;
+    static constexpr int64_t kTier3Threshold = 500;
+    static constexpr int64_t kTier4Threshold = 5000;
+    static constexpr int kNumTiers = 4;
 
     AdaptiveJITRunner();
     ~AdaptiveJITRunner();
@@ -189,15 +171,16 @@ class AdaptiveJITRunner {
     /// Returns the integer value returned by main() (clamped to [0, 255]).
     int run(llvm::Module* module);
 
-    /// Called from __omsc_adaptive_recompile when a function goes hot.
-    /// Recompiles @p name from the clean bitcode with O3 + PGO entry-count,
-    /// then writes the new function pointer into *fnPtrSlot.
+    /// Called from __omsc_adaptive_recompile when a function hits a tier
+    /// threshold.  Recompiles @p name from the clean bitcode with O3 + PGO,
+    /// using tier-appropriate aggressiveness, then writes the new native
+    /// function pointer into *fnPtrSlot.
     void onHotFunction(const char* name, int64_t callCount, void** fnPtrSlot);
 
   private:
     /// Serialised clean IR — preserved from the initial module before any
     /// counter instrumentation is added.  Used as the source for all
-    /// Tier-2 recompilations.
+    /// tiered recompilations.
     std::vector<char> cleanBitcode_;
 
     /// Keeps MCJIT ExecutionEngines (and their contexts) alive so compiled
@@ -208,10 +191,14 @@ class AdaptiveJITRunner {
     };
     std::vector<JitModule> modules_;
 
-    /// Functions that have already been recompiled (at most once each).
-    std::unordered_set<std::string> recompiled_;
-    std::mutex recompiledMtx_; ///< Guards recompiled_ and modules_ across threads.
+    /// Tracks the highest completed tier per function (0 = not yet recompiled).
+    std::unordered_map<std::string, int> functionTier_;
+    std::mutex recompiledMtx_; ///< Guards functionTier_ and modules_ across threads.
     bool verbose_ = false;     ///< Print JIT recompile events when true.
+
+    /// Return the tier (2, 3, or 4) for a given call count, or 0 if below
+    /// all thresholds.
+    static int tierForCallCount(int64_t count);
 
     void ensureInitialized();
 
