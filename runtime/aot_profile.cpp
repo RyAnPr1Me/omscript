@@ -543,7 +543,8 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
     }
 
     const char* tierNames[] = {"", "", "Tier-2 (warm)", "Tier-3 (hot)", "Tier-4 (saturated)"};
-    const char* tierLabel = (targetTier >= 2 && targetTier <= 4) ? tierNames[targetTier] : "Tier-?";
+    const char* tierLabel =
+        (targetTier >= 2 && targetTier <= AdaptiveJITRunner::kMaxTier) ? tierNames[targetTier] : "Tier-?";
     std::cerr << "JIT: recompiling '" << funcName << "' (calls: " << callCount << ") at " << tierLabel << " O3+PGO\n";
 
     // RAII scope guard: on early return (failure), revert the tier so that

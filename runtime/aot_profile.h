@@ -150,7 +150,8 @@ class AdaptiveJITRunner {
     static constexpr int64_t kTier2Threshold = 50;
     static constexpr int64_t kTier3Threshold = 500;
     static constexpr int64_t kTier4Threshold = 5000;
-    static constexpr int kNumTiers = 4;
+    /// Highest tier number (Tier-1 = baseline, Tier-2..kMaxTier = recompiled).
+    static constexpr int kMaxTier = 4;
 
     AdaptiveJITRunner();
     ~AdaptiveJITRunner();
