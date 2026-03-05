@@ -4,7 +4,7 @@
 //
 // Benchmarks OmScript against equivalent C and Rust implementations.
 // Each hot function is called thousands of times to trigger the adaptive
-// JIT Tier-2 recompilation (threshold = 20 calls) when run with `omsc run`.
+// JIT Tier-2 recompilation (threshold = 10 calls) when run with `omsc run`.
 //
 // Equivalent source files for live comparison:
 //   - examples/benchmark_loops_math.c   (compile: gcc -O2 -o bench_c ...)

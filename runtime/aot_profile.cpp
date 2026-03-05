@@ -392,9 +392,8 @@ void AdaptiveJITRunner::injectCounters(llvm::Module& mod) {
         B.CreateStore(newSample, sampleGV);
 
         // Inject argument type profiling every 4th call (sample counter & 0x3 == 0).
-        // With only 20 cold-path calls before Tier-2, sampling every 8th call
-        // would give only 2-3 data points.  Sampling every 4th gives 5 data
-        // points — enough for reliable type/constant/range detection while
+        // With only 10 cold-path calls before Tier-2, sampling every 4th call
+        // gives 2-3 data points — enough for type/constant detection while
         // keeping overhead moderate.
         auto* shouldProfileArgs = B.CreateICmpEQ(
             B.CreateAnd(newSample, llvm::ConstantInt::get(i64Ty, 0x3), "omsc.asmod"),
@@ -480,7 +479,7 @@ int AdaptiveJITRunner::run(llvm::Module* baseModule) {
     // Step 4: JIT-compile the instrumented module.
     // Use Less (O1) backend optimization for Tier-1 so the initial native
     // code compiles as quickly as possible.  Tier-1 code is replaced by the
-    // Tier-2 PGO recompile after just 20 calls, so spending time on O2/O3
+    // Tier-2 PGO recompile after just 10 calls, so spending time on O2/O3
     // optimization at startup is wasted — the code will be thrown away.
     // O1 provides a good balance: ~30-50% faster compilation than O2 while
     // still producing reasonable code for the brief warm-up period.
@@ -969,7 +968,7 @@ void AdaptiveJITRunner::doRecompile(const std::string& funcName, int64_t callCou
                     if (ratio > 0.2) {
                         llvm::Function* callee = mod->getFunction(cs.first);
                         if (callee && !callee->isDeclaration()) {
-                            // At Tier-3 (2000+ calls), dominant callees (>40% of calls)
+                            // At Tier-3 (1000+ calls), dominant callees (>40% of calls)
                             // get alwaysinline to guarantee full inlining.
                             if (targetTier >= 3 && ratio > 0.4) {
                                 callee->addFnAttr(llvm::Attribute::AlwaysInline);
@@ -1178,8 +1177,8 @@ void AdaptiveJITRunner::doRecompile(const std::string& funcName, int64_t callCou
 
     // --- Re-optimise with PGO guidance and full native CPU features ---
     // Each tier uses progressively more aggressive optimisation settings:
-    //   Tier 2 (warm,   20 calls):  O2 pipeline, inliner threshold 600
-    //   Tier 3 (hot,  2000 calls):  O3 pipeline, inliner threshold 1200,
+    //   Tier 2 (warm,   10 calls):  O2 pipeline, inliner threshold 600
+    //   Tier 3 (hot,  1000 calls):  O3 pipeline, inliner threshold 1200,
     //                               double O3 pass for cascading optimizations
     //
     // User flags (-ffast-math, -fvectorize, -funroll-loops, -floop-optimize)
@@ -1245,7 +1244,7 @@ void AdaptiveJITRunner::doRecompile(const std::string& funcName, int64_t callCou
         auto pipeline = PB.buildPerModuleDefaultPipeline(optLevel);
         pipeline.run(*mod, MAM);
 
-        // At Tier-3 (2000+ calls), run the O3 pipeline a second time.
+        // At Tier-3 (1000+ calls), run the O3 pipeline a second time.
         // The first pass often creates new optimization opportunities
         // (e.g., inlining exposes constant folding, dead code elimination
         // reveals further loop simplification) that a second pass can exploit.

@@ -76,7 +76,7 @@
 //     loaded, call-counting dispatch prologs are injected into every
 //     non-main function, and the result is JIT-compiled at O1 via LLVM
 //     MCJIT.  Execution begins immediately.  O1 keeps startup fast; the
-//     code is replaced after just 20 calls by PGO-guided Tier-2.
+//     code is replaced after just 10 calls by PGO-guided Tier-2.
 //
 //   Runtime Profiling (continuous):
 //     Each non-main function collects runtime data via atomic counters
