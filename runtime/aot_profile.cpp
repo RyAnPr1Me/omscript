@@ -714,7 +714,7 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
     // constant folding in expressions, and loop trip-count computation — all
     // without creating a separate specialized clone.
     //
-    // At Tier-4+, also use the top-K value frequency tracker: if a single
+    // At Tier-3, also use the top-K value frequency tracker: if a single
     // value dominates >60% of calls, inject the same assumption.  This catches
     // cases where the constant-count tracker was confused by early non-constant
     // calls but the top-K tracker correctly identified the dominant value.
@@ -741,7 +741,7 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
                     asB.CreateCall(assumeFn, {cmp});
                 } else if (targetTier >= 3 && ap.hasDominantValue() &&
                            arg->getType() == i64Ty) {
-                    // Top-K fallback: dominant value detected at Tier-4+.
+                    // Top-K fallback: dominant value detected at Tier-3.
                     auto* cmp = asB.CreateICmpEQ(arg,
                                                  llvm::ConstantInt::get(i64Ty, ap.dominantValue()),
                                                  "omsc.topk_spec");
@@ -799,7 +799,7 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
     // this hot function, add `inlinehint` to those callees to guide LLVM's
     // inliner to prioritize inlining them.  Callees that account for >20%
     // of all calls from this function are considered hot call sites.
-    // At Tier-4+, callees that dominate >40% of calls get `alwaysinline`
+    // At Tier-3, callees that dominate >40% of calls get `alwaysinline`
     // to guarantee full inlining of the hot path.
     {
         const FunctionProfile* prof = JITProfiler::instance().getProfile(funcName);

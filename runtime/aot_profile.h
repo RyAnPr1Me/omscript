@@ -228,7 +228,7 @@ class AdaptiveJITRunner {
     bool unrollLoops_ = true;
     bool loopOptimize_ = true;
 
-    /// Return the tier (2, 3, 4, or 5) for a given call count, or 0 if below
+    /// Return the tier (2 or 3) for a given call count, or 0 if below
     /// all thresholds.
     static int tierForCallCount(int64_t count);
 

@@ -119,7 +119,7 @@ fn bench_primes() {
 
 fn bench_fibonacci() {
     // 200k calls to fibonacci(200) — each call does 198 loop iterations
-    // Total: ~40M iterations, hits Tier-5 at 50k calls
+    // Total: ~40M iterations, hits Tier-3 at 2k calls
     var iters = 200000;
     var checksum = 0;
     for (i in 0...iters) {
@@ -130,7 +130,7 @@ fn bench_fibonacci() {
 
 fn bench_collatz() {
     // 60k calls to collatz_sum(837799) — each call ~525 iterations
-    // Total: ~31M iterations, hits Tier-5 at 50k calls
+    // Total: ~31M iterations, hits Tier-3 at 2k calls
     var iters = 60000;
     var checksum = 0;
     for (i in 0...iters) {
@@ -152,7 +152,7 @@ fn bench_matrix() {
 
 fn bench_gcd() {
     // 200k calls to gcd — each call ~20 iterations
-    // Total: ~4M iterations, hits Tier-5 at 50k calls
+    // Total: ~4M iterations, hits Tier-3 at 2k calls
     var iters = 200000;
     var checksum = 0;
     for (i in 0...iters) {
