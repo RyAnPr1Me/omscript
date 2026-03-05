@@ -392,3 +392,216 @@ TEST(ArgProfileTest, NegativeConstantTracked) {
     EXPECT_TRUE(ap.hasConstantSpecialization());
     EXPECT_EQ(ap.observedConstant, -42);
 }
+
+// ===========================================================================
+// Value range profiling tests
+// ===========================================================================
+
+TEST(ArgProfileTest, RangeTrackingBasic) {
+    // Record values in [10, 50] — should track min/max correctly
+    ArgProfile ap;
+    ap.record(ArgType::Integer, 10);
+    ap.record(ArgType::Integer, 30);
+    ap.record(ArgType::Integer, 50);
+    ap.record(ArgType::Integer, 20);
+    EXPECT_EQ(ap.minObserved, 10);
+    EXPECT_EQ(ap.maxObserved, 50);
+    EXPECT_EQ(ap.rangeCount, 4u);
+}
+
+TEST(ArgProfileTest, RangeSpecializationTightRange) {
+    // All values in [0, 100] — tight range, should trigger range specialization
+    ArgProfile ap;
+    for (int i = 0; i <= 100; i++)
+        ap.record(ArgType::Integer, i);
+    EXPECT_TRUE(ap.hasRangeSpecialization());
+    EXPECT_EQ(ap.minObserved, 0);
+    EXPECT_EQ(ap.maxObserved, 100);
+}
+
+TEST(ArgProfileTest, RangeSpecializationWideRange) {
+    // Values spread across [0, 10000] — too wide, should NOT trigger
+    ArgProfile ap;
+    ap.record(ArgType::Integer, 0);
+    ap.record(ArgType::Integer, 10000);
+    EXPECT_FALSE(ap.hasRangeSpecialization());
+}
+
+TEST(ArgProfileTest, RangeSpecializationNoData) {
+    // No data — should NOT trigger range specialization
+    ArgProfile ap;
+    EXPECT_FALSE(ap.hasRangeSpecialization());
+}
+
+TEST(ArgProfileTest, RangeSpecializationNegativeRange) {
+    // Negative range [-50, -10] — should trigger
+    ArgProfile ap;
+    for (int i = -50; i <= -10; i++)
+        ap.record(ArgType::Integer, i);
+    EXPECT_TRUE(ap.hasRangeSpecialization());
+    EXPECT_EQ(ap.minObserved, -50);
+    EXPECT_EQ(ap.maxObserved, -10);
+}
+
+TEST(ArgProfileTest, RangeSpecializationMixedTypes) {
+    // Only integer values contribute to range; if <90% are integers,
+    // range specialization should not trigger.
+    ArgProfile ap;
+    for (int i = 0; i < 5; i++)
+        ap.record(ArgType::Integer, i);
+    for (int i = 0; i < 6; i++)
+        ap.record(ArgType::Float, 0);
+    // 5 integers out of 11 total = ~45% → range should NOT trigger
+    EXPECT_FALSE(ap.hasRangeSpecialization());
+}
+
+TEST(ArgProfileTest, RangeSpecializationSingleValue) {
+    // A single value [42, 42] is a tight range
+    ArgProfile ap;
+    ap.record(ArgType::Integer, 42);
+    EXPECT_TRUE(ap.hasRangeSpecialization());
+    EXPECT_EQ(ap.minObserved, 42);
+    EXPECT_EQ(ap.maxObserved, 42);
+}
+
+TEST(ArgProfileTest, RangeSpecializationExactBoundary) {
+    // Range width exactly 1024: [0, 1024] — should trigger
+    ArgProfile ap;
+    ap.record(ArgType::Integer, 0);
+    ap.record(ArgType::Integer, 1024);
+    EXPECT_TRUE(ap.hasRangeSpecialization());
+}
+
+TEST(ArgProfileTest, RangeSpecializationOverBoundary) {
+    // Range width 1025: [0, 1025] — should NOT trigger
+    ArgProfile ap;
+    ap.record(ArgType::Integer, 0);
+    ap.record(ArgType::Integer, 1025);
+    EXPECT_FALSE(ap.hasRangeSpecialization());
+}
+
+// ===========================================================================
+// Loop trip count profiling tests
+// ===========================================================================
+
+TEST(LoopProfileTest, BasicTripCount) {
+    LoopProfile lp;
+    EXPECT_EQ(lp.averageTripCount(), 0u);
+    EXPECT_EQ(lp.executionCount, 0u);
+}
+
+TEST(LoopProfileTest, AverageTripCount) {
+    LoopProfile lp;
+    lp.totalIterations = 300;
+    lp.executionCount = 10;
+    EXPECT_EQ(lp.averageTripCount(), 30u);
+}
+
+TEST(LoopProfileTest, SingleExecution) {
+    LoopProfile lp;
+    lp.totalIterations = 42;
+    lp.executionCount = 1;
+    EXPECT_EQ(lp.averageTripCount(), 42u);
+}
+
+TEST(JITProfilerTest, RecordLoopTripCount) {
+    JITProfiler::instance().reset();
+
+    JITProfiler::instance().recordLoopTripCount("loop_fn", 0, 100);
+    JITProfiler::instance().recordLoopTripCount("loop_fn", 0, 200);
+    JITProfiler::instance().recordLoopTripCount("loop_fn", 0, 300);
+
+    const FunctionProfile* prof = JITProfiler::instance().getProfile("loop_fn");
+    ASSERT_NE(prof, nullptr);
+    ASSERT_EQ(prof->loops.size(), 1u);
+    EXPECT_EQ(prof->loops[0].totalIterations, 600u);
+    EXPECT_EQ(prof->loops[0].executionCount, 3u);
+    EXPECT_EQ(prof->loops[0].averageTripCount(), 200u);
+
+    JITProfiler::instance().reset();
+}
+
+TEST(JITProfilerTest, RecordMultipleLoops) {
+    JITProfiler::instance().reset();
+
+    JITProfiler::instance().recordLoopTripCount("multi_loop", 0, 10);
+    JITProfiler::instance().recordLoopTripCount("multi_loop", 1, 50);
+    JITProfiler::instance().recordLoopTripCount("multi_loop", 2, 1000);
+
+    const FunctionProfile* prof = JITProfiler::instance().getProfile("multi_loop");
+    ASSERT_NE(prof, nullptr);
+    ASSERT_EQ(prof->loops.size(), 3u);
+    EXPECT_EQ(prof->loops[0].averageTripCount(), 10u);
+    EXPECT_EQ(prof->loops[1].averageTripCount(), 50u);
+    EXPECT_EQ(prof->loops[2].averageTripCount(), 1000u);
+
+    JITProfiler::instance().reset();
+}
+
+// ===========================================================================
+// Call-site frequency profiling tests
+// ===========================================================================
+
+TEST(JITProfilerTest, RecordCallSite) {
+    JITProfiler::instance().reset();
+
+    JITProfiler::instance().recordCallSite("caller", "callee_a");
+    JITProfiler::instance().recordCallSite("caller", "callee_a");
+    JITProfiler::instance().recordCallSite("caller", "callee_b");
+
+    const FunctionProfile* prof = JITProfiler::instance().getProfile("caller");
+    ASSERT_NE(prof, nullptr);
+    EXPECT_EQ(prof->callSites.size(), 2u);
+    EXPECT_EQ(prof->callSites.at("callee_a"), 2u);
+    EXPECT_EQ(prof->callSites.at("callee_b"), 1u);
+
+    JITProfiler::instance().reset();
+}
+
+TEST(JITProfilerTest, CallSiteIndependentCallers) {
+    JITProfiler::instance().reset();
+
+    JITProfiler::instance().recordCallSite("fn_a", "helper");
+    JITProfiler::instance().recordCallSite("fn_b", "helper");
+
+    const FunctionProfile* profA = JITProfiler::instance().getProfile("fn_a");
+    const FunctionProfile* profB = JITProfiler::instance().getProfile("fn_b");
+    ASSERT_NE(profA, nullptr);
+    ASSERT_NE(profB, nullptr);
+    EXPECT_EQ(profA->callSites.at("helper"), 1u);
+    EXPECT_EQ(profB->callSites.at("helper"), 1u);
+
+    JITProfiler::instance().reset();
+}
+
+// ===========================================================================
+// C-linkage callback tests for new profiling callbacks
+// ===========================================================================
+
+TEST(JITProfilerCallbackTest, ProfileLoopCallback) {
+    JITProfiler::instance().reset();
+
+    __omsc_profile_loop("cb_loop_fn", 0, 42);
+    __omsc_profile_loop("cb_loop_fn", 0, 58);
+
+    const FunctionProfile* prof = JITProfiler::instance().getProfile("cb_loop_fn");
+    ASSERT_NE(prof, nullptr);
+    ASSERT_GE(prof->loops.size(), 1u);
+    EXPECT_EQ(prof->loops[0].totalIterations, 100u);
+    EXPECT_EQ(prof->loops[0].executionCount, 2u);
+
+    JITProfiler::instance().reset();
+}
+
+TEST(JITProfilerCallbackTest, ProfileCallSiteCallback) {
+    JITProfiler::instance().reset();
+
+    __omsc_profile_call_site("cb_caller", "cb_callee");
+    __omsc_profile_call_site("cb_caller", "cb_callee");
+
+    const FunctionProfile* prof = JITProfiler::instance().getProfile("cb_caller");
+    ASSERT_NE(prof, nullptr);
+    EXPECT_EQ(prof->callSites.at("cb_callee"), 2u);
+
+    JITProfiler::instance().reset();
+}

@@ -57,6 +57,29 @@ void JITProfiler::recordArg(const char* funcName, uint32_t argIndex, ArgType typ
     prof.args[argIndex].record(type, value);
 }
 
+void JITProfiler::recordLoopTripCount(const char* funcName, uint32_t loopId, uint64_t tripCount) {
+    std::unique_lock<std::mutex> lk(mtx_, std::try_to_lock);
+    if (__builtin_expect(!lk.owns_lock(), 0))
+        return;
+    auto& prof = profiles_[funcName];
+    if (prof.name.empty())
+        prof.name = funcName;
+    if (loopId >= prof.loops.size())
+        prof.loops.resize(loopId + 1);
+    prof.loops[loopId].totalIterations += tripCount;
+    prof.loops[loopId].executionCount++;
+}
+
+void JITProfiler::recordCallSite(const char* callerName, const char* calleeName) {
+    std::unique_lock<std::mutex> lk(mtx_, std::try_to_lock);
+    if (__builtin_expect(!lk.owns_lock(), 0))
+        return;
+    auto& prof = profiles_[callerName];
+    if (prof.name.empty())
+        prof.name = callerName;
+    prof.callSites[calleeName]++;
+}
+
 const FunctionProfile* JITProfiler::getProfile(const std::string& funcName) const {
     std::lock_guard<std::mutex> lk(mtx_);
     auto it = profiles_.find(funcName);
@@ -91,7 +114,17 @@ void JITProfiler::dump() const {
                       << " total=" << ap.totalCalls;
             if (ap.hasConstantSpecialization())
                 std::cerr << " const_spec=" << ap.observedConstant;
+            if (ap.hasRangeSpecialization())
+                std::cerr << " range=[" << ap.minObserved << "," << ap.maxObserved << "]";
             std::cerr << "\n";
+        }
+        for (size_t i = 0; i < prof.loops.size(); i++) {
+            const auto& lp = prof.loops[i];
+            std::cerr << "    loop[" << i << "]: avg_trip=" << lp.averageTripCount()
+                      << " executions=" << lp.executionCount << " total_iters=" << lp.totalIterations << "\n";
+        }
+        for (const auto& cs : prof.callSites) {
+            std::cerr << "    call_site: " << cs.first << " count=" << cs.second << "\n";
         }
     }
     std::cerr << "=========================\n";
@@ -118,6 +151,14 @@ void __omsc_profile_arg(const char* funcName, uint32_t argIndex, uint8_t type, i
     if (type > static_cast<uint8_t>(omscript::ArgType::None))
         type = static_cast<uint8_t>(omscript::ArgType::Unknown);
     omscript::JITProfiler::instance().recordArg(funcName, argIndex, static_cast<omscript::ArgType>(type), value);
+}
+
+void __omsc_profile_loop(const char* funcName, uint32_t loopId, uint64_t tripCount) {
+    omscript::JITProfiler::instance().recordLoopTripCount(funcName, loopId, tripCount);
+}
+
+void __omsc_profile_call_site(const char* callerName, const char* calleeName) {
+    omscript::JITProfiler::instance().recordCallSite(callerName, calleeName);
 }
 
 } // extern "C"

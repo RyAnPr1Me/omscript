@@ -46,6 +46,9 @@
 //                                     │  - Loop unrolling  │
 //                                     │  - Vectorization   │
 //                                     │  - Type specialize │
+//                                     │  - Range specialize│
+//                                     │  - Loop unroll PGO │
+//                                     │  - Inline hints    │
 //                                     └────────┬───────────┘
 //                                              │
 //                                              ▼
@@ -80,9 +83,15 @@
 //     - Argument types: each parameter's type tag is recorded via
 //       __omsc_profile_arg() — feeds into type specialization.
 //     - Branch probabilities: conditional branch taken/not-taken counts
-//       recorded via __omsc_profile_branch() (reserved for future use).
+//       recorded via __omsc_profile_branch() for branch weight metadata.
 //     - Observed constants: frequently-passed constant values tracked
 //       for constant folding during recompilation.
+//     - Value ranges: min/max observed integer values per parameter,
+//       enabling range-based llvm.assume optimizations.
+//     - Loop trip counts: iteration counts per loop recorded via
+//       __omsc_profile_loop() — feeds into unroll count decisions.
+//     - Call-site frequencies: caller→callee pair counts recorded via
+//       __omsc_profile_call_site() — drives inline hint decisions.
 //     Overhead is minimal: one atomic increment + one callback per arg
 //     per call during the warm-up phase only.
 //
@@ -99,15 +108,24 @@
 //       4. Injects llvm.assume(arg == constant) for parameters where >80%
 //          of calls passed the same integer constant, enabling IPSCCP to
 //          propagate the constant through the function body.
-//       5. Marks non-hot functions with the `cold` attribute to improve
+//       5. Injects llvm.assume(arg >= min && arg <= max) for parameters
+//          where >90% of observed values fall in a tight range (<=1024),
+//          enabling range-check elimination and narrower operations.
+//       6. Applies call-site frequency data: adds `inlinehint` to callees
+//          that account for >20% of calls from the hot function, guiding
+//          the inliner to prioritize them.
+//       7. Marks non-hot functions with the `cold` attribute to improve
 //          inlining decisions and I-cache layout.
-//       6. Attaches loop vectorization metadata (mustprogress,
+//       8. Attaches loop vectorization metadata (mustprogress,
 //          interleave.count=4, vectorize.width=4) to loop back-edges.
-//       7. Re-runs the full LLVM O3 pipeline with those annotations:
+//       9. Attaches profile-guided loop unroll count metadata based on
+//          observed average trip counts (full unroll for small loops,
+//          unroll-by-4/8 for medium/large loops).
+//       10. Re-runs the full LLVM O3 pipeline with those annotations:
 //          the inliner, branch-layout pass, loop vectorizer, and unroller
 //          all see the function as hot and optimize accordingly.
-//       8. JIT-compiles the result via MCJIT.
-//       9. Writes the new native function pointer into the function's
+//       11. JIT-compiles the result via MCJIT.
+//       12. Writes the new native function pointer into the function's
 //          @__omsc_fn_<name> slot.
 //
 //   Deoptimization:

@@ -100,6 +100,12 @@ struct ArgProfile {
     uint64_t constantCount = 0;
     uint64_t totalCalls = 0;
 
+    /// Observed value range (min/max) for integer arguments.
+    /// Valid when rangeCount > 0.
+    int64_t minObserved = INT64_MAX;
+    int64_t maxObserved = INT64_MIN;
+    uint64_t rangeCount = 0;
+
     /// Record an observed argument value.
     void record(ArgType type, int64_t value) {
         auto idx = static_cast<uint8_t>(type);
@@ -111,6 +117,12 @@ struct ArgProfile {
                 observedConstant = value;
                 constantCount++;
             }
+            // Track value range for range-based optimizations.
+            if (value < minObserved)
+                minObserved = value;
+            if (value > maxObserved)
+                maxObserved = value;
+            rangeCount++;
         }
     }
 
@@ -132,6 +144,42 @@ struct ArgProfile {
         return totalCalls > 0 && constantCount > 0 &&
                (static_cast<double>(constantCount) / static_cast<double>(totalCalls)) > 0.8;
     }
+
+    /// Return true if observed integer values fall within a tight range.
+    /// A "tight" range is when all observed values fit within [min, max] where
+    /// max - min <= 1024.  This enables range-based llvm.assume optimizations
+    /// that help LLVM eliminate bounds checks and narrow integer widths.
+    bool hasRangeSpecialization() const {
+        if (rangeCount == 0 || rangeCount < totalCalls * 0.9)
+            return false;
+        // Avoid overflow: if minObserved > maxObserved (shouldn't happen), bail.
+        if (minObserved > maxObserved)
+            return false;
+        // Use unsigned subtraction to safely check range width.
+        auto range = static_cast<uint64_t>(maxObserved) - static_cast<uint64_t>(minObserved);
+        return range <= 1024;
+    }
+};
+
+// ---------------------------------------------------------------------------
+// LoopProfile — per-loop trip count statistics
+// ---------------------------------------------------------------------------
+struct LoopProfile {
+    uint64_t totalIterations = 0; ///< Sum of all observed trip counts.
+    uint64_t executionCount = 0;  ///< Number of times the loop was entered.
+
+    /// Return the average trip count (0 if never executed).
+    uint64_t averageTripCount() const {
+        return executionCount > 0 ? totalIterations / executionCount : 0;
+    }
+};
+
+// ---------------------------------------------------------------------------
+// CallSiteProfile — per-callee call frequency from a specific caller
+// ---------------------------------------------------------------------------
+struct CallSiteProfile {
+    std::string calleeName;
+    uint64_t count = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -148,6 +196,12 @@ struct FunctionProfile {
 
     /// Argument profiles indexed by parameter position.
     std::vector<ArgProfile> args;
+
+    /// Loop profiles indexed by loop-site ID (sequential per function).
+    std::vector<LoopProfile> loops;
+
+    /// Call-site profiles: callee frequency from this function.
+    std::unordered_map<std::string, uint64_t> callSites;
 
     /// Whether this function has been promoted to Tier-2.
     bool promoted = false;
@@ -173,6 +227,12 @@ class JITProfiler {
     /// Record an argument observation for parameter @p argIndex
     /// of function @p funcName.
     void recordArg(const char* funcName, uint32_t argIndex, ArgType type, int64_t value);
+
+    /// Record a loop trip count for loop @p loopId of function @p funcName.
+    void recordLoopTripCount(const char* funcName, uint32_t loopId, uint64_t tripCount);
+
+    /// Record a call-site observation: @p callerName called @p calleeName.
+    void recordCallSite(const char* callerName, const char* calleeName);
 
     /// Retrieve the profile for a function.  Returns nullptr if no data.
     const FunctionProfile* getProfile(const std::string& funcName) const;
@@ -204,6 +264,12 @@ void __omsc_profile_branch(const char* funcName, uint32_t branchId, int64_t take
 
 /// Record an argument type/value observation.
 void __omsc_profile_arg(const char* funcName, uint32_t argIndex, uint8_t type, int64_t value);
+
+/// Record a loop trip count observation.
+void __omsc_profile_loop(const char* funcName, uint32_t loopId, uint64_t tripCount);
+
+/// Record a call-site observation (caller → callee).
+void __omsc_profile_call_site(const char* callerName, const char* calleeName);
 
 } // extern "C"
 
