@@ -144,7 +144,7 @@ void AdaptiveJITRunner::injectCounters(llvm::Module& mod) {
         // count profiling, or call-site profiling into the function body.
         // These callbacks added measurable overhead on every branch, loop
         // iteration, and call site during Tier-1 execution.  Since Tier-1
-        // only runs for 10 calls (kTier2Threshold), the profile data
+        // only runs for a few calls (kTier2Threshold), the profile data
         // collected was minimal anyway.  Instead, the Tier-2 recompile
         // applies conservative PGO heuristics (equal branch weights,
         // aggressive inlining of all callees, default loop unroll factors)
@@ -250,7 +250,7 @@ int AdaptiveJITRunner::run(llvm::Module* baseModule) {
     // Step 4: JIT-compile the instrumented module.
     // Use None (O0) backend optimization for Tier-1 so the initial native
     // code compiles as fast as possible.  Tier-1 code is replaced by the
-    // Tier-2 PGO recompile after just 10 calls, so spending ANY time on
+    // Tier-2 recompile after just a few calls, so spending ANY time on
     // optimization at startup is wasted — the code will be thrown away.
     // O0 gives the fastest possible MCJIT compilation time, minimizing
     // the startup latency that dominates short-running programs.
