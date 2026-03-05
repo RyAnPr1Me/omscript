@@ -402,6 +402,20 @@ The Tier-2 recompilation pipeline also includes:
   function entry.  LLVM's IPSCCP and instcombine propagate the assumed constant through the
   function body, enabling dead-branch elimination, constant folding, and loop trip-count
   computation without creating a separate specialized clone
+- **Value range specialization via `llvm.assume`**: when profiling shows that >90% of an
+  argument's observed values fall within a tight integer range (width ≤ 1024),
+  `llvm.assume(arg >= min)` and `llvm.assume(arg <= max)` are injected at function entry.
+  This enables LLVM to eliminate bounds/range checks, use narrower integer operations, simplify
+  comparisons, and improve loop trip-count estimation — all without creating specialized clones
+- **Profile-guided loop unroll hints**: loop trip counts are profiled during Tier-1 execution.
+  During Tier-2 recompilation, `llvm.loop.unroll.count` metadata is attached to loop back-edges
+  based on the average observed trip count: small loops (≤16 iterations) get full unrolling,
+  medium loops (≤64) get unroll-by-4, and large loops get unroll-by-8 for instruction-level
+  parallelism
+- **Call-site-frequency-driven inline hints**: caller→callee pair frequencies are profiled
+  during Tier-1 execution.  During Tier-2 recompilation, callees that account for >20% of all
+  calls from the hot function receive the `inlinehint` attribute (and have `cold` removed),
+  guiding LLVM's inliner to prioritize inlining the most impactful callees
 - **Cold function attributes**: non-hot functions in the module receive the `cold` attribute
   during Tier-2 recompilation, telling LLVM's inliner to avoid inlining cold callees into
   the hot function (saving I-cache space) and guiding the code layout pass to place cold code
@@ -469,7 +483,9 @@ When running interactively with `omsc run`, a two-tier adaptive JIT is used:
 2. **Tier 2 — Hot Recompile**: Functions that exceed a call-count threshold are recompiled
    at O3 with profile-guided optimization hints including branch weights, entry counts,
    argument-type annotations, the `hot` function attribute, loop distribution, constant
-   specialization via `llvm.assume`, cold function marking, and loop vectorization metadata.
+   specialization via `llvm.assume`, value-range specialization via `llvm.assume`,
+   profile-guided loop unroll counts, call-site-frequency-driven inline hints, cold function
+   marking, and loop vectorization metadata.
    The `hot` attribute tells LLVM to use maximum optimization effort: hot/cold splitting
    (moving error paths out of the fast region), more aggressive inlining (threshold 600
    vs 400 for AOT), and better I-cache layout. The LLVM inliner, branch layout, loop
@@ -569,6 +585,11 @@ OmScript's optimization infrastructure provides:
 - ✅ JIT Tier-2 inliner threshold 600 (vs 400 AOT) for aggressive callee inlining
 - ✅ JIT Tier-2 LoopDistribute pass for cache-friendly loop splitting
 - ✅ JIT Tier-2 argument-type annotations (noundef, signext) from runtime profiling
+- ✅ JIT Tier-2 value-range specialization via `llvm.assume(arg >= min && arg <= max)`
+- ✅ JIT Tier-2 profile-guided loop unroll counts from observed trip count averages
+- ✅ JIT Tier-2 call-site-frequency-driven inline hints for hot callees
+- ✅ JIT Tier-1 loop trip count profiling instrumentation
+- ✅ JIT Tier-1 call-site frequency profiling instrumentation
 - ✅ MergedLoadStoreMotion at O2+ for eliminating redundant memory traffic across branches
 - ✅ SpeculativeExecution at O3 for hiding branch latency on wide-issue CPUs
 - ✅ SeparateConstOffsetFromGEP at O3 for better addressing mode selection in array loops
