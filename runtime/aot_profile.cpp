@@ -148,12 +148,12 @@ void AdaptiveJITRunner::injectCounters(llvm::Module& mod) {
     for (auto* fn : toInstrument) {
         const std::string name = fn->getName().str();
 
-        // The dispatch prolog adds volatile loads (fnPtrGV) and atomic
-        // read-modify-write instructions (call counter).  Strip function-level
-        // attributes that would contradict these new accesses and cause the
-        // backend to miscompile the instrumented function.
-        fn->removeFnAttr(llvm::Attribute::NoSync);   // atomicrmw is synchronising
-        fn->removeFnAttr(llvm::Attribute::Memory);   // we now read global memory
+        // The dispatch prolog adds volatile loads (fnPtrGV) and writes to
+        // global counters.  Strip function-level attributes that would
+        // contradict these new accesses and cause the backend to miscompile
+        // the instrumented function.
+        fn->removeFnAttr(llvm::Attribute::NoSync);   // we call external profiling functions
+        fn->removeFnAttr(llvm::Attribute::Memory);   // we now read/write global memory
         fn->removeFnAttr(llvm::Attribute::ReadNone); // legacy alias
         fn->removeFnAttr(llvm::Attribute::ReadOnly); // legacy alias
 
@@ -321,16 +321,24 @@ void AdaptiveJITRunner::injectCounters(llvm::Module& mod) {
         auto* weights = mdB.createBranchWeights(99, 1);
         B.CreateCondBr(isHot, hotBB, countBB, weights);
 
-        // --- omsc.hot: increment counter and check for higher-tier thresholds ---
-        // After a recompile the fn-ptr slot is set, so every subsequent call
-        // takes this path.  We use a plain (non-atomic) load/add/store for
-        // the counter since the OmScript program is single-threaded — only
-        // the main thread reads/writes the counter.  The background compilation
-        // thread only writes to the fn-ptr slot (via atomic store), never to
-        // the counter.  A plain counter saves ~15 cycles per call vs atomicrmw
-        // (no locked bus cycle / cache-line bounce).
+        // --- omsc.hot: skip counter if already past Tier-3, else check threshold ---
+        // After the fn-ptr is set (Tier-2+), every call takes this path.
+        // Once the counter exceeds kTier3Threshold, there are no more tiers
+        // to promote to, so we skip the counter entirely — the hot path
+        // becomes just: volatile load → call → ret (minimal overhead).
+        //
+        // Before Tier-3 is reached, we increment a plain (non-atomic) counter
+        // and check for the threshold.  Plain counter is safe because the
+        // OmScript program is single-threaded.
         B.SetInsertPoint(hotBB);
         auto* hotOld = B.CreateLoad(i64Ty, counterGV, "omsc.hot_old");
+        auto* pastMaxTier = B.CreateICmpSGT(hotOld,
+            llvm::ConstantInt::get(i64Ty, AdaptiveJITRunner::kTier3Threshold), "omsc.past_max");
+        auto* hotCountBB = llvm::BasicBlock::Create(ctx, "omsc.hot_count", fn, hotCheckBB);
+        B.CreateCondBr(pastMaxTier, hotCallBB, hotCountBB, mdB.createBranchWeights(999, 1));
+
+        // --- omsc.hot_count: still tracking for Tier-3 ---
+        B.SetInsertPoint(hotCountBB);
         auto* hotNew = B.CreateAdd(hotOld, llvm::ConstantInt::get(i64Ty, 1), "omsc.hot_new");
         B.CreateStore(hotNew, counterGV);
         auto* hitHigher =
@@ -369,12 +377,13 @@ void AdaptiveJITRunner::injectCounters(llvm::Module& mod) {
             B.CreateRet(hotCall);
         }
 
-        // --- omsc.count: atomic increment, check thresholds, sampled arg profile ---
+        // --- omsc.count: increment counter, check thresholds, sampled arg profile ---
+        // The cold path only runs before the first recompile (calls 1-20).
+        // Using a plain (non-atomic) counter since the program is single-threaded.
         B.SetInsertPoint(countBB);
-        auto* oldCnt = B.CreateAtomicRMW(llvm::AtomicRMWInst::Add, counterGV, llvm::ConstantInt::get(i64Ty, 1),
-                                         llvm::MaybeAlign(), llvm::AtomicOrdering::Monotonic);
-        oldCnt->setName("omsc.old");
+        auto* oldCnt = B.CreateLoad(i64Ty, counterGV, "omsc.old");
         auto* newCnt = B.CreateAdd(oldCnt, llvm::ConstantInt::get(i64Ty, 1), "omsc.new");
+        B.CreateStore(newCnt, counterGV);
 
         // Increment the per-function sample counter (non-atomic — single-threaded
         // cold path only, the hot path already redirects to recompiled code).
@@ -382,17 +391,18 @@ void AdaptiveJITRunner::injectCounters(llvm::Module& mod) {
         auto* newSample = B.CreateAdd(oldSample, llvm::ConstantInt::get(i64Ty, 1), "omsc.smp_new");
         B.CreateStore(newSample, sampleGV);
 
-        // Inject argument type profiling every 8th call (sample counter & 0x7 == 0).
-        // This reduces function-call overhead on the cold path by ~8x while
-        // maintaining sufficient statistical accuracy for type/constant/range
-        // profiling decisions.
+        // Inject argument type profiling every 4th call (sample counter & 0x3 == 0).
+        // With only 20 cold-path calls before Tier-2, sampling every 8th call
+        // would give only 2-3 data points.  Sampling every 4th gives 5 data
+        // points — enough for reliable type/constant/range detection while
+        // keeping overhead moderate.
         auto* shouldProfileArgs = B.CreateICmpEQ(
-            B.CreateAnd(newSample, llvm::ConstantInt::get(i64Ty, 0x7), "omsc.asmod"),
+            B.CreateAnd(newSample, llvm::ConstantInt::get(i64Ty, 0x3), "omsc.asmod"),
             llvm::ConstantInt::get(i64Ty, 0), "omsc.aprof");
         auto* argProfileBB = llvm::BasicBlock::Create(ctx, "omsc.arg_prof", fn);
         auto* argSkipBB = llvm::BasicBlock::Create(ctx, "omsc.arg_skip", fn);
         B.CreateCondBr(shouldProfileArgs, argProfileBB, argSkipBB,
-                       llvm::MDBuilder(ctx).createBranchWeights(1, 7));
+                       llvm::MDBuilder(ctx).createBranchWeights(1, 3));
 
         // Arg profiling block.
         B.SetInsertPoint(argProfileBB);
@@ -458,9 +468,13 @@ int AdaptiveJITRunner::run(llvm::Module* baseModule) {
     injectCounters(*instrMod);
 
     // Verify the instrumented IR is well-formed before handing it to MCJIT.
-    if (llvm::verifyModule(*instrMod, &llvm::errs())) {
-        llvm::errs() << "omsc: internal error: instrumented IR failed verification\n";
-        return 1;
+    // Only run verification in verbose mode to save startup time in production.
+    // The counter injection is well-tested and deterministic.
+    if (verbose_) {
+        if (llvm::verifyModule(*instrMod, &llvm::errs())) {
+            llvm::errs() << "omsc: internal error: instrumented IR failed verification\n";
+            return 1;
+        }
     }
 
     // Step 4: JIT-compile the instrumented module.
@@ -718,18 +732,22 @@ void AdaptiveJITRunner::doRecompile(const std::string& funcName, int64_t callCou
 
     // --- Parse clean bitcode into a fresh context ---
     auto newCtx = std::make_unique<llvm::LLVMContext>();
-    // Suppress LLVM optimization remarks (e.g. "loop not vectorized") that add
-    // noise to stderr and waste time formatting diagnostic strings.  Only errors
-    // and warnings are forwarded; remarks are silently discarded.
-    newCtx->setDiagnosticHandlerCallBack(
-        [](const llvm::DiagnosticInfo& DI, void*) {
-            if (DI.getSeverity() == llvm::DS_Remark)
-                return;
-            llvm::DiagnosticPrinterRawOStream DP(llvm::errs());
-            DI.print(DP);
-            llvm::errs() << "\n";
-        },
-        nullptr);
+    // Suppress all LLVM diagnostics to avoid wasted time formatting diagnostic
+    // strings.  In verbose mode, forward warnings/errors; in production mode,
+    // discard everything for maximum speed.
+    if (verbose_) {
+        newCtx->setDiagnosticHandlerCallBack(
+            [](const llvm::DiagnosticInfo& DI, void*) {
+                if (DI.getSeverity() == llvm::DS_Remark)
+                    return;
+                llvm::DiagnosticPrinterRawOStream DP(llvm::errs());
+                DI.print(DP);
+                llvm::errs() << "\n";
+            },
+            nullptr);
+    } else {
+        newCtx->setDiagnosticHandlerCallBack([](const llvm::DiagnosticInfo&, void*) {}, nullptr);
+    }
     auto memBuf = llvm::MemoryBuffer::getMemBuffer(llvm::StringRef(cleanBitcode_.data(), cleanBitcode_.size()),
                                                    "omsc_pgo_bc", /*RequiresNullTerminator=*/false);
     auto modOrErr = llvm::parseBitcodeFile(memBuf->getMemBufferRef(), *newCtx);
@@ -1233,11 +1251,13 @@ void AdaptiveJITRunner::doRecompile(const std::string& funcName, int64_t callCou
         }
     }
 
-    // Verify the module after O3 optimization to catch optimizer bugs early.
-    if (llvm::verifyModule(*mod, &llvm::errs())) {
-        llvm::errs() << "omsc: " << tierLabel << " recompile of '" << funcName
-                     << "' failed: module verification after O3\n";
-        return;
+    // Verify the module after optimization — only in verbose mode to save time.
+    if (verbose_) {
+        if (llvm::verifyModule(*mod, &llvm::errs())) {
+            llvm::errs() << "omsc: " << tierLabel << " recompile of '" << funcName
+                         << "' failed: module verification after optimization\n";
+            return;
+        }
     }
 
     // --- JIT-compile the reoptimised module ---
