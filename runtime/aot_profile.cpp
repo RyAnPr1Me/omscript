@@ -234,7 +234,7 @@ void AdaptiveJITRunner::injectCounters(llvm::Module& mod) {
                     continue; // infinite loop with no exit — skip
                 }
                 // Create a trip-count alloca in the entry block.
-                llvm::IRBuilder<> entryB(&fn->getEntryBlock().front());
+                llvm::IRBuilder<> entryB(fn->getEntryBlock().getFirstNonPHI());
                 auto* tripCountAlloca = entryB.CreateAlloca(i64Ty, nullptr, "omsc.trip_cnt_" + std::to_string(loopIdx));
                 entryB.CreateStore(llvm::ConstantInt::get(i64Ty, 0), tripCountAlloca);
 
@@ -245,7 +245,7 @@ void AdaptiveJITRunner::injectCounters(llvm::Module& mod) {
                 beB.CreateStore(newTrip, tripCountAlloca);
 
                 // Report trip count at loop exit.
-                llvm::IRBuilder<> exitB(&exitBB->front());
+                llvm::IRBuilder<> exitB(exitBB->getFirstNonPHI());
                 auto* finalTrip = exitB.CreateLoad(i64Ty, tripCountAlloca, "omsc.trip_final");
                 exitB.CreateCall(loopProfileTy, loopProfileFn,
                                  {nameGV, llvm::ConstantInt::get(i32Ty, loopIdx), finalTrip});
@@ -620,7 +620,7 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
 #else
             llvm::Function* assumeFn = llvm::Intrinsic::getDeclaration(mod.get(), llvm::Intrinsic::assume);
 #endif
-            llvm::IRBuilder<> asB(&fn->getEntryBlock().front());
+            llvm::IRBuilder<> asB(fn->getEntryBlock().getFirstNonPHI());
             for (size_t i = 0; i < prof->args.size() && i < fn->arg_size(); i++) {
                 const auto& ap = prof->args[i];
                 // hasConstantSpecialization() checks profile data (>80% same
@@ -655,7 +655,7 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
 #else
             llvm::Function* assumeFn = llvm::Intrinsic::getDeclaration(mod.get(), llvm::Intrinsic::assume);
 #endif
-            llvm::IRBuilder<> rgB(&fn->getEntryBlock().front());
+            llvm::IRBuilder<> rgB(fn->getEntryBlock().getFirstNonPHI());
             for (size_t i = 0; i < prof->args.size() && i < fn->arg_size(); i++) {
                 const auto& ap = prof->args[i];
                 // Only apply range assumptions when:
