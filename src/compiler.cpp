@@ -118,6 +118,7 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
     codegen.setVectorize(vectorize_);
     codegen.setUnrollLoops(unrollLoops_);
     codegen.setLoopOptimize(loopOptimize_);
+    codegen.setLTO(lto_);
     if (!pgoGenPath_.empty()) {
         codegen.setPGOGen(pgoGenPath_);
     }

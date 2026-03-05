@@ -152,6 +152,14 @@ class CodeGenerator {
         dynamicCompilation_ = enable;
     }
 
+    /// Enable LTO pre-link optimization pipeline.
+    /// When true, runOptimizationPasses() uses buildLTOPreLinkDefaultPipeline()
+    /// instead of buildPerModuleDefaultPipeline(), deferring heavy IPO to the
+    /// linker so that the bitcode is not double-optimized.
+    void setLTO(bool enable) {
+        lto_ = enable;
+    }
+
   private:
     std::unique_ptr<llvm::LLVMContext> context;
     std::unique_ptr<llvm::IRBuilder<>> builder;
@@ -304,6 +312,7 @@ class CodeGenerator {
     std::string pgoGenPath_;          // --pgo-gen=<path>: emit raw profile to this file
     std::string pgoUsePath_;          // --pgo-use=<path>: read profile data from this file
     bool dynamicCompilation_ = false; // Dynamic (JIT) compilation mode
+    bool lto_ = false;                // LTO mode: use pre-link pipeline
 
     /// Compile-time resource budget — limits to prevent DoS via oversized inputs.
     /// Checked during code generation to abort compilation if the program
