@@ -309,9 +309,9 @@ int AdaptiveJITRunner::run(llvm::Module* baseModule) {
     // recompilation.  This starts compiling optimised versions before
     // main() even begins executing, so by the time hot functions are
     // first called the optimised code is already (or nearly) available.
-    // The dispatch prolog's volatile load will pick up the fn-ptr as soon
-    // as the background thread patches it, with zero contention on the
-    // main execution thread.
+    // The dispatch prolog's atomic monotonic load will pick up the fn-ptr
+    // as soon as the background thread patches it via atomic release store,
+    // with zero contention on the main execution thread.
     //
     // Start the background compilation thread pool FIRST so workers are
     // ready to consume tasks immediately.
