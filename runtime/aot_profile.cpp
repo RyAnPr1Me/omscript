@@ -6,8 +6,11 @@
 #include <llvm/Bitcode/BitcodeReader.h>
 #include <llvm/Bitcode/BitcodeWriter.h>
 #include <llvm/Config/llvm-config.h>
-#include <llvm/ExecutionEngine/ExecutionEngine.h>
-#include <llvm/ExecutionEngine/MCJIT.h>
+#include <llvm/ExecutionEngine/JITSymbol.h>
+#include <llvm/ExecutionEngine/Orc/ExecutionUtils.h>
+#include <llvm/ExecutionEngine/Orc/JITTargetMachineBuilder.h>
+#include <llvm/ExecutionEngine/Orc/LLJIT.h>
+#include <llvm/ExecutionEngine/Orc/ThreadSafeModule.h>
 #include <llvm/IR/DiagnosticInfo.h>
 #include <llvm/IR/DiagnosticPrinter.h>
 #include <llvm/IR/IRBuilder.h>
@@ -57,6 +60,23 @@ void AdaptiveJITRunner::ensureInitialized() {
         llvm::InitializeNativeTargetAsmPrinter();
         llvm::InitializeNativeTargetAsmParser();
     });
+}
+
+// ---------------------------------------------------------------------------
+// setJTMBOptLevel() — version-portable codegen optimization level setter
+// ---------------------------------------------------------------------------
+// LLVM 18 renamed CodeGenOpt::Level to CodeGenOptLevel, so every call site
+// that sets the opt level needs a compile-time conditional.  This helper
+// centralises the conditional so it appears exactly once.
+static void setJTMBOptLevel(llvm::orc::JITTargetMachineBuilder& JTMB,
+                             bool aggressive) {
+#if LLVM_VERSION_MAJOR >= 18
+    JTMB.setCodeGenOptLevel(aggressive ? llvm::CodeGenOptLevel::Aggressive
+                                       : llvm::CodeGenOptLevel::None);
+#else
+    JTMB.setCodeGenOptLevel(aggressive ? llvm::CodeGenOpt::Aggressive
+                                       : llvm::CodeGenOpt::None);
+#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -126,11 +146,18 @@ void AdaptiveJITRunner::injectCounters(llvm::Module& mod) {
         fn->removeFnAttr(llvm::Attribute::ReadNone); // legacy alias
         fn->removeFnAttr(llvm::Attribute::ReadOnly); // legacy alias
 
+        // __omsc_calls_<name>: call counter, accessed only within the JIT'd code.
+        // InternalLinkage keeps it private to the Tier-1 module — no lookup needed.
         auto* counterGV = new llvm::GlobalVariable(mod, i64Ty, /*isConst=*/false, llvm::GlobalValue::InternalLinkage,
                                                    llvm::ConstantInt::get(i64Ty, 0), "__omsc_calls_" + name);
         counterGV->setAlignment(llvm::Align(8));
 
-        auto* fnPtrGV = new llvm::GlobalVariable(mod, ptrTy, /*isConst=*/false, llvm::GlobalValue::InternalLinkage,
+        // __omsc_fn_<name>: the hot-path function-pointer slot.  ExternalLinkage
+        // is required so ORC LLJIT's lookup() can resolve this global by name
+        // after compilation (to pass the slot address to the eager-compilation
+        // enqueue).  Names are unique (prefixed with the function name, itself
+        // unique within the module) so there is no risk of cross-module collision.
+        auto* fnPtrGV = new llvm::GlobalVariable(mod, ptrTy, /*isConst=*/false, llvm::GlobalValue::ExternalLinkage,
                                                  llvm::Constant::getNullValue(ptrTy), "__omsc_fn_" + name);
         fnPtrGV->setAlignment(llvm::Align(8));
 
@@ -254,60 +281,91 @@ int AdaptiveJITRunner::run(llvm::Module* baseModule) {
         }
     }
 
-    // Step 4: JIT-compile the instrumented module.
-    // Use None (O0) backend optimization for Tier-1 so the initial native
-    // code compiles as fast as possible.  Tier-1 code is replaced by the
-    // Tier-2 recompile after just a few calls, so spending ANY time on
-    // optimization at startup is wasted — the code will be thrown away.
-    // O0 gives the fastest possible MCJIT compilation time, minimizing
-    // the startup latency that dominates short-running programs.
+    // Step 4: JIT-compile the instrumented module using ORC LLJIT.
+    // Use O0 codegen for Tier-1 so the initial native code compiles as fast
+    // as possible.  Tier-1 code is replaced by the Tier-2 recompile after
+    // just a few calls, so spending any time on optimization at startup is
+    // wasted — the code will be thrown away.  O0 gives the fastest possible
+    // ORC LLJIT compilation time, minimizing startup latency.
     if (verbose_)
         std::cout << "JIT: compiling instrumented module (Tier-1, O0)..." << std::endl;
-    JitModule jm;
-    jm.ctx = std::move(instrCtx); // keep context alive with the engine
 
-    std::string engineErr;
-    llvm::EngineBuilder builder(std::move(instrMod));
-    builder.setErrorStr(&engineErr);
-    builder.setEngineKind(llvm::EngineKind::JIT);
-#if LLVM_VERSION_MAJOR >= 18
-    builder.setOptLevel(llvm::CodeGenOptLevel::None);
-#else
-    builder.setOptLevel(llvm::CodeGenOpt::None);
-#endif
-
-    llvm::ExecutionEngine* rawEngine = builder.create();
-    if (!rawEngine) {
-        llvm::errs() << "omsc: JIT engine creation failed: " << engineErr << "\n";
+    // Create an ORC LLJIT instance with O0 backend codegen.
+    auto JTMB1 = llvm::orc::JITTargetMachineBuilder::detectHost();
+    if (!JTMB1) {
+        llvm::errs() << "omsc: JIT engine creation failed: " << llvm::toString(JTMB1.takeError()) << "\n";
         return 1;
     }
-    jm.engine.reset(rawEngine);
+    setJTMBOptLevel(*JTMB1, /*aggressive=*/false);
 
-    // Register the C-linkage recompile callback so MCJIT can resolve it
-    // without needing -rdynamic.  The symbol is in the executable but not
-    // in the dynamic symbol table unless the binary is built with -rdynamic,
-    // so we map it explicitly.
-    rawEngine->addGlobalMapping("__omsc_adaptive_recompile", reinterpret_cast<uint64_t>(&__omsc_adaptive_recompile));
-
-    // Register the deoptimization callback so JIT-compiled code can resolve it.
-    // Profiling callbacks are no longer injected into Tier-1 code.
-    rawEngine->addGlobalMapping("__omsc_deopt_guard_fail", reinterpret_cast<uint64_t>(&__omsc_deopt_guard_fail));
-
-    rawEngine->finalizeObject();
-
-    uint64_t mainAddr = rawEngine->getFunctionAddress("main");
-    if (!mainAddr)
+    auto jitOrErr = llvm::orc::LLJITBuilder()
+                        .setJITTargetMachineBuilder(std::move(*JTMB1))
+                        .create();
+    if (!jitOrErr) {
+        llvm::errs() << "omsc: JIT engine creation failed: " << llvm::toString(jitOrErr.takeError()) << "\n";
         return 1;
+    }
+    JitModule jm;
+    jm.lljit = std::move(*jitOrErr);
+    auto* rawLLJIT = jm.lljit.get();
+
+    // Register C-linkage callbacks as absolute symbols so JIT'd code can
+    // resolve them without -rdynamic.  They live in this process but are
+    // not exported in the dynamic symbol table of a non-rdynamic binary.
+    {
+        auto& ES  = rawLLJIT->getExecutionSession();
+        auto& mainJD = rawLLJIT->getMainJITDylib();
+
+        llvm::orc::SymbolMap syms;
+        syms[ES.intern("__omsc_adaptive_recompile")] = {
+            llvm::orc::ExecutorAddr(reinterpret_cast<uint64_t>(&__omsc_adaptive_recompile)),
+            llvm::JITSymbolFlags(llvm::JITSymbolFlags::Exported | llvm::JITSymbolFlags::Callable)};
+        syms[ES.intern("__omsc_deopt_guard_fail")] = {
+            llvm::orc::ExecutorAddr(reinterpret_cast<uint64_t>(&__omsc_deopt_guard_fail)),
+            llvm::JITSymbolFlags(llvm::JITSymbolFlags::Exported | llvm::JITSymbolFlags::Callable)};
+        if (auto err = mainJD.define(llvm::orc::absoluteSymbols(std::move(syms)))) {
+            llvm::errs() << "omsc: failed to define JIT symbols: " << llvm::toString(std::move(err)) << "\n";
+            return 1;
+        }
+
+        // Add a process-symbol generator so the JIT'd code can resolve libc
+        // functions (printf, malloc, etc.) without needing -rdynamic.
+        auto procGen = llvm::orc::DynamicLibrarySearchGenerator::GetForCurrentProcess(
+            rawLLJIT->getDataLayout().getGlobalPrefix());
+        if (!procGen) {
+            llvm::errs() << "omsc: failed to create process symbol generator: "
+                         << llvm::toString(procGen.takeError()) << "\n";
+            return 1;
+        }
+        mainJD.addGenerator(std::move(*procGen));
+    }
+
+    // Add the instrumented module to ORC. ThreadSafeModule takes ownership
+    // of both the module and its LLVMContext.
+    if (auto err = rawLLJIT->addIRModule(
+            llvm::orc::ThreadSafeModule(std::move(instrMod), std::move(instrCtx)))) {
+        llvm::errs() << "omsc: failed to add IR module to JIT: " << llvm::toString(std::move(err)) << "\n";
+        return 1;
+    }
+
+    // Trigger compilation by looking up main(). ORC materialises the entire
+    // module on the first lookup, so all globals (__omsc_fn_*) are also
+    // available in the symbol table immediately after this call returns.
+    auto mainSymOrErr = rawLLJIT->lookup("main");
+    if (!mainSymOrErr) {
+        llvm::errs() << "omsc: JIT lookup of 'main' failed: " << llvm::toString(mainSymOrErr.takeError()) << "\n";
+        return 1;
+    }
+    uint64_t mainAddr = mainSymOrErr->getValue();
 
     // --- Eager background compilation ---
-    // Resolve every __omsc_fn_<name> slot from the Tier-1 engine and
+    // Resolve every __omsc_fn_<name> slot from the Tier-1 LLJIT and
     // immediately enqueue ALL non-main user functions for background O3
     // recompilation.  This starts compiling optimised versions before
     // main() even begins executing, so by the time hot functions are
     // first called the optimised code is already (or nearly) available.
-    // The dispatch prolog's atomic monotonic load will pick up the fn-ptr
-    // as soon as the background thread patches it via atomic release store,
-    // with zero contention on the main execution thread.
+    // The dispatch prolog's atomic acquire load will pick up the fn-ptr
+    // as soon as the background thread patches it via atomic release store.
     //
     // Start the background compilation thread pool FIRST so workers are
     // ready to consume tasks immediately.
@@ -317,11 +375,10 @@ int AdaptiveJITRunner::run(llvm::Module* baseModule) {
         bgThreads_.emplace_back(&AdaptiveJITRunner::backgroundWorker, this);
 
     {
-        // Walk the Tier-1 module to find every instrumented function and
-        // resolve its fn-ptr slot address from the JIT engine.
-        // We parse the clean bitcode to discover function names (the clean
-        // bitcode has the same functions as the instrumented module, minus
-        // the dispatch prolog globals).
+        // Walk the clean bitcode to discover function names, then resolve
+        // each function's __omsc_fn_* slot address via LLJIT lookup.
+        // (The clean bitcode has the same user functions as the instrumented
+        // module, minus the dispatch prolog globals.)
         auto eagerCtx = std::make_unique<llvm::LLVMContext>();
         auto eagerBuf = llvm::MemoryBuffer::getMemBuffer(
             llvm::StringRef(cleanBitcode_.data(), cleanBitcode_.size()),
@@ -342,16 +399,27 @@ int AdaptiveJITRunner::run(llvm::Module* baseModule) {
                     continue;
                 std::string name = fn.getName().str();
                 std::string slotName = "__omsc_fn_" + name;
-                uint64_t slotAddr = rawEngine->getGlobalValueAddress(slotName);
-                if (!slotAddr)
-                    continue;
-                void** fnPtrSlot = reinterpret_cast<void**>(slotAddr);
 
-                // Tentatively mark this function as being compiled at Tier-2
-                // so the threshold-triggered callback does not duplicate work.
+                // Look up the slot global from the already-compiled Tier-1
+                // module. Because __omsc_fn_* has ExternalLinkage it is
+                // accessible via LLJIT lookup().
+                auto slotOrErr = rawLLJIT->lookup(slotName);
+                if (!slotOrErr) {
+                    llvm::consumeError(slotOrErr.takeError());
+                    continue;
+                }
+                void** fnPtrSlot = reinterpret_cast<void**>(slotOrErr->getValue());
+
+                // Mark as tier-1 (eagerly queued, not yet compiled) instead of
+                // tier-2.  This lets onHotFunction() later re-enqueue the same
+                // function with the ACTUAL call count as the priority key.  Since
+                // the priority queue is a max-heap, a threshold-triggered entry
+                // (callCount >= kTier2Threshold, observed at runtime) naturally
+                // preempts this eager entry (callCount == kTier2Threshold, synthetic),
+                // so hot functions compile before cold ones.
                 {
                     std::lock_guard<std::mutex> lk(recompiledMtx_);
-                    functionTier_[name] = 2;
+                    functionTier_[name] = 1; // "eagerly queued, not yet compiled"
                 }
 
                 // Enqueue eagerly — a background thread will compile it.
@@ -462,18 +530,27 @@ std::unique_ptr<llvm::TargetMachine> AdaptiveJITRunner::createTargetMachine() {
 // ---------------------------------------------------------------------------
 // onHotFunction() — non-blocking recompilation enqueue
 // ---------------------------------------------------------------------------
-// Called from the dispatch prolog when a function's call count hits the
-// tier threshold.  With eager compilation, this should rarely fire (all
-// functions are pre-enqueued at startup).  Uses try_lock to be completely
-// non-blocking — if the lock is contended, we skip the enqueue entirely
-// rather than stalling the main execution thread.  The function will
-// continue running baseline code; the eager compilation will eventually
-// patch the fn-ptr anyway.
+// Called from the dispatch prolog when a function's call count hits the tier
+// threshold.  Enqueues the function into the PRIORITY QUEUE with the actual
+// runtime call count as the priority key so that the background threads always
+// compile the hottest functions first.
+//
+// Two scenarios:
+//   1. Function was NOT eagerly queued (functionTier_ == 0): standard path,
+//      same as before.
+//   2. Function WAS eagerly queued (functionTier_ == 1, "queued but not yet
+//      compiled"): we are now called with the ACTUAL runtime callCount which
+//      is >= kTier2Threshold.  We promote it to tier-2, enqueue a new entry
+//      with the real callCount.  The old eager entry (callCount = kTier2Threshold)
+//      will be found in the priority queue at LOWER priority and will be skipped
+//      by backgroundWorker once it sees the fn-ptr slot already set.
+//
+// Uses try_lock to be completely non-blocking: if either lock is contended,
+// skip the enqueue entirely rather than stalling the main execution thread.
+// The function continues running baseline code.
 void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void** fnPtrSlot) {
     const std::string funcName(name);
 
-    // Determine which tier this call count corresponds to and whether
-    // the function has already been compiled at this tier or higher.
     int targetTier = tierForCallCount(callCount);
     if (targetTier == 0)
         return; // Below all thresholds — nothing to do.
@@ -484,10 +561,14 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
         std::unique_lock<std::mutex> lk(recompiledMtx_, std::try_to_lock);
         if (!lk.owns_lock())
             return; // Lock contended — don't block the main thread.
-        prevTier = functionTier_[funcName]; // 0 if never compiled
-        if (targetTier <= prevTier)
-            return; // Already at this tier or above.
-        // Tentatively promote to prevent duplicate enqueues.
+        prevTier = functionTier_[funcName]; // 0 if never seen, 1 if eagerly queued
+        // Already compiled (tier >= 2): nothing to do.
+        // Tier-1 means "eagerly queued but not yet compiled" — allow promotion
+        // to tier-2 with the real callCount so the hot entry preempts the eager
+        // low-priority entry already in the queue.
+        if (prevTier >= 2)
+            return;
+        // Tentatively promote to prevent duplicate enqueues from concurrent hits.
         functionTier_[funcName] = targetTier;
     }
 
@@ -496,23 +577,28 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
     {
         std::unique_lock<std::mutex> lk(queueMtx_, std::try_to_lock);
         if (!lk.owns_lock()) {
-            // Rollback: the task was never enqueued, so revert the tier
-            // so the next threshold hit can retry.
+            // Rollback: task was never enqueued — revert so next hit can retry.
             std::lock_guard<std::mutex> rlk(recompiledMtx_);
             functionTier_[funcName] = prevTier;
             return;
         }
+        // Push with ACTUAL callCount as priority key: hotter functions sort to
+        // the top of the max-heap and compile before cooler ones.
         taskQueue_.push({funcName, callCount, fnPtrSlot});
     }
     queueCV_.notify_one();
 }
-
 // ---------------------------------------------------------------------------
-// backgroundWorker() — background compilation thread loop
+// backgroundWorker() — priority-ordered background compilation thread loop
 // ---------------------------------------------------------------------------
-// Waits for recompilation tasks on the queue, processes them sequentially.
-// Tasks are processed one at a time to avoid contention on LLVM's
-// thread-unsafe MCJIT infrastructure.
+// Waits for tasks on the priority queue and processes them in hottest-first
+// order (highest callCount = most-called function = compiled first).
+//
+// Duplicate-skip: a function may appear twice in the queue when
+// onHotFunction() adds a high-priority entry for a function that was already
+// eagerly enqueued at low priority.  The eager entry is harmlessly skipped
+// once it reaches the top of the heap and we see the fn-ptr slot is already
+// set by the earlier, higher-priority compilation.
 void AdaptiveJITRunner::backgroundWorker() {
     while (true) {
         RecompileTask task;
@@ -523,9 +609,24 @@ void AdaptiveJITRunner::backgroundWorker() {
             });
             if (taskQueue_.empty() && shutdownRequested_.load(std::memory_order_relaxed))
                 return; // Shutdown requested and no more work.
-            task = std::move(taskQueue_.front());
+            // priority_queue::top() returns const ref; copy before pop.
+            task = taskQueue_.top();
             taskQueue_.pop();
         }
+
+        // Duplicate-skip (first guard — cheap): if the fn-ptr slot is already
+        // non-null, a higher-priority entry already compiled and hot-patched
+        // this function.  Skip before touching LLVM to avoid redundant work.
+        // doRecompile() contains a matching second guard for the rare case
+        // where the slot is patched between this check and compilation start.
+        if (task.fnPtrSlot != nullptr &&
+            __atomic_load_n(task.fnPtrSlot, __ATOMIC_ACQUIRE) != nullptr) {
+            if (verbose_)
+                std::cerr << "JIT: skipping duplicate queue entry for '" << task.funcName
+                          << "' (already compiled by higher-priority entry)\n";
+            continue;
+        }
+
         // Catch any exceptions from LLVM to prevent the background thread
         // from crashing and hanging the main thread at shutdown (join).
         try {
@@ -557,20 +658,41 @@ void AdaptiveJITRunner::drainBackgroundThread() {
 // doRecompile() — multi-tier PGO recompilation (runs on background thread)
 // ---------------------------------------------------------------------------
 // Performs the actual heavy work of recompilation: parsing clean bitcode,
-// applying PGO annotations, running the O2/O3 pipeline, JIT-compiling,
+// applying PGO annotations, running the O3 pipeline, ORC LLJIT compilation,
 // and atomically storing the new function pointer.
+//
+// Priority-queue interaction:
+//   When onHotFunction() adds a high-priority entry for a function that was
+//   already eagerly queued at low priority, both entries eventually reach
+//   doRecompile().  The high-priority one runs first (by design of the max-
+//   heap).  When the low-priority eager entry later fires, the fn-ptr slot
+//   is already non-null (set by the first run), so we return early without
+//   repeating the expensive compilation work.
 void AdaptiveJITRunner::doRecompile(const std::string& funcName, int64_t callCount, void** fnPtrSlot) {
 
     int targetTier = tierForCallCount(callCount);
     if (targetTier == 0)
         return;
 
+    // Duplicate-skip (second guard — safety net): handles the rare window
+    // between backgroundWorker's first guard and the start of compilation
+    // where another thread could have patched the slot.  Acquiring the
+    // pointer here also synchronises with the release store in the hot-patch
+    // so that any memory written by the other compilation is visible.
+    if (fnPtrSlot != nullptr && __atomic_load_n(fnPtrSlot, __ATOMIC_ACQUIRE) != nullptr) {
+        // Ensure tier reflects the completed compilation even if we skip.
+        std::lock_guard<std::mutex> lk(recompiledMtx_);
+        if (functionTier_[funcName] < targetTier)
+            functionTier_[funcName] = targetTier;
+        return;
+    }
+
     const char* tierNames[] = {"", "", "Tier-2 (warm)", "Tier-3 (hot)"};
     const char* tierLabel =
         (targetTier >= 2 && targetTier <= AdaptiveJITRunner::kMaxTier) ? tierNames[targetTier] : "Tier-?";
     if (verbose_) {
-        std::cerr << "JIT: recompiling '" << funcName << "' (calls: " << callCount << ") at " << tierLabel << " O"
-                  << (targetTier >= 3 ? "3" : "2") << "+PGO [background]\n";
+        std::cerr << "JIT: recompiling '" << funcName << "' (calls: " << callCount << ") at " << tierLabel
+                  << " O3+PGO [background]\n";
     }
 
     // RAII scope guard: on early return (failure), revert the tier so that
@@ -1100,35 +1222,80 @@ void AdaptiveJITRunner::doRecompile(const std::string& funcName, int64_t callCou
         }
     }
 
-    // --- JIT-compile the reoptimised module ---
-    std::string engineErr;
-    llvm::EngineBuilder eb(std::move(mod));
-    eb.setErrorStr(&engineErr);
-    eb.setEngineKind(llvm::EngineKind::JIT);
-#if LLVM_VERSION_MAJOR >= 18
-    eb.setOptLevel(llvm::CodeGenOptLevel::Aggressive);
-#else
-    eb.setOptLevel(llvm::CodeGenOpt::Aggressive);
+    // --- JIT-compile the reoptimised module using ORC LLJIT ---
+    // Create a fresh LLJIT instance with Aggressive backend codegen.
+    // Each recompiled module gets its own LLJIT instance so there is no
+    // sharing of mutable state between concurrent background threads.
+    auto JTMB2 = llvm::orc::JITTargetMachineBuilder::detectHost();
+    if (!JTMB2) {
+        llvm::errs() << "omsc: " << tierLabel << " JIT compilation of '" << funcName
+                     << "' failed: " << llvm::toString(JTMB2.takeError()) << "\n";
+        return;
+    }
+    setJTMBOptLevel(*JTMB2, /*aggressive=*/true);
+    // Propagate fast-math options into the backend TargetMachine so that
+    // FMA fusion, reciprocal estimation, and FP-reassociation are enabled
+    // in the native code emitter, matching the IR-level flags set above.
+    if (fastMath_) {
+        auto& opts = JTMB2->getOptions();
+#if LLVM_VERSION_MAJOR < 22
+        opts.UnsafeFPMath = true;
 #endif
-
-    std::unique_ptr<llvm::ExecutionEngine> engine(eb.create());
-    if (!engine) {
-        llvm::errs() << "omsc: " << tierLabel << " JIT compilation of '" << funcName << "' failed: " << engineErr
-                     << "\n";
-        return;
-    }
-    engine->finalizeObject();
-
-    uint64_t addr = engine->getFunctionAddress(funcName);
-    if (!addr) {
-        return;
+        opts.NoInfsFPMath = true;
+        opts.NoNaNsFPMath = true;
+        opts.NoSignedZerosFPMath = true;
     }
 
-    // Store the engine first, then mark successful.  This ensures the module
-    // stays alive even if something goes wrong after the success flag is set.
+    auto jitOrErr2 = llvm::orc::LLJITBuilder()
+                         .setJITTargetMachineBuilder(std::move(*JTMB2))
+                         .create();
+    if (!jitOrErr2) {
+        llvm::errs() << "omsc: " << tierLabel << " JIT compilation of '" << funcName
+                     << "' failed: " << llvm::toString(jitOrErr2.takeError()) << "\n";
+        return;
+    }
+    auto jit = std::move(*jitOrErr2);
+
+    // Add a process-symbol generator so the recompiled code can resolve
+    // any libc / runtime symbols it calls.
+    {
+        auto& mainJD = jit->getMainJITDylib();
+        auto procGen = llvm::orc::DynamicLibrarySearchGenerator::GetForCurrentProcess(
+            jit->getDataLayout().getGlobalPrefix());
+        if (procGen)
+            mainJD.addGenerator(std::move(*procGen));
+        else
+            llvm::consumeError(procGen.takeError());
+    }
+
+    // Add the optimised module. ORC takes ownership of the module and its
+    // context via ThreadSafeModule (context is already owned by newCtx).
+    if (auto err = jit->addIRModule(
+            llvm::orc::ThreadSafeModule(std::move(mod), std::move(newCtx)))) {
+        llvm::errs() << "omsc: " << tierLabel << " JIT compilation of '" << funcName
+                     << "' failed: " << llvm::toString(std::move(err)) << "\n";
+        return;
+    }
+
+    // Trigger compilation and retrieve the function's native address.
+    auto symOrErr = jit->lookup(funcName);
+    if (!symOrErr) {
+        llvm::errs() << "omsc: " << tierLabel << " JIT lookup of '" << funcName
+                     << "' failed: " << llvm::toString(symOrErr.takeError()) << "\n";
+        return;
+    }
+    uint64_t addr = symOrErr->getValue();
+
+    // Keep the LLJIT instance alive — it owns the JIT'd code memory.
+    // Also explicitly update functionTier_ to targetTier here.  This is
+    // needed for eagerly-queued functions (prevTier=1) that were compiled
+    // without going through onHotFunction(): without this, the tier stays at
+    // 1 and onHotFunction() could re-enqueue the function unnecessarily.
     {
         std::lock_guard<std::mutex> lk(recompiledMtx_);
-        modules_.push_back({std::move(newCtx), std::move(engine)});
+        modules_.push_back({std::move(jit)});
+        if (functionTier_[funcName] < targetTier)
+            functionTier_[funcName] = targetTier;
     }
 
     // Mark successful — prevents the RAII scope guard from reverting the tier.
