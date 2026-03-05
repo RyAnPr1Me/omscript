@@ -162,20 +162,16 @@ void AdaptiveJITRunner::injectCounters(llvm::Module& mod) {
         // --- omsc.dispatch: atomic-load fn-ptr, branch on non-null ---
         // This is the entry point for EVERY call.  After the background
         // thread stores an optimized fn-ptr via atomic release, the atomic
-        // acquire load here picks it up.  Using atomic (monotonic) instead
-        // of volatile allows the LLVM backend to:
-        //   - Combine redundant loads when a function is called multiple
-        //     times in a basic block
-        //   - Schedule the load earlier (out-of-order friendly)
-        // On x86/TSO this compiles to a plain MOV — same cost as volatile
-        // but with better optimiser freedom.
+        // acquire load here picks it up.  Acquire pairs with the writer's
+        // release store so the reader is guaranteed to see the fully-
+        // initialized function pointer (not a stale null or partial write)
+        // on ALL architectures, including weakly-ordered ARM and PowerPC.
+        // On x86/TSO this compiles to a plain MOV — acquire is free.
         llvm::IRBuilder<> B(dispatchBB);
         auto* fpLoad = B.CreateAlignedLoad(ptrTy, fnPtrGV, llvm::Align(8), /*isVolatile=*/false, "omsc.fp");
-        // Set atomic ordering to monotonic — sufficient for single-writer
-        // (background thread) / single-reader (main thread) on x86 TSO.
-        // The release store on the writer side + monotonic load here gives
-        // eventual visibility without stalling the pipeline.
-        fpLoad->setOrdering(llvm::AtomicOrdering::Monotonic);
+        // Acquire ordering synchronizes with the writer's release store,
+        // ensuring the fn-ptr is fully visible on all architectures.
+        fpLoad->setOrdering(llvm::AtomicOrdering::Acquire);
         auto* isHot = B.CreateICmpNE(fpLoad, llvm::Constant::getNullValue(ptrTy), "omsc.is_hot");
         llvm::MDBuilder mdB(ctx);
         B.CreateCondBr(isHot, hotCallBB, countBB, mdB.createBranchWeights(99, 1));
@@ -331,7 +327,14 @@ int AdaptiveJITRunner::run(llvm::Module* baseModule) {
             llvm::StringRef(cleanBitcode_.data(), cleanBitcode_.size()),
             "omsc_eager_bc", /*RequiresNullTerminator=*/false);
         auto eagerMod = llvm::parseBitcodeFile(eagerBuf->getMemBufferRef(), *eagerCtx);
-        if (eagerMod) {
+        if (!eagerMod) {
+            // Log warning — eager compilation cannot proceed, but threshold-
+            // triggered recompilation will still work as a fallback.
+            if (verbose_)
+                llvm::errs() << "JIT: warning: could not parse clean bitcode for "
+                                "eager compilation; falling back to threshold-triggered\n";
+            llvm::consumeError(eagerMod.takeError());
+        } else if (eagerMod) {
             for (auto& fn : **eagerMod) {
                 if (fn.isDeclaration() || fn.getName() == "main")
                     continue;
@@ -474,23 +477,31 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
     int targetTier = tierForCallCount(callCount);
     if (targetTier == 0)
         return; // Below all thresholds — nothing to do.
+
+    int prevTier = 0;
     {
         // Non-blocking: if the lock is held by a bg thread, skip entirely.
         std::unique_lock<std::mutex> lk(recompiledMtx_, std::try_to_lock);
         if (!lk.owns_lock())
             return; // Lock contended — don't block the main thread.
-        int currentTier = functionTier_[funcName]; // 0 if never compiled
-        if (targetTier <= currentTier)
+        prevTier = functionTier_[funcName]; // 0 if never compiled
+        if (targetTier <= prevTier)
             return; // Already at this tier or above.
         // Tentatively promote to prevent duplicate enqueues.
         functionTier_[funcName] = targetTier;
     }
 
-    // Non-blocking enqueue: if the queue lock is held, skip.
+    // Non-blocking enqueue: if the queue lock is held, rollback the tier
+    // promotion so the function can be recompiled on a future threshold hit.
     {
         std::unique_lock<std::mutex> lk(queueMtx_, std::try_to_lock);
-        if (!lk.owns_lock())
-            return; // Lock contended — eager compilation handles it.
+        if (!lk.owns_lock()) {
+            // Rollback: the task was never enqueued, so revert the tier
+            // so the next threshold hit can retry.
+            std::lock_guard<std::mutex> rlk(recompiledMtx_);
+            functionTier_[funcName] = prevTier;
+            return;
+        }
         taskQueue_.push({funcName, callCount, fnPtrSlot});
     }
     queueCV_.notify_one();
@@ -1124,8 +1135,8 @@ void AdaptiveJITRunner::doRecompile(const std::string& funcName, int64_t callCou
     succeeded = true;
 
     // Hot-patch: use an atomic store with release ordering so the dispatch
-    // prolog's volatile load sees the new pointer on the very next function
-    // call.  We use __atomic_store_n (GCC/Clang built-in) instead of
+    // prolog's atomic acquire load sees the new pointer on the very next
+    // function call.  We use __atomic_store_n (GCC/Clang built-in) instead of
     // reinterpret_cast<std::atomic<void*>*> to avoid strict-aliasing UB.
     // On x86 this compiles to a simple MOV (TSO provides release semantics
     // for free); on ARM/POWER it emits the appropriate release fence.
