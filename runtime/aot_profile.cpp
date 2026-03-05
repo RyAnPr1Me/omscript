@@ -245,7 +245,11 @@ void AdaptiveJITRunner::injectCounters(llvm::Module& mod) {
                 beB.CreateStore(newTrip, tripCountAlloca);
 
                 // Report trip count at loop exit.
-                llvm::IRBuilder<> exitB(&exitBB->front());
+                // Use getFirstNonPHI() to insert after any PHI nodes at the
+                // top of the exit block (e.g. LCSSA PHIs from loop-closed SSA).
+                // Inserting before PHIs would violate the LLVM invariant that
+                // PHI nodes must be grouped at the top of a basic block.
+                llvm::IRBuilder<> exitB(exitBB->getFirstNonPHI());
                 auto* finalTrip = exitB.CreateLoad(i64Ty, tripCountAlloca, "omsc.trip_final");
                 exitB.CreateCall(loopProfileTy, loopProfileFn,
                                  {nameGV, llvm::ConstantInt::get(i32Ty, loopIdx), finalTrip});
