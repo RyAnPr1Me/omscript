@@ -291,9 +291,9 @@ class AdaptiveJITRunner {
     std::atomic<bool> shutdownRequested_{false}; ///< Signals the workers to exit.
 
     /// Number of background compilation threads.
-    /// Using 3 threads to maximise background CPU utilisation during
-    /// eager compilation, leaving 1 core for the main execution thread.
-    static constexpr int kNumBgThreads = 3;
+    /// Using 4 threads to maximise background CPU utilisation during
+    /// eager compilation — one thread per available core on typical CI.
+    static constexpr int kNumBgThreads = 4;
 
     /// Background worker loop: waits for tasks, executes them sequentially.
     void backgroundWorker();

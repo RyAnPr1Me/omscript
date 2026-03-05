@@ -894,10 +894,10 @@ void AdaptiveJITRunner::doRecompile(const std::string& funcName, int64_t callCou
             llvm::MDNode* mustProgress = llvm::MDNode::get(ctx, {llvm::MDString::get(ctx, "llvm.loop.mustprogress")});
             llvm::MDNode* interleave = llvm::MDNode::get(
                 ctx, {llvm::MDString::get(ctx, "llvm.loop.interleave.count"),
-                      llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), 4))});
+                      llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), 8))});
             llvm::MDNode* vecWidth = llvm::MDNode::get(
                 ctx, {llvm::MDString::get(ctx, "llvm.loop.vectorize.width"),
-                      llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), 4))});
+                      llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), 8))});
             llvm::SmallVector<llvm::Metadata*, 6> loopMDs;
             loopMDs.push_back(nullptr); // self-reference placeholder
             loopMDs.push_back(mustProgress);
@@ -935,11 +935,13 @@ void AdaptiveJITRunner::doRecompile(const std::string& funcName, int64_t callCou
                     unrollCount = static_cast<uint32_t>(avgTrip);
                     fullUnroll = true;
                 } else if (avgTrip > 16 && avgTrip <= 64) {
-                    // Medium trip count: unroll by 4.
-                    unrollCount = 4;
-                } else if (avgTrip > 64) {
-                    // Large trip count: unroll by 8 for ILP.
+                    // Medium trip count: unroll by 8 for ILP.
                     unrollCount = 8;
+                } else if (avgTrip > 64) {
+                    // Large trip count: unroll by 16 for maximum ILP —
+                    // JIT can afford larger code since it only processes
+                    // hot functions (stripped module).
+                    unrollCount = 16;
                 }
                 if (unrollCount > 0) {
                     if (fullUnroll) {
