@@ -245,7 +245,9 @@ void AdaptiveJITRunner::injectCounters(llvm::Module& mod) {
                 beB.CreateStore(newTrip, tripCountAlloca);
 
                 // Report trip count at loop exit.
-                llvm::IRBuilder<> exitB(&exitBB->front());
+                // Use getFirstInsertionPt() to skip past any PHI nodes at
+                // the top of the exit block (e.g. LCSSA phis in whileend).
+                llvm::IRBuilder<> exitB(&*exitBB->getFirstInsertionPt());
                 auto* finalTrip = exitB.CreateLoad(i64Ty, tripCountAlloca, "omsc.trip_final");
                 exitB.CreateCall(loopProfileTy, loopProfileFn,
                                  {nameGV, llvm::ConstantInt::get(i32Ty, loopIdx), finalTrip});
