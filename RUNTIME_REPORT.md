@@ -923,7 +923,7 @@ path.  Dropped samples are statistically insignificant.
 ## 13. Non-JIT `run` Path (AOT Fallback)
 
 When `omsc run` is invoked with `-fno-jit`, the fallback AOT path
-(`main.cpp` line 2778+) is used:
+(the `Command::Run` branch inside the `Compiler::compile()` fallback in `main.cpp`) is used:
 
 1. `Compiler::compile()` performs the full AOT pipeline (codegen → object → linker).
 2. The compiled binary is written to a temporary file.
