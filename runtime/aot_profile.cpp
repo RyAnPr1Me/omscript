@@ -117,6 +117,20 @@ void AdaptiveJITRunner::injectCounters(llvm::Module& mod) {
         llvm::cast<llvm::Function>(mod.getOrInsertFunction("__omsc_profile_branch", branchProfileTy).getCallee());
     branchProfileFn->addFnAttr(llvm::Attribute::NoUnwind);
 
+    // Declare the loop trip count profiling callback.
+    // Signature: void __omsc_profile_loop(const char* name, uint32_t loopId, uint64_t tripCount)
+    auto* loopProfileTy = llvm::FunctionType::get(voidTy, {ptrTy, i32Ty, i64Ty}, false);
+    auto* loopProfileFn =
+        llvm::cast<llvm::Function>(mod.getOrInsertFunction("__omsc_profile_loop", loopProfileTy).getCallee());
+    loopProfileFn->addFnAttr(llvm::Attribute::NoUnwind);
+
+    // Declare the call-site frequency profiling callback.
+    // Signature: void __omsc_profile_call_site(const char* callerName, const char* calleeName)
+    auto* callSiteProfileTy = llvm::FunctionType::get(voidTy, {ptrTy, ptrTy}, false);
+    auto* callSiteProfileFn =
+        llvm::cast<llvm::Function>(mod.getOrInsertFunction("__omsc_profile_call_site", callSiteProfileTy).getCallee());
+    callSiteProfileFn->addFnAttr(llvm::Attribute::NoUnwind);
+
     // Collect functions first to avoid iterator invalidation.
     llvm::SmallVector<llvm::Function*, 32> toInstrument;
     for (auto& fn : mod) {
@@ -175,6 +189,97 @@ void AdaptiveJITRunner::injectCounters(llvm::Module& mod) {
                 auto* cond64 = brB.CreateZExt(br->getCondition(), i64Ty, "omsc.cond64");
                 brB.CreateCall(branchProfileTy, branchProfileFn,
                                {nameGV, llvm::ConstantInt::get(i32Ty, branchId), cond64});
+            }
+        }
+
+        // --- Inject loop trip count profiling ---
+        // For each loop back-edge we create a counter alloca that is
+        // incremented on every back-edge iteration and reported when the
+        // loop exits.  This feeds average trip counts into Tier-2 unroll
+        // decisions.  We detect loops by looking for back-edges (branches
+        // to blocks earlier in the block list).
+        {
+            llvm::SmallPtrSet<llvm::BasicBlock*, 32> visited;
+            llvm::SmallVector<std::pair<llvm::BranchInst*, llvm::BasicBlock*>, 8> backEdges;
+            for (auto& bb : *fn) {
+                visited.insert(&bb);
+                auto* term = bb.getTerminator();
+                if (!term)
+                    continue;
+                auto* br = llvm::dyn_cast<llvm::BranchInst>(term);
+                if (!br)
+                    continue;
+                for (unsigned s = 0; s < br->getNumSuccessors(); s++) {
+                    if (visited.count(br->getSuccessor(s))) {
+                        backEdges.push_back({br, br->getSuccessor(s)});
+                        break;
+                    }
+                }
+            }
+            uint32_t loopIdx = 0;
+            for (auto& [backEdgeBr, headerBB] : backEdges) {
+                // Insert a trip count counter: alloca at function entry, increment
+                // at back-edge, report at loop exit.
+                // To minimize overhead we only insert the profiling call at the
+                // loop exit edge (the non-back-edge successor of the back-edge branch).
+                llvm::BasicBlock* exitBB = nullptr;
+                for (unsigned s = 0; s < backEdgeBr->getNumSuccessors(); s++) {
+                    if (backEdgeBr->getSuccessor(s) != headerBB) {
+                        exitBB = backEdgeBr->getSuccessor(s);
+                        break;
+                    }
+                }
+                if (!exitBB) {
+                    loopIdx++;
+                    continue; // infinite loop with no exit — skip
+                }
+                // Create a trip-count alloca in the entry block.
+                llvm::IRBuilder<> entryB(&fn->getEntryBlock().front());
+                auto* tripCountAlloca = entryB.CreateAlloca(i64Ty, nullptr, "omsc.trip_cnt_" + std::to_string(loopIdx));
+                entryB.CreateStore(llvm::ConstantInt::get(i64Ty, 0), tripCountAlloca);
+
+                // Increment trip count at the back-edge.
+                llvm::IRBuilder<> beB(backEdgeBr);
+                auto* oldTrip = beB.CreateLoad(i64Ty, tripCountAlloca, "omsc.trip_old");
+                auto* newTrip = beB.CreateAdd(oldTrip, llvm::ConstantInt::get(i64Ty, 1), "omsc.trip_new");
+                beB.CreateStore(newTrip, tripCountAlloca);
+
+                // Report trip count at loop exit.
+                llvm::IRBuilder<> exitB(&exitBB->front());
+                auto* finalTrip = exitB.CreateLoad(i64Ty, tripCountAlloca, "omsc.trip_final");
+                exitB.CreateCall(loopProfileTy, loopProfileFn,
+                                 {nameGV, llvm::ConstantInt::get(i32Ty, loopIdx), finalTrip});
+                // Reset for next loop execution.
+                exitB.CreateStore(llvm::ConstantInt::get(i64Ty, 0), tripCountAlloca);
+
+                loopIdx++;
+            }
+        }
+
+        // --- Inject call-site frequency profiling ---
+        // For each call instruction in the function body, insert a profiling
+        // callback that records caller→callee pairs.  This data drives inline
+        // hint decisions during Tier-2 recompilation.
+        {
+            llvm::SmallVector<llvm::CallInst*, 16> callSites;
+            for (auto& bb : *fn) {
+                for (auto& inst : bb) {
+                    if (auto* ci = llvm::dyn_cast<llvm::CallInst>(&inst)) {
+                        auto* callee = ci->getCalledFunction();
+                        // Only track direct calls to user functions (not
+                        // intrinsics or profiling callbacks).
+                        if (callee && !callee->isDeclaration() && !callee->isIntrinsic() &&
+                            !callee->getName().starts_with("__omsc_") && callee->getName() != "main") {
+                            callSites.push_back(ci);
+                        }
+                    }
+                }
+            }
+            for (auto* ci : callSites) {
+                auto calleeName = ci->getCalledFunction()->getName().str();
+                llvm::IRBuilder<> csB(ci);
+                auto* calleeNameGV = csB.CreateGlobalString(calleeName, "__omsc_callee_" + calleeName, 0, &mod);
+                csB.CreateCall(callSiteProfileTy, callSiteProfileFn, {nameGV, calleeNameGV});
             }
         }
 
@@ -327,6 +432,8 @@ int AdaptiveJITRunner::run(llvm::Module* baseModule) {
     // code that calls them can be resolved by MCJIT.
     rawEngine->addGlobalMapping("__omsc_profile_branch", reinterpret_cast<uint64_t>(&__omsc_profile_branch));
     rawEngine->addGlobalMapping("__omsc_profile_arg", reinterpret_cast<uint64_t>(&__omsc_profile_arg));
+    rawEngine->addGlobalMapping("__omsc_profile_loop", reinterpret_cast<uint64_t>(&__omsc_profile_loop));
+    rawEngine->addGlobalMapping("__omsc_profile_call_site", reinterpret_cast<uint64_t>(&__omsc_profile_call_site));
     rawEngine->addGlobalMapping("__omsc_deopt_guard_fail", reinterpret_cast<uint64_t>(&__omsc_deopt_guard_fail));
 
     rawEngine->finalizeObject();
@@ -528,6 +635,77 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
         }
     }
 
+    // --- Range-based value specialization via llvm.assume ---
+    // When profiling shows that >90% of an argument's observed values are
+    // integers falling within a tight range [min, max] (width <= 1024),
+    // inject `llvm.assume(arg >= min)` and `llvm.assume(arg <= max)` at
+    // function entry.  This enables LLVM to:
+    //   - Eliminate bounds/range checks that fall within the known range
+    //   - Use narrower integer operations where the range permits
+    //   - Simplify comparisons involving the parameter
+    //   - Enable better loop trip count estimation when the arg is a bound
+    // This is only applied when constant specialization was NOT already
+    // injected (to avoid redundant assumptions).
+    {
+        const FunctionProfile* prof = JITProfiler::instance().getProfile(funcName);
+        if (prof && !fn->empty()) {
+            auto* i64Ty = llvm::Type::getInt64Ty(fn->getContext());
+#if LLVM_VERSION_MAJOR >= 19
+            llvm::Function* assumeFn = llvm::Intrinsic::getOrInsertDeclaration(mod.get(), llvm::Intrinsic::assume);
+#else
+            llvm::Function* assumeFn = llvm::Intrinsic::getDeclaration(mod.get(), llvm::Intrinsic::assume);
+#endif
+            llvm::IRBuilder<> rgB(&fn->getEntryBlock().front());
+            for (size_t i = 0; i < prof->args.size() && i < fn->arg_size(); i++) {
+                const auto& ap = prof->args[i];
+                // Only apply range assumptions when:
+                //   1. We have a tight observed range
+                //   2. Constant specialization was NOT applied (avoid redundancy)
+                //   3. The LLVM parameter type is i64
+                if (ap.hasRangeSpecialization() && !ap.hasConstantSpecialization() &&
+                    fn->getArg(static_cast<unsigned>(i))->getType() == i64Ty) {
+                    auto* arg = fn->getArg(static_cast<unsigned>(i));
+                    // assume(arg >= minObserved)
+                    auto* geMin = rgB.CreateICmpSGE(arg, llvm::ConstantInt::get(i64Ty, ap.minObserved),
+                                                    "omsc.range_ge_min");
+                    rgB.CreateCall(assumeFn, {geMin});
+                    // assume(arg <= maxObserved)
+                    auto* leMax = rgB.CreateICmpSLE(arg, llvm::ConstantInt::get(i64Ty, ap.maxObserved),
+                                                    "omsc.range_le_max");
+                    rgB.CreateCall(assumeFn, {leMax});
+                }
+            }
+        }
+    }
+
+    // --- Apply call-site-frequency-driven inline hints ---
+    // When profiling shows that certain callees are called frequently from
+    // this hot function, add `inlinehint` to those callees to guide LLVM's
+    // inliner to prioritize inlining them.  Callees that account for >20%
+    // of all calls from this function are considered hot call sites.
+    {
+        const FunctionProfile* prof = JITProfiler::instance().getProfile(funcName);
+        if (prof && !prof->callSites.empty()) {
+            uint64_t totalCalls = 0;
+            for (const auto& cs : prof->callSites)
+                totalCalls += cs.second;
+            if (totalCalls > 0) {
+                for (const auto& cs : prof->callSites) {
+                    double ratio = static_cast<double>(cs.second) / static_cast<double>(totalCalls);
+                    if (ratio > 0.2) {
+                        llvm::Function* callee = mod->getFunction(cs.first);
+                        if (callee && !callee->isDeclaration()) {
+                            callee->addFnAttr(llvm::Attribute::InlineHint);
+                            // Remove the cold attribute if it was previously set
+                            // so the inliner doesn't skip this hot callee.
+                            callee->removeFnAttr(llvm::Attribute::Cold);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // --- Mark non-hot functions as cold ---
     // During Tier-2 recompilation, mark all other functions in the module
     // with the `cold` attribute.  This tells LLVM's inliner to avoid
@@ -541,7 +719,7 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
             other.addFnAttr(llvm::Attribute::Cold);
     }
 
-    // --- Attach loop vectorization and interleaving metadata ---
+    // --- Attach loop vectorization, interleaving, and unroll metadata ---
     // The AOT pipeline attaches llvm.loop.mustprogress, interleave.count=4,
     // and vectorize.width=4 hints to every loop back-edge.  However, when
     // Tier-2 re-parses the clean bitcode these metadata nodes are absent
@@ -549,11 +727,18 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
     // been compiled at < O2).  Re-injecting the hints here ensures the O3
     // loop vectorizer and unroller treat every loop in the hot function as
     // a SIMD candidate, matching the AOT code quality.
+    //
+    // Additionally, when loop trip count profiling data is available, we
+    // attach llvm.loop.unroll.count metadata with a profile-guided unroll
+    // factor.  Small trip counts (<=16) get full unrolling; medium trip
+    // counts (<=64) get unroll-by-4; larger loops keep the default strategy.
     {
         auto& ctx = fn->getContext();
+        const FunctionProfile* loopProf = JITProfiler::instance().getProfile(funcName);
         // Build a set of blocks we've visited so far to detect back-edges in
         // O(n) total time instead of O(n²) per-branch inner scan.
         llvm::SmallPtrSet<llvm::BasicBlock*, 32> visited;
+        uint32_t loopIdx = 0;
         for (auto& bb : *fn) {
             visited.insert(&bb);
             auto* term = bb.getTerminator();
@@ -574,8 +759,10 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
             if (!isBackEdge)
                 continue;
             // Skip branches that already have loop metadata.
-            if (br->getMetadata(llvm::LLVMContext::MD_loop))
+            if (br->getMetadata(llvm::LLVMContext::MD_loop)) {
+                loopIdx++;
                 continue;
+            }
             llvm::MDNode* mustProgress = llvm::MDNode::get(ctx, {llvm::MDString::get(ctx, "llvm.loop.mustprogress")});
             llvm::MDNode* interleave = llvm::MDNode::get(
                 ctx, {llvm::MDString::get(ctx, "llvm.loop.interleave.count"),
@@ -583,14 +770,39 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
             llvm::MDNode* vecWidth = llvm::MDNode::get(
                 ctx, {llvm::MDString::get(ctx, "llvm.loop.vectorize.width"),
                       llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), 4))});
-            llvm::SmallVector<llvm::Metadata*, 4> loopMDs;
+            llvm::SmallVector<llvm::Metadata*, 6> loopMDs;
             loopMDs.push_back(nullptr); // self-reference placeholder
             loopMDs.push_back(mustProgress);
             loopMDs.push_back(interleave);
             loopMDs.push_back(vecWidth);
+
+            // Attach profile-guided unroll count when trip count data is available.
+            if (loopProf && loopIdx < loopProf->loops.size()) {
+                uint64_t avgTrip = loopProf->loops[loopIdx].averageTripCount();
+                uint32_t unrollCount = 0;
+                if (avgTrip > 0 && avgTrip <= 16) {
+                    // Small trip count: fully unroll by the trip count.
+                    unrollCount = static_cast<uint32_t>(avgTrip);
+                } else if (avgTrip > 16 && avgTrip <= 64) {
+                    // Medium trip count: unroll by 4.
+                    unrollCount = 4;
+                } else if (avgTrip > 64) {
+                    // Large trip count: unroll by 8 for ILP.
+                    unrollCount = 8;
+                }
+                if (unrollCount > 0) {
+                    llvm::MDNode* unrollMD = llvm::MDNode::get(
+                        ctx, {llvm::MDString::get(ctx, "llvm.loop.unroll.count"),
+                              llvm::ConstantAsMetadata::get(
+                                  llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), unrollCount))});
+                    loopMDs.push_back(unrollMD);
+                }
+            }
+
             llvm::MDNode* loopMD = llvm::MDNode::get(ctx, loopMDs);
             loopMD->replaceOperandWith(0, loopMD);
             br->setMetadata(llvm::LLVMContext::MD_loop, loopMD);
+            loopIdx++;
         }
     }
 
