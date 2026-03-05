@@ -23,7 +23,7 @@
 
 set -uo pipefail
 
-# --- Colours ---------------------------------------------------------------
+# --- Colors ---------------------------------------------------------------
 GREEN='\033[0;32m'
 RED='\033[0;31m'
 CYAN='\033[0;36m'
@@ -77,8 +77,8 @@ fi
 
 # --- Benchmark list --------------------------------------------------------
 # Each entry: "source_file|aot_exit_code|jit_exit_code|description"
-# JIT exit code may differ from AOT due to PGO-specialised computation paths
-# and different overflow behaviour at higher tiers.
+# JIT exit code may differ from AOT due to PGO-specialized computation paths
+# and different overflow behavior at higher tiers.
 BENCHMARKS=(
     "examples/benchmark_jit_aot.om|128|128|JIT/AOT Suite (8 kernels)"
     "examples/benchmark_loops_math.om|240|34|Loops + Math (8 kernels)"
