@@ -292,6 +292,64 @@ int AdaptiveJITRunner::run(llvm::Module* baseModule) {
     if (!mainAddr)
         return 1;
 
+    // --- Eager background compilation ---
+    // Resolve every __omsc_fn_<name> slot from the Tier-1 engine and
+    // immediately enqueue ALL non-main user functions for background O3
+    // recompilation.  This starts compiling optimised versions before
+    // main() even begins executing, so by the time hot functions are
+    // first called the optimised code is already (or nearly) available.
+    // The dispatch prolog's volatile load will pick up the fn-ptr as soon
+    // as the background thread patches it, with zero contention on the
+    // main execution thread.
+    //
+    // Start the background compilation thread pool FIRST so workers are
+    // ready to consume tasks immediately.
+    shutdownRequested_.store(false, std::memory_order_relaxed);
+    bgThreads_.reserve(kNumBgThreads);
+    for (int i = 0; i < kNumBgThreads; i++)
+        bgThreads_.emplace_back(&AdaptiveJITRunner::backgroundWorker, this);
+
+    {
+        // Walk the Tier-1 module to find every instrumented function and
+        // resolve its fn-ptr slot address from the JIT engine.
+        // We parse the clean bitcode to discover function names (the clean
+        // bitcode has the same functions as the instrumented module, minus
+        // the dispatch prolog globals).
+        auto eagerCtx = std::make_unique<llvm::LLVMContext>();
+        auto eagerBuf = llvm::MemoryBuffer::getMemBuffer(
+            llvm::StringRef(cleanBitcode_.data(), cleanBitcode_.size()),
+            "omsc_eager_bc", /*RequiresNullTerminator=*/false);
+        auto eagerMod = llvm::parseBitcodeFile(eagerBuf->getMemBufferRef(), *eagerCtx);
+        if (eagerMod) {
+            for (auto& fn : **eagerMod) {
+                if (fn.isDeclaration() || fn.getName() == "main")
+                    continue;
+                if (fn.getName().starts_with("__"))
+                    continue;
+                std::string name = fn.getName().str();
+                std::string slotName = "__omsc_fn_" + name;
+                uint64_t slotAddr = rawEngine->getGlobalValueAddress(slotName);
+                if (!slotAddr)
+                    continue;
+                void** fnPtrSlot = reinterpret_cast<void**>(slotAddr);
+
+                // Tentatively mark this function as being compiled at Tier-2
+                // so the threshold-triggered callback does not duplicate work.
+                {
+                    std::lock_guard<std::mutex> lk(recompiledMtx_);
+                    functionTier_[name] = 2;
+                }
+
+                // Enqueue eagerly — a background thread will compile it.
+                {
+                    std::lock_guard<std::mutex> lk(queueMtx_);
+                    taskQueue_.push({name, kTier2Threshold, fnPtrSlot});
+                }
+                queueCV_.notify_one();
+            }
+        }
+    }
+
     {
         std::lock_guard<std::mutex> lk(recompiledMtx_);
         modules_.push_back(std::move(jm));
@@ -304,13 +362,7 @@ int AdaptiveJITRunner::run(llvm::Module* baseModule) {
     if (verbose_)
         std::cout << "JIT: executing program..." << std::endl;
 
-    // Start the background compilation thread pool before execution begins.
-    // Multiple threads allow parallel recompilation of different functions,
-    // utilizing idle CPU cores while the main thread executes Tier-1 code.
-    shutdownRequested_.store(false, std::memory_order_relaxed);
-    bgThreads_.reserve(kNumBgThreads);
-    for (int i = 0; i < kNumBgThreads; i++)
-        bgThreads_.emplace_back(&AdaptiveJITRunner::backgroundWorker, this);
+    // Background thread pool was already started above (eager compilation).
 
     g_activeRunner.store(this, std::memory_order_release);
     struct RunnerGuard {
@@ -958,9 +1010,13 @@ void AdaptiveJITRunner::doRecompile(const std::string& funcName, int64_t callCou
         PTO.LoopInterleaving = vectorize_;
         PTO.MergeFunctions = true;
         PTO.CallGraphProfile = true;
-        // Use aggressive inliner threshold — with only one recompile tier,
-        // we invest fully in code quality for proven hot functions.
-        PTO.InlinerThreshold = 1200;
+        // Use very aggressive inliner threshold — significantly higher than
+        // AOT's 400.  JIT can afford this because it only optimizes the hot
+        // function and its transitive callees (stripped module), while AOT
+        // must process the entire program.  The extra inlining exposes more
+        // constant folding, dead code elimination, and vectorization across
+        // function boundaries — the key to beating AOT code quality.
+        PTO.InlinerThreshold = 2000;
 
         // Create a TargetMachine for this recompilation.  Each background
         // thread gets its own TM since LLVM TargetMachine is not thread-safe.
