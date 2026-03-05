@@ -139,6 +139,11 @@ target_link_libraries(omsc ${llvm_libs})
 # executor can locate ORC runtime helpers (e.g. llvm_orc_registerEHFrameSectionWrapper)
 # via dlsym.  --export-dynamic ensures all statically-linked symbols from
 # libLLVMOrcTargetProcess are visible to the dynamic linker at runtime.
+#
+# Note: a linker version script (--version-script) could be used to export
+# only the specific ORC symbols needed, reducing symbol-table bloat.  For
+# simplicity we use --export-dynamic, which is the approach used by LLVM's
+# own in-process JIT examples and test infrastructure.
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND NOT APPLE)
     target_link_options(omsc PRIVATE -Wl,--export-dynamic)
 endif()

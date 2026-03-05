@@ -235,7 +235,12 @@ class AdaptiveJITRunner {
     };
     std::vector<JitModule> modules_;
 
-    /// Tracks the highest completed tier per function (0 = not yet recompiled).
+    /// Tracks the compilation state per function.  Values:
+    ///   0  — never seen (default)
+    ///   1  — eagerly queued at startup but not yet compiled; onHotFunction()
+    ///         may promote to 2 with the actual runtime callCount so that the
+    ///         hot entry preempts the low-priority eager entry in the queue
+    ///   2+ — compiled (or being compiled) at that tier
     std::unordered_map<std::string, int> functionTier_;
     std::mutex recompiledMtx_; ///< Guards functionTier_ and modules_ across threads.
     bool verbose_ = false;     ///< Print JIT recompile events when true.
@@ -279,14 +284,25 @@ class AdaptiveJITRunner {
     // -------------------------------------------------------------------
 
     /// A pending recompilation request.
+    /// Sorted by callCount descending in the priority queue: the function that
+    /// has been called the most times is compiled first, ensuring the hottest
+    /// code gets optimized before lukewarm or eagerly-queued code.
     struct RecompileTask {
         std::string funcName;
         int64_t callCount;
         void** fnPtrSlot; ///< Pointer to the dispatch slot (cast to std::atomic<void*>* at point of update).
+        /// Max-heap ordering: higher callCount = higher priority = compiled first.
+        bool operator<(const RecompileTask& o) const { return callCount < o.callCount; }
     };
 
-    std::vector<std::thread> bgThreads_;           ///< Background compilation workers.
-    std::queue<RecompileTask> taskQueue_;     ///< Pending recompilation requests.
+    std::vector<std::thread> bgThreads_; ///< Background compilation workers.
+    /// Priority queue of pending recompilation requests (hottest functions first).
+    /// std::priority_queue is a max-heap, so the task with the largest callCount
+    /// is always at the top and gets processed next.  Threshold-triggered tasks
+    /// (callCount = actual runtime value, >= kTier2Threshold) naturally preempt
+    /// eagerly-queued tasks (callCount = kTier2Threshold), so a function called
+    /// 10 000 times is always compiled before one called only 5 times.
+    std::priority_queue<RecompileTask> taskQueue_;
     std::mutex queueMtx_;                    ///< Guards taskQueue_.
     std::condition_variable queueCV_;        ///< Signals the background threads.
     std::atomic<bool> shutdownRequested_{false}; ///< Signals the workers to exit.
