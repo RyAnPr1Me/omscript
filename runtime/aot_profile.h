@@ -171,9 +171,9 @@ class AdaptiveJITRunner {
     // faster than a full O3 pass.
     // -----------------------------------------------------------------------
     static constexpr int64_t kTier2Threshold = 10;
-    static constexpr int64_t kTier3Threshold = 1000;
+    static constexpr int64_t kTier3Threshold = 1000000000LL; // effectively disabled
     /// Highest tier number (Tier-1 = baseline, Tier-2..kMaxTier = recompiled).
-    static constexpr int kMaxTier = 3;
+    static constexpr int kMaxTier = 2;
 
     AdaptiveJITRunner();
     ~AdaptiveJITRunner();
