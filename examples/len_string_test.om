@@ -1,0 +1,54 @@
+// len_string_test.om
+//
+// Regression test: len() on string variables and string concatenation results
+// must return the character count (like strlen), not garbage from treating
+// the string pointer as an array-length header.
+
+fn repeat_char(c, n) {
+    // Build a string of n copies of c using concatenation.
+    var s = "";
+    for (i in 0...n) {
+        s = s + c;
+    }
+    return s;
+}
+
+fn main() {
+    var total = 0;
+
+    // Test 1: len on a string literal variable
+    var s1 = "hello";
+    total = total + (len(s1) == 5);   // 1
+
+    // Test 2: len on an empty string
+    var s2 = "";
+    total = total + (len(s2) == 0);   // 1
+
+    // Test 3: len on a single-char string
+    var s3 = "x";
+    total = total + (len(s3) == 1);   // 1
+
+    // Test 4: len on a concatenated string
+    var s4 = "hello" + " " + "world";
+    total = total + (len(s4) == 11);  // 1
+
+    // Test 5: len on a variable built by concatenation
+    var s5 = "foo";
+    s5 = s5 + "bar";
+    total = total + (len(s5) == 6);   // 1
+
+    // Test 6: len on a string returned by a function
+    var s6 = repeat_char("a", 4);
+    total = total + (len(s6) == 4);   // 1
+
+    // Test 7: len still works for arrays
+    var arr = [10, 20, 30, 40, 50];
+    total = total + (len(arr) == 5);  // 1
+
+    // Test 8: len on an empty array
+    var arr2 = [];
+    total = total + (len(arr2) == 0); // 1
+
+    // Expected: 8
+    return total;
+}

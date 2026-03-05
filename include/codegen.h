@@ -173,6 +173,13 @@ class CodeGenerator {
         llvm::BasicBlock* continueTarget;
     };
     std::vector<LoopContext> loopStack;
+
+    // Stack of innermost catch-entry basic blocks, pushed/popped by
+    // generateTryCatch(). generateThrow() branches directly to the top of this
+    // stack when a throw occurs inside a try block, ensuring that control flow
+    // reaches the catch handler immediately (rather than relying on a post-loop
+    // flag check that could allow dangerous code to execute after the throw).
+    std::vector<llvm::BasicBlock*> tryCatchStack_;
     bool inOptMaxFunction;
     bool hasOptMaxFunctions;
     std::unordered_set<std::string> optMaxFunctions;

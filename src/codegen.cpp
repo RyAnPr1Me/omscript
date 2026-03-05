@@ -2401,6 +2401,28 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                          expr);
         }
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        Expression* argExpr = expr->arguments[0].get();
+
+        // String detection uses two complementary checks:
+        //   1. arg->getType()->isPointerTy()  — string literals (ptr @"...") and
+        //      string variables whose LLVM alloca holds a ptr type.
+        //   2. isStringExpr(argExpr) — string variables tracked in stringVars_
+        //      that are stored as i64 (pointer cast to integer, OmScript's
+        //      canonical runtime representation for strings passed across call
+        //      boundaries).  In that case the IntToPtr below reconstructs the
+        //      char* needed by strlen.
+        // If neither is true the argument is assumed to be an array.
+        if (arg->getType()->isPointerTy() || isStringExpr(argExpr)) {
+            // Reconstruct the char* for strlen when the value is stored as i64.
+            llvm::Value* strPtr = arg->getType()->isPointerTy()
+                                      ? arg
+                                      : builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "len.sptr");
+            llvm::Value* rawLen = builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "len.strlen");
+            // strlen returns size_t (i64 on 64-bit); ensure we return the default type.
+            return rawLen->getType() == getDefaultType()
+                       ? rawLen
+                       : builder->CreateZExtOrTrunc(rawLen, getDefaultType(), "len.strsz");
+        }
         // Array is stored as an i64 holding a pointer to [length, elem0, elem1, ...]
         // Convert to integer first if needed (e.g. if stored in a float variable)
         arg = toDefaultType(arg);
@@ -5736,14 +5758,32 @@ void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
 }
 
 void CodeGenerator::generateTryCatch(TryCatchStmt* stmt) {
-    // Implementation uses a global error flag/value approach:
-    // 1. Save old error state
-    // 2. Clear error flag
-    // 3. Execute try block
-    // 4. If error flag is set, execute catch block with error value
-    // 5. Restore old error state at end of both paths
+    // Implementation uses a global error-flag/value approach combined with
+    // direct-branch throw semantics:
+    //
+    // For a `throw` that occurs DIRECTLY inside the try block (or in any
+    // function on the call stack that is itself inside a try block),
+    // generateThrow() uses tryCatchStack_.back() to branch straight to the
+    // catch entry block, which terminates the basic block immediately and
+    // prevents any subsequent code in the try block or the throwing function
+    // from executing.
+    //
+    // For a `throw` that occurs in a callee that was compiled WITHOUT a
+    // surrounding try block (i.e. the callee was emitted when tryCatchStack_
+    // was empty), generateThrow() instead emits `ret i64 0` so the function
+    // returns immediately.  The try block then performs a per-statement flag
+    // check and branches to catchBB if the callee set the error flag.
+    //
+    // Steps:
+    //   1. Save old error state, clear flag.
+    //   2. Create catch/restore/end blocks BEFORE generating the try body
+    //      (so generateThrow can reference catchBB via tryCatchStack_).
+    //   3. Push catchBB onto tryCatchStack_; generate try body with
+    //      per-statement flag checks; pop tryCatchStack_.
+    //   4. Catch block: bind catch variable, clear flag, generate catch body.
+    //   5. restoreBB: restore old error state.  endBB: normal continuation.
 
-    // Get or create global error flag and value
+    // --- Get or create global error flag / value ---
     llvm::GlobalVariable* errFlag = module->getGlobalVariable("__om_error_flag", true);
     if (!errFlag) {
         errFlag = new llvm::GlobalVariable(*module, getDefaultType(), false, llvm::GlobalValue::InternalLinkage,
@@ -5757,64 +5797,94 @@ void CodeGenerator::generateTryCatch(TryCatchStmt* stmt) {
 
     llvm::Function* function = builder->GetInsertBlock()->getParent();
 
-    // Save old error state
+    // --- Save and clear old error state ---
     llvm::Value* oldFlag = builder->CreateLoad(getDefaultType(), errFlag, "try.oldflag");
-    llvm::Value* oldVal = builder->CreateLoad(getDefaultType(), errVal, "try.oldval");
-
-    // Clear error flag
+    llvm::Value* oldVal  = builder->CreateLoad(getDefaultType(), errVal,  "try.oldval");
     builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 0), errFlag);
 
-    // Generate try block
+    // --- Create all blocks upfront so generateThrow() can reference catchBB ---
+    llvm::BasicBlock* catchBB   = llvm::BasicBlock::Create(*context, "catch.body",  function);
+    llvm::BasicBlock* restoreBB = llvm::BasicBlock::Create(*context, "try.restore", function);
+    llvm::BasicBlock* endBB     = llvm::BasicBlock::Create(*context, "try.end",     function);
+
+    // --- Generate try body ---
+    // Push catchBB so that any `throw` emitted during code generation of this
+    // try block (or inside a callee that is currently being inlined/compiled
+    // within this scope) branches directly here.
+    tryCatchStack_.push_back(catchBB);
     {
         ScopeGuard scope(*this);
         for (auto& s : stmt->tryBlock->statements) {
+            // Stop if the current block already has a terminator (e.g. a direct
+            // `throw` branched to catchBB or a `return`).
+            if (builder->GetInsertBlock()->getTerminator())
+                break;
+
             generateStatement(s.get());
+
+            // After each statement that didn't terminate the block, check
+            // whether a *called function* propagated an error via the flag.
+            // Callees compiled without a surrounding try block use `ret i64 0`
+            // + flag to propagate throws; we must detect that here.
+            //
+            // Performance note: this adds a load + compare + conditional branch
+            // per try-block statement.  The branch is strongly predicted not-taken
+            // because the cold weight is implied by LLVM's default branch predictor.
+            // O3 can often hoist or eliminate the check when the statement is a
+            // simple arithmetic expression with no calls (dead-store elimination of
+            // the flag store + load pair).  The cost is acceptable because try blocks
+            // are rare in tight loops; try/catch is an error-handling construct.
+            if (!builder->GetInsertBlock()->getTerminator()) {
+                llvm::Value* flagNow = builder->CreateLoad(getDefaultType(), errFlag, "try.chk");
+                llvm::Value* flagSet = builder->CreateICmpNE(
+                    flagNow, llvm::ConstantInt::get(getDefaultType(), 0), "try.flagset");
+                llvm::BasicBlock* contBB =
+                    llvm::BasicBlock::Create(*context, "try.cont", function);
+                builder->CreateCondBr(flagSet, catchBB, contBB);
+                builder->SetInsertPoint(contBB);
+            }
         }
     }
+    tryCatchStack_.pop_back();
 
-    // Check if error was thrown
-    llvm::Value* thrown = builder->CreateLoad(getDefaultType(), errFlag, "try.thrown");
-    llvm::Value* wasThrown =
-        builder->CreateICmpNE(thrown, llvm::ConstantInt::get(getDefaultType(), 0), "try.wasthrown");
+    // Fall through from the try body to the restore path (no error thrown).
+    if (!builder->GetInsertBlock()->getTerminator())
+        builder->CreateBr(restoreBB);
 
-    llvm::BasicBlock* catchBB = llvm::BasicBlock::Create(*context, "catch.body", function);
-    llvm::BasicBlock* restoreBB = llvm::BasicBlock::Create(*context, "try.restore", function);
-    llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "try.end", function);
-
-    builder->CreateCondBr(wasThrown, catchBB, restoreBB);
-
-    // Catch block
+    // --- Catch block ---
     builder->SetInsertPoint(catchBB);
     {
         ScopeGuard scope(*this);
-        // Bind the error value to the catch variable
         llvm::Value* errValLoaded = builder->CreateLoad(getDefaultType(), errVal, "catch.errval");
         llvm::AllocaInst* catchVar = createEntryBlockAlloca(function, stmt->catchVar);
         builder->CreateStore(errValLoaded, catchVar);
         bindVariable(stmt->catchVar, catchVar);
 
-        // Clear error flag so catch block can execute normally
+        // Clear error state so the catch body executes normally.
         builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 0), errFlag);
         builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 0), errVal);
 
         for (auto& s : stmt->catchBlock->statements) {
+            if (builder->GetInsertBlock()->getTerminator())
+                break;
             generateStatement(s.get());
         }
     }
-    builder->CreateBr(restoreBB);
+    if (!builder->GetInsertBlock()->getTerminator())
+        builder->CreateBr(restoreBB);
 
-    // Restore old error state (reached from both normal try and after catch)
+    // --- Restore old error state ---
     builder->SetInsertPoint(restoreBB);
     builder->CreateStore(oldFlag, errFlag);
-    builder->CreateStore(oldVal, errVal);
+    builder->CreateStore(oldVal,  errVal);
     builder->CreateBr(endBB);
 
-    // End
+    // --- Continuation ---
     builder->SetInsertPoint(endBB);
 }
 
 void CodeGenerator::generateThrow(ThrowStmt* stmt) {
-    // Set global error flag and value
+    // Get or create global error flag / value.
     llvm::GlobalVariable* errFlag = module->getGlobalVariable("__om_error_flag", true);
     if (!errFlag) {
         errFlag = new llvm::GlobalVariable(*module, getDefaultType(), false, llvm::GlobalValue::InternalLinkage,
@@ -5828,8 +5898,28 @@ void CodeGenerator::generateThrow(ThrowStmt* stmt) {
 
     llvm::Value* val = generateExpression(stmt->value.get());
     val = toDefaultType(val);
+
+    // Set the error flag and store the thrown value.
     builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 1), errFlag);
     builder->CreateStore(val, errVal);
+
+    // Terminate the basic block so that no code after `throw` executes.
+    //
+    // Two cases:
+    //   (a) We are currently generating code INSIDE a try block:
+    //       tryCatchStack_.back() is the catch-entry block for the innermost
+    //       surrounding try.  Branch there directly — this is the fast path
+    //       that does not require the per-statement flag checks in the caller.
+    //
+    //   (b) We are NOT inside any try block (or we are inside a called function
+    //       that was compiled without a surrounding try):
+    //       Return 0 from the current function so the caller can detect the
+    //       thrown error via the global flag.
+    if (!tryCatchStack_.empty()) {
+        builder->CreateBr(tryCatchStack_.back());
+    } else {
+        builder->CreateRet(llvm::ConstantInt::get(getDefaultType(), 0));
+    }
 }
 
 void CodeGenerator::resolveTargetCPU(std::string& cpu, std::string& features) const {
