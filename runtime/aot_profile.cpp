@@ -152,62 +152,28 @@ void AdaptiveJITRunner::injectCounters(llvm::Module& mod) {
         // ---------------------------------------------------------------
 
         // --- New basic blocks (inserted before original entry) ---
+        // Simplified two-path dispatch: hot (fn-ptr set) or cold (counting).
         auto& origEntry = fn->getEntryBlock();
         auto* dispatchBB = llvm::BasicBlock::Create(ctx, "omsc.dispatch", fn, &origEntry);
-        auto* hotBB = llvm::BasicBlock::Create(ctx, "omsc.hot", fn, &origEntry);
-        auto* hotCheckBB = llvm::BasicBlock::Create(ctx, "omsc.hot_check", fn, &origEntry);
-        auto* hotRecompBB = llvm::BasicBlock::Create(ctx, "omsc.hot_recomp", fn, &origEntry);
         auto* hotCallBB = llvm::BasicBlock::Create(ctx, "omsc.hot_call", fn, &origEntry);
         auto* countBB = llvm::BasicBlock::Create(ctx, "omsc.count", fn, &origEntry);
         auto* recompileBB = llvm::BasicBlock::Create(ctx, "omsc.recompile", fn, &origEntry);
 
         // --- omsc.dispatch: volatile-load fn-ptr, branch on non-null ---
+        // This is the entry point for EVERY call.  After the background
+        // thread stores an optimized fn-ptr, the volatile load picks it up
+        // and branches to the hot call — just 3 instructions per call:
+        //   load ptr → cmp null → br hot_call
         llvm::IRBuilder<> B(dispatchBB);
         auto* fp = B.CreateAlignedLoad(ptrTy, fnPtrGV, llvm::Align(8), /*isVolatile=*/true, "omsc.fp");
-        auto* isHot =
-            B.CreateICmpNE(B.CreatePtrToInt(fp, i64Ty, "omsc.fp_int"), llvm::ConstantInt::get(i64Ty, 0), "omsc.is_hot");
+        auto* isHot = B.CreateICmpNE(fp, llvm::Constant::getNullValue(ptrTy), "omsc.is_hot");
         llvm::MDBuilder mdB(ctx);
-        auto* weights = mdB.createBranchWeights(99, 1);
-        B.CreateCondBr(isHot, hotBB, countBB, weights);
+        B.CreateCondBr(isHot, hotCallBB, countBB, mdB.createBranchWeights(99, 1));
 
-        // --- omsc.hot: skip counter if already past Tier-3, else check threshold ---
-        // After the fn-ptr is set (Tier-2+), every call takes this path.
-        // Once the counter exceeds kTier3Threshold, there are no more tiers
-        // to promote to, so we skip the counter entirely — the hot path
-        // becomes just: volatile load → call → ret (minimal overhead).
-        //
-        // Before Tier-3 is reached, we increment a plain (non-atomic) counter
-        // and check for the threshold.  Plain counter is safe because the
-        // OmScript program is single-threaded.
-        B.SetInsertPoint(hotBB);
-        auto* hotOld = B.CreateLoad(i64Ty, counterGV, "omsc.hot_old");
-        auto* pastMaxTier = B.CreateICmpSGT(hotOld,
-            llvm::ConstantInt::get(i64Ty, AdaptiveJITRunner::kTier3Threshold), "omsc.past_max");
-        auto* hotCountBB = llvm::BasicBlock::Create(ctx, "omsc.hot_count", fn, hotCheckBB);
-        B.CreateCondBr(pastMaxTier, hotCallBB, hotCountBB, mdB.createBranchWeights(999, 1));
-
-        // --- omsc.hot_count: still tracking for Tier-3 ---
-        B.SetInsertPoint(hotCountBB);
-        auto* hotNew = B.CreateAdd(hotOld, llvm::ConstantInt::get(i64Ty, 1), "omsc.hot_new");
-        B.CreateStore(hotNew, counterGV);
-        auto* hitHigher =
-            B.CreateICmpEQ(hotNew, llvm::ConstantInt::get(i64Ty, AdaptiveJITRunner::kTier3Threshold), "omsc.ht3");
-        B.CreateCondBr(hitHigher, hotCheckBB, hotCallBB, mdB.createBranchWeights(1, 999));
-
-        // --- omsc.hot_check: trigger recompile directly ---
-        B.SetInsertPoint(hotCheckBB);
-        B.CreateBr(hotRecompBB);
-
-        // --- omsc.hot_recomp: enqueue recompile, then call current fn-ptr ---
-        // With background compilation, the callback returns immediately.
-        // The fn-ptr has not been updated yet, so we just call the current
-        // optimised version.  The background thread will atomically update
-        // the pointer when it finishes, and subsequent calls will use it.
-        B.SetInsertPoint(hotRecompBB);
-        B.CreateCall(callbackTy, callbackFn, {nameGV, hotNew, fnPtrGV});
-        B.CreateBr(hotCallBB);
-
-        // --- omsc.hot_call: normal hot-path call with current fn-ptr ---
+        // --- omsc.hot_call: fast path — call through optimized fn-ptr ---
+        // After Tier-2 recompilation, this is the only path taken.
+        // Overhead: volatile load + null check + indirect call + ret
+        // (approximately 3-4 nanoseconds on modern x86).
         B.SetInsertPoint(hotCallBB);
         {
             llvm::SmallVector<llvm::Value*, 8> args;
@@ -217,23 +183,18 @@ void AdaptiveJITRunner::injectCounters(llvm::Module& mod) {
             B.CreateRet(hotCall);
         }
 
-        // --- omsc.count: increment counter and check tier thresholds ---
-        // The cold path only runs before the first recompile (calls 1-10).
+        // --- omsc.count: increment counter and check tier threshold ---
+        // The cold path only runs before the first recompile (calls 1-5).
         // Using a plain (non-atomic) counter since the program is single-threaded.
-        // No profiling callbacks — they added overhead for minimal data gain
-        // over just 10 calls.  Tier-2 recompile uses aggressive defaults.
         B.SetInsertPoint(countBB);
         auto* oldCnt = B.CreateLoad(i64Ty, counterGV, "omsc.old");
         auto* newCnt = B.CreateAdd(oldCnt, llvm::ConstantInt::get(i64Ty, 1), "omsc.new");
         B.CreateStore(newCnt, counterGV);
 
-        // Check whether the call count hits ANY of the multi-tier thresholds.
+        // Check whether the call count hits the recompilation threshold.
         auto* hitT2 =
-            B.CreateICmpEQ(newCnt, llvm::ConstantInt::get(i64Ty, AdaptiveJITRunner::kTier2Threshold), "omsc.hit_t2");
-        auto* hitT3 =
-            B.CreateICmpEQ(newCnt, llvm::ConstantInt::get(i64Ty, AdaptiveJITRunner::kTier3Threshold), "omsc.hit_t3");
-        auto* hitAny = B.CreateOr(hitT2, hitT3, "omsc.hit");
-        B.CreateCondBr(hitAny, recompileBB, &origEntry);
+            B.CreateICmpEQ(newCnt, llvm::ConstantInt::get(i64Ty, AdaptiveJITRunner::kTier2Threshold), "omsc.hit");
+        B.CreateCondBr(hitT2, recompileBB, &origEntry);
 
         // --- omsc.recompile: call the C++ recompiler, then fall to body ---
         B.SetInsertPoint(recompileBB);
@@ -343,11 +304,13 @@ int AdaptiveJITRunner::run(llvm::Module* baseModule) {
     if (verbose_)
         std::cout << "JIT: executing program..." << std::endl;
 
-    // Start the background compilation thread before execution begins.
-    // All tier-threshold recompilations will be offloaded to this thread,
-    // allowing the main execution thread to continue without pausing.
+    // Start the background compilation thread pool before execution begins.
+    // Multiple threads allow parallel recompilation of different functions,
+    // utilizing idle CPU cores while the main thread executes Tier-1 code.
     shutdownRequested_.store(false, std::memory_order_relaxed);
-    bgThread_ = std::thread(&AdaptiveJITRunner::backgroundWorker, this);
+    bgThreads_.reserve(kNumBgThreads);
+    for (int i = 0; i < kNumBgThreads; i++)
+        bgThreads_.emplace_back(&AdaptiveJITRunner::backgroundWorker, this);
 
     g_activeRunner.store(this, std::memory_order_release);
     struct RunnerGuard {
@@ -378,31 +341,33 @@ int AdaptiveJITRunner::tierForCallCount(int64_t count) {
 }
 
 // ---------------------------------------------------------------------------
-// getOrCreateTargetMachine() — cached native TargetMachine
+// createTargetMachine() — thread-safe TargetMachine factory
 // ---------------------------------------------------------------------------
 // Creates the TargetMachine once (detecting host CPU, features, triple)
 // and returns the cached instance on subsequent calls.  Saves ~1-3ms per
 // recompilation by avoiding repeated target lookup and feature detection.
-// Only called from the background thread — no locking needed.
-llvm::TargetMachine* AdaptiveJITRunner::getOrCreateTargetMachine() {
-    if (cachedTM_)
-        return cachedTM_.get();
-
-    std::string triple = llvm::sys::getDefaultTargetTriple();
-    std::string cpu = llvm::sys::getHostCPUName().str();
-    llvm::SubtargetFeatures featureSet;
+// Thread-safe factory that creates a new TargetMachine per call.
+// The host CPU, features, and triple are detected once (via call_once)
+// and cached; subsequent calls just create a fresh TM from the cached
+// strings.  Each background thread gets its own TM.
+std::unique_ptr<llvm::TargetMachine> AdaptiveJITRunner::createTargetMachine() {
+    std::call_once(tmInitFlag_, [this] {
+        cachedTriple_ = llvm::sys::getDefaultTargetTriple();
+        cachedCPU_ = llvm::sys::getHostCPUName().str();
+        llvm::SubtargetFeatures featureSet;
 #if LLVM_VERSION_MAJOR >= 19
-    llvm::StringMap<bool> hostFeatures = llvm::sys::getHostCPUFeatures();
+        llvm::StringMap<bool> hostFeatures = llvm::sys::getHostCPUFeatures();
 #else
-    llvm::StringMap<bool> hostFeatures;
-    llvm::sys::getHostCPUFeatures(hostFeatures);
+        llvm::StringMap<bool> hostFeatures;
+        llvm::sys::getHostCPUFeatures(hostFeatures);
 #endif
-    for (auto& kv : hostFeatures)
-        featureSet.AddFeature(kv.first(), kv.second);
-    std::string features = featureSet.getString();
+        for (auto& kv : hostFeatures)
+            featureSet.AddFeature(kv.first(), kv.second);
+        cachedFeatures_ = featureSet.getString();
+    });
 
     std::string errStr;
-    const llvm::Target* target = llvm::TargetRegistry::lookupTarget(triple, errStr);
+    const llvm::Target* target = llvm::TargetRegistry::lookupTarget(cachedTriple_, errStr);
     if (!target) {
         llvm::errs() << "omsc: could not lookup target: " << errStr << "\n";
         return nullptr;
@@ -417,13 +382,15 @@ llvm::TargetMachine* AdaptiveJITRunner::getOrCreateTargetMachine() {
         opts.NoNaNsFPMath = true;
         opts.NoSignedZerosFPMath = true;
     }
+    std::unique_ptr<llvm::TargetMachine> TM;
 #if LLVM_VERSION_MAJOR >= 21
-    cachedTM_.reset(target->createTargetMachine(llvm::Triple(triple), cpu, features, opts,
-                                                std::optional<llvm::Reloc::Model>()));
+    TM.reset(target->createTargetMachine(llvm::Triple(cachedTriple_), cachedCPU_, cachedFeatures_, opts,
+                                         std::optional<llvm::Reloc::Model>()));
 #else
-    cachedTM_.reset(target->createTargetMachine(triple, cpu, features, opts, std::optional<llvm::Reloc::Model>()));
+    TM.reset(target->createTargetMachine(cachedTriple_, cachedCPU_, cachedFeatures_, opts,
+                                         std::optional<llvm::Reloc::Model>()));
 #endif
-    return cachedTM_.get();
+    return TM;
 }
 
 // ---------------------------------------------------------------------------
@@ -494,14 +461,16 @@ void AdaptiveJITRunner::backgroundWorker() {
 }
 
 // ---------------------------------------------------------------------------
-// drainBackgroundThread() — stop the background worker cleanly
+// drainBackgroundThread() — stop the background worker pool cleanly
 // ---------------------------------------------------------------------------
 void AdaptiveJITRunner::drainBackgroundThread() {
-    if (!bgThread_.joinable())
-        return;
     shutdownRequested_.store(true, std::memory_order_relaxed);
-    queueCV_.notify_one();
-    bgThread_.join();
+    queueCV_.notify_all();  // Wake all worker threads
+    for (auto& t : bgThreads_) {
+        if (t.joinable())
+            t.join();
+    }
+    bgThreads_.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -993,9 +962,9 @@ void AdaptiveJITRunner::doRecompile(const std::string& funcName, int64_t callCou
         // we invest fully in code quality for proven hot functions.
         PTO.InlinerThreshold = 1200;
 
-        // Use the cached TargetMachine (created once, reused across all
-        // recompilations — saves ~1-3ms per function).
-        llvm::TargetMachine* TM = getOrCreateTargetMachine();
+        // Create a TargetMachine for this recompilation.  Each background
+        // thread gets its own TM since LLVM TargetMachine is not thread-safe.
+        auto TM = createTargetMachine();
         if (!TM) {
             llvm::errs() << "omsc: " << tierLabel << " recompile of '" << funcName
                          << "' failed: could not create target machine\n";
@@ -1003,7 +972,7 @@ void AdaptiveJITRunner::doRecompile(const std::string& funcName, int64_t callCou
         }
         mod->setDataLayout(TM->createDataLayout());
 
-        llvm::PassBuilder PB(TM, PTO);
+        llvm::PassBuilder PB(TM.get(), PTO);
 
         // Register LoopDistributePass to run just before vectorisation,
         // matching the AOT O3 pipeline.  Loop distribution splits loops with
@@ -1028,9 +997,10 @@ void AdaptiveJITRunner::doRecompile(const std::string& funcName, int64_t callCou
         PB.registerLoopAnalyses(LAM);
         PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
 
-        // Always use O3 for recompilation — since we now have only a single
-        // recompile tier, we apply maximum optimization to produce the best
-        // possible code in one shot.
+        // Use O3 for maximum code quality in the single recompile tier.
+        // Combined with AlwaysInline on all callees, aggressive inliner
+        // threshold (1200), and stripped unreachable functions, O3 produces
+        // code that can match or beat AOT for hot functions.
         auto pipeline = PB.buildPerModuleDefaultPipeline(llvm::OptimizationLevel::O3);
         pipeline.run(*mod, MAM);
     }

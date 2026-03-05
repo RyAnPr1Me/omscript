@@ -98,7 +98,7 @@ fn gcd(a, b) {
 fn bench_sum_cubes() {
     // 60k calls to sum_cubes_mod(500, 999983) — each call does 500 iterations
     // Total: 30M loop iterations across 60k function calls
-    var iters = 60000;
+    var iters = 480000;
     var checksum = 0;
     for (i in 0...iters) {
         checksum = checksum + sum_cubes_mod(500, 999983);
@@ -109,7 +109,7 @@ fn bench_sum_cubes() {
 fn bench_primes() {
     // 10k calls to count_primes(500) — each call scans 498 candidates
     // Total: ~5M iterations across 10k calls
-    var iters = 10000;
+    var iters = 80000;
     var checksum = 0;
     for (i in 0...iters) {
         checksum = checksum + count_primes(500);
@@ -120,7 +120,7 @@ fn bench_primes() {
 fn bench_fibonacci() {
     // 200k calls to fibonacci(200) — each call does 198 loop iterations
     // Total: ~40M iterations, hits Tier-3 at 2k calls
-    var iters = 200000;
+    var iters = 1600000;
     var checksum = 0;
     for (i in 0...iters) {
         checksum = checksum + fibonacci(200);
@@ -131,7 +131,7 @@ fn bench_fibonacci() {
 fn bench_collatz() {
     // 60k calls to collatz_sum(837799) — each call ~525 iterations
     // Total: ~31M iterations, hits Tier-3 at 2k calls
-    var iters = 60000;
+    var iters = 480000;
     var checksum = 0;
     for (i in 0...iters) {
         checksum = checksum + collatz_sum(837799);
@@ -142,7 +142,7 @@ fn bench_collatz() {
 fn bench_matrix() {
     // 10k calls to matrix_work(40) — each call does 40*40=1600 iterations
     // Total: 16M iterations
-    var iters = 10000;
+    var iters = 80000;
     var checksum = 0;
     for (i in 0...iters) {
         checksum = checksum + matrix_work(40);
@@ -153,7 +153,7 @@ fn bench_matrix() {
 fn bench_gcd() {
     // 200k calls to gcd — each call ~20 iterations
     // Total: ~4M iterations, hits Tier-3 at 2k calls
-    var iters = 200000;
+    var iters = 1600000;
     var checksum = 0;
     for (i in 0...iters) {
         checksum = checksum + gcd(1234567890, 987654321);

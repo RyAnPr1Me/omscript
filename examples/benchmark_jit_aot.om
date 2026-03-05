@@ -135,7 +135,7 @@ fn isqrt(n) {
 // ===========================================================================
 
 fn bench_sum_squares() {
-    var iters = 80000;
+    var iters = 640000;
     var checksum = 0;
     var t0 = time();
     for (i in 0...iters) {
@@ -148,7 +148,7 @@ fn bench_sum_squares() {
 }
 
 fn bench_fib() {
-    var iters = 200000;
+    var iters = 1600000;
     var checksum = 0;
     var t0 = time();
     for (i in 0...iters) {
@@ -161,7 +161,7 @@ fn bench_fib() {
 }
 
 fn bench_collatz() {
-    var iters = 80000;
+    var iters = 640000;
     var checksum = 0;
     var t0 = time();
     for (i in 0...iters) {
@@ -174,7 +174,7 @@ fn bench_collatz() {
 }
 
 fn bench_gcd() {
-    var iters = 300000;
+    var iters = 2400000;
     var checksum = 0;
     var t0 = time();
     for (i in 0...iters) {
@@ -187,7 +187,7 @@ fn bench_gcd() {
 }
 
 fn bench_primes() {
-    var iters = 8000;
+    var iters = 64000;
     var checksum = 0;
     var t0 = time();
     for (i in 0...iters) {
@@ -200,7 +200,7 @@ fn bench_primes() {
 }
 
 fn bench_matrix() {
-    var iters = 8000;
+    var iters = 64000;
     var checksum = 0;
     var t0 = time();
     for (i in 0...iters) {
@@ -213,7 +213,7 @@ fn bench_matrix() {
 }
 
 fn bench_ipow() {
-    var iters = 300000;
+    var iters = 2400000;
     var checksum = 0;
     var t0 = time();
     for (i in 0...iters) {
@@ -226,7 +226,7 @@ fn bench_ipow() {
 }
 
 fn bench_isqrt() {
-    var iters = 200000;
+    var iters = 1600000;
     var checksum = 0;
     var t0 = time();
     for (i in 0...iters) {

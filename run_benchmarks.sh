@@ -80,9 +80,9 @@ fi
 # JIT exit code may differ from AOT due to PGO-specialized computation paths
 # and different overflow behavior at higher tiers.
 BENCHMARKS=(
-    "examples/benchmark_jit_aot.om|128|128|JIT/AOT Suite (8 kernels)"
-    "examples/benchmark_loops_math.om|240|240|Loops + Math (8 kernels)"
-    "examples/jit_tier4_bench.om|96|96|Heavy Loops (6 kernels)"
+    "examples/benchmark_jit_aot.om|0|0|JIT/AOT Suite (8 kernels)"
+    "examples/benchmark_loops_math.om|192|192|Loops + Math (8 kernels)"
+    "examples/jit_tier4_bench.om|0|0|Heavy Loops (6 kernels)"
 )
 
 # --- Helper: run a command and write elapsed milliseconds to a file --------

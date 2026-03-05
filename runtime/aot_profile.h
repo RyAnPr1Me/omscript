@@ -170,7 +170,7 @@ class AdaptiveJITRunner {
     // twice instead of four times, and the Tier-2 O2 recompile is ~2x
     // faster than a full O3 pass.
     // -----------------------------------------------------------------------
-    static constexpr int64_t kTier2Threshold = 10;
+    static constexpr int64_t kTier2Threshold = 5;
     static constexpr int64_t kTier3Threshold = 1000000000LL; // effectively disabled
     /// Highest tier number (Tier-1 = baseline, Tier-2..kMaxTier = recompiled).
     static constexpr int kMaxTier = 2;
@@ -246,19 +246,22 @@ class AdaptiveJITRunner {
     bool loopOptimize_ = true;
 
     // -------------------------------------------------------------------
-    // Cached TargetMachine for recompilation
+    // Cached TargetMachine factory for recompilation
     // -------------------------------------------------------------------
     // Creating an LLVM TargetMachine involves string parsing, feature
-    // detection, and target registry lookup (~1-3ms).  Since all
-    // recompilations target the same host CPU, we create the TM once
-    // on the first recompile and reuse it for all subsequent ones.
-    // Only accessed from the background thread (no locking needed).
+    // detection, and target registry lookup (~1-3ms).  With parallel
+    // background threads, each thread needs its own TargetMachine (TM
+    // is not thread-safe).  We cache the host CPU/features/triple strings
+    // once and reuse them.
     // -------------------------------------------------------------------
-    std::unique_ptr<llvm::TargetMachine> cachedTM_;
+    std::string cachedTriple_;
+    std::string cachedCPU_;
+    std::string cachedFeatures_;
+    std::once_flag tmInitFlag_;
 
-    /// Build (or return cached) TargetMachine for the host CPU.
-    /// Returns nullptr on failure.  Only called from the background thread.
-    llvm::TargetMachine* getOrCreateTargetMachine();
+    /// Build a new TargetMachine for the host CPU.
+    /// Thread-safe: can be called from multiple background threads.
+    std::unique_ptr<llvm::TargetMachine> createTargetMachine();
 
     // -------------------------------------------------------------------
     // Background compilation thread
@@ -281,11 +284,14 @@ class AdaptiveJITRunner {
         void** fnPtrSlot; ///< Pointer to the dispatch slot (cast to std::atomic<void*>* at point of update).
     };
 
-    std::thread bgThread_;                   ///< Background compilation worker.
+    std::vector<std::thread> bgThreads_;           ///< Background compilation workers.
     std::queue<RecompileTask> taskQueue_;     ///< Pending recompilation requests.
     std::mutex queueMtx_;                    ///< Guards taskQueue_.
-    std::condition_variable queueCV_;        ///< Signals the background thread.
-    std::atomic<bool> shutdownRequested_{false}; ///< Signals the worker to exit.
+    std::condition_variable queueCV_;        ///< Signals the background threads.
+    std::atomic<bool> shutdownRequested_{false}; ///< Signals the workers to exit.
+
+    /// Number of background compilation threads.
+    static constexpr int kNumBgThreads = 2;
 
     /// Background worker loop: waits for tasks, executes them sequentially.
     void backgroundWorker();
