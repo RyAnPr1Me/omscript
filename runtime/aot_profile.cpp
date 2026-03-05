@@ -625,7 +625,7 @@ llvm::TargetMachine* AdaptiveJITRunner::getOrCreateTargetMachine() {
 // onHotFunction() — non-blocking recompilation enqueue
 // ---------------------------------------------------------------------------
 // Called from the dispatch prolog when a function's call count hits any of
-// the tier thresholds (20 / 2000).  Instead of blocking the main execution
+// the tier thresholds (10 / 2000).  Instead of blocking the main execution
 // thread, this enqueues a task on the background compilation thread and
 // returns immediately.  The function continues executing baseline code
 // until the background thread finishes and atomically patches the slot.

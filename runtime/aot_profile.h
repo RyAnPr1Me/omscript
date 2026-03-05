@@ -26,7 +26,7 @@
 //                                     ┌────────────────────┐
 //                                     │  Hot Function      │
 //                                     │  Detected          │
-//                                     │ (>= 20 calls)      │
+//                                     │ (>= 10 calls)      │
 //                                     └────────┬───────────┘
 //                                              │
 //                                              ▼
@@ -87,13 +87,13 @@
 //     Profiling continues even after Tier-2 promotion so that higher
 //     tiers benefit from richer statistical data.
 //
-//   Tier 2 — Warm recompile (20 calls):
+//   Tier 2 — Warm recompile (10 calls):
 //     First O2+PGO recompile with early profile data.
 //     Inliner threshold: 600.
 //     O2 keeps recompilation fast (~2x faster than O3) while still
 //     benefiting from PGO annotations (branch weights, type hints).
 //
-//   Tier 3 — Hot recompile (2000 calls):
+//   Tier 3 — Hot recompile (1000 calls):
 //     Full O3+PGO recompile with deep profile data.
 //     Inliner threshold: 1200, double O3 pass for cascading optimizations,
 //     alwaysinline on hot callees (>40% of calls).
@@ -156,11 +156,11 @@ class AdaptiveJITRunner {
     //   Tier 1 (baseline):  O1-backend JIT of the compiler's IR — runs from
     //                       call 0 while profile data is being collected.
     //                       O1 backend provides fast startup; the code is
-    //                       replaced by Tier-2 after just 20 calls.
-    //   Tier 2 (warm):      20 calls — first O2+PGO recompile with early
+    //                       replaced by Tier-2 after just 10 calls.
+    //   Tier 2 (warm):      10 calls — first O2+PGO recompile with early
     //                       profile data (branch weights, argument types).
     //                       O2 keeps recompile time low while applying PGO.
-    //   Tier 3 (hot):       2000 calls — full O3+PGO recompile with deep
+    //   Tier 3 (hot):       1000 calls — full O3+PGO recompile with deep
     //                       profile, inliner threshold 1200, double O3
     //                       pass for cascading optimizations, alwaysinline
     //                       on hot callees.
@@ -170,8 +170,8 @@ class AdaptiveJITRunner {
     // twice instead of four times, and the Tier-2 O2 recompile is ~2x
     // faster than a full O3 pass.
     // -----------------------------------------------------------------------
-    static constexpr int64_t kTier2Threshold = 20;
-    static constexpr int64_t kTier3Threshold = 2000;
+    static constexpr int64_t kTier2Threshold = 10;
+    static constexpr int64_t kTier3Threshold = 1000;
     /// Highest tier number (Tier-1 = baseline, Tier-2..kMaxTier = recompiled).
     static constexpr int kMaxTier = 3;
 
