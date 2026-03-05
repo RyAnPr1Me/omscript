@@ -674,7 +674,17 @@ void AdaptiveJITRunner::backgroundWorker() {
             task = std::move(taskQueue_.front());
             taskQueue_.pop();
         }
-        doRecompile(task.funcName, task.callCount, task.fnPtrSlot);
+        // Catch any exceptions from LLVM to prevent the background thread
+        // from crashing and hanging the main thread at shutdown (join).
+        try {
+            doRecompile(task.funcName, task.callCount, task.fnPtrSlot);
+        } catch (const std::exception& e) {
+            std::cerr << "JIT: background recompile of '" << task.funcName
+                      << "' threw exception: " << e.what() << "\n";
+        } catch (...) {
+            std::cerr << "JIT: background recompile of '" << task.funcName
+                      << "' threw unknown exception\n";
+        }
     }
 }
 
@@ -780,13 +790,24 @@ void AdaptiveJITRunner::doRecompile(const std::string& funcName, int64_t callCou
             other.setEntryCount(1);
     }
 
+    // --- Snapshot profile data for thread safety ---
+    // The main thread continues writing to the profiler while we read on the
+    // background thread.  Take a deep copy of the profile data inside the
+    // profiler's lock so all subsequent reads are race-free.
+    std::unique_ptr<FunctionProfile> profSnapshot;
+    {
+        const FunctionProfile* rawProf = JITProfiler::instance().getProfile(funcName);
+        if (rawProf)
+            profSnapshot = std::make_unique<FunctionProfile>(*rawProf);
+    }
+
     // --- Apply collected branch profile data as LLVM branch weights ---
     // The JITProfiler records taken/not-taken counts for each branch site
     // during the warm-up phase.  Attaching these as branch weight metadata
     // guides the code layout, branch predictor hints, and LLVM's hot/cold
     // splitting passes in the O3 pipeline.
     {
-        const FunctionProfile* prof = JITProfiler::instance().getProfile(funcName);
+        const FunctionProfile* prof = profSnapshot.get();
         if (prof && !prof->branches.empty()) {
             llvm::MDBuilder mdb(fn->getContext());
             uint32_t branchIdx = 0;
@@ -823,7 +844,7 @@ void AdaptiveJITRunner::doRecompile(const std::string& funcName, int64_t callCou
     // These attributes feed into LLVM's IPSCCP, instcombine, and inliner
     // to produce tighter specialized code for the hot path.
     {
-        const FunctionProfile* prof = JITProfiler::instance().getProfile(funcName);
+        const FunctionProfile* prof = profSnapshot.get();
         if (prof) {
             for (size_t i = 0; i < prof->args.size() && i < fn->arg_size(); i++) {
                 const auto& ap = prof->args[i];
@@ -854,7 +875,7 @@ void AdaptiveJITRunner::doRecompile(const std::string& funcName, int64_t callCou
     // cases where the constant-count tracker was confused by early non-constant
     // calls but the top-K tracker correctly identified the dominant value.
     {
-        const FunctionProfile* prof = JITProfiler::instance().getProfile(funcName);
+        const FunctionProfile* prof = profSnapshot.get();
         if (prof && !fn->empty()) {
             auto* i64Ty = llvm::Type::getInt64Ty(fn->getContext());
             // Declare @llvm.assume(i1) intrinsic.
@@ -898,7 +919,7 @@ void AdaptiveJITRunner::doRecompile(const std::string& funcName, int64_t callCou
     // This is only applied when constant specialization was NOT already
     // injected (to avoid redundant assumptions).
     {
-        const FunctionProfile* prof = JITProfiler::instance().getProfile(funcName);
+        const FunctionProfile* prof = profSnapshot.get();
         if (prof && !fn->empty()) {
             auto* i64Ty = llvm::Type::getInt64Ty(fn->getContext());
 #if LLVM_VERSION_MAJOR >= 19
@@ -937,7 +958,7 @@ void AdaptiveJITRunner::doRecompile(const std::string& funcName, int64_t callCou
     // At Tier-3, callees that dominate >40% of calls get `alwaysinline`
     // to guarantee full inlining of the hot path.
     {
-        const FunctionProfile* prof = JITProfiler::instance().getProfile(funcName);
+        const FunctionProfile* prof = profSnapshot.get();
         if (prof && !prof->callSites.empty()) {
             uint64_t totalCalls = 0;
             for (const auto& cs : prof->callSites)
@@ -1023,7 +1044,7 @@ void AdaptiveJITRunner::doRecompile(const std::string& funcName, int64_t callCou
     // counts (<=64) get unroll-by-4; larger loops keep the default strategy.
     {
         auto& ctx = fn->getContext();
-        const FunctionProfile* loopProf = JITProfiler::instance().getProfile(funcName);
+        const FunctionProfile* loopProf = profSnapshot.get();
         // Build a set of blocks we've visited so far to detect back-edges in
         // O(n) total time instead of O(n²) per-branch inner scan.
         llvm::SmallPtrSet<llvm::BasicBlock*, 32> visited;
@@ -1284,22 +1305,24 @@ void AdaptiveJITRunner::doRecompile(const std::string& funcName, int64_t callCou
         return;
     }
 
-    // Mark successful — prevents the RAII scope guard from reverting the tier.
-    succeeded = true;
-
+    // Store the engine first, then mark successful.  This ensures the module
+    // stays alive even if something goes wrong after the success flag is set.
     {
         std::lock_guard<std::mutex> lk(recompiledMtx_);
         modules_.push_back({std::move(newCtx), std::move(engine)});
     }
 
+    // Mark successful — prevents the RAII scope guard from reverting the tier.
+    succeeded = true;
+
     // Hot-patch: use an atomic store with release ordering so the dispatch
-    // prolog's volatile load (which acts as an acquire on x86, and pairs
-    // with the release here on weakly-ordered architectures) sees the new
-    // pointer on the very next function call.  This is the key to making
-    // background compilation have zero performance impact — the main thread
-    // never pauses; it simply starts seeing the optimised pointer.
-    reinterpret_cast<std::atomic<void*>*>(fnPtrSlot)->store(
-        reinterpret_cast<void*>(addr), std::memory_order_release);
+    // prolog's volatile load sees the new pointer on the very next function
+    // call.  We use __atomic_store_n (GCC/Clang built-in) instead of
+    // reinterpret_cast<std::atomic<void*>*> to avoid strict-aliasing UB.
+    // On x86 this compiles to a simple MOV (TSO provides release semantics
+    // for free); on ARM/POWER it emits the appropriate release fence.
+    void* newPtr = reinterpret_cast<void*>(addr);
+    __atomic_store_n(fnPtrSlot, newPtr, __ATOMIC_RELEASE);
     std::cerr << "JIT: recompiled '" << funcName << "' successfully (" << tierLabel << " active) [background]\n";
 }
 
