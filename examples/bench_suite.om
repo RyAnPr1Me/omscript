@@ -1,0 +1,219 @@
+// ---------------------------------------------------------------------------
+// OmScript Comprehensive Benchmark Suite  (examples/bench_suite.om)
+// ---------------------------------------------------------------------------
+//
+// Covers eight workload categories to expose JIT vs AOT performance.
+// Every kernel is called thousands of times so ORC JIT's background
+// Tier-2 (O3+PGO) compilation warms up well before the heavy work starts.
+//
+// Iteration counts are tuned so each kernel runs ≈ 1-4 s on a modern x86
+// machine in AOT -O3 mode.  Loop-carried dependencies (varying arguments)
+// prevent the compiler from constant-folding the outer loops away.
+//
+// Usage:
+//   omsc run  examples/bench_suite.om                             # JIT
+//   omsc compile -O3 examples/bench_suite.om -o /tmp/bs && /tmp/bs  # AOT
+//
+// ---------------------------------------------------------------------------
+
+// ===========================================================================
+// Kernel implementations
+// ===========================================================================
+
+// 1. Sum of squares — vectorisable arithmetic loop
+fn sum_squares(n) {
+    var total = 0;
+    for (i in 0...n) { total = total + i * i; }
+    return total;
+}
+
+// 2. Recursive Fibonacci — true tree recursion, cannot be vectorised
+fn fib_rec(n) {
+    if (n <= 1) { return n; }
+    return fib_rec(n - 1) + fib_rec(n - 2);
+}
+
+// 3. Collatz sequence length — unpredictable branch pattern
+fn collatz_steps(n) {
+    var steps = 0;
+    var v = n;
+    while (v != 1) {
+        if (v % 2 == 0) { v = v / 2; } else { v = v * 3 + 1; }
+        steps = steps + 1;
+    }
+    return steps;
+}
+
+// 4. Trial-division prime test — branch-heavy inner loop
+fn is_prime(n) {
+    if (n < 2) { return 0; }
+    if (n == 2) { return 1; }
+    if (n % 2 == 0) { return 0; }
+    var i = 3;
+    while (i * i <= n) { if (n % i == 0) { return 0; } i = i + 2; }
+    return 1;
+}
+
+// 4b. Count primes up to n
+fn count_primes(n) {
+    var cnt = 0;
+    for (i in 2...n) { cnt = cnt + is_prime(i); }
+    return cnt;
+}
+
+// 5. GCD (Euclidean) — tight register loop
+fn gcd(a, b) {
+    while (b != 0) { var t = b; b = a % b; a = t; }
+    return a;
+}
+
+// 6. Modular exponentiation — bit-scan + multiply loop
+fn mod_exp(base, exp, mod) {
+    var result = 1;
+    var b = base % mod;
+    var e = exp;
+    while (e > 0) {
+        if (e % 2 == 1) { result = (result * b) % mod; }
+        b = (b * b) % mod;
+        e = e / 2;
+    }
+    return result;
+}
+
+// 7. Integer square root via Newton convergence
+fn isqrt(n) {
+    if (n <= 1) { return n; }
+    var x = n;
+    var y = (x + 1) / 2;
+    while (y < x) { x = y; y = (x + n / x) / 2; }
+    return x;
+}
+
+// 8. Hot-call churn — many small function calls (dispatch + inlining stress)
+fn add2(a, b)       { return a + b; }
+fn mul2(a, b)       { return a * b; }
+fn abs_diff(a, b)   { if (a > b) { return a - b; } return b - a; }
+
+fn churn_step(i) {
+    var x = add2(i, i + 1);
+    var y = mul2(i + 1, 3);
+    return abs_diff(x, y);
+}
+
+// ===========================================================================
+// Benchmark harness
+// ===========================================================================
+
+fn sep() { print("------------------------------------------------------------"); }
+fn row(label, cs, t) { print(label); print(t); print(cs); }
+
+fn main() {
+    print("============================================================");
+    print("  OmScript Comprehensive Benchmark Suite");
+    print("  JIT: `omsc run`  |  AOT: `omsc compile -O3 ... && ./bench`");
+    print("============================================================");
+    print("Kernel                         Time(s)  Checksum");
+    sep();
+
+    var grand = 0;
+    var cs = 0;
+    var t0 = 0;
+    var t1 = 0;
+
+    // ---------------------------------------------------------------
+    // 1. Arithmetic: sum_squares with varying n (anti-fold)
+    //    ~1 s AOT.  n varies each iter to prevent hoisting.
+    // ---------------------------------------------------------------
+    t0 = time(); cs = 0;
+    for (i in 0...20000000) {
+        cs = cs + sum_squares((i % 100) + 100);
+    }
+    t1 = time();
+    grand = grand + cs % 1000000;
+    row("1.  sum_squares(100-200)x20M   ", cs % 1000000, t1 - t0);
+
+    // ---------------------------------------------------------------
+    // 2. Recursive Fibonacci: fib_rec(28) x 2500
+    //    ~5 s AOT (tree recursion, ~270M recursive calls total).
+    //    JIT Tier-2 inlines recursive base cases → substantial speedup.
+    // ---------------------------------------------------------------
+    t0 = time(); cs = 0;
+    for (i in 0...2500) { cs = cs + fib_rec(28); }
+    t1 = time();
+    grand = grand + cs % 1000000;
+    row("2.  fib_rec(28)x2500           ", cs % 1000000, t1 - t0);
+
+    // ---------------------------------------------------------------
+    // 3. Collatz: varying starting values, 5 000 000 calls
+    //    ~1 s AOT.  Branch pattern changes every iteration.
+    // ---------------------------------------------------------------
+    t0 = time(); cs = 0;
+    for (i in 0...5000000) {
+        cs = cs + collatz_steps((i % 999983) + 2);
+    }
+    t1 = time();
+    grand = grand + cs % 1000000;
+    row("3.  collatz(varying)x5M        ", cs % 1000000, t1 - t0);
+
+    // ---------------------------------------------------------------
+    // 4. Prime counting: count_primes(1000) x 200 000
+    //    ~2 s AOT.  Exercises is_prime with many trial-division paths.
+    // ---------------------------------------------------------------
+    t0 = time(); cs = 0;
+    for (i in 0...200000) { cs = cs + count_primes(1000); }
+    t1 = time();
+    grand = grand + cs % 1000000;
+    row("4.  count_primes(1000)x200k    ", cs % 1000000, t1 - t0);
+
+    // ---------------------------------------------------------------
+    // 5a. GCD chain: 20 000 000 calls with varying inputs
+    //     ~2 s AOT.  Extremely tight loop; tests integer throughput.
+    // ---------------------------------------------------------------
+    t0 = time(); cs = 0;
+    for (i in 0...20000000) {
+        cs = cs + gcd(1234567891 + i, 987654321 - i % 1000);
+    }
+    t1 = time();
+    grand = grand + cs % 1000000;
+    row("5a. gcd(varying)x20M           ", cs % 1000000, t1 - t0);
+
+    // ---------------------------------------------------------------
+    // 5b. Modular exponentiation: 2 000 000 calls
+    //     ~2 s AOT.  Bit-loop with multiplies and modulos.
+    // ---------------------------------------------------------------
+    t0 = time(); cs = 0;
+    for (i in 0...2000000) {
+        cs = (cs + mod_exp(65537 + i % 1000, 999983, 1000000007)) % 1000000007;
+    }
+    t1 = time();
+    grand = grand + cs % 1000000;
+    row("5b. mod_exp(65537,999983)x2M   ", cs % 1000000, t1 - t0);
+
+    // ---------------------------------------------------------------
+    // 6. isqrt batch: 10 000 000 Newton-convergence calls
+    //    ~1 s AOT.  Convergence depth varies with input magnitude.
+    // ---------------------------------------------------------------
+    t0 = time(); cs = 0;
+    for (i in 0...10000000) {
+        cs = cs + isqrt(i * 999983 + 1);
+    }
+    t1 = time();
+    grand = grand + cs % 1000000;
+    row("6.  isqrt(varying)x10M         ", cs % 1000000, t1 - t0);
+
+    // ---------------------------------------------------------------
+    // 7. Hot-call churn: 20 000 000 churn_step() calls
+    //    ~1 s AOT.  Stresses function-call dispatch + inlining.
+    // ---------------------------------------------------------------
+    t0 = time(); cs = 0;
+    for (i in 0...20000000) { cs = cs + churn_step(i); }
+    t1 = time();
+    grand = grand + cs % 1000000;
+    row("7.  hot_churn()x20M            ", cs % 1000000, t1 - t0);
+
+    sep();
+    print("Grand checksum (mod 1M):");
+    print(grand % 1000000);
+
+    return grand % 256;
+}
