@@ -942,12 +942,8 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
         FMF.setFast();
         for (auto& bb : *fn) {
             for (auto& inst : bb) {
-                if (inst.getType()->isFloatingPointTy() || inst.getType()->isVectorTy()) {
-                    if (auto* fpOp = llvm::dyn_cast<llvm::FPMathOperator>(&inst)) {
-                        // Only upgrade — don't downgrade instructions that already have flags.
-                        (void)fpOp; // satisfies linter; we set via the Instruction interface.
-                        inst.setFastMathFlags(FMF);
-                    }
+                if (llvm::isa<llvm::FPMathOperator>(inst)) {
+                    inst.setFastMathFlags(FMF);
                 }
             }
         }
