@@ -322,7 +322,10 @@ void AdaptiveJITRunner::injectCounters(llvm::Module& mod) {
             B.CreateICmpEQ(hotNew, llvm::ConstantInt::get(i64Ty, AdaptiveJITRunner::kTier3Threshold), "omsc.ht3");
         auto* hitHigherT4 =
             B.CreateICmpEQ(hotNew, llvm::ConstantInt::get(i64Ty, AdaptiveJITRunner::kTier4Threshold), "omsc.ht4");
-        auto* hitHigher = B.CreateOr(hitHigherT3, hitHigherT4, "omsc.hit_higher");
+        auto* hitHigherT5 =
+            B.CreateICmpEQ(hotNew, llvm::ConstantInt::get(i64Ty, AdaptiveJITRunner::kTier5Threshold), "omsc.ht5");
+        auto* hitHigher = B.CreateOr(B.CreateOr(hitHigherT3, hitHigherT4, "omsc.hit_h34"),
+                                     hitHigherT5, "omsc.hit_higher");
         B.CreateCondBr(hitHigher, hotCheckBB, hotCallBB, mdB.createBranchWeights(1, 999));
 
         // --- omsc.hot_check: profile args then trigger recompile ---
@@ -384,7 +387,10 @@ void AdaptiveJITRunner::injectCounters(llvm::Module& mod) {
             B.CreateICmpEQ(newCnt, llvm::ConstantInt::get(i64Ty, AdaptiveJITRunner::kTier3Threshold), "omsc.hit_t3");
         auto* hitT4 =
             B.CreateICmpEQ(newCnt, llvm::ConstantInt::get(i64Ty, AdaptiveJITRunner::kTier4Threshold), "omsc.hit_t4");
-        auto* hitAny = B.CreateOr(B.CreateOr(hitT2, hitT3, "omsc.hit23"), hitT4, "omsc.hit");
+        auto* hitT5 =
+            B.CreateICmpEQ(newCnt, llvm::ConstantInt::get(i64Ty, AdaptiveJITRunner::kTier5Threshold), "omsc.hit_t5");
+        auto* hitAny = B.CreateOr(B.CreateOr(B.CreateOr(hitT2, hitT3, "omsc.hit23"), hitT4, "omsc.hit234"),
+                                  hitT5, "omsc.hit");
         B.CreateCondBr(hitAny, recompileBB, &origEntry);
 
         // --- omsc.recompile: call the C++ recompiler, then fall to body ---
@@ -510,6 +516,8 @@ int AdaptiveJITRunner::run(llvm::Module* baseModule) {
 // tierForCallCount() — map a call count to its JIT tier
 // ---------------------------------------------------------------------------
 int AdaptiveJITRunner::tierForCallCount(int64_t count) {
+    if (count >= kTier5Threshold)
+        return 5;
     if (count >= kTier4Threshold)
         return 4;
     if (count >= kTier3Threshold)
@@ -542,7 +550,7 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
             return; // Already at this tier or above.
     }
 
-    const char* tierNames[] = {"", "", "Tier-2 (warm)", "Tier-3 (hot)", "Tier-4 (saturated)"};
+    const char* tierNames[] = {"", "", "Tier-2 (warm)", "Tier-3 (hot)", "Tier-4 (saturated)", "Tier-5 (mega-hot)"};
     const char* tierLabel =
         (targetTier >= 2 && targetTier <= AdaptiveJITRunner::kMaxTier) ? tierNames[targetTier] : "Tier-?";
     std::cerr << "JIT: recompiling '" << funcName << "' (calls: " << callCount << ") at " << tierLabel << " O3+PGO\n";
@@ -758,6 +766,8 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
     // this hot function, add `inlinehint` to those callees to guide LLVM's
     // inliner to prioritize inlining them.  Callees that account for >20%
     // of all calls from this function are considered hot call sites.
+    // At Tier-4+, callees that dominate >40% of calls get `alwaysinline`
+    // to guarantee full inlining of the hot path.
     {
         const FunctionProfile* prof = JITProfiler::instance().getProfile(funcName);
         if (prof && !prof->callSites.empty()) {
@@ -770,7 +780,13 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
                     if (ratio > 0.2) {
                         llvm::Function* callee = mod->getFunction(cs.first);
                         if (callee && !callee->isDeclaration()) {
-                            callee->addFnAttr(llvm::Attribute::InlineHint);
+                            // At Tier-4+ (5000+ calls), dominant callees (>40% of calls)
+                            // get alwaysinline to guarantee full inlining.
+                            if (targetTier >= 4 && ratio > 0.4) {
+                                callee->addFnAttr(llvm::Attribute::AlwaysInline);
+                            } else {
+                                callee->addFnAttr(llvm::Attribute::InlineHint);
+                            }
                             // Remove the cold attribute if it was previously set
                             // so the inliner doesn't skip this hot callee.
                             callee->removeFnAttr(llvm::Attribute::Cold);
@@ -911,17 +927,47 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
         }
     }
 
+    // --- Propagate fast-math IR flags to all floating-point instructions ---
+    // When the user passes -ffast-math, the codegen frontend sets FMF.setFast()
+    // on the IRBuilder, tagging every FP instruction with nnan/ninf/nsz/arcp/
+    // contract/afn/reassoc flags.  The clean bitcode preserves these flags.
+    // However, llvm.assume and other injected instructions in the PGO
+    // annotation above may have been inserted WITHOUT fast-math flags.
+    // To ensure the O3 pipeline sees consistent FP semantics, sweep the hot
+    // function and set fast-math flags on any FP instruction that doesn't
+    // already have them.  This enables FMA fusion, reciprocal estimation,
+    // and reassociation across the entire hot function body.
+    if (fastMath_) {
+        llvm::FastMathFlags FMF;
+        FMF.setFast();
+        for (auto& bb : *fn) {
+            for (auto& inst : bb) {
+                if (inst.getType()->isFloatingPointTy() || inst.getType()->isVectorTy()) {
+                    if (auto* fpOp = llvm::dyn_cast<llvm::FPMathOperator>(&inst)) {
+                        // Only upgrade — don't downgrade instructions that already have flags.
+                        (void)fpOp; // satisfies linter; we set via the Instruction interface.
+                        inst.setFastMathFlags(FMF);
+                    }
+                }
+            }
+        }
+    }
+
     // --- Re-optimise at O3 with PGO guidance and full native CPU features ---
     // Each tier uses progressively more aggressive optimisation settings:
-    //   Tier 2 (warm,  50 calls): inliner threshold 600
-    //   Tier 3 (hot,  500 calls): inliner threshold 800, merge functions
-    //   Tier 4 (sat, 5000 calls): inliner threshold 1200, maximum aggression
+    //   Tier 2 (warm,  50 calls):  inliner threshold 600
+    //   Tier 3 (hot,  500 calls):  inliner threshold 800
+    //   Tier 4 (sat, 5000 calls):  inliner threshold 1200, double O3 pass
+    //   Tier 5 (mega,50000 calls): inliner threshold 1600, double O3 pass
+    //
+    // User flags (-ffast-math, -fvectorize, -funroll-loops, -floop-optimize)
+    // are propagated from the command line to the recompilation pipeline.
     {
         llvm::PipelineTuningOptions PTO;
-        PTO.LoopVectorization = true;
-        PTO.SLPVectorization = true;
-        PTO.LoopUnrolling = true;
-        PTO.LoopInterleaving = true;
+        PTO.LoopVectorization = vectorize_;
+        PTO.SLPVectorization = vectorize_;
+        PTO.LoopUnrolling = unrollLoops_;
+        PTO.LoopInterleaving = vectorize_;
         PTO.MergeFunctions = true;
         PTO.CallGraphProfile = true;
         // Scale the inliner threshold with the tier: higher tiers justify the
@@ -936,6 +982,9 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
             break;
         case 4:
             PTO.InlinerThreshold = 1200;
+            break;
+        case 5:
+            PTO.InlinerThreshold = 1600;
             break;
         }
 
@@ -965,6 +1014,17 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
             }
             llvm::TargetOptions opts;
             opts.EnableFastISel = false; // force optimising ISel for best codegen
+            // Propagate user's -ffast-math flag to the TargetMachine so that
+            // the backend can use reciprocal estimates, FMA fusion, and
+            // relaxed NaN/Inf handling in instruction selection.
+            if (fastMath_) {
+#if LLVM_VERSION_MAJOR < 22
+                opts.UnsafeFPMath = true;
+#endif
+                opts.NoInfsFPMath = true;
+                opts.NoNaNsFPMath = true;
+                opts.NoSignedZerosFPMath = true;
+            }
 #if LLVM_VERSION_MAJOR >= 21
             TM.reset(target->createTargetMachine(llvm::Triple(triple), cpu, features, opts,
                                                  std::optional<llvm::Reloc::Model>()));
@@ -986,8 +1046,13 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
         // multiple independent memory streams into separate loops with smaller
         // working sets, improving cache locality and enabling downstream
         // vectorisation of the resulting simpler loops.
-        PB.registerVectorizerStartEPCallback(
-            [](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) { FPM.addPass(llvm::LoopDistributePass()); });
+        // Only registered when the user has not disabled loop optimization.
+        if (loopOptimize_) {
+            PB.registerVectorizerStartEPCallback(
+                [](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) {
+                    FPM.addPass(llvm::LoopDistributePass());
+                });
+        }
 
         llvm::LoopAnalysisManager LAM;
         llvm::FunctionAnalysisManager FAM;
@@ -998,7 +1063,35 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
         PB.registerFunctionAnalyses(FAM);
         PB.registerLoopAnalyses(LAM);
         PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
-        PB.buildPerModuleDefaultPipeline(llvm::OptimizationLevel::O3).run(*mod, MAM);
+
+        auto pipeline = PB.buildPerModuleDefaultPipeline(llvm::OptimizationLevel::O3);
+        pipeline.run(*mod, MAM);
+
+        // At Tier-4+ (5000+ calls), run the O3 pipeline a second time.
+        // The first pass often creates new optimization opportunities
+        // (e.g., inlining exposes constant folding, dead code elimination
+        // reveals further loop simplification) that a second pass can exploit.
+        // This mirrors the AOT pipeline's iterative approach at O3.
+        if (targetTier >= 4) {
+            // The first O3 pass may have added module flags (e.g., "CG Profile")
+            // that would conflict with the second pass trying to add them again.
+            // Strip all module flags to avoid "module flag identifiers must be
+            // unique" verification failures.
+            if (auto* modFlags = mod->getModuleFlagsMetadata())
+                mod->eraseNamedMetadata(modFlags);
+
+            // Re-create analysis managers for the second pass.
+            llvm::LoopAnalysisManager LAM2;
+            llvm::FunctionAnalysisManager FAM2;
+            llvm::CGSCCAnalysisManager CGAM2;
+            llvm::ModuleAnalysisManager MAM2;
+            PB.registerModuleAnalyses(MAM2);
+            PB.registerCGSCCAnalyses(CGAM2);
+            PB.registerFunctionAnalyses(FAM2);
+            PB.registerLoopAnalyses(LAM2);
+            PB.crossRegisterProxies(LAM2, FAM2, CGAM2, MAM2);
+            PB.buildPerModuleDefaultPipeline(llvm::OptimizationLevel::O3).run(*mod, MAM2);
+        }
     }
 
     // Verify the module after O3 optimization to catch optimizer bugs early.

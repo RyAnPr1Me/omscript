@@ -95,8 +95,12 @@
 //     Inliner threshold: 800 — more aggressive cross-function inlining.
 //
 //   Tier 4 — Saturated recompile (5000 calls):
-//     Final recompile with the deepest profile and maximum aggression.
-//     Inliner threshold: 1200 — full specialisation of the hot path.
+//     Deep profile, inliner threshold 1200, double O3 pipeline pass
+//     to catch cascading optimizations.
+//
+//   Tier 5 — Mega-hot recompile (50000 calls):
+//     Maximum aggression: inliner threshold 1600, alwaysinline on hot
+//     callees, double O3 pass, full specialisation of the hot path.
 //
 //   Each tier:
 //     1. Parses the clean bitcode, strips unreachable functions.
@@ -104,6 +108,10 @@
 //        constant specialization, range assumptions, inline hints.
 //     3. Re-runs the full LLVM O3 pipeline with tier-specific settings.
 //     4. JIT-compiles and hot-patches the dispatch slot.
+//
+//   User flags (-ffast-math, -fvectorize, -funroll-loops, -floop-optimize)
+//   are propagated to the Tier-2+ O3 pipeline so the JIT honours the same
+//   optimisation policy the user requested.
 //
 //   Deoptimization:
 //     Specialized code may include guard checks.  After kDeoptThreshold
@@ -132,7 +140,7 @@ class AdaptiveJITRunner {
     // -----------------------------------------------------------------------
     // Multi-tier recompilation thresholds
     // -----------------------------------------------------------------------
-    // The JIT uses four execution tiers, each triggered when a function's
+    // The JIT uses five execution tiers, each triggered when a function's
     // call count first reaches the corresponding threshold:
     //
     //   Tier 1 (baseline):  O3-backend JIT of the compiler's IR — runs from
@@ -141,8 +149,10 @@ class AdaptiveJITRunner {
     //                       profile data (branch weights, argument types).
     //   Tier 3 (hot):       500 calls — richer profile, more aggressive
     //                       inlining (threshold 800) and full loop unroll.
-    //   Tier 4 (saturated): 5000 calls — maximum optimisation with the
-    //                       deepest profile and most aggressive settings.
+    //   Tier 4 (saturated): 5000 calls — deep profile, inliner 1200, double
+    //                       O3 pass for cascading optimizations.
+    //   Tier 5 (mega-hot):  50000 calls — maximum aggression: inliner 1600,
+    //                       alwaysinline on hot callees, double O3 pass.
     //
     // Each successive tier uses increasingly aggressive inliner thresholds
     // and benefits from more statistically significant profile data.
@@ -150,8 +160,9 @@ class AdaptiveJITRunner {
     static constexpr int64_t kTier2Threshold = 50;
     static constexpr int64_t kTier3Threshold = 500;
     static constexpr int64_t kTier4Threshold = 5000;
+    static constexpr int64_t kTier5Threshold = 50000;
     /// Highest tier number (Tier-1 = baseline, Tier-2..kMaxTier = recompiled).
-    static constexpr int kMaxTier = 4;
+    static constexpr int kMaxTier = 5;
 
     AdaptiveJITRunner();
     ~AdaptiveJITRunner();
@@ -165,6 +176,25 @@ class AdaptiveJITRunner {
     }
     bool isVerbose() const {
         return verbose_;
+    }
+
+    // -------------------------------------------------------------------
+    // Propagated optimisation flags — set by the driver before run().
+    // These mirror the user's command-line flags (-ffast-math, -fvectorize,
+    // etc.) so that Tier-2+ recompilation applies the SAME optimisation
+    // policy the user requested for the AOT pipeline.
+    // -------------------------------------------------------------------
+    void setFastMath(bool v) {
+        fastMath_ = v;
+    }
+    void setVectorize(bool v) {
+        vectorize_ = v;
+    }
+    void setUnrollLoops(bool v) {
+        unrollLoops_ = v;
+    }
+    void setLoopOptimize(bool v) {
+        loopOptimize_ = v;
     }
 
     /// Execute the program defined by @p module in-process.
@@ -197,7 +227,13 @@ class AdaptiveJITRunner {
     std::mutex recompiledMtx_; ///< Guards functionTier_ and modules_ across threads.
     bool verbose_ = false;     ///< Print JIT recompile events when true.
 
-    /// Return the tier (2, 3, or 4) for a given call count, or 0 if below
+    // --- User-provided optimisation flags (propagated to Tier-2+ O3 pipeline) ---
+    bool fastMath_ = false;
+    bool vectorize_ = true;
+    bool unrollLoops_ = true;
+    bool loopOptimize_ = true;
+
+    /// Return the tier (2, 3, 4, or 5) for a given call count, or 0 if below
     /// all thresholds.
     static int tierForCallCount(int64_t count);
 
