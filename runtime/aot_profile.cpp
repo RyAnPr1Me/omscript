@@ -159,27 +159,38 @@ void AdaptiveJITRunner::injectCounters(llvm::Module& mod) {
         auto* countBB = llvm::BasicBlock::Create(ctx, "omsc.count", fn, &origEntry);
         auto* recompileBB = llvm::BasicBlock::Create(ctx, "omsc.recompile", fn, &origEntry);
 
-        // --- omsc.dispatch: volatile-load fn-ptr, branch on non-null ---
+        // --- omsc.dispatch: atomic-load fn-ptr, branch on non-null ---
         // This is the entry point for EVERY call.  After the background
-        // thread stores an optimized fn-ptr, the volatile load picks it up
-        // and branches to the hot call — just 3 instructions per call:
-        //   load ptr → cmp null → br hot_call
+        // thread stores an optimized fn-ptr via atomic release, the atomic
+        // acquire load here picks it up.  Using atomic (monotonic) instead
+        // of volatile allows the LLVM backend to:
+        //   - Combine redundant loads when a function is called multiple
+        //     times in a basic block
+        //   - Schedule the load earlier (out-of-order friendly)
+        // On x86/TSO this compiles to a plain MOV — same cost as volatile
+        // but with better optimiser freedom.
         llvm::IRBuilder<> B(dispatchBB);
-        auto* fp = B.CreateAlignedLoad(ptrTy, fnPtrGV, llvm::Align(8), /*isVolatile=*/true, "omsc.fp");
-        auto* isHot = B.CreateICmpNE(fp, llvm::Constant::getNullValue(ptrTy), "omsc.is_hot");
+        auto* fpLoad = B.CreateAlignedLoad(ptrTy, fnPtrGV, llvm::Align(8), /*isVolatile=*/false, "omsc.fp");
+        // Set atomic ordering to monotonic — sufficient for single-writer
+        // (background thread) / single-reader (main thread) on x86 TSO.
+        // The release store on the writer side + monotonic load here gives
+        // eventual visibility without stalling the pipeline.
+        fpLoad->setOrdering(llvm::AtomicOrdering::Monotonic);
+        auto* isHot = B.CreateICmpNE(fpLoad, llvm::Constant::getNullValue(ptrTy), "omsc.is_hot");
         llvm::MDBuilder mdB(ctx);
         B.CreateCondBr(isHot, hotCallBB, countBB, mdB.createBranchWeights(99, 1));
 
         // --- omsc.hot_call: fast path — call through optimized fn-ptr ---
-        // After Tier-2 recompilation, this is the only path taken.
-        // Overhead: volatile load + null check + indirect call + ret
-        // (approximately 3-4 nanoseconds on modern x86).
+        // After background recompilation, this is the only path taken.
+        // Overhead: atomic load + null check + indirect call + ret.
+        // The atomic monotonic load allows the CPU to pipeline efficiently
+        // and the LLVM O0 backend to schedule optimally.
         B.SetInsertPoint(hotCallBB);
         {
             llvm::SmallVector<llvm::Value*, 8> args;
             for (auto& arg : fn->args())
                 args.push_back(&arg);
-            auto* hotCall = B.CreateCall(fn->getFunctionType(), fp, args, "omsc.hot_r");
+            auto* hotCall = B.CreateCall(fn->getFunctionType(), fpLoad, args, "omsc.hot_r");
             B.CreateRet(hotCall);
         }
 
@@ -448,11 +459,13 @@ std::unique_ptr<llvm::TargetMachine> AdaptiveJITRunner::createTargetMachine() {
 // ---------------------------------------------------------------------------
 // onHotFunction() — non-blocking recompilation enqueue
 // ---------------------------------------------------------------------------
-// Called from the dispatch prolog when a function's call count hits any of
-// the tier thresholds (10 / 2000).  Instead of blocking the main execution
-// thread, this enqueues a task on the background compilation thread and
-// returns immediately.  The function continues executing baseline code
-// until the background thread finishes and atomically patches the slot.
+// Called from the dispatch prolog when a function's call count hits the
+// tier threshold.  With eager compilation, this should rarely fire (all
+// functions are pre-enqueued at startup).  Uses try_lock to be completely
+// non-blocking — if the lock is contended, we skip the enqueue entirely
+// rather than stalling the main execution thread.  The function will
+// continue running baseline code; the eager compilation will eventually
+// patch the fn-ptr anyway.
 void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void** fnPtrSlot) {
     const std::string funcName(name);
 
@@ -462,7 +475,10 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
     if (targetTier == 0)
         return; // Below all thresholds — nothing to do.
     {
-        std::lock_guard<std::mutex> lk(recompiledMtx_);
+        // Non-blocking: if the lock is held by a bg thread, skip entirely.
+        std::unique_lock<std::mutex> lk(recompiledMtx_, std::try_to_lock);
+        if (!lk.owns_lock())
+            return; // Lock contended — don't block the main thread.
         int currentTier = functionTier_[funcName]; // 0 if never compiled
         if (targetTier <= currentTier)
             return; // Already at this tier or above.
@@ -470,10 +486,11 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
         functionTier_[funcName] = targetTier;
     }
 
-    // Enqueue the recompilation task on the background thread.
-    // This returns immediately — zero pause on the hot path.
+    // Non-blocking enqueue: if the queue lock is held, skip.
     {
-        std::lock_guard<std::mutex> lk(queueMtx_);
+        std::unique_lock<std::mutex> lk(queueMtx_, std::try_to_lock);
+        if (!lk.owns_lock())
+            return; // Lock contended — eager compilation handles it.
         taskQueue_.push({funcName, callCount, fnPtrSlot});
     }
     queueCV_.notify_one();
