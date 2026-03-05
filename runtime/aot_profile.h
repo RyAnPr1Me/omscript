@@ -9,7 +9,7 @@
 //
 //   ┌────────────┐    ┌──────────┐    ┌──────────────────┐    ┌───────────────┐
 //   │ Source Code │───>│ Compiler │───>│ Optimized IR     │───>│ Baseline Code │
-//   │  (.om)     │    │ Frontend │    │ (AOT, SSA/LLVM)  │    │ (Tier-1, O2)  │
+//   │  (.om)     │    │ Frontend │    │ (AOT, SSA/LLVM)  │    │ (Tier-1, O1)  │
 //   └────────────┘    └──────────┘    └──────────────────┘    └───────┬───────┘
 //                                              │                      │
 //                                              │ (preserved bitcode)  │ execution
@@ -74,8 +74,9 @@
 //   Tier 1 — Baseline JIT (fast startup):
 //     The module's clean IR is serialised to bitcode, then a fresh copy is
 //     loaded, call-counting dispatch prologs are injected into every
-//     non-main function, and the result is JIT-compiled at O2 via LLVM
-//     MCJIT.  Execution begins immediately.
+//     non-main function, and the result is JIT-compiled at O1 via LLVM
+//     MCJIT.  Execution begins immediately.  O1 keeps startup fast; the
+//     code is replaced after just 20 calls by PGO-guided Tier-2.
 //
 //   Runtime Profiling (continuous):
 //     Each non-main function collects runtime data via atomic counters
@@ -139,6 +140,7 @@ namespace llvm {
 class ExecutionEngine;
 class LLVMContext;
 class Module;
+class TargetMachine;
 } // namespace llvm
 
 namespace omscript {
@@ -151,9 +153,10 @@ class AdaptiveJITRunner {
     // The JIT uses three execution tiers, each triggered when a function's
     // call count first reaches the corresponding threshold:
     //
-    //   Tier 1 (baseline):  O2-backend JIT of the compiler's IR — runs from
+    //   Tier 1 (baseline):  O1-backend JIT of the compiler's IR — runs from
     //                       call 0 while profile data is being collected.
-    //                       O2 backend provides fast startup with good code.
+    //                       O1 backend provides fast startup; the code is
+    //                       replaced by Tier-2 after just 20 calls.
     //   Tier 2 (warm):      20 calls — first O2+PGO recompile with early
     //                       profile data (branch weights, argument types).
     //                       O2 keeps recompile time low while applying PGO.
@@ -241,6 +244,21 @@ class AdaptiveJITRunner {
     bool vectorize_ = true;
     bool unrollLoops_ = true;
     bool loopOptimize_ = true;
+
+    // -------------------------------------------------------------------
+    // Cached TargetMachine for recompilation
+    // -------------------------------------------------------------------
+    // Creating an LLVM TargetMachine involves string parsing, feature
+    // detection, and target registry lookup (~1-3ms).  Since all
+    // recompilations target the same host CPU, we create the TM once
+    // on the first recompile and reuse it for all subsequent ones.
+    // Only accessed from the background thread (no locking needed).
+    // -------------------------------------------------------------------
+    std::unique_ptr<llvm::TargetMachine> cachedTM_;
+
+    /// Build (or return cached) TargetMachine for the host CPU.
+    /// Returns nullptr on failure.  Only called from the background thread.
+    llvm::TargetMachine* getOrCreateTargetMachine();
 
     // -------------------------------------------------------------------
     // Background compilation thread

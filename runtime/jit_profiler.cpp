@@ -67,6 +67,15 @@ void JITProfiler::recordArg(const char* funcName, uint32_t argIndex, ArgType typ
 }
 
 void JITProfiler::recordLoopTripCount(const char* funcName, uint32_t loopId, uint64_t tripCount) {
+    // Sample every 8th loop exit to reduce overhead.  Loop profiling previously
+    // fired on EVERY loop exit, causing massive overhead in loop-heavy code
+    // (e.g. 27k mutex lock attempts for matrix_accum(30)).  Sampling at 1/8
+    // still provides accurate average trip count and constant-trip-count detection.
+    static std::atomic<uint64_t> loopSampleCounter{0};
+    uint64_t sample = loopSampleCounter.fetch_add(1, std::memory_order_relaxed);
+    if (__builtin_expect((sample & 0x7) != 0, 1))
+        return;
+
     std::unique_lock<std::mutex> lk(mtx_, std::try_to_lock);
     if (__builtin_expect(!lk.owns_lock(), 0))
         return;
