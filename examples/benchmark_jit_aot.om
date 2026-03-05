@@ -1,0 +1,274 @@
+// ---------------------------------------------------------------------------
+// JIT vs AOT Benchmark Suite
+// ---------------------------------------------------------------------------
+//
+// Comprehensive benchmark comparing JIT (tiered adaptive) and AOT (static O3)
+// execution modes across a range of computational kernels.
+//
+// Each kernel is exercised at multiple call-count levels to measure:
+//   - Tier-1 baseline performance (first 50 calls)
+//   - Tier-2 warm performance (50–500 calls)
+//   - Tier-3 hot performance (500–5000 calls)
+//   - Tier-4 saturated performance (5000–50000 calls)
+//   - Tier-5 mega-hot performance (50000+ calls)
+//
+// When run via `omsc run`, the adaptive JIT recompiles functions at each tier
+// threshold, and the timings capture the combined cost of profiling overhead
+// plus the benefit of PGO-guided specialization.
+//
+// When run via AOT (`omsc build -O3`), all functions are statically optimized
+// at O3 with no runtime profiling — this is the baseline for comparison.
+//
+// Usage:
+//   omsc run examples/benchmark_jit_aot.om          # JIT mode
+//   omsc build -O3 examples/benchmark_jit_aot.om -o bench_aot && ./bench_aot  # AOT mode
+//
+// ---------------------------------------------------------------------------
+
+// ===========================================================================
+// Computational Kernels
+// ===========================================================================
+
+// 1. Sum of squares with modular arithmetic (loop-heavy, integer arithmetic)
+fn sum_squares_mod(n, m) {
+    var total = 0;
+    for (i in 0...n) {
+        total = (total + i * i) % m;
+    }
+    return total;
+}
+
+// 2. Fibonacci (simple loop, constant arguments → constant specialization)
+fn fib_iter(n) {
+    if (n <= 1) { return n; }
+    var a = 0;
+    var b = 1;
+    for (i in 2...n) {
+        var tmp = (a + b) % 1000000007;
+        a = b;
+        b = tmp;
+    }
+    return b;
+}
+
+// 3. Collatz sequence steps (unpredictable branching)
+fn collatz_steps(start) {
+    var steps = 0;
+    var val = start;
+    while (val != 1) {
+        if (val % 2 == 0) {
+            val = val / 2;
+        } else {
+            val = val * 3 + 1;
+        }
+        steps = steps + 1;
+    }
+    return steps;
+}
+
+// 4. GCD via Euclidean algorithm (tight loop, few iterations per call)
+fn gcd(a, b) {
+    while (b != 0) {
+        var t = b;
+        b = a % b;
+        a = t;
+    }
+    return a;
+}
+
+// 5. Prime sieve-like counting (nested loop, branch-heavy)
+fn count_primes_to(n) {
+    var count = 0;
+    for (i in 2...n) {
+        var is_p = 1;
+        var j = 2;
+        while (j * j <= i) {
+            if (i % j == 0) {
+                is_p = 0;
+                j = i;
+            }
+            j = j + 1;
+        }
+        count = count + is_p;
+    }
+    return count;
+}
+
+// 6. Matrix-style nested loop accumulator (O(N^2) inner work)
+fn matrix_accum(size) {
+    var accum = 0;
+    for (i in 0...size) {
+        for (j in 0...size) {
+            accum = accum + (i * j + i + j) % 997;
+        }
+    }
+    return accum;
+}
+
+// 7. Integer power by squaring (bit-level loop)
+fn ipow(base, exp) {
+    var result = 1;
+    var b = base;
+    var e = exp;
+    while (e > 0) {
+        if (e % 2 == 1) {
+            result = result * b;
+        }
+        b = b * b;
+        e = e / 2;
+    }
+    return result;
+}
+
+// 8. Integer square root via Newton's method
+fn isqrt(n) {
+    if (n <= 1) { return n; }
+    var x = n;
+    var y = (x + 1) / 2;
+    while (y < x) {
+        x = y;
+        y = (x + n / x) / 2;
+    }
+    return x;
+}
+
+// ===========================================================================
+// Benchmark Harness — per-function timed runs
+// ===========================================================================
+
+fn bench_sum_squares() {
+    var iters = 80000;
+    var checksum = 0;
+    var t0 = time();
+    for (i in 0...iters) {
+        checksum = checksum + sum_squares_mod(300, 999983);
+    }
+    var t1 = time();
+    print("sum_squares_mod  ");
+    print(t1 - t0);
+    return checksum;
+}
+
+fn bench_fib() {
+    var iters = 200000;
+    var checksum = 0;
+    var t0 = time();
+    for (i in 0...iters) {
+        checksum = checksum + fib_iter(150);
+    }
+    var t1 = time();
+    print("fib_iter         ");
+    print(t1 - t0);
+    return checksum;
+}
+
+fn bench_collatz() {
+    var iters = 80000;
+    var checksum = 0;
+    var t0 = time();
+    for (i in 0...iters) {
+        checksum = checksum + collatz_steps(837799);
+    }
+    var t1 = time();
+    print("collatz_steps    ");
+    print(t1 - t0);
+    return checksum;
+}
+
+fn bench_gcd() {
+    var iters = 300000;
+    var checksum = 0;
+    var t0 = time();
+    for (i in 0...iters) {
+        checksum = checksum + gcd(1234567890, 987654321);
+    }
+    var t1 = time();
+    print("gcd              ");
+    print(t1 - t0);
+    return checksum;
+}
+
+fn bench_primes() {
+    var iters = 8000;
+    var checksum = 0;
+    var t0 = time();
+    for (i in 0...iters) {
+        checksum = checksum + count_primes_to(500);
+    }
+    var t1 = time();
+    print("count_primes_to  ");
+    print(t1 - t0);
+    return checksum;
+}
+
+fn bench_matrix() {
+    var iters = 8000;
+    var checksum = 0;
+    var t0 = time();
+    for (i in 0...iters) {
+        checksum = checksum + matrix_accum(40);
+    }
+    var t1 = time();
+    print("matrix_accum     ");
+    print(t1 - t0);
+    return checksum;
+}
+
+fn bench_ipow() {
+    var iters = 300000;
+    var checksum = 0;
+    var t0 = time();
+    for (i in 0...iters) {
+        checksum = checksum + ipow(3, 20);
+    }
+    var t1 = time();
+    print("ipow             ");
+    print(t1 - t0);
+    return checksum;
+}
+
+fn bench_isqrt() {
+    var iters = 200000;
+    var checksum = 0;
+    var t0 = time();
+    for (i in 0...iters) {
+        checksum = checksum + isqrt(999999937);
+    }
+    var t1 = time();
+    print("isqrt            ");
+    print(t1 - t0);
+    return checksum;
+}
+
+// ===========================================================================
+// Main — run all benchmarks and produce summary
+// ===========================================================================
+
+fn main() {
+    print("============================================");
+    print("  OmScript JIT vs AOT Benchmark Suite");
+    print("============================================");
+    print("Kernel           Time(s)");
+    print("------------------------------------");
+
+    var total_t0 = time();
+    var total = 0;
+
+    total = total + bench_sum_squares();
+    total = total + bench_fib();
+    total = total + bench_collatz();
+    total = total + bench_gcd();
+    total = total + bench_primes();
+    total = total + bench_matrix();
+    total = total + bench_ipow();
+    total = total + bench_isqrt();
+
+    var total_t1 = time();
+    print("------------------------------------");
+    print("TOTAL            ");
+    print(total_t1 - total_t0);
+    print("============================================");
+
+    // Return deterministic checksum for test validation
+    return total % 256;
+}
