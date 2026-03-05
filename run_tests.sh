@@ -314,7 +314,8 @@ test_program "examples/swap_oob.om" 134
 test_program "examples/char_at_oob.om" 134
 test_program "examples/overflow_wrap_test.om" 42
 test_program "examples/jit_hot_demo.om" 144
-test_program "examples/benchmark_loops_math.om" 240
+test_program "examples/benchmark_loops_math.om" 192
+test_program "examples/benchmark_jit_aot.om" 0
 test_program "examples/try_catch_test.om" 88
 test_compile_fail "examples/const_fail.om"
 test_compile_fail "examples/break_outside_loop.om"

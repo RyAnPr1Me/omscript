@@ -27,6 +27,15 @@ JITProfiler& JITProfiler::instance() {
 }
 
 void JITProfiler::recordBranch(const char* funcName, uint32_t branchId, bool taken) {
+    // Sample at the callback level: only record every 16th branch observation.
+    // This reduces mutex contention and cache-line bouncing by 16x while
+    // maintaining statistically accurate branch weight ratios.  The atomic
+    // counter increment is much cheaper than the mutex try_lock + hash lookup.
+    static std::atomic<uint64_t> branchSampleCounter{0};
+    uint64_t sample = branchSampleCounter.fetch_add(1, std::memory_order_relaxed);
+    if (__builtin_expect((sample & 0xF) != 0, 1))
+        return;
+
     // Use try_lock to avoid blocking on the hot path — dropping a few samples
     // has negligible impact on profile accuracy since profiling is statistical.
     std::unique_lock<std::mutex> lk(mtx_, std::try_to_lock);
@@ -58,6 +67,15 @@ void JITProfiler::recordArg(const char* funcName, uint32_t argIndex, ArgType typ
 }
 
 void JITProfiler::recordLoopTripCount(const char* funcName, uint32_t loopId, uint64_t tripCount) {
+    // Sample every 8th loop exit to reduce overhead.  Loop profiling previously
+    // fired on EVERY loop exit, causing massive overhead in loop-heavy code
+    // (e.g. 27k mutex lock attempts for matrix_accum(30)).  Sampling at 1/8
+    // still provides accurate average trip count and constant-trip-count detection.
+    static std::atomic<uint64_t> loopSampleCounter{0};
+    uint64_t sample = loopSampleCounter.fetch_add(1, std::memory_order_relaxed);
+    if (__builtin_expect((sample & 0x7) != 0, 1))
+        return;
+
     std::unique_lock<std::mutex> lk(mtx_, std::try_to_lock);
     if (__builtin_expect(!lk.owns_lock(), 0))
         return;
@@ -66,11 +84,16 @@ void JITProfiler::recordLoopTripCount(const char* funcName, uint32_t loopId, uin
         prof.name = funcName;
     if (loopId >= prof.loops.size())
         prof.loops.resize(loopId + 1);
-    prof.loops[loopId].totalIterations += tripCount;
-    prof.loops[loopId].executionCount++;
+    prof.loops[loopId].record(tripCount);
 }
 
 void JITProfiler::recordCallSite(const char* callerName, const char* calleeName) {
+    // Sample every 16th call-site observation to reduce overhead.
+    static std::atomic<uint64_t> callSiteSampleCounter{0};
+    uint64_t sample = callSiteSampleCounter.fetch_add(1, std::memory_order_relaxed);
+    if (__builtin_expect((sample & 0xF) != 0, 1))
+        return;
+
     std::unique_lock<std::mutex> lk(mtx_, std::try_to_lock);
     if (__builtin_expect(!lk.owns_lock(), 0))
         return;
@@ -121,7 +144,12 @@ void JITProfiler::dump() const {
         for (size_t i = 0; i < prof.loops.size(); i++) {
             const auto& lp = prof.loops[i];
             std::cerr << "    loop[" << i << "]: avg_trip=" << lp.averageTripCount()
-                      << " executions=" << lp.executionCount << " total_iters=" << lp.totalIterations << "\n";
+                      << " executions=" << lp.executionCount << " total_iters=" << lp.totalIterations;
+            if (lp.hasConstantTripCount())
+                std::cerr << " const_trip=" << lp.constantTripCount;
+            if (lp.hasNarrowTripRange())
+                std::cerr << " narrow_range=[" << lp.minTripCount << "," << lp.maxTripCount << "]";
+            std::cerr << "\n";
         }
         for (const auto& cs : prof.callSites) {
             std::cerr << "    call_site: " << cs.first << " count=" << cs.second << "\n";

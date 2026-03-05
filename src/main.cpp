@@ -2744,6 +2744,10 @@ int main(int argc, char* argv[]) {
 
             omscript::AdaptiveJITRunner runner;
             runner.setVerbose(verbose);
+            runner.setFastMath(flagFastMath);
+            runner.setVectorize(flagVectorize);
+            runner.setUnrollLoops(flagUnrollLoops);
+            runner.setLoopOptimize(flagLoopOptimize);
             int exitCode = 1;
             try {
                 exitCode = runner.run(cg.getModule());

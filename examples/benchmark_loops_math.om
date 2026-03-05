@@ -4,7 +4,7 @@
 //
 // Benchmarks OmScript against equivalent C and Rust implementations.
 // Each hot function is called thousands of times to trigger the adaptive
-// JIT Tier-2 recompilation (threshold = 500 calls) when run with `omsc run`.
+// JIT Tier-2 recompilation (threshold = 10 calls) when run with `omsc run`.
 //
 // Equivalent source files for live comparison:
 //   - examples/benchmark_loops_math.c   (compile: gcc -O2 -o bench_c ...)
@@ -151,7 +151,7 @@ fn matrix_accum(size) {
 // ===========================================================================
 
 fn bench_sum_of_squares() {
-    var iters = 2000;
+    var iters = 200000;
     var checksum = 0;
     var t0 = time();
     for (i in 0...iters) {
@@ -164,7 +164,7 @@ fn bench_sum_of_squares() {
 }
 
 fn bench_fibonacci() {
-    var iters = 5000;
+    var iters = 500000;
     var checksum = 0;
     var t0 = time();
     for (i in 0...iters) {
@@ -177,7 +177,7 @@ fn bench_fibonacci() {
 }
 
 fn bench_collatz() {
-    var iters = 2000;
+    var iters = 200000;
     var checksum = 0;
     var t0 = time();
     for (i in 0...iters) {
@@ -191,7 +191,7 @@ fn bench_collatz() {
 }
 
 fn bench_isqrt() {
-    var iters = 3000;
+    var iters = 300000;
     var checksum = 0;
     var t0 = time();
     for (i in 0...iters) {
@@ -204,7 +204,7 @@ fn bench_isqrt() {
 }
 
 fn bench_gcd() {
-    var iters = 5000;
+    var iters = 500000;
     var checksum = 0;
     var t0 = time();
     for (i in 0...iters) {
@@ -217,7 +217,7 @@ fn bench_gcd() {
 }
 
 fn bench_primes() {
-    var iters = 1000;
+    var iters = 100000;
     var checksum = 0;
     var t0 = time();
     for (i in 0...iters) {
@@ -235,7 +235,7 @@ fn bench_primes() {
 }
 
 fn bench_ipow() {
-    var iters = 5000;
+    var iters = 500000;
     var checksum = 0;
     var t0 = time();
     for (i in 0...iters) {
@@ -248,7 +248,7 @@ fn bench_ipow() {
 }
 
 fn bench_matrix() {
-    var iters = 200;
+    var iters = 20000;
     var checksum = 0;
     var t0 = time();
     for (i in 0...iters) {

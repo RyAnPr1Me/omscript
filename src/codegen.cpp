@@ -6096,7 +6096,16 @@ void CodeGenerator::runOptimizationPasses() {
         newPMLevel = llvm::OptimizationLevel::O2;
         break;
     }
-    llvm::ModulePassManager MPM = PB.buildPerModuleDefaultPipeline(newPMLevel);
+    llvm::ModulePassManager MPM;
+    if (lto_) {
+        // LTO mode: use the pre-link pipeline that runs lighter intra-procedural
+        // passes and defers heavy IPO (inlining, IPSCCP, GlobalDCE) to the
+        // linker.  This avoids double-optimizing the bitcode — once here and
+        // again during the link-time optimization pass in the linker.
+        MPM = PB.buildLTOPreLinkDefaultPipeline(newPMLevel);
+    } else {
+        MPM = PB.buildPerModuleDefaultPipeline(newPMLevel);
+    }
     MPM.run(*module, MAM);
 }
 

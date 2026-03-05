@@ -106,6 +106,18 @@ struct ArgProfile {
     int64_t maxObserved = INT64_MIN;
     uint64_t rangeCount = 0;
 
+    // -----------------------------------------------------------------------
+    // Top-K value frequency tracking (space-saving / misra-gries style).
+    // Tracks up to kTopKSize most frequent integer values with approximate
+    // counts.  Used for multi-value specialization at Tier-4+.
+    // -----------------------------------------------------------------------
+    static constexpr size_t kTopKSize = 4;
+    struct ValueSlot {
+        int64_t value = 0;
+        uint64_t count = 0;
+    };
+    ValueSlot topK[kTopKSize] = {};
+
     /// Record an observed argument value.
     void record(ArgType type, int64_t value) {
         auto idx = static_cast<uint8_t>(type);
@@ -123,6 +135,9 @@ struct ArgProfile {
             if (value > maxObserved)
                 maxObserved = value;
             rangeCount++;
+
+            // Top-K tracking: increment existing slot or replace minimum.
+            recordTopK(value);
         }
     }
 
@@ -159,18 +174,119 @@ struct ArgProfile {
         auto range = static_cast<uint64_t>(maxObserved) - static_cast<uint64_t>(minObserved);
         return range <= 1024;
     }
+
+    /// Return true if the top-K data shows a small number of distinct values
+    /// dominating (top value > 60% of calls).  Useful for multi-version
+    /// specialization at Tier-4+.
+    bool hasDominantValue() const {
+        if (totalCalls == 0)
+            return false;
+        uint64_t bestCount = 0;
+        for (size_t i = 0; i < kTopKSize; i++) {
+            if (topK[i].count > bestCount)
+                bestCount = topK[i].count;
+        }
+        return bestCount > 0 &&
+               (static_cast<double>(bestCount) / static_cast<double>(totalCalls)) > 0.6;
+    }
+
+    /// Return the most frequent value from the top-K tracker.
+    int64_t dominantValue() const {
+        uint64_t bestCount = 0;
+        int64_t bestVal = 0;
+        for (size_t i = 0; i < kTopKSize; i++) {
+            if (topK[i].count > bestCount) {
+                bestCount = topK[i].count;
+                bestVal = topK[i].value;
+            }
+        }
+        return bestVal;
+    }
+
+  private:
+    void recordTopK(int64_t value) {
+        // Check if value is already tracked.
+        for (size_t i = 0; i < kTopKSize; i++) {
+            if (topK[i].count > 0 && topK[i].value == value) {
+                topK[i].count++;
+                return;
+            }
+        }
+        // Find an empty slot.
+        for (size_t i = 0; i < kTopKSize; i++) {
+            if (topK[i].count == 0) {
+                topK[i].value = value;
+                topK[i].count = 1;
+                return;
+            }
+        }
+        // All slots occupied — replace the minimum-count slot (Misra-Gries).
+        size_t minIdx = 0;
+        uint64_t minCount = topK[0].count;
+        for (size_t i = 1; i < kTopKSize; i++) {
+            if (topK[i].count < minCount) {
+                minCount = topK[i].count;
+                minIdx = i;
+            }
+        }
+        // Decrement all counts by the minimum; if any reach 0, evict.
+        for (size_t i = 0; i < kTopKSize; i++) {
+            topK[i].count -= minCount;
+        }
+        topK[minIdx].value = value;
+        topK[minIdx].count = 1;
+    }
 };
 
 // ---------------------------------------------------------------------------
-// LoopProfile — per-loop trip count statistics
+// LoopProfile — per-loop trip count statistics with stride detection
 // ---------------------------------------------------------------------------
 struct LoopProfile {
     uint64_t totalIterations = 0; ///< Sum of all observed trip counts.
     uint64_t executionCount = 0;  ///< Number of times the loop was entered.
 
+    /// Track whether all observed trip counts are exactly the same value.
+    /// When true, the loop has a constant trip count that can be used for
+    /// full unrolling or exact vectorisation width selection.
+    int64_t constantTripCount = -1; ///< -1 = unknown, >=0 = observed constant.
+    bool tripCountIsConstant = true; ///< false once a different trip count is seen.
+
+    /// Min/max observed trip counts for range-based unroll decisions.
+    uint64_t minTripCount = UINT64_MAX;
+    uint64_t maxTripCount = 0;
+
+    /// Record an observed trip count.
+    void record(uint64_t tripCount) {
+        totalIterations += tripCount;
+        executionCount++;
+        if (tripCount < minTripCount)
+            minTripCount = tripCount;
+        if (tripCount > maxTripCount)
+            maxTripCount = tripCount;
+        // Track constant trip count.
+        if (executionCount == 1) {
+            constantTripCount = static_cast<int64_t>(tripCount);
+        } else if (tripCountIsConstant &&
+                   static_cast<int64_t>(tripCount) != constantTripCount) {
+            tripCountIsConstant = false;
+        }
+    }
+
     /// Return the average trip count (0 if never executed).
     uint64_t averageTripCount() const {
         return executionCount > 0 ? totalIterations / executionCount : 0;
+    }
+
+    /// Return true if the loop always executes the same number of iterations.
+    bool hasConstantTripCount() const {
+        return executionCount > 0 && tripCountIsConstant && constantTripCount >= 0;
+    }
+
+    /// Return true if trip counts fall in a narrow range (max - min <= 4).
+    /// Such loops benefit from aggressive unrolling.
+    bool hasNarrowTripRange() const {
+        return executionCount > 0 && maxTripCount >= minTripCount &&
+               (maxTripCount - minTripCount) <= 4;
     }
 };
 

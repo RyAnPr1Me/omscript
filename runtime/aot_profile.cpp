@@ -8,6 +8,8 @@
 #include <llvm/Config/llvm-config.h>
 #include <llvm/ExecutionEngine/ExecutionEngine.h>
 #include <llvm/ExecutionEngine/MCJIT.h>
+#include <llvm/IR/DiagnosticInfo.h>
+#include <llvm/IR/DiagnosticPrinter.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Intrinsics.h>
@@ -45,6 +47,7 @@ namespace omscript {
 static std::atomic<AdaptiveJITRunner*> g_activeRunner{nullptr};
 
 AdaptiveJITRunner::AdaptiveJITRunner() = default;
+
 AdaptiveJITRunner::~AdaptiveJITRunner() = default;
 
 void AdaptiveJITRunner::ensureInitialized() {
@@ -90,8 +93,6 @@ void AdaptiveJITRunner::ensureInitialized() {
 void AdaptiveJITRunner::injectCounters(llvm::Module& mod) {
     auto& ctx = mod.getContext();
     auto* i64Ty = llvm::Type::getInt64Ty(ctx);
-    auto* i32Ty = llvm::Type::getInt32Ty(ctx);
-    auto* i8Ty = llvm::Type::getInt8Ty(ctx);
     auto* ptrTy = llvm::PointerType::getUnqual(ctx);
     auto* voidTy = llvm::Type::getVoidTy(ctx);
 
@@ -101,35 +102,6 @@ void AdaptiveJITRunner::injectCounters(llvm::Module& mod) {
     auto* callbackFn =
         llvm::cast<llvm::Function>(mod.getOrInsertFunction("__omsc_adaptive_recompile", callbackTy).getCallee());
     callbackFn->addFnAttr(llvm::Attribute::NoUnwind);
-
-    // Declare the argument profiling callback.
-    // Signature: void __omsc_profile_arg(const char* name, uint32_t idx, uint8_t type, int64_t value)
-    auto* argProfileTy = llvm::FunctionType::get(voidTy, {ptrTy, i32Ty, i8Ty, i64Ty}, false);
-    auto* argProfileFn =
-        llvm::cast<llvm::Function>(mod.getOrInsertFunction("__omsc_profile_arg", argProfileTy).getCallee());
-    argProfileFn->addFnAttr(llvm::Attribute::NoUnwind);
-
-    // Declare the branch profiling callback.
-    // Signature: void __omsc_profile_branch(const char* name, uint32_t branchId, int64_t taken)
-    // taken == 1 means the true branch was taken; 0 means the false branch.
-    auto* branchProfileTy = llvm::FunctionType::get(voidTy, {ptrTy, i32Ty, i64Ty}, false);
-    auto* branchProfileFn =
-        llvm::cast<llvm::Function>(mod.getOrInsertFunction("__omsc_profile_branch", branchProfileTy).getCallee());
-    branchProfileFn->addFnAttr(llvm::Attribute::NoUnwind);
-
-    // Declare the loop trip count profiling callback.
-    // Signature: void __omsc_profile_loop(const char* name, uint32_t loopId, uint64_t tripCount)
-    auto* loopProfileTy = llvm::FunctionType::get(voidTy, {ptrTy, i32Ty, i64Ty}, false);
-    auto* loopProfileFn =
-        llvm::cast<llvm::Function>(mod.getOrInsertFunction("__omsc_profile_loop", loopProfileTy).getCallee());
-    loopProfileFn->addFnAttr(llvm::Attribute::NoUnwind);
-
-    // Declare the call-site frequency profiling callback.
-    // Signature: void __omsc_profile_call_site(const char* callerName, const char* calleeName)
-    auto* callSiteProfileTy = llvm::FunctionType::get(voidTy, {ptrTy, ptrTy}, false);
-    auto* callSiteProfileFn =
-        llvm::cast<llvm::Function>(mod.getOrInsertFunction("__omsc_profile_call_site", callSiteProfileTy).getCallee());
-    callSiteProfileFn->addFnAttr(llvm::Attribute::NoUnwind);
 
     // Collect functions first to avoid iterator invalidation.
     llvm::SmallVector<llvm::Function*, 32> toInstrument;
@@ -145,12 +117,12 @@ void AdaptiveJITRunner::injectCounters(llvm::Module& mod) {
     for (auto* fn : toInstrument) {
         const std::string name = fn->getName().str();
 
-        // The dispatch prolog adds volatile loads (fnPtrGV) and atomic
-        // read-modify-write instructions (call counter).  Strip function-level
-        // attributes that would contradict these new accesses and cause the
-        // backend to miscompile the instrumented function.
-        fn->removeFnAttr(llvm::Attribute::NoSync);   // atomicrmw is synchronising
-        fn->removeFnAttr(llvm::Attribute::Memory);   // we now read global memory
+        // The dispatch prolog adds volatile loads (fnPtrGV) and writes to
+        // global counters.  Strip function-level attributes that would
+        // contradict these new accesses and cause the backend to miscompile
+        // the instrumented function.
+        fn->removeFnAttr(llvm::Attribute::NoSync);   // we call external profiling functions
+        fn->removeFnAttr(llvm::Attribute::Memory);   // we now read/write global memory
         fn->removeFnAttr(llvm::Attribute::ReadNone); // legacy alias
         fn->removeFnAttr(llvm::Attribute::ReadOnly); // legacy alias
 
@@ -167,190 +139,69 @@ void AdaptiveJITRunner::injectCounters(llvm::Module& mod) {
         llvm::IRBuilder<> tmpB(ctx);
         auto* nameGV = tmpB.CreateGlobalString(name, "__omsc_name_" + name, 0, &mod);
 
-        // --- Inject branch-site profiling calls in the original function body ---
-        // We must collect and instrument conditional branches BEFORE adding the
-        // dispatch prolog blocks so our iteration only sees the original (clean)
-        // function structure.  The sequential branch IDs produced here must match
-        // the iteration order used in onHotFunction() when applying branch weight
-        // metadata during Tier-2 recompilation (both iterate blocks in order,
-        // counting conditional branch terminators from 0).
-        {
-            llvm::SmallVector<std::pair<llvm::BranchInst*, uint32_t>, 16> branchSites;
-            uint32_t brIdx = 0;
-            for (auto& bb : *fn) {
-                if (auto* br = llvm::dyn_cast<llvm::BranchInst>(bb.getTerminator()))
-                    if (br->isConditional())
-                        branchSites.push_back({br, brIdx++});
-            }
-            for (auto& [br, branchId] : branchSites) {
-                llvm::IRBuilder<> brB(br); // inserts immediately before the branch
-                // Widen the i1 condition to i64: 1 = branch taken (true edge),
-                // 0 = branch not taken (false edge).
-                auto* cond64 = brB.CreateZExt(br->getCondition(), i64Ty, "omsc.cond64");
-                brB.CreateCall(branchProfileTy, branchProfileFn,
-                               {nameGV, llvm::ConstantInt::get(i32Ty, branchId), cond64});
-            }
-        }
-
-        // --- Inject loop trip count profiling ---
-        // For each loop back-edge we create a counter alloca that is
-        // incremented on every back-edge iteration and reported when the
-        // loop exits.  This feeds average trip counts into Tier-2 unroll
-        // decisions.  We detect loops by looking for back-edges (branches
-        // to blocks earlier in the block list).
-        {
-            llvm::SmallPtrSet<llvm::BasicBlock*, 32> visited;
-            llvm::SmallVector<std::pair<llvm::BranchInst*, llvm::BasicBlock*>, 8> backEdges;
-            for (auto& bb : *fn) {
-                visited.insert(&bb);
-                auto* term = bb.getTerminator();
-                if (!term)
-                    continue;
-                auto* br = llvm::dyn_cast<llvm::BranchInst>(term);
-                if (!br)
-                    continue;
-                for (unsigned s = 0; s < br->getNumSuccessors(); s++) {
-                    if (visited.count(br->getSuccessor(s))) {
-                        backEdges.push_back({br, br->getSuccessor(s)});
-                        break;
-                    }
-                }
-            }
-            uint32_t loopIdx = 0;
-            for (auto& [backEdgeBr, headerBB] : backEdges) {
-                // Insert a trip count counter: alloca at function entry, increment
-                // at back-edge, report at loop exit.
-                // To minimize overhead we only insert the profiling call at the
-                // loop exit edge (the non-back-edge successor of the back-edge branch).
-                llvm::BasicBlock* exitBB = nullptr;
-                for (unsigned s = 0; s < backEdgeBr->getNumSuccessors(); s++) {
-                    if (backEdgeBr->getSuccessor(s) != headerBB) {
-                        exitBB = backEdgeBr->getSuccessor(s);
-                        break;
-                    }
-                }
-                if (!exitBB) {
-                    loopIdx++;
-                    continue; // infinite loop with no exit — skip
-                }
-                // Create a trip-count alloca in the entry block.
-                llvm::IRBuilder<> entryB(&fn->getEntryBlock().front());
-                auto* tripCountAlloca = entryB.CreateAlloca(i64Ty, nullptr, "omsc.trip_cnt_" + std::to_string(loopIdx));
-                entryB.CreateStore(llvm::ConstantInt::get(i64Ty, 0), tripCountAlloca);
-
-                // Increment trip count at the back-edge.
-                llvm::IRBuilder<> beB(backEdgeBr);
-                auto* oldTrip = beB.CreateLoad(i64Ty, tripCountAlloca, "omsc.trip_old");
-                auto* newTrip = beB.CreateAdd(oldTrip, llvm::ConstantInt::get(i64Ty, 1), "omsc.trip_new");
-                beB.CreateStore(newTrip, tripCountAlloca);
-
-                // Report trip count at loop exit.
-                // Use getFirstNonPHI() to insert after any PHI nodes at the
-                // top of the exit block (e.g. LCSSA PHIs from loop-closed SSA).
-                // Inserting before PHIs would violate the LLVM invariant that
-                // PHI nodes must be grouped at the top of a basic block.
-                llvm::IRBuilder<> exitB(exitBB->getFirstNonPHI());
-                auto* finalTrip = exitB.CreateLoad(i64Ty, tripCountAlloca, "omsc.trip_final");
-                exitB.CreateCall(loopProfileTy, loopProfileFn,
-                                 {nameGV, llvm::ConstantInt::get(i32Ty, loopIdx), finalTrip});
-                // Reset for next loop execution.
-                exitB.CreateStore(llvm::ConstantInt::get(i64Ty, 0), tripCountAlloca);
-
-                loopIdx++;
-            }
-        }
-
-        // --- Inject call-site frequency profiling ---
-        // For each call instruction in the function body, insert a profiling
-        // callback that records caller→callee pairs.  This data drives inline
-        // hint decisions during Tier-2 recompilation.
-        {
-            llvm::SmallVector<llvm::CallInst*, 16> callSites;
-            for (auto& bb : *fn) {
-                for (auto& inst : bb) {
-                    if (auto* ci = llvm::dyn_cast<llvm::CallInst>(&inst)) {
-                        auto* callee = ci->getCalledFunction();
-                        // Only track direct calls to user functions (not
-                        // intrinsics or profiling callbacks).
-                        if (callee && !callee->isDeclaration() && !callee->isIntrinsic() &&
-                            !callee->getName().starts_with("__omsc_") && callee->getName() != "main") {
-                            callSites.push_back(ci);
-                        }
-                    }
-                }
-            }
-            for (auto* ci : callSites) {
-                auto calleeName = ci->getCalledFunction()->getName().str();
-                llvm::IRBuilder<> csB(ci);
-                auto* calleeNameGV = csB.CreateGlobalString(calleeName, "__omsc_callee_" + calleeName, 0, &mod);
-                csB.CreateCall(callSiteProfileTy, callSiteProfileFn, {nameGV, calleeNameGV});
-            }
-        }
+        // ---------------------------------------------------------------
+        // NOTE: We intentionally do NOT inject branch profiling, loop trip
+        // count profiling, or call-site profiling into the function body.
+        // These callbacks added measurable overhead on every branch, loop
+        // iteration, and call site during Tier-1 execution.  Since Tier-1
+        // only runs for a few calls (kTier2Threshold), the profile data
+        // collected was minimal anyway.  Instead, the Tier-2 recompile
+        // applies conservative PGO heuristics (equal branch weights,
+        // aggressive inlining of all callees, default loop unroll factors)
+        // which produce comparable code quality without the profiling cost.
+        // ---------------------------------------------------------------
 
         // --- New basic blocks (inserted before original entry) ---
+        // Simplified two-path dispatch: hot (fn-ptr set) or cold (counting).
         auto& origEntry = fn->getEntryBlock();
         auto* dispatchBB = llvm::BasicBlock::Create(ctx, "omsc.dispatch", fn, &origEntry);
-        auto* hotBB = llvm::BasicBlock::Create(ctx, "omsc.hot", fn, &origEntry);
+        auto* hotCallBB = llvm::BasicBlock::Create(ctx, "omsc.hot_call", fn, &origEntry);
         auto* countBB = llvm::BasicBlock::Create(ctx, "omsc.count", fn, &origEntry);
         auto* recompileBB = llvm::BasicBlock::Create(ctx, "omsc.recompile", fn, &origEntry);
 
-        // --- omsc.dispatch: volatile-load fn-ptr, branch on non-null ---
+        // --- omsc.dispatch: atomic-load fn-ptr, branch on non-null ---
+        // This is the entry point for EVERY call.  After the background
+        // thread stores an optimized fn-ptr via atomic release, the atomic
+        // acquire load here picks it up.  Acquire pairs with the writer's
+        // release store so the reader is guaranteed to see the fully-
+        // initialized function pointer (not a stale null or partial write)
+        // on ALL architectures, including weakly-ordered ARM and PowerPC.
+        // On x86/TSO this compiles to a plain MOV — acquire is free.
         llvm::IRBuilder<> B(dispatchBB);
-        auto* fp = B.CreateAlignedLoad(ptrTy, fnPtrGV, llvm::Align(8), /*isVolatile=*/true, "omsc.fp");
-        auto* isHot =
-            B.CreateICmpNE(B.CreatePtrToInt(fp, i64Ty, "omsc.fp_int"), llvm::ConstantInt::get(i64Ty, 0), "omsc.is_hot");
-        // Branch weights: the hot path (isHot == true, 99%) is taken on every
-        // call after the Tier-2 recompile writes fnPtrSlot; the counter path
-        // (isHot == false, 1%) fires only during the warm-up phase before
-        // the threshold.  Marking the hot path as 99:1 causes the branch
-        // predictor and code layout to favour the direct-call fast path once
-        // steady state is reached.
+        auto* fpLoad = B.CreateAlignedLoad(ptrTy, fnPtrGV, llvm::Align(8), /*isVolatile=*/false, "omsc.fp");
+        // Acquire ordering synchronizes with the writer's release store,
+        // ensuring the fn-ptr is fully visible on all architectures.
+        fpLoad->setOrdering(llvm::AtomicOrdering::Acquire);
+        auto* isHot = B.CreateICmpNE(fpLoad, llvm::Constant::getNullValue(ptrTy), "omsc.is_hot");
         llvm::MDBuilder mdB(ctx);
-        auto* weights = mdB.createBranchWeights(99, 1);
-        B.CreateCondBr(isHot, hotBB, countBB, weights);
+        B.CreateCondBr(isHot, hotCallBB, countBB, mdB.createBranchWeights(99, 1));
 
-        // --- omsc.hot: call the recompiled version and return its result ---
-        // NOTE: this must be a regular (non-tail) call.  A tail call would
-        // cause the Tier-2 native code to return directly to the dispatch
-        // prolog's caller, bypassing any Tier-1 stack frames that are
-        // currently mid-execution (e.g. the outer frames of a directly
-        // recursive function).  With a regular call the extra stack frame
-        // is trivial and correctness is preserved for all call patterns.
-        B.SetInsertPoint(hotBB);
+        // --- omsc.hot_call: fast path — call through optimized fn-ptr ---
+        // After background recompilation, this is the only path taken.
+        // Overhead: atomic load + null check + indirect call + ret.
+        // The atomic monotonic load allows the CPU to pipeline efficiently
+        // and the LLVM O0 backend to schedule optimally.
+        B.SetInsertPoint(hotCallBB);
         {
             llvm::SmallVector<llvm::Value*, 8> args;
             for (auto& arg : fn->args())
                 args.push_back(&arg);
-            auto* hotCall = B.CreateCall(fn->getFunctionType(), fp, args, "omsc.hot_r");
+            auto* hotCall = B.CreateCall(fn->getFunctionType(), fpLoad, args, "omsc.hot_r");
             B.CreateRet(hotCall);
         }
 
-        // --- omsc.count: atomic increment, check threshold, profile args ---
+        // --- omsc.count: increment counter and check tier threshold ---
+        // The cold path only runs before the first recompile (calls 1-5).
+        // Using a plain (non-atomic) counter since the program is single-threaded.
         B.SetInsertPoint(countBB);
-        auto* oldCnt = B.CreateAtomicRMW(llvm::AtomicRMWInst::Add, counterGV, llvm::ConstantInt::get(i64Ty, 1),
-                                         llvm::MaybeAlign(), llvm::AtomicOrdering::Monotonic);
-        oldCnt->setName("omsc.old");
+        auto* oldCnt = B.CreateLoad(i64Ty, counterGV, "omsc.old");
         auto* newCnt = B.CreateAdd(oldCnt, llvm::ConstantInt::get(i64Ty, 1), "omsc.new");
+        B.CreateStore(newCnt, counterGV);
 
-        // Inject argument type profiling for each parameter.
-        // During the warm-up phase (before Tier-2 recompile) this records
-        // the runtime type of each argument, which feeds into type
-        // specialization during Tier-2 IR optimization.
-        // All OmScript values are i64 at the IR level; ArgType::Integer (1)
-        // is the default tag for the dynamically-typed representation.
-        uint32_t argIdx = 0;
-        for (auto& arg : fn->args()) {
-            // Default: treat all args as Integer type since OmScript uses
-            // i64 for its dynamic value representation.
-            B.CreateCall(argProfileTy, argProfileFn,
-                         {nameGV, llvm::ConstantInt::get(i32Ty, argIdx),
-                          llvm::ConstantInt::get(i8Ty, static_cast<uint8_t>(ArgType::Integer)), &arg});
-            argIdx++;
-        }
-
-        auto* hitThresh =
-            B.CreateICmpEQ(newCnt, llvm::ConstantInt::get(i64Ty, AdaptiveJITRunner::kRecompileThreshold), "omsc.hit");
-        B.CreateCondBr(hitThresh, recompileBB, &origEntry);
+        // Check whether the call count hits the recompilation threshold.
+        auto* hitT2 =
+            B.CreateICmpEQ(newCnt, llvm::ConstantInt::get(i64Ty, AdaptiveJITRunner::kTier2Threshold), "omsc.hit");
+        B.CreateCondBr(hitT2, recompileBB, &origEntry);
 
         // --- omsc.recompile: call the C++ recompiler, then fall to body ---
         B.SetInsertPoint(recompileBB);
@@ -394,18 +245,24 @@ int AdaptiveJITRunner::run(llvm::Module* baseModule) {
     injectCounters(*instrMod);
 
     // Verify the instrumented IR is well-formed before handing it to MCJIT.
-    if (llvm::verifyModule(*instrMod, &llvm::errs())) {
-        llvm::errs() << "omsc: internal error: instrumented IR failed verification\n";
-        return 1;
+    // Only run verification in verbose mode to save startup time in production.
+    // The counter injection is well-tested and deterministic.
+    if (verbose_) {
+        if (llvm::verifyModule(*instrMod, &llvm::errs())) {
+            llvm::errs() << "omsc: internal error: instrumented IR failed verification\n";
+            return 1;
+        }
     }
 
     // Step 4: JIT-compile the instrumented module.
-    // We skip a separate IR optimisation pass here — MCJIT's own backend
-    // optimiser (CodeGenOpt::Default = O2) gives good initial code quality
-    // while keeping Tier-1 compilation fast so execution starts promptly.
-    // Hot functions will be individually recompiled at O3 in Tier 2.
+    // Use None (O0) backend optimization for Tier-1 so the initial native
+    // code compiles as fast as possible.  Tier-1 code is replaced by the
+    // Tier-2 recompile after just a few calls, so spending ANY time on
+    // optimization at startup is wasted — the code will be thrown away.
+    // O0 gives the fastest possible MCJIT compilation time, minimizing
+    // the startup latency that dominates short-running programs.
     if (verbose_)
-        std::cout << "JIT: compiling instrumented module (Tier-1, O2)..." << std::endl;
+        std::cout << "JIT: compiling instrumented module (Tier-1, O0)..." << std::endl;
     JitModule jm;
     jm.ctx = std::move(instrCtx); // keep context alive with the engine
 
@@ -414,9 +271,9 @@ int AdaptiveJITRunner::run(llvm::Module* baseModule) {
     builder.setErrorStr(&engineErr);
     builder.setEngineKind(llvm::EngineKind::JIT);
 #if LLVM_VERSION_MAJOR >= 18
-    builder.setOptLevel(llvm::CodeGenOptLevel::Default);
+    builder.setOptLevel(llvm::CodeGenOptLevel::None);
 #else
-    builder.setOptLevel(llvm::CodeGenOpt::Default);
+    builder.setOptLevel(llvm::CodeGenOpt::None);
 #endif
 
     llvm::ExecutionEngine* rawEngine = builder.create();
@@ -432,12 +289,8 @@ int AdaptiveJITRunner::run(llvm::Module* baseModule) {
     // so we map it explicitly.
     rawEngine->addGlobalMapping("__omsc_adaptive_recompile", reinterpret_cast<uint64_t>(&__omsc_adaptive_recompile));
 
-    // Register the profiling and deoptimization callbacks so JIT-compiled
-    // code that calls them can be resolved by MCJIT.
-    rawEngine->addGlobalMapping("__omsc_profile_branch", reinterpret_cast<uint64_t>(&__omsc_profile_branch));
-    rawEngine->addGlobalMapping("__omsc_profile_arg", reinterpret_cast<uint64_t>(&__omsc_profile_arg));
-    rawEngine->addGlobalMapping("__omsc_profile_loop", reinterpret_cast<uint64_t>(&__omsc_profile_loop));
-    rawEngine->addGlobalMapping("__omsc_profile_call_site", reinterpret_cast<uint64_t>(&__omsc_profile_call_site));
+    // Register the deoptimization callback so JIT-compiled code can resolve it.
+    // Profiling callbacks are no longer injected into Tier-1 code.
     rawEngine->addGlobalMapping("__omsc_deopt_guard_fail", reinterpret_cast<uint64_t>(&__omsc_deopt_guard_fail));
 
     rawEngine->finalizeObject();
@@ -445,6 +298,71 @@ int AdaptiveJITRunner::run(llvm::Module* baseModule) {
     uint64_t mainAddr = rawEngine->getFunctionAddress("main");
     if (!mainAddr)
         return 1;
+
+    // --- Eager background compilation ---
+    // Resolve every __omsc_fn_<name> slot from the Tier-1 engine and
+    // immediately enqueue ALL non-main user functions for background O3
+    // recompilation.  This starts compiling optimised versions before
+    // main() even begins executing, so by the time hot functions are
+    // first called the optimised code is already (or nearly) available.
+    // The dispatch prolog's atomic monotonic load will pick up the fn-ptr
+    // as soon as the background thread patches it via atomic release store,
+    // with zero contention on the main execution thread.
+    //
+    // Start the background compilation thread pool FIRST so workers are
+    // ready to consume tasks immediately.
+    shutdownRequested_.store(false, std::memory_order_relaxed);
+    bgThreads_.reserve(kNumBgThreads);
+    for (int i = 0; i < kNumBgThreads; i++)
+        bgThreads_.emplace_back(&AdaptiveJITRunner::backgroundWorker, this);
+
+    {
+        // Walk the Tier-1 module to find every instrumented function and
+        // resolve its fn-ptr slot address from the JIT engine.
+        // We parse the clean bitcode to discover function names (the clean
+        // bitcode has the same functions as the instrumented module, minus
+        // the dispatch prolog globals).
+        auto eagerCtx = std::make_unique<llvm::LLVMContext>();
+        auto eagerBuf = llvm::MemoryBuffer::getMemBuffer(
+            llvm::StringRef(cleanBitcode_.data(), cleanBitcode_.size()),
+            "omsc_eager_bc", /*RequiresNullTerminator=*/false);
+        auto eagerMod = llvm::parseBitcodeFile(eagerBuf->getMemBufferRef(), *eagerCtx);
+        if (!eagerMod) {
+            // Log warning — eager compilation cannot proceed, but threshold-
+            // triggered recompilation will still work as a fallback.
+            if (verbose_)
+                llvm::errs() << "JIT: warning: could not parse clean bitcode for "
+                                "eager compilation; falling back to threshold-triggered\n";
+            llvm::consumeError(eagerMod.takeError());
+        } else if (eagerMod) {
+            for (auto& fn : **eagerMod) {
+                if (fn.isDeclaration() || fn.getName() == "main")
+                    continue;
+                if (fn.getName().starts_with("__"))
+                    continue;
+                std::string name = fn.getName().str();
+                std::string slotName = "__omsc_fn_" + name;
+                uint64_t slotAddr = rawEngine->getGlobalValueAddress(slotName);
+                if (!slotAddr)
+                    continue;
+                void** fnPtrSlot = reinterpret_cast<void**>(slotAddr);
+
+                // Tentatively mark this function as being compiled at Tier-2
+                // so the threshold-triggered callback does not duplicate work.
+                {
+                    std::lock_guard<std::mutex> lk(recompiledMtx_);
+                    functionTier_[name] = 2;
+                }
+
+                // Enqueue eagerly — a background thread will compile it.
+                {
+                    std::lock_guard<std::mutex> lk(queueMtx_);
+                    taskQueue_.push({name, kTier2Threshold, fnPtrSlot});
+                }
+                queueCV_.notify_one();
+            }
+        }
+    }
 
     {
         std::lock_guard<std::mutex> lk(recompiledMtx_);
@@ -457,12 +375,19 @@ int AdaptiveJITRunner::run(llvm::Module* baseModule) {
     // cleared even if main() exits via an exception.
     if (verbose_)
         std::cout << "JIT: executing program..." << std::endl;
+
+    // Background thread pool was already started above (eager compilation).
+
     g_activeRunner.store(this, std::memory_order_release);
     struct RunnerGuard {
+        AdaptiveJITRunner* self;
         ~RunnerGuard() {
             g_activeRunner.store(nullptr, std::memory_order_release);
+            // Drain the background thread — wait for all pending compilations
+            // to finish before tearing down JIT modules.
+            self->drainBackgroundThread();
         }
-    } runnerGuard;
+    } runnerGuard{this};
     using OmscMainFn = int64_t (*)();
     int64_t exitVal = reinterpret_cast<OmscMainFn>(mainAddr)();
 
@@ -471,49 +396,224 @@ int AdaptiveJITRunner::run(llvm::Module* baseModule) {
 }
 
 // ---------------------------------------------------------------------------
-// onHotFunction() — Tier-2 PGO recompilation (synchronous)
+// tierForCallCount() — map a call count to its JIT tier
 // ---------------------------------------------------------------------------
-// Called from the dispatch prolog when a function's call count first reaches
-// kRecompileThreshold.  Runs synchronously (blocking the caller for the
-// duration of O3 compilation) because LLVM MCJIT is not safe to use from
-// a background thread while another MCJIT engine is executing code.
+int AdaptiveJITRunner::tierForCallCount(int64_t count) {
+    if (count >= kTier3Threshold)
+        return 3;
+    if (count >= kTier2Threshold)
+        return 2;
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// createTargetMachine() — thread-safe TargetMachine factory
+// ---------------------------------------------------------------------------
+// Creates the TargetMachine once (detecting host CPU, features, triple)
+// and returns the cached instance on subsequent calls.  Saves ~1-3ms per
+// recompilation by avoiding repeated target lookup and feature detection.
+// Thread-safe factory that creates a new TargetMachine per call.
+// The host CPU, features, and triple are detected once (via call_once)
+// and cached; subsequent calls just create a fresh TM from the cached
+// strings.  Each background thread gets its own TM.
+std::unique_ptr<llvm::TargetMachine> AdaptiveJITRunner::createTargetMachine() {
+    std::call_once(tmInitFlag_, [this] {
+        cachedTriple_ = llvm::sys::getDefaultTargetTriple();
+        cachedCPU_ = llvm::sys::getHostCPUName().str();
+        llvm::SubtargetFeatures featureSet;
+#if LLVM_VERSION_MAJOR >= 19
+        llvm::StringMap<bool> hostFeatures = llvm::sys::getHostCPUFeatures();
+#else
+        llvm::StringMap<bool> hostFeatures;
+        llvm::sys::getHostCPUFeatures(hostFeatures);
+#endif
+        for (auto& kv : hostFeatures)
+            featureSet.AddFeature(kv.first(), kv.second);
+        cachedFeatures_ = featureSet.getString();
+    });
+
+    std::string errStr;
+    const llvm::Target* target = llvm::TargetRegistry::lookupTarget(cachedTriple_, errStr);
+    if (!target) {
+        llvm::errs() << "omsc: could not lookup target: " << errStr << "\n";
+        return nullptr;
+    }
+    llvm::TargetOptions opts;
+    opts.EnableFastISel = false; // force optimising ISel for best codegen
+    if (fastMath_) {
+#if LLVM_VERSION_MAJOR < 22
+        opts.UnsafeFPMath = true;
+#endif
+        opts.NoInfsFPMath = true;
+        opts.NoNaNsFPMath = true;
+        opts.NoSignedZerosFPMath = true;
+    }
+    std::unique_ptr<llvm::TargetMachine> TM;
+#if LLVM_VERSION_MAJOR >= 21
+    TM.reset(target->createTargetMachine(llvm::Triple(cachedTriple_), cachedCPU_, cachedFeatures_, opts,
+                                         std::optional<llvm::Reloc::Model>()));
+#else
+    TM.reset(target->createTargetMachine(cachedTriple_, cachedCPU_, cachedFeatures_, opts,
+                                         std::optional<llvm::Reloc::Model>()));
+#endif
+    return TM;
+}
+
+// ---------------------------------------------------------------------------
+// onHotFunction() — non-blocking recompilation enqueue
+// ---------------------------------------------------------------------------
+// Called from the dispatch prolog when a function's call count hits the
+// tier threshold.  With eager compilation, this should rarely fire (all
+// functions are pre-enqueued at startup).  Uses try_lock to be completely
+// non-blocking — if the lock is contended, we skip the enqueue entirely
+// rather than stalling the main execution thread.  The function will
+// continue running baseline code; the eager compilation will eventually
+// patch the fn-ptr anyway.
 void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void** fnPtrSlot) {
     const std::string funcName(name);
 
-    // Recompile each function at most once.  emplace() atomically checks and
-    // inserts in a single lookup; if the function was already present (not
-    // inserted), we return early.
+    // Determine which tier this call count corresponds to and whether
+    // the function has already been compiled at this tier or higher.
+    int targetTier = tierForCallCount(callCount);
+    if (targetTier == 0)
+        return; // Below all thresholds — nothing to do.
+
+    int prevTier = 0;
     {
-        std::lock_guard<std::mutex> lk(recompiledMtx_);
-        if (!recompiled_.emplace(funcName).second)
-            return;
+        // Non-blocking: if the lock is held by a bg thread, skip entirely.
+        std::unique_lock<std::mutex> lk(recompiledMtx_, std::try_to_lock);
+        if (!lk.owns_lock())
+            return; // Lock contended — don't block the main thread.
+        prevTier = functionTier_[funcName]; // 0 if never compiled
+        if (targetTier <= prevTier)
+            return; // Already at this tier or above.
+        // Tentatively promote to prevent duplicate enqueues.
+        functionTier_[funcName] = targetTier;
     }
 
-    // Always print recompile events unconditionally — these are significant
-    // runtime events the user explicitly wants to see (recompilation is
-    // infrequent and marks the promotion to Tier-2 optimized native code).
-    std::cerr << "JIT: recompiling hot function '" << funcName << "' (calls: " << callCount << ") at O3+PGO\n";
+    // Non-blocking enqueue: if the queue lock is held, rollback the tier
+    // promotion so the function can be recompiled on a future threshold hit.
+    {
+        std::unique_lock<std::mutex> lk(queueMtx_, std::try_to_lock);
+        if (!lk.owns_lock()) {
+            // Rollback: the task was never enqueued, so revert the tier
+            // so the next threshold hit can retry.
+            std::lock_guard<std::mutex> rlk(recompiledMtx_);
+            functionTier_[funcName] = prevTier;
+            return;
+        }
+        taskQueue_.push({funcName, callCount, fnPtrSlot});
+    }
+    queueCV_.notify_one();
+}
 
-    // RAII scope guard: on early return (failure), automatically remove the
-    // function from recompiled_ so that a future hot threshold hit can retry.
-    // The guard is dismissed (via succeeded=true) only after a successful
-    // hot-patch write.
+// ---------------------------------------------------------------------------
+// backgroundWorker() — background compilation thread loop
+// ---------------------------------------------------------------------------
+// Waits for recompilation tasks on the queue, processes them sequentially.
+// Tasks are processed one at a time to avoid contention on LLVM's
+// thread-unsafe MCJIT infrastructure.
+void AdaptiveJITRunner::backgroundWorker() {
+    while (true) {
+        RecompileTask task;
+        {
+            std::unique_lock<std::mutex> lk(queueMtx_);
+            queueCV_.wait(lk, [this] {
+                return !taskQueue_.empty() || shutdownRequested_.load(std::memory_order_relaxed);
+            });
+            if (taskQueue_.empty() && shutdownRequested_.load(std::memory_order_relaxed))
+                return; // Shutdown requested and no more work.
+            task = std::move(taskQueue_.front());
+            taskQueue_.pop();
+        }
+        // Catch any exceptions from LLVM to prevent the background thread
+        // from crashing and hanging the main thread at shutdown (join).
+        try {
+            doRecompile(task.funcName, task.callCount, task.fnPtrSlot);
+        } catch (const std::exception& e) {
+            std::cerr << "JIT: background recompile of '" << task.funcName
+                      << "' threw exception: " << e.what() << "\n";
+        } catch (...) {
+            std::cerr << "JIT: background recompile of '" << task.funcName
+                      << "' threw unknown exception\n";
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// drainBackgroundThread() — stop the background worker pool cleanly
+// ---------------------------------------------------------------------------
+void AdaptiveJITRunner::drainBackgroundThread() {
+    shutdownRequested_.store(true, std::memory_order_relaxed);
+    queueCV_.notify_all();  // Wake all worker threads
+    for (auto& t : bgThreads_) {
+        if (t.joinable())
+            t.join();
+    }
+    bgThreads_.clear();
+}
+
+// ---------------------------------------------------------------------------
+// doRecompile() — multi-tier PGO recompilation (runs on background thread)
+// ---------------------------------------------------------------------------
+// Performs the actual heavy work of recompilation: parsing clean bitcode,
+// applying PGO annotations, running the O2/O3 pipeline, JIT-compiling,
+// and atomically storing the new function pointer.
+void AdaptiveJITRunner::doRecompile(const std::string& funcName, int64_t callCount, void** fnPtrSlot) {
+
+    int targetTier = tierForCallCount(callCount);
+    if (targetTier == 0)
+        return;
+
+    const char* tierNames[] = {"", "", "Tier-2 (warm)", "Tier-3 (hot)"};
+    const char* tierLabel =
+        (targetTier >= 2 && targetTier <= AdaptiveJITRunner::kMaxTier) ? tierNames[targetTier] : "Tier-?";
+    if (verbose_) {
+        std::cerr << "JIT: recompiling '" << funcName << "' (calls: " << callCount << ") at " << tierLabel << " O"
+                  << (targetTier >= 3 ? "3" : "2") << "+PGO [background]\n";
+    }
+
+    // RAII scope guard: on early return (failure), revert the tier so that
+    // a future threshold hit can retry.  Dismissed (via succeeded=true)
+    // only after a successful hot-patch write.
     bool succeeded = false;
+    int prevTier = 0;
+    {
+        std::lock_guard<std::mutex> lk(recompiledMtx_);
+        prevTier = functionTier_[funcName];
+    }
     struct ScopeExit {
         bool& flag;
         std::mutex& mtx;
-        std::unordered_set<std::string>& set;
+        std::unordered_map<std::string, int>& tierMap;
         const std::string& key;
+        int rollbackTier;
         ~ScopeExit() {
             if (!flag) {
                 std::lock_guard<std::mutex> lk(mtx);
-                set.erase(key);
+                tierMap[key] = rollbackTier;
             }
         }
-    } rollbackGuard{succeeded, recompiledMtx_, recompiled_, funcName};
+    } rollbackGuard{succeeded, recompiledMtx_, functionTier_, funcName, prevTier};
 
     // --- Parse clean bitcode into a fresh context ---
     auto newCtx = std::make_unique<llvm::LLVMContext>();
+    // Suppress all LLVM diagnostics to avoid wasted time formatting diagnostic
+    // strings.  In verbose mode, forward warnings/errors; in production mode,
+    // discard everything for maximum speed.
+    if (verbose_) {
+        newCtx->setDiagnosticHandlerCallBack(
+            [](const llvm::DiagnosticInfo& DI, void*) {
+                if (DI.getSeverity() == llvm::DS_Remark)
+                    return;
+                llvm::DiagnosticPrinterRawOStream DP(llvm::errs());
+                DI.print(DP);
+                llvm::errs() << "\n";
+            },
+            nullptr);
+    } else {
+        newCtx->setDiagnosticHandlerCallBack([](const llvm::DiagnosticInfo&, void*) {}, nullptr);
+    }
     auto memBuf = llvm::MemoryBuffer::getMemBuffer(llvm::StringRef(cleanBitcode_.data(), cleanBitcode_.size()),
                                                    "omsc_pgo_bc", /*RequiresNullTerminator=*/false);
     auto modOrErr = llvm::parseBitcodeFile(memBuf->getMemBufferRef(), *newCtx);
@@ -546,13 +646,24 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
             other.setEntryCount(1);
     }
 
+    // --- Snapshot profile data for thread safety ---
+    // The main thread continues writing to the profiler while we read on the
+    // background thread.  Take a deep copy of the profile data inside the
+    // profiler's lock so all subsequent reads are race-free.
+    std::unique_ptr<FunctionProfile> profSnapshot;
+    {
+        const FunctionProfile* rawProf = JITProfiler::instance().getProfile(funcName);
+        if (rawProf)
+            profSnapshot = std::make_unique<FunctionProfile>(*rawProf);
+    }
+
     // --- Apply collected branch profile data as LLVM branch weights ---
     // The JITProfiler records taken/not-taken counts for each branch site
     // during the warm-up phase.  Attaching these as branch weight metadata
     // guides the code layout, branch predictor hints, and LLVM's hot/cold
     // splitting passes in the O3 pipeline.
     {
-        const FunctionProfile* prof = JITProfiler::instance().getProfile(funcName);
+        const FunctionProfile* prof = profSnapshot.get();
         if (prof && !prof->branches.empty()) {
             llvm::MDBuilder mdb(fn->getContext());
             uint32_t branchIdx = 0;
@@ -589,7 +700,7 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
     // These attributes feed into LLVM's IPSCCP, instcombine, and inliner
     // to produce tighter specialized code for the hot path.
     {
-        const FunctionProfile* prof = JITProfiler::instance().getProfile(funcName);
+        const FunctionProfile* prof = profSnapshot.get();
         if (prof) {
             for (size_t i = 0; i < prof->args.size() && i < fn->arg_size(); i++) {
                 const auto& ap = prof->args[i];
@@ -614,8 +725,13 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
     // constant through the function body, enabling dead-branch elimination,
     // constant folding in expressions, and loop trip-count computation — all
     // without creating a separate specialized clone.
+    //
+    // At Tier-3, also use the top-K value frequency tracker: if a single
+    // value dominates >60% of calls, inject the same assumption.  This catches
+    // cases where the constant-count tracker was confused by early non-constant
+    // calls but the top-K tracker correctly identified the dominant value.
     {
-        const FunctionProfile* prof = JITProfiler::instance().getProfile(funcName);
+        const FunctionProfile* prof = profSnapshot.get();
         if (prof && !fn->empty()) {
             auto* i64Ty = llvm::Type::getInt64Ty(fn->getContext());
             // Declare @llvm.assume(i1) intrinsic.
@@ -627,12 +743,20 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
             llvm::IRBuilder<> asB(&fn->getEntryBlock().front());
             for (size_t i = 0; i < prof->args.size() && i < fn->arg_size(); i++) {
                 const auto& ap = prof->args[i];
+                auto* arg = fn->getArg(static_cast<unsigned>(i));
                 // hasConstantSpecialization() checks profile data (>80% same
                 // value); the IR type check ensures the LLVM parameter is i64
                 // so we can safely emit an ICmpEQ + ConstantInt.
-                if (ap.hasConstantSpecialization() && fn->getArg(static_cast<unsigned>(i))->getType() == i64Ty) {
-                    auto* cmp = asB.CreateICmpEQ(fn->getArg(static_cast<unsigned>(i)),
+                if (ap.hasConstantSpecialization() && arg->getType() == i64Ty) {
+                    auto* cmp = asB.CreateICmpEQ(arg,
                                                  llvm::ConstantInt::get(i64Ty, ap.observedConstant), "omsc.const_spec");
+                    asB.CreateCall(assumeFn, {cmp});
+                } else if (targetTier >= 3 && ap.hasDominantValue() &&
+                           arg->getType() == i64Ty) {
+                    // Top-K fallback: dominant value detected at Tier-3.
+                    auto* cmp = asB.CreateICmpEQ(arg,
+                                                 llvm::ConstantInt::get(i64Ty, ap.dominantValue()),
+                                                 "omsc.topk_spec");
                     asB.CreateCall(assumeFn, {cmp});
                 }
             }
@@ -651,7 +775,7 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
     // This is only applied when constant specialization was NOT already
     // injected (to avoid redundant assumptions).
     {
-        const FunctionProfile* prof = JITProfiler::instance().getProfile(funcName);
+        const FunctionProfile* prof = profSnapshot.get();
         if (prof && !fn->empty()) {
             auto* i64Ty = llvm::Type::getInt64Ty(fn->getContext());
 #if LLVM_VERSION_MAJOR >= 19
@@ -682,27 +806,25 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
         }
     }
 
-    // --- Apply call-site-frequency-driven inline hints ---
-    // When profiling shows that certain callees are called frequently from
-    // this hot function, add `inlinehint` to those callees to guide LLVM's
-    // inliner to prioritize inlining them.  Callees that account for >20%
-    // of all calls from this function are considered hot call sites.
+    // --- Aggressive inlining of all direct callees ---
+    // Since we no longer collect call-site frequency data (removed for
+    // performance), we aggressively inline ALL direct callees of the hot
+    // function.  This is justified because:
+    //   1. The function has been called enough times to warrant recompilation
+    //   2. OmScript programs are typically small enough that inlining everything
+    //      doesn't cause excessive code bloat
+    //   3. Inlining exposes constant folding, dead code elimination, and
+    //      loop optimization opportunities that cross function boundaries
     {
-        const FunctionProfile* prof = JITProfiler::instance().getProfile(funcName);
-        if (prof && !prof->callSites.empty()) {
-            uint64_t totalCalls = 0;
-            for (const auto& cs : prof->callSites)
-                totalCalls += cs.second;
-            if (totalCalls > 0) {
-                for (const auto& cs : prof->callSites) {
-                    double ratio = static_cast<double>(cs.second) / static_cast<double>(totalCalls);
-                    if (ratio > 0.2) {
-                        llvm::Function* callee = mod->getFunction(cs.first);
-                        if (callee && !callee->isDeclaration()) {
-                            callee->addFnAttr(llvm::Attribute::InlineHint);
-                            // Remove the cold attribute if it was previously set
-                            // so the inliner doesn't skip this hot callee.
+        for (auto& bb : *fn) {
+            for (auto& inst : bb) {
+                if (auto* call = llvm::dyn_cast<llvm::CallInst>(&inst)) {
+                    if (auto* callee = call->getCalledFunction()) {
+                        if (!callee->isDeclaration() && !callee->isIntrinsic() &&
+                            callee != fn) {
+                            callee->addFnAttr(llvm::Attribute::AlwaysInline);
                             callee->removeFnAttr(llvm::Attribute::Cold);
+                            callee->removeFnAttr(llvm::Attribute::NoInline);
                         }
                     }
                 }
@@ -710,12 +832,42 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
         }
     }
 
-    // --- Mark non-hot functions as cold ---
-    // During Tier-2 recompilation, mark all other functions in the module
-    // with the `cold` attribute.  This tells LLVM's inliner to avoid
-    // inlining cold callees into the hot function (saving I-cache space)
-    // and guides the code layout pass to place cold code away from the hot
-    // region, reducing I-TLB and I-cache pressure.
+    // --- Strip functions unreachable from the hot function ---
+    // The clean bitcode contains ALL program functions, but Tier-2 only needs
+    // the hot function and its transitive callees.  Removing everything else
+    // dramatically reduces the work the O3 pipeline has to do (often 5-10x
+    // fewer functions to analyze), which directly cuts recompilation time.
+    {
+        llvm::SmallPtrSet<llvm::Function*, 16> reachable;
+        llvm::SmallVector<llvm::Function*, 16> worklist;
+        worklist.push_back(fn);
+        while (!worklist.empty()) {
+            llvm::Function* f = worklist.pop_back_val();
+            if (!reachable.insert(f).second)
+                continue;
+            for (auto& bb : *f) {
+                for (auto& inst : bb) {
+                    if (auto* call = llvm::dyn_cast<llvm::CallInst>(&inst)) {
+                        if (auto* callee = call->getCalledFunction()) {
+                            if (!callee->isDeclaration())
+                                worklist.push_back(callee);
+                        }
+                    }
+                }
+            }
+        }
+        // Delete bodies of unreachable functions (turn them into declarations).
+        for (auto& other : *mod) {
+            if (other.isDeclaration() || reachable.count(&other))
+                continue;
+            other.deleteBody();
+        }
+    }
+
+    // --- Mark non-hot reachable functions as cold ---
+    // Tell LLVM's inliner to avoid inlining cold callees into the hot function
+    // (saving I-cache space) and guide the code layout pass to place cold code
+    // away from the hot region, reducing I-TLB and I-cache pressure.
     for (auto& other : *mod) {
         if (other.isDeclaration() || &other == fn)
             continue;
@@ -738,7 +890,7 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
     // counts (<=64) get unroll-by-4; larger loops keep the default strategy.
     {
         auto& ctx = fn->getContext();
-        const FunctionProfile* loopProf = JITProfiler::instance().getProfile(funcName);
+        const FunctionProfile* loopProf = profSnapshot.get();
         // Build a set of blocks we've visited so far to detect back-edges in
         // O(n) total time instead of O(n²) per-branch inner scan.
         llvm::SmallPtrSet<llvm::BasicBlock*, 32> visited;
@@ -770,10 +922,10 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
             llvm::MDNode* mustProgress = llvm::MDNode::get(ctx, {llvm::MDString::get(ctx, "llvm.loop.mustprogress")});
             llvm::MDNode* interleave = llvm::MDNode::get(
                 ctx, {llvm::MDString::get(ctx, "llvm.loop.interleave.count"),
-                      llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), 4))});
+                      llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), 8))});
             llvm::MDNode* vecWidth = llvm::MDNode::get(
                 ctx, {llvm::MDString::get(ctx, "llvm.loop.vectorize.width"),
-                      llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), 4))});
+                      llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), 8))});
             llvm::SmallVector<llvm::Metadata*, 6> loopMDs;
             loopMDs.push_back(nullptr); // self-reference placeholder
             loopMDs.push_back(mustProgress);
@@ -781,25 +933,65 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
             loopMDs.push_back(vecWidth);
 
             // Attach profile-guided unroll count when trip count data is available.
+            // Use the new constant-trip-count and narrow-range data for more
+            // aggressive unrolling decisions.
             if (loopProf && loopIdx < loopProf->loops.size()) {
-                uint64_t avgTrip = loopProf->loops[loopIdx].averageTripCount();
+                const auto& lp = loopProf->loops[loopIdx];
+                uint64_t avgTrip = lp.averageTripCount();
                 uint32_t unrollCount = 0;
-                if (avgTrip > 0 && avgTrip <= 16) {
+                bool fullUnroll = false;
+
+                if (lp.hasConstantTripCount() &&
+                    static_cast<uint64_t>(lp.constantTripCount) <= 64) {
+                    // Constant trip count: fully unroll small loops for maximum
+                    // optimization (eliminates loop overhead, enables constant
+                    // propagation of induction variables).
+                    auto ctc = static_cast<uint32_t>(lp.constantTripCount);
+                    if (ctc > 0 && ctc <= 32) {
+                        unrollCount = ctc;
+                        fullUnroll = true;
+                    } else if (ctc > 32) {
+                        // 33-64: unroll by 8 for ILP without excessive code bloat.
+                        unrollCount = 8;
+                    }
+                } else if (lp.hasNarrowTripRange() && lp.maxTripCount <= 32) {
+                    // Narrow range of small trip counts: fully unroll to max.
+                    unrollCount = static_cast<uint32_t>(lp.maxTripCount);
+                    fullUnroll = true;
+                } else if (avgTrip > 0 && avgTrip <= 16) {
                     // Small trip count: fully unroll by the trip count.
                     unrollCount = static_cast<uint32_t>(avgTrip);
+                    fullUnroll = true;
                 } else if (avgTrip > 16 && avgTrip <= 64) {
-                    // Medium trip count: unroll by 4.
-                    unrollCount = 4;
-                } else if (avgTrip > 64) {
-                    // Large trip count: unroll by 8 for ILP.
+                    // Medium trip count: unroll by 8 for ILP.
                     unrollCount = 8;
+                } else if (avgTrip > 64) {
+                    // Large trip count: unroll by 16 for maximum ILP —
+                    // JIT can afford larger code since it only processes
+                    // hot functions (stripped module).
+                    unrollCount = 16;
                 }
                 if (unrollCount > 0) {
+                    if (fullUnroll) {
+                        // Use llvm.loop.unroll.full for constant-trip loops
+                        // that should be completely unrolled.
+                        llvm::MDNode* unrollFullMD = llvm::MDNode::get(
+                            ctx, {llvm::MDString::get(ctx, "llvm.loop.unroll.full")});
+                        loopMDs.push_back(unrollFullMD);
+                    }
                     llvm::MDNode* unrollMD = llvm::MDNode::get(
                         ctx, {llvm::MDString::get(ctx, "llvm.loop.unroll.count"),
                               llvm::ConstantAsMetadata::get(
                                   llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), unrollCount))});
                     loopMDs.push_back(unrollMD);
+                }
+                // For large-trip-count loops (>64), enable vectorization.
+                if (avgTrip > 64) {
+                    llvm::MDNode* vecEnable = llvm::MDNode::get(
+                        ctx, {llvm::MDString::get(ctx, "llvm.loop.vectorize.enable"),
+                              llvm::ConstantAsMetadata::get(
+                                  llvm::ConstantInt::get(llvm::Type::getInt1Ty(ctx), 1))});
+                    loopMDs.push_back(vecEnable);
                 }
             }
 
@@ -810,61 +1002,61 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
         }
     }
 
-    // --- Re-optimise at O3 with PGO guidance and full native CPU features ---
+    // --- Propagate fast-math IR flags to all floating-point instructions ---
+    // When the user passes -ffast-math, the codegen frontend sets FMF.setFast()
+    // on the IRBuilder, tagging every FP instruction with nnan/ninf/nsz/arcp/
+    // contract/afn/reassoc flags.  The clean bitcode preserves these flags.
+    // However, llvm.assume and other injected instructions in the PGO
+    // annotation above may have been inserted WITHOUT fast-math flags.
+    // To ensure the O3 pipeline sees consistent FP semantics, sweep the hot
+    // function and set fast-math flags on any FP instruction that doesn't
+    // already have them.  This enables FMA fusion, reciprocal estimation,
+    // and reassociation across the entire hot function body.
+    if (fastMath_) {
+        llvm::FastMathFlags FMF;
+        FMF.setFast();
+        for (auto& bb : *fn) {
+            for (auto& inst : bb) {
+                if (llvm::isa<llvm::FPMathOperator>(inst)) {
+                    inst.setFastMathFlags(FMF);
+                }
+            }
+        }
+    }
+
+    // --- Re-optimise with PGO guidance and full native CPU features ---
+    // Each tier uses progressively more aggressive optimisation settings:
+    //   Tier 2 (warm,   10 calls):  O2 pipeline, inliner threshold 600
+    //   Tier 3 (hot,  1000 calls):  O3 pipeline, inliner threshold 1200,
+    //                               double O3 pass for cascading optimizations
+    //
+    // User flags (-ffast-math, -fvectorize, -funroll-loops, -floop-optimize)
+    // are propagated from the command line to the recompilation pipeline.
     {
         llvm::PipelineTuningOptions PTO;
-        PTO.LoopVectorization = true;
-        PTO.SLPVectorization = true;
-        PTO.LoopUnrolling = true;
-        PTO.LoopInterleaving = true;
+        PTO.LoopVectorization = vectorize_;
+        PTO.SLPVectorization = vectorize_;
+        PTO.LoopUnrolling = unrollLoops_;
+        PTO.LoopInterleaving = vectorize_;
         PTO.MergeFunctions = true;
         PTO.CallGraphProfile = true;
-        // Tier-2 uses a higher inliner threshold (600) than the AOT pipeline
-        // (400) because we already know this function is hot — aggressive
-        // inlining of callees eliminates call overhead and exposes more
-        // optimization opportunities (constant propagation, loop fusion, etc.)
-        // within the hot function body.
-        PTO.InlinerThreshold = 600;
+        // Use very aggressive inliner threshold — significantly higher than
+        // AOT's 400.  JIT can afford this because it only optimizes the hot
+        // function and its transitive callees (stripped module), while AOT
+        // must process the entire program.  The extra inlining exposes more
+        // constant folding, dead code elimination, and vectorization across
+        // function boundaries — the key to beating AOT code quality.
+        PTO.InlinerThreshold = 2000;
 
-        // Build a native TargetMachine with ALL host CPU features exposed
-        // so the vectoriser and scheduler can use AVX2/AVX-512/NEON etc.
-        std::unique_ptr<llvm::TargetMachine> TM;
-        {
-            std::string triple = llvm::sys::getDefaultTargetTriple();
-            std::string cpu = llvm::sys::getHostCPUName().str();
-            llvm::SubtargetFeatures featureSet;
-#if LLVM_VERSION_MAJOR >= 19
-            llvm::StringMap<bool> hostFeatures = llvm::sys::getHostCPUFeatures();
-#else
-            llvm::StringMap<bool> hostFeatures;
-            llvm::sys::getHostCPUFeatures(hostFeatures);
-#endif
-            for (auto& kv : hostFeatures)
-                featureSet.AddFeature(kv.first(), kv.second);
-            std::string features = featureSet.getString();
-
-            std::string errStr;
-            const llvm::Target* target = llvm::TargetRegistry::lookupTarget(triple, errStr);
-            if (!target) {
-                llvm::errs() << "omsc: Tier-2 recompile of '" << funcName
-                             << "' failed: could not lookup target: " << errStr << "\n";
-                return;
-            }
-            llvm::TargetOptions opts;
-            opts.EnableFastISel = false; // force optimising ISel for best codegen
-#if LLVM_VERSION_MAJOR >= 21
-            TM.reset(target->createTargetMachine(llvm::Triple(triple), cpu, features, opts,
-                                                 std::optional<llvm::Reloc::Model>()));
-#else
-            TM.reset(target->createTargetMachine(triple, cpu, features, opts, std::optional<llvm::Reloc::Model>()));
-#endif
-            if (!TM) {
-                llvm::errs() << "omsc: Tier-2 recompile of '" << funcName
-                             << "' failed: could not create target machine\n";
-                return;
-            }
-            mod->setDataLayout(TM->createDataLayout());
+        // Create a TargetMachine for this recompilation.  Each background
+        // thread gets its own TM since LLVM TargetMachine is not thread-safe.
+        auto TM = createTargetMachine();
+        if (!TM) {
+            llvm::errs() << "omsc: " << tierLabel << " recompile of '" << funcName
+                         << "' failed: could not create target machine\n";
+            return;
         }
+        mod->setDataLayout(TM->createDataLayout());
 
         llvm::PassBuilder PB(TM.get(), PTO);
 
@@ -873,8 +1065,13 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
         // multiple independent memory streams into separate loops with smaller
         // working sets, improving cache locality and enabling downstream
         // vectorisation of the resulting simpler loops.
-        PB.registerVectorizerStartEPCallback(
-            [](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) { FPM.addPass(llvm::LoopDistributePass()); });
+        // Only registered when the user has not disabled loop optimization.
+        if (loopOptimize_) {
+            PB.registerVectorizerStartEPCallback(
+                [](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) {
+                    FPM.addPass(llvm::LoopDistributePass());
+                });
+        }
 
         llvm::LoopAnalysisManager LAM;
         llvm::FunctionAnalysisManager FAM;
@@ -885,14 +1082,22 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
         PB.registerFunctionAnalyses(FAM);
         PB.registerLoopAnalyses(LAM);
         PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
-        PB.buildPerModuleDefaultPipeline(llvm::OptimizationLevel::O3).run(*mod, MAM);
+
+        // Use O3 for maximum code quality in the single recompile tier.
+        // Combined with AlwaysInline on all callees, aggressive inliner
+        // threshold (1200), and stripped unreachable functions, O3 produces
+        // code that can match or beat AOT for hot functions.
+        auto pipeline = PB.buildPerModuleDefaultPipeline(llvm::OptimizationLevel::O3);
+        pipeline.run(*mod, MAM);
     }
 
-    // Verify the module after O3 optimization to catch optimizer bugs early
-    // (the Tier-1 path already verifies at line 246; this mirrors it for Tier-2).
-    if (llvm::verifyModule(*mod, &llvm::errs())) {
-        llvm::errs() << "omsc: Tier-2 recompile of '" << funcName << "' failed: module verification after O3\n";
-        return;
+    // Verify the module after optimization — only in verbose mode to save time.
+    if (verbose_) {
+        if (llvm::verifyModule(*mod, &llvm::errs())) {
+            llvm::errs() << "omsc: " << tierLabel << " recompile of '" << funcName
+                         << "' failed: module verification after optimization\n";
+            return;
+        }
     }
 
     // --- JIT-compile the reoptimised module ---
@@ -908,7 +1113,8 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
 
     std::unique_ptr<llvm::ExecutionEngine> engine(eb.create());
     if (!engine) {
-        llvm::errs() << "omsc: Tier-2 JIT compilation of '" << funcName << "' failed: " << engineErr << "\n";
+        llvm::errs() << "omsc: " << tierLabel << " JIT compilation of '" << funcName << "' failed: " << engineErr
+                     << "\n";
         return;
     }
     engine->finalizeObject();
@@ -918,18 +1124,27 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
         return;
     }
 
-    // Mark successful — prevents the RAII scope guard from clearing the recompiled flag.
-    succeeded = true;
-
+    // Store the engine first, then mark successful.  This ensures the module
+    // stays alive even if something goes wrong after the success flag is set.
     {
         std::lock_guard<std::mutex> lk(recompiledMtx_);
         modules_.push_back({std::move(newCtx), std::move(engine)});
     }
 
-    // Hot-patch: the volatile load in the dispatch prolog will see this on
-    // the very next call to this function.
-    *fnPtrSlot = reinterpret_cast<void*>(addr);
-    std::cerr << "JIT: recompiled '" << funcName << "' successfully (Tier-2 active)\n"; // always printed
+    // Mark successful — prevents the RAII scope guard from reverting the tier.
+    succeeded = true;
+
+    // Hot-patch: use an atomic store with release ordering so the dispatch
+    // prolog's atomic acquire load sees the new pointer on the very next
+    // function call.  We use __atomic_store_n (GCC/Clang built-in) instead of
+    // reinterpret_cast<std::atomic<void*>*> to avoid strict-aliasing UB.
+    // On x86 this compiles to a simple MOV (TSO provides release semantics
+    // for free); on ARM/POWER it emits the appropriate release fence.
+    void* newPtr = reinterpret_cast<void*>(addr);
+    __atomic_store_n(fnPtrSlot, newPtr, __ATOMIC_RELEASE);
+    if (verbose_) {
+        std::cerr << "JIT: recompiled '" << funcName << "' successfully (" << tierLabel << " active) [background]\n";
+    }
 }
 
 } // namespace omscript

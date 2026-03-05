@@ -20,19 +20,22 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
-# Enable link-time optimization for Release builds when the compiler supports it.
-if(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
-    include(CheckIPOSupported)
-    check_ipo_supported(RESULT lto_supported OUTPUT lto_error)
-    if(lto_supported)
-        set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
-        message(STATUS "Link-time optimization (LTO) enabled")
+# Link-time optimization for the compiler binary itself (disabled by default
+# to avoid linking issues on some platforms).  Enable with -DLTO=ON.
+option(LTO "Enable link-time optimization for the compiler build" OFF)
+if(LTO)
+    if(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
+        include(CheckIPOSupported)
+        check_ipo_supported(RESULT lto_supported OUTPUT lto_error)
+        if(lto_supported)
+            set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
+            message(STATUS "Link-time optimization (LTO) enabled")
+        else()
+            message(WARNING "LTO requested but not supported: ${lto_error}")
+        endif()
+    else()
+        message(STATUS "LTO requires Release or RelWithDebInfo build type; ignoring -DLTO=ON")
     endif()
-endif()
-
-# Disable LTO by default to avoid linking issues (can be enabled with -DLTO=ON)
-if(NOT DEFINED LTO)
-    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION FALSE)
 endif()
 
 # Code coverage configuration
