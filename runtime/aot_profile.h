@@ -134,6 +134,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace llvm {
@@ -291,6 +292,7 @@ class AdaptiveJITRunner {
         std::string funcName;
         int64_t callCount;
         void** fnPtrSlot; ///< Pointer to the dispatch slot (cast to std::atomic<void*>* at point of update).
+        bool isEager = false; ///< True if this is an eagerly-queued startup task (not threshold-triggered).
         /// Max-heap ordering: higher callCount = higher priority = compiled first.
         bool operator<(const RecompileTask& o) const { return callCount < o.callCount; }
     };
@@ -307,10 +309,18 @@ class AdaptiveJITRunner {
     std::condition_variable queueCV_;        ///< Signals the background threads.
     std::atomic<bool> shutdownRequested_{false}; ///< Signals the workers to exit.
 
-    /// Number of background compilation threads.
-    /// Using 4 threads to maximise background CPU utilisation during
-    /// eager compilation — one thread per available core on typical CI.
-    static constexpr int kNumBgThreads = 4;
+    /// Counter of pending eager (startup) compilations.  Decremented by the
+    /// background worker after each eager task finishes.  When it reaches 0,
+    /// eagerDoneCV_ is notified so run() can start execution.
+    std::atomic<int> pendingEagerCount_{0};
+    std::mutex eagerDoneMtx_;         ///< Guards eagerDoneCV_ wait.
+    std::condition_variable eagerDoneCV_; ///< Signalled when all eager tasks complete.
+
+    /// Set of functions currently being compiled on a background thread.
+    /// Protected by recompiledMtx_.  Prevents two threads from compiling the
+    /// same function simultaneously when both the eager task and a threshold-
+    /// triggered task are in the queue at the same time.
+    std::unordered_set<std::string> compilingNow_;
 
     /// Background worker loop: waits for tasks, executes them sequentially.
     void backgroundWorker();
