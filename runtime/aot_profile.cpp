@@ -169,6 +169,14 @@ void AdaptiveJITRunner::injectCounters(llvm::Module& mod) {
         llvm::IRBuilder<> tmpB(ctx);
         auto* nameGV = tmpB.CreateGlobalString(name, "__omsc_name_" + name, 0, &mod);
 
+        // --- Per-function sample counter for profiling overhead reduction ---
+        // Used by the cold-path argument profiling to only fire callbacks
+        // every 8th call, reducing function-call overhead while maintaining
+        // sufficient statistical accuracy.
+        auto* sampleGV = new llvm::GlobalVariable(mod, i64Ty, /*isConst=*/false, llvm::GlobalValue::InternalLinkage,
+                                                   llvm::ConstantInt::get(i64Ty, 0), "__omsc_sample_" + name);
+        sampleGV->setAlignment(llvm::Align(8));
+
         // --- Inject branch-site profiling calls in the original function body ---
         // We must collect and instrument conditional branches BEFORE adding the
         // dispatch prolog blocks so our iteration only sees the original (clean)
@@ -176,6 +184,10 @@ void AdaptiveJITRunner::injectCounters(llvm::Module& mod) {
         // the iteration order used in onHotFunction() when applying branch weight
         // metadata during Tier-2 recompilation (both iterate blocks in order,
         // counting conditional branch terminators from 0).
+        //
+        // Branch profiling overhead is reduced at the C++ callback level: the
+        // profiler uses try_lock and an atomic sample counter to skip most
+        // invocations while maintaining statistical accuracy.
         {
             llvm::SmallVector<std::pair<llvm::BranchInst*, uint32_t>, 16> branchSites;
             uint32_t brIdx = 0;
@@ -364,14 +376,33 @@ void AdaptiveJITRunner::injectCounters(llvm::Module& mod) {
             B.CreateRet(hotCall);
         }
 
-        // --- omsc.count: atomic increment, check thresholds, profile args ---
+        // --- omsc.count: atomic increment, check thresholds, sampled arg profile ---
         B.SetInsertPoint(countBB);
         auto* oldCnt = B.CreateAtomicRMW(llvm::AtomicRMWInst::Add, counterGV, llvm::ConstantInt::get(i64Ty, 1),
                                          llvm::MaybeAlign(), llvm::AtomicOrdering::Monotonic);
         oldCnt->setName("omsc.old");
         auto* newCnt = B.CreateAdd(oldCnt, llvm::ConstantInt::get(i64Ty, 1), "omsc.new");
 
-        // Inject argument type profiling for each parameter.
+        // Increment the per-function sample counter (non-atomic — single-threaded
+        // cold path only, the hot path already redirects to recompiled code).
+        auto* oldSample = B.CreateLoad(i64Ty, sampleGV, "omsc.smp_old");
+        auto* newSample = B.CreateAdd(oldSample, llvm::ConstantInt::get(i64Ty, 1), "omsc.smp_new");
+        B.CreateStore(newSample, sampleGV);
+
+        // Inject argument type profiling every 8th call (sample counter & 0x7 == 0).
+        // This reduces function-call overhead on the cold path by ~8x while
+        // maintaining sufficient statistical accuracy for type/constant/range
+        // profiling decisions.
+        auto* shouldProfileArgs = B.CreateICmpEQ(
+            B.CreateAnd(newSample, llvm::ConstantInt::get(i64Ty, 0x7), "omsc.asmod"),
+            llvm::ConstantInt::get(i64Ty, 0), "omsc.aprof");
+        auto* argProfileBB = llvm::BasicBlock::Create(ctx, "omsc.arg_prof", fn);
+        auto* argSkipBB = llvm::BasicBlock::Create(ctx, "omsc.arg_skip", fn);
+        B.CreateCondBr(shouldProfileArgs, argProfileBB, argSkipBB,
+                       llvm::MDBuilder(ctx).createBranchWeights(1, 7));
+
+        // Arg profiling block.
+        B.SetInsertPoint(argProfileBB);
         uint32_t argIdx = 0;
         for (auto& arg : fn->args()) {
             B.CreateCall(argProfileTy, argProfileFn,
@@ -379,6 +410,10 @@ void AdaptiveJITRunner::injectCounters(llvm::Module& mod) {
                           llvm::ConstantInt::get(i8Ty, static_cast<uint8_t>(ArgType::Integer)), &arg});
             argIdx++;
         }
+        B.CreateBr(argSkipBB);
+
+        // Continue with threshold checks.
+        B.SetInsertPoint(argSkipBB);
 
         // Check whether the call count hits ANY of the multi-tier thresholds.
         auto* hitT2 =
@@ -693,6 +728,11 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
     // constant through the function body, enabling dead-branch elimination,
     // constant folding in expressions, and loop trip-count computation — all
     // without creating a separate specialized clone.
+    //
+    // At Tier-4+, also use the top-K value frequency tracker: if a single
+    // value dominates >60% of calls, inject the same assumption.  This catches
+    // cases where the constant-count tracker was confused by early non-constant
+    // calls but the top-K tracker correctly identified the dominant value.
     {
         const FunctionProfile* prof = JITProfiler::instance().getProfile(funcName);
         if (prof && !fn->empty()) {
@@ -712,6 +752,13 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
                 if (ap.hasConstantSpecialization() && fn->getArg(static_cast<unsigned>(i))->getType() == i64Ty) {
                     auto* cmp = asB.CreateICmpEQ(fn->getArg(static_cast<unsigned>(i)),
                                                  llvm::ConstantInt::get(i64Ty, ap.observedConstant), "omsc.const_spec");
+                    asB.CreateCall(assumeFn, {cmp});
+                } else if (targetTier >= 4 && ap.hasDominantValue() &&
+                           fn->getArg(static_cast<unsigned>(i))->getType() == i64Ty) {
+                    // Top-K fallback: dominant value detected at Tier-4+.
+                    auto* cmp = asB.CreateICmpEQ(fn->getArg(static_cast<unsigned>(i)),
+                                                 llvm::ConstantInt::get(i64Ty, ap.dominantValue()),
+                                                 "omsc.topk_spec");
                     asB.CreateCall(assumeFn, {cmp});
                 }
             }
@@ -898,12 +945,34 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
             loopMDs.push_back(vecWidth);
 
             // Attach profile-guided unroll count when trip count data is available.
+            // Use the new constant-trip-count and narrow-range data for more
+            // aggressive unrolling decisions.
             if (loopProf && loopIdx < loopProf->loops.size()) {
-                uint64_t avgTrip = loopProf->loops[loopIdx].averageTripCount();
+                const auto& lp = loopProf->loops[loopIdx];
+                uint64_t avgTrip = lp.averageTripCount();
                 uint32_t unrollCount = 0;
-                if (avgTrip > 0 && avgTrip <= 16) {
+                bool fullUnroll = false;
+
+                if (lp.hasConstantTripCount() && lp.constantTripCount > 0 &&
+                    lp.constantTripCount <= 64) {
+                    // Constant trip count: fully unroll small loops for maximum
+                    // optimization (eliminates loop overhead, enables constant
+                    // propagation of induction variables).
+                    if (lp.constantTripCount <= 32) {
+                        unrollCount = static_cast<uint32_t>(lp.constantTripCount);
+                        fullUnroll = true;
+                    } else {
+                        // 33-64: unroll by 8 for ILP without excessive code bloat.
+                        unrollCount = 8;
+                    }
+                } else if (lp.hasNarrowTripRange() && lp.maxTripCount <= 32) {
+                    // Narrow range of small trip counts: fully unroll to max.
+                    unrollCount = static_cast<uint32_t>(lp.maxTripCount);
+                    fullUnroll = true;
+                } else if (avgTrip > 0 && avgTrip <= 16) {
                     // Small trip count: fully unroll by the trip count.
                     unrollCount = static_cast<uint32_t>(avgTrip);
+                    fullUnroll = true;
                 } else if (avgTrip > 16 && avgTrip <= 64) {
                     // Medium trip count: unroll by 4.
                     unrollCount = 4;
@@ -912,11 +981,26 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
                     unrollCount = 8;
                 }
                 if (unrollCount > 0) {
+                    if (fullUnroll) {
+                        // Use llvm.loop.unroll.full for constant-trip loops
+                        // that should be completely unrolled.
+                        llvm::MDNode* unrollFullMD = llvm::MDNode::get(
+                            ctx, {llvm::MDString::get(ctx, "llvm.loop.unroll.full")});
+                        loopMDs.push_back(unrollFullMD);
+                    }
                     llvm::MDNode* unrollMD = llvm::MDNode::get(
                         ctx, {llvm::MDString::get(ctx, "llvm.loop.unroll.count"),
                               llvm::ConstantAsMetadata::get(
                                   llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), unrollCount))});
                     loopMDs.push_back(unrollMD);
+                }
+                // For large-trip-count loops (>64), enable vectorization.
+                if (avgTrip > 64) {
+                    llvm::MDNode* vecEnable = llvm::MDNode::get(
+                        ctx, {llvm::MDString::get(ctx, "llvm.loop.vectorize.enable"),
+                              llvm::ConstantAsMetadata::get(
+                                  llvm::ConstantInt::get(llvm::Type::getInt1Ty(ctx), 1))});
+                    loopMDs.push_back(vecEnable);
                 }
             }
 
