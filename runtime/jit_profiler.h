@@ -264,9 +264,10 @@ struct LoopProfile {
         if (tripCount > maxTripCount)
             maxTripCount = tripCount;
         // Track constant trip count.
-        if (constantTripCount < 0) {
+        if (executionCount == 1) {
             constantTripCount = static_cast<int64_t>(tripCount);
-        } else if (static_cast<uint64_t>(constantTripCount) != tripCount) {
+        } else if (tripCountIsConstant &&
+                   static_cast<int64_t>(tripCount) != constantTripCount) {
             tripCountIsConstant = false;
         }
     }

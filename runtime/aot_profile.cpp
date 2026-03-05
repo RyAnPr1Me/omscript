@@ -746,17 +746,18 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
             llvm::IRBuilder<> asB(&fn->getEntryBlock().front());
             for (size_t i = 0; i < prof->args.size() && i < fn->arg_size(); i++) {
                 const auto& ap = prof->args[i];
+                auto* arg = fn->getArg(static_cast<unsigned>(i));
                 // hasConstantSpecialization() checks profile data (>80% same
                 // value); the IR type check ensures the LLVM parameter is i64
                 // so we can safely emit an ICmpEQ + ConstantInt.
-                if (ap.hasConstantSpecialization() && fn->getArg(static_cast<unsigned>(i))->getType() == i64Ty) {
-                    auto* cmp = asB.CreateICmpEQ(fn->getArg(static_cast<unsigned>(i)),
+                if (ap.hasConstantSpecialization() && arg->getType() == i64Ty) {
+                    auto* cmp = asB.CreateICmpEQ(arg,
                                                  llvm::ConstantInt::get(i64Ty, ap.observedConstant), "omsc.const_spec");
                     asB.CreateCall(assumeFn, {cmp});
                 } else if (targetTier >= 4 && ap.hasDominantValue() &&
-                           fn->getArg(static_cast<unsigned>(i))->getType() == i64Ty) {
+                           arg->getType() == i64Ty) {
                     // Top-K fallback: dominant value detected at Tier-4+.
-                    auto* cmp = asB.CreateICmpEQ(fn->getArg(static_cast<unsigned>(i)),
+                    auto* cmp = asB.CreateICmpEQ(arg,
                                                  llvm::ConstantInt::get(i64Ty, ap.dominantValue()),
                                                  "omsc.topk_spec");
                     asB.CreateCall(assumeFn, {cmp});
@@ -953,15 +954,16 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
                 uint32_t unrollCount = 0;
                 bool fullUnroll = false;
 
-                if (lp.hasConstantTripCount() && lp.constantTripCount > 0 &&
-                    lp.constantTripCount <= 64) {
+                if (lp.hasConstantTripCount() &&
+                    static_cast<uint64_t>(lp.constantTripCount) <= 64) {
                     // Constant trip count: fully unroll small loops for maximum
                     // optimization (eliminates loop overhead, enables constant
                     // propagation of induction variables).
-                    if (lp.constantTripCount <= 32) {
-                        unrollCount = static_cast<uint32_t>(lp.constantTripCount);
+                    auto ctc = static_cast<uint32_t>(lp.constantTripCount);
+                    if (ctc > 0 && ctc <= 32) {
+                        unrollCount = ctc;
                         fullUnroll = true;
-                    } else {
+                    } else if (ctc > 32) {
                         // 33-64: unroll by 8 for ILP without excessive code bloat.
                         unrollCount = 8;
                     }
