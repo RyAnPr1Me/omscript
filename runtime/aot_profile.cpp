@@ -48,9 +48,7 @@ static std::atomic<AdaptiveJITRunner*> g_activeRunner{nullptr};
 
 AdaptiveJITRunner::AdaptiveJITRunner() = default;
 
-AdaptiveJITRunner::~AdaptiveJITRunner() {
-    drainBackgroundThread();
-}
+AdaptiveJITRunner::~AdaptiveJITRunner() = default;
 
 void AdaptiveJITRunner::ensureInitialized() {
     static std::once_flag initFlag;

@@ -260,7 +260,7 @@ class AdaptiveJITRunner {
     struct RecompileTask {
         std::string funcName;
         int64_t callCount;
-        void** fnPtrSlot; ///< Atomic-compatible pointer to the dispatch slot.
+        void** fnPtrSlot; ///< Pointer to the dispatch slot (cast to std::atomic<void*>* at point of update).
     };
 
     std::thread bgThread_;                   ///< Background compilation worker.
