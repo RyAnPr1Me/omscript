@@ -6,11 +6,9 @@
 // execution modes across a range of computational kernels.
 //
 // Each kernel is exercised at multiple call-count levels to measure:
-//   - Tier-1 baseline performance (first 50 calls)
-//   - Tier-2 warm performance (50–500 calls)
-//   - Tier-3 hot performance (500–5000 calls)
-//   - Tier-4 saturated performance (5000–50000 calls)
-//   - Tier-5 mega-hot performance (50000+ calls)
+//   - Tier-1 baseline performance (first 20 calls)
+//   - Tier-2 warm performance (20–2000 calls, O2+PGO)
+//   - Tier-3 hot performance (2000+ calls, O3+PGO)
 //
 // When run via `omsc run`, the adaptive JIT recompiles functions at each tier
 // threshold, and the timings capture the combined cost of profiling overhead

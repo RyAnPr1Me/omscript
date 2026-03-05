@@ -26,7 +26,7 @@
 //                                     ┌────────────────────┐
 //                                     │  Hot Function      │
 //                                     │  Detected          │
-//                                     │ (>= 100 calls)     │
+//                                     │ (>= 20 calls)      │
 //                                     └────────┬───────────┘
 //                                              │
 //                                              ▼
@@ -39,7 +39,7 @@
 //                                              │
 //                                              ▼
 //                                     ┌────────────────────┐
-//                                     │  O3 Optimization   │
+//                                     │  O2/O3 Optimization│
 //                                     │  - Constant fold   │
 //                                     │  - Dead code elim  │
 //                                     │  - Inlining        │
@@ -54,7 +54,7 @@
 //                                              ▼
 //                                     ┌────────────────────┐
 //                                     │ Optimized Machine  │────> Execution
-//                                     │ Code (Tier-2, O3)  │    (hot-patched)
+//                                     │ Code (Tier-2+)     │    (hot-patched)
 //                                     └────────────────────┘
 //                                              │
 //                                              │ guard failure?
@@ -74,7 +74,7 @@
 //   Tier 1 — Baseline JIT (fast startup):
 //     The module's clean IR is serialised to bitcode, then a fresh copy is
 //     loaded, call-counting dispatch prologs are injected into every
-//     non-main function, and the result is JIT-compiled at O3 via LLVM
+//     non-main function, and the result is JIT-compiled at O2 via LLVM
 //     MCJIT.  Execution begins immediately.
 //
 //   Runtime Profiling (continuous):
@@ -86,31 +86,26 @@
 //     Profiling continues even after Tier-2 promotion so that higher
 //     tiers benefit from richer statistical data.
 //
-//   Tier 2 — Warm recompile (50 calls):
-//     First O3+PGO recompile with early profile data.
+//   Tier 2 — Warm recompile (20 calls):
+//     First O2+PGO recompile with early profile data.
 //     Inliner threshold: 600.
+//     O2 keeps recompilation fast (~2x faster than O3) while still
+//     benefiting from PGO annotations (branch weights, type hints).
 //
-//   Tier 3 — Hot recompile (500 calls):
-//     Second recompile with 10x more profile samples.
-//     Inliner threshold: 800 — more aggressive cross-function inlining.
-//
-//   Tier 4 — Saturated recompile (5000 calls):
-//     Deep profile, inliner threshold 1200, double O3 pipeline pass
-//     to catch cascading optimizations.
-//
-//   Tier 5 — Mega-hot recompile (50000 calls):
-//     Maximum aggression: inliner threshold 1600, alwaysinline on hot
-//     callees, double O3 pass, full specialisation of the hot path.
+//   Tier 3 — Hot recompile (2000 calls):
+//     Full O3+PGO recompile with deep profile data.
+//     Inliner threshold: 1200, double O3 pass for cascading optimizations,
+//     alwaysinline on hot callees (>40% of calls).
 //
 //   Each tier:
 //     1. Parses the clean bitcode, strips unreachable functions.
 //     2. Annotates with PGO entry counts, branch weights, type hints,
 //        constant specialization, range assumptions, inline hints.
-//     3. Re-runs the full LLVM O3 pipeline with tier-specific settings.
+//     3. Re-runs the LLVM O2 or O3 pipeline with tier-specific settings.
 //     4. JIT-compiles and hot-patches the dispatch slot.
 //
 //   User flags (-ffast-math, -fvectorize, -funroll-loops, -floop-optimize)
-//   are propagated to the Tier-2+ O3 pipeline so the JIT honours the same
+//   are propagated to the Tier-2+ pipeline so the JIT honours the same
 //   optimisation policy the user requested.
 //
 //   Deoptimization:
@@ -140,29 +135,29 @@ class AdaptiveJITRunner {
     // -----------------------------------------------------------------------
     // Multi-tier recompilation thresholds
     // -----------------------------------------------------------------------
-    // The JIT uses five execution tiers, each triggered when a function's
+    // The JIT uses three execution tiers, each triggered when a function's
     // call count first reaches the corresponding threshold:
     //
-    //   Tier 1 (baseline):  O3-backend JIT of the compiler's IR — runs from
+    //   Tier 1 (baseline):  O2-backend JIT of the compiler's IR — runs from
     //                       call 0 while profile data is being collected.
-    //   Tier 2 (warm):      50 calls — first O3+PGO recompile with early
+    //                       O2 backend provides fast startup with good code.
+    //   Tier 2 (warm):      20 calls — first O2+PGO recompile with early
     //                       profile data (branch weights, argument types).
-    //   Tier 3 (hot):       500 calls — richer profile, more aggressive
-    //                       inlining (threshold 800) and full loop unroll.
-    //   Tier 4 (saturated): 5000 calls — deep profile, inliner 1200, double
-    //                       O3 pass for cascading optimizations.
-    //   Tier 5 (mega-hot):  50000 calls — maximum aggression: inliner 1600,
-    //                       alwaysinline on hot callees, double O3 pass.
+    //                       O2 keeps recompile time low while applying PGO.
+    //   Tier 3 (hot):       2000 calls — full O3+PGO recompile with deep
+    //                       profile, inliner threshold 1200, double O3
+    //                       pass for cascading optimizations, alwaysinline
+    //                       on hot callees.
     //
-    // Each successive tier uses increasingly aggressive inliner thresholds
-    // and benefits from more statistically significant profile data.
+    // The reduced number of tiers (3 vs the previous 5) dramatically cuts
+    // total recompilation overhead: each hot function is recompiled at most
+    // twice instead of four times, and the Tier-2 O2 recompile is ~2x
+    // faster than a full O3 pass.
     // -----------------------------------------------------------------------
-    static constexpr int64_t kTier2Threshold = 50;
-    static constexpr int64_t kTier3Threshold = 500;
-    static constexpr int64_t kTier4Threshold = 5000;
-    static constexpr int64_t kTier5Threshold = 50000;
+    static constexpr int64_t kTier2Threshold = 20;
+    static constexpr int64_t kTier3Threshold = 2000;
     /// Highest tier number (Tier-1 = baseline, Tier-2..kMaxTier = recompiled).
-    static constexpr int kMaxTier = 5;
+    static constexpr int kMaxTier = 3;
 
     AdaptiveJITRunner();
     ~AdaptiveJITRunner();

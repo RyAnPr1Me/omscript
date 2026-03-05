@@ -1,10 +1,10 @@
 // ---------------------------------------------------------------------------
-// Tier-4+ Large Loop Benchmark
+// Heavy Loop Benchmark
 // ---------------------------------------------------------------------------
 //
-// This benchmark exercises functions with enough calls to hit Tier-4 (5000+)
-// and Tier-5 (50000+) JIT recompilation thresholds, with large iteration
-// counts to produce measurable wall-clock times.
+// This benchmark exercises functions with enough calls to hit the Tier-3
+// (2000+) JIT recompilation threshold with large iteration counts to
+// produce measurable wall-clock times.
 //
 // Run:
 //   omsc run examples/jit_tier4_bench.om                 # JIT mode
@@ -92,7 +92,7 @@ fn gcd(a, b) {
 }
 
 // ===========================================================================
-// Benchmark harness — heavy iteration counts for Tier-4/5 + measurable times
+// Benchmark harness — heavy iteration counts for Tier-3 + measurable times
 // ===========================================================================
 
 fn bench_sum_cubes() {
@@ -162,8 +162,8 @@ fn bench_gcd() {
 }
 
 fn main() {
-    print("=== Tier-4+ Large Loop Benchmark ===");
-    print("Functions called 10k-200k times (Tier-4 at 5k, Tier-5 at 50k)");
+    print("=== Heavy Loop Benchmark ===");
+    print("Functions called 10k-200k times (Tier-2 at 20, Tier-3 at 2k)");
     print("");
 
     var t0 = time();

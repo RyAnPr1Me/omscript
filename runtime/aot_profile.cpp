@@ -323,21 +323,15 @@ void AdaptiveJITRunner::injectCounters(llvm::Module& mod) {
         // --- omsc.hot: increment counter and check for higher-tier thresholds ---
         // After a recompile the fn-ptr slot is set, so every subsequent call
         // takes this path.  We still increment the counter (cheap atomic add)
-        // so Tier-3 and Tier-4 thresholds can trigger.  The higher-tier check
-        // is a single EQ comparison per tier — negligible overhead.
+        // so Tier-3 threshold can trigger.  The higher-tier check
+        // is a single EQ comparison — negligible overhead.
         B.SetInsertPoint(hotBB);
         auto* hotOld = B.CreateAtomicRMW(llvm::AtomicRMWInst::Add, counterGV, llvm::ConstantInt::get(i64Ty, 1),
                                          llvm::MaybeAlign(), llvm::AtomicOrdering::Monotonic);
         hotOld->setName("omsc.hot_old");
         auto* hotNew = B.CreateAdd(hotOld, llvm::ConstantInt::get(i64Ty, 1), "omsc.hot_new");
-        auto* hitHigherT3 =
+        auto* hitHigher =
             B.CreateICmpEQ(hotNew, llvm::ConstantInt::get(i64Ty, AdaptiveJITRunner::kTier3Threshold), "omsc.ht3");
-        auto* hitHigherT4 =
-            B.CreateICmpEQ(hotNew, llvm::ConstantInt::get(i64Ty, AdaptiveJITRunner::kTier4Threshold), "omsc.ht4");
-        auto* hitHigherT5 =
-            B.CreateICmpEQ(hotNew, llvm::ConstantInt::get(i64Ty, AdaptiveJITRunner::kTier5Threshold), "omsc.ht5");
-        auto* hitHigher = B.CreateOr(B.CreateOr(hitHigherT3, hitHigherT4, "omsc.hit_h34"),
-                                     hitHigherT5, "omsc.hit_higher");
         B.CreateCondBr(hitHigher, hotCheckBB, hotCallBB, mdB.createBranchWeights(1, 999));
 
         // --- omsc.hot_check: profile args then trigger recompile ---
@@ -420,12 +414,7 @@ void AdaptiveJITRunner::injectCounters(llvm::Module& mod) {
             B.CreateICmpEQ(newCnt, llvm::ConstantInt::get(i64Ty, AdaptiveJITRunner::kTier2Threshold), "omsc.hit_t2");
         auto* hitT3 =
             B.CreateICmpEQ(newCnt, llvm::ConstantInt::get(i64Ty, AdaptiveJITRunner::kTier3Threshold), "omsc.hit_t3");
-        auto* hitT4 =
-            B.CreateICmpEQ(newCnt, llvm::ConstantInt::get(i64Ty, AdaptiveJITRunner::kTier4Threshold), "omsc.hit_t4");
-        auto* hitT5 =
-            B.CreateICmpEQ(newCnt, llvm::ConstantInt::get(i64Ty, AdaptiveJITRunner::kTier5Threshold), "omsc.hit_t5");
-        auto* hitAny = B.CreateOr(B.CreateOr(B.CreateOr(hitT2, hitT3, "omsc.hit23"), hitT4, "omsc.hit234"),
-                                  hitT5, "omsc.hit");
+        auto* hitAny = B.CreateOr(hitT2, hitT3, "omsc.hit");
         B.CreateCondBr(hitAny, recompileBB, &origEntry);
 
         // --- omsc.recompile: call the C++ recompiler, then fall to body ---
@@ -476,13 +465,12 @@ int AdaptiveJITRunner::run(llvm::Module* baseModule) {
     }
 
     // Step 4: JIT-compile the instrumented module.
-    // Use Aggressive (O3) backend optimization for Tier-1 so the initial
-    // native code is high quality — this minimises the performance gap between
-    // Tier-1 execution and the Tier-2 O3+PGO recompiled code.  The extra
-    // backend compilation cost is negligible for the handful of functions in
-    // a typical OmScript program.
+    // Use Default (O2) backend optimization for Tier-1 so the initial native
+    // code compiles quickly while maintaining reasonable quality.  The Tier-2
+    // O2+PGO recompile at 20 calls quickly replaces this baseline with
+    // profile-guided code, so the O2 startup cost is negligible.
     if (verbose_)
-        std::cout << "JIT: compiling instrumented module (Tier-1, O3)..." << std::endl;
+        std::cout << "JIT: compiling instrumented module (Tier-1, O2)..." << std::endl;
     JitModule jm;
     jm.ctx = std::move(instrCtx); // keep context alive with the engine
 
@@ -491,9 +479,9 @@ int AdaptiveJITRunner::run(llvm::Module* baseModule) {
     builder.setErrorStr(&engineErr);
     builder.setEngineKind(llvm::EngineKind::JIT);
 #if LLVM_VERSION_MAJOR >= 18
-    builder.setOptLevel(llvm::CodeGenOptLevel::Aggressive);
+    builder.setOptLevel(llvm::CodeGenOptLevel::Default);
 #else
-    builder.setOptLevel(llvm::CodeGenOpt::Aggressive);
+    builder.setOptLevel(llvm::CodeGenOpt::Default);
 #endif
 
     llvm::ExecutionEngine* rawEngine = builder.create();
@@ -551,10 +539,6 @@ int AdaptiveJITRunner::run(llvm::Module* baseModule) {
 // tierForCallCount() — map a call count to its JIT tier
 // ---------------------------------------------------------------------------
 int AdaptiveJITRunner::tierForCallCount(int64_t count) {
-    if (count >= kTier5Threshold)
-        return 5;
-    if (count >= kTier4Threshold)
-        return 4;
     if (count >= kTier3Threshold)
         return 3;
     if (count >= kTier2Threshold)
@@ -566,7 +550,7 @@ int AdaptiveJITRunner::tierForCallCount(int64_t count) {
 // onHotFunction() — multi-tier PGO recompilation (synchronous)
 // ---------------------------------------------------------------------------
 // Called from the dispatch prolog when a function's call count hits any of
-// the tier thresholds (50 / 500 / 5000).  Each successive tier uses richer
+// the tier thresholds (20 / 2000).  Each successive tier uses richer
 // profile data and more aggressive optimisation settings.  Runs synchronously
 // because LLVM MCJIT is not safe to use from a background thread while
 // another MCJIT engine is executing code.
@@ -585,10 +569,11 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
             return; // Already at this tier or above.
     }
 
-    const char* tierNames[] = {"", "", "Tier-2 (warm)", "Tier-3 (hot)", "Tier-4 (saturated)", "Tier-5 (mega-hot)"};
+    const char* tierNames[] = {"", "", "Tier-2 (warm)", "Tier-3 (hot)"};
     const char* tierLabel =
         (targetTier >= 2 && targetTier <= AdaptiveJITRunner::kMaxTier) ? tierNames[targetTier] : "Tier-?";
-    std::cerr << "JIT: recompiling '" << funcName << "' (calls: " << callCount << ") at " << tierLabel << " O3+PGO\n";
+    std::cerr << "JIT: recompiling '" << funcName << "' (calls: " << callCount << ") at " << tierLabel << " O"
+              << (targetTier >= 3 ? "3" : "2") << "+PGO\n";
 
     // RAII scope guard: on early return (failure), revert the tier so that
     // a future threshold hit can retry.  Dismissed (via succeeded=true)
@@ -754,7 +739,7 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
                     auto* cmp = asB.CreateICmpEQ(arg,
                                                  llvm::ConstantInt::get(i64Ty, ap.observedConstant), "omsc.const_spec");
                     asB.CreateCall(assumeFn, {cmp});
-                } else if (targetTier >= 4 && ap.hasDominantValue() &&
+                } else if (targetTier >= 3 && ap.hasDominantValue() &&
                            arg->getType() == i64Ty) {
                     // Top-K fallback: dominant value detected at Tier-4+.
                     auto* cmp = asB.CreateICmpEQ(arg,
@@ -828,9 +813,9 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
                     if (ratio > 0.2) {
                         llvm::Function* callee = mod->getFunction(cs.first);
                         if (callee && !callee->isDeclaration()) {
-                            // At Tier-4+ (5000+ calls), dominant callees (>40% of calls)
+                            // At Tier-3 (2000+ calls), dominant callees (>40% of calls)
                             // get alwaysinline to guarantee full inlining.
-                            if (targetTier >= 4 && ratio > 0.4) {
+                            if (targetTier >= 3 && ratio > 0.4) {
                                 callee->addFnAttr(llvm::Attribute::AlwaysInline);
                             } else {
                                 callee->addFnAttr(llvm::Attribute::InlineHint);
@@ -1035,12 +1020,11 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
         }
     }
 
-    // --- Re-optimise at O3 with PGO guidance and full native CPU features ---
+    // --- Re-optimise with PGO guidance and full native CPU features ---
     // Each tier uses progressively more aggressive optimisation settings:
-    //   Tier 2 (warm,  50 calls):  inliner threshold 600
-    //   Tier 3 (hot,  500 calls):  inliner threshold 800
-    //   Tier 4 (sat, 5000 calls):  inliner threshold 1200, double O3 pass
-    //   Tier 5 (mega,50000 calls): inliner threshold 1600, double O3 pass
+    //   Tier 2 (warm,   20 calls):  O2 pipeline, inliner threshold 600
+    //   Tier 3 (hot,  2000 calls):  O3 pipeline, inliner threshold 1200,
+    //                               double O3 pass for cascading optimizations
     //
     // User flags (-ffast-math, -fvectorize, -funroll-loops, -floop-optimize)
     // are propagated from the command line to the recompilation pipeline.
@@ -1060,13 +1044,7 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
             PTO.InlinerThreshold = 600;
             break;
         case 3:
-            PTO.InlinerThreshold = 800;
-            break;
-        case 4:
             PTO.InlinerThreshold = 1200;
-            break;
-        case 5:
-            PTO.InlinerThreshold = 1600;
             break;
         }
 
@@ -1146,15 +1124,18 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
         PB.registerLoopAnalyses(LAM);
         PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
 
-        auto pipeline = PB.buildPerModuleDefaultPipeline(llvm::OptimizationLevel::O3);
+        // Tier-2 (warm) uses O2 for fast recompilation with PGO guidance.
+        // Tier-3 (hot) uses O3 for maximum optimisation of proven hot code.
+        auto optLevel = (targetTier >= 3) ? llvm::OptimizationLevel::O3 : llvm::OptimizationLevel::O2;
+        auto pipeline = PB.buildPerModuleDefaultPipeline(optLevel);
         pipeline.run(*mod, MAM);
 
-        // At Tier-4+ (5000+ calls), run the O3 pipeline a second time.
+        // At Tier-3 (2000+ calls), run the O3 pipeline a second time.
         // The first pass often creates new optimization opportunities
         // (e.g., inlining exposes constant folding, dead code elimination
         // reveals further loop simplification) that a second pass can exploit.
         // This mirrors the AOT pipeline's iterative approach at O3.
-        if (targetTier >= 4) {
+        if (targetTier >= 3) {
             // The first O3 pass may have added module flags (e.g., "CG Profile")
             // that would conflict with the second pass trying to add them again.
             // Strip all module flags to avoid "module flag identifiers must be
