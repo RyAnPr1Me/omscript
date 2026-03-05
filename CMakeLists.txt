@@ -103,6 +103,7 @@ add_executable(omsc ${COMPILER_SOURCES} ${RUNTIME_SOURCES})
 set(LLVM_COMPONENTS
     core
     executionengine
+    interpreter
     orcjit
     orctargetprocess
     native
