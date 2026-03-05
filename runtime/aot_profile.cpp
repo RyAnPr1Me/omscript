@@ -47,7 +47,10 @@ namespace omscript {
 static std::atomic<AdaptiveJITRunner*> g_activeRunner{nullptr};
 
 AdaptiveJITRunner::AdaptiveJITRunner() = default;
-AdaptiveJITRunner::~AdaptiveJITRunner() = default;
+
+AdaptiveJITRunner::~AdaptiveJITRunner() {
+    drainBackgroundThread();
+}
 
 void AdaptiveJITRunner::ensureInitialized() {
     static std::once_flag initFlag;
@@ -347,18 +350,14 @@ void AdaptiveJITRunner::injectCounters(llvm::Module& mod) {
         }
         B.CreateBr(hotRecompBB);
 
-        // --- omsc.hot_recomp: call recompiler, then re-load fn-ptr and call ---
+        // --- omsc.hot_recomp: enqueue recompile, then call current fn-ptr ---
+        // With background compilation, the callback returns immediately.
+        // The fn-ptr has not been updated yet, so we just call the current
+        // optimised version.  The background thread will atomically update
+        // the pointer when it finishes, and subsequent calls will use it.
         B.SetInsertPoint(hotRecompBB);
         B.CreateCall(callbackTy, callbackFn, {nameGV, hotNew, fnPtrGV});
-        {
-            // Re-load the fn-ptr slot — it may have been updated by the recompiler.
-            auto* newFP = B.CreateAlignedLoad(ptrTy, fnPtrGV, llvm::Align(8), /*isVolatile=*/true, "omsc.new_fp");
-            llvm::SmallVector<llvm::Value*, 8> args;
-            for (auto& arg : fn->args())
-                args.push_back(&arg);
-            auto* reCall = B.CreateCall(fn->getFunctionType(), newFP, args, "omsc.re_r");
-            B.CreateRet(reCall);
-        }
+        B.CreateBr(hotCallBB);
 
         // --- omsc.hot_call: normal hot-path call with current fn-ptr ---
         B.SetInsertPoint(hotCallBB);
@@ -522,12 +521,23 @@ int AdaptiveJITRunner::run(llvm::Module* baseModule) {
     // cleared even if main() exits via an exception.
     if (verbose_)
         std::cout << "JIT: executing program..." << std::endl;
+
+    // Start the background compilation thread before execution begins.
+    // All tier-threshold recompilations will be offloaded to this thread,
+    // allowing the main execution thread to continue without pausing.
+    shutdownRequested_.store(false, std::memory_order_relaxed);
+    bgThread_ = std::thread(&AdaptiveJITRunner::backgroundWorker, this);
+
     g_activeRunner.store(this, std::memory_order_release);
     struct RunnerGuard {
+        AdaptiveJITRunner* self;
         ~RunnerGuard() {
             g_activeRunner.store(nullptr, std::memory_order_release);
+            // Drain the background thread — wait for all pending compilations
+            // to finish before tearing down JIT modules.
+            self->drainBackgroundThread();
         }
-    } runnerGuard;
+    } runnerGuard{this};
     using OmscMainFn = int64_t (*)();
     int64_t exitVal = reinterpret_cast<OmscMainFn>(mainAddr)();
 
@@ -547,13 +557,13 @@ int AdaptiveJITRunner::tierForCallCount(int64_t count) {
 }
 
 // ---------------------------------------------------------------------------
-// onHotFunction() — multi-tier PGO recompilation (synchronous)
+// onHotFunction() — non-blocking recompilation enqueue
 // ---------------------------------------------------------------------------
 // Called from the dispatch prolog when a function's call count hits any of
-// the tier thresholds (20 / 2000).  Each successive tier uses richer
-// profile data and more aggressive optimisation settings.  Runs synchronously
-// because LLVM MCJIT is not safe to use from a background thread while
-// another MCJIT engine is executing code.
+// the tier thresholds (20 / 2000).  Instead of blocking the main execution
+// thread, this enqueues a task on the background compilation thread and
+// returns immediately.  The function continues executing baseline code
+// until the background thread finishes and atomically patches the slot.
 void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void** fnPtrSlot) {
     const std::string funcName(name);
 
@@ -567,13 +577,70 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
         int currentTier = functionTier_[funcName]; // 0 if never compiled
         if (targetTier <= currentTier)
             return; // Already at this tier or above.
+        // Tentatively promote to prevent duplicate enqueues.
+        functionTier_[funcName] = targetTier;
     }
+
+    // Enqueue the recompilation task on the background thread.
+    // This returns immediately — zero pause on the hot path.
+    {
+        std::lock_guard<std::mutex> lk(queueMtx_);
+        taskQueue_.push({funcName, callCount, fnPtrSlot});
+    }
+    queueCV_.notify_one();
+}
+
+// ---------------------------------------------------------------------------
+// backgroundWorker() — background compilation thread loop
+// ---------------------------------------------------------------------------
+// Waits for recompilation tasks on the queue, processes them sequentially.
+// Tasks are processed one at a time to avoid contention on LLVM's
+// thread-unsafe MCJIT infrastructure.
+void AdaptiveJITRunner::backgroundWorker() {
+    while (true) {
+        RecompileTask task;
+        {
+            std::unique_lock<std::mutex> lk(queueMtx_);
+            queueCV_.wait(lk, [this] {
+                return !taskQueue_.empty() || shutdownRequested_.load(std::memory_order_relaxed);
+            });
+            if (taskQueue_.empty() && shutdownRequested_.load(std::memory_order_relaxed))
+                return; // Shutdown requested and no more work.
+            task = std::move(taskQueue_.front());
+            taskQueue_.pop();
+        }
+        doRecompile(task.funcName, task.callCount, task.fnPtrSlot);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// drainBackgroundThread() — stop the background worker cleanly
+// ---------------------------------------------------------------------------
+void AdaptiveJITRunner::drainBackgroundThread() {
+    if (!bgThread_.joinable())
+        return;
+    shutdownRequested_.store(true, std::memory_order_relaxed);
+    queueCV_.notify_one();
+    bgThread_.join();
+}
+
+// ---------------------------------------------------------------------------
+// doRecompile() — multi-tier PGO recompilation (runs on background thread)
+// ---------------------------------------------------------------------------
+// Performs the actual heavy work of recompilation: parsing clean bitcode,
+// applying PGO annotations, running the O2/O3 pipeline, JIT-compiling,
+// and atomically storing the new function pointer.
+void AdaptiveJITRunner::doRecompile(const std::string& funcName, int64_t callCount, void** fnPtrSlot) {
+
+    int targetTier = tierForCallCount(callCount);
+    if (targetTier == 0)
+        return;
 
     const char* tierNames[] = {"", "", "Tier-2 (warm)", "Tier-3 (hot)"};
     const char* tierLabel =
         (targetTier >= 2 && targetTier <= AdaptiveJITRunner::kMaxTier) ? tierNames[targetTier] : "Tier-?";
     std::cerr << "JIT: recompiling '" << funcName << "' (calls: " << callCount << ") at " << tierLabel << " O"
-              << (targetTier >= 3 ? "3" : "2") << "+PGO\n";
+              << (targetTier >= 3 ? "3" : "2") << "+PGO [background]\n";
 
     // RAII scope guard: on early return (failure), revert the tier so that
     // a future threshold hit can retry.  Dismissed (via succeeded=true)
@@ -583,7 +650,6 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
     {
         std::lock_guard<std::mutex> lk(recompiledMtx_);
         prevTier = functionTier_[funcName];
-        functionTier_[funcName] = targetTier; // tentatively promote
     }
     struct ScopeExit {
         bool& flag;
@@ -1196,10 +1262,15 @@ void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void*
         modules_.push_back({std::move(newCtx), std::move(engine)});
     }
 
-    // Hot-patch: the volatile load in the dispatch prolog will see this on
-    // the very next call to this function.
-    *fnPtrSlot = reinterpret_cast<void*>(addr);
-    std::cerr << "JIT: recompiled '" << funcName << "' successfully (" << tierLabel << " active)\n";
+    // Hot-patch: use an atomic store with release ordering so the dispatch
+    // prolog's volatile load (which acts as an acquire on x86, and pairs
+    // with the release here on weakly-ordered architectures) sees the new
+    // pointer on the very next function call.  This is the key to making
+    // background compilation have zero performance impact — the main thread
+    // never pauses; it simply starts seeing the optimised pointer.
+    reinterpret_cast<std::atomic<void*>*>(fnPtrSlot)->store(
+        reinterpret_cast<void*>(addr), std::memory_order_release);
+    std::cerr << "JIT: recompiled '" << funcName << "' successfully (" << tierLabel << " active) [background]\n";
 }
 
 } // namespace omscript

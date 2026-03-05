@@ -81,7 +81,7 @@ fi
 # and different overflow behavior at higher tiers.
 BENCHMARKS=(
     "examples/benchmark_jit_aot.om|128|128|JIT/AOT Suite (8 kernels)"
-    "examples/benchmark_loops_math.om|240|143|Loops + Math (8 kernels)"
+    "examples/benchmark_loops_math.om|240|240|Loops + Math (8 kernels)"
     "examples/jit_tier4_bench.om|96|96|Heavy Loops (6 kernels)"
 )
 

@@ -97,12 +97,21 @@
 //     Inliner threshold: 1200, double O3 pass for cascading optimizations,
 //     alwaysinline on hot callees (>40% of calls).
 //
+//   Background Compilation:
+//     All recompilations (Tier-2 and Tier-3) run on a dedicated background
+//     thread.  When a tier threshold is hit, the dispatch prolog's callback
+//     enqueues a recompilation task and returns immediately — the function
+//     continues executing baseline (Tier-1) code with zero pause.  When
+//     the background thread finishes, it atomically stores the new native
+//     function pointer into the dispatch slot, and subsequent calls take
+//     the fast path to the optimised code.
+//
 //   Each tier:
 //     1. Parses the clean bitcode, strips unreachable functions.
 //     2. Annotates with PGO entry counts, branch weights, type hints,
 //        constant specialization, range assumptions, inline hints.
 //     3. Re-runs the LLVM O2 or O3 pipeline with tier-specific settings.
-//     4. JIT-compiles and hot-patches the dispatch slot.
+//     4. JIT-compiles and atomically hot-patches the dispatch slot.
 //
 //   User flags (-ffast-math, -fvectorize, -funroll-loops, -floop-optimize)
 //   are propagated to the Tier-2+ pipeline so the JIT honours the same
@@ -114,11 +123,15 @@
 //     Tier-1 baseline code.
 // ---------------------------------------------------------------------------
 
+#include <atomic>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <queue>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -198,9 +211,10 @@ class AdaptiveJITRunner {
     int run(llvm::Module* module);
 
     /// Called from __omsc_adaptive_recompile when a function hits a tier
-    /// threshold.  Recompiles @p name from the clean bitcode with O3 + PGO,
-    /// using tier-appropriate aggressiveness, then writes the new native
-    /// function pointer into *fnPtrSlot.
+    /// threshold.  Enqueues an asynchronous recompilation on the background
+    /// thread and returns immediately so the calling function continues
+    /// executing baseline code with virtually zero pause.  The background
+    /// thread atomically updates *fnPtrSlot when compilation finishes.
     void onHotFunction(const char* name, int64_t callCount, void** fnPtrSlot);
 
   private:
@@ -228,6 +242,46 @@ class AdaptiveJITRunner {
     bool unrollLoops_ = true;
     bool loopOptimize_ = true;
 
+    // -------------------------------------------------------------------
+    // Background compilation thread
+    // -------------------------------------------------------------------
+    // Recompilation is offloaded to a dedicated background thread so that
+    // the main execution thread never stalls.  The dispatch prolog's
+    // __omsc_adaptive_recompile callback enqueues a task and returns
+    // immediately; the background thread picks it up, runs the O2/O3+PGO
+    // pipeline, and atomically stores the new function pointer when done.
+    //
+    // The function pointer slot is updated with an atomic store (release
+    // ordering) so the next volatile load in the dispatch prolog sees it
+    // without any additional fencing on the hot path.
+    // -------------------------------------------------------------------
+
+    /// A pending recompilation request.
+    struct RecompileTask {
+        std::string funcName;
+        int64_t callCount;
+        void** fnPtrSlot; ///< Atomic-compatible pointer to the dispatch slot.
+    };
+
+    std::thread bgThread_;                   ///< Background compilation worker.
+    std::queue<RecompileTask> taskQueue_;     ///< Pending recompilation requests.
+    std::mutex queueMtx_;                    ///< Guards taskQueue_.
+    std::condition_variable queueCV_;        ///< Signals the background thread.
+    std::atomic<bool> shutdownRequested_{false}; ///< Signals the worker to exit.
+
+    /// Background worker loop: waits for tasks, executes them sequentially.
+    void backgroundWorker();
+
+    /// The actual heavy recompilation work — runs on the background thread.
+    /// Parses clean bitcode, applies PGO annotations, runs O2/O3 pipeline,
+    /// JIT-compiles, and atomically stores the new function pointer.
+    void doRecompile(const std::string& funcName, int64_t callCount, void** fnPtrSlot);
+
+    /// Drain the task queue and join the background thread.
+    /// Called from run() after main() returns to ensure all pending
+    /// compilations complete before JIT modules are destroyed.
+    void drainBackgroundThread();
+
     /// Return the tier (2 or 3) for a given call count, or 0 if below
     /// all thresholds.
     static int tierForCallCount(int64_t count);
@@ -246,10 +300,12 @@ class AdaptiveJITRunner {
 // C-linkage callback — invoked directly from compiler-injected LLVM IR
 // ---------------------------------------------------------------------------
 extern "C" {
-/// Trigger Tier-2 recompilation of @p name.
+/// Enqueue asynchronous recompilation of @p name on the background thread.
 /// @p callCount is the observed call count (used as the PGO entry-count hint).
 /// @p fnPtrSlot points to the @__omsc_fn_<name> global in the JIT binary;
-/// the recompiler stores the new native pointer there on success.
+/// the background thread atomically stores the new native pointer there on
+/// success.  Returns immediately so the calling function continues executing
+/// baseline code with no pause.
 void __omsc_adaptive_recompile(const char* name, int64_t callCount, void** fnPtrSlot);
 } // extern "C"
 
