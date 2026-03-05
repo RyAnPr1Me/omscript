@@ -74,9 +74,9 @@
 //   Tier 1 — Baseline JIT (fast startup):
 //     The module's clean IR is serialised to bitcode, then a fresh copy is
 //     loaded, call-counting dispatch prologs are injected into every
-//     non-main function, and the result is JIT-compiled at O1 via LLVM
-//     MCJIT.  Execution begins immediately.  O1 keeps startup fast; the
-//     code is replaced after just 10 calls by PGO-guided Tier-2.
+//     non-main function, and the result is JIT-compiled at O0 via LLVM
+//     ORC LLJIT.  Execution begins immediately.  O0 codegen keeps startup
+//     fast; the code is replaced after just a few calls by PGO-guided Tier-2.
 //
 //   Runtime Profiling (continuous):
 //     Each non-main function collects runtime data via atomic counters
@@ -137,10 +137,12 @@
 #include <vector>
 
 namespace llvm {
-class ExecutionEngine;
 class LLVMContext;
 class Module;
 class TargetMachine;
+namespace orc {
+class LLJIT;
+} // namespace orc
 } // namespace llvm
 
 namespace omscript {
@@ -226,11 +228,10 @@ class AdaptiveJITRunner {
     /// tiered recompilations.
     std::vector<char> cleanBitcode_;
 
-    /// Keeps MCJIT ExecutionEngines (and their contexts) alive so compiled
+    /// Keeps ORC LLJIT instances (and their contexts) alive so compiled
     /// native code pointers remain valid for the process lifetime.
     struct JitModule {
-        std::unique_ptr<llvm::LLVMContext> ctx;
-        std::unique_ptr<llvm::ExecutionEngine> engine;
+        std::unique_ptr<llvm::orc::LLJIT> lljit;
     };
     std::vector<JitModule> modules_;
 

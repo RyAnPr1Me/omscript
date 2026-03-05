@@ -96,14 +96,15 @@ add_executable(omsc ${COMPILER_SOURCES} ${RUNTIME_SOURCES})
 # Link LLVM libraries
 # Only components actually used by the compiler and AOT runtime are listed.
 # - core, support: fundamental LLVM infrastructure
-# - executionengine, mcjit: adaptive JIT execution (runtime/aot_profile.cpp)
+# - executionengine, orcjit: adaptive ORC JIT execution (runtime/aot_profile.cpp)
 # - native: host target auto-detection
 # - passes, transformutils, analysis: optimization pipeline
 # - target, codegen, mc, mcparser, asmparser: machine code emission
 set(LLVM_COMPONENTS
     core
     executionengine
-    mcjit
+    orcjit
+    orctargetprocess
     native
     support
     passes
@@ -133,6 +134,14 @@ endif()
 llvm_map_components_to_libnames(llvm_libs ${LLVM_COMPONENTS})
 
 target_link_libraries(omsc ${llvm_libs})
+
+# ORC JIT requires the host binary to export its own symbols so the in-process
+# executor can locate ORC runtime helpers (e.g. llvm_orc_registerEHFrameSectionWrapper)
+# via dlsym.  --export-dynamic ensures all statically-linked symbols from
+# libLLVMOrcTargetProcess are visible to the dynamic linker at runtime.
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND NOT APPLE)
+    target_link_options(omsc PRIVATE -Wl,--export-dynamic)
+endif()
 
 # Installation
 install(TARGETS omsc DESTINATION bin)
