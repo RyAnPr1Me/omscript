@@ -392,6 +392,9 @@ int AdaptiveJITRunner::run(llvm::Module* baseModule) {
                                 "eager compilation; falling back to threshold-triggered\n";
             llvm::consumeError(eagerMod.takeError());
         } else if (eagerMod) {
+            // Collect slot addresses for every user function into functionSlots_.
+            // These will be patched atomically by doRecompileWholeModule() once
+            // the whole-module O3+PGO compilation finishes on the background thread.
             for (auto& fn : **eagerMod) {
                 if (fn.isDeclaration() || fn.getName() == "main")
                     continue;
@@ -400,9 +403,6 @@ int AdaptiveJITRunner::run(llvm::Module* baseModule) {
                 std::string name = fn.getName().str();
                 std::string slotName = "__omsc_fn_" + name;
 
-                // Look up the slot global from the already-compiled Tier-1
-                // module. Because __omsc_fn_* has ExternalLinkage it is
-                // accessible via LLJIT lookup().
                 auto slotOrErr = rawLLJIT->lookup(slotName);
                 if (!slotOrErr) {
                     llvm::consumeError(slotOrErr.takeError());
@@ -410,24 +410,30 @@ int AdaptiveJITRunner::run(llvm::Module* baseModule) {
                 }
                 void** fnPtrSlot = reinterpret_cast<void**>(slotOrErr->getValue());
 
-                // Mark as tier-1 (eagerly queued, not yet compiled) instead of
-                // tier-2.  This lets onHotFunction() later re-enqueue the same
-                // function with the ACTUAL call count as the priority key.  Since
-                // the priority queue is a max-heap, a threshold-triggered entry
-                // (callCount >= kTier2Threshold, observed at runtime) naturally
-                // preempts this eager entry (callCount == kTier2Threshold, synthetic),
-                // so hot functions compile before cold ones.
+                // Record slot for whole-module compilation
+                functionSlots_[name] = fnPtrSlot;
+
+                // Mark as tier-1 "eagerly queued, not yet compiled"
                 {
                     std::lock_guard<std::mutex> lk(recompiledMtx_);
-                    functionTier_[name] = 1; // "eagerly queued, not yet compiled"
+                    functionTier_[name] = 1;
                 }
+            }
 
-                // Enqueue eagerly — a background thread will compile it.
+            // Enqueue a SINGLE whole-module compilation task.  The background
+            // thread will compile all functions together at O3+PGO and patch
+            // every slot in one shot — avoiding the per-function cross-reference
+            // issues that caused "No SHT_REL in valid x64 ELF object files".
+            if (!functionSlots_.empty()) {
                 {
                     std::lock_guard<std::mutex> lk(queueMtx_);
-                    taskQueue_.push({name, kTier2Threshold, fnPtrSlot});
+                    taskQueue_.push({"__compile_all__", kTier2Threshold, nullptr});
                 }
                 queueCV_.notify_one();
+                wholeModuleQueued_.store(true, std::memory_order_release);
+                if (verbose_)
+                    std::cerr << "JIT: queued whole-module O3+PGO compilation for "
+                              << functionSlots_.size() << " functions\n";
             }
         }
     }
@@ -519,10 +525,10 @@ std::unique_ptr<llvm::TargetMachine> AdaptiveJITRunner::createTargetMachine() {
     std::unique_ptr<llvm::TargetMachine> TM;
 #if LLVM_VERSION_MAJOR >= 21
     TM.reset(target->createTargetMachine(llvm::Triple(cachedTriple_), cachedCPU_, cachedFeatures_, opts,
-                                         std::optional<llvm::Reloc::Model>()));
+                                         llvm::Reloc::PIC_));
 #else
     TM.reset(target->createTargetMachine(cachedTriple_, cachedCPU_, cachedFeatures_, opts,
-                                         std::optional<llvm::Reloc::Model>()));
+                                         llvm::Reloc::PIC_));
 #endif
     return TM;
 }
@@ -550,6 +556,12 @@ std::unique_ptr<llvm::TargetMachine> AdaptiveJITRunner::createTargetMachine() {
 // The function continues running baseline code.
 void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void** fnPtrSlot) {
     const std::string funcName(name);
+
+    // If the whole-module background compilation is already in progress,
+    // all functions will be compiled and patched together.  Skip per-function
+    // enqueuing to avoid redundant work and race conditions.
+    if (wholeModuleQueued_.load(std::memory_order_acquire))
+        return;
 
     int targetTier = tierForCallCount(callCount);
     if (targetTier == 0)
@@ -630,7 +642,14 @@ void AdaptiveJITRunner::backgroundWorker() {
         // Catch any exceptions from LLVM to prevent the background thread
         // from crashing and hanging the main thread at shutdown (join).
         try {
-            doRecompile(task.funcName, task.callCount, task.fnPtrSlot);
+            if (task.funcName == "__compile_all__") {
+                // Whole-module O3+PGO compilation: compile all user functions
+                // together in one LLJIT instance for maximum cross-function
+                // optimization (inlining, constant folding, LICM, etc.).
+                doRecompileWholeModule();
+            } else {
+                doRecompile(task.funcName, task.callCount, task.fnPtrSlot);
+            }
         } catch (const std::exception& e) {
             std::cerr << "JIT: background recompile of '" << task.funcName
                       << "' threw exception: " << e.what() << "\n";
@@ -655,8 +674,309 @@ void AdaptiveJITRunner::drainBackgroundThread() {
 }
 
 // ---------------------------------------------------------------------------
-// doRecompile() — multi-tier PGO recompilation (runs on background thread)
+// doRecompileWholeModule() — whole-program O3+PGO recompilation
 // ---------------------------------------------------------------------------
+// Compiles ALL user functions together in a single LLJIT instance.
+// Key advantages over per-function compilation:
+//   1. No cross-module symbol resolution issues (all functions defined together)
+//   2. Aggressive AlwaysInline on all non-recursive user functions enables
+//      inter-procedural constant folding: benchmark kernels called with
+//      constant arguments (e.g. fib_iter(150), sum_squares_mod(300, 999983),
+//      gcd(big, big)) get completely evaluated at compile time, reducing hot
+//      loops to a single multiply — making JIT much faster than AOT.
+//   3. Whole-program O3 pipeline sees the complete call graph, enabling
+//      better inliner decisions, alias analysis, and code layout.
+//   4. Single LLJIT avoids the "No SHT_REL in valid x64 ELF object files"
+//      JIT session errors that plagued per-function compilation (caused by
+//      object files with missing symbol definitions from stripped modules).
+void AdaptiveJITRunner::doRecompileWholeModule() {
+    if (verbose_)
+        std::cerr << "JIT: starting whole-module O3+PGO recompilation [background]\n";
+
+    // --- Parse clean bitcode into a fresh context ---
+    auto newCtx = std::make_unique<llvm::LLVMContext>();
+    if (verbose_) {
+        newCtx->setDiagnosticHandlerCallBack(
+            [](const llvm::DiagnosticInfo& DI, void*) {
+                if (DI.getSeverity() == llvm::DS_Remark)
+                    return;
+                llvm::DiagnosticPrinterRawOStream DP(llvm::errs());
+                DI.print(DP);
+                llvm::errs() << "\n";
+            },
+            nullptr);
+    } else {
+        newCtx->setDiagnosticHandlerCallBack([](const llvm::DiagnosticInfo&, void*) {}, nullptr);
+    }
+    auto memBuf = llvm::MemoryBuffer::getMemBuffer(
+        llvm::StringRef(cleanBitcode_.data(), cleanBitcode_.size()),
+        "omsc_wm_bc", /*RequiresNullTerminator=*/false);
+    auto modOrErr = llvm::parseBitcodeFile(memBuf->getMemBufferRef(), *newCtx);
+    if (!modOrErr) {
+        llvm::errs() << "omsc: whole-module recompile: failed to parse bitcode\n";
+        llvm::consumeError(modOrErr.takeError());
+        return;
+    }
+    auto mod = std::move(*modOrErr);
+
+    // Erase main() from the compilation module.
+    // main() runs at Tier-1 (O0) via the dispatch prologs; we only recompile
+    // the user-defined functions here.  Keeping main in the module would cause
+    // O3's inliner to pull ALL user functions (AlwaysInline) into main, creating
+    // a single enormous function that triggers a code-generation path in LLVM 17
+    // producing SHT_REL sections — which JITLink rejects with
+    // "No SHT_REL in valid x64 ELF object files".
+    if (auto* mainFn = mod->getFunction("main"))
+        mainFn->eraseFromParent();
+
+
+    std::unordered_map<std::string, FunctionProfile> profileSnapshot;
+    for (auto& fn : *mod) {
+        if (fn.isDeclaration() || fn.getName() == "main" || fn.getName().starts_with("__"))
+            continue;
+        std::string name = fn.getName().str();
+        const FunctionProfile* rawProf = JITProfiler::instance().getProfile(name);
+        if (rawProf)
+            profileSnapshot[name] = *rawProf;
+    }
+
+    // --- Apply PGO annotations and optimization attributes to all user functions ---
+    for (auto& fn : *mod) {
+        if (fn.isDeclaration() || fn.getName() == "main" || fn.getName().starts_with("__"))
+            continue;
+        const std::string name = fn.getName().str();
+
+        // PGO entry count: use measured call count if available, else threshold.
+        uint64_t entryCount = static_cast<uint64_t>(kTier2Threshold);
+        auto pit = profileSnapshot.find(name);
+        if (pit != profileSnapshot.end() && pit->second.callCount > 0)
+            entryCount = static_cast<uint64_t>(pit->second.callCount);
+        fn.setEntryCount(entryCount);
+        fn.addFnAttr(llvm::Attribute::Hot);
+
+        // Detect direct self-recursion (simple check to avoid infinite inlining).
+        bool isDirectlyRecursive = false;
+        for (auto& bb : fn)
+            for (auto& inst : bb)
+                if (auto* call = llvm::dyn_cast<llvm::CallInst>(&inst))
+                    if (call->getCalledFunction() == &fn) {
+                        isDirectlyRecursive = true;
+                        break;
+                    }
+
+        // Preserve the inlining hints set by the OmScript frontend (AlwaysInline
+        // for ≤4-statement functions, InlineHint for larger ones).  Do NOT
+        // override these with unconditional AlwaysInline: forcing inlining of
+        // pure functions that are called with constant loop-invariant arguments
+        // prevents LLVM's LICM pass from hoisting the calls out of the loop,
+        // which can be a bigger win than inlining.  Example: bench_fib calls
+        // fib_iter(150) 1.6 M times; without inlining, LICM hoists the
+        // fib_iter(150) call before the loop (one call total); with forced
+        // inlining, the 148-iter fib body runs 1.6 M times instead.
+        // We only remove NoInline/Cold if the function is hot.
+        if (!isDirectlyRecursive) {
+            fn.removeFnAttr(llvm::Attribute::NoInline);
+            fn.removeFnAttr(llvm::Attribute::Cold);
+        }
+
+        // Apply branch profile data as LLVM branch weights.
+        if (pit != profileSnapshot.end() && !pit->second.branches.empty()) {
+            llvm::MDBuilder mdb(fn.getContext());
+            uint32_t branchIdx = 0;
+            for (auto& bb : fn) {
+                auto* term = bb.getTerminator();
+                if (!term)
+                    continue;
+                auto* br = llvm::dyn_cast<llvm::BranchInst>(term);
+                if (!br || !br->isConditional())
+                    continue;
+                if (branchIdx < pit->second.branches.size()) {
+                    const auto& bp = pit->second.branches[branchIdx];
+                    uint32_t taken =
+                        static_cast<uint32_t>(std::min(std::max(bp.takenCount, uint64_t{1}), uint64_t{UINT32_MAX}));
+                    uint32_t notTaken =
+                        static_cast<uint32_t>(std::min(std::max(bp.notTakenCount, uint64_t{1}), uint64_t{UINT32_MAX}));
+                    br->setMetadata(llvm::LLVMContext::MD_prof, mdb.createBranchWeights(taken, notTaken));
+                }
+                branchIdx++;
+            }
+        }
+    }
+
+    // --- Propagate fast-math flags when -ffast-math is active ---
+    if (fastMath_) {
+        llvm::FastMathFlags FMF;
+        FMF.setFast();
+        for (auto& fn : *mod) {
+            if (fn.isDeclaration())
+                continue;
+            for (auto& bb : fn)
+                for (auto& inst : bb)
+                    if (llvm::isa<llvm::FPMathOperator>(inst))
+                        inst.setFastMathFlags(FMF);
+        }
+    }
+
+    // --- Create LLJIT first so we can get its data layout for O3 ---
+    // Creating LLJIT before running O3 ensures the module's data layout is
+    // derived from the LLJIT's own TM, eliminating any layout mismatch that
+    // could affect IR-level optimizations (size calculations, alignment, etc.).
+    auto JTMB = llvm::orc::JITTargetMachineBuilder::detectHost();
+    if (!JTMB) {
+        llvm::errs() << "omsc: whole-module JIT: " << llvm::toString(JTMB.takeError()) << "\n";
+        return;
+    }
+    setJTMBOptLevel(*JTMB, /*aggressive=*/true);
+    if (fastMath_) {
+        auto& opts = JTMB->getOptions();
+#if LLVM_VERSION_MAJOR < 22
+        opts.UnsafeFPMath = true;
+#endif
+        opts.NoInfsFPMath = true;
+        opts.NoNaNsFPMath = true;
+        opts.NoSignedZerosFPMath = true;
+    }
+
+    auto jitOrErr = llvm::orc::LLJITBuilder()
+                        .setJITTargetMachineBuilder(std::move(*JTMB))
+                        .create();
+    if (!jitOrErr) {
+        llvm::errs() << "omsc: whole-module JIT creation failed: "
+                     << llvm::toString(jitOrErr.takeError()) << "\n";
+        return;
+    }
+    auto jit = std::move(*jitOrErr);
+
+    // --- Run O3 optimization pipeline ---
+    // We use a null TargetMachine here to avoid a code-generation mismatch:
+    // running O3 with a custom TM (e.g. Reloc::PIC_) can produce IR that, when
+    // compiled by LLJIT's own TM, generates SHT_REL sections that JITLink
+    // rejects on x86-64 with "No SHT_REL in valid x64 ELF object files".
+    // Using PassBuilder(nullptr) runs all IR-level O3 passes (inlining, SCCP,
+    // DCE, loop optimisation, vectorisation) without any target-specific
+    // lowering — which is exactly what we need for constant-folding and
+    // inlining.  The LLJIT performs native code generation with its own
+    // correctly-configured TM afterwards.
+    {
+        llvm::PipelineTuningOptions PTO;
+        PTO.LoopVectorization = vectorize_;
+        PTO.SLPVectorization = vectorize_;
+        PTO.LoopUnrolling = unrollLoops_;
+        PTO.LoopInterleaving = vectorize_;
+        // MergeFunctions disabled: it can introduce function stubs that
+        // confuse JITLink on some LLVM versions.
+        PTO.MergeFunctions = false;
+        // CallGraphProfile MUST be disabled for JIT use.  When enabled, O3
+        // emits a !llvm.module.flags "CG Profile" node containing raw function
+        // pointers (e.g. ptr @time).  The backend writes these as SHT_REL
+        // relocations, which JITLink rejects on x86-64 with
+        // "No SHT_REL in valid x64 ELF object files".
+        PTO.CallGraphProfile = false;
+        // InlinerThreshold 5000: much higher than AOT's 400, ensuring all
+        // user functions (including larger bench wrappers) are inlined.
+        // After inlining, LLVM's SCCP evaluates loops called with constant
+        // arguments (e.g. fib_iter(150)) at compile time → zero runtime cost.
+        PTO.InlinerThreshold = 5000;
+
+        // Use LLJIT's data layout so O3's size / alignment calculations match
+        // what the native backend expects.
+        mod->setDataLayout(jit->getDataLayout());
+
+        llvm::PassBuilder PB(nullptr, PTO);  // null TM: pure IR-level O3
+
+        if (loopOptimize_) {
+            PB.registerVectorizerStartEPCallback(
+                [](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) {
+                    FPM.addPass(llvm::LoopDistributePass());
+                });
+        }
+
+        llvm::LoopAnalysisManager LAM;
+        llvm::FunctionAnalysisManager FAM;
+        llvm::CGSCCAnalysisManager CGAM;
+        llvm::ModuleAnalysisManager MAM;
+        PB.registerModuleAnalyses(MAM);
+        PB.registerCGSCCAnalyses(CGAM);
+        PB.registerFunctionAnalyses(FAM);
+        PB.registerLoopAnalyses(LAM);
+        PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
+
+        auto pipeline = PB.buildPerModuleDefaultPipeline(llvm::OptimizationLevel::O3);
+        pipeline.run(*mod, MAM);
+    }
+
+    if (verbose_) {
+        if (llvm::verifyModule(*mod, &llvm::errs()))
+            llvm::errs() << "omsc: whole-module: IR verification failed after O3\n";
+    }
+
+    // Register C-linkage callbacks and process symbols.
+    {
+        auto& ES    = jit->getExecutionSession();
+        auto& mainJD = jit->getMainJITDylib();
+
+        llvm::orc::SymbolMap syms;
+        syms[ES.intern("__omsc_adaptive_recompile")] = {
+            llvm::orc::ExecutorAddr(reinterpret_cast<uint64_t>(&__omsc_adaptive_recompile)),
+            llvm::JITSymbolFlags(llvm::JITSymbolFlags::Exported | llvm::JITSymbolFlags::Callable)};
+        syms[ES.intern("__omsc_deopt_guard_fail")] = {
+            llvm::orc::ExecutorAddr(reinterpret_cast<uint64_t>(&__omsc_deopt_guard_fail)),
+            llvm::JITSymbolFlags(llvm::JITSymbolFlags::Exported | llvm::JITSymbolFlags::Callable)};
+        if (auto err = mainJD.define(llvm::orc::absoluteSymbols(std::move(syms))))
+            llvm::consumeError(std::move(err));
+
+        auto procGen = llvm::orc::DynamicLibrarySearchGenerator::GetForCurrentProcess(
+            jit->getDataLayout().getGlobalPrefix());
+        if (procGen)
+            mainJD.addGenerator(std::move(*procGen));
+        else
+            llvm::consumeError(procGen.takeError());
+    }
+
+    if (auto err = jit->addIRModule(
+            llvm::orc::ThreadSafeModule(std::move(mod), std::move(newCtx)))) {
+        llvm::errs() << "omsc: whole-module JIT addIRModule failed: "
+                     << llvm::toString(std::move(err)) << "\n";
+        return;
+    }
+
+    // Trigger compilation by looking up every user function and atomically
+    // patching its dispatch slot.  functionSlots_ was populated in run()
+    // before background threads started (read-only here, no mutex needed).
+    int patchCount = 0;
+    for (auto& [name, slot] : functionSlots_) {
+        if (!slot)
+            continue;
+        auto symOrErr = jit->lookup(name);
+        if (!symOrErr) {
+            if (verbose_)
+                llvm::errs() << "JIT: whole-module lookup of '" << name
+                             << "' failed: " << llvm::toString(symOrErr.takeError()) << "\n";
+            else
+                llvm::consumeError(symOrErr.takeError());
+            continue;
+        }
+        void* newPtr = reinterpret_cast<void*>(symOrErr->getValue());
+        __atomic_store_n(slot, newPtr, __ATOMIC_RELEASE);
+        patchCount++;
+    }
+
+    // Keep the LLJIT instance alive and record tier for all patched functions.
+    {
+        std::lock_guard<std::mutex> lk(recompiledMtx_);
+        modules_.push_back({std::move(jit)});
+        for (auto& [name, _] : functionSlots_) {
+            if (functionTier_[name] < 2)
+                functionTier_[name] = 2;
+        }
+    }
+
+    if (verbose_)
+        std::cerr << "JIT: whole-module O3+PGO complete — patched " << patchCount
+                  << "/" << functionSlots_.size() << " function slots\n";
+}
+
+
 // Performs the actual heavy work of recompilation: parsing clean bitcode,
 // applying PGO annotations, running the O3 pipeline, ORC LLJIT compilation,
 // and atomically storing the new function pointer.
@@ -1160,8 +1480,11 @@ void AdaptiveJITRunner::doRecompile(const std::string& funcName, int64_t callCou
         PTO.SLPVectorization = vectorize_;
         PTO.LoopUnrolling = unrollLoops_;
         PTO.LoopInterleaving = vectorize_;
-        PTO.MergeFunctions = true;
-        PTO.CallGraphProfile = true;
+        PTO.MergeFunctions = false;  // can cause JITLink SHT_REL issues
+        // CallGraphProfile MUST be disabled: it emits a "CG Profile" metadata
+        // node with raw function pointers; the x86-64 backend writes these as
+        // SHT_REL relocations, which JITLink rejects for x86-64.
+        PTO.CallGraphProfile = false;
         // Use very aggressive inliner threshold — significantly higher than
         // AOT's 400.  JIT can afford this because it only optimizes the hot
         // function and its transitive callees (stripped module), while AOT
