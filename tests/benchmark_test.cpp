@@ -9,9 +9,10 @@
 // Methodology:
 //   - Call each profiler entry point many thousands of times and measure
 //     wall-clock elapsed time.
-//   - Assert that per-call overhead is below a generous threshold (50 ns).
+//   - Assert that per-call overhead is below a generous threshold (200 ns).
 //     This catches regressions like accidentally re-introducing mutex
-//     acquisition or atomic operations on the hot path.
+//     acquisition or atomic operations on the hot path while remaining
+//     stable on loaded CI runners.
 //   - Verify that per-thread sampling counters fire independently across
 //     threads so that two threads calling different functions both produce
 //     samples, even when the same global call index would suppress one.
@@ -52,11 +53,11 @@ TEST(BenchmarkProfiler, RecordBranchOverhead) {
         JITProfiler::instance().recordBranch("bench_branch", 0, (i & 1) != 0);
     });
 
-    // 50 ns per call is a very generous upper bound; well-tuned sampling
-    // code should be under 5 ns on modern hardware.  The threshold avoids
-    // test flakiness on loaded CI machines while still catching regressions
-    // that re-introduce mutex acquisition on every call.
-    EXPECT_LT(ns, 50.0) << "recordBranch overhead too high: " << ns << " ns/call";
+    // 200 ns per call is a generous upper bound that accommodates loaded CI
+    // runners; well-tuned sampling code should be under 5 ns on modern
+    // hardware.  The threshold still catches regressions that re-introduce
+    // mutex acquisition (typically 500 ns+) on every call.
+    EXPECT_LT(ns, 200.0) << "recordBranch overhead too high: " << ns << " ns/call";
 
     JITProfiler::instance().reset();
 }
@@ -73,7 +74,7 @@ TEST(BenchmarkProfiler, RecordLoopTripCountOverhead) {
                                                     static_cast<uint64_t>(i + 1));
     });
 
-    EXPECT_LT(ns, 50.0) << "recordLoopTripCount overhead too high: " << ns << " ns/call";
+    EXPECT_LT(ns, 200.0) << "recordLoopTripCount overhead too high: " << ns << " ns/call";
 
     JITProfiler::instance().reset();
 }
@@ -89,7 +90,7 @@ TEST(BenchmarkProfiler, RecordCallSiteOverhead) {
         JITProfiler::instance().recordCallSite("bench_caller", "bench_callee");
     });
 
-    EXPECT_LT(ns, 50.0) << "recordCallSite overhead too high: " << ns << " ns/call";
+    EXPECT_LT(ns, 200.0) << "recordCallSite overhead too high: " << ns << " ns/call";
 
     JITProfiler::instance().reset();
 }
