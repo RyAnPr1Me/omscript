@@ -1,0 +1,71 @@
+// string_comparison_test.om
+//
+// Regression test: string <, >, <=, >= with variable operands previously
+// compared raw pointer addresses instead of string contents.  The comparisons
+// returned results that depended on allocation order rather than lexicographic
+// order — so ("banana" > "apple") could return 0 if "banana" happened to be
+// allocated at a lower address.
+//
+// After the fix, all six relational operators (==, !=, <, <=, >, >=) on
+// string operands call strcmp and compare the signed result against 0,
+// giving correct lexicographic ordering regardless of allocation order.
+
+fn main() {
+    var total = 0;
+    var a = "banana";
+    var b = "apple";
+    var c = "cherry";
+    var same = "banana";
+
+    // ---- Correctness with variables ----
+
+    // a > b : "banana" > "apple"  (b > a lexicographically) → 1
+    total = total + (a > b);          // +1
+
+    // b < a : "apple" < "banana"  → 1
+    total = total + (b < a);          // +1
+
+    // a >= b → 1
+    total = total + (a >= b);         // +1
+
+    // b <= a → 1
+    total = total + (b <= a);         // +1
+
+    // a == same : "banana" == "banana" → 1
+    total = total + (a == same);      // +1
+
+    // a != b : "banana" != "apple" → 1
+    total = total + (a != b);         // +1
+
+    // a < b  : "banana" < "apple"  → 0
+    total = total + (a < b);          // +0
+
+    // b > a  : "apple" > "banana"  → 0
+    total = total + (b > a);          // +0
+
+    // ---- Transitivity ----
+
+    // "apple" < "banana" < "cherry"
+    total = total + (b < a && a < c); // +1
+    total = total + (b < c);          // +1
+
+    // ---- Mixed with literals ----
+
+    // variable == literal
+    total = total + (a == "banana");  // +1
+    total = total + (b == "apple");   // +1
+
+    // literal < variable
+    total = total + ("ant" < b);      // "ant" < "apple" → 1 +1
+    total = total + ("zzz" > c);      // "zzz" > "cherry" → 1 +1
+
+    // ---- Same-value identity ----
+    total = total + (a <= a);         // +1
+    total = total + (a >= a);         // +1
+
+    // ---- str_eq consistency ----
+    total = total + (str_eq(a, "banana") == (a == "banana"));  // +1
+
+    // Expected: 15
+    return total;
+}

@@ -1,0 +1,43 @@
+// to_char_test.om
+//
+// Regression test: to_char(n) previously returned the raw integer n unchanged.
+// When the result was passed to print()/len() those functions tried to
+// dereference n as a char*, instantly segfaulting for small code points.
+//
+// After the fix, to_char(n) malloc-allocates a 2-byte buffer [byte(n), '\0']
+// and returns a pointer to it, so the result behaves like a normal
+// one-character string.
+
+fn main() {
+    var total = 0;
+
+    // Length is always 1
+    total = total + (len(to_char(65)) == 1);    // 'A'  +1
+    total = total + (len(to_char(97)) == 1);    // 'a'  +1
+    total = total + (len(to_char(48)) == 1);    // '0'  +1
+
+    // Content equality
+    total = total + str_eq(to_char(65), "A");   // +1
+    total = total + str_eq(to_char(97), "a");   // +1
+    total = total + str_eq(to_char(48), "0");   // +1
+    total = total + str_eq(to_char(122), "z");  // +1
+    total = total + str_eq(to_char(90),  "Z");  // +1
+    total = total + str_eq(to_char(57),  "9");  // +1
+
+    // Round-trip: to_char followed by indexing recovers the code
+    var ca = to_char(72);   // 'H'
+    total = total + (ca[0] == 72);              // +1
+
+    // Concatenation works
+    var hello = str_concat(str_concat(str_concat(
+        str_concat(to_char(72), to_char(105)),  // "Hi"
+        "!"), ""), "");
+    total = total + str_eq(hello, "Hi!");        // +1
+
+    // Variable code point
+    var code = 77;   // 'M'
+    total = total + str_eq(to_char(code), "M"); // +1
+
+    // Expected: 12
+    return total;
+}

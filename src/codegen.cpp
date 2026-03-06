@@ -1196,8 +1196,10 @@ bool CodeGenerator::isPreAnalysisStringExpr(Expression* expr, const std::unorder
         return false;
     }
     if (auto* bin = dynamic_cast<BinaryExpr*>(expr)) {
-        return bin->op == "+" && (isPreAnalysisStringExpr(bin->left.get(), paramStringIndices, func) ||
-                                  isPreAnalysisStringExpr(bin->right.get(), paramStringIndices, func));
+        if (bin->op == "+" || bin->op == "*")
+            return isPreAnalysisStringExpr(bin->left.get(), paramStringIndices, func) ||
+                   isPreAnalysisStringExpr(bin->right.get(), paramStringIndices, func);
+        return false;
     }
     if (auto* tern = dynamic_cast<TernaryExpr*>(expr)) {
         return isPreAnalysisStringExpr(tern->thenExpr.get(), paramStringIndices, func) ||
@@ -1357,7 +1359,12 @@ bool CodeGenerator::isStringExpr(Expression* expr) const {
         return stringVars_.count(id->name) > 0;
     }
     if (auto* bin = dynamic_cast<BinaryExpr*>(expr)) {
-        return bin->op == "+" && (isStringExpr(bin->left.get()) || isStringExpr(bin->right.get()));
+        if (bin->op == "+")
+            return isStringExpr(bin->left.get()) || isStringExpr(bin->right.get());
+        // str * n  and  n * str  both produce a string
+        if (bin->op == "*")
+            return isStringExpr(bin->left.get()) || isStringExpr(bin->right.get());
+        return false;
     }
     if (auto* tern = dynamic_cast<TernaryExpr*>(expr)) {
         return isStringExpr(tern->thenExpr.get()) || isStringExpr(tern->elseExpr.get());
@@ -1987,6 +1994,86 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             builder->CreateCall(getOrDeclareStrcat(), {buf, right});
             return buf;
         }
+    }
+
+    // String repetition: str * n  (or  n * str) → repeat str n times.
+    // This is the binary-operator equivalent of str_repeat(str, n).
+    if (expr->op == "*" && (leftIsStr || rightIsStr)) {
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* strVal   = leftIsStr  ? left  : right;
+        llvm::Value* countVal = leftIsStr  ? right : left;
+        countVal = toDefaultType(countVal);
+        llvm::Value* strPtr = strVal->getType()->isPointerTy()
+                                  ? strVal
+                                  : builder->CreateIntToPtr(strVal, ptrTy, "strmul.ptr");
+        llvm::Value* strLen   = builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "strmul.len");
+        llvm::Value* totalLen = builder->CreateMul(strLen, countVal, "strmul.total");
+        llvm::Value* allocSz  = builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "strmul.alloc");
+        llvm::Value* buf      = builder->CreateCall(getOrDeclareMalloc(), {allocSz}, "strmul.buf");
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), buf);
+        // Loop countVal times, appending strPtr each iteration.
+        llvm::Function* curFn = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* preHdr  = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB  = llvm::BasicBlock::Create(*context, "strmul.loop", curFn);
+        llvm::BasicBlock* bodyBB  = llvm::BasicBlock::Create(*context, "strmul.body", curFn);
+        llvm::BasicBlock* doneBB  = llvm::BasicBlock::Create(*context, "strmul.done", curFn);
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one  = llvm::ConstantInt::get(getDefaultType(), 1);
+        builder->CreateBr(loopBB);
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "strmul.idx");
+        idx->addIncoming(zero, preHdr);
+        builder->CreateCondBr(builder->CreateICmpSLT(idx, countVal, "strmul.cond"), bodyBB, doneBB);
+        builder->SetInsertPoint(bodyBB);
+        builder->CreateCall(getOrDeclareStrcat(), {buf, strPtr});
+        llvm::Value* nextIdx = builder->CreateAdd(idx, one, "strmul.next");
+        idx->addIncoming(nextIdx, bodyBB);
+        builder->CreateBr(loopBB);
+        builder->SetInsertPoint(doneBB);
+        return buf;
+    }
+
+
+    // for all relational and equality operators.  Without this, the ptr→int
+    // fallback below would compare raw memory addresses instead of lexicographic
+    // order, giving results that depend on allocation order rather than content.
+    if (leftIsStr || rightIsStr) {
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        auto toStrPtr = [&](llvm::Value* v, bool isStr) -> llvm::Value* {
+            if (!isStr) {
+                // Non-string operand in a mixed comparison: treat as pointer.
+                return v->getType()->isPointerTy()
+                           ? v
+                           : builder->CreateIntToPtr(v, ptrTy, "strcmp.cast");
+            }
+            return v->getType()->isPointerTy()
+                       ? v
+                       : builder->CreateIntToPtr(v, ptrTy, "strcmp.cast");
+        };
+        llvm::Value* lPtr = toStrPtr(left,  leftIsStr);
+        llvm::Value* rPtr = toStrPtr(right, rightIsStr);
+        llvm::Value* cmpResult = builder->CreateCall(getOrDeclareStrcmp(), {lPtr, rPtr}, "strcmp.res");
+        llvm::Value* zero32 = builder->getInt32(0);
+        llvm::Value* cmpBool;
+        if (expr->op == "==")
+            cmpBool = builder->CreateICmpEQ(cmpResult,  zero32, "scmp.eq");
+        else if (expr->op == "!=")
+            cmpBool = builder->CreateICmpNE(cmpResult,  zero32, "scmp.ne");
+        else if (expr->op == "<")
+            cmpBool = builder->CreateICmpSLT(cmpResult, zero32, "scmp.lt");
+        else if (expr->op == "<=")
+            cmpBool = builder->CreateICmpSLE(cmpResult, zero32, "scmp.le");
+        else if (expr->op == ">")
+            cmpBool = builder->CreateICmpSGT(cmpResult, zero32, "scmp.gt");
+        else if (expr->op == ">=")
+            cmpBool = builder->CreateICmpSGE(cmpResult, zero32, "scmp.ge");
+        else
+            cmpBool = nullptr;
+
+        if (cmpBool)
+            return builder->CreateZExt(cmpBool, getDefaultType(), "scmp.result");
+        // For non-comparison operators on strings (should not normally occur here),
+        // fall through to the integer path.
     }
 
     // Convert pointer types to i64 for integer operations (fallback)
@@ -2886,8 +2973,20 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                              std::to_string(expr->arguments.size()) + " provided",
                          expr);
         }
-        // Returns the value itself - the integer IS the character code
-        return generateExpression(expr->arguments[0].get());
+        // Allocate a 2-byte buffer [char, '\0'] and return a pointer to it,
+        // so the result behaves like a one-character string.
+        llvm::Value* code = generateExpression(expr->arguments[0].get());
+        code = toDefaultType(code);  // ensure i64
+        llvm::Value* two = llvm::ConstantInt::get(getDefaultType(), 2);
+        llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {two}, "tochar.buf");
+        llvm::Value* byteVal = builder->CreateTrunc(code, llvm::Type::getInt8Ty(*context), "tochar.byte");
+        builder->CreateStore(byteVal, buf);
+        llvm::Value* nulPtr = builder->CreateGEP(
+            llvm::Type::getInt8Ty(*context), buf,
+            llvm::ConstantInt::get(getDefaultType(), 1), "tochar.nul");
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), nulPtr);
+        stringReturningFunctions_.insert("to_char");
+        return buf;
     }
 
     if (expr->callee == "is_alpha") {
