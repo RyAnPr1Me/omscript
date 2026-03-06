@@ -1,4 +1,5 @@
 #include "value.h"
+#include <cinttypes>
 #include <cstdint>
 #include <cstdio>
 #include <stdexcept>
@@ -27,6 +28,29 @@ std::string Value::toString() const {
     return "";
 }
 
+std::pair<const char*, size_t> Value::toCStrBuf(char* buf, size_t bufSize) const noexcept {
+    switch (type) {
+    case Type::INTEGER: {
+        int len = std::snprintf(buf, bufSize, "%" PRId64, intValue);
+        if (__builtin_expect(len > 0 && static_cast<size_t>(len) < bufSize, 1))
+            return {buf, static_cast<size_t>(len)};
+        return {buf, 0}; // overflow guard (should never happen for int64_t)
+    }
+    case Type::FLOAT: {
+        int len = std::snprintf(buf, bufSize, "%g", floatValue);
+        if (__builtin_expect(len > 0 && static_cast<size_t>(len) < bufSize, 1))
+            return {buf, static_cast<size_t>(len)};
+        static constexpr char kFallback[] = "<float>";
+        return {kFallback, sizeof(kFallback) - 1};
+    }
+    case Type::STRING:
+        return {stringValue.c_str(), stringValue.length()};
+    case Type::NONE:
+        return {"none", 4};
+    }
+    return {"", 0};
+}
+
 Value Value::operator+(const Value& other) const {
     if (__builtin_expect(type == Type::INTEGER && other.type == Type::INTEGER, 1)) {
         return Value(intValue + other.intValue);
@@ -42,11 +66,19 @@ Value Value::operator+(const Value& other) const {
         if (type == Type::STRING && other.type == Type::STRING) {
             result = stringValue + other.stringValue;
         } else if (type == Type::STRING) {
-            RefCountedString otherStr(other.toString().c_str());
-            result = stringValue + otherStr;
+            // Use toCStrBuf to avoid heap allocation: formats integer/float into
+            // a stack buffer, then concat() builds the result in one allocation.
+            char buf[32];
+            auto [ptr, len] = other.toCStrBuf(buf, sizeof(buf));
+            result = RefCountedString::concat(
+                stringValue.c_str(), stringValue.length(),
+                ptr, len);
         } else {
-            RefCountedString thisStr(toString().c_str());
-            result = thisStr + other.stringValue;
+            char buf[32];
+            auto [ptr, len] = toCStrBuf(buf, sizeof(buf));
+            result = RefCountedString::concat(
+                ptr, len,
+                other.stringValue.c_str(), other.stringValue.length());
         }
         Value v;
         v.type = Type::STRING;

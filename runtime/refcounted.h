@@ -104,6 +104,26 @@ class RefCountedString {
         return result;
     }
 
+    /// Concatenate two C string segments into a new RefCountedString using a
+    /// single allocation.  This is more efficient than constructing a temporary
+    /// RefCountedString for one operand and then calling operator+, which would
+    /// require two allocations.  Intended for mixed-type string concatenation
+    /// where one operand must first be converted to a C string (e.g. via
+    /// Value::toString()), so the length is already known from the std::string.
+    ///
+    /// Both @p a and @p b must be valid non-null pointers (use "" for empty).
+    static RefCountedString concat(const char* a, size_t lenA, const char* b, size_t lenB) {
+        if (lenA == 0 && lenB == 0)
+            return RefCountedString();
+        size_t newLen = lenA + lenB;
+        RefCountedString result;
+        result.data = allocate(newLen);
+        std::memcpy(result.data->chars, a, lenA);
+        std::memcpy(result.data->chars + lenA, b, lenB);
+        result.data->chars[newLen] = '\0';
+        return result;
+    }
+
     // Comparison
     bool operator==(const RefCountedString& other) const {
         if (data == other.data)

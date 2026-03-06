@@ -181,6 +181,18 @@ class Value {
     double toDouble() const {
         return (type == Type::FLOAT) ? floatValue : static_cast<double>(intValue);
     }
+
+    /// Write a string representation of this value into a caller-supplied stack
+    /// buffer without heap allocation, and return a (pointer, length) pair.
+    ///
+    ///   INTEGER → decimal digits written into @p buf via snprintf
+    ///   FLOAT   → "%g" formatted into @p buf via snprintf
+    ///   STRING  → returns the existing c_str() / length() — no copy at all
+    ///   NONE    → returns the literal "none"
+    ///
+    /// @p buf must be at least 32 bytes.  The returned pointer is valid until
+    /// @p buf goes out of scope or this Value is modified.
+    std::pair<const char*, size_t> toCStrBuf(char* buf, size_t bufSize) const noexcept;
 };
 
 } // namespace omscript
