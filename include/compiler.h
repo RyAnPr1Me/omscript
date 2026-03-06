@@ -8,7 +8,13 @@ namespace omscript {
 
 class Compiler {
   public:
-    Compiler();
+    /// Maximum allowed length for source/output file paths.
+    static constexpr size_t kMaxPathLength = 4096;
+
+    /// Maximum allowed source file size in bytes (100 MB).
+    static constexpr size_t kMaxFileSize = size_t{100} * 1024 * 1024;
+
+    Compiler() = default;
 
     void compile(const std::string& sourceFile, const std::string& outputFile);
     void writeFile(const std::string& filename, const std::string& content);

@@ -1,3 +1,6 @@
+#ifndef JIT_PROFILER_H
+#define JIT_PROFILER_H
+
 // ---------------------------------------------------------------------------
 // JIT Profiler — Runtime data collection for tiered optimizing JIT
 // ---------------------------------------------------------------------------
@@ -23,9 +26,6 @@
 //   - Deoptimization guards protect speculative assumptions
 //
 // ---------------------------------------------------------------------------
-
-#ifndef JIT_PROFILER_H
-#define JIT_PROFILER_H
 
 #include <atomic>
 #include <cstdint>

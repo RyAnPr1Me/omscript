@@ -1,4 +1,5 @@
 #include "codegen.h"
+#include "diagnostic.h"
 #include <climits>
 #include <cmath>
 #include <cstdint>
@@ -39,8 +40,6 @@
 #include <optional>
 #include <set>
 #include <stdexcept>
-
-#include "diagnostic.h"
 
 // LLVM 21 removed Attribute::NoCapture in favour of the captures(...) attribute.
 #if LLVM_VERSION_MAJOR >= 21
