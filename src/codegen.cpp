@@ -2751,9 +2751,19 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         if (arg->getType()->isDoubleTy()) {
             arg = builder->CreateFPToSI(arg, getDefaultType(), "ftoi");
         }
-        llvm::Value* truncated = builder->CreateTrunc(arg, llvm::Type::getInt32Ty(*context), "charval");
-        builder->CreateCall(getOrDeclarePutchar(), {truncated});
-        return arg; // return the character code as documented
+        llvm::Value* charCode;
+        if (arg->getType()->isPointerTy() || isStringExpr(expr->arguments[0].get())) {
+            // Argument is a string (e.g. result of to_char): load the first byte.
+            llvm::Value* ptr = arg->getType()->isPointerTy()
+                                   ? arg
+                                   : builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "pc.strptr");
+            llvm::Value* byte = builder->CreateLoad(llvm::Type::getInt8Ty(*context), ptr, "pc.byte");
+            charCode = builder->CreateZExt(byte, llvm::Type::getInt32Ty(*context), "charval");
+        } else {
+            charCode = builder->CreateTrunc(arg, llvm::Type::getInt32Ty(*context), "charval");
+        }
+        builder->CreateCall(getOrDeclarePutchar(), {charCode});
+        return arg; // return the original argument as documented
     }
 
     if (expr->callee == "input") {
