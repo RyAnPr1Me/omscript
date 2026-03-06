@@ -21,7 +21,7 @@ std::string Value::toString() const {
         return std::string(buf, static_cast<size_t>(len));
     }
     case Type::STRING:
-        return std::string(stringValue.c_str());
+        return std::string(stringValue.c_str(), stringValue.length());
     case Type::NONE:
         return "none";
     }

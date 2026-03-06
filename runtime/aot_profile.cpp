@@ -1648,7 +1648,7 @@ void AdaptiveJITRunner::doRecompile(const std::string& funcName, int64_t callCou
                 // so we can safely emit an ICmpEQ + ConstantInt.
                 if (ap.hasConstantSpecialization() && arg->getType() == i64Ty) {
                     auto* cmp = asB.CreateICmpEQ(arg,
-                                                 llvm::ConstantInt::get(i64Ty, ap.observedConstant), "omsc.const_spec");
+                                                 llvm::ConstantInt::get(i64Ty, ap.constantSpecValue()), "omsc.const_spec");
                     asB.CreateCall(assumeFn, {cmp});
                 } else if (targetTier >= 3 && ap.hasDominantValue() &&
                            arg->getType() == i64Ty) {

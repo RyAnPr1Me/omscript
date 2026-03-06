@@ -147,7 +147,7 @@ void JITProfiler::dump() const {
             std::cerr << "    arg[" << i << "]: dominant=" << argTypeName(ap.dominantType())
                       << " total=" << ap.totalCalls;
             if (ap.hasConstantSpecialization())
-                std::cerr << " const_spec=" << ap.observedConstant;
+                std::cerr << " const_spec=" << ap.constantSpecValue();
             if (ap.hasRangeSpecialization())
                 std::cerr << " range=[" << ap.minObserved << "," << ap.maxObserved << "]";
             std::cerr << "\n";

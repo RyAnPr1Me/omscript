@@ -709,3 +709,54 @@ TEST(ValueTest, NegateInt64Min) {
     // -INT64_MIN would overflow; must throw instead of UB.
     EXPECT_THROW(-Value(std::numeric_limits<int64_t>::min()), std::runtime_error);
 }
+
+// ===========================================================================
+// noexcept contracts for copy constructor and copy assignment
+// ===========================================================================
+
+TEST(ValueTest, CopyConstructorIsNoexcept) {
+    // Compile-time guarantee that Value copy is noexcept.
+    static_assert(std::is_nothrow_copy_constructible<Value>::value,
+                  "Value copy constructor must be noexcept");
+    // Runtime exercise to confirm no exception is thrown for each type.
+    Value vi(int64_t(42));
+    Value vf(3.14);
+    Value vs(std::string("hello"));
+    Value vn;
+    Value ci(vi), cf(vf), cs(vs), cn(vn);
+    EXPECT_EQ(ci.asInt(), 42);
+    EXPECT_DOUBLE_EQ(cf.asFloat(), 3.14);
+    EXPECT_STREQ(cs.asString(), "hello");
+    EXPECT_EQ(cn.getType(), Value::Type::NONE);
+}
+
+TEST(ValueTest, CopyAssignmentIsNoexcept) {
+    // Compile-time guarantee that Value copy assignment is noexcept.
+    static_assert(std::is_nothrow_copy_assignable<Value>::value,
+                  "Value copy assignment must be noexcept");
+    // Runtime exercise: all type transitions.
+    Value target(int64_t(1));
+    target = Value(std::string("assigned"));
+    EXPECT_STREQ(target.asString(), "assigned");
+    target = Value(int64_t(99));
+    EXPECT_EQ(target.asInt(), 99);
+}
+
+// ===========================================================================
+// Value(const std::string&) uses length-aware RefCountedString constructor
+// ===========================================================================
+
+TEST(ValueTest, ConstructFromStdStringPreservesLength) {
+    // Verify that constructing from std::string gives the correct length and
+    // content — this exercises the new data()/size() path.
+    std::string s = "hello world";
+    Value v(s);
+    EXPECT_EQ(v.getType(), Value::Type::STRING);
+    EXPECT_STREQ(v.asString(), "hello world");
+}
+
+TEST(ValueTest, ConstructFromStdStringEmpty) {
+    Value v(std::string(""));
+    EXPECT_EQ(v.getType(), Value::Type::STRING);
+    EXPECT_STREQ(v.asString(), "");
+}
