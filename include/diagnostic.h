@@ -77,6 +77,32 @@ class DiagnosticError : public std::runtime_error {
     Diagnostic diagnostic_;
 };
 
+// ---------------------------------------------------------------------------
+// Production-grade exception hierarchy
+// ---------------------------------------------------------------------------
+// These exception types replace generic std::runtime_error throws throughout
+// the compiler and driver, enabling callers to catch and handle specific
+// failure modes (I/O errors, validation failures, linker failures)
+// independently.
+
+/// Thrown when a file cannot be opened, read, or written.
+class FileError : public std::runtime_error {
+  public:
+    using std::runtime_error::runtime_error;
+};
+
+/// Thrown when input validation fails (empty paths, oversized names, etc.).
+class ValidationError : public std::invalid_argument {
+  public:
+    using std::invalid_argument::invalid_argument;
+};
+
+/// Thrown when the external linker invocation fails.
+class LinkError : public std::runtime_error {
+  public:
+    using std::runtime_error::runtime_error;
+};
+
 } // namespace omscript
 
 #endif // DIAGNOSTIC_H

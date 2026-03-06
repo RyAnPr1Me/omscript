@@ -51,17 +51,17 @@ class ASTNode {
     virtual ~ASTNode() = default;
 
   protected:
-    ASTNode(ASTNodeType t) : type(t) {}
+    explicit ASTNode(ASTNodeType t) : type(t) {}
 };
 
 class Expression : public ASTNode {
   protected:
-    Expression(ASTNodeType t) : ASTNode(t) {}
+    explicit Expression(ASTNodeType t) : ASTNode(t) {}
 };
 
 class Statement : public ASTNode {
   protected:
-    Statement(ASTNodeType t) : ASTNode(t) {}
+    explicit Statement(ASTNodeType t) : ASTNode(t) {}
 };
 
 // Expressions
@@ -75,12 +75,12 @@ class LiteralExpr : public Expression {
     };
     std::string stringValue;
 
-    LiteralExpr(long long val)
+    explicit LiteralExpr(long long val)
         : Expression(ASTNodeType::LITERAL_EXPR), literalType(LiteralType::INTEGER), intValue(val) {}
 
-    LiteralExpr(double val) : Expression(ASTNodeType::LITERAL_EXPR), literalType(LiteralType::FLOAT), floatValue(val) {}
+    explicit LiteralExpr(double val) : Expression(ASTNodeType::LITERAL_EXPR), literalType(LiteralType::FLOAT), floatValue(val) {}
 
-    LiteralExpr(const std::string& val)
+    explicit LiteralExpr(const std::string& val)
         : Expression(ASTNodeType::LITERAL_EXPR), literalType(LiteralType::STRING), intValue(0), stringValue(val) {}
 };
 
@@ -88,7 +88,7 @@ class IdentifierExpr : public Expression {
   public:
     std::string name;
 
-    IdentifierExpr(const std::string& n) : Expression(ASTNodeType::IDENTIFIER_EXPR), name(n) {}
+    explicit IdentifierExpr(const std::string& n) : Expression(ASTNodeType::IDENTIFIER_EXPR), name(n) {}
 };
 
 class BinaryExpr : public Expression {
@@ -161,7 +161,7 @@ class ArrayExpr : public Expression {
   public:
     std::vector<std::unique_ptr<Expression>> elements;
 
-    ArrayExpr(std::vector<std::unique_ptr<Expression>> elems)
+    explicit ArrayExpr(std::vector<std::unique_ptr<Expression>> elems)
         : Expression(ASTNodeType::ARRAY_EXPR), elements(std::move(elems)) {}
 };
 
@@ -198,7 +198,7 @@ class SpreadExpr : public Expression {
   public:
     std::unique_ptr<Expression> operand;
 
-    SpreadExpr(std::unique_ptr<Expression> op) : Expression(ASTNodeType::SPREAD_EXPR), operand(std::move(op)) {}
+    explicit SpreadExpr(std::unique_ptr<Expression> op) : Expression(ASTNodeType::SPREAD_EXPR), operand(std::move(op)) {}
 };
 
 class PipeExpr : public Expression {
@@ -215,7 +215,7 @@ class ExprStmt : public Statement {
   public:
     std::unique_ptr<Expression> expression;
 
-    ExprStmt(std::unique_ptr<Expression> expr) : Statement(ASTNodeType::EXPR_STMT), expression(std::move(expr)) {}
+    explicit ExprStmt(std::unique_ptr<Expression> expr) : Statement(ASTNodeType::EXPR_STMT), expression(std::move(expr)) {}
 };
 
 class VarDecl : public Statement {
@@ -233,7 +233,7 @@ class ReturnStmt : public Statement {
   public:
     std::unique_ptr<Expression> value;
 
-    ReturnStmt(std::unique_ptr<Expression> val) : Statement(ASTNodeType::RETURN_STMT), value(std::move(val)) {}
+    explicit ReturnStmt(std::unique_ptr<Expression> val) : Statement(ASTNodeType::RETURN_STMT), value(std::move(val)) {}
 };
 
 class IfStmt : public Statement {
@@ -324,7 +324,7 @@ class BlockStmt : public Statement {
   public:
     std::vector<std::unique_ptr<Statement>> statements;
 
-    BlockStmt(std::vector<std::unique_ptr<Statement>> stmts)
+    explicit BlockStmt(std::vector<std::unique_ptr<Statement>> stmts)
         : Statement(ASTNodeType::BLOCK), statements(std::move(stmts)) {}
 };
 
@@ -343,7 +343,7 @@ class ThrowStmt : public Statement {
   public:
     std::unique_ptr<Expression> value;
 
-    ThrowStmt(std::unique_ptr<Expression> val) : Statement(ASTNodeType::THROW_STMT), value(std::move(val)) {}
+    explicit ThrowStmt(std::unique_ptr<Expression> val) : Statement(ASTNodeType::THROW_STMT), value(std::move(val)) {}
 };
 
 class EnumDecl : public Statement {

@@ -1502,24 +1502,23 @@ void printUsage(const char* progName) {
 
 std::string readSourceFile(const std::string& filename) {
     if (!std::filesystem::exists(filename)) {
-        throw std::runtime_error("Source file does not exist: " + filename);
+        throw omscript::FileError("Source file does not exist: " + filename);
     }
     if (std::filesystem::is_directory(filename)) {
-        throw std::runtime_error("'" + filename + "' is a directory, not a source file");
+        throw omscript::FileError("'" + filename + "' is a directory, not a source file");
     }
     if (std::filesystem::is_regular_file(filename)) {
         auto fileSize = std::filesystem::file_size(filename);
-        if (fileSize > size_t{100} * 1024 * 1024) { // 100MB limit
-            throw std::runtime_error("Source file too large (max 100MB): " + filename);
+        if (fileSize > omscript::Compiler::kMaxFileSize) {
+            throw omscript::FileError("Source file too large (max 100MB): " + filename);
         }
     }
     std::ifstream file(filename);
     if (!file.is_open()) {
-        throw std::runtime_error("Could not open file: " + filename);
+        throw omscript::FileError("Could not open file: " + filename);
     }
     std::stringstream buffer;
     buffer << file.rdbuf();
-    file.close();
     return buffer.str();
 }
 
@@ -2529,7 +2528,7 @@ int main(int argc, char* argv[]) {
                     std::error_code ec;
                     llvm::raw_fd_ostream out(outputFile, ec, llvm::sys::fs::OF_None);
                     if (ec) {
-                        throw std::runtime_error("Could not write IR to file: " + ec.message());
+                        throw omscript::FileError("Could not write IR to file: " + ec.message());
                     }
                     codegen.getModule()->print(out, nullptr);
                 }

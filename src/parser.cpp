@@ -129,9 +129,9 @@ std::unique_ptr<Program> Parser::parse() {
             combined += errors_[i];
         }
         // Errors already contain formatted location information from individual
-        // DiagnosticError exceptions; wrap in a plain runtime_error to avoid
-        // double-formatting when the caller adds a "file: " prefix.
-        throw std::runtime_error(combined);
+        // DiagnosticError exceptions; wrap in a DiagnosticError so callers can
+        // catch a single exception type for all compilation failures.
+        throw DiagnosticError(Diagnostic{DiagnosticSeverity::Error, {"", 0, 0}, combined});
     }
 
     // Append generated lambda functions to the program

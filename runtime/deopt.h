@@ -1,3 +1,6 @@
+#ifndef DEOPT_H
+#define DEOPT_H
+
 // ---------------------------------------------------------------------------
 // Deoptimization — guard-based fallback from specialized to baseline code
 // ---------------------------------------------------------------------------
@@ -24,9 +27,6 @@
 // are violated, the program correctly falls back to the general-purpose
 // baseline code without any incorrect behavior.
 // ---------------------------------------------------------------------------
-
-#ifndef DEOPT_H
-#define DEOPT_H
 
 #include <cstdint>
 #include <mutex>

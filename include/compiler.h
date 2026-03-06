@@ -8,7 +8,13 @@ namespace omscript {
 
 class Compiler {
   public:
-    Compiler();
+    /// Maximum allowed length for source/output file paths.
+    static constexpr size_t kMaxPathLength = 4096;
+
+    /// Maximum allowed source file size in bytes (100 MB).
+    static constexpr size_t kMaxFileSize = size_t{100} * 1024 * 1024;
+
+    Compiler() = default;
 
     void compile(const std::string& sourceFile, const std::string& outputFile);
     void writeFile(const std::string& filename, const std::string& content);
@@ -17,7 +23,7 @@ class Compiler {
     void setVerbose(bool v) {
         verbose_ = v;
     }
-    bool isVerbose() const {
+    [[nodiscard]] bool isVerbose() const noexcept {
         return verbose_;
     }
 
@@ -25,7 +31,7 @@ class Compiler {
     void setQuiet(bool q) {
         quiet_ = q;
     }
-    bool isQuiet() const {
+    [[nodiscard]] bool isQuiet() const noexcept {
         return quiet_;
     }
 
@@ -33,7 +39,7 @@ class Compiler {
     void setOptimizationLevel(OptimizationLevel level) {
         optLevel_ = level;
     }
-    OptimizationLevel getOptimizationLevel() const {
+    [[nodiscard]] OptimizationLevel getOptimizationLevel() const noexcept {
         return optLevel_;
     }
 

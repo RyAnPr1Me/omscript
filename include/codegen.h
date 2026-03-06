@@ -78,7 +78,7 @@ class CodeGenerator {
     /// The linker (gcc/clang with -flto) reads bitcode and performs whole-program
     /// optimization across translation units at link time.
     void writeBitcodeFile(const std::string& filename);
-    llvm::Module* getModule() {
+    [[nodiscard]] llvm::Module* getModule() noexcept {
         return module.get();
     }
     void setOptimizationLevel(OptimizationLevel level) {
@@ -143,7 +143,7 @@ class CodeGenerator {
     }
 
     /// Check whether dynamic (JIT) compilation mode is enabled.
-    bool isDynamicCompilation() const {
+    [[nodiscard]] bool isDynamicCompilation() const noexcept {
         return dynamicCompilation_;
     }
 
@@ -425,13 +425,13 @@ class CodeGenerator {
     void generateHybrid(Program* program);
 
     /// Return the execution tier assigned to a function, or AOT if not found.
-    ExecutionTier getFunctionTier(const std::string& name) const {
+    [[nodiscard]] ExecutionTier getFunctionTier(const std::string& name) const {
         auto it = functionTiers.find(name);
         return it != functionTiers.end() ? it->second : ExecutionTier::AOT;
     }
 
     /// Return a read-only view of all function tier assignments.
-    const std::unordered_map<std::string, ExecutionTier>& getFunctionTiers() const {
+    [[nodiscard]] const std::unordered_map<std::string, ExecutionTier>& getFunctionTiers() const noexcept {
         return functionTiers;
     }
 };

@@ -88,3 +88,60 @@ TEST(DiagnosticTest, DiagnosticErrorWithFilename) {
     EXPECT_EQ(err.diagnostic().location.filename, "test.om");
     EXPECT_STREQ(err.what(), "test.om:7:12: error: type mismatch");
 }
+
+// ===========================================================================
+// Production exception hierarchy
+// ===========================================================================
+
+TEST(DiagnosticTest, FileErrorIsRuntimeError) {
+    FileError err("Could not open file: test.om");
+    // FileError inherits from std::runtime_error.
+    const std::runtime_error& base = err;
+    EXPECT_STREQ(base.what(), "Could not open file: test.om");
+}
+
+TEST(DiagnosticTest, FileErrorCatchAsRuntimeError) {
+    bool caught = false;
+    try {
+        throw FileError("read failed");
+    } catch (const std::runtime_error& e) {
+        caught = true;
+        EXPECT_STREQ(e.what(), "read failed");
+    }
+    EXPECT_TRUE(caught);
+}
+
+TEST(DiagnosticTest, ValidationErrorIsInvalidArgument) {
+    ValidationError err("Source file name cannot be empty");
+    // ValidationError inherits from std::invalid_argument.
+    const std::invalid_argument& base = err;
+    EXPECT_STREQ(base.what(), "Source file name cannot be empty");
+}
+
+TEST(DiagnosticTest, ValidationErrorCatchAsInvalidArgument) {
+    bool caught = false;
+    try {
+        throw ValidationError("bad path");
+    } catch (const std::invalid_argument& e) {
+        caught = true;
+        EXPECT_STREQ(e.what(), "bad path");
+    }
+    EXPECT_TRUE(caught);
+}
+
+TEST(DiagnosticTest, LinkErrorIsRuntimeError) {
+    LinkError err("Linking failed with exit code 1");
+    const std::runtime_error& base = err;
+    EXPECT_STREQ(base.what(), "Linking failed with exit code 1");
+}
+
+TEST(DiagnosticTest, LinkErrorCatchAsRuntimeError) {
+    bool caught = false;
+    try {
+        throw LinkError("signal 11");
+    } catch (const std::runtime_error& e) {
+        caught = true;
+        EXPECT_STREQ(e.what(), "signal 11");
+    }
+    EXPECT_TRUE(caught);
+}

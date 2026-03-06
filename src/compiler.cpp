@@ -13,60 +13,56 @@
 
 namespace omscript {
 
-Compiler::Compiler() {}
-
 std::string Compiler::readFile(const std::string& filename) {
     std::ifstream file(filename);
     if (!file.is_open()) {
-        throw std::runtime_error("Could not open file: " + filename);
+        throw FileError("Could not open file: " + filename);
     }
 
     std::stringstream buffer;
     buffer << file.rdbuf();
-    file.close();
     return buffer.str();
 }
 
 void Compiler::writeFile(const std::string& filename, const std::string& content) {
     std::ofstream file(filename);
     if (!file.is_open()) {
-        throw std::runtime_error("Could not write to file: " + filename);
+        throw FileError("Could not write to file: " + filename);
     }
     file << content;
     if (file.fail()) {
-        throw std::runtime_error("Error writing to file: " + filename);
+        throw FileError("Error writing to file: " + filename);
     }
-    file.close();
 }
 
 void Compiler::compile(const std::string& sourceFile, const std::string& outputFile) {
     // Validate input file
     if (sourceFile.empty()) {
-        throw std::runtime_error("Source file name cannot be empty");
+        throw ValidationError("Source file name cannot be empty");
     }
-    if (sourceFile.size() > 4096) {
-        throw std::runtime_error("Source file name too long (max 4096 characters)");
+    if (sourceFile.size() > kMaxPathLength) {
+        throw ValidationError("Source file name too long (max " + std::to_string(kMaxPathLength) + " characters)");
     }
     if (outputFile.empty()) {
-        throw std::runtime_error("Output file name cannot be empty");
+        throw ValidationError("Output file name cannot be empty");
     }
-    if (outputFile.size() > 4096) {
-        throw std::runtime_error("Output file name too long (max 4096 characters)");
+    if (outputFile.size() > kMaxPathLength) {
+        throw ValidationError("Output file name too long (max " + std::to_string(kMaxPathLength) + " characters)");
     }
 
     // Check if source file exists before attempting to read
     if (!std::filesystem::exists(sourceFile)) {
-        throw std::runtime_error("Source file does not exist: " + sourceFile);
+        throw FileError("Source file does not exist: " + sourceFile);
     }
     if (std::filesystem::is_directory(sourceFile)) {
-        throw std::runtime_error("'" + sourceFile + "' is a directory, not a source file");
+        throw FileError("'" + sourceFile + "' is a directory, not a source file");
     }
 
     // Check file size to prevent memory exhaustion (skip for non-regular files like pipes)
     if (std::filesystem::is_regular_file(sourceFile)) {
         auto fileSize = std::filesystem::file_size(sourceFile);
-        if (fileSize > size_t{100} * 1024 * 1024) { // 100MB limit
-            throw std::runtime_error("Source file too large (max 100MB): " + sourceFile);
+        if (fileSize > kMaxFileSize) {
+            throw FileError("Source file too large (max 100MB): " + sourceFile);
         }
     }
 
@@ -87,8 +83,8 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
         tokens = lexer.tokenize();
     } catch (const DiagnosticError&) {
         throw; // Preserves source location; main.cpp adds filename prefix
-    } catch (const std::runtime_error& e) {
-        throw std::runtime_error(sourceFile + ": " + e.what());
+    } catch (const std::exception& e) {
+        throw FileError(sourceFile + ": " + e.what());
     }
 
     // Syntax analysis
@@ -101,8 +97,8 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
         program = parser.parse();
     } catch (const DiagnosticError&) {
         throw;
-    } catch (const std::runtime_error& e) {
-        throw std::runtime_error(sourceFile + ": " + e.what());
+    } catch (const std::exception& e) {
+        throw FileError(sourceFile + ": " + e.what());
     }
 
     // Code generation
@@ -136,8 +132,8 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
         }
     } catch (const DiagnosticError&) {
         throw;
-    } catch (const std::runtime_error& e) {
-        throw std::runtime_error(sourceFile + ": " + e.what());
+    } catch (const std::exception& e) {
+        throw FileError(sourceFile + ": " + e.what());
     }
 
     // Print LLVM IR only in verbose mode
@@ -192,7 +188,7 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
             }
         }
         if (linkerProgram.empty()) {
-            throw std::runtime_error("Failed to locate a C linker (tried gcc, cc, clang)");
+            throw LinkError("Failed to locate a C linker (tried gcc, cc, clang)");
         }
         std::vector<std::string> linkArgs = {objFile, "-o", outputFile};
         // Pass optimization level to the linker for better code layout,
@@ -234,9 +230,9 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
         if (result != 0) {
             cleanupObject();
             if (result < 0) {
-                throw std::runtime_error("Linker terminated by signal " + std::to_string(-result));
+                throw LinkError("Linker terminated by signal " + std::to_string(-result));
             }
-            throw std::runtime_error("Linking failed with exit code " + std::to_string(result));
+            throw LinkError("Linking failed with exit code " + std::to_string(result));
         }
 
         // Clean up temporary object file after successful link.
