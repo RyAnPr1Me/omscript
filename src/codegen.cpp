@@ -5234,33 +5234,59 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
 llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
     llvm::Value* arrVal = generateExpression(expr->array.get());
     llvm::Value* idxVal = generateExpression(expr->index.get());
+    idxVal = toDefaultType(idxVal);
 
-    // Convert the i64 back to a pointer
-    llvm::Value* arrPtr = builder->CreateIntToPtr(arrVal, llvm::PointerType::getUnqual(*context), "idx.arrptr");
+    // Detect whether the base expression is a string.  Strings are raw char
+    // pointers without a length header; arrays have the layout [length, e0,
+    // e1, ...] and each element is 8 bytes (i64).
+    bool isStr = arrVal->getType()->isPointerTy() || isStringExpr(expr->array.get());
 
-    // Bounds check: load length from slot 0, verify 0 <= index < length
-    llvm::Value* lenVal = builder->CreateLoad(getDefaultType(), arrPtr, "idx.len");
-    llvm::Value* inBounds = builder->CreateICmpSLT(idxVal, lenVal, "idx.inbounds");
-    llvm::Value* notNeg = builder->CreateICmpSGE(idxVal, llvm::ConstantInt::get(getDefaultType(), 0), "idx.notneg");
-    llvm::Value* valid = builder->CreateAnd(inBounds, notNeg, "idx.valid");
+    // Convert i64 → pointer (strings may arrive as i64 via ptrtoint)
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    llvm::Value* basePtr = arrVal->getType()->isPointerTy()
+                               ? arrVal
+                               : builder->CreateIntToPtr(arrVal, ptrTy, "idx.baseptr");
 
     llvm::Function* function = builder->GetInsertBlock()->getParent();
-    llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "idx.ok", function);
+    llvm::BasicBlock* okBB   = llvm::BasicBlock::Create(*context, "idx.ok",   function);
     llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "idx.fail", function);
+
+    llvm::Value* lenVal;
+    if (isStr) {
+        // String: use strlen to get length — no length header.
+        lenVal = builder->CreateCall(getOrDeclareStrlen(), {basePtr}, "idx.strlen");
+    } else {
+        // Array: length is stored in slot 0 of the buffer.
+        lenVal = builder->CreateLoad(getDefaultType(), basePtr, "idx.len");
+    }
+
+    // Bounds check: 0 <= index < length
+    llvm::Value* inBounds = builder->CreateICmpSLT(idxVal, lenVal, "idx.inbounds");
+    llvm::Value* notNeg   = builder->CreateICmpSGE(idxVal, llvm::ConstantInt::get(getDefaultType(), 0), "idx.notneg");
+    llvm::Value* valid    = builder->CreateAnd(inBounds, notNeg, "idx.valid");
 
     builder->CreateCondBr(valid, okBB, failBB);
 
     // Out-of-bounds path: print error and abort
     builder->SetInsertPoint(failBB);
-    llvm::Value* errMsg = builder->CreateGlobalString("Runtime error: array index out of bounds\n", "idx_oob_msg");
+    llvm::Value* errMsg = isStr
+        ? builder->CreateGlobalString("Runtime error: string index out of bounds\n", "idx_str_oob_msg")
+        : builder->CreateGlobalString("Runtime error: array index out of bounds\n",  "idx_arr_oob_msg");
     builder->CreateCall(getPrintfFunction(), {errMsg});
     builder->CreateCall(getOrDeclareAbort());
     builder->CreateUnreachable();
 
-    // Success path: load element at offset (index + 1)
+    // Success path
     builder->SetInsertPoint(okBB);
-    llvm::Value* offset = builder->CreateAdd(idxVal, llvm::ConstantInt::get(getDefaultType(), 1), "idx.offset");
-    llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrPtr, offset, "idx.elem.ptr");
+    if (isStr) {
+        // Load single byte at offset index, zero-extend to i64
+        llvm::Value* charPtr = builder->CreateGEP(llvm::Type::getInt8Ty(*context), basePtr, idxVal, "idx.charptr");
+        llvm::Value* charVal = builder->CreateLoad(llvm::Type::getInt8Ty(*context), charPtr, "idx.char");
+        return builder->CreateZExt(charVal, getDefaultType(), "idx.charext");
+    }
+    // Array: element is at slot (index + 1) in the i64 buffer.
+    llvm::Value* offset  = builder->CreateAdd(idxVal, llvm::ConstantInt::get(getDefaultType(), 1), "idx.offset");
+    llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), basePtr, offset, "idx.elem.ptr");
     return builder->CreateLoad(getDefaultType(), elemPtr, "idx.elem");
 }
 
@@ -5637,15 +5663,29 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
 
     ScopeGuard scope(*this);
 
-    // Evaluate the collection (array)
+    // Evaluate the collection (array or string)
     llvm::Value* collVal = generateExpression(stmt->collection.get());
+
+    // Detect whether the collection is a string.  Strings are raw char
+    // pointers without a length header; arrays use [length, e0, e1, ...].
+    bool isStr = collVal->getType()->isPointerTy() || isStringExpr(stmt->collection.get());
+
+    // Normalise to i64 for uniformity; we'll re-cast to ptr below.
     collVal = toDefaultType(collVal);
 
-    // Convert i64 to pointer — array layout is [length, elem0, elem1, ...]
-    llvm::Value* arrPtr = builder->CreateIntToPtr(collVal, llvm::PointerType::getUnqual(*context), "foreach.arrptr");
+    // Convert i64 → pointer
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    llvm::Value* basePtr = builder->CreateIntToPtr(collVal, ptrTy, "foreach.baseptr");
 
-    // Load length from slot 0
-    llvm::Value* lenVal = builder->CreateLoad(getDefaultType(), arrPtr, "foreach.len");
+    // Get the collection length
+    llvm::Value* lenVal;
+    if (isStr) {
+        // String: strlen (no length header)
+        lenVal = builder->CreateCall(getOrDeclareStrlen(), {basePtr}, "foreach.strlen");
+    } else {
+        // Array: length stored in slot 0
+        lenVal = builder->CreateLoad(getDefaultType(), basePtr, "foreach.len");
+    }
 
     // Allocate hidden index variable and the user's iterator variable
     llvm::AllocaInst* idxAlloca = createEntryBlockAlloca(function, "_foreach_idx");
@@ -5657,23 +5697,32 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
     // Create blocks
     llvm::BasicBlock* condBB = llvm::BasicBlock::Create(*context, "foreach.cond", function);
     llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "foreach.body", function);
-    llvm::BasicBlock* incBB = llvm::BasicBlock::Create(*context, "foreach.inc", function);
-    llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "foreach.end", function);
+    llvm::BasicBlock* incBB  = llvm::BasicBlock::Create(*context, "foreach.inc",  function);
+    llvm::BasicBlock* endBB  = llvm::BasicBlock::Create(*context, "foreach.end",  function);
 
     builder->CreateBr(condBB);
 
     // Condition: idx < length
     builder->SetInsertPoint(condBB);
     llvm::Value* curIdx = builder->CreateLoad(getDefaultType(), idxAlloca, "foreach.idx");
-    llvm::Value* cond = builder->CreateICmpSLT(curIdx, lenVal, "foreach.cmp");
+    llvm::Value* cond   = builder->CreateICmpSLT(curIdx, lenVal, "foreach.cmp");
     builder->CreateCondBr(cond, bodyBB, endBB);
 
     // Body: load current element into iterator variable, then execute body
     builder->SetInsertPoint(bodyBB);
     llvm::Value* bodyIdx = builder->CreateLoad(getDefaultType(), idxAlloca, "foreach.bidx");
-    llvm::Value* offset = builder->CreateAdd(bodyIdx, llvm::ConstantInt::get(getDefaultType(), 1), "foreach.offset");
-    llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrPtr, offset, "foreach.elem.ptr");
-    llvm::Value* elemVal = builder->CreateLoad(getDefaultType(), elemPtr, "foreach.elem");
+    llvm::Value* elemVal;
+    if (isStr) {
+        // String: load single byte at offset bodyIdx, zero-extend to i64
+        llvm::Value* charPtr = builder->CreateGEP(llvm::Type::getInt8Ty(*context), basePtr, bodyIdx, "foreach.charptr");
+        llvm::Value* charByte = builder->CreateLoad(llvm::Type::getInt8Ty(*context), charPtr, "foreach.char");
+        elemVal = builder->CreateZExt(charByte, getDefaultType(), "foreach.charext");
+    } else {
+        // Array: element is at slot (bodyIdx + 1)
+        llvm::Value* offset  = builder->CreateAdd(bodyIdx, llvm::ConstantInt::get(getDefaultType(), 1), "foreach.offset");
+        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), basePtr, offset, "foreach.elem.ptr");
+        elemVal = builder->CreateLoad(getDefaultType(), elemPtr, "foreach.elem");
+    }
     builder->CreateStore(elemVal, iterAlloca);
 
     loopStack.push_back({endBB, incBB});
@@ -5686,7 +5735,7 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
     // Increment hidden index
     builder->SetInsertPoint(incBB);
     llvm::Value* nextIdx = builder->CreateLoad(getDefaultType(), idxAlloca, "foreach.nidx");
-    llvm::Value* incIdx = builder->CreateAdd(nextIdx, llvm::ConstantInt::get(getDefaultType(), 1), "foreach.next");
+    llvm::Value* incIdx  = builder->CreateAdd(nextIdx, llvm::ConstantInt::get(getDefaultType(), 1), "foreach.next");
     builder->CreateStore(incIdx, idxAlloca);
     builder->CreateBr(condBB);
 
