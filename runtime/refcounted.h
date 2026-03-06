@@ -52,7 +52,7 @@ class RefCountedString {
     }
 
     // Copy assignment
-    RefCountedString& operator=(const RefCountedString& other) {
+    RefCountedString& operator=(const RefCountedString& other) noexcept {
         if (this != &other) {
             release();
             data = other.data;
@@ -140,9 +140,15 @@ class RefCountedString {
     }
 
     [[nodiscard]] bool operator<(const RefCountedString& other) const {
-        const char* s1 = c_str();
-        const char* s2 = other.c_str();
-        return std::strcmp(s1, s2) < 0;
+        size_t len1 = length();
+        size_t len2 = other.length();
+        size_t minLen = len1 < len2 ? len1 : len2;
+        if (minLen > 0) {
+            int cmp = std::memcmp(c_str(), other.c_str(), minLen);
+            if (cmp != 0)
+                return cmp < 0;
+        }
+        return len1 < len2;
     }
 
   private:

@@ -407,6 +407,32 @@ TEST(ArgProfileTest, NegativeConstantTracked) {
     EXPECT_EQ(ap.observedConstant, -42);
 }
 
+TEST(ArgProfileTest, ConstantSpecDominantFirstCallDiffers) {
+    // Verify hasConstantSpecialization() detects the dominant value correctly
+    // even when the very first recorded call has a different value.
+    // The old constantCount approach would miss this because it only tracked
+    // the first-seen value; the top-K-based implementation handles it.
+    ArgProfile ap;
+    // First call: outlier value 99
+    ap.record(ArgType::Integer, 99);
+    // Next 9 calls: dominant value 42
+    for (int i = 0; i < 9; i++)
+        ap.record(ArgType::Integer, 42);
+    // 42 appears 9/10 = 90% > 80% — should be detected
+    EXPECT_TRUE(ap.hasConstantSpecialization());
+    EXPECT_EQ(ap.constantSpecValue(), 42);
+}
+
+TEST(ArgProfileTest, ConstantSpecValueMatchesDominant) {
+    // Verify constantSpecValue() returns the top-K dominant value.
+    ArgProfile ap;
+    for (int i = 0; i < 9; i++)
+        ap.record(ArgType::Integer, 7);
+    ap.record(ArgType::Integer, 100);
+    EXPECT_TRUE(ap.hasConstantSpecialization());
+    EXPECT_EQ(ap.constantSpecValue(), 7);
+}
+
 // ===========================================================================
 // Value range profiling tests
 // ===========================================================================

@@ -64,8 +64,16 @@ class DeoptManager {
   private:
     DeoptManager() = default;
     mutable std::mutex mtx_;
-    std::unordered_map<std::string, int64_t> failures_;
-    std::unordered_map<std::string, bool> deoptimized_;
+
+    /// Per-function deoptimization state.  Keeping both fields in a single
+    /// struct reduces the map from two separate lookups to one, and improves
+    /// cache locality since the failure counter and the deoptimized flag are
+    /// accessed together inside onGuardFailure().
+    struct FuncDeoptState {
+        int64_t failures = 0;
+        bool deoptimized = false;
+    };
+    std::unordered_map<std::string, FuncDeoptState> state_;
 };
 
 } // namespace omscript

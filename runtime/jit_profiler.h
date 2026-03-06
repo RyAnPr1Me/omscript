@@ -171,9 +171,57 @@ struct ArgProfile {
     }
 
     /// Return true if a single constant dominates (>80% of calls).
+    /// Uses a two-stage check:
+    ///   1. The first-seen constant tracker (accurate when the dominant value
+    ///      is observed first — the common case for inlined benchmarks).
+    ///   2. The top-K frequency tracker as a fallback, catching cases where
+    ///      the very first call had a different value than the true dominant
+    ///      constant (e.g. a warm-up call with a different argument).
     [[nodiscard]] bool hasConstantSpecialization() const {
-        return totalCalls > 0 && constantCount > 0 &&
-               (static_cast<double>(constantCount) / static_cast<double>(totalCalls)) > kConstantSpecThreshold;
+        if (totalCalls == 0)
+            return false;
+        // Primary: first-seen dominant value counter (exact count, not Misra-Gries).
+        if (constantCount > 0 &&
+            (static_cast<double>(constantCount) / static_cast<double>(totalCalls)) > kConstantSpecThreshold)
+            return true;
+        // Secondary: top-K tracker catches the case where the dominant value was
+        // not the first observed.  Misra-Gries may undercount when many distinct
+        // non-dominant values appear, so this path is only reached when the first
+        // check fails.
+        uint64_t bestCount = 0;
+        for (size_t i = 0; i < kTopKSize; i++) {
+            if (topK[i].count > bestCount)
+                bestCount = topK[i].count;
+        }
+        return bestCount > 0 &&
+               (static_cast<double>(bestCount) / static_cast<double>(totalCalls)) > kConstantSpecThreshold;
+    }
+
+    /// Return the constant integer value to use for specialization.
+    /// Only meaningful when hasConstantSpecialization() returns true.
+    /// Prefers the first-seen constant when it passes the threshold (exact
+    /// count); otherwise returns the top-K dominant value (handles the case
+    /// where the first call was an outlier).
+    [[nodiscard]] int64_t constantSpecValue() const {
+        // If the primary (first-seen) tracker says this value dominates, trust it —
+        // the count is exact.
+        if (constantCount > 0 && totalCalls > 0 &&
+            (static_cast<double>(constantCount) / static_cast<double>(totalCalls)) > kConstantSpecThreshold)
+            return observedConstant;
+        // Fall back to the top-K dominant value.  When hasConstantSpecialization()
+        // returned true via the secondary (top-K) path, at least one slot must have
+        // count > 0, so bestVal will always be updated below.  Initialise to 0 so
+        // callers that ignore the contract get a defined, neutral value rather than
+        // a stale observedConstant.
+        uint64_t bestCount = 0;
+        int64_t bestVal = 0;
+        for (size_t i = 0; i < kTopKSize; i++) {
+            if (topK[i].count > bestCount) {
+                bestCount = topK[i].count;
+                bestVal = topK[i].value;
+            }
+        }
+        return bestVal;
     }
 
     /// Return true if observed integer values fall within a tight range.
