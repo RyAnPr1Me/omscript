@@ -209,9 +209,14 @@ class CodeGenerator {
     // stringReturningFunctions_: functions known to return a string value.
     // funcParamStringTypes_: maps function name to the set of parameter indices
     //   that are expected to receive string arguments.
+    // stringArrayVars_: names of variables that hold arrays whose elements are
+    //   string pointers (e.g. declared with ["a","b"] or assigned from str_split).
+    //   Used by isStringExpr(IndexExpr) and generateForEach to propagate string
+    //   type information through array element accesses.
     std::unordered_set<std::string> stringVars_;
     std::unordered_set<std::string> stringReturningFunctions_;
     std::unordered_map<std::string, std::unordered_set<size_t>> funcParamStringTypes_;
+    std::unordered_set<std::string> stringArrayVars_;
 
     /// Classify a function into its execution tier based on type annotations,
     /// OPTMAX status, and whether it is a special function (main/stdlib).
@@ -290,6 +295,9 @@ class CodeGenerator {
     //   produce a string value at the current codegen point (uses namedValues
     //   and stringVars_ for identifier lookups).
     bool isStringExpr(Expression* expr) const;
+    // isStringArrayExpr: returns true if the expression is known to be an array
+    //   whose elements are string pointers (uses stringArrayVars_ lookup).
+    bool isStringArrayExpr(Expression* expr) const;
     // preAnalyzeStringTypes: iterative pre-pass over the full program AST to
     //   populate stringReturningFunctions_ and funcParamStringTypes_ before
     //   any function body is generated.

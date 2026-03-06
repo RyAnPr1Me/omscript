@@ -1,0 +1,115 @@
+// string_array_test.om
+//
+// Regression test: string array elements lost their type information in three
+// scenarios:
+//
+// Bug 1 — arr[i] on a string array printed raw pointer address
+//   print(words[0])  →  "93851565146116" instead of "hello"
+//   typeof(words[0]) →  1 (int)           instead of 3 (string)
+//   len(words[0])    →  garbage integer    instead of 5
+//
+// Root cause: isStringExpr() had no case for IndexExpr.  Without it, the
+// compiler treated every array element as an integer, so print() printed
+// the address, len() called strlen() on a wrong pointer, and comparisons
+// compared addresses.
+//
+// Bug 2 — for(w in words) over a string array iterated incorrectly
+//   len(w) returned wrong values; print(w) printed addresses.
+//
+// Root cause: generateForEach() did not check isStringArrayExpr() and
+// never inserted the iterator variable into stringVars_.
+//
+// Bug 3 — sort(strArr) sorted by pointer address instead of content
+//   sort(["banana","apple"]) → ["banana","apple"] (order unchanged!)
+//
+// Root cause: the sort builtin used ICmpSGT on the raw i64 elements, which
+// compares memory addresses for string arrays. The fix detects string arrays
+// via isStringArrayExpr() and substitutes a strcmp()-based comparison.
+//
+// After the fixes:
+//   - isStringExpr() handles IndexExpr by delegating to isStringArrayExpr()
+//   - isStringArrayExpr() recognises array literals with all-string elements,
+//     str_split() results, and push()/array_copy()/array_concat() results on
+//     string arrays
+//   - generateVarDecl/generateAssign populate stringArrayVars_ when the
+//     initializer/rhs is a string array expression
+//   - generateForEach inserts the iterator variable into stringVars_ when
+//     the collection is in stringArrayVars_
+//   - sort() uses strcmp() when sorting a string array
+
+fn main() {
+    var total = 0;
+
+    // -----------------------------------------------------------------------
+    // Bug 1: arr[i] type-propagation
+    // -----------------------------------------------------------------------
+    var words = ["hello","world","foo"];
+
+    // len() uses strlen on the element pointer (requires string recognition)
+    total = total + (len(words[0]) == 5);          // +1
+    total = total + (len(words[1]) == 5);          // +1
+    total = total + (len(words[2]) == 3);          // +1
+
+    // str_eq works (already passed before the fix, keep as sanity check)
+    total = total + str_eq(words[0], "hello");     // +1
+    total = total + str_eq(words[1], "world");     // +1
+
+    // typeof reports 3 (string)
+    total = total + (typeof(words[0]) == 3);       // +1
+
+    // string comparison on element
+    total = total + (words[0] < words[1]);         // "hello" < "world" → +1
+    total = total + (words[1] > words[0]);         // "world" > "hello" → +1
+
+    // -----------------------------------------------------------------------
+    // Bug 2: for-each over string array
+    // -----------------------------------------------------------------------
+    var a = ["a","bb","ccc"];
+    var lenSum = 0;
+    for(w in a) { lenSum = lenSum + len(w); }
+    total = total + (lenSum == 6);                 // 1+2+3=6  → +1
+
+    // print and compare inside the loop
+    var foundBanana = 0;
+    var fruits = ["apple","banana","cherry"];
+    for(f in fruits) {
+        if(str_eq(f, "banana")) { foundBanana = 1; }
+    }
+    total = total + foundBanana;                   // +1
+
+    // str_concat inside the loop
+    var joined = "";
+    for(w in ["x","y","z"]) { joined = str_concat(joined, w); }
+    total = total + str_eq(joined, "xyz");         // +1
+
+    // -----------------------------------------------------------------------
+    // Bug 3: sort(strArr) uses strcmp
+    // -----------------------------------------------------------------------
+    var s = ["banana","apple","cherry","date"];
+    sort(s);
+    total = total + str_eq(s[0], "apple");         // +1
+    total = total + str_eq(s[1], "banana");        // +1
+    total = total + str_eq(s[2], "cherry");        // +1
+    total = total + str_eq(s[3], "date");          // +1
+
+    // -----------------------------------------------------------------------
+    // push() preserves string-array type
+    // -----------------------------------------------------------------------
+    var b = ["hello"];
+    b = push(b, "world");
+    var pushSum = 0;
+    for(w in b) { pushSum = pushSum + len(w); }
+    total = total + (pushSum == 10);               // 5+5=10 → +1
+
+    // str_split element access and for-each
+    var parts = str_split("one,two,three", ",");
+    total = total + str_eq(parts[0], "one");       // +1
+    total = total + str_eq(parts[1], "two");       // +1
+    total = total + str_eq(parts[2], "three");     // +1
+    var splitLen = 0;
+    for(p in parts) { splitLen = splitLen + len(p); }
+    total = total + (splitLen == 11);              // 3+3+5=11 → +1
+
+    // Expected: 20
+    return total;
+}

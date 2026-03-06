@@ -1358,6 +1358,10 @@ bool CodeGenerator::isStringExpr(Expression* expr) const {
         // assigned from string function returns).
         return stringVars_.count(id->name) > 0;
     }
+    // arr[i] where arr is a string array → the element is a string.
+    if (auto* idx = dynamic_cast<IndexExpr*>(expr)) {
+        return isStringArrayExpr(idx->array.get());
+    }
     if (auto* bin = dynamic_cast<BinaryExpr*>(expr)) {
         if (bin->op == "+")
             return isStringExpr(bin->left.get()) || isStringExpr(bin->right.get());
@@ -1373,6 +1377,39 @@ bool CodeGenerator::isStringExpr(Expression* expr) const {
         return stringReturningFunctions_.count(call->callee) > 0;
     return false;
 }
+
+// Returns true if the expression is an array whose elements are string pointers.
+bool CodeGenerator::isStringArrayExpr(Expression* expr) const {
+    if (!expr)
+        return false;
+    // Variable whose name is tracked as a string array.
+    if (auto* id = dynamic_cast<IdentifierExpr*>(expr))
+        return stringArrayVars_.count(id->name) > 0;
+    // Array literal whose elements are all strings.
+    if (auto* arr = dynamic_cast<ArrayExpr*>(expr)) {
+        if (arr->elements.empty())
+            return false;
+        for (const auto& e : arr->elements) {
+            if (!isStringExpr(e.get()))
+                return false;
+        }
+        return true;
+    }
+    // str_split() always returns an array of strings.
+    // push(strArr, elem) returns a string array if the input is one.
+    // array_concat/array_copy preserve the string-array type of the input.
+    if (auto* call = dynamic_cast<CallExpr*>(expr)) {
+        if (call->callee == "str_split")
+            return true;
+        if ((call->callee == "push" || call->callee == "array_copy") && !call->arguments.empty())
+            return isStringArrayExpr(call->arguments[0].get());
+        if (call->callee == "array_concat" && !call->arguments.empty())
+            return isStringArrayExpr(call->arguments[0].get());
+        return false;
+    }
+    return false;
+}
+
 
 void CodeGenerator::generate(Program* program) {
     hasOptMaxFunctions = false;
@@ -1643,6 +1680,7 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     constValues.clear();
     constScopeStack.clear();
     stringVars_.clear();
+    stringArrayVars_.clear();
 
     // Pre-populate stringVars_ for parameters known to receive string arguments.
     auto paramStrIt = funcParamStringTypes_.find(func->name);
@@ -4204,6 +4242,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                              std::to_string(expr->arguments.size()) + " provided",
                          expr);
         }
+        bool sortStrings = isStringArrayExpr(expr->arguments[0].get());
         llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
         arrArg = toDefaultType(arrArg);
         llvm::Value* arrPtr = builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "sort.arrptr");
@@ -4243,7 +4282,17 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* ptr2 = builder->CreateGEP(getDefaultType(), arrPtr, idx2, "sort.ptr2");
         llvm::Value* val1 = builder->CreateLoad(getDefaultType(), ptr1, "sort.val1");
         llvm::Value* val2 = builder->CreateLoad(getDefaultType(), ptr2, "sort.val2");
-        llvm::Value* needSwap = builder->CreateICmpSGT(val1, val2, "sort.needswap");
+        llvm::Value* needSwap;
+        if (sortStrings) {
+            // String sort: use strcmp(val1_as_ptr, val2_as_ptr) > 0
+            auto* ptrTy = llvm::PointerType::getUnqual(*context);
+            llvm::Value* sptr1 = builder->CreateIntToPtr(val1, ptrTy, "sort.sptr1");
+            llvm::Value* sptr2 = builder->CreateIntToPtr(val2, ptrTy, "sort.sptr2");
+            llvm::Value* cmpRes = builder->CreateCall(getOrDeclareStrcmp(), {sptr1, sptr2}, "sort.strcmp");
+            needSwap = builder->CreateICmpSGT(cmpRes, builder->getInt32(0), "sort.needswap");
+        } else {
+            needSwap = builder->CreateICmpSGT(val1, val2, "sort.needswap");
+        }
         builder->CreateCondBr(needSwap, swapBB, noswapBB);
 
         builder->SetInsertPoint(swapBB);
@@ -5159,6 +5208,11 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
         stringVars_.insert(expr->name);
     else
         stringVars_.erase(expr->name);
+    // Update string-array tracking after assignment.
+    if (isStringArrayExpr(expr->value.get()))
+        stringArrayVars_.insert(expr->name);
+    else
+        stringArrayVars_.erase(expr->name);
     return value;
 }
 
@@ -5573,6 +5627,12 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             stringVars_.insert(stmt->name);
         else
             stringVars_.erase(stmt->name);
+        // Track whether this variable holds an array of strings so that
+        // arr[i] and for-each correctly propagate string type information.
+        if (isStringArrayExpr(stmt->initializer.get()))
+            stringArrayVars_.insert(stmt->name);
+        else
+            stringArrayVars_.erase(stmt->name);
     } else {
         builder->CreateStore(llvm::ConstantInt::get(*context, llvm::APInt(64, 0)), alloca);
     }
@@ -5888,7 +5948,9 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
 
     // Detect whether the collection is a string.  Strings are raw char
     // pointers without a length header; arrays use [length, e0, e1, ...].
-    bool isStr = collVal->getType()->isPointerTy() || isStringExpr(stmt->collection.get());
+    bool isStr     = collVal->getType()->isPointerTy() || isStringExpr(stmt->collection.get());
+    // Detect whether this is an array whose elements are string pointers.
+    bool isStrArray = !isStr && isStringArrayExpr(stmt->collection.get());
 
     // Normalise to i64 for uniformity; we'll re-cast to ptr below.
     collVal = toDefaultType(collVal);
@@ -5913,6 +5975,11 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
 
     llvm::AllocaInst* iterAlloca = createEntryBlockAlloca(function, stmt->iteratorVar);
     bindVariable(stmt->iteratorVar, iterAlloca);
+    // If the collection is a string array, mark the iterator as a string
+    // variable so that print(), len(), and comparison operators handle it
+    // correctly inside the loop body.
+    if (isStrArray)
+        stringVars_.insert(stmt->iteratorVar);
 
     // Create blocks
     llvm::BasicBlock* condBB = llvm::BasicBlock::Create(*context, "foreach.cond", function);

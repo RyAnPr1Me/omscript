@@ -330,6 +330,7 @@ test_program "examples/str_replace_all_test.om" 10
 test_program "examples/to_char_test.om" 12
 test_program "examples/string_comparison_test.om" 15
 test_program "examples/string_multiply_test.om" 9
+test_program "examples/string_array_test.om" 20
 test_compile_fail "examples/const_fail.om"
 test_compile_fail "examples/break_outside_loop.om"
 test_compile_fail "examples/continue_outside_loop.om"
