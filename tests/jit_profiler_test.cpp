@@ -669,3 +669,33 @@ TEST(JITProfilerCallbackTest, ProfileCallSiteCallback) {
 
     JITProfiler::instance().reset();
 }
+
+// ===========================================================================
+// dump() uses constantSpecValue() not observedConstant
+// ===========================================================================
+
+TEST(JITProfilerTest, DumpShowsCorrectConstantSpec) {
+    // Verify that dump() logs the dominant constant via constantSpecValue(),
+    // not the first-seen value.  When the first call is an outlier and the
+    // remaining calls pass a different dominant constant, the log must show
+    // the dominant value (42), not the outlier (99).
+    JITProfiler::instance().reset();
+    // First call: outlier 99 — this is what observedConstant will hold.
+    JITProfiler::instance().recordArg("dump_test", 0, ArgType::Integer, 99);
+    // Remaining 9 calls: dominant value 42 (90% > 80% threshold).
+    for (int i = 0; i < 9; i++)
+        JITProfiler::instance().recordArg("dump_test", 0, ArgType::Integer, 42);
+
+    const FunctionProfile* prof = JITProfiler::instance().getProfile("dump_test");
+    ASSERT_NE(prof, nullptr);
+    ASSERT_EQ(prof->args.size(), 1u);
+
+    // hasConstantSpecialization() should detect the dominant value 42 via top-K.
+    EXPECT_TRUE(prof->args[0].hasConstantSpecialization());
+    // constantSpecValue() must return 42, not 99.
+    EXPECT_EQ(prof->args[0].constantSpecValue(), int64_t(42));
+    // observedConstant holds 99 (first seen) — dump() must NOT use this directly.
+    EXPECT_EQ(prof->args[0].observedConstant, int64_t(99));
+
+    JITProfiler::instance().reset();
+}

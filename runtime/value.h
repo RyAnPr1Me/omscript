@@ -17,7 +17,9 @@ class Value {
     Value(double val) noexcept : type(Type::FLOAT), floatValue(val) {}
 
     Value(const std::string& val) : type(Type::STRING) {
-        new (&stringValue) RefCountedString(val.c_str());
+        // Use the length-aware constructor to avoid a redundant strlen call
+        // since std::string already knows its size.
+        new (&stringValue) RefCountedString(val.data(), val.size());
     }
 
     Value(const char* val) : type(Type::STRING) {
@@ -25,7 +27,8 @@ class Value {
     }
 
     // Copy constructor
-    Value(const Value& other) : type(other.type) {
+    // noexcept: RefCountedString copy ctor is noexcept (retain() is noexcept).
+    Value(const Value& other) noexcept : type(other.type) {
         if (__builtin_expect(type != Type::STRING, 1)) {
             // Fast path: POD copy covers INTEGER, FLOAT, and NONE without branching.
             intValue = other.intValue;
@@ -54,22 +57,24 @@ class Value {
     }
 
     // Copy assignment
-    Value& operator=(const Value& other) {
+    // noexcept: RefCountedString copy ctor is noexcept (retain() only does an
+    // atomic increment), so the placement-new below cannot throw.  Marking this
+    // noexcept enables std::vector<Value> to use the copy constructor during
+    // reallocation when no move constructor is available, and lets the compiler
+    // omit exception-handling overhead throughout the assignment body.
+    Value& operator=(const Value& other) noexcept {
         if (__builtin_expect(this != &other, 1)) {
             if (__builtin_expect(type == Type::STRING, 0)) {
                 stringValue.~RefCountedString();
             }
-            // Set type to NONE before the potentially-throwing placement-new so
-            // that the destructor is safe if RefCountedString's constructor throws
-            // (e.g. std::bad_alloc from malloc).  We restore the correct type only
-            // after the construction succeeds.
-            type = Type::NONE;
-            if (__builtin_expect(other.type != Type::STRING, 1)) {
+            // Since RefCountedString's copy constructor is noexcept, set the
+            // type directly rather than using a temporary Type::NONE guard.
+            type = other.type;
+            if (__builtin_expect(type != Type::STRING, 1)) {
                 intValue = other.intValue;
             } else {
                 new (&stringValue) RefCountedString(other.stringValue);
             }
-            type = other.type;
         }
         return *this;
     }

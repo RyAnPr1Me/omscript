@@ -36,8 +36,21 @@ class RefCountedString {
         }
     }
 
+    // Create from C string with known length — avoids strlen when the
+    // caller already has the length (e.g. from std::string::size()).
+    RefCountedString(const char* str, size_t len) {
+        if (str && len > 0) {
+            data = allocate(len);
+            std::memcpy(data->chars, str, len);
+            data->chars[len] = '\0';
+        } else {
+            data = nullptr;
+        }
+    }
+
     // Copy constructor - increment reference count
-    RefCountedString(const RefCountedString& other) : data(other.data) {
+    // noexcept: retain() only does an atomic increment, which cannot throw.
+    RefCountedString(const RefCountedString& other) noexcept : data(other.data) {
         retain();
     }
 

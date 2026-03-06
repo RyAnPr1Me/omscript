@@ -241,3 +241,59 @@ TEST(RefCountedStringTest, ConcatStaticIndependentFromOperands) {
     buf2[0] = 'Y';
     EXPECT_STREQ(r.c_str(), "hello world");
 }
+
+// ===========================================================================
+// Length-aware constructor (const char*, size_t)
+// ===========================================================================
+
+TEST(RefCountedStringTest, ConstructFromPtrAndLength) {
+    RefCountedString s("hello world", 5); // only first 5 chars
+    EXPECT_EQ(s.length(), 5u);
+    EXPECT_STREQ(s.c_str(), "hello");
+}
+
+TEST(RefCountedStringTest, ConstructFromPtrAndLengthFull) {
+    const char* src = "omscript";
+    size_t len = std::strlen(src);
+    RefCountedString s(src, len);
+    EXPECT_EQ(s.length(), len);
+    EXPECT_STREQ(s.c_str(), src);
+}
+
+TEST(RefCountedStringTest, ConstructFromPtrAndLengthZero) {
+    RefCountedString s("non-empty", 0);
+    EXPECT_TRUE(s.empty());
+    EXPECT_STREQ(s.c_str(), "");
+}
+
+TEST(RefCountedStringTest, ConstructFromPtrAndLengthNullTerminated) {
+    // Result must be null-terminated even though no '\0' is in the source slice.
+    char buf[] = {'a', 'b', 'c', 'd', 'e'};
+    RefCountedString s(buf, 3);
+    EXPECT_EQ(s.length(), 3u);
+    EXPECT_EQ(s.c_str()[3], '\0');
+    EXPECT_STREQ(s.c_str(), "abc");
+}
+
+TEST(RefCountedStringTest, ConstructFromPtrAndLengthSharesOnCopy) {
+    // Two copies of a length-constructed string should share the underlying data.
+    RefCountedString a("hello", 5);
+    RefCountedString b(a);
+    EXPECT_STREQ(a.c_str(), "hello");
+    EXPECT_STREQ(b.c_str(), "hello");
+    EXPECT_EQ(a.c_str(), b.c_str()); // same pointer — shared data
+}
+
+// ===========================================================================
+// Copy constructor is noexcept
+// ===========================================================================
+
+TEST(RefCountedStringTest, CopyConstructorIsNoexcept) {
+    // Verify at compile time that the copy constructor is noexcept.
+    static_assert(std::is_nothrow_copy_constructible<RefCountedString>::value,
+                  "RefCountedString copy constructor must be noexcept");
+    // Also exercise at runtime to ensure no unexpected throw occurs.
+    RefCountedString a("noexcept test");
+    RefCountedString b(a);
+    EXPECT_STREQ(b.c_str(), "noexcept test");
+}
