@@ -18,6 +18,13 @@
 
 namespace omscript {
 
+// Sampling masks for the thread-local sample counters.  A mask of 0xF samples
+// every 16th event (1/16); 0x7 samples every 8th event (1/8).  Using bit-masks
+// instead of modulo keeps the hot-path check to a single AND instruction.
+static constexpr uint64_t kBranchSampleMask   = 0xF; // 1-in-16 sampling
+static constexpr uint64_t kLoopSampleMask     = 0x7; // 1-in-8 sampling
+static constexpr uint64_t kCallSiteSampleMask = 0xF; // 1-in-16 sampling
+
 // ---------------------------------------------------------------------------
 // JITProfiler singleton
 // ---------------------------------------------------------------------------
@@ -35,7 +42,7 @@ void JITProfiler::recordBranch(const char* funcName, uint32_t branchId, bool tak
     // profile statistics when multiple threads call different functions.
     thread_local uint64_t branchSampleCounter = 0;
     uint64_t sample = branchSampleCounter++;
-    if (__builtin_expect((sample & 0xF) != 0, 1))
+    if (__builtin_expect((sample & kBranchSampleMask) != 0, 1))
         return;
 
     // Use try_lock to avoid blocking on the hot path — dropping a few samples
@@ -76,7 +83,7 @@ void JITProfiler::recordLoopTripCount(const char* funcName, uint32_t loopId, uin
     // thread_local avoids atomic ops and cross-thread counter interference.
     thread_local uint64_t loopSampleCounter = 0;
     uint64_t sample = loopSampleCounter++;
-    if (__builtin_expect((sample & 0x7) != 0, 1))
+    if (__builtin_expect((sample & kLoopSampleMask) != 0, 1))
         return;
 
     std::unique_lock<std::mutex> lk(mtx_, std::try_to_lock);
@@ -95,7 +102,7 @@ void JITProfiler::recordCallSite(const char* callerName, const char* calleeName)
     // thread_local avoids atomic ops and cross-thread counter interference.
     thread_local uint64_t callSiteSampleCounter = 0;
     uint64_t sample = callSiteSampleCounter++;
-    if (__builtin_expect((sample & 0xF) != 0, 1))
+    if (__builtin_expect((sample & kCallSiteSampleMask) != 0, 1))
         return;
 
     std::unique_lock<std::mutex> lk(mtx_, std::try_to_lock);

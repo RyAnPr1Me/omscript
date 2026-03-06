@@ -129,9 +129,9 @@ class Lexer {
     int line;
     int column;
 
-    char peek(int offset = 0) const;
-    char advance();
-    bool isAtEnd() const;
+    char peek(int offset = 0) const noexcept;
+    char advance() noexcept;
+    bool isAtEnd() const noexcept;
     void skipWhitespace();
     void skipComment();
     void skipBlockComment();

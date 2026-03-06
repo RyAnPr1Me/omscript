@@ -40,7 +40,7 @@ Lexer::Lexer(const std::string& source) : source(source), pos(0), line(1), colum
 
 Lexer::Lexer(std::string&& source) : source(std::move(source)), pos(0), line(1), column(1) {}
 
-char Lexer::peek(int offset) const {
+char Lexer::peek(int offset) const noexcept {
     size_t index = pos + offset;
     if (index >= source.length()) {
         return '\0';
@@ -48,7 +48,7 @@ char Lexer::peek(int offset) const {
     return source[index];
 }
 
-char Lexer::advance() {
+char Lexer::advance() noexcept {
     if (isAtEnd())
         return '\0';
     char c = source[pos++];
@@ -61,7 +61,7 @@ char Lexer::advance() {
     return c;
 }
 
-bool Lexer::isAtEnd() const {
+bool Lexer::isAtEnd() const noexcept {
     return pos >= source.length();
 }
 

@@ -72,17 +72,17 @@ class RefCountedString {
     }
 
     // Get C string
-    const char* c_str() const {
+    [[nodiscard]] const char* c_str() const {
         return __builtin_expect(data != nullptr, 1) ? data->chars : "";
     }
 
     // Get length
-    size_t length() const {
+    [[nodiscard]] size_t length() const {
         return __builtin_expect(data != nullptr, 1) ? data->length : 0;
     }
 
     // Check if empty
-    bool empty() const {
+    [[nodiscard]] bool empty() const {
         return __builtin_expect(data == nullptr, 0) || data->length == 0;
     }
 
@@ -125,7 +125,7 @@ class RefCountedString {
     }
 
     // Comparison
-    bool operator==(const RefCountedString& other) const {
+    [[nodiscard]] bool operator==(const RefCountedString& other) const {
         if (data == other.data)
             return true;
         if (!data || !other.data)
@@ -135,11 +135,11 @@ class RefCountedString {
         return std::memcmp(data->chars, other.data->chars, data->length) == 0;
     }
 
-    bool operator!=(const RefCountedString& other) const {
+    [[nodiscard]] bool operator!=(const RefCountedString& other) const {
         return !(*this == other);
     }
 
-    bool operator<(const RefCountedString& other) const {
+    [[nodiscard]] bool operator<(const RefCountedString& other) const {
         const char* s1 = c_str();
         const char* s2 = other.c_str();
         return std::strcmp(s1, s2) < 0;
