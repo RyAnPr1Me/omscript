@@ -195,3 +195,49 @@ TEST(RefCountedStringTest, DifferentLengths) {
     RefCountedString b("abcd");
     EXPECT_FALSE(a == b);
 }
+
+// ===========================================================================
+// RefCountedString::concat static helper
+// ===========================================================================
+
+TEST(RefCountedStringTest, ConcatStaticBothNonEmpty) {
+    RefCountedString r = RefCountedString::concat("hello ", 6, "world", 5);
+    EXPECT_STREQ(r.c_str(), "hello world");
+    EXPECT_EQ(r.length(), 11u);
+}
+
+TEST(RefCountedStringTest, ConcatStaticFirstEmpty) {
+    RefCountedString r = RefCountedString::concat("", 0, "world", 5);
+    EXPECT_STREQ(r.c_str(), "world");
+    EXPECT_EQ(r.length(), 5u);
+}
+
+TEST(RefCountedStringTest, ConcatStaticSecondEmpty) {
+    RefCountedString r = RefCountedString::concat("hello", 5, "", 0);
+    EXPECT_STREQ(r.c_str(), "hello");
+    EXPECT_EQ(r.length(), 5u);
+}
+
+TEST(RefCountedStringTest, ConcatStaticBothEmpty) {
+    RefCountedString r = RefCountedString::concat("", 0, "", 0);
+    EXPECT_TRUE(r.empty());
+    EXPECT_STREQ(r.c_str(), "");
+}
+
+TEST(RefCountedStringTest, ConcatStaticNullTerminated) {
+    // Verify the result is properly null-terminated.
+    RefCountedString r = RefCountedString::concat("abc", 3, "def", 3);
+    EXPECT_EQ(r.length(), 6u);
+    EXPECT_EQ(std::strlen(r.c_str()), 6u);
+    EXPECT_STREQ(r.c_str(), "abcdef");
+}
+
+TEST(RefCountedStringTest, ConcatStaticIndependentFromOperands) {
+    // Modifying the source buffers after concat must not corrupt the result.
+    char buf1[] = "hello ";
+    char buf2[] = "world";
+    RefCountedString r = RefCountedString::concat(buf1, 6, buf2, 5);
+    buf1[0] = 'X';
+    buf2[0] = 'Y';
+    EXPECT_STREQ(r.c_str(), "hello world");
+}

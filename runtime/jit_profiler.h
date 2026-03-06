@@ -76,7 +76,7 @@ struct BranchProfile {
     uint64_t notTakenCount = 0;
 
     /// Return the probability (0.0–1.0) that the branch is taken.
-    double takenProbability() const {
+    [[nodiscard]] double takenProbability() const {
         uint64_t total = takenCount + notTakenCount;
         if (total == 0)
             return 0.5; // No data — assume 50/50
@@ -90,6 +90,22 @@ struct BranchProfile {
 struct ArgProfile {
     /// Number of distinct ArgType values — must match the ArgType enum.
     static constexpr size_t kNumArgTypes = 6;
+
+    /// Minimum fraction of calls where a single constant must dominate to
+    /// trigger constant-value specialization.
+    static constexpr double kConstantSpecThreshold = 0.8;
+
+    /// Minimum fraction of integer samples that must be in-range for
+    /// range-based specialization to be applied.
+    static constexpr double kRangeValidityThreshold = 0.9;
+
+    /// Maximum range width (max - min) considered "tight" for range
+    /// specialization.  Values spanning more than this are not specialized.
+    static constexpr int64_t kTightRangeLimit = 1024;
+
+    /// Minimum fraction of calls where the top value must appear to be
+    /// considered "dominant" for multi-value specialization.
+    static constexpr double kDominantValueThreshold = 0.6;
 
     /// Counts of each observed type for this parameter position.
     uint64_t typeCounts[kNumArgTypes] = {}; // indexed by ArgType
@@ -142,7 +158,7 @@ struct ArgProfile {
     }
 
     /// Return the dominant argument type (most frequently observed).
-    ArgType dominantType() const {
+    [[nodiscard]] ArgType dominantType() const {
         ArgType best = ArgType::Unknown;
         uint64_t bestCount = 0;
         for (size_t i = 0; i < kNumArgTypes; i++) {
@@ -155,30 +171,30 @@ struct ArgProfile {
     }
 
     /// Return true if a single constant dominates (>80% of calls).
-    bool hasConstantSpecialization() const {
+    [[nodiscard]] bool hasConstantSpecialization() const {
         return totalCalls > 0 && constantCount > 0 &&
-               (static_cast<double>(constantCount) / static_cast<double>(totalCalls)) > 0.8;
+               (static_cast<double>(constantCount) / static_cast<double>(totalCalls)) > kConstantSpecThreshold;
     }
 
     /// Return true if observed integer values fall within a tight range.
     /// A "tight" range is when all observed values fit within [min, max] where
     /// max - min <= 1024.  This enables range-based llvm.assume optimizations
     /// that help LLVM eliminate bounds checks and narrow integer widths.
-    bool hasRangeSpecialization() const {
-        if (rangeCount == 0 || rangeCount < totalCalls * 0.9)
+    [[nodiscard]] bool hasRangeSpecialization() const {
+        if (rangeCount == 0 || rangeCount < totalCalls * kRangeValidityThreshold)
             return false;
         // Avoid overflow: if minObserved > maxObserved (shouldn't happen), bail.
         if (minObserved > maxObserved)
             return false;
         // Use unsigned subtraction to safely check range width.
         auto range = static_cast<uint64_t>(maxObserved) - static_cast<uint64_t>(minObserved);
-        return range <= 1024;
+        return range <= static_cast<uint64_t>(kTightRangeLimit);
     }
 
     /// Return true if the top-K data shows a small number of distinct values
     /// dominating (top value > 60% of calls).  Useful for multi-version
     /// specialization at Tier-4+.
-    bool hasDominantValue() const {
+    [[nodiscard]] bool hasDominantValue() const {
         if (totalCalls == 0)
             return false;
         uint64_t bestCount = 0;
@@ -187,11 +203,11 @@ struct ArgProfile {
                 bestCount = topK[i].count;
         }
         return bestCount > 0 &&
-               (static_cast<double>(bestCount) / static_cast<double>(totalCalls)) > 0.6;
+               (static_cast<double>(bestCount) / static_cast<double>(totalCalls)) > kDominantValueThreshold;
     }
 
     /// Return the most frequent value from the top-K tracker.
-    int64_t dominantValue() const {
+    [[nodiscard]] int64_t dominantValue() const {
         uint64_t bestCount = 0;
         int64_t bestVal = 0;
         for (size_t i = 0; i < kTopKSize; i++) {
@@ -273,18 +289,18 @@ struct LoopProfile {
     }
 
     /// Return the average trip count (0 if never executed).
-    uint64_t averageTripCount() const {
+    [[nodiscard]] uint64_t averageTripCount() const {
         return executionCount > 0 ? totalIterations / executionCount : 0;
     }
 
     /// Return true if the loop always executes the same number of iterations.
-    bool hasConstantTripCount() const {
+    [[nodiscard]] bool hasConstantTripCount() const {
         return executionCount > 0 && tripCountIsConstant && constantTripCount >= 0;
     }
 
     /// Return true if trip counts fall in a narrow range (max - min <= 4).
     /// Such loops benefit from aggressive unrolling.
-    bool hasNarrowTripRange() const {
+    [[nodiscard]] bool hasNarrowTripRange() const {
         return executionCount > 0 && maxTripCount >= minTripCount &&
                (maxTripCount - minTripCount) <= 4;
     }

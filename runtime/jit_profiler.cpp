@@ -18,6 +18,13 @@
 
 namespace omscript {
 
+// Sampling masks for the thread-local sample counters.  A mask of 0xF samples
+// every 16th event (1/16); 0x7 samples every 8th event (1/8).  Using bit-masks
+// instead of modulo keeps the hot-path check to a single AND instruction.
+static constexpr uint64_t kBranchSampleMask   = 0xF; // 1-in-16 sampling
+static constexpr uint64_t kLoopSampleMask     = 0x7; // 1-in-8 sampling
+static constexpr uint64_t kCallSiteSampleMask = 0xF; // 1-in-16 sampling
+
 // ---------------------------------------------------------------------------
 // JITProfiler singleton
 // ---------------------------------------------------------------------------
@@ -29,11 +36,13 @@ JITProfiler& JITProfiler::instance() {
 void JITProfiler::recordBranch(const char* funcName, uint32_t branchId, bool taken) {
     // Sample at the callback level: only record every 16th branch observation.
     // This reduces mutex contention and cache-line bouncing by 16x while
-    // maintaining statistically accurate branch weight ratios.  The atomic
-    // counter increment is much cheaper than the mutex try_lock + hash lookup.
-    static std::atomic<uint64_t> branchSampleCounter{0};
-    uint64_t sample = branchSampleCounter.fetch_add(1, std::memory_order_relaxed);
-    if (__builtin_expect((sample & 0xF) != 0, 1))
+    // maintaining statistically accurate branch weight ratios.
+    // thread_local avoids atomic operations entirely on the hot path and
+    // prevents cross-thread counter aliasing that would bias per-function
+    // profile statistics when multiple threads call different functions.
+    thread_local uint64_t branchSampleCounter = 0;
+    uint64_t sample = branchSampleCounter++;
+    if (__builtin_expect((sample & kBranchSampleMask) != 0, 1))
         return;
 
     // Use try_lock to avoid blocking on the hot path — dropping a few samples
@@ -71,9 +80,10 @@ void JITProfiler::recordLoopTripCount(const char* funcName, uint32_t loopId, uin
     // fired on EVERY loop exit, causing massive overhead in loop-heavy code
     // (e.g. 27k mutex lock attempts for matrix_accum(30)).  Sampling at 1/8
     // still provides accurate average trip count and constant-trip-count detection.
-    static std::atomic<uint64_t> loopSampleCounter{0};
-    uint64_t sample = loopSampleCounter.fetch_add(1, std::memory_order_relaxed);
-    if (__builtin_expect((sample & 0x7) != 0, 1))
+    // thread_local avoids atomic ops and cross-thread counter interference.
+    thread_local uint64_t loopSampleCounter = 0;
+    uint64_t sample = loopSampleCounter++;
+    if (__builtin_expect((sample & kLoopSampleMask) != 0, 1))
         return;
 
     std::unique_lock<std::mutex> lk(mtx_, std::try_to_lock);
@@ -89,9 +99,10 @@ void JITProfiler::recordLoopTripCount(const char* funcName, uint32_t loopId, uin
 
 void JITProfiler::recordCallSite(const char* callerName, const char* calleeName) {
     // Sample every 16th call-site observation to reduce overhead.
-    static std::atomic<uint64_t> callSiteSampleCounter{0};
-    uint64_t sample = callSiteSampleCounter.fetch_add(1, std::memory_order_relaxed);
-    if (__builtin_expect((sample & 0xF) != 0, 1))
+    // thread_local avoids atomic ops and cross-thread counter interference.
+    thread_local uint64_t callSiteSampleCounter = 0;
+    uint64_t sample = callSiteSampleCounter++;
+    if (__builtin_expect((sample & kCallSiteSampleMask) != 0, 1))
         return;
 
     std::unique_lock<std::mutex> lk(mtx_, std::try_to_lock);

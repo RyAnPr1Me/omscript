@@ -72,17 +72,17 @@ class RefCountedString {
     }
 
     // Get C string
-    const char* c_str() const {
+    [[nodiscard]] const char* c_str() const {
         return __builtin_expect(data != nullptr, 1) ? data->chars : "";
     }
 
     // Get length
-    size_t length() const {
+    [[nodiscard]] size_t length() const {
         return __builtin_expect(data != nullptr, 1) ? data->length : 0;
     }
 
     // Check if empty
-    bool empty() const {
+    [[nodiscard]] bool empty() const {
         return __builtin_expect(data == nullptr, 0) || data->length == 0;
     }
 
@@ -104,8 +104,28 @@ class RefCountedString {
         return result;
     }
 
+    /// Concatenate two C string segments into a new RefCountedString using a
+    /// single allocation.  This is more efficient than constructing a temporary
+    /// RefCountedString for one operand and then calling operator+, which would
+    /// require two allocations.  Intended for mixed-type string concatenation
+    /// where one operand must first be converted to a C string (e.g. via
+    /// Value::toString()), so the length is already known from the std::string.
+    ///
+    /// Both @p a and @p b must be valid non-null pointers (use "" for empty).
+    static RefCountedString concat(const char* a, size_t lenA, const char* b, size_t lenB) {
+        if (lenA == 0 && lenB == 0)
+            return RefCountedString();
+        size_t newLen = lenA + lenB;
+        RefCountedString result;
+        result.data = allocate(newLen);
+        std::memcpy(result.data->chars, a, lenA);
+        std::memcpy(result.data->chars + lenA, b, lenB);
+        result.data->chars[newLen] = '\0';
+        return result;
+    }
+
     // Comparison
-    bool operator==(const RefCountedString& other) const {
+    [[nodiscard]] bool operator==(const RefCountedString& other) const {
         if (data == other.data)
             return true;
         if (!data || !other.data)
@@ -115,11 +135,11 @@ class RefCountedString {
         return std::memcmp(data->chars, other.data->chars, data->length) == 0;
     }
 
-    bool operator!=(const RefCountedString& other) const {
+    [[nodiscard]] bool operator!=(const RefCountedString& other) const {
         return !(*this == other);
     }
 
-    bool operator<(const RefCountedString& other) const {
+    [[nodiscard]] bool operator<(const RefCountedString& other) const {
         const char* s1 = c_str();
         const char* s2 = other.c_str();
         return std::strcmp(s1, s2) < 0;

@@ -44,17 +44,17 @@ TEST(ValueTest, StringFromCString) {
 
 TEST(ValueTest, AsIntThrowsForFloat) {
     Value v(1.0);
-    EXPECT_THROW(v.asInt(), std::runtime_error);
+    EXPECT_THROW((void)v.asInt(), std::runtime_error);
 }
 
 TEST(ValueTest, AsFloatThrowsForInt) {
     Value v(int64_t(1));
-    EXPECT_THROW(v.asFloat(), std::runtime_error);
+    EXPECT_THROW((void)v.asFloat(), std::runtime_error);
 }
 
 TEST(ValueTest, AsStringThrowsForInt) {
     Value v(int64_t(1));
-    EXPECT_THROW(v.asString(), std::runtime_error);
+    EXPECT_THROW((void)v.asString(), std::runtime_error);
 }
 
 // ===========================================================================
@@ -316,7 +316,7 @@ TEST(ValueTest, LessStringString) {
 }
 
 TEST(ValueTest, LessInvalid) {
-    EXPECT_THROW(Value("a") < Value(int64_t(1)), std::runtime_error);
+    EXPECT_THROW((void)(Value("a") < Value(int64_t(1))), std::runtime_error);
 }
 
 TEST(ValueTest, LessOrEqual) {

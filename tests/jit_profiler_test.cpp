@@ -21,7 +21,7 @@ using namespace omscript;
 TEST(JITProfilerTest, RecordBranch) {
     JITProfiler::instance().reset();
 
-    // recordBranch() samples every 16th call (static counter, `& 0xF`).
+    // recordBranch() samples every 16th call (thread-local counter, `& 0xF`).
     // Call 160 taken + 80 not-taken to guarantee enough samples pass through.
     for (int i = 0; i < 160; i++)
         JITProfiler::instance().recordBranch("foo", 0, true);
@@ -521,7 +521,7 @@ TEST(LoopProfileTest, SingleExecution) {
 TEST(JITProfilerTest, RecordLoopTripCount) {
     JITProfiler::instance().reset();
 
-    // recordLoopTripCount() samples every 8th call (static counter, `& 0x7`).
+    // recordLoopTripCount() samples every 8th call (thread-local counter, `& 0x7`).
     // Call 8× per observation to guarantee at least one sample passes.
     for (int i = 0; i < 8; i++)
         JITProfiler::instance().recordLoopTripCount("loop_fn", 0, 100);
@@ -569,7 +569,7 @@ TEST(JITProfilerTest, RecordMultipleLoops) {
 TEST(JITProfilerTest, RecordCallSite) {
     JITProfiler::instance().reset();
 
-    // recordCallSite() samples every 16th call (static counter, `& 0xF`).
+    // recordCallSite() samples every 16th call (thread-local counter, `& 0xF`).
     // Call 32× per callee to guarantee at least one sample each.
     for (int i = 0; i < 32; i++)
         JITProfiler::instance().recordCallSite("caller", "callee_a");

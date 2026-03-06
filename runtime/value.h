@@ -5,7 +5,6 @@
 #include <cstdint>
 #include <stdexcept>
 #include <string>
-#include <variant>
 
 namespace omscript {
 
@@ -60,12 +59,17 @@ class Value {
             if (__builtin_expect(type == Type::STRING, 0)) {
                 stringValue.~RefCountedString();
             }
-            type = other.type;
-            if (__builtin_expect(type != Type::STRING, 1)) {
+            // Set type to NONE before the potentially-throwing placement-new so
+            // that the destructor is safe if RefCountedString's constructor throws
+            // (e.g. std::bad_alloc from malloc).  We restore the correct type only
+            // after the construction succeeds.
+            type = Type::NONE;
+            if (__builtin_expect(other.type != Type::STRING, 1)) {
                 intValue = other.intValue;
             } else {
                 new (&stringValue) RefCountedString(other.stringValue);
             }
+            type = other.type;
         }
         return *this;
     }
@@ -89,23 +93,23 @@ class Value {
         return *this;
     }
 
-    Type getType() const {
+    [[nodiscard]] Type getType() const {
         return type;
     }
 
-    int64_t asInt() const {
+    [[nodiscard]] int64_t asInt() const {
         if (__builtin_expect(type != Type::INTEGER, 0)) {
             throw std::runtime_error("Value is not an integer");
         }
         return intValue;
     }
-    double asFloat() const {
+    [[nodiscard]] double asFloat() const {
         if (__builtin_expect(type != Type::FLOAT, 0)) {
             throw std::runtime_error("Value is not a float");
         }
         return floatValue;
     }
-    const char* asString() const {
+    [[nodiscard]] const char* asString() const {
         if (__builtin_expect(type != Type::STRING, 0)) {
             throw std::runtime_error("Value is not a string");
         }
@@ -114,14 +118,14 @@ class Value {
 
     // Unchecked accessors for performance-critical paths.
     // Caller must guarantee the type matches.
-    int64_t unsafeAsInt() const {
+    [[nodiscard]] int64_t unsafeAsInt() const {
         return intValue;
     }
-    double unsafeAsFloat() const {
+    [[nodiscard]] double unsafeAsFloat() const {
         return floatValue;
     }
 
-    bool isTruthy() const {
+    [[nodiscard]] bool isTruthy() const {
         switch (type) {
         case Type::INTEGER:
             return intValue != 0;
@@ -134,31 +138,31 @@ class Value {
         }
         return false;
     }
-    std::string toString() const;
+    [[nodiscard]] std::string toString() const;
 
     // Arithmetic operations
-    Value operator+(const Value& other) const;
-    Value operator-(const Value& other) const;
-    Value operator*(const Value& other) const;
-    Value operator/(const Value& other) const;
-    Value operator%(const Value& other) const;
-    Value operator-() const;
+    [[nodiscard]] Value operator+(const Value& other) const;
+    [[nodiscard]] Value operator-(const Value& other) const;
+    [[nodiscard]] Value operator*(const Value& other) const;
+    [[nodiscard]] Value operator/(const Value& other) const;
+    [[nodiscard]] Value operator%(const Value& other) const;
+    [[nodiscard]] Value operator-() const;
 
     // Comparison operations
-    bool operator==(const Value& other) const;
-    bool operator!=(const Value& other) const;
-    bool operator<(const Value& other) const;
-    bool operator<=(const Value& other) const;
-    bool operator>(const Value& other) const;
-    bool operator>=(const Value& other) const;
+    [[nodiscard]] bool operator==(const Value& other) const;
+    [[nodiscard]] bool operator!=(const Value& other) const;
+    [[nodiscard]] bool operator<(const Value& other) const;
+    [[nodiscard]] bool operator<=(const Value& other) const;
+    [[nodiscard]] bool operator>(const Value& other) const;
+    [[nodiscard]] bool operator>=(const Value& other) const;
 
     // Bitwise operations
-    Value operator&(const Value& other) const;
-    Value operator|(const Value& other) const;
-    Value operator^(const Value& other) const;
-    Value operator~() const;
-    Value operator<<(const Value& other) const;
-    Value operator>>(const Value& other) const;
+    [[nodiscard]] Value operator&(const Value& other) const;
+    [[nodiscard]] Value operator|(const Value& other) const;
+    [[nodiscard]] Value operator^(const Value& other) const;
+    [[nodiscard]] Value operator~() const;
+    [[nodiscard]] Value operator<<(const Value& other) const;
+    [[nodiscard]] Value operator>>(const Value& other) const;
 
   private:
     Type type;
@@ -181,6 +185,18 @@ class Value {
     double toDouble() const {
         return (type == Type::FLOAT) ? floatValue : static_cast<double>(intValue);
     }
+
+    /// Write a string representation of this value into a caller-supplied stack
+    /// buffer without heap allocation, and return a (pointer, length) pair.
+    ///
+    ///   INTEGER → decimal digits written into @p buf via snprintf
+    ///   FLOAT   → "%g" formatted into @p buf via snprintf
+    ///   STRING  → returns the existing c_str() / length() — no copy at all
+    ///   NONE    → returns the literal "none"
+    ///
+    /// @p buf must be at least 32 bytes.  The returned pointer is valid until
+    /// @p buf goes out of scope or this Value is modified.
+    std::pair<const char*, size_t> toCStrBuf(char* buf, size_t bufSize) const noexcept;
 };
 
 } // namespace omscript
