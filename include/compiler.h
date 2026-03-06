@@ -23,7 +23,7 @@ class Compiler {
     void setVerbose(bool v) {
         verbose_ = v;
     }
-    bool isVerbose() const {
+    [[nodiscard]] bool isVerbose() const noexcept {
         return verbose_;
     }
 
@@ -31,7 +31,7 @@ class Compiler {
     void setQuiet(bool q) {
         quiet_ = q;
     }
-    bool isQuiet() const {
+    [[nodiscard]] bool isQuiet() const noexcept {
         return quiet_;
     }
 
@@ -39,7 +39,7 @@ class Compiler {
     void setOptimizationLevel(OptimizationLevel level) {
         optLevel_ = level;
     }
-    OptimizationLevel getOptimizationLevel() const {
+    [[nodiscard]] OptimizationLevel getOptimizationLevel() const noexcept {
         return optLevel_;
     }
 

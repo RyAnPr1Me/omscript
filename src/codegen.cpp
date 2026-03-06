@@ -741,9 +741,11 @@ void CodeGenerator::checkConstModification(const std::string& name, const std::s
 
 void CodeGenerator::validateScopeStacksMatch(const char* location) {
     if (scopeStack.size() != constScopeStack.size()) {
-        throw std::runtime_error("Scope tracking mismatch in codegen (" + std::string(location) +
-                                 "): values=" + std::to_string(scopeStack.size()) +
-                                 ", consts=" + std::to_string(constScopeStack.size()));
+        throw DiagnosticError(
+            Diagnostic{DiagnosticSeverity::Error, {"", 0, 0},
+                       "Scope tracking mismatch in codegen (" + std::string(location) +
+                           "): values=" + std::to_string(scopeStack.size()) +
+                           ", consts=" + std::to_string(constScopeStack.size())});
     }
 }
 

@@ -83,8 +83,8 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
         tokens = lexer.tokenize();
     } catch (const DiagnosticError&) {
         throw; // Preserves source location; main.cpp adds filename prefix
-    } catch (const std::runtime_error& e) {
-        throw std::runtime_error(sourceFile + ": " + e.what());
+    } catch (const std::exception& e) {
+        throw FileError(sourceFile + ": " + e.what());
     }
 
     // Syntax analysis
@@ -97,8 +97,8 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
         program = parser.parse();
     } catch (const DiagnosticError&) {
         throw;
-    } catch (const std::runtime_error& e) {
-        throw std::runtime_error(sourceFile + ": " + e.what());
+    } catch (const std::exception& e) {
+        throw FileError(sourceFile + ": " + e.what());
     }
 
     // Code generation
@@ -132,8 +132,8 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
         }
     } catch (const DiagnosticError&) {
         throw;
-    } catch (const std::runtime_error& e) {
-        throw std::runtime_error(sourceFile + ": " + e.what());
+    } catch (const std::exception& e) {
+        throw FileError(sourceFile + ": " + e.what());
     }
 
     // Print LLVM IR only in verbose mode
