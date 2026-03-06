@@ -1886,8 +1886,17 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     bool leftIsFloat = left->getType()->isDoubleTy();
     bool rightIsFloat = right->getType()->isDoubleTy();
 
-    // Float operations path
-    if (leftIsFloat || rightIsFloat) {
+    // Pre-compute string flags once, used by both the float-skip guard below
+    // and the string concatenation block that follows.
+    bool leftIsStr  = left->getType()->isPointerTy()  || isStringExpr(expr->left.get());
+    bool rightIsStr = right->getType()->isPointerTy() || isStringExpr(expr->right.get());
+
+    // Float operations path — but only when neither operand is a string.
+    // When the '+' operator has one string and one float (e.g. "pi=" + 3.14),
+    // the string-concatenation block below must handle it; otherwise
+    // ensureFloat() would reinterpret the string pointer as an integer and
+    // silently produce garbage.
+    if ((leftIsFloat || rightIsFloat) && !(expr->op == "+" && (leftIsStr || rightIsStr))) {
         if (!leftIsFloat)
             left = ensureFloat(left);
         if (!rightIsFloat)
@@ -1940,8 +1949,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
 
     // String concatenation path: either operand is a string (ptr or i64-as-string).
     if (expr->op == "+") {
-        bool leftIsStr = left->getType()->isPointerTy() || isStringExpr(expr->left.get());
-        bool rightIsStr = right->getType()->isPointerTy() || isStringExpr(expr->right.get());
         if (leftIsStr || rightIsStr) {
             // Auto-convert non-string operand to string via snprintf (like to_string builtin).
             auto ensureStrPtr = [&](llvm::Value* val, bool isStr) -> llvm::Value* {
@@ -2908,20 +2915,30 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         return builder->CreateZExt(isDigit, getDefaultType(), "digitval");
     }
 
-    // typeof(x) returns 1 for integer, 2 for float, 3 for string, 0 for none.
-    // In the current LLVM compilation path, all values are represented as i64,
-    // so typeof() always returns 1 (integer).
+    // typeof(x) returns a type tag: 1=integer, 2=float, 3=string.
+    // The tag is determined from the LLVM IR type of the expression, which is
+    // known statically for literals and for variables whose alloca type was
+    // set at declaration time.  Integer variables stored as i64 and arrays
+    // (also i64 pointers) both return 1; floats stored as double return 2;
+    // string literals and tracked string variables return 3.
     if (expr->callee == "typeof") {
         if (expr->arguments.size() != 1) {
             codegenError("Built-in function 'typeof' expects 1 argument, but " +
                              std::to_string(expr->arguments.size()) + " provided",
                          expr);
         }
-        // Evaluate the argument for its side effects, then return type tag.
+        // Evaluate the argument for its side effects, then derive type tag.
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        long long tag;
+        if (arg->getType()->isDoubleTy()) {
+            tag = 2; // float
+        } else if (arg->getType()->isPointerTy() || isStringExpr(expr->arguments[0].get())) {
+            tag = 3; // string
+        } else {
+            tag = 1; // integer (default for all i64 values including arrays)
+        }
         (void)arg;
-        // In the LLVM native path all values are i64, so type is always 1 (integer).
-        return llvm::ConstantInt::get(getDefaultType(), 1);
+        return llvm::ConstantInt::get(getDefaultType(), tag);
     }
 
     // assert(condition) — aborts with an error if the condition is falsy.
@@ -3164,8 +3181,21 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                          expr);
         }
         llvm::Value* val = generateExpression(expr->arguments[0].get());
-        val = toDefaultType(val);
-        // Allocate buffer (21 bytes is enough for any 64-bit signed decimal integer including sign and null terminator)
+        bool isFloat = val->getType()->isDoubleTy();
+        if (!isFloat)
+            val = toDefaultType(val);
+        if (isFloat) {
+            // Float: use a 32-byte buffer and %g format to preserve decimal places.
+            llvm::Value* bufSize = llvm::ConstantInt::get(getDefaultType(), 32);
+            llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bufSize}, "tostr.buf");
+            llvm::GlobalVariable* fmtStr = module->getGlobalVariable("tostr_float_fmt", true);
+            if (!fmtStr)
+                fmtStr = builder->CreateGlobalString("%g", "tostr_float_fmt");
+            builder->CreateCall(getOrDeclareSnprintf(), {buf, bufSize, fmtStr, val});
+            stringReturningFunctions_.insert("to_string");
+            return buf;
+        }
+        // Integer: 21 bytes is enough for any 64-bit signed decimal plus null terminator.
         llvm::Value* bufSize = llvm::ConstantInt::get(getDefaultType(), 21);
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bufSize}, "tostr.buf");
         // snprintf(buf, 21, "%lld", val)

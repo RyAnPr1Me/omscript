@@ -1760,13 +1760,25 @@ sleep(1000);  // sleep for 1 second
 
 #### `typeof(x)`
 
-Returns a type tag for `x`. All values are represented as `i64` in the compiled output, so `typeof` always returns `1` (integer).
+Returns a type tag for `x` based on the static LLVM IR type of the expression:
+
+| Tag | Meaning |
+|-----|---------|
+| `1` | Integer (default for `i64` values, including arrays) |
+| `2` | Float (double-precision) |
+| `3` | String (pointer type or tracked string variable) |
 
 ```javascript
 typeof(42)         // 1  (integer)
-typeof(3.14)       // 1  (always 1 in native path)
-typeof("hello")    // 1  (always 1 in native path)
+typeof(3.14)       // 2  (float)
+typeof("hello")    // 3  (string)
+var f = 2.71828;
+typeof(f)          // 2  (float variable)
+var s = "world";
+typeof(s)          // 3  (string variable)
 ```
+
+> **Note:** The type tag reflects the *static* type known at compile time.  A variable holding the result of a function call that could return either an integer or a string will have tag `1` unless the compiler can prove it is a string.
 
 #### `assert(condition)`
 
@@ -1839,7 +1851,7 @@ assert(0);          // always aborts: "Runtime error: assertion failed"
 | `array_map(arr, "fn")` | 2 | array | Apply named function to each element |
 | `array_filter(arr, "fn")` | 2 | array | Keep elements where named function returns non-zero |
 | `array_reduce(arr, "fn", init)` | 3 | value | Reduce array using named 2-arg function |
-| `typeof(x)` | 1 | 1 | Type tag (always 1/integer in native path) |
+| `typeof(x)` | 1 | 1/2/3 | Type tag: 1=int, 2=float, 3=string |
 | `assert(cond)` | 1 | 1 | Abort with error if `cond` is falsy |
 | `println(x)` | 1 | 0 | Print value with newline (alias for print) |
 | `write(x)` | 1 | 0 | Print value without trailing newline |

@@ -1,0 +1,56 @@
+// float_string_concat_test.om
+//
+// Regression test: string + float concatenation previously produced garbage
+// because the binary operator checked the float path before the string path,
+// causing ensureFloat() to reinterpret the string pointer as a float.
+//
+// Also tests to_string(float) which previously truncated the decimal part
+// because it used %lld format instead of %g.
+
+fn main() {
+    var total = 0;
+
+    // Test 1: string literal + float variable
+    var f = 2.5;
+    var s1 = "x=" + f;              // must produce "x=2.5"
+    total = total + str_eq(s1, "x=2.5");  // +1
+
+    // Test 2: float variable + string literal
+    var s2 = f + "!";               // must produce "2.5!"
+    total = total + str_eq(s2, "2.5!");   // +1
+
+    // Test 3: string literal + float literal
+    var s3 = "pi=" + 3.14;          // must produce "pi=3.14"
+    total = total + str_eq(s3, "pi=3.14"); // +1
+
+    // Test 4: float literal + string literal
+    var s4 = 1.5 + " apples";       // must produce "1.5 apples"
+    total = total + str_eq(s4, "1.5 apples"); // +1
+
+    // Test 5: string + integer still works
+    var s5 = "n=" + 42;             // must produce "n=42"
+    total = total + str_eq(s5, "n=42");   // +1
+
+    // Test 6: integer + string still works
+    var s6 = 7 + " dwarfs";         // must produce "7 dwarfs"
+    total = total + str_eq(s6, "7 dwarfs"); // +1
+
+    // Test 7: to_string(float) preserves decimal part
+    var ts1 = to_string(3.14);
+    total = total + str_eq(ts1, "3.14");   // +1
+
+    // Test 8: to_string(negative float)
+    var ts2 = to_string(-0.5);
+    total = total + str_eq(ts2, "-0.5");   // +1
+
+    // Test 9: to_string(integer) still works
+    var ts3 = to_string(42);
+    total = total + str_eq(ts3, "42");     // +1
+
+    // Test 10: chained float + string concatenation
+    var s10 = 3.14 + " is pi and " + 2.71828 + " is e";
+    total = total + str_eq(s10, "3.14 is pi and 2.71828 is e"); // +1
+
+    // Expected: 10
+    return total;
+}

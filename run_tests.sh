@@ -319,6 +319,8 @@ test_program "examples/benchmark_jit_aot.om" 0
 test_program "examples/try_catch_test.om" 88
 test_program "examples/throw_in_called_fn_test.om" 147
 test_program "examples/len_string_test.om" 8
+test_program "examples/float_string_concat_test.om" 10
+test_program "examples/typeof_full_test.om" 12
 test_compile_fail "examples/const_fail.om"
 test_compile_fail "examples/break_outside_loop.om"
 test_compile_fail "examples/continue_outside_loop.om"
