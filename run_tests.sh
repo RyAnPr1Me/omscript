@@ -323,6 +323,10 @@ test_program "examples/float_string_concat_test.om" 10
 test_program "examples/typeof_full_test.om" 12
 test_program "examples/string_index_test.om" 13
 test_program "examples/string_foreach_test.om" 9
+test_program "examples/to_int_to_float_string_test.om" 12
+test_program "examples/string_index_assign_test.om" 11
+test_program "examples/pow_float_test.om" 11
+test_program "examples/str_replace_all_test.om" 10
 test_compile_fail "examples/const_fail.om"
 test_compile_fail "examples/break_outside_loop.om"
 test_compile_fail "examples/continue_outside_loop.om"

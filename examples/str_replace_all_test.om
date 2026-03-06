@@ -1,0 +1,59 @@
+// str_replace_all_test.om
+//
+// Regression test: str_replace previously only replaced the FIRST occurrence
+// of the old substring.  str_replace("hello world hello", "hello", "bye")
+// returned "bye world hello" (length 15) instead of "bye world bye" (length 13).
+//
+// After the fix, str_replace uses a two-pass algorithm:
+//  1. Count occurrences and compute exact result size.
+//  2. Walk the string, copying prefix segments and replacements.
+// All occurrences are replaced, matching the behaviour of Python's
+// str.replace(), PHP's str_replace(), and JavaScript's replaceAll().
+
+fn main() {
+    var total = 0;
+
+    // Test 1: multiple identical occurrences
+    var r1 = str_replace("hello world hello", "hello", "bye");
+    total = total + str_eq(r1, "bye world bye");       // +1
+
+    // Test 2: replacement with a longer string
+    var r2 = str_replace("aaa", "a", "bb");
+    total = total + str_eq(r2, "bbbbbb");              // +1
+
+    // Test 3: replacement with a shorter string
+    var r3 = str_replace("xxxx", "xx", "y");
+    total = total + str_eq(r3, "yy");                  // +1
+
+    // Test 4: delete all occurrences (replace with empty string)
+    var r4 = str_replace("aababc", "a", "");
+    total = total + str_eq(r4, "bbc");                 // +1
+
+    // Test 5: no occurrence → returns a copy of the original
+    var r5 = str_replace("hello", "xyz", "abc");
+    total = total + str_eq(r5, "hello");               // +1
+
+    // Test 6: replace at start and end
+    var r6 = str_replace("abc-abc", "abc", "XY");
+    total = total + str_eq(r6, "XY-XY");               // +1
+
+    // Test 7: entire string is the old pattern
+    var r7 = str_replace("hello", "hello", "world");
+    total = total + str_eq(r7, "world");               // +1
+
+    // Test 8: overlapping-lookalike (non-overlapping replacement)
+    // "aaaa" with old="aa" → should produce "bb" (replaces [0,1] and [2,3])
+    var r8 = str_replace("aaaa", "aa", "b");
+    total = total + str_eq(r8, "bb");                  // +1
+
+    // Test 9: single occurrence still works
+    var r9 = str_replace("hello world", "world", "there");
+    total = total + str_eq(r9, "hello there");         // +1
+
+    // Test 10: old is longer than new (result is shorter)
+    var r10 = str_replace("foobarfoobaz", "foobar", "x");
+    total = total + str_eq(r10, "xfoobaz");            // +1
+
+    // Expected: 10
+    return total;
+}

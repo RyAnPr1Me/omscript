@@ -1,0 +1,72 @@
+// to_int_to_float_string_test.om
+//
+// Regression test: to_int(string) and to_float(string) previously returned
+// the raw pointer value of the string instead of parsing it numerically.
+//
+// Root cause: to_int fell through to toDefaultType() for non-double inputs,
+// which calls ptrtoint on a string pointer → raw address as i64.  to_float
+// called ensureFloat() which reinterprets the pointer bits as a double.
+//
+// After the fix, both builtins detect a string argument and dispatch to
+// strtoll / strtod respectively.
+
+fn main() {
+    var total = 0;
+
+    // --- to_int(string) ---
+
+    // Basic positive integer
+    var n1 = to_int("42");
+    total = total + (n1 == 42);   // +1
+
+    // Negative integer
+    var n2 = to_int("-17");
+    total = total + (n2 == -17);  // +1
+
+    // Zero
+    var n3 = to_int("0");
+    total = total + (n3 == 0);    // +1
+
+    // Large value
+    var n4 = to_int("1000");
+    total = total + (n4 == 1000); // +1
+
+    // From a variable string
+    var s = "99";
+    var n5 = to_int(s);
+    total = total + (n5 == 99);   // +1
+
+    // to_int(float) still works: truncates toward zero
+    var n6 = to_int(3.9);
+    total = total + (n6 == 3);    // +1
+
+    // to_int(int) is identity
+    var n7 = to_int(77);
+    total = total + (n7 == 77);   // +1
+
+    // --- to_float(string) ---
+
+    // Basic decimal
+    var f1 = to_float("3.14");
+    total = total + (f1 > 3.13 && f1 < 3.15);  // +1
+
+    // Negative
+    var f2 = to_float("-1.5");
+    total = total + (f2 > -1.51 && f2 < -1.49); // +1
+
+    // Integer string → float
+    var f3 = to_float("5");
+    total = total + (f3 == 5.0);  // +1
+
+    // From a variable string
+    var sf = "2.718";
+    var f4 = to_float(sf);
+    total = total + (f4 > 2.717 && f4 < 2.719); // +1
+
+    // to_float(int) still works
+    var f5 = to_float(10);
+    total = total + (f5 == 10.0); // +1
+
+    // Expected: 12
+    return total;
+}

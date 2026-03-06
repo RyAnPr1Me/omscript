@@ -2542,10 +2542,21 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                          expr);
         }
         llvm::Value* base = generateExpression(expr->arguments[0].get());
-        llvm::Value* exp = generateExpression(expr->arguments[1].get());
-        // Convert float arguments to integer since pow() is an integer operation
+        llvm::Value* exp  = generateExpression(expr->arguments[1].get());
+
+        // If either argument is a float, delegate to the llvm.pow.f64 intrinsic.
+        // This handles pow(2.0, 0.5) = sqrt(2), pow(x, n) for fractional n, etc.
+        if (base->getType()->isDoubleTy() || exp->getType()->isDoubleTy()) {
+            if (!base->getType()->isDoubleTy()) base = ensureFloat(base);
+            if (!exp->getType()->isDoubleTy())  exp  = ensureFloat(exp);
+            llvm::Function* powFn =
+                OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::pow, {getFloatType()});
+            return builder->CreateCall(powFn, {base, exp}, "pow.fresult");
+        }
+
+        // Integer path: convert to i64 and use binary exponentiation (O(log n)).
         base = toDefaultType(base);
-        exp = toDefaultType(exp);
+        exp  = toDefaultType(exp);
 
         llvm::Function* function = builder->GetInsertBlock()->getParent();
 
@@ -3297,6 +3308,16 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         if (arg->getType()->isDoubleTy()) {
             return builder->CreateFPToSI(arg, getDefaultType(), "toint.ftoi");
         }
+        // If the argument is a string, parse it with strtoll.
+        if (arg->getType()->isPointerTy() || isStringExpr(expr->arguments[0].get())) {
+            auto* ptrTy = llvm::PointerType::getUnqual(*context);
+            llvm::Value* strPtr = arg->getType()->isPointerTy()
+                                      ? arg
+                                      : builder->CreateIntToPtr(arg, ptrTy, "toint.strptr");
+            auto* nullPtr = llvm::ConstantPointerNull::get(ptrTy);
+            auto* base10 = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 10);
+            return builder->CreateCall(getOrDeclareStrtoll(), {strPtr, nullPtr, base10}, "toint.parsed");
+        }
         return toDefaultType(arg);
     }
 
@@ -3307,6 +3328,15 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                          expr);
         }
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        // If the argument is a string, parse it with strtod.
+        if (arg->getType()->isPointerTy() || isStringExpr(expr->arguments[0].get())) {
+            auto* ptrTy = llvm::PointerType::getUnqual(*context);
+            llvm::Value* strPtr = arg->getType()->isPointerTy()
+                                      ? arg
+                                      : builder->CreateIntToPtr(arg, ptrTy, "tofloat.strptr");
+            auto* nullPtr = llvm::ConstantPointerNull::get(ptrTy);
+            return builder->CreateCall(getOrDeclareStrtod(), {strPtr, nullPtr}, "tofloat.parsed");
+        }
         return ensureFloat(arg);
     }
 
@@ -3506,74 +3536,143 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* oldArg = generateExpression(expr->arguments[1].get());
         llvm::Value* newArg = generateExpression(expr->arguments[2].get());
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
         llvm::Value* strPtr =
             strArg->getType()->isPointerTy()
                 ? strArg
-                : builder->CreateIntToPtr(strArg, llvm::PointerType::getUnqual(*context), "replace.str");
+                : builder->CreateIntToPtr(strArg, ptrTy, "replace.str");
         llvm::Value* oldPtr =
             oldArg->getType()->isPointerTy()
                 ? oldArg
-                : builder->CreateIntToPtr(oldArg, llvm::PointerType::getUnqual(*context), "replace.old");
+                : builder->CreateIntToPtr(oldArg, ptrTy, "replace.old");
         llvm::Value* newPtr =
             newArg->getType()->isPointerTy()
                 ? newArg
-                : builder->CreateIntToPtr(newArg, llvm::PointerType::getUnqual(*context), "replace.new");
-
-        // Find the first occurrence of old in str
-        llvm::Value* found = builder->CreateCall(getOrDeclareStrstr(), {strPtr, oldPtr}, "replace.found");
-        llvm::Value* nullPtr = llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context));
-        llvm::Value* isNull = builder->CreateICmpEQ(found, nullPtr, "replace.isnull");
+                : builder->CreateIntToPtr(newArg, ptrTy, "replace.new");
 
         llvm::Function* function = builder->GetInsertBlock()->getParent();
-        llvm::BasicBlock* foundBB = llvm::BasicBlock::Create(*context, "replace.found", function);
-        llvm::BasicBlock* notFoundBB = llvm::BasicBlock::Create(*context, "replace.notfound", function);
+        llvm::Value* nullPtr  = llvm::ConstantPointerNull::get(ptrTy);
+        llvm::Value* zero     = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one      = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* i8zero   = llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0);
+
+        llvm::Value* oldLen  = builder->CreateCall(getOrDeclareStrlen(), {oldPtr}, "replace.oldlen");
+        llvm::Value* newLen  = builder->CreateCall(getOrDeclareStrlen(), {newPtr}, "replace.newlen");
+        llvm::Value* strLen  = builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "replace.strlen");
+
+        // If old is the empty string, just return a copy of str to avoid
+        // an infinite loop (strstr("x","") always succeeds).
+        llvm::BasicBlock* emptyOldBB = llvm::BasicBlock::Create(*context, "replace.emptyold", function);
+        llvm::BasicBlock* replaceMainBB = llvm::BasicBlock::Create(*context, "replace.main", function);
+        llvm::Value* oldIsEmpty = builder->CreateICmpEQ(oldLen, zero, "replace.oldempty");
+        builder->CreateCondBr(oldIsEmpty, emptyOldBB, replaceMainBB);
+
+        // Empty old: return strdup(str)
+        builder->SetInsertPoint(emptyOldBB);
+        llvm::Value* copySize0 = builder->CreateAdd(strLen, one, "replace.copysize0");
+        llvm::Value* copyBuf0  = builder->CreateCall(getOrDeclareMalloc(), {copySize0}, "replace.copybuf0");
+        builder->CreateCall(getOrDeclareStrcpy(), {copyBuf0, strPtr});
+
+        llvm::BasicBlock* emptyOldExitBB = builder->GetInsertBlock();
         llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "replace.merge", function);
-        builder->CreateCondBr(isNull, notFoundBB, foundBB);
-
-        // Not found: return a copy of the original string
-        builder->SetInsertPoint(notFoundBB);
-        llvm::Value* origLen = builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "replace.origlen");
-        llvm::Value* copySize =
-            builder->CreateAdd(origLen, llvm::ConstantInt::get(getDefaultType(), 1), "replace.copysize");
-        llvm::Value* copyBuf = builder->CreateCall(getOrDeclareMalloc(), {copySize}, "replace.copybuf");
-        builder->CreateCall(getOrDeclareStrcpy(), {copyBuf, strPtr});
         builder->CreateBr(mergeBB);
 
-        // Found: construct prefix + new + suffix
-        builder->SetInsertPoint(foundBB);
-        llvm::Value* prefixLen =
-            builder->CreatePtrDiff(llvm::Type::getInt8Ty(*context), found, strPtr, "replace.prefixlen");
-        llvm::Value* oldLen = builder->CreateCall(getOrDeclareStrlen(), {oldPtr}, "replace.oldlen");
-        llvm::Value* newLen = builder->CreateCall(getOrDeclareStrlen(), {newPtr}, "replace.newlen");
-        llvm::Value* totalOrigLen = builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "replace.totallen");
-        // result len = prefixLen + newLen + (totalOrigLen - prefixLen - oldLen) + 1
-        llvm::Value* suffixLen = builder->CreateSub(
-            totalOrigLen, builder->CreateAdd(prefixLen, oldLen, "replace.prold"), "replace.suffixlen");
-        llvm::Value* resultLen =
-            builder->CreateAdd(builder->CreateAdd(prefixLen, newLen, "replace.prnew"), suffixLen, "replace.resultlen");
-        llvm::Value* resultSize =
-            builder->CreateAdd(resultLen, llvm::ConstantInt::get(getDefaultType(), 1), "replace.resultsize");
+        // ---------------------------------------------------------------
+        // Pass 1: count occurrences of old in str
+        // ---------------------------------------------------------------
+        builder->SetInsertPoint(replaceMainBB);
+        llvm::BasicBlock* countLoopBB = llvm::BasicBlock::Create(*context, "replace.countloop", function);
+        llvm::BasicBlock* countBodyBB = llvm::BasicBlock::Create(*context, "replace.countbody", function);
+        llvm::BasicBlock* countDoneBB = llvm::BasicBlock::Create(*context, "replace.countdone", function);
+        builder->CreateBr(countLoopBB);
+
+        // Loop header: PHIs for cursor position and running count.
+        builder->SetInsertPoint(countLoopBB);
+        llvm::PHINode* cCursor = builder->CreatePHI(ptrTy, 2, "replace.ccursor");
+        cCursor->addIncoming(strPtr, replaceMainBB);
+        llvm::PHINode* cCount  = builder->CreatePHI(getDefaultType(), 2, "replace.ccount");
+        cCount->addIncoming(zero, replaceMainBB);
+
+        // Single strstr call per iteration.
+        llvm::Value* cFound  = builder->CreateCall(getOrDeclareStrstr(), {cCursor, oldPtr}, "replace.cfound");
+        llvm::Value* cIsNull = builder->CreateICmpEQ(cFound, nullPtr, "replace.cisnull");
+        builder->CreateCondBr(cIsNull, countDoneBB, countBodyBB);
+
+        // Body: increment count, advance cursor past the matched occurrence.
+        builder->SetInsertPoint(countBodyBB);
+        llvm::Value* newCount   = builder->CreateAdd(cCount, one, "replace.newcount");
+        llvm::Value* nextCursor = builder->CreateGEP(llvm::Type::getInt8Ty(*context), cFound, oldLen, "replace.nextcursor");
+        cCursor->addIncoming(nextCursor, countBodyBB);
+        cCount->addIncoming(newCount, countBodyBB);
+        builder->CreateBr(countLoopBB);
+
+        // Done: cCount holds the total number of occurrences.
+        builder->SetInsertPoint(countDoneBB);
+        // cCount is the final count; use it directly (single predecessor from countLoopBB).
+        llvm::Value* totalCount = cCount;
+
+        // ---------------------------------------------------------------
+        // Compute result size and allocate
+        // ---------------------------------------------------------------
+        // resultLen = strLen + totalCount * (newLen - oldLen)
+        llvm::Value* lenDiff   = builder->CreateSub(newLen, oldLen, "replace.lendiff");
+        llvm::Value* extraLen  = builder->CreateMul(totalCount, lenDiff, "replace.extralen");
+        llvm::Value* resultLen = builder->CreateAdd(strLen, extraLen, "replace.resultlen");
+        llvm::Value* resultSize= builder->CreateAdd(resultLen, one, "replace.resultsize");
         llvm::Value* resultBuf = builder->CreateCall(getOrDeclareMalloc(), {resultSize}, "replace.resultbuf");
-        // Copy prefix
-        builder->CreateCall(getOrDeclareMemcpy(), {resultBuf, strPtr, prefixLen});
-        // Copy new string
-        llvm::Value* afterPrefix =
-            builder->CreateGEP(llvm::Type::getInt8Ty(*context), resultBuf, prefixLen, "replace.afterprefix");
-        builder->CreateCall(getOrDeclareMemcpy(), {afterPrefix, newPtr, newLen});
-        // Copy suffix (after old in original)
-        llvm::Value* afterNew =
-            builder->CreateGEP(llvm::Type::getInt8Ty(*context), afterPrefix, newLen, "replace.afternew");
-        llvm::Value* suffixSrc =
-            builder->CreateGEP(llvm::Type::getInt8Ty(*context), found, oldLen, "replace.suffixsrc");
-        llvm::Value* suffixCopyLen =
-            builder->CreateAdd(suffixLen, llvm::ConstantInt::get(getDefaultType(), 1), "replace.suffixcopylen");
-        builder->CreateCall(getOrDeclareMemcpy(), {afterNew, suffixSrc, suffixCopyLen});
+
+        // ---------------------------------------------------------------
+        // Pass 2: build output string, replacing every occurrence
+        // ---------------------------------------------------------------
+        llvm::BasicBlock* buildLoopBB = llvm::BasicBlock::Create(*context, "replace.buildloop", function);
+        llvm::BasicBlock* buildBodyBB = llvm::BasicBlock::Create(*context, "replace.buildbody", function);
+        llvm::BasicBlock* buildDoneBB = llvm::BasicBlock::Create(*context, "replace.builddone", function);
+        builder->CreateBr(buildLoopBB);
+
+        builder->SetInsertPoint(buildLoopBB);
+        llvm::PHINode* bSrc = builder->CreatePHI(ptrTy, 2, "replace.bsrc");
+        bSrc->addIncoming(strPtr, countDoneBB);
+        llvm::PHINode* bDst = builder->CreatePHI(ptrTy, 2, "replace.bdst");
+        bDst->addIncoming(resultBuf, countDoneBB);
+
+        llvm::Value* bFound  = builder->CreateCall(getOrDeclareStrstr(), {bSrc, oldPtr}, "replace.bfound");
+        llvm::Value* bIsNull = builder->CreateICmpEQ(bFound, nullPtr, "replace.bnull");
+        builder->CreateCondBr(bIsNull, buildDoneBB, buildBodyBB);
+
+        // Body: copy prefix, then replacement, advance
+        builder->SetInsertPoint(buildBodyBB);
+        llvm::Value* prefLen = builder->CreatePtrDiff(llvm::Type::getInt8Ty(*context), bFound, bSrc, "replace.preflen");
+        builder->CreateCall(getOrDeclareMemcpy(), {bDst, bSrc, prefLen});
+        llvm::Value* dstAfterPref = builder->CreateGEP(llvm::Type::getInt8Ty(*context), bDst, prefLen, "replace.dstpref");
+        builder->CreateCall(getOrDeclareMemcpy(), {dstAfterPref, newPtr, newLen});
+        llvm::Value* dstAfterNew  = builder->CreateGEP(llvm::Type::getInt8Ty(*context), dstAfterPref, newLen, "replace.dstnew");
+        llvm::Value* srcAfterOld  = builder->CreateGEP(llvm::Type::getInt8Ty(*context), bFound, oldLen, "replace.srcold");
+        bSrc->addIncoming(srcAfterOld, buildBodyBB);
+        bDst->addIncoming(dstAfterNew, buildBodyBB);
+        builder->CreateBr(buildLoopBB);
+
+        // Done: copy remaining tail and null-terminate.
+        // bSrc and bDst are live values from the loop header (single predecessor).
+        builder->SetInsertPoint(buildDoneBB);
+        // Copy remaining chars: tail = strLen - (bSrc - strPtr)
+        llvm::Value* srcBase  = builder->CreatePtrToInt(strPtr, getDefaultType(), "replace.srcbase");
+        llvm::Value* srcCurr  = builder->CreatePtrToInt(bSrc,   getDefaultType(), "replace.srccurr");
+        llvm::Value* consumed = builder->CreateSub(srcCurr, srcBase, "replace.consumed");
+        llvm::Value* tail     = builder->CreateSub(strLen, consumed, "replace.tail");
+        builder->CreateCall(getOrDeclareMemcpy(), {bDst, bSrc, tail});
+        llvm::Value* endPtr   = builder->CreateGEP(llvm::Type::getInt8Ty(*context), bDst, tail, "replace.end");
+        builder->CreateStore(i8zero, endPtr);
+
+        llvm::BasicBlock* buildExitBB = builder->GetInsertBlock();
         builder->CreateBr(mergeBB);
 
+        // ---------------------------------------------------------------
+        // Merge: return result (or copy if old was empty)
+        // ---------------------------------------------------------------
         builder->SetInsertPoint(mergeBB);
-        llvm::PHINode* resultPhi = builder->CreatePHI(llvm::PointerType::getUnqual(*context), 2, "replace.result");
-        resultPhi->addIncoming(copyBuf, notFoundBB);
-        resultPhi->addIncoming(resultBuf, foundBB);
+        llvm::PHINode* resultPhi = builder->CreatePHI(ptrTy, 2, "replace.result");
+        resultPhi->addIncoming(copyBuf0,   emptyOldExitBB);
+        resultPhi->addIncoming(resultBuf,  buildExitBB);
         stringReturningFunctions_.insert("str_replace");
         return resultPhi;
     }
@@ -5295,34 +5394,56 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
     llvm::Value* idxVal = generateExpression(expr->index.get());
     llvm::Value* newVal = generateExpression(expr->value.get());
     newVal = toDefaultType(newVal);
+    idxVal = toDefaultType(idxVal);
 
-    // Convert the i64 back to a pointer
-    llvm::Value* arrPtr = builder->CreateIntToPtr(arrVal, llvm::PointerType::getUnqual(*context), "idxa.arrptr");
+    // Detect whether the base is a string (raw char* without a length header).
+    bool isStr = arrVal->getType()->isPointerTy() || isStringExpr(expr->array.get());
 
-    // Bounds check: load length from slot 0, verify 0 <= index < length
-    llvm::Value* lenVal = builder->CreateLoad(getDefaultType(), arrPtr, "idxa.len");
-    llvm::Value* inBounds = builder->CreateICmpSLT(idxVal, lenVal, "idxa.inbounds");
-    llvm::Value* notNeg = builder->CreateICmpSGE(idxVal, llvm::ConstantInt::get(getDefaultType(), 0), "idxa.notneg");
-    llvm::Value* valid = builder->CreateAnd(inBounds, notNeg, "idxa.valid");
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    llvm::Value* basePtr = arrVal->getType()->isPointerTy()
+                               ? arrVal
+                               : builder->CreateIntToPtr(arrVal, ptrTy, "idxa.baseptr");
 
     llvm::Function* function = builder->GetInsertBlock()->getParent();
-    llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "idxa.ok", function);
+    llvm::BasicBlock* okBB   = llvm::BasicBlock::Create(*context, "idxa.ok",   function);
     llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "idxa.fail", function);
+
+    llvm::Value* lenVal;
+    if (isStr) {
+        lenVal = builder->CreateCall(getOrDeclareStrlen(), {basePtr}, "idxa.strlen");
+    } else {
+        lenVal = builder->CreateLoad(getDefaultType(), basePtr, "idxa.len");
+    }
+
+    // Bounds check: 0 <= index < length
+    llvm::Value* inBounds = builder->CreateICmpSLT(idxVal, lenVal, "idxa.inbounds");
+    llvm::Value* notNeg   = builder->CreateICmpSGE(idxVal, llvm::ConstantInt::get(getDefaultType(), 0), "idxa.notneg");
+    llvm::Value* valid    = builder->CreateAnd(inBounds, notNeg, "idxa.valid");
 
     builder->CreateCondBr(valid, okBB, failBB);
 
     // Out-of-bounds path: print error and abort
     builder->SetInsertPoint(failBB);
-    llvm::Value* errMsg = builder->CreateGlobalString("Runtime error: array index out of bounds\n", "idx_oob_msg");
+    llvm::Value* errMsg = isStr
+        ? builder->CreateGlobalString("Runtime error: string index out of bounds\n", "idxa_str_oob_msg")
+        : builder->CreateGlobalString("Runtime error: array index out of bounds\n",  "idxa_arr_oob_msg");
     builder->CreateCall(getPrintfFunction(), {errMsg});
     builder->CreateCall(getOrDeclareAbort());
     builder->CreateUnreachable();
 
-    // Success path: store element at offset (index + 1)
+    // Success path
     builder->SetInsertPoint(okBB);
-    llvm::Value* offset = builder->CreateAdd(idxVal, llvm::ConstantInt::get(getDefaultType(), 1), "idxa.offset");
-    llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrPtr, offset, "idxa.elem.ptr");
-    builder->CreateStore(newVal, elemPtr);
+    if (isStr) {
+        // Truncate to i8 and store at byte offset index
+        llvm::Value* byteVal = builder->CreateTrunc(newVal, llvm::Type::getInt8Ty(*context), "idxa.byte");
+        llvm::Value* charPtr = builder->CreateGEP(llvm::Type::getInt8Ty(*context), basePtr, idxVal, "idxa.charptr");
+        builder->CreateStore(byteVal, charPtr);
+    } else {
+        // Array: store i64 element at slot (index + 1)
+        llvm::Value* offset  = builder->CreateAdd(idxVal, llvm::ConstantInt::get(getDefaultType(), 1), "idxa.offset");
+        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), basePtr, offset, "idxa.elem.ptr");
+        builder->CreateStore(newVal, elemPtr);
+    }
     return newVal;
 }
 
