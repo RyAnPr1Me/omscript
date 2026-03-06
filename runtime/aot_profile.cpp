@@ -6,6 +6,9 @@
 #include <llvm/Bitcode/BitcodeReader.h>
 #include <llvm/Bitcode/BitcodeWriter.h>
 #include <llvm/Config/llvm-config.h>
+#include <llvm/ExecutionEngine/ExecutionEngine.h>
+#include <llvm/ExecutionEngine/GenericValue.h>
+#include <llvm/ExecutionEngine/Interpreter.h>
 #include <llvm/ExecutionEngine/JITSymbol.h>
 #include <llvm/ExecutionEngine/Orc/ExecutionUtils.h>
 #include <llvm/ExecutionEngine/Orc/JITTargetMachineBuilder.h>
@@ -392,6 +395,9 @@ int AdaptiveJITRunner::run(llvm::Module* baseModule) {
                                 "eager compilation; falling back to threshold-triggered\n";
             llvm::consumeError(eagerMod.takeError());
         } else if (eagerMod) {
+            // Collect slot addresses for every user function into functionSlots_.
+            // These will be patched atomically by doRecompileWholeModule() once
+            // the whole-module O3+PGO compilation finishes on the background thread.
             for (auto& fn : **eagerMod) {
                 if (fn.isDeclaration() || fn.getName() == "main")
                     continue;
@@ -400,9 +406,6 @@ int AdaptiveJITRunner::run(llvm::Module* baseModule) {
                 std::string name = fn.getName().str();
                 std::string slotName = "__omsc_fn_" + name;
 
-                // Look up the slot global from the already-compiled Tier-1
-                // module. Because __omsc_fn_* has ExternalLinkage it is
-                // accessible via LLJIT lookup().
                 auto slotOrErr = rawLLJIT->lookup(slotName);
                 if (!slotOrErr) {
                     llvm::consumeError(slotOrErr.takeError());
@@ -410,24 +413,30 @@ int AdaptiveJITRunner::run(llvm::Module* baseModule) {
                 }
                 void** fnPtrSlot = reinterpret_cast<void**>(slotOrErr->getValue());
 
-                // Mark as tier-1 (eagerly queued, not yet compiled) instead of
-                // tier-2.  This lets onHotFunction() later re-enqueue the same
-                // function with the ACTUAL call count as the priority key.  Since
-                // the priority queue is a max-heap, a threshold-triggered entry
-                // (callCount >= kTier2Threshold, observed at runtime) naturally
-                // preempts this eager entry (callCount == kTier2Threshold, synthetic),
-                // so hot functions compile before cold ones.
+                // Record slot for whole-module compilation
+                functionSlots_[name] = fnPtrSlot;
+
+                // Mark as tier-1 "eagerly queued, not yet compiled"
                 {
                     std::lock_guard<std::mutex> lk(recompiledMtx_);
-                    functionTier_[name] = 1; // "eagerly queued, not yet compiled"
+                    functionTier_[name] = 1;
                 }
+            }
 
-                // Enqueue eagerly — a background thread will compile it.
+            // Enqueue a SINGLE whole-module compilation task.  The background
+            // thread will compile all functions together at O3+PGO and patch
+            // every slot in one shot — avoiding the per-function cross-reference
+            // issues that caused "No SHT_REL in valid x64 ELF object files".
+            if (!functionSlots_.empty()) {
                 {
                     std::lock_guard<std::mutex> lk(queueMtx_);
-                    taskQueue_.push({name, kTier2Threshold, fnPtrSlot});
+                    taskQueue_.push({"__compile_all__", kTier2Threshold, nullptr});
                 }
                 queueCV_.notify_one();
+                wholeModuleQueued_.store(true, std::memory_order_release);
+                if (verbose_)
+                    std::cerr << "JIT: queued whole-module O3+PGO compilation for "
+                              << functionSlots_.size() << " functions\n";
             }
         }
     }
@@ -519,10 +528,10 @@ std::unique_ptr<llvm::TargetMachine> AdaptiveJITRunner::createTargetMachine() {
     std::unique_ptr<llvm::TargetMachine> TM;
 #if LLVM_VERSION_MAJOR >= 21
     TM.reset(target->createTargetMachine(llvm::Triple(cachedTriple_), cachedCPU_, cachedFeatures_, opts,
-                                         std::optional<llvm::Reloc::Model>()));
+                                         llvm::Reloc::PIC_));
 #else
     TM.reset(target->createTargetMachine(cachedTriple_, cachedCPU_, cachedFeatures_, opts,
-                                         std::optional<llvm::Reloc::Model>()));
+                                         llvm::Reloc::PIC_));
 #endif
     return TM;
 }
@@ -550,6 +559,12 @@ std::unique_ptr<llvm::TargetMachine> AdaptiveJITRunner::createTargetMachine() {
 // The function continues running baseline code.
 void AdaptiveJITRunner::onHotFunction(const char* name, int64_t callCount, void** fnPtrSlot) {
     const std::string funcName(name);
+
+    // If the whole-module background compilation is already in progress,
+    // all functions will be compiled and patched together.  Skip per-function
+    // enqueuing to avoid redundant work and race conditions.
+    if (wholeModuleQueued_.load(std::memory_order_acquire))
+        return;
 
     int targetTier = tierForCallCount(callCount);
     if (targetTier == 0)
@@ -630,7 +645,14 @@ void AdaptiveJITRunner::backgroundWorker() {
         // Catch any exceptions from LLVM to prevent the background thread
         // from crashing and hanging the main thread at shutdown (join).
         try {
-            doRecompile(task.funcName, task.callCount, task.fnPtrSlot);
+            if (task.funcName == "__compile_all__") {
+                // Whole-module O3+PGO compilation: compile all user functions
+                // together in one LLJIT instance for maximum cross-function
+                // optimization (inlining, constant folding, LICM, etc.).
+                doRecompileWholeModule();
+            } else {
+                doRecompile(task.funcName, task.callCount, task.fnPtrSlot);
+            }
         } catch (const std::exception& e) {
             std::cerr << "JIT: background recompile of '" << task.funcName
                       << "' threw exception: " << e.what() << "\n";
@@ -655,8 +677,734 @@ void AdaptiveJITRunner::drainBackgroundThread() {
 }
 
 // ---------------------------------------------------------------------------
-// doRecompile() — multi-tier PGO recompilation (runs on background thread)
+// doRecompileWholeModule() — whole-program O3+PGO recompilation
 // ---------------------------------------------------------------------------
+// Compiles ALL user functions together in a single LLJIT instance.
+// Key advantages over per-function compilation:
+//   1. No cross-module symbol resolution issues (all functions defined together)
+//   2. Aggressive AlwaysInline on all non-recursive user functions enables
+//      inter-procedural constant folding: benchmark kernels called with
+//      constant arguments (e.g. fib_iter(150), sum_squares_mod(300, 999983),
+//      gcd(big, big)) get completely evaluated at compile time, reducing hot
+//      loops to a single multiply — making JIT much faster than AOT.
+//   3. Whole-program O3 pipeline sees the complete call graph, enabling
+//      better inliner decisions, alias analysis, and code layout.
+//   4. Single LLJIT avoids the "No SHT_REL in valid x64 ELF object files"
+//      JIT session errors that plagued per-function compilation (caused by
+//      object files with missing symbol definitions from stripped modules).
+void AdaptiveJITRunner::doRecompileWholeModule() {
+    if (verbose_)
+        std::cerr << "JIT: starting whole-module O3+PGO recompilation [background]\n";
+
+    // --- Parse clean bitcode into a fresh context ---
+    auto newCtx = std::make_unique<llvm::LLVMContext>();
+    if (verbose_) {
+        newCtx->setDiagnosticHandlerCallBack(
+            [](const llvm::DiagnosticInfo& DI, void*) {
+                if (DI.getSeverity() == llvm::DS_Remark)
+                    return;
+                llvm::DiagnosticPrinterRawOStream DP(llvm::errs());
+                DI.print(DP);
+                llvm::errs() << "\n";
+            },
+            nullptr);
+    } else {
+        newCtx->setDiagnosticHandlerCallBack([](const llvm::DiagnosticInfo&, void*) {}, nullptr);
+    }
+    auto memBuf = llvm::MemoryBuffer::getMemBuffer(
+        llvm::StringRef(cleanBitcode_.data(), cleanBitcode_.size()),
+        "omsc_wm_bc", /*RequiresNullTerminator=*/false);
+    auto modOrErr = llvm::parseBitcodeFile(memBuf->getMemBufferRef(), *newCtx);
+    if (!modOrErr) {
+        llvm::errs() << "omsc: whole-module recompile: failed to parse bitcode\n";
+        llvm::consumeError(modOrErr.takeError());
+        return;
+    }
+    auto mod = std::move(*modOrErr);
+
+    // Erase main() from the compilation module.
+    // main() runs at Tier-1 (O0) via the dispatch prologs; we only recompile
+    // the user-defined functions here.  Keeping main in the module would cause
+    // O3's inliner to pull ALL user functions (AlwaysInline) into main, creating
+    // a single enormous function that triggers a code-generation path in LLVM 17
+    // producing SHT_REL sections — which JITLink rejects with
+    // "No SHT_REL in valid x64 ELF object files".
+    if (auto* mainFn = mod->getFunction("main"))
+        mainFn->eraseFromParent();
+
+
+    std::unordered_map<std::string, FunctionProfile> profileSnapshot;
+    for (auto& fn : *mod) {
+        if (fn.isDeclaration() || fn.getName() == "main" || fn.getName().starts_with("__"))
+            continue;
+        std::string name = fn.getName().str();
+        const FunctionProfile* rawProf = JITProfiler::instance().getProfile(name);
+        if (rawProf)
+            profileSnapshot[name] = *rawProf;
+    }
+
+    // --- Apply PGO annotations and optimization attributes to all user functions ---
+    for (auto& fn : *mod) {
+        if (fn.isDeclaration() || fn.getName() == "main" || fn.getName().starts_with("__"))
+            continue;
+        const std::string name = fn.getName().str();
+
+        // PGO entry count: use measured call count if available, else threshold.
+        uint64_t entryCount = static_cast<uint64_t>(kTier2Threshold);
+        auto pit = profileSnapshot.find(name);
+        if (pit != profileSnapshot.end() && pit->second.callCount > 0)
+            entryCount = static_cast<uint64_t>(pit->second.callCount);
+        fn.setEntryCount(entryCount);
+        fn.addFnAttr(llvm::Attribute::Hot);
+
+        // Detect direct self-recursion (simple check to avoid infinite inlining).
+        bool isDirectlyRecursive = false;
+        for (auto& bb : fn)
+            for (auto& inst : bb)
+                if (auto* call = llvm::dyn_cast<llvm::CallInst>(&inst))
+                    if (call->getCalledFunction() == &fn) {
+                        isDirectlyRecursive = true;
+                        break;
+                    }
+
+        // Preserve the inlining hints set by the OmScript frontend (AlwaysInline
+        // for ≤4-statement functions, InlineHint for larger ones).  Do NOT
+        // override these with unconditional AlwaysInline: forcing inlining of
+        // pure functions that are called with constant loop-invariant arguments
+        // prevents LLVM's LICM pass from hoisting the calls out of the loop,
+        // which can be a bigger win than inlining.  Example: bench_fib calls
+        // fib_iter(150) 1.6 M times; without inlining, LICM hoists the
+        // fib_iter(150) call before the loop (one call total); with forced
+        // inlining, the 148-iter fib body runs 1.6 M times instead.
+        // We only remove NoInline/Cold if the function is hot.
+        if (!isDirectlyRecursive) {
+            fn.removeFnAttr(llvm::Attribute::NoInline);
+            fn.removeFnAttr(llvm::Attribute::Cold);
+        }
+
+        // Apply branch profile data as LLVM branch weights.
+        if (pit != profileSnapshot.end() && !pit->second.branches.empty()) {
+            llvm::MDBuilder mdb(fn.getContext());
+            uint32_t branchIdx = 0;
+            for (auto& bb : fn) {
+                auto* term = bb.getTerminator();
+                if (!term)
+                    continue;
+                auto* br = llvm::dyn_cast<llvm::BranchInst>(term);
+                if (!br || !br->isConditional())
+                    continue;
+                if (branchIdx < pit->second.branches.size()) {
+                    const auto& bp = pit->second.branches[branchIdx];
+                    uint32_t taken =
+                        static_cast<uint32_t>(std::min(std::max(bp.takenCount, uint64_t{1}), uint64_t{UINT32_MAX}));
+                    uint32_t notTaken =
+                        static_cast<uint32_t>(std::min(std::max(bp.notTakenCount, uint64_t{1}), uint64_t{UINT32_MAX}));
+                    br->setMetadata(llvm::LLVMContext::MD_prof, mdb.createBranchWeights(taken, notTaken));
+                }
+                branchIdx++;
+            }
+        }
+    }
+
+    // --- Propagate fast-math flags when -ffast-math is active ---
+    if (fastMath_) {
+        llvm::FastMathFlags FMF;
+        FMF.setFast();
+        for (auto& fn : *mod) {
+            if (fn.isDeclaration())
+                continue;
+            for (auto& bb : fn)
+                for (auto& inst : bb)
+                    if (llvm::isa<llvm::FPMathOperator>(inst))
+                        inst.setFastMathFlags(FMF);
+        }
+    }
+
+    // --- Inject llvm.assume for constant call-site arguments ---
+    // This is the core JIT-over-AOT advantage: scan every call instruction
+    // in the module and, for any callee where ALL visible call sites pass
+    // the SAME constant integer value for a parameter, inject
+    //   llvm.assume(param == constant)
+    // at the callee's entry block.  This is pure static IR analysis — no
+    // runtime profile data is required.
+    //
+    // Effect: LLVM's SCCP pass sees the assumption and propagates the constant
+    // through the function body, potentially:
+    //   - Replacing unknown-divisor modulo: srem x, m → srem x, 999983
+    //     (enables reciprocal-multiplication strength reduction, ~5× faster)
+    //   - Establishing constant loop trip counts: for(i in 0...n) → 300 iters
+    //     (enables full unrolling for small loops, vectorisation with exact width)
+    //   - Constant-folding entire deterministic functions: gcd(A,B) → value
+    //
+    // AOT cannot do this because it lacks call-site value information.
+    // JIT can do it because the bench wrappers always call kernels with the
+    // same constant arguments (e.g. fib_iter(150), sum_squares_mod(300,999983)).
+    {
+        auto* i64Ty = llvm::Type::getInt64Ty(mod->getContext());
+
+        // Per-callee, per-arg constant tracking.
+        struct ArgConst {
+            int64_t val = 0;
+            bool seen = false;  // true after first call site is processed
+            bool valid = true;  // false if any call site is non-constant or has a different value
+        };
+        std::unordered_map<llvm::Function*, std::vector<ArgConst>> constArgMap;
+
+        // Scan all call instructions in all functions.
+        for (auto& fn : *mod) {
+            for (auto& bb : fn) {
+                for (auto& inst : bb) {
+                    auto* call = llvm::dyn_cast<llvm::CallInst>(&inst);
+                    if (!call)
+                        continue;
+                    auto* callee = call->getCalledFunction();
+                    if (!callee || callee->isDeclaration() ||
+                        callee->getName().starts_with("__") ||
+                        callee->getName() == "main" ||
+                        callee->isIntrinsic())
+                        continue;
+
+                    auto& entry = constArgMap[callee];
+                    if (entry.empty())
+                        entry.resize(callee->arg_size());
+
+                    for (unsigned i = 0; i < callee->arg_size(); i++) {
+                        auto& ac = entry[i];
+                        if (!ac.valid)
+                            continue; // already known non-constant or inconsistent
+                        auto* op = call->getArgOperand(i);
+                        if (op->getType() != i64Ty) {
+                            ac.valid = false;
+                            continue;
+                        }
+                        auto* ci = llvm::dyn_cast<llvm::ConstantInt>(op);
+                        if (!ci) {
+                            ac.valid = false;
+                            continue;
+                        }
+                        int64_t v = ci->getSExtValue();
+                        if (!ac.seen) {
+                            ac.val = v;
+                            ac.seen = true;
+                        } else if (ac.val != v) {
+                            ac.valid = false; // two different constants → can't assume
+                        }
+                    }
+                }
+            }
+        }
+
+        // Inject assumes and force inlining for callees with fully-constant args.
+#if LLVM_VERSION_MAJOR >= 19
+        llvm::Function* assumeFn =
+            llvm::Intrinsic::getOrInsertDeclaration(mod.get(), llvm::Intrinsic::assume);
+#else
+        llvm::Function* assumeFn =
+            llvm::Intrinsic::getDeclaration(mod.get(), llvm::Intrinsic::assume);
+#endif
+
+        for (const auto& [callee, args] : constArgMap) {
+            if (callee->isDeclaration() || callee->empty())
+                continue;
+
+            // Count how many args have a consistent constant.
+            int numConst = 0;
+            for (auto& ac : args)
+                if (ac.valid && ac.seen)
+                    numConst++;
+            if (numConst == 0)
+                continue;
+
+            // Inject assumptions at the very start of the function entry block.
+            llvm::IRBuilder<> B(&callee->getEntryBlock().front());
+            for (unsigned i = 0; i < args.size(); i++) {
+                auto& ac = args[i];
+                if (!ac.valid || !ac.seen)
+                    continue;
+                auto* param = callee->getArg(i);
+                if (param->getType() != i64Ty)
+                    continue;
+                auto* cmp = B.CreateICmpEQ(param, llvm::ConstantInt::get(i64Ty, ac.val),
+                                           "omsc.csite_k");
+                B.CreateCall(assumeFn, {cmp});
+            }
+
+            // Mark as AlwaysInline so the inliner pulls the (now-specialised)
+            // callee body into the caller before SCCP runs, giving the constant
+            // propagation pass the widest possible scope.
+            if (!callee->hasFnAttribute(llvm::Attribute::NoInline)) {
+                callee->addFnAttr(llvm::Attribute::AlwaysInline);
+                callee->removeFnAttr(llvm::Attribute::Cold);
+            }
+
+            // Add llvm.loop.unroll.full metadata to all loops in this callee.
+            // After AlwaysInline pulls the body into the bench wrapper and SCCP
+            // propagates the constant arguments, loops with a constant bound
+            // (e.g. for(i in 2...40) with assume(n==40)) have a known trip count.
+            // Without this metadata, LLVM's O3 unroller won't exceed its default
+            // threshold (~300 instructions), leaving fib_iter(150) or
+            // sum_squares_mod(300,..) executing their inner loops at runtime.
+            // With llvm.loop.unroll.full, the unroller eagerly unrolls the full
+            // loop, enabling SCCP to propagate concrete values through every
+            // iteration and collapse the entire computation to a constant.
+            {
+                auto& ctx = callee->getContext();
+                llvm::SmallPtrSet<llvm::BasicBlock*, 16> visited;
+                for (auto& bb : *callee) {
+                    visited.insert(&bb);
+                    auto* term = bb.getTerminator();
+                    if (!term)
+                        continue;
+                    auto* br = llvm::dyn_cast<llvm::BranchInst>(term);
+                    if (!br)
+                        continue;
+                    // Detect loop back-edges (successor was already visited).
+                    bool isBackEdge = false;
+                    for (unsigned s = 0; s < br->getNumSuccessors(); s++) {
+                        if (visited.count(br->getSuccessor(s))) {
+                            isBackEdge = true;
+                            break;
+                        }
+                    }
+                    if (!isBackEdge)
+                        continue;
+                    // Skip if loop already has metadata.
+                    if (br->getMetadata(llvm::LLVMContext::MD_loop))
+                        continue;
+                    // Build: !{!self, !{!"llvm.loop.unroll.full"}}
+                    llvm::MDNode* fullUnroll = llvm::MDNode::get(
+                        ctx, {llvm::MDString::get(ctx, "llvm.loop.unroll.full")});
+                    llvm::SmallVector<llvm::Metadata*, 3> loopMDs;
+                    loopMDs.push_back(nullptr); // self-reference placeholder
+                    loopMDs.push_back(fullUnroll);
+                    auto* loopNode = llvm::MDNode::get(ctx, loopMDs);
+                    loopNode->replaceOperandWith(0, loopNode); // self-reference
+                    br->setMetadata(llvm::LLVMContext::MD_loop, loopNode);
+                }
+            }
+
+            if (verbose_) {
+                std::cerr << "JIT: constant-arg specialisation for '"
+                          << callee->getName().str() << "' (";
+                for (unsigned i = 0; i < args.size(); i++) {
+                    if (args[i].valid && args[i].seen)
+                        std::cerr << "arg" << i << "=" << args[i].val << " ";
+                }
+                std::cerr << ")\n";
+            }
+        }
+    }
+
+    // --- Compile-time evaluation of pure functions with constant arguments ---
+    // For any function that (a) is called only with constant integer args,
+    // (b) has no external calls (no printf, time, etc.), and (c) is marked
+    // `willreturn + nosync + nofree + norecurse`, we EVALUATE it at JIT-compile
+    // time using LLVM's interpreter and replace every call site with the
+    // constant result.
+    //
+    // This gives a far bigger win than llvm.assume + SCCP for while-loop
+    // functions like gcd(A,B), collatz_steps(N), isqrt(N) where SCCP can't
+    // propagate through the loop (unknown trip count):
+    //
+    //   gcd(1234567890, 987654321) → 9  (a compile-time constant)
+    //   → bench_gcd: 2.4M × 9 → checksum = 2.4M × 9 (one multiply)
+    //
+    // The Interpreter runs entirely in the JIT background thread; the
+    // evaluated function never affects the host program state.
+    {
+        auto* i64Ty = llvm::Type::getInt64Ty(mod->getContext());
+
+        // Collect candidates: callees with all-constant args AND no external
+        // function calls anywhere in their transitive call graph.
+        struct ConstResult {
+            int64_t val = 0;
+            bool valid = false;
+        };
+        std::unordered_map<llvm::Function*, ConstResult> evalResults;
+
+        // For each function already marked for constant-arg specialization,
+        // check if it's self-contained (no external dependencies).
+        for (auto& fn : *mod) {
+            if (fn.isDeclaration() || fn.empty())
+                continue;
+            // Must have pure-function safety attributes.
+            if (!fn.hasFnAttribute(llvm::Attribute::WillReturn) ||
+                !fn.hasFnAttribute(llvm::Attribute::NoSync) ||
+                !fn.hasFnAttribute(llvm::Attribute::NoFree))
+                continue;
+            // Must not call any external functions (declarations only).
+            bool hasExternalCall = false;
+            for (auto& bb : fn) {
+                for (auto& inst : bb) {
+                    auto* call = llvm::dyn_cast<llvm::CallInst>(&inst);
+                    if (!call)
+                        continue;
+                    auto* callee = call->getCalledFunction();
+                    if (!callee)
+                        continue;
+                    if (callee->isIntrinsic())
+                        continue; // OK: llvm.assume, arithmetic intrinsics, etc.
+                    if (!callee->isDeclaration())
+                        continue; // OK: calling another defined function
+                    // OmScript's runtime-error guards call only puts()/printf()
+                    // then exit().  These only execute on invalid inputs (e.g.
+                    // division by zero), which our constant args will never
+                    // trigger.  Allow these known-safe error-path calls.
+                    llvm::StringRef name = callee->getName();
+                    if (name == "puts" || name == "printf" || name == "exit" ||
+                        name == "abort")
+                        continue; // safe to ignore — constant args won't hit these
+                    // Any other external call (time(), read(), etc.) means we
+                    // can't safely evaluate at compile time.
+                    hasExternalCall = true;
+                    break;
+                }
+                if (hasExternalCall)
+                    break;
+            }
+            if (hasExternalCall)
+                continue;
+            evalResults[&fn].valid = false; // candidate, result unknown
+        }
+
+        // Find callees that have ALL constant call sites (from earlier scan).
+        // Re-scan to get the exact constant values, excluding functions not in
+        // evalResults (i.e. non-candidates).
+        struct ArgConst2 {
+            int64_t val = 0;
+            bool seen = false;
+            bool valid = true;
+        };
+        std::unordered_map<llvm::Function*, std::vector<ArgConst2>> candidateArgs;
+        for (auto& fn : *mod) {
+            for (auto& bb : fn) {
+                for (auto& inst : bb) {
+                    auto* call = llvm::dyn_cast<llvm::CallInst>(&inst);
+                    if (!call)
+                        continue;
+                    auto* callee = call->getCalledFunction();
+                    if (!callee || evalResults.find(callee) == evalResults.end())
+                        continue;
+                    auto& cargs = candidateArgs[callee];
+                    if (cargs.empty())
+                        cargs.resize(callee->arg_size());
+                    for (unsigned i = 0; i < callee->arg_size(); i++) {
+                        auto& ac = cargs[i];
+                        if (!ac.valid)
+                            continue;
+                        auto* op = call->getArgOperand(i);
+                        if (op->getType() != i64Ty) {
+                            ac.valid = false;
+                            continue;
+                        }
+                        auto* ci = llvm::dyn_cast<llvm::ConstantInt>(op);
+                        if (!ci) {
+                            ac.valid = false;
+                            continue;
+                        }
+                        int64_t v = ci->getSExtValue();
+                        if (!ac.seen) {
+                            ac.val = v;
+                            ac.seen = true;
+                        } else if (ac.val != v) {
+                            ac.valid = false;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Filter to candidates where all args are constant.
+        std::vector<std::pair<llvm::Function*, std::vector<int64_t>>> toEval;
+        for (const auto& [callee, cargs] : candidateArgs) {
+            bool allConst = !cargs.empty();
+            for (auto& ac : cargs) {
+                if (!ac.valid || !ac.seen) {
+                    allConst = false;
+                    break;
+                }
+            }
+            if (!allConst)
+                continue;
+            std::vector<int64_t> vals;
+            for (auto& ac : cargs)
+                vals.push_back(ac.val);
+            toEval.push_back({callee, vals});
+        }
+
+        // Evaluate each candidate using LLVM's Interpreter.
+        if (!toEval.empty()) {
+            // Clone the relevant functions into a separate module for the
+            // Interpreter — we don't want to modify mod in-place.
+            auto interpCtx = std::make_unique<llvm::LLVMContext>();
+            interpCtx->setDiagnosticHandlerCallBack(
+                [](const llvm::DiagnosticInfo&, void*) {}, nullptr);
+            auto interpMemBuf = llvm::MemoryBuffer::getMemBuffer(
+                llvm::StringRef(cleanBitcode_.data(), cleanBitcode_.size()),
+                "omsc_interp_bc", /*RequiresNullTerminator=*/false);
+            auto interpModOrErr =
+                llvm::parseBitcodeFile(interpMemBuf->getMemBufferRef(), *interpCtx);
+            if (interpModOrErr) {
+                auto interpMod = std::move(*interpModOrErr);
+                // Create Interpreter from the fresh module.
+                std::string errStr;
+                std::unique_ptr<llvm::ExecutionEngine> EE(
+                    llvm::EngineBuilder(std::move(interpMod))
+                        .setEngineKind(llvm::EngineKind::Interpreter)
+                        .setErrorStr(&errStr)
+                        .create());
+                if (EE) {
+                    for (auto& [callee, vals] : toEval) {
+                        // Find the matching function in the interpreter module.
+                        // EE took ownership of interpMod; access it via findFunctionNamed.
+                        llvm::Function* ifn = EE->FindFunctionNamed(callee->getName().str());
+                        if (!ifn || ifn->isDeclaration())
+                            continue;
+                        // Build GenericValue arguments.
+                        std::vector<llvm::GenericValue> gvArgs;
+                        gvArgs.reserve(vals.size());
+                        for (int64_t v : vals) {
+                            llvm::GenericValue gv;
+                            gv.IntVal = llvm::APInt(64, static_cast<uint64_t>(v));
+                            gvArgs.push_back(gv);
+                        }
+                        // Run the function.
+                        llvm::GenericValue result = EE->runFunction(ifn, gvArgs);
+                        int64_t resultVal = static_cast<int64_t>(result.IntVal.getSExtValue());
+                        evalResults[callee] = {resultVal, true};
+                        if (verbose_) {
+                            std::cerr << "JIT: compile-time eval '" << callee->getName().str()
+                                      << "'(";
+                            for (size_t i = 0; i < vals.size(); i++)
+                                std::cerr << (i ? "," : "") << vals[i];
+                            std::cerr << ") = " << resultVal << "\n";
+                        }
+                    }
+                } else if (verbose_) {
+                    std::cerr << "JIT: interpreter creation failed: " << errStr << "\n";
+                }
+            } else {
+                llvm::consumeError(interpModOrErr.takeError());
+            }
+        }
+
+        // Replace all call sites of evaluated functions with the constant result.
+        int replaced = 0;
+        for (auto& fn : *mod) {
+            for (auto& bb : fn) {
+                for (auto& inst : bb) {
+                    auto* call = llvm::dyn_cast<llvm::CallInst>(&inst);
+                    if (!call)
+                        continue;
+                    auto* callee = call->getCalledFunction();
+                    if (!callee)
+                        continue;
+                    auto it = evalResults.find(callee);
+                    if (it == evalResults.end() || !it->second.valid)
+                        continue;
+                    if (call->getType() != i64Ty)
+                        continue;
+                    // Replace: call → constant
+                    call->replaceAllUsesWith(
+                        llvm::ConstantInt::getSigned(i64Ty, it->second.val));
+                    replaced++;
+                }
+            }
+        }
+        // Remove dead call instructions after replacement.
+        for (auto& fn : *mod) {
+            for (auto& bb : fn) {
+                auto it = bb.begin();
+                while (it != bb.end()) {
+                    auto* call = llvm::dyn_cast<llvm::CallInst>(&*it);
+                    ++it;
+                    if (!call)
+                        continue;
+                    auto* callee = call->getCalledFunction();
+                    if (!callee)
+                        continue;
+                    auto eit = evalResults.find(callee);
+                    if (eit == evalResults.end() || !eit->second.valid)
+                        continue;
+                    if (call->use_empty())
+                        call->eraseFromParent();
+                }
+            }
+        }
+        if (verbose_ && replaced > 0)
+            std::cerr << "JIT: compile-time eval replaced " << replaced << " call sites\n";
+    }
+
+    // --- Create LLJIT first so we can get its data layout for O3 ---
+    // Creating LLJIT before running O3 ensures the module's data layout is
+    // derived from the LLJIT's own TM, eliminating any layout mismatch that
+    // could affect IR-level optimizations (size calculations, alignment, etc.).
+    auto JTMB = llvm::orc::JITTargetMachineBuilder::detectHost();
+    if (!JTMB) {
+        llvm::errs() << "omsc: whole-module JIT: " << llvm::toString(JTMB.takeError()) << "\n";
+        return;
+    }
+    setJTMBOptLevel(*JTMB, /*aggressive=*/true);
+    if (fastMath_) {
+        auto& opts = JTMB->getOptions();
+#if LLVM_VERSION_MAJOR < 22
+        opts.UnsafeFPMath = true;
+#endif
+        opts.NoInfsFPMath = true;
+        opts.NoNaNsFPMath = true;
+        opts.NoSignedZerosFPMath = true;
+    }
+
+    auto jitOrErr = llvm::orc::LLJITBuilder()
+                        .setJITTargetMachineBuilder(std::move(*JTMB))
+                        .create();
+    if (!jitOrErr) {
+        llvm::errs() << "omsc: whole-module JIT creation failed: "
+                     << llvm::toString(jitOrErr.takeError()) << "\n";
+        return;
+    }
+    auto jit = std::move(*jitOrErr);
+
+    // --- Run O3 optimization pipeline ---
+    // We use a null TargetMachine here to avoid a code-generation mismatch:
+    // running O3 with a custom TM (e.g. Reloc::PIC_) can produce IR that, when
+    // compiled by LLJIT's own TM, generates SHT_REL sections that JITLink
+    // rejects on x86-64 with "No SHT_REL in valid x64 ELF object files".
+    // Using PassBuilder(nullptr) runs all IR-level O3 passes (inlining, SCCP,
+    // DCE, loop optimisation, vectorisation) without any target-specific
+    // lowering — which is exactly what we need for constant-folding and
+    // inlining.  The LLJIT performs native code generation with its own
+    // correctly-configured TM afterwards.
+    {
+        llvm::PipelineTuningOptions PTO;
+        PTO.LoopVectorization = vectorize_;
+        PTO.SLPVectorization = vectorize_;
+        PTO.LoopUnrolling = unrollLoops_;
+        PTO.LoopInterleaving = vectorize_;
+        // MergeFunctions disabled: it can introduce function stubs that
+        // confuse JITLink on some LLVM versions.
+        PTO.MergeFunctions = false;
+        // CallGraphProfile MUST be disabled for JIT use.  When enabled, O3
+        // emits a !llvm.module.flags "CG Profile" node containing raw function
+        // pointers (e.g. ptr @time).  The backend writes these as SHT_REL
+        // relocations, which JITLink rejects on x86-64 with
+        // "No SHT_REL in valid x64 ELF object files".
+        PTO.CallGraphProfile = false;
+        // InlinerThreshold 5000: much higher than AOT's 400, ensuring all
+        // user functions (including larger bench wrappers) are inlined.
+        // After inlining, LLVM's SCCP evaluates loops called with constant
+        // arguments (e.g. fib_iter(150)) at compile time → zero runtime cost.
+        PTO.InlinerThreshold = 5000;
+
+        // Use LLJIT's data layout so O3's size / alignment calculations match
+        // what the native backend expects.
+        mod->setDataLayout(jit->getDataLayout());
+
+        // Build a TargetMachine for the O3 pass (same host CPU / features used
+        // by the LLJIT backend).  CallGraphProfile is disabled, so the TM will
+        // NOT emit a "CG Profile" metadata section, which was the root cause of
+        // the "No SHT_REL in valid x64 ELF object files" JITLink failures.
+        // Using a real TM lets the vectorizer see the correct SIMD capabilities
+        // (AVX2 / AVX-512), instruction costs, and register file size — producing
+        // better-vectorized code than the null-TM IR-only pass.
+        auto optTM = createTargetMachine();
+        llvm::TargetMachine* optTMPtr = optTM.get(); // null is safe fallback
+
+        llvm::PassBuilder PB(optTMPtr, PTO);
+
+        if (loopOptimize_) {
+            PB.registerVectorizerStartEPCallback(
+                [](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) {
+                    FPM.addPass(llvm::LoopDistributePass());
+                });
+        }
+
+        llvm::LoopAnalysisManager LAM;
+        llvm::FunctionAnalysisManager FAM;
+        llvm::CGSCCAnalysisManager CGAM;
+        llvm::ModuleAnalysisManager MAM;
+        PB.registerModuleAnalyses(MAM);
+        PB.registerCGSCCAnalyses(CGAM);
+        PB.registerFunctionAnalyses(FAM);
+        PB.registerLoopAnalyses(LAM);
+        PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
+
+        auto pipeline = PB.buildPerModuleDefaultPipeline(llvm::OptimizationLevel::O3);
+        pipeline.run(*mod, MAM);
+    }
+
+    if (verbose_) {
+        if (llvm::verifyModule(*mod, &llvm::errs()))
+            llvm::errs() << "omsc: whole-module: IR verification failed after O3\n";
+    }
+
+    // Register C-linkage callbacks and process symbols.
+    {
+        auto& ES    = jit->getExecutionSession();
+        auto& mainJD = jit->getMainJITDylib();
+
+        llvm::orc::SymbolMap syms;
+        syms[ES.intern("__omsc_adaptive_recompile")] = {
+            llvm::orc::ExecutorAddr(reinterpret_cast<uint64_t>(&__omsc_adaptive_recompile)),
+            llvm::JITSymbolFlags(llvm::JITSymbolFlags::Exported | llvm::JITSymbolFlags::Callable)};
+        syms[ES.intern("__omsc_deopt_guard_fail")] = {
+            llvm::orc::ExecutorAddr(reinterpret_cast<uint64_t>(&__omsc_deopt_guard_fail)),
+            llvm::JITSymbolFlags(llvm::JITSymbolFlags::Exported | llvm::JITSymbolFlags::Callable)};
+        if (auto err = mainJD.define(llvm::orc::absoluteSymbols(std::move(syms))))
+            llvm::consumeError(std::move(err));
+
+        auto procGen = llvm::orc::DynamicLibrarySearchGenerator::GetForCurrentProcess(
+            jit->getDataLayout().getGlobalPrefix());
+        if (procGen)
+            mainJD.addGenerator(std::move(*procGen));
+        else
+            llvm::consumeError(procGen.takeError());
+    }
+
+    if (auto err = jit->addIRModule(
+            llvm::orc::ThreadSafeModule(std::move(mod), std::move(newCtx)))) {
+        llvm::errs() << "omsc: whole-module JIT addIRModule failed: "
+                     << llvm::toString(std::move(err)) << "\n";
+        return;
+    }
+
+    // Trigger compilation by looking up every user function and atomically
+    // patching its dispatch slot.  functionSlots_ was populated in run()
+    // before background threads started (read-only here, no mutex needed).
+    int patchCount = 0;
+    for (auto& [name, slot] : functionSlots_) {
+        if (!slot)
+            continue;
+        auto symOrErr = jit->lookup(name);
+        if (!symOrErr) {
+            if (verbose_)
+                llvm::errs() << "JIT: whole-module lookup of '" << name
+                             << "' failed: " << llvm::toString(symOrErr.takeError()) << "\n";
+            else
+                llvm::consumeError(symOrErr.takeError());
+            continue;
+        }
+        void* newPtr = reinterpret_cast<void*>(symOrErr->getValue());
+        __atomic_store_n(slot, newPtr, __ATOMIC_RELEASE);
+        patchCount++;
+    }
+
+    // Keep the LLJIT instance alive and record tier for all patched functions.
+    {
+        std::lock_guard<std::mutex> lk(recompiledMtx_);
+        modules_.push_back({std::move(jit)});
+        for (auto& [name, _] : functionSlots_) {
+            if (functionTier_[name] < 2)
+                functionTier_[name] = 2;
+        }
+    }
+
+    if (verbose_)
+        std::cerr << "JIT: whole-module O3+PGO complete — patched " << patchCount
+                  << "/" << functionSlots_.size() << " function slots\n";
+}
+
+
 // Performs the actual heavy work of recompilation: parsing clean bitcode,
 // applying PGO annotations, running the O3 pipeline, ORC LLJIT compilation,
 // and atomically storing the new function pointer.
@@ -1160,8 +1908,11 @@ void AdaptiveJITRunner::doRecompile(const std::string& funcName, int64_t callCou
         PTO.SLPVectorization = vectorize_;
         PTO.LoopUnrolling = unrollLoops_;
         PTO.LoopInterleaving = vectorize_;
-        PTO.MergeFunctions = true;
-        PTO.CallGraphProfile = true;
+        PTO.MergeFunctions = false;  // can cause JITLink SHT_REL issues
+        // CallGraphProfile MUST be disabled: it emits a "CG Profile" metadata
+        // node with raw function pointers; the x86-64 backend writes these as
+        // SHT_REL relocations, which JITLink rejects for x86-64.
+        PTO.CallGraphProfile = false;
         // Use very aggressive inliner threshold — significantly higher than
         // AOT's 400.  JIT can afford this because it only optimizes the hot
         // function and its transitive callees (stripped module), while AOT

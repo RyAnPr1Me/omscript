@@ -1196,8 +1196,10 @@ bool CodeGenerator::isPreAnalysisStringExpr(Expression* expr, const std::unorder
         return false;
     }
     if (auto* bin = dynamic_cast<BinaryExpr*>(expr)) {
-        return bin->op == "+" && (isPreAnalysisStringExpr(bin->left.get(), paramStringIndices, func) ||
-                                  isPreAnalysisStringExpr(bin->right.get(), paramStringIndices, func));
+        if (bin->op == "+" || bin->op == "*")
+            return isPreAnalysisStringExpr(bin->left.get(), paramStringIndices, func) ||
+                   isPreAnalysisStringExpr(bin->right.get(), paramStringIndices, func);
+        return false;
     }
     if (auto* tern = dynamic_cast<TernaryExpr*>(expr)) {
         return isPreAnalysisStringExpr(tern->thenExpr.get(), paramStringIndices, func) ||
@@ -1356,8 +1358,17 @@ bool CodeGenerator::isStringExpr(Expression* expr) const {
         // assigned from string function returns).
         return stringVars_.count(id->name) > 0;
     }
+    // arr[i] where arr is a string array → the element is a string.
+    if (auto* idx = dynamic_cast<IndexExpr*>(expr)) {
+        return isStringArrayExpr(idx->array.get());
+    }
     if (auto* bin = dynamic_cast<BinaryExpr*>(expr)) {
-        return bin->op == "+" && (isStringExpr(bin->left.get()) || isStringExpr(bin->right.get()));
+        if (bin->op == "+")
+            return isStringExpr(bin->left.get()) || isStringExpr(bin->right.get());
+        // str * n  and  n * str  both produce a string
+        if (bin->op == "*")
+            return isStringExpr(bin->left.get()) || isStringExpr(bin->right.get());
+        return false;
     }
     if (auto* tern = dynamic_cast<TernaryExpr*>(expr)) {
         return isStringExpr(tern->thenExpr.get()) || isStringExpr(tern->elseExpr.get());
@@ -1366,6 +1377,39 @@ bool CodeGenerator::isStringExpr(Expression* expr) const {
         return stringReturningFunctions_.count(call->callee) > 0;
     return false;
 }
+
+// Returns true if the expression is an array whose elements are string pointers.
+bool CodeGenerator::isStringArrayExpr(Expression* expr) const {
+    if (!expr)
+        return false;
+    // Variable whose name is tracked as a string array.
+    if (auto* id = dynamic_cast<IdentifierExpr*>(expr))
+        return stringArrayVars_.count(id->name) > 0;
+    // Array literal whose elements are all strings.
+    if (auto* arr = dynamic_cast<ArrayExpr*>(expr)) {
+        if (arr->elements.empty())
+            return false;
+        for (const auto& e : arr->elements) {
+            if (!isStringExpr(e.get()))
+                return false;
+        }
+        return true;
+    }
+    // str_split() always returns an array of strings.
+    // push(strArr, elem) returns a string array if the input is one.
+    // array_concat/array_copy preserve the string-array type of the input.
+    if (auto* call = dynamic_cast<CallExpr*>(expr)) {
+        if (call->callee == "str_split")
+            return true;
+        if ((call->callee == "push" || call->callee == "array_copy") && !call->arguments.empty())
+            return isStringArrayExpr(call->arguments[0].get());
+        if (call->callee == "array_concat" && !call->arguments.empty())
+            return isStringArrayExpr(call->arguments[0].get());
+        return false;
+    }
+    return false;
+}
+
 
 void CodeGenerator::generate(Program* program) {
     hasOptMaxFunctions = false;
@@ -1636,6 +1680,7 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     constValues.clear();
     constScopeStack.clear();
     stringVars_.clear();
+    stringArrayVars_.clear();
 
     // Pre-populate stringVars_ for parameters known to receive string arguments.
     auto paramStrIt = funcParamStringTypes_.find(func->name);
@@ -1886,8 +1931,17 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     bool leftIsFloat = left->getType()->isDoubleTy();
     bool rightIsFloat = right->getType()->isDoubleTy();
 
-    // Float operations path
-    if (leftIsFloat || rightIsFloat) {
+    // Pre-compute string flags once, used by both the float-skip guard below
+    // and the string concatenation block that follows.
+    bool leftIsStr  = left->getType()->isPointerTy()  || isStringExpr(expr->left.get());
+    bool rightIsStr = right->getType()->isPointerTy() || isStringExpr(expr->right.get());
+
+    // Float operations path — but only when neither operand is a string.
+    // When the '+' operator has one string and one float (e.g. "pi=" + 3.14),
+    // the string-concatenation block below must handle it; otherwise
+    // ensureFloat() would reinterpret the string pointer as an integer and
+    // silently produce garbage.
+    if ((leftIsFloat || rightIsFloat) && !(expr->op == "+" && (leftIsStr || rightIsStr))) {
         if (!leftIsFloat)
             left = ensureFloat(left);
         if (!rightIsFloat)
@@ -1940,8 +1994,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
 
     // String concatenation path: either operand is a string (ptr or i64-as-string).
     if (expr->op == "+") {
-        bool leftIsStr = left->getType()->isPointerTy() || isStringExpr(expr->left.get());
-        bool rightIsStr = right->getType()->isPointerTy() || isStringExpr(expr->right.get());
         if (leftIsStr || rightIsStr) {
             // Auto-convert non-string operand to string via snprintf (like to_string builtin).
             auto ensureStrPtr = [&](llvm::Value* val, bool isStr) -> llvm::Value* {
@@ -1980,6 +2032,86 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             builder->CreateCall(getOrDeclareStrcat(), {buf, right});
             return buf;
         }
+    }
+
+    // String repetition: str * n  (or  n * str) → repeat str n times.
+    // This is the binary-operator equivalent of str_repeat(str, n).
+    if (expr->op == "*" && (leftIsStr || rightIsStr)) {
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* strVal   = leftIsStr  ? left  : right;
+        llvm::Value* countVal = leftIsStr  ? right : left;
+        countVal = toDefaultType(countVal);
+        llvm::Value* strPtr = strVal->getType()->isPointerTy()
+                                  ? strVal
+                                  : builder->CreateIntToPtr(strVal, ptrTy, "strmul.ptr");
+        llvm::Value* strLen   = builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "strmul.len");
+        llvm::Value* totalLen = builder->CreateMul(strLen, countVal, "strmul.total");
+        llvm::Value* allocSz  = builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "strmul.alloc");
+        llvm::Value* buf      = builder->CreateCall(getOrDeclareMalloc(), {allocSz}, "strmul.buf");
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), buf);
+        // Loop countVal times, appending strPtr each iteration.
+        llvm::Function* curFn = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* preHdr  = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB  = llvm::BasicBlock::Create(*context, "strmul.loop", curFn);
+        llvm::BasicBlock* bodyBB  = llvm::BasicBlock::Create(*context, "strmul.body", curFn);
+        llvm::BasicBlock* doneBB  = llvm::BasicBlock::Create(*context, "strmul.done", curFn);
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one  = llvm::ConstantInt::get(getDefaultType(), 1);
+        builder->CreateBr(loopBB);
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "strmul.idx");
+        idx->addIncoming(zero, preHdr);
+        builder->CreateCondBr(builder->CreateICmpSLT(idx, countVal, "strmul.cond"), bodyBB, doneBB);
+        builder->SetInsertPoint(bodyBB);
+        builder->CreateCall(getOrDeclareStrcat(), {buf, strPtr});
+        llvm::Value* nextIdx = builder->CreateAdd(idx, one, "strmul.next");
+        idx->addIncoming(nextIdx, bodyBB);
+        builder->CreateBr(loopBB);
+        builder->SetInsertPoint(doneBB);
+        return buf;
+    }
+
+
+    // for all relational and equality operators.  Without this, the ptr→int
+    // fallback below would compare raw memory addresses instead of lexicographic
+    // order, giving results that depend on allocation order rather than content.
+    if (leftIsStr || rightIsStr) {
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        auto toStrPtr = [&](llvm::Value* v, bool isStr) -> llvm::Value* {
+            if (!isStr) {
+                // Non-string operand in a mixed comparison: treat as pointer.
+                return v->getType()->isPointerTy()
+                           ? v
+                           : builder->CreateIntToPtr(v, ptrTy, "strcmp.cast");
+            }
+            return v->getType()->isPointerTy()
+                       ? v
+                       : builder->CreateIntToPtr(v, ptrTy, "strcmp.cast");
+        };
+        llvm::Value* lPtr = toStrPtr(left,  leftIsStr);
+        llvm::Value* rPtr = toStrPtr(right, rightIsStr);
+        llvm::Value* cmpResult = builder->CreateCall(getOrDeclareStrcmp(), {lPtr, rPtr}, "strcmp.res");
+        llvm::Value* zero32 = builder->getInt32(0);
+        llvm::Value* cmpBool;
+        if (expr->op == "==")
+            cmpBool = builder->CreateICmpEQ(cmpResult,  zero32, "scmp.eq");
+        else if (expr->op == "!=")
+            cmpBool = builder->CreateICmpNE(cmpResult,  zero32, "scmp.ne");
+        else if (expr->op == "<")
+            cmpBool = builder->CreateICmpSLT(cmpResult, zero32, "scmp.lt");
+        else if (expr->op == "<=")
+            cmpBool = builder->CreateICmpSLE(cmpResult, zero32, "scmp.le");
+        else if (expr->op == ">")
+            cmpBool = builder->CreateICmpSGT(cmpResult, zero32, "scmp.gt");
+        else if (expr->op == ">=")
+            cmpBool = builder->CreateICmpSGE(cmpResult, zero32, "scmp.ge");
+        else
+            cmpBool = nullptr;
+
+        if (cmpBool)
+            return builder->CreateZExt(cmpBool, getDefaultType(), "scmp.result");
+        // For non-comparison operators on strings (should not normally occur here),
+        // fall through to the integer path.
     }
 
     // Convert pointer types to i64 for integer operations (fallback)
@@ -2401,6 +2533,28 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                          expr);
         }
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        Expression* argExpr = expr->arguments[0].get();
+
+        // String detection uses two complementary checks:
+        //   1. arg->getType()->isPointerTy()  — string literals (ptr @"...") and
+        //      string variables whose LLVM alloca holds a ptr type.
+        //   2. isStringExpr(argExpr) — string variables tracked in stringVars_
+        //      that are stored as i64 (pointer cast to integer, OmScript's
+        //      canonical runtime representation for strings passed across call
+        //      boundaries).  In that case the IntToPtr below reconstructs the
+        //      char* needed by strlen.
+        // If neither is true the argument is assumed to be an array.
+        if (arg->getType()->isPointerTy() || isStringExpr(argExpr)) {
+            // Reconstruct the char* for strlen when the value is stored as i64.
+            llvm::Value* strPtr = arg->getType()->isPointerTy()
+                                      ? arg
+                                      : builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "len.sptr");
+            llvm::Value* rawLen = builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "len.strlen");
+            // strlen returns size_t (i64 on 64-bit); ensure we return the default type.
+            return rawLen->getType() == getDefaultType()
+                       ? rawLen
+                       : builder->CreateZExtOrTrunc(rawLen, getDefaultType(), "len.strsz");
+        }
         // Array is stored as an i64 holding a pointer to [length, elem0, elem1, ...]
         // Convert to integer first if needed (e.g. if stored in a float variable)
         arg = toDefaultType(arg);
@@ -2513,10 +2667,21 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                          expr);
         }
         llvm::Value* base = generateExpression(expr->arguments[0].get());
-        llvm::Value* exp = generateExpression(expr->arguments[1].get());
-        // Convert float arguments to integer since pow() is an integer operation
+        llvm::Value* exp  = generateExpression(expr->arguments[1].get());
+
+        // If either argument is a float, delegate to the llvm.pow.f64 intrinsic.
+        // This handles pow(2.0, 0.5) = sqrt(2), pow(x, n) for fractional n, etc.
+        if (base->getType()->isDoubleTy() || exp->getType()->isDoubleTy()) {
+            if (!base->getType()->isDoubleTy()) base = ensureFloat(base);
+            if (!exp->getType()->isDoubleTy())  exp  = ensureFloat(exp);
+            llvm::Function* powFn =
+                OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::pow, {getFloatType()});
+            return builder->CreateCall(powFn, {base, exp}, "pow.fresult");
+        }
+
+        // Integer path: convert to i64 and use binary exponentiation (O(log n)).
         base = toDefaultType(base);
-        exp = toDefaultType(exp);
+        exp  = toDefaultType(exp);
 
         llvm::Function* function = builder->GetInsertBlock()->getParent();
 
@@ -2586,9 +2751,19 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         if (arg->getType()->isDoubleTy()) {
             arg = builder->CreateFPToSI(arg, getDefaultType(), "ftoi");
         }
-        llvm::Value* truncated = builder->CreateTrunc(arg, llvm::Type::getInt32Ty(*context), "charval");
-        builder->CreateCall(getOrDeclarePutchar(), {truncated});
-        return arg; // return the character code as documented
+        llvm::Value* charCode;
+        if (arg->getType()->isPointerTy() || isStringExpr(expr->arguments[0].get())) {
+            // Argument is a string (e.g. result of to_char): load the first byte.
+            llvm::Value* ptr = arg->getType()->isPointerTy()
+                                   ? arg
+                                   : builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "pc.strptr");
+            llvm::Value* byte = builder->CreateLoad(llvm::Type::getInt8Ty(*context), ptr, "pc.byte");
+            charCode = builder->CreateZExt(byte, llvm::Type::getInt32Ty(*context), "charval");
+        } else {
+            charCode = builder->CreateTrunc(arg, llvm::Type::getInt32Ty(*context), "charval");
+        }
+        builder->CreateCall(getOrDeclarePutchar(), {charCode});
+        return arg; // return the original argument as documented
     }
 
     if (expr->callee == "input") {
@@ -2846,8 +3021,20 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                              std::to_string(expr->arguments.size()) + " provided",
                          expr);
         }
-        // Returns the value itself - the integer IS the character code
-        return generateExpression(expr->arguments[0].get());
+        // Allocate a 2-byte buffer [char, '\0'] and return a pointer to it,
+        // so the result behaves like a one-character string.
+        llvm::Value* code = generateExpression(expr->arguments[0].get());
+        code = toDefaultType(code);  // ensure i64
+        llvm::Value* two = llvm::ConstantInt::get(getDefaultType(), 2);
+        llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {two}, "tochar.buf");
+        llvm::Value* byteVal = builder->CreateTrunc(code, llvm::Type::getInt8Ty(*context), "tochar.byte");
+        builder->CreateStore(byteVal, buf);
+        llvm::Value* nulPtr = builder->CreateGEP(
+            llvm::Type::getInt8Ty(*context), buf,
+            llvm::ConstantInt::get(getDefaultType(), 1), "tochar.nul");
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), nulPtr);
+        stringReturningFunctions_.insert("to_char");
+        return buf;
     }
 
     if (expr->callee == "is_alpha") {
@@ -2886,20 +3073,30 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         return builder->CreateZExt(isDigit, getDefaultType(), "digitval");
     }
 
-    // typeof(x) returns 1 for integer, 2 for float, 3 for string, 0 for none.
-    // In the current LLVM compilation path, all values are represented as i64,
-    // so typeof() always returns 1 (integer).
+    // typeof(x) returns a type tag: 1=integer, 2=float, 3=string.
+    // The tag is determined from the LLVM IR type of the expression, which is
+    // known statically for literals and for variables whose alloca type was
+    // set at declaration time.  Integer variables stored as i64 and arrays
+    // (also i64 pointers) both return 1; floats stored as double return 2;
+    // string literals and tracked string variables return 3.
     if (expr->callee == "typeof") {
         if (expr->arguments.size() != 1) {
             codegenError("Built-in function 'typeof' expects 1 argument, but " +
                              std::to_string(expr->arguments.size()) + " provided",
                          expr);
         }
-        // Evaluate the argument for its side effects, then return type tag.
+        // Evaluate the argument for its side effects, then derive type tag.
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        long long tag;
+        if (arg->getType()->isDoubleTy()) {
+            tag = 2; // float
+        } else if (arg->getType()->isPointerTy() || isStringExpr(expr->arguments[0].get())) {
+            tag = 3; // string
+        } else {
+            tag = 1; // integer (default for all i64 values including arrays)
+        }
         (void)arg;
-        // In the LLVM native path all values are i64, so type is always 1 (integer).
-        return llvm::ConstantInt::get(getDefaultType(), 1);
+        return llvm::ConstantInt::get(getDefaultType(), tag);
     }
 
     // assert(condition) — aborts with an error if the condition is falsy.
@@ -3142,8 +3339,21 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                          expr);
         }
         llvm::Value* val = generateExpression(expr->arguments[0].get());
-        val = toDefaultType(val);
-        // Allocate buffer (21 bytes is enough for any 64-bit signed decimal integer including sign and null terminator)
+        bool isFloat = val->getType()->isDoubleTy();
+        if (!isFloat)
+            val = toDefaultType(val);
+        if (isFloat) {
+            // Float: use a 32-byte buffer and %g format to preserve decimal places.
+            llvm::Value* bufSize = llvm::ConstantInt::get(getDefaultType(), 32);
+            llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bufSize}, "tostr.buf");
+            llvm::GlobalVariable* fmtStr = module->getGlobalVariable("tostr_float_fmt", true);
+            if (!fmtStr)
+                fmtStr = builder->CreateGlobalString("%g", "tostr_float_fmt");
+            builder->CreateCall(getOrDeclareSnprintf(), {buf, bufSize, fmtStr, val});
+            stringReturningFunctions_.insert("to_string");
+            return buf;
+        }
+        // Integer: 21 bytes is enough for any 64-bit signed decimal plus null terminator.
         llvm::Value* bufSize = llvm::ConstantInt::get(getDefaultType(), 21);
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bufSize}, "tostr.buf");
         // snprintf(buf, 21, "%lld", val)
@@ -3245,6 +3455,16 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         if (arg->getType()->isDoubleTy()) {
             return builder->CreateFPToSI(arg, getDefaultType(), "toint.ftoi");
         }
+        // If the argument is a string, parse it with strtoll.
+        if (arg->getType()->isPointerTy() || isStringExpr(expr->arguments[0].get())) {
+            auto* ptrTy = llvm::PointerType::getUnqual(*context);
+            llvm::Value* strPtr = arg->getType()->isPointerTy()
+                                      ? arg
+                                      : builder->CreateIntToPtr(arg, ptrTy, "toint.strptr");
+            auto* nullPtr = llvm::ConstantPointerNull::get(ptrTy);
+            auto* base10 = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 10);
+            return builder->CreateCall(getOrDeclareStrtoll(), {strPtr, nullPtr, base10}, "toint.parsed");
+        }
         return toDefaultType(arg);
     }
 
@@ -3255,6 +3475,15 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                          expr);
         }
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        // If the argument is a string, parse it with strtod.
+        if (arg->getType()->isPointerTy() || isStringExpr(expr->arguments[0].get())) {
+            auto* ptrTy = llvm::PointerType::getUnqual(*context);
+            llvm::Value* strPtr = arg->getType()->isPointerTy()
+                                      ? arg
+                                      : builder->CreateIntToPtr(arg, ptrTy, "tofloat.strptr");
+            auto* nullPtr = llvm::ConstantPointerNull::get(ptrTy);
+            return builder->CreateCall(getOrDeclareStrtod(), {strPtr, nullPtr}, "tofloat.parsed");
+        }
         return ensureFloat(arg);
     }
 
@@ -3454,74 +3683,143 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* oldArg = generateExpression(expr->arguments[1].get());
         llvm::Value* newArg = generateExpression(expr->arguments[2].get());
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
         llvm::Value* strPtr =
             strArg->getType()->isPointerTy()
                 ? strArg
-                : builder->CreateIntToPtr(strArg, llvm::PointerType::getUnqual(*context), "replace.str");
+                : builder->CreateIntToPtr(strArg, ptrTy, "replace.str");
         llvm::Value* oldPtr =
             oldArg->getType()->isPointerTy()
                 ? oldArg
-                : builder->CreateIntToPtr(oldArg, llvm::PointerType::getUnqual(*context), "replace.old");
+                : builder->CreateIntToPtr(oldArg, ptrTy, "replace.old");
         llvm::Value* newPtr =
             newArg->getType()->isPointerTy()
                 ? newArg
-                : builder->CreateIntToPtr(newArg, llvm::PointerType::getUnqual(*context), "replace.new");
-
-        // Find the first occurrence of old in str
-        llvm::Value* found = builder->CreateCall(getOrDeclareStrstr(), {strPtr, oldPtr}, "replace.found");
-        llvm::Value* nullPtr = llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context));
-        llvm::Value* isNull = builder->CreateICmpEQ(found, nullPtr, "replace.isnull");
+                : builder->CreateIntToPtr(newArg, ptrTy, "replace.new");
 
         llvm::Function* function = builder->GetInsertBlock()->getParent();
-        llvm::BasicBlock* foundBB = llvm::BasicBlock::Create(*context, "replace.found", function);
-        llvm::BasicBlock* notFoundBB = llvm::BasicBlock::Create(*context, "replace.notfound", function);
+        llvm::Value* nullPtr  = llvm::ConstantPointerNull::get(ptrTy);
+        llvm::Value* zero     = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one      = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* i8zero   = llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0);
+
+        llvm::Value* oldLen  = builder->CreateCall(getOrDeclareStrlen(), {oldPtr}, "replace.oldlen");
+        llvm::Value* newLen  = builder->CreateCall(getOrDeclareStrlen(), {newPtr}, "replace.newlen");
+        llvm::Value* strLen  = builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "replace.strlen");
+
+        // If old is the empty string, just return a copy of str to avoid
+        // an infinite loop (strstr("x","") always succeeds).
+        llvm::BasicBlock* emptyOldBB = llvm::BasicBlock::Create(*context, "replace.emptyold", function);
+        llvm::BasicBlock* replaceMainBB = llvm::BasicBlock::Create(*context, "replace.main", function);
+        llvm::Value* oldIsEmpty = builder->CreateICmpEQ(oldLen, zero, "replace.oldempty");
+        builder->CreateCondBr(oldIsEmpty, emptyOldBB, replaceMainBB);
+
+        // Empty old: return strdup(str)
+        builder->SetInsertPoint(emptyOldBB);
+        llvm::Value* copySize0 = builder->CreateAdd(strLen, one, "replace.copysize0");
+        llvm::Value* copyBuf0  = builder->CreateCall(getOrDeclareMalloc(), {copySize0}, "replace.copybuf0");
+        builder->CreateCall(getOrDeclareStrcpy(), {copyBuf0, strPtr});
+
+        llvm::BasicBlock* emptyOldExitBB = builder->GetInsertBlock();
         llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "replace.merge", function);
-        builder->CreateCondBr(isNull, notFoundBB, foundBB);
-
-        // Not found: return a copy of the original string
-        builder->SetInsertPoint(notFoundBB);
-        llvm::Value* origLen = builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "replace.origlen");
-        llvm::Value* copySize =
-            builder->CreateAdd(origLen, llvm::ConstantInt::get(getDefaultType(), 1), "replace.copysize");
-        llvm::Value* copyBuf = builder->CreateCall(getOrDeclareMalloc(), {copySize}, "replace.copybuf");
-        builder->CreateCall(getOrDeclareStrcpy(), {copyBuf, strPtr});
         builder->CreateBr(mergeBB);
 
-        // Found: construct prefix + new + suffix
-        builder->SetInsertPoint(foundBB);
-        llvm::Value* prefixLen =
-            builder->CreatePtrDiff(llvm::Type::getInt8Ty(*context), found, strPtr, "replace.prefixlen");
-        llvm::Value* oldLen = builder->CreateCall(getOrDeclareStrlen(), {oldPtr}, "replace.oldlen");
-        llvm::Value* newLen = builder->CreateCall(getOrDeclareStrlen(), {newPtr}, "replace.newlen");
-        llvm::Value* totalOrigLen = builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "replace.totallen");
-        // result len = prefixLen + newLen + (totalOrigLen - prefixLen - oldLen) + 1
-        llvm::Value* suffixLen = builder->CreateSub(
-            totalOrigLen, builder->CreateAdd(prefixLen, oldLen, "replace.prold"), "replace.suffixlen");
-        llvm::Value* resultLen =
-            builder->CreateAdd(builder->CreateAdd(prefixLen, newLen, "replace.prnew"), suffixLen, "replace.resultlen");
-        llvm::Value* resultSize =
-            builder->CreateAdd(resultLen, llvm::ConstantInt::get(getDefaultType(), 1), "replace.resultsize");
+        // ---------------------------------------------------------------
+        // Pass 1: count occurrences of old in str
+        // ---------------------------------------------------------------
+        builder->SetInsertPoint(replaceMainBB);
+        llvm::BasicBlock* countLoopBB = llvm::BasicBlock::Create(*context, "replace.countloop", function);
+        llvm::BasicBlock* countBodyBB = llvm::BasicBlock::Create(*context, "replace.countbody", function);
+        llvm::BasicBlock* countDoneBB = llvm::BasicBlock::Create(*context, "replace.countdone", function);
+        builder->CreateBr(countLoopBB);
+
+        // Loop header: PHIs for cursor position and running count.
+        builder->SetInsertPoint(countLoopBB);
+        llvm::PHINode* cCursor = builder->CreatePHI(ptrTy, 2, "replace.ccursor");
+        cCursor->addIncoming(strPtr, replaceMainBB);
+        llvm::PHINode* cCount  = builder->CreatePHI(getDefaultType(), 2, "replace.ccount");
+        cCount->addIncoming(zero, replaceMainBB);
+
+        // Single strstr call per iteration.
+        llvm::Value* cFound  = builder->CreateCall(getOrDeclareStrstr(), {cCursor, oldPtr}, "replace.cfound");
+        llvm::Value* cIsNull = builder->CreateICmpEQ(cFound, nullPtr, "replace.cisnull");
+        builder->CreateCondBr(cIsNull, countDoneBB, countBodyBB);
+
+        // Body: increment count, advance cursor past the matched occurrence.
+        builder->SetInsertPoint(countBodyBB);
+        llvm::Value* newCount   = builder->CreateAdd(cCount, one, "replace.newcount");
+        llvm::Value* nextCursor = builder->CreateGEP(llvm::Type::getInt8Ty(*context), cFound, oldLen, "replace.nextcursor");
+        cCursor->addIncoming(nextCursor, countBodyBB);
+        cCount->addIncoming(newCount, countBodyBB);
+        builder->CreateBr(countLoopBB);
+
+        // Done: cCount holds the total number of occurrences.
+        builder->SetInsertPoint(countDoneBB);
+        // cCount is the final count; use it directly (single predecessor from countLoopBB).
+        llvm::Value* totalCount = cCount;
+
+        // ---------------------------------------------------------------
+        // Compute result size and allocate
+        // ---------------------------------------------------------------
+        // resultLen = strLen + totalCount * (newLen - oldLen)
+        llvm::Value* lenDiff   = builder->CreateSub(newLen, oldLen, "replace.lendiff");
+        llvm::Value* extraLen  = builder->CreateMul(totalCount, lenDiff, "replace.extralen");
+        llvm::Value* resultLen = builder->CreateAdd(strLen, extraLen, "replace.resultlen");
+        llvm::Value* resultSize= builder->CreateAdd(resultLen, one, "replace.resultsize");
         llvm::Value* resultBuf = builder->CreateCall(getOrDeclareMalloc(), {resultSize}, "replace.resultbuf");
-        // Copy prefix
-        builder->CreateCall(getOrDeclareMemcpy(), {resultBuf, strPtr, prefixLen});
-        // Copy new string
-        llvm::Value* afterPrefix =
-            builder->CreateGEP(llvm::Type::getInt8Ty(*context), resultBuf, prefixLen, "replace.afterprefix");
-        builder->CreateCall(getOrDeclareMemcpy(), {afterPrefix, newPtr, newLen});
-        // Copy suffix (after old in original)
-        llvm::Value* afterNew =
-            builder->CreateGEP(llvm::Type::getInt8Ty(*context), afterPrefix, newLen, "replace.afternew");
-        llvm::Value* suffixSrc =
-            builder->CreateGEP(llvm::Type::getInt8Ty(*context), found, oldLen, "replace.suffixsrc");
-        llvm::Value* suffixCopyLen =
-            builder->CreateAdd(suffixLen, llvm::ConstantInt::get(getDefaultType(), 1), "replace.suffixcopylen");
-        builder->CreateCall(getOrDeclareMemcpy(), {afterNew, suffixSrc, suffixCopyLen});
+
+        // ---------------------------------------------------------------
+        // Pass 2: build output string, replacing every occurrence
+        // ---------------------------------------------------------------
+        llvm::BasicBlock* buildLoopBB = llvm::BasicBlock::Create(*context, "replace.buildloop", function);
+        llvm::BasicBlock* buildBodyBB = llvm::BasicBlock::Create(*context, "replace.buildbody", function);
+        llvm::BasicBlock* buildDoneBB = llvm::BasicBlock::Create(*context, "replace.builddone", function);
+        builder->CreateBr(buildLoopBB);
+
+        builder->SetInsertPoint(buildLoopBB);
+        llvm::PHINode* bSrc = builder->CreatePHI(ptrTy, 2, "replace.bsrc");
+        bSrc->addIncoming(strPtr, countDoneBB);
+        llvm::PHINode* bDst = builder->CreatePHI(ptrTy, 2, "replace.bdst");
+        bDst->addIncoming(resultBuf, countDoneBB);
+
+        llvm::Value* bFound  = builder->CreateCall(getOrDeclareStrstr(), {bSrc, oldPtr}, "replace.bfound");
+        llvm::Value* bIsNull = builder->CreateICmpEQ(bFound, nullPtr, "replace.bnull");
+        builder->CreateCondBr(bIsNull, buildDoneBB, buildBodyBB);
+
+        // Body: copy prefix, then replacement, advance
+        builder->SetInsertPoint(buildBodyBB);
+        llvm::Value* prefLen = builder->CreatePtrDiff(llvm::Type::getInt8Ty(*context), bFound, bSrc, "replace.preflen");
+        builder->CreateCall(getOrDeclareMemcpy(), {bDst, bSrc, prefLen});
+        llvm::Value* dstAfterPref = builder->CreateGEP(llvm::Type::getInt8Ty(*context), bDst, prefLen, "replace.dstpref");
+        builder->CreateCall(getOrDeclareMemcpy(), {dstAfterPref, newPtr, newLen});
+        llvm::Value* dstAfterNew  = builder->CreateGEP(llvm::Type::getInt8Ty(*context), dstAfterPref, newLen, "replace.dstnew");
+        llvm::Value* srcAfterOld  = builder->CreateGEP(llvm::Type::getInt8Ty(*context), bFound, oldLen, "replace.srcold");
+        bSrc->addIncoming(srcAfterOld, buildBodyBB);
+        bDst->addIncoming(dstAfterNew, buildBodyBB);
+        builder->CreateBr(buildLoopBB);
+
+        // Done: copy remaining tail and null-terminate.
+        // bSrc and bDst are live values from the loop header (single predecessor).
+        builder->SetInsertPoint(buildDoneBB);
+        // Copy remaining chars: tail = strLen - (bSrc - strPtr)
+        llvm::Value* srcBase  = builder->CreatePtrToInt(strPtr, getDefaultType(), "replace.srcbase");
+        llvm::Value* srcCurr  = builder->CreatePtrToInt(bSrc,   getDefaultType(), "replace.srccurr");
+        llvm::Value* consumed = builder->CreateSub(srcCurr, srcBase, "replace.consumed");
+        llvm::Value* tail     = builder->CreateSub(strLen, consumed, "replace.tail");
+        builder->CreateCall(getOrDeclareMemcpy(), {bDst, bSrc, tail});
+        llvm::Value* endPtr   = builder->CreateGEP(llvm::Type::getInt8Ty(*context), bDst, tail, "replace.end");
+        builder->CreateStore(i8zero, endPtr);
+
+        llvm::BasicBlock* buildExitBB = builder->GetInsertBlock();
         builder->CreateBr(mergeBB);
 
+        // ---------------------------------------------------------------
+        // Merge: return result (or copy if old was empty)
+        // ---------------------------------------------------------------
         builder->SetInsertPoint(mergeBB);
-        llvm::PHINode* resultPhi = builder->CreatePHI(llvm::PointerType::getUnqual(*context), 2, "replace.result");
-        resultPhi->addIncoming(copyBuf, notFoundBB);
-        resultPhi->addIncoming(resultBuf, foundBB);
+        llvm::PHINode* resultPhi = builder->CreatePHI(ptrTy, 2, "replace.result");
+        resultPhi->addIncoming(copyBuf0,   emptyOldExitBB);
+        resultPhi->addIncoming(resultBuf,  buildExitBB);
         stringReturningFunctions_.insert("str_replace");
         return resultPhi;
     }
@@ -3954,6 +4252,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                              std::to_string(expr->arguments.size()) + " provided",
                          expr);
         }
+        bool sortStrings = isStringArrayExpr(expr->arguments[0].get());
         llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
         arrArg = toDefaultType(arrArg);
         llvm::Value* arrPtr = builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "sort.arrptr");
@@ -3993,7 +4292,17 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* ptr2 = builder->CreateGEP(getDefaultType(), arrPtr, idx2, "sort.ptr2");
         llvm::Value* val1 = builder->CreateLoad(getDefaultType(), ptr1, "sort.val1");
         llvm::Value* val2 = builder->CreateLoad(getDefaultType(), ptr2, "sort.val2");
-        llvm::Value* needSwap = builder->CreateICmpSGT(val1, val2, "sort.needswap");
+        llvm::Value* needSwap;
+        if (sortStrings) {
+            // String sort: use strcmp(val1_as_ptr, val2_as_ptr) > 0
+            auto* ptrTy = llvm::PointerType::getUnqual(*context);
+            llvm::Value* sptr1 = builder->CreateIntToPtr(val1, ptrTy, "sort.sptr1");
+            llvm::Value* sptr2 = builder->CreateIntToPtr(val2, ptrTy, "sort.sptr2");
+            llvm::Value* cmpRes = builder->CreateCall(getOrDeclareStrcmp(), {sptr1, sptr2}, "sort.strcmp");
+            needSwap = builder->CreateICmpSGT(cmpRes, builder->getInt32(0), "sort.needswap");
+        } else {
+            needSwap = builder->CreateICmpSGT(val1, val2, "sort.needswap");
+        }
         builder->CreateCondBr(needSwap, swapBB, noswapBB);
 
         builder->SetInsertPoint(swapBB);
@@ -4909,6 +5218,11 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
         stringVars_.insert(expr->name);
     else
         stringVars_.erase(expr->name);
+    // Update string-array tracking after assignment.
+    if (isStringArrayExpr(expr->value.get()))
+        stringArrayVars_.insert(expr->name);
+    else
+        stringArrayVars_.erase(expr->name);
     return value;
 }
 
@@ -5182,33 +5496,59 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
 llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
     llvm::Value* arrVal = generateExpression(expr->array.get());
     llvm::Value* idxVal = generateExpression(expr->index.get());
+    idxVal = toDefaultType(idxVal);
 
-    // Convert the i64 back to a pointer
-    llvm::Value* arrPtr = builder->CreateIntToPtr(arrVal, llvm::PointerType::getUnqual(*context), "idx.arrptr");
+    // Detect whether the base expression is a string.  Strings are raw char
+    // pointers without a length header; arrays have the layout [length, e0,
+    // e1, ...] and each element is 8 bytes (i64).
+    bool isStr = arrVal->getType()->isPointerTy() || isStringExpr(expr->array.get());
 
-    // Bounds check: load length from slot 0, verify 0 <= index < length
-    llvm::Value* lenVal = builder->CreateLoad(getDefaultType(), arrPtr, "idx.len");
-    llvm::Value* inBounds = builder->CreateICmpSLT(idxVal, lenVal, "idx.inbounds");
-    llvm::Value* notNeg = builder->CreateICmpSGE(idxVal, llvm::ConstantInt::get(getDefaultType(), 0), "idx.notneg");
-    llvm::Value* valid = builder->CreateAnd(inBounds, notNeg, "idx.valid");
+    // Convert i64 → pointer (strings may arrive as i64 via ptrtoint)
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    llvm::Value* basePtr = arrVal->getType()->isPointerTy()
+                               ? arrVal
+                               : builder->CreateIntToPtr(arrVal, ptrTy, "idx.baseptr");
 
     llvm::Function* function = builder->GetInsertBlock()->getParent();
-    llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "idx.ok", function);
+    llvm::BasicBlock* okBB   = llvm::BasicBlock::Create(*context, "idx.ok",   function);
     llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "idx.fail", function);
+
+    llvm::Value* lenVal;
+    if (isStr) {
+        // String: use strlen to get length — no length header.
+        lenVal = builder->CreateCall(getOrDeclareStrlen(), {basePtr}, "idx.strlen");
+    } else {
+        // Array: length is stored in slot 0 of the buffer.
+        lenVal = builder->CreateLoad(getDefaultType(), basePtr, "idx.len");
+    }
+
+    // Bounds check: 0 <= index < length
+    llvm::Value* inBounds = builder->CreateICmpSLT(idxVal, lenVal, "idx.inbounds");
+    llvm::Value* notNeg   = builder->CreateICmpSGE(idxVal, llvm::ConstantInt::get(getDefaultType(), 0), "idx.notneg");
+    llvm::Value* valid    = builder->CreateAnd(inBounds, notNeg, "idx.valid");
 
     builder->CreateCondBr(valid, okBB, failBB);
 
     // Out-of-bounds path: print error and abort
     builder->SetInsertPoint(failBB);
-    llvm::Value* errMsg = builder->CreateGlobalString("Runtime error: array index out of bounds\n", "idx_oob_msg");
+    llvm::Value* errMsg = isStr
+        ? builder->CreateGlobalString("Runtime error: string index out of bounds\n", "idx_str_oob_msg")
+        : builder->CreateGlobalString("Runtime error: array index out of bounds\n",  "idx_arr_oob_msg");
     builder->CreateCall(getPrintfFunction(), {errMsg});
     builder->CreateCall(getOrDeclareAbort());
     builder->CreateUnreachable();
 
-    // Success path: load element at offset (index + 1)
+    // Success path
     builder->SetInsertPoint(okBB);
-    llvm::Value* offset = builder->CreateAdd(idxVal, llvm::ConstantInt::get(getDefaultType(), 1), "idx.offset");
-    llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrPtr, offset, "idx.elem.ptr");
+    if (isStr) {
+        // Load single byte at offset index, zero-extend to i64
+        llvm::Value* charPtr = builder->CreateGEP(llvm::Type::getInt8Ty(*context), basePtr, idxVal, "idx.charptr");
+        llvm::Value* charVal = builder->CreateLoad(llvm::Type::getInt8Ty(*context), charPtr, "idx.char");
+        return builder->CreateZExt(charVal, getDefaultType(), "idx.charext");
+    }
+    // Array: element is at slot (index + 1) in the i64 buffer.
+    llvm::Value* offset  = builder->CreateAdd(idxVal, llvm::ConstantInt::get(getDefaultType(), 1), "idx.offset");
+    llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), basePtr, offset, "idx.elem.ptr");
     return builder->CreateLoad(getDefaultType(), elemPtr, "idx.elem");
 }
 
@@ -5217,34 +5557,56 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
     llvm::Value* idxVal = generateExpression(expr->index.get());
     llvm::Value* newVal = generateExpression(expr->value.get());
     newVal = toDefaultType(newVal);
+    idxVal = toDefaultType(idxVal);
 
-    // Convert the i64 back to a pointer
-    llvm::Value* arrPtr = builder->CreateIntToPtr(arrVal, llvm::PointerType::getUnqual(*context), "idxa.arrptr");
+    // Detect whether the base is a string (raw char* without a length header).
+    bool isStr = arrVal->getType()->isPointerTy() || isStringExpr(expr->array.get());
 
-    // Bounds check: load length from slot 0, verify 0 <= index < length
-    llvm::Value* lenVal = builder->CreateLoad(getDefaultType(), arrPtr, "idxa.len");
-    llvm::Value* inBounds = builder->CreateICmpSLT(idxVal, lenVal, "idxa.inbounds");
-    llvm::Value* notNeg = builder->CreateICmpSGE(idxVal, llvm::ConstantInt::get(getDefaultType(), 0), "idxa.notneg");
-    llvm::Value* valid = builder->CreateAnd(inBounds, notNeg, "idxa.valid");
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    llvm::Value* basePtr = arrVal->getType()->isPointerTy()
+                               ? arrVal
+                               : builder->CreateIntToPtr(arrVal, ptrTy, "idxa.baseptr");
 
     llvm::Function* function = builder->GetInsertBlock()->getParent();
-    llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "idxa.ok", function);
+    llvm::BasicBlock* okBB   = llvm::BasicBlock::Create(*context, "idxa.ok",   function);
     llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "idxa.fail", function);
+
+    llvm::Value* lenVal;
+    if (isStr) {
+        lenVal = builder->CreateCall(getOrDeclareStrlen(), {basePtr}, "idxa.strlen");
+    } else {
+        lenVal = builder->CreateLoad(getDefaultType(), basePtr, "idxa.len");
+    }
+
+    // Bounds check: 0 <= index < length
+    llvm::Value* inBounds = builder->CreateICmpSLT(idxVal, lenVal, "idxa.inbounds");
+    llvm::Value* notNeg   = builder->CreateICmpSGE(idxVal, llvm::ConstantInt::get(getDefaultType(), 0), "idxa.notneg");
+    llvm::Value* valid    = builder->CreateAnd(inBounds, notNeg, "idxa.valid");
 
     builder->CreateCondBr(valid, okBB, failBB);
 
     // Out-of-bounds path: print error and abort
     builder->SetInsertPoint(failBB);
-    llvm::Value* errMsg = builder->CreateGlobalString("Runtime error: array index out of bounds\n", "idx_oob_msg");
+    llvm::Value* errMsg = isStr
+        ? builder->CreateGlobalString("Runtime error: string index out of bounds\n", "idxa_str_oob_msg")
+        : builder->CreateGlobalString("Runtime error: array index out of bounds\n",  "idxa_arr_oob_msg");
     builder->CreateCall(getPrintfFunction(), {errMsg});
     builder->CreateCall(getOrDeclareAbort());
     builder->CreateUnreachable();
 
-    // Success path: store element at offset (index + 1)
+    // Success path
     builder->SetInsertPoint(okBB);
-    llvm::Value* offset = builder->CreateAdd(idxVal, llvm::ConstantInt::get(getDefaultType(), 1), "idxa.offset");
-    llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrPtr, offset, "idxa.elem.ptr");
-    builder->CreateStore(newVal, elemPtr);
+    if (isStr) {
+        // Truncate to i8 and store at byte offset index
+        llvm::Value* byteVal = builder->CreateTrunc(newVal, llvm::Type::getInt8Ty(*context), "idxa.byte");
+        llvm::Value* charPtr = builder->CreateGEP(llvm::Type::getInt8Ty(*context), basePtr, idxVal, "idxa.charptr");
+        builder->CreateStore(byteVal, charPtr);
+    } else {
+        // Array: store i64 element at slot (index + 1)
+        llvm::Value* offset  = builder->CreateAdd(idxVal, llvm::ConstantInt::get(getDefaultType(), 1), "idxa.offset");
+        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), basePtr, offset, "idxa.elem.ptr");
+        builder->CreateStore(newVal, elemPtr);
+    }
     return newVal;
 }
 
@@ -5275,6 +5637,12 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             stringVars_.insert(stmt->name);
         else
             stringVars_.erase(stmt->name);
+        // Track whether this variable holds an array of strings so that
+        // arr[i] and for-each correctly propagate string type information.
+        if (isStringArrayExpr(stmt->initializer.get()))
+            stringArrayVars_.insert(stmt->name);
+        else
+            stringArrayVars_.erase(stmt->name);
     } else {
         builder->CreateStore(llvm::ConstantInt::get(*context, llvm::APInt(64, 0)), alloca);
     }
@@ -5585,15 +5953,31 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
 
     ScopeGuard scope(*this);
 
-    // Evaluate the collection (array)
+    // Evaluate the collection (array or string)
     llvm::Value* collVal = generateExpression(stmt->collection.get());
+
+    // Detect whether the collection is a string.  Strings are raw char
+    // pointers without a length header; arrays use [length, e0, e1, ...].
+    bool isStr     = collVal->getType()->isPointerTy() || isStringExpr(stmt->collection.get());
+    // Detect whether this is an array whose elements are string pointers.
+    bool isStrArray = !isStr && isStringArrayExpr(stmt->collection.get());
+
+    // Normalise to i64 for uniformity; we'll re-cast to ptr below.
     collVal = toDefaultType(collVal);
 
-    // Convert i64 to pointer — array layout is [length, elem0, elem1, ...]
-    llvm::Value* arrPtr = builder->CreateIntToPtr(collVal, llvm::PointerType::getUnqual(*context), "foreach.arrptr");
+    // Convert i64 → pointer
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    llvm::Value* basePtr = builder->CreateIntToPtr(collVal, ptrTy, "foreach.baseptr");
 
-    // Load length from slot 0
-    llvm::Value* lenVal = builder->CreateLoad(getDefaultType(), arrPtr, "foreach.len");
+    // Get the collection length
+    llvm::Value* lenVal;
+    if (isStr) {
+        // String: strlen (no length header)
+        lenVal = builder->CreateCall(getOrDeclareStrlen(), {basePtr}, "foreach.strlen");
+    } else {
+        // Array: length stored in slot 0
+        lenVal = builder->CreateLoad(getDefaultType(), basePtr, "foreach.len");
+    }
 
     // Allocate hidden index variable and the user's iterator variable
     llvm::AllocaInst* idxAlloca = createEntryBlockAlloca(function, "_foreach_idx");
@@ -5601,27 +5985,41 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
 
     llvm::AllocaInst* iterAlloca = createEntryBlockAlloca(function, stmt->iteratorVar);
     bindVariable(stmt->iteratorVar, iterAlloca);
+    // If the collection is a string array, mark the iterator as a string
+    // variable so that print(), len(), and comparison operators handle it
+    // correctly inside the loop body.
+    if (isStrArray)
+        stringVars_.insert(stmt->iteratorVar);
 
     // Create blocks
     llvm::BasicBlock* condBB = llvm::BasicBlock::Create(*context, "foreach.cond", function);
     llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "foreach.body", function);
-    llvm::BasicBlock* incBB = llvm::BasicBlock::Create(*context, "foreach.inc", function);
-    llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "foreach.end", function);
+    llvm::BasicBlock* incBB  = llvm::BasicBlock::Create(*context, "foreach.inc",  function);
+    llvm::BasicBlock* endBB  = llvm::BasicBlock::Create(*context, "foreach.end",  function);
 
     builder->CreateBr(condBB);
 
     // Condition: idx < length
     builder->SetInsertPoint(condBB);
     llvm::Value* curIdx = builder->CreateLoad(getDefaultType(), idxAlloca, "foreach.idx");
-    llvm::Value* cond = builder->CreateICmpSLT(curIdx, lenVal, "foreach.cmp");
+    llvm::Value* cond   = builder->CreateICmpSLT(curIdx, lenVal, "foreach.cmp");
     builder->CreateCondBr(cond, bodyBB, endBB);
 
     // Body: load current element into iterator variable, then execute body
     builder->SetInsertPoint(bodyBB);
     llvm::Value* bodyIdx = builder->CreateLoad(getDefaultType(), idxAlloca, "foreach.bidx");
-    llvm::Value* offset = builder->CreateAdd(bodyIdx, llvm::ConstantInt::get(getDefaultType(), 1), "foreach.offset");
-    llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrPtr, offset, "foreach.elem.ptr");
-    llvm::Value* elemVal = builder->CreateLoad(getDefaultType(), elemPtr, "foreach.elem");
+    llvm::Value* elemVal;
+    if (isStr) {
+        // String: load single byte at offset bodyIdx, zero-extend to i64
+        llvm::Value* charPtr = builder->CreateGEP(llvm::Type::getInt8Ty(*context), basePtr, bodyIdx, "foreach.charptr");
+        llvm::Value* charByte = builder->CreateLoad(llvm::Type::getInt8Ty(*context), charPtr, "foreach.char");
+        elemVal = builder->CreateZExt(charByte, getDefaultType(), "foreach.charext");
+    } else {
+        // Array: element is at slot (bodyIdx + 1)
+        llvm::Value* offset  = builder->CreateAdd(bodyIdx, llvm::ConstantInt::get(getDefaultType(), 1), "foreach.offset");
+        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), basePtr, offset, "foreach.elem.ptr");
+        elemVal = builder->CreateLoad(getDefaultType(), elemPtr, "foreach.elem");
+    }
     builder->CreateStore(elemVal, iterAlloca);
 
     loopStack.push_back({endBB, incBB});
@@ -5634,7 +6032,7 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
     // Increment hidden index
     builder->SetInsertPoint(incBB);
     llvm::Value* nextIdx = builder->CreateLoad(getDefaultType(), idxAlloca, "foreach.nidx");
-    llvm::Value* incIdx = builder->CreateAdd(nextIdx, llvm::ConstantInt::get(getDefaultType(), 1), "foreach.next");
+    llvm::Value* incIdx  = builder->CreateAdd(nextIdx, llvm::ConstantInt::get(getDefaultType(), 1), "foreach.next");
     builder->CreateStore(incIdx, idxAlloca);
     builder->CreateBr(condBB);
 
@@ -5736,14 +6134,32 @@ void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
 }
 
 void CodeGenerator::generateTryCatch(TryCatchStmt* stmt) {
-    // Implementation uses a global error flag/value approach:
-    // 1. Save old error state
-    // 2. Clear error flag
-    // 3. Execute try block
-    // 4. If error flag is set, execute catch block with error value
-    // 5. Restore old error state at end of both paths
+    // Implementation uses a global error-flag/value approach combined with
+    // direct-branch throw semantics:
+    //
+    // For a `throw` that occurs DIRECTLY inside the try block (or in any
+    // function on the call stack that is itself inside a try block),
+    // generateThrow() uses tryCatchStack_.back() to branch straight to the
+    // catch entry block, which terminates the basic block immediately and
+    // prevents any subsequent code in the try block or the throwing function
+    // from executing.
+    //
+    // For a `throw` that occurs in a callee that was compiled WITHOUT a
+    // surrounding try block (i.e. the callee was emitted when tryCatchStack_
+    // was empty), generateThrow() instead emits `ret i64 0` so the function
+    // returns immediately.  The try block then performs a per-statement flag
+    // check and branches to catchBB if the callee set the error flag.
+    //
+    // Steps:
+    //   1. Save old error state, clear flag.
+    //   2. Create catch/restore/end blocks BEFORE generating the try body
+    //      (so generateThrow can reference catchBB via tryCatchStack_).
+    //   3. Push catchBB onto tryCatchStack_; generate try body with
+    //      per-statement flag checks; pop tryCatchStack_.
+    //   4. Catch block: bind catch variable, clear flag, generate catch body.
+    //   5. restoreBB: restore old error state.  endBB: normal continuation.
 
-    // Get or create global error flag and value
+    // --- Get or create global error flag / value ---
     llvm::GlobalVariable* errFlag = module->getGlobalVariable("__om_error_flag", true);
     if (!errFlag) {
         errFlag = new llvm::GlobalVariable(*module, getDefaultType(), false, llvm::GlobalValue::InternalLinkage,
@@ -5757,64 +6173,94 @@ void CodeGenerator::generateTryCatch(TryCatchStmt* stmt) {
 
     llvm::Function* function = builder->GetInsertBlock()->getParent();
 
-    // Save old error state
+    // --- Save and clear old error state ---
     llvm::Value* oldFlag = builder->CreateLoad(getDefaultType(), errFlag, "try.oldflag");
-    llvm::Value* oldVal = builder->CreateLoad(getDefaultType(), errVal, "try.oldval");
-
-    // Clear error flag
+    llvm::Value* oldVal  = builder->CreateLoad(getDefaultType(), errVal,  "try.oldval");
     builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 0), errFlag);
 
-    // Generate try block
+    // --- Create all blocks upfront so generateThrow() can reference catchBB ---
+    llvm::BasicBlock* catchBB   = llvm::BasicBlock::Create(*context, "catch.body",  function);
+    llvm::BasicBlock* restoreBB = llvm::BasicBlock::Create(*context, "try.restore", function);
+    llvm::BasicBlock* endBB     = llvm::BasicBlock::Create(*context, "try.end",     function);
+
+    // --- Generate try body ---
+    // Push catchBB so that any `throw` emitted during code generation of this
+    // try block (or inside a callee that is currently being inlined/compiled
+    // within this scope) branches directly here.
+    tryCatchStack_.push_back(catchBB);
     {
         ScopeGuard scope(*this);
         for (auto& s : stmt->tryBlock->statements) {
+            // Stop if the current block already has a terminator (e.g. a direct
+            // `throw` branched to catchBB or a `return`).
+            if (builder->GetInsertBlock()->getTerminator())
+                break;
+
             generateStatement(s.get());
+
+            // After each statement that didn't terminate the block, check
+            // whether a *called function* propagated an error via the flag.
+            // Callees compiled without a surrounding try block use `ret i64 0`
+            // + flag to propagate throws; we must detect that here.
+            //
+            // Performance note: this adds a load + compare + conditional branch
+            // per try-block statement.  The branch is strongly predicted not-taken
+            // because the cold weight is implied by LLVM's default branch predictor.
+            // O3 can often hoist or eliminate the check when the statement is a
+            // simple arithmetic expression with no calls (dead-store elimination of
+            // the flag store + load pair).  The cost is acceptable because try blocks
+            // are rare in tight loops; try/catch is an error-handling construct.
+            if (!builder->GetInsertBlock()->getTerminator()) {
+                llvm::Value* flagNow = builder->CreateLoad(getDefaultType(), errFlag, "try.chk");
+                llvm::Value* flagSet = builder->CreateICmpNE(
+                    flagNow, llvm::ConstantInt::get(getDefaultType(), 0), "try.flagset");
+                llvm::BasicBlock* contBB =
+                    llvm::BasicBlock::Create(*context, "try.cont", function);
+                builder->CreateCondBr(flagSet, catchBB, contBB);
+                builder->SetInsertPoint(contBB);
+            }
         }
     }
+    tryCatchStack_.pop_back();
 
-    // Check if error was thrown
-    llvm::Value* thrown = builder->CreateLoad(getDefaultType(), errFlag, "try.thrown");
-    llvm::Value* wasThrown =
-        builder->CreateICmpNE(thrown, llvm::ConstantInt::get(getDefaultType(), 0), "try.wasthrown");
+    // Fall through from the try body to the restore path (no error thrown).
+    if (!builder->GetInsertBlock()->getTerminator())
+        builder->CreateBr(restoreBB);
 
-    llvm::BasicBlock* catchBB = llvm::BasicBlock::Create(*context, "catch.body", function);
-    llvm::BasicBlock* restoreBB = llvm::BasicBlock::Create(*context, "try.restore", function);
-    llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "try.end", function);
-
-    builder->CreateCondBr(wasThrown, catchBB, restoreBB);
-
-    // Catch block
+    // --- Catch block ---
     builder->SetInsertPoint(catchBB);
     {
         ScopeGuard scope(*this);
-        // Bind the error value to the catch variable
         llvm::Value* errValLoaded = builder->CreateLoad(getDefaultType(), errVal, "catch.errval");
         llvm::AllocaInst* catchVar = createEntryBlockAlloca(function, stmt->catchVar);
         builder->CreateStore(errValLoaded, catchVar);
         bindVariable(stmt->catchVar, catchVar);
 
-        // Clear error flag so catch block can execute normally
+        // Clear error state so the catch body executes normally.
         builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 0), errFlag);
         builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 0), errVal);
 
         for (auto& s : stmt->catchBlock->statements) {
+            if (builder->GetInsertBlock()->getTerminator())
+                break;
             generateStatement(s.get());
         }
     }
-    builder->CreateBr(restoreBB);
+    if (!builder->GetInsertBlock()->getTerminator())
+        builder->CreateBr(restoreBB);
 
-    // Restore old error state (reached from both normal try and after catch)
+    // --- Restore old error state ---
     builder->SetInsertPoint(restoreBB);
     builder->CreateStore(oldFlag, errFlag);
-    builder->CreateStore(oldVal, errVal);
+    builder->CreateStore(oldVal,  errVal);
     builder->CreateBr(endBB);
 
-    // End
+    // --- Continuation ---
     builder->SetInsertPoint(endBB);
 }
 
 void CodeGenerator::generateThrow(ThrowStmt* stmt) {
-    // Set global error flag and value
+    // Get or create global error flag / value.
     llvm::GlobalVariable* errFlag = module->getGlobalVariable("__om_error_flag", true);
     if (!errFlag) {
         errFlag = new llvm::GlobalVariable(*module, getDefaultType(), false, llvm::GlobalValue::InternalLinkage,
@@ -5828,8 +6274,28 @@ void CodeGenerator::generateThrow(ThrowStmt* stmt) {
 
     llvm::Value* val = generateExpression(stmt->value.get());
     val = toDefaultType(val);
+
+    // Set the error flag and store the thrown value.
     builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 1), errFlag);
     builder->CreateStore(val, errVal);
+
+    // Terminate the basic block so that no code after `throw` executes.
+    //
+    // Two cases:
+    //   (a) We are currently generating code INSIDE a try block:
+    //       tryCatchStack_.back() is the catch-entry block for the innermost
+    //       surrounding try.  Branch there directly — this is the fast path
+    //       that does not require the per-statement flag checks in the caller.
+    //
+    //   (b) We are NOT inside any try block (or we are inside a called function
+    //       that was compiled without a surrounding try):
+    //       Return 0 from the current function so the caller can detect the
+    //       thrown error via the global flag.
+    if (!tryCatchStack_.empty()) {
+        builder->CreateBr(tryCatchStack_.back());
+    } else {
+        builder->CreateRet(llvm::ConstantInt::get(getDefaultType(), 0));
+    }
 }
 
 void CodeGenerator::resolveTargetCPU(std::string& cpu, std::string& features) const {

@@ -1,0 +1,56 @@
+// string_multiply_test.om
+//
+// Regression test: "ab" * 3 previously crashed with a segfault (exit 139).
+//
+// Root cause: when either operand of the `*` binary operator was a string,
+// the code fell through to the integer multiplication path which first
+// converted the string pointer to i64 via PtrToInt, multiplied it by 3,
+// and returned the result.  Passing that huge address to print() or len()
+// as a char* caused an immediate segfault.
+//
+// After the fix, the binary code generator detects string * int (or int *
+// string) before the ptr→int fallback and emits the same loop used by
+// str_repeat(): allocate totalLen+1 bytes, zero the first byte, then
+// strcat(buf, str) count times.
+//
+// str_repeat() is the canonical builtin; the * operator is syntactic sugar.
+
+fn main() {
+    var total = 0;
+
+    // str * int literal
+    var r1 = "ab" * 3;
+    total = total + str_eq(r1, "ababab");       // +1
+    total = total + (len(r1) == 6);             // +1
+
+    // str variable * int variable
+    var s = "xy";
+    var n = 4;
+    var r2 = s * n;
+    total = total + str_eq(r2, "xyxyxyxy");     // +1
+    total = total + (len(r2) == 8);             // +1
+
+    // int * str (reversed order)
+    var r3 = 2 * "abc";
+    total = total + str_eq(r3, "abcabc");       // +1
+
+    // * 0 → empty string
+    var r4 = "hello" * 0;
+    total = total + (len(r4) == 0);             // +1
+
+    // * 1 → identical content
+    var r5 = "hi" * 1;
+    total = total + str_eq(r5, "hi");           // +1
+
+    // result usable in further string operations
+    var r6 = str_concat("ab" * 2, "cd");
+    total = total + str_eq(r6, "ababcd");       // +1
+
+    // str_eq consistency with str_repeat
+    total = total + str_eq("x" * 5, str_repeat("x", 5));  // +1
+
+    // print works on result
+    print("ab" * 2);   // ababab → stdout only, not in total
+
+    return total;  // 9
+}

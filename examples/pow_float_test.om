@@ -1,0 +1,62 @@
+// pow_float_test.om
+//
+// Regression test: pow(base, float_exp) previously converted both arguments
+// to integers via toDefaultType() before applying integer exponentiation.
+// This meant pow(2.0, 0.5) became pow(2, 0) = 1 instead of sqrt(2).
+//
+// After the fix, pow() detects when either argument is a double and delegates
+// to the llvm.pow.f64 intrinsic.  Integer-only calls still use the O(log n)
+// binary exponentiation path.
+
+fn main() {
+    var total = 0;
+
+    // --- Float exponent cases (previously broken) ---
+
+    // pow(4.0, 0.5) = sqrt(4) = 2.0
+    var r1 = pow(4.0, 0.5);
+    total = total + (r1 > 1.99 && r1 < 2.01);   // +1
+
+    // pow(2.0, 0.5) = sqrt(2) ~= 1.414
+    var r2 = pow(2.0, 0.5);
+    total = total + (r2 > 1.41 && r2 < 1.42);   // +1
+
+    // Float exponent stored in variable
+    var base = 2.0;
+    var exp  = 0.5;
+    var r3 = pow(base, exp);
+    total = total + (r3 > 1.41 && r3 < 1.42);   // +1
+
+    // Integer base, float exponent
+    var r4 = pow(8.0, 1.0/3.0);
+    total = total + (r4 > 1.99 && r4 < 2.01);   // +1
+
+    // Float base, integer-valued exponent expressed as float
+    var r5 = pow(2.0, 3.0);
+    total = total + (r5 > 7.99 && r5 < 8.01);   // +1
+
+    // pow(x, 1.0) = x
+    var r6 = pow(5.0, 1.0);
+    total = total + (r6 > 4.99 && r6 < 5.01);   // +1
+
+    // pow(x, 0.0) = 1
+    var r7 = pow(7.0, 0.0);
+    total = total + (r7 > 0.99 && r7 < 1.01);   // +1
+
+    // --- Integer exponent cases (must still work correctly) ---
+
+    var r8 = pow(2, 10);
+    total = total + (r8 == 1024);                // +1
+
+    var r9 = pow(3, 3);
+    total = total + (r9 == 27);                  // +1
+
+    var r10 = pow(5, 0);
+    total = total + (r10 == 1);                  // +1
+
+    var r11 = pow(2, 20);
+    total = total + (r11 == 1048576);            // +1
+
+    // Expected: 11
+    return total;
+}

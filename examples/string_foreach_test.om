@@ -1,0 +1,86 @@
+// string_foreach_test.om
+//
+// Regression test: for (c in s) previously treated the string as an array
+// with a length header.  The first 8 bytes of the string were read as an
+// i64 "length", which for typical 6–8 char strings is a massive number
+// (millions), causing an effectively infinite loop.
+//
+// After the fix, for (c in s) calls strlen to get the number of iterations
+// and reads one byte per step, yielding character codes (matching char_at).
+
+fn main() {
+    var total = 0;
+
+    // Test 1: basic char codes from string literal
+    var sum1 = 0;
+    for (c in "abc") {
+        sum1 = sum1 + c;
+    }
+    total = total + (sum1 == 294);  // 97+98+99  +1
+
+    // Test 2: for-each on a string variable
+    var s = "XYZ";
+    var sum2 = 0;
+    for (c in s) {
+        sum2 = sum2 + c;
+    }
+    total = total + (sum2 == 267);  // 88+89+90  +1
+
+    // Test 3: empty string iterates zero times
+    var count = 0;
+    for (c in "") {
+        count = count + 1;
+    }
+    total = total + (count == 0);   // +1
+
+    // Test 4: single-character string iterates once
+    var hits = 0;
+    var val = 0;
+    for (c in "!") {
+        hits = hits + 1;
+        val = c;
+    }
+    total = total + (hits == 1);    // +1
+    total = total + (val == 33);    // '!' = 33  +1
+
+    // Test 5: characters match s[i] / char_at
+    var s2 = "hello";
+    var ok = 1;
+    var i = 0;
+    for (c in s2) {
+        if (c != s2[i]) { ok = 0; }
+        if (c != char_at(s2, i)) { ok = 0; }
+        i = i + 1;
+    }
+    total = total + ok;  // +1 if all chars matched
+
+    // Test 6: loop-variable does not affect outer scope
+    var outer = 999;
+    for (outer in "ab") {
+        // inner shadow: outer should hold char codes 97, 98 here
+    }
+    // After loop, outer should be restored to 999
+    total = total + (outer == 999);  // +1
+
+    // Test 7: break/continue work inside string for-each
+    var sum3 = 0;
+    for (c in "abcde") {
+        if (c == 99) { continue; }  // skip 'c'=99
+        if (c == 101) { break; }    // stop before 'e'=101
+        sum3 = sum3 + c;
+    }
+    // 'a'=97 + 'b'=98 + 'd'=100 (skip 'c'=99, stop at 'e'=101) = 295
+    total = total + (sum3 == 295);  // +1
+
+    // Test 8: nested for-each over strings
+    var pairs = 0;
+    for (c1 in "ab") {
+        for (c2 in "xy") {
+            pairs = pairs + 1;
+        }
+    }
+    total = total + (pairs == 4);   // 2×2 = 4  +1
+
+    // Expected: 9
+    return total;
+}

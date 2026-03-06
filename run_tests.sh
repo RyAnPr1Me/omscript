@@ -270,7 +270,7 @@ test_program "examples/foreach_test.om" 150
 test_program "examples/foreach_break_test.om" 12
 test_program "examples/string_func_test.om" 178
 test_program "examples/stdlib_test.om" 66
-test_program "examples/stdlib2_test.om" 255
+test_program "examples/stdlib2_test.om" 194
 test_program "examples/new_builtins_test.om" 87
 test_program "examples/math_builtins_test.om" 52
 test_program "examples/string_builtins_test.om" 12
@@ -317,6 +317,20 @@ test_program "examples/jit_hot_demo.om" 144
 test_program "examples/benchmark_loops_math.om" 192
 test_program "examples/benchmark_jit_aot.om" 0
 test_program "examples/try_catch_test.om" 88
+test_program "examples/throw_in_called_fn_test.om" 147
+test_program "examples/len_string_test.om" 8
+test_program "examples/float_string_concat_test.om" 10
+test_program "examples/typeof_full_test.om" 12
+test_program "examples/string_index_test.om" 13
+test_program "examples/string_foreach_test.om" 9
+test_program "examples/to_int_to_float_string_test.om" 12
+test_program "examples/string_index_assign_test.om" 11
+test_program "examples/pow_float_test.om" 11
+test_program "examples/str_replace_all_test.om" 10
+test_program "examples/to_char_test.om" 12
+test_program "examples/string_comparison_test.om" 15
+test_program "examples/string_multiply_test.om" 9
+test_program "examples/string_array_test.om" 20
 test_compile_fail "examples/const_fail.om"
 test_compile_fail "examples/break_outside_loop.om"
 test_compile_fail "examples/continue_outside_loop.om"

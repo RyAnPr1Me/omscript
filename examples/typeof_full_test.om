@@ -1,0 +1,54 @@
+// typeof_full_test.om
+//
+// Regression test: typeof() now returns accurate type tags using static
+// LLVM IR type information instead of always returning 1.
+//
+//   1 = integer
+//   2 = float
+//   3 = string
+
+fn main() {
+    var total = 0;
+
+    // Test 1: typeof integer literal
+    total = total + (typeof(42) == 1);      // +1
+
+    // Test 2: typeof float literal
+    total = total + (typeof(3.14) == 2);    // +1
+
+    // Test 3: typeof string literal
+    total = total + (typeof("hi") == 3);    // +1
+
+    // Test 4: typeof integer variable
+    var i = 7;
+    total = total + (typeof(i) == 1);       // +1
+
+    // Test 5: typeof float variable
+    var f = 2.71828;
+    total = total + (typeof(f) == 2);       // +1
+
+    // Test 6: typeof string variable
+    var s = "world";
+    total = total + (typeof(s) == 3);       // +1
+
+    // Test 7: typeof of zero (integer)
+    total = total + (typeof(0) == 1);       // +1
+
+    // Test 8: typeof of negative float
+    total = total + (typeof(-1.5) == 2);    // +1
+
+    // Test 9: typeof of concatenated string is 3
+    var cs = "a" + "b";
+    total = total + (typeof(cs) == 3);      // +1
+
+    // Test 10: typeof returns different values for int vs float vs string
+    var ti = typeof(1);
+    var tf = typeof(1.0);
+    var ts = typeof("x");
+    total = total + (ti != tf);             // +1 (1 != 2)
+    total = total + (tf != ts);             // +1 (2 != 3)
+    total = total + (ti != ts);             // +1 (1 != 3)
+
+    // Expected: 12
+    return total;
+}

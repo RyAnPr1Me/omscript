@@ -1,0 +1,86 @@
+// throw_in_called_fn_test.om
+//
+// Regression test: `throw` inside a called function must propagate correctly
+// to an enclosing try/catch block.
+//
+// Previously, `generateThrow` only set a global error flag but did NOT
+// terminate the basic block, allowing code after the throw to continue
+// executing (causing crashes like division by zero).  The fix makes throw
+// branch directly to the innermost catch block when inside a try region, and
+// emit `ret i64 0` otherwise so the caller can detect the error via the flag.
+
+fn safe_divide(a, b) {
+    if (b == 0) {
+        throw 99;   // must NOT fall through to `return a / b`
+    }
+    return a / b;
+}
+
+fn maybe_throw(code) {
+    if (code != 0) {
+        throw code;
+    }
+    return 0;
+}
+
+fn nested_throw() {
+    throw 7;
+    return 0;  // must never execute
+}
+
+fn main() {
+    var result = 0;
+
+    // Test 1: throw inside called function, division-by-zero trap not triggered
+    try {
+        result = safe_divide(10, 0);
+        result = 1000;  // must NOT execute
+    } catch (e) {
+        result = result + e;   // +99
+    }
+
+    // Test 2: no-throw path still works
+    try {
+        result = result + safe_divide(10, 2);  // +5
+    } catch (e) {
+        result = result + 1000;  // must NOT execute
+    }
+
+    // Test 3: statements after a throwing call inside try must NOT execute
+    try {
+        maybe_throw(3);
+        result = result + 500;  // must NOT execute
+    } catch (e) {
+        result = result + e;   // +3
+    }
+
+    // Test 4: multiple sequential try/catch blocks
+    try {
+        throw 10;
+    } catch (e1) {
+        result = result + e1;  // +10
+    }
+    try {
+        throw 20;
+    } catch (e2) {
+        result = result + e2;  // +20
+    }
+
+    // Test 5: nested try/catch — inner catch fires, outer does not
+    try {
+        try {
+            nested_throw();
+        } catch (inner) {
+            result = result + inner;  // +7
+        }
+        result = result + 1;          // +1  (resumes after inner catch)
+    } catch (outer) {
+        result = result + 1000;  // must NOT execute
+    }
+
+    // Test 6: code after the whole try/catch continues normally
+    result = result + 2;  // +2
+
+    // Expected: 99 + 5 + 3 + 10 + 20 + 7 + 1 + 2 = 147
+    return result;
+}

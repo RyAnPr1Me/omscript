@@ -245,6 +245,17 @@ class AdaptiveJITRunner {
     std::mutex recompiledMtx_; ///< Guards functionTier_ and modules_ across threads.
     bool verbose_ = false;     ///< Print JIT recompile events when true.
 
+    /// Maps every user function name to its __omsc_fn_* slot address in the
+    /// Tier-1 LLJIT.  Populated during eager startup before background threads
+    /// start; read-only thereafter (no mutex needed for reads).
+    std::unordered_map<std::string, void**> functionSlots_;
+    std::mutex slotsMtx_; ///< Guards functionSlots_ writes during startup.
+
+    /// Set to true once a whole-module background compilation has been
+    /// enqueued.  onHotFunction() checks this to skip redundant per-function
+    /// enqueues.
+    std::atomic<bool> wholeModuleQueued_{false};
+
     // --- User-provided optimisation flags (propagated to Tier-2+ O3 pipeline) ---
     bool fastMath_ = false;
     bool vectorize_ = true;
@@ -308,12 +319,19 @@ class AdaptiveJITRunner {
     std::atomic<bool> shutdownRequested_{false}; ///< Signals the workers to exit.
 
     /// Number of background compilation threads.
-    /// Using 4 threads to maximise background CPU utilisation during
-    /// eager compilation — one thread per available core on typical CI.
-    static constexpr int kNumBgThreads = 4;
+    /// Using 2 threads: one for the whole-module O3 compile, one spare for
+    /// any fallback per-function recompiles triggered by onHotFunction().
+    static constexpr int kNumBgThreads = 2;
 
     /// Background worker loop: waits for tasks, executes them sequentially.
     void backgroundWorker();
+
+    /// Compile the entire program module at O3+PGO in a single LLJIT instance.
+    /// Marks all non-recursive user functions as AlwaysInline to enable
+    /// aggressive constant folding (e.g. fib_iter(150), sum_squares_mod(300,…)).
+    /// After successful compilation, atomically patches every function slot
+    /// collected in functionSlots_.  Called from a background thread.
+    void doRecompileWholeModule();
 
     /// The actual heavy recompilation work — runs on the background thread.
     /// Parses clean bitcode, applies PGO annotations, runs O2/O3 pipeline,
