@@ -700,16 +700,28 @@ void AdaptiveJITRunner::doRecompileWholeModule() {
     auto newCtx = std::make_unique<llvm::LLVMContext>();
     if (verbose_) {
         newCtx->setDiagnosticHandlerCallBack(
+#if LLVM_VERSION_MAJOR >= 20
+            [](const llvm::DiagnosticInfo* DI, void*) {
+                if (DI->getSeverity() == llvm::DS_Remark)
+                    return;
+                llvm::DiagnosticPrinterRawOStream DP(llvm::errs());
+                DI->print(DP);
+#else
             [](const llvm::DiagnosticInfo& DI, void*) {
                 if (DI.getSeverity() == llvm::DS_Remark)
                     return;
                 llvm::DiagnosticPrinterRawOStream DP(llvm::errs());
                 DI.print(DP);
+#endif
                 llvm::errs() << "\n";
             },
             nullptr);
     } else {
+#if LLVM_VERSION_MAJOR >= 20
+        newCtx->setDiagnosticHandlerCallBack([](const llvm::DiagnosticInfo*, void*) {}, nullptr);
+#else
         newCtx->setDiagnosticHandlerCallBack([](const llvm::DiagnosticInfo&, void*) {}, nullptr);
+#endif
     }
     auto memBuf = llvm::MemoryBuffer::getMemBuffer(
         llvm::StringRef(cleanBitcode_.data(), cleanBitcode_.size()),
@@ -1138,7 +1150,12 @@ void AdaptiveJITRunner::doRecompileWholeModule() {
             // Interpreter — we don't want to modify mod in-place.
             auto interpCtx = std::make_unique<llvm::LLVMContext>();
             interpCtx->setDiagnosticHandlerCallBack(
-                [](const llvm::DiagnosticInfo&, void*) {}, nullptr);
+#if LLVM_VERSION_MAJOR >= 20
+                [](const llvm::DiagnosticInfo*, void*) {},
+#else
+                [](const llvm::DiagnosticInfo&, void*) {},
+#endif
+                nullptr);
             auto interpMemBuf = llvm::MemoryBuffer::getMemBuffer(
                 llvm::StringRef(cleanBitcode_.data(), cleanBitcode_.size()),
                 "omsc_interp_bc", /*RequiresNullTerminator=*/false);
@@ -1473,16 +1490,28 @@ void AdaptiveJITRunner::doRecompile(const std::string& funcName, int64_t callCou
     // discard everything for maximum speed.
     if (verbose_) {
         newCtx->setDiagnosticHandlerCallBack(
+#if LLVM_VERSION_MAJOR >= 20
+            [](const llvm::DiagnosticInfo* DI, void*) {
+                if (DI->getSeverity() == llvm::DS_Remark)
+                    return;
+                llvm::DiagnosticPrinterRawOStream DP(llvm::errs());
+                DI->print(DP);
+#else
             [](const llvm::DiagnosticInfo& DI, void*) {
                 if (DI.getSeverity() == llvm::DS_Remark)
                     return;
                 llvm::DiagnosticPrinterRawOStream DP(llvm::errs());
                 DI.print(DP);
+#endif
                 llvm::errs() << "\n";
             },
             nullptr);
     } else {
+#if LLVM_VERSION_MAJOR >= 20
+        newCtx->setDiagnosticHandlerCallBack([](const llvm::DiagnosticInfo*, void*) {}, nullptr);
+#else
         newCtx->setDiagnosticHandlerCallBack([](const llvm::DiagnosticInfo&, void*) {}, nullptr);
+#endif
     }
     auto memBuf = llvm::MemoryBuffer::getMemBuffer(llvm::StringRef(cleanBitcode_.data(), cleanBitcode_.size()),
                                                    "omsc_pgo_bc", /*RequiresNullTerminator=*/false);
