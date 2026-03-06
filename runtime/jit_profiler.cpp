@@ -29,10 +29,12 @@ JITProfiler& JITProfiler::instance() {
 void JITProfiler::recordBranch(const char* funcName, uint32_t branchId, bool taken) {
     // Sample at the callback level: only record every 16th branch observation.
     // This reduces mutex contention and cache-line bouncing by 16x while
-    // maintaining statistically accurate branch weight ratios.  The atomic
-    // counter increment is much cheaper than the mutex try_lock + hash lookup.
-    static std::atomic<uint64_t> branchSampleCounter{0};
-    uint64_t sample = branchSampleCounter.fetch_add(1, std::memory_order_relaxed);
+    // maintaining statistically accurate branch weight ratios.
+    // thread_local avoids atomic operations entirely on the hot path and
+    // prevents cross-thread counter aliasing that would bias per-function
+    // profile statistics when multiple threads call different functions.
+    thread_local uint64_t branchSampleCounter = 0;
+    uint64_t sample = branchSampleCounter++;
     if (__builtin_expect((sample & 0xF) != 0, 1))
         return;
 
@@ -71,8 +73,9 @@ void JITProfiler::recordLoopTripCount(const char* funcName, uint32_t loopId, uin
     // fired on EVERY loop exit, causing massive overhead in loop-heavy code
     // (e.g. 27k mutex lock attempts for matrix_accum(30)).  Sampling at 1/8
     // still provides accurate average trip count and constant-trip-count detection.
-    static std::atomic<uint64_t> loopSampleCounter{0};
-    uint64_t sample = loopSampleCounter.fetch_add(1, std::memory_order_relaxed);
+    // thread_local avoids atomic ops and cross-thread counter interference.
+    thread_local uint64_t loopSampleCounter = 0;
+    uint64_t sample = loopSampleCounter++;
     if (__builtin_expect((sample & 0x7) != 0, 1))
         return;
 
@@ -89,8 +92,9 @@ void JITProfiler::recordLoopTripCount(const char* funcName, uint32_t loopId, uin
 
 void JITProfiler::recordCallSite(const char* callerName, const char* calleeName) {
     // Sample every 16th call-site observation to reduce overhead.
-    static std::atomic<uint64_t> callSiteSampleCounter{0};
-    uint64_t sample = callSiteSampleCounter.fetch_add(1, std::memory_order_relaxed);
+    // thread_local avoids atomic ops and cross-thread counter interference.
+    thread_local uint64_t callSiteSampleCounter = 0;
+    uint64_t sample = callSiteSampleCounter++;
     if (__builtin_expect((sample & 0xF) != 0, 1))
         return;
 
