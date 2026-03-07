@@ -3807,18 +3807,25 @@ TEST(CodegenTest, WhileConstantTrueNoCondCheck) {
 // ===========================================================================
 
 TEST(CodegenTest, DoWhileConstantFalseSingleExec) {
-    // do { ... } while (0) should execute body once and not loop
+    // do { ... } while (0) should execute body once and not loop back
     CodeGenerator codegen(OptimizationLevel::O0);
     auto* mod = generateIR("fn main() { var x = 0; do { x = x + 1; } while (0); return x; }", codegen);
     auto* mainFn = mod->getFunction("main");
     ASSERT_NE(mainFn, nullptr);
-    // Should not have a dowhilecond block (condition is eliminated)
-    bool hasCondBlock = false;
+    // The condition block should not have a conditional branch back to the body
+    // (it should be an unconditional branch to endBB)
+    bool hasCondBr = false;
     for (auto& BB : *mainFn) {
-        if (BB.getName().str().find("dowhilecond") != std::string::npos)
-            hasCondBlock = true;
+        if (BB.getName().str().find("dowhilecond") != std::string::npos) {
+            auto* term = BB.getTerminator();
+            if (term && llvm::isa<llvm::BranchInst>(term)) {
+                auto* br = llvm::cast<llvm::BranchInst>(term);
+                if (br->isConditional())
+                    hasCondBr = true;
+            }
+        }
     }
-    EXPECT_FALSE(hasCondBlock) << "do-while(0) should not generate a condition check block";
+    EXPECT_FALSE(hasCondBr) << "do-while(0) condition block should have unconditional branch, not conditional";
 }
 
 // ===========================================================================

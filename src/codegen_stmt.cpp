@@ -207,6 +207,10 @@ void CodeGenerator::generateDoWhile(DoWhileStmt* stmt) {
     ScopeGuard scope(*this);
 
     llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "dowhilebody", function);
+    // Create condBB upfront so that 'continue' inside the body jumps to the
+    // condition check (correct do-while semantics).  If the condition turns
+    // out to be a compile-time constant we redirect condBB afterwards.
+    llvm::BasicBlock* condBB = llvm::BasicBlock::Create(*context, "dowhilecond", function);
     llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "dowhileend", function);
 
     // Jump directly to body (execute at least once)
@@ -214,57 +218,57 @@ void CodeGenerator::generateDoWhile(DoWhileStmt* stmt) {
 
     // Body block
     builder->SetInsertPoint(bodyBB);
-    loopStack.push_back({endBB, bodyBB});
+    loopStack.push_back({endBB, condBB});
     generateStatement(stmt->body.get());
     loopStack.pop_back();
+    if (!builder->GetInsertBlock()->getTerminator()) {
+        builder->CreateBr(condBB);
+    }
+
+    // Condition block
+    builder->SetInsertPoint(condBB);
+    llvm::Value* condition = generateExpression(stmt->condition.get());
 
     // Constant condition elimination for do-while: the body always executes
-    // once, but we can skip the condition check or the back-edge when the
-    // condition is statically known.
-    if (!builder->GetInsertBlock()->getTerminator()) {
-        llvm::Value* condition = generateExpression(stmt->condition.get());
-        if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(condition)) {
-            if (ci->isZero()) {
-                // Condition is statically false: body executes once, fall through.
-                builder->CreateBr(endBB);
-            } else {
-                // Condition is statically true: unconditional infinite loop.
-                builder->CreateBr(bodyBB);
-            }
-            builder->SetInsertPoint(endBB);
-            return;
+    // once, but we can skip the condition branch when the result is statically
+    // known, replacing the conditional back-edge with an unconditional one.
+    if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(condition)) {
+        if (ci->isZero()) {
+            // Condition is statically false: body executes once, fall through.
+            builder->CreateBr(endBB);
+        } else {
+            // Condition is statically true: unconditional infinite loop.
+            builder->CreateBr(bodyBB);
         }
-        llvm::BasicBlock* condBB = llvm::BasicBlock::Create(*context, "dowhilecond", function);
-        builder->CreateBr(condBB);
-        builder->SetInsertPoint(condBB);
-        llvm::Value* condBool = toBool(condition);
-        auto* backBrDoWhile = builder->CreateCondBr(condBool, bodyBB, endBB);
-        // Attach loop metadata to the do-while back-edge, matching for-loop and
-        // while-loop hints for consistent vectorization across all loop forms.
-        {
-            llvm::MDNode* mustProgress =
-                llvm::MDNode::get(*context, {llvm::MDString::get(*context, "llvm.loop.mustprogress")});
-            llvm::SmallVector<llvm::Metadata*, 4> loopMDs;
-            loopMDs.push_back(nullptr);
-            loopMDs.push_back(mustProgress);
-            if (optimizationLevel >= OptimizationLevel::O2 && enableVectorize_) {
-                llvm::MDNode* interleave = llvm::MDNode::get(
-                    *context,
-                    {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
-                     llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))});
-                loopMDs.push_back(interleave);
-            }
-            if (optimizationLevel >= OptimizationLevel::O3 && enableVectorize_) {
-                llvm::MDNode* vecWidth = llvm::MDNode::get(
-                    *context,
-                    {llvm::MDString::get(*context, "llvm.loop.vectorize.width"),
-                     llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))});
-                loopMDs.push_back(vecWidth);
-            }
-            llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
-            loopMD->replaceOperandWith(0, loopMD);
-            backBrDoWhile->setMetadata(llvm::LLVMContext::MD_loop, loopMD);
+        builder->SetInsertPoint(endBB);
+        return;
+    }
+
+    llvm::Value* condBool = toBool(condition);
+    auto* backBrDoWhile = builder->CreateCondBr(condBool, bodyBB, endBB);
+    // Attach loop metadata to the do-while back-edge, matching for-loop and
+    // while-loop hints for consistent vectorization across all loop forms.
+    {
+        llvm::MDNode* mustProgress =
+            llvm::MDNode::get(*context, {llvm::MDString::get(*context, "llvm.loop.mustprogress")});
+        llvm::SmallVector<llvm::Metadata*, 4> loopMDs;
+        loopMDs.push_back(nullptr);
+        loopMDs.push_back(mustProgress);
+        if (optimizationLevel >= OptimizationLevel::O2 && enableVectorize_) {
+            llvm::MDNode* interleave = llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
+                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))});
+            loopMDs.push_back(interleave);
         }
+        if (optimizationLevel >= OptimizationLevel::O3 && enableVectorize_) {
+            llvm::MDNode* vecWidth = llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.width"),
+                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))});
+            loopMDs.push_back(vecWidth);
+        }
+        llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
+        loopMD->replaceOperandWith(0, loopMD);
+        backBrDoWhile->setMetadata(llvm::LLVMContext::MD_loop, loopMD);
     }
 
     // End block
