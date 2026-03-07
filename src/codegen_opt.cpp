@@ -23,11 +23,13 @@
 #include <llvm/TargetParser/Host.h>
 #include <llvm/TargetParser/SubtargetFeature.h>
 #include <llvm/TargetParser/Triple.h>
+#include <llvm/Transforms/AggressiveInstCombine/AggressiveInstCombine.h>
 #include <llvm/Transforms/IPO.h>
 #include <llvm/Transforms/IPO/AlwaysInliner.h>
 #include <llvm/Transforms/IPO/GlobalDCE.h>
 #include <llvm/Transforms/InstCombine/InstCombine.h>
 #include <llvm/Transforms/Scalar.h>
+#include <llvm/Transforms/Scalar/ConstraintElimination.h>
 #include <llvm/Transforms/Scalar/GVN.h>
 #include <llvm/Transforms/Scalar/LoopDistribute.h>
 #include <llvm/Transforms/Utils.h>
@@ -278,6 +280,24 @@ void CodeGenerator::runOptimizationPasses() {
             [](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) { FPM.addPass(llvm::LoopDistributePass()); });
     }
 
+    // At O3, inject AggressiveInstCombine after the standard peephole passes
+    // to catch multi-instruction patterns (e.g. truncation sequences, popcount
+    // idioms) that regular InstCombine does not handle.
+    if (optimizationLevel >= OptimizationLevel::O3) {
+        PB.registerPeepholeEPCallback([](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) {
+            FPM.addPass(llvm::AggressiveInstCombinePass());
+        });
+    }
+
+    // At O3, inject ConstraintElimination late in the scalar optimizer to
+    // remove redundant comparisons and branches using range constraints
+    // (e.g. after a bounds check, subsequent in-range accesses skip the check).
+    if (optimizationLevel >= OptimizationLevel::O3) {
+        PB.registerScalarOptimizerLateEPCallback([](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) {
+            FPM.addPass(llvm::ConstraintEliminationPass());
+        });
+    }
+
     llvm::LoopAnalysisManager LAM;
     llvm::FunctionAnalysisManager FAM;
     llvm::CGSCCAnalysisManager CGAM;
@@ -354,7 +374,7 @@ void CodeGenerator::optimizeOptMaxFunctions() {
 
     // Phase 1: Early canonicalization
     fpm.add(llvm::createSROAPass());
-    fpm.add(llvm::createEarlyCSEPass());
+    fpm.add(llvm::createEarlyCSEPass(/*UseMemorySSA=*/true));
     fpm.add(llvm::createPromoteMemoryToRegisterPass());
     fpm.add(llvm::createInstructionCombiningPass());
     fpm.add(llvm::createReassociatePass());

@@ -127,6 +127,31 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
 
     ScopeGuard scope(*this);
 
+    // Constant condition elimination — match generateIf's dead-branch pruning.
+    // Evaluate the condition once; if it folds to a constant we can avoid
+    // emitting the loop structure entirely (false) or the condition check (true).
+    llvm::Value* preCondition = generateExpression(stmt->condition.get());
+    if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(preCondition)) {
+        if (ci->isZero()) {
+            // Condition is statically false: loop body never executes.
+            return;
+        }
+        // Condition is statically true: emit an unconditional infinite loop
+        // (no condition check on each iteration).
+        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "whilebody", function);
+        llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "whileend", function);
+        builder->CreateBr(bodyBB);
+        builder->SetInsertPoint(bodyBB);
+        loopStack.push_back({endBB, bodyBB});
+        generateStatement(stmt->body.get());
+        loopStack.pop_back();
+        if (!builder->GetInsertBlock()->getTerminator()) {
+            builder->CreateBr(bodyBB);
+        }
+        builder->SetInsertPoint(endBB);
+        return;
+    }
+
     llvm::BasicBlock* condBB = llvm::BasicBlock::Create(*context, "whilecond", function);
     llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "whilebody", function);
     llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "whileend", function);
@@ -182,6 +207,9 @@ void CodeGenerator::generateDoWhile(DoWhileStmt* stmt) {
     ScopeGuard scope(*this);
 
     llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "dowhilebody", function);
+    // Create condBB upfront so that 'continue' inside the body jumps to the
+    // condition check (correct do-while semantics).  If the condition turns
+    // out to be a compile-time constant we redirect condBB afterwards.
     llvm::BasicBlock* condBB = llvm::BasicBlock::Create(*context, "dowhilecond", function);
     llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "dowhileend", function);
 
@@ -200,6 +228,22 @@ void CodeGenerator::generateDoWhile(DoWhileStmt* stmt) {
     // Condition block
     builder->SetInsertPoint(condBB);
     llvm::Value* condition = generateExpression(stmt->condition.get());
+
+    // Constant condition elimination for do-while: the body always executes
+    // once, but we can skip the condition branch when the result is statically
+    // known, replacing the conditional back-edge with an unconditional one.
+    if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(condition)) {
+        if (ci->isZero()) {
+            // Condition is statically false: body executes once, fall through.
+            builder->CreateBr(endBB);
+        } else {
+            // Condition is statically true: unconditional infinite loop.
+            builder->CreateBr(bodyBB);
+        }
+        builder->SetInsertPoint(endBB);
+        return;
+    }
+
     llvm::Value* condBool = toBool(condition);
     auto* backBrDoWhile = builder->CreateCondBr(condBool, bodyBB, endBB);
     // Attach loop metadata to the do-while back-edge, matching for-loop and
@@ -253,6 +297,18 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     llvm::Value* endVal = generateExpression(stmt->end.get());
     // Convert to integer since loop bounds are always integer
     endVal = toDefaultType(endVal);
+
+    // Empty range elimination: when start and end are compile-time constants
+    // and start == end, the loop body never executes (the condition check
+    // `i < end` (ascending) or `i > end` (descending) fails on the first
+    // iteration).  This avoids emitting the entire loop structure.
+    if (auto* startCI = llvm::dyn_cast<llvm::ConstantInt>(startVal)) {
+        if (auto* endCI = llvm::dyn_cast<llvm::ConstantInt>(endVal)) {
+            if (startCI->getSExtValue() == endCI->getSExtValue()) {
+                return;
+            }
+        }
+    }
 
     // Get step value.  When not specified, default to +1 for ascending ranges
     // (start < end) and -1 for descending ranges (start > end) so that
@@ -369,7 +425,7 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
 
     // Detect whether the collection is a string.  Strings are raw char
     // pointers without a length header; arrays use [length, e0, e1, ...].
-    bool isStr     = collVal->getType()->isPointerTy() || isStringExpr(stmt->collection.get());
+    bool isStr = collVal->getType()->isPointerTy() || isStringExpr(stmt->collection.get());
     // Detect whether this is an array whose elements are string pointers.
     bool isStrArray = !isStr && isStringArrayExpr(stmt->collection.get());
 
@@ -405,15 +461,15 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
     // Create blocks
     llvm::BasicBlock* condBB = llvm::BasicBlock::Create(*context, "foreach.cond", function);
     llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "foreach.body", function);
-    llvm::BasicBlock* incBB  = llvm::BasicBlock::Create(*context, "foreach.inc",  function);
-    llvm::BasicBlock* endBB  = llvm::BasicBlock::Create(*context, "foreach.end",  function);
+    llvm::BasicBlock* incBB = llvm::BasicBlock::Create(*context, "foreach.inc", function);
+    llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "foreach.end", function);
 
     builder->CreateBr(condBB);
 
     // Condition: idx < length
     builder->SetInsertPoint(condBB);
     llvm::Value* curIdx = builder->CreateLoad(getDefaultType(), idxAlloca, "foreach.idx");
-    llvm::Value* cond   = builder->CreateICmpSLT(curIdx, lenVal, "foreach.cmp");
+    llvm::Value* cond = builder->CreateICmpSLT(curIdx, lenVal, "foreach.cmp");
     builder->CreateCondBr(cond, bodyBB, endBB);
 
     // Body: load current element into iterator variable, then execute body
@@ -427,7 +483,8 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
         elemVal = builder->CreateZExt(charByte, getDefaultType(), "foreach.charext");
     } else {
         // Array: element is at slot (bodyIdx + 1)
-        llvm::Value* offset  = builder->CreateAdd(bodyIdx, llvm::ConstantInt::get(getDefaultType(), 1), "foreach.offset");
+        llvm::Value* offset =
+            builder->CreateAdd(bodyIdx, llvm::ConstantInt::get(getDefaultType(), 1), "foreach.offset");
         llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), basePtr, offset, "foreach.elem.ptr");
         elemVal = builder->CreateLoad(getDefaultType(), elemPtr, "foreach.elem");
     }
@@ -443,7 +500,7 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
     // Increment hidden index
     builder->SetInsertPoint(incBB);
     llvm::Value* nextIdx = builder->CreateLoad(getDefaultType(), idxAlloca, "foreach.nidx");
-    llvm::Value* incIdx  = builder->CreateAdd(nextIdx, llvm::ConstantInt::get(getDefaultType(), 1), "foreach.next");
+    llvm::Value* incIdx = builder->CreateAdd(nextIdx, llvm::ConstantInt::get(getDefaultType(), 1), "foreach.next");
     builder->CreateStore(incIdx, idxAlloca);
     builder->CreateBr(condBB);
 
@@ -586,13 +643,13 @@ void CodeGenerator::generateTryCatch(TryCatchStmt* stmt) {
 
     // --- Save and clear old error state ---
     llvm::Value* oldFlag = builder->CreateLoad(getDefaultType(), errFlag, "try.oldflag");
-    llvm::Value* oldVal  = builder->CreateLoad(getDefaultType(), errVal,  "try.oldval");
+    llvm::Value* oldVal = builder->CreateLoad(getDefaultType(), errVal, "try.oldval");
     builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 0), errFlag);
 
     // --- Create all blocks upfront so generateThrow() can reference catchBB ---
-    llvm::BasicBlock* catchBB   = llvm::BasicBlock::Create(*context, "catch.body",  function);
+    llvm::BasicBlock* catchBB = llvm::BasicBlock::Create(*context, "catch.body", function);
     llvm::BasicBlock* restoreBB = llvm::BasicBlock::Create(*context, "try.restore", function);
-    llvm::BasicBlock* endBB     = llvm::BasicBlock::Create(*context, "try.end",     function);
+    llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "try.end", function);
 
     // --- Generate try body ---
     // Push catchBB so that any `throw` emitted during code generation of this
@@ -623,10 +680,9 @@ void CodeGenerator::generateTryCatch(TryCatchStmt* stmt) {
             // are rare in tight loops; try/catch is an error-handling construct.
             if (!builder->GetInsertBlock()->getTerminator()) {
                 llvm::Value* flagNow = builder->CreateLoad(getDefaultType(), errFlag, "try.chk");
-                llvm::Value* flagSet = builder->CreateICmpNE(
-                    flagNow, llvm::ConstantInt::get(getDefaultType(), 0), "try.flagset");
-                llvm::BasicBlock* contBB =
-                    llvm::BasicBlock::Create(*context, "try.cont", function);
+                llvm::Value* flagSet =
+                    builder->CreateICmpNE(flagNow, llvm::ConstantInt::get(getDefaultType(), 0), "try.flagset");
+                llvm::BasicBlock* contBB = llvm::BasicBlock::Create(*context, "try.cont", function);
                 builder->CreateCondBr(flagSet, catchBB, contBB);
                 builder->SetInsertPoint(contBB);
             }
@@ -663,7 +719,7 @@ void CodeGenerator::generateTryCatch(TryCatchStmt* stmt) {
     // --- Restore old error state ---
     builder->SetInsertPoint(restoreBB);
     builder->CreateStore(oldFlag, errFlag);
-    builder->CreateStore(oldVal,  errVal);
+    builder->CreateStore(oldVal, errVal);
     builder->CreateBr(endBB);
 
     // --- Continuation ---

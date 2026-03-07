@@ -87,9 +87,8 @@ using omscript::WhileStmt;
 /// be marked nosync/nofree/willreturn because those attributes promise to the
 /// optimizer that the function performs no synchronization, never frees memory,
 /// and always returns — all of which are violated by pthreads primitives.
-static const std::unordered_set<std::string> kConcurrencyBuiltins = {
-    "thread_create", "thread_join", "mutex_new", "mutex_lock", "mutex_unlock", "mutex_destroy"
-};
+static const std::unordered_set<std::string> kConcurrencyBuiltins = {"thread_create", "thread_join",  "mutex_new",
+                                                                     "mutex_lock",    "mutex_unlock", "mutex_destroy"};
 
 /// Recursively check if an expression tree contains a call to any name in @p names.
 static bool exprCallsAny(const Expression* e, const std::unordered_set<std::string>& names) {
@@ -838,11 +837,11 @@ void CodeGenerator::checkConstModification(const std::string& name, const std::s
 
 void CodeGenerator::validateScopeStacksMatch(const char* location) {
     if (scopeStack.size() != constScopeStack.size()) {
-        throw DiagnosticError(
-            Diagnostic{DiagnosticSeverity::Error, {"", 0, 0},
-                       "Scope tracking mismatch in codegen (" + std::string(location) +
-                           "): values=" + std::to_string(scopeStack.size()) +
-                           ", consts=" + std::to_string(constScopeStack.size())});
+        throw DiagnosticError(Diagnostic{DiagnosticSeverity::Error,
+                                         {"", 0, 0},
+                                         "Scope tracking mismatch in codegen (" + std::string(location) +
+                                             "): values=" + std::to_string(scopeStack.size()) +
+                                             ", consts=" + std::to_string(constScopeStack.size())});
     }
 }
 
@@ -981,7 +980,10 @@ llvm::Function* CodeGenerator::getOrDeclareSnprintf() {
         return fn;
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {ptrTy, getDefaultType(), ptrTy}, true);
-    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "snprintf", module.get());
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "snprintf", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
+    return fn;
 }
 
 llvm::Function* CodeGenerator::getOrDeclareMemchr() {
@@ -1034,6 +1036,7 @@ llvm::Function* CodeGenerator::getOrDeclareMemcpy() {
     auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy, ptrTy, getDefaultType()}, false);
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "memcpy", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addRetAttr(llvm::Attribute::NoAlias); // returned (destination) pointer does not alias any pointer visible to
                                               // the caller before this call
     return fn;
@@ -1046,6 +1049,9 @@ llvm::Function* CodeGenerator::getOrDeclareMemmove() {
     auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy, ptrTy, getDefaultType()}, false);
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "memmove", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    fn->addFnAttr(llvm::Attribute::NoSync);
     return fn;
 }
 
@@ -1304,7 +1310,7 @@ llvm::Function* CodeGenerator::getOrDeclareFseek() {
         return fn;
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context),
-                                        {ptrTy, getDefaultType(), llvm::Type::getInt32Ty(*context)}, false);
+                                       {ptrTy, getDefaultType(), llvm::Type::getInt32Ty(*context)}, false);
     return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "fseek", module.get());
 }
 
@@ -1320,8 +1326,8 @@ llvm::Function* CodeGenerator::getOrDeclareAccess() {
     if (auto* fn = module->getFunction("access"))
         return fn;
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
-    auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context),
-                                        {ptrTy, llvm::Type::getInt32Ty(*context)}, false);
+    auto* ty =
+        llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {ptrTy, llvm::Type::getInt32Ty(*context)}, false);
     return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "access", module.get());
 }
 
@@ -1335,8 +1341,7 @@ llvm::Function* CodeGenerator::getOrDeclarePthreadCreate() {
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     // int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
     //                    void *(*start_routine)(void*), void *arg)
-    auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context),
-                                        {ptrTy, ptrTy, ptrTy, ptrTy}, false);
+    auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {ptrTy, ptrTy, ptrTy, ptrTy}, false);
     return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "pthread_create", module.get());
 }
 
@@ -1345,8 +1350,7 @@ llvm::Function* CodeGenerator::getOrDeclarePthreadJoin() {
         return fn;
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     // int pthread_join(pthread_t thread, void **retval)
-    auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context),
-                                        {getDefaultType(), ptrTy}, false);
+    auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {getDefaultType(), ptrTy}, false);
     return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "pthread_join", module.get());
 }
 
@@ -1628,12 +1632,10 @@ void CodeGenerator::generate(Program* program) {
         debugBuilder_ = std::make_unique<llvm::DIBuilder>(*module);
         std::string filename = sourceFilename_.empty() ? "source.om" : sourceFilename_;
         debugFile_ = debugBuilder_->createFile(filename, ".");
-        debugCU_ = debugBuilder_->createCompileUnit(
-            llvm::dwarf::DW_LANG_C, debugFile_, "OmScript Compiler",
-            optimizationLevel != OptimizationLevel::O0, /*Flags=*/"", /*RV=*/0);
+        debugCU_ = debugBuilder_->createCompileUnit(llvm::dwarf::DW_LANG_C, debugFile_, "OmScript Compiler",
+                                                    optimizationLevel != OptimizationLevel::O0, /*Flags=*/"", /*RV=*/0);
         debugScope_ = debugFile_;
-        module->addModuleFlag(llvm::Module::Warning, "Debug Info Version",
-                              llvm::DEBUG_METADATA_VERSION);
+        module->addModuleFlag(llvm::Module::Warning, "Debug Info Version", llvm::DEBUG_METADATA_VERSION);
         // On Linux, DWARF4 is the most compatible format.
         module->addModuleFlag(llvm::Module::Warning, "Dwarf Version", 4);
     }
@@ -1816,13 +1818,11 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
 
     // --- Attach DWARF debug subprogram ---
     if (debugMode_ && debugBuilder_ && debugFile_) {
-        llvm::DISubroutineType* debugFuncType = debugBuilder_->createSubroutineType(
-            debugBuilder_->getOrCreateTypeArray({}));
+        llvm::DISubroutineType* debugFuncType =
+            debugBuilder_->createSubroutineType(debugBuilder_->getOrCreateTypeArray({}));
         llvm::DISubprogram* SP = debugBuilder_->createFunction(
-            debugFile_, func->name, llvm::StringRef(), debugFile_,
-            func->line > 0 ? func->line : 1,
-            debugFuncType, /*ScopeLine=*/func->line > 0 ? func->line : 1,
-            llvm::DINode::FlagPrototyped,
+            debugFile_, func->name, llvm::StringRef(), debugFile_, func->line > 0 ? func->line : 1, debugFuncType,
+            /*ScopeLine=*/func->line > 0 ? func->line : 1, llvm::DINode::FlagPrototyped,
             llvm::DISubprogram::SPFlagDefinition);
         function->setSubprogram(SP);
     }
