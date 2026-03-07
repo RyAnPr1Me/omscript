@@ -82,8 +82,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     if (expr->op == "+") {
         auto* leftLit = dynamic_cast<LiteralExpr*>(expr->left.get());
         auto* rightLit = dynamic_cast<LiteralExpr*>(expr->right.get());
-        if (leftLit && rightLit &&
-            leftLit->literalType == LiteralExpr::LiteralType::STRING &&
+        if (leftLit && rightLit && leftLit->literalType == LiteralExpr::LiteralType::STRING &&
             rightLit->literalType == LiteralExpr::LiteralType::STRING) {
             std::string folded = leftLit->stringValue + rightLit->stringValue;
             return builder->CreateGlobalString(folded, "strfold");
@@ -150,7 +149,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
 
     // Pre-compute string flags once, used by both the float-skip guard below
     // and the string concatenation block that follows.
-    bool leftIsStr  = left->getType()->isPointerTy()  || isStringExpr(expr->left.get());
+    bool leftIsStr = left->getType()->isPointerTy() || isStringExpr(expr->left.get());
     bool rightIsStr = right->getType()->isPointerTy() || isStringExpr(expr->right.get());
 
     // Float operations path — but only when neither operand is a string.
@@ -163,6 +162,40 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             left = ensureFloat(left);
         if (!rightIsFloat)
             right = ensureFloat(right);
+
+        // Float constant folding — compute at compile time when both operands
+        // are known constants, avoiding runtime FP instructions entirely.
+        if (auto* lc = llvm::dyn_cast<llvm::ConstantFP>(left)) {
+            if (auto* rc = llvm::dyn_cast<llvm::ConstantFP>(right)) {
+                double lv = lc->getValueAPF().convertToDouble();
+                double rv = rc->getValueAPF().convertToDouble();
+                if (expr->op == "+")
+                    return llvm::ConstantFP::get(getFloatType(), lv + rv);
+                if (expr->op == "-")
+                    return llvm::ConstantFP::get(getFloatType(), lv - rv);
+                if (expr->op == "*")
+                    return llvm::ConstantFP::get(getFloatType(), lv * rv);
+                if (expr->op == "/" && rv != 0.0)
+                    return llvm::ConstantFP::get(getFloatType(), lv / rv);
+                if (expr->op == "==" || expr->op == "!=" || expr->op == "<" || expr->op == "<=" || expr->op == ">" ||
+                    expr->op == ">=") {
+                    int64_t result = 0;
+                    if (expr->op == "==")
+                        result = lv == rv ? 1 : 0;
+                    else if (expr->op == "!=")
+                        result = lv != rv ? 1 : 0;
+                    else if (expr->op == "<")
+                        result = lv < rv ? 1 : 0;
+                    else if (expr->op == "<=")
+                        result = lv <= rv ? 1 : 0;
+                    else if (expr->op == ">")
+                        result = lv > rv ? 1 : 0;
+                    else if (expr->op == ">=")
+                        result = lv >= rv ? 1 : 0;
+                    return llvm::ConstantInt::get(getDefaultType(), result);
+                }
+            }
+        }
 
         if (expr->op == "+")
             return builder->CreateFAdd(left, right, "faddtmp");
@@ -255,29 +288,29 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     // This is the binary-operator equivalent of str_repeat(str, n).
     if (expr->op == "*" && (leftIsStr || rightIsStr)) {
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
-        llvm::Value* strVal   = leftIsStr  ? left  : right;
-        llvm::Value* countVal = leftIsStr  ? right : left;
+        llvm::Value* strVal = leftIsStr ? left : right;
+        llvm::Value* countVal = leftIsStr ? right : left;
         countVal = toDefaultType(countVal);
         // Clamp negative counts to 0 to prevent integer overflow in the
         // totalLen = strLen * count multiplication.
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
         llvm::Value* isNeg = builder->CreateICmpSLT(countVal, zero, "strmul.isneg");
         countVal = builder->CreateSelect(isNeg, zero, countVal, "strmul.clamp");
-        llvm::Value* strPtr = strVal->getType()->isPointerTy()
-                                  ? strVal
-                                  : builder->CreateIntToPtr(strVal, ptrTy, "strmul.ptr");
-        llvm::Value* strLen   = builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "strmul.len");
+        llvm::Value* strPtr =
+            strVal->getType()->isPointerTy() ? strVal : builder->CreateIntToPtr(strVal, ptrTy, "strmul.ptr");
+        llvm::Value* strLen = builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "strmul.len");
         llvm::Value* totalLen = builder->CreateMul(strLen, countVal, "strmul.total");
-        llvm::Value* allocSz  = builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "strmul.alloc");
-        llvm::Value* buf      = builder->CreateCall(getOrDeclareMalloc(), {allocSz}, "strmul.buf");
+        llvm::Value* allocSz =
+            builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "strmul.alloc");
+        llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {allocSz}, "strmul.buf");
         builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), buf);
         // Loop countVal times, appending strPtr each iteration.
         llvm::Function* curFn = builder->GetInsertBlock()->getParent();
-        llvm::BasicBlock* preHdr  = builder->GetInsertBlock();
-        llvm::BasicBlock* loopBB  = llvm::BasicBlock::Create(*context, "strmul.loop", curFn);
-        llvm::BasicBlock* bodyBB  = llvm::BasicBlock::Create(*context, "strmul.body", curFn);
-        llvm::BasicBlock* doneBB  = llvm::BasicBlock::Create(*context, "strmul.done", curFn);
-        llvm::Value* one  = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::BasicBlock* preHdr = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "strmul.loop", curFn);
+        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "strmul.body", curFn);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "strmul.done", curFn);
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
         builder->CreateBr(loopBB);
         builder->SetInsertPoint(loopBB);
         llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "strmul.idx");
@@ -301,23 +334,19 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         auto toStrPtr = [&](llvm::Value* v, bool isStr) -> llvm::Value* {
             if (!isStr) {
                 // Non-string operand in a mixed comparison: treat as pointer.
-                return v->getType()->isPointerTy()
-                           ? v
-                           : builder->CreateIntToPtr(v, ptrTy, "strcmp.cast");
+                return v->getType()->isPointerTy() ? v : builder->CreateIntToPtr(v, ptrTy, "strcmp.cast");
             }
-            return v->getType()->isPointerTy()
-                       ? v
-                       : builder->CreateIntToPtr(v, ptrTy, "strcmp.cast");
+            return v->getType()->isPointerTy() ? v : builder->CreateIntToPtr(v, ptrTy, "strcmp.cast");
         };
-        llvm::Value* lPtr = toStrPtr(left,  leftIsStr);
+        llvm::Value* lPtr = toStrPtr(left, leftIsStr);
         llvm::Value* rPtr = toStrPtr(right, rightIsStr);
         llvm::Value* cmpResult = builder->CreateCall(getOrDeclareStrcmp(), {lPtr, rPtr}, "strcmp.res");
         llvm::Value* zero32 = builder->getInt32(0);
         llvm::Value* cmpBool;
         if (expr->op == "==")
-            cmpBool = builder->CreateICmpEQ(cmpResult,  zero32, "scmp.eq");
+            cmpBool = builder->CreateICmpEQ(cmpResult, zero32, "scmp.eq");
         else if (expr->op == "!=")
-            cmpBool = builder->CreateICmpNE(cmpResult,  zero32, "scmp.ne");
+            cmpBool = builder->CreateICmpNE(cmpResult, zero32, "scmp.ne");
         else if (expr->op == "<")
             cmpBool = builder->CreateICmpSLT(cmpResult, zero32, "scmp.lt");
         else if (expr->op == "<=")
@@ -462,6 +491,11 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             return llvm::ConstantInt::get(getDefaultType(), 0); // x-x→0, x^x→0
         if (expr->op == "&" || expr->op == "|")
             return left; // x&x→x, x|x→x
+        // Comparison identities: reflexive comparisons on the same SSA value.
+        if (expr->op == "==" || expr->op == "<=" || expr->op == ">=")
+            return llvm::ConstantInt::get(getDefaultType(), 1); // x==x→1, x<=x→1, x>=x→1
+        if (expr->op == "!=" || expr->op == "<" || expr->op == ">")
+            return llvm::ConstantInt::get(getDefaultType(), 0); // x!=x→0, x<x→0, x>x→0
     }
 
     // Regular code generation for non-constant expressions.
@@ -756,9 +790,8 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
         // Convert i64 → pointer; check if already a pointer first to avoid
         // invalid IntToPtr of a pointer value (matches generateIndex() pattern).
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
-        llvm::Value* arrPtr = arrVal->getType()->isPointerTy()
-                                  ? arrVal
-                                  : builder->CreateIntToPtr(arrVal, ptrTy, "incdec.arrptr");
+        llvm::Value* arrPtr =
+            arrVal->getType()->isPointerTy() ? arrVal : builder->CreateIntToPtr(arrVal, ptrTy, "incdec.arrptr");
 
         // Bounds check
         llvm::Value* lenVal = builder->CreateLoad(getDefaultType(), arrPtr, "incdec.len");
@@ -1018,12 +1051,11 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
 
     // Convert i64 → pointer (strings may arrive as i64 via ptrtoint)
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
-    llvm::Value* basePtr = arrVal->getType()->isPointerTy()
-                               ? arrVal
-                               : builder->CreateIntToPtr(arrVal, ptrTy, "idx.baseptr");
+    llvm::Value* basePtr =
+        arrVal->getType()->isPointerTy() ? arrVal : builder->CreateIntToPtr(arrVal, ptrTy, "idx.baseptr");
 
     llvm::Function* function = builder->GetInsertBlock()->getParent();
-    llvm::BasicBlock* okBB   = llvm::BasicBlock::Create(*context, "idx.ok",   function);
+    llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "idx.ok", function);
     llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "idx.fail", function);
 
     llvm::Value* lenVal;
@@ -1037,16 +1069,16 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
 
     // Bounds check: 0 <= index < length
     llvm::Value* inBounds = builder->CreateICmpSLT(idxVal, lenVal, "idx.inbounds");
-    llvm::Value* notNeg   = builder->CreateICmpSGE(idxVal, llvm::ConstantInt::get(getDefaultType(), 0), "idx.notneg");
-    llvm::Value* valid    = builder->CreateAnd(inBounds, notNeg, "idx.valid");
+    llvm::Value* notNeg = builder->CreateICmpSGE(idxVal, llvm::ConstantInt::get(getDefaultType(), 0), "idx.notneg");
+    llvm::Value* valid = builder->CreateAnd(inBounds, notNeg, "idx.valid");
 
     builder->CreateCondBr(valid, okBB, failBB);
 
     // Out-of-bounds path: print error and abort
     builder->SetInsertPoint(failBB);
-    llvm::Value* errMsg = isStr
-        ? builder->CreateGlobalString("Runtime error: string index out of bounds\n", "idx_str_oob_msg")
-        : builder->CreateGlobalString("Runtime error: array index out of bounds\n",  "idx_arr_oob_msg");
+    llvm::Value* errMsg =
+        isStr ? builder->CreateGlobalString("Runtime error: string index out of bounds\n", "idx_str_oob_msg")
+              : builder->CreateGlobalString("Runtime error: array index out of bounds\n", "idx_arr_oob_msg");
     builder->CreateCall(getPrintfFunction(), {errMsg});
     builder->CreateCall(getOrDeclareAbort());
     builder->CreateUnreachable();
@@ -1060,7 +1092,7 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
         return builder->CreateZExt(charVal, getDefaultType(), "idx.charext");
     }
     // Array: element is at slot (index + 1) in the i64 buffer.
-    llvm::Value* offset  = builder->CreateAdd(idxVal, llvm::ConstantInt::get(getDefaultType(), 1), "idx.offset");
+    llvm::Value* offset = builder->CreateAdd(idxVal, llvm::ConstantInt::get(getDefaultType(), 1), "idx.offset");
     llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), basePtr, offset, "idx.elem.ptr");
     return builder->CreateLoad(getDefaultType(), elemPtr, "idx.elem");
 }
@@ -1076,12 +1108,11 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
     bool isStr = arrVal->getType()->isPointerTy() || isStringExpr(expr->array.get());
 
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
-    llvm::Value* basePtr = arrVal->getType()->isPointerTy()
-                               ? arrVal
-                               : builder->CreateIntToPtr(arrVal, ptrTy, "idxa.baseptr");
+    llvm::Value* basePtr =
+        arrVal->getType()->isPointerTy() ? arrVal : builder->CreateIntToPtr(arrVal, ptrTy, "idxa.baseptr");
 
     llvm::Function* function = builder->GetInsertBlock()->getParent();
-    llvm::BasicBlock* okBB   = llvm::BasicBlock::Create(*context, "idxa.ok",   function);
+    llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "idxa.ok", function);
     llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "idxa.fail", function);
 
     llvm::Value* lenVal;
@@ -1093,16 +1124,16 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
 
     // Bounds check: 0 <= index < length
     llvm::Value* inBounds = builder->CreateICmpSLT(idxVal, lenVal, "idxa.inbounds");
-    llvm::Value* notNeg   = builder->CreateICmpSGE(idxVal, llvm::ConstantInt::get(getDefaultType(), 0), "idxa.notneg");
-    llvm::Value* valid    = builder->CreateAnd(inBounds, notNeg, "idxa.valid");
+    llvm::Value* notNeg = builder->CreateICmpSGE(idxVal, llvm::ConstantInt::get(getDefaultType(), 0), "idxa.notneg");
+    llvm::Value* valid = builder->CreateAnd(inBounds, notNeg, "idxa.valid");
 
     builder->CreateCondBr(valid, okBB, failBB);
 
     // Out-of-bounds path: print error and abort
     builder->SetInsertPoint(failBB);
-    llvm::Value* errMsg = isStr
-        ? builder->CreateGlobalString("Runtime error: string index out of bounds\n", "idxa_str_oob_msg")
-        : builder->CreateGlobalString("Runtime error: array index out of bounds\n",  "idxa_arr_oob_msg");
+    llvm::Value* errMsg =
+        isStr ? builder->CreateGlobalString("Runtime error: string index out of bounds\n", "idxa_str_oob_msg")
+              : builder->CreateGlobalString("Runtime error: array index out of bounds\n", "idxa_arr_oob_msg");
     builder->CreateCall(getPrintfFunction(), {errMsg});
     builder->CreateCall(getOrDeclareAbort());
     builder->CreateUnreachable();
@@ -1116,7 +1147,7 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
         builder->CreateStore(byteVal, charPtr);
     } else {
         // Array: store i64 element at slot (index + 1)
-        llvm::Value* offset  = builder->CreateAdd(idxVal, llvm::ConstantInt::get(getDefaultType(), 1), "idxa.offset");
+        llvm::Value* offset = builder->CreateAdd(idxVal, llvm::ConstantInt::get(getDefaultType(), 1), "idxa.offset");
         llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), basePtr, offset, "idxa.elem.ptr");
         builder->CreateStore(newVal, elemPtr);
     }
@@ -1200,8 +1231,8 @@ llvm::Value* CodeGenerator::generateStructLiteral(StructLiteralExpr* expr) {
 
     // Initialize all fields to 0
     for (size_t i = 0; i < numFields; i++) {
-        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), ptr,
-                                                   llvm::ConstantInt::get(getDefaultType(), i), "struct.field.ptr");
+        llvm::Value* elemPtr =
+            builder->CreateGEP(getDefaultType(), ptr, llvm::ConstantInt::get(getDefaultType(), i), "struct.field.ptr");
         builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 0), elemPtr);
     }
 
@@ -1213,9 +1244,8 @@ llvm::Value* CodeGenerator::generateStructLiteral(StructLiteralExpr* expr) {
         }
         llvm::Value* val = generateExpression(valueExpr.get());
         val = toDefaultType(val);
-        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), ptr,
-                                                   llvm::ConstantInt::get(getDefaultType(), fit->second),
-                                                   "struct.field.ptr");
+        llvm::Value* elemPtr = builder->CreateGEP(
+            getDefaultType(), ptr, llvm::ConstantInt::get(getDefaultType(), fit->second), "struct.field.ptr");
         builder->CreateStore(val, elemPtr);
     }
 
@@ -1231,9 +1261,8 @@ llvm::Value* CodeGenerator::generateFieldAccess(FieldAccessExpr* expr) {
 
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     llvm::Value* basePtr = builder->CreateIntToPtr(objVal, ptrTy, "struct.baseptr");
-    llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), basePtr,
-                                               llvm::ConstantInt::get(getDefaultType(), fieldIdx),
-                                               "struct.field.load.ptr");
+    llvm::Value* elemPtr = builder->CreateGEP(
+        getDefaultType(), basePtr, llvm::ConstantInt::get(getDefaultType(), fieldIdx), "struct.field.load.ptr");
     return builder->CreateLoad(getDefaultType(), elemPtr, "struct.field.val");
 }
 
@@ -1248,9 +1277,8 @@ llvm::Value* CodeGenerator::generateFieldAssign(FieldAssignExpr* expr) {
 
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     llvm::Value* basePtr = builder->CreateIntToPtr(objVal, ptrTy, "struct.baseptr");
-    llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), basePtr,
-                                               llvm::ConstantInt::get(getDefaultType(), fieldIdx),
-                                               "struct.field.store.ptr");
+    llvm::Value* elemPtr = builder->CreateGEP(
+        getDefaultType(), basePtr, llvm::ConstantInt::get(getDefaultType(), fieldIdx), "struct.field.store.ptr");
     builder->CreateStore(newVal, elemPtr);
     return newVal;
 }
