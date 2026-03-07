@@ -571,7 +571,8 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
             int64_t rv = ci->getSExtValue();
             int s = log2IfPowerOf2(rv);
-            if (s > 0) { // positive power-of-2 (exclude 1, which is identity/zero)
+            if (s > 0) { // positive power-of-2 with shift > 0 (divisor=1 has s=0 and is
+                         // already handled as an algebraic identity above)
                 if (isDivision) {
                     // Emit: (x + ((x >> 63) & (divisor-1))) >> n
                     llvm::Value* signBit =
