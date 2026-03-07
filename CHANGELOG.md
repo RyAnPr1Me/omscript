@@ -5,6 +5,163 @@ All notable changes to the OmScript compiler will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.9] - 2026-03-07
+
+### Added
+- **Struct/record type support**: `struct Point { x, y }` with field access (`p.x`), field assignment (`p.x = 10`), and struct literal creation (`Point { x: 10, y: 20 }`)
+- **Module/import system**: `import "path/to/module"` with automatic `.om` extension, relative path resolution from source file, and circular import detection
+- **Generic function type parameter syntax**: `fn identity<T>(x: T) -> T { ... }` — type parameters are parsed for documentation and annotation (type-erased at runtime since all values are i64)
+- **File I/O builtins**: `file_read(path)`, `file_write(path, content)`, `file_append(path, content)`, `file_exists(path)`
+- **Map/dictionary builtins**: `map_new()`, `map_set(map, key, value)`, `map_get(map, key, default)`, `map_has(map, key)`, `map_size(map)`, `map_keys(map)`, `map_values(map)`, `map_remove(map, key)`
+- **Range builtins**: `range(start, end)`, `range_step(start, end, step)`
+- **Concurrency primitives** (pthreads): `thread_create("fn_name")`, `thread_join(handle)`, `mutex_new()`, `mutex_lock(m)`, `mutex_unlock(m)`, `mutex_destroy(m)`
+- **DWARF debug info**: `DIBuilder` integration with source line and column tracking attached to IR instructions (Dwarf Version 4)
+- **Structured error codes** (E001–E012) with diagnostic severity levels (error, warning, note, hint) and Levenshtein-based "did you mean?" suggestions
+- **Compile-time string constant folding**: adjacent string literal concatenations merged at compile time
+- **OPTMAX pragma expansion** for more aggressive per-function optimization
+- Utility builtins: `char_code()`, `number_to_string()`, `string_to_number()`
+- CodeGenerator refactored from monolithic `codegen.cpp` into 5 focused files: `codegen.cpp`, `codegen_builtins.cpp`, `codegen_expr.cpp`, `codegen_stmt.cpp`, `codegen_opt.cpp`
+- Standard library expanded to **97 built-in functions** (from 69)
+- New integration tests: `struct_test.om`, `import_test.om`, `generic_test.om`, `file_io_test.om`, `map_test.om`, `range_test.om`, `string_fold_test.om`, `thread_test.om`
+
+### Fixed
+- For-loop descending range now auto-detects step `-1` when `start > end`
+- `range_step` division by zero when step is 0
+- `push()` memory leak when reallocating arrays
+- `generateIncDec` type normalization for increment/decrement operations
+- Null byte escape inconsistency between `\0` and `\x00`
+- `NoSync`/`NoFree`/`WillReturn` LLVM attributes incorrectly applied to functions calling concurrency primitives
+- `str_repeat` with negative count no longer causes undefined behavior
+- Constant folding undefined behavior edge cases
+
+## [2.3.2] - 2026-03-06
+
+### Added
+- **Production-grade exception hierarchy**: `FileError`, `ValidationError`, `LinkError` in `diagnostic.h` — replaces raw `std::runtime_error` throws with domain-specific exception types
+
+### Changed
+- `[[nodiscard]]`/`noexcept` annotations added to all getter methods
+- `explicit` keyword on all single-argument constructors to prevent implicit conversions
+- Named constants replacing magic numbers throughout codebase
+- Fixed include order and header guards to match style guide
+
+## [2.3.1] - 2026-03-06
+
+### Changed
+- `noexcept` on Value copy operations for move-optimization in STL containers
+- Length-aware `RefCountedString` constructor avoids redundant `strlen` calls
+- `memcmp`-based string comparisons replacing character-by-character loops
+- `DeoptManager` merge optimization for deoptimization logic
+
+### Fixed
+- `dump()` method const-correctness
+- `ArgProfile` data structure correctness
+
+## [2.3.0] - 2026-03-06
+
+### Added
+- Thread-local profiler counters for reduced contention in JIT runtime
+- Benchmark tests for profiling overhead measurement
+- Single-allocation mixed-type string concatenation in Value class
+
+### Changed
+- Improved code quality throughout: `[[nodiscard]]` annotations, exception safety, named constants, `noexcept` specifiers
+
+## [2.2.9] - 2026-03-05
+
+### Added
+- **Multi-tier JIT system** with adaptive recompilation — Tier-1 baseline through Tier-5 mega-hot (thresholds at 50, 500, 5000, and 50000 calls) with increasingly aggressive optimization
+- **ORC LLJIT** replaces MCJIT — modern, thread-safe JIT compilation engine
+- **Parallel background compilation** with 4 dedicated threads and atomic function pointer hot-patching for zero-stall recompilation
+- **Eager background compilation** with aggressive inlining — JIT achieves **2.6× faster than AOT**
+- **Non-blocking runtime**: atomic loads and try_lock callbacks eliminate stalls during compilation
+- **Hot-function priority queue** for compilation scheduling — hottest functions recompiled first
+- **Constant-argument specialization**: clone and constant-propagate hot functions with stable argument patterns
+- **Loop unroll hints** and compile-time function evaluation via LLVM Interpreter
+- **LTO pre-link pipeline** with CMake LTO configuration
+- JIT vs AOT benchmark suite with runner script and per-function timing
+- Comprehensive `RUNTIME_REPORT.md` documenting all runtimes and JIT/AOT pipelines
+
+### Fixed
+- String + float concatenation and `to_string(float)` output format
+- `typeof` type tags for correct runtime type identification
+- `throw` propagation through nested `try`/`catch` blocks
+- `len()` on strings (previously returned array length instead of string length)
+- `s[i]` and for-each on strings were using array layout semantics instead of string character access
+- `pow(float)` incorrect results for fractional exponents
+- `str_replace` now replaces **all** occurrences instead of only the first
+- `to_int`/`to_float` string parsing edge cases
+- `to_char` segfault when called with certain values
+- String variable ordering comparisons (`<`, `>`, `<=`, `>=`)
+- `string * int` concatenation crash
+- String array element type-loss, for-each string iterator, and `sort` on string arrays
+- `print_char` crash when given `to_char()` result
+- Profile data race, atomic undefined behavior, exception safety, and RAII ordering in JIT runtime
+- Memory ordering upgraded from Monotonic to Acquire for correctness
+- JIT compilation failures: disabled CallGraphProfile pass, use null TargetMachine for O3, erase main before recompile, whole-module compilation
+- PHI node ordering: use `getFirstNonPHI()` for loop exit block instrumentation
+
+## [2.2.0] - 2026-03-04
+
+### Added
+- **Loop trip count profiling** in JIT optimizer — records iteration counts per loop for unroll and vectorization decisions
+- **Call-site frequency tracking** — per-callsite counters feeding inlining heuristics
+- **Value range profiling** — tracks argument value distributions for specialization opportunities
+- JIT constant specialization for hot call sites
+- Cold function marking with LLVM `cold` attribute for improved code layout
+- Loop vectorization metadata on JIT-recompiled functions
+
+### Fixed
+- O(n²) back-edge detection replaced with linear algorithm
+
+## [2.1.9] - 2026-03-04
+
+### Changed
+- JIT now respects user-specified optimization level (`-O0` through `-O3`)
+
+### Fixed
+- `createMergedLoadStoreMotionPass` guarded with LLVM version check for cross-version compatibility
+
+## [2.1.3] - 2026-03-04
+
+### Added
+- Intra-procedural optimization passes applied in JIT baseline (`generateHybrid`)
+- Branch profiling wired into `injectCounters` with C-linkage callback tests
+- Loop rotation, simplification, and sinking passes added to JIT pipeline
+
+### Changed
+- Tier-2 JIT threshold lowered to 100 calls for earlier reoptimization
+
+### Fixed
+- LLVM API compatibility: guarded `UnsafeFPMath`, `PGOOptions` VFS parameter, and `createLoopRotatePass` for multi-version support
+
+## [2.1.1] - 2026-03-03
+
+### Added
+- **Verbose JIT output**: print recompile events when `--verbose` flag is set
+
+### Fixed
+- JIT recompilation not firing for hot functions
+- OPTMAX pass ordering (optimization passes now applied in correct sequence)
+
+## [2.1.0] - 2026-03-03
+
+### Added
+- **NSW (No-Signed-Wrap) flags** on integer `add`, `sub`, `mul`, `shl` for better range analysis and optimization
+- **`norecurse` attribute** on non-recursive user functions for interprocedural optimization
+- **`noundef` attribute** on function parameters and return values for value-range propagation
+- **Loop vectorization hints**: `llvm.loop.vectorize.enable` and `llvm.loop.interleave.count` metadata on loops
+- **Power-of-2 division strength reduction**: `x / 2^n` compiled as arithmetic right shift `x >> n`
+- **Power-of-2 modulo strength reduction**: `x % 2^n` compiled as bitwise mask `x & (2^n - 1)`
+- Large-scale loops + math benchmark suite with C and Rust reference implementations
+
+### Changed
+- Runtime overhead reduced with branch prediction hints (`__builtin_expect`), optimized copy/move paths, and lock-free profiling
+
+### Fixed
+- Auto-convert int/float to string in string concatenation (previously caused SIGSEGV)
+- Wrapping arithmetic and direct `SDiv`/`SRem` for constant divisors in codegen
+
 ## [2.0.0] - 2026-03-01
 
 ### Added
