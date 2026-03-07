@@ -331,21 +331,21 @@ TEST(JITProfilerTest, DumpDoesNotCrash) {
 // ===========================================================================
 
 TEST(ArgProfileTest, ConstantSpecExactThreshold) {
-    // Exactly 80% (8/10) should NOT trigger (threshold is >80%, i.e. strictly greater)
+    // Exactly 60% (6/10) should NOT trigger (threshold is >60%, i.e. strictly greater)
     ArgProfile ap;
-    for (int i = 0; i < 8; i++)
+    for (int i = 0; i < 6; i++)
         ap.record(ArgType::Integer, 42);
-    ap.record(ArgType::Integer, 99);
-    ap.record(ArgType::Integer, 100);
+    for (int i = 0; i < 4; i++)
+        ap.record(ArgType::Integer, i + 100);
     EXPECT_FALSE(ap.hasConstantSpecialization());
 }
 
 TEST(ArgProfileTest, ConstantSpecAboveThreshold) {
-    // 81% (81/100) should trigger constant specialization
+    // 70% (7/10) should trigger constant specialization
     ArgProfile ap;
-    for (int i = 0; i < 81; i++)
+    for (int i = 0; i < 7; i++)
         ap.record(ArgType::Integer, 42);
-    for (int i = 0; i < 19; i++)
+    for (int i = 0; i < 3; i++)
         ap.record(ArgType::Integer, i + 100);
     EXPECT_TRUE(ap.hasConstantSpecialization());
     EXPECT_EQ(ap.observedConstant, 42);

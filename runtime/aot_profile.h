@@ -74,9 +74,10 @@
 //   Tier 1 — Baseline JIT (fast startup):
 //     The module's clean IR is serialised to bitcode, then a fresh copy is
 //     loaded, call-counting dispatch prologs are injected into every
-//     non-main function, and the result is JIT-compiled at O0 via LLVM
-//     ORC LLJIT.  Execution begins immediately.  O0 codegen keeps startup
-//     fast; the code is replaced after just a few calls by PGO-guided Tier-2.
+//     non-main function, and the result is JIT-compiled at O1 via LLVM
+//     ORC LLJIT.  Execution begins immediately.  O1 codegen provides
+//     good baseline performance; the code is replaced after just 2 calls
+//     by PGO-guided Tier-2.
 //
 //   Runtime Profiling (continuous):
 //     Each non-main function collects runtime data via atomic counters
@@ -87,16 +88,12 @@
 //     Profiling continues even after Tier-2 promotion so that higher
 //     tiers benefit from richer statistical data.
 //
-//   Tier 2 — Warm recompile (10 calls):
-//     First O2+PGO recompile with early profile data.
-//     Inliner threshold: 600.
-//     O2 keeps recompilation fast (~2x faster than O3) while still
-//     benefiting from PGO annotations (branch weights, type hints).
-//
-//   Tier 3 — Hot recompile (1000 calls):
-//     Full O3+PGO recompile with deep profile data.
-//     Inliner threshold: 1200, double O3 pass for cascading optimizations,
-//     alwaysinline on hot callees (>40% of calls).
+//   Tier 2 — Warm recompile (2 calls):
+//     Full O3+PGO recompile with double O3 pass for cascading
+//     optimizations.  Inliner threshold: 10000 (whole-module) / 5000
+//     (per-function).  Vectorize width 16, interleave 16, aggressive
+//     loop unrolling up to 64 iterations.  Constant-arg specialization
+//     threshold lowered to 60% for more aggressive folding.
 //
 //   Background Compilation:
 //     All recompilations (Tier-2 and Tier-3) run on a dedicated background
@@ -152,27 +149,24 @@ class AdaptiveJITRunner {
     // -----------------------------------------------------------------------
     // Multi-tier recompilation thresholds
     // -----------------------------------------------------------------------
-    // The JIT uses three execution tiers, each triggered when a function's
+    // The JIT uses two execution tiers, each triggered when a function's
     // call count first reaches the corresponding threshold:
     //
     //   Tier 1 (baseline):  O1-backend JIT of the compiler's IR — runs from
     //                       call 0 while profile data is being collected.
-    //                       O1 backend provides fast startup; the code is
-    //                       replaced by Tier-2 after just 10 calls.
-    //   Tier 2 (warm):      10 calls — first O2+PGO recompile with early
-    //                       profile data (branch weights, argument types).
-    //                       O2 keeps recompile time low while applying PGO.
-    //   Tier 3 (hot):       1000 calls — full O3+PGO recompile with deep
-    //                       profile, inliner threshold 1200, double O3
-    //                       pass for cascading optimizations, alwaysinline
-    //                       on hot callees.
+    //                       O1 backend provides good baseline code quality;
+    //                       the code is replaced by Tier-2 after just 2 calls.
+    //   Tier 2 (warm):      2 calls — full O3+PGO recompile with double O3
+    //                       pass, aggressive inlining (threshold 10000/5000),
+    //                       constant-arg specialization (60% threshold),
+    //                       vectorize width 16, loop unrolling up to 64.
     //
-    // The reduced number of tiers (3 vs the previous 5) dramatically cuts
-    // total recompilation overhead: each hot function is recompiled at most
-    // twice instead of four times, and the Tier-2 O2 recompile is ~2x
-    // faster than a full O3 pass.
+    // The single recompile tier minimises total recompilation overhead:
+    // each hot function is recompiled at most once, using the most
+    // aggressive optimisation available.  4 background threads ensure
+    // compilation completes before the function is called a third time.
     // -----------------------------------------------------------------------
-    static constexpr int64_t kTier2Threshold = 5;
+    static constexpr int64_t kTier2Threshold = 2;
     static constexpr int64_t kTier3Threshold = 1000000000LL; // effectively disabled
     /// Highest tier number (Tier-1 = baseline, Tier-2..kMaxTier = recompiled).
     static constexpr int kMaxTier = 2;
@@ -319,9 +313,10 @@ class AdaptiveJITRunner {
     std::atomic<bool> shutdownRequested_{false}; ///< Signals the workers to exit.
 
     /// Number of background compilation threads.
-    /// Using 2 threads: one for the whole-module O3 compile, one spare for
-    /// any fallback per-function recompiles triggered by onHotFunction().
-    static constexpr int kNumBgThreads = 2;
+    /// Using 4 threads: maximises parallel compilation bandwidth so the
+    /// whole-module O3 compile and per-function fallback recompiles can
+    /// proceed simultaneously.
+    static constexpr int kNumBgThreads = 4;
 
     /// Background worker loop: waits for tasks, executes them sequentially.
     void backgroundWorker();

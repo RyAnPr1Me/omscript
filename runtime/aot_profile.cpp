@@ -221,7 +221,7 @@ void AdaptiveJITRunner::injectCounters(llvm::Module& mod) {
         }
 
         // --- omsc.count: increment counter and check tier threshold ---
-        // The cold path only runs before the first recompile (calls 1-5).
+        // The cold path only runs before the first recompile (calls 1-2).
         // Using a plain (non-atomic) counter since the program is single-threaded.
         B.SetInsertPoint(countBB);
         auto* oldCnt = B.CreateLoad(i64Ty, counterGV, "omsc.old");
@@ -285,21 +285,27 @@ int AdaptiveJITRunner::run(llvm::Module* baseModule) {
     }
 
     // Step 4: JIT-compile the instrumented module using ORC LLJIT.
-    // Use O0 codegen for Tier-1 so the initial native code compiles as fast
-    // as possible.  Tier-1 code is replaced by the Tier-2 recompile after
-    // just a few calls, so spending any time on optimization at startup is
-    // wasted — the code will be thrown away.  O0 gives the fastest possible
-    // ORC LLJIT compilation time, minimizing startup latency.
+    // Use O1 codegen for Tier-1 so the baseline code is reasonably fast while
+    // still compiling quickly.  O1 applies basic optimizations (register
+    // allocation, instruction scheduling, peephole) that make Tier-1 code
+    // ~2-3× faster than O0, significantly reducing the gap to Tier-2.
+    // Since Tier-2 fires after just 2 calls, the brief O1 compile cost is
+    // quickly amortised by faster baseline execution.
     if (verbose_)
-        std::cout << "JIT: compiling instrumented module (Tier-1, O0)..." << std::endl;
+        std::cout << "JIT: compiling instrumented module (Tier-1, O1)..." << std::endl;
 
-    // Create an ORC LLJIT instance with O0 backend codegen.
+    // Create an ORC LLJIT instance with O1 backend codegen.
     auto JTMB1 = llvm::orc::JITTargetMachineBuilder::detectHost();
     if (!JTMB1) {
         llvm::errs() << "omsc: JIT engine creation failed: " << llvm::toString(JTMB1.takeError()) << "\n";
         return 1;
     }
-    setJTMBOptLevel(*JTMB1, /*aggressive=*/false);
+    // O1 for Tier-1: fast compile, reasonable code quality.
+#if LLVM_VERSION_MAJOR >= 18
+    JTMB1->setCodeGenOptLevel(llvm::CodeGenOptLevel::Default);
+#else
+    JTMB1->setCodeGenOptLevel(llvm::CodeGenOpt::Default);
+#endif
 
     auto jitOrErr = llvm::orc::LLJITBuilder()
                         .setJITTargetMachineBuilder(std::move(*JTMB1))
@@ -1307,11 +1313,12 @@ void AdaptiveJITRunner::doRecompileWholeModule() {
         // relocations, which JITLink rejects on x86-64 with
         // "No SHT_REL in valid x64 ELF object files".
         PTO.CallGraphProfile = false;
-        // InlinerThreshold 5000: much higher than AOT's 400, ensuring all
-        // user functions (including larger bench wrappers) are inlined.
-        // After inlining, LLVM's SCCP evaluates loops called with constant
-        // arguments (e.g. fib_iter(150)) at compile time → zero runtime cost.
-        PTO.InlinerThreshold = 5000;
+        // InlinerThreshold 10000: extremely aggressive inlining to ensure all
+        // user functions are fully inlined.  After inlining, LLVM's SCCP
+        // evaluates loops called with constant arguments (e.g. fib_iter(150))
+        // at compile time → zero runtime cost.  Higher than AOT's 400 because
+        // the JIT only processes the stripped module (hot functions + callees).
+        PTO.InlinerThreshold = 10000;
 
         // Use LLJIT's data layout so O3's size / alignment calculations match
         // what the native backend expects.
@@ -1348,6 +1355,15 @@ void AdaptiveJITRunner::doRecompileWholeModule() {
 
         auto pipeline = PB.buildPerModuleDefaultPipeline(llvm::OptimizationLevel::O3);
         pipeline.run(*mod, MAM);
+
+        // Double O3 pass: the first pass performs inlining, SCCP, and constant
+        // folding which may expose NEW optimization opportunities (dead code,
+        // simplified loops, redundant stores) that the second pass can exploit.
+        // This cascading effect is especially powerful after constant-arg
+        // specialization and compile-time function evaluation have replaced
+        // call sites with constants.
+        auto pipeline2 = PB.buildPerModuleDefaultPipeline(llvm::OptimizationLevel::O3);
+        pipeline2.run(*mod, MAM);
     }
 
     if (verbose_) {
@@ -1821,10 +1837,10 @@ void AdaptiveJITRunner::doRecompile(const std::string& funcName, int64_t callCou
             llvm::MDNode* mustProgress = llvm::MDNode::get(ctx, {llvm::MDString::get(ctx, "llvm.loop.mustprogress")});
             llvm::MDNode* interleave = llvm::MDNode::get(
                 ctx, {llvm::MDString::get(ctx, "llvm.loop.interleave.count"),
-                      llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), 8))});
+                      llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), 16))});
             llvm::MDNode* vecWidth = llvm::MDNode::get(
                 ctx, {llvm::MDString::get(ctx, "llvm.loop.vectorize.width"),
-                      llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), 8))});
+                      llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), 16))});
             llvm::SmallVector<llvm::Metadata*, 6> loopMDs;
             loopMDs.push_back(nullptr); // self-reference placeholder
             loopMDs.push_back(mustProgress);
@@ -1841,34 +1857,34 @@ void AdaptiveJITRunner::doRecompile(const std::string& funcName, int64_t callCou
                 bool fullUnroll = false;
 
                 if (lp.hasConstantTripCount() &&
-                    static_cast<uint64_t>(lp.constantTripCount) <= 64) {
+                    static_cast<uint64_t>(lp.constantTripCount) <= 128) {
                     // Constant trip count: fully unroll small loops for maximum
                     // optimization (eliminates loop overhead, enables constant
                     // propagation of induction variables).
                     auto ctc = static_cast<uint32_t>(lp.constantTripCount);
-                    if (ctc > 0 && ctc <= 32) {
+                    if (ctc > 0 && ctc <= 64) {
                         unrollCount = ctc;
                         fullUnroll = true;
-                    } else if (ctc > 32) {
-                        // 33-64: unroll by 8 for ILP without excessive code bloat.
-                        unrollCount = 8;
+                    } else if (ctc > 64) {
+                        // 65-128: unroll by 16 for ILP without excessive code bloat.
+                        unrollCount = 16;
                     }
-                } else if (lp.hasNarrowTripRange() && lp.maxTripCount <= 32) {
+                } else if (lp.hasNarrowTripRange() && lp.maxTripCount <= 64) {
                     // Narrow range of small trip counts: fully unroll to max.
                     unrollCount = static_cast<uint32_t>(lp.maxTripCount);
                     fullUnroll = true;
-                } else if (avgTrip > 0 && avgTrip <= 16) {
+                } else if (avgTrip > 0 && avgTrip <= 32) {
                     // Small trip count: fully unroll by the trip count.
                     unrollCount = static_cast<uint32_t>(avgTrip);
                     fullUnroll = true;
-                } else if (avgTrip > 16 && avgTrip <= 64) {
-                    // Medium trip count: unroll by 8 for ILP.
-                    unrollCount = 8;
-                } else if (avgTrip > 64) {
-                    // Large trip count: unroll by 16 for maximum ILP —
+                } else if (avgTrip > 32 && avgTrip <= 128) {
+                    // Medium trip count: unroll by 16 for ILP.
+                    unrollCount = 16;
+                } else if (avgTrip > 128) {
+                    // Large trip count: unroll by 32 for maximum ILP —
                     // JIT can afford larger code since it only processes
                     // hot functions (stripped module).
-                    unrollCount = 16;
+                    unrollCount = 32;
                 }
                 if (unrollCount > 0) {
                     if (fullUnroll) {
@@ -1948,7 +1964,7 @@ void AdaptiveJITRunner::doRecompile(const std::string& funcName, int64_t callCou
         // must process the entire program.  The extra inlining exposes more
         // constant folding, dead code elimination, and vectorization across
         // function boundaries — the key to beating AOT code quality.
-        PTO.InlinerThreshold = 2000;
+        PTO.InlinerThreshold = 5000;
 
         // Create a TargetMachine for this recompilation.  Each background
         // thread gets its own TM since LLVM TargetMachine is not thread-safe.
@@ -1987,10 +2003,16 @@ void AdaptiveJITRunner::doRecompile(const std::string& funcName, int64_t callCou
 
         // Use O3 for maximum code quality in the single recompile tier.
         // Combined with AlwaysInline on all callees, aggressive inliner
-        // threshold (1200), and stripped unreachable functions, O3 produces
+        // threshold (5000), and stripped unreachable functions, O3 produces
         // code that can match or beat AOT for hot functions.
         auto pipeline = PB.buildPerModuleDefaultPipeline(llvm::OptimizationLevel::O3);
         pipeline.run(*mod, MAM);
+
+        // Double O3 pass for cascading optimizations: the first pass may
+        // expose new opportunities (dead code after constant folding,
+        // simplified loops after inlining) that the second pass exploits.
+        auto pipeline2 = PB.buildPerModuleDefaultPipeline(llvm::OptimizationLevel::O3);
+        pipeline2.run(*mod, MAM);
     }
 
     // Verify the module after optimization — only in verbose mode to save time.

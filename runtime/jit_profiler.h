@@ -93,7 +93,7 @@ struct ArgProfile {
 
     /// Minimum fraction of calls where a single constant must dominate to
     /// trigger constant-value specialization.
-    static constexpr double kConstantSpecThreshold = 0.8;
+    static constexpr double kConstantSpecThreshold = 0.6;
 
     /// Minimum fraction of integer samples that must be in-range for
     /// range-based specialization to be applied.
