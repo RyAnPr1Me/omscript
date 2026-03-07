@@ -83,6 +83,80 @@ using omscript::UnaryExpr;
 using omscript::VarDecl;
 using omscript::WhileStmt;
 
+/// Concurrency builtin names.  User functions that call any of these must NOT
+/// be marked nosync/nofree/willreturn because those attributes promise to the
+/// optimizer that the function performs no synchronization, never frees memory,
+/// and always returns — all of which are violated by pthreads primitives.
+static const std::unordered_set<std::string> kConcurrencyBuiltins = {
+    "thread_create", "thread_join", "mutex_new", "mutex_lock", "mutex_unlock", "mutex_destroy",
+};
+
+/// Recursively check if an expression tree contains a call to any name in @p names.
+static bool exprCallsAny(const Expression* e, const std::unordered_set<std::string>& names) {
+    if (!e)
+        return false;
+    if (auto* call = dynamic_cast<const CallExpr*>(e)) {
+        if (names.count(call->callee))
+            return true;
+        for (auto& arg : call->arguments)
+            if (exprCallsAny(arg.get(), names))
+                return true;
+    }
+    if (auto* bin = dynamic_cast<const BinaryExpr*>(e))
+        return exprCallsAny(bin->left.get(), names) || exprCallsAny(bin->right.get(), names);
+    if (auto* un = dynamic_cast<const UnaryExpr*>(e))
+        return exprCallsAny(un->operand.get(), names);
+    if (auto* tern = dynamic_cast<const TernaryExpr*>(e))
+        return exprCallsAny(tern->condition.get(), names) || exprCallsAny(tern->thenExpr.get(), names) ||
+               exprCallsAny(tern->elseExpr.get(), names);
+    if (auto* idx = dynamic_cast<const IndexExpr*>(e))
+        return exprCallsAny(idx->array.get(), names) || exprCallsAny(idx->index.get(), names);
+    if (auto* ia = dynamic_cast<const IndexAssignExpr*>(e))
+        return exprCallsAny(ia->array.get(), names) || exprCallsAny(ia->index.get(), names) ||
+               exprCallsAny(ia->value.get(), names);
+    if (auto* assign = dynamic_cast<const AssignExpr*>(e))
+        return exprCallsAny(assign->value.get(), names);
+    return false;
+}
+
+/// Recursively check if a statement tree contains a call to any name in @p names.
+static bool stmtCallsAny(const Statement* s, const std::unordered_set<std::string>& names) {
+    if (!s)
+        return false;
+    if (auto* blk = dynamic_cast<const BlockStmt*>(s)) {
+        for (auto& st : blk->statements)
+            if (stmtCallsAny(st.get(), names))
+                return true;
+        return false;
+    }
+    if (auto* ret = dynamic_cast<const omscript::ReturnStmt*>(s))
+        return exprCallsAny(ret->value.get(), names);
+    if (auto* exprS = dynamic_cast<const ExprStmt*>(s))
+        return exprCallsAny(exprS->expression.get(), names);
+    if (auto* var = dynamic_cast<const VarDecl*>(s))
+        return exprCallsAny(var->initializer.get(), names);
+    if (auto* ifS = dynamic_cast<const IfStmt*>(s))
+        return exprCallsAny(ifS->condition.get(), names) || stmtCallsAny(ifS->thenBranch.get(), names) ||
+               stmtCallsAny(ifS->elseBranch.get(), names);
+    if (auto* wh = dynamic_cast<const WhileStmt*>(s))
+        return exprCallsAny(wh->condition.get(), names) || stmtCallsAny(wh->body.get(), names);
+    if (auto* dw = dynamic_cast<const DoWhileStmt*>(s))
+        return stmtCallsAny(dw->body.get(), names) || exprCallsAny(dw->condition.get(), names);
+    if (auto* fr = dynamic_cast<const ForStmt*>(s))
+        return exprCallsAny(fr->start.get(), names) || exprCallsAny(fr->end.get(), names) ||
+               exprCallsAny(fr->step.get(), names) || stmtCallsAny(fr->body.get(), names);
+    if (auto* fe = dynamic_cast<const ForEachStmt*>(s))
+        return exprCallsAny(fe->collection.get(), names) || stmtCallsAny(fe->body.get(), names);
+    return false;
+}
+
+/// Returns true if the function body contains calls to any concurrency builtin.
+static bool usesConcurrencyPrimitive(const omscript::FunctionDecl* func) {
+    if (!func->body)
+        return false;
+    return stmtCallsAny(func->body.get(), kConcurrencyBuiltins);
+}
+
 /// Returns the log2 of a positive power-of-two value, or -1 if the value is
 /// not a power of two (or is non-positive).  Used by strength-reduction passes
 /// to convert multiply/divide/modulo by a constant power of 2 into cheaper
@@ -1629,18 +1703,19 @@ void CodeGenerator::generate(Program* program) {
         //              and turns calls into simpler instructions.
         // mustprogress – every function is required to make forward progress;
         //              unlocks loop-idiom recognition (auto-memset/memcpy detection).
-        // nosync     – no synchronization primitives; enables load/store hoisting.
-        // nofree     – omscript user functions never call free(); lets the
-        //              optimizer eliminate dead malloc/free pairs and extend
-        //              the lifetime of heap-allocated values for reuse.
-        // willreturn – every function terminates (no infinite loops in user
-        //              code at the IR level); enables speculative execution
-        //              of calls and loop-invariant code motion across calls.
         function->addFnAttr(llvm::Attribute::NoUnwind);
         function->addFnAttr(llvm::Attribute::MustProgress);
-        function->addFnAttr(llvm::Attribute::NoSync);
-        function->addFnAttr(llvm::Attribute::NoFree);
-        function->addFnAttr(llvm::Attribute::WillReturn);
+        // nosync, nofree, willreturn — these promise the optimizer that the
+        // function never synchronizes, never frees memory, and always returns.
+        // These promises are WRONG for functions that use concurrency
+        // primitives (mutex_lock blocks, mutex_destroy frees, thread_join
+        // blocks), so we only add them when the function body is
+        // concurrency-free.
+        if (!usesConcurrencyPrimitive(func.get())) {
+            function->addFnAttr(llvm::Attribute::NoSync);
+            function->addFnAttr(llvm::Attribute::NoFree);
+            function->addFnAttr(llvm::Attribute::WillReturn);
+        }
         // noundef on all parameters and the return value — omscript always
         // initializes every variable, so the optimizer can assume no undef/
         // poison values flow through function boundaries.  This strengthens

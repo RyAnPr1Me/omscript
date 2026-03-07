@@ -258,6 +258,11 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         llvm::Value* strVal   = leftIsStr  ? left  : right;
         llvm::Value* countVal = leftIsStr  ? right : left;
         countVal = toDefaultType(countVal);
+        // Clamp negative counts to 0 to prevent integer overflow in the
+        // totalLen = strLen * count multiplication.
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* isNeg = builder->CreateICmpSLT(countVal, zero, "strmul.isneg");
+        countVal = builder->CreateSelect(isNeg, zero, countVal, "strmul.clamp");
         llvm::Value* strPtr = strVal->getType()->isPointerTy()
                                   ? strVal
                                   : builder->CreateIntToPtr(strVal, ptrTy, "strmul.ptr");
@@ -272,7 +277,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         llvm::BasicBlock* loopBB  = llvm::BasicBlock::Create(*context, "strmul.loop", curFn);
         llvm::BasicBlock* bodyBB  = llvm::BasicBlock::Create(*context, "strmul.body", curFn);
         llvm::BasicBlock* doneBB  = llvm::BasicBlock::Create(*context, "strmul.done", curFn);
-        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
         llvm::Value* one  = llvm::ConstantInt::get(getDefaultType(), 1);
         builder->CreateBr(loopBB);
         builder->SetInsertPoint(loopBB);
@@ -345,13 +349,18 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         auto rightConst = llvm::dyn_cast<llvm::ConstantInt>(right);
         int64_t lval = leftConst->getSExtValue();
         int64_t rval = rightConst->getSExtValue();
+        // Use unsigned arithmetic for +, -, * to avoid signed overflow UB.
+        // The unsigned result, when reinterpreted as signed, gives the correct
+        // two's-complement wrapping behavior that matches LLVM's add/sub/mul.
+        uint64_t ulval = static_cast<uint64_t>(lval);
+        uint64_t urval = static_cast<uint64_t>(rval);
 
         if (expr->op == "+") {
-            return llvm::ConstantInt::get(*context, llvm::APInt(64, lval + rval));
+            return llvm::ConstantInt::get(*context, llvm::APInt(64, ulval + urval));
         } else if (expr->op == "-") {
-            return llvm::ConstantInt::get(*context, llvm::APInt(64, lval - rval));
+            return llvm::ConstantInt::get(*context, llvm::APInt(64, ulval - urval));
         } else if (expr->op == "*") {
-            return llvm::ConstantInt::get(*context, llvm::APInt(64, lval * rval));
+            return llvm::ConstantInt::get(*context, llvm::APInt(64, ulval * urval));
         } else if (expr->op == "/") {
             if (rval != 0 && !(lval == INT64_MIN && rval == -1)) {
                 return llvm::ConstantInt::get(*context, llvm::APInt(64, lval / rval));

@@ -1553,6 +1553,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* countArg = generateExpression(expr->arguments[1].get());
         countArg = toDefaultType(countArg);
+        // Clamp negative counts to 0 to prevent integer overflow in the
+        // totalLen = strLen * count multiplication (negative * positive wraps
+        // to a large unsigned value, causing malloc to over-allocate or fail).
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* isNeg = builder->CreateICmpSLT(countArg, zero, "repeat.isneg");
+        countArg = builder->CreateSelect(isNeg, zero, countArg, "repeat.clamp");
         llvm::Value* strPtr =
             strArg->getType()->isPointerTy()
                 ? strArg
@@ -1571,7 +1577,6 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "repeat.loop", function);
         llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "repeat.body", function);
         llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "repeat.done", function);
-        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
         llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
         builder->CreateBr(loopBB);
         builder->SetInsertPoint(loopBB);

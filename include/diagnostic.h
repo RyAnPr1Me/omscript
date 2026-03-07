@@ -56,6 +56,9 @@ inline const char* errorCodeString(ErrorCode code) {
 /// Accounts for insertions, deletions, and substitutions.
 inline size_t editDistance(const std::string& a, const std::string& b) {
     size_t m = a.size(), n = b.size();
+    // Fast paths for trivial cases.
+    if (m == 0) return n;
+    if (n == 0) return m;
     // Use a single-row DP array for space efficiency: O(min(m,n)).
     std::vector<size_t> prev(n + 1), curr(n + 1);
     for (size_t j = 0; j <= n; ++j)
