@@ -1,7 +1,0 @@
-fn main() {
-    print("Test: loop variable scoping");
-    for (i in 0...3) {
-        print(i);
-    }
-    print(i);  // This should fail
-}

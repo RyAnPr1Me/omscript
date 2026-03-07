@@ -1,8 +1,0 @@
-fn main() {
-    print("Test: loop variable scoping");
-    for (i in 0...3) {
-        var x = i;
-    }
-    // x should not be visible here
-    // Trying to use x will cause a compile error
-}
