@@ -56,7 +56,19 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
         if (enumIt != enumConstants_.end()) {
             return llvm::ConstantInt::get(getDefaultType(), enumIt->second);
         }
-        codegenError("Unknown variable: " + expr->name, expr);
+        // Build "did you mean?" suggestion from known variables.
+        std::string msg = "Unknown variable: " + expr->name;
+        std::vector<std::string> candidates;
+        candidates.reserve(namedValues.size());
+        for (const auto& kv : namedValues) {
+            if (kv.second)
+                candidates.push_back(kv.first);
+        }
+        std::string suggestion = suggestSimilar(expr->name, candidates);
+        if (!suggestion.empty()) {
+            msg += " (did you mean '" + suggestion + "'?)";
+        }
+        codegenError(msg, expr);
     }
     auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(it->second);
     llvm::Type* loadType = alloca ? alloca->getAllocatedType() : getDefaultType();
@@ -64,6 +76,21 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
 }
 
 llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
+    // --- Compile-time string constant folding ---
+    // When both operands of '+' are string literals, concatenate at compile time
+    // to avoid runtime malloc+strcpy overhead.
+    if (expr->op == "+") {
+        auto* leftLit = dynamic_cast<LiteralExpr*>(expr->left.get());
+        auto* rightLit = dynamic_cast<LiteralExpr*>(expr->right.get());
+        if (leftLit && rightLit &&
+            leftLit->literalType == LiteralExpr::LiteralType::STRING &&
+            rightLit->literalType == LiteralExpr::LiteralType::STRING) {
+            std::string folded = leftLit->stringValue + rightLit->stringValue;
+            return builder->CreateGlobalString(folded, "strfold");
+        }
+    }
+    // --- End string constant folding ---
+
     llvm::Value* left = generateExpression(expr->left.get());
     if (expr->op == "&&" || expr->op == "||") {
         llvm::Function* function = builder->GetInsertBlock()->getParent();

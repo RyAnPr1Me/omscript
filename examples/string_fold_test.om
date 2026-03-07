@@ -1,0 +1,15 @@
+// Test string constant folding — "hello" + " " + "world" should be folded at compile time
+fn main() {
+    var s = "hello" + " world";
+    println(s);
+
+    var s2 = "foo" + "bar";
+    println(s2);
+
+    // Runtime concat (not foldable — variable involved)
+    var a = "x";
+    var b = a + "y";
+    println(b);
+
+    return 0;
+}

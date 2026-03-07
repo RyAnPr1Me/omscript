@@ -2061,6 +2061,7 @@ int main(int argc, char* argv[]) {
     bool flagVectorize = true;
     bool flagUnrollLoops = true;
     bool flagLoopOptimize = true;
+    bool flagDebug = false;
     const auto tryParseOptimizationFlag = [](const std::string& arg) -> std::optional<omscript::OptimizationLevel> {
         if (arg == "-Ofast") {
             return omscript::OptimizationLevel::O3;
@@ -2163,6 +2164,10 @@ int main(int argc, char* argv[]) {
         }
         if (arg == "-s" || arg == "--strip") {
             flagStrip = true;
+            return true;
+        }
+        if (arg == "-g" || arg == "--debug") {
+            flagDebug = true;
             return true;
         }
         return false;
@@ -2521,6 +2526,8 @@ int main(int argc, char* argv[]) {
             codegen.setVectorize(flagVectorize);
             codegen.setUnrollLoops(flagUnrollLoops);
             codegen.setLoopOptimize(flagLoopOptimize);
+            codegen.setDebugMode(flagDebug);
+            codegen.setSourceFilename(sourceFile);
             codegen.generate(program.get());
             auto codegenEnd = std::chrono::steady_clock::now();
 
@@ -2574,6 +2581,8 @@ int main(int argc, char* argv[]) {
             codegen.setVectorize(flagVectorize);
             codegen.setUnrollLoops(flagUnrollLoops);
             codegen.setLoopOptimize(flagLoopOptimize);
+            codegen.setDebugMode(flagDebug);
+            codegen.setSourceFilename(sourceFile);
             if (flagJIT) {
                 codegen.generateHybrid(program.get());
             } else {
@@ -2617,6 +2626,8 @@ int main(int argc, char* argv[]) {
             codegen.setVectorize(flagVectorize);
             codegen.setUnrollLoops(flagUnrollLoops);
             codegen.setLoopOptimize(flagLoopOptimize);
+            codegen.setDebugMode(flagDebug);
+            codegen.setSourceFilename(sourceFile);
             if (flagJIT) {
                 codegen.generateHybrid(program.get());
             } else {
@@ -2726,7 +2737,7 @@ int main(int argc, char* argv[]) {
                         std::cerr << "Warning: --keep-temps: no C linker found (tried gcc, cc, clang); "
                                      "AOT binary not written\n";
                     } else {
-                        std::vector<std::string> linkArgs = {objFile, "-o", outputFile, "-lm"};
+                        std::vector<std::string> linkArgs = {objFile, "-o", outputFile, "-lm", "-lpthread"};
                         llvm::SmallVector<llvm::StringRef, 8> laRefs;
                         laRefs.push_back(linkerProgram);
                         for (const auto& a : linkArgs)
@@ -2794,6 +2805,7 @@ int main(int argc, char* argv[]) {
         compiler.setVectorize(flagVectorize);
         compiler.setUnrollLoops(flagUnrollLoops);
         compiler.setLoopOptimize(flagLoopOptimize);
+        compiler.setDebugMode(flagDebug);
         if (quiet) {
             compiler.setVerbose(false);
             compiler.setQuiet(true);

@@ -1,10 +1,86 @@
 #ifndef DIAGNOSTIC_H
 #define DIAGNOSTIC_H
 
+#include <algorithm>
+#include <cstddef>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace omscript {
+
+// ---------------------------------------------------------------------------
+// Error codes — machine-readable identifiers for every diagnostic.
+// ---------------------------------------------------------------------------
+enum class ErrorCode {
+    E001_UNDEFINED_VARIABLE,
+    E002_TYPE_MISMATCH,
+    E003_UNDEFINED_FUNCTION,
+    E004_WRONG_ARG_COUNT,
+    E005_CONST_MODIFICATION,
+    E006_SYNTAX_ERROR,
+    E007_IMPORT_NOT_FOUND,
+    E008_CIRCULAR_IMPORT,
+    E009_DUPLICATE_FIELD,
+    E010_UNKNOWN_FIELD,
+    E011_DIVISION_BY_ZERO,
+    E012_INDEX_OUT_OF_BOUNDS,
+    NONE  ///< No specific error code (legacy/fallback).
+};
+
+/// Return the string code (e.g. "E001") for a given ErrorCode.
+inline const char* errorCodeString(ErrorCode code) {
+    switch (code) {
+    case ErrorCode::E001_UNDEFINED_VARIABLE:  return "E001";
+    case ErrorCode::E002_TYPE_MISMATCH:       return "E002";
+    case ErrorCode::E003_UNDEFINED_FUNCTION:  return "E003";
+    case ErrorCode::E004_WRONG_ARG_COUNT:     return "E004";
+    case ErrorCode::E005_CONST_MODIFICATION:  return "E005";
+    case ErrorCode::E006_SYNTAX_ERROR:        return "E006";
+    case ErrorCode::E007_IMPORT_NOT_FOUND:    return "E007";
+    case ErrorCode::E008_CIRCULAR_IMPORT:     return "E008";
+    case ErrorCode::E009_DUPLICATE_FIELD:     return "E009";
+    case ErrorCode::E010_UNKNOWN_FIELD:       return "E010";
+    case ErrorCode::E011_DIVISION_BY_ZERO:    return "E011";
+    case ErrorCode::E012_INDEX_OUT_OF_BOUNDS: return "E012";
+    case ErrorCode::NONE:                     return "";
+    }
+    return "";
+}
+
+// ---------------------------------------------------------------------------
+// "Did you mean?" suggestion helper
+// ---------------------------------------------------------------------------
+
+/// Compute the edit distance between two strings (simple character-level).
+/// Returns the number of character differences + length difference.
+inline size_t editDistance(const std::string& a, const std::string& b) {
+    size_t maxLen = std::max(a.size(), b.size());
+    size_t minLen = std::min(a.size(), b.size());
+    size_t dist = maxLen - minLen;
+    for (size_t i = 0; i < minLen; ++i) {
+        if (a[i] != b[i])
+            ++dist;
+    }
+    return dist;
+}
+
+/// Find the most similar name from a list of candidates.
+/// Returns empty string if no close match (distance > threshold).
+inline std::string suggestSimilar(const std::string& name,
+                                  const std::vector<std::string>& candidates,
+                                  size_t threshold = 3) {
+    std::string best;
+    size_t bestDist = threshold + 1;
+    for (const auto& c : candidates) {
+        size_t dist = editDistance(name, c);
+        if (dist < bestDist) {
+            bestDist = dist;
+            best = c;
+        }
+    }
+    return best;
+}
 
 /// Source location attached to every diagnostic.
 struct SourceLocation {
@@ -30,8 +106,9 @@ struct Diagnostic {
     DiagnosticSeverity severity = DiagnosticSeverity::Error;
     SourceLocation location;
     std::string message;
+    ErrorCode code = ErrorCode::NONE;  ///< Machine-readable error code.
 
-    /// Format as "file:L:C: error: message" (or "error at line L, column C: message" if no file).
+    /// Format as "[E001] file:L:C: error: message" (or "error at line L, column C: message" if no file).
     std::string format() const {
         std::string prefix;
         switch (severity) {
@@ -48,15 +125,20 @@ struct Diagnostic {
             prefix = "hint";
             break;
         }
+        // Prepend error code if present.
+        std::string codePrefix;
+        if (code != ErrorCode::NONE) {
+            codePrefix = std::string("[") + errorCodeString(code) + "] ";
+        }
         if (!location.filename.empty() && location.line > 0) {
-            return location.filename + ":" + std::to_string(location.line) + ":" + std::to_string(location.column) +
+            return codePrefix + location.filename + ":" + std::to_string(location.line) + ":" + std::to_string(location.column) +
                    ": " + prefix + ": " + message;
         }
         if (location.line > 0) {
-            return prefix + " at line " + std::to_string(location.line) + ", column " +
+            return codePrefix + prefix + " at line " + std::to_string(location.line) + ", column " +
                    std::to_string(location.column) + ": " + message;
         }
-        return prefix + ": " + message;
+        return codePrefix + prefix + ": " + message;
     }
 };
 

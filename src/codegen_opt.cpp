@@ -336,6 +336,19 @@ void CodeGenerator::optimizeFunction(llvm::Function* func) {
 
 
 void CodeGenerator::optimizeOptMaxFunctions() {
+    // Phase 0: Apply aggressive function attributes to OPTMAX functions.
+    // - nounwind: guaranteed no exceptions (enables tail call, smaller EH tables)
+    // - optsize is NOT set (we want max speed, not size)
+    for (auto& func : module->functions()) {
+        if (!func.isDeclaration() && optMaxFunctions.count(std::string(func.getName()))) {
+            func.addFnAttr(llvm::Attribute::NoUnwind);
+            // Mark small OPTMAX helpers as always-inline candidates
+            if (func.getInstructionCount() < 50) {
+                func.addFnAttr(llvm::Attribute::AlwaysInline);
+            }
+        }
+    }
+
     llvm::legacy::FunctionPassManager fpm(module.get());
 
     // Phase 1: Early canonicalization
@@ -363,6 +376,11 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     fpm.add(llvm::createLoopDataPrefetchPass());
     fpm.add(llvm::createLoopStrengthReducePass());
     fpm.add(llvm::createLoopUnrollPass());
+    // Phase 2.5: Additional aggressive cleanup after loop optimizations.
+    // A second GVN + instcombine round catches patterns exposed by loop
+    // strength reduction, unrolling, and LICM that the first round missed.
+    fpm.add(llvm::createGVNPass());
+    fpm.add(llvm::createInstructionCombiningPass());
     // Phase 3: Post-loop optimizations
 #if LLVM_VERSION_MAJOR < 18
     fpm.add(llvm::createMergedLoadStoreMotionPass());

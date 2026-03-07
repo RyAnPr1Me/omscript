@@ -116,6 +116,8 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
     codegen.setUnrollLoops(unrollLoops_);
     codegen.setLoopOptimize(loopOptimize_);
     codegen.setLTO(lto_);
+    codegen.setDebugMode(debug_);
+    codegen.setSourceFilename(sourceFile);
     if (!pgoGenPath_.empty()) {
         codegen.setPGOGen(pgoGenPath_);
     }
@@ -219,8 +221,13 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
         if (stackProtector_) {
             linkArgs.push_back("-fstack-protector-strong");
         }
+        if (debug_) {
+            linkArgs.push_back("-g");
+        }
         // Link against libm for math intrinsic fallbacks (sqrt, floor, etc.)
         linkArgs.push_back("-lm");
+        // Link against pthreads for concurrency primitives.
+        linkArgs.push_back("-lpthread");
         llvm::SmallVector<llvm::StringRef, 8> argRefs;
         argRefs.push_back(linkerProgram);
         for (const auto& arg : linkArgs) {

@@ -3465,6 +3465,138 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         return result;
     }
 
+    // -----------------------------------------------------------------------
+    // Concurrency primitives (pthreads)
+    // -----------------------------------------------------------------------
+
+    if (expr->callee == "thread_create") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'thread_create' expects 1 argument (function name as string), but " +
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
+        }
+        // thread_create("func_name") — look up the function by name and call pthread_create
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+
+        // The argument should be a string containing a function name.
+        // We look up the function directly by checking if the argument is a literal.
+        auto* litArg = dynamic_cast<LiteralExpr*>(expr->arguments[0].get());
+        if (!litArg || litArg->literalType != LiteralExpr::LiteralType::STRING) {
+            codegenError("thread_create requires a string literal function name", expr);
+        }
+        auto fnIt = functions.find(litArg->stringValue);
+        if (fnIt == functions.end() || !fnIt->second) {
+            codegenError("thread_create: unknown function '" + litArg->stringValue + "'", expr);
+        }
+        llvm::Function* targetFunc = fnIt->second;
+
+        // Generate a wrapper function: void* __thread_wrapper_<name>(void* arg) { target(); return NULL; }
+        std::string wrapperName = "__thread_wrapper_" + litArg->stringValue;
+        llvm::Function* wrapper = module->getFunction(wrapperName);
+        if (!wrapper) {
+            auto* wrapperType = llvm::FunctionType::get(ptrTy, {ptrTy}, false);
+            wrapper = llvm::Function::Create(wrapperType, llvm::Function::InternalLinkage,
+                                             wrapperName, module.get());
+            auto* savedBB = builder->GetInsertBlock();
+            auto* savedPoint = builder->GetInsertPoint() != builder->GetInsertBlock()->end()
+                                    ? &*builder->GetInsertPoint() : nullptr;
+            auto* entry = llvm::BasicBlock::Create(*context, "entry", wrapper);
+            builder->SetInsertPoint(entry);
+            builder->CreateCall(targetFunc);
+            builder->CreateRet(llvm::ConstantPointerNull::get(ptrTy));
+            if (savedPoint) {
+                builder->SetInsertPoint(savedBB, llvm::BasicBlock::iterator(savedPoint));
+            } else {
+                builder->SetInsertPoint(savedBB);
+            }
+        }
+
+        // Allocate pthread_t on the stack (8 bytes = i64)
+        auto* parentFunc = builder->GetInsertBlock()->getParent();
+        auto* tidAlloca = createEntryBlockAlloca(parentFunc, "tid");
+        llvm::Value* nullAttr = llvm::ConstantPointerNull::get(ptrTy);
+        llvm::Value* nullArg = llvm::ConstantPointerNull::get(ptrTy);
+
+        builder->CreateCall(getOrDeclarePthreadCreate(),
+                            {tidAlloca, nullAttr, wrapper, nullArg});
+
+        // Return the thread id
+        return builder->CreateLoad(getDefaultType(), tidAlloca, "tid.val");
+    }
+
+    if (expr->callee == "thread_join") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'thread_join' expects 1 argument (thread id), but " +
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
+        }
+        llvm::Value* tid = generateExpression(expr->arguments[0].get());
+        tid = toDefaultType(tid);
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* nullRetval = llvm::ConstantPointerNull::get(ptrTy);
+        builder->CreateCall(getOrDeclarePthreadJoin(), {tid, nullRetval});
+        return llvm::ConstantInt::get(getDefaultType(), 0);
+    }
+
+    if (expr->callee == "mutex_new") {
+        if (expr->arguments.size() != 0) {
+            codegenError("Built-in function 'mutex_new' expects 0 arguments, but " +
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
+        }
+        // Allocate 64 bytes for pthread_mutex_t (generous for all platforms)
+        llvm::Value* size = llvm::ConstantInt::get(getDefaultType(), 64);
+        llvm::Value* mutex = builder->CreateCall(getOrDeclareMalloc(), {size}, "mutex.ptr");
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* nullAttr = llvm::ConstantPointerNull::get(ptrTy);
+        builder->CreateCall(getOrDeclarePthreadMutexInit(), {mutex, nullAttr});
+        // Return as i64
+        return builder->CreatePtrToInt(mutex, getDefaultType(), "mutex.val");
+    }
+
+    if (expr->callee == "mutex_lock") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'mutex_lock' expects 1 argument, but " +
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
+        }
+        llvm::Value* mutexVal = generateExpression(expr->arguments[0].get());
+        mutexVal = toDefaultType(mutexVal);
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* mutexPtr = builder->CreateIntToPtr(mutexVal, ptrTy, "mutex.ptr");
+        builder->CreateCall(getOrDeclarePthreadMutexLock(), {mutexPtr});
+        return llvm::ConstantInt::get(getDefaultType(), 0);
+    }
+
+    if (expr->callee == "mutex_unlock") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'mutex_unlock' expects 1 argument, but " +
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
+        }
+        llvm::Value* mutexVal = generateExpression(expr->arguments[0].get());
+        mutexVal = toDefaultType(mutexVal);
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* mutexPtr = builder->CreateIntToPtr(mutexVal, ptrTy, "mutex.ptr");
+        builder->CreateCall(getOrDeclarePthreadMutexUnlock(), {mutexPtr});
+        return llvm::ConstantInt::get(getDefaultType(), 0);
+    }
+
+    if (expr->callee == "mutex_destroy") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'mutex_destroy' expects 1 argument, but " +
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
+        }
+        llvm::Value* mutexVal = generateExpression(expr->arguments[0].get());
+        mutexVal = toDefaultType(mutexVal);
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* mutexPtr = builder->CreateIntToPtr(mutexVal, ptrTy, "mutex.ptr");
+        builder->CreateCall(getOrDeclarePthreadMutexDestroy(), {mutexPtr});
+        builder->CreateCall(getOrDeclareFree(), {mutexPtr});
+        return llvm::ConstantInt::get(getDefaultType(), 0);
+    }
+
     if (inOptMaxFunction) {
         // Stdlib functions are always native machine code, so they're safe to call from OPTMAX
         if (!isStdlibFunction(expr->callee) && optMaxFunctions.find(expr->callee) == optMaxFunctions.end()) {
@@ -3479,7 +3611,19 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
     auto calleeIt = functions.find(expr->callee);
     if (calleeIt == functions.end() || !calleeIt->second) {
-        codegenError("Unknown function: " + expr->callee, expr);
+        // Build "did you mean?" suggestion from known functions.
+        std::string msg = "Unknown function: " + expr->callee;
+        std::vector<std::string> candidates;
+        candidates.reserve(functions.size());
+        for (const auto& kv : functions) {
+            if (kv.second)
+                candidates.push_back(kv.first);
+        }
+        std::string suggestion = suggestSimilar(expr->callee, candidates);
+        if (!suggestion.empty()) {
+            msg += " (did you mean '" + suggestion + "'?)";
+        }
+        codegenError(msg, expr);
     }
     llvm::Function* callee = calleeIt->second;
 

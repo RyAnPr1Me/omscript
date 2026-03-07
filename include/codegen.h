@@ -3,6 +3,7 @@
 
 #include "ast.h"
 #include "diagnostic.h"
+#include <llvm/IR/DIBuilder.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
@@ -158,6 +159,18 @@ class CodeGenerator {
     /// linker so that the bitcode is not double-optimized.
     void setLTO(bool enable) {
         lto_ = enable;
+    }
+
+    /// Enable or disable DWARF debug info generation.
+    /// When true, the CodeGenerator emits debug metadata (compile unit,
+    /// subprograms) so that compiled binaries can be debugged with GDB/LLDB.
+    void setDebugMode(bool enable) {
+        debugMode_ = enable;
+    }
+
+    /// Set the source filename for debug info metadata.
+    void setSourceFilename(const std::string& filename) {
+        sourceFilename_ = filename;
     }
 
   private:
@@ -342,6 +355,14 @@ class CodeGenerator {
     bool dynamicCompilation_ = false; // Dynamic (JIT) compilation mode
     bool lto_ = false;                // LTO mode: use pre-link pipeline
 
+    // DWARF debug info infrastructure
+    bool debugMode_ = false;                       // -g: emit debug metadata
+    std::string sourceFilename_;                   // Source file for debug CU
+    std::unique_ptr<llvm::DIBuilder> debugBuilder_; // Debug info builder (null if !debugMode_)
+    llvm::DICompileUnit* debugCU_ = nullptr;       // DWARF compile unit
+    llvm::DIFile* debugFile_ = nullptr;            // DWARF file descriptor
+    llvm::DIScope* debugScope_ = nullptr;          // Current debug scope (CU or subprogram)
+
     /// Compile-time resource budget — limits to prevent DoS via oversized inputs.
     /// Checked during code generation to abort compilation if the program
     /// exceeds reasonable complexity bounds.
@@ -417,6 +438,12 @@ class CodeGenerator {
     llvm::Function* getOrDeclareFseek();
     llvm::Function* getOrDeclareFtell();
     llvm::Function* getOrDeclareAccess();
+    llvm::Function* getOrDeclarePthreadCreate();
+    llvm::Function* getOrDeclarePthreadJoin();
+    llvm::Function* getOrDeclarePthreadMutexInit();
+    llvm::Function* getOrDeclarePthreadMutexLock();
+    llvm::Function* getOrDeclarePthreadMutexUnlock();
+    llvm::Function* getOrDeclarePthreadMutexDestroy();
 
     /// Shared implementation for prefix and postfix increment/decrement.
     /// Returns the *old* value for postfix (isPostfix=true) and the *new*

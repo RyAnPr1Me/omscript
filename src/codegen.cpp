@@ -598,6 +598,12 @@ static const std::unordered_set<std::string> stdlibFunctions = {"abs",
                                                                 "to_float",
                                                                 "to_int",
                                                                 "to_string",
+                                                                "thread_create",
+                                                                "thread_join",
+                                                                "mutex_new",
+                                                                "mutex_lock",
+                                                                "mutex_unlock",
+                                                                "mutex_destroy",
                                                                 "typeof",
                                                                 "write"};
 
@@ -1246,6 +1252,64 @@ llvm::Function* CodeGenerator::getOrDeclareAccess() {
 }
 
 // ---------------------------------------------------------------------------
+// pthread function declarations for concurrency primitives
+// ---------------------------------------------------------------------------
+
+llvm::Function* CodeGenerator::getOrDeclarePthreadCreate() {
+    if (auto* fn = module->getFunction("pthread_create"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    // int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
+    //                    void *(*start_routine)(void*), void *arg)
+    auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context),
+                                        {ptrTy, ptrTy, ptrTy, ptrTy}, false);
+    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "pthread_create", module.get());
+}
+
+llvm::Function* CodeGenerator::getOrDeclarePthreadJoin() {
+    if (auto* fn = module->getFunction("pthread_join"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    // int pthread_join(pthread_t thread, void **retval)
+    auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context),
+                                        {getDefaultType(), ptrTy}, false);
+    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "pthread_join", module.get());
+}
+
+llvm::Function* CodeGenerator::getOrDeclarePthreadMutexInit() {
+    if (auto* fn = module->getFunction("pthread_mutex_init"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    // int pthread_mutex_init(pthread_mutex_t *mutex, const pthread_mutexattr_t *attr)
+    auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {ptrTy, ptrTy}, false);
+    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "pthread_mutex_init", module.get());
+}
+
+llvm::Function* CodeGenerator::getOrDeclarePthreadMutexLock() {
+    if (auto* fn = module->getFunction("pthread_mutex_lock"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {ptrTy}, false);
+    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "pthread_mutex_lock", module.get());
+}
+
+llvm::Function* CodeGenerator::getOrDeclarePthreadMutexUnlock() {
+    if (auto* fn = module->getFunction("pthread_mutex_unlock"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {ptrTy}, false);
+    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "pthread_mutex_unlock", module.get());
+}
+
+llvm::Function* CodeGenerator::getOrDeclarePthreadMutexDestroy() {
+    if (auto* fn = module->getFunction("pthread_mutex_destroy"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {ptrTy}, false);
+    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "pthread_mutex_destroy", module.get());
+}
+
+// ---------------------------------------------------------------------------
 // String type inference helpers
 // ---------------------------------------------------------------------------
 
@@ -1485,6 +1549,21 @@ void CodeGenerator::generate(Program* program) {
     optMaxFunctions.clear();
     irInstructionCount_ = 0;
 
+    // --- DWARF debug info initialization ---
+    if (debugMode_) {
+        debugBuilder_ = std::make_unique<llvm::DIBuilder>(*module);
+        std::string filename = sourceFilename_.empty() ? "source.om" : sourceFilename_;
+        debugFile_ = debugBuilder_->createFile(filename, ".");
+        debugCU_ = debugBuilder_->createCompileUnit(
+            llvm::dwarf::DW_LANG_C, debugFile_, "OmScript Compiler",
+            optimizationLevel != OptimizationLevel::O0, /*Flags=*/"", /*RV=*/0);
+        debugScope_ = debugFile_;
+        module->addModuleFlag(llvm::Module::Warning, "Debug Info Version",
+                              llvm::DEBUG_METADATA_VERSION);
+        // On Linux, DWARF4 is the most compatible format.
+        module->addModuleFlag(llvm::Module::Warning, "Dwarf Version", 4);
+    }
+
     // Resource budget: limit number of functions to prevent DoS.
     if (program->functions.size() > kMaxFunctions) {
         throw DiagnosticError(Diagnostic{DiagnosticSeverity::Error,
@@ -1632,6 +1711,11 @@ void CodeGenerator::generate(Program* program) {
         runOptimizationPasses();
     }
 
+    // Finalize DWARF debug info before module verification.
+    if (debugMode_ && debugBuilder_) {
+        debugBuilder_->finalize();
+    }
+
     // Verify the module
     std::string errorStr;
     llvm::raw_string_ostream errorStream(errorStr);
@@ -1654,6 +1738,19 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
 
     // Retrieve the forward-declared function
     llvm::Function* function = functions[func->name];
+
+    // --- Attach DWARF debug subprogram ---
+    if (debugMode_ && debugBuilder_ && debugFile_) {
+        llvm::DISubroutineType* debugFuncType = debugBuilder_->createSubroutineType(
+            debugBuilder_->getOrCreateTypeArray({}));
+        llvm::DISubprogram* SP = debugBuilder_->createFunction(
+            debugFile_, func->name, llvm::StringRef(), debugFile_,
+            func->line > 0 ? func->line : 1,
+            debugFuncType, /*ScopeLine=*/func->line > 0 ? func->line : 1,
+            llvm::DINode::FlagPrototyped,
+            llvm::DISubprogram::SPFlagDefinition);
+        function->setSubprogram(SP);
+    }
 
     // Detect direct self-recursion.  Used for:
     //   - norecurse attribute (O1+): helps interprocedural alias analysis
