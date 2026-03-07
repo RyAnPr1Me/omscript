@@ -88,7 +88,7 @@ using omscript::WhileStmt;
 /// optimizer that the function performs no synchronization, never frees memory,
 /// and always returns — all of which are violated by pthreads primitives.
 static const std::unordered_set<std::string> kConcurrencyBuiltins = {
-    "thread_create", "thread_join", "mutex_new", "mutex_lock", "mutex_unlock", "mutex_destroy",
+    "thread_create", "thread_join", "mutex_new", "mutex_lock", "mutex_unlock", "mutex_destroy"
 };
 
 /// Recursively check if an expression tree contains a call to any name in @p names.

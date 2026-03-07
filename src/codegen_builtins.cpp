@@ -3383,7 +3383,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         builder->SetInsertPoint(stepFailBB);
         llvm::Value* errMsg = builder->CreateGlobalString(
-            "Runtime error: range_step called with step=0\n", "rstep_zero_msg");
+            "Runtime error: range step cannot be zero\n", "rstep_zero_msg");
         builder->CreateCall(getPrintfFunction(), {errMsg});
         builder->CreateCall(getOrDeclareAbort());
         builder->CreateUnreachable();
