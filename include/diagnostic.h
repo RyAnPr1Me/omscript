@@ -52,17 +52,23 @@ inline const char* errorCodeString(ErrorCode code) {
 // "Did you mean?" suggestion helper
 // ---------------------------------------------------------------------------
 
-/// Compute the edit distance between two strings (simple character-level).
-/// Returns the number of character differences + length difference.
+/// Compute the edit distance between two strings (Levenshtein distance).
+/// Accounts for insertions, deletions, and substitutions.
 inline size_t editDistance(const std::string& a, const std::string& b) {
-    size_t maxLen = std::max(a.size(), b.size());
-    size_t minLen = std::min(a.size(), b.size());
-    size_t dist = maxLen - minLen;
-    for (size_t i = 0; i < minLen; ++i) {
-        if (a[i] != b[i])
-            ++dist;
+    size_t m = a.size(), n = b.size();
+    // Use a single-row DP array for space efficiency: O(min(m,n)).
+    std::vector<size_t> prev(n + 1), curr(n + 1);
+    for (size_t j = 0; j <= n; ++j)
+        prev[j] = j;
+    for (size_t i = 1; i <= m; ++i) {
+        curr[0] = i;
+        for (size_t j = 1; j <= n; ++j) {
+            size_t cost = (a[i - 1] == b[j - 1]) ? 0 : 1;
+            curr[j] = std::min({prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost});
+        }
+        std::swap(prev, curr);
     }
-    return dist;
+    return prev[n];
 }
 
 /// Find the most similar name from a list of candidates.

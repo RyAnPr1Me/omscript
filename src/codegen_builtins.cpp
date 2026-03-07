@@ -3544,8 +3544,11 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                              std::to_string(expr->arguments.size()) + " provided",
                          expr);
         }
-        // Allocate 64 bytes for pthread_mutex_t (generous for all platforms)
-        llvm::Value* size = llvm::ConstantInt::get(getDefaultType(), 64);
+        // Allocate space for pthread_mutex_t.  The struct size varies by
+        // platform (40 bytes on Linux x86_64, 64 on macOS).  We allocate a
+        // generous fixed size that covers all common platforms.
+        static constexpr int64_t kMutexAllocSize = 64;
+        llvm::Value* size = llvm::ConstantInt::get(getDefaultType(), kMutexAllocSize);
         llvm::Value* mutex = builder->CreateCall(getOrDeclareMalloc(), {size}, "mutex.ptr");
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
         llvm::Value* nullAttr = llvm::ConstantPointerNull::get(ptrTy);
