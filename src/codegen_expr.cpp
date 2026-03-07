@@ -748,8 +748,17 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
     if (indexExpr) {
         llvm::Value* arrVal = generateExpression(indexExpr->array.get());
         llvm::Value* idxVal = generateExpression(indexExpr->index.get());
+        // Normalize index to i64 — generateIndex() does this (line 1003) but
+        // generateIncDec() was missing it, causing type mismatches in the
+        // ICmpSLT bounds check below when the index is a float or i1.
+        idxVal = toDefaultType(idxVal);
 
-        llvm::Value* arrPtr = builder->CreateIntToPtr(arrVal, llvm::PointerType::getUnqual(*context), "incdec.arrptr");
+        // Convert i64 → pointer; check if already a pointer first to avoid
+        // invalid IntToPtr of a pointer value (matches generateIndex() pattern).
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* arrPtr = arrVal->getType()->isPointerTy()
+                                  ? arrVal
+                                  : builder->CreateIntToPtr(arrVal, ptrTy, "incdec.arrptr");
 
         // Bounds check
         llvm::Value* lenVal = builder->CreateLoad(getDefaultType(), arrPtr, "incdec.len");

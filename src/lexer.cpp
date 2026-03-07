@@ -270,7 +270,10 @@ Token Lexer::scanString() {
                 str += '\r';
                 break;
             case '0':
-                str += '\0';
+                // Reject embedded null bytes — they would silently truncate
+                // C-strings at runtime, causing data loss or subtle bugs.
+                // This matches the \x00 rejection below for consistency.
+                lexError("Null byte '\\0' is not allowed in string literals", line, column);
                 break;
             case 'b':
                 str += '\b';

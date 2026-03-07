@@ -1669,6 +1669,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             builder->CreateMul(builder->CreateAdd(oldLen, llvm::ConstantInt::get(getDefaultType(), 1), "push.oldslots"),
                                llvm::ConstantInt::get(getDefaultType(), 8), "push.oldbytes");
         builder->CreateCall(getOrDeclareMemcpy(), {newBuf, arrPtr, oldSize});
+        // Free old buffer to prevent memory leak.
+        builder->CreateCall(getOrDeclareFree(), {arrPtr});
         // Update length
         builder->CreateStore(newLen, newBuf);
         // Store new value at index oldLen + 1 (after header)

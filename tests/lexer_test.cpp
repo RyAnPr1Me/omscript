@@ -390,11 +390,9 @@ TEST(LexerTest, StringEscapeCarriageReturn) {
 // ---------------------------------------------------------------------------
 
 TEST(LexerTest, StringEscapeNull) {
-    auto tokens = lex("\"a\\0b\"");
-    ASSERT_GE(tokens.size(), 2u);
-    EXPECT_EQ(tokens[0].type, TokenType::STRING);
-    std::string expected = std::string("a") + '\0' + "b";
-    EXPECT_EQ(tokens[0].lexeme, expected);
+    // \0 is rejected because embedded null bytes silently truncate C-strings
+    // at runtime, causing data loss (same rationale as the \x00 rejection).
+    EXPECT_THROW(lex("\"a\\0b\""), std::runtime_error);
 }
 
 TEST(LexerTest, StringEscapeBackspace) {
