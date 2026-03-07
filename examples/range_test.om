@@ -1,0 +1,58 @@
+// Test range, char_code, number_to_string, string_to_number
+fn main() {
+    var total = 0;
+
+    // Test range(start, end)
+    var r = range(0, 5);
+    total = total + (len(r) == 5);         // 1
+    total = total + (r[0] == 0);           // 1
+    total = total + (r[1] == 1);           // 1
+    total = total + (r[4] == 4);           // 1
+    // total = 4
+
+    // Test range with start > end (empty)
+    var r2 = range(5, 3);
+    total = total + (len(r2) == 0);        // 1
+    // total = 5
+
+    // Test range with negative start
+    var r3 = range(-2, 3);
+    total = total + (len(r3) == 5);        // 1
+    total = total + (r3[0] == -2);         // 1
+    total = total + (r3[4] == 2);          // 1
+    // total = 8
+
+    // Test range_step
+    var r4 = range_step(0, 10, 2);
+    total = total + (len(r4) == 5);        // 1
+    total = total + (r4[0] == 0);          // 1
+    total = total + (r4[1] == 2);          // 1
+    total = total + (r4[4] == 8);          // 1
+    // total = 12
+
+    // Test range_step with step 3
+    var r5 = range_step(1, 10, 3);
+    total = total + (len(r5) == 3);        // 1: [1, 4, 7]
+    total = total + (r5[0] == 1);          // 1
+    total = total + (r5[2] == 7);          // 1
+    // total = 15
+
+    // Test char_code
+    total = total + (char_code("A") == 65);   // 1
+    total = total + (char_code("0") == 48);   // 1
+    total = total + (char_code("a") == 97);   // 1
+    // total = 18
+
+    // Test number_to_string
+    var numStr = number_to_string(42);
+    total = total + str_eq(numStr, "42");       // 1
+    // total = 19
+
+    // Test string_to_number
+    total = total + (string_to_number("123") == 123); // 1
+    total = total + (string_to_number("-5") == -5);   // 1
+    // total = 21
+
+    println(total);
+    return total;
+}

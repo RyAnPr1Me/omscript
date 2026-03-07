@@ -1,0 +1,43 @@
+// Test file I/O built-in functions
+fn main() {
+    var total = 0;
+
+    // Test file_write and file_read
+    var path = "/tmp/omscript_fileio_test.txt";
+    var content = "Hello, OmScript!";
+    var wres = file_write(path, content);
+    total = total + (wres == 0);           // 1: write succeeded
+    // total = 1
+
+    // Test file_exists
+    total = total + file_exists(path);     // 1: file exists
+    total = total + (1 - file_exists("/tmp/omscript_nonexistent_xyz.txt")); // 1: doesn't exist
+    // total = 3
+
+    // Test file_read
+    var data = file_read(path);
+    total = total + str_eq(data, "Hello, OmScript!"); // 1
+    // total = 4
+
+    // Test file_append
+    var ares = file_append(path, " More!");
+    total = total + (ares == 0);           // 1: append succeeded
+    // total = 5
+
+    var data2 = file_read(path);
+    total = total + str_eq(data2, "Hello, OmScript! More!"); // 1
+    // total = 6
+
+    // Test reading nonexistent file returns empty string
+    var empty = file_read("/tmp/omscript_nonexistent_xyz.txt");
+    total = total + (str_len(empty) == 0); // 1
+    // total = 7
+
+    // Test file_write error on invalid path returns 1
+    var badres = file_write("/proc/nonexistent/impossible/path.txt", "x");
+    total = total + (badres == 1);         // 1: error
+    // total = 8
+
+    println(total);
+    return total;
+}

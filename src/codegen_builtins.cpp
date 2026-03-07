@@ -2697,6 +2697,774 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         return builder->CreatePtrToInt(buf, getDefaultType(), "chars.result");
     }
 
+    // -----------------------------------------------------------------------
+    // File I/O built-ins
+    // -----------------------------------------------------------------------
+
+    if (expr->callee == "file_read") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'file_read' expects 1 argument (path)", expr);
+        }
+        llvm::Value* pathArg = generateExpression(expr->arguments[0].get());
+        llvm::Value* pathPtr =
+            pathArg->getType()->isPointerTy()
+                ? pathArg
+                : builder->CreateIntToPtr(pathArg, llvm::PointerType::getUnqual(*context), "fread.path");
+
+        // mode = "rb"
+        llvm::GlobalVariable* mode = module->getGlobalVariable("__fread_mode", true);
+        if (!mode)
+            mode = builder->CreateGlobalString("rb", "__fread_mode");
+
+        // FILE* fp = fopen(path, "rb")
+        llvm::Value* fp = builder->CreateCall(getOrDeclareFopen(), {pathPtr, mode}, "fread.fp");
+
+        // Check for null
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* nullPtr = llvm::ConstantPointerNull::get(ptrTy);
+        llvm::Value* isNull = builder->CreateICmpEQ(fp, nullPtr, "fread.isnull");
+
+        llvm::Function* parentFn = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* nullBB = llvm::BasicBlock::Create(*context, "fread.null", parentFn);
+        llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "fread.ok", parentFn);
+        llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "fread.merge", parentFn);
+        builder->CreateCondBr(isNull, nullBB, okBB);
+
+        // Null path: return empty string
+        builder->SetInsertPoint(nullBB);
+        llvm::Value* emptyBuf = builder->CreateCall(getOrDeclareMalloc(),
+            {llvm::ConstantInt::get(getDefaultType(), 1)}, "fread.empty");
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), emptyBuf);
+        llvm::Value* emptyResult = emptyBuf;
+        builder->CreateBr(mergeBB);
+        llvm::BasicBlock* nullEndBB = builder->GetInsertBlock();
+
+        // OK path: seek to end, get size, read
+        builder->SetInsertPoint(okBB);
+        // fseek(fp, 0, SEEK_END=2)
+        builder->CreateCall(getOrDeclareFseek(),
+            {fp, llvm::ConstantInt::get(getDefaultType(), 0),
+             llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 2)});
+        // size = ftell(fp)
+        llvm::Value* fileSize = builder->CreateCall(getOrDeclareFtell(), {fp}, "fread.size");
+        // fseek(fp, 0, SEEK_SET=0)
+        builder->CreateCall(getOrDeclareFseek(),
+            {fp, llvm::ConstantInt::get(getDefaultType(), 0),
+             llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0)});
+        // buf = malloc(size + 1)
+        llvm::Value* bufSize = builder->CreateAdd(fileSize,
+            llvm::ConstantInt::get(getDefaultType(), 1), "fread.bufsize");
+        llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bufSize}, "fread.buf");
+        // fread(buf, 1, size, fp)
+        builder->CreateCall(getOrDeclareFread(),
+            {buf, llvm::ConstantInt::get(getDefaultType(), 1), fileSize, fp});
+        // null terminate
+        llvm::Value* nullTermPtr = builder->CreateGEP(llvm::Type::getInt8Ty(*context), buf, fileSize, "fread.nullterm");
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), nullTermPtr);
+        // fclose(fp)
+        builder->CreateCall(getOrDeclareFclose(), {fp});
+        llvm::Value* okResult = buf;
+        builder->CreateBr(mergeBB);
+        llvm::BasicBlock* okEndBB = builder->GetInsertBlock();
+
+        // Merge
+        builder->SetInsertPoint(mergeBB);
+        llvm::PHINode* phi = builder->CreatePHI(ptrTy, 2, "fread.result");
+        phi->addIncoming(emptyResult, nullEndBB);
+        phi->addIncoming(okResult, okEndBB);
+        stringReturningFunctions_.insert("file_read");
+        return phi;
+    }
+
+    if (expr->callee == "file_write") {
+        if (expr->arguments.size() != 2) {
+            codegenError("Built-in function 'file_write' expects 2 arguments (path, content)", expr);
+        }
+        llvm::Value* pathArg = generateExpression(expr->arguments[0].get());
+        llvm::Value* contentArg = generateExpression(expr->arguments[1].get());
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* pathPtr = pathArg->getType()->isPointerTy()
+            ? pathArg : builder->CreateIntToPtr(pathArg, ptrTy, "fwrite.path");
+        llvm::Value* contentPtr = contentArg->getType()->isPointerTy()
+            ? contentArg : builder->CreateIntToPtr(contentArg, ptrTy, "fwrite.content");
+
+        llvm::GlobalVariable* mode = module->getGlobalVariable("__fwrite_mode", true);
+        if (!mode)
+            mode = builder->CreateGlobalString("wb", "__fwrite_mode");
+
+        llvm::Value* fp = builder->CreateCall(getOrDeclareFopen(), {pathPtr, mode}, "fwrite.fp");
+        llvm::Value* nullPtr = llvm::ConstantPointerNull::get(ptrTy);
+        llvm::Value* isNull = builder->CreateICmpEQ(fp, nullPtr, "fwrite.isnull");
+
+        llvm::Function* parentFn = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* nullBB = llvm::BasicBlock::Create(*context, "fwrite.null", parentFn);
+        llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "fwrite.ok", parentFn);
+        llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "fwrite.merge", parentFn);
+        builder->CreateCondBr(isNull, nullBB, okBB);
+
+        builder->SetInsertPoint(nullBB);
+        builder->CreateBr(mergeBB);
+
+        builder->SetInsertPoint(okBB);
+        llvm::Value* slen = builder->CreateCall(getOrDeclareStrlen(), {contentPtr}, "fwrite.len");
+        builder->CreateCall(getOrDeclareFwrite(),
+            {contentPtr, llvm::ConstantInt::get(getDefaultType(), 1), slen, fp});
+        builder->CreateCall(getOrDeclareFclose(), {fp});
+        builder->CreateBr(mergeBB);
+
+        builder->SetInsertPoint(mergeBB);
+        llvm::PHINode* phi = builder->CreatePHI(getDefaultType(), 2, "fwrite.result");
+        phi->addIncoming(llvm::ConstantInt::get(getDefaultType(), 1), nullBB);
+        phi->addIncoming(llvm::ConstantInt::get(getDefaultType(), 0), okBB);
+        return phi;
+    }
+
+    if (expr->callee == "file_append") {
+        if (expr->arguments.size() != 2) {
+            codegenError("Built-in function 'file_append' expects 2 arguments (path, content)", expr);
+        }
+        llvm::Value* pathArg = generateExpression(expr->arguments[0].get());
+        llvm::Value* contentArg = generateExpression(expr->arguments[1].get());
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* pathPtr = pathArg->getType()->isPointerTy()
+            ? pathArg : builder->CreateIntToPtr(pathArg, ptrTy, "fappend.path");
+        llvm::Value* contentPtr = contentArg->getType()->isPointerTy()
+            ? contentArg : builder->CreateIntToPtr(contentArg, ptrTy, "fappend.content");
+
+        llvm::GlobalVariable* mode = module->getGlobalVariable("__fappend_mode", true);
+        if (!mode)
+            mode = builder->CreateGlobalString("a", "__fappend_mode");
+
+        llvm::Value* fp = builder->CreateCall(getOrDeclareFopen(), {pathPtr, mode}, "fappend.fp");
+        llvm::Value* nullPtr = llvm::ConstantPointerNull::get(ptrTy);
+        llvm::Value* isNull = builder->CreateICmpEQ(fp, nullPtr, "fappend.isnull");
+
+        llvm::Function* parentFn = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* nullBB = llvm::BasicBlock::Create(*context, "fappend.null", parentFn);
+        llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "fappend.ok", parentFn);
+        llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "fappend.merge", parentFn);
+        builder->CreateCondBr(isNull, nullBB, okBB);
+
+        builder->SetInsertPoint(nullBB);
+        builder->CreateBr(mergeBB);
+
+        builder->SetInsertPoint(okBB);
+        llvm::Value* slen = builder->CreateCall(getOrDeclareStrlen(), {contentPtr}, "fappend.len");
+        builder->CreateCall(getOrDeclareFwrite(),
+            {contentPtr, llvm::ConstantInt::get(getDefaultType(), 1), slen, fp});
+        builder->CreateCall(getOrDeclareFclose(), {fp});
+        builder->CreateBr(mergeBB);
+
+        builder->SetInsertPoint(mergeBB);
+        llvm::PHINode* phi = builder->CreatePHI(getDefaultType(), 2, "fappend.result");
+        phi->addIncoming(llvm::ConstantInt::get(getDefaultType(), 1), nullBB);
+        phi->addIncoming(llvm::ConstantInt::get(getDefaultType(), 0), okBB);
+        return phi;
+    }
+
+    if (expr->callee == "file_exists") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'file_exists' expects 1 argument (path)", expr);
+        }
+        llvm::Value* pathArg = generateExpression(expr->arguments[0].get());
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* pathPtr = pathArg->getType()->isPointerTy()
+            ? pathArg : builder->CreateIntToPtr(pathArg, ptrTy, "fexists.path");
+        // access(path, F_OK=0) returns 0 on success, -1 on failure
+        llvm::Value* result = builder->CreateCall(getOrDeclareAccess(),
+            {pathPtr, llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0)}, "fexists.access");
+        llvm::Value* isZero = builder->CreateICmpEQ(result,
+            llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0), "fexists.cmp");
+        return builder->CreateZExt(isZero, getDefaultType(), "fexists.result");
+    }
+
+    // -----------------------------------------------------------------------
+    // Map/Dictionary built-ins
+    // -----------------------------------------------------------------------
+
+    if (expr->callee == "map_new") {
+        if (expr->arguments.size() != 0) {
+            codegenError("Built-in function 'map_new' expects 0 arguments", expr);
+        }
+        // Allocate array with just the length header = 0
+        llvm::Value* bufSize = llvm::ConstantInt::get(getDefaultType(), 8);
+        llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bufSize}, "mapnew.buf");
+        // Store length = 0
+        builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 0), buf);
+        return builder->CreatePtrToInt(buf, getDefaultType(), "mapnew.result");
+    }
+
+    if (expr->callee == "map_set") {
+        if (expr->arguments.size() != 3) {
+            codegenError("Built-in function 'map_set' expects 3 arguments (map, key, value)", expr);
+        }
+        llvm::Value* mapArg = generateExpression(expr->arguments[0].get());
+        llvm::Value* keyArg = generateExpression(expr->arguments[1].get());
+        llvm::Value* valArg = generateExpression(expr->arguments[2].get());
+        mapArg = toDefaultType(mapArg);
+        keyArg = toDefaultType(keyArg);
+        valArg = toDefaultType(valArg);
+
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* mapPtr = builder->CreateIntToPtr(mapArg, ptrTy, "mapset.ptr");
+        llvm::Value* mapLen = builder->CreateLoad(getDefaultType(), mapPtr, "mapset.len");
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* two = llvm::ConstantInt::get(getDefaultType(), 2);
+        llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
+
+        llvm::Function* parentFn = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* entryBB = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "mapset.loop", parentFn);
+        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "mapset.body", parentFn);
+        llvm::BasicBlock* foundBB = llvm::BasicBlock::Create(*context, "mapset.found", parentFn);
+        llvm::BasicBlock* nextBB = llvm::BasicBlock::Create(*context, "mapset.next", parentFn);
+        llvm::BasicBlock* appendBB = llvm::BasicBlock::Create(*context, "mapset.append", parentFn);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "mapset.done", parentFn);
+
+        builder->CreateBr(loopBB);
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "mapset.idx");
+        idx->addIncoming(zero, entryBB);
+        llvm::Value* cond = builder->CreateICmpSLT(idx, mapLen, "mapset.cond");
+        builder->CreateCondBr(cond, bodyBB, appendBB);
+
+        // Body: check if key matches
+        builder->SetInsertPoint(bodyBB);
+        llvm::Value* keySlot = builder->CreateAdd(idx, one, "mapset.keyslot");
+        llvm::Value* keyPtr = builder->CreateGEP(getDefaultType(), mapPtr, keySlot, "mapset.keyptr");
+        llvm::Value* existingKey = builder->CreateLoad(getDefaultType(), keyPtr, "mapset.existkey");
+        llvm::Value* keyMatch = builder->CreateICmpEQ(existingKey, keyArg, "mapset.match");
+        builder->CreateCondBr(keyMatch, foundBB, nextBB);
+
+        // Next: increment and loop back
+        builder->SetInsertPoint(nextBB);
+        llvm::Value* nextIdx = builder->CreateAdd(idx, two, "mapset.next");
+        idx->addIncoming(nextIdx, nextBB);
+        builder->CreateBr(loopBB);
+
+        // Found: update value in place
+        builder->SetInsertPoint(foundBB);
+        llvm::Value* valSlot = builder->CreateAdd(idx, two, "mapset.valslot");
+        llvm::Value* valPtr = builder->CreateGEP(getDefaultType(), mapPtr, valSlot, "mapset.valptr");
+        builder->CreateStore(valArg, valPtr);
+        builder->CreateBr(doneBB);
+
+        // Append: allocate new buffer with 2 more slots
+        builder->SetInsertPoint(appendBB);
+        llvm::Value* newLen = builder->CreateAdd(mapLen, two, "mapset.newlen");
+        llvm::Value* newSlots = builder->CreateAdd(newLen, one, "mapset.newslots");
+        llvm::Value* newSize = builder->CreateMul(newSlots, eight, "mapset.newsize");
+        llvm::Value* newBuf = builder->CreateCall(getOrDeclareMalloc(), {newSize}, "mapset.newbuf");
+        // Copy old data
+        llvm::Value* oldSlots = builder->CreateAdd(mapLen, one, "mapset.oldslots");
+        llvm::Value* oldSize = builder->CreateMul(oldSlots, eight, "mapset.oldsize");
+        builder->CreateCall(getOrDeclareMemcpy(), {newBuf, mapPtr, oldSize});
+        // Store new length
+        builder->CreateStore(newLen, newBuf);
+        // Store new key at [mapLen + 1]
+        llvm::Value* newKeySlot = builder->CreateAdd(mapLen, one, "mapset.nkeyslot");
+        llvm::Value* newKeyPtr = builder->CreateGEP(getDefaultType(), newBuf, newKeySlot, "mapset.nkeyptr");
+        builder->CreateStore(keyArg, newKeyPtr);
+        // Store new value at [mapLen + 2]
+        llvm::Value* newValSlot = builder->CreateAdd(mapLen, two, "mapset.nvalslot");
+        llvm::Value* newValPtr = builder->CreateGEP(getDefaultType(), newBuf, newValSlot, "mapset.nvalptr");
+        builder->CreateStore(valArg, newValPtr);
+        llvm::Value* appendResult = builder->CreatePtrToInt(newBuf, getDefaultType(), "mapset.appendres");
+        builder->CreateBr(doneBB);
+
+        builder->SetInsertPoint(doneBB);
+        llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "mapset.result");
+        result->addIncoming(mapArg, foundBB);
+        result->addIncoming(appendResult, appendBB);
+        return result;
+    }
+
+    if (expr->callee == "map_get") {
+        if (expr->arguments.size() != 3) {
+            codegenError("Built-in function 'map_get' expects 3 arguments (map, key, default)", expr);
+        }
+        llvm::Value* mapArg = generateExpression(expr->arguments[0].get());
+        llvm::Value* keyArg = generateExpression(expr->arguments[1].get());
+        llvm::Value* defArg = generateExpression(expr->arguments[2].get());
+        mapArg = toDefaultType(mapArg);
+        keyArg = toDefaultType(keyArg);
+        defArg = toDefaultType(defArg);
+
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* mapPtr = builder->CreateIntToPtr(mapArg, ptrTy, "mapget.ptr");
+        llvm::Value* mapLen = builder->CreateLoad(getDefaultType(), mapPtr, "mapget.len");
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* two = llvm::ConstantInt::get(getDefaultType(), 2);
+
+        llvm::Function* parentFn = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* entryBB = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "mapget.loop", parentFn);
+        llvm::BasicBlock* checkBB = llvm::BasicBlock::Create(*context, "mapget.check", parentFn);
+        llvm::BasicBlock* foundBB = llvm::BasicBlock::Create(*context, "mapget.found", parentFn);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "mapget.done", parentFn);
+
+        builder->CreateBr(loopBB);
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "mapget.idx");
+        idx->addIncoming(zero, entryBB);
+        llvm::Value* cond = builder->CreateICmpSLT(idx, mapLen, "mapget.cond");
+        builder->CreateCondBr(cond, checkBB, doneBB);
+
+        builder->SetInsertPoint(checkBB);
+        llvm::Value* keySlot = builder->CreateAdd(idx, one, "mapget.keyslot");
+        llvm::Value* keyPtr = builder->CreateGEP(getDefaultType(), mapPtr, keySlot, "mapget.keyptr");
+        llvm::Value* existingKey = builder->CreateLoad(getDefaultType(), keyPtr, "mapget.existkey");
+        llvm::Value* keyMatch = builder->CreateICmpEQ(existingKey, keyArg, "mapget.match");
+        llvm::Value* nextIdx = builder->CreateAdd(idx, two, "mapget.next");
+        idx->addIncoming(nextIdx, checkBB);
+        builder->CreateCondBr(keyMatch, foundBB, loopBB);
+
+        builder->SetInsertPoint(foundBB);
+        llvm::Value* valSlot = builder->CreateAdd(idx, two, "mapget.valslot");
+        llvm::Value* valPtr = builder->CreateGEP(getDefaultType(), mapPtr, valSlot, "mapget.valptr");
+        llvm::Value* foundVal = builder->CreateLoad(getDefaultType(), valPtr, "mapget.val");
+        builder->CreateBr(doneBB);
+
+        builder->SetInsertPoint(doneBB);
+        llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "mapget.result");
+        result->addIncoming(defArg, loopBB);
+        result->addIncoming(foundVal, foundBB);
+        return result;
+    }
+
+    if (expr->callee == "map_has") {
+        if (expr->arguments.size() != 2) {
+            codegenError("Built-in function 'map_has' expects 2 arguments (map, key)", expr);
+        }
+        llvm::Value* mapArg = generateExpression(expr->arguments[0].get());
+        llvm::Value* keyArg = generateExpression(expr->arguments[1].get());
+        mapArg = toDefaultType(mapArg);
+        keyArg = toDefaultType(keyArg);
+
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* mapPtr = builder->CreateIntToPtr(mapArg, ptrTy, "maphas.ptr");
+        llvm::Value* mapLen = builder->CreateLoad(getDefaultType(), mapPtr, "maphas.len");
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* two = llvm::ConstantInt::get(getDefaultType(), 2);
+
+        llvm::Function* parentFn = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* entryBB = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "maphas.loop", parentFn);
+        llvm::BasicBlock* checkBB = llvm::BasicBlock::Create(*context, "maphas.check", parentFn);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "maphas.done", parentFn);
+
+        builder->CreateBr(loopBB);
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "maphas.idx");
+        idx->addIncoming(zero, entryBB);
+        llvm::Value* cond = builder->CreateICmpSLT(idx, mapLen, "maphas.cond");
+        builder->CreateCondBr(cond, checkBB, doneBB);
+
+        builder->SetInsertPoint(checkBB);
+        llvm::Value* keySlot = builder->CreateAdd(idx, one, "maphas.keyslot");
+        llvm::Value* keyPtr = builder->CreateGEP(getDefaultType(), mapPtr, keySlot, "maphas.keyptr");
+        llvm::Value* existingKey = builder->CreateLoad(getDefaultType(), keyPtr, "maphas.existkey");
+        llvm::Value* keyMatch = builder->CreateICmpEQ(existingKey, keyArg, "maphas.match");
+        llvm::Value* nextIdx = builder->CreateAdd(idx, two, "maphas.next");
+        idx->addIncoming(nextIdx, checkBB);
+        // If found, go to done with 1; otherwise loop
+        llvm::BasicBlock* foundBB = llvm::BasicBlock::Create(*context, "maphas.found", parentFn);
+        builder->CreateCondBr(keyMatch, foundBB, loopBB);
+
+        builder->SetInsertPoint(foundBB);
+        builder->CreateBr(doneBB);
+
+        builder->SetInsertPoint(doneBB);
+        llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "maphas.result");
+        result->addIncoming(zero, loopBB);
+        result->addIncoming(one, foundBB);
+        return result;
+    }
+
+    if (expr->callee == "map_remove") {
+        if (expr->arguments.size() != 2) {
+            codegenError("Built-in function 'map_remove' expects 2 arguments (map, key)", expr);
+        }
+        llvm::Value* mapArg = generateExpression(expr->arguments[0].get());
+        llvm::Value* keyArg = generateExpression(expr->arguments[1].get());
+        mapArg = toDefaultType(mapArg);
+        keyArg = toDefaultType(keyArg);
+
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* mapPtr = builder->CreateIntToPtr(mapArg, ptrTy, "maprem.ptr");
+        llvm::Value* mapLen = builder->CreateLoad(getDefaultType(), mapPtr, "maprem.len");
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* two = llvm::ConstantInt::get(getDefaultType(), 2);
+        llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
+
+        llvm::Function* parentFn = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* entryBB = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "maprem.loop", parentFn);
+        llvm::BasicBlock* checkBB = llvm::BasicBlock::Create(*context, "maprem.check", parentFn);
+        llvm::BasicBlock* foundBB = llvm::BasicBlock::Create(*context, "maprem.found", parentFn);
+        llvm::BasicBlock* notFoundBB = llvm::BasicBlock::Create(*context, "maprem.notfound", parentFn);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "maprem.done", parentFn);
+
+        builder->CreateBr(loopBB);
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "maprem.idx");
+        idx->addIncoming(zero, entryBB);
+        llvm::Value* cond = builder->CreateICmpSLT(idx, mapLen, "maprem.cond");
+        builder->CreateCondBr(cond, checkBB, notFoundBB);
+
+        builder->SetInsertPoint(checkBB);
+        llvm::Value* keySlot = builder->CreateAdd(idx, one, "maprem.keyslot");
+        llvm::Value* keyPtr = builder->CreateGEP(getDefaultType(), mapPtr, keySlot, "maprem.keyptr");
+        llvm::Value* existingKey = builder->CreateLoad(getDefaultType(), keyPtr, "maprem.existkey");
+        llvm::Value* keyMatch = builder->CreateICmpEQ(existingKey, keyArg, "maprem.match");
+        llvm::Value* nextIdx = builder->CreateAdd(idx, two, "maprem.next");
+        idx->addIncoming(nextIdx, checkBB);
+        builder->CreateCondBr(keyMatch, foundBB, loopBB);
+
+        // Not found: return original map
+        builder->SetInsertPoint(notFoundBB);
+        builder->CreateBr(doneBB);
+
+        // Found: build new array without this pair
+        builder->SetInsertPoint(foundBB);
+        llvm::Value* newLen = builder->CreateSub(mapLen, two, "maprem.newlen");
+        llvm::Value* newSlots = builder->CreateAdd(newLen, one, "maprem.newslots");
+        llvm::Value* newSize = builder->CreateMul(newSlots, eight, "maprem.newsize");
+        llvm::Value* newBuf = builder->CreateCall(getOrDeclareMalloc(), {newSize}, "maprem.newbuf");
+        builder->CreateStore(newLen, newBuf);
+
+        // Copy elements before the removed pair: slots 1..idx (idx elements)
+        llvm::Value* beforeBytes = builder->CreateMul(idx, eight, "maprem.beforebytes");
+        llvm::Value* hasBefore = builder->CreateICmpSGT(idx, zero, "maprem.hasbefore");
+
+        llvm::BasicBlock* copyBeforeBB = llvm::BasicBlock::Create(*context, "maprem.copybefore", parentFn);
+        llvm::BasicBlock* afterCopyBeforeBB = llvm::BasicBlock::Create(*context, "maprem.afterbefore", parentFn);
+        builder->CreateCondBr(hasBefore, copyBeforeBB, afterCopyBeforeBB);
+
+        builder->SetInsertPoint(copyBeforeBB);
+        llvm::Value* srcBefore = builder->CreateGEP(getDefaultType(), mapPtr, one, "maprem.srcbefore");
+        llvm::Value* dstBefore = builder->CreateGEP(getDefaultType(), newBuf, one, "maprem.dstbefore");
+        builder->CreateCall(getOrDeclareMemcpy(), {dstBefore, srcBefore, beforeBytes});
+        builder->CreateBr(afterCopyBeforeBB);
+
+        builder->SetInsertPoint(afterCopyBeforeBB);
+        // Copy elements after the removed pair
+        llvm::Value* afterStart = builder->CreateAdd(idx, two, "maprem.afterstart");
+        llvm::Value* afterCount = builder->CreateSub(mapLen, afterStart, "maprem.aftercount");
+        llvm::Value* hasAfter = builder->CreateICmpSGT(afterCount, zero, "maprem.hasafter");
+
+        llvm::BasicBlock* copyAfterBB = llvm::BasicBlock::Create(*context, "maprem.copyafter", parentFn);
+        llvm::BasicBlock* afterCopyAfterBB = llvm::BasicBlock::Create(*context, "maprem.afterafter", parentFn);
+        builder->CreateCondBr(hasAfter, copyAfterBB, afterCopyAfterBB);
+
+        builder->SetInsertPoint(copyAfterBB);
+        llvm::Value* srcAfterSlot = builder->CreateAdd(afterStart, one, "maprem.srcafterslot");
+        llvm::Value* srcAfter = builder->CreateGEP(getDefaultType(), mapPtr, srcAfterSlot, "maprem.srcafter");
+        llvm::Value* dstAfterSlot = builder->CreateAdd(idx, one, "maprem.dstafterslot");
+        llvm::Value* dstAfter = builder->CreateGEP(getDefaultType(), newBuf, dstAfterSlot, "maprem.dstafter");
+        llvm::Value* afterBytes = builder->CreateMul(afterCount, eight, "maprem.afterbytes");
+        builder->CreateCall(getOrDeclareMemcpy(), {dstAfter, srcAfter, afterBytes});
+        builder->CreateBr(afterCopyAfterBB);
+
+        builder->SetInsertPoint(afterCopyAfterBB);
+        llvm::Value* foundResult = builder->CreatePtrToInt(newBuf, getDefaultType(), "maprem.foundres");
+        builder->CreateBr(doneBB);
+
+        builder->SetInsertPoint(doneBB);
+        llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "maprem.result");
+        result->addIncoming(mapArg, notFoundBB);
+        result->addIncoming(foundResult, afterCopyAfterBB);
+        return result;
+    }
+
+    if (expr->callee == "map_keys") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'map_keys' expects 1 argument (map)", expr);
+        }
+        llvm::Value* mapArg = generateExpression(expr->arguments[0].get());
+        mapArg = toDefaultType(mapArg);
+
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* mapPtr = builder->CreateIntToPtr(mapArg, ptrTy, "mapkeys.ptr");
+        llvm::Value* mapLen = builder->CreateLoad(getDefaultType(), mapPtr, "mapkeys.len");
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* two = llvm::ConstantInt::get(getDefaultType(), 2);
+        llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
+
+        // Number of pairs = mapLen / 2
+        llvm::Value* numPairs = builder->CreateSDiv(mapLen, two, "mapkeys.numpairs");
+        // Allocate: (numPairs + 1) * 8
+        llvm::Value* arrSlots = builder->CreateAdd(numPairs, one, "mapkeys.arrslots");
+        llvm::Value* arrSize = builder->CreateMul(arrSlots, eight, "mapkeys.arrsize");
+        llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {arrSize}, "mapkeys.buf");
+        builder->CreateStore(numPairs, buf);
+
+        llvm::Function* parentFn = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* entryBB = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "mapkeys.loop", parentFn);
+        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "mapkeys.body", parentFn);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "mapkeys.done", parentFn);
+
+        builder->CreateBr(loopBB);
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* i = builder->CreatePHI(getDefaultType(), 2, "mapkeys.i");
+        i->addIncoming(zero, entryBB);
+        llvm::Value* cond = builder->CreateICmpSLT(i, numPairs, "mapkeys.cond");
+        builder->CreateCondBr(cond, bodyBB, doneBB);
+
+        builder->SetInsertPoint(bodyBB);
+        // Key is at map slot: i*2 + 1
+        llvm::Value* mapSlot = builder->CreateAdd(builder->CreateMul(i, two, "mapkeys.mi"), one, "mapkeys.mapslot");
+        llvm::Value* keyPtr = builder->CreateGEP(getDefaultType(), mapPtr, mapSlot, "mapkeys.keyptr");
+        llvm::Value* keyVal = builder->CreateLoad(getDefaultType(), keyPtr, "mapkeys.key");
+        // Store at buf slot: i + 1
+        llvm::Value* arrSlot = builder->CreateAdd(i, one, "mapkeys.arrslot");
+        llvm::Value* arrElemPtr = builder->CreateGEP(getDefaultType(), buf, arrSlot, "mapkeys.arrptr");
+        builder->CreateStore(keyVal, arrElemPtr);
+        llvm::Value* nextI = builder->CreateAdd(i, one, "mapkeys.next");
+        i->addIncoming(nextI, bodyBB);
+        builder->CreateBr(loopBB);
+
+        builder->SetInsertPoint(doneBB);
+        return builder->CreatePtrToInt(buf, getDefaultType(), "mapkeys.result");
+    }
+
+    if (expr->callee == "map_values") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'map_values' expects 1 argument (map)", expr);
+        }
+        llvm::Value* mapArg = generateExpression(expr->arguments[0].get());
+        mapArg = toDefaultType(mapArg);
+
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* mapPtr = builder->CreateIntToPtr(mapArg, ptrTy, "mapvals.ptr");
+        llvm::Value* mapLen = builder->CreateLoad(getDefaultType(), mapPtr, "mapvals.len");
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* two = llvm::ConstantInt::get(getDefaultType(), 2);
+        llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
+
+        llvm::Value* numPairs = builder->CreateSDiv(mapLen, two, "mapvals.numpairs");
+        llvm::Value* arrSlots = builder->CreateAdd(numPairs, one, "mapvals.arrslots");
+        llvm::Value* arrSize = builder->CreateMul(arrSlots, eight, "mapvals.arrsize");
+        llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {arrSize}, "mapvals.buf");
+        builder->CreateStore(numPairs, buf);
+
+        llvm::Function* parentFn = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* entryBB = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "mapvals.loop", parentFn);
+        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "mapvals.body", parentFn);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "mapvals.done", parentFn);
+
+        builder->CreateBr(loopBB);
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* i = builder->CreatePHI(getDefaultType(), 2, "mapvals.i");
+        i->addIncoming(zero, entryBB);
+        llvm::Value* cond = builder->CreateICmpSLT(i, numPairs, "mapvals.cond");
+        builder->CreateCondBr(cond, bodyBB, doneBB);
+
+        builder->SetInsertPoint(bodyBB);
+        // Value is at map slot: i*2 + 2
+        llvm::Value* mapSlot = builder->CreateAdd(builder->CreateMul(i, two, "mapvals.mi"), two, "mapvals.mapslot");
+        llvm::Value* valPtr = builder->CreateGEP(getDefaultType(), mapPtr, mapSlot, "mapvals.valptr");
+        llvm::Value* valVal = builder->CreateLoad(getDefaultType(), valPtr, "mapvals.val");
+        llvm::Value* arrSlot = builder->CreateAdd(i, one, "mapvals.arrslot");
+        llvm::Value* arrElemPtr = builder->CreateGEP(getDefaultType(), buf, arrSlot, "mapvals.arrptr");
+        builder->CreateStore(valVal, arrElemPtr);
+        llvm::Value* nextI = builder->CreateAdd(i, one, "mapvals.next");
+        i->addIncoming(nextI, bodyBB);
+        builder->CreateBr(loopBB);
+
+        builder->SetInsertPoint(doneBB);
+        return builder->CreatePtrToInt(buf, getDefaultType(), "mapvals.result");
+    }
+
+    if (expr->callee == "map_size") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'map_size' expects 1 argument (map)", expr);
+        }
+        llvm::Value* mapArg = generateExpression(expr->arguments[0].get());
+        mapArg = toDefaultType(mapArg);
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* mapPtr = builder->CreateIntToPtr(mapArg, ptrTy, "mapsize.ptr");
+        llvm::Value* mapLen = builder->CreateLoad(getDefaultType(), mapPtr, "mapsize.len");
+        // Number of pairs = mapLen / 2
+        return builder->CreateSDiv(mapLen,
+            llvm::ConstantInt::get(getDefaultType(), 2), "mapsize.result");
+    }
+
+    // -----------------------------------------------------------------------
+    // Range and utility built-ins
+    // -----------------------------------------------------------------------
+
+    if (expr->callee == "range") {
+        if (expr->arguments.size() != 2) {
+            codegenError("Built-in function 'range' expects 2 arguments (start, end)", expr);
+        }
+        llvm::Value* startArg = generateExpression(expr->arguments[0].get());
+        llvm::Value* endArg = generateExpression(expr->arguments[1].get());
+        startArg = toDefaultType(startArg);
+        endArg = toDefaultType(endArg);
+
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
+
+        // count = max(end - start, 0)
+        llvm::Value* diff = builder->CreateSub(endArg, startArg, "range.diff");
+        llvm::Value* isPos = builder->CreateICmpSGT(diff, zero, "range.ispos");
+        llvm::Value* count = builder->CreateSelect(isPos, diff, zero, "range.count");
+
+        // Allocate: (count + 1) * 8
+        llvm::Value* arrSlots = builder->CreateAdd(count, one, "range.arrslots");
+        llvm::Value* arrSize = builder->CreateMul(arrSlots, eight, "range.arrsize");
+        llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {arrSize}, "range.buf");
+        builder->CreateStore(count, buf);
+
+        llvm::Function* parentFn = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* entryBB = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "range.loop", parentFn);
+        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "range.body", parentFn);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "range.done", parentFn);
+
+        builder->CreateBr(loopBB);
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* i = builder->CreatePHI(getDefaultType(), 2, "range.i");
+        i->addIncoming(zero, entryBB);
+        llvm::Value* cond = builder->CreateICmpSLT(i, count, "range.cond");
+        builder->CreateCondBr(cond, bodyBB, doneBB);
+
+        builder->SetInsertPoint(bodyBB);
+        llvm::Value* val = builder->CreateAdd(startArg, i, "range.val");
+        llvm::Value* slot = builder->CreateAdd(i, one, "range.slot");
+        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), buf, slot, "range.elemptr");
+        builder->CreateStore(val, elemPtr);
+        llvm::Value* nextI = builder->CreateAdd(i, one, "range.next");
+        i->addIncoming(nextI, bodyBB);
+        builder->CreateBr(loopBB);
+
+        builder->SetInsertPoint(doneBB);
+        return builder->CreatePtrToInt(buf, getDefaultType(), "range.result");
+    }
+
+    if (expr->callee == "range_step") {
+        if (expr->arguments.size() != 3) {
+            codegenError("Built-in function 'range_step' expects 3 arguments (start, end, step)", expr);
+        }
+        llvm::Value* startArg = generateExpression(expr->arguments[0].get());
+        llvm::Value* endArg = generateExpression(expr->arguments[1].get());
+        llvm::Value* stepArg = generateExpression(expr->arguments[2].get());
+        startArg = toDefaultType(startArg);
+        endArg = toDefaultType(endArg);
+        stepArg = toDefaultType(stepArg);
+
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
+
+        // count = max((end - start + step - 1) / step, 0) for positive step
+        // Simplified: count = max(0, (end - start + step - sign) / step)
+        // Use a safe approach: (end - start) / step, clamped to 0
+        llvm::Value* diff = builder->CreateSub(endArg, startArg, "rstep.diff");
+        // For positive step: count = (diff + step - 1) / step if diff > 0
+        llvm::Value* adjDiff = builder->CreateAdd(diff,
+            builder->CreateSub(stepArg, one, "rstep.stepm1"), "rstep.adjdiff");
+        llvm::Value* count = builder->CreateSDiv(adjDiff, stepArg, "rstep.count");
+        llvm::Value* isPos = builder->CreateICmpSGT(count, zero, "rstep.ispos");
+        count = builder->CreateSelect(isPos, count, zero, "rstep.clampcount");
+
+        llvm::Value* arrSlots = builder->CreateAdd(count, one, "rstep.arrslots");
+        llvm::Value* arrSize = builder->CreateMul(arrSlots, eight, "rstep.arrsize");
+        llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {arrSize}, "rstep.buf");
+        builder->CreateStore(count, buf);
+
+        llvm::Function* parentFn = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* entryBB = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "rstep.loop", parentFn);
+        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "rstep.body", parentFn);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "rstep.done", parentFn);
+
+        builder->CreateBr(loopBB);
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* i = builder->CreatePHI(getDefaultType(), 2, "rstep.i");
+        i->addIncoming(zero, entryBB);
+        llvm::Value* cond = builder->CreateICmpSLT(i, count, "rstep.cond");
+        builder->CreateCondBr(cond, bodyBB, doneBB);
+
+        builder->SetInsertPoint(bodyBB);
+        llvm::Value* val = builder->CreateAdd(startArg,
+            builder->CreateMul(i, stepArg, "rstep.offset"), "rstep.val");
+        llvm::Value* slot = builder->CreateAdd(i, one, "rstep.slot");
+        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), buf, slot, "rstep.elemptr");
+        builder->CreateStore(val, elemPtr);
+        llvm::Value* nextI = builder->CreateAdd(i, one, "rstep.next");
+        i->addIncoming(nextI, bodyBB);
+        builder->CreateBr(loopBB);
+
+        builder->SetInsertPoint(doneBB);
+        return builder->CreatePtrToInt(buf, getDefaultType(), "rstep.result");
+    }
+
+    if (expr->callee == "char_code") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'char_code' expects 1 argument (string)", expr);
+        }
+        llvm::Value* strArg = generateExpression(expr->arguments[0].get());
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* strPtr = strArg->getType()->isPointerTy()
+            ? strArg : builder->CreateIntToPtr(strArg, ptrTy, "charcode.ptr");
+        llvm::Value* ch = builder->CreateLoad(llvm::Type::getInt8Ty(*context), strPtr, "charcode.ch");
+        return builder->CreateZExt(ch, getDefaultType(), "charcode.result");
+    }
+
+    if (expr->callee == "number_to_string") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'number_to_string' expects 1 argument", expr);
+        }
+        llvm::Value* val = generateExpression(expr->arguments[0].get());
+        bool isFloat = val->getType()->isDoubleTy();
+        if (!isFloat)
+            val = toDefaultType(val);
+        if (isFloat) {
+            llvm::Value* bufSize = llvm::ConstantInt::get(getDefaultType(), 32);
+            llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bufSize}, "numtostr.buf");
+            llvm::GlobalVariable* fmtStr = module->getGlobalVariable("tostr_float_fmt", true);
+            if (!fmtStr)
+                fmtStr = builder->CreateGlobalString("%g", "tostr_float_fmt");
+            builder->CreateCall(getOrDeclareSnprintf(), {buf, bufSize, fmtStr, val});
+            stringReturningFunctions_.insert("number_to_string");
+            return buf;
+        }
+        llvm::Value* bufSize = llvm::ConstantInt::get(getDefaultType(), 21);
+        llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bufSize}, "numtostr.buf");
+        llvm::GlobalVariable* fmtStr = module->getGlobalVariable("tostr_fmt", true);
+        if (!fmtStr)
+            fmtStr = builder->CreateGlobalString("%lld", "tostr_fmt");
+        builder->CreateCall(getOrDeclareSnprintf(), {buf, bufSize, fmtStr, val});
+        stringReturningFunctions_.insert("number_to_string");
+        return buf;
+    }
+
+    if (expr->callee == "string_to_number") {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'string_to_number' expects 1 argument (string)", expr);
+        }
+        llvm::Value* strArg = generateExpression(expr->arguments[0].get());
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* strPtr = strArg->getType()->isPointerTy()
+            ? strArg : builder->CreateIntToPtr(strArg, ptrTy, "strtonum.ptr");
+        // Use strtoll to parse as integer first
+        llvm::Value* nullPtr = llvm::ConstantPointerNull::get(ptrTy);
+        llvm::Value* result = builder->CreateCall(getOrDeclareStrtoll(),
+            {strPtr, nullPtr, llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 10)}, "strtonum.result");
+        return result;
+    }
+
     if (inOptMaxFunction) {
         // Stdlib functions are always native machine code, so they're safe to call from OPTMAX
         if (!isStdlibFunction(expr->callee) && optMaxFunctions.find(expr->callee) == optMaxFunctions.end()) {

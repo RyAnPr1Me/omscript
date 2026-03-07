@@ -527,8 +527,13 @@ static const std::unordered_set<std::string> stdlibFunctions = {"abs",
                                                                 "assert",
                                                                 "ceil",
                                                                 "char_at",
+                                                                "char_code",
                                                                 "clamp",
                                                                 "exit_program",
+                                                                "file_append",
+                                                                "file_exists",
+                                                                "file_read",
+                                                                "file_write",
                                                                 "floor",
                                                                 "gcd",
                                                                 "index_of",
@@ -540,8 +545,17 @@ static const std::unordered_set<std::string> stdlibFunctions = {"abs",
                                                                 "is_odd",
                                                                 "len",
                                                                 "log2",
+                                                                "map_get",
+                                                                "map_has",
+                                                                "map_keys",
+                                                                "map_new",
+                                                                "map_remove",
+                                                                "map_set",
+                                                                "map_size",
+                                                                "map_values",
                                                                 "max",
                                                                 "min",
+                                                                "number_to_string",
                                                                 "pop",
                                                                 "pow",
                                                                 "print",
@@ -549,6 +563,8 @@ static const std::unordered_set<std::string> stdlibFunctions = {"abs",
                                                                 "println",
                                                                 "push",
                                                                 "random",
+                                                                "range",
+                                                                "range_step",
                                                                 "reverse",
                                                                 "round",
                                                                 "sign",
@@ -574,6 +590,7 @@ static const std::unordered_set<std::string> stdlibFunctions = {"abs",
                                                                 "str_to_int",
                                                                 "str_trim",
                                                                 "str_upper",
+                                                                "string_to_number",
                                                                 "sum",
                                                                 "swap",
                                                                 "time",
@@ -1175,6 +1192,57 @@ llvm::Function* CodeGenerator::getOrDeclareFgets() {
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy, llvm::Type::getInt32Ty(*context), ptrTy}, false);
     return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "fgets", module.get());
+}
+
+
+llvm::Function* CodeGenerator::getOrDeclareFopen() {
+    if (auto* fn = module->getFunction("fopen"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy, ptrTy}, false);
+    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "fopen", module.get());
+}
+
+llvm::Function* CodeGenerator::getOrDeclareFclose() {
+    if (auto* fn = module->getFunction("fclose"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {ptrTy}, false);
+    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "fclose", module.get());
+}
+
+llvm::Function* CodeGenerator::getOrDeclareFread() {
+    if (auto* fn = module->getFunction("fread"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(getDefaultType(), {ptrTy, getDefaultType(), getDefaultType(), ptrTy}, false);
+    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "fread", module.get());
+}
+
+llvm::Function* CodeGenerator::getOrDeclareFseek() {
+    if (auto* fn = module->getFunction("fseek"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context),
+                                        {ptrTy, getDefaultType(), llvm::Type::getInt32Ty(*context)}, false);
+    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "fseek", module.get());
+}
+
+llvm::Function* CodeGenerator::getOrDeclareFtell() {
+    if (auto* fn = module->getFunction("ftell"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(getDefaultType(), {ptrTy}, false);
+    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "ftell", module.get());
+}
+
+llvm::Function* CodeGenerator::getOrDeclareAccess() {
+    if (auto* fn = module->getFunction("access"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context),
+                                        {ptrTy, llvm::Type::getInt32Ty(*context)}, false);
+    return llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "access", module.get());
 }
 
 // ---------------------------------------------------------------------------

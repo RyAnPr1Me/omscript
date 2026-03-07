@@ -1,0 +1,61 @@
+// Test map/dictionary built-in functions
+fn main() {
+    var total = 0;
+
+    // Test map_new
+    var m = map_new();
+    total = total + (map_size(m) == 0);    // 1
+    // total = 1
+
+    // Test map_set and map_get
+    m = map_set(m, 1, 100);
+    m = map_set(m, 2, 200);
+    m = map_set(m, 3, 300);
+    total = total + (map_size(m) == 3);    // 1
+    total = total + (map_get(m, 1, 0) == 100); // 1
+    total = total + (map_get(m, 2, 0) == 200); // 1
+    total = total + (map_get(m, 3, 0) == 300); // 1
+    // total = 5
+
+    // Test map_get with default for missing key
+    total = total + (map_get(m, 99, -1) == -1); // 1
+    // total = 6
+
+    // Test map_has
+    total = total + map_has(m, 1);         // 1
+    total = total + map_has(m, 2);         // 1
+    total = total + (1 - map_has(m, 99));  // 1
+    // total = 9
+
+    // Test map_set update existing key
+    m = map_set(m, 2, 999);
+    total = total + (map_get(m, 2, 0) == 999); // 1
+    total = total + (map_size(m) == 3);    // 1: size unchanged
+    // total = 11
+
+    // Test map_keys
+    var keys = map_keys(m);
+    total = total + (len(keys) == 3);      // 1
+    // total = 12
+
+    // Test map_values
+    var vals = map_values(m);
+    total = total + (len(vals) == 3);      // 1
+    // total = 13
+
+    // Test map_remove
+    m = map_remove(m, 2);
+    total = total + (map_size(m) == 2);    // 1
+    total = total + (1 - map_has(m, 2));   // 1
+    total = total + map_has(m, 1);         // 1
+    total = total + map_has(m, 3);         // 1
+    // total = 17
+
+    // Test map_remove nonexistent key (no change)
+    var m2 = map_remove(m, 999);
+    total = total + (map_size(m2) == 2);   // 1
+    // total = 18
+
+    println(total);
+    return total;
+}

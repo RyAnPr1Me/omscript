@@ -287,6 +287,9 @@ test_program "examples/print_return_test.om" 0
 test_program "examples/optmax_div_zero.om" 1
 test_program "examples/forward_ref_test.om" 24
 test_program "examples/stdlib_float_test.om" 29
+test_program "examples/file_io_test.om" 8
+test_program "examples/map_test.om" 18
+test_program "examples/range_test.om" 21
 test_program "examples/float_edge_cases.om" 14
 test_program "examples/switch_test.om" 60
 test_program "examples/switch_break_test.om" 159
