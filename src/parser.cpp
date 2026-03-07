@@ -83,6 +83,7 @@ void Parser::synchronize() {
 std::unique_ptr<Program> Parser::parse() {
     std::vector<std::unique_ptr<FunctionDecl>> functions;
     std::vector<std::unique_ptr<EnumDecl>> enums;
+    std::vector<std::unique_ptr<StructDecl>> structs;
     bool optMaxTagActive = false;
 
     while (!isAtEnd()) {
@@ -103,6 +104,15 @@ std::unique_ptr<Program> Parser::parse() {
         if (match(TokenType::ENUM)) {
             try {
                 enums.push_back(parseEnumDecl());
+            } catch (const std::runtime_error& e) {
+                errors_.push_back(e.what());
+                synchronize();
+            }
+            continue;
+        }
+        if (match(TokenType::STRUCT)) {
+            try {
+                structs.push_back(parseStructDecl());
             } catch (const std::runtime_error& e) {
                 errors_.push_back(e.what());
                 synchronize();
@@ -140,7 +150,7 @@ std::unique_ptr<Program> Parser::parse() {
     }
     lambdaFunctions_.clear();
 
-    return std::make_unique<Program>(std::move(functions), std::move(enums));
+    return std::make_unique<Program>(std::move(functions), std::move(enums), std::move(structs));
 }
 
 std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
@@ -507,6 +517,41 @@ std::unique_ptr<EnumDecl> Parser::parseEnumDecl() {
     return std::make_unique<EnumDecl>(nameToken.lexeme, std::move(members));
 }
 
+std::unique_ptr<StructDecl> Parser::parseStructDecl() {
+    Token nameToken = consume(TokenType::IDENTIFIER, "Expected struct name");
+    consume(TokenType::LBRACE, "Expected '{' after struct name");
+
+    std::vector<std::string> fields;
+
+    while (!check(TokenType::RBRACE) && !isAtEnd()) {
+        Token fieldToken = consume(TokenType::IDENTIFIER, "Expected field name");
+        fields.push_back(fieldToken.lexeme);
+        match(TokenType::COMMA);
+    }
+
+    consume(TokenType::RBRACE, "Expected '}' after struct body");
+    structNames_.insert(nameToken.lexeme);
+    return std::make_unique<StructDecl>(nameToken.lexeme, std::move(fields));
+}
+
+std::unique_ptr<Expression> Parser::parseStructLiteral(const std::string& name, int line, int col) {
+    std::vector<std::pair<std::string, std::unique_ptr<Expression>>> fieldValues;
+
+    while (!check(TokenType::RBRACE) && !isAtEnd()) {
+        Token fieldToken = consume(TokenType::IDENTIFIER, "Expected field name in struct literal");
+        consume(TokenType::COLON, "Expected ':' after field name");
+        auto value = parseExpression();
+        fieldValues.push_back({fieldToken.lexeme, std::move(value)});
+        match(TokenType::COMMA);
+    }
+
+    consume(TokenType::RBRACE, "Expected '}' after struct literal");
+    auto expr = std::make_unique<StructLiteralExpr>(name, std::move(fieldValues));
+    expr->line = line;
+    expr->column = col;
+    return expr;
+}
+
 std::unique_ptr<Statement> Parser::parseExprStmt() {
     Token start = peek();
     auto expr = parseExpression();
@@ -541,6 +586,15 @@ std::unique_ptr<Expression> Parser::parseAssignment() {
             auto arrClone = std::move(indexExpr->array);
             auto idxClone = std::move(indexExpr->index);
             auto node = std::make_unique<IndexAssignExpr>(std::move(arrClone), std::move(idxClone), std::move(value));
+            node->line = expr->line;
+            node->column = expr->column;
+            return node;
+        } else if (expr->type == ASTNodeType::FIELD_ACCESS_EXPR) {
+            auto* fieldExpr = static_cast<FieldAccessExpr*>(expr.get());
+            auto value = parseAssignment();
+            auto objClone = std::move(fieldExpr->object);
+            std::string fieldName = fieldExpr->fieldName;
+            auto node = std::make_unique<FieldAssignExpr>(std::move(objClone), fieldName, std::move(value));
             node->line = expr->line;
             node->column = expr->column;
             return node;
@@ -892,6 +946,15 @@ std::unique_ptr<Expression> Parser::parsePostfix() {
             indexExpr->line = bracketToken.line;
             indexExpr->column = bracketToken.column;
             expr = std::move(indexExpr);
+        }
+        // Handle field access (dot notation)
+        else if (match(TokenType::DOT)) {
+            Token dotToken = tokens[current - 1];
+            Token fieldToken = consume(TokenType::IDENTIFIER, "Expected field name after '.'");
+            auto fieldExpr = std::make_unique<FieldAccessExpr>(std::move(expr), fieldToken.lexeme);
+            fieldExpr->line = dotToken.line;
+            fieldExpr->column = dotToken.column;
+            expr = std::move(fieldExpr);
         } else {
             break;
         }
@@ -972,6 +1035,11 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
 
     if (match(TokenType::IDENTIFIER)) {
         Token token = tokens[current - 1];
+        // Check if this is a struct literal: StructName { field: value, ... }
+        if (structNames_.count(token.lexeme) && check(TokenType::LBRACE)) {
+            advance(); // consume '{'
+            return parseStructLiteral(token.lexeme, token.line, token.column);
+        }
         auto expr = std::make_unique<IdentifierExpr>(token.lexeme);
         expr->line = token.line;
         expr->column = token.column;

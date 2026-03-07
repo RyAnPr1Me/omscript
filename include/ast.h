@@ -25,6 +25,10 @@ enum class ASTNodeType {
     TRY_CATCH_STMT,
     THROW_STMT,
     ENUM_DECL,
+    STRUCT_DECL,
+    STRUCT_LITERAL_EXPR,
+    FIELD_ACCESS_EXPR,
+    FIELD_ASSIGN_EXPR,
     EXPR_STMT,
     BINARY_EXPR,
     UNARY_EXPR,
@@ -355,6 +359,45 @@ class EnumDecl : public Statement {
         : Statement(ASTNodeType::ENUM_DECL), name(n), members(std::move(m)) {}
 };
 
+class StructDecl : public Statement {
+  public:
+    std::string name;
+    std::vector<std::string> fields;
+
+    StructDecl(const std::string& n, std::vector<std::string> f)
+        : Statement(ASTNodeType::STRUCT_DECL), name(n), fields(std::move(f)) {}
+};
+
+class StructLiteralExpr : public Expression {
+  public:
+    std::string structName;
+    std::vector<std::pair<std::string, std::unique_ptr<Expression>>> fieldValues;
+
+    StructLiteralExpr(const std::string& name,
+                      std::vector<std::pair<std::string, std::unique_ptr<Expression>>> fv)
+        : Expression(ASTNodeType::STRUCT_LITERAL_EXPR), structName(name), fieldValues(std::move(fv)) {}
+};
+
+class FieldAccessExpr : public Expression {
+  public:
+    std::unique_ptr<Expression> object;
+    std::string fieldName;
+
+    FieldAccessExpr(std::unique_ptr<Expression> obj, const std::string& field)
+        : Expression(ASTNodeType::FIELD_ACCESS_EXPR), object(std::move(obj)), fieldName(field) {}
+};
+
+class FieldAssignExpr : public Expression {
+  public:
+    std::unique_ptr<Expression> object;
+    std::string fieldName;
+    std::unique_ptr<Expression> value;
+
+    FieldAssignExpr(std::unique_ptr<Expression> obj, const std::string& field, std::unique_ptr<Expression> val)
+        : Expression(ASTNodeType::FIELD_ASSIGN_EXPR), object(std::move(obj)), fieldName(field),
+          value(std::move(val)) {}
+};
+
 // Top-level
 class Parameter {
   public:
@@ -403,9 +446,12 @@ class Program : public ASTNode {
   public:
     std::vector<std::unique_ptr<FunctionDecl>> functions;
     std::vector<std::unique_ptr<EnumDecl>> enums;
+    std::vector<std::unique_ptr<StructDecl>> structs;
 
-    Program(std::vector<std::unique_ptr<FunctionDecl>> funcs, std::vector<std::unique_ptr<EnumDecl>> enms = {})
-        : ASTNode(ASTNodeType::PROGRAM), functions(std::move(funcs)), enums(std::move(enms)) {}
+    Program(std::vector<std::unique_ptr<FunctionDecl>> funcs, std::vector<std::unique_ptr<EnumDecl>> enms = {},
+            std::vector<std::unique_ptr<StructDecl>> strcts = {})
+        : ASTNode(ASTNodeType::PROGRAM), functions(std::move(funcs)), enums(std::move(enms)),
+          structs(std::move(strcts)) {}
 };
 
 } // namespace omscript

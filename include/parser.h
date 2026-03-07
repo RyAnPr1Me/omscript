@@ -4,6 +4,7 @@
 #include "ast.h"
 #include "lexer.h"
 #include <memory>
+#include <unordered_set>
 #include <vector>
 
 namespace omscript {
@@ -79,7 +80,12 @@ class Parser {
     std::unique_ptr<Statement> parseTryCatchStmt();
     std::unique_ptr<Statement> parseThrowStmt();
     std::unique_ptr<EnumDecl> parseEnumDecl();
+    std::unique_ptr<StructDecl> parseStructDecl();
+    std::unique_ptr<Expression> parseStructLiteral(const std::string& name, int line, int col);
     std::unique_ptr<Statement> parseExprStmt();
+
+    /// Known struct names for parsing struct literals.
+    std::unordered_set<std::string> structNames_;
 
     std::unique_ptr<Expression> parseExpression();
     std::unique_ptr<Expression> parseAssignment();

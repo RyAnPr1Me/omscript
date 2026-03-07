@@ -198,6 +198,11 @@ class CodeGenerator {
     // Enum constant values (name → integer value), populated from enum declarations.
     std::unordered_map<std::string, long long> enumConstants_;
 
+    // Struct type definitions: struct name → ordered list of field names.
+    std::unordered_map<std::string, std::vector<std::string>> structDefs_;
+    // Variables known to hold struct values, maps var name → struct type name.
+    std::unordered_map<std::string, std::string> structVars_;
+
     OptimizationLevel optimizationLevel;
 
     // Per-function execution tier decided during code generation.
@@ -240,6 +245,14 @@ class CodeGenerator {
     llvm::Value* generateArray(ArrayExpr* expr);
     llvm::Value* generateIndex(IndexExpr* expr);
     llvm::Value* generateIndexAssign(IndexAssignExpr* expr);
+    llvm::Value* generateStructLiteral(StructLiteralExpr* expr);
+    llvm::Value* generateFieldAccess(FieldAccessExpr* expr);
+    llvm::Value* generateFieldAssign(FieldAssignExpr* expr);
+
+    // Struct type resolution helpers.
+    std::string resolveStructType(Expression* objExpr) const;
+    size_t resolveFieldIndex(const std::string& structType, const std::string& fieldName,
+                             const ASTNode* errorNode);
 
     // Statement generators
     void generateVarDecl(VarDecl* stmt);

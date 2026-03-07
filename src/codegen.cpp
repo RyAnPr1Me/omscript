@@ -1514,6 +1514,11 @@ void CodeGenerator::generate(Program* program) {
         }
     }
 
+    // Process struct declarations: store field layouts for struct operations.
+    for (auto& structDecl : program->structs) {
+        structDefs_[structDecl->name] = structDecl->fields;
+    }
+
     // Pre-analyze string types: determine which functions return strings and
     // which parameters receive string arguments, so that print/concat/etc.
     // work correctly when strings cross function boundaries.
@@ -1793,6 +1798,9 @@ void CodeGenerator::generateStatement(Statement* stmt) {
     case ASTNodeType::ENUM_DECL:
         // Enums are handled at program level, nothing to do here
         break;
+    case ASTNodeType::STRUCT_DECL:
+        // Structs are handled at program level, nothing to do here
+        break;
     default:
         codegenError("Unknown statement type", stmt);
     }
@@ -1825,6 +1833,12 @@ llvm::Value* CodeGenerator::generateExpression(Expression* expr) {
         return generateIndex(static_cast<IndexExpr*>(expr));
     case ASTNodeType::INDEX_ASSIGN_EXPR:
         return generateIndexAssign(static_cast<IndexAssignExpr*>(expr));
+    case ASTNodeType::STRUCT_LITERAL_EXPR:
+        return generateStructLiteral(static_cast<StructLiteralExpr*>(expr));
+    case ASTNodeType::FIELD_ACCESS_EXPR:
+        return generateFieldAccess(static_cast<FieldAccessExpr*>(expr));
+    case ASTNodeType::FIELD_ASSIGN_EXPR:
+        return generateFieldAssign(static_cast<FieldAssignExpr*>(expr));
     case ASTNodeType::PIPE_EXPR: {
         // Desugar: expr |> fn  =>  fn(expr)
         auto* pipe = static_cast<PipeExpr*>(expr);
@@ -5611,6 +5625,137 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
     return newVal;
 }
 
+std::string CodeGenerator::resolveStructType(Expression* objExpr) const {
+    if (objExpr->type == ASTNodeType::IDENTIFIER_EXPR) {
+        auto* id = static_cast<IdentifierExpr*>(objExpr);
+        auto vit = structVars_.find(id->name);
+        if (vit != structVars_.end()) {
+            return vit->second;
+        }
+    } else if (objExpr->type == ASTNodeType::STRUCT_LITERAL_EXPR) {
+        return static_cast<StructLiteralExpr*>(objExpr)->structName;
+    }
+    // For function returns, parameters, and nested field access the struct
+    // type is unknown at compile time in this dynamically typed language.
+    return "";
+}
+
+size_t CodeGenerator::resolveFieldIndex(const std::string& structType, const std::string& fieldName,
+                                        const ASTNode* errorNode) {
+    // If we know the exact struct type, use it directly.
+    if (!structType.empty()) {
+        auto it = structDefs_.find(structType);
+        if (it != structDefs_.end()) {
+            for (size_t i = 0; i < it->second.size(); i++) {
+                if (it->second[i] == fieldName) {
+                    return i;
+                }
+            }
+            codegenError("Struct '" + structType + "' has no field '" + fieldName + "'", errorNode);
+        }
+    }
+
+    // Fallback: search all struct definitions.  Error if the field is
+    // ambiguous (same name at different indices in multiple structs).
+    size_t foundIdx = 0;
+    bool found = false;
+    bool ambiguous = false;
+    for (auto& [sname, sfields] : structDefs_) {
+        for (size_t i = 0; i < sfields.size(); i++) {
+            if (sfields[i] == fieldName) {
+                if (found && i != foundIdx) {
+                    ambiguous = true;
+                }
+                foundIdx = i;
+                found = true;
+                break;
+            }
+        }
+    }
+    if (ambiguous) {
+        codegenError("Ambiguous field '" + fieldName + "' exists at different indices in multiple structs", errorNode);
+    }
+    if (!found) {
+        codegenError("Unknown field '" + fieldName + "'", errorNode);
+    }
+    return foundIdx;
+}
+
+llvm::Value* CodeGenerator::generateStructLiteral(StructLiteralExpr* expr) {
+    auto it = structDefs_.find(expr->structName);
+    if (it == structDefs_.end()) {
+        codegenError("Unknown struct type '" + expr->structName + "'", expr);
+    }
+    const auto& fields = it->second;
+    size_t numFields = fields.size();
+
+    // Allocate: numFields * 8 bytes (each field is an i64 slot)
+    llvm::Value* byteSize = llvm::ConstantInt::get(getDefaultType(), numFields * 8);
+    llvm::Value* ptr = builder->CreateCall(getOrDeclareMalloc(), {byteSize}, "struct.alloc");
+
+    // Build field name → index map
+    std::unordered_map<std::string, size_t> fieldIndex;
+    for (size_t i = 0; i < fields.size(); i++) {
+        fieldIndex[fields[i]] = i;
+    }
+
+    // Initialize all fields to 0
+    for (size_t i = 0; i < numFields; i++) {
+        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), ptr,
+                                                   llvm::ConstantInt::get(getDefaultType(), i), "struct.field.ptr");
+        builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 0), elemPtr);
+    }
+
+    // Set provided field values
+    for (auto& [fieldName, valueExpr] : expr->fieldValues) {
+        auto fit = fieldIndex.find(fieldName);
+        if (fit == fieldIndex.end()) {
+            codegenError("Unknown field '" + fieldName + "' in struct '" + expr->structName + "'", expr);
+        }
+        llvm::Value* val = generateExpression(valueExpr.get());
+        val = toDefaultType(val);
+        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), ptr,
+                                                   llvm::ConstantInt::get(getDefaultType(), fit->second),
+                                                   "struct.field.ptr");
+        builder->CreateStore(val, elemPtr);
+    }
+
+    return builder->CreatePtrToInt(ptr, getDefaultType(), "struct.int");
+}
+
+llvm::Value* CodeGenerator::generateFieldAccess(FieldAccessExpr* expr) {
+    std::string structType = resolveStructType(expr->object.get());
+    size_t fieldIdx = resolveFieldIndex(structType, expr->fieldName, expr);
+
+    llvm::Value* objVal = generateExpression(expr->object.get());
+    objVal = toDefaultType(objVal);
+
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    llvm::Value* basePtr = builder->CreateIntToPtr(objVal, ptrTy, "struct.baseptr");
+    llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), basePtr,
+                                               llvm::ConstantInt::get(getDefaultType(), fieldIdx),
+                                               "struct.field.load.ptr");
+    return builder->CreateLoad(getDefaultType(), elemPtr, "struct.field.val");
+}
+
+llvm::Value* CodeGenerator::generateFieldAssign(FieldAssignExpr* expr) {
+    std::string structType = resolveStructType(expr->object.get());
+    size_t fieldIdx = resolveFieldIndex(structType, expr->fieldName, expr);
+
+    llvm::Value* objVal = generateExpression(expr->object.get());
+    objVal = toDefaultType(objVal);
+    llvm::Value* newVal = generateExpression(expr->value.get());
+    newVal = toDefaultType(newVal);
+
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    llvm::Value* basePtr = builder->CreateIntToPtr(objVal, ptrTy, "struct.baseptr");
+    llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), basePtr,
+                                               llvm::ConstantInt::get(getDefaultType(), fieldIdx),
+                                               "struct.field.store.ptr");
+    builder->CreateStore(newVal, elemPtr);
+    return newVal;
+}
+
 void CodeGenerator::generateVarDecl(VarDecl* stmt) {
     llvm::Function* function = builder->GetInsertBlock()->getParent();
     if (!function) {
@@ -5644,6 +5789,14 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             stringArrayVars_.insert(stmt->name);
         else
             stringArrayVars_.erase(stmt->name);
+        // Track whether this variable holds a struct value so that
+        // field access/assignment can resolve the struct type.
+        if (stmt->initializer->type == ASTNodeType::STRUCT_LITERAL_EXPR) {
+            auto* structLit = static_cast<StructLiteralExpr*>(stmt->initializer.get());
+            structVars_[stmt->name] = structLit->structName;
+        } else {
+            structVars_.erase(stmt->name);
+        }
     } else {
         builder->CreateStore(llvm::ConstantInt::get(*context, llvm::APInt(64, 0)), alloca);
     }

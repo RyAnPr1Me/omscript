@@ -29,7 +29,8 @@ static const std::unordered_map<std::string, TokenType> keywords = {
     {"true", TokenType::TRUE},     {"false", TokenType::FALSE},       {"null", TokenType::NULL_LITERAL},
     {"switch", TokenType::SWITCH}, {"case", TokenType::CASE},         {"default", TokenType::DEFAULT},
     {"try", TokenType::TRY},       {"catch", TokenType::CATCH},       {"throw", TokenType::THROW},
-    {"enum", TokenType::ENUM}};
+    {"enum", TokenType::ENUM},
+    {"struct", TokenType::STRUCT}};
 
 /// Throw a DiagnosticError with the given message and source location.
 [[noreturn]] static void lexError(const std::string& msg, int ln, int col) {

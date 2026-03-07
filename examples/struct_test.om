@@ -1,0 +1,33 @@
+struct Point { x, y }
+
+fn print_point(p) {
+    println(p.x);
+    println(p.y);
+    return 0;
+}
+
+fn make_point(a, b) {
+    var p = Point { x: a, y: b };
+    return p;
+}
+
+fn main() {
+    // Basic struct creation and field access
+    var p = Point { x: 10, y: 20 };
+    println(p.x);
+    println(p.y);
+
+    // Field assignment
+    p.x = 30;
+    println(p.x);
+
+    // Struct as function argument
+    print_point(p);
+
+    // Struct as return value
+    var q = make_point(100, 200);
+    println(q.x);
+    println(q.y);
+
+    return 0;
+}
