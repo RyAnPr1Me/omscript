@@ -209,7 +209,7 @@ TEST(ASTTest, FunctionDecl) {
     params.emplace_back("a");
     std::vector<std::unique_ptr<Statement>> stmts;
     auto body = std::make_unique<BlockStmt>(std::move(stmts));
-    FunctionDecl func("test", std::move(params), std::move(body), false);
+    FunctionDecl func("test", {}, std::move(params), std::move(body), false);
     EXPECT_EQ(func.type, ASTNodeType::FUNCTION);
     EXPECT_EQ(func.name, "test");
     EXPECT_FALSE(func.isOptMax);
@@ -219,7 +219,7 @@ TEST(ASTTest, FunctionDeclOptMax) {
     std::vector<Parameter> params;
     std::vector<std::unique_ptr<Statement>> stmts;
     auto body = std::make_unique<BlockStmt>(std::move(stmts));
-    FunctionDecl func("test", std::move(params), std::move(body), true);
+    FunctionDecl func("test", {}, std::move(params), std::move(body), true);
     EXPECT_TRUE(func.isOptMax);
 }
 

@@ -242,6 +242,16 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
     consume(TokenType::FN, "Expected 'fn'");
     Token name = consume(TokenType::IDENTIFIER, "Expected function name");
 
+    // Parse optional type parameters: <T, R, ...>
+    std::vector<std::string> typeParams;
+    if (match(TokenType::LT)) {
+        do {
+            Token tp = consume(TokenType::IDENTIFIER, "Expected type parameter name");
+            typeParams.push_back(tp.lexeme);
+        } while (match(TokenType::COMMA));
+        consume(TokenType::GT, "Expected '>' after type parameters");
+    }
+
     consume(TokenType::LPAREN, "Expected '(' after function name");
 
     std::vector<Parameter> parameters;
@@ -280,7 +290,7 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
 
     inOptMaxFunction = savedOptMaxState;
 
-    auto funcDecl = std::make_unique<FunctionDecl>(name.lexeme, std::move(parameters), std::move(body), isOptMax);
+    auto funcDecl = std::make_unique<FunctionDecl>(name.lexeme, std::move(typeParams), std::move(parameters), std::move(body), isOptMax);
     funcDecl->line = name.line;
     funcDecl->column = name.column;
     return funcDecl;
@@ -1168,7 +1178,7 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
         auto block = std::make_unique<BlockStmt>(std::move(stmts));
         block->line = orToken.line;
         block->column = orToken.column;
-        auto fnDecl = std::make_unique<FunctionDecl>(lambdaName, std::move(fnParams), std::move(block));
+        auto fnDecl = std::make_unique<FunctionDecl>(lambdaName, std::vector<std::string>{}, std::move(fnParams), std::move(block));
         fnDecl->line = orToken.line;
         fnDecl->column = orToken.column;
         lambdaFunctions_.push_back(std::move(fnDecl));
@@ -1259,7 +1269,7 @@ std::unique_ptr<Expression> Parser::parseLambda() {
     auto block = std::make_unique<BlockStmt>(std::move(stmts));
     block->line = pipeToken.line;
     block->column = pipeToken.column;
-    auto fnDecl = std::make_unique<FunctionDecl>(lambdaName, std::move(fnParams), std::move(block));
+    auto fnDecl = std::make_unique<FunctionDecl>(lambdaName, std::vector<std::string>{}, std::move(fnParams), std::move(block));
     fnDecl->line = pipeToken.line;
     fnDecl->column = pipeToken.column;
 

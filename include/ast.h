@@ -412,12 +412,13 @@ class Parameter {
 class FunctionDecl : public ASTNode {
   public:
     std::string name;
+    std::vector<std::string> typeParams;  // Generic type parameters like <T, R>
     std::vector<Parameter> parameters;
     std::unique_ptr<BlockStmt> body;
     bool isOptMax;
 
-    FunctionDecl(const std::string& n, std::vector<Parameter> params, std::unique_ptr<BlockStmt> b, bool optMax = false)
-        : ASTNode(ASTNodeType::FUNCTION), name(n), parameters(std::move(params)), body(std::move(b)), isOptMax(optMax) {
+    FunctionDecl(const std::string& n, std::vector<std::string> tps, std::vector<Parameter> params, std::unique_ptr<BlockStmt> b, bool optMax = false)
+        : ASTNode(ASTNodeType::FUNCTION), name(n), typeParams(std::move(tps)), parameters(std::move(params)), body(std::move(b)), isOptMax(optMax) {
     }
 
     /// Returns the number of parameters that have no default value.
