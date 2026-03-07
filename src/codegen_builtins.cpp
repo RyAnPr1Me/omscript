@@ -3374,6 +3374,22 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
         llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
 
+        // Guard: step must not be 0 (division by zero).
+        llvm::Value* stepIsZero = builder->CreateICmpEQ(stepArg, zero, "rstep.stepzero");
+        llvm::Function* parentFn = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* stepOkBB = llvm::BasicBlock::Create(*context, "rstep.stepok", parentFn);
+        llvm::BasicBlock* stepFailBB = llvm::BasicBlock::Create(*context, "rstep.stepfail", parentFn);
+        builder->CreateCondBr(stepIsZero, stepFailBB, stepOkBB);
+
+        builder->SetInsertPoint(stepFailBB);
+        llvm::Value* errMsg = builder->CreateGlobalString(
+            "Runtime error: range_step called with step=0\n", "rstep_zero_msg");
+        builder->CreateCall(getPrintfFunction(), {errMsg});
+        builder->CreateCall(getOrDeclareAbort());
+        builder->CreateUnreachable();
+
+        builder->SetInsertPoint(stepOkBB);
+
         // count = max((end - start + step - 1) / step, 0) for positive step
         // Simplified: count = max(0, (end - start + step - sign) / step)
         // Use a safe approach: (end - start) / step, clamped to 0
@@ -3390,7 +3406,6 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {arrSize}, "rstep.buf");
         builder->CreateStore(count, buf);
 
-        llvm::Function* parentFn = builder->GetInsertBlock()->getParent();
         llvm::BasicBlock* entryBB = builder->GetInsertBlock();
         llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "rstep.loop", parentFn);
         llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "rstep.body", parentFn);
