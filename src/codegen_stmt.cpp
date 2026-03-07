@@ -254,14 +254,19 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     // Convert to integer since loop bounds are always integer
     endVal = toDefaultType(endVal);
 
-    // Get step value (default to 1 if not specified)
+    // Get step value.  When not specified, default to +1 for ascending ranges
+    // (start < end) and -1 for descending ranges (start > end) so that
+    // `for (i in 5...0)` iterates 5,4,3,2,1 as users would expect.
     llvm::Value* stepVal;
     if (stmt->step) {
         stepVal = generateExpression(stmt->step.get());
         // Convert to integer since loop step is always integer
         stepVal = toDefaultType(stepVal);
     } else {
-        stepVal = llvm::ConstantInt::get(*context, llvm::APInt(64, 1));
+        llvm::Value* isDesc = builder->CreateICmpSGT(startVal, endVal, "for.isdesc");
+        llvm::Value* posOne = llvm::ConstantInt::get(*context, llvm::APInt(64, 1));
+        llvm::Value* negOne = llvm::ConstantInt::get(*context, llvm::APInt(64, static_cast<uint64_t>(-1), true));
+        stepVal = builder->CreateSelect(isDesc, negOne, posOne, "for.autostep");
     }
 
     llvm::Value* zero = llvm::ConstantInt::get(stepVal->getType(), 0, true);

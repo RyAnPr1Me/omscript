@@ -1,0 +1,16 @@
+fn sideEffect() {
+    print("SIDE EFFECT");
+    return 1;
+}
+
+fn main() {
+    print("Test 1: && short-circuit");
+    var x = 0 && sideEffect();
+    print("x = ");
+    print(x);
+    
+    print("Test 2: || short-circuit");
+    var y = 1 || sideEffect();
+    print("y = ");
+    print(y);
+}

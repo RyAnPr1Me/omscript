@@ -1,0 +1,25 @@
+fn main() {
+    print("Test 1: empty array");
+    var arr = [];
+    var idx = index_of(arr, 5);
+    print("idx = ");
+    print(idx);
+    
+    print("Test 2: element not found");
+    var arr2 = [1, 2, 3];
+    var idx2 = index_of(arr2, 5);
+    print("idx2 = ");
+    print(idx2);
+    
+    print("Test 3: element found at 0");
+    var arr3 = [5, 2, 3];
+    var idx3 = index_of(arr3, 5);
+    print("idx3 = ");
+    print(idx3);
+    
+    print("Test 4: element found at 2");
+    var arr4 = [1, 2, 5];
+    var idx4 = index_of(arr4, 5);
+    print("idx4 = ");
+    print(idx4);
+}
