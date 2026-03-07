@@ -78,6 +78,10 @@ set(COMPILER_SOURCES
     src/parser.cpp
     src/ast.cpp
     src/codegen.cpp
+    src/codegen_builtins.cpp
+    src/codegen_expr.cpp
+    src/codegen_stmt.cpp
+    src/codegen_opt.cpp
     src/compiler.cpp
     src/main.cpp
 )
@@ -164,6 +168,10 @@ if(GTest_FOUND)
         src/parser.cpp
         src/ast.cpp
         src/codegen.cpp
+        src/codegen_builtins.cpp
+        src/codegen_expr.cpp
+        src/codegen_stmt.cpp
+        src/codegen_opt.cpp
         src/compiler.cpp
         runtime/value.cpp
         runtime/aot_profile.cpp
