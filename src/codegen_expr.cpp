@@ -556,11 +556,44 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     } else if (expr->op == "/" || expr->op == "%") {
         bool isDivision = expr->op == "/";
 
-        // Optimization for any non-zero constant divisor: the divisor can never
-        // be zero at runtime, so we can skip the division-by-zero guard and emit
-        // SDiv/SRem directly.  SDiv/SRem are used (not shift-based sequences)
-        // because signed division must truncate toward zero, not toward -infinity.
+        // Strength reduction: division/modulo by a positive power-of-2 constant
+        // can be lowered to shift/mask sequences that are significantly faster
+        // than hardware division instructions.
+        //
+        // Division: x / (2^n) → (x + ((x >> 63) & ((2^n)-1))) >> n
+        //   The correction term adds (2^n - 1) when x is negative so the result
+        //   rounds toward zero (C/LLVM semantics), not toward -infinity.
+        //
+        // Modulo: x % (2^n) → x - ((x / (2^n)) * (2^n))
+        //   Reuses the optimized division above, then subtracts the quotient
+        //   times the divisor.  For signed modulo, this is correct because
+        //   the sign of the remainder must match the sign of the dividend.
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
+            int64_t rv = ci->getSExtValue();
+            int s = log2IfPowerOf2(rv);
+            if (s > 0) { // positive power-of-2 (exclude 1, which is identity/zero)
+                if (isDivision) {
+                    // Emit: (x + ((x >> 63) & (divisor-1))) >> n
+                    llvm::Value* signBit =
+                        builder->CreateAShr(left, llvm::ConstantInt::get(getDefaultType(), 63), "div.sign");
+                    llvm::Value* correction =
+                        builder->CreateAnd(signBit, llvm::ConstantInt::get(getDefaultType(), rv - 1), "div.corr");
+                    llvm::Value* adjusted = builder->CreateAdd(left, correction, "div.adj");
+                    return builder->CreateAShr(adjusted, llvm::ConstantInt::get(getDefaultType(), s), "div.shr");
+                }
+                // Modulo: x % (2^n) → x - ((x / (2^n)) * (2^n))
+                llvm::Value* signBit =
+                    builder->CreateAShr(left, llvm::ConstantInt::get(getDefaultType(), 63), "mod.sign");
+                llvm::Value* correction =
+                    builder->CreateAnd(signBit, llvm::ConstantInt::get(getDefaultType(), rv - 1), "mod.corr");
+                llvm::Value* adjusted = builder->CreateAdd(left, correction, "mod.adj");
+                llvm::Value* quotient =
+                    builder->CreateAShr(adjusted, llvm::ConstantInt::get(getDefaultType(), s), "mod.quot");
+                llvm::Value* product =
+                    builder->CreateShl(quotient, llvm::ConstantInt::get(getDefaultType(), s), "mod.prod");
+                return builder->CreateSub(left, product, "mod.rem");
+            }
+            // Non-power-of-2 constant divisor: skip zero-check but use SDiv/SRem.
             if (!ci->isZero()) {
                 return isDivision ? builder->CreateSDiv(left, right, "divtmp")
                                   : builder->CreateSRem(left, right, "modtmp");
@@ -688,6 +721,14 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
 }
 
 llvm::Value* CodeGenerator::generateUnary(UnaryExpr* expr) {
+    // Double negation elimination — detect op(op(x)) patterns at the AST level
+    // and short-circuit to just x: -(-x) → x, ~(~x) → x, !(!x) → x.
+    if (auto* inner = dynamic_cast<UnaryExpr*>(expr->operand.get())) {
+        if (inner->op == expr->op && (expr->op == "-" || expr->op == "~" || expr->op == "!")) {
+            return generateExpression(inner->operand.get());
+        }
+    }
+
     llvm::Value* operand = generateExpression(expr->operand.get());
 
     // Constant folding for unary operations
@@ -862,6 +903,17 @@ llvm::Value* CodeGenerator::generatePrefix(PrefixExpr* expr) {
 
 llvm::Value* CodeGenerator::generateTernary(TernaryExpr* expr) {
     llvm::Value* condition = generateExpression(expr->condition.get());
+
+    // Constant condition elimination — when the condition is known at compile
+    // time we can evaluate only the selected branch, avoiding the branch/PHI
+    // overhead entirely (matches generateIf's dead-branch pruning).
+    if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(condition)) {
+        if (ci->isZero()) {
+            return generateExpression(expr->elseExpr.get());
+        }
+        return generateExpression(expr->thenExpr.get());
+    }
+
     llvm::Value* condBool = toBool(condition);
 
     llvm::Function* function = builder->GetInsertBlock()->getParent();

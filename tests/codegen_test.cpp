@@ -2178,11 +2178,10 @@ TEST(CodegenTest, IRConstantComparisonFolding) {
 // ===========================================================================
 
 TEST(CodegenTest, DivisionStrengthReduction) {
-    // n / 4 where divisor is a known power-of-2 constant should skip the
-    // runtime division-by-zero check (the constant is never zero).  The IR
-    // should contain SDiv but no conditional branch for the zero-check.
-    // SDiv is used instead of AShr because AShr rounds toward -infinity,
-    // while signed division must truncate toward zero.
+    // n / 4 where divisor is a known power-of-2 constant should be strength-
+    // reduced to a shift sequence: (n + ((n >> 63) & 3)) >> 2.
+    // This avoids the expensive hardware division instruction and skips the
+    // runtime division-by-zero check since the constant is never zero.
     CodeGenerator codegen(OptimizationLevel::O0);
     auto* mod = generateIR("fn divide_by_four(n) { return n / 4; }\n"
                            "fn main() { return divide_by_four(16); }",
@@ -2190,11 +2189,14 @@ TEST(CodegenTest, DivisionStrengthReduction) {
     auto* func = mod->getFunction("divide_by_four");
     ASSERT_NE(func, nullptr);
     EXPECT_FALSE(func->empty());
-    // Verify the function contains an SDiv instruction with no zero-check branch
+    // Verify the function contains an AShr (arithmetic shift right) and no SDiv
+    bool hasAShr = false;
     bool hasSDiv = false;
     bool hasCondBr = false;
     for (auto& bb : *func) {
         for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::AShr)
+                hasAShr = true;
             if (inst.getOpcode() == llvm::Instruction::SDiv)
                 hasSDiv = true;
             if (auto* br = llvm::dyn_cast<llvm::BranchInst>(&inst)) {
@@ -2203,14 +2205,15 @@ TEST(CodegenTest, DivisionStrengthReduction) {
             }
         }
     }
-    EXPECT_TRUE(hasSDiv);
+    EXPECT_TRUE(hasAShr) << "Division by power-of-2 should use AShr";
+    EXPECT_FALSE(hasSDiv) << "Division by power-of-2 should NOT use SDiv";
     EXPECT_FALSE(hasCondBr);
 }
 
 TEST(CodegenTest, ModuloStrengthReduction) {
-    // n % 8 where the divisor is a known power-of-2 constant should skip the
-    // runtime division-by-zero check (the constant is never zero).  The IR
-    // should contain SRem but no conditional branch for the zero-check.
+    // n % 8 where the divisor is a known power-of-2 constant should be
+    // strength-reduced to a shift+sub sequence that avoids the expensive
+    // SRem hardware instruction while correctly handling signed values.
     CodeGenerator codegen(OptimizationLevel::O0);
     auto* mod = generateIR("fn mod_by_eight(n) { return n % 8; }\n"
                            "fn main() { return mod_by_eight(17); }",
@@ -2218,21 +2221,24 @@ TEST(CodegenTest, ModuloStrengthReduction) {
     auto* func = mod->getFunction("mod_by_eight");
     ASSERT_NE(func, nullptr);
     EXPECT_FALSE(func->empty());
-    // The function should use SRem (correct for signed values) but should NOT
-    // have a conditional branch for division-by-zero since 8 is never zero.
+    // The function should use shift/sub (no SRem) and no conditional branch
     bool hasSRem = false;
+    bool hasAShr = false;
     bool hasCondBr = false;
     for (auto& bb : *func) {
         for (auto& inst : bb) {
             if (inst.getOpcode() == llvm::Instruction::SRem)
                 hasSRem = true;
+            if (inst.getOpcode() == llvm::Instruction::AShr)
+                hasAShr = true;
             if (auto* br = llvm::dyn_cast<llvm::BranchInst>(&inst)) {
                 if (br->isConditional())
                     hasCondBr = true;
             }
         }
     }
-    EXPECT_TRUE(hasSRem);
+    EXPECT_TRUE(hasAShr) << "Modulo by power-of-2 should use AShr-based sequence";
+    EXPECT_FALSE(hasSRem) << "Modulo by power-of-2 should NOT use SRem";
     EXPECT_FALSE(hasCondBr);
 }
 
@@ -3853,4 +3859,226 @@ TEST(CodegenTest, O3PipelineAggressiveInstCombine) {
     ASSERT_NE(mod, nullptr);
     auto* mainFn = mod->getFunction("main");
     ASSERT_NE(mainFn, nullptr);
+}
+
+// ===========================================================================
+// Division by power-of-2 strength reduction (shift-based)
+// ===========================================================================
+
+TEST(CodegenTest, DivisionByPow2EmitsShiftNotSDiv) {
+    // n / 16 should emit AShr-based sequence, not SDiv
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn f(n) { return n / 16; } fn main() { return f(32); }", codegen);
+    auto* func = mod->getFunction("f");
+    ASSERT_NE(func, nullptr);
+    bool hasAShr = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::AShr)
+                hasAShr = true;
+        }
+    }
+    EXPECT_TRUE(hasAShr) << "Division by 16 should use AShr";
+}
+
+TEST(CodegenTest, DivisionByNonPow2KeepsSDiv) {
+    // n / 3 should still use SDiv (not a power-of-2)
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn f(n) { return n / 3; } fn main() { return f(9); }", codegen);
+    auto* func = mod->getFunction("f");
+    ASSERT_NE(func, nullptr);
+    bool hasSDiv = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::SDiv)
+                hasSDiv = true;
+        }
+    }
+    EXPECT_TRUE(hasSDiv) << "Division by 3 should use SDiv";
+}
+
+TEST(CodegenTest, DivisionByOneIsIdentity) {
+    // n / 1 should be simplified by the algebraic identity (x/1 → x)
+    // and not generate any division or shift instructions at all.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn f(n) { return n / 1; } fn main() { return f(42); }", codegen);
+    auto* func = mod->getFunction("f");
+    ASSERT_NE(func, nullptr);
+    bool hasSDiv = false;
+    bool hasAShr = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::SDiv)
+                hasSDiv = true;
+            if (inst.getOpcode() == llvm::Instruction::AShr)
+                hasAShr = true;
+        }
+    }
+    EXPECT_FALSE(hasSDiv) << "Division by 1 should be identity (no SDiv)";
+    EXPECT_FALSE(hasAShr) << "Division by 1 should be identity (no AShr)";
+}
+
+// ===========================================================================
+// Modulo by power-of-2 strength reduction
+// ===========================================================================
+
+TEST(CodegenTest, ModuloByPow2EmitsShiftNotSRem) {
+    // n % 16 should emit shift-based sequence, not SRem
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn f(n) { return n % 16; } fn main() { return f(33); }", codegen);
+    auto* func = mod->getFunction("f");
+    ASSERT_NE(func, nullptr);
+    bool hasSRem = false;
+    bool hasAShr = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::SRem)
+                hasSRem = true;
+            if (inst.getOpcode() == llvm::Instruction::AShr)
+                hasAShr = true;
+        }
+    }
+    EXPECT_FALSE(hasSRem) << "Modulo by 16 should NOT use SRem";
+    EXPECT_TRUE(hasAShr) << "Modulo by 16 should use shift-based sequence";
+}
+
+// ===========================================================================
+// Ternary constant condition elimination
+// ===========================================================================
+
+TEST(CodegenTest, TernaryConstantTrue) {
+    // 1 ? 42 : 99 should fold to 42 with no branch
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return 1 ? 42 : 99; }", codegen);
+    auto* func = mod->getFunction("main");
+    ASSERT_NE(func, nullptr);
+    bool hasCondBr = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (auto* br = llvm::dyn_cast<llvm::BranchInst>(&inst)) {
+                if (br->isConditional())
+                    hasCondBr = true;
+            }
+        }
+    }
+    EXPECT_FALSE(hasCondBr) << "Ternary with constant true condition should have no conditional branch";
+}
+
+TEST(CodegenTest, TernaryConstantFalse) {
+    // 0 ? 42 : 99 should fold to 99 with no branch
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return 0 ? 42 : 99; }", codegen);
+    auto* func = mod->getFunction("main");
+    ASSERT_NE(func, nullptr);
+    bool hasCondBr = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (auto* br = llvm::dyn_cast<llvm::BranchInst>(&inst)) {
+                if (br->isConditional())
+                    hasCondBr = true;
+            }
+        }
+    }
+    EXPECT_FALSE(hasCondBr) << "Ternary with constant false condition should have no conditional branch";
+}
+
+// ===========================================================================
+// Double negation elimination
+// ===========================================================================
+
+TEST(CodegenTest, DoubleNegationInt) {
+    // -(-x) should simplify to x (no Neg instructions)
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn f(x) { return -(-x); } fn main() { return f(5); }", codegen);
+    auto* func = mod->getFunction("f");
+    ASSERT_NE(func, nullptr);
+    int negCount = 0;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            // Neg is emitted as Sub 0, x
+            if (inst.getOpcode() == llvm::Instruction::Sub)
+                negCount++;
+        }
+    }
+    EXPECT_EQ(negCount, 0) << "-(-x) should be simplified to x with no Sub";
+}
+
+TEST(CodegenTest, DoubleBitwiseNotElim) {
+    // ~(~x) should simplify to x (no Xor instructions)
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn f(x) { return ~(~x); } fn main() { return f(5); }", codegen);
+    auto* func = mod->getFunction("f");
+    ASSERT_NE(func, nullptr);
+    int xorCount = 0;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::Xor)
+                xorCount++;
+        }
+    }
+    EXPECT_EQ(xorCount, 0) << "~(~x) should be simplified to x with no Xor";
+}
+
+TEST(CodegenTest, DoubleLogicalNotElim) {
+    // !(!x) should simplify to x (no ICmp/Xor)
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn f(x) { return !(!x); } fn main() { return f(5); }", codegen);
+    auto* func = mod->getFunction("f");
+    ASSERT_NE(func, nullptr);
+    int icmpCount = 0;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::ICmp)
+                icmpCount++;
+        }
+    }
+    EXPECT_EQ(icmpCount, 0) << "!(!x) should be simplified to x with no ICmp";
+}
+
+// ===========================================================================
+// For-loop empty range elimination
+// ===========================================================================
+
+TEST(CodegenTest, ForLoopEmptyRangeEliminated) {
+    // for (i in 10...10) {} should be entirely eliminated since start == end
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var x = 1; for (i in 10...10) { x = x + 1; } return x; }", codegen);
+    auto* func = mod->getFunction("main");
+    ASSERT_NE(func, nullptr);
+    // Should not have any for-loop blocks
+    bool hasForBlock = false;
+    for (auto& BB : *func) {
+        std::string name = BB.getName().str();
+        if (name.find("forcond") != std::string::npos || name.find("forbody") != std::string::npos)
+            hasForBlock = true;
+    }
+    EXPECT_FALSE(hasForBlock) << "for(i in 10...10) should be entirely eliminated";
+}
+
+// ===========================================================================
+// Function attribute completeness
+// ===========================================================================
+
+TEST(CodegenTest, MemcpyHasWillReturn) {
+    // memcpy should have WillReturn attribute
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var a = [1, 2, 3]; var b = a; return b[0]; }", codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("memcpy");
+    if (fn) {
+        EXPECT_TRUE(fn->hasFnAttribute(llvm::Attribute::WillReturn)) << "memcpy should have WillReturn attribute";
+    }
+}
+
+TEST(CodegenTest, MemmoveHasFullAttributes) {
+    // memmove should have WillReturn, NoFree, NoSync attributes
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var a = [1, 2, 3]; return a[0]; }", codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("memmove");
+    if (fn) {
+        EXPECT_TRUE(fn->hasFnAttribute(llvm::Attribute::WillReturn)) << "memmove should have WillReturn attribute";
+        EXPECT_TRUE(fn->hasFnAttribute(llvm::Attribute::NoFree)) << "memmove should have NoFree attribute";
+        EXPECT_TRUE(fn->hasFnAttribute(llvm::Attribute::NoSync)) << "memmove should have NoSync attribute";
+    }
 }

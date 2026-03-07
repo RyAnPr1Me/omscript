@@ -298,6 +298,18 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     // Convert to integer since loop bounds are always integer
     endVal = toDefaultType(endVal);
 
+    // Empty range elimination: when start and end are compile-time constants
+    // and start == end, the loop body never executes (the condition check
+    // `i < end` (ascending) or `i > end` (descending) fails on the first
+    // iteration).  This avoids emitting the entire loop structure.
+    if (auto* startCI = llvm::dyn_cast<llvm::ConstantInt>(startVal)) {
+        if (auto* endCI = llvm::dyn_cast<llvm::ConstantInt>(endVal)) {
+            if (startCI->getSExtValue() == endCI->getSExtValue()) {
+                return;
+            }
+        }
+    }
+
     // Get step value.  When not specified, default to +1 for ascending ranges
     // (start < end) and -1 for descending ranges (start > end) so that
     // `for (i in 5...0)` iterates 5,4,3,2,1 as users would expect.
