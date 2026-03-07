@@ -1,13 +1,19 @@
 #include "parser.h"
 #include "diagnostic.h"
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 
 namespace omscript {
 
-Parser::Parser(const std::vector<Token>& tokens) : tokens(tokens), current(0), inOptMaxFunction(false) {}
+Parser::Parser(const std::vector<Token>& tokens)
+    : tokens(tokens), current(0), inOptMaxFunction(false),
+      importedFiles_(std::make_shared<std::unordered_set<std::string>>()) {}
 
-Parser::Parser(std::vector<Token>&& tokens) : tokens(std::move(tokens)), current(0), inOptMaxFunction(false) {}
+Parser::Parser(std::vector<Token>&& tokens)
+    : tokens(std::move(tokens)), current(0), inOptMaxFunction(false),
+      importedFiles_(std::make_shared<std::unordered_set<std::string>>()) {}
 
 const Token& Parser::peek(int offset) const {
     static const Token eofToken(TokenType::END_OF_FILE, "", 0, 0);
@@ -83,9 +89,19 @@ void Parser::synchronize() {
 std::unique_ptr<Program> Parser::parse() {
     std::vector<std::unique_ptr<FunctionDecl>> functions;
     std::vector<std::unique_ptr<EnumDecl>> enums;
+    std::vector<std::unique_ptr<StructDecl>> structs;
     bool optMaxTagActive = false;
 
     while (!isAtEnd()) {
+        if (match(TokenType::IMPORT)) {
+            try {
+                parseImport(functions, enums, structs);
+            } catch (const std::runtime_error& e) {
+                errors_.push_back(e.what());
+                synchronize();
+            }
+            continue;
+        }
         if (match(TokenType::OPTMAX_START)) {
             if (optMaxTagActive) {
                 error("Nested OPTMAX blocks are not allowed");
@@ -103,6 +119,15 @@ std::unique_ptr<Program> Parser::parse() {
         if (match(TokenType::ENUM)) {
             try {
                 enums.push_back(parseEnumDecl());
+            } catch (const std::runtime_error& e) {
+                errors_.push_back(e.what());
+                synchronize();
+            }
+            continue;
+        }
+        if (match(TokenType::STRUCT)) {
+            try {
+                structs.push_back(parseStructDecl());
             } catch (const std::runtime_error& e) {
                 errors_.push_back(e.what());
                 synchronize();
@@ -140,7 +165,75 @@ std::unique_ptr<Program> Parser::parse() {
     }
     lambdaFunctions_.clear();
 
-    return std::make_unique<Program>(std::move(functions), std::move(enums));
+    return std::make_unique<Program>(std::move(functions), std::move(enums), std::move(structs));
+}
+
+void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
+                         std::vector<std::unique_ptr<EnumDecl>>& enums,
+                         std::vector<std::unique_ptr<StructDecl>>& structs) {
+    Token fileToken = consume(TokenType::STRING, "Expected filename string after 'import'");
+    consume(TokenType::SEMICOLON, "Expected ';' after import statement");
+
+    std::string filename = fileToken.lexeme;
+    // Append .om extension if not already present
+    if (filename.size() < 3 || filename.substr(filename.size() - 3) != ".om") {
+        filename += ".om";
+    }
+
+    // Resolve full path relative to the base directory
+    std::string fullPath;
+    if (baseDir_.empty()) {
+        fullPath = filename;
+    } else {
+        fullPath = baseDir_ + "/" + filename;
+    }
+
+    // Normalize the path to a canonical form for circular import detection
+    std::error_code ec;
+    auto canonicalPath = std::filesystem::weakly_canonical(fullPath, ec);
+    std::string normalizedPath = ec ? fullPath : canonicalPath.string();
+
+    // Check for circular/duplicate imports
+    if (importedFiles_->count(normalizedPath)) {
+        return; // Already imported, skip
+    }
+    importedFiles_->insert(normalizedPath);
+
+    // Read the imported file
+    std::ifstream file(fullPath);
+    if (!file.is_open()) {
+        error("Cannot open imported file: " + fullPath);
+    }
+    std::string source((std::istreambuf_iterator<char>(file)),
+                        std::istreambuf_iterator<char>());
+
+    // Lex the imported file
+    Lexer importLexer(std::move(source));
+    std::vector<Token> importTokens = importLexer.tokenize();
+
+    // Parse the imported file
+    Parser importParser(std::move(importTokens));
+    std::string importDir = std::filesystem::path(fullPath).parent_path().string();
+    importParser.setBaseDir(importDir);
+    importParser.importedFiles_ = importedFiles_; // Share import tracking
+
+    auto importedProgram = importParser.parse();
+
+    // Merge imported declarations into the current program
+    for (auto& fn : importedProgram->functions) {
+        functions.push_back(std::move(fn));
+    }
+    for (auto& en : importedProgram->enums) {
+        enums.push_back(std::move(en));
+    }
+    for (auto& st : importedProgram->structs) {
+        structs.push_back(std::move(st));
+    }
+
+    // Also import struct names so struct literals can be parsed
+    for (const auto& name : importParser.structNames_) {
+        structNames_.insert(name);
+    }
 }
 
 std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
@@ -148,6 +241,16 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
     inOptMaxFunction = isOptMax;
     consume(TokenType::FN, "Expected 'fn'");
     Token name = consume(TokenType::IDENTIFIER, "Expected function name");
+
+    // Parse optional type parameters: <T, R, ...>
+    std::vector<std::string> typeParams;
+    if (match(TokenType::LT)) {
+        do {
+            Token tp = consume(TokenType::IDENTIFIER, "Expected type parameter name");
+            typeParams.push_back(tp.lexeme);
+        } while (match(TokenType::COMMA));
+        consume(TokenType::GT, "Expected '>' after type parameters");
+    }
 
     consume(TokenType::LPAREN, "Expected '(' after function name");
 
@@ -187,7 +290,7 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
 
     inOptMaxFunction = savedOptMaxState;
 
-    auto funcDecl = std::make_unique<FunctionDecl>(name.lexeme, std::move(parameters), std::move(body), isOptMax);
+    auto funcDecl = std::make_unique<FunctionDecl>(name.lexeme, std::move(typeParams), std::move(parameters), std::move(body), isOptMax);
     funcDecl->line = name.line;
     funcDecl->column = name.column;
     return funcDecl;
@@ -507,6 +610,41 @@ std::unique_ptr<EnumDecl> Parser::parseEnumDecl() {
     return std::make_unique<EnumDecl>(nameToken.lexeme, std::move(members));
 }
 
+std::unique_ptr<StructDecl> Parser::parseStructDecl() {
+    Token nameToken = consume(TokenType::IDENTIFIER, "Expected struct name");
+    consume(TokenType::LBRACE, "Expected '{' after struct name");
+
+    std::vector<std::string> fields;
+
+    while (!check(TokenType::RBRACE) && !isAtEnd()) {
+        Token fieldToken = consume(TokenType::IDENTIFIER, "Expected field name");
+        fields.push_back(fieldToken.lexeme);
+        match(TokenType::COMMA);
+    }
+
+    consume(TokenType::RBRACE, "Expected '}' after struct body");
+    structNames_.insert(nameToken.lexeme);
+    return std::make_unique<StructDecl>(nameToken.lexeme, std::move(fields));
+}
+
+std::unique_ptr<Expression> Parser::parseStructLiteral(const std::string& name, int line, int col) {
+    std::vector<std::pair<std::string, std::unique_ptr<Expression>>> fieldValues;
+
+    while (!check(TokenType::RBRACE) && !isAtEnd()) {
+        Token fieldToken = consume(TokenType::IDENTIFIER, "Expected field name in struct literal");
+        consume(TokenType::COLON, "Expected ':' after field name");
+        auto value = parseExpression();
+        fieldValues.push_back({fieldToken.lexeme, std::move(value)});
+        match(TokenType::COMMA);
+    }
+
+    consume(TokenType::RBRACE, "Expected '}' after struct literal");
+    auto expr = std::make_unique<StructLiteralExpr>(name, std::move(fieldValues));
+    expr->line = line;
+    expr->column = col;
+    return expr;
+}
+
 std::unique_ptr<Statement> Parser::parseExprStmt() {
     Token start = peek();
     auto expr = parseExpression();
@@ -541,6 +679,15 @@ std::unique_ptr<Expression> Parser::parseAssignment() {
             auto arrClone = std::move(indexExpr->array);
             auto idxClone = std::move(indexExpr->index);
             auto node = std::make_unique<IndexAssignExpr>(std::move(arrClone), std::move(idxClone), std::move(value));
+            node->line = expr->line;
+            node->column = expr->column;
+            return node;
+        } else if (expr->type == ASTNodeType::FIELD_ACCESS_EXPR) {
+            auto* fieldExpr = static_cast<FieldAccessExpr*>(expr.get());
+            auto value = parseAssignment();
+            auto objClone = std::move(fieldExpr->object);
+            std::string fieldName = fieldExpr->fieldName;
+            auto node = std::make_unique<FieldAssignExpr>(std::move(objClone), fieldName, std::move(value));
             node->line = expr->line;
             node->column = expr->column;
             return node;
@@ -892,6 +1039,15 @@ std::unique_ptr<Expression> Parser::parsePostfix() {
             indexExpr->line = bracketToken.line;
             indexExpr->column = bracketToken.column;
             expr = std::move(indexExpr);
+        }
+        // Handle field access (dot notation)
+        else if (match(TokenType::DOT)) {
+            Token dotToken = tokens[current - 1];
+            Token fieldToken = consume(TokenType::IDENTIFIER, "Expected field name after '.'");
+            auto fieldExpr = std::make_unique<FieldAccessExpr>(std::move(expr), fieldToken.lexeme);
+            fieldExpr->line = dotToken.line;
+            fieldExpr->column = dotToken.column;
+            expr = std::move(fieldExpr);
         } else {
             break;
         }
@@ -972,6 +1128,11 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
 
     if (match(TokenType::IDENTIFIER)) {
         Token token = tokens[current - 1];
+        // Check if this is a struct literal: StructName { field: value, ... }
+        if (structNames_.count(token.lexeme) && check(TokenType::LBRACE)) {
+            advance(); // consume '{'
+            return parseStructLiteral(token.lexeme, token.line, token.column);
+        }
         auto expr = std::make_unique<IdentifierExpr>(token.lexeme);
         expr->line = token.line;
         expr->column = token.column;
@@ -1017,7 +1178,7 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
         auto block = std::make_unique<BlockStmt>(std::move(stmts));
         block->line = orToken.line;
         block->column = orToken.column;
-        auto fnDecl = std::make_unique<FunctionDecl>(lambdaName, std::move(fnParams), std::move(block));
+        auto fnDecl = std::make_unique<FunctionDecl>(lambdaName, std::vector<std::string>{}, std::move(fnParams), std::move(block));
         fnDecl->line = orToken.line;
         fnDecl->column = orToken.column;
         lambdaFunctions_.push_back(std::move(fnDecl));
@@ -1108,7 +1269,7 @@ std::unique_ptr<Expression> Parser::parseLambda() {
     auto block = std::make_unique<BlockStmt>(std::move(stmts));
     block->line = pipeToken.line;
     block->column = pipeToken.column;
-    auto fnDecl = std::make_unique<FunctionDecl>(lambdaName, std::move(fnParams), std::move(block));
+    auto fnDecl = std::make_unique<FunctionDecl>(lambdaName, std::vector<std::string>{}, std::move(fnParams), std::move(block));
     fnDecl->line = pipeToken.line;
     fnDecl->column = pipeToken.column;
 

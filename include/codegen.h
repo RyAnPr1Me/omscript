@@ -3,6 +3,7 @@
 
 #include "ast.h"
 #include "diagnostic.h"
+#include <llvm/IR/DIBuilder.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
@@ -160,6 +161,18 @@ class CodeGenerator {
         lto_ = enable;
     }
 
+    /// Enable or disable DWARF debug info generation.
+    /// When true, the CodeGenerator emits debug metadata (compile unit,
+    /// subprograms) so that compiled binaries can be debugged with GDB/LLDB.
+    void setDebugMode(bool enable) {
+        debugMode_ = enable;
+    }
+
+    /// Set the source filename for debug info metadata.
+    void setSourceFilename(const std::string& filename) {
+        sourceFilename_ = filename;
+    }
+
   private:
     std::unique_ptr<llvm::LLVMContext> context;
     std::unique_ptr<llvm::IRBuilder<>> builder;
@@ -197,6 +210,11 @@ class CodeGenerator {
 
     // Enum constant values (name → integer value), populated from enum declarations.
     std::unordered_map<std::string, long long> enumConstants_;
+
+    // Struct type definitions: struct name → ordered list of field names.
+    std::unordered_map<std::string, std::vector<std::string>> structDefs_;
+    // Variables known to hold struct values, maps var name → struct type name.
+    std::unordered_map<std::string, std::string> structVars_;
 
     OptimizationLevel optimizationLevel;
 
@@ -240,6 +258,14 @@ class CodeGenerator {
     llvm::Value* generateArray(ArrayExpr* expr);
     llvm::Value* generateIndex(IndexExpr* expr);
     llvm::Value* generateIndexAssign(IndexAssignExpr* expr);
+    llvm::Value* generateStructLiteral(StructLiteralExpr* expr);
+    llvm::Value* generateFieldAccess(FieldAccessExpr* expr);
+    llvm::Value* generateFieldAssign(FieldAssignExpr* expr);
+
+    // Struct type resolution helpers.
+    std::string resolveStructType(Expression* objExpr) const;
+    size_t resolveFieldIndex(const std::string& structType, const std::string& fieldName,
+                             const ASTNode* errorNode);
 
     // Statement generators
     void generateVarDecl(VarDecl* stmt);
@@ -329,6 +355,14 @@ class CodeGenerator {
     bool dynamicCompilation_ = false; // Dynamic (JIT) compilation mode
     bool lto_ = false;                // LTO mode: use pre-link pipeline
 
+    // DWARF debug info infrastructure
+    bool debugMode_ = false;                       // -g: emit debug metadata
+    std::string sourceFilename_;                   // Source file for debug CU
+    std::unique_ptr<llvm::DIBuilder> debugBuilder_; // Debug info builder (null if !debugMode_)
+    llvm::DICompileUnit* debugCU_ = nullptr;       // DWARF compile unit
+    llvm::DIFile* debugFile_ = nullptr;            // DWARF file descriptor
+    llvm::DIScope* debugScope_ = nullptr;          // Current debug scope (CU or subprogram)
+
     /// Compile-time resource budget — limits to prevent DoS via oversized inputs.
     /// Checked during code generation to abort compilation if the program
     /// exceeds reasonable complexity bounds.
@@ -398,6 +432,18 @@ class CodeGenerator {
     llvm::Function* getOrDeclareFwrite();
     llvm::Function* getOrDeclareFflush();
     llvm::Function* getOrDeclareFgets();
+    llvm::Function* getOrDeclareFopen();
+    llvm::Function* getOrDeclareFclose();
+    llvm::Function* getOrDeclareFread();
+    llvm::Function* getOrDeclareFseek();
+    llvm::Function* getOrDeclareFtell();
+    llvm::Function* getOrDeclareAccess();
+    llvm::Function* getOrDeclarePthreadCreate();
+    llvm::Function* getOrDeclarePthreadJoin();
+    llvm::Function* getOrDeclarePthreadMutexInit();
+    llvm::Function* getOrDeclarePthreadMutexLock();
+    llvm::Function* getOrDeclarePthreadMutexUnlock();
+    llvm::Function* getOrDeclarePthreadMutexDestroy();
 
     /// Shared implementation for prefix and postfix increment/decrement.
     /// Returns the *old* value for postfix (isPostfix=true) and the *new*

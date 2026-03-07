@@ -1,0 +1,20 @@
+// Test concurrency primitives: thread_create, thread_join, mutex
+fn worker() {
+    println(42);
+    return 0;
+}
+
+fn main() {
+    // Test mutex creation and operations
+    var m = mutex_new();
+    mutex_lock(m);
+    mutex_unlock(m);
+    mutex_destroy(m);
+
+    // Test thread creation and join
+    var t = thread_create("worker");
+    thread_join(t);
+
+    println(0);
+    return 0;
+}

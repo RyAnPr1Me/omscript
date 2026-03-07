@@ -1,0 +1,7 @@
+import "modules/circular_a";
+
+fn main() {
+    println(from_a());
+    println(from_b());
+    return 0;
+}

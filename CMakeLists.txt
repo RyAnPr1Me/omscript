@@ -78,6 +78,10 @@ set(COMPILER_SOURCES
     src/parser.cpp
     src/ast.cpp
     src/codegen.cpp
+    src/codegen_builtins.cpp
+    src/codegen_expr.cpp
+    src/codegen_stmt.cpp
+    src/codegen_opt.cpp
     src/compiler.cpp
     src/main.cpp
 )
@@ -136,6 +140,10 @@ llvm_map_components_to_libnames(llvm_libs ${LLVM_COMPONENTS})
 
 target_link_libraries(omsc ${llvm_libs})
 
+# Link pthreads for concurrency primitives (thread_create, mutex_*, etc.)
+find_package(Threads REQUIRED)
+target_link_libraries(omsc Threads::Threads)
+
 # ORC JIT requires the host binary to export its own symbols so the in-process
 # executor can locate ORC runtime helpers (e.g. llvm_orc_registerEHFrameSectionWrapper)
 # via dlsym.  --export-dynamic ensures all statically-linked symbols from
@@ -164,6 +172,10 @@ if(GTest_FOUND)
         src/parser.cpp
         src/ast.cpp
         src/codegen.cpp
+        src/codegen_builtins.cpp
+        src/codegen_expr.cpp
+        src/codegen_stmt.cpp
+        src/codegen_opt.cpp
         src/compiler.cpp
         runtime/value.cpp
         runtime/aot_profile.cpp

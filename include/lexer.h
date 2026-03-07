@@ -38,6 +38,8 @@ enum class TokenType {
     CATCH,
     THROW,
     ENUM,
+    STRUCT,
+    IMPORT,
 
     // Operators
     PLUS,

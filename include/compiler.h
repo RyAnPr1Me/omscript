@@ -105,6 +105,10 @@ class Compiler {
     void setPGOUse(const std::string& path) {
         pgoUsePath_ = path;
     }
+    /// Enable or disable DWARF debug info generation (default: false).
+    void setDebugMode(bool enable) {
+        debug_ = enable;
+    }
 
   private:
     std::string readFile(const std::string& filename);
@@ -124,6 +128,7 @@ class Compiler {
     bool vectorize_ = true;
     bool unrollLoops_ = true;
     bool loopOptimize_ = true;
+    bool debug_ = false;
     std::string pgoGenPath_;
     std::string pgoUsePath_;
 };

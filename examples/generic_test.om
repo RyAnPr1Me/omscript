@@ -1,0 +1,20 @@
+fn identity<T>(x: T) -> T {
+    return x;
+}
+
+fn first<T>(arr) -> T {
+    return arr[0];
+}
+
+fn main() {
+    var a = identity(42);
+    println(a);
+
+    var b = identity(99);
+    println(b);
+
+    var arr = [10, 20, 30];
+    println(first(arr));
+
+    return 0;
+}

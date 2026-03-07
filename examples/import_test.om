@@ -1,0 +1,11 @@
+import "modules/math_utils";
+import "modules/string_utils";
+
+fn main() {
+    println(square(5));
+    println(cube(3));
+    println(add(10, 20));
+    println(greet("World"));
+    println(exclaim("Wow"));
+    return 0;
+}

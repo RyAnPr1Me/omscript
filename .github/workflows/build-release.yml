@@ -52,8 +52,8 @@ jobs:
           else
             # Get number of files changed in last commit
             FILES_CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null | wc -l)
-            # Get lines changed
-            LINES_CHANGED=$(git diff --shortstat HEAD~1 HEAD 2>/dev/null | awk '{print $1+$4}' || echo "0")
+            # Get total lines changed (insertions + deletions)
+            LINES_CHANGED=$(git diff --numstat HEAD~1 HEAD 2>/dev/null | awk '{total+=$1+$2} END {print total+0}')
             
             echo "Files changed: $FILES_CHANGED"
             echo "Lines changed: $LINES_CHANGED"

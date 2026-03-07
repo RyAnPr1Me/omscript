@@ -29,7 +29,9 @@ static const std::unordered_map<std::string, TokenType> keywords = {
     {"true", TokenType::TRUE},     {"false", TokenType::FALSE},       {"null", TokenType::NULL_LITERAL},
     {"switch", TokenType::SWITCH}, {"case", TokenType::CASE},         {"default", TokenType::DEFAULT},
     {"try", TokenType::TRY},       {"catch", TokenType::CATCH},       {"throw", TokenType::THROW},
-    {"enum", TokenType::ENUM}};
+    {"enum", TokenType::ENUM},
+    {"struct", TokenType::STRUCT},
+    {"import", TokenType::IMPORT}};
 
 /// Throw a DiagnosticError with the given message and source location.
 [[noreturn]] static void lexError(const std::string& msg, int ln, int col) {
@@ -268,7 +270,10 @@ Token Lexer::scanString() {
                 str += '\r';
                 break;
             case '0':
-                str += '\0';
+                // Reject embedded null bytes — they would silently truncate
+                // C-strings at runtime, causing data loss or subtle bugs.
+                // This matches the \x00 rejection below for consistency.
+                lexError("Null byte '\\0' is not allowed in string literals", line, column);
                 break;
             case 'b':
                 str += '\b';
