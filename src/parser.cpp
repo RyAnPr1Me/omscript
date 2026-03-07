@@ -1,13 +1,19 @@
 #include "parser.h"
 #include "diagnostic.h"
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 
 namespace omscript {
 
-Parser::Parser(const std::vector<Token>& tokens) : tokens(tokens), current(0), inOptMaxFunction(false) {}
+Parser::Parser(const std::vector<Token>& tokens)
+    : tokens(tokens), current(0), inOptMaxFunction(false),
+      importedFiles_(std::make_shared<std::unordered_set<std::string>>()) {}
 
-Parser::Parser(std::vector<Token>&& tokens) : tokens(std::move(tokens)), current(0), inOptMaxFunction(false) {}
+Parser::Parser(std::vector<Token>&& tokens)
+    : tokens(std::move(tokens)), current(0), inOptMaxFunction(false),
+      importedFiles_(std::make_shared<std::unordered_set<std::string>>()) {}
 
 const Token& Parser::peek(int offset) const {
     static const Token eofToken(TokenType::END_OF_FILE, "", 0, 0);
@@ -87,6 +93,15 @@ std::unique_ptr<Program> Parser::parse() {
     bool optMaxTagActive = false;
 
     while (!isAtEnd()) {
+        if (match(TokenType::IMPORT)) {
+            try {
+                parseImport(functions, enums, structs);
+            } catch (const std::runtime_error& e) {
+                errors_.push_back(e.what());
+                synchronize();
+            }
+            continue;
+        }
         if (match(TokenType::OPTMAX_START)) {
             if (optMaxTagActive) {
                 error("Nested OPTMAX blocks are not allowed");
@@ -151,6 +166,74 @@ std::unique_ptr<Program> Parser::parse() {
     lambdaFunctions_.clear();
 
     return std::make_unique<Program>(std::move(functions), std::move(enums), std::move(structs));
+}
+
+void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
+                         std::vector<std::unique_ptr<EnumDecl>>& enums,
+                         std::vector<std::unique_ptr<StructDecl>>& structs) {
+    Token fileToken = consume(TokenType::STRING, "Expected filename string after 'import'");
+    consume(TokenType::SEMICOLON, "Expected ';' after import statement");
+
+    std::string filename = fileToken.lexeme;
+    // Append .om extension if not already present
+    if (filename.size() < 3 || filename.substr(filename.size() - 3) != ".om") {
+        filename += ".om";
+    }
+
+    // Resolve full path relative to the base directory
+    std::string fullPath;
+    if (baseDir_.empty()) {
+        fullPath = filename;
+    } else {
+        fullPath = baseDir_ + "/" + filename;
+    }
+
+    // Normalize the path to a canonical form for circular import detection
+    std::error_code ec;
+    auto canonicalPath = std::filesystem::weakly_canonical(fullPath, ec);
+    std::string normalizedPath = ec ? fullPath : canonicalPath.string();
+
+    // Check for circular/duplicate imports
+    if (importedFiles_->count(normalizedPath)) {
+        return; // Already imported, skip
+    }
+    importedFiles_->insert(normalizedPath);
+
+    // Read the imported file
+    std::ifstream file(fullPath);
+    if (!file.is_open()) {
+        error("Cannot open imported file: " + fullPath);
+    }
+    std::string source((std::istreambuf_iterator<char>(file)),
+                        std::istreambuf_iterator<char>());
+
+    // Lex the imported file
+    Lexer importLexer(std::move(source));
+    std::vector<Token> importTokens = importLexer.tokenize();
+
+    // Parse the imported file
+    Parser importParser(std::move(importTokens));
+    std::string importDir = std::filesystem::path(fullPath).parent_path().string();
+    importParser.setBaseDir(importDir);
+    importParser.importedFiles_ = importedFiles_; // Share import tracking
+
+    auto importedProgram = importParser.parse();
+
+    // Merge imported declarations into the current program
+    for (auto& fn : importedProgram->functions) {
+        functions.push_back(std::move(fn));
+    }
+    for (auto& en : importedProgram->enums) {
+        enums.push_back(std::move(en));
+    }
+    for (auto& st : importedProgram->structs) {
+        structs.push_back(std::move(st));
+    }
+
+    // Also import struct names so struct literals can be parsed
+    for (const auto& name : importParser.structNames_) {
+        structNames_.insert(name);
+    }
 }
 
 std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {

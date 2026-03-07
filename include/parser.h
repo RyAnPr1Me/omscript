@@ -4,6 +4,7 @@
 #include "ast.h"
 #include "lexer.h"
 #include <memory>
+#include <string>
 #include <unordered_set>
 #include <vector>
 
@@ -14,6 +15,9 @@ class Parser {
     Parser(const std::vector<Token>& tokens);
     Parser(std::vector<Token>&& tokens);
     std::unique_ptr<Program> parse();
+
+    /// Set the base directory for resolving import paths.
+    void setBaseDir(const std::string& dir) { baseDir_ = dir; }
 
     /// Returns collected parse errors (populated when multi-error mode is active).
     const std::vector<std::string>& errors() const {
@@ -53,6 +57,17 @@ class Parser {
 
     /// Generated lambda functions to be appended to the program.
     std::vector<std::unique_ptr<FunctionDecl>> lambdaFunctions_;
+
+    /// Base directory for resolving import paths.
+    std::string baseDir_;
+
+    /// Set of already-imported file paths (prevents circular imports).
+    std::shared_ptr<std::unordered_set<std::string>> importedFiles_;
+
+    /// Parse an import statement and return the imported program.
+    void parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
+                     std::vector<std::unique_ptr<EnumDecl>>& enums,
+                     std::vector<std::unique_ptr<StructDecl>>& structs);
 
     const Token& peek(int offset = 0) const;
     Token advance();

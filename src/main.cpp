@@ -1580,6 +1580,10 @@ const char* tokenTypeToString(omscript::TokenType type) {
         return "THROW";
     case omscript::TokenType::ENUM:
         return "ENUM";
+    case omscript::TokenType::STRUCT:
+        return "STRUCT";
+    case omscript::TokenType::IMPORT:
+        return "IMPORT";
     case omscript::TokenType::PLUS:
         return "PLUS";
     case omscript::TokenType::MINUS:

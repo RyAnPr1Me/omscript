@@ -39,6 +39,7 @@ enum class TokenType {
     THROW,
     ENUM,
     STRUCT,
+    IMPORT,
 
     // Operators
     PLUS,

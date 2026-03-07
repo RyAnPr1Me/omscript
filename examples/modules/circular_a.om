@@ -1,0 +1,5 @@
+import "circular_b";
+
+fn from_a() {
+    return 1;
+}

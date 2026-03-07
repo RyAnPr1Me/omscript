@@ -92,6 +92,7 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
         std::cout << "  Parsing..." << std::endl;
     }
     Parser parser(std::move(tokens));
+    parser.setBaseDir(std::filesystem::path(sourceFile).parent_path().string());
     std::unique_ptr<Program> program;
     try {
         program = parser.parse();
