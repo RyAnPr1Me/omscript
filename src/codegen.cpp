@@ -891,6 +891,20 @@ llvm::Function* CodeGenerator::getOrDeclareMalloc() {
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addRetAttr(llvm::Attribute::NoAlias); // returned pointer does not alias any pointer visible to the caller
+    // allocsize(0): parameter 0 is the allocation size — enables LLVM to track
+    // allocation sizes for bounds checking elimination and alias analysis.
+    fn->addFnAttr(llvm::Attribute::getWithAllocSizeArgs(*context, 0, std::nullopt));
+    // allockind("alloc,uninitialized"): marks malloc as a heap allocator returning
+    // uninitialised memory — enables dead allocation elimination (removing
+    // malloc/free pairs whose result is never read).
+    fn->addFnAttr(llvm::Attribute::get(*context, llvm::Attribute::AllocKind,
+                                       static_cast<uint64_t>(llvm::AllocFnKind::Alloc |
+                                                             llvm::AllocFnKind::Uninitialized)));
+    // memory(inaccessiblemem: readwrite): malloc only touches memory not yet
+    // visible to the caller — lets the optimiser move/eliminate malloc calls
+    // across instructions that access only known memory.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects::inaccessibleMemOnly()));
     return fn;
 }
 
@@ -1009,6 +1023,17 @@ llvm::Function* CodeGenerator::getOrDeclareFree() {
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "free", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
+    OMSC_ADD_NOCAPTURE(fn, 0); // free does not capture its pointer argument
+    // allockind("free"): marks free as a deallocation function — enables the
+    // optimiser to pair malloc/free and eliminate dead allocation sequences.
+    fn->addFnAttr(llvm::Attribute::get(*context, llvm::Attribute::AllocKind,
+                                       static_cast<uint64_t>(llvm::AllocFnKind::Free)));
+    // memory(argmem: readwrite, inaccessiblemem: readwrite): free reads the
+    // pointed-to allocation metadata and returns the block to the allocator's
+    // internal (inaccessible) structures.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects::inaccessibleOrArgMemOnly()));
+    fn->addParamAttr(0, llvm::Attribute::get(*context, llvm::Attribute::AllocatedPointer));
     return fn;
 }
 
@@ -1211,6 +1236,15 @@ llvm::Function* CodeGenerator::getOrDeclareStrndup() {
     fn->addRetAttr(llvm::Attribute::NoAlias);
     fn->addParamAttr(0, llvm::Attribute::ReadOnly);
     OMSC_ADD_NOCAPTURE(fn, 0);
+    // allocsize(1): parameter 1 upper-bounds the allocation size — enables LLVM
+    // to reason about the returned buffer size for alias analysis.
+    fn->addFnAttr(llvm::Attribute::getWithAllocSizeArgs(*context, 1, std::nullopt));
+    // allockind("alloc,uninitialized"): strndup allocates new heap memory (the
+    // content is initialised by the function itself, but from LLVM's perspective
+    // the returned block is freshly allocated).
+    fn->addFnAttr(llvm::Attribute::get(*context, llvm::Attribute::AllocKind,
+                                       static_cast<uint64_t>(llvm::AllocFnKind::Alloc |
+                                                             llvm::AllocFnKind::Uninitialized)));
     return fn;
 }
 
@@ -1223,6 +1257,18 @@ llvm::Function* CodeGenerator::getOrDeclareRealloc() {
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addRetAttr(llvm::Attribute::NoAlias);
+    OMSC_ADD_NOCAPTURE(fn, 0); // realloc does not capture the old pointer
+    // allocsize(1): parameter 1 is the new allocation size.
+    fn->addFnAttr(llvm::Attribute::getWithAllocSizeArgs(*context, 1, std::nullopt));
+    // allockind("realloc"): marks realloc as a reallocation function so LLVM can
+    // track the pointer through resize operations for alias analysis.
+    fn->addFnAttr(llvm::Attribute::get(*context, llvm::Attribute::AllocKind,
+                                       static_cast<uint64_t>(llvm::AllocFnKind::Realloc)));
+    // memory(argmem: readwrite, inaccessiblemem: readwrite): realloc reads the
+    // old allocation and writes to allocator-internal structures.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects::inaccessibleOrArgMemOnly()));
+    fn->addParamAttr(0, llvm::Attribute::get(*context, llvm::Attribute::AllocatedPointer));
     return fn;
 }
 
