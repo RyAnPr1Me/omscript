@@ -4082,3 +4082,119 @@ TEST(CodegenTest, MemmoveHasFullAttributes) {
         EXPECT_TRUE(fn->hasFnAttribute(llvm::Attribute::NoSync)) << "memmove should have NoSync attribute";
     }
 }
+
+// ===========================================================================
+// Memory allocator attribute tests
+// ===========================================================================
+
+TEST(CodegenTest, MallocHasAllocatorAttributes) {
+    // malloc should have allocsize, allockind, and memory effect attributes
+    // to enable dead allocation elimination and improved alias analysis.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    // String concatenation triggers a malloc call.
+    auto* mod =
+        generateIR("fn main() { var a = \"hello\"; var b = \"world\"; print(a + b); return 0; }", codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("malloc");
+    ASSERT_NE(fn, nullptr) << "malloc should be declared";
+    EXPECT_TRUE(fn->hasFnAttribute(llvm::Attribute::NoUnwind));
+    EXPECT_TRUE(fn->hasFnAttribute(llvm::Attribute::WillReturn));
+    EXPECT_TRUE(fn->hasRetAttribute(llvm::Attribute::NoAlias));
+    // allocsize(0): parameter 0 is the allocation size
+    EXPECT_TRUE(fn->hasFnAttribute(llvm::Attribute::AllocSize))
+        << "malloc should have allocsize attribute";
+    auto allocSize = fn->getFnAttribute(llvm::Attribute::AllocSize).getAllocSizeArgs();
+    EXPECT_EQ(allocSize.first, 0u) << "malloc allocsize should reference parameter 0";
+    // allockind: alloc | uninitialized
+    EXPECT_TRUE(fn->hasFnAttribute(llvm::Attribute::AllocKind))
+        << "malloc should have allockind attribute";
+    auto kind = fn->getFnAttribute(llvm::Attribute::AllocKind).getAllocKind();
+    EXPECT_TRUE((kind & llvm::AllocFnKind::Alloc) != llvm::AllocFnKind::Unknown)
+        << "malloc allockind should include Alloc";
+    EXPECT_TRUE((kind & llvm::AllocFnKind::Uninitialized) != llvm::AllocFnKind::Unknown)
+        << "malloc allockind should include Uninitialized";
+    // memory(inaccessiblemem: readwrite)
+    EXPECT_TRUE(fn->hasFnAttribute(llvm::Attribute::Memory))
+        << "malloc should have memory effects attribute";
+}
+
+TEST(CodegenTest, FreeHasAllocatorAttributes) {
+    // free should have nocapture, allockind, and memory effect attributes.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    // Array push triggers both malloc and free.
+    auto* mod = generateIR("fn main() { var a = [1, 2]; push(a, 3); return a[0]; }", codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("free");
+    ASSERT_NE(fn, nullptr) << "free should be declared";
+    EXPECT_TRUE(fn->hasFnAttribute(llvm::Attribute::NoUnwind));
+    EXPECT_TRUE(fn->hasFnAttribute(llvm::Attribute::WillReturn));
+    // allockind: free
+    EXPECT_TRUE(fn->hasFnAttribute(llvm::Attribute::AllocKind))
+        << "free should have allockind attribute";
+    auto kind = fn->getFnAttribute(llvm::Attribute::AllocKind).getAllocKind();
+    EXPECT_TRUE((kind & llvm::AllocFnKind::Free) != llvm::AllocFnKind::Unknown)
+        << "free allockind should include Free";
+    // memory effects
+    EXPECT_TRUE(fn->hasFnAttribute(llvm::Attribute::Memory))
+        << "free should have memory effects attribute";
+    // allocptr on parameter 0
+    EXPECT_TRUE(fn->hasParamAttribute(0, llvm::Attribute::AllocatedPointer))
+        << "free parameter 0 should have allocptr attribute";
+}
+
+TEST(CodegenTest, ReallocHasAllocatorAttributes) {
+    // realloc should have allocsize, allockind, nocapture, and memory effect attrs.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    // Use array operations that may trigger realloc
+    auto* mod = generateIR("fn main() { var a = [1, 2]; return len(a); }", codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("realloc");
+    if (fn) {
+        EXPECT_TRUE(fn->hasFnAttribute(llvm::Attribute::NoUnwind));
+        EXPECT_TRUE(fn->hasFnAttribute(llvm::Attribute::WillReturn));
+        EXPECT_TRUE(fn->hasRetAttribute(llvm::Attribute::NoAlias));
+        // allocsize(1): parameter 1 is the new allocation size
+        EXPECT_TRUE(fn->hasFnAttribute(llvm::Attribute::AllocSize))
+            << "realloc should have allocsize attribute";
+        auto allocSize = fn->getFnAttribute(llvm::Attribute::AllocSize).getAllocSizeArgs();
+        EXPECT_EQ(allocSize.first, 1u) << "realloc allocsize should reference parameter 1";
+        // allockind: realloc
+        EXPECT_TRUE(fn->hasFnAttribute(llvm::Attribute::AllocKind))
+            << "realloc should have allockind attribute";
+        auto kind = fn->getFnAttribute(llvm::Attribute::AllocKind).getAllocKind();
+        EXPECT_TRUE((kind & llvm::AllocFnKind::Realloc) != llvm::AllocFnKind::Unknown)
+            << "realloc allockind should include Realloc";
+        // memory effects
+        EXPECT_TRUE(fn->hasFnAttribute(llvm::Attribute::Memory))
+            << "realloc should have memory effects attribute";
+        // allocptr on parameter 0
+        EXPECT_TRUE(fn->hasParamAttribute(0, llvm::Attribute::AllocatedPointer))
+            << "realloc parameter 0 should have allocptr attribute";
+    }
+}
+
+TEST(CodegenTest, StrndupHasAllocatorAttributes) {
+    // strndup should have allocsize and allockind attributes.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    // str_split triggers strndup for extracting substrings.
+    auto* mod =
+        generateIR("fn main() { var s = \"hello world\"; var parts = str_split(s, \" \"); return len(parts); }", codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("strndup");
+    if (fn) {
+        EXPECT_TRUE(fn->hasFnAttribute(llvm::Attribute::NoUnwind));
+        EXPECT_TRUE(fn->hasFnAttribute(llvm::Attribute::WillReturn));
+        EXPECT_TRUE(fn->hasRetAttribute(llvm::Attribute::NoAlias));
+        // allocsize(1)
+        EXPECT_TRUE(fn->hasFnAttribute(llvm::Attribute::AllocSize))
+            << "strndup should have allocsize attribute";
+        auto allocSize = fn->getFnAttribute(llvm::Attribute::AllocSize).getAllocSizeArgs();
+        EXPECT_EQ(allocSize.first, 1u) << "strndup allocsize should reference parameter 1";
+        // allockind: alloc | uninitialized
+        EXPECT_TRUE(fn->hasFnAttribute(llvm::Attribute::AllocKind))
+            << "strndup should have allockind attribute";
+        auto kind = fn->getFnAttribute(llvm::Attribute::AllocKind).getAllocKind();
+        EXPECT_TRUE((kind & llvm::AllocFnKind::Alloc) != llvm::AllocFnKind::Unknown)
+            << "strndup allockind should include Alloc";
+    }
+}
