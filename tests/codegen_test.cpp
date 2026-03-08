@@ -4092,7 +4092,8 @@ TEST(CodegenTest, MallocHasAllocatorAttributes) {
     // to enable dead allocation elimination and improved alias analysis.
     CodeGenerator codegen(OptimizationLevel::O0);
     // String concatenation triggers a malloc call.
-    auto* mod = generateIR("fn main() { var a = \"hello\"; var b = \"world\"; var c = a + b; return 0; }", codegen);
+    auto* mod =
+        generateIR("fn main() { var a = \"hello\"; var b = \"world\"; print(a + b); return 0; }", codegen);
     ASSERT_NE(mod, nullptr);
     auto* fn = mod->getFunction("malloc");
     ASSERT_NE(fn, nullptr) << "malloc should be declared";
@@ -4144,8 +4145,8 @@ TEST(CodegenTest, FreeHasAllocatorAttributes) {
 TEST(CodegenTest, ReallocHasAllocatorAttributes) {
     // realloc should have allocsize, allockind, nocapture, and memory effect attrs.
     CodeGenerator codegen(OptimizationLevel::O0);
-    // Use array concat which triggers realloc
-    auto* mod = generateIR("fn main() { var a = [1, 2]; var b = [3]; return len(a); }", codegen);
+    // Use array operations that may trigger realloc
+    auto* mod = generateIR("fn main() { var a = [1, 2]; return len(a); }", codegen);
     ASSERT_NE(mod, nullptr);
     auto* fn = mod->getFunction("realloc");
     if (fn) {

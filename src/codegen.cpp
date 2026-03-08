@@ -895,13 +895,13 @@ llvm::Function* CodeGenerator::getOrDeclareMalloc() {
     // allocation sizes for bounds checking elimination and alias analysis.
     fn->addFnAttr(llvm::Attribute::getWithAllocSizeArgs(*context, 0, std::nullopt));
     // allockind("alloc,uninitialized"): marks malloc as a heap allocator returning
-    // uninitialised memory — enables dead allocation elimination (removing
+    // uninitialized memory — enables dead allocation elimination (removing
     // malloc/free pairs whose result is never read).
     fn->addFnAttr(llvm::Attribute::get(*context, llvm::Attribute::AllocKind,
                                        static_cast<uint64_t>(llvm::AllocFnKind::Alloc |
                                                              llvm::AllocFnKind::Uninitialized)));
     // memory(inaccessiblemem: readwrite): malloc only touches memory not yet
-    // visible to the caller — lets the optimiser move/eliminate malloc calls
+    // visible to the caller — lets the optimizer move/eliminate malloc calls
     // across instructions that access only known memory.
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
         *context, llvm::MemoryEffects::inaccessibleMemOnly()));
@@ -1025,7 +1025,7 @@ llvm::Function* CodeGenerator::getOrDeclareFree() {
     fn->addFnAttr(llvm::Attribute::WillReturn);
     OMSC_ADD_NOCAPTURE(fn, 0); // free does not capture its pointer argument
     // allockind("free"): marks free as a deallocation function — enables the
-    // optimiser to pair malloc/free and eliminate dead allocation sequences.
+    // optimizer to pair malloc/free and eliminate dead allocation sequences.
     fn->addFnAttr(llvm::Attribute::get(*context, llvm::Attribute::AllocKind,
                                        static_cast<uint64_t>(llvm::AllocFnKind::Free)));
     // memory(argmem: readwrite, inaccessiblemem: readwrite): free reads the
