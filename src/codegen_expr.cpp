@@ -217,8 +217,8 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             if (rv == 1.0 && expr->op == "**")
                 return left;  // x**1.0 → x
         }
-        if (auto* lc2 = llvm::dyn_cast<llvm::ConstantFP>(left)) {
-            double lv = lc2->getValueAPF().convertToDouble();
+        if (auto* lc = llvm::dyn_cast<llvm::ConstantFP>(left)) {
+            double lv = lc->getValueAPF().convertToDouble();
             if (lv == 0.0 && expr->op == "+")
                 return right; // 0.0+x → x
             if (lv == 1.0 && expr->op == "*")

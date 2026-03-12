@@ -462,8 +462,9 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     fpm.add(llvm::createSeparateConstOffsetFromGEPPass());
     fpm.add(llvm::createSpeculativeExecutionPass());
     fpm.add(llvm::createFlattenCFGPass());
-    // Phase 4: Final cleanup — use standard DCE to eliminate dead code
-    // after loop and control-flow transformations.
+    // Phase 4: Final cleanup — InstSimplify, InstCombine, CFGSimplification,
+    // and DCE remove dead code and simplify patterns exposed by loop and
+    // control-flow transformations above.
     fpm.add(llvm::createInstSimplifyLegacyPass()); // lightweight complement to instcombine
     fpm.add(llvm::createInstructionCombiningPass());
     fpm.add(llvm::createCFGSimplificationPass());
