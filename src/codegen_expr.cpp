@@ -197,6 +197,63 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             }
         }
 
+        // Float algebraic identity optimizations — eliminate no-op float
+        // operations when one operand is a known constant.  These supplement
+        // LLVM's InstCombine by catching patterns at the IR emission level.
+        if (auto* rc = llvm::dyn_cast<llvm::ConstantFP>(right)) {
+            double rv = rc->getValueAPF().convertToDouble();
+            if (rv == 0.0 && (expr->op == "+" || expr->op == "-"))
+                return left;  // x+0.0, x-0.0 → x
+            if (rv == 1.0 && (expr->op == "*" || expr->op == "/"))
+                return left;  // x*1.0, x/1.0 → x
+            // Note: x*0.0 → 0.0 is NOT valid under IEEE-754: NaN*0=NaN,
+            // Inf*0=NaN, and (-x)*0 = -0.0 (not +0.0).  We leave this to
+            // LLVM InstCombine with fast-math flags if the user opts in.
+            if (rv == 2.0 && expr->op == "*")
+                return builder->CreateFAdd(left, left, "fmul2"); // x*2.0 → x+x
+            if (rv == 2.0 && expr->op == "**")
+                return builder->CreateFMul(left, left, "fsq");   // x**2.0 → x*x
+            if (rv == 0.0 && expr->op == "**")
+                return llvm::ConstantFP::get(getFloatType(), 1.0); // x**0.0 → 1.0
+            if (rv == 1.0 && expr->op == "**")
+                return left;  // x**1.0 → x
+            // Float division by power-of-2 constant → multiply by reciprocal.
+            // x / 2.0 → x * 0.5, x / 4.0 → x * 0.25, etc.
+            // Multiplication is faster than division on all modern CPUs (3-5 cyc
+            // vs 15-25 cyc).  Only applies to exact powers of 2 where the
+            // reciprocal is exactly representable in IEEE-754 (no rounding error).
+            if (expr->op == "/" && rv != 0.0) {
+                double abs_rv = rv < 0 ? -rv : rv;
+                bool isPow2 = false;
+                if (abs_rv >= 1.0 && abs_rv <= 4503599627370496.0) { // 2^52 max exact int in double
+                    auto u = static_cast<uint64_t>(abs_rv);
+                    // Verify the cast is exact (no truncation of fractional part)
+                    isPow2 = (static_cast<double>(u) == abs_rv) && u > 0 && (u & (u - 1)) == 0;
+                } else if (abs_rv > 0.0 && abs_rv < 1.0) {
+                    double inv = 1.0 / abs_rv;
+                    auto u = static_cast<uint64_t>(inv);
+                    isPow2 = (static_cast<double>(u) == inv) && u > 0 && (u & (u - 1)) == 0;
+                }
+                if (isPow2) {
+                    double recip = 1.0 / rv;
+                    return builder->CreateFMul(left, llvm::ConstantFP::get(getFloatType(), recip), "fdivrecip");
+                }
+            }
+        }
+        if (auto* lc = llvm::dyn_cast<llvm::ConstantFP>(left)) {
+            double lv = lc->getValueAPF().convertToDouble();
+            if (lv == 0.0 && expr->op == "+")
+                return right; // 0.0+x → x
+            if (lv == 0.0 && expr->op == "-")
+                return builder->CreateFNeg(right, "fnegtmp"); // 0.0-x → -x
+            if (lv == 1.0 && expr->op == "*")
+                return right; // 1.0*x → x
+            // Note: 0.0*x → 0.0 is NOT valid under IEEE-754: 0*NaN=NaN,
+            // 0*Inf=NaN, and 0*(-x) = -0.0 (not +0.0).
+            if (lv == 2.0 && expr->op == "*")
+                return builder->CreateFAdd(right, right, "fmul2"); // 2.0*x → x+x
+        }
+
         if (expr->op == "+")
             return builder->CreateFAdd(left, right, "faddtmp");
         if (expr->op == "-")
@@ -233,7 +290,23 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             return builder->CreateZExt(cmp, getDefaultType(), "booltmp");
         }
         if (expr->op == "**") {
-            // Float exponentiation: use llvm.pow intrinsic
+            // Float exponent specialization: emit cheaper inline sequences
+            // for common small-integer and half-integer exponents.
+            if (auto* rc = llvm::dyn_cast<llvm::ConstantFP>(right)) {
+                double rv = rc->getValueAPF().convertToDouble();
+                if (rv == 0.5) {
+                    // x**0.5 → sqrt(x): single-instruction latency vs llvm.pow call
+                    llvm::Function* sqrtFn =
+                        OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::sqrt, {llvm::Type::getDoubleTy(*context)});
+                    return builder->CreateCall(sqrtFn, {left}, "fsqrt");
+                }
+                if (rv == 3.0) {
+                    // x**3.0 → x*x*x  (2 fmuls vs pow call)
+                    auto* sq = builder->CreateFMul(left, left, "fpow3.sq");
+                    return builder->CreateFMul(sq, left, "fpow3");
+                }
+            }
+            // General float exponentiation: use llvm.pow intrinsic
             llvm::Function* powFn =
                 OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::pow, {llvm::Type::getDoubleTy(*context)});
             return builder->CreateCall(powFn, {left, right}, "fpowtmp");
@@ -464,20 +537,40 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         if (rv == 1) {
             if (expr->op == "*" || expr->op == "/" || expr->op == "**")
                 return left; // x*1, x/1, x**1 → x
+            if (expr->op == "%")
+                return llvm::ConstantInt::get(getDefaultType(), 0); // x%1 → 0
         }
+        if (rv == -1 && expr->op == "*")
+            return builder->CreateNeg(left, "negtmp"); // x*(-1) → -x
+        // x & -1 (all ones) → x
+        if (rv == -1 && expr->op == "&")
+            return left;
+        // x | -1 (all ones) → -1
+        if (rv == -1 && expr->op == "|")
+            return llvm::ConstantInt::get(getDefaultType(), -1);
     }
     if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left)) {
         int64_t lv = ci->getSExtValue();
         if (lv == 0) {
             if (expr->op == "+" || expr->op == "|" || expr->op == "^")
                 return right; // 0+x, 0|x, 0^x → x
-            if (expr->op == "*" || expr->op == "&")
-                return llvm::ConstantInt::get(getDefaultType(), 0); // 0*x, 0&x → 0
+            if (expr->op == "*" || expr->op == "&" || expr->op == "<<" || expr->op == ">>")
+                return llvm::ConstantInt::get(getDefaultType(), 0); // 0*x, 0&x, 0<<x, 0>>x → 0
+            if (expr->op == "-")
+                return builder->CreateNeg(right, "negtmp"); // 0-x → -x
         }
         if (lv == 1 && expr->op == "*")
             return right; // 1*x → x
         if (lv == 1 && expr->op == "**")
             return llvm::ConstantInt::get(getDefaultType(), 1); // 1**x → 1
+        if (lv == -1 && expr->op == "*")
+            return builder->CreateNeg(right, "negtmp"); // (-1)*x → -x
+        // -1 & x → x
+        if (lv == -1 && expr->op == "&")
+            return right;
+        // -1 | x → -1
+        if (lv == -1 && expr->op == "|")
+            return llvm::ConstantInt::get(getDefaultType(), -1);
     }
 
     // Same-value identity optimizations — when both operands are the exact
@@ -496,6 +589,79 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             return llvm::ConstantInt::get(getDefaultType(), 1); // x==x→1, x<=x→1, x>=x→1
         if (expr->op == "!=" || expr->op == "<" || expr->op == ">")
             return llvm::ConstantInt::get(getDefaultType(), 0); // x!=x→0, x<x→0, x>x→0
+        // Same-value division and modulo identities.
+        if (expr->op == "/")
+            return llvm::ConstantInt::get(getDefaultType(), 1); // x/x→1
+        if (expr->op == "%")
+            return llvm::ConstantInt::get(getDefaultType(), 0); // x%x→0
+    }
+
+    // Comparison-against-zero strength reduction: when one side of an
+    // equality/inequality comparison is the constant 0, exploit the fact
+    // that x86-64 (and most architectures) can test for zero with a single
+    // TEST/CMP instruction.  We canonicalize to place 0 on the right.
+    if (expr->op == "==" || expr->op == "!=") {
+        llvm::Value* testVal = nullptr;
+        if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
+            if (ci->isZero()) { testVal = left; }
+        }
+        if (!testVal) {
+            if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left)) {
+                if (ci->isZero()) { testVal = right; }
+            }
+        }
+        // x * N == 0  →  x == 0  (when N is a nonzero constant)
+        // This eliminates a multiply when comparing the product against zero.
+        if (testVal) {
+            if (auto* mulInst = llvm::dyn_cast<llvm::BinaryOperator>(testVal)) {
+                if (mulInst->getOpcode() == llvm::Instruction::Mul) {
+                    llvm::Value* mulLeft = mulInst->getOperand(0);
+                    llvm::Value* mulRight = mulInst->getOperand(1);
+                    if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(mulRight)) {
+                        if (!ci->isZero()) {
+                            llvm::Value* cmp = (expr->op == "==")
+                                ? builder->CreateICmpEQ(mulLeft, llvm::ConstantInt::get(getDefaultType(), 0), "cmptmp")
+                                : builder->CreateICmpNE(mulLeft, llvm::ConstantInt::get(getDefaultType(), 0), "cmptmp");
+                            return builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+                        }
+                    }
+                    if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(mulLeft)) {
+                        if (!ci->isZero()) {
+                            llvm::Value* cmp = (expr->op == "==")
+                                ? builder->CreateICmpEQ(mulRight, llvm::ConstantInt::get(getDefaultType(), 0), "cmptmp")
+                                : builder->CreateICmpNE(mulRight, llvm::ConstantInt::get(getDefaultType(), 0), "cmptmp");
+                            return builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Subtraction-comparison strength reduction: when one side of an
+    // equality/inequality comparison is a subtraction and the other is 0,
+    // replace (x - y) == 0 with x == y and (x - y) != 0 with x != y.
+    // This eliminates a sub instruction since the comparison subsumes it.
+    if (expr->op == "==" || expr->op == "!=") {
+        auto tryFoldSub = [&](llvm::Value* lhs, llvm::Value* rhs) -> llvm::Value* {
+            if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(rhs)) {
+                if (ci->isZero()) {
+                    if (auto* subInst = llvm::dyn_cast<llvm::BinaryOperator>(lhs)) {
+                        if (subInst->getOpcode() == llvm::Instruction::Sub) {
+                            llvm::Value* cmp = (expr->op == "==")
+                                ? builder->CreateICmpEQ(subInst->getOperand(0), subInst->getOperand(1), "cmptmp")
+                                : builder->CreateICmpNE(subInst->getOperand(0), subInst->getOperand(1), "cmptmp");
+                            return builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+                        }
+                    }
+                }
+            }
+            return nullptr;
+        };
+        if (auto* result = tryFoldSub(left, right))
+            return result;
+        if (auto* result = tryFoldSub(right, left))
+            return result;
     }
 
     // Regular code generation for non-constant expressions.
@@ -522,6 +688,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         // Strength reduction: multiply by small non-power-of-2 constants
         // to shift+add/sub sequences (faster on many microarchitectures).
         // n*3 → (n<<1)+n, n*5 → (n<<2)+n, n*7 → (n<<3)-n, n*9 → (n<<3)+n
+        // n*10 → (n<<3)+(n<<1), n*15 → (n<<4)-n, n*17 → (n<<4)+n
         auto emitShiftAdd = [&](llvm::Value* base, int64_t multiplier) -> llvm::Value* {
             switch (multiplier) {
             case 3: {
@@ -540,6 +707,120 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 auto* shl = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 3), "mul9.shl");
                 return builder->CreateAdd(shl, base, "mul9");
             }
+            case 10: {
+                // n*10 → (n<<3) + (n<<1)
+                auto* shl3 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 3), "mul10.shl3");
+                auto* shl1 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 1), "mul10.shl1");
+                return builder->CreateAdd(shl3, shl1, "mul10");
+            }
+            case 15: {
+                // n*15 → (n<<4) - n
+                auto* shl = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 4), "mul15.shl");
+                return builder->CreateSub(shl, base, "mul15");
+            }
+            case 17: {
+                // n*17 → (n<<4) + n
+                auto* shl = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 4), "mul17.shl");
+                return builder->CreateAdd(shl, base, "mul17");
+            }
+            case 6: {
+                // n*6 → (n<<2) + (n<<1)  (= n*4 + n*2)
+                auto* shl2 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 2), "mul6.shl2");
+                auto* shl1 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 1), "mul6.shl1");
+                return builder->CreateAdd(shl2, shl1, "mul6");
+            }
+            case 12: {
+                // n*12 → (n<<3) + (n<<2)  (= n*8 + n*4)
+                auto* shl3 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 3), "mul12.shl3");
+                auto* shl2 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 2), "mul12.shl2");
+                return builder->CreateAdd(shl3, shl2, "mul12");
+            }
+            case 24: {
+                // n*24 → (n<<5) - (n<<3)  (= n*32 - n*8)
+                auto* shl5 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 5), "mul24.shl5");
+                auto* shl3 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 3), "mul24.shl3");
+                return builder->CreateSub(shl5, shl3, "mul24");
+            }
+            case 25: {
+                // n*25 → ((n<<5) - (n<<3)) + n  (= (n*32 - n*8) + n = n*24 + n)
+                auto* shl5 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 5), "mul25.shl5");
+                auto* shl3 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 3), "mul25.shl3");
+                auto* t = builder->CreateSub(shl5, shl3, "mul25.t");
+                return builder->CreateAdd(t, base, "mul25");
+            }
+            case 31: {
+                // n*31 → (n<<5) - n
+                auto* shl = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 5), "mul31.shl");
+                return builder->CreateSub(shl, base, "mul31");
+            }
+            case 33: {
+                // n*33 → (n<<5) + n
+                auto* shl = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 5), "mul33.shl");
+                return builder->CreateAdd(shl, base, "mul33");
+            }
+            case 63: {
+                // n*63 → (n<<6) - n
+                auto* shl = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 6), "mul63.shl");
+                return builder->CreateSub(shl, base, "mul63");
+            }
+            case 65: {
+                // n*65 → (n<<6) + n
+                auto* shl = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 6), "mul65.shl");
+                return builder->CreateAdd(shl, base, "mul65");
+            }
+            case 127: {
+                // n*127 → (n<<7) - n
+                auto* shl = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 7), "mul127.shl");
+                return builder->CreateSub(shl, base, "mul127");
+            }
+            case 255: {
+                // n*255 → (n<<8) - n
+                auto* shl = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 8), "mul255.shl");
+                return builder->CreateSub(shl, base, "mul255");
+            }
+            case 1000: {
+                // n*1000 → (n<<10) - (n<<5) + (n<<3)  (= 1024n - 32n + 8n)
+                auto* shl10 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 10), "mul1000.shl10");
+                auto* shl5 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 5), "mul1000.shl5");
+                auto* shl3 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 3), "mul1000.shl3");
+                auto* t = builder->CreateSub(shl10, shl5, "mul1000.t");
+                return builder->CreateAdd(t, shl3, "mul1000");
+            }
+            case 100: {
+                // n*100 → (n<<7) - (n<<5) + (n<<2)  (= 128n - 32n + 4n)
+                auto* shl7 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 7), "mul100.shl7");
+                auto* shl5 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 5), "mul100.shl5");
+                auto* shl2 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 2), "mul100.shl2");
+                auto* t = builder->CreateSub(shl7, shl5, "mul100.t");
+                return builder->CreateAdd(t, shl2, "mul100");
+            }
+            case 11: {
+                // n*11 → (n<<3) + (n<<1) + n  (= 8n + 2n + n)
+                auto* shl3 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 3), "mul11.shl3");
+                auto* shl1 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 1), "mul11.shl1");
+                auto* t = builder->CreateAdd(shl3, shl1, "mul11.t");
+                return builder->CreateAdd(t, base, "mul11");
+            }
+            case 13: {
+                // n*13 → (n<<4) - (n<<1) - n  (= 16n - 2n - n)
+                auto* shl4 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 4), "mul13.shl4");
+                auto* shl1 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 1), "mul13.shl1");
+                auto* t = builder->CreateSub(shl4, shl1, "mul13.t");
+                return builder->CreateSub(t, base, "mul13");
+            }
+            case 20: {
+                // n*20 → (n<<4) + (n<<2)  (= 16n + 4n)
+                auto* shl4 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 4), "mul20.shl4");
+                auto* shl2 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 2), "mul20.shl2");
+                return builder->CreateAdd(shl4, shl2, "mul20");
+            }
+            case 21: {
+                // n*21 → (n<<4) + (n<<2) + n  (= 16n + 4n + n)
+                auto* shl4 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 4), "mul21.shl4");
+                auto* shl2 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 2), "mul21.shl2");
+                auto* t = builder->CreateAdd(shl4, shl2, "mul21.t");
+                return builder->CreateAdd(t, base, "mul21");
+            }
             default:
                 return nullptr;
             }
@@ -547,10 +828,26 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
             if (auto* result = emitShiftAdd(left, ci->getSExtValue()))
                 return result;
+            // Negative constant strength reduction: n * (-K) → neg(n * K).
+            // This leverages the existing shift+add patterns for the absolute
+            // value, then negates the result.  A single neg (sub 0, x) is far
+            // cheaper than a hardware multiply.
+            int64_t rv = ci->getSExtValue();
+            if (rv < -1) {
+                if (auto* posResult = emitShiftAdd(left, -rv)) {
+                    return builder->CreateNeg(posResult, "mulneg");
+                }
+            }
         }
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left)) {
             if (auto* result = emitShiftAdd(right, ci->getSExtValue()))
                 return result;
+            int64_t lv = ci->getSExtValue();
+            if (lv < -1) {
+                if (auto* posResult = emitShiftAdd(right, -lv)) {
+                    return builder->CreateNeg(posResult, "mulneg");
+                }
+            }
         }
         return builder->CreateMul(left, right, "multmp");
     } else if (expr->op == "/" || expr->op == "%") {
@@ -594,7 +891,98 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                     builder->CreateShl(quotient, llvm::ConstantInt::get(getDefaultType(), s), "mod.prod");
                 return builder->CreateSub(left, product, "mod.rem");
             }
-            // Non-power-of-2 constant divisor: skip zero-check but use SDiv/SRem.
+            // Negative constant divisor: x / (-d) → -(x / d), x % (-d) → x % d.
+            // For signed division, the quotient negates and the remainder keeps
+            // the dividend's sign.  We apply the magic-number algorithm to the
+            // absolute value and negate the quotient, avoiding hardware division.
+            if (rv <= -3) {
+                int64_t posDiv = -rv;
+                // Guard against INT64_MIN whose negation overflows.
+                if (posDiv > 0) {
+                    uint64_t d = static_cast<uint64_t>(posDiv);
+                    int l = (d <= 1) ? 0 : (64 - __builtin_clzll(d - 1));
+                    llvm::APInt twoN = llvm::APInt(128, 1).shl(63 + l);
+                    llvm::APInt dWide(128, d);
+                    llvm::APInt magicWide = (twoN + dWide - 1).udiv(dWide);
+                    uint64_t magicNum = magicWide.getLimitedValue();
+                    int shiftAmt = l - 1;
+
+                    llvm::Type* i128Ty = llvm::Type::getInt128Ty(*context);
+                    llvm::Value* xExt = builder->CreateSExt(left, i128Ty, "magdiv.xext");
+                    llvm::Value* mConst = llvm::ConstantInt::get(i128Ty, magicNum);
+                    llvm::Value* product = builder->CreateMul(xExt, mConst, "magdiv.prod");
+                    llvm::Value* hi = builder->CreateAShr(product, llvm::ConstantInt::get(i128Ty, 64), "magdiv.hi128");
+                    llvm::Value* q = builder->CreateTrunc(hi, getDefaultType(), "magdiv.hi");
+                    if (shiftAmt > 0)
+                        q = builder->CreateAShr(q, llvm::ConstantInt::get(getDefaultType(), shiftAmt), "magdiv.shr");
+                    llvm::Value* signBit = builder->CreateLShr(
+                        left, llvm::ConstantInt::get(getDefaultType(), 63), "magdiv.sign");
+                    q = builder->CreateAdd(q, signBit, "magdiv.q");
+
+                    if (isDivision) {
+                        // x / (-d) → -(x / d)
+                        return builder->CreateNeg(q, "negdiv");
+                    }
+                    // x % (-d) → x - (x/d)*d  (remainder keeps dividend sign)
+                    // Note: use the original negative divisor so the identity
+                    // x == (x/d)*d + (x%d) holds with the negated quotient.
+                    llvm::Value* negQ = builder->CreateNeg(q, "negdiv.q");
+                    llvm::Value* prod = builder->CreateMul(negQ, right, "magmod.prod");
+                    return builder->CreateSub(left, prod, "magmod.rem");
+                }
+            }
+            // Non-power-of-2 constant divisor: use magic-number multiplication.
+            // This is the same algorithm GCC and Clang use to avoid hardware
+            // division instructions.  For signed division by a constant d:
+            //   quotient ≈ mulhi(x, magic) >> shift
+            // with a correction for the sign.  This replaces a 20-90 cycle
+            // division with a 3-5 cycle multiply-high + shift sequence.
+            //
+            // The magic number M and shift S satisfy:
+            //   floor(x / d) = mulhi(x, M) >> S  (for positive x)
+            // with a sign-correction step for negative dividends.
+            if (!ci->isZero() && rv >= 3) {
+                // Compute magic number for signed division by positive constant.
+                // Algorithm: find M, S such that  mulhi(x, M) >> S ≈ x/d
+                // Based on "Division by Invariant Integers using Multiplication"
+                // (Granlund & Montgomery, 1994).
+                uint64_t d = static_cast<uint64_t>(rv);
+                // Find the shift amount: ceil(log2(d)) using __builtin_clzll
+                // for constant-time bit-scan on modern CPUs.
+                int l = (d <= 1) ? 0 : (64 - __builtin_clzll(d - 1));
+                // Magic number: (2^(63+l) + d - 1) / d  (rounded up)
+                // Use LLVM's APInt for portable 128-bit arithmetic.
+                llvm::APInt twoN = llvm::APInt(128, 1).shl(63 + l);
+                llvm::APInt dWide(128, d);
+                llvm::APInt magicWide = (twoN + dWide - 1).udiv(dWide);
+                uint64_t magicNum = magicWide.getLimitedValue();
+                int shiftAmt = l - 1;
+
+                // Emit: mulhi(x, magic) >> shift, with sign correction.
+                // On typical x86-64 hardware, this is 3-5 cycles vs 20-90 cycles
+                // for hardware division.
+                // Step 1: q = mulhi(x, M) — high 64 bits of 128-bit product
+                llvm::Type* i128Ty = llvm::Type::getInt128Ty(*context);
+                llvm::Value* xExt = builder->CreateSExt(left, i128Ty, "magdiv.xext");
+                llvm::Value* mConst = llvm::ConstantInt::get(i128Ty, magicNum);
+                llvm::Value* product = builder->CreateMul(xExt, mConst, "magdiv.prod");
+                llvm::Value* hi = builder->CreateAShr(product, llvm::ConstantInt::get(i128Ty, 64), "magdiv.hi128");
+                llvm::Value* q = builder->CreateTrunc(hi, getDefaultType(), "magdiv.hi");
+                // Step 2: arithmetic shift right by (l-1)
+                if (shiftAmt > 0)
+                    q = builder->CreateAShr(q, llvm::ConstantInt::get(getDefaultType(), shiftAmt), "magdiv.shr");
+                // Step 3: add 1 if dividend was negative (round toward zero)
+                llvm::Value* signBit = builder->CreateLShr(
+                    left, llvm::ConstantInt::get(getDefaultType(), 63), "magdiv.sign");
+                q = builder->CreateAdd(q, signBit, "magdiv.q");
+
+                if (isDivision) {
+                    return q;
+                }
+                // Modulo: x % d → x - (x/d) * d
+                llvm::Value* prod = builder->CreateMul(q, right, "magmod.prod");
+                return builder->CreateSub(left, prod, "magmod.rem");
+            }
             if (!ci->isZero()) {
                 return isDivision ? builder->CreateSDiv(left, right, "divtmp")
                                   : builder->CreateSRem(left, right, "modtmp");
@@ -660,6 +1048,130 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         llvm::Value* safeShift = builder->CreateAnd(right, mask, "shrmask");
         return builder->CreateAShr(left, safeShift, "ashrtmp");
     } else if (expr->op == "**") {
+        // Small constant exponent specialization — emit inline multiplications
+        // instead of the general binary-exponentiation loop.  This eliminates
+        // loop overhead and branches for the most common exponents,
+        // producing straight-line code that the backend can schedule optimally.
+        if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
+            int64_t exp = ci->getSExtValue();
+            if (exp == 2) {
+                // x**2 → x*x  (1 mul)
+                return builder->CreateMul(left, left, "pow2");
+            }
+            if (exp == 3) {
+                // x**3 → x*x*x  (2 muls)
+                auto* sq = builder->CreateMul(left, left, "pow3.sq");
+                return builder->CreateMul(sq, left, "pow3");
+            }
+            if (exp == 4) {
+                // x**4 → t=x*x; t*t  (2 muls)
+                auto* sq = builder->CreateMul(left, left, "pow4.sq");
+                return builder->CreateMul(sq, sq, "pow4");
+            }
+            if (exp == 5) {
+                // x**5 → t=x*x; t*t*x  (3 muls)
+                auto* sq = builder->CreateMul(left, left, "pow5.sq");
+                auto* q4 = builder->CreateMul(sq, sq, "pow5.q4");
+                return builder->CreateMul(q4, left, "pow5");
+            }
+            if (exp == 6) {
+                // x**6 → t=x*x; u=t*t; u*t  (3 muls)
+                auto* sq = builder->CreateMul(left, left, "pow6.sq");
+                auto* q4 = builder->CreateMul(sq, sq, "pow6.q4");
+                return builder->CreateMul(q4, sq, "pow6");
+            }
+            if (exp == 7) {
+                // x**7 → t=x*x; u=t*t; u*t*x  (4 muls)
+                auto* sq = builder->CreateMul(left, left, "pow7.sq");
+                auto* q4 = builder->CreateMul(sq, sq, "pow7.q4");
+                auto* q6 = builder->CreateMul(q4, sq, "pow7.q6");
+                return builder->CreateMul(q6, left, "pow7");
+            }
+            if (exp == 8) {
+                // x**8 → t=x*x; u=t*t; u*u  (3 muls)
+                auto* sq = builder->CreateMul(left, left, "pow8.sq");
+                auto* q4 = builder->CreateMul(sq, sq, "pow8.q4");
+                return builder->CreateMul(q4, q4, "pow8");
+            }
+            if (exp == 9) {
+                // x**9 → t=x*x; u=t*t; v=u*u; v*x  (4 muls)
+                auto* sq = builder->CreateMul(left, left, "pow9.sq");
+                auto* q4 = builder->CreateMul(sq, sq, "pow9.q4");
+                auto* q8 = builder->CreateMul(q4, q4, "pow9.q8");
+                return builder->CreateMul(q8, left, "pow9");
+            }
+            if (exp == 10) {
+                // x**10 → t=x*x; u=t*t; v=u*u; v*t  (4 muls)
+                auto* sq = builder->CreateMul(left, left, "pow10.sq");
+                auto* q4 = builder->CreateMul(sq, sq, "pow10.q4");
+                auto* q8 = builder->CreateMul(q4, q4, "pow10.q8");
+                return builder->CreateMul(q8, sq, "pow10");
+            }
+            if (exp == 11) {
+                // x**11 → t=x*x; u=t*t; v=u*u; v*t*x  (5 muls)
+                auto* sq = builder->CreateMul(left, left, "pow11.sq");
+                auto* q4 = builder->CreateMul(sq, sq, "pow11.q4");
+                auto* q8 = builder->CreateMul(q4, q4, "pow11.q8");
+                auto* q10 = builder->CreateMul(q8, sq, "pow11.q10");
+                return builder->CreateMul(q10, left, "pow11");
+            }
+            if (exp == 12) {
+                // x**12 → t=x*x; u=t*t; v=u*u; v*u  (4 muls)
+                auto* sq = builder->CreateMul(left, left, "pow12.sq");
+                auto* q4 = builder->CreateMul(sq, sq, "pow12.q4");
+                auto* q8 = builder->CreateMul(q4, q4, "pow12.q8");
+                return builder->CreateMul(q8, q4, "pow12");
+            }
+            if (exp == 16) {
+                // x**16 → t=x*x; u=t*t; v=u*u; v*v  (4 muls)
+                auto* sq = builder->CreateMul(left, left, "pow16.sq");
+                auto* q4 = builder->CreateMul(sq, sq, "pow16.q4");
+                auto* q8 = builder->CreateMul(q4, q4, "pow16.q8");
+                return builder->CreateMul(q8, q8, "pow16");
+            }
+            if (exp == 13) {
+                // x**13 → t=x*x; u=t*t; v=u*t; w=v*v; w*x  (5 muls)
+                auto* sq = builder->CreateMul(left, left, "pow13.sq");
+                auto* q4 = builder->CreateMul(sq, sq, "pow13.q4");
+                auto* q6 = builder->CreateMul(q4, sq, "pow13.q6");
+                auto* q12 = builder->CreateMul(q6, q6, "pow13.q12");
+                return builder->CreateMul(q12, left, "pow13");
+            }
+            if (exp == 14) {
+                // x**14 = x^12 * x^2 → sq=x*x; q4=sq*sq; q8=q4*q4; q12=q8*q4; q12*sq  (5 muls)
+                auto* sq = builder->CreateMul(left, left, "pow14.sq");
+                auto* q4 = builder->CreateMul(sq, sq, "pow14.q4");
+                auto* q8 = builder->CreateMul(q4, q4, "pow14.q8");
+                auto* q12 = builder->CreateMul(q8, q4, "pow14.q12");
+                return builder->CreateMul(q12, sq, "pow14");
+            }
+            if (exp == 15) {
+                // x**15 = x^12 * x^3 → sq; q3=sq*x; q6=q3*q3; q12=q6*q6; q12*q3  (5 muls)
+                auto* sq = builder->CreateMul(left, left, "pow15.sq");
+                auto* q3 = builder->CreateMul(sq, left, "pow15.q3");
+                auto* q6 = builder->CreateMul(q3, q3, "pow15.q6");
+                auto* q12 = builder->CreateMul(q6, q6, "pow15.q12");
+                return builder->CreateMul(q12, q3, "pow15");
+            }
+            if (exp == 32) {
+                // x**32 → ((((x*x)^2)^2)^2)^2  (5 muls)
+                auto* sq = builder->CreateMul(left, left, "pow32.sq");
+                auto* q4 = builder->CreateMul(sq, sq, "pow32.q4");
+                auto* q8 = builder->CreateMul(q4, q4, "pow32.q8");
+                auto* q16 = builder->CreateMul(q8, q8, "pow32.q16");
+                return builder->CreateMul(q16, q16, "pow32");
+            }
+            if (exp == 64) {
+                // x**64 → (((((x*x)^2)^2)^2)^2)^2  (6 muls)
+                auto* sq = builder->CreateMul(left, left, "pow64.sq");
+                auto* q4 = builder->CreateMul(sq, sq, "pow64.q4");
+                auto* q8 = builder->CreateMul(q4, q4, "pow64.q8");
+                auto* q16 = builder->CreateMul(q8, q8, "pow64.q16");
+                auto* q32 = builder->CreateMul(q16, q16, "pow64.q32");
+                return builder->CreateMul(q32, q32, "pow64");
+            }
+        }
+
         // Integer exponentiation via binary exponentiation (exponentiation by
         // squaring).  This is O(log n) in the exponent vs. the naive O(n) loop.
         llvm::Function* function = builder->GetInsertBlock()->getParent();
