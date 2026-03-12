@@ -224,10 +224,11 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             if (expr->op == "/" && rv != 0.0) {
                 double abs_rv = rv < 0 ? -rv : rv;
                 bool isPow2 = false;
-                if (abs_rv >= 1.0) {
+                if (abs_rv >= 1.0 && abs_rv <= 4503599627370496.0) { // 2^52 max exact int in double
                     auto u = static_cast<uint64_t>(abs_rv);
+                    // Verify the cast is exact (no truncation of fractional part)
                     isPow2 = (static_cast<double>(u) == abs_rv) && u > 0 && (u & (u - 1)) == 0;
-                } else if (abs_rv > 0.0) {
+                } else if (abs_rv > 0.0 && abs_rv < 1.0) {
                     double inv = 1.0 / abs_rv;
                     auto u = static_cast<uint64_t>(inv);
                     isPow2 = (static_cast<double>(u) == inv) && u > 0 && (u & (u - 1)) == 0;
@@ -781,7 +782,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             // The magic number M and shift S satisfy:
             //   floor(x / d) = mulhi(x, M) >> S  (for positive x)
             // with a sign-correction step for negative dividends.
-            if (!ci->isZero() && rv > 2 && rv <= 1000) {
+            if (!ci->isZero() && rv >= 3 && rv <= 1000) {
                 // Compute magic number for signed division by positive constant.
                 // Algorithm: find M, S such that  mulhi(x, M) >> S ≈ x/d
                 // Based on "Division by Invariant Integers using Multiplication"
@@ -794,12 +795,16 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                     while (t > 0) { t >>= 1; l++; }
                 }
                 // Magic number: (2^(63+l) + d - 1) / d  (rounded up)
-                // We use 128-bit arithmetic via __int128 to avoid overflow.
-                __int128 twoN = static_cast<__int128>(1) << (63 + l);
-                int64_t magicNum = static_cast<int64_t>((twoN + d - 1) / d);
+                // Use LLVM's APInt for portable 128-bit arithmetic.
+                llvm::APInt twoN = llvm::APInt(128, 1).shl(63 + l);
+                llvm::APInt dWide(128, d);
+                llvm::APInt magicWide = (twoN + dWide - 1).udiv(dWide);
+                int64_t magicNum = static_cast<int64_t>(magicWide.getLimitedValue());
                 int shiftAmt = l - 1;
 
                 // Emit: mulhi(x, magic) >> shift, with sign correction.
+                // On typical x86-64 hardware, this is 3-5 cycles vs 20-90 cycles
+                // for hardware division.
                 // Step 1: q = mulhi(x, M) — high 64 bits of 128-bit product
                 llvm::Type* i128Ty = llvm::Type::getInt128Ty(*context);
                 llvm::Value* xExt = builder->CreateSExt(left, i128Ty, "magdiv.xext");

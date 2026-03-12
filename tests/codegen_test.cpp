@@ -4246,8 +4246,8 @@ TEST(CodegenTest, DivisionByPow2EmitsShiftNotSDiv) {
 
 TEST(CodegenTest, DivisionByNonPow2UsesMagicNumber) {
     // n / 3 should use magic-number multiplication (mulhi + shift),
-    // not a hardware SDiv instruction.  Magic-number division is 3-5
-    // cycles vs 20-90 cycles for hardware division.
+    // not a hardware SDiv instruction.  On typical x86-64 hardware,
+    // magic-number division is ~3-5 cycles vs ~20-90 for SDiv.
     CodeGenerator codegen(OptimizationLevel::O0);
     auto* mod = generateIR("fn f(n) { return n / 3; } fn main() { return f(9); }", codegen);
     auto* func = mod->getFunction("f");
