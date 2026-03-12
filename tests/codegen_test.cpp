@@ -5646,3 +5646,97 @@ TEST(CodegenTest, ZeroMinusXIsNeg) {
     // is that we emit it directly rather than a generic sub.
     EXPECT_NE(func, nullptr);
 }
+
+// ===========================================================================
+// IEEE-754 float identity correctness tests
+// ===========================================================================
+
+TEST(CodegenTest, FloatMulByZeroNotFolded) {
+    // x*0.0 must NOT be folded to 0.0: NaN*0=NaN, Inf*0=NaN, (-x)*0=-0.
+    // Verify that FMul instruction is preserved (not folded to constant).
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn f(x) { return to_float(x) * 0.0; }\n"
+                           "fn main() { return f(1); }",
+                           codegen);
+    auto* func = mod->getFunction("f");
+    ASSERT_NE(func, nullptr);
+    bool hasFMul = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::FMul)
+                hasFMul = true;
+        }
+    }
+    EXPECT_TRUE(hasFMul)
+        << "x * 0.0 must emit FMul (not fold to constant) for IEEE-754 correctness";
+}
+
+TEST(CodegenTest, ZeroMulByFloatNotFolded) {
+    // 0.0*x must NOT be folded to 0.0: same IEEE-754 concerns as x*0.0.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn f(x) { return 0.0 * to_float(x); }\n"
+                           "fn main() { return f(1); }",
+                           codegen);
+    auto* func = mod->getFunction("f");
+    ASSERT_NE(func, nullptr);
+    bool hasFMul = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::FMul)
+                hasFMul = true;
+        }
+    }
+    EXPECT_TRUE(hasFMul)
+        << "0.0 * x must emit FMul (not fold to constant) for IEEE-754 correctness";
+}
+
+// ===========================================================================
+// usleep WillReturn attribute test
+// ===========================================================================
+
+TEST(CodegenTest, UsleepHasWillReturnAttribute) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { sleep(100); return 0; }", codegen);
+    auto* fn = mod->getFunction("usleep");
+    if (fn) {
+        EXPECT_TRUE(fn->hasFnAttribute(llvm::Attribute::NoUnwind))
+            << "usleep() should have nounwind attribute";
+        EXPECT_TRUE(fn->hasFnAttribute(llvm::Attribute::WillReturn))
+            << "usleep() should have willreturn attribute";
+    }
+}
+
+// ===========================================================================
+// rand/srand/time memory effect attribute tests
+// ===========================================================================
+
+TEST(CodegenTest, RandHasInaccessibleMemOnly) {
+    // rand() only accesses global PRNG state → inaccessibleMemOnly.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return random(); }", codegen);
+    auto* fn = mod->getFunction("rand");
+    ASSERT_NE(fn, nullptr);
+    EXPECT_TRUE(fn->hasFnAttribute(llvm::Attribute::Memory))
+        << "rand() should have memory attribute";
+}
+
+TEST(CodegenTest, SrandHasInaccessibleMemOnly) {
+    // srand() only accesses global PRNG state → inaccessibleMemOnly.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return random(); }", codegen);
+    auto* fn = mod->getFunction("srand");
+    if (fn) {
+        EXPECT_TRUE(fn->hasFnAttribute(llvm::Attribute::Memory))
+            << "srand() should have memory attribute";
+    }
+}
+
+TEST(CodegenTest, TimeHasNoSyncAttribute) {
+    // time() doesn't synchronize with other threads.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return time(); }", codegen);
+    auto* fn = mod->getFunction("time");
+    ASSERT_NE(fn, nullptr);
+    EXPECT_TRUE(fn->hasFnAttribute(llvm::Attribute::NoSync))
+        << "time() should have nosync attribute";
+}

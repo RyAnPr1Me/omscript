@@ -206,8 +206,9 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 return left;  // x+0.0, x-0.0 → x
             if (rv == 1.0 && (expr->op == "*" || expr->op == "/"))
                 return left;  // x*1.0, x/1.0 → x
-            if (rv == 0.0 && expr->op == "*")
-                return llvm::ConstantFP::get(getFloatType(), 0.0); // x*0.0 → 0.0
+            // Note: x*0.0 → 0.0 is NOT valid under IEEE-754: NaN*0=NaN,
+            // Inf*0=NaN, and (-x)*0 = -0.0 (not +0.0).  We leave this to
+            // LLVM InstCombine with fast-math flags if the user opts in.
             if (rv == 2.0 && expr->op == "*")
                 return builder->CreateFAdd(left, left, "fmul2"); // x*2.0 → x+x
             if (rv == 2.0 && expr->op == "**")
@@ -247,8 +248,8 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 return builder->CreateFNeg(right, "fnegtmp"); // 0.0-x → -x
             if (lv == 1.0 && expr->op == "*")
                 return right; // 1.0*x → x
-            if (lv == 0.0 && expr->op == "*")
-                return llvm::ConstantFP::get(getFloatType(), 0.0); // 0.0*x → 0.0
+            // Note: 0.0*x → 0.0 is NOT valid under IEEE-754: 0*NaN=NaN,
+            // 0*Inf=NaN, and 0*(-x) = -0.0 (not +0.0).
             if (lv == 2.0 && expr->op == "*")
                 return builder->CreateFAdd(right, right, "fmul2"); // 2.0*x → x+x
         }
@@ -903,12 +904,12 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                     llvm::APInt twoN = llvm::APInt(128, 1).shl(63 + l);
                     llvm::APInt dWide(128, d);
                     llvm::APInt magicWide = (twoN + dWide - 1).udiv(dWide);
-                    int64_t magicNum = static_cast<int64_t>(magicWide.getLimitedValue());
+                    uint64_t magicNum = magicWide.getLimitedValue();
                     int shiftAmt = l - 1;
 
                     llvm::Type* i128Ty = llvm::Type::getInt128Ty(*context);
                     llvm::Value* xExt = builder->CreateSExt(left, i128Ty, "magdiv.xext");
-                    llvm::Value* mConst = llvm::ConstantInt::get(i128Ty, static_cast<uint64_t>(magicNum));
+                    llvm::Value* mConst = llvm::ConstantInt::get(i128Ty, magicNum);
                     llvm::Value* product = builder->CreateMul(xExt, mConst, "magdiv.prod");
                     llvm::Value* hi = builder->CreateAShr(product, llvm::ConstantInt::get(i128Ty, 64), "magdiv.hi128");
                     llvm::Value* q = builder->CreateTrunc(hi, getDefaultType(), "magdiv.hi");
@@ -954,7 +955,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 llvm::APInt twoN = llvm::APInt(128, 1).shl(63 + l);
                 llvm::APInt dWide(128, d);
                 llvm::APInt magicWide = (twoN + dWide - 1).udiv(dWide);
-                int64_t magicNum = static_cast<int64_t>(magicWide.getLimitedValue());
+                uint64_t magicNum = magicWide.getLimitedValue();
                 int shiftAmt = l - 1;
 
                 // Emit: mulhi(x, magic) >> shift, with sign correction.
@@ -963,7 +964,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 // Step 1: q = mulhi(x, M) — high 64 bits of 128-bit product
                 llvm::Type* i128Ty = llvm::Type::getInt128Ty(*context);
                 llvm::Value* xExt = builder->CreateSExt(left, i128Ty, "magdiv.xext");
-                llvm::Value* mConst = llvm::ConstantInt::get(i128Ty, static_cast<uint64_t>(magicNum));
+                llvm::Value* mConst = llvm::ConstantInt::get(i128Ty, magicNum);
                 llvm::Value* product = builder->CreateMul(xExt, mConst, "magdiv.prod");
                 llvm::Value* hi = builder->CreateAShr(product, llvm::ConstantInt::get(i128Ty, 64), "magdiv.hi128");
                 llvm::Value* q = builder->CreateTrunc(hi, getDefaultType(), "magdiv.hi");
@@ -1137,7 +1138,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 return builder->CreateMul(q12, left, "pow13");
             }
             if (exp == 14) {
-                // x**14 = x^8 * x^4 * x^2 → sq=x*x; q4=sq*sq; q8=q4*q4; q8*q4*sq  (5 muls)
+                // x**14 = x^12 * x^2 → sq=x*x; q4=sq*sq; q8=q4*q4; q12=q8*q4; q12*sq  (5 muls)
                 auto* sq = builder->CreateMul(left, left, "pow14.sq");
                 auto* q4 = builder->CreateMul(sq, sq, "pow14.q4");
                 auto* q8 = builder->CreateMul(q4, q4, "pow14.q8");

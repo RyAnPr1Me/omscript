@@ -1254,6 +1254,10 @@ llvm::Function* CodeGenerator::getOrDeclareRand() {
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addFnAttr(llvm::Attribute::NoFree);
+    // rand() only accesses global PRNG state (inaccessible to the caller);
+    // this lets LLVM reorder it past pure memory operations.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context,
+        llvm::MemoryEffects::inaccessibleMemOnly()));
     return fn;
 }
 
@@ -1265,8 +1269,10 @@ llvm::Function* CodeGenerator::getOrDeclareSrand() {
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addFnAttr(llvm::Attribute::NoFree);
-    // Note: srand() modifies global PRNG state, so it is NOT NoSync —
-    // it must not be reordered or eliminated relative to rand() calls.
+    // srand() only modifies global PRNG state (inaccessible to the caller);
+    // it must not be reordered past rand() but can float past local stores.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context,
+        llvm::MemoryEffects::inaccessibleMemOnly()));
     return fn;
 }
 
@@ -1279,6 +1285,7 @@ llvm::Function* CodeGenerator::getOrDeclareTimeFunc() {
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addFnAttr(llvm::Attribute::NoFree);
+    fn->addFnAttr(llvm::Attribute::NoSync);
     return fn;
 }
 
@@ -1288,6 +1295,7 @@ llvm::Function* CodeGenerator::getOrDeclareUsleep() {
     auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {llvm::Type::getInt32Ty(*context)}, false);
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "usleep", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addFnAttr(llvm::Attribute::NoFree);
     return fn;
 }
