@@ -1844,6 +1844,64 @@ void CodeGenerator::generate(Program* program) {
         generateFunction(func.get());
     }
 
+    // Infer memory effect attributes on user-defined functions.
+    // After all function bodies have been generated, scan LLVM IR to detect
+    // functions that only read memory (readonly) or don't access memory at
+    // all (readnone).  This enables interprocedural optimizations: LICM can
+    // hoist readonly calls out of loops, and the inliner uses memory effects
+    // to avoid unnecessary spills around call sites.
+    if (optimizationLevel >= OptimizationLevel::O1) {
+        for (auto& func : module->functions()) {
+            if (func.isDeclaration() || func.getName() == "main")
+                continue;
+            // Skip functions that already have explicit memory attributes.
+            if (func.hasFnAttribute(llvm::Attribute::Memory))
+                continue;
+            // Scan all instructions: track whether the function reads/writes memory.
+            bool hasMemoryWrite = false;
+            bool hasMemoryRead = false;
+            bool hasCall = false;
+            bool hasUnknownSideEffect = false;
+            for (auto& BB : func) {
+                for (auto& I : BB) {
+                    if (auto* SI = llvm::dyn_cast<llvm::StoreInst>(&I)) {
+                        // Stores to allocas (local variables) don't count as
+                        // external writes — they're promoted to SSA by mem2reg.
+                        if (!llvm::isa<llvm::AllocaInst>(SI->getPointerOperand()))
+                            hasMemoryWrite = true;
+                    } else if (auto* LI = llvm::dyn_cast<llvm::LoadInst>(&I)) {
+                        if (!llvm::isa<llvm::AllocaInst>(LI->getPointerOperand()))
+                            hasMemoryRead = true;
+                    } else if (auto* CI = llvm::dyn_cast<llvm::CallInst>(&I)) {
+                        hasCall = true;
+                        auto* calledFn = CI->getCalledFunction();
+                        if (!calledFn) {
+                            hasUnknownSideEffect = true;
+                        } else {
+                            // Check callee's memory effects.
+                            auto ME = calledFn->getMemoryEffects();
+                            if (!ME.onlyReadsMemory() && !ME.doesNotAccessMemory())
+                                hasMemoryWrite = true;
+                            if (!ME.doesNotAccessMemory())
+                                hasMemoryRead = true;
+                            if (ME == llvm::MemoryEffects::unknown())
+                                hasUnknownSideEffect = true;
+                        }
+                    }
+                }
+            }
+            if (!hasUnknownSideEffect && !hasMemoryWrite && !hasMemoryRead && !hasCall) {
+                // Function doesn't access memory at all → readnone.
+                func.addFnAttr(llvm::Attribute::getWithMemoryEffects(
+                    *context, llvm::MemoryEffects::none()));
+            } else if (!hasUnknownSideEffect && !hasMemoryWrite) {
+                // Function only reads memory → readonly.
+                func.addFnAttr(llvm::Attribute::getWithMemoryEffects(
+                    *context, llvm::MemoryEffects::readOnly()));
+            }
+        }
+    }
+
     // Apply OPTMAX per-function optimization passes BEFORE the module-wide IPO
     // pipeline.  This ensures the aggressively-optimized OPTMAX function bodies
     // feed into the inliner and constant-propagation passes in

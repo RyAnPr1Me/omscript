@@ -4244,20 +4244,26 @@ TEST(CodegenTest, DivisionByPow2EmitsShiftNotSDiv) {
     EXPECT_TRUE(hasAShr) << "Division by 16 should use AShr";
 }
 
-TEST(CodegenTest, DivisionByNonPow2KeepsSDiv) {
-    // n / 3 should still use SDiv (not a power-of-2)
+TEST(CodegenTest, DivisionByNonPow2UsesMagicNumber) {
+    // n / 3 should use magic-number multiplication (mulhi + shift),
+    // not a hardware SDiv instruction.  Magic-number division is 3-5
+    // cycles vs 20-90 cycles for hardware division.
     CodeGenerator codegen(OptimizationLevel::O0);
     auto* mod = generateIR("fn f(n) { return n / 3; } fn main() { return f(9); }", codegen);
     auto* func = mod->getFunction("f");
     ASSERT_NE(func, nullptr);
     bool hasSDiv = false;
+    bool hasMul = false;
     for (auto& bb : *func) {
         for (auto& inst : bb) {
             if (inst.getOpcode() == llvm::Instruction::SDiv)
                 hasSDiv = true;
+            if (inst.getOpcode() == llvm::Instruction::Mul)
+                hasMul = true;
         }
     }
-    EXPECT_TRUE(hasSDiv) << "Division by 3 should use SDiv";
+    EXPECT_FALSE(hasSDiv) << "Division by 3 should NOT use SDiv (should use magic number)";
+    EXPECT_TRUE(hasMul) << "Division by 3 should use multiply (magic number sequence)";
 }
 
 TEST(CodegenTest, DivisionByOneIsIdentity) {
@@ -4559,5 +4565,171 @@ TEST(CodegenTest, StrndupHasAllocatorAttributes) {
         auto kind = fn->getFnAttribute(llvm::Attribute::AllocKind).getAllocKind();
         EXPECT_TRUE((kind & llvm::AllocFnKind::Alloc) != llvm::AllocFnKind::Unknown)
             << "strndup allockind should include Alloc";
+    }
+}
+
+// ===========================================================================
+// Magic-number division tests
+// ===========================================================================
+
+TEST(CodegenTest, MagicDivisionBy7) {
+    // n / 7 should use magic-number multiplication, not SDiv
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn f(n) { return n / 7; } fn main() { return f(49); }", codegen);
+    auto* func = mod->getFunction("f");
+    ASSERT_NE(func, nullptr);
+    bool hasSDiv = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::SDiv)
+                hasSDiv = true;
+        }
+    }
+    EXPECT_FALSE(hasSDiv) << "Division by 7 should NOT use SDiv (should use magic number)";
+}
+
+TEST(CodegenTest, MagicModuloBy7) {
+    // n % 7 should use magic-number multiplication for quotient, not SRem
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn f(n) { return n % 7; } fn main() { return f(50); }", codegen);
+    auto* func = mod->getFunction("f");
+    ASSERT_NE(func, nullptr);
+    bool hasSRem = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::SRem)
+                hasSRem = true;
+        }
+    }
+    EXPECT_FALSE(hasSRem) << "Modulo by 7 should NOT use SRem (should use magic number)";
+}
+
+// ===========================================================================
+// Negative constant strength reduction tests
+// ===========================================================================
+
+TEST(CodegenTest, NegativeMultiplyStrengthReduction) {
+    // n * (-3) should use shift+add+neg, not generic multiply
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn f(n) { return n * (-3); } fn main() { return f(5); }", codegen);
+    auto* func = mod->getFunction("f");
+    ASSERT_NE(func, nullptr);
+    bool hasMul = false;
+    bool hasShl = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::Mul)
+                hasMul = true;
+            if (inst.getOpcode() == llvm::Instruction::Shl)
+                hasShl = true;
+        }
+    }
+    EXPECT_FALSE(hasMul) << "n * (-3) should NOT use Mul (should use shift+neg)";
+    EXPECT_TRUE(hasShl) << "n * (-3) should use shifts";
+}
+
+// ===========================================================================
+// Additional strength reduction tests
+// ===========================================================================
+
+TEST(CodegenTest, StrengthReductionMultiplyBy127) {
+    // n * 127 → (n<<7) - n
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn f(n) { return n * 127; } fn main() { return f(5); }", codegen);
+    auto* func = mod->getFunction("f");
+    ASSERT_NE(func, nullptr);
+    bool hasMul = false;
+    bool hasShl = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::Mul)
+                hasMul = true;
+            if (inst.getOpcode() == llvm::Instruction::Shl)
+                hasShl = true;
+        }
+    }
+    EXPECT_FALSE(hasMul) << "n * 127 should NOT use Mul";
+    EXPECT_TRUE(hasShl) << "n * 127 should use shift+sub";
+}
+
+TEST(CodegenTest, StrengthReductionMultiplyBy255) {
+    // n * 255 → (n<<8) - n
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn f(n) { return n * 255; } fn main() { return f(5); }", codegen);
+    auto* func = mod->getFunction("f");
+    ASSERT_NE(func, nullptr);
+    bool hasMul = false;
+    bool hasShl = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::Mul)
+                hasMul = true;
+            if (inst.getOpcode() == llvm::Instruction::Shl)
+                hasShl = true;
+        }
+    }
+    EXPECT_FALSE(hasMul) << "n * 255 should NOT use Mul";
+    EXPECT_TRUE(hasShl) << "n * 255 should use shift+sub";
+}
+
+TEST(CodegenTest, StrengthReductionMultiplyBy1000) {
+    // n * 1000 → shift+sub sequence
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn f(n) { return n * 1000; } fn main() { return f(5); }", codegen);
+    auto* func = mod->getFunction("f");
+    ASSERT_NE(func, nullptr);
+    bool hasMul = false;
+    bool hasShl = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::Mul)
+                hasMul = true;
+            if (inst.getOpcode() == llvm::Instruction::Shl)
+                hasShl = true;
+        }
+    }
+    EXPECT_FALSE(hasMul) << "n * 1000 should NOT use Mul";
+    EXPECT_TRUE(hasShl) << "n * 1000 should use shift+add/sub sequence";
+}
+
+// ===========================================================================
+// Float division by power-of-2 → reciprocal multiplication
+// ===========================================================================
+
+TEST(CodegenTest, FloatDivByPow2UsesReciprocal) {
+    // x / 2.0 should become x * 0.5 (FMul not FDiv)
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn f(x) { return to_float(x) / 2.0; } fn main() { return f(10); }", codegen);
+    auto* func = mod->getFunction("f");
+    ASSERT_NE(func, nullptr);
+    bool hasFDiv = false;
+    bool hasFMul = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::FDiv)
+                hasFDiv = true;
+            if (inst.getOpcode() == llvm::Instruction::FMul)
+                hasFMul = true;
+        }
+    }
+    EXPECT_FALSE(hasFDiv) << "x / 2.0 should NOT use FDiv";
+    EXPECT_TRUE(hasFMul) << "x / 2.0 should use FMul (reciprocal)";
+}
+
+// ===========================================================================
+// Pure function attribute inference tests
+// ===========================================================================
+
+TEST(CodegenTest, PureFunctionGetsReadnone) {
+    // A pure arithmetic function (no memory access) should get
+    // memory(none) at O1+.
+    CodeGenerator codegen(OptimizationLevel::O1);
+    auto* mod = generateIR("fn square(x) { return x * x; }\n"
+                           "fn main() { return square(5); }",
+                           codegen);
+    auto* func = mod->getFunction("square");
+    if (func && !func->isDeclaration()) {
+        EXPECT_TRUE(func->doesNotAccessMemory())
+            << "Pure function 'square' should have readnone/memory(none) attribute";
     }
 }

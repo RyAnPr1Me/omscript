@@ -216,6 +216,27 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 return llvm::ConstantFP::get(getFloatType(), 1.0); // x**0.0 → 1.0
             if (rv == 1.0 && expr->op == "**")
                 return left;  // x**1.0 → x
+            // Float division by power-of-2 constant → multiply by reciprocal.
+            // x / 2.0 → x * 0.5, x / 4.0 → x * 0.25, etc.
+            // Multiplication is faster than division on all modern CPUs (3-5 cyc
+            // vs 15-25 cyc).  Only applies to exact powers of 2 where the
+            // reciprocal is exactly representable in IEEE-754 (no rounding error).
+            if (expr->op == "/" && rv != 0.0) {
+                double abs_rv = rv < 0 ? -rv : rv;
+                bool isPow2 = false;
+                if (abs_rv >= 1.0) {
+                    auto u = static_cast<uint64_t>(abs_rv);
+                    isPow2 = (static_cast<double>(u) == abs_rv) && u > 0 && (u & (u - 1)) == 0;
+                } else if (abs_rv > 0.0) {
+                    double inv = 1.0 / abs_rv;
+                    auto u = static_cast<uint64_t>(inv);
+                    isPow2 = (static_cast<double>(u) == inv) && u > 0 && (u & (u - 1)) == 0;
+                }
+                if (isPow2) {
+                    double recip = 1.0 / rv;
+                    return builder->CreateFMul(left, llvm::ConstantFP::get(getFloatType(), recip), "fdivrecip");
+                }
+            }
         }
         if (auto* lc = llvm::dyn_cast<llvm::ConstantFP>(left)) {
             double lv = lc->getValueAPF().convertToDouble();
@@ -654,6 +675,32 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 auto* shl = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 6), "mul65.shl");
                 return builder->CreateAdd(shl, base, "mul65");
             }
+            case 127: {
+                // n*127 → (n<<7) - n
+                auto* shl = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 7), "mul127.shl");
+                return builder->CreateSub(shl, base, "mul127");
+            }
+            case 255: {
+                // n*255 → (n<<8) - n
+                auto* shl = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 8), "mul255.shl");
+                return builder->CreateSub(shl, base, "mul255");
+            }
+            case 1000: {
+                // n*1000 → (n<<10) - (n<<5) + (n<<3)  (= 1024n - 32n + 8n)
+                auto* shl10 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 10), "mul1000.shl10");
+                auto* shl5 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 5), "mul1000.shl5");
+                auto* shl3 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 3), "mul1000.shl3");
+                auto* t = builder->CreateSub(shl10, shl5, "mul1000.t");
+                return builder->CreateAdd(t, shl3, "mul1000");
+            }
+            case 100: {
+                // n*100 → (n<<7) - (n<<5) + (n<<2)  (= 128n - 32n + 4n)
+                auto* shl7 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 7), "mul100.shl7");
+                auto* shl5 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 5), "mul100.shl5");
+                auto* shl2 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 2), "mul100.shl2");
+                auto* t = builder->CreateSub(shl7, shl5, "mul100.t");
+                return builder->CreateAdd(t, shl2, "mul100");
+            }
             default:
                 return nullptr;
             }
@@ -661,10 +708,26 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
             if (auto* result = emitShiftAdd(left, ci->getSExtValue()))
                 return result;
+            // Negative constant strength reduction: n * (-K) → neg(n * K).
+            // This leverages the existing shift+add patterns for the absolute
+            // value, then negates the result.  A single neg (sub 0, x) is far
+            // cheaper than a hardware multiply.
+            int64_t rv = ci->getSExtValue();
+            if (rv < -1) {
+                if (auto* posResult = emitShiftAdd(left, -rv)) {
+                    return builder->CreateNeg(posResult, "mulneg");
+                }
+            }
         }
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left)) {
             if (auto* result = emitShiftAdd(right, ci->getSExtValue()))
                 return result;
+            int64_t lv = ci->getSExtValue();
+            if (lv < -1) {
+                if (auto* posResult = emitShiftAdd(right, -lv)) {
+                    return builder->CreateNeg(posResult, "mulneg");
+                }
+            }
         }
         return builder->CreateMul(left, right, "multmp");
     } else if (expr->op == "/" || expr->op == "%") {
@@ -708,7 +771,57 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                     builder->CreateShl(quotient, llvm::ConstantInt::get(getDefaultType(), s), "mod.prod");
                 return builder->CreateSub(left, product, "mod.rem");
             }
-            // Non-power-of-2 constant divisor: skip zero-check but use SDiv/SRem.
+            // Non-power-of-2 constant divisor: use magic-number multiplication.
+            // This is the same algorithm GCC and Clang use to avoid hardware
+            // division instructions.  For signed division by a constant d:
+            //   quotient ≈ mulhi(x, magic) >> shift
+            // with a correction for the sign.  This replaces a 20-90 cycle
+            // division with a 3-5 cycle multiply-high + shift sequence.
+            //
+            // The magic number M and shift S satisfy:
+            //   floor(x / d) = mulhi(x, M) >> S  (for positive x)
+            // with a sign-correction step for negative dividends.
+            if (!ci->isZero() && rv > 2 && rv <= 1000) {
+                // Compute magic number for signed division by positive constant.
+                // Algorithm: find M, S such that  mulhi(x, M) >> S ≈ x/d
+                // Based on "Division by Invariant Integers using Multiplication"
+                // (Granlund & Montgomery, 1994).
+                uint64_t d = static_cast<uint64_t>(rv);
+                // Find the shift amount: ceil(log2(d))
+                int l = 0;
+                {
+                    uint64_t t = d - 1;
+                    while (t > 0) { t >>= 1; l++; }
+                }
+                // Magic number: (2^(63+l) + d - 1) / d  (rounded up)
+                // We use 128-bit arithmetic via __int128 to avoid overflow.
+                __int128 twoN = static_cast<__int128>(1) << (63 + l);
+                int64_t magicNum = static_cast<int64_t>((twoN + d - 1) / d);
+                int shiftAmt = l - 1;
+
+                // Emit: mulhi(x, magic) >> shift, with sign correction.
+                // Step 1: q = mulhi(x, M) — high 64 bits of 128-bit product
+                llvm::Type* i128Ty = llvm::Type::getInt128Ty(*context);
+                llvm::Value* xExt = builder->CreateSExt(left, i128Ty, "magdiv.xext");
+                llvm::Value* mConst = llvm::ConstantInt::get(i128Ty, static_cast<uint64_t>(magicNum));
+                llvm::Value* product = builder->CreateMul(xExt, mConst, "magdiv.prod");
+                llvm::Value* hi = builder->CreateAShr(product, llvm::ConstantInt::get(i128Ty, 64), "magdiv.hi128");
+                llvm::Value* q = builder->CreateTrunc(hi, getDefaultType(), "magdiv.hi");
+                // Step 2: arithmetic shift right by (l-1)
+                if (shiftAmt > 0)
+                    q = builder->CreateAShr(q, llvm::ConstantInt::get(getDefaultType(), shiftAmt), "magdiv.shr");
+                // Step 3: add 1 if dividend was negative (round toward zero)
+                llvm::Value* signBit = builder->CreateLShr(
+                    left, llvm::ConstantInt::get(getDefaultType(), 63), "magdiv.sign");
+                q = builder->CreateAdd(q, signBit, "magdiv.q");
+
+                if (isDivision) {
+                    return q;
+                }
+                // Modulo: x % d → x - (x/d) * d
+                llvm::Value* prod = builder->CreateMul(q, right, "magmod.prod");
+                return builder->CreateSub(left, prod, "magmod.rem");
+            }
             if (!ci->isZero()) {
                 return isDivision ? builder->CreateSDiv(left, right, "divtmp")
                                   : builder->CreateSRem(left, right, "modtmp");
