@@ -570,6 +570,53 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             return llvm::ConstantInt::get(getDefaultType(), 1); // x==x→1, x<=x→1, x>=x→1
         if (expr->op == "!=" || expr->op == "<" || expr->op == ">")
             return llvm::ConstantInt::get(getDefaultType(), 0); // x!=x→0, x<x→0, x>x→0
+        // Same-value division and modulo identities.
+        if (expr->op == "/")
+            return llvm::ConstantInt::get(getDefaultType(), 1); // x/x→1
+        if (expr->op == "%")
+            return llvm::ConstantInt::get(getDefaultType(), 0); // x%x→0
+    }
+
+    // Comparison-against-zero strength reduction: when one side of an
+    // equality/inequality comparison is the constant 0, exploit the fact
+    // that x86-64 (and most architectures) can test for zero with a single
+    // TEST/CMP instruction.  We canonicalize to place 0 on the right.
+    if (expr->op == "==" || expr->op == "!=") {
+        llvm::Value* testVal = nullptr;
+        if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
+            if (ci->isZero()) { testVal = left; }
+        }
+        if (!testVal) {
+            if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left)) {
+                if (ci->isZero()) { testVal = right; }
+            }
+        }
+        // x * N == 0  →  x == 0  (when N is a nonzero constant)
+        // This eliminates a multiply when comparing the product against zero.
+        if (testVal) {
+            if (auto* mulInst = llvm::dyn_cast<llvm::BinaryOperator>(testVal)) {
+                if (mulInst->getOpcode() == llvm::Instruction::Mul) {
+                    llvm::Value* mulLeft = mulInst->getOperand(0);
+                    llvm::Value* mulRight = mulInst->getOperand(1);
+                    if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(mulRight)) {
+                        if (!ci->isZero()) {
+                            llvm::Value* cmp = (expr->op == "==")
+                                ? builder->CreateICmpEQ(mulLeft, llvm::ConstantInt::get(getDefaultType(), 0), "cmptmp")
+                                : builder->CreateICmpNE(mulLeft, llvm::ConstantInt::get(getDefaultType(), 0), "cmptmp");
+                            return builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+                        }
+                    }
+                    if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(mulLeft)) {
+                        if (!ci->isZero()) {
+                            llvm::Value* cmp = (expr->op == "==")
+                                ? builder->CreateICmpEQ(mulRight, llvm::ConstantInt::get(getDefaultType(), 0), "cmptmp")
+                                : builder->CreateICmpNE(mulRight, llvm::ConstantInt::get(getDefaultType(), 0), "cmptmp");
+                            return builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // Regular code generation for non-constant expressions.
@@ -782,7 +829,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             // The magic number M and shift S satisfy:
             //   floor(x / d) = mulhi(x, M) >> S  (for positive x)
             // with a sign-correction step for negative dividends.
-            if (!ci->isZero() && rv >= 3 && rv <= 1000) {
+            if (!ci->isZero() && rv >= 3) {
                 // Compute magic number for signed division by positive constant.
                 // Algorithm: find M, S such that  mulhi(x, M) >> S ≈ x/d
                 // Based on "Division by Invariant Integers using Multiplication"
@@ -894,26 +941,26 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     } else if (expr->op == "**") {
         // Small constant exponent specialization — emit inline multiplications
         // instead of the general binary-exponentiation loop.  This eliminates
-        // loop overhead and branches for the most common exponents (2, 3, 4, 5, 6, 8),
+        // loop overhead and branches for the most common exponents,
         // producing straight-line code that the backend can schedule optimally.
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
             int64_t exp = ci->getSExtValue();
             if (exp == 2) {
-                // x**2 → x*x
+                // x**2 → x*x  (1 mul)
                 return builder->CreateMul(left, left, "pow2");
             }
             if (exp == 3) {
-                // x**3 → x*x*x
+                // x**3 → x*x*x  (2 muls)
                 auto* sq = builder->CreateMul(left, left, "pow3.sq");
                 return builder->CreateMul(sq, left, "pow3");
             }
             if (exp == 4) {
-                // x**4 → t=x*x; t*t
+                // x**4 → t=x*x; t*t  (2 muls)
                 auto* sq = builder->CreateMul(left, left, "pow4.sq");
                 return builder->CreateMul(sq, sq, "pow4");
             }
             if (exp == 5) {
-                // x**5 → t=x*x; t*t*x
+                // x**5 → t=x*x; t*t*x  (3 muls)
                 auto* sq = builder->CreateMul(left, left, "pow5.sq");
                 auto* q4 = builder->CreateMul(sq, sq, "pow5.q4");
                 return builder->CreateMul(q4, left, "pow5");
@@ -924,11 +971,39 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 auto* q4 = builder->CreateMul(sq, sq, "pow6.q4");
                 return builder->CreateMul(q4, sq, "pow6");
             }
+            if (exp == 7) {
+                // x**7 → t=x*x; u=t*t; u*t*x  (4 muls)
+                auto* sq = builder->CreateMul(left, left, "pow7.sq");
+                auto* q4 = builder->CreateMul(sq, sq, "pow7.q4");
+                auto* q6 = builder->CreateMul(q4, sq, "pow7.q6");
+                return builder->CreateMul(q6, left, "pow7");
+            }
             if (exp == 8) {
                 // x**8 → t=x*x; u=t*t; u*u  (3 muls)
                 auto* sq = builder->CreateMul(left, left, "pow8.sq");
                 auto* q4 = builder->CreateMul(sq, sq, "pow8.q4");
                 return builder->CreateMul(q4, q4, "pow8");
+            }
+            if (exp == 9) {
+                // x**9 → t=x*x; u=t*t; v=u*u; v*x  (4 muls)
+                auto* sq = builder->CreateMul(left, left, "pow9.sq");
+                auto* q4 = builder->CreateMul(sq, sq, "pow9.q4");
+                auto* q8 = builder->CreateMul(q4, q4, "pow9.q8");
+                return builder->CreateMul(q8, left, "pow9");
+            }
+            if (exp == 10) {
+                // x**10 → t=x*x; u=t*t; v=u*u; v*t  (4 muls)
+                auto* sq = builder->CreateMul(left, left, "pow10.sq");
+                auto* q4 = builder->CreateMul(sq, sq, "pow10.q4");
+                auto* q8 = builder->CreateMul(q4, q4, "pow10.q8");
+                return builder->CreateMul(q8, sq, "pow10");
+            }
+            if (exp == 16) {
+                // x**16 → t=x*x; u=t*t; v=u*u; v*v  (4 muls)
+                auto* sq = builder->CreateMul(left, left, "pow16.sq");
+                auto* q4 = builder->CreateMul(sq, sq, "pow16.q4");
+                auto* q8 = builder->CreateMul(q4, q4, "pow16.q8");
+                return builder->CreateMul(q8, q8, "pow16");
             }
         }
 

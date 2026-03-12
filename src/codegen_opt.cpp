@@ -38,6 +38,8 @@
 #include <llvm/Transforms/Scalar/LoopFuse.h>
 #include <llvm/Transforms/Scalar/LoopLoadElimination.h>
 #include <llvm/Transforms/Scalar/MemCpyOptimizer.h>
+#include <llvm/Transforms/Scalar/BDCE.h>
+#include <llvm/Transforms/Scalar/JumpThreading.h>
 #include <llvm/Transforms/Utils.h>
 #include <optional>
 #include <stdexcept>
@@ -322,20 +324,27 @@ void CodeGenerator::runOptimizationPasses() {
     // to unsigned (enabling more shifts/masks), and eliminate provably-dead
     // branches.  DSE removes stores whose values are never read (e.g.
     // overwritten before use, or stored to dead allocations).
+    // BDCE (Bit-tracking Dead Code Elimination) identifies and eliminates
+    // instructions whose results have unused bits, shrinking live ranges
+    // and enabling further simplification.
     if (optimizationLevel >= OptimizationLevel::O2) {
         PB.registerScalarOptimizerLateEPCallback([](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) {
             FPM.addPass(llvm::CorrelatedValuePropagationPass());
+            FPM.addPass(llvm::BDCEPass());
             FPM.addPass(llvm::DSEPass());
             FPM.addPass(llvm::MemCpyOptPass());
         });
     }
 
-    // At O3, inject ConstraintElimination late in the scalar optimizer to
-    // remove redundant comparisons and branches using range constraints
-    // (e.g. after a bounds check, subsequent in-range accesses skip the check).
+    // At O3, inject ConstraintElimination and JumpThreading late in the
+    // scalar optimizer.  ConstraintElimination removes redundant comparisons
+    // using range constraints (e.g. after a bounds check, subsequent in-range
+    // accesses skip the check).  JumpThreading threads branches through
+    // basic blocks with known conditions, reducing branch mispredictions.
     if (optimizationLevel >= OptimizationLevel::O3) {
         PB.registerScalarOptimizerLateEPCallback([](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) {
             FPM.addPass(llvm::ConstraintEliminationPass());
+            FPM.addPass(llvm::JumpThreadingPass());
         });
     }
 

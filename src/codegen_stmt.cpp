@@ -386,7 +386,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         // at O3, vectorize.width=4 requests 4-lane SIMD (SSE/NEON) explicitly.
         llvm::MDNode* mustProgress =
             llvm::MDNode::get(*context, {llvm::MDString::get(*context, "llvm.loop.mustprogress")});
-        llvm::SmallVector<llvm::Metadata*, 4> loopMDs;
+        llvm::SmallVector<llvm::Metadata*, 6> loopMDs;
         loopMDs.push_back(nullptr); // self-reference placeholder (fixed below)
         loopMDs.push_back(mustProgress);
         if (optimizationLevel >= OptimizationLevel::O2 && enableVectorize_) {
@@ -402,6 +402,26 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.width"),
                            llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))});
             loopMDs.push_back(vecWidth);
+        }
+        // At O3, hint the unroller for small constant-trip-count loops.
+        // When both start and end are compile-time constants, the trip count
+        // is known; if it's ≤ 64, suggest full unrolling to eliminate loop
+        // overhead entirely.  For trip counts ≤ 16, this typically produces
+        // straight-line code that fits in the I-cache.
+        if (optimizationLevel >= OptimizationLevel::O3 && enableUnrollLoops_) {
+            if (auto* startCI = llvm::dyn_cast<llvm::ConstantInt>(startVal)) {
+                if (auto* endCI = llvm::dyn_cast<llvm::ConstantInt>(endVal)) {
+                    int64_t tripCount = std::abs(endCI->getSExtValue() - startCI->getSExtValue());
+                    if (tripCount > 0 && tripCount <= 64) {
+                        llvm::MDNode* unrollCount = llvm::MDNode::get(
+                            *context,
+                            {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
+                             llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                                 llvm::Type::getInt32Ty(*context), static_cast<uint32_t>(tripCount)))});
+                        loopMDs.push_back(unrollCount);
+                    }
+                }
+            }
         }
         llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
         loopMD->replaceOperandWith(0, loopMD);

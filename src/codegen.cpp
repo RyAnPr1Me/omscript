@@ -1813,10 +1813,15 @@ void CodeGenerator::generate(Program* program) {
         // initializes every variable, so the optimizer can assume no undef/
         // poison values flow through function boundaries.  This strengthens
         // SCEV, value-range propagation, and alias analysis.
+        // signext on the return value — omscript always returns i64, and
+        // sign-extending the return enables better codegen on targets where
+        // the calling convention requires sign-extension (e.g. AArch64).
         for (unsigned i = 0; i < func->parameters.size(); ++i) {
             function->addParamAttr(i, llvm::Attribute::NoUndef);
+            function->addParamAttr(i, llvm::Attribute::SExt);
         }
         function->addRetAttr(llvm::Attribute::NoUndef);
+        function->addRetAttr(llvm::Attribute::SExt);
         functions[func->name] = function;
         functionDecls_[func->name] = func.get();
     }
@@ -1898,6 +1903,39 @@ void CodeGenerator::generate(Program* program) {
                 // Function only reads memory → readonly.
                 func.addFnAttr(llvm::Attribute::getWithMemoryEffects(
                     *context, llvm::MemoryEffects::readOnly()));
+            }
+        }
+    }
+
+    // Infer norecurse attribute on user-defined functions.
+    // A function that never calls itself (directly or indirectly through
+    // internal functions) can be marked norecurse, which enables IPSCCP and
+    // the inliner to reason more aggressively about call effects.
+    if (optimizationLevel >= OptimizationLevel::O1) {
+        // Build a set of function names for quick lookup.
+        std::unordered_set<std::string> allFunctions;
+        for (auto& func : module->functions()) {
+            if (!func.isDeclaration())
+                allFunctions.insert(func.getName().str());
+        }
+        for (auto& func : module->functions()) {
+            if (func.isDeclaration() || func.getName() == "main")
+                continue;
+            bool callsSelf = false;
+            for (auto& BB : func) {
+                for (auto& I : BB) {
+                    if (auto* CI = llvm::dyn_cast<llvm::CallInst>(&I)) {
+                        auto* calledFn = CI->getCalledFunction();
+                        if (calledFn && calledFn->getName() == func.getName()) {
+                            callsSelf = true;
+                            break;
+                        }
+                    }
+                }
+                if (callsSelf) break;
+            }
+            if (!callsSelf) {
+                func.addFnAttr(llvm::Attribute::NoRecurse);
             }
         }
     }
