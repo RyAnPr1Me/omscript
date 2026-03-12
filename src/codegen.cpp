@@ -877,6 +877,8 @@ llvm::Function* CodeGenerator::getOrDeclareStrlen() {
     fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addFnAttr(llvm::Attribute::NoFree);
     fn->addFnAttr(llvm::Attribute::NoSync);
+    // memory(argmem: read): strlen only reads through its pointer arg.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::Ref)));
     OMSC_ADD_NOCAPTURE(fn, 0);                      // does not capture its pointer arg
     fn->addParamAttr(0, llvm::Attribute::ReadOnly); // only reads through the pointer
     fn->addParamAttr(0, llvm::Attribute::NonNull);  // never called with null
@@ -891,6 +893,7 @@ llvm::Function* CodeGenerator::getOrDeclareMalloc() {
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addRetAttr(llvm::Attribute::NoAlias); // returned pointer does not alias any pointer visible to the caller
+    fn->addRetAttr(llvm::Attribute::NonNull);  // malloc never returns null (we abort on failure)
     // allocsize(0): parameter 0 is the allocation size — enables LLVM to track
     // allocation sizes for bounds checking elimination and alias analysis.
     fn->addFnAttr(llvm::Attribute::getWithAllocSizeArgs(*context, 0, std::nullopt));
@@ -916,7 +919,9 @@ llvm::Function* CodeGenerator::getOrDeclareStrcpy() {
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strcpy", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
     fn->addParamAttr(1, llvm::Attribute::ReadOnly);
+    fn->addParamAttr(1, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 1);
     return fn;
 }
@@ -929,7 +934,9 @@ llvm::Function* CodeGenerator::getOrDeclareStrcat() {
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strcat", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
     fn->addParamAttr(1, llvm::Attribute::ReadOnly);
+    fn->addParamAttr(1, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 1);
     return fn;
 }
@@ -944,9 +951,13 @@ llvm::Function* CodeGenerator::getOrDeclareStrcmp() {
     fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addFnAttr(llvm::Attribute::NoFree);
     fn->addFnAttr(llvm::Attribute::NoSync);
+    // memory(argmem: read): strcmp only reads through its pointer args.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::Ref)));
     fn->addParamAttr(0, llvm::Attribute::ReadOnly);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 0);
     fn->addParamAttr(1, llvm::Attribute::ReadOnly);
+    fn->addParamAttr(1, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 1);
     return fn;
 }
@@ -1010,7 +1021,10 @@ llvm::Function* CodeGenerator::getOrDeclareMemchr() {
     fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addFnAttr(llvm::Attribute::NoFree);
     fn->addFnAttr(llvm::Attribute::NoSync);
+    // memory(argmem: read): memchr only reads through its pointer arg.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::Ref)));
     fn->addParamAttr(0, llvm::Attribute::ReadOnly);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 0);
     return fn;
 }
@@ -1047,9 +1061,13 @@ llvm::Function* CodeGenerator::getOrDeclareStrstr() {
     fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addFnAttr(llvm::Attribute::NoFree);
     fn->addFnAttr(llvm::Attribute::NoSync);
+    // memory(argmem: read): strstr only reads through its pointer args.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::Ref)));
     fn->addParamAttr(0, llvm::Attribute::ReadOnly);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 0);
     fn->addParamAttr(1, llvm::Attribute::ReadOnly);
+    fn->addParamAttr(1, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 1);
     return fn;
 }
@@ -1089,6 +1107,9 @@ llvm::Function* CodeGenerator::getOrDeclareToupper() {
     fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addFnAttr(llvm::Attribute::NoFree);
     fn->addFnAttr(llvm::Attribute::NoSync);
+    // memory(none): toupper is a pure function — no reads or writes to memory.
+    // This lets the optimizer hoist it out of loops and CSE duplicate calls.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::none()));
     return fn;
 }
 
@@ -1101,6 +1122,8 @@ llvm::Function* CodeGenerator::getOrDeclareTolower() {
     fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addFnAttr(llvm::Attribute::NoFree);
     fn->addFnAttr(llvm::Attribute::NoSync);
+    // memory(none): tolower is a pure function — no reads or writes to memory.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::none()));
     return fn;
 }
 
@@ -1113,6 +1136,8 @@ llvm::Function* CodeGenerator::getOrDeclareIsspace() {
     fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addFnAttr(llvm::Attribute::NoFree);
     fn->addFnAttr(llvm::Attribute::NoSync);
+    // memory(none): isspace is a pure function — no reads or writes to memory.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::none()));
     return fn;
 }
 
@@ -1149,6 +1174,10 @@ llvm::Function* CodeGenerator::getOrDeclareFloor() {
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "floor", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    fn->addFnAttr(llvm::Attribute::NoSync);
+    // memory(none): floor is a pure mathematical function.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::none()));
     return fn;
 }
 
@@ -1159,6 +1188,10 @@ llvm::Function* CodeGenerator::getOrDeclareCeil() {
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "ceil", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    fn->addFnAttr(llvm::Attribute::NoSync);
+    // memory(none): ceil is a pure mathematical function.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::none()));
     return fn;
 }
 
@@ -1169,6 +1202,10 @@ llvm::Function* CodeGenerator::getOrDeclareRound() {
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "round", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    fn->addFnAttr(llvm::Attribute::NoSync);
+    // memory(none): round is a pure mathematical function.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::none()));
     return fn;
 }
 
@@ -1220,7 +1257,10 @@ llvm::Function* CodeGenerator::getOrDeclareStrchr() {
     fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addFnAttr(llvm::Attribute::NoFree);
     fn->addFnAttr(llvm::Attribute::NoSync);
+    // memory(argmem: read): strchr only reads through its pointer arg.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::Ref)));
     fn->addParamAttr(0, llvm::Attribute::ReadOnly);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 0);
     return fn;
 }
@@ -1234,8 +1274,10 @@ llvm::Function* CodeGenerator::getOrDeclareStrndup() {
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addRetAttr(llvm::Attribute::NoAlias);
+    fn->addRetAttr(llvm::Attribute::NonNull);  // strndup never returns null (we abort on failure)
     fn->addParamAttr(0, llvm::Attribute::ReadOnly);
     OMSC_ADD_NOCAPTURE(fn, 0);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);  // source string is never null
     // allocsize(1): parameter 1 upper-bounds the allocation size — enables LLVM
     // to reason about the returned buffer size for alias analysis.
     fn->addFnAttr(llvm::Attribute::getWithAllocSizeArgs(*context, 1, std::nullopt));
@@ -1282,7 +1324,10 @@ llvm::Function* CodeGenerator::getOrDeclareAtoi() {
     fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addFnAttr(llvm::Attribute::NoFree);
     fn->addFnAttr(llvm::Attribute::NoSync);
+    // memory(argmem: read): atoi only reads through its pointer arg.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::Ref)));
     fn->addParamAttr(0, llvm::Attribute::ReadOnly);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 0);
     return fn;
 }

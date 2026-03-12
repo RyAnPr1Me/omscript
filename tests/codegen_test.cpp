@@ -2991,6 +2991,182 @@ TEST(CodegenTest, O2GlobalOptimization) {
 }
 
 // ===========================================================================
+// Small constant exponentiation specialization
+// ===========================================================================
+
+TEST(CodegenTest, SmallExponentPow2) {
+    // x**2 should inline as x*x — no loop needed
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn sq(n) { return n ** 2; }\n"
+                           "fn main() { return sq(5); }",
+                           codegen);
+    auto* func = mod->getFunction("sq");
+    ASSERT_NE(func, nullptr);
+    int bbCount = 0;
+    for (auto& bb : *func) {
+        (void)bb;
+        bbCount++;
+    }
+    // Inlined x*x: single basic block, no pow loop
+    EXPECT_EQ(bbCount, 1) << "x**2 should be a single basic block (no loop)";
+}
+
+TEST(CodegenTest, SmallExponentPow3) {
+    // x**3 should inline as x*x*x — no loop needed
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn cube(n) { return n ** 3; }\n"
+                           "fn main() { return cube(5); }",
+                           codegen);
+    auto* func = mod->getFunction("cube");
+    ASSERT_NE(func, nullptr);
+    int bbCount = 0;
+    for (auto& bb : *func) {
+        (void)bb;
+        bbCount++;
+    }
+    EXPECT_EQ(bbCount, 1) << "x**3 should be a single basic block (no loop)";
+}
+
+TEST(CodegenTest, SmallExponentPow4) {
+    // x**4 should inline as t=x*x; t*t — no loop needed
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn pow4(n) { return n ** 4; }\n"
+                           "fn main() { return pow4(5); }",
+                           codegen);
+    auto* func = mod->getFunction("pow4");
+    ASSERT_NE(func, nullptr);
+    int bbCount = 0;
+    for (auto& bb : *func) {
+        (void)bb;
+        bbCount++;
+    }
+    EXPECT_EQ(bbCount, 1) << "x**4 should be a single basic block (no loop)";
+}
+
+TEST(CodegenTest, SmallExponentPow8) {
+    // x**8 should inline as t=x*x; u=t*t; u*u — no loop needed
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn pow8(n) { return n ** 8; }\n"
+                           "fn main() { return pow8(2); }",
+                           codegen);
+    auto* func = mod->getFunction("pow8");
+    ASSERT_NE(func, nullptr);
+    int bbCount = 0;
+    for (auto& bb : *func) {
+        (void)bb;
+        bbCount++;
+    }
+    EXPECT_EQ(bbCount, 1) << "x**8 should be a single basic block (no loop)";
+}
+
+// ===========================================================================
+// Extended strength reduction tests (6, 12, 24, 25, 31, 33, 63, 65)
+// ===========================================================================
+
+TEST(CodegenTest, StrengthReductionMultiplyBy6) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn mul6(n) { return n * 6; }\n"
+                           "fn main() { return mul6(5); }",
+                           codegen);
+    auto* func = mod->getFunction("mul6");
+    ASSERT_NE(func, nullptr);
+    bool hasMul = false;
+    bool hasShl = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::Mul)
+                hasMul = true;
+            if (inst.getOpcode() == llvm::Instruction::Shl)
+                hasShl = true;
+        }
+    }
+    EXPECT_FALSE(hasMul) << "n * 6 should use shift+add, not multiply";
+    EXPECT_TRUE(hasShl) << "n * 6 should use shifts";
+}
+
+TEST(CodegenTest, StrengthReductionMultiplyBy24) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn mul24(n) { return n * 24; }\n"
+                           "fn main() { return mul24(5); }",
+                           codegen);
+    auto* func = mod->getFunction("mul24");
+    ASSERT_NE(func, nullptr);
+    bool hasMul = false;
+    bool hasShl = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::Mul)
+                hasMul = true;
+            if (inst.getOpcode() == llvm::Instruction::Shl)
+                hasShl = true;
+        }
+    }
+    EXPECT_FALSE(hasMul) << "n * 24 should use shift+sub, not multiply";
+    EXPECT_TRUE(hasShl) << "n * 24 should use shifts";
+}
+
+TEST(CodegenTest, StrengthReductionMultiplyBy31) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn mul31(n) { return n * 31; }\n"
+                           "fn main() { return mul31(5); }",
+                           codegen);
+    auto* func = mod->getFunction("mul31");
+    ASSERT_NE(func, nullptr);
+    bool hasMul = false;
+    bool hasShl = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::Mul)
+                hasMul = true;
+            if (inst.getOpcode() == llvm::Instruction::Shl)
+                hasShl = true;
+        }
+    }
+    EXPECT_FALSE(hasMul) << "n * 31 should use shift+sub, not multiply";
+    EXPECT_TRUE(hasShl) << "n * 31 should use shifts";
+}
+
+// ===========================================================================
+// C library function attribute tests
+// ===========================================================================
+
+TEST(CodegenTest, MallocHasNonNullReturn) {
+    // malloc should have nonnull on its return value
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() {\n"
+                           "  var arr = [1, 2, 3];\n"
+                           "  return arr[0];\n"
+                           "}",
+                           codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("malloc");
+    if (fn) {
+        EXPECT_TRUE(fn->hasRetAttribute(llvm::Attribute::NonNull))
+            << "malloc return should have nonnull attribute";
+        EXPECT_TRUE(fn->hasRetAttribute(llvm::Attribute::NoAlias))
+            << "malloc return should have noalias attribute";
+    }
+}
+
+TEST(CodegenTest, PureFunctionsHaveMemoryNone) {
+    // Pure math functions should have memory(none)
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() {\n"
+                           "  var x = floor(3.7);\n"
+                           "  return to_int(x);\n"
+                           "}",
+                           codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("floor");
+    if (fn) {
+        EXPECT_TRUE(fn->hasFnAttribute(llvm::Attribute::NoFree))
+            << "floor should have nofree attribute";
+        EXPECT_TRUE(fn->hasFnAttribute(llvm::Attribute::NoSync))
+            << "floor should have nosync attribute";
+    }
+}
+
+// ===========================================================================
 // Hybrid algebraic identity tests (generateHybrid → LLVM IR)
 // ===========================================================================
 
