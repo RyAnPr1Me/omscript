@@ -2804,6 +2804,193 @@ TEST(CodegenTest, OptmaxDoubleBitwiseNot) {
 }
 
 // ===========================================================================
+// Extended algebraic identity optimizations
+// ===========================================================================
+
+TEST(CodegenTest, AlgebraicIdentityModOne) {
+    // x % 1 should fold to 0 (no modulo instruction emitted)
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn mod_one(n) { return n % 1; }\n"
+                           "fn main() { return mod_one(42); }",
+                           codegen);
+    auto* func = mod->getFunction("mod_one");
+    ASSERT_NE(func, nullptr);
+    // Check that no SRem instruction is emitted
+    bool hasSRem = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::SRem)
+                hasSRem = true;
+        }
+    }
+    EXPECT_FALSE(hasSRem) << "x % 1 should be folded to 0, no SRem emitted";
+}
+
+TEST(CodegenTest, AlgebraicIdentityMulNegOne) {
+    // x * (-1) should emit a negation, not a multiply
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn mul_neg(n) { return n * (-1); }\n"
+                           "fn main() { return mul_neg(42); }",
+                           codegen);
+    auto* func = mod->getFunction("mul_neg");
+    ASSERT_NE(func, nullptr);
+    bool hasMul = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::Mul)
+                hasMul = true;
+        }
+    }
+    EXPECT_FALSE(hasMul) << "x * (-1) should be strength-reduced to negation";
+}
+
+TEST(CodegenTest, AlgebraicIdentityAndAllOnes) {
+    // x & (-1) should fold to x (no AND instruction emitted)
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn and_allones(n) { return n & (-1); }\n"
+                           "fn main() { return and_allones(42); }",
+                           codegen);
+    auto* func = mod->getFunction("and_allones");
+    ASSERT_NE(func, nullptr);
+    bool hasAnd = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::And)
+                hasAnd = true;
+        }
+    }
+    EXPECT_FALSE(hasAnd) << "x & (-1) should fold to x, no And emitted";
+}
+
+TEST(CodegenTest, AlgebraicIdentityOrAllOnes) {
+    // x | (-1) should fold to -1 (all ones)
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn or_allones(n) { return n | (-1); }\n"
+                           "fn main() { return or_allones(42); }",
+                           codegen);
+    auto* func = mod->getFunction("or_allones");
+    ASSERT_NE(func, nullptr);
+    bool hasOr = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::Or)
+                hasOr = true;
+        }
+    }
+    EXPECT_FALSE(hasOr) << "x | (-1) should fold to -1, no Or emitted";
+}
+
+// ===========================================================================
+// Extended strength reduction tests
+// ===========================================================================
+
+TEST(CodegenTest, StrengthReductionMultiplyBy10) {
+    // n * 10 should use shift+add: (n<<3) + (n<<1)
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn mul10(n) { return n * 10; }\n"
+                           "fn main() { return mul10(5); }",
+                           codegen);
+    auto* func = mod->getFunction("mul10");
+    ASSERT_NE(func, nullptr);
+    bool hasMul = false;
+    bool hasShl = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::Mul)
+                hasMul = true;
+            if (inst.getOpcode() == llvm::Instruction::Shl)
+                hasShl = true;
+        }
+    }
+    EXPECT_FALSE(hasMul) << "n * 10 should use shift+add, not multiply";
+    EXPECT_TRUE(hasShl) << "n * 10 should use shifts";
+}
+
+TEST(CodegenTest, StrengthReductionMultiplyBy15) {
+    // n * 15 should use (n<<4) - n
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn mul15(n) { return n * 15; }\n"
+                           "fn main() { return mul15(5); }",
+                           codegen);
+    auto* func = mod->getFunction("mul15");
+    ASSERT_NE(func, nullptr);
+    bool hasMul = false;
+    bool hasShl = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::Mul)
+                hasMul = true;
+            if (inst.getOpcode() == llvm::Instruction::Shl)
+                hasShl = true;
+        }
+    }
+    EXPECT_FALSE(hasMul) << "n * 15 should use shift+sub, not multiply";
+    EXPECT_TRUE(hasShl) << "n * 15 should use shifts";
+}
+
+TEST(CodegenTest, StrengthReductionMultiplyBy17) {
+    // n * 17 should use (n<<4) + n
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn mul17(n) { return n * 17; }\n"
+                           "fn main() { return mul17(5); }",
+                           codegen);
+    auto* func = mod->getFunction("mul17");
+    ASSERT_NE(func, nullptr);
+    bool hasMul = false;
+    bool hasShl = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::Mul)
+                hasMul = true;
+            if (inst.getOpcode() == llvm::Instruction::Shl)
+                hasShl = true;
+        }
+    }
+    EXPECT_FALSE(hasMul) << "n * 17 should use shift+add, not multiply";
+    EXPECT_TRUE(hasShl) << "n * 17 should use shifts";
+}
+
+// ===========================================================================
+// New PM pass pipeline tests
+// ===========================================================================
+
+TEST(CodegenTest, O2DeadStoreElimination) {
+    // At O2, dead stores (values written but never read) should be eliminated
+    CodeGenerator codegen(OptimizationLevel::O2);
+    auto* mod = generateIR("fn dead_store() {\n"
+                           "  var x = 42;\n"
+                           "  x = 100;\n"
+                           "  return x;\n"
+                           "}\n"
+                           "fn main() { return dead_store(); }",
+                           codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* func = mod->getFunction("dead_store");
+    ASSERT_NE(func, nullptr);
+    // After DSE + mem2reg, the function should have minimal instructions
+    int storeCount = 0;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::Store)
+                storeCount++;
+        }
+    }
+    // DSE should eliminate the dead store of 42
+    EXPECT_LE(storeCount, 1) << "Dead stores should be eliminated at O2";
+}
+
+TEST(CodegenTest, O2GlobalOptimization) {
+    // At O2, GlobalOpt + GlobalDCE should optimize the module
+    CodeGenerator codegen(OptimizationLevel::O2);
+    auto* mod = generateIR("fn helper() { return 42; }\n"
+                           "fn main() { return helper(); }",
+                           codegen);
+    ASSERT_NE(mod, nullptr);
+    // After optimization, the module should still be valid
+    EXPECT_NE(mod->getFunction("main"), nullptr);
+}
+
+// ===========================================================================
 // Hybrid algebraic identity tests (generateHybrid → LLVM IR)
 // ===========================================================================
 
