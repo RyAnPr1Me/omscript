@@ -289,7 +289,23 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             return builder->CreateZExt(cmp, getDefaultType(), "booltmp");
         }
         if (expr->op == "**") {
-            // Float exponentiation: use llvm.pow intrinsic
+            // Float exponent specialization: emit cheaper inline sequences
+            // for common small-integer and half-integer exponents.
+            if (auto* rc = llvm::dyn_cast<llvm::ConstantFP>(right)) {
+                double rv = rc->getValueAPF().convertToDouble();
+                if (rv == 0.5) {
+                    // x**0.5 → sqrt(x): single-instruction latency vs llvm.pow call
+                    llvm::Function* sqrtFn =
+                        OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::sqrt, {llvm::Type::getDoubleTy(*context)});
+                    return builder->CreateCall(sqrtFn, {left}, "fsqrt");
+                }
+                if (rv == 3.0) {
+                    // x**3.0 → x*x*x  (2 fmuls vs pow call)
+                    auto* sq = builder->CreateFMul(left, left, "fpow3.sq");
+                    return builder->CreateFMul(sq, left, "fpow3");
+                }
+            }
+            // General float exponentiation: use llvm.pow intrinsic
             llvm::Function* powFn =
                 OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::pow, {llvm::Type::getDoubleTy(*context)});
             return builder->CreateCall(powFn, {left, right}, "fpowtmp");
@@ -537,8 +553,10 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         if (lv == 0) {
             if (expr->op == "+" || expr->op == "|" || expr->op == "^")
                 return right; // 0+x, 0|x, 0^x → x
-            if (expr->op == "*" || expr->op == "&")
-                return llvm::ConstantInt::get(getDefaultType(), 0); // 0*x, 0&x → 0
+            if (expr->op == "*" || expr->op == "&" || expr->op == "<<" || expr->op == ">>")
+                return llvm::ConstantInt::get(getDefaultType(), 0); // 0*x, 0&x, 0<<x, 0>>x → 0
+            if (expr->op == "-")
+                return builder->CreateNeg(right, "negtmp"); // 0-x → -x
         }
         if (lv == 1 && expr->op == "*")
             return right; // 1*x → x
@@ -872,6 +890,46 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                     builder->CreateShl(quotient, llvm::ConstantInt::get(getDefaultType(), s), "mod.prod");
                 return builder->CreateSub(left, product, "mod.rem");
             }
+            // Negative constant divisor: x / (-d) → -(x / d), x % (-d) → x % d.
+            // For signed division, the quotient negates and the remainder keeps
+            // the dividend's sign.  We apply the magic-number algorithm to the
+            // absolute value and negate the quotient, avoiding hardware division.
+            if (rv <= -3) {
+                int64_t posDiv = -rv;
+                // Guard against INT64_MIN whose negation overflows.
+                if (posDiv > 0) {
+                    uint64_t d = static_cast<uint64_t>(posDiv);
+                    int l = (d <= 1) ? 0 : (64 - __builtin_clzll(d - 1));
+                    llvm::APInt twoN = llvm::APInt(128, 1).shl(63 + l);
+                    llvm::APInt dWide(128, d);
+                    llvm::APInt magicWide = (twoN + dWide - 1).udiv(dWide);
+                    int64_t magicNum = static_cast<int64_t>(magicWide.getLimitedValue());
+                    int shiftAmt = l - 1;
+
+                    llvm::Type* i128Ty = llvm::Type::getInt128Ty(*context);
+                    llvm::Value* xExt = builder->CreateSExt(left, i128Ty, "magdiv.xext");
+                    llvm::Value* mConst = llvm::ConstantInt::get(i128Ty, static_cast<uint64_t>(magicNum));
+                    llvm::Value* product = builder->CreateMul(xExt, mConst, "magdiv.prod");
+                    llvm::Value* hi = builder->CreateAShr(product, llvm::ConstantInt::get(i128Ty, 64), "magdiv.hi128");
+                    llvm::Value* q = builder->CreateTrunc(hi, getDefaultType(), "magdiv.hi");
+                    if (shiftAmt > 0)
+                        q = builder->CreateAShr(q, llvm::ConstantInt::get(getDefaultType(), shiftAmt), "magdiv.shr");
+                    llvm::Value* signBit = builder->CreateLShr(
+                        left, llvm::ConstantInt::get(getDefaultType(), 63), "magdiv.sign");
+                    q = builder->CreateAdd(q, signBit, "magdiv.q");
+
+                    if (isDivision) {
+                        // x / (-d) → -(x / d)
+                        return builder->CreateNeg(q, "negdiv");
+                    }
+                    // x % (-d) → x - (x/d)*d  (remainder keeps dividend sign)
+                    // Note: use the original negative divisor so the identity
+                    // x == (x/d)*d + (x%d) holds with the negated quotient.
+                    llvm::Value* negQ = builder->CreateNeg(q, "negdiv.q");
+                    llvm::Value* prod = builder->CreateMul(negQ, right, "magmod.prod");
+                    return builder->CreateSub(left, prod, "magmod.rem");
+                }
+            }
             // Non-power-of-2 constant divisor: use magic-number multiplication.
             // This is the same algorithm GCC and Clang use to avoid hardware
             // division instructions.  For signed division by a constant d:
@@ -1069,6 +1127,47 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 auto* q4 = builder->CreateMul(sq, sq, "pow16.q4");
                 auto* q8 = builder->CreateMul(q4, q4, "pow16.q8");
                 return builder->CreateMul(q8, q8, "pow16");
+            }
+            if (exp == 13) {
+                // x**13 → t=x*x; u=t*t; v=u*t; w=v*v; w*x  (5 muls)
+                auto* sq = builder->CreateMul(left, left, "pow13.sq");
+                auto* q4 = builder->CreateMul(sq, sq, "pow13.q4");
+                auto* q6 = builder->CreateMul(q4, sq, "pow13.q6");
+                auto* q12 = builder->CreateMul(q6, q6, "pow13.q12");
+                return builder->CreateMul(q12, left, "pow13");
+            }
+            if (exp == 14) {
+                // x**14 = x^8 * x^4 * x^2 → sq=x*x; q4=sq*sq; q8=q4*q4; q8*q4*sq  (5 muls)
+                auto* sq = builder->CreateMul(left, left, "pow14.sq");
+                auto* q4 = builder->CreateMul(sq, sq, "pow14.q4");
+                auto* q8 = builder->CreateMul(q4, q4, "pow14.q8");
+                auto* q12 = builder->CreateMul(q8, q4, "pow14.q12");
+                return builder->CreateMul(q12, sq, "pow14");
+            }
+            if (exp == 15) {
+                // x**15 = x^12 * x^3 → sq; q3=sq*x; q6=q3*q3; q12=q6*q6; q12*q3  (5 muls)
+                auto* sq = builder->CreateMul(left, left, "pow15.sq");
+                auto* q3 = builder->CreateMul(sq, left, "pow15.q3");
+                auto* q6 = builder->CreateMul(q3, q3, "pow15.q6");
+                auto* q12 = builder->CreateMul(q6, q6, "pow15.q12");
+                return builder->CreateMul(q12, q3, "pow15");
+            }
+            if (exp == 32) {
+                // x**32 → ((((x*x)^2)^2)^2)^2  (5 muls)
+                auto* sq = builder->CreateMul(left, left, "pow32.sq");
+                auto* q4 = builder->CreateMul(sq, sq, "pow32.q4");
+                auto* q8 = builder->CreateMul(q4, q4, "pow32.q8");
+                auto* q16 = builder->CreateMul(q8, q8, "pow32.q16");
+                return builder->CreateMul(q16, q16, "pow32");
+            }
+            if (exp == 64) {
+                // x**64 → (((((x*x)^2)^2)^2)^2)^2  (6 muls)
+                auto* sq = builder->CreateMul(left, left, "pow64.sq");
+                auto* q4 = builder->CreateMul(sq, sq, "pow64.q4");
+                auto* q8 = builder->CreateMul(q4, q4, "pow64.q8");
+                auto* q16 = builder->CreateMul(q8, q8, "pow64.q16");
+                auto* q32 = builder->CreateMul(q16, q16, "pow64.q32");
+                return builder->CreateMul(q32, q32, "pow64");
             }
         }
 

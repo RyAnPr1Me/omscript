@@ -1265,7 +1265,8 @@ llvm::Function* CodeGenerator::getOrDeclareSrand() {
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addFnAttr(llvm::Attribute::NoFree);
-    fn->addFnAttr(llvm::Attribute::NoSync);
+    // Note: srand() modifies global PRNG state, so it is NOT NoSync —
+    // it must not be reordered or eliminated relative to rand() calls.
     return fn;
 }
 
