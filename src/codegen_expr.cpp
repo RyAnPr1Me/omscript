@@ -197,6 +197,38 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             }
         }
 
+        // Float algebraic identity optimizations — eliminate no-op float
+        // operations when one operand is a known constant.  These supplement
+        // LLVM's InstCombine by catching patterns at the IR emission level.
+        if (auto* rc = llvm::dyn_cast<llvm::ConstantFP>(right)) {
+            double rv = rc->getValueAPF().convertToDouble();
+            if (rv == 0.0 && (expr->op == "+" || expr->op == "-"))
+                return left;  // x+0.0, x-0.0 → x
+            if (rv == 1.0 && (expr->op == "*" || expr->op == "/"))
+                return left;  // x*1.0, x/1.0 → x
+            if (rv == 0.0 && expr->op == "*")
+                return llvm::ConstantFP::get(getFloatType(), 0.0); // x*0.0 → 0.0
+            if (rv == 2.0 && expr->op == "*")
+                return builder->CreateFAdd(left, left, "fmul2"); // x*2.0 → x+x
+            if (rv == 2.0 && expr->op == "**")
+                return builder->CreateFMul(left, left, "fsq");   // x**2.0 → x*x
+            if (rv == 0.0 && expr->op == "**")
+                return llvm::ConstantFP::get(getFloatType(), 1.0); // x**0.0 → 1.0
+            if (rv == 1.0 && expr->op == "**")
+                return left;  // x**1.0 → x
+        }
+        if (auto* lc2 = llvm::dyn_cast<llvm::ConstantFP>(left)) {
+            double lv = lc2->getValueAPF().convertToDouble();
+            if (lv == 0.0 && expr->op == "+")
+                return right; // 0.0+x → x
+            if (lv == 1.0 && expr->op == "*")
+                return right; // 1.0*x → x
+            if (lv == 0.0 && expr->op == "*")
+                return llvm::ConstantFP::get(getFloatType(), 0.0); // 0.0*x → 0.0
+            if (lv == 2.0 && expr->op == "*")
+                return builder->CreateFAdd(right, right, "fmul2"); // 2.0*x → x+x
+        }
+
         if (expr->op == "+")
             return builder->CreateFAdd(left, right, "faddtmp");
         if (expr->op == "-")
@@ -464,7 +496,17 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         if (rv == 1) {
             if (expr->op == "*" || expr->op == "/" || expr->op == "**")
                 return left; // x*1, x/1, x**1 → x
+            if (expr->op == "%")
+                return llvm::ConstantInt::get(getDefaultType(), 0); // x%1 → 0
         }
+        if (rv == -1 && expr->op == "*")
+            return builder->CreateNeg(left, "negtmp"); // x*(-1) → -x
+        // x & -1 (all ones) → x
+        if (rv == -1 && expr->op == "&")
+            return left;
+        // x | -1 (all ones) → -1
+        if (rv == -1 && expr->op == "|")
+            return llvm::ConstantInt::get(getDefaultType(), -1);
     }
     if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left)) {
         int64_t lv = ci->getSExtValue();
@@ -478,6 +520,14 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             return right; // 1*x → x
         if (lv == 1 && expr->op == "**")
             return llvm::ConstantInt::get(getDefaultType(), 1); // 1**x → 1
+        if (lv == -1 && expr->op == "*")
+            return builder->CreateNeg(right, "negtmp"); // (-1)*x → -x
+        // -1 & x → x
+        if (lv == -1 && expr->op == "&")
+            return right;
+        // -1 | x → -1
+        if (lv == -1 && expr->op == "|")
+            return llvm::ConstantInt::get(getDefaultType(), -1);
     }
 
     // Same-value identity optimizations — when both operands are the exact
@@ -522,6 +572,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         // Strength reduction: multiply by small non-power-of-2 constants
         // to shift+add/sub sequences (faster on many microarchitectures).
         // n*3 → (n<<1)+n, n*5 → (n<<2)+n, n*7 → (n<<3)-n, n*9 → (n<<3)+n
+        // n*10 → (n<<3)+(n<<1), n*15 → (n<<4)-n, n*17 → (n<<4)+n
         auto emitShiftAdd = [&](llvm::Value* base, int64_t multiplier) -> llvm::Value* {
             switch (multiplier) {
             case 3: {
@@ -539,6 +590,22 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             case 9: {
                 auto* shl = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 3), "mul9.shl");
                 return builder->CreateAdd(shl, base, "mul9");
+            }
+            case 10: {
+                // n*10 → (n<<3) + (n<<1)
+                auto* shl3 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 3), "mul10.shl3");
+                auto* shl1 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 1), "mul10.shl1");
+                return builder->CreateAdd(shl3, shl1, "mul10");
+            }
+            case 15: {
+                // n*15 → (n<<4) - n
+                auto* shl = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 4), "mul15.shl");
+                return builder->CreateSub(shl, base, "mul15");
+            }
+            case 17: {
+                // n*17 → (n<<4) + n
+                auto* shl = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 4), "mul17.shl");
+                return builder->CreateAdd(shl, base, "mul17");
             }
             default:
                 return nullptr;
