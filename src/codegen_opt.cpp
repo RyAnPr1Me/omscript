@@ -296,11 +296,12 @@ void CodeGenerator::runOptimizationPasses() {
         });
     }
 
-    // At O3 with -floop-optimize, register LoopFusePass before vectorization
-    // to merge adjacent loops with the same trip count into a single loop,
-    // dramatically improving data cache locality and reducing loop overhead.
-    // This is particularly beneficial for array-processing code where
-    // successive passes over the same data can be combined.
+    // At O3 with loop optimization enabled (enableLoopOptimize_ / -floop-optimize),
+    // register LoopFusePass before vectorization to merge adjacent loops with
+    // the same trip count into a single loop, dramatically improving data cache
+    // locality and reducing loop overhead.  This is particularly beneficial for
+    // array-processing code where successive passes over the same data can be
+    // combined.
     if (optimizationLevel >= OptimizationLevel::O3 && enableLoopOptimize_) {
         PB.registerVectorizerStartEPCallback(
             [](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) { FPM.addPass(llvm::LoopFusePass()); });

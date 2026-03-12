@@ -628,7 +628,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 return builder->CreateSub(shl5, shl3, "mul24");
             }
             case 25: {
-                // n*25 → (n<<5) - (n<<3) + n  (= n*32 - n*8 + n = n*24 + n)
+                // n*25 → ((n<<5) - (n<<3)) + n  (= (n*32 - n*8) + n = n*24 + n)
                 auto* shl5 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 5), "mul25.shl5");
                 auto* shl3 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 3), "mul25.shl3");
                 auto* t = builder->CreateSub(shl5, shl3, "mul25.t");
