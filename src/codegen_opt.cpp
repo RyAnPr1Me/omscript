@@ -40,6 +40,7 @@
 #include <llvm/Transforms/Scalar/MemCpyOptimizer.h>
 #include <llvm/Transforms/Scalar/BDCE.h>
 #include <llvm/Transforms/Scalar/JumpThreading.h>
+#include <llvm/Transforms/Scalar/TailRecursionElimination.h>
 #include <llvm/Transforms/Utils.h>
 #include <optional>
 #include <stdexcept>
@@ -327,12 +328,15 @@ void CodeGenerator::runOptimizationPasses() {
     // BDCE (Bit-tracking Dead Code Elimination) identifies and eliminates
     // instructions whose results have unused bits, shrinking live ranges
     // and enabling further simplification.
+    // TailCallElimPass converts tail-recursive calls into loops, eliminating
+    // stack growth for recursive algorithms (e.g. list traversals, tree walks).
     if (optimizationLevel >= OptimizationLevel::O2) {
         PB.registerScalarOptimizerLateEPCallback([](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) {
             FPM.addPass(llvm::CorrelatedValuePropagationPass());
             FPM.addPass(llvm::BDCEPass());
             FPM.addPass(llvm::DSEPass());
             FPM.addPass(llvm::MemCpyOptPass());
+            FPM.addPass(llvm::TailCallElimPass());
         });
     }
 

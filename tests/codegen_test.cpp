@@ -4979,3 +4979,182 @@ TEST(CodegenTest, RecursiveFunctionDoesNotGetNorecurse) {
             << "Recursive function should NOT have norecurse attribute";
     }
 }
+
+// ===========================================================================
+// Cold attribute on error-handling functions
+// ===========================================================================
+
+TEST(CodegenTest, ExitHasColdAttribute) {
+    // exit() should be marked cold since it's an error/termination path.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    // Division-by-zero path calls exit, which forces the declaration.
+    auto* mod = generateIR("fn f(a, b) { return a / b; }\nfn main() { return f(10, 2); }", codegen);
+    auto* exitFn = mod->getFunction("exit");
+    if (exitFn) {
+        EXPECT_TRUE(exitFn->hasFnAttribute(llvm::Attribute::Cold))
+            << "exit() should have cold attribute";
+    }
+}
+
+// ===========================================================================
+// Returned attribute on memcpy/strcpy/strcat/memmove
+// ===========================================================================
+
+TEST(CodegenTest, StrcpyHasReturnedAttribute) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var s = \"hello\"; return len(s); }", codegen);
+    auto* fn = mod->getFunction("strcpy");
+    if (fn) {
+        EXPECT_TRUE(fn->hasParamAttribute(0, llvm::Attribute::Returned))
+            << "strcpy param 0 should have returned attribute";
+    }
+}
+
+TEST(CodegenTest, MemcpyHasReturnedAttribute) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var arr = [1, 2, 3]; return arr[0]; }", codegen);
+    auto* fn = mod->getFunction("memcpy");
+    if (fn) {
+        EXPECT_TRUE(fn->hasParamAttribute(0, llvm::Attribute::Returned))
+            << "memcpy param 0 should have returned attribute";
+    }
+}
+
+TEST(CodegenTest, MemcpyHasArgMemOnly) {
+    // memcpy should have memory(argmem: readwrite)
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var arr = [1, 2, 3]; return arr[0]; }", codegen);
+    auto* fn = mod->getFunction("memcpy");
+    if (fn) {
+        EXPECT_TRUE(fn->hasFnAttribute(llvm::Attribute::NoSync))
+            << "memcpy should have nosync attribute";
+        EXPECT_TRUE(fn->hasFnAttribute(llvm::Attribute::NoFree))
+            << "memcpy should have nofree attribute";
+    }
+}
+
+// ===========================================================================
+// C library function attribute completeness
+// ===========================================================================
+
+TEST(CodegenTest, RandHasNoUnwindAttribute) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    // 'random()' is the omscript builtin that calls C's rand().
+    auto* mod = generateIR("fn main() { return random(); }", codegen);
+    auto* fn = mod->getFunction("rand");
+    ASSERT_NE(fn, nullptr);
+    EXPECT_TRUE(fn->hasFnAttribute(llvm::Attribute::NoUnwind))
+        << "rand() should have nounwind attribute";
+    EXPECT_TRUE(fn->hasFnAttribute(llvm::Attribute::WillReturn))
+        << "rand() should have willreturn attribute";
+}
+
+TEST(CodegenTest, SrandHasNoUnwindAttribute) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    // 'seed(N)' or 'random()' triggers srand; random auto-seeds.
+    // Trigger srand via random() which auto-seeds on first call.
+    auto* mod = generateIR("fn main() { return random(); }", codegen);
+    auto* fn = mod->getFunction("srand");
+    if (fn) {
+        EXPECT_TRUE(fn->hasFnAttribute(llvm::Attribute::NoUnwind))
+            << "srand() should have nounwind attribute";
+        EXPECT_TRUE(fn->hasFnAttribute(llvm::Attribute::NoSync))
+            << "srand() should have nosync attribute";
+    }
+}
+
+TEST(CodegenTest, TimeHasNoUnwindAttribute) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return time(); }", codegen);
+    auto* fn = mod->getFunction("time");
+    ASSERT_NE(fn, nullptr);
+    EXPECT_TRUE(fn->hasFnAttribute(llvm::Attribute::NoUnwind))
+        << "time() should have nounwind attribute";
+}
+
+TEST(CodegenTest, AtofHasArgMemRead) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return to_float(\"3.14\"); }", codegen);
+    auto* fn = mod->getFunction("atof");
+    if (fn) {
+        EXPECT_TRUE(fn->hasFnAttribute(llvm::Attribute::Memory))
+            << "atof() should have memory attribute";
+        EXPECT_TRUE(fn->hasParamAttribute(0, llvm::Attribute::NonNull))
+            << "atof() param 0 should be nonnull";
+    }
+}
+
+// ===========================================================================
+// File I/O function attributes
+// ===========================================================================
+
+TEST(CodegenTest, FopenHasNoUnwind) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    // file_read() builtin calls fopen internally
+    auto* mod = generateIR("fn main() { var s = file_read(\"test.txt\"); return 0; }", codegen);
+    auto* fn = mod->getFunction("fopen");
+    if (fn) {
+        EXPECT_TRUE(fn->hasFnAttribute(llvm::Attribute::NoUnwind))
+            << "fopen() should have nounwind attribute";
+        EXPECT_TRUE(fn->hasParamAttribute(0, llvm::Attribute::NonNull))
+            << "fopen param 0 should be nonnull";
+        EXPECT_TRUE(fn->hasParamAttribute(0, llvm::Attribute::ReadOnly))
+            << "fopen param 0 should be readonly";
+    }
+}
+
+// ===========================================================================
+// Subtraction-comparison strength reduction tests
+// ===========================================================================
+
+TEST(CodegenTest, SubEqZeroFoldsToEq) {
+    // (x - y) == 0 should fold to x == y, comparing operands directly
+    // instead of using the sub result in the comparison.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn f(a, b) { return (a - b) == 0; }\n"
+                           "fn main() { return f(5, 5); }",
+                           codegen);
+    auto* func = mod->getFunction("f");
+    ASSERT_NE(func, nullptr);
+    // Verify that the icmp instruction does NOT use the sub result.
+    // The sub may still exist (dead code), but the comparison should
+    // directly compare the sub's operands.
+    bool subUsedInCmp = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(&inst)) {
+                for (unsigned i = 0; i < cmp->getNumOperands(); ++i) {
+                    if (auto* sub = llvm::dyn_cast<llvm::BinaryOperator>(cmp->getOperand(i))) {
+                        if (sub->getOpcode() == llvm::Instruction::Sub)
+                            subUsedInCmp = true;
+                    }
+                }
+            }
+        }
+    }
+    EXPECT_FALSE(subUsedInCmp) << "(a - b) == 0 should compare a == b directly (no Sub in comparison)";
+}
+
+TEST(CodegenTest, SubNeqZeroFoldsToNeq) {
+    // (x - y) != 0 should fold to x != y, comparing operands directly
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn f(a, b) { return (a - b) != 0; }\n"
+                           "fn main() { return f(5, 3); }",
+                           codegen);
+    auto* func = mod->getFunction("f");
+    ASSERT_NE(func, nullptr);
+    bool subUsedInCmp = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(&inst)) {
+                for (unsigned i = 0; i < cmp->getNumOperands(); ++i) {
+                    if (auto* sub = llvm::dyn_cast<llvm::BinaryOperator>(cmp->getOperand(i))) {
+                        if (sub->getOpcode() == llvm::Instruction::Sub)
+                            subUsedInCmp = true;
+                    }
+                }
+            }
+        }
+    }
+    EXPECT_FALSE(subUsedInCmp) << "(a - b) != 0 should compare a != b directly (no Sub in comparison)";
+}

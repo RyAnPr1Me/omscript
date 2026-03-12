@@ -619,6 +619,32 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         }
     }
 
+    // Subtraction-comparison strength reduction: when one side of an
+    // equality/inequality comparison is a subtraction and the other is 0,
+    // replace (x - y) == 0 with x == y and (x - y) != 0 with x != y.
+    // This eliminates a sub instruction since the comparison subsumes it.
+    if (expr->op == "==" || expr->op == "!=") {
+        auto tryFoldSub = [&](llvm::Value* lhs, llvm::Value* rhs) -> llvm::Value* {
+            if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(rhs)) {
+                if (ci->isZero()) {
+                    if (auto* subInst = llvm::dyn_cast<llvm::BinaryOperator>(lhs)) {
+                        if (subInst->getOpcode() == llvm::Instruction::Sub) {
+                            llvm::Value* cmp = (expr->op == "==")
+                                ? builder->CreateICmpEQ(subInst->getOperand(0), subInst->getOperand(1), "cmptmp")
+                                : builder->CreateICmpNE(subInst->getOperand(0), subInst->getOperand(1), "cmptmp");
+                            return builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+                        }
+                    }
+                }
+            }
+            return nullptr;
+        };
+        if (auto* result = tryFoldSub(left, right))
+            return result;
+        if (auto* result = tryFoldSub(right, left))
+            return result;
+    }
+
     // Regular code generation for non-constant expressions.
     // Integer arithmetic uses wrapping (no NSW/NUW flags): NSW/NUW flags tell
     // LLVM that overflow is undefined behavior, which can cause miscompilation
