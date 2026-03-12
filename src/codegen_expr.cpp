@@ -835,12 +835,9 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 // Based on "Division by Invariant Integers using Multiplication"
                 // (Granlund & Montgomery, 1994).
                 uint64_t d = static_cast<uint64_t>(rv);
-                // Find the shift amount: ceil(log2(d))
-                int l = 0;
-                {
-                    uint64_t t = d - 1;
-                    while (t > 0) { t >>= 1; l++; }
-                }
+                // Find the shift amount: ceil(log2(d)) using __builtin_clzll
+                // for constant-time bit-scan on modern CPUs.
+                int l = (d <= 1) ? 0 : (64 - __builtin_clzll(d - 1));
                 // Magic number: (2^(63+l) + d - 1) / d  (rounded up)
                 // Use LLVM's APInt for portable 128-bit arithmetic.
                 llvm::APInt twoN = llvm::APInt(128, 1).shl(63 + l);

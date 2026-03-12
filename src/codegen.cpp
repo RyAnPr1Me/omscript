@@ -1867,15 +1867,24 @@ void CodeGenerator::generate(Program* program) {
             bool hasMemoryRead = false;
             bool hasCall = false;
             bool hasUnknownSideEffect = false;
+            // Helper: strip GEP chains to find the underlying allocation.
+            // A store to `getelementptr(alloca, ...)` is still a local write.
+            auto isLocalAlloca = [](llvm::Value* ptr) -> bool {
+                while (auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(ptr))
+                    ptr = gep->getPointerOperand();
+                return llvm::isa<llvm::AllocaInst>(ptr);
+            };
             for (auto& BB : func) {
                 for (auto& I : BB) {
                     if (auto* SI = llvm::dyn_cast<llvm::StoreInst>(&I)) {
                         // Stores to allocas (local variables) don't count as
                         // external writes — they're promoted to SSA by mem2reg.
-                        if (!llvm::isa<llvm::AllocaInst>(SI->getPointerOperand()))
+                        // Also check through GEP chains (struct field / array
+                        // element stores) whose base is an alloca.
+                        if (!isLocalAlloca(SI->getPointerOperand()))
                             hasMemoryWrite = true;
                     } else if (auto* LI = llvm::dyn_cast<llvm::LoadInst>(&I)) {
-                        if (!llvm::isa<llvm::AllocaInst>(LI->getPointerOperand()))
+                        if (!isLocalAlloca(LI->getPointerOperand()))
                             hasMemoryRead = true;
                     } else if (auto* CI = llvm::dyn_cast<llvm::CallInst>(&I)) {
                         hasCall = true;

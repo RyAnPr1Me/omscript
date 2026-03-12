@@ -411,7 +411,13 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         if (optimizationLevel >= OptimizationLevel::O3 && enableUnrollLoops_) {
             if (auto* startCI = llvm::dyn_cast<llvm::ConstantInt>(startVal)) {
                 if (auto* endCI = llvm::dyn_cast<llvm::ConstantInt>(endVal)) {
-                    int64_t tripCount = std::abs(endCI->getSExtValue() - startCI->getSExtValue());
+                    int64_t startV = startCI->getSExtValue();
+                    int64_t endV = endCI->getSExtValue();
+                    // Compute trip count safely using unsigned subtraction to
+                    // avoid signed overflow when start and end are far apart.
+                    uint64_t tripCount = (endV >= startV)
+                        ? static_cast<uint64_t>(endV) - static_cast<uint64_t>(startV)
+                        : static_cast<uint64_t>(startV) - static_cast<uint64_t>(endV);
                     if (tripCount > 0 && tripCount <= 64) {
                         llvm::MDNode* unrollCount = llvm::MDNode::get(
                             *context,
