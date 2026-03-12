@@ -41,6 +41,9 @@
 #include <llvm/Transforms/Scalar/BDCE.h>
 #include <llvm/Transforms/Scalar/JumpThreading.h>
 #include <llvm/Transforms/Scalar/TailRecursionElimination.h>
+#include <llvm/Transforms/Scalar/SimpleLoopUnswitch.h>
+#include <llvm/Transforms/Scalar/SpeculativeExecution.h>
+#include <llvm/Transforms/Scalar/DivRemPairs.h>
 #include <llvm/Transforms/Utils.h>
 #include <optional>
 #include <stdexcept>
@@ -319,6 +322,19 @@ void CodeGenerator::runOptimizationPasses() {
         });
     }
 
+    // At O2+, inject SimpleLoopUnswitchPass late in the loop optimizer to hoist
+    // loop-invariant conditional branches out of loops.  This transforms a loop
+    // with an invariant if/else into two specialized loops — one for the true
+    // path and one for the false path — eliminating a branch per iteration
+    // and enabling further loop-specific optimizations on each clone.
+    // NonTrivial=true allows cloning of the loop for non-trivial unswitching
+    // (i.e. the condition has side effects in the loop body).
+    if (optimizationLevel >= OptimizationLevel::O2) {
+        PB.registerLateLoopOptimizationsEPCallback([](llvm::LoopPassManager& LPM, llvm::OptimizationLevel) {
+            LPM.addPass(llvm::SimpleLoopUnswitchPass(/*NonTrivial=*/true));
+        });
+    }
+
     // At O2+, inject CorrelatedValuePropagation and DeadStoreElimination
     // late in the scalar optimizer.  CVP uses value-range information from
     // branch conditions to sharpen comparisons, convert signed operations
@@ -345,10 +361,17 @@ void CodeGenerator::runOptimizationPasses() {
     // using range constraints (e.g. after a bounds check, subsequent in-range
     // accesses skip the check).  JumpThreading threads branches through
     // basic blocks with known conditions, reducing branch mispredictions.
+    // DivRemPairsPass hoists and decomposes division/remainder pairs — when
+    // both x/y and x%y appear in the same function, the backend can reuse
+    // the quotient from a single hardware division for both results.
+    // SpeculativeExecutionPass speculatively executes instructions from a
+    // branch to reduce branch misprediction cost on wide-issue CPUs.
     if (optimizationLevel >= OptimizationLevel::O3) {
         PB.registerScalarOptimizerLateEPCallback([](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) {
             FPM.addPass(llvm::ConstraintEliminationPass());
             FPM.addPass(llvm::JumpThreadingPass());
+            FPM.addPass(llvm::DivRemPairsPass());
+            FPM.addPass(llvm::SpeculativeExecutionPass());
         });
     }
 

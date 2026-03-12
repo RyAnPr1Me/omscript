@@ -5158,3 +5158,251 @@ TEST(CodegenTest, SubNeqZeroFoldsToNeq) {
     }
     EXPECT_FALSE(subUsedInCmp) << "(a - b) != 0 should compare a != b directly (no Sub in comparison)";
 }
+
+// ===========================================================================
+// Multiply strength reduction: new patterns (n*11, n*13, n*20, n*21)
+// ===========================================================================
+
+TEST(CodegenTest, StrengthReductionMultiplyBy11) {
+    // n * 11 should use shift+add: (n<<3) + (n<<1) + n
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn mul11(n) { return n * 11; }\n"
+                           "fn main() { return mul11(5); }",
+                           codegen);
+    auto* func = mod->getFunction("mul11");
+    ASSERT_NE(func, nullptr);
+    bool hasMul = false;
+    bool hasShl = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::Mul)
+                hasMul = true;
+            if (inst.getOpcode() == llvm::Instruction::Shl)
+                hasShl = true;
+        }
+    }
+    EXPECT_FALSE(hasMul) << "n * 11 should use shift+add, not multiply";
+    EXPECT_TRUE(hasShl) << "n * 11 should use shifts";
+}
+
+TEST(CodegenTest, StrengthReductionMultiplyBy13) {
+    // n * 13 should use shift+sub: (n<<4) - (n<<1) - n
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn mul13(n) { return n * 13; }\n"
+                           "fn main() { return mul13(5); }",
+                           codegen);
+    auto* func = mod->getFunction("mul13");
+    ASSERT_NE(func, nullptr);
+    bool hasMul = false;
+    bool hasShl = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::Mul)
+                hasMul = true;
+            if (inst.getOpcode() == llvm::Instruction::Shl)
+                hasShl = true;
+        }
+    }
+    EXPECT_FALSE(hasMul) << "n * 13 should use shift+sub, not multiply";
+    EXPECT_TRUE(hasShl) << "n * 13 should use shifts";
+}
+
+TEST(CodegenTest, StrengthReductionMultiplyBy20) {
+    // n * 20 should use shift+add: (n<<4) + (n<<2)
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn mul20(n) { return n * 20; }\n"
+                           "fn main() { return mul20(5); }",
+                           codegen);
+    auto* func = mod->getFunction("mul20");
+    ASSERT_NE(func, nullptr);
+    bool hasMul = false;
+    bool hasShl = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::Mul)
+                hasMul = true;
+            if (inst.getOpcode() == llvm::Instruction::Shl)
+                hasShl = true;
+        }
+    }
+    EXPECT_FALSE(hasMul) << "n * 20 should use shift+add, not multiply";
+    EXPECT_TRUE(hasShl) << "n * 20 should use shifts";
+}
+
+TEST(CodegenTest, StrengthReductionMultiplyBy21) {
+    // n * 21 should use shift+add: (n<<4) + (n<<2) + n
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn mul21(n) { return n * 21; }\n"
+                           "fn main() { return mul21(5); }",
+                           codegen);
+    auto* func = mod->getFunction("mul21");
+    ASSERT_NE(func, nullptr);
+    bool hasMul = false;
+    bool hasShl = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::Mul)
+                hasMul = true;
+            if (inst.getOpcode() == llvm::Instruction::Shl)
+                hasShl = true;
+        }
+    }
+    EXPECT_FALSE(hasMul) << "n * 21 should use shift+add, not multiply";
+    EXPECT_TRUE(hasShl) << "n * 21 should use shifts";
+}
+
+TEST(CodegenTest, StrengthReductionMultiplyBy11Commutative) {
+    // 11 * n (left operand constant) should also use shift+add
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn mul11c(n) { return 11 * n; }\n"
+                           "fn main() { return mul11c(5); }",
+                           codegen);
+    auto* func = mod->getFunction("mul11c");
+    ASSERT_NE(func, nullptr);
+    bool hasMul = false;
+    bool hasShl = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::Mul)
+                hasMul = true;
+            if (inst.getOpcode() == llvm::Instruction::Shl)
+                hasShl = true;
+        }
+    }
+    EXPECT_FALSE(hasMul) << "11 * n should use shift+add, not multiply";
+    EXPECT_TRUE(hasShl) << "11 * n should use shifts";
+}
+
+TEST(CodegenTest, NegativeMultiplyBy11StrengthReduction) {
+    // n * (-11) should use shift+add + neg
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn muln11(n) { return n * (-11); }\n"
+                           "fn main() { return muln11(5); }",
+                           codegen);
+    auto* func = mod->getFunction("muln11");
+    ASSERT_NE(func, nullptr);
+    bool hasMul = false;
+    bool hasShl = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::Mul)
+                hasMul = true;
+            if (inst.getOpcode() == llvm::Instruction::Shl)
+                hasShl = true;
+        }
+    }
+    EXPECT_FALSE(hasMul) << "n * (-11) should use shift+add+neg, not multiply";
+    EXPECT_TRUE(hasShl) << "n * (-11) should use shifts";
+}
+
+// ===========================================================================
+// Exponent specialization: x**11 and x**12
+// ===========================================================================
+
+TEST(CodegenTest, ExponentSpecializationPow11) {
+    // x**11 should produce inline multiplications, no loop
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn f(x) { return x ** 11; } fn main() { return f(2); }", codegen);
+    auto* func = mod->getFunction("f");
+    ASSERT_NE(func, nullptr);
+    bool hasLoop = false;
+    int mulCount = 0;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::Mul)
+                mulCount++;
+            if (auto* br = llvm::dyn_cast<llvm::BranchInst>(&inst)) {
+                if (br->isConditional())
+                    hasLoop = true;
+            }
+        }
+    }
+    EXPECT_FALSE(hasLoop) << "x**11 should be inline (no loop)";
+    EXPECT_EQ(mulCount, 5) << "x**11 should use exactly 5 multiplications";
+}
+
+TEST(CodegenTest, ExponentSpecializationPow12) {
+    // x**12 should produce inline multiplications, no loop
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn f(x) { return x ** 12; } fn main() { return f(2); }", codegen);
+    auto* func = mod->getFunction("f");
+    ASSERT_NE(func, nullptr);
+    bool hasLoop = false;
+    int mulCount = 0;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::Mul)
+                mulCount++;
+            if (auto* br = llvm::dyn_cast<llvm::BranchInst>(&inst)) {
+                if (br->isConditional())
+                    hasLoop = true;
+            }
+        }
+    }
+    EXPECT_FALSE(hasLoop) << "x**12 should be inline (no loop)";
+    EXPECT_EQ(mulCount, 4) << "x**12 should use exactly 4 multiplications";
+}
+
+// ===========================================================================
+// Constant nonzero divisor skips zero-check
+// ===========================================================================
+
+TEST(CodegenTest, ConstantDivisorSkipsZeroCheck) {
+    // Division by a constant nonzero value should not generate a zero-check branch
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn f(n) { return n / 7; }\n"
+                           "fn main() { return f(42); }",
+                           codegen);
+    auto* func = mod->getFunction("f");
+    ASSERT_NE(func, nullptr);
+    int condBranches = 0;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (auto* br = llvm::dyn_cast<llvm::BranchInst>(&inst)) {
+                if (br->isConditional())
+                    condBranches++;
+            }
+        }
+    }
+    EXPECT_EQ(condBranches, 0) << "Division by constant 7 should not have a zero-check branch";
+}
+
+TEST(CodegenTest, ConstantModuloSkipsZeroCheck) {
+    // Modulo by a constant nonzero value should not generate a zero-check branch
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn f(n) { return n % 5; }\n"
+                           "fn main() { return f(42); }",
+                           codegen);
+    auto* func = mod->getFunction("f");
+    ASSERT_NE(func, nullptr);
+    int condBranches = 0;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (auto* br = llvm::dyn_cast<llvm::BranchInst>(&inst)) {
+                if (br->isConditional())
+                    condBranches++;
+            }
+        }
+    }
+    EXPECT_EQ(condBranches, 0) << "Modulo by constant 5 should not have a zero-check branch";
+}
+
+TEST(CodegenTest, VariableDivisorHasZeroCheck) {
+    // Division by a variable should still generate a zero-check branch
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn f(a, b) { return a / b; }\n"
+                           "fn main() { return f(42, 7); }",
+                           codegen);
+    auto* func = mod->getFunction("f");
+    ASSERT_NE(func, nullptr);
+    int condBranches = 0;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (auto* br = llvm::dyn_cast<llvm::BranchInst>(&inst)) {
+                if (br->isConditional())
+                    condBranches++;
+            }
+        }
+    }
+    EXPECT_GT(condBranches, 0) << "Division by variable should have a zero-check branch";
+}

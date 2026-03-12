@@ -775,6 +775,33 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 auto* t = builder->CreateSub(shl7, shl5, "mul100.t");
                 return builder->CreateAdd(t, shl2, "mul100");
             }
+            case 11: {
+                // n*11 → (n<<3) + (n<<1) + n  (= 8n + 2n + n)
+                auto* shl3 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 3), "mul11.shl3");
+                auto* shl1 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 1), "mul11.shl1");
+                auto* t = builder->CreateAdd(shl3, shl1, "mul11.t");
+                return builder->CreateAdd(t, base, "mul11");
+            }
+            case 13: {
+                // n*13 → (n<<4) - (n<<1) - n  (= 16n - 2n - n)
+                auto* shl4 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 4), "mul13.shl4");
+                auto* shl1 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 1), "mul13.shl1");
+                auto* t = builder->CreateSub(shl4, shl1, "mul13.t");
+                return builder->CreateSub(t, base, "mul13");
+            }
+            case 20: {
+                // n*20 → (n<<4) + (n<<2)  (= 16n + 4n)
+                auto* shl4 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 4), "mul20.shl4");
+                auto* shl2 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 2), "mul20.shl2");
+                return builder->CreateAdd(shl4, shl2, "mul20");
+            }
+            case 21: {
+                // n*21 → (n<<4) + (n<<2) + n  (= 16n + 4n + n)
+                auto* shl4 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 4), "mul21.shl4");
+                auto* shl2 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 2), "mul21.shl2");
+                auto* t = builder->CreateAdd(shl4, shl2, "mul21.t");
+                return builder->CreateAdd(t, base, "mul21");
+            }
             default:
                 return nullptr;
             }
@@ -1020,6 +1047,21 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 auto* q4 = builder->CreateMul(sq, sq, "pow10.q4");
                 auto* q8 = builder->CreateMul(q4, q4, "pow10.q8");
                 return builder->CreateMul(q8, sq, "pow10");
+            }
+            if (exp == 11) {
+                // x**11 → t=x*x; u=t*t; v=u*u; v*t*x  (5 muls)
+                auto* sq = builder->CreateMul(left, left, "pow11.sq");
+                auto* q4 = builder->CreateMul(sq, sq, "pow11.q4");
+                auto* q8 = builder->CreateMul(q4, q4, "pow11.q8");
+                auto* q10 = builder->CreateMul(q8, sq, "pow11.q10");
+                return builder->CreateMul(q10, left, "pow11");
+            }
+            if (exp == 12) {
+                // x**12 → t=x*x; u=t*t; v=u*u; v*u  (4 muls)
+                auto* sq = builder->CreateMul(left, left, "pow12.sq");
+                auto* q4 = builder->CreateMul(sq, sq, "pow12.q4");
+                auto* q8 = builder->CreateMul(q4, q4, "pow12.q8");
+                return builder->CreateMul(q8, q4, "pow12");
             }
             if (exp == 16) {
                 // x**16 → t=x*x; u=t*t; v=u*u; v*v  (4 muls)
