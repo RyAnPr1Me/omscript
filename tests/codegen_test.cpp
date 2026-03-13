@@ -3464,6 +3464,57 @@ TEST(CodegenTest, PollyDisabledWhenLoopOptOff) {
     ASSERT_NE(mod, nullptr);
 }
 
+TEST(CodegenTest, LoopIdiomAndIndVarO2) {
+    // At O2+, LoopIdiomRecognize and IndVarSimplify run via the loop optimizer
+    // end EP.  Verify the pipeline doesn't crash on a typical loop.
+    CodeGenerator codegen(OptimizationLevel::O2);
+    auto* mod = generateIR("fn main() { var s = 0; for (i in 0...1000) { s = s + i; } return s; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, LoopDeletionO2) {
+    // LoopDeletion should handle dead loops (result unused) without crashing.
+    CodeGenerator codegen(OptimizationLevel::O2);
+    auto* mod = generateIR("fn main() { var s = 0; for (i in 0...100) { s = s + 1; } return 42; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, LoopInterchangeO3) {
+    // At O3 with loop-optimize, LoopInterchange runs for nested loop patterns.
+    CodeGenerator codegen(OptimizationLevel::O3);
+    codegen.setLoopOptimize(true);
+    auto* mod = generateIR("fn main() { var s = 0; for (i in 0...10) { for (j in 0...10) { s = s + i * j; } } return s; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, ADCEAndFloat2IntO2) {
+    // ADCE and Float2Int run at the scalar optimizer late EP for O2+.
+    CodeGenerator codegen(OptimizationLevel::O2);
+    auto* mod = generateIR("fn main() { var x = 3.0; var y = x + 1.0; return 0; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, VectorCombineAndLoopSinkO2) {
+    // VectorCombine and LoopSink run at the optimizer last EP for O2+.
+    CodeGenerator codegen(OptimizationLevel::O2);
+    auto* mod = generateIR("fn main() { var s = 0; for (i in 0...100) { s = s + i; } return s; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, InferFunctionAttrsO1) {
+    // InferFunctionAttrs runs at pipeline start for O1+.
+    CodeGenerator codegen(OptimizationLevel::O1);
+    auto* mod = generateIR("fn add(a, b) { return a + b; } fn main() { return add(1, 2); }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, PartiallyInlineLibCallsOptmax) {
+    // PartiallyInlineLibCalls is in the OPTMAX pipeline for math functions.
+    CodeGenerator codegen(OptimizationLevel::O3);
+    auto* mod = generateIR("fn main() { var x = 2.0; var y = x ** 0.5; return 0; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
 TEST(CodegenTest, WhileLoopWithVectorizeHints) {
     // While loops should also get vectorization metadata at O2+.
     CodeGenerator codegen(OptimizationLevel::O2);
