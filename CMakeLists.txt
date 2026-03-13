@@ -75,7 +75,7 @@ add_definitions(${LLVM_DEFINITIONS})
 # (e.g. /usr/lib/llvm-18/lib/) and is named LLVMPolly.so (no lib prefix),
 # so we derive the search path from LLVM_DIR and use find_file.
 get_filename_component(_LLVM_BASE_DIR "${LLVM_DIR}" DIRECTORY)
-find_file(POLLY_LIB NAMES LLVMPolly.so
+find_file(POLLY_LIB NAMES LLVMPolly.so LLVMPolly.dylib
     HINTS "${_LLVM_BASE_DIR}/lib" "${LLVM_LIBRARY_DIR}"
     NO_DEFAULT_PATH)
 if(POLLY_LIB)

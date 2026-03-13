@@ -294,6 +294,8 @@ void CodeGenerator::runOptimizationPasses() {
         if (pollyPlugin) {
             pollyPlugin->registerPassBuilderCallbacks(PB);
         } else {
+            llvm::errs() << "omsc: warning: failed to load Polly plugin; "
+                            "polyhedral loop optimizations disabled\n";
             llvm::consumeError(pollyPlugin.takeError());
         }
     }
