@@ -439,13 +439,19 @@ single comparison rather than calling both `operator<` and `operator==`, elimina
 redundant type-checking and dispatch overhead.
 
 ### Polyhedral-Style Loop Optimizations
-At O3 with `-floop-optimize`, the compiler appends LLVM's `LoopDistributePass` to the
-new-PM module pipeline. Loop distribution splits a single loop with multiple independent
-memory access streams into separate loops, each with a smaller working set. This is the
-key transformation in polyhedral loop optimization that improves data-cache utilization
-and enables downstream vectorization of the simpler resulting loops. The OPTMAX pipeline
-also includes `LoopDataPrefetchPass` for software prefetch insertion in loops with
-predictable array access patterns.
+At O2+ with `-floop-optimize`, the compiler loads the **LLVM Polly** polyhedral optimizer
+plugin when available. Polly provides advanced loop transformations — tiling, fusion,
+interchange, and data-locality optimization — based on the polyhedral model, which
+reasons about loop iteration spaces and memory access patterns mathematically. This
+enables automatic optimization of affine loop nests that is difficult to achieve with
+traditional loop passes alone.
+
+In addition, at O3 with `-floop-optimize`, the compiler appends LLVM's `LoopDistributePass`
+to the new-PM module pipeline. Loop distribution splits a single loop with multiple
+independent memory access streams into separate loops, each with a smaller working set.
+This improves data-cache utilization and enables downstream vectorization of the simpler
+resulting loops. The OPTMAX pipeline also includes `LoopDataPrefetchPass` for software
+prefetch insertion in loops with predictable array access patterns.
 
 ### SIMD Vectorization Hints
 At O2+ with `-fvectorize`, the compiler attaches LLVM loop metadata to generated loop

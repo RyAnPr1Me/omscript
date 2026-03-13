@@ -10,6 +10,9 @@
 #include <llvm/MC/TargetRegistry.h>
 #include <llvm/Passes/OptimizationLevel.h>
 #include <llvm/Passes/PassBuilder.h>
+#ifdef POLLY_LIB_PATH
+#include <llvm/Passes/PassPlugin.h>
+#endif
 #include <llvm/Support/CodeGen.h>
 #include <llvm/Support/FileSystem.h>
 #include <llvm/Support/PGOOptions.h>
@@ -277,6 +280,24 @@ void CodeGenerator::runOptimizationPasses() {
     }
 
     llvm::PassBuilder PB(targetMachine.get(), PTO, pgoOpt);
+
+    // At O2+ with -floop-optimize, load the LLVM Polly polyhedral optimizer
+    // plugin.  Polly provides high-level loop transformations (tiling, fusion,
+    // interchange) based on the polyhedral model, improving data locality and
+    // enabling automatic parallelization for affine loop nests.  The plugin
+    // registers its analysis passes and pipeline extension-point callbacks so
+    // that the standard buildPerModuleDefaultPipeline() automatically invokes
+    // Polly at the appropriate point in the optimization pipeline.
+#ifdef POLLY_LIB_PATH
+    if (optimizationLevel >= OptimizationLevel::O2 && enableLoopOptimize_) {
+        auto pollyPlugin = llvm::PassPlugin::Load(POLLY_LIB_PATH);
+        if (pollyPlugin) {
+            pollyPlugin->registerPassBuilderCallbacks(PB);
+        } else {
+            llvm::consumeError(pollyPlugin.takeError());
+        }
+    }
+#endif
 
     // At O2+ with -floop-optimize, register LoopDistributePass to run just
     // before the vectorizer starts.  Loop distribution splits a loop with

@@ -3448,6 +3448,22 @@ TEST(CodegenTest, LoopOptimizeFlagOnO3) {
     ASSERT_NE(mod, nullptr);
 }
 
+TEST(CodegenTest, PollyLoopOptO2) {
+    // At O2 with loop-optimize on, the Polly polyhedral plugin is loaded.
+    CodeGenerator codegen(OptimizationLevel::O2);
+    codegen.setLoopOptimize(true);
+    auto* mod = generateIR("fn main() { var s = 0; for (i in 0...100) { s = s + i; } return s; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, PollyDisabledWhenLoopOptOff) {
+    // When loop-optimize is off, Polly should not be loaded; compilation still works.
+    CodeGenerator codegen(OptimizationLevel::O2);
+    codegen.setLoopOptimize(false);
+    auto* mod = generateIR("fn main() { var s = 0; for (i in 0...100) { s = s + i; } return s; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
 TEST(CodegenTest, WhileLoopWithVectorizeHints) {
     // While loops should also get vectorization metadata at O2+.
     CodeGenerator codegen(OptimizationLevel::O2);
