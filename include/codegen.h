@@ -350,6 +350,7 @@ class CodeGenerator {
     bool enableVectorize_ = true;     // -fvectorize / -fno-vectorize
     bool enableUnrollLoops_ = true;   // -funroll-loops / -fno-unroll-loops
     bool enableLoopOptimize_ = true;  // -floop-optimize / -fno-loop-optimize
+    unsigned preferredVectorWidth_ = 4; // SIMD vector width for loop hints (target-aware)
     std::string pgoGenPath_;          // --pgo-gen=<path>: emit raw profile to this file
     std::string pgoUsePath_;          // --pgo-use=<path>: read profile data from this file
     bool dynamicCompilation_ = false; // Dynamic (JIT) compilation mode

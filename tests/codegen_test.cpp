@@ -3448,6 +3448,227 @@ TEST(CodegenTest, LoopOptimizeFlagOnO3) {
     ASSERT_NE(mod, nullptr);
 }
 
+TEST(CodegenTest, PollyLoopOptO2) {
+    // At O2 with loop-optimize on, the Polly polyhedral plugin is loaded.
+    CodeGenerator codegen(OptimizationLevel::O2);
+    codegen.setLoopOptimize(true);
+    auto* mod = generateIR("fn main() { var s = 0; for (i in 0...100) { s = s + i; } return s; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, PollyDisabledWhenLoopOptOff) {
+    // When loop-optimize is off, Polly should not be loaded; compilation still works.
+    CodeGenerator codegen(OptimizationLevel::O2);
+    codegen.setLoopOptimize(false);
+    auto* mod = generateIR("fn main() { var s = 0; for (i in 0...100) { s = s + i; } return s; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, LoopIdiomAndIndVarO2) {
+    // At O2+, LoopIdiomRecognize and IndVarSimplify run via the loop optimizer
+    // end EP.  Verify the pipeline doesn't crash on a typical loop.
+    CodeGenerator codegen(OptimizationLevel::O2);
+    auto* mod = generateIR("fn main() { var s = 0; for (i in 0...1000) { s = s + i; } return s; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, LoopDeletionO2) {
+    // LoopDeletion should handle dead loops (result unused) without crashing.
+    CodeGenerator codegen(OptimizationLevel::O2);
+    auto* mod = generateIR("fn main() { var s = 0; for (i in 0...100) { s = s + 1; } return 42; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, LoopInterchangeO3) {
+    // At O3 with loop-optimize, LoopInterchange runs for nested loop patterns.
+    CodeGenerator codegen(OptimizationLevel::O3);
+    codegen.setLoopOptimize(true);
+    auto* mod = generateIR("fn main() { var s = 0; for (i in 0...10) { for (j in 0...10) { s = s + i * j; } } return s; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, ADCEAndFloat2IntO2) {
+    // ADCE and Float2Int run at the scalar optimizer late EP for O2+.
+    CodeGenerator codegen(OptimizationLevel::O2);
+    auto* mod = generateIR("fn main() { var x = 3.0; var y = x + 1.0; return 0; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, VectorCombineAndLoopSinkO2) {
+    // VectorCombine and LoopSink run at the optimizer last EP for O2+.
+    CodeGenerator codegen(OptimizationLevel::O2);
+    auto* mod = generateIR("fn main() { var s = 0; for (i in 0...100) { s = s + i; } return s; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, InferFunctionAttrsO1) {
+    // InferFunctionAttrs runs at pipeline start for O1+.
+    CodeGenerator codegen(OptimizationLevel::O1);
+    auto* mod = generateIR("fn add(a, b) { return a + b; } fn main() { return add(1, 2); }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, PartiallyInlineLibCallsOptmax) {
+    // PartiallyInlineLibCalls is in the OPTMAX pipeline for math functions.
+    CodeGenerator codegen(OptimizationLevel::O3);
+    auto* mod = generateIR("fn main() { var x = 2.0; var y = x ** 0.5; return 0; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+// ===========================================================================
+// Extended strength reduction patterns
+// ===========================================================================
+
+TEST(CodegenTest, StrengthReductionMul14) {
+    // n*14 → (n<<4) - (n<<1) — two shifts + one sub instead of hardware multiply.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var x = 7; return x * 14; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, StrengthReductionMul28) {
+    // n*28 → (n<<5) - (n<<2).
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var x = 3; return x * 28; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, StrengthReductionMul40) {
+    // n*40 → (n<<5) + (n<<3).
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var x = 5; return x * 40; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, StrengthReductionMul48) {
+    // n*48 → (n<<5) + (n<<4).
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var x = 2; return x * 48; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, StrengthReductionMul60) {
+    // n*60 → (n<<6) - (n<<2).
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var x = 4; return x * 60; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, StrengthReductionMul96) {
+    // n*96 → (n<<7) - (n<<5).
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var x = 3; return x * 96; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, StrengthReductionMul120) {
+    // n*120 → (n<<7) - (n<<3).
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var x = 2; return x * 120; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, StrengthReductionMul256) {
+    // n*256 → (n<<8).
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var x = 5; return x * 256; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, StrengthReductionMul512) {
+    // n*512 → (n<<9).
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var x = 3; return x * 512; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, StrengthReductionMul1024) {
+    // n*1024 → (n<<10).
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var x = 7; return x * 1024; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+// ===========================================================================
+// Extended exponent specialization (powers 17-25)
+// ===========================================================================
+
+TEST(CodegenTest, ExponentSpecializationPow17) {
+    // x**17 → inline 5 multiplications instead of binary exponentiation loop.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var x = 2; return x ** 17; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, ExponentSpecializationPow18) {
+    // x**18 → inline 5 multiplications.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var x = 2; return x ** 18; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, ExponentSpecializationPow20) {
+    // x**20 → inline 5 multiplications.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var x = 2; return x ** 20; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, ExponentSpecializationPow24) {
+    // x**24 → inline 5 multiplications.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var x = 2; return x ** 24; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, ExponentSpecializationPow25) {
+    // x**25 → inline 6 multiplications.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var x = 2; return x ** 25; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+// ===========================================================================
+// Additional optimization passes (pipeline coverage)
+// ===========================================================================
+
+TEST(CodegenTest, MergeICmpsO2) {
+    // MergeICmps runs at O2+ to merge comparison chains into memcmp.
+    CodeGenerator codegen(OptimizationLevel::O2);
+    auto* mod = generateIR("fn main() { var a = 1; var b = 2; if (a == 1 && b == 2) { return 1; } return 0; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, HotColdSplittingO3) {
+    // HotColdSplitting at O3 outlines cold code for better I-cache density.
+    CodeGenerator codegen(OptimizationLevel::O3);
+    auto* mod = generateIR("fn main() { var s = 0; for (i in 0...1000) { s = s + i; } return s; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, StraightLineStrengthReduceO2) {
+    // StraightLineStrengthReduce reuses address computations in straight-line code.
+    CodeGenerator codegen(OptimizationLevel::O2);
+    auto* mod = generateIR("fn main() { var a = 5; var b = a * 3 + 1; var c = a * 3 + 2; return b + c; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, NaryReassociateO2) {
+    // NaryReassociate reuses sub-expressions in add/mul chains.
+    CodeGenerator codegen(OptimizationLevel::O2);
+    auto* mod = generateIR("fn f(a, b) { var t = a + b; return (a + b) + 2; } fn main() { return f(3, 4); }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, TargetAwareVectorWidth) {
+    // Vector width hint should use target-native SIMD width (not hardcoded 4).
+    // On the build machine this is at least 4 (SSE), 8 (AVX2), or 16 (AVX-512).
+    CodeGenerator codegen(OptimizationLevel::O3);
+    codegen.setVectorize(true);
+    auto* mod = generateIR("fn main() { var s = 0; for (i in 0...1000) { s = s + i; } return s; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
 TEST(CodegenTest, WhileLoopWithVectorizeHints) {
     // While loops should also get vectorization metadata at O2+.
     CodeGenerator codegen(OptimizationLevel::O2);

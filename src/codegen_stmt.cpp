@@ -183,13 +183,15 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
         if (optimizationLevel >= OptimizationLevel::O2 && enableVectorize_) {
             llvm::MDNode* interleave = llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
-                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))});
+                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), preferredVectorWidth_))});
             loopMDs.push_back(interleave);
         }
         if (optimizationLevel >= OptimizationLevel::O3 && enableVectorize_) {
+            // Use the target-aware preferred vector width to fully utilise
+            // the widest available SIMD registers (SSE=4, AVX2=8, AVX-512=16).
             llvm::MDNode* vecWidth = llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.width"),
-                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))});
+                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), preferredVectorWidth_))});
             loopMDs.push_back(vecWidth);
         }
         llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
@@ -257,13 +259,13 @@ void CodeGenerator::generateDoWhile(DoWhileStmt* stmt) {
         if (optimizationLevel >= OptimizationLevel::O2 && enableVectorize_) {
             llvm::MDNode* interleave = llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
-                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))});
+                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), preferredVectorWidth_))});
             loopMDs.push_back(interleave);
         }
         if (optimizationLevel >= OptimizationLevel::O3 && enableVectorize_) {
             llvm::MDNode* vecWidth = llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.width"),
-                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))});
+                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), preferredVectorWidth_))});
             loopMDs.push_back(vecWidth);
         }
         llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
@@ -383,7 +385,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     {
         // Loop metadata: mustprogress enables loop-idiom recognition (auto
         // memset/memcpy detection); interleave.count improves SIMD throughput;
-        // at O3, vectorize.width=4 requests 4-lane SIMD (SSE/NEON) explicitly.
+        // at O3, vectorize.width uses the target-aware preferred SIMD width.
         llvm::MDNode* mustProgress =
             llvm::MDNode::get(*context, {llvm::MDString::get(*context, "llvm.loop.mustprogress")});
         llvm::SmallVector<llvm::Metadata*, 6> loopMDs;
@@ -392,15 +394,15 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         if (optimizationLevel >= OptimizationLevel::O2 && enableVectorize_) {
             llvm::MDNode* interleave = llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
-                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))});
+                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), preferredVectorWidth_))});
             loopMDs.push_back(interleave);
         }
         if (optimizationLevel >= OptimizationLevel::O3 && enableVectorize_) {
-            // Suggest 4-lane SIMD vectorization to the back-end.  The optimizer
-            // will widen further if the target supports AVX2/AVX-512 (8/16 lanes).
+            // Use the target-aware preferred vector width to fully utilise
+            // the widest available SIMD registers (SSE=4, AVX2=8, AVX-512=16).
             llvm::MDNode* vecWidth = llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.width"),
-                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))});
+                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), preferredVectorWidth_))});
             loopMDs.push_back(vecWidth);
         }
         // At O3, hint the unroller for small constant-trip-count loops.

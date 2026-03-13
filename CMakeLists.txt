@@ -68,6 +68,22 @@ message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
 include_directories(SYSTEM ${LLVM_INCLUDE_DIRS})
 add_definitions(${LLVM_DEFINITIONS})
 
+# Look for the LLVM Polly plugin (polyhedral loop optimizer).
+# When found, the path is passed as a compile-time define so codegen_opt.cpp
+# can load it at runtime via llvm::PassPlugin::Load().
+# On Debian/Ubuntu the plugin lives under the version-specific directory
+# (e.g. /usr/lib/llvm-18/lib/) and is named LLVMPolly.so (no lib prefix),
+# so we derive the search path from LLVM_DIR and use find_file.
+get_filename_component(_LLVM_BASE_DIR "${LLVM_DIR}" DIRECTORY)
+find_file(POLLY_LIB NAMES LLVMPolly.so LLVMPolly.dylib
+    HINTS "${_LLVM_BASE_DIR}/lib" "${LLVM_LIBRARY_DIR}"
+    NO_DEFAULT_PATH)
+if(POLLY_LIB)
+    message(STATUS "Found LLVM Polly: ${POLLY_LIB}")
+else()
+    message(STATUS "LLVM Polly not found; polyhedral loop optimizations disabled")
+endif()
+
 # Include directories
 include_directories(${CMAKE_SOURCE_DIR}/include)
 include_directories(${CMAKE_SOURCE_DIR}/runtime)
@@ -96,6 +112,11 @@ set(RUNTIME_SOURCES
 
 # Compiler executable
 add_executable(omsc ${COMPILER_SOURCES} ${RUNTIME_SOURCES})
+
+# Pass Polly plugin path as a compile-time define so the optimizer can load it.
+if(POLLY_LIB)
+    target_compile_definitions(omsc PRIVATE "POLLY_LIB_PATH=\"${POLLY_LIB}\"")
+endif()
 
 # Link LLVM libraries
 # Only components actually used by the compiler and AOT runtime are listed.
@@ -185,6 +206,9 @@ if(GTest_FOUND)
 
     add_library(omscript_lib STATIC ${LIB_SOURCES})
     target_link_libraries(omscript_lib ${llvm_libs})
+    if(POLLY_LIB)
+        target_compile_definitions(omscript_lib PRIVATE "POLLY_LIB_PATH=\"${POLLY_LIB}\"")
+    endif()
 
     # Collect all test source files
     file(GLOB TEST_SOURCES tests/*_test.cpp)
