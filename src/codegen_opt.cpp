@@ -457,9 +457,10 @@ void CodeGenerator::runOptimizationPasses() {
     //   VectorCombinePass: optimizes scalar/vector interactions using target
     //     cost models — converts redundant scalar extract/insert sequences
     //     into direct vector operations and eliminates unnecessary shuffles.
-    //   LoopSinkPass: profile-guided sinking of loop-invariant code back into
-    //     the loop body when the instruction is only used on a cold path,
-    //     reducing register pressure on the hot path.
+    //   LoopSinkPass: sinks loop-invariant code back into the loop body
+    //     when the instruction is only used on a cold path, reducing register
+    //     pressure on the hot path.  Uses block frequency heuristics and can
+    //     optionally benefit from profile data when available.
     if (optimizationLevel >= OptimizationLevel::O2) {
         PB.registerOptimizerLastEPCallback([](llvm::ModulePassManager& MPM, llvm::OptimizationLevel) {
             llvm::FunctionPassManager FPM;
