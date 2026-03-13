@@ -31,6 +31,7 @@
 #include <llvm/Transforms/IPO/AlwaysInliner.h>
 #include <llvm/Transforms/IPO/GlobalDCE.h>
 #include <llvm/Transforms/IPO/GlobalOpt.h>
+#include <llvm/Transforms/IPO/HotColdSplitting.h>
 #include <llvm/Transforms/IPO/InferFunctionAttrs.h>
 #include <llvm/Transforms/InstCombine/InstCombine.h>
 #include <llvm/Transforms/Scalar.h>
@@ -49,9 +50,13 @@
 #include <llvm/Transforms/Scalar/LoopLoadElimination.h>
 #include <llvm/Transforms/Scalar/LoopRotation.h>
 #include <llvm/Transforms/Scalar/LoopSink.h>
+#include <llvm/Transforms/Scalar/MergeICmps.h>
+#include <llvm/Transforms/Scalar/MergedLoadStoreMotion.h>
 #include <llvm/Transforms/Scalar/MemCpyOptimizer.h>
+#include <llvm/Transforms/Scalar/NaryReassociate.h>
 #include <llvm/Transforms/Scalar/BDCE.h>
 #include <llvm/Transforms/Scalar/JumpThreading.h>
+#include <llvm/Transforms/Scalar/StraightLineStrengthReduce.h>
 #include <llvm/Transforms/Scalar/TailRecursionElimination.h>
 #include <llvm/Transforms/Scalar/SimpleLoopUnswitch.h>
 #include <llvm/Transforms/Scalar/SpeculativeExecution.h>
@@ -430,6 +435,23 @@ void CodeGenerator::runOptimizationPasses() {
             FPM.addPass(llvm::MemCpyOptPass());
             FPM.addPass(llvm::Float2IntPass());
             FPM.addPass(llvm::TailCallElimPass());
+            // MergeICmps merges chains of integer comparisons (e.g. struct
+            // field-by-field equality) into efficient memcmp/bcmp calls,
+            // which the back-end can lower to vectorized SIMD comparisons.
+            FPM.addPass(llvm::MergeICmpsPass());
+            // MergedLoadStoreMotion hoists loads and sinks stores across
+            // diamond-shaped (if/else) control flow, hiding memory latency
+            // and reducing static code size.
+            FPM.addPass(llvm::MergedLoadStoreMotionPass());
+            // StraightLineStrengthReduce detects and reuses redundant
+            // address/offset computations in straight-line code (e.g.
+            // base+i*stride patterns), replacing expensive multiplies with
+            // incremental additions.
+            FPM.addPass(llvm::StraightLineStrengthReducePass());
+            // NaryReassociate reassociates n-ary add/mul expressions to
+            // maximize reuse of existing sub-expressions (e.g. (a+b)+2
+            // when (a+b) is already available → reuse + add 2).
+            FPM.addPass(llvm::NaryReassociatePass());
         });
     }
 
@@ -467,6 +489,17 @@ void CodeGenerator::runOptimizationPasses() {
             FPM.addPass(llvm::VectorCombinePass());
             FPM.addPass(llvm::LoopSinkPass());
             MPM.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(FPM)));
+        });
+    }
+
+    // At O3, run HotColdSplitting to outline cold code regions (error
+    // handlers, assertion failures, rarely-taken branches) into separate
+    // functions.  This improves I-cache density on the hot path and
+    // enables better register allocation and instruction scheduling in
+    // the remaining hot code.
+    if (optimizationLevel >= OptimizationLevel::O3) {
+        PB.registerOptimizerLastEPCallback([](llvm::ModulePassManager& MPM, llvm::OptimizationLevel) {
+            MPM.addPass(llvm::HotColdSplittingPass());
         });
     }
 

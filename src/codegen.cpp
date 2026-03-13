@@ -1832,6 +1832,23 @@ void CodeGenerator::generate(Program* program) {
         module->addModuleFlag(llvm::Module::Warning, "Dwarf Version", 4);
     }
 
+    // Detect preferred SIMD vector width from the target's CPU features.
+    // AVX-512 supports 16-lane i32/float (64-byte vectors), AVX2 supports
+    // 8-lane, and SSE/NEON supports 4-lane.  Using the target-native width
+    // for loop vectorization hints allows the vectorizer to use the widest
+    // available SIMD registers without over-requesting on narrow targets.
+    {
+        std::string cpu, features;
+        resolveTargetCPU(cpu, features);
+        if (features.find("+avx512f") != std::string::npos) {
+            preferredVectorWidth_ = 16;
+        } else if (features.find("+avx2") != std::string::npos) {
+            preferredVectorWidth_ = 8;
+        } else {
+            preferredVectorWidth_ = 4;  // SSE2 / NEON fallback
+        }
+    }
+
     // Resource budget: limit number of functions to prevent DoS.
     if (program->functions.size() > kMaxFunctions) {
         throw DiagnosticError(Diagnostic{DiagnosticSeverity::Error,

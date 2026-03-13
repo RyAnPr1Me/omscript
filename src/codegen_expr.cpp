@@ -821,6 +821,60 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 auto* t = builder->CreateAdd(shl4, shl2, "mul21.t");
                 return builder->CreateAdd(t, base, "mul21");
             }
+            case 14: {
+                // n*14 → (n<<4) - (n<<1)  (= 16n - 2n)
+                auto* shl4 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 4), "mul14.shl4");
+                auto* shl1 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 1), "mul14.shl1");
+                return builder->CreateSub(shl4, shl1, "mul14");
+            }
+            case 28: {
+                // n*28 → (n<<5) - (n<<2)  (= 32n - 4n)
+                auto* shl5 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 5), "mul28.shl5");
+                auto* shl2 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 2), "mul28.shl2");
+                return builder->CreateSub(shl5, shl2, "mul28");
+            }
+            case 40: {
+                // n*40 → (n<<5) + (n<<3)  (= 32n + 8n)
+                auto* shl5 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 5), "mul40.shl5");
+                auto* shl3 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 3), "mul40.shl3");
+                return builder->CreateAdd(shl5, shl3, "mul40");
+            }
+            case 48: {
+                // n*48 → (n<<5) + (n<<4)  (= 32n + 16n)
+                auto* shl5 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 5), "mul48.shl5");
+                auto* shl4 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 4), "mul48.shl4");
+                return builder->CreateAdd(shl5, shl4, "mul48");
+            }
+            case 60: {
+                // n*60 → (n<<6) - (n<<2)  (= 64n - 4n)
+                auto* shl6 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 6), "mul60.shl6");
+                auto* shl2 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 2), "mul60.shl2");
+                return builder->CreateSub(shl6, shl2, "mul60");
+            }
+            case 96: {
+                // n*96 → (n<<7) - (n<<5)  (= 128n - 32n)
+                auto* shl7 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 7), "mul96.shl7");
+                auto* shl5 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 5), "mul96.shl5");
+                return builder->CreateSub(shl7, shl5, "mul96");
+            }
+            case 120: {
+                // n*120 → (n<<7) - (n<<3)  (= 128n - 8n)
+                auto* shl7 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 7), "mul120.shl7");
+                auto* shl3 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 3), "mul120.shl3");
+                return builder->CreateSub(shl7, shl3, "mul120");
+            }
+            case 256: {
+                // n*256 → (n<<8)
+                return builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 8), "mul256");
+            }
+            case 512: {
+                // n*512 → (n<<9)
+                return builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 9), "mul512");
+            }
+            case 1024: {
+                // n*1024 → (n<<10)
+                return builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 10), "mul1024");
+            }
             default:
                 return nullptr;
             }
@@ -1152,6 +1206,47 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 auto* q6 = builder->CreateMul(q3, q3, "pow15.q6");
                 auto* q12 = builder->CreateMul(q6, q6, "pow15.q12");
                 return builder->CreateMul(q12, q3, "pow15");
+            }
+            if (exp == 17) {
+                // x**17 = x^16 * x  (5 muls)
+                auto* sq = builder->CreateMul(left, left, "pow17.sq");
+                auto* q4 = builder->CreateMul(sq, sq, "pow17.q4");
+                auto* q8 = builder->CreateMul(q4, q4, "pow17.q8");
+                auto* q16 = builder->CreateMul(q8, q8, "pow17.q16");
+                return builder->CreateMul(q16, left, "pow17");
+            }
+            if (exp == 18) {
+                // x**18 = x^16 * x^2  (5 muls)
+                auto* sq = builder->CreateMul(left, left, "pow18.sq");
+                auto* q4 = builder->CreateMul(sq, sq, "pow18.q4");
+                auto* q8 = builder->CreateMul(q4, q4, "pow18.q8");
+                auto* q16 = builder->CreateMul(q8, q8, "pow18.q16");
+                return builder->CreateMul(q16, sq, "pow18");
+            }
+            if (exp == 20) {
+                // x**20 = x^16 * x^4  (5 muls)
+                auto* sq = builder->CreateMul(left, left, "pow20.sq");
+                auto* q4 = builder->CreateMul(sq, sq, "pow20.q4");
+                auto* q8 = builder->CreateMul(q4, q4, "pow20.q8");
+                auto* q16 = builder->CreateMul(q8, q8, "pow20.q16");
+                return builder->CreateMul(q16, q4, "pow20");
+            }
+            if (exp == 24) {
+                // x**24 = x^16 * x^8  (5 muls)
+                auto* sq = builder->CreateMul(left, left, "pow24.sq");
+                auto* q4 = builder->CreateMul(sq, sq, "pow24.q4");
+                auto* q8 = builder->CreateMul(q4, q4, "pow24.q8");
+                auto* q16 = builder->CreateMul(q8, q8, "pow24.q16");
+                return builder->CreateMul(q16, q8, "pow24");
+            }
+            if (exp == 25) {
+                // x**25 = x^24 * x = x^16 * x^8 * x  (6 muls)
+                auto* sq = builder->CreateMul(left, left, "pow25.sq");
+                auto* q4 = builder->CreateMul(sq, sq, "pow25.q4");
+                auto* q8 = builder->CreateMul(q4, q4, "pow25.q8");
+                auto* q16 = builder->CreateMul(q8, q8, "pow25.q16");
+                auto* q24 = builder->CreateMul(q16, q8, "pow25.q24");
+                return builder->CreateMul(q24, left, "pow25");
             }
             if (exp == 32) {
                 // x**32 → ((((x*x)^2)^2)^2)^2  (5 muls)
