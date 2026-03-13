@@ -11,7 +11,11 @@
 #include <llvm/Passes/OptimizationLevel.h>
 #include <llvm/Passes/PassBuilder.h>
 #ifdef POLLY_LIB_PATH
+#if LLVM_VERSION_MAJOR >= 22
+#include <llvm/Plugins/PassPlugin.h>
+#else
 #include <llvm/Passes/PassPlugin.h>
+#endif
 #endif
 #include <llvm/Support/CodeGen.h>
 #include <llvm/Support/FileSystem.h>
@@ -484,7 +488,12 @@ void CodeGenerator::runOptimizationPasses() {
     //     pressure on the hot path.  Uses block frequency heuristics and can
     //     optionally benefit from profile data when available.
     if (optimizationLevel >= OptimizationLevel::O2) {
-        PB.registerOptimizerLastEPCallback([](llvm::ModulePassManager& MPM, llvm::OptimizationLevel) {
+        PB.registerOptimizerLastEPCallback(
+#if LLVM_VERSION_MAJOR >= 21
+            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel, llvm::ThinOrFullLTOPhase) {
+#else
+            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel) {
+#endif
             llvm::FunctionPassManager FPM;
             FPM.addPass(llvm::VectorCombinePass());
             FPM.addPass(llvm::LoopSinkPass());
@@ -498,7 +507,12 @@ void CodeGenerator::runOptimizationPasses() {
     // enables better register allocation and instruction scheduling in
     // the remaining hot code.
     if (optimizationLevel >= OptimizationLevel::O3) {
-        PB.registerOptimizerLastEPCallback([](llvm::ModulePassManager& MPM, llvm::OptimizationLevel) {
+        PB.registerOptimizerLastEPCallback(
+#if LLVM_VERSION_MAJOR >= 21
+            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel, llvm::ThinOrFullLTOPhase) {
+#else
+            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel) {
+#endif
             MPM.addPass(llvm::HotColdSplittingPass());
         });
     }
