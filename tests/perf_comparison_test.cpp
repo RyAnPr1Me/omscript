@@ -174,12 +174,12 @@ fn main() {
 
     for (int i = 0; i < kRuns; i++) {
         auto [cExit, cNs] = timedRun(cBin + " > /dev/null 2>&1");
-        EXPECT_EQ(cExit & 0xFF, cExit & 0xFF); // just check it ran
+        EXPECT_GE(cExit, 0) << "C binary exited with negative status";
         bestC = std::min(bestC, cNs);
     }
     for (int i = 0; i < kRuns; i++) {
         auto [omExit, omNs] = timedRun(omBin + " > /dev/null 2>&1");
-        EXPECT_EQ(omExit & 0xFF, omExit & 0xFF);
+        EXPECT_GE(omExit, 0) << "OmScript binary exited with negative status";
         bestOm = std::min(bestOm, omNs);
     }
 
