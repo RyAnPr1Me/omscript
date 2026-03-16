@@ -133,6 +133,11 @@ class CodeGenerator {
         enableEGraph_ = enable;
     }
 
+    /// Enable or disable the superoptimizer pass (default: true at O2+).
+    void setSuperoptimize(bool enable) {
+        enableSuperopt_ = enable;
+    }
+
     /// Enable PGO instrumentation generation mode.
     /// When set, the AOT-compiled binary will write a raw profile (.profraw)
     /// to @p profilePath at program exit, capturing branch and call counts.
@@ -356,6 +361,7 @@ class CodeGenerator {
     bool enableUnrollLoops_ = true;   // -funroll-loops / -fno-unroll-loops
     bool enableLoopOptimize_ = true;  // -floop-optimize / -fno-loop-optimize
     bool enableEGraph_ = true;        // -fegraph / -fno-egraph (e-graph equality saturation)
+    bool enableSuperopt_ = true;      // -fsuperopt / -fno-superopt (superoptimizer)
     unsigned preferredVectorWidth_ = 4; // SIMD vector width for loop hints (target-aware)
     std::string pgoGenPath_;          // --pgo-gen=<path>: emit raw profile to this file
     std::string pgoUsePath_;          // --pgo-use=<path>: read profile data from this file
