@@ -12,6 +12,7 @@
 /// cross-instruction analysis.
 
 #include "superoptimizer.h"
+#include <llvm/Config/llvm-config.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/Dominators.h>
 #include <llvm/IR/InstrTypes.h>
@@ -21,6 +22,14 @@
 #include <llvm/IR/PatternMatch.h>
 #include <llvm/Support/KnownBits.h>
 #include <llvm/Support/MathExtras.h>
+
+// LLVM 19 introduced getOrInsertDeclaration; older versions only have getDeclaration.
+#if LLVM_VERSION_MAJOR >= 19
+#define OMSC_GET_INTRINSIC llvm::Intrinsic::getOrInsertDeclaration
+#else
+#define OMSC_GET_INTRINSIC llvm::Intrinsic::getDeclaration
+#endif
+
 #include <algorithm>
 #include <cstdint>
 #include <random>
@@ -662,7 +671,7 @@ static bool replaceIdiom(IdiomMatch& match) {
         // Replace with llvm.fshl(x, x, amount) — funnel shift left = rotate
         llvm::Value* x = match.operands[0];
         llvm::Value* amt = match.operands[1];
-        llvm::Function* fshl = llvm::Intrinsic::getDeclaration(
+        llvm::Function* fshl = OMSC_GET_INTRINSIC(
             mod, llvm::Intrinsic::fshl, {intTy});
         llvm::Value* result = builder.CreateCall(fshl, {x, x, amt}, "rotl");
         match.rootInst->replaceAllUsesWith(result);
@@ -672,7 +681,7 @@ static bool replaceIdiom(IdiomMatch& match) {
     case Idiom::RotateRight: {
         llvm::Value* x = match.operands[0];
         llvm::Value* amt = match.operands[1];
-        llvm::Function* fshr = llvm::Intrinsic::getDeclaration(
+        llvm::Function* fshr = OMSC_GET_INTRINSIC(
             mod, llvm::Intrinsic::fshr, {intTy});
         llvm::Value* result = builder.CreateCall(fshr, {x, x, amt}, "rotr");
         match.rootInst->replaceAllUsesWith(result);
@@ -681,7 +690,7 @@ static bool replaceIdiom(IdiomMatch& match) {
 
     case Idiom::AbsoluteValue: {
         llvm::Value* x = match.operands[0];
-        llvm::Function* absIntrinsic = llvm::Intrinsic::getDeclaration(
+        llvm::Function* absIntrinsic = OMSC_GET_INTRINSIC(
             mod, llvm::Intrinsic::abs, {intTy});
         llvm::Value* falseConst = llvm::ConstantInt::getFalse(ctx);
         llvm::Value* result = builder.CreateCall(absIntrinsic, {x, falseConst}, "abs");
@@ -694,7 +703,7 @@ static bool replaceIdiom(IdiomMatch& match) {
         llvm::Value* b = match.operands[1];
         bool isUnsigned = (match.bitWidth & 0x80000000u) != 0;
         llvm::Intrinsic::ID intrID = isUnsigned ? llvm::Intrinsic::umin : llvm::Intrinsic::smin;
-        llvm::Function* minIntrinsic = llvm::Intrinsic::getDeclaration(mod, intrID, {intTy});
+        llvm::Function* minIntrinsic = OMSC_GET_INTRINSIC(mod, intrID, {intTy});
         llvm::Value* result = builder.CreateCall(minIntrinsic, {a, b}, "imin");
         match.rootInst->replaceAllUsesWith(result);
         return true;
@@ -705,7 +714,7 @@ static bool replaceIdiom(IdiomMatch& match) {
         llvm::Value* b = match.operands[1];
         bool isUnsigned = (match.bitWidth & 0x80000000u) != 0;
         llvm::Intrinsic::ID intrID = isUnsigned ? llvm::Intrinsic::umax : llvm::Intrinsic::smax;
-        llvm::Function* maxIntrinsic = llvm::Intrinsic::getDeclaration(mod, intrID, {intTy});
+        llvm::Function* maxIntrinsic = OMSC_GET_INTRINSIC(mod, intrID, {intTy});
         llvm::Value* result = builder.CreateCall(maxIntrinsic, {a, b}, "imax");
         match.rootInst->replaceAllUsesWith(result);
         return true;
@@ -715,7 +724,7 @@ static bool replaceIdiom(IdiomMatch& match) {
         // (x & (x-1)) == 0 → ctpop(x) <= 1
         // This helps the backend select POPCNT + CMP instead of SUB + AND + CMP
         llvm::Value* x = match.operands[0];
-        llvm::Function* ctpop = llvm::Intrinsic::getDeclaration(
+        llvm::Function* ctpop = OMSC_GET_INTRINSIC(
             mod, llvm::Intrinsic::ctpop, {x->getType()});
         llvm::Value* popcount = builder.CreateCall(ctpop, {x}, "popcnt");
         llvm::Value* one = llvm::ConstantInt::get(x->getType(), 1);

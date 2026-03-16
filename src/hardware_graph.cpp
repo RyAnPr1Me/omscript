@@ -11,12 +11,20 @@
 /// Activated only when -march or -mtune flags are explicitly provided.
 
 #include "hardware_graph.h"
+#include <llvm/Config/llvm-config.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/InstrTypes.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/PatternMatch.h>
+
+// LLVM 19 introduced getOrInsertDeclaration; older versions only have getDeclaration.
+#if LLVM_VERSION_MAJOR >= 19
+#define OMSC_GET_INTRINSIC llvm::Intrinsic::getOrInsertDeclaration
+#else
+#define OMSC_GET_INTRINSIC llvm::Intrinsic::getDeclaration
+#endif
 #include <algorithm>
 #include <cassert>
 #include <cmath>
@@ -1298,7 +1306,7 @@ static unsigned generateFMA(llvm::Function& func, const MicroarchProfile& profil
                         llvm::Module* mod = func.getParent();
                         llvm::Type* ty = inst.getType();
 
-                        llvm::Function* fmaFn = llvm::Intrinsic::getDeclaration(
+                        llvm::Function* fmaFn = OMSC_GET_INTRINSIC(
                             mod, llvm::Intrinsic::fma, {ty});
                         llvm::Value* result = builder.CreateCall(
                             fmaFn, {fmul->getOperand(0), fmul->getOperand(1), addend},
@@ -1365,7 +1373,7 @@ static unsigned insertPrefetches(llvm::Function& func, const MicroarchProfile& p
                 builder.getInt8Ty(), ptr, offset, "prefetch_addr");
 
             // Insert llvm.prefetch intrinsic.
-            llvm::Function* prefetchFn = llvm::Intrinsic::getDeclaration(
+            llvm::Function* prefetchFn = OMSC_GET_INTRINSIC(
                 mod, llvm::Intrinsic::prefetch, {ptrTy});
 
             // Args: ptr, rw (0=read), locality (3=high), cache_type (1=data)

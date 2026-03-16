@@ -283,14 +283,12 @@ TEST(EGraphTest, DivPow2ToShift) {
     auto rules = getAlgebraicRules();
     g.saturate(rules);
 
-    // After adding div_4_to_shr2 rule, x/4 IS equivalent to x>>2 in the
-    // e-graph (the cost model will select the cheaper shift).  For signed
-    // integers with negative values the semantics differ, but the e-graph
-    // explores both representations and the cost model picks the best.
+    // x/4 should NOT be equivalent to x>>2 for signed integers
+    // (e.g. -7/4 = -1, but -7>>2 = -2 due to rounding toward -inf).
+    // The div_pow2 rules were removed to fix this signed-division bug.
     ClassId two = g.addConst(2);
     ClassId shiftExpr = g.addBinOp(Op::Shr, x, two);
-    g.saturate(rules);
-    EXPECT_EQ(g.find(expr), g.find(shiftExpr));
+    EXPECT_NE(g.find(expr), g.find(shiftExpr));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1554,4 +1552,215 @@ TEST(EGraphTest, AllRulesHasSubstantialCount) {
     // Verify the total rule count has grown
     auto rules = getAllRules();
     EXPECT_GT(rules.size(), 70u);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Distributive / factoring / large power-of-2 tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST(EGraphTest, MulDistributeOverAdd) {
+    // a * (b + c) → a*b + a*c
+    EGraph g;
+    ClassId a = g.addVar("a");
+    ClassId b = g.addVar("b");
+    ClassId c = g.addVar("c");
+    ClassId bc = g.addBinOp(Op::Add, b, c);
+    ClassId expr = g.addBinOp(Op::Mul, a, bc);
+
+    auto rules = getAlgebraicRules();
+    g.saturate(rules);
+
+    ClassId ab = g.addBinOp(Op::Mul, a, b);
+    ClassId ac = g.addBinOp(Op::Mul, a, c);
+    ClassId distributed = g.addBinOp(Op::Add, ab, ac);
+    g.saturate(rules);
+    EXPECT_EQ(g.find(expr), g.find(distributed));
+}
+
+TEST(EGraphTest, AddFactorRight) {
+    // a*c + b*c → (a + b) * c
+    EGraph g;
+    ClassId a = g.addVar("a");
+    ClassId b = g.addVar("b");
+    ClassId c = g.addVar("c");
+    ClassId ac = g.addBinOp(Op::Mul, a, c);
+    ClassId bc = g.addBinOp(Op::Mul, b, c);
+    ClassId expr = g.addBinOp(Op::Add, ac, bc);
+
+    auto rules = getAlgebraicRules();
+    g.saturate(rules);
+
+    ClassId aplusb = g.addBinOp(Op::Add, a, b);
+    ClassId factored = g.addBinOp(Op::Mul, aplusb, c);
+    g.saturate(rules);
+    EXPECT_EQ(g.find(expr), g.find(factored));
+}
+
+TEST(EGraphTest, Mul128ToShl7) {
+    EGraph g;
+    ClassId x = g.addVar("x");
+    ClassId c128 = g.addConst(128);
+    ClassId expr = g.addBinOp(Op::Mul, x, c128);
+
+    auto rules = getAlgebraicRules();
+    g.saturate(rules);
+
+    ClassId seven = g.addConst(7);
+    ClassId shift = g.addBinOp(Op::Shl, x, seven);
+    EXPECT_EQ(g.find(expr), g.find(shift));
+}
+
+TEST(EGraphTest, Mul256ToShl8) {
+    EGraph g;
+    ClassId x = g.addVar("x");
+    ClassId c256 = g.addConst(256);
+    ClassId expr = g.addBinOp(Op::Mul, x, c256);
+
+    auto rules = getAlgebraicRules();
+    g.saturate(rules);
+
+    ClassId eight = g.addConst(8);
+    ClassId shift = g.addBinOp(Op::Shl, x, eight);
+    EXPECT_EQ(g.find(expr), g.find(shift));
+}
+
+TEST(EGraphTest, Mul1024ToShl10) {
+    EGraph g;
+    ClassId x = g.addVar("x");
+    ClassId c1024 = g.addConst(1024);
+    ClassId expr = g.addBinOp(Op::Mul, x, c1024);
+
+    auto rules = getAlgebraicRules();
+    g.saturate(rules);
+
+    ClassId ten = g.addConst(10);
+    ClassId shift = g.addBinOp(Op::Shl, x, ten);
+    EXPECT_EQ(g.find(expr), g.find(shift));
+}
+
+TEST(EGraphTest, DeMorganLogicalAnd) {
+    // !(a && b) → !a || !b
+    EGraph g;
+    ClassId a = g.addVar("a");
+    ClassId b = g.addVar("b");
+    ClassId land = g.addBinOp(Op::LogAnd, a, b);
+    ClassId notLand = g.addUnaryOp(Op::LogNot, land);
+
+    auto rules = getComparisonRules();
+    g.saturate(rules);
+
+    ClassId notA = g.addUnaryOp(Op::LogNot, a);
+    ClassId notB = g.addUnaryOp(Op::LogNot, b);
+    ClassId demorgan = g.addBinOp(Op::LogOr, notA, notB);
+    g.saturate(rules);
+    EXPECT_EQ(g.find(notLand), g.find(demorgan));
+}
+
+TEST(EGraphTest, DeMorganLogicalOr) {
+    // !(a || b) → !a && !b
+    EGraph g;
+    ClassId a = g.addVar("a");
+    ClassId b = g.addVar("b");
+    ClassId lor = g.addBinOp(Op::LogOr, a, b);
+    ClassId notLor = g.addUnaryOp(Op::LogNot, lor);
+
+    auto rules = getComparisonRules();
+    g.saturate(rules);
+
+    ClassId notA = g.addUnaryOp(Op::LogNot, a);
+    ClassId notB = g.addUnaryOp(Op::LogNot, b);
+    ClassId demorgan = g.addBinOp(Op::LogAnd, notA, notB);
+    g.saturate(rules);
+    EXPECT_EQ(g.find(notLor), g.find(demorgan));
+}
+
+TEST(EGraphTest, NotEqToNe) {
+    // !(a == b) → a != b
+    EGraph g;
+    ClassId a = g.addVar("a");
+    ClassId b = g.addVar("b");
+    ClassId eq = g.addBinOp(Op::Eq, a, b);
+    ClassId notEq = g.addUnaryOp(Op::LogNot, eq);
+
+    auto rules = getComparisonRules();
+    g.saturate(rules);
+
+    ClassId ne = g.addBinOp(Op::Ne, a, b);
+    EXPECT_EQ(g.find(notEq), g.find(ne));
+}
+
+TEST(EGraphTest, NotLtToGe) {
+    // !(a < b) → a >= b
+    EGraph g;
+    ClassId a = g.addVar("a");
+    ClassId b = g.addVar("b");
+    ClassId lt = g.addBinOp(Op::Lt, a, b);
+    ClassId notLt = g.addUnaryOp(Op::LogNot, lt);
+
+    auto rules = getComparisonRules();
+    g.saturate(rules);
+
+    ClassId ge = g.addBinOp(Op::Ge, a, b);
+    EXPECT_EQ(g.find(notLt), g.find(ge));
+}
+
+TEST(EGraphTest, GtSwapToLt) {
+    // a > b → b < a
+    EGraph g;
+    ClassId a = g.addVar("a");
+    ClassId b = g.addVar("b");
+    ClassId gt = g.addBinOp(Op::Gt, a, b);
+
+    auto rules = getComparisonRules();
+    g.saturate(rules);
+
+    ClassId lt = g.addBinOp(Op::Lt, b, a);
+    EXPECT_EQ(g.find(gt), g.find(lt));
+}
+
+TEST(EGraphTest, SubLtZeroToLt) {
+    // (a - b) < 0 → a < b
+    EGraph g;
+    ClassId a = g.addVar("a");
+    ClassId b = g.addVar("b");
+    ClassId sub = g.addBinOp(Op::Sub, a, b);
+    ClassId zero = g.addConst(0);
+    ClassId expr = g.addBinOp(Op::Lt, sub, zero);
+
+    auto rules = getComparisonRules();
+    g.saturate(rules);
+
+    ClassId lt = g.addBinOp(Op::Lt, a, b);
+    EXPECT_EQ(g.find(expr), g.find(lt));
+}
+
+TEST(EGraphTest, DeMorganBitwiseAnd) {
+    // ~(a & b) → (~a) | (~b)
+    EGraph g;
+    ClassId a = g.addVar("a");
+    ClassId b = g.addVar("b");
+    ClassId band = g.addBinOp(Op::BitAnd, a, b);
+    ClassId notBand = g.addUnaryOp(Op::BitNot, band);
+
+    auto rules = getBitwiseRules();
+    g.saturate(rules);
+
+    ClassId notA = g.addUnaryOp(Op::BitNot, a);
+    ClassId notB = g.addUnaryOp(Op::BitNot, b);
+    ClassId demorgan = g.addBinOp(Op::BitOr, notA, notB);
+    g.saturate(rules);
+    EXPECT_EQ(g.find(notBand), g.find(demorgan));
+}
+
+TEST(EGraphTest, DoubleBitNotIdentity) {
+    // ~~x → x
+    EGraph g;
+    ClassId x = g.addVar("x");
+    ClassId not1 = g.addUnaryOp(Op::BitNot, x);
+    ClassId not2 = g.addUnaryOp(Op::BitNot, not1);
+
+    auto rules = getBitwiseRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(not2), g.find(x));
 }
