@@ -101,6 +101,7 @@ set(COMPILER_SOURCES
     src/egraph.cpp
     src/egraph_optimizer.cpp
     src/superoptimizer.cpp
+    src/hardware_graph.cpp
     src/compiler.cpp
     src/main.cpp
 )
@@ -203,6 +204,7 @@ if(GTest_FOUND)
         src/egraph.cpp
         src/egraph_optimizer.cpp
         src/superoptimizer.cpp
+        src/hardware_graph.cpp
         src/compiler.cpp
         runtime/value.cpp
         runtime/aot_profile.cpp

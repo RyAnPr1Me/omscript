@@ -15,7 +15,7 @@ A low-level, C-like programming language with dynamic typing and **automatic ref
 - **For-Each Loops**: Iterate over arrays with `for (x in array)`
 - **Switch/Case**: Multi-way branching with `switch`/`case`/`default`
 - **Do-While Loops**: Execute body at least once with `do { ... } while (cond);`
-- **69 Built-in Functions**: Math, array manipulation, strings, character classification, type conversion, system, and I/O
+- **92 Built-in Functions**: Math, array manipulation, strings, character classification, type conversion, system, and I/O
 - **Error Handling**: `try`/`catch`/`throw` for structured error handling
 - **Enum Declarations**: Named integer constants with auto-increment
 - **Default Parameters**: Optional function parameters with default values
@@ -50,7 +50,7 @@ OmScript uses **reference counting** for automatic memory management:
 
 - **malloc/free based**: All heap allocations use standard C memory functions
 - **Automatic cleanup**: Reference counting ensures deterministic deallocation
-- **Zero-copy**: Shared strings through reference counting (copy-on-write)
+- **Shared strings**: Reference counting avoids unnecessary copies
 - **No GC pauses**: Deterministic memory management without stop-the-world collection
 - **Minimal overhead**: Only 16 bytes per unique string + data
 
@@ -157,7 +157,7 @@ var m = min(3, 7);       // minimum: m = 3
 var p = pow(2, 8);       // integer exponentiation: p = 256
 var s = sqrt(16);        // integer square root: s = 4
 ```
-See [LANGUAGE_REFERENCE.md](LANGUAGE_REFERENCE.md) for the full list of 69 built-in functions.
+See [LANGUAGE_REFERENCE.md](LANGUAGE_REFERENCE.md) for the full list of 92 built-in functions.
 
 ### Lambda Expressions
 ```omscript
@@ -439,7 +439,7 @@ Types are determined at runtime, allowing flexible code while maintaining perfor
 # Run unit tests (requires GTest)
 cd build && ctest --output-on-failure
 
-# Run integration tests (276 tests)
+# Run integration tests (299 tests)
 bash run_tests.sh
 
 # Build with sanitizers for development

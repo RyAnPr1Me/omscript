@@ -1,5 +1,6 @@
 #include "codegen.h"
 #include "diagnostic.h"
+#include "hardware_graph.h"
 #include "superoptimizer.h"
 #include <iostream>
 #include <llvm/ADT/StringMap.h>
@@ -321,15 +322,16 @@ void CodeGenerator::runOptimizationPasses() {
     }
 #endif
 
-    // At O1+, infer function attributes (readnone, readonly, nounwind, etc.)
-    // from well-known library function declarations early in the pipeline.
-    // This enriches the attribute set before any optimization pass runs,
-    // enabling better alias analysis, dead-code elimination, and inlining.
-    if (optimizationLevel >= OptimizationLevel::O1) {
-        PB.registerPipelineStartEPCallback([](llvm::ModulePassManager& MPM, llvm::OptimizationLevel) {
-            MPM.addPass(llvm::InferFunctionAttrsPass());
-        });
-    }
+    // NOTE: InferFunctionAttrsPass is intentionally NOT registered here.
+    // LLVM's default pipeline already includes it, and we previously added it
+    // again as an explicit pipeline-start callback.  However, this pass auto-
+    // infers aggressive attributes (allocsize, allockind, inaccessibleMemOnly)
+    // on well-known C library functions like malloc.  Those attributes interact
+    // poorly with the loop unroller/optimizer when the allocated buffer is
+    // immediately written to in a loop (e.g. string repetition via strcat or
+    // memcpy): the optimizer can incorrectly eliminate the loop exit condition,
+    // producing an infinite loop and segfault.  The attributes we manually set
+    // on library function declarations are sufficient.
 
     // At O2+ with -floop-optimize, register LoopDistributePass to run just
     // before the vectorizer starts.  Loop distribution splits a loop with
@@ -575,6 +577,19 @@ void CodeGenerator::runOptimizationPasses() {
             superConfig.synthesis.costThreshold = 0.9;
         }
         superopt::superoptimizeModule(*module, superConfig);
+    }
+
+    // Hardware Graph Optimization Engine: run after the superoptimizer when
+    // -march or -mtune is explicitly provided.  The HGOE models the target
+    // CPU as a directed graph of execution resources, maps the compiled
+    // program onto that graph, and applies hardware-aware transformations
+    // (FMA generation, prefetch insertion, branch layout optimisation).
+    // When neither flag is set, this is a complete no-op.
+    if (enableHGOE_ && optimizationLevel >= OptimizationLevel::O2) {
+        hgoe::HGOEConfig hgoeConfig;
+        hgoeConfig.marchCpu = marchCpu_;
+        hgoeConfig.mtuneCpu = mtuneCpu_;
+        hgoe::optimizeModule(*module, hgoeConfig);
     }
 }
 

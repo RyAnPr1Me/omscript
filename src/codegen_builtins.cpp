@@ -1901,6 +1901,14 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* valArg = generateExpression(expr->arguments[1].get());
         sizeArg = toDefaultType(sizeArg);
         valArg = toDefaultType(valArg);
+        // Clamp negative sizes to 0 to prevent integer overflow in the
+        // allocation size calculation (negative * 8 wraps to a huge unsigned
+        // value, causing malloc to over-allocate or fail).
+        {
+            llvm::Value* zeroClamp = llvm::ConstantInt::get(getDefaultType(), 0);
+            llvm::Value* isNeg = builder->CreateICmpSLT(sizeArg, zeroClamp, "fill.isneg");
+            sizeArg = builder->CreateSelect(isNeg, zeroClamp, sizeArg, "fill.clamp");
+        }
         // Allocate: (size + 1) * 8 bytes
         llvm::Value* slots = builder->CreateAdd(sizeArg, llvm::ConstantInt::get(getDefaultType(), 1), "fill.slots");
         llvm::Value* bytes = builder->CreateMul(slots, llvm::ConstantInt::get(getDefaultType(), 8), "fill.bytes");

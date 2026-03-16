@@ -9,7 +9,7 @@ OmScript implements **reference counting** for memory management of dynamic valu
 ### Key Components
 
 1. **RefCountedString Class** (`runtime/refcounted.h`)
-   - Implements copy-on-write semantics
+   - Implements reference-counted sharing
    - Uses `malloc` for string data allocation
    - Automatic reference count management
    - Zero-overhead for empty strings
@@ -238,7 +238,7 @@ OmScript's reference counting system provides:
 - ✅ Automatic memory management
 - ✅ Deterministic deallocation
 - ✅ Minimal overhead (16 bytes + string data)
-- ✅ Zero-copy for shared strings
+- ✅ Shared strings via reference counting
 - ✅ Exception-safe cleanup
 - ✅ No garbage collection pauses
 

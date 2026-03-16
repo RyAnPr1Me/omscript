@@ -359,6 +359,9 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
 
     // String repetition: str * n  (or  n * str) → repeat str n times.
     // This is the binary-operator equivalent of str_repeat(str, n).
+    //
+    // Uses the same strcat-loop strategy as the str_repeat() builtin,
+    // which is robust under LLVM O2+ optimizations.
     if (expr->op == "*" && (leftIsStr || rightIsStr)) {
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
         llvm::Value* strVal = leftIsStr ? left : right;
@@ -376,8 +379,9 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         llvm::Value* allocSz =
             builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "strmul.alloc");
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {allocSz}, "strmul.buf");
+        // Null-terminate first byte so strcat works from empty buffer
         builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), buf);
-        // Loop countVal times, appending strPtr each iteration.
+        // Loop countVal times, strcat'ing strPtr each iteration.
         llvm::Function* curFn = builder->GetInsertBlock()->getParent();
         llvm::BasicBlock* preHdr = builder->GetInsertBlock();
         llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "strmul.loop", curFn);

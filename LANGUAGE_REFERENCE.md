@@ -41,7 +41,7 @@ OmScript is a **low-level, C-like programming language** featuring:
 - **Reference-counted memory management** — Automatic deterministic deallocation via malloc/free with reference counting on strings.
 - **Adaptive JIT runtime** — A lightweight JIT runtime monitors function call counts and recompiles hot functions at higher optimization levels with profile-guided hints, producing even faster native code for performance-critical paths.
 - **Aggressive optimization** — Four optimization levels (O0–O3) plus a special OPTMAX directive that applies exhaustive multi-pass optimization to marked functions.
-- **69 built-in standard library functions** — Math, array manipulation, string, character classification, type conversion, system, and I/O, all compiled to native machine code.
+- **92 built-in standard library functions** — Math, array manipulation, string, character classification, type conversion, system, and I/O, all compiled to native machine code.
 
 ### Design Philosophy
 
@@ -53,7 +53,7 @@ OmScript prioritizes **performance** and **simplicity**. The language is deliber
 
 ### 2.1 Pipeline Stages
 
-The OmScript compiler (`omsc`) transforms source code to a native executable through five stages:
+The OmScript compiler (`omsc`) transforms source code to a native executable through eight stages:
 
 ```
 Source Code (.om)
@@ -70,7 +70,27 @@ Source Code (.om)
         │
         ▼
    ┌──────────┐
-   │ CODEGEN  │  Translates AST → LLVM IR, runs optimization passes
+   │  E-GRAPH │  Equality-saturation rewrites on AST (O2+)
+   └────┬─────┘
+        │
+        ▼
+   ┌──────────┐
+   │ CODEGEN  │  Translates AST → LLVM IR
+   └────┬─────┘
+        │
+        ▼
+   ┌──────────┐
+   │ LLVM OPT │  Standard LLVM optimization pipeline
+   └────┬─────┘
+        │
+        ▼
+   ┌──────────┐
+   │SUPEROPT  │  Post-pipeline superoptimizer (O2+)
+   └────┬─────┘
+        │
+        ▼
+   ┌──────────┐
+   │   HGOE   │  Hardware-graph target-aware opts (O2+, -march/-mtune)
    └────┬─────┘
         │
         ▼
@@ -90,8 +110,12 @@ Source Code (.om)
 |-------|-------|--------|------|
 | **Lexing** | Source text (`.om` file) | Token stream | `Lexer::tokenize()` |
 | **Parsing** | Token stream | Abstract Syntax Tree | `Parser::parse()` |
+| **E-Graph Optimization** | AST | Optimized AST | `egraph::optimizeProgram()` |
 | **Code Generation** | AST | LLVM IR Module | `CodeGenerator::generate()` |
-| **Object Emission** | LLVM IR Module | Native object file (`.o`) | `CodeGenerator::writeObjectFile()` |
+| **LLVM Optimization** | LLVM IR Module | Optimized LLVM IR | `runOptimizationPasses()` |
+| **Superoptimizer** | Optimized LLVM IR | Further-optimized IR | `superopt::superoptimizeModule()` |
+| **HGOE** | Optimized LLVM IR | Target-tuned IR | `hgoe::optimizeModule()` |
+| **Object Emission** | Optimized LLVM IR | Native object file (`.o`) | `CodeGenerator::writeObjectFile()` |
 | **Linking** | Object file | Executable binary | System `gcc` |
 
 ### 2.3 Intermediate Representations
@@ -1026,7 +1050,7 @@ At runtime, strings are fully dynamic:
 
 ## 11. Standard Library
 
-OmScript provides **69 built-in functions**. All stdlib functions are compiled directly to native machine code via LLVM IR.
+OmScript provides **92 built-in functions**. All stdlib functions are compiled directly to native machine code via LLVM IR.
 
 ### 11.1 I/O Functions
 
@@ -2022,7 +2046,7 @@ OmScript is an **AOT-compiled language** — all code compiles to native machine
 When compiling to an executable (the default `omsc build` path), all code is AOT-compiled through the standard LLVM pipeline:
 
 ```
-Source → Lexer → Parser → AST → CodeGen (LLVM IR) → LLVM Optimizer → Native Object → Linker → Executable
+Source → Lexer → Parser → AST → E-Graph (O2+) → CodeGen (LLVM IR) → LLVM Optimizer → Superoptimizer (O2+) → HGOE (O2+) → Native Object → Linker → Executable
 ```
 
 The adaptive JIT runtime is only used during `omsc run` for interactive/development workflows.

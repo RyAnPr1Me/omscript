@@ -138,6 +138,13 @@ class CodeGenerator {
         enableSuperopt_ = enable;
     }
 
+    /// Enable or disable the Hardware Graph Optimization Engine (default: true).
+    /// HGOE activates only when -march or -mtune flags are provided; this flag
+    /// allows explicitly disabling it even when those flags are present.
+    void setHardwareGraphOpt(bool enable) {
+        enableHGOE_ = enable;
+    }
+
     /// Enable PGO instrumentation generation mode.
     /// When set, the AOT-compiled binary will write a raw profile (.profraw)
     /// to @p profilePath at program exit, capturing branch and call counts.
@@ -362,6 +369,7 @@ class CodeGenerator {
     bool enableLoopOptimize_ = true;  // -floop-optimize / -fno-loop-optimize
     bool enableEGraph_ = true;        // -fegraph / -fno-egraph (e-graph equality saturation)
     bool enableSuperopt_ = true;      // -fsuperopt / -fno-superopt (superoptimizer)
+    bool enableHGOE_ = true;          // -fhgoe / -fno-hgoe (hardware graph optimization)
     unsigned preferredVectorWidth_ = 4; // SIMD vector width for loop hints (target-aware)
     std::string pgoGenPath_;          // --pgo-gen=<path>: emit raw profile to this file
     std::string pgoUsePath_;          // --pgo-use=<path>: read profile data from this file

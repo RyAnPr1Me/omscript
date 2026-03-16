@@ -19,6 +19,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace omscript {
 namespace egraph {
@@ -285,6 +286,71 @@ std::unique_ptr<Expression> optimizeExpression(const Expression* expr) {
 /// Recursively optimize all expressions within a statement.
 static void optimizeStatement(Statement* stmt);
 
+/// Check whether an expression tree can be fully represented in the e-graph.
+/// Returns false if any sub-expression would degenerate into an opaque variable
+/// (e.g. IndexExpr, unsupported binary operators like ??), which would cause
+/// the reconstructed AST to reference non-existent variables like __opaque.
+static bool canRepresentInEGraph(const Expression* expr) {
+    if (!expr) return true;
+
+    switch (expr->type) {
+    case ASTNodeType::LITERAL_EXPR:
+    case ASTNodeType::IDENTIFIER_EXPR:
+        return true;
+
+    case ASTNodeType::BINARY_EXPR: {
+        auto* bin = static_cast<const BinaryExpr*>(expr);
+        // Only operators that have a corresponding e-graph Op are safe.
+        static const std::unordered_set<std::string> supported = {
+            "+", "-", "*", "/", "%", "**", "&", "|", "^", "<<", ">>",
+            "==", "!=", "<", "<=", ">", ">=", "&&", "||"
+        };
+        if (supported.find(bin->op) == supported.end()) return false;
+        // String operands with * or + have different semantics (repetition,
+        // concatenation) than integer arithmetic.  The e-graph's algebraic
+        // rules (e.g. x*0→0, x*1→x) are not valid for string operations,
+        // so we must exclude them.
+        if (bin->op == "*" || bin->op == "+") {
+            auto isStringLit = [](const Expression* e) -> bool {
+                if (!e) return false;
+                if (auto* lit = dynamic_cast<const LiteralExpr*>(e))
+                    return lit->literalType == LiteralExpr::LiteralType::STRING;
+                return false;
+            };
+            if (isStringLit(bin->left.get()) || isStringLit(bin->right.get()))
+                return false;
+        }
+        return canRepresentInEGraph(bin->left.get()) &&
+               canRepresentInEGraph(bin->right.get());
+    }
+
+    case ASTNodeType::UNARY_EXPR: {
+        auto* un = static_cast<const UnaryExpr*>(expr);
+        if (un->op != "-" && un->op != "~" && un->op != "!") return false;
+        return canRepresentInEGraph(un->operand.get());
+    }
+
+    case ASTNodeType::TERNARY_EXPR: {
+        auto* tern = static_cast<const TernaryExpr*>(expr);
+        return canRepresentInEGraph(tern->condition.get()) &&
+               canRepresentInEGraph(tern->thenExpr.get()) &&
+               canRepresentInEGraph(tern->elseExpr.get());
+    }
+
+    case ASTNodeType::CALL_EXPR: {
+        auto* call = static_cast<const CallExpr*>(expr);
+        for (const auto& arg : call->arguments) {
+            if (!canRepresentInEGraph(arg.get())) return false;
+        }
+        return true;
+    }
+
+    default:
+        // IndexExpr, AssignExpr, etc. — cannot be represented.
+        return false;
+    }
+}
+
 /// Optimize an expression in-place by replacing with the e-graph result.
 static std::unique_ptr<Expression> tryOptimize(std::unique_ptr<Expression> expr) {
     if (!expr) return nullptr;
@@ -297,8 +363,24 @@ static std::unique_ptr<Expression> tryOptimize(std::unique_ptr<Expression> expr)
     case ASTNodeType::LITERAL_EXPR:
     case ASTNodeType::IDENTIFIER_EXPR:
     case ASTNodeType::TERNARY_EXPR: {
+        // Guard: skip expressions containing sub-expressions that the e-graph
+        // cannot represent (e.g. array index, null coalesce ??).  Without this
+        // check, the e-graph would introduce opaque variable references like
+        // __opaque or __binop_?? that break codegen.
+        if (!canRepresentInEGraph(expr.get()))
+            return expr;
+        // Preserve source location from the original expression so that error
+        // messages from the codegen still include line/column information.
+        int origLine = expr->line;
+        int origColumn = expr->column;
         auto optimized = optimizeExpression(expr.get());
-        if (optimized) return optimized;
+        if (optimized) {
+            if (optimized->line == 0) {
+                optimized->line = origLine;
+                optimized->column = origColumn;
+            }
+            return optimized;
+        }
         return expr;
     }
     default:

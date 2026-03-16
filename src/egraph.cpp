@@ -338,8 +338,14 @@ void EGraph::foldConstants(ClassId cls) {
                 case Op::BitAnd: result = lv & rv; break;
                 case Op::BitOr:  result = lv | rv; break;
                 case Op::BitXor: result = lv ^ rv; break;
-                case Op::Shl:    result = lv << rv; break;
-                case Op::Shr:    result = lv >> rv; break;
+                case Op::Shl:
+                    if (rv >= 0 && rv < 64) result = lv << rv;
+                    else valid = false;
+                    break;
+                case Op::Shr:
+                    if (rv >= 0 && rv < 64) result = lv >> rv;
+                    else valid = false;
+                    break;
                 case Op::Eq:     result = (lv == rv) ? 1 : 0; break;
                 case Op::Ne:     result = (lv != rv) ? 1 : 0; break;
                 case Op::Lt:     result = (lv < rv) ? 1 : 0; break;
@@ -648,16 +654,11 @@ std::vector<RewriteRule> getAlgebraicRules() {
         P::OpPat(Op::Div, {P::Wild("x"), P::Wild("x")}),
         [](EGraph& g, const Subst&) { return g.addConst(1); });
 
-    // ── Strength reduction: x / 2^n → x >> n ────────────────────────────
-    for (int shift = 1; shift <= 10; ++shift) {
-        long long val = 1LL << shift;
-        rules.emplace_back("div_pow2_" + std::to_string(val),
-            P::OpPat(Op::Div, {P::Wild("x"), P::ConstPat(val)}),
-            [shift](EGraph& g, const Subst& s) {
-                ClassId shiftAmt = g.addConst(shift);
-                return g.addBinOp(Op::Shr, s.at("x"), shiftAmt);
-            });
-    }
+    // NOTE: x / 2^n → x >> n is NOT valid for signed integers.
+    // Arithmetic shift right rounds toward -∞ but signed division rounds
+    // toward zero.  For example, -7 / 2 = -3 but -7 >> 1 = -4.
+    // The codegen already emits the correct (x + ((x >> 63) & (2^n - 1))) >> n
+    // sequence for power-of-2 constant divisors.
 
     // ── Double negation: -(-x) → x ──────────────────────────────────────
     rules.emplace_back("double_neg",
