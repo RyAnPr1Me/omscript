@@ -338,8 +338,14 @@ void EGraph::foldConstants(ClassId cls) {
                 case Op::BitAnd: result = lv & rv; break;
                 case Op::BitOr:  result = lv | rv; break;
                 case Op::BitXor: result = lv ^ rv; break;
-                case Op::Shl:    result = lv << rv; break;
-                case Op::Shr:    result = lv >> rv; break;
+                case Op::Shl:
+                    if (rv >= 0 && rv < 64) result = lv << rv;
+                    else valid = false;
+                    break;
+                case Op::Shr:
+                    if (rv >= 0 && rv < 64) result = lv >> rv;
+                    else valid = false;
+                    break;
                 case Op::Eq:     result = (lv == rv) ? 1 : 0; break;
                 case Op::Ne:     result = (lv != rv) ? 1 : 0; break;
                 case Op::Lt:     result = (lv < rv) ? 1 : 0; break;

@@ -359,6 +359,30 @@ TEST(EGraphTest, ConstantFoldComparison) {
     EXPECT_EQ(g.find(expr), g.find(expected));
 }
 
+// Regression: shifting by >= 64 or by a negative amount is undefined behavior
+// in C++.  The constant folder must refuse to fold these instead of invoking UB.
+TEST(EGraphTest, ConstantFoldShiftOutOfRange) {
+    {
+        EGraph g;
+        ClassId a = g.addConst(1);
+        ClassId b = g.addConst(100);  // shift >= 64 → UB
+        (void)g.addBinOp(Op::Shl, a, b);
+
+        auto rules = getAllRules();
+        // Must not crash (no UB) — just not fold the constant
+        g.saturate(rules);
+    }
+    {
+        EGraph g;
+        ClassId a = g.addConst(1);
+        ClassId b = g.addConst(-1);  // negative shift → UB
+        (void)g.addBinOp(Op::Shr, a, b);
+
+        auto rules = getAllRules();
+        g.saturate(rules);
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Comparison rule tests
 // ─────────────────────────────────────────────────────────────────────────────
