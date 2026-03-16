@@ -2518,6 +2518,7 @@ int main(int argc, char* argv[]) {
             // EmitIR
             auto codegenStart = std::chrono::steady_clock::now();
             omscript::CodeGenerator codegen(optLevel);
+            codegen.setVerbose(verbose);
             codegen.setMarch(marchCpu);
             codegen.setMtune(mtuneCpu);
             codegen.setPIC(flagPIC);
@@ -2573,6 +2574,7 @@ int main(int argc, char* argv[]) {
 
             auto codegenStart = std::chrono::steady_clock::now();
             omscript::CodeGenerator codegen(optLevel);
+            codegen.setVerbose(verbose);
             codegen.setMarch(marchCpu);
             codegen.setMtune(mtuneCpu);
             codegen.setPIC(flagPIC);
@@ -2688,6 +2690,7 @@ int main(int argc, char* argv[]) {
                 std::cout << "  Generating code..." << std::endl;
             auto codegenStart2 = std::chrono::steady_clock::now();
             omscript::CodeGenerator cg(optLevel);
+            cg.setVerbose(verbose);
             cg.setMarch(marchCpu);
             cg.setMtune(mtuneCpu);
             cg.setPIC(false); // not needed for in-process JIT

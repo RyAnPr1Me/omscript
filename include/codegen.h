@@ -185,6 +185,17 @@ class CodeGenerator {
         debugMode_ = enable;
     }
 
+    /// Enable or disable verbose output during code generation.
+    /// When true, the CodeGenerator prints messages about which optimization
+    /// passes are running and their results.
+    void setVerbose(bool enable) {
+        verbose_ = enable;
+    }
+
+    [[nodiscard]] bool isVerbose() const noexcept {
+        return verbose_;
+    }
+
     /// Set the source filename for debug info metadata.
     void setSourceFilename(const std::string& filename) {
         sourceFilename_ = filename;
@@ -375,6 +386,7 @@ class CodeGenerator {
     std::string pgoUsePath_;          // --pgo-use=<path>: read profile data from this file
     bool dynamicCompilation_ = false; // Dynamic (JIT) compilation mode
     bool lto_ = false;                // LTO mode: use pre-link pipeline
+    bool verbose_ = false;            // -V: print optimization pass messages
 
     // DWARF debug info infrastructure
     bool debugMode_ = false;                       // -g: emit debug metadata
