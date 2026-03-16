@@ -283,10 +283,12 @@ TEST(EGraphTest, DivPow2ToShift) {
     auto rules = getAlgebraicRules();
     g.saturate(rules);
 
-    // x/4 should be equivalent to x>>2
+    // x/4 should NOT be equivalent to x>>2 for signed integers
+    // (e.g. -7/4 = -1, but -7>>2 = -2 due to rounding toward -inf).
+    // The div_pow2 rule was removed to fix this signed-division bug.
     ClassId two = g.addConst(2);
     ClassId shiftExpr = g.addBinOp(Op::Shr, x, two);
-    EXPECT_EQ(g.find(expr), g.find(shiftExpr));
+    EXPECT_NE(g.find(expr), g.find(shiftExpr));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

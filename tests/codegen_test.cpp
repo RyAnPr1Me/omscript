@@ -4678,8 +4678,10 @@ TEST(CodegenTest, MemmoveHasFullAttributes) {
 // ===========================================================================
 
 TEST(CodegenTest, MallocHasAllocatorAttributes) {
-    // malloc should have allocsize, allockind, and memory effect attributes
-    // to enable dead allocation elimination and improved alias analysis.
+    // malloc should have basic safety attributes.
+    // NOTE: allocsize, allockind, and inaccessibleMemOnly are intentionally
+    // omitted — they cause LLVM's InferFunctionAttrs to add aggressive
+    // attributes that lead to miscompilation of string repetition loops.
     CodeGenerator codegen(OptimizationLevel::O0);
     // String concatenation triggers a malloc call.
     auto* mod =
@@ -4690,22 +4692,7 @@ TEST(CodegenTest, MallocHasAllocatorAttributes) {
     EXPECT_TRUE(fn->hasFnAttribute(llvm::Attribute::NoUnwind));
     EXPECT_TRUE(fn->hasFnAttribute(llvm::Attribute::WillReturn));
     EXPECT_TRUE(fn->hasRetAttribute(llvm::Attribute::NoAlias));
-    // allocsize(0): parameter 0 is the allocation size
-    EXPECT_TRUE(fn->hasFnAttribute(llvm::Attribute::AllocSize))
-        << "malloc should have allocsize attribute";
-    auto allocSize = fn->getFnAttribute(llvm::Attribute::AllocSize).getAllocSizeArgs();
-    EXPECT_EQ(allocSize.first, 0u) << "malloc allocsize should reference parameter 0";
-    // allockind: alloc | uninitialized
-    EXPECT_TRUE(fn->hasFnAttribute(llvm::Attribute::AllocKind))
-        << "malloc should have allockind attribute";
-    auto kind = fn->getFnAttribute(llvm::Attribute::AllocKind).getAllocKind();
-    EXPECT_TRUE((kind & llvm::AllocFnKind::Alloc) != llvm::AllocFnKind::Unknown)
-        << "malloc allockind should include Alloc";
-    EXPECT_TRUE((kind & llvm::AllocFnKind::Uninitialized) != llvm::AllocFnKind::Unknown)
-        << "malloc allockind should include Uninitialized";
-    // memory(inaccessiblemem: readwrite)
-    EXPECT_TRUE(fn->hasFnAttribute(llvm::Attribute::Memory))
-        << "malloc should have memory effects attribute";
+    EXPECT_TRUE(fn->hasRetAttribute(llvm::Attribute::NonNull));
 }
 
 TEST(CodegenTest, FreeHasAllocatorAttributes) {

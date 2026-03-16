@@ -306,6 +306,20 @@ static bool canRepresentInEGraph(const Expression* expr) {
             "==", "!=", "<", "<=", ">", ">=", "&&", "||"
         };
         if (supported.find(bin->op) == supported.end()) return false;
+        // String operands with * or + have different semantics (repetition,
+        // concatenation) than integer arithmetic.  The e-graph's algebraic
+        // rules (e.g. x*0→0, x*1→x) are not valid for string operations,
+        // so we must exclude them.
+        if (bin->op == "*" || bin->op == "+") {
+            auto isStringLit = [](const Expression* e) -> bool {
+                if (!e) return false;
+                if (auto* lit = dynamic_cast<const LiteralExpr*>(e))
+                    return lit->literalType == LiteralExpr::LiteralType::STRING;
+                return false;
+            };
+            if (isStringLit(bin->left.get()) || isStringLit(bin->right.get()))
+                return false;
+        }
         return canRepresentInEGraph(bin->left.get()) &&
                canRepresentInEGraph(bin->right.get());
     }
