@@ -827,8 +827,11 @@ bool synthesizeReplacement(llvm::Instruction* inst, const SynthesisConfig& confi
     // Template 1: Expensive multiply by constant → shift+add/sub sequence
     if (inst->getOpcode() == llvm::Instruction::Mul) {
         auto cval = getConstIntValue(inst->getOperand(1));
-        if (!cval) cval = getConstIntValue(inst->getOperand(0));
-        llvm::Value* var = getConstIntValue(inst->getOperand(1)) ? inst->getOperand(0) : inst->getOperand(1);
+        llvm::Value* var = inst->getOperand(0);
+        if (!cval) {
+            cval = getConstIntValue(inst->getOperand(0));
+            var = inst->getOperand(1);
+        }
         if (!cval) return false;
 
         int64_t c = *cval;
