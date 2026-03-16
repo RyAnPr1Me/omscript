@@ -124,6 +124,7 @@ struct SuperoptimizerConfig {
     bool enableSynthesis = true;         ///< Enumerative synthesis for small sequences
     bool enableBranchOpt = true;         ///< Branch-to-select conversion
     bool enableAlgebraic = true;         ///< Algebraic identity simplification
+    bool enableDeadCodeElim = true;      ///< Remove dead instructions after optimization
     SynthesisConfig synthesis;
 };
 
@@ -133,6 +134,7 @@ struct SuperoptimizerStats {
     unsigned synthReplacements = 0;
     unsigned branchesSimplified = 0;
     unsigned algebraicSimplified = 0;
+    unsigned deadCodeEliminated = 0;
     double estimatedSpeedup = 0.0;     ///< Estimated percentage improvement
 };
 

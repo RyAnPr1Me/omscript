@@ -224,6 +224,16 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
         if (lhs && rhs && *rhs < 64) return *lhs >> *rhs;
         break;
     }
+    case llvm::Instruction::AShr: {
+        auto lhs = getVal(inst->getOperand(0));
+        auto rhs = getVal(inst->getOperand(1));
+        if (lhs && rhs && *rhs < 64) {
+            // Arithmetic shift right (sign-extending)
+            int64_t signed_lhs = static_cast<int64_t>(*lhs);
+            return static_cast<uint64_t>(signed_lhs >> *rhs);
+        }
+        break;
+    }
     default:
         break;
     }
@@ -506,6 +516,93 @@ static std::optional<IdiomMatch> detectBitFieldExtract(llvm::Instruction* inst) 
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Idiom detection — conditional negation
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Detect: select(cond, sub(0, x), x)  →  conditional negation
+/// Also:   (x ^ mask) - mask  where mask = ashr(x, bitwidth-1)
+static std::optional<IdiomMatch> detectConditionalNeg(llvm::Instruction* inst) {
+    // Pattern: select(cond, -x, x)
+    if (auto* sel = llvm::dyn_cast<llvm::SelectInst>(inst)) {
+        llvm::Value* trueVal = sel->getTrueValue();
+        llvm::Value* falseVal = sel->getFalseValue();
+
+        // Check if trueVal = sub(0, falseVal)  i.e. trueVal = -falseVal
+        if (auto* sub = llvm::dyn_cast<llvm::BinaryOperator>(trueVal)) {
+            if (sub->getOpcode() == llvm::Instruction::Sub &&
+                isConstInt(sub->getOperand(0), 0) &&
+                sub->getOperand(1) == falseVal) {
+                // This is select(cond, -x, x) but NOT abs (abs checks x < 0)
+                // Only match if condition is NOT "x < 0" (abs is already handled)
+                auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(sel->getCondition());
+                if (cmp && cmp->getPredicate() == llvm::ICmpInst::ICMP_SLT &&
+                    isConstInt(cmp->getOperand(1), 0) &&
+                    cmp->getOperand(0) == falseVal) {
+                    return std::nullopt; // This is abs, handled elsewhere
+                }
+
+                IdiomMatch match;
+                match.idiom = Idiom::ConditionalNeg;
+                match.rootInst = inst;
+                match.operands = {sel->getCondition(), falseVal};
+                match.bitWidth = inst->getType()->getIntegerBitWidth();
+                return match;
+            }
+        }
+        // Check reverse: select(cond, x, -x)
+        if (auto* sub = llvm::dyn_cast<llvm::BinaryOperator>(falseVal)) {
+            if (sub->getOpcode() == llvm::Instruction::Sub &&
+                isConstInt(sub->getOperand(0), 0) &&
+                sub->getOperand(1) == trueVal) {
+                IdiomMatch match;
+                match.idiom = Idiom::ConditionalNeg;
+                match.rootInst = inst;
+                // Invert: select(!cond, -x, x)
+                match.operands = {sel->getCondition(), trueVal};
+                match.bitWidth = inst->getType()->getIntegerBitWidth();
+                return match;
+            }
+        }
+    }
+    return std::nullopt;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Idiom detection — count trailing zeros via isolate lowest bit
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Detect: x & (-x) → isolate lowest set bit (related to CTZ)
+/// Pattern: and(x, sub(0, x))
+static std::optional<IdiomMatch> detectIsolateLowestBit(llvm::Instruction* inst) {
+    if (inst->getOpcode() != llvm::Instruction::And) return std::nullopt;
+
+    llvm::Value* op0 = inst->getOperand(0);
+    llvm::Value* op1 = inst->getOperand(1);
+
+    // Try both orderings: and(x, sub(0, x)) or and(sub(0, x), x)
+    auto tryMatch = [](llvm::Value* x, llvm::Value* negCandidate) -> llvm::Value* {
+        auto* sub = llvm::dyn_cast<llvm::BinaryOperator>(negCandidate);
+        if (sub && sub->getOpcode() == llvm::Instruction::Sub &&
+            isConstInt(sub->getOperand(0), 0) &&
+            sub->getOperand(1) == x) {
+            return x;
+        }
+        return nullptr;
+    };
+
+    llvm::Value* x = tryMatch(op0, op1);
+    if (!x) x = tryMatch(op1, op0);
+    if (!x) return std::nullopt;
+
+    IdiomMatch match;
+    match.idiom = Idiom::CountTrailingZeros;
+    match.rootInst = inst;
+    match.operands = {x};
+    match.bitWidth = inst->getType()->getIntegerBitWidth();
+    return match;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main idiom detection
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -531,6 +628,14 @@ std::vector<IdiomMatch> detectIdioms(llvm::BasicBlock& bb) {
             continue;
         }
         if (auto m = detectBitFieldExtract(&inst)) {
+            results.push_back(std::move(*m));
+            continue;
+        }
+        if (auto m = detectConditionalNeg(&inst)) {
+            results.push_back(std::move(*m));
+            continue;
+        }
+        if (auto m = detectIsolateLowestBit(&inst)) {
             results.push_back(std::move(*m));
             continue;
         }
@@ -716,6 +821,147 @@ static unsigned applyAlgebraicSimplifications(llvm::Function& func) {
                 }
             }
 
+            // Pattern: x + 0 → x
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Add) {
+                if (isConstInt(inst.getOperand(1), 0)) {
+                    simplified = inst.getOperand(0);
+                } else if (isConstInt(inst.getOperand(0), 0)) {
+                    simplified = inst.getOperand(1);
+                }
+            }
+
+            // Pattern: x * 1 → x
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Mul) {
+                if (isConstInt(inst.getOperand(1), 1)) {
+                    simplified = inst.getOperand(0);
+                } else if (isConstInt(inst.getOperand(0), 1)) {
+                    simplified = inst.getOperand(1);
+                }
+            }
+
+            // Pattern: x * 0 → 0 (integer only)
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Mul) {
+                if (isConstInt(inst.getOperand(1), 0)) {
+                    simplified = llvm::ConstantInt::get(inst.getType(), 0);
+                } else if (isConstInt(inst.getOperand(0), 0)) {
+                    simplified = llvm::ConstantInt::get(inst.getType(), 0);
+                }
+            }
+
+            // Pattern: x & 0 → 0
+            if (!simplified && inst.getOpcode() == llvm::Instruction::And) {
+                if (isConstInt(inst.getOperand(1), 0)) {
+                    simplified = llvm::ConstantInt::get(inst.getType(), 0);
+                } else if (isConstInt(inst.getOperand(0), 0)) {
+                    simplified = llvm::ConstantInt::get(inst.getType(), 0);
+                }
+            }
+
+            // Pattern: x | 0 → x
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Or) {
+                if (isConstInt(inst.getOperand(1), 0)) {
+                    simplified = inst.getOperand(0);
+                } else if (isConstInt(inst.getOperand(0), 0)) {
+                    simplified = inst.getOperand(1);
+                }
+            }
+
+            // Pattern: x << 0 → x
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Shl) {
+                if (isConstInt(inst.getOperand(1), 0)) {
+                    simplified = inst.getOperand(0);
+                }
+            }
+
+            // Pattern: x >> 0 → x (logical or arithmetic)
+            if (!simplified && (inst.getOpcode() == llvm::Instruction::LShr ||
+                                inst.getOpcode() == llvm::Instruction::AShr)) {
+                if (isConstInt(inst.getOperand(1), 0)) {
+                    simplified = inst.getOperand(0);
+                }
+            }
+
+            // Pattern: (x + y) - y → x
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Sub) {
+                if (auto* addInst = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0))) {
+                    if (addInst->getOpcode() == llvm::Instruction::Add &&
+                        addInst->getOperand(1) == inst.getOperand(1) &&
+                        hasOneUse(addInst)) {
+                        simplified = addInst->getOperand(0);
+                    }
+                }
+            }
+
+            // Pattern: (x - y) + y → x
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Add) {
+                if (auto* subInst = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0))) {
+                    if (subInst->getOpcode() == llvm::Instruction::Sub &&
+                        subInst->getOperand(1) == inst.getOperand(1) &&
+                        hasOneUse(subInst)) {
+                        simplified = subInst->getOperand(0);
+                    }
+                }
+            }
+
+            // Pattern: ~~x → x  (xor(xor(x, -1), -1) → x)
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Xor) {
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1))) {
+                    if (ci->isMinusOne()) {
+                        if (auto* inner = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0))) {
+                            if (inner->getOpcode() == llvm::Instruction::Xor) {
+                                if (auto* ci2 = llvm::dyn_cast<llvm::ConstantInt>(inner->getOperand(1))) {
+                                    if (ci2->isMinusOne() && hasOneUse(inner)) {
+                                        simplified = inner->getOperand(0);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Pattern: (x << c1) << c2 → x << (c1 + c2)
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Shl) {
+                if (auto* inner = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0))) {
+                    if (inner->getOpcode() == llvm::Instruction::Shl && hasOneUse(inner)) {
+                        auto c1 = getConstIntValue(inner->getOperand(1));
+                        auto c2 = getConstIntValue(inst.getOperand(1));
+                        if (c1 && c2) {
+                            unsigned bitWidth = inst.getType()->getIntegerBitWidth();
+                            int64_t total = *c1 + *c2;
+                            if (total >= 0 && total < static_cast<int64_t>(bitWidth)) {
+                                llvm::IRBuilder<> builder(&inst);
+                                simplified = builder.CreateShl(
+                                    inner->getOperand(0),
+                                    llvm::ConstantInt::get(inst.getType(), total),
+                                    "shl_combine");
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Pattern: (x >> c1) >> c2 → x >> (c1 + c2) (logical shift)
+            if (!simplified && inst.getOpcode() == llvm::Instruction::LShr) {
+                if (auto* inner = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0))) {
+                    if (inner->getOpcode() == llvm::Instruction::LShr && hasOneUse(inner)) {
+                        auto c1 = getConstIntValue(inner->getOperand(1));
+                        auto c2 = getConstIntValue(inst.getOperand(1));
+                        if (c1 && c2) {
+                            unsigned bitWidth = inst.getType()->getIntegerBitWidth();
+                            int64_t total = *c1 + *c2;
+                            if (total >= 0 && total < static_cast<int64_t>(bitWidth)) {
+                                llvm::IRBuilder<> builder(&inst);
+                                simplified = builder.CreateLShr(
+                                    inner->getOperand(0),
+                                    llvm::ConstantInt::get(inst.getType(), total),
+                                    "lshr_combine");
+                            }
+                        }
+                    }
+                }
+            }
+
             if (simplified) {
                 inst.replaceAllUsesWith(simplified);
                 toErase.push_back(&inst);
@@ -867,6 +1113,36 @@ bool synthesizeReplacement(llvm::Instruction* inst, const SynthesisConfig& confi
             llvm::Value* shl = builder.CreateShl(var, 4);
             replacement = builder.CreateAdd(shl, var, "mul17");
         }
+        // x * 31 → (x << 5) - x  (cost: 2 vs 3)
+        else if (c == 31) {
+            llvm::Value* shl = builder.CreateShl(var, 5);
+            replacement = builder.CreateSub(shl, var, "mul31");
+        }
+        // x * 33 → (x << 5) + x  (cost: 2 vs 3)
+        else if (c == 33) {
+            llvm::Value* shl = builder.CreateShl(var, 5);
+            replacement = builder.CreateAdd(shl, var, "mul33");
+        }
+        // x * 63 → (x << 6) - x  (cost: 2 vs 3)
+        else if (c == 63) {
+            llvm::Value* shl = builder.CreateShl(var, 6);
+            replacement = builder.CreateSub(shl, var, "mul63");
+        }
+        // x * 65 → (x << 6) + x  (cost: 2 vs 3)
+        else if (c == 65) {
+            llvm::Value* shl = builder.CreateShl(var, 6);
+            replacement = builder.CreateAdd(shl, var, "mul65");
+        }
+        // x * 127 → (x << 7) - x  (cost: 2 vs 3)
+        else if (c == 127) {
+            llvm::Value* shl = builder.CreateShl(var, 7);
+            replacement = builder.CreateSub(shl, var, "mul127");
+        }
+        // x * 255 → (x << 8) - x  (cost: 2 vs 3)
+        else if (c == 255) {
+            llvm::Value* shl = builder.CreateShl(var, 8);
+            replacement = builder.CreateSub(shl, var, "mul255");
+        }
     }
 
     // Template 2: Division by power-of-2 constant → shift
@@ -917,6 +1193,39 @@ bool synthesizeReplacement(llvm::Instruction* inst, const SynthesisConfig& confi
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Dead code elimination
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Remove dead (unused) instructions that were left behind by other
+/// superoptimizer phases.  Returns the number of instructions removed.
+static unsigned eliminateDeadCode(llvm::Function& func) {
+    unsigned count = 0;
+    bool changed = true;
+
+    // Iterate until convergence — removing one instruction may make others dead.
+    while (changed) {
+        changed = false;
+        std::vector<llvm::Instruction*> toErase;
+
+        for (auto& bb : func) {
+            for (auto& inst : bb) {
+                if (inst.isTerminator()) continue;
+                if (inst.use_empty() && !inst.mayHaveSideEffects()) {
+                    toErase.push_back(&inst);
+                }
+            }
+        }
+
+        for (auto* inst : toErase) {
+            inst->eraseFromParent();
+            count++;
+            changed = true;
+        }
+    }
+    return count;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main superoptimizer entry points
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -964,6 +1273,12 @@ SuperoptimizerStats superoptimizeFunction(llvm::Function& func,
         }
     }
 
+    // Phase 5: Dead code elimination — clean up instructions made dead by
+    // previous phases (idiom replacement, algebraic simplification, synthesis).
+    if (config.enableDeadCodeElim) {
+        stats.deadCodeEliminated = eliminateDeadCode(func);
+    }
+
     return stats;
 }
 
@@ -976,6 +1291,7 @@ SuperoptimizerStats superoptimizeModule(llvm::Module& module,
         total.synthReplacements += stats.synthReplacements;
         total.branchesSimplified += stats.branchesSimplified;
         total.algebraicSimplified += stats.algebraicSimplified;
+        total.deadCodeEliminated += stats.deadCodeEliminated;
     }
     return total;
 }
