@@ -1,5 +1,6 @@
 #include "codegen.h"
 #include "diagnostic.h"
+#include "hardware_graph.h"
 #include "superoptimizer.h"
 #include <iostream>
 #include <llvm/ADT/StringMap.h>
@@ -575,6 +576,19 @@ void CodeGenerator::runOptimizationPasses() {
             superConfig.synthesis.costThreshold = 0.9;
         }
         superopt::superoptimizeModule(*module, superConfig);
+    }
+
+    // Hardware Graph Optimization Engine: run after the superoptimizer when
+    // -march or -mtune is explicitly provided.  The HGOE models the target
+    // CPU as a directed graph of execution resources, maps the compiled
+    // program onto that graph, and applies hardware-aware transformations
+    // (FMA generation, prefetch insertion, branch layout optimisation).
+    // When neither flag is set, this is a complete no-op.
+    if (enableHGOE_ && optimizationLevel >= OptimizationLevel::O2) {
+        hgoe::HGOEConfig hgoeConfig;
+        hgoeConfig.marchCpu = marchCpu_;
+        hgoeConfig.mtuneCpu = mtuneCpu_;
+        hgoe::optimizeModule(*module, hgoeConfig);
     }
 }
 
