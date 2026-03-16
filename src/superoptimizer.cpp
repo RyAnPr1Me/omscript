@@ -20,6 +20,7 @@
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/PatternMatch.h>
 #include <llvm/Support/KnownBits.h>
+#include <llvm/Support/MathExtras.h>
 #include <algorithm>
 #include <cstdint>
 #include <random>
@@ -1232,9 +1233,7 @@ bool synthesizeReplacement(llvm::Instruction* inst, const SynthesisConfig& confi
             // Check if c = 2^n + 1
             int64_t cm1 = c - 1;
             if (cm1 > 0 && (cm1 & (cm1 - 1)) == 0) {
-                unsigned n = 0;
-                int64_t tmp = cm1;
-                while (tmp > 1) { tmp >>= 1; n++; }
+                unsigned n = llvm::Log2_64(static_cast<uint64_t>(cm1));
                 llvm::Value* shl = builder.CreateShl(var, n);
                 replacement = builder.CreateAdd(shl, var,
                     "mul" + std::to_string(c));
@@ -1243,9 +1242,7 @@ bool synthesizeReplacement(llvm::Instruction* inst, const SynthesisConfig& confi
             else {
                 int64_t cp1 = c + 1;
                 if (cp1 > 0 && (cp1 & (cp1 - 1)) == 0) {
-                    unsigned n = 0;
-                    int64_t tmp = cp1;
-                    while (tmp > 1) { tmp >>= 1; n++; }
+                    unsigned n = llvm::Log2_64(static_cast<uint64_t>(cp1));
                     llvm::Value* shl = builder.CreateShl(var, n);
                     replacement = builder.CreateSub(shl, var,
                         "mul" + std::to_string(c));
