@@ -1015,6 +1015,135 @@ static unsigned applyAlgebraicSimplifications(llvm::Function& func) {
                 }
             }
 
+            // Pattern: select(cond, x, x) → x
+            if (!simplified && llvm::isa<llvm::SelectInst>(inst)) {
+                auto* sel = llvm::cast<llvm::SelectInst>(&inst);
+                if (sel->getTrueValue() == sel->getFalseValue()) {
+                    simplified = sel->getTrueValue();
+                }
+            }
+
+            // Pattern: (x >> c) << c → x & ~((1 << c) - 1)  [mask off low bits]
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Shl) {
+                auto* lshr = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                auto shlAmt = getConstIntValue(inst.getOperand(1));
+                if (lshr && shlAmt && lshr->getOpcode() == llvm::Instruction::LShr) {
+                    auto lshrAmt = getConstIntValue(lshr->getOperand(1));
+                    if (lshrAmt && *lshrAmt == *shlAmt && hasOneUse(lshr)) {
+                        unsigned bitWidth = inst.getType()->getIntegerBitWidth();
+                        if (*shlAmt > 0 && *shlAmt < static_cast<int64_t>(bitWidth)) {
+                            llvm::IRBuilder<> builder(&inst);
+                            uint64_t mask = ~((1ULL << *shlAmt) - 1);
+                            if (bitWidth < 64) {
+                                mask &= (1ULL << bitWidth) - 1;
+                            }
+                            simplified = builder.CreateAnd(
+                                lshr->getOperand(0),
+                                llvm::ConstantInt::get(inst.getType(), mask),
+                                "round_down_mask");
+                        }
+                    }
+                }
+            }
+
+            // Pattern: x * c where c is power of 2 → x << log2(c)
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Mul) {
+                auto c = getConstIntValue(inst.getOperand(1));
+                llvm::Value* var = inst.getOperand(0);
+                if (!c) {
+                    c = getConstIntValue(inst.getOperand(0));
+                    var = inst.getOperand(1);
+                }
+                if (c && *c > 2 && (*c & (*c - 1)) == 0) {
+                    // It's a power of 2 > 2 (mul by 2 already handled above)
+                    unsigned shift = llvm::Log2_64(static_cast<uint64_t>(*c));
+                    llvm::IRBuilder<> builder(&inst);
+                    simplified = builder.CreateShl(var,
+                        llvm::ConstantInt::get(inst.getType(), shift), "mulpow2_shl");
+                }
+            }
+
+            // Pattern: udiv x, 1 → x
+            if (!simplified && inst.getOpcode() == llvm::Instruction::UDiv) {
+                if (isConstInt(inst.getOperand(1), 1)) {
+                    simplified = inst.getOperand(0);
+                }
+            }
+
+            // Pattern: sdiv x, 1 → x
+            if (!simplified && inst.getOpcode() == llvm::Instruction::SDiv) {
+                if (isConstInt(inst.getOperand(1), 1)) {
+                    simplified = inst.getOperand(0);
+                }
+            }
+
+            // Pattern: urem x, 1 → 0
+            if (!simplified && inst.getOpcode() == llvm::Instruction::URem) {
+                if (isConstInt(inst.getOperand(1), 1)) {
+                    simplified = llvm::ConstantInt::get(inst.getType(), 0);
+                }
+            }
+
+            // Pattern: srem x, 1 → 0
+            if (!simplified && inst.getOpcode() == llvm::Instruction::SRem) {
+                if (isConstInt(inst.getOperand(1), 1)) {
+                    simplified = llvm::ConstantInt::get(inst.getType(), 0);
+                }
+            }
+
+            // Pattern: sub 0, sub(0, x) → x  (double negation)
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Sub) {
+                if (isConstInt(inst.getOperand(0), 0)) {
+                    if (auto* inner = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1))) {
+                        if (inner->getOpcode() == llvm::Instruction::Sub &&
+                            isConstInt(inner->getOperand(0), 0) && hasOneUse(inner)) {
+                            simplified = inner->getOperand(1);
+                        }
+                    }
+                }
+            }
+
+            // Pattern: (x | y) & x → x  (absorption)
+            if (!simplified && inst.getOpcode() == llvm::Instruction::And) {
+                auto* orInst = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                if (orInst && orInst->getOpcode() == llvm::Instruction::Or) {
+                    if (orInst->getOperand(0) == inst.getOperand(1) ||
+                        orInst->getOperand(1) == inst.getOperand(1)) {
+                        simplified = inst.getOperand(1);
+                    }
+                }
+                // Also check: x & (x | y) → x
+                if (!simplified) {
+                    orInst = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
+                    if (orInst && orInst->getOpcode() == llvm::Instruction::Or) {
+                        if (orInst->getOperand(0) == inst.getOperand(0) ||
+                            orInst->getOperand(1) == inst.getOperand(0)) {
+                            simplified = inst.getOperand(0);
+                        }
+                    }
+                }
+            }
+
+            // Pattern: (x & y) | x → x  (absorption)
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Or) {
+                auto* andInst = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                if (andInst && andInst->getOpcode() == llvm::Instruction::And) {
+                    if (andInst->getOperand(0) == inst.getOperand(1) ||
+                        andInst->getOperand(1) == inst.getOperand(1)) {
+                        simplified = inst.getOperand(1);
+                    }
+                }
+                if (!simplified) {
+                    andInst = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
+                    if (andInst && andInst->getOpcode() == llvm::Instruction::And) {
+                        if (andInst->getOperand(0) == inst.getOperand(0) ||
+                            andInst->getOperand(1) == inst.getOperand(0)) {
+                            simplified = inst.getOperand(0);
+                        }
+                    }
+                }
+            }
+
             if (simplified) {
                 inst.replaceAllUsesWith(simplified);
                 toErase.push_back(&inst);

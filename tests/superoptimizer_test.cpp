@@ -1245,3 +1245,185 @@ TEST(SuperoptimizerTest, CompileCLikeMinMaxFunction) {
     auto* clampFn = mod->getFunction("clamp");
     ASSERT_NE(clampFn, nullptr);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// New superoptimizer algebraic tests (round 2)
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST(SuperoptimizerTest, AlgebraicSelectSameBranch) {
+    TestModule tm;
+    auto* a = tm.arg(0);
+    auto* cond = tm.builder.CreateICmpSGT(a, llvm::ConstantInt::get(tm.i64Ty(), 0));
+    auto* sel = tm.builder.CreateSelect(cond, a, a, "sel_same");
+    tm.builder.CreateRet(sel);
+
+    SuperoptimizerConfig config;
+    config.enableIdiomRecognition = false;
+    config.enableSynthesis = false;
+    config.enableBranchOpt = false;
+    auto stats = superoptimizeFunction(*tm.func, config);
+
+    EXPECT_GE(stats.algebraicSimplified, 1u);
+    EXPECT_TRUE(tm.verify());
+}
+
+TEST(SuperoptimizerTest, AlgebraicRoundDownMask) {
+    // (x >> 3) << 3 → x & ~7
+    TestModule tm;
+    auto* a = tm.arg(0);
+    auto* shr = tm.builder.CreateLShr(a, llvm::ConstantInt::get(tm.i64Ty(), 3));
+    auto* shl = tm.builder.CreateShl(shr, llvm::ConstantInt::get(tm.i64Ty(), 3), "round_down");
+    tm.builder.CreateRet(shl);
+
+    SuperoptimizerConfig config;
+    config.enableIdiomRecognition = false;
+    config.enableSynthesis = false;
+    config.enableBranchOpt = false;
+    auto stats = superoptimizeFunction(*tm.func, config);
+
+    EXPECT_GE(stats.algebraicSimplified, 1u);
+    EXPECT_TRUE(tm.verify());
+}
+
+TEST(SuperoptimizerTest, AlgebraicMulPow2ToShift) {
+    // x * 16 → x << 4
+    TestModule tm;
+    auto* a = tm.arg(0);
+    auto* c = llvm::ConstantInt::get(tm.i64Ty(), 16);
+    auto* mul = tm.builder.CreateMul(a, c, "mul16");
+    tm.builder.CreateRet(mul);
+
+    SuperoptimizerConfig config;
+    config.enableIdiomRecognition = false;
+    config.enableSynthesis = false;
+    config.enableBranchOpt = false;
+    auto stats = superoptimizeFunction(*tm.func, config);
+
+    EXPECT_GE(stats.algebraicSimplified, 1u);
+    EXPECT_TRUE(tm.verify());
+}
+
+TEST(SuperoptimizerTest, AlgebraicUDivOne) {
+    TestModule tm;
+    auto* a = tm.arg(0);
+    auto* one = llvm::ConstantInt::get(tm.i64Ty(), 1);
+    auto* div = tm.builder.CreateUDiv(a, one, "div_one");
+    tm.builder.CreateRet(div);
+
+    SuperoptimizerConfig config;
+    config.enableIdiomRecognition = false;
+    config.enableSynthesis = false;
+    config.enableBranchOpt = false;
+    auto stats = superoptimizeFunction(*tm.func, config);
+
+    EXPECT_GE(stats.algebraicSimplified, 1u);
+    EXPECT_TRUE(tm.verify());
+}
+
+TEST(SuperoptimizerTest, AlgebraicSDivOne) {
+    TestModule tm;
+    auto* a = tm.arg(0);
+    auto* one = llvm::ConstantInt::get(tm.i64Ty(), 1);
+    auto* div = tm.builder.CreateSDiv(a, one, "sdiv_one");
+    tm.builder.CreateRet(div);
+
+    SuperoptimizerConfig config;
+    config.enableIdiomRecognition = false;
+    config.enableSynthesis = false;
+    config.enableBranchOpt = false;
+    auto stats = superoptimizeFunction(*tm.func, config);
+
+    EXPECT_GE(stats.algebraicSimplified, 1u);
+    EXPECT_TRUE(tm.verify());
+}
+
+TEST(SuperoptimizerTest, AlgebraicURemOne) {
+    TestModule tm;
+    auto* a = tm.arg(0);
+    auto* one = llvm::ConstantInt::get(tm.i64Ty(), 1);
+    auto* rem = tm.builder.CreateURem(a, one, "urem_one");
+    tm.builder.CreateRet(rem);
+
+    SuperoptimizerConfig config;
+    config.enableIdiomRecognition = false;
+    config.enableSynthesis = false;
+    config.enableBranchOpt = false;
+    auto stats = superoptimizeFunction(*tm.func, config);
+
+    EXPECT_GE(stats.algebraicSimplified, 1u);
+    EXPECT_TRUE(tm.verify());
+}
+
+TEST(SuperoptimizerTest, AlgebraicSRemOne) {
+    TestModule tm;
+    auto* a = tm.arg(0);
+    auto* one = llvm::ConstantInt::get(tm.i64Ty(), 1);
+    auto* rem = tm.builder.CreateSRem(a, one, "srem_one");
+    tm.builder.CreateRet(rem);
+
+    SuperoptimizerConfig config;
+    config.enableIdiomRecognition = false;
+    config.enableSynthesis = false;
+    config.enableBranchOpt = false;
+    auto stats = superoptimizeFunction(*tm.func, config);
+
+    EXPECT_GE(stats.algebraicSimplified, 1u);
+    EXPECT_TRUE(tm.verify());
+}
+
+TEST(SuperoptimizerTest, AlgebraicDoubleNeg) {
+    // sub(0, sub(0, x)) → x
+    TestModule tm;
+    auto* a = tm.arg(0);
+    auto* zero = llvm::ConstantInt::get(tm.i64Ty(), 0);
+    auto* neg1 = tm.builder.CreateSub(zero, a, "neg1");
+    auto* neg2 = tm.builder.CreateSub(zero, neg1, "neg2");
+    tm.builder.CreateRet(neg2);
+
+    SuperoptimizerConfig config;
+    config.enableIdiomRecognition = false;
+    config.enableSynthesis = false;
+    config.enableBranchOpt = false;
+    auto stats = superoptimizeFunction(*tm.func, config);
+
+    EXPECT_GE(stats.algebraicSimplified, 1u);
+    EXPECT_TRUE(tm.verify());
+}
+
+TEST(SuperoptimizerTest, AlgebraicAbsorptionAndOr) {
+    // x & (x | y) → x
+    TestModule tm;
+    auto* a = tm.arg(0);
+    auto* b = tm.arg(1);
+    auto* orI = tm.builder.CreateOr(a, b, "or_val");
+    auto* andI = tm.builder.CreateAnd(a, orI, "absorb");
+    tm.builder.CreateRet(andI);
+
+    SuperoptimizerConfig config;
+    config.enableIdiomRecognition = false;
+    config.enableSynthesis = false;
+    config.enableBranchOpt = false;
+    auto stats = superoptimizeFunction(*tm.func, config);
+
+    EXPECT_GE(stats.algebraicSimplified, 1u);
+    EXPECT_TRUE(tm.verify());
+}
+
+TEST(SuperoptimizerTest, AlgebraicAbsorptionOrAnd) {
+    // x | (x & y) → x
+    TestModule tm;
+    auto* a = tm.arg(0);
+    auto* b = tm.arg(1);
+    auto* andI = tm.builder.CreateAnd(a, b, "and_val");
+    auto* orI = tm.builder.CreateOr(a, andI, "absorb");
+    tm.builder.CreateRet(orI);
+
+    SuperoptimizerConfig config;
+    config.enableIdiomRecognition = false;
+    config.enableSynthesis = false;
+    config.enableBranchOpt = false;
+    auto stats = superoptimizeFunction(*tm.func, config);
+
+    EXPECT_GE(stats.algebraicSimplified, 1u);
+    EXPECT_TRUE(tm.verify());
+}

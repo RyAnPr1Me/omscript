@@ -1175,3 +1175,381 @@ TEST(EGraphTest, CompileCLikeStrengthReduction) {
     auto* optFn = mod->getFunction("optimize_mul");
     ASSERT_NE(optFn, nullptr);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// New e-graph algebraic rule tests (round 2)
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST(EGraphTest, AddNegToSub) {
+    // a + (-b) → a - b
+    EGraph g;
+    ClassId a = g.addVar("a");
+    ClassId b = g.addVar("b");
+    ClassId negB = g.addUnaryOp(Op::Neg, b);
+    ClassId expr = g.addBinOp(Op::Add, a, negB);
+
+    auto rules = getAlgebraicRules();
+    g.saturate(rules);
+
+    ClassId expected = g.addBinOp(Op::Sub, a, b);
+    EXPECT_EQ(g.find(expr), g.find(expected));
+}
+
+TEST(EGraphTest, ZeroSubToNeg) {
+    // 0 - x → -x
+    EGraph g;
+    ClassId zero = g.addConst(0);
+    ClassId x = g.addVar("x");
+    ClassId expr = g.addBinOp(Op::Sub, zero, x);
+
+    auto rules = getAlgebraicRules();
+    g.saturate(rules);
+
+    ClassId expected = g.addUnaryOp(Op::Neg, x);
+    EXPECT_EQ(g.find(expr), g.find(expected));
+}
+
+TEST(EGraphTest, MulNeg1ToNeg) {
+    // x * (-1) → -x
+    EGraph g;
+    ClassId x = g.addVar("x");
+    ClassId neg1 = g.addConst(-1);
+    ClassId expr = g.addBinOp(Op::Mul, x, neg1);
+
+    auto rules = getAlgebraicRules();
+    g.saturate(rules);
+
+    ClassId expected = g.addUnaryOp(Op::Neg, x);
+    EXPECT_EQ(g.find(expr), g.find(expected));
+}
+
+TEST(EGraphTest, AddSelfToMul2) {
+    // x + x → x * 2
+    EGraph g;
+    ClassId x = g.addVar("x");
+    ClassId expr = g.addBinOp(Op::Add, x, x);
+
+    auto rules = getAlgebraicRules();
+    g.saturate(rules);
+
+    ClassId two = g.addConst(2);
+    ClassId expected = g.addBinOp(Op::Mul, x, two);
+    EXPECT_EQ(g.find(expr), g.find(expected));
+}
+
+TEST(EGraphTest, AddSubCancelLeft) {
+    // (a + b) - a → b
+    EGraph g;
+    ClassId a = g.addVar("a");
+    ClassId b = g.addVar("b");
+    ClassId sum = g.addBinOp(Op::Add, a, b);
+    ClassId expr = g.addBinOp(Op::Sub, sum, a);
+
+    auto rules = getAlgebraicRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(expr), g.find(b));
+}
+
+TEST(EGraphTest, AddSubCancelRight) {
+    // (a + b) - b → a
+    EGraph g;
+    ClassId a = g.addVar("a");
+    ClassId b = g.addVar("b");
+    ClassId sum = g.addBinOp(Op::Add, a, b);
+    ClassId expr = g.addBinOp(Op::Sub, sum, b);
+
+    auto rules = getAlgebraicRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(expr), g.find(a));
+}
+
+TEST(EGraphTest, SubNegToAdd) {
+    // a - (-b) → a + b
+    EGraph g;
+    ClassId a = g.addVar("a");
+    ClassId b = g.addVar("b");
+    ClassId negB = g.addUnaryOp(Op::Neg, b);
+    ClassId expr = g.addBinOp(Op::Sub, a, negB);
+
+    auto rules = getAlgebraicRules();
+    g.saturate(rules);
+
+    ClassId expected = g.addBinOp(Op::Add, a, b);
+    EXPECT_EQ(g.find(expr), g.find(expected));
+}
+
+TEST(EGraphTest, PowZero) {
+    // x ** 0 → 1
+    EGraph g;
+    ClassId x = g.addVar("x");
+    ClassId zero = g.addConst(0);
+    ClassId expr = g.addBinOp(Op::Pow, x, zero);
+
+    auto rules = getAlgebraicRules();
+    g.saturate(rules);
+
+    ClassId one = g.addConst(1);
+    EXPECT_EQ(g.find(expr), g.find(one));
+}
+
+TEST(EGraphTest, PowOne) {
+    // x ** 1 → x
+    EGraph g;
+    ClassId x = g.addVar("x");
+    ClassId one = g.addConst(1);
+    ClassId expr = g.addBinOp(Op::Pow, x, one);
+
+    auto rules = getAlgebraicRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(expr), g.find(x));
+}
+
+TEST(EGraphTest, PowTwo) {
+    // x ** 2 → x * x
+    EGraph g;
+    ClassId x = g.addVar("x");
+    ClassId two = g.addConst(2);
+    ClassId expr = g.addBinOp(Op::Pow, x, two);
+
+    auto rules = getAlgebraicRules();
+    g.saturate(rules);
+
+    ClassId expected = g.addBinOp(Op::Mul, x, x);
+    EXPECT_EQ(g.find(expr), g.find(expected));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// New e-graph comparison rule tests (round 2)
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST(EGraphTest, TernaryNotCondFlip) {
+    // (!c) ? a : b → c ? b : a
+    EGraph g;
+    ClassId c = g.addVar("c");
+    ClassId a = g.addVar("a");
+    ClassId b = g.addVar("b");
+    ClassId notC = g.addUnaryOp(Op::LogNot, c);
+
+    ENode ternaryNode(Op::Ternary, std::vector<ClassId>{notC, a, b});
+    ClassId expr = g.add(ternaryNode);
+
+    auto rules = getComparisonRules();
+    g.saturate(rules);
+
+    ENode expectedNode(Op::Ternary, std::vector<ClassId>{c, b, a});
+    ClassId expected = g.add(expectedNode);
+    EXPECT_EQ(g.find(expr), g.find(expected));
+}
+
+TEST(EGraphTest, LogAndOne) {
+    // x && 1 → x
+    EGraph g;
+    ClassId x = g.addVar("x");
+    ClassId one = g.addConst(1);
+    ClassId expr = g.addBinOp(Op::LogAnd, x, one);
+
+    auto rules = getComparisonRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(expr), g.find(x));
+}
+
+TEST(EGraphTest, LogOrOne) {
+    // x || 1 → 1
+    EGraph g;
+    ClassId x = g.addVar("x");
+    ClassId one = g.addConst(1);
+    ClassId expr = g.addBinOp(Op::LogOr, x, one);
+
+    auto rules = getComparisonRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(expr), g.find(one));
+}
+
+TEST(EGraphTest, LogNotZero) {
+    // !0 → 1
+    EGraph g;
+    ClassId zero = g.addConst(0);
+    ClassId expr = g.addUnaryOp(Op::LogNot, zero);
+
+    auto rules = getComparisonRules();
+    g.saturate(rules);
+
+    ClassId one = g.addConst(1);
+    EXPECT_EQ(g.find(expr), g.find(one));
+}
+
+TEST(EGraphTest, LogNotOne) {
+    // !1 → 0
+    EGraph g;
+    ClassId one = g.addConst(1);
+    ClassId expr = g.addUnaryOp(Op::LogNot, one);
+
+    auto rules = getComparisonRules();
+    g.saturate(rules);
+
+    ClassId zero = g.addConst(0);
+    EXPECT_EQ(g.find(expr), g.find(zero));
+}
+
+TEST(EGraphTest, SubNeZero) {
+    // (x - y) != 0 → x != y
+    EGraph g;
+    ClassId x = g.addVar("x");
+    ClassId y = g.addVar("y");
+    ClassId sub = g.addBinOp(Op::Sub, x, y);
+    ClassId zero = g.addConst(0);
+    ClassId expr = g.addBinOp(Op::Ne, sub, zero);
+
+    auto rules = getComparisonRules();
+    auto algRules = getAlgebraicRules();
+    rules.insert(rules.end(), algRules.begin(), algRules.end());
+    g.saturate(rules);
+
+    ClassId expected = g.addBinOp(Op::Ne, x, y);
+    EXPECT_EQ(g.find(expr), g.find(expected));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// New e-graph bitwise rule tests (round 2)
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST(EGraphTest, XorAssociativity) {
+    // (a ^ b) ^ c → a ^ (b ^ c)
+    EGraph g;
+    ClassId a = g.addVar("a");
+    ClassId b = g.addVar("b");
+    ClassId c = g.addVar("c");
+    ClassId ab = g.addBinOp(Op::BitXor, a, b);
+    ClassId expr = g.addBinOp(Op::BitXor, ab, c);
+
+    auto rules = getBitwiseRules();
+    g.saturate(rules);
+
+    ClassId bc = g.addBinOp(Op::BitXor, b, c);
+    ClassId expected = g.addBinOp(Op::BitXor, a, bc);
+    EXPECT_EQ(g.find(expr), g.find(expected));
+}
+
+TEST(EGraphTest, AndAssociativity) {
+    // (a & b) & c → a & (b & c)
+    EGraph g;
+    ClassId a = g.addVar("a");
+    ClassId b = g.addVar("b");
+    ClassId c = g.addVar("c");
+    ClassId ab = g.addBinOp(Op::BitAnd, a, b);
+    ClassId expr = g.addBinOp(Op::BitAnd, ab, c);
+
+    auto rules = getBitwiseRules();
+    g.saturate(rules);
+
+    ClassId bc = g.addBinOp(Op::BitAnd, b, c);
+    ClassId expected = g.addBinOp(Op::BitAnd, a, bc);
+    EXPECT_EQ(g.find(expr), g.find(expected));
+}
+
+TEST(EGraphTest, OrAssociativity) {
+    // (a | b) | c → a | (b | c)
+    EGraph g;
+    ClassId a = g.addVar("a");
+    ClassId b = g.addVar("b");
+    ClassId c = g.addVar("c");
+    ClassId ab = g.addBinOp(Op::BitOr, a, b);
+    ClassId expr = g.addBinOp(Op::BitOr, ab, c);
+
+    auto rules = getBitwiseRules();
+    g.saturate(rules);
+
+    ClassId bc = g.addBinOp(Op::BitOr, b, c);
+    ClassId expected = g.addBinOp(Op::BitOr, a, bc);
+    EXPECT_EQ(g.find(expr), g.find(expected));
+}
+
+TEST(EGraphTest, XorZeroLeft) {
+    // 0 ^ x → x
+    EGraph g;
+    ClassId zero = g.addConst(0);
+    ClassId x = g.addVar("x");
+    ClassId expr = g.addBinOp(Op::BitXor, zero, x);
+
+    auto rules = getBitwiseRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(expr), g.find(x));
+}
+
+TEST(EGraphTest, AndZeroLeft) {
+    // 0 & x → 0
+    EGraph g;
+    ClassId zero = g.addConst(0);
+    ClassId x = g.addVar("x");
+    ClassId expr = g.addBinOp(Op::BitAnd, zero, x);
+
+    auto rules = getBitwiseRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(expr), g.find(zero));
+}
+
+TEST(EGraphTest, OrZeroLeft) {
+    // 0 | x → x
+    EGraph g;
+    ClassId zero = g.addConst(0);
+    ClassId x = g.addVar("x");
+    ClassId expr = g.addBinOp(Op::BitOr, zero, x);
+
+    auto rules = getBitwiseRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(expr), g.find(x));
+}
+
+TEST(EGraphTest, AndAllOnesLeft) {
+    // -1 & x → x
+    EGraph g;
+    ClassId allOnes = g.addConst(-1);
+    ClassId x = g.addVar("x");
+    ClassId expr = g.addBinOp(Op::BitAnd, allOnes, x);
+
+    auto rules = getBitwiseRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(expr), g.find(x));
+}
+
+TEST(EGraphTest, OrAllOnesLeft) {
+    // -1 | x → -1
+    EGraph g;
+    ClassId allOnes = g.addConst(-1);
+    ClassId x = g.addVar("x");
+    ClassId expr = g.addBinOp(Op::BitOr, allOnes, x);
+
+    auto rules = getBitwiseRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(expr), g.find(allOnes));
+}
+
+TEST(EGraphTest, BitNotToXorAndBack) {
+    // ~x → x ^ -1, and they should be in the same e-class
+    EGraph g;
+    ClassId x = g.addVar("x");
+    ClassId bitNot = g.addUnaryOp(Op::BitNot, x);
+
+    auto rules = getBitwiseRules();
+    g.saturate(rules);
+
+    ClassId allOnes = g.addConst(-1);
+    ClassId xorExpr = g.addBinOp(Op::BitXor, x, allOnes);
+    EXPECT_EQ(g.find(bitNot), g.find(xorExpr));
+}
+
+TEST(EGraphTest, AllRulesHasSubstantialCount) {
+    // Verify the total rule count has grown
+    auto rules = getAllRules();
+    EXPECT_GT(rules.size(), 70u);
+}
