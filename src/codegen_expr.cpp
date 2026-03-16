@@ -359,6 +359,13 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
 
     // String repetition: str * n  (or  n * str) → repeat str n times.
     // This is the binary-operator equivalent of str_repeat(str, n).
+    //
+    // Implementation: allocate totalLen+1 bytes, then memcpy the source
+    // string `count` times at offset idx*strLen using a counted loop.
+    // We use memcpy with a computed offset instead of strcat to avoid
+    // strlen calls inside the loop body that interact poorly with LLVM's
+    // loop optimizer at O2+ (the optimizer can incorrectly eliminate the
+    // loop exit condition when strcat's implicit strlen is involved).
     if (expr->op == "*" && (leftIsStr || rightIsStr)) {
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
         llvm::Value* strVal = leftIsStr ? left : right;
@@ -376,8 +383,11 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         llvm::Value* allocSz =
             builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "strmul.alloc");
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {allocSz}, "strmul.buf");
-        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), buf);
-        // Loop countVal times, appending strPtr each iteration.
+        // Null-terminate the buffer at offset totalLen so that the result
+        // is a valid C string even before the loop fills it.
+        llvm::Value* endPtr = builder->CreateGEP(llvm::Type::getInt8Ty(*context), buf, totalLen, "strmul.end");
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), endPtr);
+        // Loop countVal times, memcpy'ing strPtr at offset idx*strLen each iteration.
         llvm::Function* curFn = builder->GetInsertBlock()->getParent();
         llvm::BasicBlock* preHdr = builder->GetInsertBlock();
         llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "strmul.loop", curFn);
@@ -390,7 +400,9 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         idx->addIncoming(zero, preHdr);
         builder->CreateCondBr(builder->CreateICmpSLT(idx, countVal, "strmul.cond"), bodyBB, doneBB);
         builder->SetInsertPoint(bodyBB);
-        builder->CreateCall(getOrDeclareStrcat(), {buf, strPtr});
+        llvm::Value* offset = builder->CreateMul(idx, strLen, "strmul.off");
+        llvm::Value* destPtr = builder->CreateGEP(llvm::Type::getInt8Ty(*context), buf, offset, "strmul.dst");
+        builder->CreateMemCpy(destPtr, llvm::MaybeAlign(1), strPtr, llvm::MaybeAlign(1), strLen);
         llvm::Value* nextIdx = builder->CreateAdd(idx, one, "strmul.next");
         idx->addIncoming(nextIdx, bodyBB);
         builder->CreateBr(loopBB);

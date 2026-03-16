@@ -893,22 +893,9 @@ llvm::Function* CodeGenerator::getOrDeclareMalloc() {
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "malloc", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
-    fn->addRetAttr(llvm::Attribute::NoAlias); // returned pointer does not alias any pointer visible to the caller
-    fn->addRetAttr(llvm::Attribute::NonNull);  // malloc never returns null (we abort on failure)
-    // allocsize(0): parameter 0 is the allocation size — enables LLVM to track
-    // allocation sizes for bounds checking elimination and alias analysis.
-    fn->addFnAttr(llvm::Attribute::getWithAllocSizeArgs(*context, 0, std::nullopt));
-    // allockind("alloc,uninitialized"): marks malloc as a heap allocator returning
-    // uninitialized memory — enables dead allocation elimination (removing
-    // malloc/free pairs whose result is never read).
-    fn->addFnAttr(llvm::Attribute::get(*context, llvm::Attribute::AllocKind,
-                                       static_cast<uint64_t>(llvm::AllocFnKind::Alloc |
-                                                             llvm::AllocFnKind::Uninitialized)));
-    // memory(inaccessiblemem: readwrite): malloc only touches memory not yet
-    // visible to the caller — lets the optimizer move/eliminate malloc calls
-    // across instructions that access only known memory.
-    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
-        *context, llvm::MemoryEffects::inaccessibleMemOnly()));
+    fn->addFnAttr(llvm::Attribute::NoBuiltin);
+    fn->addRetAttr(llvm::Attribute::NoAlias);
+    fn->addRetAttr(llvm::Attribute::NonNull);
     return fn;
 }
 

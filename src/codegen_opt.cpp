@@ -322,15 +322,16 @@ void CodeGenerator::runOptimizationPasses() {
     }
 #endif
 
-    // At O1+, infer function attributes (readnone, readonly, nounwind, etc.)
-    // from well-known library function declarations early in the pipeline.
-    // This enriches the attribute set before any optimization pass runs,
-    // enabling better alias analysis, dead-code elimination, and inlining.
-    if (optimizationLevel >= OptimizationLevel::O1) {
-        PB.registerPipelineStartEPCallback([](llvm::ModulePassManager& MPM, llvm::OptimizationLevel) {
-            MPM.addPass(llvm::InferFunctionAttrsPass());
-        });
-    }
+    // NOTE: InferFunctionAttrsPass is intentionally NOT registered here.
+    // LLVM's default pipeline already includes it, and we previously added it
+    // again as an explicit pipeline-start callback.  However, this pass auto-
+    // infers aggressive attributes (allocsize, allockind, inaccessibleMemOnly)
+    // on well-known C library functions like malloc.  Those attributes interact
+    // poorly with the loop unroller/optimizer when the allocated buffer is
+    // immediately written to in a loop (e.g. string repetition via strcat or
+    // memcpy): the optimizer can incorrectly eliminate the loop exit condition,
+    // producing an infinite loop and segfault.  The attributes we manually set
+    // on library function declarations are sufficient.
 
     // At O2+ with -floop-optimize, register LoopDistributePass to run just
     // before the vectorizer starts.  Loop distribution splits a loop with
