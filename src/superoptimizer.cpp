@@ -881,24 +881,37 @@ static unsigned applyAlgebraicSimplifications(llvm::Function& func) {
                 }
             }
 
-            // Pattern: (x + y) - y → x
+            // Pattern: (x + y) - y → x  or  (y + x) - y → x
             if (!simplified && inst.getOpcode() == llvm::Instruction::Sub) {
                 if (auto* addInst = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0))) {
-                    if (addInst->getOpcode() == llvm::Instruction::Add &&
-                        addInst->getOperand(1) == inst.getOperand(1) &&
-                        hasOneUse(addInst)) {
-                        simplified = addInst->getOperand(0);
+                    if (addInst->getOpcode() == llvm::Instruction::Add && hasOneUse(addInst)) {
+                        if (addInst->getOperand(1) == inst.getOperand(1)) {
+                            simplified = addInst->getOperand(0);
+                        } else if (addInst->getOperand(0) == inst.getOperand(1)) {
+                            simplified = addInst->getOperand(1);
+                        }
                     }
                 }
             }
 
-            // Pattern: (x - y) + y → x
+            // Pattern: (x - y) + y → x  or  y + (x - y) → x
             if (!simplified && inst.getOpcode() == llvm::Instruction::Add) {
+                // Case 1: (x - y) + y
                 if (auto* subInst = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0))) {
                     if (subInst->getOpcode() == llvm::Instruction::Sub &&
                         subInst->getOperand(1) == inst.getOperand(1) &&
                         hasOneUse(subInst)) {
                         simplified = subInst->getOperand(0);
+                    }
+                }
+                // Case 2: y + (x - y)
+                if (!simplified) {
+                    if (auto* subInst = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1))) {
+                        if (subInst->getOpcode() == llvm::Instruction::Sub &&
+                            subInst->getOperand(1) == inst.getOperand(0) &&
+                            hasOneUse(subInst)) {
+                            simplified = subInst->getOperand(0);
+                        }
                     }
                 }
             }

@@ -787,6 +787,46 @@ TEST(SuperoptimizerTest, AlgebraicLShrCombine) {
     EXPECT_TRUE(tm.verify());
 }
 
+TEST(SuperoptimizerTest, AlgebraicAddSubCancelCommutative) {
+    TestModule tm;
+    auto* a = tm.arg(0);
+    auto* b = tm.arg(1);
+
+    // (b + a) - b → a  (commutative variant)
+    auto* add = tm.builder.CreateAdd(b, a, "add_comm");
+    auto* sub = tm.builder.CreateSub(add, b, "sub_cancel");
+    tm.builder.CreateRet(sub);
+
+    SuperoptimizerConfig config;
+    config.enableIdiomRecognition = false;
+    config.enableSynthesis = false;
+    config.enableBranchOpt = false;
+    auto stats = superoptimizeFunction(*tm.func, config);
+
+    EXPECT_GE(stats.algebraicSimplified, 1u);
+    EXPECT_TRUE(tm.verify());
+}
+
+TEST(SuperoptimizerTest, AlgebraicSubAddCancelCommutative) {
+    TestModule tm;
+    auto* a = tm.arg(0);
+    auto* b = tm.arg(1);
+
+    // b + (a - b) → a  (commutative variant)
+    auto* sub = tm.builder.CreateSub(a, b, "sub");
+    auto* add = tm.builder.CreateAdd(b, sub, "add_cancel");
+    tm.builder.CreateRet(add);
+
+    SuperoptimizerConfig config;
+    config.enableIdiomRecognition = false;
+    config.enableSynthesis = false;
+    config.enableBranchOpt = false;
+    auto stats = superoptimizeFunction(*tm.func, config);
+
+    EXPECT_GE(stats.algebraicSimplified, 1u);
+    EXPECT_TRUE(tm.verify());
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // New synthesis tests
 // ─────────────────────────────────────────────────────────────────────────────
@@ -884,7 +924,7 @@ TEST(SuperoptimizerTest, DetectConditionalNeg) {
     EXPECT_EQ(idioms[0].idiom, Idiom::ConditionalNeg);
 }
 
-TEST(SuperoptimizerTest, DetectIsolateLowestBit) {
+TEST(SuperoptimizerTest, DetectCountTrailingZerosViaIsolate) {
     TestModule tm;
     auto* x = tm.arg(0);
     auto* zero = llvm::ConstantInt::get(tm.i64Ty(), 0);
