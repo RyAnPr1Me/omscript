@@ -52,6 +52,15 @@ Source Code
 └─────────────────────────────────┘
     │
     ▼
+┌─────────────────────────────────┐
+│  HGOE                           │  ← IR-level (O2+, -march/-mtune)
+│  • FMA generation               │
+│  • Prefetch insertion            │
+│  • Branch layout optimisation    │
+│  • Target microarch tuning       │
+└─────────────────────────────────┘
+    │
+    ▼
 Machine Code
 ```
 

@@ -34,7 +34,7 @@ code through LLVM:
 
 | Mode | Command | Pipeline | Use Case |
 |------|---------|----------|----------|
-| **AOT** | `omsc build foo.om` | Source → Lex → Parse → LLVM IR → IPO/O2/O3 → Object → Link → Binary | Production binaries |
+| **AOT** | `omsc build foo.om` | Source → Lex → Parse → E-Graph (O2+) → LLVM IR → IPO/O2/O3 → Superopt (O2+) → HGOE (O2+) → Object → Link → Binary | Production binaries |
 | **JIT** | `omsc run foo.om` | Source → Lex → Parse → LLVM IR → Per-function O1-O3 → MCJIT → In-process execution → Background O3+PGO tiered recompilation | Development / interactive |
 
 There is **no interpreter or bytecode tier** — every function is compiled to
