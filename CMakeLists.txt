@@ -98,6 +98,9 @@ set(COMPILER_SOURCES
     src/codegen_expr.cpp
     src/codegen_stmt.cpp
     src/codegen_opt.cpp
+    src/egraph.cpp
+    src/egraph_optimizer.cpp
+    src/superoptimizer.cpp
     src/compiler.cpp
     src/main.cpp
 )
@@ -197,6 +200,9 @@ if(GTest_FOUND)
         src/codegen_expr.cpp
         src/codegen_stmt.cpp
         src/codegen_opt.cpp
+        src/egraph.cpp
+        src/egraph_optimizer.cpp
+        src/superoptimizer.cpp
         src/compiler.cpp
         runtime/value.cpp
         runtime/aot_profile.cpp

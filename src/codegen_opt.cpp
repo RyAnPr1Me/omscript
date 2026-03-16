@@ -1,5 +1,6 @@
 #include "codegen.h"
 #include "diagnostic.h"
+#include "superoptimizer.h"
 #include <iostream>
 #include <llvm/ADT/StringMap.h>
 #include <llvm/Analysis/TargetTransformInfo.h>
@@ -558,6 +559,23 @@ void CodeGenerator::runOptimizationPasses() {
         MPM.addPass(llvm::GlobalDCEPass());
     }
     MPM.run(*module, MAM);
+
+    // Superoptimizer: run after the standard LLVM pipeline to catch patterns
+    // that individual passes miss.  The superoptimizer performs:
+    //   - Idiom recognition (rotate, abs, min/max, popcount)
+    //   - Algebraic identity simplification on LLVM IR
+    //   - Branch-to-select conversion for simple diamond CFGs
+    //   - Enumerative synthesis of cheaper instruction sequences
+    // Enabled at O2+ unless explicitly disabled with -fno-superopt.
+    if (enableSuperopt_ && optimizationLevel >= OptimizationLevel::O2) {
+        superopt::SuperoptimizerConfig superConfig;
+        // At O3, enable more aggressive synthesis
+        if (optimizationLevel >= OptimizationLevel::O3) {
+            superConfig.synthesis.maxInstructions = 5;
+            superConfig.synthesis.costThreshold = 0.9;
+        }
+        superopt::superoptimizeModule(*module, superConfig);
+    }
 }
 
 void CodeGenerator::optimizeFunction(llvm::Function* func) {

@@ -1,5 +1,6 @@
 #include "codegen.h"
 #include "diagnostic.h"
+#include "egraph.h"
 #include <climits>
 #include <cmath>
 #include <cstdint>
@@ -1961,6 +1962,16 @@ void CodeGenerator::generate(Program* program) {
     // which parameters receive string arguments, so that print/concat/etc.
     // work correctly when strings cross function boundaries.
     preAnalyzeStringTypes(program);
+
+    // E-Graph Equality Saturation: apply algebraic simplification, constant
+    // folding, strength reduction, and other rewrites at the AST level using
+    // an e-graph.  This discovers globally optimal expression representations
+    // before LLVM codegen, enabling optimizations that LLVM's pass pipeline
+    // may miss (e.g., cross-expression algebraic identities).
+    // Enabled at O2+ unless explicitly disabled with -fno-egraph.
+    if (enableEGraph_ && optimizationLevel >= OptimizationLevel::O2) {
+        egraph::optimizeProgram(program);
+    }
 
     // Generate all function bodies
     for (auto& func : program->functions) {
