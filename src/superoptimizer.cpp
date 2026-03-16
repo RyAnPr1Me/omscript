@@ -1260,6 +1260,107 @@ static unsigned applyAlgebraicSimplifications(llvm::Function& func) {
                 }
             }
 
+            // Pattern: (a + b) ^ (a & b) → (a | b)
+            // Proof: a+b = (a^b) + 2*(a&b), but (a+b)^(a&b) = a|b is only valid
+            // when there's no carry.  For general values: (a^b) + (a&b) = a|b is NOT
+            // true.  So skip this — it's not a correct identity for all inputs.
+
+            // Pattern: (x << c) | (x >> (bitwidth - c)) → rotate left
+            // These are already handled by the idiom recognizer, so skip here.
+
+            // Pattern: zext(trunc(x)) where no bits lost → x
+            // Only valid when upper bits are known zero.
+            // Leave to LLVM's instcombine as it has proper known-bits analysis.
+
+            // Pattern: select(cond, x, undef) → x
+            if (!simplified && llvm::isa<llvm::SelectInst>(inst)) {
+                auto* sel = llvm::cast<llvm::SelectInst>(&inst);
+                if (llvm::isa<llvm::UndefValue>(sel->getFalseValue())) {
+                    simplified = sel->getTrueValue();
+                } else if (llvm::isa<llvm::UndefValue>(sel->getTrueValue())) {
+                    simplified = sel->getFalseValue();
+                }
+            }
+
+            // Pattern: select(true, a, b) → a
+            if (!simplified && llvm::isa<llvm::SelectInst>(inst)) {
+                auto* sel = llvm::cast<llvm::SelectInst>(&inst);
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(sel->getCondition())) {
+                    simplified = ci->isOne() ? sel->getTrueValue() : sel->getFalseValue();
+                }
+            }
+
+            // Pattern: (x ^ -1) → ~x   (canonical form for LLVM)
+            // Already in canonical form. No action needed.
+
+            // Pattern: -(-x) → x  (sub 0, sub 0, x → x)  (already handled above)
+
+            // Pattern: x + (-y) → x - y
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Add) {
+                // Check if RHS is sub(0, y)
+                if (auto* rhs = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1))) {
+                    if (rhs->getOpcode() == llvm::Instruction::Sub &&
+                        isConstInt(rhs->getOperand(0), 0) && hasOneUse(rhs)) {
+                        llvm::IRBuilder<> builder(&inst);
+                        simplified = builder.CreateSub(inst.getOperand(0),
+                            rhs->getOperand(1), "add_neg_to_sub");
+                    }
+                }
+                // Check if LHS is sub(0, x)
+                if (!simplified) {
+                    if (auto* lhs = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0))) {
+                        if (lhs->getOpcode() == llvm::Instruction::Sub &&
+                            isConstInt(lhs->getOperand(0), 0) && hasOneUse(lhs)) {
+                            llvm::IRBuilder<> builder(&inst);
+                            simplified = builder.CreateSub(inst.getOperand(1),
+                                lhs->getOperand(1), "neg_add_to_sub");
+                        }
+                    }
+                }
+            }
+
+            // Pattern: (x * c1) + (x * c2) → x * (c1 + c2)
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Add) {
+                auto* lhs = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                auto* rhs = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
+                if (lhs && rhs &&
+                    lhs->getOpcode() == llvm::Instruction::Mul &&
+                    rhs->getOpcode() == llvm::Instruction::Mul) {
+                    auto c1 = getConstIntValue(lhs->getOperand(1));
+                    auto c2 = getConstIntValue(rhs->getOperand(1));
+                    if (c1 && c2 &&
+                        lhs->getOperand(0) == rhs->getOperand(0) &&
+                        hasOneUse(lhs) && hasOneUse(rhs)) {
+                        llvm::IRBuilder<> builder(&inst);
+                        llvm::Value* combined = llvm::ConstantInt::get(
+                            inst.getType(), *c1 + *c2);
+                        simplified = builder.CreateMul(lhs->getOperand(0), combined,
+                            "factor_mul");
+                    }
+                }
+            }
+
+            // Pattern: (x * c1) - (x * c2) → x * (c1 - c2)
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Sub) {
+                auto* lhs = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                auto* rhs = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
+                if (lhs && rhs &&
+                    lhs->getOpcode() == llvm::Instruction::Mul &&
+                    rhs->getOpcode() == llvm::Instruction::Mul) {
+                    auto c1 = getConstIntValue(lhs->getOperand(1));
+                    auto c2 = getConstIntValue(rhs->getOperand(1));
+                    if (c1 && c2 &&
+                        lhs->getOperand(0) == rhs->getOperand(0) &&
+                        hasOneUse(lhs) && hasOneUse(rhs)) {
+                        llvm::IRBuilder<> builder(&inst);
+                        llvm::Value* combined = llvm::ConstantInt::get(
+                            inst.getType(), *c1 - *c2);
+                        simplified = builder.CreateMul(lhs->getOperand(0), combined,
+                            "factor_sub_mul");
+                    }
+                }
+            }
+
             if (simplified) {
                 inst.replaceAllUsesWith(simplified);
                 toErase.push_back(&inst);
