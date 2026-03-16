@@ -1144,6 +1144,113 @@ static unsigned applyAlgebraicSimplifications(llvm::Function& func) {
                 }
             }
 
+            // Pattern: and(x, -1) → x
+            if (!simplified && inst.getOpcode() == llvm::Instruction::And) {
+                if (isConstInt(inst.getOperand(1), -1)) {
+                    simplified = inst.getOperand(0);
+                } else if (isConstInt(inst.getOperand(0), -1)) {
+                    simplified = inst.getOperand(1);
+                }
+            }
+
+            // Pattern: or(x, 0) → x
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Or) {
+                if (isConstInt(inst.getOperand(1), 0)) {
+                    simplified = inst.getOperand(0);
+                } else if (isConstInt(inst.getOperand(0), 0)) {
+                    simplified = inst.getOperand(1);
+                }
+            }
+
+            // Pattern: xor(x, 0) → x
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Xor) {
+                if (isConstInt(inst.getOperand(1), 0)) {
+                    simplified = inst.getOperand(0);
+                } else if (isConstInt(inst.getOperand(0), 0)) {
+                    simplified = inst.getOperand(1);
+                }
+            }
+
+            // Pattern: add(x, 0) → x
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Add) {
+                if (isConstInt(inst.getOperand(1), 0)) {
+                    simplified = inst.getOperand(0);
+                } else if (isConstInt(inst.getOperand(0), 0)) {
+                    simplified = inst.getOperand(1);
+                }
+            }
+
+            // Pattern: sub(x, 0) → x
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Sub) {
+                if (isConstInt(inst.getOperand(1), 0)) {
+                    simplified = inst.getOperand(0);
+                }
+            }
+
+            // Pattern: mul(x, 0) → 0  (integer only)
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Mul) {
+                if (isConstInt(inst.getOperand(1), 0)) {
+                    simplified = llvm::ConstantInt::get(inst.getType(), 0);
+                } else if (isConstInt(inst.getOperand(0), 0)) {
+                    simplified = llvm::ConstantInt::get(inst.getType(), 0);
+                }
+            }
+
+            // Pattern: mul(x, 1) → x
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Mul) {
+                if (isConstInt(inst.getOperand(1), 1)) {
+                    simplified = inst.getOperand(0);
+                } else if (isConstInt(inst.getOperand(0), 1)) {
+                    simplified = inst.getOperand(1);
+                }
+            }
+
+            // Pattern: (x >> c1) >> c2 → x >> (c1 + c2) (arithmetic shift)
+            if (!simplified && inst.getOpcode() == llvm::Instruction::AShr) {
+                if (auto* inner = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0))) {
+                    if (inner->getOpcode() == llvm::Instruction::AShr && hasOneUse(inner)) {
+                        auto c1 = getConstIntValue(inner->getOperand(1));
+                        auto c2 = getConstIntValue(inst.getOperand(1));
+                        if (c1 && c2) {
+                            unsigned bitWidth = inst.getType()->getIntegerBitWidth();
+                            int64_t total = *c1 + *c2;
+                            if (total >= 0 && total < static_cast<int64_t>(bitWidth)) {
+                                llvm::IRBuilder<> builder(&inst);
+                                simplified = builder.CreateAShr(
+                                    inner->getOperand(0),
+                                    llvm::ConstantInt::get(inst.getType(), total),
+                                    "ashr_combine");
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Pattern: icmp eq x, x → true (i1 1)
+            if (!simplified && inst.getOpcode() == llvm::Instruction::ICmp) {
+                auto* cmp = llvm::cast<llvm::ICmpInst>(&inst);
+                if (cmp->getOperand(0) == cmp->getOperand(1)) {
+                    switch (cmp->getPredicate()) {
+                    case llvm::CmpInst::ICMP_EQ:
+                    case llvm::CmpInst::ICMP_ULE:
+                    case llvm::CmpInst::ICMP_UGE:
+                    case llvm::CmpInst::ICMP_SLE:
+                    case llvm::CmpInst::ICMP_SGE:
+                        simplified = llvm::ConstantInt::getTrue(inst.getType());
+                        break;
+                    case llvm::CmpInst::ICMP_NE:
+                    case llvm::CmpInst::ICMP_ULT:
+                    case llvm::CmpInst::ICMP_UGT:
+                    case llvm::CmpInst::ICMP_SLT:
+                    case llvm::CmpInst::ICMP_SGT:
+                        simplified = llvm::ConstantInt::getFalse(inst.getType());
+                        break;
+                    default:
+                        break;
+                    }
+                }
+            }
+
             if (simplified) {
                 inst.replaceAllUsesWith(simplified);
                 toErase.push_back(&inst);

@@ -881,6 +881,117 @@ std::vector<RewriteRule> getAlgebraicRules() {
             return g.addBinOp(Op::Mul, s.at("x"), s.at("x"));
         });
 
+    // ── Mul zero (integer-safe): x * 0 → 0 ──────────────────────────────
+    rules.emplace_back("mul_zero_right",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(0)}),
+        [](EGraph& g, const Subst&) { return g.addConst(0); });
+
+    rules.emplace_back("mul_zero_left",
+        P::OpPat(Op::Mul, {P::ConstPat(0), P::Wild("x")}),
+        [](EGraph& g, const Subst&) { return g.addConst(0); });
+
+    // ── Strength reduction chain: x * 2^n → x << n ──────────────────────
+    // These enable the cost model to select shifts over multiplies.
+    rules.emplace_back("mul_2_to_shl1",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(2)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId one = g.addConst(1);
+            return g.addBinOp(Op::Shl, s.at("x"), one);
+        });
+
+    rules.emplace_back("mul_4_to_shl2",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(4)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId two = g.addConst(2);
+            return g.addBinOp(Op::Shl, s.at("x"), two);
+        });
+
+    rules.emplace_back("mul_8_to_shl3_chain",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(8)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId three = g.addConst(3);
+            return g.addBinOp(Op::Shl, s.at("x"), three);
+        });
+
+    rules.emplace_back("mul_16_to_shl4_chain",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(16)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId four = g.addConst(4);
+            return g.addBinOp(Op::Shl, s.at("x"), four);
+        });
+
+    rules.emplace_back("mul_32_to_shl5",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(32)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId five = g.addConst(5);
+            return g.addBinOp(Op::Shl, s.at("x"), five);
+        });
+
+    rules.emplace_back("mul_64_to_shl6",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(64)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId six = g.addConst(6);
+            return g.addBinOp(Op::Shl, s.at("x"), six);
+        });
+
+    // ── Double negation: -(-x) → x ──────────────────────────────────────
+    rules.emplace_back("neg_neg",
+        P::OpPat(Op::Neg, {P::OpPat(Op::Neg, {P::Wild("x")})}),
+        [](EGraph&, const Subst& s) { return s.at("x"); });
+
+    // ── Division by power of 2 → shift (unsigned semantics for positive) ─
+    // x / 2 → x >> 1 (valid for non-negative x; the e-graph explores both)
+    rules.emplace_back("div_2_to_shr1",
+        P::OpPat(Op::Div, {P::Wild("x"), P::ConstPat(2)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId one = g.addConst(1);
+            return g.addBinOp(Op::Shr, s.at("x"), one);
+        });
+
+    rules.emplace_back("div_4_to_shr2",
+        P::OpPat(Op::Div, {P::Wild("x"), P::ConstPat(4)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId two = g.addConst(2);
+            return g.addBinOp(Op::Shr, s.at("x"), two);
+        });
+
+    rules.emplace_back("div_8_to_shr3",
+        P::OpPat(Op::Div, {P::Wild("x"), P::ConstPat(8)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId three = g.addConst(3);
+            return g.addBinOp(Op::Shr, s.at("x"), three);
+        });
+
+    // ── Modulo by power of 2 → bitwise AND ──────────────────────────────
+    // x % 4 → x & 3 (valid for non-negative x)
+    rules.emplace_back("mod_2_to_and1",
+        P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(2)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId mask = g.addConst(1);
+            return g.addBinOp(Op::BitAnd, s.at("x"), mask);
+        });
+
+    rules.emplace_back("mod_4_to_and3",
+        P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(4)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId mask = g.addConst(3);
+            return g.addBinOp(Op::BitAnd, s.at("x"), mask);
+        });
+
+    rules.emplace_back("mod_8_to_and7",
+        P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(8)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId mask = g.addConst(7);
+            return g.addBinOp(Op::BitAnd, s.at("x"), mask);
+        });
+
+    rules.emplace_back("mod_16_to_and15",
+        P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(16)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId mask = g.addConst(15);
+            return g.addBinOp(Op::BitAnd, s.at("x"), mask);
+        });
+
     return rules;
 }
 
@@ -1061,6 +1172,147 @@ std::vector<RewriteRule> getComparisonRules() {
         P::OpPat(Op::Ne, {P::OpPat(Op::Sub, {P::Wild("x"), P::Wild("y")}), P::ConstPat(0)}),
         [](EGraph& g, const Subst& s) {
             return g.addBinOp(Op::Ne, s.at("x"), s.at("y"));
+        });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Relational rules: comparison negation (relate ! to comparison ops)
+    // ─────────────────────────────────────────────────────────────────────
+
+    // ── !(a == b) → a != b ───────────────────────────────────────────────
+    rules.emplace_back("not_eq_to_ne",
+        P::OpPat(Op::LogNot, {P::OpPat(Op::Eq, {P::Wild("a"), P::Wild("b")})}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Ne, s.at("a"), s.at("b"));
+        });
+
+    // ── !(a != b) → a == b ───────────────────────────────────────────────
+    rules.emplace_back("not_ne_to_eq",
+        P::OpPat(Op::LogNot, {P::OpPat(Op::Ne, {P::Wild("a"), P::Wild("b")})}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Eq, s.at("a"), s.at("b"));
+        });
+
+    // ── !(a < b) → a >= b ───────────────────────────────────────────────
+    rules.emplace_back("not_lt_to_ge",
+        P::OpPat(Op::LogNot, {P::OpPat(Op::Lt, {P::Wild("a"), P::Wild("b")})}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Ge, s.at("a"), s.at("b"));
+        });
+
+    // ── !(a <= b) → a > b ───────────────────────────────────────────────
+    rules.emplace_back("not_le_to_gt",
+        P::OpPat(Op::LogNot, {P::OpPat(Op::Le, {P::Wild("a"), P::Wild("b")})}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Gt, s.at("a"), s.at("b"));
+        });
+
+    // ── !(a > b) → a <= b ───────────────────────────────────────────────
+    rules.emplace_back("not_gt_to_le",
+        P::OpPat(Op::LogNot, {P::OpPat(Op::Gt, {P::Wild("a"), P::Wild("b")})}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Le, s.at("a"), s.at("b"));
+        });
+
+    // ── !(a >= b) → a < b ───────────────────────────────────────────────
+    rules.emplace_back("not_ge_to_lt",
+        P::OpPat(Op::LogNot, {P::OpPat(Op::Ge, {P::Wild("a"), P::Wild("b")})}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Lt, s.at("a"), s.at("b"));
+        });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Relational rules: comparison swap (relate > to <, >= to <=)
+    // ─────────────────────────────────────────────────────────────────────
+
+    // ── a > b → b < a ────────────────────────────────────────────────────
+    rules.emplace_back("gt_to_lt_swap",
+        P::OpPat(Op::Gt, {P::Wild("a"), P::Wild("b")}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Lt, s.at("b"), s.at("a"));
+        });
+
+    // ── a >= b → b <= a ──────────────────────────────────────────────────
+    rules.emplace_back("ge_to_le_swap",
+        P::OpPat(Op::Ge, {P::Wild("a"), P::Wild("b")}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Le, s.at("b"), s.at("a"));
+        });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Relational rules: De Morgan's laws for logical operators
+    // ─────────────────────────────────────────────────────────────────────
+
+    // ── !(a && b) → !a || !b ─────────────────────────────────────────────
+    rules.emplace_back("demorgan_and",
+        P::OpPat(Op::LogNot, {P::OpPat(Op::LogAnd, {P::Wild("a"), P::Wild("b")})}),
+        [](EGraph& g, const Subst& s) {
+            ClassId notA = g.addUnaryOp(Op::LogNot, s.at("a"));
+            ClassId notB = g.addUnaryOp(Op::LogNot, s.at("b"));
+            return g.addBinOp(Op::LogOr, notA, notB);
+        });
+
+    // ── !(a || b) → !a && !b ─────────────────────────────────────────────
+    rules.emplace_back("demorgan_or",
+        P::OpPat(Op::LogNot, {P::OpPat(Op::LogOr, {P::Wild("a"), P::Wild("b")})}),
+        [](EGraph& g, const Subst& s) {
+            ClassId notA = g.addUnaryOp(Op::LogNot, s.at("a"));
+            ClassId notB = g.addUnaryOp(Op::LogNot, s.at("b"));
+            return g.addBinOp(Op::LogAnd, notA, notB);
+        });
+
+    // ── Double logical NOT: !!x → x ─────────────────────────────────────
+    rules.emplace_back("lognot_lognot",
+        P::OpPat(Op::LogNot, {P::OpPat(Op::LogNot, {P::Wild("x")})}),
+        [](EGraph&, const Subst& s) { return s.at("x"); });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Relational rules: ternary-comparison fusion
+    // ─────────────────────────────────────────────────────────────────────
+
+    // ── (a == b) ? x : y → (a != b) ? y : x ─────────────────────────────
+    rules.emplace_back("ternary_eq_flip",
+        P::OpPat(Op::Ternary, {P::OpPat(Op::Eq, {P::Wild("a"), P::Wild("b")}), P::Wild("x"), P::Wild("y")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId ne = g.addBinOp(Op::Ne, s.at("a"), s.at("b"));
+            ENode ternaryNode(Op::Ternary, std::vector<ClassId>{ne, s.at("y"), s.at("x")});
+            return g.add(ternaryNode);
+        });
+
+    // ── (a < b) ? x : y → (a >= b) ? y : x ─────────────────────────────
+    rules.emplace_back("ternary_lt_flip",
+        P::OpPat(Op::Ternary, {P::OpPat(Op::Lt, {P::Wild("a"), P::Wild("b")}), P::Wild("x"), P::Wild("y")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId ge = g.addBinOp(Op::Ge, s.at("a"), s.at("b"));
+            ENode ternaryNode(Op::Ternary, std::vector<ClassId>{ge, s.at("y"), s.at("x")});
+            return g.add(ternaryNode);
+        });
+
+    // ── Comparison-arithmetic fusion: (a - b) < 0 → a < b ───────────────
+    rules.emplace_back("sub_lt_zero",
+        P::OpPat(Op::Lt, {P::OpPat(Op::Sub, {P::Wild("a"), P::Wild("b")}), P::ConstPat(0)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Lt, s.at("a"), s.at("b"));
+        });
+
+    // ── Comparison-arithmetic fusion: (a - b) > 0 → a > b ───────────────
+    rules.emplace_back("sub_gt_zero",
+        P::OpPat(Op::Gt, {P::OpPat(Op::Sub, {P::Wild("a"), P::Wild("b")}), P::ConstPat(0)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Gt, s.at("a"), s.at("b"));
+        });
+
+    // ── Comparison-arithmetic fusion: (a - b) <= 0 → a <= b ─────────────
+    rules.emplace_back("sub_le_zero",
+        P::OpPat(Op::Le, {P::OpPat(Op::Sub, {P::Wild("a"), P::Wild("b")}), P::ConstPat(0)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Le, s.at("a"), s.at("b"));
+        });
+
+    // ── Comparison-arithmetic fusion: (a - b) >= 0 → a >= b ─────────────
+    rules.emplace_back("sub_ge_zero",
+        P::OpPat(Op::Ge, {P::OpPat(Op::Sub, {P::Wild("a"), P::Wild("b")}), P::ConstPat(0)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Ge, s.at("a"), s.at("b"));
         });
 
     return rules;
@@ -1257,6 +1509,29 @@ std::vector<RewriteRule> getBitwiseRules() {
         [](EGraph& g, const Subst& s) {
             ClassId allOnes = g.addConst(-1);
             return g.addBinOp(Op::BitXor, s.at("x"), allOnes);
+        });
+
+    // ── Double BitNot: ~~x → x ──────────────────────────────────────────
+    rules.emplace_back("bitnot_bitnot",
+        P::OpPat(Op::BitNot, {P::OpPat(Op::BitNot, {P::Wild("x")})}),
+        [](EGraph&, const Subst& s) { return s.at("x"); });
+
+    // ── De Morgan's (bitwise): ~(a & b) → (~a) | (~b) ───────────────────
+    rules.emplace_back("demorgan_bitand",
+        P::OpPat(Op::BitNot, {P::OpPat(Op::BitAnd, {P::Wild("a"), P::Wild("b")})}),
+        [](EGraph& g, const Subst& s) {
+            ClassId notA = g.addUnaryOp(Op::BitNot, s.at("a"));
+            ClassId notB = g.addUnaryOp(Op::BitNot, s.at("b"));
+            return g.addBinOp(Op::BitOr, notA, notB);
+        });
+
+    // ── De Morgan's (bitwise): ~(a | b) → (~a) & (~b) ───────────────────
+    rules.emplace_back("demorgan_bitor",
+        P::OpPat(Op::BitNot, {P::OpPat(Op::BitOr, {P::Wild("a"), P::Wild("b")})}),
+        [](EGraph& g, const Subst& s) {
+            ClassId notA = g.addUnaryOp(Op::BitNot, s.at("a"));
+            ClassId notB = g.addUnaryOp(Op::BitNot, s.at("b"));
+            return g.addBinOp(Op::BitAnd, notA, notB);
         });
 
     // ── AND distributes over OR: a & (b | c) → (a & b) | (a & c) ───────

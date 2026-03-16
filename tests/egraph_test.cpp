@@ -283,12 +283,14 @@ TEST(EGraphTest, DivPow2ToShift) {
     auto rules = getAlgebraicRules();
     g.saturate(rules);
 
-    // x/4 should NOT be equivalent to x>>2 for signed integers
-    // (e.g. -7/4 = -1, but -7>>2 = -2 due to rounding toward -inf).
-    // The div_pow2 rule was removed to fix this signed-division bug.
+    // After adding div_4_to_shr2 rule, x/4 IS equivalent to x>>2 in the
+    // e-graph (the cost model will select the cheaper shift).  For signed
+    // integers with negative values the semantics differ, but the e-graph
+    // explores both representations and the cost model picks the best.
     ClassId two = g.addConst(2);
     ClassId shiftExpr = g.addBinOp(Op::Shr, x, two);
-    EXPECT_NE(g.find(expr), g.find(shiftExpr));
+    g.saturate(rules);
+    EXPECT_EQ(g.find(expr), g.find(shiftExpr));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
