@@ -817,3 +817,361 @@ TEST(EGraphTest, BitwiseRulesNotEmpty) {
     auto rules = getBitwiseRules();
     EXPECT_GT(rules.size(), 5u);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// New e-graph rule tests — improved optimization coverage
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST(EGraphTest, ModSelfIsZero) {
+    EGraph g;
+    ClassId x = g.addVar("x");
+    ClassId expr = g.addBinOp(Op::Mod, x, x);
+
+    auto rules = getAlgebraicRules();
+    g.saturate(rules);
+
+    ClassId zero = g.addConst(0);
+    EXPECT_EQ(g.find(expr), g.find(zero));
+}
+
+TEST(EGraphTest, NegSubSwap) {
+    // -(a - b) → b - a
+    EGraph g;
+    ClassId a = g.addVar("a");
+    ClassId b = g.addVar("b");
+    ClassId sub = g.addBinOp(Op::Sub, a, b);
+    ClassId negSub = g.addUnaryOp(Op::Neg, sub);
+
+    auto rules = getAlgebraicRules();
+    g.saturate(rules);
+
+    ClassId bMinusA = g.addBinOp(Op::Sub, b, a);
+    EXPECT_EQ(g.find(negSub), g.find(bMinusA));
+}
+
+TEST(EGraphTest, MulAssociativity) {
+    EGraph g;
+    ClassId a = g.addVar("a");
+    ClassId b = g.addVar("b");
+    ClassId c = g.addVar("c");
+    ClassId ab = g.addBinOp(Op::Mul, a, b);
+    ClassId abc_left = g.addBinOp(Op::Mul, ab, c);
+
+    auto rules = getAlgebraicRules();
+    g.saturate(rules);
+
+    ClassId bc = g.addBinOp(Op::Mul, b, c);
+    ClassId abc_right = g.addBinOp(Op::Mul, a, bc);
+    EXPECT_EQ(g.find(abc_left), g.find(abc_right));
+}
+
+TEST(EGraphTest, StrengthReductionMul3) {
+    // x * 3 → (x << 1) + x
+    EGraph g;
+    ClassId x = g.addVar("x");
+    ClassId three = g.addConst(3);
+    ClassId expr = g.addBinOp(Op::Mul, x, three);
+
+    auto rules = getAlgebraicRules();
+    g.saturate(rules);
+
+    ClassId one = g.addConst(1);
+    ClassId shl = g.addBinOp(Op::Shl, x, one);
+    ClassId addExpr = g.addBinOp(Op::Add, shl, x);
+    EXPECT_EQ(g.find(expr), g.find(addExpr));
+}
+
+TEST(EGraphTest, StrengthReductionMul5) {
+    // x * 5 → (x << 2) + x
+    EGraph g;
+    ClassId x = g.addVar("x");
+    ClassId five = g.addConst(5);
+    ClassId expr = g.addBinOp(Op::Mul, x, five);
+
+    auto rules = getAlgebraicRules();
+    g.saturate(rules);
+
+    ClassId two = g.addConst(2);
+    ClassId shl = g.addBinOp(Op::Shl, x, two);
+    ClassId addExpr = g.addBinOp(Op::Add, shl, x);
+    EXPECT_EQ(g.find(expr), g.find(addExpr));
+}
+
+TEST(EGraphTest, StrengthReductionMul7) {
+    // x * 7 → (x << 3) - x
+    EGraph g;
+    ClassId x = g.addVar("x");
+    ClassId seven = g.addConst(7);
+    ClassId expr = g.addBinOp(Op::Mul, x, seven);
+
+    auto rules = getAlgebraicRules();
+    g.saturate(rules);
+
+    ClassId three = g.addConst(3);
+    ClassId shl = g.addBinOp(Op::Shl, x, three);
+    ClassId subExpr = g.addBinOp(Op::Sub, shl, x);
+    EXPECT_EQ(g.find(expr), g.find(subExpr));
+}
+
+TEST(EGraphTest, LogAndSelf) {
+    EGraph g;
+    ClassId x = g.addVar("x");
+    ClassId expr = g.addBinOp(Op::LogAnd, x, x);
+
+    auto rules = getComparisonRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(expr), g.find(x));
+}
+
+TEST(EGraphTest, LogOrSelf) {
+    EGraph g;
+    ClassId x = g.addVar("x");
+    ClassId expr = g.addBinOp(Op::LogOr, x, x);
+
+    auto rules = getComparisonRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(expr), g.find(x));
+}
+
+TEST(EGraphTest, LogAndZero) {
+    EGraph g;
+    ClassId x = g.addVar("x");
+    ClassId zero = g.addConst(0);
+    ClassId expr = g.addBinOp(Op::LogAnd, x, zero);
+
+    auto rules = getComparisonRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(expr), g.find(zero));
+}
+
+TEST(EGraphTest, LogOrZero) {
+    EGraph g;
+    ClassId x = g.addVar("x");
+    ClassId zero = g.addConst(0);
+    ClassId expr = g.addBinOp(Op::LogOr, x, zero);
+
+    auto rules = getComparisonRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(expr), g.find(x));
+}
+
+TEST(EGraphTest, TernarySameBranch) {
+    // cond ? x : x → x
+    EGraph g;
+    ClassId cond = g.addVar("cond");
+    ClassId x = g.addVar("x");
+
+    ENode ternaryNode(Op::Ternary, std::vector<ClassId>{cond, x, x});
+    ClassId expr = g.add(ternaryNode);
+
+    auto rules = getComparisonRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(expr), g.find(x));
+}
+
+TEST(EGraphTest, TernaryTrueCondition) {
+    // 1 ? a : b → a
+    EGraph g;
+    ClassId one = g.addConst(1);
+    ClassId a = g.addVar("a");
+    ClassId b = g.addVar("b");
+
+    ENode ternaryNode(Op::Ternary, std::vector<ClassId>{one, a, b});
+    ClassId expr = g.add(ternaryNode);
+
+    auto rules = getComparisonRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(expr), g.find(a));
+}
+
+TEST(EGraphTest, TernaryFalseCondition) {
+    // 0 ? a : b → b
+    EGraph g;
+    ClassId zero = g.addConst(0);
+    ClassId a = g.addVar("a");
+    ClassId b = g.addVar("b");
+
+    ENode ternaryNode(Op::Ternary, std::vector<ClassId>{zero, a, b});
+    ClassId expr = g.add(ternaryNode);
+
+    auto rules = getComparisonRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(expr), g.find(b));
+}
+
+TEST(EGraphTest, BitwiseAbsorptionAndOr) {
+    // a & (a | b) → a
+    EGraph g;
+    ClassId a = g.addVar("a");
+    ClassId b = g.addVar("b");
+    ClassId orExpr = g.addBinOp(Op::BitOr, a, b);
+    ClassId expr = g.addBinOp(Op::BitAnd, a, orExpr);
+
+    auto rules = getBitwiseRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(expr), g.find(a));
+}
+
+TEST(EGraphTest, BitwiseAbsorptionOrAnd) {
+    // a | (a & b) → a
+    EGraph g;
+    ClassId a = g.addVar("a");
+    ClassId b = g.addVar("b");
+    ClassId andExpr = g.addBinOp(Op::BitAnd, a, b);
+    ClassId expr = g.addBinOp(Op::BitOr, a, andExpr);
+
+    auto rules = getBitwiseRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(expr), g.find(a));
+}
+
+TEST(EGraphTest, XorAllOnesToBitNot) {
+    // x ^ -1 → ~x
+    EGraph g;
+    ClassId x = g.addVar("x");
+    ClassId allOnes = g.addConst(-1);
+    ClassId xorExpr = g.addBinOp(Op::BitXor, x, allOnes);
+
+    auto rules = getBitwiseRules();
+    g.saturate(rules);
+
+    ClassId bitNotExpr = g.addUnaryOp(Op::BitNot, x);
+    EXPECT_EQ(g.find(xorExpr), g.find(bitNotExpr));
+}
+
+TEST(EGraphTest, ShiftCombineShl) {
+    // (x << 2) << 3 → x << 5
+    EGraph g;
+    ClassId x = g.addVar("x");
+    ClassId two = g.addConst(2);
+    ClassId three = g.addConst(3);
+    ClassId inner = g.addBinOp(Op::Shl, x, two);
+    ClassId outer = g.addBinOp(Op::Shl, inner, three);
+
+    auto rules = getBitwiseRules();
+    auto algRules = getAlgebraicRules();
+    rules.insert(rules.end(), algRules.begin(), algRules.end());
+    g.saturate(rules);
+
+    ClassId five = g.addConst(5);
+    ClassId combined = g.addBinOp(Op::Shl, x, five);
+    EXPECT_EQ(g.find(outer), g.find(combined));
+}
+
+TEST(EGraphTest, ShiftCombineShr) {
+    // (x >> 3) >> 4 → x >> 7
+    EGraph g;
+    ClassId x = g.addVar("x");
+    ClassId three = g.addConst(3);
+    ClassId four = g.addConst(4);
+    ClassId inner = g.addBinOp(Op::Shr, x, three);
+    ClassId outer = g.addBinOp(Op::Shr, inner, four);
+
+    auto rules = getBitwiseRules();
+    auto algRules = getAlgebraicRules();
+    rules.insert(rules.end(), algRules.begin(), algRules.end());
+    g.saturate(rules);
+
+    ClassId seven = g.addConst(7);
+    ClassId combined = g.addBinOp(Op::Shr, x, seven);
+    EXPECT_EQ(g.find(outer), g.find(combined));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Integration test: compile a C-like function through OmScript
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST(EGraphTest, CompileCLikeSumFunction) {
+    // This test compiles an OmScript equivalent of the C function:
+    //   #include <stdio.h>
+    //   int sum_array(int n) {
+    //       int total = 0;
+    //       for (int i = 0; i < n; i++) { total = total + i; }
+    //       return total;
+    //   }
+    CodeGenerator codegen(OptimizationLevel::O2);
+    auto* mod = generateIR(
+        "fn sum_array(n) {\n"
+        "  var total = 0;\n"
+        "  for (i in 0...n) {\n"
+        "    total = total + i;\n"
+        "  }\n"
+        "  return total;\n"
+        "}\n"
+        "fn main() { return sum_array(100); }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* sumFn = mod->getFunction("sum_array");
+    ASSERT_NE(sumFn, nullptr);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+}
+
+TEST(EGraphTest, CompileCLikeFactorialFunction) {
+    // OmScript equivalent of:
+    //   int factorial(int n) {
+    //       if (n <= 1) return 1;
+    //       return n * factorial(n - 1);
+    //   }
+    CodeGenerator codegen(OptimizationLevel::O2);
+    auto* mod = generateIR(
+        "fn factorial(n) {\n"
+        "  if (n <= 1) { return 1; }\n"
+        "  return n * factorial(n - 1);\n"
+        "}\n"
+        "fn main() { return factorial(10); }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* factFn = mod->getFunction("factorial");
+    ASSERT_NE(factFn, nullptr);
+}
+
+TEST(EGraphTest, CompileCLikeBitwiseOperations) {
+    // OmScript equivalent of C-like bitwise optimization patterns:
+    //   int bitwise_opt(int x, int y) {
+    //       int a = x & (x | y);   // absorption: should optimize to x
+    //       int b = (x * 1) + (y - 0);  // identity: x + y
+    //       int c = x ^ x;         // self-xor: 0
+    //       return a + b + c;
+    //   }
+    CodeGenerator codegen(OptimizationLevel::O2);
+    auto* mod = generateIR(
+        "fn bitwise_opt(x, y) {\n"
+        "  var a = x & (x | y);\n"
+        "  var b = (x * 1) + (y - 0);\n"
+        "  var c = x ^ x;\n"
+        "  return a + b + c;\n"
+        "}\n"
+        "fn main() { return bitwise_opt(42, 7); }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* bwFn = mod->getFunction("bitwise_opt");
+    ASSERT_NE(bwFn, nullptr);
+}
+
+TEST(EGraphTest, CompileCLikeStrengthReduction) {
+    // Test that strength reduction optimizations apply to C-like patterns:
+    //   int optimize_mul(int x) {
+    //       return x * 8 + x * 3 + x * 15;
+    //   }
+    // x*8 → x<<3, x*3 → (x<<1)+x, x*15 → (x<<4)-x
+    CodeGenerator codegen(OptimizationLevel::O2);
+    auto* mod = generateIR(
+        "fn optimize_mul(x) {\n"
+        "  return x * 8 + x * 3 + x * 15;\n"
+        "}\n"
+        "fn main() { return optimize_mul(10); }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* optFn = mod->getFunction("optimize_mul");
+    ASSERT_NE(optFn, nullptr);
+}

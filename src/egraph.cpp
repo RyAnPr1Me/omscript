@@ -720,6 +720,89 @@ std::vector<RewriteRule> getAlgebraicRules() {
         P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(1)}),
         [](EGraph& g, const Subst&) { return g.addConst(0); });
 
+    // ── Self-modulo: x % x → 0 ──────────────────────────────────────────
+    rules.emplace_back("mod_self",
+        P::OpPat(Op::Mod, {P::Wild("x"), P::Wild("x")}),
+        [](EGraph& g, const Subst&) { return g.addConst(0); });
+
+    // ── Negation distribution: -(a - b) → b - a ─────────────────────────
+    rules.emplace_back("neg_sub_to_swap",
+        P::OpPat(Op::Neg, {P::OpPat(Op::Sub, {P::Wild("a"), P::Wild("b")})}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Sub, s.at("b"), s.at("a"));
+        });
+
+    // ── Multiplicative associativity: (a * b) * c → a * (b * c) ─────────
+    rules.emplace_back("mul_assoc",
+        P::OpPat(Op::Mul, {P::OpPat(Op::Mul, {P::Wild("a"), P::Wild("b")}), P::Wild("c")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId bc = g.addBinOp(Op::Mul, s.at("b"), s.at("c"));
+            return g.addBinOp(Op::Mul, s.at("a"), bc);
+        });
+
+    // ── Distributivity over subtraction: a * (b - c) → a*b - a*c ────────
+    rules.emplace_back("distribute_mul_sub",
+        P::OpPat(Op::Mul, {P::Wild("a"), P::OpPat(Op::Sub, {P::Wild("b"), P::Wild("c")})}),
+        [](EGraph& g, const Subst& s) {
+            ClassId ab = g.addBinOp(Op::Mul, s.at("a"), s.at("b"));
+            ClassId ac = g.addBinOp(Op::Mul, s.at("a"), s.at("c"));
+            return g.addBinOp(Op::Sub, ab, ac);
+        });
+
+    // ── Strength reduction: x * 3 → (x << 1) + x ───────────────────────
+    rules.emplace_back("mul_3_shift_add",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(3)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId one = g.addConst(1);
+            ClassId shl = g.addBinOp(Op::Shl, s.at("x"), one);
+            return g.addBinOp(Op::Add, shl, s.at("x"));
+        });
+
+    // ── Strength reduction: x * 5 → (x << 2) + x ───────────────────────
+    rules.emplace_back("mul_5_shift_add",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(5)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId two = g.addConst(2);
+            ClassId shl = g.addBinOp(Op::Shl, s.at("x"), two);
+            return g.addBinOp(Op::Add, shl, s.at("x"));
+        });
+
+    // ── Strength reduction: x * 7 → (x << 3) - x ───────────────────────
+    rules.emplace_back("mul_7_shift_sub",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(7)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId three = g.addConst(3);
+            ClassId shl = g.addBinOp(Op::Shl, s.at("x"), three);
+            return g.addBinOp(Op::Sub, shl, s.at("x"));
+        });
+
+    // ── Strength reduction: x * 9 → (x << 3) + x ───────────────────────
+    rules.emplace_back("mul_9_shift_add",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(9)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId three = g.addConst(3);
+            ClassId shl = g.addBinOp(Op::Shl, s.at("x"), three);
+            return g.addBinOp(Op::Add, shl, s.at("x"));
+        });
+
+    // ── Strength reduction: x * 15 → (x << 4) - x ──────────────────────
+    rules.emplace_back("mul_15_shift_sub",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(15)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId four = g.addConst(4);
+            ClassId shl = g.addBinOp(Op::Shl, s.at("x"), four);
+            return g.addBinOp(Op::Sub, shl, s.at("x"));
+        });
+
+    // ── Strength reduction: x * 17 → (x << 4) + x ──────────────────────
+    rules.emplace_back("mul_17_shift_add",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(17)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId four = g.addConst(4);
+            ClassId shl = g.addBinOp(Op::Shl, s.at("x"), four);
+            return g.addBinOp(Op::Add, shl, s.at("x"));
+        });
+
     return rules;
 }
 
@@ -796,6 +879,65 @@ std::vector<RewriteRule> getComparisonRules() {
     rules.emplace_back("double_log_not",
         P::OpPat(Op::LogNot, {P::OpPat(Op::LogNot, {P::Wild("x")})}),
         [](EGraph&, const Subst& s) { return s.at("x"); });
+
+    // ── Complement: !(a > b) → a <= b ────────────────────────────────────
+    rules.emplace_back("not_gt_to_le",
+        P::OpPat(Op::LogNot, {P::OpPat(Op::Gt, {P::Wild("a"), P::Wild("b")})}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Le, s.at("a"), s.at("b"));
+        });
+
+    // ── Complement: !(a >= b) → a < b ────────────────────────────────────
+    rules.emplace_back("not_ge_to_lt",
+        P::OpPat(Op::LogNot, {P::OpPat(Op::Ge, {P::Wild("a"), P::Wild("b")})}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Lt, s.at("a"), s.at("b"));
+        });
+
+    // ── Logical identity: x && x → x ────────────────────────────────────
+    rules.emplace_back("logand_self",
+        P::OpPat(Op::LogAnd, {P::Wild("x"), P::Wild("x")}),
+        [](EGraph&, const Subst& s) { return s.at("x"); });
+
+    // ── Logical identity: x || x → x ────────────────────────────────────
+    rules.emplace_back("logor_self",
+        P::OpPat(Op::LogOr, {P::Wild("x"), P::Wild("x")}),
+        [](EGraph&, const Subst& s) { return s.at("x"); });
+
+    // ── Logical annihilation: x && 0 → 0 ────────────────────────────────
+    rules.emplace_back("logand_zero",
+        P::OpPat(Op::LogAnd, {P::Wild("x"), P::ConstPat(0)}),
+        [](EGraph& g, const Subst&) { return g.addConst(0); });
+
+    // ── Logical annihilation: 0 && x → 0 ────────────────────────────────
+    rules.emplace_back("logand_zero_left",
+        P::OpPat(Op::LogAnd, {P::ConstPat(0), P::Wild("x")}),
+        [](EGraph& g, const Subst&) { return g.addConst(0); });
+
+    // ── Logical identity: x || 0 → x ────────────────────────────────────
+    rules.emplace_back("logor_zero",
+        P::OpPat(Op::LogOr, {P::Wild("x"), P::ConstPat(0)}),
+        [](EGraph&, const Subst& s) { return s.at("x"); });
+
+    // ── Logical identity: 0 || x → x ────────────────────────────────────
+    rules.emplace_back("logor_zero_left",
+        P::OpPat(Op::LogOr, {P::ConstPat(0), P::Wild("x")}),
+        [](EGraph&, const Subst& s) { return s.at("x"); });
+
+    // ── Ternary same-branch: cond ? x : x → x ──────────────────────────
+    rules.emplace_back("ternary_same",
+        P::OpPat(Op::Ternary, {P::Wild("c"), P::Wild("x"), P::Wild("x")}),
+        [](EGraph&, const Subst& s) { return s.at("x"); });
+
+    // ── Ternary true: 1 ? a : b → a ────────────────────────────────────
+    rules.emplace_back("ternary_true",
+        P::OpPat(Op::Ternary, {P::ConstPat(1), P::Wild("a"), P::Wild("b")}),
+        [](EGraph&, const Subst& s) { return s.at("a"); });
+
+    // ── Ternary false: 0 ? a : b → b ───────────────────────────────────
+    rules.emplace_back("ternary_false",
+        P::OpPat(Op::Ternary, {P::ConstPat(0), P::Wild("a"), P::Wild("b")}),
+        [](EGraph&, const Subst& s) { return s.at("b"); });
 
     return rules;
 }
@@ -892,6 +1034,40 @@ std::vector<RewriteRule> getBitwiseRules() {
         P::OpPat(Op::BitXor, {P::Wild("a"), P::Wild("b")}),
         [](EGraph& g, const Subst& s) {
             return g.addBinOp(Op::BitXor, s.at("b"), s.at("a"));
+        });
+
+    // ── Absorption: a & (a | b) → a ─────────────────────────────────────
+    rules.emplace_back("and_absorb",
+        P::OpPat(Op::BitAnd, {P::Wild("a"), P::OpPat(Op::BitOr, {P::Wild("a"), P::Wild("b")})}),
+        [](EGraph&, const Subst& s) { return s.at("a"); });
+
+    // ── Absorption: a | (a & b) → a ─────────────────────────────────────
+    rules.emplace_back("or_absorb",
+        P::OpPat(Op::BitOr, {P::Wild("a"), P::OpPat(Op::BitAnd, {P::Wild("a"), P::Wild("b")})}),
+        [](EGraph&, const Subst& s) { return s.at("a"); });
+
+    // ── XOR cancel: a ^ a → 0 (already covered by xor_self) ─────────────
+    // ── XOR not: x ^ -1 → ~x ────────────────────────────────────────────
+    rules.emplace_back("xor_all_ones_to_bitnot",
+        P::OpPat(Op::BitXor, {P::Wild("x"), P::ConstPat(-1)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addUnaryOp(Op::BitNot, s.at("x"));
+        });
+
+    // ── Shift combination: (x << a) << b → x << (a + b) ────────────────
+    rules.emplace_back("shl_combine",
+        P::OpPat(Op::Shl, {P::OpPat(Op::Shl, {P::Wild("x"), P::Wild("a")}), P::Wild("b")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId sum = g.addBinOp(Op::Add, s.at("a"), s.at("b"));
+            return g.addBinOp(Op::Shl, s.at("x"), sum);
+        });
+
+    // ── Shift combination: (x >> a) >> b → x >> (a + b) ────────────────
+    rules.emplace_back("shr_combine",
+        P::OpPat(Op::Shr, {P::OpPat(Op::Shr, {P::Wild("x"), P::Wild("a")}), P::Wild("b")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId sum = g.addBinOp(Op::Add, s.at("a"), s.at("b"));
+            return g.addBinOp(Op::Shr, s.at("x"), sum);
         });
 
     return rules;

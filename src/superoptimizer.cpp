@@ -866,6 +866,45 @@ static unsigned applyAlgebraicSimplifications(llvm::Function& func) {
                 }
             }
 
+            // Pattern: x & -1 → x (AND with all-ones)
+            if (!simplified && inst.getOpcode() == llvm::Instruction::And) {
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1))) {
+                    if (ci->isMinusOne()) {
+                        simplified = inst.getOperand(0);
+                    }
+                } else if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(0))) {
+                    if (ci->isMinusOne()) {
+                        simplified = inst.getOperand(1);
+                    }
+                }
+            }
+
+            // Pattern: x | -1 → -1 (OR with all-ones)
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Or) {
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1))) {
+                    if (ci->isMinusOne()) {
+                        simplified = llvm::ConstantInt::get(inst.getType(), -1);
+                    }
+                } else if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(0))) {
+                    if (ci->isMinusOne()) {
+                        simplified = llvm::ConstantInt::get(inst.getType(), -1);
+                    }
+                }
+            }
+
+            // Pattern: x * 2 → x << 1 (strength reduction)
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Mul) {
+                if (isConstInt(inst.getOperand(1), 2)) {
+                    llvm::IRBuilder<> builder(&inst);
+                    simplified = builder.CreateShl(inst.getOperand(0),
+                        llvm::ConstantInt::get(inst.getType(), 1), "mul2_shl");
+                } else if (isConstInt(inst.getOperand(0), 2)) {
+                    llvm::IRBuilder<> builder(&inst);
+                    simplified = builder.CreateShl(inst.getOperand(1),
+                        llvm::ConstantInt::get(inst.getType(), 1), "mul2_shl");
+                }
+            }
+
             // Pattern: x << 0 → x
             if (!simplified && inst.getOpcode() == llvm::Instruction::Shl) {
                 if (isConstInt(inst.getOperand(1), 0)) {
@@ -1155,6 +1194,63 @@ bool synthesizeReplacement(llvm::Instruction* inst, const SynthesisConfig& confi
         else if (c == 255) {
             llvm::Value* shl = builder.CreateShl(var, 8);
             replacement = builder.CreateSub(shl, var, "mul255");
+        }
+        // x * 129 → (x << 7) + x  (cost: 2 vs 3)
+        else if (c == 129) {
+            llvm::Value* shl = builder.CreateShl(var, 7);
+            replacement = builder.CreateAdd(shl, var, "mul129");
+        }
+        // x * 257 → (x << 8) + x  (cost: 2 vs 3)
+        else if (c == 257) {
+            llvm::Value* shl = builder.CreateShl(var, 8);
+            replacement = builder.CreateAdd(shl, var, "mul257");
+        }
+        // x * 511 → (x << 9) - x  (cost: 2 vs 3)
+        else if (c == 511) {
+            llvm::Value* shl = builder.CreateShl(var, 9);
+            replacement = builder.CreateSub(shl, var, "mul511");
+        }
+        // x * 513 → (x << 9) + x  (cost: 2 vs 3)
+        else if (c == 513) {
+            llvm::Value* shl = builder.CreateShl(var, 9);
+            replacement = builder.CreateAdd(shl, var, "mul513");
+        }
+        // x * 1023 → (x << 10) - x  (cost: 2 vs 3)
+        else if (c == 1023) {
+            llvm::Value* shl = builder.CreateShl(var, 10);
+            replacement = builder.CreateSub(shl, var, "mul1023");
+        }
+        // x * 1025 → (x << 10) + x  (cost: 2 vs 3)
+        else if (c == 1025) {
+            llvm::Value* shl = builder.CreateShl(var, 10);
+            replacement = builder.CreateAdd(shl, var, "mul1025");
+        }
+        // General: x * (2^n + 1) → (x << n) + x  for any n
+        // General: x * (2^n - 1) → (x << n) - x  for any n
+        // These are always 2 instructions (cost 2.0) vs mul (cost 3.0)
+        else {
+            // Check if c = 2^n + 1
+            int64_t cm1 = c - 1;
+            if (cm1 > 0 && (cm1 & (cm1 - 1)) == 0) {
+                unsigned n = 0;
+                int64_t tmp = cm1;
+                while (tmp > 1) { tmp >>= 1; n++; }
+                llvm::Value* shl = builder.CreateShl(var, n);
+                replacement = builder.CreateAdd(shl, var,
+                    "mul" + std::to_string(c));
+            }
+            // Check if c = 2^n - 1
+            else {
+                int64_t cp1 = c + 1;
+                if (cp1 > 0 && (cp1 & (cp1 - 1)) == 0) {
+                    unsigned n = 0;
+                    int64_t tmp = cp1;
+                    while (tmp > 1) { tmp >>= 1; n++; }
+                    llvm::Value* shl = builder.CreateShl(var, n);
+                    replacement = builder.CreateSub(shl, var,
+                        "mul" + std::to_string(c));
+                }
+            }
         }
     }
 
