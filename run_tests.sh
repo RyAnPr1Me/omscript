@@ -335,6 +335,12 @@ test_program "examples/string_comparison_test.om" 15
 test_program "examples/string_multiply_test.om" 9
 test_program "examples/string_array_test.om" 20
 test_program "examples/array_fill_negative_test.om" 3
+test_program "examples/struct_test.om" 0
+test_program "examples/import_test.om" 0
+test_program "examples/generic_test.om" 0
+test_program "examples/thread_test.om" 0
+test_program "examples/string_fold_test.om" 0
+test_program "examples/circular_import_test.om" 0
 test_compile_fail "examples/const_fail.om"
 test_compile_fail "examples/break_outside_loop.om"
 test_compile_fail "examples/continue_outside_loop.om"

@@ -1430,15 +1430,10 @@ std::vector<RewriteRule> getAlgebraicRules() {
         P::OpPat(Op::Mod, {P::OpPat(Op::Mod, {P::Wild("x"), P::Wild("n")}), P::Wild("n")}),
         [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Mod, s.at("x"), s.at("n")); });
 
-    // 0 / x → 0
-    rules.emplace_back("zero_div",
-        P::OpPat(Op::Div, {P::ConstPat(0), P::Wild("x")}),
-        [](EGraph& g, const Subst&) { return g.addConst(0); });
-
-    // 0 % x → 0
-    rules.emplace_back("zero_mod",
-        P::OpPat(Op::Mod, {P::ConstPat(0), P::Wild("x")}),
-        [](EGraph& g, const Subst&) { return g.addConst(0); });
+    // NOTE: `0 / x → 0` and `0 % x → 0` are omitted intentionally.
+    // When x is also 0 these would suppress the division-by-zero / modulo-by-zero
+    // runtime error, producing incorrect behaviour.  Leave the division to
+    // runtime so that the fault can be reported correctly.
 
     // ─────────────────────────────────────────────────────────────────────
     // Power rules

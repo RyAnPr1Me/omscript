@@ -291,6 +291,38 @@ TEST(EGraphTest, DivPow2ToShift) {
     EXPECT_NE(g.find(expr), g.find(shiftExpr));
 }
 
+TEST(EGraphTest, ZeroDivNotFolded) {
+    // 0 / x must NOT be simplified to 0.
+    // When x is also 0 the fold would suppress the division-by-zero runtime
+    // error and produce an incorrect result.
+    EGraph g;
+    ClassId zero = g.addConst(0);
+    ClassId x = g.addVar("x");
+    ClassId expr = g.addBinOp(Op::Div, zero, x);
+
+    auto rules = getAlgebraicRules();
+    g.saturate(rules);
+
+    ClassId zero2 = g.addConst(0);
+    // After saturation, 0/x must NOT be merged with the constant 0.
+    EXPECT_NE(g.find(expr), g.find(zero2));
+}
+
+TEST(EGraphTest, ZeroModNotFolded) {
+    // 0 % x must NOT be simplified to 0 for the same reason: when x==0,
+    // the fold masks the modulo-by-zero runtime error.
+    EGraph g;
+    ClassId zero = g.addConst(0);
+    ClassId x = g.addVar("x");
+    ClassId expr = g.addBinOp(Op::Mod, zero, x);
+
+    auto rules = getAlgebraicRules();
+    g.saturate(rules);
+
+    ClassId zero2 = g.addConst(0);
+    EXPECT_NE(g.find(expr), g.find(zero2));
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Constant folding tests
 // ─────────────────────────────────────────────────────────────────────────────

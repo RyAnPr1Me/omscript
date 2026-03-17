@@ -1,7 +1,7 @@
 # OmScript Language Reference
 
-> **Version:** 2.0.0  
-> **Compiler:** `omsc` — OmScript Compiler v2.0.0  
+> **Version:** 2.3.9  
+> **Compiler:** `omsc` — OmScript Compiler v2.3.9  
 > **Standard:** C++17 · LLVM Backend · Ahead-of-Time Compilation  
 > **License:** See repository root
 
@@ -19,16 +19,22 @@
 8. [Control Flow](#8-control-flow)
 9. [Arrays](#9-arrays)
 10. [Strings](#10-strings)
-11. [Standard Library](#11-standard-library)
-12. [Optimization Levels](#12-optimization-levels)
-13. [OPTMAX Directive](#13-optmax-directive)
-14. [Adaptive JIT Runtime](#14-adaptive-jit-runtime)
-15. [Memory Management](#15-memory-management)
-16. [CLI Reference](#16-cli-reference)
-17. [Building from Source](#17-building-from-source)
-18. [Error Handling and Diagnostics](#18-error-handling-and-diagnostics)
-19. [Complete Code Examples](#19-complete-code-examples)
-20. [Grammar Summary](#20-grammar-summary)
+11. [Structs](#11-structs)
+12. [Enums](#12-enums)
+13. [Maps](#13-maps)
+14. [Module Imports](#14-module-imports)
+15. [File I/O](#15-file-io)
+16. [Concurrency](#16-concurrency)
+17. [Standard Library](#17-standard-library)
+18. [Optimization Levels](#18-optimization-levels)
+19. [OPTMAX Directive](#19-optmax-directive)
+20. [Adaptive JIT Runtime](#20-adaptive-jit-runtime)
+21. [Memory Management](#21-memory-management)
+22. [CLI Reference](#22-cli-reference)
+23. [Building from Source](#23-building-from-source)
+24. [Error Handling and Diagnostics](#24-error-handling-and-diagnostics)
+25. [Complete Code Examples](#25-complete-code-examples)
+26. [Grammar Summary](#26-grammar-summary)
 
 ---
 
@@ -41,11 +47,15 @@ OmScript is a **low-level, C-like programming language** featuring:
 - **Reference-counted memory management** — Automatic deterministic deallocation via malloc/free with reference counting on strings.
 - **Adaptive JIT runtime** — A lightweight JIT runtime monitors function call counts and recompiles hot functions at higher optimization levels with profile-guided hints, producing even faster native code for performance-critical paths.
 - **Aggressive optimization** — Four optimization levels (O0–O3) plus a special OPTMAX directive that applies exhaustive multi-pass optimization to marked functions.
-- **92 built-in standard library functions** — Math, array manipulation, string, character classification, type conversion, system, and I/O, all compiled to native machine code.
+- **97 built-in standard library functions** — Math, array manipulation, string, character classification, type conversion, map/dictionary, file I/O, concurrency, and system functions, all compiled to native machine code.
+- **Structs** — Named record types with field access and mutation.
+- **Module system** — `import` statements with circular-import detection.
+- **Generic function syntax** — Type-annotated generic parameters (type-erased at runtime).
+- **Concurrency primitives** — POSIX thread creation/join and mutex operations.
 
 ### Design Philosophy
 
-OmScript prioritizes **performance** and **simplicity**. The language is deliberately minimal — it provides the essential building blocks (functions, variables, loops, conditionals, arrays, basic I/O) without the overhead of classes, modules, or a garbage collector. Every stdlib function compiles directly to LLVM IR, producing native machine instructions with zero runtime dispatch overhead.
+OmScript prioritizes **performance** and **simplicity**. The language provides the essential building blocks (functions, variables, loops, conditionals, arrays, structs, maps, modules, and I/O) without a garbage collector. Every stdlib function compiles directly to LLVM IR, producing native machine instructions with zero runtime dispatch overhead.
 
 ---
 
@@ -218,7 +228,7 @@ identifier := [a-zA-Z_][a-zA-Z0-9_]*
 
 ### 4.4 Keywords
 
-The following 22 words are reserved:
+The following 24 words are reserved:
 
 | Keyword | Purpose |
 |---------|---------|
@@ -241,6 +251,8 @@ The following 22 words are reserved:
 | `catch` | Error handler |
 | `throw` | Throw an error value |
 | `enum` | Enum declaration |
+| `struct` | Struct/record type declaration |
+| `import` | Module import statement |
 | `true` | Boolean true (1) |
 | `false` | Boolean false (0) |
 | `null` | Null literal |
@@ -427,7 +439,39 @@ fn add(a: int, b: int) {
 }
 ```
 
-### 6.2 The `main` Function
+With an optional return-type annotation:
+
+```javascript
+fn square(n: int) -> int {
+    return n * n;
+}
+```
+
+### 6.2 Generic Functions
+
+Functions may declare one or more **type parameters** enclosed in angle brackets. Type parameters are used for documentation and tooling only; all values are represented as `i64` at runtime (type-erased), so no code is specialised per type.
+
+```javascript
+fn identity<T>(x: T) -> T {
+    return x;
+}
+
+fn first<T>(arr) -> T {
+    return arr[0];
+}
+
+fn pair<A, B>(a: A, b: B) {
+    return a;
+}
+
+fn main() {
+    println(identity(42));        // 42
+    println(first([10, 20, 30])); // 10
+    return 0;
+}
+```
+
+### 6.3 The `main` Function
 
 Every OmScript program must have a `main` function. This is the entry point. The return value of `main` becomes the process exit code (modulo 256):
 
@@ -437,7 +481,7 @@ fn main() {
 }
 ```
 
-### 6.3 Function Calls
+### 6.4 Function Calls
 
 ```javascript
 var result = factorial(5);
@@ -446,7 +490,7 @@ print(result);
 
 Functions support forward references — a function may call another function defined later in the file. Recursive and mutually recursive calls are supported.
 
-### 6.4 Default Parameters
+### 6.5 Default Parameters
 
 Parameters can have default values. When a function is called with fewer arguments than parameters, the missing arguments use their default values. Default values must be literal expressions (integer, float, or string). Non-default parameters must come before default parameters.
 
@@ -479,7 +523,7 @@ fn main() {
 }
 ```
 
-### 6.5 Return Values
+### 6.6 Return Values
 
 All functions return an `i64` value. If no `return` statement is reached, the function returns `0` by default.
 
@@ -490,7 +534,7 @@ fn nothing() {
 // nothing() returns 0
 ```
 
-### 6.6 Recursion
+### 6.7 Recursion
 
 OmScript supports recursion:
 
@@ -1048,11 +1092,332 @@ At runtime, strings are fully dynamic:
 
 ---
 
-## 11. Standard Library
+## 11. Structs
 
-OmScript provides **92 built-in functions**. All stdlib functions are compiled directly to native machine code via LLVM IR.
+### 11.1 Declaration
 
-### 11.1 I/O Functions
+Structs declare named record types at the top level. Fields are separated by commas:
+
+```javascript
+struct Point { x, y }
+struct Color { r, g, b }
+struct Person { name, age, score }
+```
+
+### 11.2 Creating Struct Instances
+
+Use a **struct literal** with field names and values:
+
+```javascript
+struct Point { x, y }
+
+fn main() {
+    var p = Point { x: 10, y: 20 };
+    return 0;
+}
+```
+
+### 11.3 Field Access
+
+Use dot notation to read a field:
+
+```javascript
+struct Point { x, y }
+
+fn main() {
+    var p = Point { x: 10, y: 20 };
+    println(p.x);   // 10
+    println(p.y);   // 20
+    return 0;
+}
+```
+
+### 11.4 Field Assignment
+
+Use dot notation on the left-hand side to update a field:
+
+```javascript
+struct Point { x, y }
+
+fn main() {
+    var p = Point { x: 10, y: 20 };
+    p.x = 30;
+    println(p.x);   // 30
+    return 0;
+}
+```
+
+### 11.5 Structs as Function Arguments and Return Values
+
+Structs are passed and returned like any other value:
+
+```javascript
+struct Point { x, y }
+
+fn make_point(a, b) {
+    return Point { x: a, y: b };
+}
+
+fn sum(p) {
+    return p.x + p.y;
+}
+
+fn main() {
+    var p = make_point(3, 4);
+    println(sum(p));   // 7
+    return 0;
+}
+```
+
+**Key points:**
+- All field names in a struct literal must match the declared fields (order is flexible).
+- Field values may be any expression.
+- Structs are value types passed by reference internally — mutation via dot-assign affects the original variable.
+
+---
+
+## 12. Enums
+
+Enums declare named integer constants at the top level. See [section 8.8](#88-enums) for full details.
+
+```javascript
+enum Direction { NORTH, SOUTH = 10, EAST, WEST }
+
+fn main() {
+    var d = Direction_EAST;   // 11
+    return d;
+}
+```
+
+---
+
+## 13. Maps
+
+Maps (dictionaries) store key-value pairs where keys are strings and values are `i64`.
+
+### 13.1 Creating a Map
+
+```javascript
+var m = map_new();
+```
+
+### 13.2 Setting and Getting Values
+
+```javascript
+m = map_set(m, "x", 42);
+var v = map_get(m, "x", 0);   // 0 is the default if key absent
+println(v);                    // 42
+```
+
+### 13.3 Checking for Keys
+
+```javascript
+var exists = map_has(m, "x");   // 1 if present, 0 otherwise
+```
+
+### 13.4 Removing Keys
+
+```javascript
+m = map_remove(m, "x");
+```
+
+### 13.5 Querying Size and Iterating
+
+```javascript
+var sz = map_size(m);
+var keys   = map_keys(m);    // returns an array of key strings
+var values = map_values(m);  // returns an array of values
+```
+
+### 13.6 Full Example
+
+```javascript
+fn main() {
+    var m = map_new();
+    m = map_set(m, "a", 1);
+    m = map_set(m, "b", 2);
+    m = map_set(m, "c", 3);
+
+    println(map_get(m, "b", 0));   // 2
+    println(map_has(m, "d"));      // 0
+    println(map_size(m));          // 3
+
+    m = map_remove(m, "a");
+    println(map_size(m));          // 2
+    return 0;
+}
+```
+
+---
+
+## 14. Module Imports
+
+### 14.1 Import Syntax
+
+The `import` statement includes another `.om` source file before compilation:
+
+```javascript
+import "path/to/module";
+```
+
+- The `.om` extension is added automatically if omitted.
+- Paths are relative to the importing file's directory.
+- Circular imports are detected and silently skipped.
+
+### 14.2 Module Files
+
+A module is an ordinary `.om` file that exports functions:
+
+```javascript
+// modules/math_utils.om
+fn square(n) { return n * n; }
+fn cube(n)   { return n * n * n; }
+fn add(a, b) { return a + b; }
+```
+
+### 14.3 Using Imported Functions
+
+After importing, all functions from the module are available in the current file:
+
+```javascript
+import "modules/math_utils";
+
+fn main() {
+    println(square(5));   // 25
+    println(cube(3));     // 27
+    println(add(10, 20)); // 30
+    return 0;
+}
+```
+
+### 14.4 Multiple Imports
+
+```javascript
+import "modules/math_utils";
+import "modules/string_utils";
+
+fn main() {
+    println(square(4));        // 16
+    println(greet("World"));   // Hello, World!
+    return 0;
+}
+```
+
+### 14.5 Circular Import Detection
+
+If file A imports file B which imports file A, the second import of A is silently ignored. This prevents infinite recursion during compilation.
+
+---
+
+## 15. File I/O
+
+### 15.1 Reading Files
+
+```javascript
+var content = file_read("data.txt");   // returns string, or "" on error
+```
+
+### 15.2 Writing Files
+
+```javascript
+file_write("output.txt", "Hello, World!\n");   // overwrites the file
+```
+
+### 15.3 Appending to Files
+
+```javascript
+file_append("log.txt", "New entry\n");   // appends to existing file
+```
+
+### 15.4 Checking File Existence
+
+```javascript
+var exists = file_exists("data.txt");   // 1 if exists, 0 otherwise
+```
+
+### 15.5 Full Example
+
+```javascript
+fn main() {
+    if (!file_exists("out.txt")) {
+        file_write("out.txt", "first line\n");
+    }
+    file_append("out.txt", "second line\n");
+    var text = file_read("out.txt");
+    println(text);
+    return 0;
+}
+```
+
+---
+
+## 16. Concurrency
+
+OmScript provides POSIX thread and mutex primitives.
+
+### 16.1 Threads
+
+#### Creating a Thread
+
+```javascript
+var handle = thread_create("function_name");
+```
+
+- The argument is the **name** of a zero-argument function defined in the current program.
+- The function runs concurrently in a new POSIX thread.
+- Returns an opaque thread handle.
+
+#### Joining a Thread
+
+```javascript
+thread_join(handle);
+```
+
+Blocks until the thread completes.
+
+### 16.2 Mutexes
+
+```javascript
+var m = mutex_new();     // create a mutex
+mutex_lock(m);           // acquire the lock
+// ... critical section ...
+mutex_unlock(m);         // release the lock
+mutex_destroy(m);        // free the mutex
+```
+
+### 16.3 Example
+
+```javascript
+fn worker() {
+    println(42);
+    return 0;
+}
+
+fn main() {
+    var m = mutex_new();
+    mutex_lock(m);
+    mutex_unlock(m);
+    mutex_destroy(m);
+
+    var t = thread_create("worker");
+    thread_join(t);
+
+    return 0;
+}
+```
+
+**Key points:**
+- Thread functions must be zero-parameter functions defined in the same program.
+- Mutex operations must be balanced (each lock must have a matching unlock).
+- Functions that use concurrency primitives do not receive the `NoSync`/`NoFree` LLVM attributes.
+
+---
+
+## 17. Standard Library
+
+OmScript provides **97 built-in functions**. All stdlib functions are compiled directly to native machine code via LLVM IR.
+
+### 17.1 I/O Functions
 
 #### `print(value)`
 
@@ -1139,7 +1504,7 @@ if (error) {
 }
 ```
 
-### 11.2 Math Functions
+### 17.2 Math Functions
 
 #### `abs(x)`
 
@@ -1323,7 +1688,7 @@ to_float(10)  // 10.0
 to_float(-3)  // -3.0
 ```
 
-### 11.3 Array Functions
+### 17.3 Array Functions
 
 #### `len(array)`
 
@@ -1522,7 +1887,7 @@ fn main() {
 }
 ```
 
-### 11.4 Character Functions
+### 17.4 Character Functions
 
 #### `to_char(code)`
 
@@ -1553,7 +1918,7 @@ is_digit(57)    // 1  ('9')
 is_digit(65)    // 0  ('A')
 ```
 
-### 11.5 String Functions
+### 17.5 String Functions
 
 #### `str_len(s)`
 
@@ -1754,7 +2119,7 @@ var chars = str_chars("ABC");
 // chars == [65, 66, 67]
 ```
 
-### 11.5.1 System Functions
+### 17.5.1 System Functions
 
 #### `random()`
 
@@ -1780,7 +2145,7 @@ Pauses execution for the specified number of milliseconds.
 sleep(1000);  // sleep for 1 second
 ```
 
-### 11.6 Utility Functions
+### 17.6 Utility Functions
 
 #### `typeof(x)`
 
@@ -1814,7 +2179,7 @@ assert(x > 0);      // passes if x > 0, otherwise aborts
 assert(0);          // always aborts: "Runtime error: assertion failed"
 ```
 
-### 11.7 Stdlib Summary Table
+### 17.7 Stdlib Summary Table
 
 | Function | Args | Returns | Description |
 |----------|:----:|---------|-------------|
@@ -1887,25 +2252,48 @@ assert(0);          // always aborts: "Runtime error: assertion failed"
 | `str_to_float(s)` | 1 | float | Parse string as float |
 | `str_split(s, delim)` | 2 | array | Split string by delimiter into array |
 | `str_chars(s)` | 1 | array | Convert string to array of char codes |
+| `char_code(s, i)` | 2 | int | ASCII code of character at index `i` in string `s` |
+| `number_to_string(n)` | 1 | string | Convert integer or float to string |
+| `string_to_number(s)` | 1 | int/float | Parse string as integer or float |
+| `file_read(path)` | 1 | string | Read entire file contents as string |
+| `file_write(path, s)` | 2 | 0 | Write string to file (overwrite) |
+| `file_append(path, s)` | 2 | 0 | Append string to file |
+| `file_exists(path)` | 1 | 0/1 | Check whether file exists |
+| `map_new()` | 0 | map | Create an empty map |
+| `map_set(m, k, v)` | 3 | map | Set key `k` to value `v`; returns updated map |
+| `map_get(m, k, d)` | 3 | value | Get value for key `k`, or default `d` |
+| `map_has(m, k)` | 2 | 0/1 | Check whether key `k` exists |
+| `map_remove(m, k)` | 2 | map | Remove key `k`; returns updated map |
+| `map_size(m)` | 1 | int | Number of keys in map |
+| `map_keys(m)` | 1 | array | Array of all keys |
+| `map_values(m)` | 1 | array | Array of all values |
+| `range(start, end)` | 2 | array | Array of integers from `start` to `end-1` |
+| `range_step(s, e, step)` | 3 | array | Array of integers from `s` to `e` with given step |
+| `thread_create(fn)` | 1 | handle | Start named function in new thread |
+| `thread_join(h)` | 1 | 0 | Wait for thread `h` to finish |
+| `mutex_new()` | 0 | mutex | Create a new mutex |
+| `mutex_lock(m)` | 1 | 0 | Acquire mutex `m` |
+| `mutex_unlock(m)` | 1 | 0 | Release mutex `m` |
+| `mutex_destroy(m)` | 1 | 0 | Destroy mutex `m` |
 
 ---
 
-## 12. Optimization Levels
+## 18. Optimization Levels
 
-### 12.1 O0 — No Optimization
+### 18.1 O0 — No Optimization
 
 - Fastest compilation, largest and slowest output.
 - LLVM IR is emitted directly without any transformation passes.
 - Useful for debugging.
 
-### 12.2 O1 — Basic Optimization
+### 18.2 O1 — Basic Optimization
 
 - Instruction combining and reassociation.
 - CFG simplification.
 - Dead code elimination.
 - Minor peephole optimizations.
 
-### 12.3 O2 — Moderate Optimization (Default)
+### 18.3 O2 — Moderate Optimization (Default)
 
 All O1 passes plus:
 
@@ -1915,7 +2303,7 @@ All O1 passes plus:
 - **Early CSE** — Common Subexpression Elimination.
 - Additional dead code elimination passes.
 
-### 12.4 O3 — Aggressive Optimization
+### 18.4 O3 — Aggressive Optimization
 
 All O2 passes plus:
 
@@ -1933,7 +2321,7 @@ All O2 passes plus:
 | **Tail Call Elimination** | Converts tail calls to jumps |
 | Second cleanup round | Instruction combining + CFG simplification + DCE |
 
-### 12.5 Constant Folding (AST-Level)
+### 18.5 Constant Folding (AST-Level)
 
 Before LLVM optimization, the code generator performs AST-level constant folding:
 
@@ -1946,9 +2334,9 @@ Before LLVM optimization, the code generator performs AST-level constant folding
 
 ---
 
-## 13. OPTMAX Directive
+## 19. OPTMAX Directive
 
-### 13.1 Overview
+### 19.1 Overview
 
 `OPTMAX` is a compiler directive that marks functions for **maximum optimization**. Functions between `OPTMAX=:` and `OPTMAX!:` receive:
 
@@ -1956,7 +2344,7 @@ Before LLVM optimization, the code generator performs AST-level constant folding
 2. **A 3-iteration fixed-point optimization pipeline** after code generation.
 3. **OPTMAX isolation** — non-OPTMAX user functions cannot be called from OPTMAX functions (stdlib functions are allowed).
 
-### 13.2 Syntax
+### 19.2 Syntax
 
 ```javascript
 OPTMAX=:
@@ -1974,7 +2362,7 @@ fn main() {
 }
 ```
 
-### 13.3 OPTMAX Optimization Pipeline
+### 19.3 OPTMAX Optimization Pipeline
 
 The OPTMAX pipeline runs **3 iterations**, each consisting of 4 phases:
 
@@ -1992,7 +2380,7 @@ Instruction combining, CFG simplification, dead code elimination.
 
 Each pass may expose new optimization opportunities that the next iteration can exploit.
 
-### 13.4 Restrictions
+### 19.4 Restrictions
 
 - OPTMAX functions **can** call other OPTMAX functions.
 - OPTMAX functions **can** call any stdlib built-in function (they compile to native code).
@@ -2000,13 +2388,13 @@ Each pass may expose new optimization opportunities that the next iteration can 
 
 ---
 
-## 14. Adaptive JIT Runtime
+## 20. Adaptive JIT Runtime
 
-### 14.1 Overview
+### 20.1 Overview
 
 OmScript is an **AOT-compiled language** — all code compiles to native machine code through LLVM. When using `omsc run`, the program executes through a lightweight **adaptive JIT runtime** that automatically recompiles hot functions with even more aggressive optimizations.
 
-### 14.2 Two-Tier Execution Model
+### 20.2 Two-Tier Execution Model
 
 ```
 ┌─────────────────────────────────────────────────────┐
@@ -2027,7 +2415,7 @@ OmScript is an **AOT-compiled language** — all code compiles to native machine
 └─────────────────────────────────────────────────────┘
 ```
 
-### 14.3 How It Works
+### 20.3 How It Works
 
 1. **Initial compilation**: When `omsc run` is invoked, the module's LLVM IR is JIT-compiled at O2. Every non-`main` function receives a lightweight dispatch prolog that atomically increments a per-function call counter.
 
@@ -2041,7 +2429,7 @@ OmScript is an **AOT-compiled language** — all code compiles to native machine
 
 4. **Fast path**: After recompilation, future calls to the function take a fast path — one volatile load and a well-predicted branch, then a direct call to the O3-PGO-optimized native code with zero counter overhead.
 
-### 14.4 AOT Compilation Path
+### 20.4 AOT Compilation Path
 
 When compiling to an executable (the default `omsc build` path), all code is AOT-compiled through the standard LLVM pipeline:
 
@@ -2053,13 +2441,13 @@ The adaptive JIT runtime is only used during `omsc run` for interactive/developm
 
 ---
 
-## 15. Memory Management
+## 21. Memory Management
 
-### 15.1 Overview
+### 21.1 Overview
 
 OmScript uses **reference counting** for automatic memory management of heap-allocated data (strings).
 
-### 15.2 Stack Allocation
+### 21.2 Stack Allocation
 
 Most values (integers, array slots) are **stack-allocated** via LLVM `alloca` in the function's entry block. This means:
 
@@ -2067,7 +2455,7 @@ Most values (integers, array slots) are **stack-allocated** via LLVM `alloca` in
 - Local variables are stack-allocated.
 - No heap allocation for numeric types.
 
-### 15.3 Reference-Counted Strings
+### 21.3 Reference-Counted Strings
 
 Strings use a `RefCountedString` type with the following layout:
 
@@ -2089,7 +2477,7 @@ Strings use a `RefCountedString` type with the following layout:
 | Assignment | `release()` old, `retain()` new |
 | Destructor | `release()` → decrement refCount, `free` when 0 |
 
-### 15.4 Characteristics
+### 21.4 Characteristics
 
 - **Deterministic:** Objects are freed immediately when the last reference is released.
 - **No GC pauses:** No stop-the-world garbage collection.
@@ -2098,15 +2486,15 @@ Strings use a `RefCountedString` type with the following layout:
 
 ---
 
-## 16. CLI Reference
+## 22. CLI Reference
 
-### 16.1 Basic Usage
+### 22.1 Basic Usage
 
 ```bash
 omsc [command] <source.om> [options]
 ```
 
-### 16.2 Commands
+### 22.2 Commands
 
 | Command | Aliases | Description |
 |---------|---------|-------------|
@@ -2124,7 +2512,7 @@ omsc [command] <source.om> [options]
 | `help` | `-h`, `--help` | Show help message |
 | `version` | `-v`, `--version` | Show compiler version |
 
-### 16.3 Options
+### 22.3 Options
 
 | Option | Description |
 |--------|-------------|
@@ -2141,7 +2529,7 @@ omsc [command] <source.om> [options]
 | `-static` | Static linking |
 | `--` | Separator between compiler args and runtime args |
 
-### 16.3.1 Codegen Options
+### 22.3.1 Codegen Options
 
 | Option | Description |
 |--------|-------------|
@@ -2159,7 +2547,7 @@ omsc [command] <source.om> [options]
 
 Use `-fno-<flag>` to disable any `-f` flag (e.g., `-fno-lto`, `-fno-vectorize`).
 
-### 16.4 Examples
+### 22.4 Examples
 
 ```bash
 # Compile to executable
@@ -2197,7 +2585,7 @@ omsc pkg list
 omsc clean program.om
 ```
 
-### 16.5 Exit Codes
+### 22.5 Exit Codes
 
 | Code | Meaning |
 |------|---------|
@@ -2207,16 +2595,16 @@ omsc clean program.om
 
 ---
 
-## 17. Building from Source
+## 23. Building from Source
 
-### 17.1 Prerequisites
+### 23.1 Prerequisites
 
 - **CMake** 3.13 or later
 - **C++17** compatible compiler (GCC, Clang)
 - **LLVM** development libraries (headers + shared libraries)
 - **GCC** (used as the linker for final executable output)
 
-### 17.2 Build Steps
+### 23.2 Build Steps
 
 ```bash
 # Clone the repository
@@ -2235,7 +2623,7 @@ make -j$(nproc)
 # The compiler is now at ./build/omsc
 ```
 
-### 17.3 CMake Configuration
+### 23.3 CMake Configuration
 
 | Setting | Value |
 |---------|-------|
@@ -2243,7 +2631,7 @@ make -j$(nproc)
 | Target | `omsc` executable |
 | LLVM Components | core, executionengine, mcjit, interpreter, native, support, passes, target, transformutils, analysis, asmparser, codegen, mc, mcparser, bitreader |
 
-### 17.4 Running Tests
+### 23.4 Running Tests
 
 ```bash
 # From repository root
@@ -2258,9 +2646,9 @@ The test suite verifies:
 
 ---
 
-## 18. Error Handling and Diagnostics
+## 24. Error Handling and Diagnostics
 
-### 18.1 Compile-Time Errors
+### 24.1 Compile-Time Errors
 
 The compiler reports errors with **file, line, and column** information:
 
@@ -2271,7 +2659,7 @@ Error: 'break' statement outside of loop
 Error: 'continue' statement outside of loop
 ```
 
-### 18.2 Runtime Errors
+### 24.2 Runtime Errors
 
 Runtime errors print a message to stderr and terminate with exit code 1:
 
@@ -2283,7 +2671,7 @@ Runtime error: array index out of bounds
 
 Division by zero and modulo by zero are detected in generated code and call `exit(1)`. Array out-of-bounds triggers `llvm.trap` after printing the error.
 
-### 18.3 Lexer Errors
+### 24.3 Lexer Errors
 
 ```
 Unterminated string literal
@@ -2291,7 +2679,7 @@ Unterminated block comment
 Unterminated escape sequence at end of string
 ```
 
-### 18.4 Code Generator Errors
+### 24.4 Code Generator Errors
 
 ```
 Unknown function: nonexistent_func
@@ -2302,9 +2690,9 @@ OPTMAX function "optimized_fn" cannot invoke non-OPTMAX function "regular_fn"
 
 ---
 
-## 19. Complete Code Examples
+## 25. Complete Code Examples
 
-### 19.1 Hello World
+### 25.1 Hello World
 
 ```javascript
 fn main() {
@@ -2313,7 +2701,7 @@ fn main() {
 }
 ```
 
-### 19.2 Factorial (Recursion)
+### 25.2 Factorial (Recursion)
 
 ```javascript
 fn factorial(n) {
@@ -2330,7 +2718,7 @@ fn main() {
 }
 ```
 
-### 19.3 Fibonacci (Iteration)
+### 25.3 Fibonacci (Iteration)
 
 ```javascript
 fn fibonacci(n) {
@@ -2354,7 +2742,7 @@ fn main() {
 }
 ```
 
-### 19.4 GCD (Euclidean Algorithm)
+### 25.4 GCD (Euclidean Algorithm)
 
 ```javascript
 fn gcd(a, b) {
@@ -2371,7 +2759,7 @@ fn main() {
 }
 ```
 
-### 19.5 Array Operations
+### 25.5 Array Operations
 
 ```javascript
 fn main() {
@@ -2393,7 +2781,7 @@ fn main() {
 }
 ```
 
-### 19.6 Math Stdlib Demo
+### 25.6 Math Stdlib Demo
 
 ```javascript
 fn main() {
@@ -2411,7 +2799,7 @@ fn main() {
 }
 ```
 
-### 19.7 Character Classification
+### 25.7 Character Classification
 
 ```javascript
 fn main() {
@@ -2432,7 +2820,7 @@ fn main() {
 }
 ```
 
-### 19.8 OPTMAX Optimization
+### 25.8 OPTMAX Optimization
 
 ```javascript
 OPTMAX=:
@@ -2450,7 +2838,7 @@ fn main() {
 }
 ```
 
-### 19.9 All Control Flow
+### 25.9 All Control Flow
 
 ```javascript
 fn main() {
@@ -2494,7 +2882,7 @@ fn main() {
 }
 ```
 
-### 19.10 Descending Range with Step
+### 25.10 Descending Range with Step
 
 ```javascript
 fn sum_down(start, end, step) {
@@ -2512,15 +2900,20 @@ fn main() {
 
 ---
 
-## 20. Grammar Summary
+## 26. Grammar Summary
 
-### 20.1 EBNF Grammar
+### 26.1 EBNF Grammar
 
 ```ebnf
-program        = { enum_decl | function_decl } ;
+program        = { import_stmt | enum_decl | struct_decl | function_decl } ;
+
+import_stmt    = "import" STRING ";" ;
 enum_decl      = "enum" IDENTIFIER "{" enum_member { "," enum_member } "}" ;
 enum_member    = IDENTIFIER [ "=" INTEGER ] ;
-function_decl  = "fn" IDENTIFIER "(" [ param_list ] ")" block ;
+struct_decl    = "struct" IDENTIFIER "{" IDENTIFIER { "," IDENTIFIER } "}" ;
+function_decl  = "fn" IDENTIFIER [ "<" type_param_list ">" ]
+                 "(" [ param_list ] ")" [ "->" IDENTIFIER ] block ;
+type_param_list = IDENTIFIER { "," IDENTIFIER } ;
 param_list     = parameter { "," parameter } ;
 parameter      = IDENTIFIER [ ":" IDENTIFIER ] [ "=" literal ] ;
 
@@ -2560,7 +2953,9 @@ expr_stmt      = expression ";" ;
 
 expression     = assignment ;
 assignment     = pipe [ ( "=" | "+=" | "-=" | "*=" | "/=" | "%="
-                        | "&=" | "|=" | "^=" | "<<=" | ">>=" ) assignment ] ;
+                        | "&=" | "|=" | "^=" | "<<=" | ">>=" ) assignment ]
+               | field_assign ;
+field_assign   = postfix "." IDENTIFIER "=" expression ;
 pipe           = ternary { "|>" IDENTIFIER } ;
 ternary        = null_coalesce [ "?" expression ":" ternary ] ;
 null_coalesce  = logical_or { "??" logical_or } ;
@@ -2576,24 +2971,28 @@ additive       = multiplicative { ( "+" | "-" ) multiplicative } ;
 multiplicative = power { ( "*" | "/" | "%" ) power } ;
 power          = unary [ "**" power ] ;
 unary          = ( "-" | "!" | "~" | "++" | "--" ) unary | postfix ;
-postfix        = primary { "++" | "--" | "[" expression "]" | "(" [ arg_list ] ")" } ;
+postfix        = primary { "++" | "--" | "[" expression "]"
+                         | "(" [ arg_list ] ")"
+                         | "." IDENTIFIER } ;
 primary        = INTEGER | FLOAT | STRING
                | "true" | "false" | "null"
                | IDENTIFIER
+               | IDENTIFIER "{" field_init { "," field_init } "}"
                | "(" expression ")"
                | "[" [ spread_or_expr { "," spread_or_expr } ] "]"
                | lambda ;
+field_init     = IDENTIFIER ":" expression ;
 spread_or_expr = [ "..." ] expression ;
 lambda         = "|" [ param_list ] "|" expression ;
 arg_list       = expression { "," expression } ;
 ```
 
-### 20.2 Token Reference
+### 26.2 Token Reference
 
 | Category | Tokens |
 |----------|--------|
 | **Literals** | `INTEGER`, `FLOAT`, `STRING`, `IDENTIFIER` |
-| **Keywords** | `fn`, `return`, `if`, `else`, `while`, `do`, `for`, `var`, `const`, `break`, `continue`, `in`, `switch`, `case`, `default`, `try`, `catch`, `throw`, `enum`, `true`, `false`, `null` |
+| **Keywords** | `fn`, `return`, `if`, `else`, `while`, `do`, `for`, `var`, `const`, `break`, `continue`, `in`, `switch`, `case`, `default`, `try`, `catch`, `throw`, `enum`, `struct`, `import`, `true`, `false`, `null` |
 | **Arithmetic** | `+`, `-`, `*`, `/`, `%`, `**` |
 | **Comparison** | `==`, `!=`, `<`, `<=`, `>`, `>=` |
 | **Logical** | `&&`, `\|\|`, `!` |
@@ -2607,4 +3006,4 @@ arg_list       = expression { "," expression } ;
 
 ---
 
-*This document describes OmScript Compiler v2.0.0. For the latest updates, see the repository at [github.com/RyAnPr1Me/omscript](https://github.com/RyAnPr1Me/omscript).*
+*This document describes OmScript Compiler v2.3.9. For the latest updates, see the repository at [github.com/RyAnPr1Me/omscript](https://github.com/RyAnPr1Me/omscript).*
