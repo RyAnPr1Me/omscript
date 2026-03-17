@@ -416,9 +416,10 @@ class FunctionDecl : public ASTNode {
     std::vector<Parameter> parameters;
     std::unique_ptr<BlockStmt> body;
     bool isOptMax;
+    std::string returnType;  // Optional return type annotation (e.g. "int", "int[]", "Point")
 
-    FunctionDecl(const std::string& n, std::vector<std::string> tps, std::vector<Parameter> params, std::unique_ptr<BlockStmt> b, bool optMax = false)
-        : ASTNode(ASTNodeType::FUNCTION), name(n), typeParams(std::move(tps)), parameters(std::move(params)), body(std::move(b)), isOptMax(optMax) {
+    FunctionDecl(const std::string& n, std::vector<std::string> tps, std::vector<Parameter> params, std::unique_ptr<BlockStmt> b, bool optMax = false, const std::string& retType = "")
+        : ASTNode(ASTNodeType::FUNCTION), name(n), typeParams(std::move(tps)), parameters(std::move(params)), body(std::move(b)), isOptMax(optMax), returnType(retType) {
     }
 
     /// Returns the number of parameters that have no default value.
