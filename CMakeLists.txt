@@ -74,14 +74,22 @@ add_definitions(${LLVM_DEFINITIONS})
 # On Debian/Ubuntu the plugin lives under the version-specific directory
 # (e.g. /usr/lib/llvm-18/lib/) and is named LLVMPolly.so (no lib prefix),
 # so we derive the search path from LLVM_DIR and use find_file.
-get_filename_component(_LLVM_BASE_DIR "${LLVM_DIR}" DIRECTORY)
-find_file(POLLY_LIB NAMES LLVMPolly.so LLVMPolly.dylib
-    HINTS "${_LLVM_BASE_DIR}/lib" "${LLVM_LIBRARY_DIR}"
-    NO_DEFAULT_PATH)
-if(POLLY_LIB)
-    message(STATUS "Found LLVM Polly: ${POLLY_LIB}")
+#
+# NOTE: Polly plugin loading is disabled on macOS because Homebrew LLVM does
+# not export llvm::PassPlugin::Load from its static archives, causing linker
+# failures.  Polyhedral loop optimizations remain available on Linux.
+if(NOT APPLE)
+    get_filename_component(_LLVM_BASE_DIR "${LLVM_DIR}" DIRECTORY)
+    find_file(POLLY_LIB NAMES LLVMPolly.so
+        HINTS "${_LLVM_BASE_DIR}/lib" "${LLVM_LIBRARY_DIR}"
+        NO_DEFAULT_PATH)
+    if(POLLY_LIB)
+        message(STATUS "Found LLVM Polly: ${POLLY_LIB}")
+    else()
+        message(STATUS "LLVM Polly not found; polyhedral loop optimizations disabled")
+    endif()
 else()
-    message(STATUS "LLVM Polly not found; polyhedral loop optimizations disabled")
+    message(STATUS "Polly plugin disabled on macOS; polyhedral loop optimizations disabled")
 endif()
 
 # Include directories
