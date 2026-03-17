@@ -327,18 +327,23 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             stepKnownNonZero = stepCI->getSExtValue() != 0;
         }
     } else {
-        // When start < end is known at compile time (e.g. for (i in 0...n)
-        // where start is a constant <= 0), emit a simple +1 step directly.
+        // Detect compile-time ascending ranges and emit simpler loop code.
         bool ascending = false;
         if (auto* startCI = llvm::dyn_cast<llvm::ConstantInt>(startVal)) {
-            // If start is a non-negative constant, the range 0...n is
-            // ascending for any n > start (checked at loop entry).
-            // If start is negative, start < end is guaranteed for any n >= 0.
-            ascending = true;
+            if (auto* endCI = llvm::dyn_cast<llvm::ConstantInt>(endVal)) {
+                // Both bounds known: ascending when start < end.
+                ascending = startCI->getSExtValue() < endCI->getSExtValue();
+            } else if (startCI->getSExtValue() == 0) {
+                // Common pattern: for (i in 0...n).  Step is always +1;
+                // when n <= 0 the loop condition (i < n) fails immediately.
+                ascending = true;
+            }
         }
         if (ascending) {
             stepVal = llvm::ConstantInt::get(*context, llvm::APInt(64, 1));
-            stepKnownPositive = true;
+            // Don't set stepKnownPositive — keep the bi-directional loop
+            // condition so that LLVM's loop interleaver doesn't aggressively
+            // speculate loops whose bodies contain non-vectorizable calls.
             stepKnownNonZero = true;
         } else {
             llvm::Value* isDesc = builder->CreateICmpSGT(startVal, endVal, "for.isdesc");
