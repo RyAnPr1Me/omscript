@@ -1659,18 +1659,11 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* arrPtr = builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "push.arrptr");
         llvm::Value* oldLen = builder->CreateLoad(getDefaultType(), arrPtr, "push.oldlen");
         llvm::Value* newLen = builder->CreateAdd(oldLen, llvm::ConstantInt::get(getDefaultType(), 1), "push.newlen");
-        // Realloc: new size = (newLen + 1) * 8 bytes
+        // Use realloc to extend in-place when possible (avoids copy)
         llvm::Value* newSize =
             builder->CreateMul(builder->CreateAdd(newLen, llvm::ConstantInt::get(getDefaultType(), 1), "push.slots"),
                                llvm::ConstantInt::get(getDefaultType(), 8), "push.bytes");
-        llvm::Value* newBuf = builder->CreateCall(getOrDeclareMalloc(), {newSize}, "push.newbuf");
-        // Copy old data: (oldLen + 1) * 8 bytes
-        llvm::Value* oldSize =
-            builder->CreateMul(builder->CreateAdd(oldLen, llvm::ConstantInt::get(getDefaultType(), 1), "push.oldslots"),
-                               llvm::ConstantInt::get(getDefaultType(), 8), "push.oldbytes");
-        builder->CreateCall(getOrDeclareMemcpy(), {newBuf, arrPtr, oldSize});
-        // Free old buffer to prevent memory leak.
-        builder->CreateCall(getOrDeclareFree(), {arrPtr});
+        llvm::Value* newBuf = builder->CreateCall(getOrDeclareRealloc(), {arrPtr, newSize}, "push.newbuf");
         // Update length
         builder->CreateStore(newLen, newBuf);
         // Store new value at index oldLen + 1 (after header)
