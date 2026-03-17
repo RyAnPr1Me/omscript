@@ -1653,7 +1653,10 @@ static unsigned annotateVectorCandidates(llvm::Function& func,
             llvm::ConstantAsMetadata::get(
                 llvm::ConstantInt::getTrue(ctx))
         });
-        unsigned width = profile.vectorWidth / 32; // 32-bit elements
+        unsigned width = profile.vectorWidth / 32; // element count assuming 32-bit elements
+        // Using 32-bit as the baseline element width because it is the most
+        // common scalar type; the LLVM vectoriser will clamp to the widest
+        // type it finds in the loop body, so this is an upper-bound hint.
         if (width < 2) width = 2;
         llvm::MDNode* widthNode = llvm::MDNode::get(ctx, {
             llvm::MDString::get(ctx, "llvm.loop.vectorize.width"),
@@ -1685,8 +1688,7 @@ TransformStats applyHardwareTransforms(llvm::Function& func,
     stats.vectorExpanded     = annotateVectorCandidates(func, profile);
     // Integer strength reduction runs last so mul→shift replacements do not
     // interfere with the FMA scan above (which looks at FMul, not int Mul).
-    // The count is not exposed in a separate TransformStats field yet.
-    (void)integerStrengthReduce(func, profile);
+    stats.intStrengthReduced = integerStrengthReduce(func, profile);
 
     return stats;
 }
@@ -1707,41 +1709,56 @@ static bool hasMemoryEffect(const llvm::Instruction* inst) {
     return false;
 }
 
-/// Per-basic-block list scheduler.
+/// Per-basic-block list scheduler driven by the detailed hardware graph.
 ///
-/// Builds a local data/memory dependency DAG, computes critical-path priority
-/// (bottom-up), then runs a priority-driven list scheduler that respects the
-/// profile's issue width and execution-unit port counts.  Finally, the
-/// scheduled instruction sequence is applied to the LLVM IR by moving each
-/// instruction before the block's terminator using moveBefore().
+/// Algorithm:
+///   1. Collect moveable instructions (non-phi, non-terminator).
+///   2. Build a data+memory dependency DAG with explicit pred/succ lists.
+///   3. Annotate instructions with profile-derived latencies.
+///   4. Compute critical-path depth bottom-up.
+///   5. Model per-port-instance availability using real HardwareGraph nodes
+///      (their `throughput` field gives instructions/cycle for each port).
+///   6. List-schedule: at each logical cycle, pick up to issueWidth ready
+///      instructions ordered by:
+///        (a) critical-path remaining (latency hiding),
+///        (b) port pressure (schedule bottleneck resource first),
+///        (c) port diversity (prefer instructions that use a port type not
+///            yet issued this cycle, maximising IPC).
+///   7. Apply the schedule to the LLVM IR with moveBefore().
 ///
 /// PHI nodes and the terminator are never moved.
-///
-/// Returns the estimated cycle count for the block.
+/// Returns estimated cycle count for the block.
 static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
+                                    const HardwareGraph& hw,
                                     const MicroarchProfile& profile) {
     // ── 1. Collect moveable instructions ─────────────────────────────────────
     std::vector<llvm::Instruction*> moveable;
     moveable.reserve(bb.size());
-    for (auto& inst : bb) {
+    for (auto& inst : bb)
         if (!llvm::isa<llvm::PHINode>(inst) && !inst.isTerminator())
             moveable.push_back(&inst);
-    }
 
     unsigned n = static_cast<unsigned>(moveable.size());
-    if (n < 2) return n; // nothing to reorder
+    if (n < 2) return n;
 
     // ── 2. Build index map ────────────────────────────────────────────────────
     std::unordered_map<llvm::Instruction*, unsigned> idx;
     idx.reserve(n);
     for (unsigned i = 0; i < n; ++i) idx[moveable[i]] = i;
 
-    // ── 3. Build dependency graph ─────────────────────────────────────────────
-    // succ[i] = list of instructions that must come after i.
-    std::vector<std::vector<unsigned>> succ(n);
+    // ── 3. Build dependency DAG (both succ[] and pred[] for O(1) lookup) ──────
+    std::vector<std::vector<unsigned>> succ(n), pred(n);
     std::vector<unsigned> inDeg(n, 0);
 
-    // Data dependencies (RAW): j uses the result of i → i must precede j.
+    // addEdge adds from→to with deduplication.
+    auto addEdge = [&](unsigned from, unsigned to) {
+        for (unsigned s : succ[from]) if (s == to) return;
+        succ[from].push_back(to);
+        pred[to].push_back(from);
+        ++inDeg[to];
+    };
+
+    // Data dependencies (RAW): if j uses the result of i (same BB), i→j.
     for (unsigned j = 0; j < n; ++j) {
         for (auto& use : moveable[j]->operands()) {
             auto* def = llvm::dyn_cast<llvm::Instruction>(use.get());
@@ -1749,142 +1766,187 @@ static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
             auto it = idx.find(def);
             if (it == idx.end()) continue; // defined outside this BB
             unsigned i = it->second;
-            if (i == j) continue;
-            // Deduplicate edges (same operand used twice).
-            bool already = false;
-            for (unsigned s : succ[i])
-                if (s == j) { already = true; break; }
-            if (!already) {
-                succ[i].push_back(j);
-                inDeg[j]++;
-            }
+            if (i != j) addEdge(i, j);
         }
     }
 
-    // Memory ordering: each memory-accessing instruction must follow all
-    // previous memory-accessing instructions (conservative).
+    // Memory ordering (conservative): each memory op follows the previous one.
     {
         int lastMem = -1;
         for (unsigned i = 0; i < n; ++i) {
             if (!hasMemoryEffect(moveable[i])) continue;
-            if (lastMem >= 0) {
-                unsigned prev = static_cast<unsigned>(lastMem);
-                bool already = false;
-                for (unsigned s : succ[prev])
-                    if (s == i) { already = true; break; }
-                if (!already) {
-                    succ[prev].push_back(i);
-                    inDeg[i]++;
-                }
-            }
+            if (lastMem >= 0)
+                addEdge(static_cast<unsigned>(lastMem), i);
             lastMem = static_cast<int>(i);
         }
     }
 
-    // ── 4. Compute critical-path depth (bottom-up) ────────────────────────────
+    // ── 4. Profile-derived instruction latencies ──────────────────────────────
     std::vector<unsigned> lat(n);
     for (unsigned i = 0; i < n; ++i)
         lat[i] = getLatency(classifyOp(moveable[i]), profile);
 
+    // ── 5. Critical-path depth (bottom-up, longest latency path to any sink) ──
     std::vector<unsigned> critPath(n, 0);
     for (int i = static_cast<int>(n) - 1; i >= 0; --i) {
+        unsigned ui = static_cast<unsigned>(i);
         unsigned maxSucc = 0;
-        for (unsigned s : succ[static_cast<unsigned>(i)])
+        for (unsigned s : succ[ui])
             if (critPath[s] > maxSucc) maxSucc = critPath[s];
-        critPath[static_cast<unsigned>(i)] = lat[static_cast<unsigned>(i)] + maxSucc;
+        critPath[ui] = lat[ui] + maxSucc;
     }
 
-    // ── 5. Port availability ──────────────────────────────────────────────────
-    std::unordered_map<int, std::vector<unsigned>> portAvail;
-    auto initPort = [&](ResourceType rt) {
-        unsigned cnt = getPortCount(rt, profile);
-        portAvail[static_cast<int>(rt)].assign(cnt, 0u);
+    // ── 6. Hardware port model from the actual HardwareGraph ──────────────────
+    // For each ResourceType we maintain one slot per physical execution-port
+    // instance.  Each slot stores:
+    //   nextFree    — first cycle this port can accept a new instruction
+    //   busyCycles  — reciprocal throughput (1 / instrs_per_cycle, ceil'd)
+    struct PortSlot {
+        unsigned nextFree   = 0;
+        unsigned busyCycles = 1; ///< cycles port is occupied per instruction
     };
-    initPort(ResourceType::IntegerALU);
-    initPort(ResourceType::VectorALU);
-    initPort(ResourceType::FMAUnit);
-    initPort(ResourceType::LoadUnit);
-    initPort(ResourceType::StoreUnit);
-    initPort(ResourceType::BranchUnit);
-    initPort(ResourceType::DividerUnit);
+    std::unordered_map<int, std::vector<PortSlot>> hwPorts;
 
-    // ── 6. List scheduling ────────────────────────────────────────────────────
+    auto initHWPort = [&](ResourceType rt) {
+        auto nodes = hw.findNodes(rt);
+        std::vector<PortSlot> slots;
+        slots.reserve(nodes.size());
+        for (const auto* node : nodes) {
+            unsigned busy = (node->throughput > 0.0)
+                ? static_cast<unsigned>(std::ceil(1.0 / node->throughput))
+                : 1u;
+            busy = std::max(busy, 1u);
+            slots.push_back({0u, busy});
+        }
+        if (slots.empty()) {
+            // Fallback: use profile port count with unit throughput.
+            unsigned cnt = getPortCount(rt, profile);
+            slots.resize(std::max(cnt, 1u), {0u, 1u});
+        }
+        hwPorts[static_cast<int>(rt)] = std::move(slots);
+    };
+    initHWPort(ResourceType::IntegerALU);
+    initHWPort(ResourceType::VectorALU);
+    initHWPort(ResourceType::FMAUnit);
+    initHWPort(ResourceType::LoadUnit);
+    initHWPort(ResourceType::StoreUnit);
+    initHWPort(ResourceType::BranchUnit);
+    initHWPort(ResourceType::DividerUnit);
+
+    // ── 6a. Port-pressure: count of pending instructions per resource type ────
+    // Scheduling bottleneck resources (more pending uses) first helps reduce
+    // the longest queue and exposes more parallelism.
+    std::unordered_map<int, unsigned> portPressure;
+    for (unsigned i = 0; i < n; ++i) {
+        int key = static_cast<int>(mapOpToResource(classifyOp(moveable[i])));
+        portPressure[key]++;
+    }
+
+    // ── 7. List scheduling ────────────────────────────────────────────────────
     std::vector<llvm::Instruction*> scheduled;
     scheduled.reserve(n);
     std::vector<bool> done(n, false);
-    // Track the cycle at which each instruction's result is available.
-    std::vector<unsigned> avail(n, 0);
+    std::vector<unsigned> avail(n, 0); // cycle when result is ready
 
     unsigned currentCycle = 0;
     unsigned totalScheduled = 0;
     unsigned maxCycle = 0;
 
     while (totalScheduled < n) {
-        // Collect ready instructions (all predecessors done).
+        // Collect all ready instructions (inDeg == 0, not yet scheduled).
         std::vector<unsigned> ready;
-        for (unsigned i = 0; i < n; ++i) {
+        for (unsigned i = 0; i < n; ++i)
             if (!done[i] && inDeg[i] == 0)
                 ready.push_back(i);
-        }
 
-        // Guard against cycles (should not occur in valid SSA).
+        // Guard: a non-empty ready list is guaranteed for DAGs (SSA form).
+        // If we reach here with an empty ready list it means there is a cycle
+        // in the dependency graph (e.g. from improper IR).  Break the cycle
+        // by scheduling the first unscheduled instruction so the algorithm
+        // terminates; the resulting order may be suboptimal but is still safe.
         if (ready.empty()) {
-            for (unsigned i = 0; i < n; ++i) {
+            for (unsigned i = 0; i < n; ++i)
                 if (!done[i]) { ready.push_back(i); break; }
-            }
             if (ready.empty()) break;
         }
 
-        // Sort by critical path descending — most critical work first.
+        // Sort ready instructions for maximum throughput:
+        //   Primary   — critical path remaining (latency hiding)
+        //   Secondary — port pressure (schedule bottleneck resource first)
+        //   Tertiary  — instruction index (deterministic tie-break)
         std::sort(ready.begin(), ready.end(), [&](unsigned a, unsigned b) {
-            return critPath[a] > critPath[b];
+            if (critPath[a] != critPath[b])
+                return critPath[a] > critPath[b];
+            int rtA = static_cast<int>(mapOpToResource(classifyOp(moveable[a])));
+            int rtB = static_cast<int>(mapOpToResource(classifyOp(moveable[b])));
+            if (portPressure[rtA] != portPressure[rtB])
+                return portPressure[rtA] > portPressure[rtB];
+            return a < b;
         });
 
+        // Within a cycle, track which ResourceTypes have been issued to
+        // encourage diversity and fill different execution units in parallel.
+        std::unordered_set<int> issuedPortsThisCycle;
         unsigned issued = 0;
-        for (unsigned id : ready) {
-            if (issued >= profile.issueWidth) break;
 
-            // Earliest cycle this instruction can start: max over all scheduled
-            // predecessors' availability cycles.
-            unsigned earliest = currentCycle;
-            for (unsigned p = 0; p < n; ++p) {
-                if (!done[p]) continue;
-                for (unsigned s : succ[p]) {
-                    if (s == id && avail[p] > earliest)
+        // Two-pass issue: first pass schedules instructions that use port
+        // types not yet used this cycle (maximises parallel unit utilisation);
+        // second pass fills remaining issue slots with any ready instruction.
+        for (int pass = 0; pass < 2; ++pass) {
+            for (unsigned id : ready) {
+                if (issued >= profile.issueWidth) break;
+                if (done[id]) continue;
+
+                int rtKey = static_cast<int>(
+                    mapOpToResource(classifyOp(moveable[id])));
+
+                // Pass 0: only issue to a port type not yet used this cycle.
+                // Pass 1: issue to any port type (fill remaining slots).
+                if (pass == 0 && issuedPortsThisCycle.count(rtKey)) continue;
+
+                // Earliest start: max(currentCycle, predecessor availability).
+                unsigned earliest = currentCycle;
+                for (unsigned p : pred[id])
+                    if (done[p] && avail[p] > earliest)
                         earliest = avail[p];
+
+                // Pick the earliest-free port instance for this resource type.
+                auto& slots = hwPorts[rtKey];
+                unsigned startCycle = earliest;
+                unsigned chosenSlot = 0;
+                if (!slots.empty()) {
+                    unsigned bestTime = std::numeric_limits<unsigned>::max();
+                    for (unsigned s = 0; s < slots.size(); ++s) {
+                        unsigned t = std::max(earliest, slots[s].nextFree);
+                        if (t < bestTime) { bestTime = t; chosenSlot = s; }
+                    }
+                    startCycle = bestTime;
+                    // Occupy port for busyCycles (= reciprocal throughput).
+                    slots[chosenSlot].nextFree = startCycle + slots[chosenSlot].busyCycles;
                 }
-            }
 
-            // Find earliest available port.
-            ResourceType rt = mapOpToResource(classifyOp(moveable[id]));
-            auto& ports = portAvail[static_cast<int>(rt)];
-            if (!ports.empty()) {
-                unsigned bestPort = 0, bestTime = ports[0];
-                for (unsigned p = 1; p < ports.size(); ++p) {
-                    if (ports[p] < bestTime) { bestTime = ports[p]; bestPort = p; }
-                }
-                if (bestTime > earliest) earliest = bestTime;
-                ports[bestPort] = earliest + 1; // port busy one cycle (pipelined)
-            }
+                avail[id] = startCycle + lat[id];
+                if (avail[id] > maxCycle) maxCycle = avail[id];
 
-            avail[id] = earliest + lat[id];
-            if (avail[id] > maxCycle) maxCycle = avail[id];
+                done[id] = true;
+                ++totalScheduled;
+                ++issued;
+                scheduled.push_back(moveable[id]);
+                issuedPortsThisCycle.insert(rtKey);
 
-            done[id] = true;
-            ++totalScheduled;
-            ++issued;
-            scheduled.push_back(moveable[id]);
+                // Decrement in-degrees of successors.
+                for (unsigned s : succ[id])
+                    if (inDeg[s] > 0) --inDeg[s];
 
-            // Decrement successor in-degrees.
-            for (unsigned s : succ[id]) {
-                if (inDeg[s] > 0) --inDeg[s];
+                // Update port pressure.
+                if (portPressure[rtKey] > 0) --portPressure[rtKey];
             }
         }
 
         ++currentCycle;
     }
 
-    // ── 7. Apply the schedule to the LLVM IR ──────────────────────────────────
+    // ── 8. Apply schedule: reorder LLVM IR within the basic block ────────────
     if (scheduled.size() == n) {
         llvm::Instruction* term = bb.getTerminator();
         for (auto* inst : scheduled)
@@ -1894,10 +1956,11 @@ static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
     return maxCycle > 0 ? maxCycle : currentCycle;
 }
 
-unsigned scheduleInstructions(llvm::Function& func, const MicroarchProfile& profile) {
+unsigned scheduleInstructions(llvm::Function& func, const HardwareGraph& hw,
+                               const MicroarchProfile& profile) {
     unsigned totalCycles = 0;
     for (auto& bb : func)
-        totalCycles += scheduleBasicBlock(bb, profile);
+        totalCycles += scheduleBasicBlock(bb, hw, profile);
     return totalCycles;
 }
 // ═════════════════════════════════════════════════════════════════════════════
@@ -1942,9 +2005,10 @@ HGOEStats optimizeFunction(llvm::Function& func, const HGOEConfig& config) {
         stats.totalScheduledCycles += mapping.totalCycles;
         stats.avgPortUtilization = mapping.portUtilization;
 
-        // Step 3b — Apply the schedule: physically reorder LLVM IR instructions
-        // within each basic block so that high-priority, long-latency operations
-        // start earlier, filling execution slots and hiding pipeline latency.
+        // Step 3b — Physically reorder LLVM IR instructions within each basic
+        // block to maximise throughput on the specific microarchitecture.
+        // The scheduler uses the full HardwareGraph (with per-port throughput)
+        // for cycle-accurate port assignment and port-diversity scheduling.
         for (auto& bb : func) {
             unsigned bbSize = 0;
             for (auto& inst : bb)
@@ -1953,7 +2017,7 @@ HGOEStats optimizeFunction(llvm::Function& func, const HGOEConfig& config) {
             if (bbSize >= 2)
                 ++stats.basicBlocksScheduled;
         }
-        scheduleInstructions(func, profile);
+        scheduleInstructions(func, hw, profile);
     }
 
     // Step 4 — Apply hardware-aware transformations.

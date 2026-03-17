@@ -368,6 +368,7 @@ struct TransformStats {
     unsigned prefetchesInserted = 0;  ///< Prefetch instructions inserted
     unsigned branchesOptimized = 0;   ///< Branch layout improvements
     unsigned vectorExpanded = 0;      ///< Vector width expansions
+    unsigned intStrengthReduced = 0;  ///< Integer multiplies replaced by shift+add
 };
 
 /// Apply hardware-aware transformations to a function.
@@ -387,11 +388,14 @@ struct HGOEConfig {
     bool enableCostModel = true;     ///< Hardware-aware cost model
 };
 
-/// Apply profile-driven instruction scheduling to all basic blocks in a
+/// Apply hardware-graph-driven instruction scheduling to all basic blocks in a
 /// function.  Reorders instructions within each basic block (phi nodes and
-/// terminators stay fixed) to minimise pipeline stalls for the given
-/// microarchitecture.  Returns the estimated total cycle count.
-unsigned scheduleInstructions(llvm::Function& func,
+/// terminators stay fixed) to maximise throughput for the specific hardware.
+/// Uses the actual HardwareGraph port model — each execution-unit node carries
+/// a throughput value (instructions/cycle) that drives cycle-accurate port
+/// assignment and port-diversity scheduling.
+/// Returns the estimated total cycle count.
+unsigned scheduleInstructions(llvm::Function& func, const HardwareGraph& hw,
                                const MicroarchProfile& profile);
 
 /// Statistics from the HGOE pipeline.
