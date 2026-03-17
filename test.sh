@@ -22,8 +22,8 @@ fn heavy_math(n:int) {
 }
 
 fn array_work(n:int) {
-    var arr:int[] = [];
-    for (i in 0...n) {
+    var arr = [0];
+    for (i:int in 0...n) {
         arr = push(arr, (i * 3) % 12345);
     }
 
@@ -43,7 +43,7 @@ fn string_work(n:int) -> int {
 }
 
 fn struct_work(n:int) -> int {
-    var p = Point { x: 1, y: 2 };
+    var: Point  = Point { x: 1, y: 2 };
     var sum:int = 0;
     for (i:int in 0...n) {
         p.x += i;
