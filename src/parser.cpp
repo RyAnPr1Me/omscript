@@ -236,6 +236,18 @@ void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
     }
 }
 
+std::string Parser::parseTypeAnnotation() {
+    std::string typeName = consume(TokenType::IDENTIFIER, "Expected type name").lexeme;
+    // Support array type annotations: type[], type[][], etc.
+    while (check(TokenType::LBRACKET) && (current + 1 < tokens.size()) &&
+           tokens[current + 1].type == TokenType::RBRACKET) {
+        advance(); // consume '['
+        advance(); // consume ']'
+        typeName += "[]";
+    }
+    return typeName;
+}
+
 std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
     bool savedOptMaxState = inOptMaxFunction;
     inOptMaxFunction = isOptMax;
@@ -261,7 +273,7 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
             Token paramName = consume(TokenType::IDENTIFIER, "Expected parameter name");
             std::string typeName;
             if (match(TokenType::COLON)) {
-                typeName = consume(TokenType::IDENTIFIER, "Expected type name after ':'").lexeme;
+                typeName = parseTypeAnnotation();
             } else if (inOptMaxFunction) {
                 error("OPTMAX parameters must include type annotations");
             }
@@ -282,15 +294,16 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
     consume(TokenType::RPAREN, "Expected ')' after parameters");
 
     // Optional return type annotation: -> type
+    std::string returnType;
     if (match(TokenType::ARROW)) {
-        consume(TokenType::IDENTIFIER, "Expected return type after '->'");
+        returnType = parseTypeAnnotation();
     }
 
     auto body = parseBlock();
 
     inOptMaxFunction = savedOptMaxState;
 
-    auto funcDecl = std::make_unique<FunctionDecl>(name.lexeme, std::move(typeParams), std::move(parameters), std::move(body), isOptMax);
+    auto funcDecl = std::make_unique<FunctionDecl>(name.lexeme, std::move(typeParams), std::move(parameters), std::move(body), isOptMax, returnType);
     funcDecl->line = name.line;
     funcDecl->column = name.column;
     return funcDecl;
@@ -418,7 +431,7 @@ std::unique_ptr<Statement> Parser::parseVarDecl(bool isConst) {
     Token name = consume(TokenType::IDENTIFIER, "Expected variable name");
     std::string typeName;
     if (match(TokenType::COLON)) {
-        typeName = consume(TokenType::IDENTIFIER, "Expected type name after ':'").lexeme;
+        typeName = parseTypeAnnotation();
     } else if (inOptMaxFunction) {
         error("OPTMAX variables must include type annotations");
     }
@@ -478,7 +491,7 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
     Token varName = consume(TokenType::IDENTIFIER, "Expected iterator variable");
     std::string iteratorType;
     if (match(TokenType::COLON)) {
-        iteratorType = consume(TokenType::IDENTIFIER, "Expected type name after ':'").lexeme;
+        iteratorType = parseTypeAnnotation();
     } else if (inOptMaxFunction) {
         error("OPTMAX loop variables must include type annotations");
     }

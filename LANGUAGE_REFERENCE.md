@@ -192,11 +192,15 @@ Everything else is **truthy**, including negative numbers and non-empty strings.
 
 ### 3.4 Optional Type Annotations
 
-Variable and parameter declarations may include optional type hints. These are currently used for documentation and OPTMAX optimization hints but are not enforced at compile time:
+Variable, parameter, and function return type declarations may include optional type hints. These are currently used for documentation and OPTMAX optimization hints but are not enforced at compile time. Type annotations support simple types, array types (with `[]` suffix), and struct names:
 
 ```javascript
-var x: int = 42;        // type hint: int
-fn add(a: int, b: int) { return a + b; }
+var x: int = 42;              // simple type hint
+var arr: int[] = [1, 2, 3];   // array type hint
+var mat: int[][] = [[1]];     // nested array type hint
+fn add(a: int, b: int) -> int { return a + b; }          // return type
+fn getNames() -> string[] { return ["a", "b"]; }         // array return type
+fn process(pts: Point[]) -> Point { return pts[0]; }     // struct types
 ```
 
 ---
@@ -2912,10 +2916,11 @@ enum_decl      = "enum" IDENTIFIER "{" enum_member { "," enum_member } "}" ;
 enum_member    = IDENTIFIER [ "=" INTEGER ] ;
 struct_decl    = "struct" IDENTIFIER "{" IDENTIFIER { "," IDENTIFIER } "}" ;
 function_decl  = "fn" IDENTIFIER [ "<" type_param_list ">" ]
-                 "(" [ param_list ] ")" [ "->" IDENTIFIER ] block ;
+                 "(" [ param_list ] ")" [ "->" type_annotation ] block ;
 type_param_list = IDENTIFIER { "," IDENTIFIER } ;
 param_list     = parameter { "," parameter } ;
-parameter      = IDENTIFIER [ ":" IDENTIFIER ] [ "=" literal ] ;
+parameter      = IDENTIFIER [ ":" type_annotation ] [ "=" literal ] ;
+type_annotation = IDENTIFIER { "[]" } ;
 
 block          = "{" { statement } "}" ;
 
@@ -2934,13 +2939,13 @@ statement      = var_decl
                | expr_stmt
                | block ;
 
-var_decl       = "var" IDENTIFIER [ ":" IDENTIFIER ] [ "=" expression ] ";" ;
-const_decl     = "const" IDENTIFIER [ ":" IDENTIFIER ] "=" expression ";" ;
+var_decl       = "var" IDENTIFIER [ ":" type_annotation ] [ "=" expression ] ";" ;
+const_decl     = "const" IDENTIFIER [ ":" type_annotation ] "=" expression ";" ;
 return_stmt    = "return" [ expression ] ";" ;
 if_stmt        = "if" "(" expression ")" statement [ "else" statement ] ;
 while_stmt     = "while" "(" expression ")" statement ;
 do_while_stmt  = "do" statement "while" "(" expression ")" ";" ;
-for_stmt       = "for" "(" IDENTIFIER [ ":" IDENTIFIER ] "in"
+for_stmt       = "for" "(" IDENTIFIER [ ":" type_annotation ] "in"
                    expression [ "..." expression [ "..." expression ] ] ")" statement ;
 switch_stmt    = "switch" "(" expression ")" "{" { case_clause } [ default_clause ] "}" ;
 case_clause    = "case" INTEGER ":" { statement } ;

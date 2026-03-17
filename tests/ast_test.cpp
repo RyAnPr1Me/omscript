@@ -213,6 +213,23 @@ TEST(ASTTest, FunctionDecl) {
     EXPECT_EQ(func.type, ASTNodeType::FUNCTION);
     EXPECT_EQ(func.name, "test");
     EXPECT_FALSE(func.isOptMax);
+    EXPECT_EQ(func.returnType, "");
+}
+
+TEST(ASTTest, FunctionDeclWithReturnType) {
+    std::vector<Parameter> params;
+    std::vector<std::unique_ptr<Statement>> stmts;
+    auto body = std::make_unique<BlockStmt>(std::move(stmts));
+    FunctionDecl func("test", {}, std::move(params), std::move(body), false, "int");
+    EXPECT_EQ(func.returnType, "int");
+}
+
+TEST(ASTTest, FunctionDeclWithArrayReturnType) {
+    std::vector<Parameter> params;
+    std::vector<std::unique_ptr<Statement>> stmts;
+    auto body = std::make_unique<BlockStmt>(std::move(stmts));
+    FunctionDecl func("test", {}, std::move(params), std::move(body), false, "int[]");
+    EXPECT_EQ(func.returnType, "int[]");
 }
 
 TEST(ASTTest, FunctionDeclOptMax) {

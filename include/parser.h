@@ -125,6 +125,9 @@ class Parser {
     std::unique_ptr<Expression> parseLambda();
     std::unique_ptr<Expression> parsePipe();
 
+    /// Parse a type annotation (e.g. "int", "int[]", "string[][]", "Point").
+    std::string parseTypeAnnotation();
+
     [[noreturn]] void error(const std::string& message);
 };
 

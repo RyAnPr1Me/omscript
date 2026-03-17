@@ -29,6 +29,7 @@ TEST(ParserTest, FunctionWithReturnType) {
     auto program = parse("fn main() -> int { return 0; }");
     ASSERT_EQ(program->functions.size(), 1u);
     EXPECT_EQ(program->functions[0]->name, "main");
+    EXPECT_EQ(program->functions[0]->returnType, "int");
     ASSERT_EQ(program->functions[0]->body->statements.size(), 1u);
 }
 
@@ -38,6 +39,7 @@ TEST(ParserTest, FunctionWithParamsAndReturnType) {
     ASSERT_EQ(program->functions[0]->parameters.size(), 2u);
     EXPECT_EQ(program->functions[0]->parameters[0].name, "a");
     EXPECT_EQ(program->functions[0]->parameters[1].name, "b");
+    EXPECT_EQ(program->functions[0]->returnType, "int");
     ASSERT_EQ(program->functions[0]->body->statements.size(), 1u);
 }
 
@@ -1263,4 +1265,182 @@ TEST(ParserTest, GenericFunctionMultipleTypeParams) {
     ASSERT_EQ(program->functions[0]->typeParams.size(), 2u);
     EXPECT_EQ(program->functions[0]->typeParams[0], "A");
     EXPECT_EQ(program->functions[0]->typeParams[1], "B");
+}
+
+// ===========================================================================
+// Return type annotation tests
+// ===========================================================================
+
+TEST(ParserTest, ReturnTypeStored) {
+    auto program = parse("fn main() -> int { return 0; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    EXPECT_EQ(program->functions[0]->returnType, "int");
+}
+
+TEST(ParserTest, ReturnTypeVoid) {
+    auto program = parse("fn doStuff() -> void { return; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    EXPECT_EQ(program->functions[0]->returnType, "void");
+}
+
+TEST(ParserTest, ReturnTypeFloat) {
+    auto program = parse("fn pi() -> float { return 3.14; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    EXPECT_EQ(program->functions[0]->returnType, "float");
+}
+
+TEST(ParserTest, ReturnTypeString) {
+    auto program = parse("fn greet() -> string { return \"hi\"; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    EXPECT_EQ(program->functions[0]->returnType, "string");
+}
+
+TEST(ParserTest, ReturnTypeBool) {
+    auto program = parse("fn isEven(n: int) -> bool { return true; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    EXPECT_EQ(program->functions[0]->returnType, "bool");
+}
+
+TEST(ParserTest, NoReturnTypeEmpty) {
+    auto program = parse("fn main() { return 0; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    EXPECT_EQ(program->functions[0]->returnType, "");
+}
+
+TEST(ParserTest, ReturnTypeWithParams) {
+    auto program = parse("fn add(a: int, b: int) -> int { return a; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    EXPECT_EQ(program->functions[0]->returnType, "int");
+    EXPECT_EQ(program->functions[0]->parameters[0].typeName, "int");
+    EXPECT_EQ(program->functions[0]->parameters[1].typeName, "int");
+}
+
+// ===========================================================================
+// Array type annotation tests
+// ===========================================================================
+
+TEST(ParserTest, ReturnTypeArray) {
+    auto program = parse("fn getArr() -> int[] { return [1, 2]; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    EXPECT_EQ(program->functions[0]->returnType, "int[]");
+}
+
+TEST(ParserTest, ReturnTypeStringArray) {
+    auto program = parse("fn getNames() -> string[] { return [\"a\"]; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    EXPECT_EQ(program->functions[0]->returnType, "string[]");
+}
+
+TEST(ParserTest, ReturnTypeNestedArray) {
+    auto program = parse("fn getMatrix() -> int[][] { return [1]; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    EXPECT_EQ(program->functions[0]->returnType, "int[][]");
+}
+
+TEST(ParserTest, ParamTypeArray) {
+    auto program = parse("fn sum(arr: int[]) { return 0; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    EXPECT_EQ(program->functions[0]->parameters[0].typeName, "int[]");
+}
+
+TEST(ParserTest, ParamTypeStringArray) {
+    auto program = parse("fn join(arr: string[]) { return 0; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    EXPECT_EQ(program->functions[0]->parameters[0].typeName, "string[]");
+}
+
+TEST(ParserTest, ParamTypeNestedArray) {
+    auto program = parse("fn flatten(mat: int[][]) { return 0; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    EXPECT_EQ(program->functions[0]->parameters[0].typeName, "int[][]");
+}
+
+TEST(ParserTest, VarDeclArrayType) {
+    auto program = parse("fn main() { var arr: int[] = [1, 2, 3]; }");
+    auto* var = dynamic_cast<VarDecl*>(program->functions[0]->body->statements[0].get());
+    ASSERT_NE(var, nullptr);
+    EXPECT_EQ(var->typeName, "int[]");
+}
+
+TEST(ParserTest, VarDeclNestedArrayType) {
+    auto program = parse("fn main() { var mat: float[][] = [1]; }");
+    auto* var = dynamic_cast<VarDecl*>(program->functions[0]->body->statements[0].get());
+    ASSERT_NE(var, nullptr);
+    EXPECT_EQ(var->typeName, "float[][]");
+}
+
+// ===========================================================================
+// Struct type annotation tests
+// ===========================================================================
+
+TEST(ParserTest, ReturnTypeStruct) {
+    auto program = parse(
+        "struct Point { x, y }"
+        "fn makePoint() -> Point { return 0; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    EXPECT_EQ(program->functions[0]->returnType, "Point");
+}
+
+TEST(ParserTest, ParamTypeStruct) {
+    auto program = parse(
+        "struct Point { x, y }"
+        "fn distance(p: Point) { return 0; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    EXPECT_EQ(program->functions[0]->parameters[0].typeName, "Point");
+}
+
+TEST(ParserTest, ReturnTypeStructArray) {
+    auto program = parse(
+        "struct Point { x, y }"
+        "fn getPoints() -> Point[] { return 0; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    EXPECT_EQ(program->functions[0]->returnType, "Point[]");
+}
+
+TEST(ParserTest, ParamTypeStructArray) {
+    auto program = parse(
+        "struct Point { x, y }"
+        "fn sumPoints(pts: Point[]) { return 0; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    EXPECT_EQ(program->functions[0]->parameters[0].typeName, "Point[]");
+}
+
+// ===========================================================================
+// Generic function return type tests
+// ===========================================================================
+
+TEST(ParserTest, GenericReturnType) {
+    auto program = parse("fn identity<T>(x: T) -> T { return x; } fn main() { return 0; }");
+    ASSERT_EQ(program->functions[0]->returnType, "T");
+}
+
+TEST(ParserTest, GenericReturnTypeArray) {
+    auto program = parse("fn wrap<T>(x: T) -> T[] { return x; } fn main() { return 0; }");
+    ASSERT_EQ(program->functions[0]->returnType, "T[]");
+}
+
+// ===========================================================================
+// Combined param + return type annotation tests
+// ===========================================================================
+
+TEST(ParserTest, ArrayParamAndReturnType) {
+    auto program = parse("fn sortArr(arr: int[]) -> int[] { return arr; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    EXPECT_EQ(program->functions[0]->parameters[0].typeName, "int[]");
+    EXPECT_EQ(program->functions[0]->returnType, "int[]");
+}
+
+TEST(ParserTest, MultipleArrayParams) {
+    auto program = parse("fn merge(a: int[], b: string[]) -> int { return 0; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    EXPECT_EQ(program->functions[0]->parameters[0].typeName, "int[]");
+    EXPECT_EQ(program->functions[0]->parameters[1].typeName, "string[]");
+    EXPECT_EQ(program->functions[0]->returnType, "int");
+}
+
+TEST(ParserTest, ForLoopIteratorArrayType) {
+    auto program = parse("fn main() { for (i: int[] in 0...10) { continue; } }");
+    auto* forStmt = dynamic_cast<ForStmt*>(program->functions[0]->body->statements[0].get());
+    ASSERT_NE(forStmt, nullptr);
+    EXPECT_EQ(forStmt->iteratorType, "int[]");
 }
