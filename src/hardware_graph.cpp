@@ -1691,6 +1691,216 @@ TransformStats applyHardwareTransforms(llvm::Function& func,
     return stats;
 }
 // ═════════════════════════════════════════════════════════════════════════════
+// Step 3b — Schedule-driven instruction reordering
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Returns true if the instruction has memory side-effects relevant to
+/// ordering (loads, stores, atomics, and memory-touching calls).
+static bool hasMemoryEffect(const llvm::Instruction* inst) {
+    if (llvm::isa<llvm::LoadInst>(inst) || llvm::isa<llvm::StoreInst>(inst) ||
+        llvm::isa<llvm::AtomicRMWInst>(inst) ||
+        llvm::isa<llvm::AtomicCmpXchgInst>(inst) ||
+        llvm::isa<llvm::FenceInst>(inst))
+        return true;
+    if (const auto* ci = llvm::dyn_cast<llvm::CallInst>(inst))
+        return !ci->doesNotAccessMemory();
+    return false;
+}
+
+/// Per-basic-block list scheduler.
+///
+/// Builds a local data/memory dependency DAG, computes critical-path priority
+/// (bottom-up), then runs a priority-driven list scheduler that respects the
+/// profile's issue width and execution-unit port counts.  Finally, the
+/// scheduled instruction sequence is applied to the LLVM IR by moving each
+/// instruction before the block's terminator using moveBefore().
+///
+/// PHI nodes and the terminator are never moved.
+///
+/// Returns the estimated cycle count for the block.
+static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
+                                    const MicroarchProfile& profile) {
+    // ── 1. Collect moveable instructions ─────────────────────────────────────
+    std::vector<llvm::Instruction*> moveable;
+    moveable.reserve(bb.size());
+    for (auto& inst : bb) {
+        if (!llvm::isa<llvm::PHINode>(inst) && !inst.isTerminator())
+            moveable.push_back(&inst);
+    }
+
+    unsigned n = static_cast<unsigned>(moveable.size());
+    if (n < 2) return n; // nothing to reorder
+
+    // ── 2. Build index map ────────────────────────────────────────────────────
+    std::unordered_map<llvm::Instruction*, unsigned> idx;
+    idx.reserve(n);
+    for (unsigned i = 0; i < n; ++i) idx[moveable[i]] = i;
+
+    // ── 3. Build dependency graph ─────────────────────────────────────────────
+    // succ[i] = list of instructions that must come after i.
+    std::vector<std::vector<unsigned>> succ(n);
+    std::vector<unsigned> inDeg(n, 0);
+
+    // Data dependencies (RAW): j uses the result of i → i must precede j.
+    for (unsigned j = 0; j < n; ++j) {
+        for (auto& use : moveable[j]->operands()) {
+            auto* def = llvm::dyn_cast<llvm::Instruction>(use.get());
+            if (!def) continue;
+            auto it = idx.find(def);
+            if (it == idx.end()) continue; // defined outside this BB
+            unsigned i = it->second;
+            if (i == j) continue;
+            // Deduplicate edges (same operand used twice).
+            bool already = false;
+            for (unsigned s : succ[i])
+                if (s == j) { already = true; break; }
+            if (!already) {
+                succ[i].push_back(j);
+                inDeg[j]++;
+            }
+        }
+    }
+
+    // Memory ordering: each memory-accessing instruction must follow all
+    // previous memory-accessing instructions (conservative).
+    {
+        int lastMem = -1;
+        for (unsigned i = 0; i < n; ++i) {
+            if (!hasMemoryEffect(moveable[i])) continue;
+            if (lastMem >= 0) {
+                unsigned prev = static_cast<unsigned>(lastMem);
+                bool already = false;
+                for (unsigned s : succ[prev])
+                    if (s == i) { already = true; break; }
+                if (!already) {
+                    succ[prev].push_back(i);
+                    inDeg[i]++;
+                }
+            }
+            lastMem = static_cast<int>(i);
+        }
+    }
+
+    // ── 4. Compute critical-path depth (bottom-up) ────────────────────────────
+    std::vector<unsigned> lat(n);
+    for (unsigned i = 0; i < n; ++i)
+        lat[i] = getLatency(classifyOp(moveable[i]), profile);
+
+    std::vector<unsigned> critPath(n, 0);
+    for (int i = static_cast<int>(n) - 1; i >= 0; --i) {
+        unsigned maxSucc = 0;
+        for (unsigned s : succ[static_cast<unsigned>(i)])
+            if (critPath[s] > maxSucc) maxSucc = critPath[s];
+        critPath[static_cast<unsigned>(i)] = lat[static_cast<unsigned>(i)] + maxSucc;
+    }
+
+    // ── 5. Port availability ──────────────────────────────────────────────────
+    std::unordered_map<int, std::vector<unsigned>> portAvail;
+    auto initPort = [&](ResourceType rt) {
+        unsigned cnt = getPortCount(rt, profile);
+        portAvail[static_cast<int>(rt)].assign(cnt, 0u);
+    };
+    initPort(ResourceType::IntegerALU);
+    initPort(ResourceType::VectorALU);
+    initPort(ResourceType::FMAUnit);
+    initPort(ResourceType::LoadUnit);
+    initPort(ResourceType::StoreUnit);
+    initPort(ResourceType::BranchUnit);
+    initPort(ResourceType::DividerUnit);
+
+    // ── 6. List scheduling ────────────────────────────────────────────────────
+    std::vector<llvm::Instruction*> scheduled;
+    scheduled.reserve(n);
+    std::vector<bool> done(n, false);
+    // Track the cycle at which each instruction's result is available.
+    std::vector<unsigned> avail(n, 0);
+
+    unsigned currentCycle = 0;
+    unsigned totalScheduled = 0;
+    unsigned maxCycle = 0;
+
+    while (totalScheduled < n) {
+        // Collect ready instructions (all predecessors done).
+        std::vector<unsigned> ready;
+        for (unsigned i = 0; i < n; ++i) {
+            if (!done[i] && inDeg[i] == 0)
+                ready.push_back(i);
+        }
+
+        // Guard against cycles (should not occur in valid SSA).
+        if (ready.empty()) {
+            for (unsigned i = 0; i < n; ++i) {
+                if (!done[i]) { ready.push_back(i); break; }
+            }
+            if (ready.empty()) break;
+        }
+
+        // Sort by critical path descending — most critical work first.
+        std::sort(ready.begin(), ready.end(), [&](unsigned a, unsigned b) {
+            return critPath[a] > critPath[b];
+        });
+
+        unsigned issued = 0;
+        for (unsigned id : ready) {
+            if (issued >= profile.issueWidth) break;
+
+            // Earliest cycle this instruction can start: max over all scheduled
+            // predecessors' availability cycles.
+            unsigned earliest = currentCycle;
+            for (unsigned p = 0; p < n; ++p) {
+                if (!done[p]) continue;
+                for (unsigned s : succ[p]) {
+                    if (s == id && avail[p] > earliest)
+                        earliest = avail[p];
+                }
+            }
+
+            // Find earliest available port.
+            ResourceType rt = mapOpToResource(classifyOp(moveable[id]));
+            auto& ports = portAvail[static_cast<int>(rt)];
+            if (!ports.empty()) {
+                unsigned bestPort = 0, bestTime = ports[0];
+                for (unsigned p = 1; p < ports.size(); ++p) {
+                    if (ports[p] < bestTime) { bestTime = ports[p]; bestPort = p; }
+                }
+                if (bestTime > earliest) earliest = bestTime;
+                ports[bestPort] = earliest + 1; // port busy one cycle (pipelined)
+            }
+
+            avail[id] = earliest + lat[id];
+            if (avail[id] > maxCycle) maxCycle = avail[id];
+
+            done[id] = true;
+            ++totalScheduled;
+            ++issued;
+            scheduled.push_back(moveable[id]);
+
+            // Decrement successor in-degrees.
+            for (unsigned s : succ[id]) {
+                if (inDeg[s] > 0) --inDeg[s];
+            }
+        }
+
+        ++currentCycle;
+    }
+
+    // ── 7. Apply the schedule to the LLVM IR ──────────────────────────────────
+    if (scheduled.size() == n) {
+        llvm::Instruction* term = bb.getTerminator();
+        for (auto* inst : scheduled)
+            inst->moveBefore(term);
+    }
+
+    return maxCycle > 0 ? maxCycle : currentCycle;
+}
+
+unsigned scheduleInstructions(llvm::Function& func, const MicroarchProfile& profile) {
+    unsigned totalCycles = 0;
+    for (auto& bb : func)
+        totalCycles += scheduleBasicBlock(bb, profile);
+    return totalCycles;
+}
+// ═════════════════════════════════════════════════════════════════════════════
 
 bool shouldActivate(const HGOEConfig& config) {
     // HGOE activates ONLY when -march or -mtune is explicitly provided.
@@ -1731,6 +1941,19 @@ HGOEStats optimizeFunction(llvm::Function& func, const HGOEConfig& config) {
         MappingResult mapping = mapProgramToHardware(pg, hw, profile);
         stats.totalScheduledCycles += mapping.totalCycles;
         stats.avgPortUtilization = mapping.portUtilization;
+
+        // Step 3b — Apply the schedule: physically reorder LLVM IR instructions
+        // within each basic block so that high-priority, long-latency operations
+        // start earlier, filling execution slots and hiding pipeline latency.
+        for (auto& bb : func) {
+            unsigned bbSize = 0;
+            for (auto& inst : bb)
+                if (!llvm::isa<llvm::PHINode>(inst) && !inst.isTerminator())
+                    ++bbSize;
+            if (bbSize >= 2)
+                ++stats.basicBlocksScheduled;
+        }
+        scheduleInstructions(func, profile);
     }
 
     // Step 4 — Apply hardware-aware transformations.
@@ -1780,6 +2003,7 @@ HGOEStats optimizeModule(llvm::Module& module, const HGOEConfig& config) {
             total.transforms.prefetchesInserted += stats.transforms.prefetchesInserted;
             total.transforms.branchesOptimized += stats.transforms.branchesOptimized;
             total.transforms.vectorExpanded += stats.transforms.vectorExpanded;
+            total.basicBlocksScheduled += stats.basicBlocksScheduled;
         }
     }
 

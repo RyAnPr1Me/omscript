@@ -387,6 +387,13 @@ struct HGOEConfig {
     bool enableCostModel = true;     ///< Hardware-aware cost model
 };
 
+/// Apply profile-driven instruction scheduling to all basic blocks in a
+/// function.  Reorders instructions within each basic block (phi nodes and
+/// terminators stay fixed) to minimise pipeline stalls for the given
+/// microarchitecture.  Returns the estimated total cycle count.
+unsigned scheduleInstructions(llvm::Function& func,
+                               const MicroarchProfile& profile);
+
 /// Statistics from the HGOE pipeline.
 struct HGOEStats {
     bool activated = false;           ///< Whether HGOE was activated
@@ -394,6 +401,7 @@ struct HGOEStats {
     unsigned functionsOptimized = 0;
     unsigned totalScheduledCycles = 0;
     double avgPortUtilization = 0.0;
+    unsigned basicBlocksScheduled = 0; ///< Basic blocks with instructions reordered
     TransformStats transforms;
 };
 
