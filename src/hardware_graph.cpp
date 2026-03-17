@@ -1441,9 +1441,6 @@ TransformStats applyHardwareTransforms(llvm::Function& func,
 
     return stats;
 }
-
-// ═════════════════════════════════════════════════════════════════════════════
-// Step 6 & 10 — Top-level HGOE API
 // ═════════════════════════════════════════════════════════════════════════════
 
 bool shouldActivate(const HGOEConfig& config) {
