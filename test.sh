@@ -863,6 +863,18 @@ fi
 echo "==================================================================="
 printf "  Aggregate:  C: %d ms   OM: %d ms   (%d%%)\n" \
        "$SUM_C" "$SUM_OM" "$OVERALL"
+
+if [ "$OVERALL" -lt 100 ]; then
+    DIFF=$(( 100 - OVERALL ))
+    echo -e "  ${GRN}${BLD}OM is ${DIFF}% faster than C on average.${RST}"
+elif [ "$OVERALL" -gt 100 ]; then
+    DIFF=$(( OVERALL - 100 ))
+    echo -e "  ${RED}${BLD}OM is ${DIFF}% slower than C on average.${RST}"
+else
+    echo -e "  ${GRN}${BLD}OM is on par with C on average.${RST}"
+fi
+
+echo ""
 if   [ "$OVERALL" -le 120 ]; then echo -e "  Verdict:    ${GRN}${BLD}Excellent -- near-native performance${RST}"
 elif [ "$OVERALL" -le 200 ]; then echo -e "  Verdict:    ${YEL}${BLD}Acceptable -- room for improvement${RST}"
 else                               echo -e "  Verdict:    ${RED}${BLD}Needs work -- significant overhead${RST}"
