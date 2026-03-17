@@ -523,6 +523,8 @@ static MicroarchProfile skylakeProfile() {
     p.branchUnits = 1;
     p.agus = 2;
     p.dividers = 1;
+    // Skylake: integer multiply on ports P0 and P1 only (2 of the 4 ALU ports).
+    p.mulPortCount = 2;
     p.latIntAdd = 1; p.latIntMul = 3; p.latIntDiv = 26;
     p.latFPAdd = 4; p.latFPMul = 4; p.latFPDiv = 14; p.latFMA = 4;
     p.latLoad = 5; p.latStore = 5; p.latBranch = 1; p.latShift = 1;
@@ -549,6 +551,8 @@ static MicroarchProfile haswellProfile() {
     p.issueWidth = 4;
     p.l3Latency = 36;
     p.branchMispredictPenalty = 15.0;
+    // Haswell: integer multiply on port P1 only (1 of the 4 ALU ports).
+    p.mulPortCount = 1;
     return p;
 }
 
@@ -583,6 +587,8 @@ static MicroarchProfile zen4Profile() {
     p.branchUnits = 1;
     p.agus = 3;
     p.dividers = 1;
+    // Zen 4: integer multiply on 2 of the 4 integer execution pipes.
+    p.mulPortCount = 2;
     p.latIntAdd = 1; p.latIntMul = 3; p.latIntDiv = 17;
     p.latFPAdd = 3; p.latFPMul = 3; p.latFPDiv = 13; p.latFMA = 4;
     p.latLoad = 4; p.latStore = 4; p.latBranch = 1; p.latShift = 1;
@@ -635,6 +641,8 @@ static MicroarchProfile appleMProfile() {
     p.branchUnits = 2;
     p.agus = 3;
     p.dividers = 2;
+    // Apple M1: multiply available on 4 of the 6 integer execution ports.
+    p.mulPortCount = 4;
     p.latIntAdd = 1; p.latIntMul = 3; p.latIntDiv = 10;
     p.latFPAdd = 3; p.latFPMul = 3; p.latFPDiv = 10; p.latFMA = 4;
     p.latLoad = 3; p.latStore = 3; p.latBranch = 1; p.latShift = 1;
@@ -669,6 +677,8 @@ static MicroarchProfile neoverseV2Profile() {
     p.branchUnits = 2;
     p.agus = 3;
     p.dividers = 2;
+    // Neoverse V2: multiply available on 4 of the 6 integer ALU pipes.
+    p.mulPortCount = 4;
     p.latIntAdd = 1; p.latIntMul = 2; p.latIntDiv = 12;
     p.latFPAdd = 2; p.latFPMul = 3; p.latFPDiv = 10; p.latFMA = 4;
     p.latLoad = 4; p.latStore = 4; p.latBranch = 1; p.latShift = 1;
@@ -1089,6 +1099,128 @@ static unsigned getPortCount(ResourceType rt, const MicroarchProfile& profile) {
     case ResourceType::BranchUnit:  return profile.branchUnits;
     case ResourceType::DividerUnit: return profile.dividers;
     default:                        return 1;
+    }
+}
+
+/// Return the precise instruction latency in cycles using the exact LLVM
+/// opcode rather than the coarser OpClass grouping.
+///
+/// Notable special cases:
+///   PHI / BitCast / IntToPtr / PtrToInt — zero latency (register rename)
+///   FP conversion — uses the FP pipeline (latFPAdd)
+///   FMA intrinsic  — latFMA
+///   sqrt intrinsic — ≈ fdiv latency
+///   Unknown calls  — conservative 10-cycle estimate
+static unsigned getOpcodeLatency(const llvm::Instruction* inst,
+                                  const MicroarchProfile& profile) {
+    // Conservative latency constants used when we cannot determine exact timing.
+    constexpr unsigned kUnknownCallLatency = 10;      ///< Non-intrinsic call (ABI overhead)
+    constexpr unsigned kUnknownIntrinsicLatency = 5;  ///< Unknown intrinsic (FP-ish pipeline)
+
+    if (!inst) return 1;
+    switch (inst->getOpcode()) {
+    // ── Integer arithmetic ──────────────────────────────────────────────────
+    case llvm::Instruction::Add:
+    case llvm::Instruction::Sub:
+    case llvm::Instruction::And:
+    case llvm::Instruction::Or:
+    case llvm::Instruction::Xor:
+    case llvm::Instruction::Select:  // CMOV-like, single ALU cycle
+        return profile.latIntAdd;
+    case llvm::Instruction::Mul:
+        return profile.latIntMul;
+    case llvm::Instruction::SDiv:
+    case llvm::Instruction::UDiv:
+    case llvm::Instruction::SRem:
+    case llvm::Instruction::URem:
+        return profile.latIntDiv;
+
+    // ── Integer shifts / comparisons ────────────────────────────────────────
+    case llvm::Instruction::Shl:
+    case llvm::Instruction::LShr:
+    case llvm::Instruction::AShr:
+        return profile.latShift;
+    case llvm::Instruction::ICmp:
+        return profile.latIntAdd; // ALU pipeline
+
+    // ── Floating-point ──────────────────────────────────────────────────────
+    case llvm::Instruction::FAdd:
+    case llvm::Instruction::FSub:
+    case llvm::Instruction::FCmp:
+        return profile.latFPAdd;
+    case llvm::Instruction::FMul:
+        return profile.latFPMul;
+    case llvm::Instruction::FDiv:
+    case llvm::Instruction::FRem:
+        return profile.latFPDiv;
+    case llvm::Instruction::FNeg:
+        return profile.latFPAdd;
+
+    // ── Memory ──────────────────────────────────────────────────────────────
+    case llvm::Instruction::Load:
+        return profile.latLoad;
+    case llvm::Instruction::Store:
+        return profile.latStore;
+    case llvm::Instruction::GetElementPtr:
+        return profile.latIntAdd; // address arithmetic
+
+    // ── Control flow ────────────────────────────────────────────────────────
+    case llvm::Instruction::Br:
+    case llvm::Instruction::Switch:
+    case llvm::Instruction::IndirectBr:
+        return profile.latBranch;
+    case llvm::Instruction::Ret:
+        return 0;
+
+    // ── Type conversions ────────────────────────────────────────────────────
+    case llvm::Instruction::Trunc:
+    case llvm::Instruction::ZExt:
+    case llvm::Instruction::SExt:
+        return profile.latIntAdd; // requires ALU
+    case llvm::Instruction::FPToUI:
+    case llvm::Instruction::FPToSI:
+    case llvm::Instruction::UIToFP:
+    case llvm::Instruction::SIToFP:
+    case llvm::Instruction::FPTrunc:
+    case llvm::Instruction::FPExt:
+        return profile.latFPAdd; // FP pipeline
+    case llvm::Instruction::BitCast:
+    case llvm::Instruction::IntToPtr:
+    case llvm::Instruction::PtrToInt:
+        return 0; // free — handled by register rename on modern CPUs
+
+    // ── PHI ─────────────────────────────────────────────────────────────────
+    case llvm::Instruction::PHI:
+        return 0; // resolved at the predecessor edge, not at the node itself
+
+    // ── Calls / intrinsics ───────────────────────────────────────────────────
+    case llvm::Instruction::Call: {
+        const auto* ii = llvm::dyn_cast<llvm::IntrinsicInst>(inst);
+        if (!ii) return kUnknownCallLatency;
+        llvm::Intrinsic::ID id = ii->getIntrinsicID();
+        switch (id) {
+        case llvm::Intrinsic::fma:
+        case llvm::Intrinsic::fmuladd:  return profile.latFMA;
+        case llvm::Intrinsic::sqrt:     return profile.latFPDiv;
+        case llvm::Intrinsic::powi:
+        case llvm::Intrinsic::pow:      return profile.latFPDiv * 3; // iterative
+        case llvm::Intrinsic::abs:
+        case llvm::Intrinsic::smin:
+        case llvm::Intrinsic::smax:
+        case llvm::Intrinsic::umin:
+        case llvm::Intrinsic::umax:     return profile.latIntAdd;
+        case llvm::Intrinsic::minnum:
+        case llvm::Intrinsic::maxnum:   return profile.latFPAdd;
+        case llvm::Intrinsic::ctpop:
+        case llvm::Intrinsic::ctlz:
+        case llvm::Intrinsic::cttz:     return profile.latIntAdd;
+        case llvm::Intrinsic::prefetch: return 0; // hint, no result latency
+        default:                        return kUnknownIntrinsicLatency;
+        }
+    }
+
+    default:
+        return 1;
     }
 }
 
@@ -1613,79 +1745,213 @@ static unsigned markLoadStorePairs(llvm::Function& func,
     return count;
 }
 
-/// Attempt to widen scalar integer/FP chains to vector operations when the
-/// hardware has wide SIMD units.  For now, this pass annotates candidate
-/// scalar loops with llvm.loop.vectorize.enable = true metadata so LLVM's
-/// vectorizer can pick them up.
-/// Returns the number of loop back-edges annotated.
-static unsigned annotateVectorCandidates(llvm::Function& func,
-                                          const MicroarchProfile& profile) {
-    if (profile.vecUnits == 0 || profile.vectorWidth < 128) return 0;
+/// Detect natural loops and annotate their back-edge terminators with
+/// software-pipelining metadata:
+///   - llvm.loop.unroll.count  (based on MII from resource pressure)
+///   - llvm.loop.vectorize.enable + llvm.loop.vectorize.width
+///   - llvm.loop.interleave.count  (= unroll count for in-order cores)
+///
+/// Loop header detection uses linear BB ordering: a BB is a loop header if
+/// any of its predecessors appears later in the function's linear order (i.e.
+/// the predecessor is a latch with a backedge).
+///
+/// Returns the number of loops annotated.
+static unsigned softwarePipelineLoops(llvm::Function& func,
+                                       const MicroarchProfile& profile) {
+    if (func.isDeclaration()) return 0;
+
+    // ── Assign linear order to each basic block ───────────────────────────────
+    std::unordered_map<llvm::BasicBlock*, unsigned> bbOrder;
+    {
+        unsigned ord = 0;
+        for (auto& bb : func) bbOrder[&bb] = ord++;
+    }
 
     unsigned count = 0;
+    llvm::LLVMContext& ctx = func.getContext();
 
     for (auto& bb : func) {
-        auto* br = llvm::dyn_cast<llvm::BranchInst>(bb.getTerminator());
-        if (!br || !br->isConditional()) continue;
-
-        // Heuristic: backedge — one successor dominates the other or equals bb.
-        bool hasBackedge = false;
-        for (unsigned i = 0; i < br->getNumSuccessors(); ++i) {
-            if (br->getSuccessor(i) == &bb) { hasBackedge = true; break; }
+        // Determine if this BB is a loop header.
+        llvm::BasicBlock* latch = nullptr;
+        for (auto* pred : llvm::predecessors(&bb)) {
+            if (bbOrder[pred] >= bbOrder[&bb]) { latch = pred; break; }
         }
-        // Also treat a loop where one successor has only one predecessor = bb.
-        if (!hasBackedge) continue;
+        if (!latch) continue; // not a loop header
 
-        // Check that the loop body does not have memory side-effects other than
-        // plain loads/stores (no calls, no atomics).
-        bool hasCall = false;
-        for (auto& inst : bb) {
+        // Use the latch's terminator to attach loop metadata.
+        auto* latchTerm = latch->getTerminator();
+        if (!latchTerm) continue;
+
+        // Skip if this loop already has loop metadata (user-annotated or
+        // set by a previous pass — don't override explicit user hints).
+        if (latchTerm->getMetadata(llvm::LLVMContext::MD_loop)) continue;
+
+        // Skip if the latch has non-intrinsic calls (unknown side-effects).
+        bool hasUnsafeCall = false;
+        for (auto& inst : *latch) {
             if (llvm::isa<llvm::CallInst>(inst) && !llvm::isa<llvm::IntrinsicInst>(inst)) {
-                hasCall = true; break;
+                hasUnsafeCall = true; break;
             }
         }
-        if (hasCall) continue;
+        if (hasUnsafeCall) continue;
 
-        // Annotate the terminator's back-edge with vectorize metadata.
-        llvm::LLVMContext& ctx = func.getContext();
-        llvm::MDNode* trueNode = llvm::MDNode::get(ctx, {
-            llvm::MDString::get(ctx, "llvm.loop.vectorize.enable"),
-            llvm::ConstantAsMetadata::get(
-                llvm::ConstantInt::getTrue(ctx))
-        });
-        unsigned width = profile.vectorWidth / 32; // element count assuming 32-bit elements
-        // Using 32-bit as the baseline element width because it is the most
-        // common scalar type; the LLVM vectoriser will clamp to the widest
-        // type it finds in the loop body, so this is an upper-bound hint.
-        if (width < 2) width = 2;
-        llvm::MDNode* widthNode = llvm::MDNode::get(ctx, {
-            llvm::MDString::get(ctx, "llvm.loop.vectorize.width"),
-            llvm::ConstantAsMetadata::get(
-                llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), width))
-        });
+        // ── Compute Resource MII (minimum initiation interval) ──────────────
+        // MII = max over all resource types of ceil(work[rt] / portCount[rt]).
+        // We count instructions in the header BB (the body of the innermost loop).
+        std::unordered_map<int, unsigned> resWork;
+        for (auto& inst : bb) {
+            if (llvm::isa<llvm::PHINode>(inst) || inst.isTerminator()) continue;
+            int key = static_cast<int>(mapOpToResource(classifyOp(&inst)));
+            resWork[key]++;
+        }
 
-        // Build the loop-id metadata node that references itself using the
-        // canonical LLVM pattern: create with nullptr first operand, then
-        // replace it with the node itself (no temporary allocation needed).
-        llvm::MDNode* loopID = llvm::MDNode::get(ctx,
-            {static_cast<llvm::Metadata*>(nullptr), trueNode, widthNode});
+        unsigned resMII = 1;
+        auto checkRT = [&](ResourceType rt) {
+            auto it = resWork.find(static_cast<int>(rt));
+            if (it == resWork.end() || it->second == 0) return;
+            unsigned ports = getPortCount(rt, profile);
+            if (ports == 0) return;
+            unsigned mii = (it->second + ports - 1) / ports;
+            if (mii > resMII) resMII = mii;
+        };
+        checkRT(ResourceType::IntegerALU);
+        checkRT(ResourceType::VectorALU);
+        checkRT(ResourceType::FMAUnit);
+        checkRT(ResourceType::LoadUnit);
+        checkRT(ResourceType::StoreUnit);
+        checkRT(ResourceType::DividerUnit);
+
+        // Unroll count: expose enough iterations to fill the pipeline.
+        // Upper-bound prevents excessive code-size growth from very deep pipelines
+        // combined with very short MII (e.g. a 14-stage pipeline with MII=1 would
+        // otherwise produce 14 unrolled copies).
+        constexpr unsigned kMaxUnrollCount = 16;
+        unsigned unroll = (profile.pipelineDepth + resMII - 1) / resMII;
+        unroll = std::max(unroll, 2u);
+        unroll = std::min(unroll, kMaxUnrollCount);
+
+        // Interleave count: same as unroll for out-of-order; limited for
+        // in-order cores (issueWidth == 1 → no benefit from high interleave).
+        unsigned interleave = (profile.issueWidth > 2) ? unroll : 2u;
+
+        // ── Vectorize width (32-bit baseline, clamped to hardware width) ─────
+        unsigned vecWidth = (profile.vecUnits > 0 && profile.vectorWidth >= 128)
+            ? profile.vectorWidth / 32 : 0;
+        if (vecWidth < 2) vecWidth = 0; // don't set a width of 1
+
+        // ── Build loop metadata ───────────────────────────────────────────────
+        llvm::SmallVector<llvm::Metadata*, 6> mds;
+        mds.push_back(nullptr); // placeholder for self-reference
+
+        mds.push_back(llvm::MDNode::get(ctx, {
+            llvm::MDString::get(ctx, "llvm.loop.unroll.count"),
+            llvm::ConstantAsMetadata::get(
+                llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), unroll))
+        }));
+
+        mds.push_back(llvm::MDNode::get(ctx, {
+            llvm::MDString::get(ctx, "llvm.loop.interleave.count"),
+            llvm::ConstantAsMetadata::get(
+                llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), interleave))
+        }));
+
+        if (vecWidth > 0) {
+            mds.push_back(llvm::MDNode::get(ctx, {
+                llvm::MDString::get(ctx, "llvm.loop.vectorize.enable"),
+                llvm::ConstantAsMetadata::get(llvm::ConstantInt::getTrue(ctx))
+            }));
+            mds.push_back(llvm::MDNode::get(ctx, {
+                llvm::MDString::get(ctx, "llvm.loop.vectorize.width"),
+                llvm::ConstantAsMetadata::get(
+                    llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), vecWidth))
+            }));
+        }
+
+        llvm::MDNode* loopID = llvm::MDNode::get(ctx, mds);
         loopID->replaceOperandWith(0, loopID);
-        br->setMetadata(llvm::LLVMContext::MD_loop, loopID);
-        count++;
+        latchTerm->setMetadata(llvm::LLVMContext::MD_loop, loopID);
+        ++count;
     }
+
     return count;
+}
+
+/// Set LLVM target-cpu and target-features function attributes so the backend
+/// uses the right ISA extensions for the resolved microarchitecture.
+/// Only sets attributes that are not already explicitly present on the function.
+static void applyTargetAttributes(llvm::Function& func,
+                                   const std::string& cpuName,
+                                   const MicroarchProfile& profile) {
+    if (cpuName.empty() || func.isDeclaration()) return;
+
+    // Set target-cpu only if not already specified.
+    if (!func.hasFnAttribute("target-cpu"))
+        func.addFnAttr("target-cpu", cpuName);
+
+    // Build a feature string from the profile's ISA and vector width.
+    if (func.hasFnAttribute("target-features")) return; // respect explicit user setting
+
+    std::string features;
+    auto addF = [&](const char* f) {
+        if (!features.empty()) features += ',';
+        features += f;
+    };
+
+    switch (profile.isa) {
+    case ISAFamily::X86_64:
+        addF("+sse");
+        addF("+sse2");
+        addF("+sse4.2");
+        addF("+bmi");
+        addF("+bmi2");
+        addF("+popcnt");
+        addF("+lzcnt");
+        if (profile.vectorWidth >= 256) { addF("+avx"); addF("+avx2"); }
+        if (profile.vectorWidth >= 512) {
+            addF("+avx512f");
+            addF("+avx512vl");
+            addF("+avx512bw");
+            addF("+avx512dq");
+        }
+        break;
+
+    case ISAFamily::AArch64:
+        addF("+neon");
+        addF("+fp-armv8");
+        if (profile.vectorWidth >= 256) {
+            addF("+sve");
+            addF("+sve2");
+        }
+        break;
+
+    case ISAFamily::RISCV64:
+        addF("+m");  // multiply/divide
+        addF("+a");  // atomics
+        addF("+f");  // single-precision FP
+        addF("+d");  // double-precision FP
+        addF("+c");  // compressed instructions
+        if (profile.vecUnits > 0 && profile.vectorWidth >= 128) addF("+v");
+        break;
+
+    default:
+        break;
+    }
+
+    if (!features.empty())
+        func.addFnAttr("target-features", features);
 }
 
 TransformStats applyHardwareTransforms(llvm::Function& func,
                                         const MicroarchProfile& profile) {
     TransformStats stats;
 
+
     stats.fmaGenerated     = generateFMA(func, profile);
     stats.fmaGenerated    += generateFMASub(func, profile);
     stats.prefetchesInserted = insertPrefetches(func, profile);
     stats.branchesOptimized  = optimizeBranchLayout(func, profile);
     stats.loadsStorePaired   = markLoadStorePairs(func, profile);
-    stats.vectorExpanded     = annotateVectorCandidates(func, profile);
+    stats.vectorExpanded     = softwarePipelineLoops(func, profile);
     // Integer strength reduction runs last so mul→shift replacements do not
     // interfere with the FMA scan above (which looks at FMul, not int Mul).
     stats.intStrengthReduced = integerStrengthReduce(func, profile);
@@ -1781,10 +2047,10 @@ static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
         }
     }
 
-    // ── 4. Profile-derived instruction latencies ──────────────────────────────
+    // ── 4. Per-opcode instruction latencies (more precise than OpClass-level) ──
     std::vector<unsigned> lat(n);
     for (unsigned i = 0; i < n; ++i)
-        lat[i] = getLatency(classifyOp(moveable[i]), profile);
+        lat[i] = getOpcodeLatency(moveable[i], profile);
 
     // ── 5. Critical-path depth (bottom-up, longest latency path to any sink) ──
     std::vector<unsigned> critPath(n, 0);
@@ -1797,31 +2063,34 @@ static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
     }
 
     // ── 6. Hardware port model from the actual HardwareGraph ──────────────────
-    // For each ResourceType we maintain one slot per physical execution-port
-    // instance.  Each slot stores:
-    //   nextFree    — first cycle this port can accept a new instruction
-    //   busyCycles  — reciprocal throughput (1 / instrs_per_cycle, ceil'd)
+    // Each HardwareGraph node may represent multiple port instances (node->count).
+    // We create one PortSlot per physical port instance to accurately model
+    // port pressure — e.g. Skylake's 4 integer ALU ports each get a slot.
     struct PortSlot {
         unsigned nextFree   = 0;
-        unsigned busyCycles = 1; ///< cycles port is occupied per instruction
+        unsigned busyCycles = 1; ///< cycles this port is occupied per instruction
     };
+    // Special key for integer multiply, which can only use a subset of the
+    // total integer ALU port count (profile.mulPortCount).
+    constexpr int kIntMulPortKey = 0x10000;
+
     std::unordered_map<int, std::vector<PortSlot>> hwPorts;
 
     auto initHWPort = [&](ResourceType rt) {
         auto nodes = hw.findNodes(rt);
         std::vector<PortSlot> slots;
-        slots.reserve(nodes.size());
         for (const auto* node : nodes) {
             unsigned busy = (node->throughput > 0.0)
-                ? static_cast<unsigned>(std::ceil(1.0 / node->throughput))
+                ? std::max(1u, static_cast<unsigned>(std::ceil(1.0 / node->throughput)))
                 : 1u;
-            busy = std::max(busy, 1u);
-            slots.push_back({0u, busy});
+            // Create one slot per port INSTANCE (node->count ports per node).
+            for (unsigned c = 0; c < std::max(node->count, 1u); ++c)
+                slots.push_back({0u, busy});
         }
         if (slots.empty()) {
             // Fallback: use profile port count with unit throughput.
-            unsigned cnt = getPortCount(rt, profile);
-            slots.resize(std::max(cnt, 1u), {0u, 1u});
+            unsigned cnt = std::max(getPortCount(rt, profile), 1u);
+            slots.assign(cnt, {0u, 1u});
         }
         hwPorts[static_cast<int>(rt)] = std::move(slots);
     };
@@ -1833,12 +2102,26 @@ static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
     initHWPort(ResourceType::BranchUnit);
     initHWPort(ResourceType::DividerUnit);
 
+    // Multiply-specific port slots: integer multiply can only use mulPortCount
+    // of the total intALUs ports (e.g. P0/P1 on Skylake, not P5/P6).
+    {
+        // Derive busyCycles from the IntegerALU node throughput.
+        unsigned mulBusy = 1u;
+        auto aluNodes = hw.findNodes(ResourceType::IntegerALU);
+        if (!aluNodes.empty() && aluNodes[0]->throughput > 0.0)
+            mulBusy = std::max(1u,
+                static_cast<unsigned>(std::ceil(1.0 / aluNodes[0]->throughput)));
+        unsigned mulPorts = std::max(profile.mulPortCount, 1u);
+        hwPorts[kIntMulPortKey].assign(mulPorts, {0u, mulBusy});
+    }
+
     // ── 6a. Port-pressure: count of pending instructions per resource type ────
-    // Scheduling bottleneck resources (more pending uses) first helps reduce
-    // the longest queue and exposes more parallelism.
     std::unordered_map<int, unsigned> portPressure;
     for (unsigned i = 0; i < n; ++i) {
-        int key = static_cast<int>(mapOpToResource(classifyOp(moveable[i])));
+        OpClass op = classifyOp(moveable[i]);
+        int key = (op == OpClass::IntMul)
+            ? kIntMulPortKey
+            : static_cast<int>(mapOpToResource(op));
         portPressure[key]++;
     }
 
@@ -1873,14 +2156,38 @@ static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
         // Sort ready instructions for maximum throughput:
         //   Primary   — critical path remaining (latency hiding)
         //   Secondary — port pressure (schedule bottleneck resource first)
-        //   Tertiary  — instruction index (deterministic tie-break)
+        //   Tertiary  — register-freeing score (prefer instructions that kill
+        //               live values, reducing register pressure)
+        //   Quaternary — instruction index (deterministic tie-break)
+        //
+        // Register-freeing score: count of predecessors whose only remaining
+        // not-yet-scheduled user is this instruction (scheduling it frees the
+        // predecessor's result register).
+        auto regFreeScore = [&](unsigned id) -> unsigned {
+            unsigned score = 0;
+            for (unsigned p : pred[id]) {
+                if (!done[p]) continue;
+                bool lastUser = true;
+                for (unsigned s : succ[p])
+                    if (s != id && !done[s]) { lastUser = false; break; }
+                if (lastUser) ++score;
+            }
+            return score;
+        };
+
         std::sort(ready.begin(), ready.end(), [&](unsigned a, unsigned b) {
             if (critPath[a] != critPath[b])
                 return critPath[a] > critPath[b];
-            int rtA = static_cast<int>(mapOpToResource(classifyOp(moveable[a])));
-            int rtB = static_cast<int>(mapOpToResource(classifyOp(moveable[b])));
+            OpClass opA = classifyOp(moveable[a]);
+            OpClass opB = classifyOp(moveable[b]);
+            int rtA = (opA == OpClass::IntMul) ? kIntMulPortKey
+                : static_cast<int>(mapOpToResource(opA));
+            int rtB = (opB == OpClass::IntMul) ? kIntMulPortKey
+                : static_cast<int>(mapOpToResource(opB));
             if (portPressure[rtA] != portPressure[rtB])
                 return portPressure[rtA] > portPressure[rtB];
+            unsigned rfsA = regFreeScore(a), rfsB = regFreeScore(b);
+            if (rfsA != rfsB) return rfsA > rfsB;
             return a < b;
         });
 
@@ -1897,8 +2204,10 @@ static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
                 if (issued >= profile.issueWidth) break;
                 if (done[id]) continue;
 
-                int rtKey = static_cast<int>(
-                    mapOpToResource(classifyOp(moveable[id])));
+                OpClass opCls = classifyOp(moveable[id]);
+                int rtKey = (opCls == OpClass::IntMul)
+                    ? kIntMulPortKey
+                    : static_cast<int>(mapOpToResource(opCls));
 
                 // Pass 0: only issue to a port type not yet used this cycle.
                 // Pass 1: issue to any port type (fill remaining slots).
@@ -1999,6 +2308,12 @@ HGOEStats optimizeFunction(llvm::Function& func, const HGOEConfig& config) {
 
     if (pg.nodeCount() == 0) return stats;
 
+    // Step 2b — Set target-cpu / target-features on the function so that
+    // LLVM's backend selects the correct ISA extensions (AVX2, AVX-512, etc.)
+    // and schedules for the specific microarchitecture during code emission.
+    if (config.enableTransforms)
+        applyTargetAttributes(func, cpuName, profile);
+
     // Step 3 — Map program onto hardware (list scheduling).
     if (config.enableScheduling) {
         MappingResult mapping = mapProgramToHardware(pg, hw, profile);
@@ -2007,8 +2322,8 @@ HGOEStats optimizeFunction(llvm::Function& func, const HGOEConfig& config) {
 
         // Step 3b — Physically reorder LLVM IR instructions within each basic
         // block to maximise throughput on the specific microarchitecture.
-        // The scheduler uses the full HardwareGraph (with per-port throughput)
-        // for cycle-accurate port assignment and port-diversity scheduling.
+        // Uses per-opcode latencies, per-port throughput from the HardwareGraph,
+        // multiply-port constraints, and register-pressure-aware priority.
         for (auto& bb : func) {
             unsigned bbSize = 0;
             for (auto& inst : bb)
@@ -2023,6 +2338,7 @@ HGOEStats optimizeFunction(llvm::Function& func, const HGOEConfig& config) {
     // Step 4 — Apply hardware-aware transformations.
     if (config.enableTransforms) {
         stats.transforms = applyHardwareTransforms(func, profile);
+        stats.loopsUnrolled = stats.transforms.vectorExpanded;
     }
 
     stats.functionsOptimized = 1;
@@ -2067,7 +2383,9 @@ HGOEStats optimizeModule(llvm::Module& module, const HGOEConfig& config) {
             total.transforms.prefetchesInserted += stats.transforms.prefetchesInserted;
             total.transforms.branchesOptimized += stats.transforms.branchesOptimized;
             total.transforms.vectorExpanded += stats.transforms.vectorExpanded;
+            total.transforms.intStrengthReduced += stats.transforms.intStrengthReduced;
             total.basicBlocksScheduled += stats.basicBlocksScheduled;
+            total.loopsUnrolled += stats.loopsUnrolled;
         }
     }
 

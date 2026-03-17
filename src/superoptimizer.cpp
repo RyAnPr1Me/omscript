@@ -1381,12 +1381,17 @@ static unsigned applyAlgebraicSimplifications(llvm::Function& func) {
                         llvm::ConstantInt::get(inst.getType(), *c - 1), "urem_pow2");
                 }
             }
-            // sdiv x, -1 → 0 - x  (negate)
+            // sdiv x, -1 → 0 - x  (negate via nsw sub from zero)
+            // Guard: INT_MIN / -1 is undefined behaviour (overflows).  The
+            // LLVM `sub nsw` carries the same UB semantics as C negation, so
+            // this transformation is correct under LLVM's poison / UB rules.
             if (!simplified && inst.getOpcode() == llvm::Instruction::SDiv) {
                 if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1))) {
                     if (ci->isMinusOne()) {
                         llvm::IRBuilder<> builder(&inst);
-                        simplified = builder.CreateNeg(inst.getOperand(0), "sdiv_neg1");
+                        // Use CreateNSWNeg so overflow (INT_MIN ÷ -1) remains
+                        // poison rather than silently wrapping.
+                        simplified = builder.CreateNSWNeg(inst.getOperand(0), "sdiv_neg1");
                     }
                 }
             }

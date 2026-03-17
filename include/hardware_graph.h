@@ -324,6 +324,12 @@ struct MicroarchProfile {
 
     // Memory
     unsigned memoryLatency = 200;   ///< Main memory latency in cycles
+
+    // Port constraints for integer multiply.
+    // Integer multiply can only use a subset of the total integer ALU ports on
+    // most microarchitectures (e.g. only 2 of 4 ports on Skylake, port 1 only
+    // on Haswell).  The scheduler uses this to avoid overcommitting ALU capacity.
+    unsigned mulPortCount = 1;      ///< ALU port instances capable of integer multiply
 };
 
 /// Look up a microarchitecture profile by CPU name.
@@ -406,6 +412,7 @@ struct HGOEStats {
     unsigned totalScheduledCycles = 0;
     double avgPortUtilization = 0.0;
     unsigned basicBlocksScheduled = 0; ///< Basic blocks with instructions reordered
+    unsigned loopsUnrolled = 0;        ///< Loops annotated for software pipelining
     TransformStats transforms;
 };
 
