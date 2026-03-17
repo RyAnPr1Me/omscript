@@ -1431,14 +1431,22 @@ static unsigned applyAlgebraicSimplifications(llvm::Function& func) {
                     case 24: simplified = builder.CreateAdd(shl(xv,4), shl(xv,3), "mul24"); break;
                     case 25: simplified = builder.CreateAdd(builder.CreateAdd(shl(xv,4), shl(xv,3)), xv, "mul25"); break;
                     case 28: simplified = builder.CreateSub(shl(xv,5), shl(xv,2), "mul28"); break;
+                    case 30: simplified = builder.CreateSub(shl(xv,5), shl(xv,1), "mul30"); break;
                     case 31: simplified = builder.CreateSub(shl(xv,5), xv, "mul31"); break;
                     case 33: simplified = builder.CreateAdd(shl(xv,5), xv, "mul33"); break;
+                    case 34: simplified = builder.CreateAdd(shl(xv,5), shl(xv,1), "mul34"); break;
+                    case 36: simplified = builder.CreateAdd(shl(xv,5), shl(xv,2), "mul36"); break;
                     case 40: simplified = builder.CreateAdd(shl(xv,5), shl(xv,3), "mul40"); break;
                     case 48: simplified = builder.CreateAdd(shl(xv,5), shl(xv,4), "mul48"); break;
+                    case 56: simplified = builder.CreateSub(shl(xv,6), shl(xv,3), "mul56"); break;
+                    case 60: simplified = builder.CreateSub(shl(xv,6), shl(xv,2), "mul60"); break;
                     case 63: simplified = builder.CreateSub(shl(xv,6), xv, "mul63"); break;
                     case 65: simplified = builder.CreateAdd(shl(xv,6), xv, "mul65"); break;
+                    case 72: simplified = builder.CreateAdd(shl(xv,6), shl(xv,3), "mul72"); break;
+                    case 80: simplified = builder.CreateAdd(shl(xv,6), shl(xv,4), "mul80"); break;
                     case 96: simplified = builder.CreateAdd(shl(xv,6), shl(xv,5), "mul96"); break;
                     case 127: simplified = builder.CreateSub(shl(xv,7), xv, "mul127"); break;
+                    case 192: simplified = builder.CreateAdd(shl(xv,7), shl(xv,6), "mul192"); break;
                     case 255: simplified = builder.CreateSub(shl(xv,8), xv, "mul255"); break;
                     default: break;
                     }
@@ -1980,6 +1988,32 @@ static unsigned applyAlgebraicSimplifications(llvm::Function& func) {
                     }
                 }
             }
+
+            // ── (a | b) - (a & b) → a ^ b ────────────────────────────────────
+            // Proof: OR = XOR + AND (in terms of bit-counting).
+            //   a|b = a^b + a&b  →  (a|b) - (a&b) = a^b  ✓
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Sub) {
+                auto* orInst  = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                auto* andInst = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
+                if (orInst  && orInst->getOpcode()  == llvm::Instruction::Or  &&
+                    andInst && andInst->getOpcode() == llvm::Instruction::And &&
+                    hasOneUse(orInst) && hasOneUse(andInst)) {
+                    // Operands of OR and AND must be the same pair (in any order)
+                    auto* orA  = orInst->getOperand(0);  auto* orB  = orInst->getOperand(1);
+                    auto* andA = andInst->getOperand(0); auto* andB = andInst->getOperand(1);
+                    if ((orA == andA && orB == andB) || (orA == andB && orB == andA)) {
+                        llvm::IRBuilder<> builder(&inst);
+                        simplified = builder.CreateXor(orA, orB, "or_sub_and_xor");
+                    }
+                }
+            }
+
+            // ── sdiv x, 2^n with nsw → arithmetic-shift + round-up correction ──
+            // NOTE: sdiv x, 2^n is NOT simply ashr(x, n) for signed values.  The
+            // correct sequence is: ashr(x + ((x >> 63) & (2^n - 1)), n).  LLVM's
+            // InstCombine already emits this sequence, so we leave signed power-of-2
+            // divisions entirely to LLVM's existing pass rather than risk introducing
+            // an unsound transformation here.
 
             if (simplified) {
                 inst.replaceAllUsesWith(simplified);

@@ -1182,3 +1182,85 @@ TEST(ParserTest, MultipleSpreadInArray) {
     EXPECT_NE(dynamic_cast<SpreadExpr*>(arr->elements[0].get()), nullptr);
     EXPECT_NE(dynamic_cast<SpreadExpr*>(arr->elements[1].get()), nullptr);
 }
+
+// ===========================================================================
+// Struct declaration tests
+// ===========================================================================
+
+TEST(ParserTest, StructDeclaration) {
+    auto program = parse("struct Point { x, y } fn main() { return 0; }");
+    ASSERT_EQ(program->structs.size(), 1u);
+    EXPECT_EQ(program->structs[0]->name, "Point");
+    ASSERT_EQ(program->structs[0]->fields.size(), 2u);
+    EXPECT_EQ(program->structs[0]->fields[0], "x");
+    EXPECT_EQ(program->structs[0]->fields[1], "y");
+}
+
+TEST(ParserTest, StructDeclarationSingleField) {
+    auto program = parse("struct Wrapper { value } fn main() { return 0; }");
+    ASSERT_EQ(program->structs.size(), 1u);
+    EXPECT_EQ(program->structs[0]->name, "Wrapper");
+    ASSERT_EQ(program->structs[0]->fields.size(), 1u);
+    EXPECT_EQ(program->structs[0]->fields[0], "value");
+}
+
+TEST(ParserTest, MultipleStructDeclarations) {
+    auto program = parse(
+        "struct Point { x, y }"
+        "struct Color { r, g, b }"
+        "fn main() { return 0; }");
+    ASSERT_EQ(program->structs.size(), 2u);
+    EXPECT_EQ(program->structs[0]->name, "Point");
+    EXPECT_EQ(program->structs[1]->name, "Color");
+}
+
+TEST(ParserTest, StructLiteralExpr) {
+    auto program = parse(
+        "struct Point { x, y }"
+        "fn main() { var p = Point { x: 10, y: 20 }; return 0; }");
+    ASSERT_EQ(program->structs.size(), 1u);
+    auto* varDecl = dynamic_cast<VarDecl*>(program->functions[0]->body->statements[0].get());
+    ASSERT_NE(varDecl, nullptr);
+    auto* lit = dynamic_cast<StructLiteralExpr*>(varDecl->initializer.get());
+    ASSERT_NE(lit, nullptr);
+    EXPECT_EQ(lit->structName, "Point");
+    ASSERT_EQ(lit->fieldValues.size(), 2u);
+    EXPECT_EQ(lit->fieldValues[0].first, "x");
+    EXPECT_EQ(lit->fieldValues[1].first, "y");
+}
+
+TEST(ParserTest, StructFieldAccess) {
+    auto program = parse(
+        "struct Point { x, y }"
+        "fn main() { var p = Point { x: 1, y: 2 }; return p.x; }");
+    auto* retStmt = dynamic_cast<ReturnStmt*>(program->functions[0]->body->statements[1].get());
+    ASSERT_NE(retStmt, nullptr);
+    auto* fieldAccess = dynamic_cast<FieldAccessExpr*>(retStmt->value.get());
+    ASSERT_NE(fieldAccess, nullptr);
+    EXPECT_EQ(fieldAccess->fieldName, "x");
+}
+
+// ===========================================================================
+// Generic function declaration tests
+// ===========================================================================
+
+TEST(ParserTest, GenericFunctionNoTypeParams) {
+    auto program = parse("fn id(x) { return x; } fn main() { return 0; }");
+    ASSERT_EQ(program->functions[0]->name, "id");
+    EXPECT_TRUE(program->functions[0]->typeParams.empty());
+}
+
+TEST(ParserTest, GenericFunctionSingleTypeParam) {
+    auto program = parse("fn identity<T>(x: T) -> T { return x; } fn main() { return 0; }");
+    ASSERT_EQ(program->functions[0]->name, "identity");
+    ASSERT_EQ(program->functions[0]->typeParams.size(), 1u);
+    EXPECT_EQ(program->functions[0]->typeParams[0], "T");
+}
+
+TEST(ParserTest, GenericFunctionMultipleTypeParams) {
+    auto program = parse("fn pair<A, B>(a: A, b: B) { return a; } fn main() { return 0; }");
+    ASSERT_EQ(program->functions[0]->name, "pair");
+    ASSERT_EQ(program->functions[0]->typeParams.size(), 2u);
+    EXPECT_EQ(program->functions[0]->typeParams[0], "A");
+    EXPECT_EQ(program->functions[0]->typeParams[1], "B");
+}

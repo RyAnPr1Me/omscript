@@ -291,6 +291,38 @@ TEST(EGraphTest, DivPow2ToShift) {
     EXPECT_NE(g.find(expr), g.find(shiftExpr));
 }
 
+TEST(EGraphTest, ZeroDivNotFolded) {
+    // 0 / x must NOT be simplified to 0.
+    // When x is also 0 the fold would suppress the division-by-zero runtime
+    // error and produce an incorrect result.
+    EGraph g;
+    ClassId zero = g.addConst(0);
+    ClassId x = g.addVar("x");
+    ClassId expr = g.addBinOp(Op::Div, zero, x);
+
+    auto rules = getAlgebraicRules();
+    g.saturate(rules);
+
+    ClassId zero2 = g.addConst(0);
+    // After saturation, 0/x must NOT be merged with the constant 0.
+    EXPECT_NE(g.find(expr), g.find(zero2));
+}
+
+TEST(EGraphTest, ZeroModNotFolded) {
+    // 0 % x must NOT be simplified to 0 for the same reason: when x==0,
+    // the fold masks the modulo-by-zero runtime error.
+    EGraph g;
+    ClassId zero = g.addConst(0);
+    ClassId x = g.addVar("x");
+    ClassId expr = g.addBinOp(Op::Mod, zero, x);
+
+    auto rules = getAlgebraicRules();
+    g.saturate(rules);
+
+    ClassId zero2 = g.addConst(0);
+    EXPECT_NE(g.find(expr), g.find(zero2));
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Constant folding tests
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1763,4 +1795,134 @@ TEST(EGraphTest, DoubleBitNotIdentity) {
     g.saturate(rules);
 
     EXPECT_EQ(g.find(not2), g.find(x));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// New multiply strength reduction rules
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST(EGraphTest, StrengthReductionMul30) {
+    // x * 30 → (x << 5) - (x << 1)
+    EGraph g;
+    ClassId x    = g.addVar("x");
+    ClassId c30  = g.addConst(30);
+    ClassId mul  = g.addBinOp(Op::Mul, x, c30);
+    ClassId c5   = g.addConst(5);
+    ClassId c1   = g.addConst(1);
+    ClassId s5   = g.addBinOp(Op::Shl, x, c5);
+    ClassId s1   = g.addBinOp(Op::Shl, x, c1);
+    ClassId expected = g.addBinOp(Op::Sub, s5, s1);
+
+    auto rules = getAlgebraicRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(mul), g.find(expected));
+}
+
+TEST(EGraphTest, StrengthReductionMul36) {
+    // x * 36 → (x << 5) + (x << 2)
+    EGraph g;
+    ClassId x    = g.addVar("x");
+    ClassId c36  = g.addConst(36);
+    ClassId mul  = g.addBinOp(Op::Mul, x, c36);
+    ClassId c5   = g.addConst(5);
+    ClassId c2   = g.addConst(2);
+    ClassId s5   = g.addBinOp(Op::Shl, x, c5);
+    ClassId s2   = g.addBinOp(Op::Shl, x, c2);
+    ClassId expected = g.addBinOp(Op::Add, s5, s2);
+
+    auto rules = getAlgebraicRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(mul), g.find(expected));
+}
+
+TEST(EGraphTest, StrengthReductionMul60) {
+    // x * 60 → (x << 6) - (x << 2)
+    EGraph g;
+    ClassId x    = g.addVar("x");
+    ClassId c60  = g.addConst(60);
+    ClassId mul  = g.addBinOp(Op::Mul, x, c60);
+    ClassId c6   = g.addConst(6);
+    ClassId c2   = g.addConst(2);
+    ClassId s6   = g.addBinOp(Op::Shl, x, c6);
+    ClassId s2   = g.addBinOp(Op::Shl, x, c2);
+    ClassId expected = g.addBinOp(Op::Sub, s6, s2);
+
+    auto rules = getAlgebraicRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(mul), g.find(expected));
+}
+
+TEST(EGraphTest, StrengthReductionMul72) {
+    // x * 72 → (x << 6) + (x << 3)
+    EGraph g;
+    ClassId x    = g.addVar("x");
+    ClassId c72  = g.addConst(72);
+    ClassId mul  = g.addBinOp(Op::Mul, x, c72);
+    ClassId c6   = g.addConst(6);
+    ClassId c3   = g.addConst(3);
+    ClassId s6   = g.addBinOp(Op::Shl, x, c6);
+    ClassId s3   = g.addBinOp(Op::Shl, x, c3);
+    ClassId expected = g.addBinOp(Op::Add, s6, s3);
+
+    auto rules = getAlgebraicRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(mul), g.find(expected));
+}
+
+TEST(EGraphTest, StrengthReductionMul192) {
+    // x * 192 → (x << 7) + (x << 6)
+    EGraph g;
+    ClassId x    = g.addVar("x");
+    ClassId c192 = g.addConst(192);
+    ClassId mul  = g.addBinOp(Op::Mul, x, c192);
+    ClassId c7   = g.addConst(7);
+    ClassId c6   = g.addConst(6);
+    ClassId s7   = g.addBinOp(Op::Shl, x, c7);
+    ClassId s6   = g.addBinOp(Op::Shl, x, c6);
+    ClassId expected = g.addBinOp(Op::Add, s7, s6);
+
+    auto rules = getAlgebraicRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(mul), g.find(expected));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Arithmetic-bitwise identity: (a|b) - (a&b) ↔ a^b
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST(EGraphTest, OrSubAndEqualsXor) {
+    // (a | b) - (a & b) should be in the same class as a ^ b
+    EGraph g;
+    ClassId a     = g.addVar("a");
+    ClassId b     = g.addVar("b");
+    ClassId orAB  = g.addBinOp(Op::BitOr,  a, b);
+    ClassId andAB = g.addBinOp(Op::BitAnd, a, b);
+    ClassId sub   = g.addBinOp(Op::Sub, orAB, andAB);
+    ClassId xorAB = g.addBinOp(Op::BitXor, a, b);
+
+    auto rules = getAdvancedBitwiseRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(sub), g.find(xorAB));
+}
+
+TEST(EGraphTest, XorAddAndEqualsOr) {
+    // (a ^ b) + (a & b) should be in the same class as a | b
+    EGraph g;
+    ClassId a     = g.addVar("a");
+    ClassId b     = g.addVar("b");
+    ClassId xorAB = g.addBinOp(Op::BitXor, a, b);
+    ClassId andAB = g.addBinOp(Op::BitAnd, a, b);
+    ClassId sum   = g.addBinOp(Op::Add, xorAB, andAB);
+    ClassId orAB  = g.addBinOp(Op::BitOr, a, b);
+
+    auto rules = getAdvancedBitwiseRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(sum), g.find(orAB));
 }

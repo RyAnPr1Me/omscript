@@ -381,6 +381,9 @@ std::vector<RewriteRule> getComparisonRules();
 /// Returns rewrite rules for bitwise operation simplification.
 std::vector<RewriteRule> getBitwiseRules();
 
+/// Returns advanced bitwise rules including arithmetic-bitwise identities.
+std::vector<RewriteRule> getAdvancedBitwiseRules();
+
 /// Returns all optimization rules combined.
 std::vector<RewriteRule> getAllRules();
 
