@@ -656,10 +656,10 @@ CEOF
 
 # ─── COMPILE ──────────────────────────────────────────────────
 echo "Compiling OM (omsc -O3 -march=native) …"
-omsc bench.om -O3 -march=native -o bench_om
+omsc bench.om -O3 -march=native -mtune=native -flto -ffast-math -fvectorize -funroll-loops -floop-optimize -o bench_om
 
 echo "Compiling C  (gcc  -O3 -march=native -flto) …"
-gcc bench.c -O3 -march=native -funroll-loops -flto -o bench_c
+gcc bench.c -O3 -march=native -mtune=native -funroll-loops -flto -o bench_c
 echo ""
 
 # ─── HELPERS ──────────────────────────────────────────────────
