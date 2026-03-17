@@ -1431,13 +1431,262 @@ static unsigned optimizeBranchLayout(llvm::Function& func,
     return count;
 }
 
+/// Expand FMA generation to also cover fsub(fmul(a,b), c) → fma(a, b, -c).
+/// (Complements generateFMA which already handles fadd variants.)
+/// Returns the number of additional FMAs generated.
+static unsigned generateFMASub(llvm::Function& func, const MicroarchProfile& profile) {
+    if (profile.fmaUnits == 0) return 0;
+
+    unsigned count = 0;
+    std::vector<llvm::Instruction*> toErase;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            // Pattern: fsub(fmul(a, b), c) → fma(a, b, -c)
+            if (inst.getOpcode() == llvm::Instruction::FSub) {
+                llvm::Value* op0 = inst.getOperand(0);
+                llvm::Value* op1 = inst.getOperand(1);
+
+                auto* fmul = llvm::dyn_cast<llvm::BinaryOperator>(op0);
+                if (fmul && fmul->getOpcode() == llvm::Instruction::FMul &&
+                    fmul->hasOneUse()) {
+                    llvm::IRBuilder<> builder(&inst);
+                    llvm::Module* mod = func.getParent();
+                    llvm::Type* ty = inst.getType();
+
+                    // fma(a, b, -c)
+                    llvm::Value* negC = builder.CreateFNeg(op1, "fneg_c");
+                    llvm::Function* fmaFn = OMSC_GET_INTRINSIC(mod, llvm::Intrinsic::fma, {ty});
+                    llvm::Value* result = builder.CreateCall(
+                        fmaFn, {fmul->getOperand(0), fmul->getOperand(1), negC}, "fma_sub");
+                    inst.replaceAllUsesWith(result);
+                    toErase.push_back(&inst);
+                    toErase.push_back(fmul);
+                    count++;
+                }
+            }
+        }
+    }
+
+    for (auto* inst : toErase) {
+        if (inst->use_empty()) inst->eraseFromParent();
+    }
+    return count;
+}
+
+/// Integer strength reduction: replace multiply-by-small-constant with
+/// shifts and adds, which execute on more ports and have lower latency.
+/// Returns the number of multiplies strength-reduced.
+static unsigned integerStrengthReduce(llvm::Function& func,
+                                       const MicroarchProfile& profile) {
+    // Only profitable when we have more ALU ports than multiply units.
+    // On modern x86/ARM the integer multiplier is a single port with latency 3;
+    // a shift+add sequence uses latency 1+1=2 and two ALU ports in parallel.
+    if (profile.intALUs < 2) return 0;
+
+    unsigned count = 0;
+    std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() != llvm::Instruction::Mul) continue;
+            if (!inst.getType()->isIntegerTy()) continue;
+
+            // Identify (x, constant) — try both orderings.
+            llvm::Value* xv = nullptr;
+            int64_t cv = 0;
+            for (int s = 0; s < 2; ++s) {
+                auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(s));
+                if (ci && ci->getBitWidth() <= 64) {
+                    cv = ci->getSExtValue();
+                    xv = inst.getOperand(1 - s);
+                    break;
+                }
+            }
+            if (!xv || cv == 0) continue;
+
+            llvm::IRBuilder<> builder(&inst);
+            llvm::Type* ty = inst.getType();
+            auto mk = [&](int64_t v) { return llvm::ConstantInt::get(ty, v); };
+            auto shl = [&](llvm::Value* v, int64_t sh) {
+                return builder.CreateShl(v, mk(sh), "sr_shl");
+            };
+
+            llvm::Value* rep = nullptr;
+            switch (cv) {
+            // 2-instruction sequences
+            case  3: rep = builder.CreateAdd(shl(xv,1), xv, "sr_mul3"); break;
+            case  5: rep = builder.CreateAdd(shl(xv,2), xv, "sr_mul5"); break;
+            case  6: rep = builder.CreateAdd(shl(xv,2), shl(xv,1), "sr_mul6"); break;
+            case  7: rep = builder.CreateSub(shl(xv,3), xv, "sr_mul7"); break;
+            case  9: rep = builder.CreateAdd(shl(xv,3), xv, "sr_mul9"); break;
+            case 10: rep = builder.CreateAdd(shl(xv,3), shl(xv,1), "sr_mul10"); break;
+            case 12: rep = builder.CreateAdd(shl(xv,3), shl(xv,2), "sr_mul12"); break;
+            case 15: rep = builder.CreateSub(shl(xv,4), xv, "sr_mul15"); break;
+            case 17: rep = builder.CreateAdd(shl(xv,4), xv, "sr_mul17"); break;
+            case 18: rep = builder.CreateAdd(shl(xv,4), shl(xv,1), "sr_mul18"); break;
+            case 20: rep = builder.CreateAdd(shl(xv,4), shl(xv,2), "sr_mul20"); break;
+            case 24: rep = builder.CreateAdd(shl(xv,4), shl(xv,3), "sr_mul24"); break;
+            case 31: rep = builder.CreateSub(shl(xv,5), xv, "sr_mul31"); break;
+            case 33: rep = builder.CreateAdd(shl(xv,5), xv, "sr_mul33"); break;
+            case 48: rep = builder.CreateAdd(shl(xv,5), shl(xv,4), "sr_mul48"); break;
+            case 63: rep = builder.CreateSub(shl(xv,6), xv, "sr_mul63"); break;
+            case 65: rep = builder.CreateAdd(shl(xv,6), xv, "sr_mul65"); break;
+            case 96: rep = builder.CreateAdd(shl(xv,6), shl(xv,5), "sr_mul96"); break;
+            case 127: rep = builder.CreateSub(shl(xv,7), xv, "sr_mul127"); break;
+            case 255: rep = builder.CreateSub(shl(xv,8), xv, "sr_mul255"); break;
+            // 3-instruction sequences
+            case 11: rep = builder.CreateAdd(builder.CreateAdd(shl(xv,3), shl(xv,1), "t"), xv, "sr_mul11"); break;
+            case 13: rep = builder.CreateAdd(builder.CreateAdd(shl(xv,3), shl(xv,2), "t"), xv, "sr_mul13"); break;
+            case 14: rep = builder.CreateSub(shl(xv,4), shl(xv,1), "sr_mul14"); break;
+            case 19: rep = builder.CreateAdd(builder.CreateAdd(shl(xv,4), shl(xv,1), "t"), xv, "sr_mul19"); break;
+            case 21: rep = builder.CreateAdd(builder.CreateAdd(shl(xv,4), shl(xv,2), "t"), xv, "sr_mul21"); break;
+            case 25: rep = builder.CreateAdd(builder.CreateAdd(shl(xv,4), shl(xv,3), "t"), xv, "sr_mul25"); break;
+            case 28: rep = builder.CreateSub(shl(xv,5), shl(xv,2), "sr_mul28"); break;
+            case 40: rep = builder.CreateAdd(shl(xv,5), shl(xv,3), "sr_mul40"); break;
+            default: break;
+            }
+
+            if (rep) {
+                replacements.emplace_back(&inst, rep);
+                count++;
+            }
+        }
+    }
+
+    for (auto& [inst, rep] : replacements) {
+        inst->replaceAllUsesWith(rep);
+        inst->eraseFromParent();
+    }
+    return count;
+}
+
+/// Detect adjacent scalar load pairs that can be annotated for hardware
+/// load pairing / memory access coalescing.  Marks paired loads with
+/// llvm.access.group metadata to hint the backend's load-store unit.
+/// Returns the number of load pairs identified.
+static unsigned markLoadStorePairs(llvm::Function& func,
+                                    const MicroarchProfile& profile) {
+    if (profile.loadPorts < 2) return 0;
+
+    unsigned count = 0;
+
+    for (auto& bb : func) {
+        std::vector<llvm::LoadInst*> loads;
+        for (auto& inst : bb) {
+            if (auto* ld = llvm::dyn_cast<llvm::LoadInst>(&inst)) {
+                if (!ld->isVolatile()) loads.push_back(ld);
+            }
+        }
+
+        // Look for consecutive GEP-based loads from the same base pointer.
+        for (size_t i = 0; i + 1 < loads.size(); ++i) {
+            llvm::LoadInst* ld0 = loads[i];
+            llvm::LoadInst* ld1 = loads[i + 1];
+
+            // Both loads must have the same type and be from GEP instructions.
+            if (ld0->getType() != ld1->getType()) continue;
+
+            auto* gep0 = llvm::dyn_cast<llvm::GetElementPtrInst>(ld0->getPointerOperand());
+            auto* gep1 = llvm::dyn_cast<llvm::GetElementPtrInst>(ld1->getPointerOperand());
+            if (!gep0 || !gep1) continue;
+            if (gep0->getPointerOperand() != gep1->getPointerOperand()) continue;
+            if (gep0->getNumIndices() != 1 || gep1->getNumIndices() != 1) continue;
+
+            auto* idx0 = llvm::dyn_cast<llvm::ConstantInt>(gep0->getOperand(1));
+            auto* idx1 = llvm::dyn_cast<llvm::ConstantInt>(gep1->getOperand(1));
+            if (!idx0 || !idx1) continue;
+
+            int64_t diff = idx1->getSExtValue() - idx0->getSExtValue();
+            if (diff != 1) continue;
+
+            // Consecutive indices — annotate with access.group metadata to hint
+            // the backend's load-store unit about pairing.
+            llvm::LLVMContext& ctx = func.getContext();
+            llvm::MDNode* agMD = llvm::MDNode::get(ctx, {});
+            ld0->setMetadata(llvm::LLVMContext::MD_access_group, agMD);
+            ld1->setMetadata(llvm::LLVMContext::MD_access_group, agMD);
+            count++;
+            ++i; // skip ld1 in outer loop
+        }
+    }
+    return count;
+}
+
+/// Attempt to widen scalar integer/FP chains to vector operations when the
+/// hardware has wide SIMD units.  For now, this pass annotates candidate
+/// scalar loops with llvm.loop.vectorize.enable = true metadata so LLVM's
+/// vectorizer can pick them up.
+/// Returns the number of loop back-edges annotated.
+static unsigned annotateVectorCandidates(llvm::Function& func,
+                                          const MicroarchProfile& profile) {
+    if (profile.vecUnits == 0 || profile.vectorWidth < 128) return 0;
+
+    unsigned count = 0;
+
+    for (auto& bb : func) {
+        auto* br = llvm::dyn_cast<llvm::BranchInst>(bb.getTerminator());
+        if (!br || !br->isConditional()) continue;
+
+        // Heuristic: backedge — one successor dominates the other or equals bb.
+        bool hasBackedge = false;
+        for (unsigned i = 0; i < br->getNumSuccessors(); ++i) {
+            if (br->getSuccessor(i) == &bb) { hasBackedge = true; break; }
+        }
+        // Also treat a loop where one successor has only one predecessor = bb.
+        if (!hasBackedge) continue;
+
+        // Check that the loop body does not have memory side-effects other than
+        // plain loads/stores (no calls, no atomics).
+        bool hasCall = false;
+        for (auto& inst : bb) {
+            if (llvm::isa<llvm::CallInst>(inst) && !llvm::isa<llvm::IntrinsicInst>(inst)) {
+                hasCall = true; break;
+            }
+        }
+        if (hasCall) continue;
+
+        // Annotate the terminator's back-edge with vectorize metadata.
+        llvm::LLVMContext& ctx = func.getContext();
+        llvm::MDNode* trueNode = llvm::MDNode::get(ctx, {
+            llvm::MDString::get(ctx, "llvm.loop.vectorize.enable"),
+            llvm::ConstantAsMetadata::get(
+                llvm::ConstantInt::getTrue(ctx))
+        });
+        unsigned width = profile.vectorWidth / 32; // 32-bit elements
+        if (width < 2) width = 2;
+        llvm::MDNode* widthNode = llvm::MDNode::get(ctx, {
+            llvm::MDString::get(ctx, "llvm.loop.vectorize.width"),
+            llvm::ConstantAsMetadata::get(
+                llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), width))
+        });
+
+        // Build the loop-id metadata node that references itself using the
+        // canonical LLVM pattern: create with nullptr first operand, then
+        // replace it with the node itself (no temporary allocation needed).
+        llvm::MDNode* loopID = llvm::MDNode::get(ctx,
+            {static_cast<llvm::Metadata*>(nullptr), trueNode, widthNode});
+        loopID->replaceOperandWith(0, loopID);
+        br->setMetadata(llvm::LLVMContext::MD_loop, loopID);
+        count++;
+    }
+    return count;
+}
+
 TransformStats applyHardwareTransforms(llvm::Function& func,
                                         const MicroarchProfile& profile) {
     TransformStats stats;
 
-    stats.fmaGenerated = generateFMA(func, profile);
+    stats.fmaGenerated     = generateFMA(func, profile);
+    stats.fmaGenerated    += generateFMASub(func, profile);
     stats.prefetchesInserted = insertPrefetches(func, profile);
-    stats.branchesOptimized = optimizeBranchLayout(func, profile);
+    stats.branchesOptimized  = optimizeBranchLayout(func, profile);
+    stats.loadsStorePaired   = markLoadStorePairs(func, profile);
+    stats.vectorExpanded     = annotateVectorCandidates(func, profile);
+    // Integer strength reduction runs last so mul→shift replacements do not
+    // interfere with the FMA scan above (which looks at FMul, not int Mul).
+    // The count is not exposed in a separate TransformStats field yet.
+    (void)integerStrengthReduce(func, profile);
 
     return stats;
 }
