@@ -786,8 +786,15 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* allocSize =
             builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "concat.allocsize");
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {allocSize}, "concat.buf");
-        builder->CreateCall(getOrDeclareStrcpy(), {buf, lhsPtr});
-        builder->CreateCall(getOrDeclareStrcat(), {buf, rhsPtr});
+        // Use memcpy instead of strcpy+strcat to avoid O(n) rescan of the buffer.
+        // memcpy(buf, lhs, len1)
+        builder->CreateCall(getOrDeclareMemcpy(), {buf, lhsPtr, len1});
+        // memcpy(buf + len1, rhs, len2)
+        llvm::Value* dst2 = builder->CreateGEP(builder->getInt8Ty(), buf, len1, "concat.dst2");
+        builder->CreateCall(getOrDeclareMemcpy(), {dst2, rhsPtr, len2});
+        // null-terminate: buf[totalLen] = '\0'
+        llvm::Value* endPtr = builder->CreateGEP(builder->getInt8Ty(), buf, totalLen, "concat.end");
+        builder->CreateStore(builder->getInt8(0), endPtr);
         // Mark return as string-returning so callers can track it
         stringReturningFunctions_.insert("str_concat");
         return buf;
@@ -1568,10 +1575,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* allocSize =
             builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "repeat.alloc");
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {allocSize}, "repeat.buf");
-        // Null-terminate first byte so strcat works from empty
-        llvm::Value* zeroByte = llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0);
-        builder->CreateStore(zeroByte, buf);
-        // Loop: strcat(buf, str) `count` times
+        // Use memcpy with tracked offset instead of strcat to avoid O(n²) rescanning
         llvm::Function* function = builder->GetInsertBlock()->getParent();
         llvm::BasicBlock* preheader = builder->GetInsertBlock();
         llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "repeat.loop", function);
@@ -1582,14 +1586,23 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(loopBB);
         llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "repeat.idx");
         idx->addIncoming(zero, preheader);
+        llvm::PHINode* offset = builder->CreatePHI(getDefaultType(), 2, "repeat.off");
+        offset->addIncoming(zero, preheader);
         llvm::Value* cond = builder->CreateICmpSLT(idx, countArg, "repeat.cond");
         builder->CreateCondBr(cond, bodyBB, doneBB);
         builder->SetInsertPoint(bodyBB);
-        builder->CreateCall(getOrDeclareStrcat(), {buf, strPtr});
+        // memcpy(buf + offset, str, strLen)
+        llvm::Value* dst = builder->CreateGEP(builder->getInt8Ty(), buf, offset, "repeat.dst");
+        builder->CreateCall(getOrDeclareMemcpy(), {dst, strPtr, strLen});
+        llvm::Value* nextOffset = builder->CreateAdd(offset, strLen, "repeat.nextoff");
         llvm::Value* nextIdx = builder->CreateAdd(idx, one, "repeat.next");
         idx->addIncoming(nextIdx, bodyBB);
+        offset->addIncoming(nextOffset, bodyBB);
         builder->CreateBr(loopBB);
         builder->SetInsertPoint(doneBB);
+        // Null-terminate: buf[totalLen] = '\0'
+        llvm::Value* endPtr = builder->CreateGEP(builder->getInt8Ty(), buf, totalLen, "repeat.end");
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), endPtr);
         stringReturningFunctions_.insert("str_repeat");
         return buf;
     }
@@ -1659,10 +1672,25 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* arrPtr = builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "push.arrptr");
         llvm::Value* oldLen = builder->CreateLoad(getDefaultType(), arrPtr, "push.oldlen");
         llvm::Value* newLen = builder->CreateAdd(oldLen, llvm::ConstantInt::get(getDefaultType(), 1), "push.newlen");
-        // Use realloc to extend in-place when possible (avoids copy)
-        llvm::Value* newSize =
-            builder->CreateMul(builder->CreateAdd(newLen, llvm::ConstantInt::get(getDefaultType(), 1), "push.slots"),
-                               llvm::ConstantInt::get(getDefaultType(), 8), "push.bytes");
+        // Round allocation up to next power of 2 for amortized O(1) growth.
+        // Compute slots = newLen + 1 (header + elements), then round to next power of 2.
+        llvm::Value* slots = builder->CreateAdd(newLen, llvm::ConstantInt::get(getDefaultType(), 1), "push.slots");
+        // capacity = max(16, nextPow2(slots)): subtract 1, OR-cascade, add 1
+        llvm::Value* one64 = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* v = builder->CreateSub(slots, one64, "push.pm1");
+        v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 1)), "push.p2a");
+        v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 2)), "push.p2b");
+        v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 4)), "push.p2c");
+        v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 8)), "push.p2d");
+        v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 16)), "push.p2e");
+        v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 32)), "push.p2f");
+        llvm::Value* cap = builder->CreateAdd(v, one64, "push.cap");
+        // Ensure minimum capacity of 16 slots
+        llvm::Value* minCap = llvm::ConstantInt::get(getDefaultType(), 16);
+        llvm::Value* useMin = builder->CreateICmpSLT(cap, minCap, "push.usemin");
+        cap = builder->CreateSelect(useMin, minCap, cap, "push.finalcap");
+        llvm::Value* newSize = builder->CreateMul(cap,
+            llvm::ConstantInt::get(getDefaultType(), 8), "push.bytes");
         llvm::Value* newBuf = builder->CreateCall(getOrDeclareRealloc(), {arrPtr, newSize}, "push.newbuf");
         // Update length
         builder->CreateStore(newLen, newBuf);

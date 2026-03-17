@@ -316,49 +316,83 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     // (start < end) and -1 for descending ranges (start > end) so that
     // `for (i in 5...0)` iterates 5,4,3,2,1 as users would expect.
     llvm::Value* stepVal;
+    bool stepKnownPositive = false;
+    bool stepKnownNonZero = false;
     if (stmt->step) {
         stepVal = generateExpression(stmt->step.get());
         // Convert to integer since loop step is always integer
         stepVal = toDefaultType(stepVal);
+        if (auto* stepCI = llvm::dyn_cast<llvm::ConstantInt>(stepVal)) {
+            stepKnownPositive = stepCI->getSExtValue() > 0;
+            stepKnownNonZero = stepCI->getSExtValue() != 0;
+        }
     } else {
-        llvm::Value* isDesc = builder->CreateICmpSGT(startVal, endVal, "for.isdesc");
-        llvm::Value* posOne = llvm::ConstantInt::get(*context, llvm::APInt(64, 1));
-        llvm::Value* negOne = llvm::ConstantInt::get(*context, llvm::APInt(64, static_cast<uint64_t>(-1), true));
-        stepVal = builder->CreateSelect(isDesc, negOne, posOne, "for.autostep");
+        // When start < end is known at compile time (e.g. for (i in 0...n)
+        // where start is a constant <= 0), emit a simple +1 step directly.
+        bool ascending = false;
+        if (auto* startCI = llvm::dyn_cast<llvm::ConstantInt>(startVal)) {
+            // If start is a non-negative constant, the range 0...n is
+            // ascending for any n > start (checked at loop entry).
+            // If start is negative, start < end is guaranteed for any n >= 0.
+            ascending = true;
+        }
+        if (ascending) {
+            stepVal = llvm::ConstantInt::get(*context, llvm::APInt(64, 1));
+            stepKnownPositive = true;
+            stepKnownNonZero = true;
+        } else {
+            llvm::Value* isDesc = builder->CreateICmpSGT(startVal, endVal, "for.isdesc");
+            llvm::Value* posOne = llvm::ConstantInt::get(*context, llvm::APInt(64, 1));
+            llvm::Value* negOne = llvm::ConstantInt::get(*context, llvm::APInt(64, static_cast<uint64_t>(-1), true));
+            stepVal = builder->CreateSelect(isDesc, negOne, posOne, "for.autostep");
+            // Auto-computed step is always +1 or -1, never zero.
+            stepKnownNonZero = true;
+        }
     }
 
     llvm::Value* zero = llvm::ConstantInt::get(stepVal->getType(), 0, true);
 
     // Create blocks
-    llvm::BasicBlock* stepCheckBB = llvm::BasicBlock::Create(*context, "forstepcheck", function);
-    llvm::BasicBlock* stepFailBB = llvm::BasicBlock::Create(*context, "forstepfail", function);
     llvm::BasicBlock* condBB = llvm::BasicBlock::Create(*context, "forcond", function);
     llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "forbody", function);
     llvm::BasicBlock* incBB = llvm::BasicBlock::Create(*context, "forinc", function);
     llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "forend", function);
 
-    builder->CreateBr(stepCheckBB);
+    // Skip the step-zero check when step is known non-zero at compile time.
+    if (stepKnownNonZero) {
+        builder->CreateBr(condBB);
+    } else {
+        llvm::BasicBlock* stepCheckBB = llvm::BasicBlock::Create(*context, "forstepcheck", function);
+        llvm::BasicBlock* stepFailBB = llvm::BasicBlock::Create(*context, "forstepfail", function);
+        builder->CreateBr(stepCheckBB);
+        builder->SetInsertPoint(stepCheckBB);
+        llvm::Value* stepNonZero = builder->CreateICmpNE(stepVal, zero, "stepnonzero");
+        builder->CreateCondBr(stepNonZero, condBB, stepFailBB);
 
-    builder->SetInsertPoint(stepCheckBB);
-    llvm::Value* stepNonZero = builder->CreateICmpNE(stepVal, zero, "stepnonzero");
-    builder->CreateCondBr(stepNonZero, condBB, stepFailBB);
+        builder->SetInsertPoint(stepFailBB);
+        std::string errorMessage = "Runtime error: for-loop step cannot be zero for iterator '" + stmt->iteratorVar + "'\n";
+        llvm::GlobalVariable* messageVar = builder->CreateGlobalString(errorMessage, "forstepmsg");
+        llvm::Constant* zeroIndex = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0);
+        llvm::Constant* indices[] = {zeroIndex, zeroIndex};
+        llvm::Constant* message =
+            llvm::ConstantExpr::getInBoundsGetElementPtr(messageVar->getValueType(), messageVar, indices);
+        builder->CreateCall(getPrintfFunction(), {message});
+        builder->CreateCall(getOrDeclareAbort());
+        builder->CreateUnreachable();
+    }
 
-    builder->SetInsertPoint(stepFailBB);
-    std::string errorMessage = "Runtime error: for-loop step cannot be zero for iterator '" + stmt->iteratorVar + "'\n";
-    llvm::GlobalVariable* messageVar = builder->CreateGlobalString(errorMessage, "forstepmsg");
-    llvm::Constant* zeroIndex = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0);
-    llvm::Constant* indices[] = {zeroIndex, zeroIndex};
-    llvm::Constant* message =
-        llvm::ConstantExpr::getInBoundsGetElementPtr(messageVar->getValueType(), messageVar, indices);
-    builder->CreateCall(getPrintfFunction(), {message});
-    builder->CreateCall(getOrDeclareAbort());
-    builder->CreateUnreachable();
     builder->SetInsertPoint(condBB);
     llvm::Value* curVal = builder->CreateLoad(getDefaultType(), iterAlloca, stmt->iteratorVar.c_str());
-    llvm::Value* stepPositive = builder->CreateICmpSGT(stepVal, zero, "steppositive");
-    llvm::Value* forwardCond = builder->CreateICmpSLT(curVal, endVal, "forcond_lt");
-    llvm::Value* backwardCond = builder->CreateICmpSGT(curVal, endVal, "forcond_gt");
-    llvm::Value* continueCond = builder->CreateSelect(stepPositive, forwardCond, backwardCond, "forcond_range");
+    llvm::Value* continueCond;
+    if (stepKnownPositive) {
+        // Fast path: known ascending loop, just compare i < end.
+        continueCond = builder->CreateICmpSLT(curVal, endVal, "forcond_lt");
+    } else {
+        llvm::Value* stepPositive = builder->CreateICmpSGT(stepVal, zero, "steppositive");
+        llvm::Value* forwardCond = builder->CreateICmpSLT(curVal, endVal, "forcond_lt");
+        llvm::Value* backwardCond = builder->CreateICmpSGT(curVal, endVal, "forcond_gt");
+        continueCond = builder->CreateSelect(stepPositive, forwardCond, backwardCond, "forcond_range");
+    }
     builder->CreateCondBr(continueCond, bodyBB, endBB);
 
     // Body block

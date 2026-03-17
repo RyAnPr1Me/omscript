@@ -41,6 +41,12 @@ CTestTestfile.cmake
 test_output/
 *.log
 
+# Benchmark artifacts
+bench.om
+bench.c
+bench_om
+bench_c
+
 # CodeQL build artifacts
 _codeql_build_dir/
 _codeql_detected_source_root
