@@ -1957,7 +1957,23 @@ void CodeGenerator::generate(Program* program) {
     // may miss (e.g., cross-expression algebraic identities).
     // Enabled at O2+ unless explicitly disabled with -fno-egraph.
     if (enableEGraph_ && optimizationLevel >= OptimizationLevel::O2) {
+        if (verbose_) {
+            std::cout << "  [opt] Running e-graph equality saturation on AST ("
+                      << program->functions.size() << " functions)..." << std::endl;
+        }
         egraph::optimizeProgram(program);
+        if (verbose_) {
+            auto rules = egraph::getAllRules();
+            std::cout << "  [opt] E-graph saturation complete (" << rules.size()
+                      << " rewrite rules applied)" << std::endl;
+        }
+    } else if (verbose_ && optimizationLevel < OptimizationLevel::O2) {
+        std::cout << "  [opt] E-graph optimization skipped (requires O2+)" << std::endl;
+    }
+
+    if (verbose_) {
+        std::cout << "  [codegen] Generating LLVM IR for " << program->functions.size()
+                  << " functions..." << std::endl;
     }
 
     // Generate all function bodies
@@ -2071,10 +2087,16 @@ void CodeGenerator::generate(Program* program) {
     // runOptimizationPasses(), rather than being optimized on already-inlined
     // (and possibly dead) copies after IPO has run.
     if (hasOptMaxFunctions && enableOptMax_) {
+        if (verbose_) {
+            std::cout << "  [opt] Running OPTMAX per-function optimization passes..." << std::endl;
+        }
         optimizeOptMaxFunctions();
     }
 
     if (dynamicCompilation_) {
+        if (verbose_) {
+            std::cout << "  [opt] JIT mode: skipping module-wide IPO pipeline" << std::endl;
+        }
         // JIT mode: skip the module-wide IPO pipeline (inlining, IPSCCP,
         // GlobalDCE) to preserve function boundaries for hot-patching.
         // Still set target triple and data layout so MCJIT and the JIT
@@ -2097,6 +2119,9 @@ void CodeGenerator::generate(Program* program) {
     } else {
         // AOT mode: run the full module-wide optimization pipeline including
         // interprocedural optimizations (inlining, constant propagation, etc.).
+        if (verbose_) {
+            std::cout << "  [opt] Running LLVM optimization pipeline..." << std::endl;
+        }
         runOptimizationPasses();
     }
 

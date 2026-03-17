@@ -107,6 +107,7 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
         std::cout << "  Generating code..." << std::endl;
     }
     CodeGenerator codegen(optLevel_);
+    codegen.setVerbose(verbose_);
     codegen.setMarch(march_);
     codegen.setMtune(mtune_);
     codegen.setPIC(pic_);

@@ -214,6 +214,9 @@ void CodeGenerator::runOptimizationPasses() {
     }
 
     if (optimizationLevel == OptimizationLevel::O0) {
+        if (verbose_) {
+            std::cout << "    Optimization level O0: skipping all passes" << std::endl;
+        }
         return;
     }
 
@@ -234,6 +237,20 @@ void CodeGenerator::runOptimizationPasses() {
     PTO.SLPVectorization = enableVectorize_;
     PTO.LoopUnrolling = enableUnrollLoops_;
     PTO.LoopInterleaving = enableVectorize_; // enable loop interleaving at O2+
+
+    if (verbose_) {
+        const char* levelStr = "O2";
+        if (optimizationLevel == OptimizationLevel::O1) levelStr = "O1";
+        else if (optimizationLevel == OptimizationLevel::O3) levelStr = "O3";
+        std::cout << "    Optimization level: " << levelStr << std::endl;
+        std::cout << "    Pipeline options:"
+                  << " vectorize=" << (enableVectorize_ ? "on" : "off")
+                  << ", unroll=" << (enableUnrollLoops_ ? "on" : "off")
+                  << ", loop-optimize=" << (enableLoopOptimize_ ? "on" : "off")
+                  << std::endl;
+        if (!pgoGenPath_.empty()) std::cout << "    PGO instrumentation: " << pgoGenPath_ << std::endl;
+        if (!pgoUsePath_.empty()) std::cout << "    PGO profile-use: " << pgoUsePath_ << std::endl;
+    }
     // Enable cross-function optimizations at O2 and above:
     // MergeFunctions deduplicates identical function bodies, shrinking
     // I-cache footprint. CallGraphProfile biases the inliner toward
@@ -311,9 +328,15 @@ void CodeGenerator::runOptimizationPasses() {
     // Polly at the appropriate point in the optimization pipeline.
 #ifdef POLLY_LIB_PATH
     if (optimizationLevel >= OptimizationLevel::O2 && enableLoopOptimize_) {
+        if (verbose_) {
+            std::cout << "    Loading Polly polyhedral loop optimizer plugin..." << std::endl;
+        }
         auto pollyPlugin = llvm::PassPlugin::Load(POLLY_LIB_PATH);
         if (pollyPlugin) {
             pollyPlugin->registerPassBuilderCallbacks(PB);
+            if (verbose_) {
+                std::cout << "    Polly plugin loaded successfully" << std::endl;
+            }
         } else {
             llvm::errs() << "omsc: warning: failed to load Polly plugin; "
                             "polyhedral loop optimizations disabled\n";
@@ -548,8 +571,17 @@ void CodeGenerator::runOptimizationPasses() {
         // passes and defers heavy IPO (inlining, IPSCCP, GlobalDCE) to the
         // linker.  This avoids double-optimizing the bitcode — once here and
         // again during the link-time optimization pass in the linker.
+        if (verbose_) {
+            std::cout << "    Building LTO pre-link default pipeline..." << std::endl;
+        }
         MPM = PB.buildLTOPreLinkDefaultPipeline(newPMLevel);
     } else {
+        if (verbose_) {
+            const char* levelStr = "O2";
+            if (optimizationLevel == OptimizationLevel::O1) levelStr = "O1";
+            else if (optimizationLevel == OptimizationLevel::O3) levelStr = "O3";
+            std::cout << "    Building per-module default pipeline at " << levelStr << "..." << std::endl;
+        }
         MPM = PB.buildPerModuleDefaultPipeline(newPMLevel);
     }
     // At O2+, append GlobalOptPass after the standard pipeline to constant-fold
@@ -557,10 +589,19 @@ void CodeGenerator::runOptimizationPasses() {
     // globals that are only stored but never read.  This cleans up patterns the
     // default pipeline leaves behind (e.g. globals used only in main).
     if (optimizationLevel >= OptimizationLevel::O2 && !lto_) {
+        if (verbose_) {
+            std::cout << "    Adding GlobalOpt + GlobalDCE passes..." << std::endl;
+        }
         MPM.addPass(llvm::GlobalOptPass());
         MPM.addPass(llvm::GlobalDCEPass());
     }
+    if (verbose_) {
+        std::cout << "    Running LLVM module pass pipeline..." << std::endl;
+    }
     MPM.run(*module, MAM);
+    if (verbose_) {
+        std::cout << "    LLVM pass pipeline complete" << std::endl;
+    }
 
     // Superoptimizer: run after the standard LLVM pipeline to catch patterns
     // that individual passes miss.  The superoptimizer performs:
@@ -570,13 +611,30 @@ void CodeGenerator::runOptimizationPasses() {
     //   - Enumerative synthesis of cheaper instruction sequences
     // Enabled at O2+ unless explicitly disabled with -fno-superopt.
     if (enableSuperopt_ && optimizationLevel >= OptimizationLevel::O2) {
+        if (verbose_) {
+            std::cout << "    Running superoptimizer (idiom recognition, algebraic simplification, synthesis)..." << std::endl;
+        }
         superopt::SuperoptimizerConfig superConfig;
         // At O3, enable more aggressive synthesis
         if (optimizationLevel >= OptimizationLevel::O3) {
             superConfig.synthesis.maxInstructions = 5;
             superConfig.synthesis.costThreshold = 0.9;
         }
-        superopt::superoptimizeModule(*module, superConfig);
+        auto superStats = superopt::superoptimizeModule(*module, superConfig);
+        if (verbose_) {
+            unsigned totalOpts = superStats.idiomsReplaced + superStats.synthReplacements +
+                                 superStats.algebraicSimplified + superStats.branchesSimplified +
+                                 superStats.deadCodeEliminated;
+            std::cout << "    Superoptimizer complete: "
+                      << superStats.idiomsReplaced << " idioms replaced, "
+                      << superStats.algebraicSimplified << " algebraic simplifications, "
+                      << superStats.synthReplacements << " synthesis replacements, "
+                      << superStats.branchesSimplified << " branches simplified, "
+                      << superStats.deadCodeEliminated << " dead instructions eliminated"
+                      << " (" << totalOpts << " total optimizations)" << std::endl;
+        }
+    } else if (verbose_ && optimizationLevel >= OptimizationLevel::O2 && !enableSuperopt_) {
+        std::cout << "    Superoptimizer disabled (-fno-superopt)" << std::endl;
     }
 
     // Hardware Graph Optimization Engine: run after the superoptimizer when
@@ -586,10 +644,25 @@ void CodeGenerator::runOptimizationPasses() {
     // (FMA generation, prefetch insertion, branch layout optimisation).
     // When neither flag is set, this is a complete no-op.
     if (enableHGOE_ && optimizationLevel >= OptimizationLevel::O2) {
+        if (verbose_) {
+            std::cout << "    Running Hardware Graph Optimization Engine";
+            if (!marchCpu_.empty()) std::cout << " (march=" << marchCpu_ << ")";
+            if (!mtuneCpu_.empty()) std::cout << " (mtune=" << mtuneCpu_ << ")";
+            std::cout << "..." << std::endl;
+        }
         hgoe::HGOEConfig hgoeConfig;
         hgoeConfig.marchCpu = marchCpu_;
         hgoeConfig.mtuneCpu = mtuneCpu_;
-        hgoe::optimizeModule(*module, hgoeConfig);
+        auto hgoeStats = hgoe::optimizeModule(*module, hgoeConfig);
+        if (verbose_) {
+            if (hgoeStats.activated) {
+                std::cout << "    HGOE complete: arch=" << hgoeStats.resolvedArch
+                          << ", " << hgoeStats.functionsOptimized << " functions optimized"
+                          << std::endl;
+            } else {
+                std::cout << "    HGOE not activated (no explicit -march/-mtune)" << std::endl;
+            }
+        }
     }
 }
 
