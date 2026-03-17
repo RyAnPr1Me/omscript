@@ -13,7 +13,7 @@ struct Point { x, y }
 fn heavy_math(n:int) {
     var acc:int = 0;
     for (i:int in 1...n) {
-        acc += (i:int * i:int) % 97;
+        acc += (i * i) % 97;
         acc ^= (i << 2);
         acc += gcd(i, acc);
         acc += log2(i);
@@ -22,7 +22,7 @@ fn heavy_math(n:int) {
 }
 
 fn array_work(n:int) {
-    var arr = [];
+    var arr:int[] = [];
     for (i in 0...n) {
         arr = push(arr, (i * 3) % 12345);
     }
@@ -35,14 +35,14 @@ fn array_work(n:int) {
 }
 
 fn string_work(n:int) -> int {
-    var s: = "bench";
-    for (i in 0...n) {
+    var s:str = "bench";
+    for (i:int in 0...n) {
         s = str_concat(s, to_string(i % 10));
     }
     return str_len(s);
 }
 
-fn struct_work(n) -> int {
+fn struct_work(n:int) -> int {
     var p = Point { x: 1, y: 2 };
     var sum:int = 0;
     for (i:int in 0...n) {
