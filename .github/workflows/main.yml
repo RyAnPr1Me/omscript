@@ -24,10 +24,10 @@ jobs:
       # OPTIONAL: install omsc if needed
       - name: Install omsc
         run: |
-          echo "Install your compiler here"
-          # example:
-          # git clone https://github.com/yourrepo/omsc.git
-          # cd omsc && make && sudo make install
+          curl -L -o omsc.tar.gz https://github.com/RyAnPr1Me/omscript/releases/download/v2.6.0/omsc-2.6.0-linux-x86_64.tar.gz
+          tar -xzf omsc.tar.gz
+          chmod +x omsc-linux-x86_64
+          sudo mv omsc-linux-x86_64 /usr/local/bin/omsc
 
       - name: Run tests
         run: ./test.sh
