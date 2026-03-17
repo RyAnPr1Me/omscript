@@ -1284,7 +1284,7 @@ TEST(ParserTest, ReturnTypeVoid) {
 }
 
 TEST(ParserTest, ReturnTypeFloat) {
-    auto program = parse("fn pi() -> float { return 3; }");
+    auto program = parse("fn pi() -> float { return 3.14; }");
     ASSERT_EQ(program->functions.size(), 1u);
     EXPECT_EQ(program->functions[0]->returnType, "float");
 }
@@ -1296,7 +1296,7 @@ TEST(ParserTest, ReturnTypeString) {
 }
 
 TEST(ParserTest, ReturnTypeBool) {
-    auto program = parse("fn isEven(n: int) -> bool { return 0; }");
+    auto program = parse("fn isEven(n: int) -> bool { return true; }");
     ASSERT_EQ(program->functions.size(), 1u);
     EXPECT_EQ(program->functions[0]->returnType, "bool");
 }
@@ -1320,19 +1320,19 @@ TEST(ParserTest, ReturnTypeWithParams) {
 // ===========================================================================
 
 TEST(ParserTest, ReturnTypeArray) {
-    auto program = parse("fn getArr() -> int[] { return 0; }");
+    auto program = parse("fn getArr() -> int[] { return [1, 2]; }");
     ASSERT_EQ(program->functions.size(), 1u);
     EXPECT_EQ(program->functions[0]->returnType, "int[]");
 }
 
 TEST(ParserTest, ReturnTypeStringArray) {
-    auto program = parse("fn getNames() -> string[] { return 0; }");
+    auto program = parse("fn getNames() -> string[] { return [\"a\"]; }");
     ASSERT_EQ(program->functions.size(), 1u);
     EXPECT_EQ(program->functions[0]->returnType, "string[]");
 }
 
 TEST(ParserTest, ReturnTypeNestedArray) {
-    auto program = parse("fn getMatrix() -> int[][] { return 0; }");
+    auto program = parse("fn getMatrix() -> int[][] { return [1]; }");
     ASSERT_EQ(program->functions.size(), 1u);
     EXPECT_EQ(program->functions[0]->returnType, "int[][]");
 }
