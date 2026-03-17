@@ -22,7 +22,7 @@ fn heavy_math(n:int) -> int {
 }
 
 fn array_work(n:int) -> int {
-    var arr:int[] = [0];
+    var arr:int[] = [];
     for (i:int in 0...n) {
         arr = push(arr, (i * 3) % 12345);
     }

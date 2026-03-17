@@ -237,7 +237,13 @@ void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
 }
 
 std::string Parser::parseTypeAnnotation() {
-    std::string typeName = consume(TokenType::IDENTIFIER, "Expected type name").lexeme;
+    // Accept identifiers and the 'struct' keyword as type names
+    std::string typeName;
+    if (check(TokenType::STRUCT)) {
+        typeName = advance().lexeme;
+    } else {
+        typeName = consume(TokenType::IDENTIFIER, "Expected type name").lexeme;
+    }
     // Support array type annotations: type[], type[][], etc.
     while (check(TokenType::LBRACKET) && (current + 1 < tokens.size()) &&
            tokens[current + 1].type == TokenType::RBRACKET) {
@@ -632,6 +638,10 @@ std::unique_ptr<StructDecl> Parser::parseStructDecl() {
     while (!check(TokenType::RBRACE) && !isAtEnd()) {
         Token fieldToken = consume(TokenType::IDENTIFIER, "Expected field name");
         fields.push_back(fieldToken.lexeme);
+        // Skip optional type annotation (e.g. x:int)
+        if (match(TokenType::COLON)) {
+            parseTypeAnnotation();
+        }
         match(TokenType::COMMA);
     }
 
@@ -1249,11 +1259,15 @@ std::unique_ptr<Expression> Parser::parseLambda() {
     Token pipeToken = tokens[current - 1]; // the opening |
     std::vector<std::string> params;
 
-    // Parse lambda parameters: |x| or |x, y| or ||
+    // Parse lambda parameters: |x| or |x, y| or || or |x:int| or |x:int, y:int|
     if (!check(TokenType::PIPE)) {
         do {
             Token paramName = consume(TokenType::IDENTIFIER, "Expected parameter name in lambda");
             params.push_back(paramName.lexeme);
+            // Skip optional type annotation (e.g. |x:int|)
+            if (match(TokenType::COLON)) {
+                parseTypeAnnotation();
+            }
         } while (match(TokenType::COMMA));
     }
 
