@@ -1,0 +1,33 @@
+name: Run Tests
+
+on:
+  push:
+    branches: [ "*" ]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Make script executable
+        run: chmod +x test.sh
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang
+
+      # OPTIONAL: install omsc if needed
+      - name: Install omsc
+        run: |
+          echo "Install your compiler here"
+          # example:
+          # git clone https://github.com/yourrepo/omsc.git
+          # cd omsc && make && sudo make install
+
+      - name: Run tests
+        run: ./test.sh
