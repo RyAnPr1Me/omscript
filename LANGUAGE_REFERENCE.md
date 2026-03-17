@@ -47,7 +47,7 @@ OmScript is a **low-level, C-like programming language** featuring:
 - **Reference-counted memory management** — Automatic deterministic deallocation via malloc/free with reference counting on strings.
 - **Adaptive JIT runtime** — A lightweight JIT runtime monitors function call counts and recompiles hot functions at higher optimization levels with profile-guided hints, producing even faster native code for performance-critical paths.
 - **Aggressive optimization** — Four optimization levels (O0–O3) plus a special OPTMAX directive that applies exhaustive multi-pass optimization to marked functions.
-- **97 built-in standard library functions** — Math, array manipulation, string, character classification, type conversion, map/dictionary, file I/O, concurrency, and system functions, all compiled to native machine code.
+- **92 built-in standard library functions** — Math, array manipulation, string, character classification, type conversion, map/dictionary, file I/O, concurrency, and system functions, all compiled to native machine code.
 - **Structs** — Named record types with field access and mutation.
 - **Module system** — `import` statements with circular-import detection.
 - **Generic function syntax** — Type-annotated generic parameters (type-erased at runtime).
@@ -1415,7 +1415,7 @@ fn main() {
 
 ## 17. Standard Library
 
-OmScript provides **97 built-in functions**. All stdlib functions are compiled directly to native machine code via LLVM IR.
+OmScript provides **92 built-in functions**. All stdlib functions are compiled directly to native machine code via LLVM IR.
 
 ### 17.1 I/O Functions
 
