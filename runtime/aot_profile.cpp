@@ -516,7 +516,11 @@ std::unique_ptr<llvm::TargetMachine> AdaptiveJITRunner::createTargetMachine() {
     });
 
     std::string errStr;
+#if LLVM_VERSION_MAJOR >= 19
+    const llvm::Target* target = llvm::TargetRegistry::lookupTarget(llvm::Triple(cachedTriple_), errStr);
+#else
     const llvm::Target* target = llvm::TargetRegistry::lookupTarget(cachedTriple_, errStr);
+#endif
     if (!target) {
         llvm::errs() << "omsc: could not lookup target: " << errStr << "\n";
         return nullptr;

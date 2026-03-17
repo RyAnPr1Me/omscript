@@ -239,7 +239,6 @@ private:
     const HardwareGraph& hw_;
     unsigned vectorWidth_ = 4;
     double issueWidth_ = 4.0;
-    double branchMispredictPenalty_ = 15.0;
     double cacheMissL1Penalty_ = 4.0;
     double cacheMissL2Penalty_ = 12.0;
     double cacheMissL3Penalty_ = 40.0;

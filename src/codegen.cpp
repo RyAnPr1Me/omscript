@@ -157,21 +157,6 @@ static bool usesConcurrencyPrimitive(const omscript::FunctionDecl* func) {
     return stmtCallsAny(func->body.get(), kConcurrencyBuiltins);
 }
 
-/// Returns the log2 of a positive power-of-two value, or -1 if the value is
-/// not a power of two (or is non-positive).  Used by strength-reduction passes
-/// to convert multiply/divide/modulo by a constant power of 2 into cheaper
-/// shift or bitwise-AND operations.
-inline int log2IfPowerOf2(int64_t val) {
-    if (val <= 0 || (val & (val - 1)) != 0)
-        return -1;
-    int shift = 0;
-    while (val > 1) {
-        val >>= 1;
-        shift++;
-    }
-    return shift;
-}
-
 /// Returns true if the expression is a simple value with no side effects
 /// (literal or identifier).  Used by algebraic identity optimizations to
 /// determine if an operand can be safely dropped.
