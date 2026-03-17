@@ -10,10 +10,10 @@ OPTMAX=:
 
 struct Point { x, y }
 
-fn heavy_math(n) {
-    var acc = 0;
-    for (i in 1...n) {
-        acc += (i * i) % 97;
+fn heavy_math(n:int) {
+    var acc:int = 0;
+    for (i:int in 1...n) {
+        acc += (i:int * i:int) % 97;
         acc ^= (i << 2);
         acc += gcd(i, acc);
         acc += log2(i);
@@ -21,21 +21,21 @@ fn heavy_math(n) {
     return acc;
 }
 
-fn array_work(n) {
+fn array_work(n:int) {
     var arr = [];
     for (i in 0...n) {
         arr = push(arr, (i * 3) % 12345);
     }
 
-    var mapped = array_map(arr, |x| (x * x) % 1000);
-    var filtered = array_filter(mapped, |x| x % 2 == 0);
-    var reduced = array_reduce(filtered, |a, b| a + b, 0);
+    var mapped = array_map(arr, |x:int| (x:int * x:int) % 1000);
+    var filtered = array_filter(mapped, |x:int| x:int % 2 == 0);
+    var reduced = array_reduce(filtered, |a:int, b:int| a:int + b:int, 0);
 
     return reduced + len(filtered);
 }
 
 fn string_work(n) {
-    var s = "bench";
+    var s: = "bench";
     for (i in 0...n) {
         s = str_concat(s, to_string(i % 10));
     }
@@ -44,8 +44,8 @@ fn string_work(n) {
 
 fn struct_work(n) {
     var p = Point { x: 1, y: 2 };
-    var sum = 0;
-    for (i in 0...n) {
+    var sum:int = 0;
+    for (i:int in 0...n) {
         p.x += i;
         p.y ^= i;
         sum += p.x + p.y;
@@ -54,8 +54,8 @@ fn struct_work(n) {
 }
 
 fn branching(n) {
-    var sum = 0;
-    for (i in 0...n) {
+    var sum:int = 0;
+    for (i:int in 0...n) {
         switch (i % 4) {
             case 0: sum += i; break;
             case 1: sum -= i; break;
@@ -76,9 +76,9 @@ fn edge_cases() {
 }
 
 fn main() {
-    var n = input();
+    var n:int = input();
 
-    var total =
+    var total:int =
         heavy_math(n) +
         array_work(n / 10) +
         string_work(n / 50) +
