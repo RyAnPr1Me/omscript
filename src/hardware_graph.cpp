@@ -8,7 +8,7 @@
 ///   4. Applying hardware-specific transformations (FMA, prefetch, etc.)
 ///   5. Providing a hardware-aware cost model for scheduling decisions
 ///
-/// Activated only when -march or -mtune flags are explicitly provided.
+/// Activated when -march or -mtune flags are provided (including "native").
 
 #include "hardware_graph.h"
 #include <llvm/Config/llvm-config.h>
@@ -25,6 +25,9 @@
 #else
 #define OMSC_GET_INTRINSIC llvm::Intrinsic::getDeclaration
 #endif
+#include <llvm/ADT/StringRef.h>
+#include <llvm/TargetParser/Host.h>
+
 #include <algorithm>
 #include <cassert>
 #include <cmath>
@@ -34,6 +37,16 @@
 
 namespace omscript {
 namespace hgoe {
+
+// ---------------------------------------------------------------------------
+// Resolve "native" to the actual host CPU name.
+// ---------------------------------------------------------------------------
+static std::string resolveNativeCpu(const std::string& cpu) {
+    if (cpu == "native") {
+        return llvm::sys::getHostCPUName().str();
+    }
+    return cpu;
+}
 
 // ═════════════════════════════════════════════════════════════════════════════
 // Step 1 — Hardware Graph implementation
@@ -2275,8 +2288,8 @@ unsigned scheduleInstructions(llvm::Function& func, const HardwareGraph& hw,
 // ═════════════════════════════════════════════════════════════════════════════
 
 bool shouldActivate(const HGOEConfig& config) {
-    // HGOE activates ONLY when -march or -mtune is explicitly provided.
-    // Empty strings or "native" mean no explicit target — bypass HGOE.
+    // HGOE activates when -march or -mtune is explicitly provided.
+    // "native" is now supported: we resolve it to the host CPU name.
     return !config.marchCpu.empty() || !config.mtuneCpu.empty();
 }
 
@@ -2285,7 +2298,10 @@ HGOEStats optimizeFunction(llvm::Function& func, const HGOEConfig& config) {
     if (func.isDeclaration()) return stats;
 
     // Resolve microarchitecture: prefer -mtune for scheduling, -march for features.
-    std::string cpuName = config.mtuneCpu.empty() ? config.marchCpu : config.mtuneCpu;
+    // Resolve "native" to the actual host CPU name so the profile lookup succeeds.
+    std::string marchResolved = resolveNativeCpu(config.marchCpu);
+    std::string mtuneResolved = resolveNativeCpu(config.mtuneCpu);
+    std::string cpuName = mtuneResolved.empty() ? marchResolved : mtuneResolved;
     auto profileOpt = lookupMicroarch(cpuName);
 
     if (!profileOpt) {
@@ -2357,7 +2373,10 @@ HGOEStats optimizeModule(llvm::Module& module, const HGOEConfig& config) {
     total.activated = true;
 
     // Resolve architecture name once for stats.
-    std::string cpuName = config.mtuneCpu.empty() ? config.marchCpu : config.mtuneCpu;
+    // Resolve "native" to the actual host CPU name.
+    std::string marchResolved = resolveNativeCpu(config.marchCpu);
+    std::string mtuneResolved = resolveNativeCpu(config.mtuneCpu);
+    std::string cpuName = mtuneResolved.empty() ? marchResolved : mtuneResolved;
     auto profileOpt = lookupMicroarch(cpuName);
     if (profileOpt) {
         total.resolvedArch = profileOpt->name;

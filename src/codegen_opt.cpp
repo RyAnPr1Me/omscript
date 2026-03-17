@@ -99,8 +99,13 @@ void CodeGenerator::resolveTargetCPU(std::string& cpu, std::string& features) co
     // unset.  When an explicit -march is given, it takes precedence because
     // LLVM's createTargetMachine uses a single CPU parameter for both
     // instruction selection and scheduling.
+    // "native" is resolved to the host CPU name just like -march=native.
     if (!mtuneCpu_.empty() && isNative) {
-        cpu = mtuneCpu_;
+        if (mtuneCpu_ == "native") {
+            cpu = llvm::sys::getHostCPUName().str();
+        } else {
+            cpu = mtuneCpu_;
+        }
     }
 }
 

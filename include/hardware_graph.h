@@ -4,11 +4,12 @@
 /// @file hardware_graph.h
 /// @brief Hardware Graph Optimization Engine (HGOE) for hardware-aware compilation.
 ///
-/// The HGOE activates only when the user provides -march or -mtune flags and
-/// models the target CPU microarchitecture as a directed graph of execution
-/// resources.  The compiled program is converted into a dependency graph and
-/// mapped onto the hardware graph to minimise pipeline stalls, port contention,
-/// register pressure and cache misses.
+/// The HGOE activates when the user provides -march or -mtune flags (including
+/// "native", which resolves to the host CPU) and models the target CPU
+/// microarchitecture as a directed graph of execution resources.  The compiled
+/// program is converted into a dependency graph and mapped onto the hardware
+/// graph to minimise pipeline stalls, port contention, register pressure and
+/// cache misses.
 ///
 /// Integration:
 ///   The HGOE runs after the superoptimizer and before final code emission.
@@ -416,7 +417,7 @@ struct HGOEStats {
 };
 
 /// Check whether HGOE should activate for the given config.
-/// Returns true only when -march or -mtune is explicitly specified.
+/// Returns true when -march or -mtune is specified (including "native").
 bool shouldActivate(const HGOEConfig& config);
 
 /// Run the Hardware Graph Optimization Engine on a module.
