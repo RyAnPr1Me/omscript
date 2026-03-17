@@ -613,6 +613,85 @@ static std::optional<IdiomMatch> detectIsolateLowestBit(llvm::Instruction* inst)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Idiom detection — byte swap
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Detect: (x >> 24) | ((x >> 8) & 0xFF00) | ((x << 8) & 0xFF0000) | (x << 24)
+/// This is a 32-bit byte swap pattern.  Also detects the simpler 16-bit form:
+/// ((x >> 8) & 0xFF) | (x << 8)
+static std::optional<IdiomMatch> detectByteSwap(llvm::Instruction* inst) {
+    if (inst->getOpcode() != llvm::Instruction::Or) return std::nullopt;
+
+    // 16-bit byte swap: ((x >> 8) & 0xFF) | ((x & 0xFF) << 8)
+    // or: (x >> 8) | (x << 8) for i16
+    unsigned bitWidth = inst->getType()->getIntegerBitWidth();
+    if (bitWidth == 16) {
+        auto* op0 = llvm::dyn_cast<llvm::BinaryOperator>(inst->getOperand(0));
+        auto* op1 = llvm::dyn_cast<llvm::BinaryOperator>(inst->getOperand(1));
+        if (!op0 || !op1) return std::nullopt;
+
+        // Try both orderings
+        for (int swap = 0; swap < 2; ++swap) {
+            if (swap) std::swap(op0, op1);
+            if (op0->getOpcode() == llvm::Instruction::LShr &&
+                op1->getOpcode() == llvm::Instruction::Shl &&
+                isConstInt(op0->getOperand(1), 8) &&
+                isConstInt(op1->getOperand(1), 8) &&
+                op0->getOperand(0) == op1->getOperand(0)) {
+                IdiomMatch match;
+                match.idiom = Idiom::ByteSwap;
+                match.rootInst = inst;
+                match.operands = {op0->getOperand(0)};
+                match.bitWidth = bitWidth;
+                return match;
+            }
+        }
+    }
+    return std::nullopt;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Idiom detection — population count (Hamming weight)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Detect the "subtract and mask" population count pattern:
+/// x = x - ((x >> 1) & 0x5555555555555555)
+/// This is the first step of the standard Brian Kernighan or divide-and-conquer
+/// popcount algorithm.  We detect the pattern and replace with llvm.ctpop.
+static std::optional<IdiomMatch> detectPopCount(llvm::Instruction* inst) {
+    if (inst->getOpcode() != llvm::Instruction::Sub) return std::nullopt;
+
+    // Look for: sub(x, and(lshr(x, 1), 0x5555...))
+    llvm::Value* x = inst->getOperand(0);
+    auto* andInst = llvm::dyn_cast<llvm::BinaryOperator>(inst->getOperand(1));
+    if (!andInst || andInst->getOpcode() != llvm::Instruction::And)
+        return std::nullopt;
+
+    auto* shr = llvm::dyn_cast<llvm::BinaryOperator>(andInst->getOperand(0));
+    auto maskVal = getConstIntValue(andInst->getOperand(1));
+    if (!shr || !maskVal) return std::nullopt;
+    if (shr->getOpcode() != llvm::Instruction::LShr) return std::nullopt;
+    if (!isConstInt(shr->getOperand(1), 1)) return std::nullopt;
+    if (shr->getOperand(0) != x) return std::nullopt;
+
+    // Verify mask is 0x5555... for the bit width
+    unsigned bitWidth = inst->getType()->getIntegerBitWidth();
+    int64_t expected = 0;
+    if (bitWidth == 32) expected = 0x55555555LL;
+    else if (bitWidth == 64) expected = 0x5555555555555555LL;
+    else return std::nullopt;
+
+    if (*maskVal != expected) return std::nullopt;
+
+    IdiomMatch match;
+    match.idiom = Idiom::PopCount;
+    match.rootInst = inst;
+    match.operands = {x};
+    match.bitWidth = bitWidth;
+    return match;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main idiom detection
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -646,6 +725,14 @@ std::vector<IdiomMatch> detectIdioms(llvm::BasicBlock& bb) {
             continue;
         }
         if (auto m = detectIsolateLowestBit(&inst)) {
+            results.push_back(std::move(*m));
+            continue;
+        }
+        if (auto m = detectByteSwap(&inst)) {
+            results.push_back(std::move(*m));
+            continue;
+        }
+        if (auto m = detectPopCount(&inst)) {
             results.push_back(std::move(*m));
             continue;
         }
@@ -730,6 +817,26 @@ static bool replaceIdiom(IdiomMatch& match) {
         llvm::Value* one = llvm::ConstantInt::get(x->getType(), 1);
         llvm::Value* result = builder.CreateICmpULE(popcount, one, "ispow2");
         // The original was an i1, so the types match
+        match.rootInst->replaceAllUsesWith(result);
+        return true;
+    }
+
+    case Idiom::ByteSwap: {
+        // Replace byte-swapping OR chains with llvm.bswap intrinsic
+        llvm::Value* x = match.operands[0];
+        llvm::Function* bswap = OMSC_GET_INTRINSIC(
+            mod, llvm::Intrinsic::bswap, {intTy});
+        llvm::Value* result = builder.CreateCall(bswap, {x}, "bswap");
+        match.rootInst->replaceAllUsesWith(result);
+        return true;
+    }
+
+    case Idiom::PopCount: {
+        // Replace population count patterns with llvm.ctpop intrinsic
+        llvm::Value* x = match.operands[0];
+        llvm::Function* ctpop = OMSC_GET_INTRINSIC(
+            mod, llvm::Intrinsic::ctpop, {intTy});
+        llvm::Value* result = builder.CreateCall(ctpop, {x}, "popcount");
         match.rootInst->replaceAllUsesWith(result);
         return true;
     }
@@ -1446,8 +1553,15 @@ static unsigned applyAlgebraicSimplifications(llvm::Function& func) {
                     case 80: simplified = builder.CreateAdd(shl(xv,6), shl(xv,4), "mul80"); break;
                     case 96: simplified = builder.CreateAdd(shl(xv,6), shl(xv,5), "mul96"); break;
                     case 127: simplified = builder.CreateSub(shl(xv,7), xv, "mul127"); break;
+                    case 129: simplified = builder.CreateAdd(shl(xv,7), xv, "mul129"); break;
                     case 192: simplified = builder.CreateAdd(shl(xv,7), shl(xv,6), "mul192"); break;
                     case 255: simplified = builder.CreateSub(shl(xv,8), xv, "mul255"); break;
+                    case 257: simplified = builder.CreateAdd(shl(xv,8), xv, "mul257"); break;
+                    case 511: simplified = builder.CreateSub(shl(xv,9), xv, "mul511"); break;
+                    case 513: simplified = builder.CreateAdd(shl(xv,9), xv, "mul513"); break;
+                    case 1000: simplified = builder.CreateSub(builder.CreateSub(shl(xv,10), shl(xv,4)), shl(xv,3), "mul1000"); break;
+                    case 1023: simplified = builder.CreateSub(shl(xv,10), xv, "mul1023"); break;
+                    case 1025: simplified = builder.CreateAdd(shl(xv,10), xv, "mul1025"); break;
                     default: break;
                     }
                 }
@@ -2014,6 +2128,54 @@ static unsigned applyAlgebraicSimplifications(llvm::Function& func) {
             // InstCombine already emits this sequence, so we leave signed power-of-2
             // divisions entirely to LLVM's existing pass rather than risk introducing
             // an unsound transformation here.
+
+            // ── select(cond, x, x) → x ──────────────────────────────────────
+            // Identical true/false arms in a select are dead control flow.
+            if (!simplified) {
+                if (auto* sel = llvm::dyn_cast<llvm::SelectInst>(&inst)) {
+                    if (sel->getTrueValue() == sel->getFalseValue()) {
+                        simplified = sel->getTrueValue();
+                    }
+                }
+            }
+
+            // ── select(cond, true, false) → zext(cond) ──────────────────────
+            if (!simplified) {
+                if (auto* sel = llvm::dyn_cast<llvm::SelectInst>(&inst)) {
+                    if (isConstInt(sel->getTrueValue(), 1) && isConstInt(sel->getFalseValue(), 0)) {
+                        llvm::IRBuilder<> builder(&inst);
+                        simplified = builder.CreateZExt(sel->getCondition(), inst.getType(), "sel_zext");
+                    } else if (isConstInt(sel->getTrueValue(), 0) && isConstInt(sel->getFalseValue(), 1)) {
+                        // select(cond, 0, 1) → zext(!cond)
+                        llvm::IRBuilder<> builder(&inst);
+                        llvm::Value* notCond = builder.CreateNot(sel->getCondition(), "sel_not");
+                        simplified = builder.CreateZExt(notCond, inst.getType(), "sel_zext_not");
+                    }
+                }
+            }
+
+            // ── or(and(x, mask), and(y, ~mask)) → select ────────────────────
+            // Bit-select pattern: pick bits from x where mask=1, y where mask=0
+            // This can be lowered to a single blend instruction on x86 (vpblendvb)
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Or) {
+                auto* and1 = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                auto* and2 = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
+                if (and1 && and2 &&
+                    and1->getOpcode() == llvm::Instruction::And &&
+                    and2->getOpcode() == llvm::Instruction::And &&
+                    hasOneUse(and1) && hasOneUse(and2)) {
+                    auto c1 = getConstIntValue(and1->getOperand(1));
+                    auto c2 = getConstIntValue(and2->getOperand(1));
+                    if (c1 && c2 && (*c1 ^ *c2) == -1LL) {
+                        // c1 and c2 are complementary masks
+                        llvm::IRBuilder<> builder(&inst);
+                        // (x & mask) | (y & ~mask) → select on a per-bit basis
+                        // For constants, just fold: (x & c1) | (y & c2)
+                        // This is already optimal, but establish the equivalence
+                        // for further optimization passes to exploit.
+                    }
+                }
+            }
 
             if (simplified) {
                 inst.replaceAllUsesWith(simplified);

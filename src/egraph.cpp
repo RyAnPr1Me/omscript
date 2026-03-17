@@ -1297,6 +1297,73 @@ std::vector<RewriteRule> getAlgebraicRules() {
             return g.addBinOp(Op::Add, s7, s6);
         });
 
+    // x * 21 → (x << 4) + (x << 2) + x  [16x + 4x + x = 21x]
+    rules.emplace_back("mul_21_shift",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(21)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId s4 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(4));
+            ClassId s2 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(2));
+            ClassId sum = g.addBinOp(Op::Add, s4, s2);
+            return g.addBinOp(Op::Add, sum, s.at("x"));
+        });
+
+    // x * 37 → (x << 5) + (x << 2) + x  [32x + 4x + x = 37x]
+    rules.emplace_back("mul_37_shift",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(37)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId s5 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(5));
+            ClassId s2 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(2));
+            ClassId sum = g.addBinOp(Op::Add, s5, s2);
+            return g.addBinOp(Op::Add, sum, s.at("x"));
+        });
+
+    // x * 41 → (x << 5) + (x << 3) + x  [32x + 8x + x = 41x]
+    rules.emplace_back("mul_41_shift",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(41)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId s5 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(5));
+            ClassId s3 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(3));
+            ClassId sum = g.addBinOp(Op::Add, s5, s3);
+            return g.addBinOp(Op::Add, sum, s.at("x"));
+        });
+
+    // x * 49 → (x << 5) + (x << 4) + x  [32x + 16x + x = 49x]
+    rules.emplace_back("mul_49_shift",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(49)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId s5 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(5));
+            ClassId s4 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(4));
+            ClassId sum = g.addBinOp(Op::Add, s5, s4);
+            return g.addBinOp(Op::Add, sum, s.at("x"));
+        });
+
+    // x * 129 → (x << 7) + x  [128x + x = 129x]
+    rules.emplace_back("mul_129_shift",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(129)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId s7 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(7));
+            return g.addBinOp(Op::Add, s7, s.at("x"));
+        });
+
+    // x * 257 → (x << 8) + x  [256x + x = 257x]
+    rules.emplace_back("mul_257_shift",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(257)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId s8 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(8));
+            return g.addBinOp(Op::Add, s8, s.at("x"));
+        });
+
+    // x * 1000 → (x << 10) - (x << 4) - (x << 3)  [1024x - 16x - 8x = 1000x]
+    rules.emplace_back("mul_1000_shift",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(1000)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId s10 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(10));
+            ClassId s4 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(4));
+            ClassId s3 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(3));
+            ClassId sub1 = g.addBinOp(Op::Sub, s10, s4);
+            return g.addBinOp(Op::Sub, sub1, s3);
+        });
+
     // ─────────────────────────────────────────────────────────────────────
     // x * 2^n strength reduction for shifts 11-30
     // ─────────────────────────────────────────────────────────────────────
@@ -1917,6 +1984,25 @@ std::vector<RewriteRule> getAdvancedAlgebraicRules() {
     rules.emplace_back("mod_sub_n",
         P::OpPat(Op::Mod, {P::OpPat(Op::Sub, {P::Wild("x"), P::Wild("n")}), P::Wild("n")}),
         [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Mod, s.at("x"), s.at("n")); });
+
+    // (x * n) % n → 0  (already in getAdvancedAlgebraicRules, but add commutative form)
+    rules.emplace_back("mul_mod_cancel_comm",
+        P::OpPat(Op::Mod, {P::OpPat(Op::Mul, {P::Wild("n"), P::Wild("x")}), P::Wild("n")}),
+        [](EGraph& g, const Subst&) { return g.addConst(0); });
+
+    // (x * a + y) % a → y % a  (factor out multiple of modulus)
+    rules.emplace_back("mod_factor_add",
+        P::OpPat(Op::Mod, {
+            P::OpPat(Op::Add, {P::OpPat(Op::Mul, {P::Wild("x"), P::Wild("a")}), P::Wild("y")}),
+            P::Wild("a")}),
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Mod, s.at("y"), s.at("a")); });
+
+    // (a * x + y) % a → y % a  (commutative form)
+    rules.emplace_back("mod_factor_add_comm",
+        P::OpPat(Op::Mod, {
+            P::OpPat(Op::Add, {P::OpPat(Op::Mul, {P::Wild("a"), P::Wild("x")}), P::Wild("y")}),
+            P::Wild("a")}),
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Mod, s.at("y"), s.at("a")); });
 
     // x / 1 → x
     rules.emplace_back("div_one",
@@ -5085,6 +5171,60 @@ std::vector<RewriteRule> getAdvancedBitwiseRules() {
     rules.emplace_back("mod16_to_and_15",
         P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(16)}),
         [](EGraph& g, const Subst& s) { return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(15)); });
+
+    // x & 31 → x % 32
+    rules.emplace_back("and_31_to_mod32",
+        P::OpPat(Op::BitAnd, {P::Wild("x"), P::ConstPat(31)}),
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Mod, s.at("x"), g.addConst(32)); });
+    // x % 32 → x & 31
+    rules.emplace_back("mod32_to_and_31",
+        P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(32)}),
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(31)); });
+
+    // x & 63 → x % 64
+    rules.emplace_back("and_63_to_mod64",
+        P::OpPat(Op::BitAnd, {P::Wild("x"), P::ConstPat(63)}),
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Mod, s.at("x"), g.addConst(64)); });
+    // x % 64 → x & 63
+    rules.emplace_back("mod64_to_and_63",
+        P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(64)}),
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(63)); });
+
+    // x & 127 → x % 128
+    rules.emplace_back("and_127_to_mod128",
+        P::OpPat(Op::BitAnd, {P::Wild("x"), P::ConstPat(127)}),
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Mod, s.at("x"), g.addConst(128)); });
+    // x % 128 → x & 127
+    rules.emplace_back("mod128_to_and_127",
+        P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(128)}),
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(127)); });
+
+    // x & 255 → x % 256
+    rules.emplace_back("and_255_to_mod256",
+        P::OpPat(Op::BitAnd, {P::Wild("x"), P::ConstPat(255)}),
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Mod, s.at("x"), g.addConst(256)); });
+    // x % 256 → x & 255
+    rules.emplace_back("mod256_to_and_255",
+        P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(256)}),
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(255)); });
+
+    // x & 511 → x % 512
+    rules.emplace_back("and_511_to_mod512",
+        P::OpPat(Op::BitAnd, {P::Wild("x"), P::ConstPat(511)}),
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Mod, s.at("x"), g.addConst(512)); });
+    // x % 512 → x & 511
+    rules.emplace_back("mod512_to_and_511",
+        P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(512)}),
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(511)); });
+
+    // x & 1023 → x % 1024
+    rules.emplace_back("and_1023_to_mod1024",
+        P::OpPat(Op::BitAnd, {P::Wild("x"), P::ConstPat(1023)}),
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Mod, s.at("x"), g.addConst(1024)); });
+    // x % 1024 → x & 1023
+    rules.emplace_back("mod1024_to_and_1023",
+        P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(1024)}),
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(1023)); });
 
     // ─────────────────────────────────────────────────────────────────────
     // AND/OR/XOR with common subexpressions
