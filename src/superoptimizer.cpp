@@ -2009,11 +2009,11 @@ static unsigned applyAlgebraicSimplifications(llvm::Function& func) {
             }
 
             // ── sdiv x, 2^n with nsw → arithmetic-shift + round-up correction ──
-            // sdiv x, 2^n is NOT simply ashr(x, n) for signed values.  The correct
-            // sequence is: ashr(x + ((x >> 63) & (2^n - 1)), n), which LLVM's
-            // InstCombine already emits.  We only handle the trivial n=0 here since
-            // that's an identity (sdiv by 1 → already handled above).
-            // All other signed power-of-2 divisions are left to LLVM's existing pass.
+            // NOTE: sdiv x, 2^n is NOT simply ashr(x, n) for signed values.  The
+            // correct sequence is: ashr(x + ((x >> 63) & (2^n - 1)), n).  LLVM's
+            // InstCombine already emits this sequence, so we leave signed power-of-2
+            // divisions entirely to LLVM's existing pass rather than risk introducing
+            // an unsound transformation here.
 
             if (simplified) {
                 inst.replaceAllUsesWith(simplified);

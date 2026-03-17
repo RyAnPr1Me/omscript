@@ -5383,9 +5383,9 @@ std::vector<RewriteRule> getAdvancedBitwiseRules() {
             return g.addBinOp(Op::Sub, aorb, aandb);
         });
 
-    // (a ^ b) + (a & b) + (a & b) → a | b
-    // Because: (a^b) + 2*(a&b) = a + b, but (a^b) + (a&b) = a|b.
-    // Simplified: (a ^ b) + (a & b) → a | b
+    // (a ^ b) + (a & b) → a | b
+    // Because: a|b = (a^b) | (a&b), and since a^b and a&b share no bits,
+    // bitwise-or is the same as addition for disjoint bit patterns.
     rules.emplace_back("xor_add_and_to_or",
         P::OpPat(Op::Add, {
             P::OpPat(Op::BitXor, {P::Wild("a"), P::Wild("b")}),
