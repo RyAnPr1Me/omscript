@@ -24,7 +24,7 @@ jobs:
       # OPTIONAL: install omsc if needed
       - name: Install omsc
         run: |
-          curl -L -o omsc.tar.gz https://github.com/RyAnPr1Me/omscript/releases/download/v2.6.1/omsc-2.6.1-linux-x86_64.tar.gz
+          curl -L -o omsc.tar.gz https://github.com/RyAnPr1Me/omscript/releases/download/v2.6.2/omsc-2.6.2-linux-x86_64.tar.gz
           tar -xzf omsc.tar.gz
           chmod +x omsc-linux-x86_64
           sudo mv omsc-linux-x86_64 /usr/local/bin/omsc
