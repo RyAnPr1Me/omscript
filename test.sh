@@ -8,9 +8,9 @@ echo "=== Generating source files ==="
 cat > bench.om << 'EOF'
 OPTMAX=:
 
-struct Point { x, y }
+struct Point { x:int, y:int }
 
-fn heavy_math(n:int) {
+fn heavy_math(n:int) -> int {
     var acc:int = 0;
     for (i:int in 1...n) {
         acc += (i * i) % 97;
@@ -27,9 +27,9 @@ fn array_work(n:int) -> int {
         arr = push(arr, (i * 3) % 12345);
     }
 
-    var mapped:int[] = array_map(arr, |x:int| (x * x) % 1000);
-    var filtered:int[] = array_filter(mapped, |x:int| x % 2 == 0);
-    var reduced:int = array_reduce(filtered, |a:int, b:int| a + b, 0);
+    var mapped:int[] = array_map(arr, |x| (x * x) % 1000);
+    var filtered:int[] = array_filter(mapped, |x| x % 2 == 0);
+    var reduced:int = array_reduce(filtered, |a:, b| a + b, 0);
 
     return reduced + len(filtered);
 }
@@ -46,8 +46,8 @@ fn struct_work(n:int) -> int {
     var p:ptr = Point { x: 1, y: 2 };
     var sum:int = 0;
     for (i:int in 0...n) {
-        p.x += i;
-        p.y ^= i;
+        p.x = p.x + i;
+        p.y = p.y ^ i;
         sum += p.x + p.y;
     }
     return sum;
