@@ -1427,3 +1427,167 @@ TEST(SuperoptimizerTest, AlgebraicAbsorptionOrAnd) {
     EXPECT_GE(stats.algebraicSimplified, 1u);
     EXPECT_TRUE(tm.verify());
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// New multiply strength reduction cases
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST(SuperoptimizerTest, StrengthReductionMul30) {
+    // x * 30 → (x << 5) - (x << 1)  [32x - 2x = 30x]
+    TestModule tm;
+    auto* x = tm.arg(0);
+    auto* mul = tm.builder.CreateMul(x, llvm::ConstantInt::get(tm.i64Ty(), 30), "mul30");
+    tm.builder.CreateRet(mul);
+
+    SuperoptimizerConfig config;
+    config.enableIdiomRecognition = false;
+    config.enableSynthesis = false;
+    config.enableBranchOpt = false;
+    auto stats = superoptimizeFunction(*tm.func, config);
+
+    EXPECT_GE(stats.algebraicSimplified, 1u);
+    EXPECT_TRUE(tm.verify());
+}
+
+TEST(SuperoptimizerTest, StrengthReductionMul34) {
+    // x * 34 → (x << 5) + (x << 1)  [32x + 2x = 34x]
+    TestModule tm;
+    auto* x = tm.arg(0);
+    auto* mul = tm.builder.CreateMul(x, llvm::ConstantInt::get(tm.i64Ty(), 34), "mul34");
+    tm.builder.CreateRet(mul);
+
+    SuperoptimizerConfig config;
+    config.enableIdiomRecognition = false;
+    config.enableSynthesis = false;
+    config.enableBranchOpt = false;
+    auto stats = superoptimizeFunction(*tm.func, config);
+
+    EXPECT_GE(stats.algebraicSimplified, 1u);
+    EXPECT_TRUE(tm.verify());
+}
+
+TEST(SuperoptimizerTest, StrengthReductionMul36) {
+    // x * 36 → (x << 5) + (x << 2)  [32x + 4x = 36x]
+    TestModule tm;
+    auto* x = tm.arg(0);
+    auto* mul = tm.builder.CreateMul(x, llvm::ConstantInt::get(tm.i64Ty(), 36), "mul36");
+    tm.builder.CreateRet(mul);
+
+    SuperoptimizerConfig config;
+    config.enableIdiomRecognition = false;
+    config.enableSynthesis = false;
+    config.enableBranchOpt = false;
+    auto stats = superoptimizeFunction(*tm.func, config);
+
+    EXPECT_GE(stats.algebraicSimplified, 1u);
+    EXPECT_TRUE(tm.verify());
+}
+
+TEST(SuperoptimizerTest, StrengthReductionMul56) {
+    // x * 56 → (x << 6) - (x << 3)  [64x - 8x = 56x]
+    TestModule tm;
+    auto* x = tm.arg(0);
+    auto* mul = tm.builder.CreateMul(x, llvm::ConstantInt::get(tm.i64Ty(), 56), "mul56");
+    tm.builder.CreateRet(mul);
+
+    SuperoptimizerConfig config;
+    config.enableIdiomRecognition = false;
+    config.enableSynthesis = false;
+    config.enableBranchOpt = false;
+    auto stats = superoptimizeFunction(*tm.func, config);
+
+    EXPECT_GE(stats.algebraicSimplified, 1u);
+    EXPECT_TRUE(tm.verify());
+}
+
+TEST(SuperoptimizerTest, StrengthReductionMul60) {
+    // x * 60 → (x << 6) - (x << 2)  [64x - 4x = 60x]
+    TestModule tm;
+    auto* x = tm.arg(0);
+    auto* mul = tm.builder.CreateMul(x, llvm::ConstantInt::get(tm.i64Ty(), 60), "mul60");
+    tm.builder.CreateRet(mul);
+
+    SuperoptimizerConfig config;
+    config.enableIdiomRecognition = false;
+    config.enableSynthesis = false;
+    config.enableBranchOpt = false;
+    auto stats = superoptimizeFunction(*tm.func, config);
+
+    EXPECT_GE(stats.algebraicSimplified, 1u);
+    EXPECT_TRUE(tm.verify());
+}
+
+TEST(SuperoptimizerTest, StrengthReductionMul72) {
+    // x * 72 → (x << 6) + (x << 3)  [64x + 8x = 72x]
+    TestModule tm;
+    auto* x = tm.arg(0);
+    auto* mul = tm.builder.CreateMul(x, llvm::ConstantInt::get(tm.i64Ty(), 72), "mul72");
+    tm.builder.CreateRet(mul);
+
+    SuperoptimizerConfig config;
+    config.enableIdiomRecognition = false;
+    config.enableSynthesis = false;
+    config.enableBranchOpt = false;
+    auto stats = superoptimizeFunction(*tm.func, config);
+
+    EXPECT_GE(stats.algebraicSimplified, 1u);
+    EXPECT_TRUE(tm.verify());
+}
+
+TEST(SuperoptimizerTest, StrengthReductionMul80) {
+    // x * 80 → (x << 6) + (x << 4)  [64x + 16x = 80x]
+    TestModule tm;
+    auto* x = tm.arg(0);
+    auto* mul = tm.builder.CreateMul(x, llvm::ConstantInt::get(tm.i64Ty(), 80), "mul80");
+    tm.builder.CreateRet(mul);
+
+    SuperoptimizerConfig config;
+    config.enableIdiomRecognition = false;
+    config.enableSynthesis = false;
+    config.enableBranchOpt = false;
+    auto stats = superoptimizeFunction(*tm.func, config);
+
+    EXPECT_GE(stats.algebraicSimplified, 1u);
+    EXPECT_TRUE(tm.verify());
+}
+
+TEST(SuperoptimizerTest, StrengthReductionMul192) {
+    // x * 192 → (x << 7) + (x << 6)  [128x + 64x = 192x]
+    TestModule tm;
+    auto* x = tm.arg(0);
+    auto* mul = tm.builder.CreateMul(x, llvm::ConstantInt::get(tm.i64Ty(), 192), "mul192");
+    tm.builder.CreateRet(mul);
+
+    SuperoptimizerConfig config;
+    config.enableIdiomRecognition = false;
+    config.enableSynthesis = false;
+    config.enableBranchOpt = false;
+    auto stats = superoptimizeFunction(*tm.func, config);
+
+    EXPECT_GE(stats.algebraicSimplified, 1u);
+    EXPECT_TRUE(tm.verify());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Arithmetic-bitwise identity: (a | b) - (a & b) → a ^ b
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST(SuperoptimizerTest, OrSubAndToXor) {
+    // (a | b) - (a & b) → a ^ b
+    TestModule tm;
+    auto* a = tm.arg(0);
+    auto* b = tm.arg(1);
+    auto* orVal  = tm.builder.CreateOr(a, b, "or_val");
+    auto* andVal = tm.builder.CreateAnd(a, b, "and_val");
+    auto* sub    = tm.builder.CreateSub(orVal, andVal, "or_sub_and");
+    tm.builder.CreateRet(sub);
+
+    SuperoptimizerConfig config;
+    config.enableIdiomRecognition = false;
+    config.enableSynthesis = false;
+    config.enableBranchOpt = false;
+    auto stats = superoptimizeFunction(*tm.func, config);
+
+    EXPECT_GE(stats.algebraicSimplified, 1u);
+    EXPECT_TRUE(tm.verify());
+}

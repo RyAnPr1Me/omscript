@@ -1217,6 +1217,86 @@ std::vector<RewriteRule> getAlgebraicRules() {
             return g.addBinOp(Op::Sub, s8, s.at("x"));
         });
 
+    // x * 30 → (x << 5) - (x << 1)  [32x - 2x = 30x]
+    rules.emplace_back("mul_30_shift",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(30)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId c5 = g.addConst(5); ClassId c1 = g.addConst(1);
+            ClassId s5 = g.addBinOp(Op::Shl, s.at("x"), c5);
+            ClassId s1 = g.addBinOp(Op::Shl, s.at("x"), c1);
+            return g.addBinOp(Op::Sub, s5, s1);
+        });
+
+    // x * 34 → (x << 5) + (x << 1)  [32x + 2x = 34x]
+    rules.emplace_back("mul_34_shift",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(34)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId c5 = g.addConst(5); ClassId c1 = g.addConst(1);
+            ClassId s5 = g.addBinOp(Op::Shl, s.at("x"), c5);
+            ClassId s1 = g.addBinOp(Op::Shl, s.at("x"), c1);
+            return g.addBinOp(Op::Add, s5, s1);
+        });
+
+    // x * 36 → (x << 5) + (x << 2)  [32x + 4x = 36x]
+    rules.emplace_back("mul_36_shift",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(36)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId c5 = g.addConst(5); ClassId c2 = g.addConst(2);
+            ClassId s5 = g.addBinOp(Op::Shl, s.at("x"), c5);
+            ClassId s2 = g.addBinOp(Op::Shl, s.at("x"), c2);
+            return g.addBinOp(Op::Add, s5, s2);
+        });
+
+    // x * 56 → (x << 6) - (x << 3)  [64x - 8x = 56x]
+    rules.emplace_back("mul_56_shift",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(56)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId c6 = g.addConst(6); ClassId c3 = g.addConst(3);
+            ClassId s6 = g.addBinOp(Op::Shl, s.at("x"), c6);
+            ClassId s3 = g.addBinOp(Op::Shl, s.at("x"), c3);
+            return g.addBinOp(Op::Sub, s6, s3);
+        });
+
+    // x * 60 → (x << 6) - (x << 2)  [64x - 4x = 60x]
+    rules.emplace_back("mul_60_shift",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(60)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId c6 = g.addConst(6); ClassId c2 = g.addConst(2);
+            ClassId s6 = g.addBinOp(Op::Shl, s.at("x"), c6);
+            ClassId s2 = g.addBinOp(Op::Shl, s.at("x"), c2);
+            return g.addBinOp(Op::Sub, s6, s2);
+        });
+
+    // x * 72 → (x << 6) + (x << 3)  [64x + 8x = 72x]
+    rules.emplace_back("mul_72_shift",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(72)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId c6 = g.addConst(6); ClassId c3 = g.addConst(3);
+            ClassId s6 = g.addBinOp(Op::Shl, s.at("x"), c6);
+            ClassId s3 = g.addBinOp(Op::Shl, s.at("x"), c3);
+            return g.addBinOp(Op::Add, s6, s3);
+        });
+
+    // x * 80 → (x << 6) + (x << 4)  [64x + 16x = 80x]
+    rules.emplace_back("mul_80_shift",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(80)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId c6 = g.addConst(6); ClassId c4 = g.addConst(4);
+            ClassId s6 = g.addBinOp(Op::Shl, s.at("x"), c6);
+            ClassId s4 = g.addBinOp(Op::Shl, s.at("x"), c4);
+            return g.addBinOp(Op::Add, s6, s4);
+        });
+
+    // x * 192 → (x << 7) + (x << 6)  [128x + 64x = 192x]
+    rules.emplace_back("mul_192_shift",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(192)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId c7 = g.addConst(7); ClassId c6 = g.addConst(6);
+            ClassId s7 = g.addBinOp(Op::Shl, s.at("x"), c7);
+            ClassId s6 = g.addBinOp(Op::Shl, s.at("x"), c6);
+            return g.addBinOp(Op::Add, s7, s6);
+        });
+
     // ─────────────────────────────────────────────────────────────────────
     // x * 2^n strength reduction for shifts 11-30
     // ─────────────────────────────────────────────────────────────────────
@@ -5279,6 +5359,47 @@ std::vector<RewriteRule> getAdvancedBitwiseRules() {
             ClassId yn = g.addBinOp(Op::Shr, s.at("y"), s.at("n"));
             return g.addBinOp(Op::BitXor, xn, yn);
         });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Arithmetic-bitwise identities
+    // ─────────────────────────────────────────────────────────────────────
+
+    // (a | b) - (a & b) → a ^ b
+    // Proof: a|b = (a^b) | (a&b) = (a^b) + (a&b) since the two terms have
+    // no common bits.  Therefore (a|b) - (a&b) = a^b.
+    rules.emplace_back("or_sub_and_to_xor",
+        P::OpPat(Op::Sub, {
+            P::OpPat(Op::BitOr,  {P::Wild("a"), P::Wild("b")}),
+            P::OpPat(Op::BitAnd, {P::Wild("a"), P::Wild("b")})
+        }),
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::BitXor, s.at("a"), s.at("b")); });
+
+    // a ^ b → (a | b) - (a & b)  (reverse direction, useful for combining)
+    rules.emplace_back("xor_to_or_sub_and",
+        P::OpPat(Op::BitXor, {P::Wild("a"), P::Wild("b")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId aorb  = g.addBinOp(Op::BitOr,  s.at("a"), s.at("b"));
+            ClassId aandb = g.addBinOp(Op::BitAnd, s.at("a"), s.at("b"));
+            return g.addBinOp(Op::Sub, aorb, aandb);
+        });
+
+    // (a ^ b) + (a & b) + (a & b) → a | b
+    // Because: (a^b) + 2*(a&b) = a + b, but (a^b) + (a&b) = a|b.
+    // Simplified: (a ^ b) + (a & b) → a | b
+    rules.emplace_back("xor_add_and_to_or",
+        P::OpPat(Op::Add, {
+            P::OpPat(Op::BitXor, {P::Wild("a"), P::Wild("b")}),
+            P::OpPat(Op::BitAnd, {P::Wild("a"), P::Wild("b")})
+        }),
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::BitOr, s.at("a"), s.at("b")); });
+
+    // (a & b) + (a ^ b) → a | b  (commuted operands)
+    rules.emplace_back("and_add_xor_to_or",
+        P::OpPat(Op::Add, {
+            P::OpPat(Op::BitAnd, {P::Wild("a"), P::Wild("b")}),
+            P::OpPat(Op::BitXor, {P::Wild("a"), P::Wild("b")})
+        }),
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::BitOr, s.at("a"), s.at("b")); });
 
 
     return rules;
