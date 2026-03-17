@@ -27,9 +27,9 @@ fn array_work(n:int) -> int {
         arr = push(arr, (i * 3) % 12345);
     }
 
-    var mapped:int[] = array_map(arr, |x| (x * x) % 1000);
-    var filtered:int[] = array_filter(mapped, |x| x % 2 == 0);
-    var reduced:int = array_reduce(filtered, |a:, b| a + b, 0);
+    var mapped:int[] = array_map(arr, |x:int| (x * x) % 1000);
+    var filtered:int[] = array_filter(mapped, |x:int| x % 2 == 0);
+    var reduced:int = array_reduce(filtered, |a:int, b:int| a + b, 0);
 
     return reduced + len(filtered);
 }
@@ -43,7 +43,8 @@ fn string_work(n:int) -> int {
 }
 
 fn struct_work(n:int) -> int {
-    var p:ptr = Point { x: 1, y: 2 };
+//
+    var p:struct = Point { x: 1, y: 2 };
     var sum:int = 0;
     for (i:int in 0...n) {
         p.x = p.x + i;
