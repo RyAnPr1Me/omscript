@@ -324,6 +324,12 @@ struct MicroarchProfile {
 
     // Memory
     unsigned memoryLatency = 200;   ///< Main memory latency in cycles
+
+    // Port constraints for integer multiply.
+    // Integer multiply can only use a subset of the total integer ALU ports on
+    // most microarchitectures (e.g. only 2 of 4 ports on Skylake, port 1 only
+    // on Haswell).  The scheduler uses this to avoid overcommitting ALU capacity.
+    unsigned mulPortCount = 1;      ///< ALU port instances capable of integer multiply
 };
 
 /// Look up a microarchitecture profile by CPU name.
@@ -368,6 +374,7 @@ struct TransformStats {
     unsigned prefetchesInserted = 0;  ///< Prefetch instructions inserted
     unsigned branchesOptimized = 0;   ///< Branch layout improvements
     unsigned vectorExpanded = 0;      ///< Vector width expansions
+    unsigned intStrengthReduced = 0;  ///< Integer multiplies replaced by shift+add
 };
 
 /// Apply hardware-aware transformations to a function.
@@ -387,6 +394,16 @@ struct HGOEConfig {
     bool enableCostModel = true;     ///< Hardware-aware cost model
 };
 
+/// Apply hardware-graph-driven instruction scheduling to all basic blocks in a
+/// function.  Reorders instructions within each basic block (phi nodes and
+/// terminators stay fixed) to maximise throughput for the specific hardware.
+/// Uses the actual HardwareGraph port model — each execution-unit node carries
+/// a throughput value (instructions/cycle) that drives cycle-accurate port
+/// assignment and port-diversity scheduling.
+/// Returns the estimated total cycle count.
+unsigned scheduleInstructions(llvm::Function& func, const HardwareGraph& hw,
+                               const MicroarchProfile& profile);
+
 /// Statistics from the HGOE pipeline.
 struct HGOEStats {
     bool activated = false;           ///< Whether HGOE was activated
@@ -394,6 +411,8 @@ struct HGOEStats {
     unsigned functionsOptimized = 0;
     unsigned totalScheduledCycles = 0;
     double avgPortUtilization = 0.0;
+    unsigned basicBlocksScheduled = 0; ///< Basic blocks with instructions reordered
+    unsigned loopsUnrolled = 0;        ///< Loops annotated for software pipelining
     TransformStats transforms;
 };
 

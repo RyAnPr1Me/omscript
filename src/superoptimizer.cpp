@@ -1361,6 +1361,626 @@ static unsigned applyAlgebraicSimplifications(llvm::Function& func) {
                 }
             }
 
+            // ── Unsigned div/rem by power-of-2 strength reduction ────────────
+            // udiv x, 2^n → x >> n  (safe ONLY for unsigned)
+            if (!simplified && inst.getOpcode() == llvm::Instruction::UDiv) {
+                auto c = getConstIntValue(inst.getOperand(1));
+                if (c && *c > 1 && (*c & (*c - 1)) == 0) {
+                    unsigned shift = llvm::Log2_64(static_cast<uint64_t>(*c));
+                    llvm::IRBuilder<> builder(&inst);
+                    simplified = builder.CreateLShr(inst.getOperand(0),
+                        llvm::ConstantInt::get(inst.getType(), shift), "udiv_pow2");
+                }
+            }
+            // urem x, 2^n → x & (2^n - 1)  (safe ONLY for unsigned)
+            if (!simplified && inst.getOpcode() == llvm::Instruction::URem) {
+                auto c = getConstIntValue(inst.getOperand(1));
+                if (c && *c > 1 && (*c & (*c - 1)) == 0) {
+                    llvm::IRBuilder<> builder(&inst);
+                    simplified = builder.CreateAnd(inst.getOperand(0),
+                        llvm::ConstantInt::get(inst.getType(), *c - 1), "urem_pow2");
+                }
+            }
+            // sdiv x, -1 → 0 - x  (negate via nsw sub from zero)
+            // Guard: INT_MIN / -1 is undefined behaviour (overflows).  The
+            // LLVM `sub nsw` carries the same UB semantics as C negation, so
+            // this transformation is correct under LLVM's poison / UB rules.
+            if (!simplified && inst.getOpcode() == llvm::Instruction::SDiv) {
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1))) {
+                    if (ci->isMinusOne()) {
+                        llvm::IRBuilder<> builder(&inst);
+                        // Use CreateNSWNeg so overflow (INT_MIN ÷ -1) remains
+                        // poison rather than silently wrapping.
+                        simplified = builder.CreateNSWNeg(inst.getOperand(0), "sdiv_neg1");
+                    }
+                }
+            }
+
+            // ── Multiply strength reduction: x * small_const → shifts+adds ──
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Mul) {
+                auto cv = getConstIntValue(inst.getOperand(1));
+                llvm::Value* xv = inst.getOperand(0);
+                if (!cv) {
+                    cv = getConstIntValue(inst.getOperand(0));
+                    xv = inst.getOperand(1);
+                }
+                if (cv) {
+                    llvm::IRBuilder<> builder(&inst);
+                    llvm::Type* ty = inst.getType();
+                    auto mk = [&](int64_t v) { return llvm::ConstantInt::get(ty, v); };
+                    auto shl = [&](llvm::Value* v, int64_t s) {
+                        return builder.CreateShl(v, mk(s));
+                    };
+                    switch (*cv) {
+                    case 3:  simplified = builder.CreateAdd(shl(xv,1), xv, "mul3"); break;
+                    case 5:  simplified = builder.CreateAdd(shl(xv,2), xv, "mul5"); break;
+                    case 6:  simplified = builder.CreateAdd(shl(xv,2), shl(xv,1), "mul6"); break;
+                    case 7:  simplified = builder.CreateSub(shl(xv,3), xv, "mul7"); break;
+                    case 9:  simplified = builder.CreateAdd(shl(xv,3), xv, "mul9"); break;
+                    case 10: simplified = builder.CreateAdd(shl(xv,3), shl(xv,1), "mul10"); break;
+                    case 11: simplified = builder.CreateAdd(builder.CreateAdd(shl(xv,3), shl(xv,1)), xv, "mul11"); break;
+                    case 12: simplified = builder.CreateAdd(shl(xv,3), shl(xv,2), "mul12"); break;
+                    case 13: simplified = builder.CreateAdd(builder.CreateAdd(shl(xv,3), shl(xv,2)), xv, "mul13"); break;
+                    case 14: simplified = builder.CreateSub(shl(xv,4), shl(xv,1), "mul14"); break;
+                    case 15: simplified = builder.CreateSub(shl(xv,4), xv, "mul15"); break;
+                    case 17: simplified = builder.CreateAdd(shl(xv,4), xv, "mul17"); break;
+                    case 18: simplified = builder.CreateAdd(shl(xv,4), shl(xv,1), "mul18"); break;
+                    case 19: simplified = builder.CreateAdd(builder.CreateAdd(shl(xv,4), shl(xv,1)), xv, "mul19"); break;
+                    case 20: simplified = builder.CreateAdd(shl(xv,4), shl(xv,2), "mul20"); break;
+                    case 21: simplified = builder.CreateAdd(builder.CreateAdd(shl(xv,4), shl(xv,2)), xv, "mul21"); break;
+                    case 24: simplified = builder.CreateAdd(shl(xv,4), shl(xv,3), "mul24"); break;
+                    case 25: simplified = builder.CreateAdd(builder.CreateAdd(shl(xv,4), shl(xv,3)), xv, "mul25"); break;
+                    case 28: simplified = builder.CreateSub(shl(xv,5), shl(xv,2), "mul28"); break;
+                    case 31: simplified = builder.CreateSub(shl(xv,5), xv, "mul31"); break;
+                    case 33: simplified = builder.CreateAdd(shl(xv,5), xv, "mul33"); break;
+                    case 40: simplified = builder.CreateAdd(shl(xv,5), shl(xv,3), "mul40"); break;
+                    case 48: simplified = builder.CreateAdd(shl(xv,5), shl(xv,4), "mul48"); break;
+                    case 63: simplified = builder.CreateSub(shl(xv,6), xv, "mul63"); break;
+                    case 65: simplified = builder.CreateAdd(shl(xv,6), xv, "mul65"); break;
+                    case 96: simplified = builder.CreateAdd(shl(xv,6), shl(xv,5), "mul96"); break;
+                    case 127: simplified = builder.CreateSub(shl(xv,7), xv, "mul127"); break;
+                    case 255: simplified = builder.CreateSub(shl(xv,8), xv, "mul255"); break;
+                    default: break;
+                    }
+                }
+            }
+
+            // ── Constant arithmetic folding: (x op c1) op c2 → x op (c1 op c2) ─
+            // (x - c1) - c2 → x - (c1+c2)
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Sub) {
+                auto* inner = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                auto c2 = getConstIntValue(inst.getOperand(1));
+                if (inner && c2 && inner->getOpcode() == llvm::Instruction::Sub && hasOneUse(inner)) {
+                    auto c1 = getConstIntValue(inner->getOperand(1));
+                    if (c1) {
+                        llvm::IRBuilder<> builder(&inst);
+                        simplified = builder.CreateSub(inner->getOperand(0),
+                            llvm::ConstantInt::get(inst.getType(), *c1 + *c2), "sub_const_fold");
+                    }
+                }
+            }
+            // (x + c1) - c2 → x + (c1-c2)
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Sub) {
+                auto* inner = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                auto c2 = getConstIntValue(inst.getOperand(1));
+                if (inner && c2 && inner->getOpcode() == llvm::Instruction::Add && hasOneUse(inner)) {
+                    auto c1 = getConstIntValue(inner->getOperand(1));
+                    if (c1) {
+                        llvm::IRBuilder<> builder(&inst);
+                        int64_t diff = *c1 - *c2;
+                        if (diff == 0) {
+                            simplified = inner->getOperand(0);
+                        } else if (diff > 0) {
+                            simplified = builder.CreateAdd(inner->getOperand(0),
+                                llvm::ConstantInt::get(inst.getType(), diff), "add_sub_fold");
+                        } else {
+                            simplified = builder.CreateSub(inner->getOperand(0),
+                                llvm::ConstantInt::get(inst.getType(), -diff), "add_sub_fold2");
+                        }
+                    }
+                }
+            }
+            // (x - c1) + c2 → x + (c2-c1)
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Add) {
+                auto* inner = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                auto c2 = getConstIntValue(inst.getOperand(1));
+                if (inner && c2 && inner->getOpcode() == llvm::Instruction::Sub && hasOneUse(inner)) {
+                    auto c1 = getConstIntValue(inner->getOperand(1));
+                    if (c1) {
+                        llvm::IRBuilder<> builder(&inst);
+                        int64_t diff = *c2 - *c1;
+                        if (diff == 0) {
+                            simplified = inner->getOperand(0);
+                        } else if (diff > 0) {
+                            simplified = builder.CreateAdd(inner->getOperand(0),
+                                llvm::ConstantInt::get(inst.getType(), diff), "sub_add_fold");
+                        } else {
+                            simplified = builder.CreateSub(inner->getOperand(0),
+                                llvm::ConstantInt::get(inst.getType(), -diff), "sub_add_fold2");
+                        }
+                    }
+                }
+            }
+            // (x * c1) + x → x * (c1+1)
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Add) {
+                auto* inner = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                llvm::Value* rhs = inst.getOperand(1);
+                if (inner && inner->getOpcode() == llvm::Instruction::Mul && hasOneUse(inner)) {
+                    auto c1 = getConstIntValue(inner->getOperand(1));
+                    if (c1 && inner->getOperand(0) == rhs) {
+                        llvm::IRBuilder<> builder(&inst);
+                        simplified = builder.CreateMul(rhs,
+                            llvm::ConstantInt::get(inst.getType(), *c1 + 1), "mul_plus_x");
+                    }
+                }
+                if (!simplified) {
+                    inner = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
+                    llvm::Value* lhs = inst.getOperand(0);
+                    if (inner && inner->getOpcode() == llvm::Instruction::Mul && hasOneUse(inner)) {
+                        auto c1 = getConstIntValue(inner->getOperand(1));
+                        if (c1 && inner->getOperand(0) == lhs) {
+                            llvm::IRBuilder<> builder(&inst);
+                            simplified = builder.CreateMul(lhs,
+                                llvm::ConstantInt::get(inst.getType(), *c1 + 1), "mul_plus_x2");
+                        }
+                    }
+                }
+            }
+            // (x * c1) - x → x * (c1-1)
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Sub) {
+                auto* inner = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                llvm::Value* rhs = inst.getOperand(1);
+                if (inner && inner->getOpcode() == llvm::Instruction::Mul && hasOneUse(inner)) {
+                    auto c1 = getConstIntValue(inner->getOperand(1));
+                    if (c1 && inner->getOperand(0) == rhs) {
+                        llvm::IRBuilder<> builder(&inst);
+                        simplified = builder.CreateMul(rhs,
+                            llvm::ConstantInt::get(inst.getType(), *c1 - 1), "mul_minus_x");
+                    }
+                }
+            }
+            // x - (x * c) → x * (1-c)
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Sub) {
+                llvm::Value* lhs = inst.getOperand(0);
+                auto* inner = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
+                if (inner && inner->getOpcode() == llvm::Instruction::Mul && hasOneUse(inner)) {
+                    auto c1 = getConstIntValue(inner->getOperand(1));
+                    if (c1 && inner->getOperand(0) == lhs) {
+                        llvm::IRBuilder<> builder(&inst);
+                        simplified = builder.CreateMul(lhs,
+                            llvm::ConstantInt::get(inst.getType(), 1 - *c1), "x_minus_mul");
+                    }
+                }
+            }
+
+            // ── Nested AND/OR/XOR with constants ─────────────────────────────
+            // (x & c1) & c2 → x & (c1&c2)
+            if (!simplified && inst.getOpcode() == llvm::Instruction::And) {
+                auto* inner = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                auto c2 = getConstIntValue(inst.getOperand(1));
+                if (inner && c2 && inner->getOpcode() == llvm::Instruction::And && hasOneUse(inner)) {
+                    auto c1 = getConstIntValue(inner->getOperand(1));
+                    if (c1) {
+                        llvm::IRBuilder<> builder(&inst);
+                        simplified = builder.CreateAnd(inner->getOperand(0),
+                            llvm::ConstantInt::get(inst.getType(), *c1 & *c2), "and_const_fold");
+                    }
+                }
+            }
+            // (x | c1) | c2 → x | (c1|c2)
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Or) {
+                auto* inner = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                auto c2 = getConstIntValue(inst.getOperand(1));
+                if (inner && c2 && inner->getOpcode() == llvm::Instruction::Or && hasOneUse(inner)) {
+                    auto c1 = getConstIntValue(inner->getOperand(1));
+                    if (c1) {
+                        llvm::IRBuilder<> builder(&inst);
+                        simplified = builder.CreateOr(inner->getOperand(0),
+                            llvm::ConstantInt::get(inst.getType(), *c1 | *c2), "or_const_fold");
+                    }
+                }
+            }
+            // (x ^ c1) ^ c2 → x ^ (c1^c2)
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Xor) {
+                auto* inner = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                auto c2 = getConstIntValue(inst.getOperand(1));
+                if (inner && c2 && inner->getOpcode() == llvm::Instruction::Xor && hasOneUse(inner)) {
+                    auto c1 = getConstIntValue(inner->getOperand(1));
+                    if (c1) {
+                        llvm::IRBuilder<> builder(&inst);
+                        simplified = builder.CreateXor(inner->getOperand(0),
+                            llvm::ConstantInt::get(inst.getType(), *c1 ^ *c2), "xor_const_fold");
+                    }
+                }
+            }
+            // (x & c1) | (x & c2) → x & (c1|c2)
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Or) {
+                auto* lhs = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                auto* rhs = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
+                if (lhs && rhs &&
+                    lhs->getOpcode() == llvm::Instruction::And &&
+                    rhs->getOpcode() == llvm::Instruction::And &&
+                    lhs->getOperand(0) == rhs->getOperand(0) &&
+                    hasOneUse(lhs) && hasOneUse(rhs)) {
+                    auto c1 = getConstIntValue(lhs->getOperand(1));
+                    auto c2 = getConstIntValue(rhs->getOperand(1));
+                    if (c1 && c2) {
+                        llvm::IRBuilder<> builder(&inst);
+                        simplified = builder.CreateAnd(lhs->getOperand(0),
+                            llvm::ConstantInt::get(inst.getType(), *c1 | *c2), "and_masks_or");
+                    }
+                }
+            }
+            // (x | c1) & (x | c2) → x | (c1&c2)
+            if (!simplified && inst.getOpcode() == llvm::Instruction::And) {
+                auto* lhs = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                auto* rhs = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
+                if (lhs && rhs &&
+                    lhs->getOpcode() == llvm::Instruction::Or &&
+                    rhs->getOpcode() == llvm::Instruction::Or &&
+                    lhs->getOperand(0) == rhs->getOperand(0) &&
+                    hasOneUse(lhs) && hasOneUse(rhs)) {
+                    auto c1 = getConstIntValue(lhs->getOperand(1));
+                    auto c2 = getConstIntValue(rhs->getOperand(1));
+                    if (c1 && c2) {
+                        llvm::IRBuilder<> builder(&inst);
+                        simplified = builder.CreateOr(lhs->getOperand(0),
+                            llvm::ConstantInt::get(inst.getType(), *c1 & *c2), "or_masks_and");
+                    }
+                }
+            }
+
+            // ── XOR cancellation chains ────────────────────────────────────
+            // (x ^ y) ^ y → x
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Xor) {
+                auto* inner = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                llvm::Value* rhs = inst.getOperand(1);
+                if (inner && inner->getOpcode() == llvm::Instruction::Xor && hasOneUse(inner)) {
+                    if (inner->getOperand(1) == rhs) {
+                        simplified = inner->getOperand(0);
+                    } else if (inner->getOperand(0) == rhs) {
+                        simplified = inner->getOperand(1);
+                    }
+                }
+            }
+            // x ^ (x ^ y) → y
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Xor) {
+                llvm::Value* lhs = inst.getOperand(0);
+                auto* inner = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
+                if (inner && inner->getOpcode() == llvm::Instruction::Xor && hasOneUse(inner)) {
+                    if (inner->getOperand(0) == lhs) {
+                        simplified = inner->getOperand(1);
+                    } else if (inner->getOperand(1) == lhs) {
+                        simplified = inner->getOperand(0);
+                    }
+                }
+            }
+
+            // ── Shifts: shl/lshr/ashr by >= bitwidth → 0 or sign bit ────────
+            if (!simplified && (inst.getOpcode() == llvm::Instruction::Shl ||
+                                 inst.getOpcode() == llvm::Instruction::LShr)) {
+                auto c = getConstIntValue(inst.getOperand(1));
+                if (c && inst.getType()->isIntegerTy()) {
+                    unsigned bw = inst.getType()->getIntegerBitWidth();
+                    if (*c >= static_cast<int64_t>(bw)) {
+                        simplified = llvm::ConstantInt::get(inst.getType(), 0);
+                    }
+                }
+            }
+            if (!simplified && inst.getOpcode() == llvm::Instruction::AShr) {
+                auto c = getConstIntValue(inst.getOperand(1));
+                if (c && inst.getType()->isIntegerTy()) {
+                    unsigned bw = inst.getType()->getIntegerBitWidth();
+                    if (*c >= static_cast<int64_t>(bw)) {
+                        // AShr by >= bitwidth → sign extension = ashr x, (bw-1)
+                        llvm::IRBuilder<> builder(&inst);
+                        simplified = builder.CreateAShr(inst.getOperand(0),
+                            llvm::ConstantInt::get(inst.getType(), bw - 1), "ashr_clamp");
+                    }
+                }
+            }
+
+            // ── (shl x, c) + x → x * (1 + 2^c)  [for c <= 30] ──────────────
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Add) {
+                auto* shlInst = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                llvm::Value* xv = inst.getOperand(1);
+                if (shlInst && shlInst->getOpcode() == llvm::Instruction::Shl &&
+                    shlInst->getOperand(0) == xv && hasOneUse(shlInst)) {
+                    auto c = getConstIntValue(shlInst->getOperand(1));
+                    if (c && *c > 0 && *c <= 30) {
+                        llvm::IRBuilder<> builder(&inst);
+                        int64_t factor = (1LL << *c) + 1;
+                        simplified = builder.CreateMul(xv,
+                            llvm::ConstantInt::get(inst.getType(), factor), "shl_add_mul");
+                    }
+                }
+                if (!simplified) {
+                    shlInst = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
+                    xv = inst.getOperand(0);
+                    if (shlInst && shlInst->getOpcode() == llvm::Instruction::Shl &&
+                        shlInst->getOperand(0) == xv && hasOneUse(shlInst)) {
+                        auto c = getConstIntValue(shlInst->getOperand(1));
+                        if (c && *c > 0 && *c <= 30) {
+                            llvm::IRBuilder<> builder(&inst);
+                            int64_t factor = (1LL << *c) + 1;
+                            simplified = builder.CreateMul(xv,
+                                llvm::ConstantInt::get(inst.getType(), factor), "shl_add_mul2");
+                        }
+                    }
+                }
+            }
+            // ── (shl x, c) - x → x * (2^c - 1) ─────────────────────────────
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Sub) {
+                auto* shlInst = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                llvm::Value* xv = inst.getOperand(1);
+                if (shlInst && shlInst->getOpcode() == llvm::Instruction::Shl &&
+                    shlInst->getOperand(0) == xv && hasOneUse(shlInst)) {
+                    auto c = getConstIntValue(shlInst->getOperand(1));
+                    if (c && *c > 0 && *c <= 30) {
+                        llvm::IRBuilder<> builder(&inst);
+                        int64_t factor = (1LL << *c) - 1;
+                        simplified = builder.CreateMul(xv,
+                            llvm::ConstantInt::get(inst.getType(), factor), "shl_sub_mul");
+                    }
+                }
+            }
+
+            // ── (shl x, c1) + (shl x, c2) → x * (2^c1 + 2^c2) ─────────────
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Add) {
+                auto* shl1 = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                auto* shl2 = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
+                if (shl1 && shl2 &&
+                    shl1->getOpcode() == llvm::Instruction::Shl &&
+                    shl2->getOpcode() == llvm::Instruction::Shl &&
+                    shl1->getOperand(0) == shl2->getOperand(0) &&
+                    hasOneUse(shl1) && hasOneUse(shl2)) {
+                    auto c1 = getConstIntValue(shl1->getOperand(1));
+                    auto c2 = getConstIntValue(shl2->getOperand(1));
+                    if (c1 && c2 && *c1 >= 0 && *c2 >= 0 && *c1 <= 30 && *c2 <= 30) {
+                        llvm::IRBuilder<> builder(&inst);
+                        int64_t factor = (1LL << *c1) + (1LL << *c2);
+                        simplified = builder.CreateMul(shl1->getOperand(0),
+                            llvm::ConstantInt::get(inst.getType(), factor), "shl_shl_add_mul");
+                    }
+                }
+            }
+            // ── (shl x, c1) - (shl x, c2) → x * (2^c1 - 2^c2) ─────────────
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Sub) {
+                auto* shl1 = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                auto* shl2 = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
+                if (shl1 && shl2 &&
+                    shl1->getOpcode() == llvm::Instruction::Shl &&
+                    shl2->getOpcode() == llvm::Instruction::Shl &&
+                    shl1->getOperand(0) == shl2->getOperand(0) &&
+                    hasOneUse(shl1) && hasOneUse(shl2)) {
+                    auto c1 = getConstIntValue(shl1->getOperand(1));
+                    auto c2 = getConstIntValue(shl2->getOperand(1));
+                    if (c1 && c2 && *c1 >= 0 && *c2 >= 0 && *c1 <= 30 && *c2 <= 30 && *c1 > *c2) {
+                        llvm::IRBuilder<> builder(&inst);
+                        int64_t factor = (1LL << *c1) - (1LL << *c2);
+                        simplified = builder.CreateMul(shl1->getOperand(0),
+                            llvm::ConstantInt::get(inst.getType(), factor), "shl_shl_sub_mul");
+                    }
+                }
+            }
+
+            // ── mul(add(x,c1), c2) → add(mul(x,c2), c1*c2) ─────────────────
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Mul) {
+                auto* inner = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                auto c2 = getConstIntValue(inst.getOperand(1));
+                if (inner && c2 && inner->getOpcode() == llvm::Instruction::Add && hasOneUse(inner)) {
+                    auto c1 = getConstIntValue(inner->getOperand(1));
+                    if (c1) {
+                        llvm::IRBuilder<> builder(&inst);
+                        llvm::Value* xc2 = builder.CreateMul(inner->getOperand(0),
+                            llvm::ConstantInt::get(inst.getType(), *c2), "mul_dist");
+                        simplified = builder.CreateAdd(xc2,
+                            llvm::ConstantInt::get(inst.getType(), *c1 * *c2), "mul_dist_add");
+                    }
+                }
+            }
+            // ── mul(sub(x,c1), c2) → sub(mul(x,c2), c1*c2) ─────────────────
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Mul) {
+                auto* inner = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                auto c2 = getConstIntValue(inst.getOperand(1));
+                if (inner && c2 && inner->getOpcode() == llvm::Instruction::Sub && hasOneUse(inner)) {
+                    auto c1 = getConstIntValue(inner->getOperand(1));
+                    if (c1) {
+                        llvm::IRBuilder<> builder(&inst);
+                        llvm::Value* xc2 = builder.CreateMul(inner->getOperand(0),
+                            llvm::ConstantInt::get(inst.getType(), *c2), "mul_dist_sub");
+                        simplified = builder.CreateSub(xc2,
+                            llvm::ConstantInt::get(inst.getType(), *c1 * *c2), "mul_dist_sub2");
+                    }
+                }
+            }
+
+            // ── add(mul(x,c1), mul(y,c1)) → mul(add(x,y), c1) ──────────────
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Add) {
+                auto* lhsi = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                auto* rhsi = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
+                if (lhsi && rhsi &&
+                    lhsi->getOpcode() == llvm::Instruction::Mul &&
+                    rhsi->getOpcode() == llvm::Instruction::Mul &&
+                    hasOneUse(lhsi) && hasOneUse(rhsi)) {
+                    auto c1 = getConstIntValue(lhsi->getOperand(1));
+                    auto c2 = getConstIntValue(rhsi->getOperand(1));
+                    if (c1 && c2 && *c1 == *c2) {
+                        llvm::IRBuilder<> builder(&inst);
+                        llvm::Value* sum = builder.CreateAdd(lhsi->getOperand(0), rhsi->getOperand(0), "factored_add");
+                        simplified = builder.CreateMul(sum,
+                            llvm::ConstantInt::get(inst.getType(), *c1), "factored_mul");
+                    }
+                }
+            }
+            // ── sub(mul(x,c1), mul(y,c1)) → mul(sub(x,y), c1) ──────────────
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Sub) {
+                auto* lhsi = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                auto* rhsi = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
+                if (lhsi && rhsi &&
+                    lhsi->getOpcode() == llvm::Instruction::Mul &&
+                    rhsi->getOpcode() == llvm::Instruction::Mul &&
+                    hasOneUse(lhsi) && hasOneUse(rhsi)) {
+                    auto c1 = getConstIntValue(lhsi->getOperand(1));
+                    auto c2 = getConstIntValue(rhsi->getOperand(1));
+                    if (c1 && c2 && *c1 == *c2) {
+                        llvm::IRBuilder<> builder(&inst);
+                        llvm::Value* diff = builder.CreateSub(lhsi->getOperand(0), rhsi->getOperand(0), "factored_sub");
+                        simplified = builder.CreateMul(diff,
+                            llvm::ConstantInt::get(inst.getType(), *c1), "factored_mul2");
+                    }
+                }
+            }
+
+            // ── icmp: fold comparisons with offset ───────────────────────────
+            // icmp eq (add x, c), 0 → icmp eq x, -c
+            if (!simplified && inst.getOpcode() == llvm::Instruction::ICmp) {
+                auto* cmp = llvm::cast<llvm::ICmpInst>(&inst);
+                if (cmp->getPredicate() == llvm::ICmpInst::ICMP_EQ ||
+                    cmp->getPredicate() == llvm::ICmpInst::ICMP_NE) {
+                    auto* addInst = llvm::dyn_cast<llvm::BinaryOperator>(cmp->getOperand(0));
+                    if (addInst && addInst->getOpcode() == llvm::Instruction::Add &&
+                        isConstInt(cmp->getOperand(1), 0)) {
+                        auto c = getConstIntValue(addInst->getOperand(1));
+                        if (c) {
+                            llvm::IRBuilder<> builder(&inst);
+                            llvm::Value* newCmp = builder.CreateICmp(cmp->getPredicate(),
+                                addInst->getOperand(0),
+                                llvm::ConstantInt::get(addInst->getType(), -*c), "cmp_add_fold");
+                            simplified = newCmp;
+                        }
+                    }
+                }
+            }
+            // icmp eq (sub x, c), 0 → icmp eq x, c
+            if (!simplified && inst.getOpcode() == llvm::Instruction::ICmp) {
+                auto* cmp = llvm::cast<llvm::ICmpInst>(&inst);
+                if (cmp->getPredicate() == llvm::ICmpInst::ICMP_EQ ||
+                    cmp->getPredicate() == llvm::ICmpInst::ICMP_NE) {
+                    auto* subInst = llvm::dyn_cast<llvm::BinaryOperator>(cmp->getOperand(0));
+                    if (subInst && subInst->getOpcode() == llvm::Instruction::Sub &&
+                        isConstInt(cmp->getOperand(1), 0)) {
+                        auto c = getConstIntValue(subInst->getOperand(1));
+                        if (c) {
+                            llvm::IRBuilder<> builder(&inst);
+                            llvm::Value* newCmp = builder.CreateICmp(cmp->getPredicate(),
+                                subInst->getOperand(0),
+                                llvm::ConstantInt::get(subInst->getType(), *c), "cmp_sub_fold");
+                            simplified = newCmp;
+                        }
+                    }
+                }
+            }
+            // icmp ult x, 1 → icmp eq x, 0
+            if (!simplified && inst.getOpcode() == llvm::Instruction::ICmp) {
+                auto* cmp = llvm::cast<llvm::ICmpInst>(&inst);
+                if (cmp->getPredicate() == llvm::ICmpInst::ICMP_ULT &&
+                    isConstInt(cmp->getOperand(1), 1)) {
+                    llvm::IRBuilder<> builder(&inst);
+                    simplified = builder.CreateICmpEQ(cmp->getOperand(0),
+                        llvm::ConstantInt::get(cmp->getOperand(0)->getType(), 0), "ult1_eq0");
+                }
+            }
+            // icmp ugt x, 0 → icmp ne x, 0
+            if (!simplified && inst.getOpcode() == llvm::Instruction::ICmp) {
+                auto* cmp = llvm::cast<llvm::ICmpInst>(&inst);
+                if (cmp->getPredicate() == llvm::ICmpInst::ICMP_UGT &&
+                    isConstInt(cmp->getOperand(1), 0)) {
+                    llvm::IRBuilder<> builder(&inst);
+                    simplified = builder.CreateICmpNE(cmp->getOperand(0),
+                        llvm::ConstantInt::get(cmp->getOperand(0)->getType(), 0), "ugt0_ne0");
+                }
+            }
+
+            // ── ~x + 1 → -x  (two's complement negate pattern) ───────────────
+            // In LLVM IR: xor(x,-1) + 1 = -x
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Add) {
+                if (isConstInt(inst.getOperand(1), 1)) {
+                    auto* xorInst = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                    if (xorInst && xorInst->getOpcode() == llvm::Instruction::Xor &&
+                        hasOneUse(xorInst)) {
+                        if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(xorInst->getOperand(1))) {
+                            if (ci->isMinusOne()) {
+                                llvm::IRBuilder<> builder(&inst);
+                                simplified = builder.CreateNeg(xorInst->getOperand(0), "bitnot_plus1_neg");
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── mul(x, -1) → 0 - x  (negate) ────────────────────────────────
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Mul) {
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1))) {
+                    if (ci->isMinusOne()) {
+                        llvm::IRBuilder<> builder(&inst);
+                        simplified = builder.CreateNeg(inst.getOperand(0), "mul_negone");
+                    }
+                } else if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(0))) {
+                    if (ci->isMinusOne()) {
+                        llvm::IRBuilder<> builder(&inst);
+                        simplified = builder.CreateNeg(inst.getOperand(1), "mul_negone2");
+                    }
+                }
+            }
+
+            // ── and(x, -1) → x  (already covered but add variant) ────────────
+            // ── or(x, -1) → -1  (already covered) ─────────────────────────────
+
+            // ── (x + y) - x → y  and  (y + x) - x → y ───────────────────────
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Sub) {
+                auto* addInst = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                llvm::Value* xv = inst.getOperand(1);
+                if (addInst && addInst->getOpcode() == llvm::Instruction::Add) {
+                    if (addInst->getOperand(0) == xv) {
+                        simplified = addInst->getOperand(1);
+                    } else if (addInst->getOperand(1) == xv) {
+                        simplified = addInst->getOperand(0);
+                    }
+                }
+            }
+
+            // ── x - (y - x) → 2*x - y → (x << 1) - y ───────────────────────
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Sub) {
+                llvm::Value* xv = inst.getOperand(0);
+                auto* subInst = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
+                if (subInst && subInst->getOpcode() == llvm::Instruction::Sub &&
+                    subInst->getOperand(1) == xv && hasOneUse(subInst)) {
+                    llvm::IRBuilder<> builder(&inst);
+                    llvm::Value* x2 = builder.CreateShl(xv,
+                        llvm::ConstantInt::get(inst.getType(), 1), "x2");
+                    simplified = builder.CreateSub(x2, subInst->getOperand(0), "x_minus_y_minus_x");
+                }
+            }
+
+            // ── a - (a - b) → b ───────────────────────────────────────────────
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Sub) {
+                llvm::Value* av = inst.getOperand(0);
+                auto* inner = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
+                if (inner && inner->getOpcode() == llvm::Instruction::Sub &&
+                    inner->getOperand(0) == av && hasOneUse(inner)) {
+                    simplified = inner->getOperand(1);
+                }
+            }
+
+            // ── (a - b) + b → a ───────────────────────────────────────────────
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Add) {
+                auto* inner = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                llvm::Value* bv = inst.getOperand(1);
+                if (inner && inner->getOpcode() == llvm::Instruction::Sub &&
+                    inner->getOperand(1) == bv && hasOneUse(inner)) {
+                    simplified = inner->getOperand(0);
+                }
+                if (!simplified) {
+                    inner = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
+                    bv = inst.getOperand(0);
+                    if (inner && inner->getOpcode() == llvm::Instruction::Sub &&
+                        inner->getOperand(1) == bv && hasOneUse(inner)) {
+                        simplified = inner->getOperand(0);
+                    }
+                }
+            }
+
             if (simplified) {
                 inst.replaceAllUsesWith(simplified);
                 toErase.push_back(&inst);
