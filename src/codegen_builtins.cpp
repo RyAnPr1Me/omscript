@@ -783,10 +783,25 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* len1 = builder->CreateCall(getOrDeclareStrlen(), {lhsPtr}, "concat.len1");
         llvm::Value* len2 = builder->CreateCall(getOrDeclareStrlen(), {rhsPtr}, "concat.len2");
         llvm::Value* totalLen = builder->CreateAdd(len1, len2, "concat.totallen");
-        llvm::Value* allocSize =
-            builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "concat.allocsize");
+        // Allocate with power-of-2 rounding for amortized O(1) growth.
+        // This matches C's realloc(cap*=2) strategy: the extra capacity
+        // means subsequent realloc calls (below) often extend in-place.
+        llvm::Value* rawSize =
+            builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "concat.rawsize");
+        // Round up to next power of 2 (minimum 32) to reduce realloc frequency
+        llvm::Value* one64 = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* v = builder->CreateSub(rawSize, one64, "concat.pm1");
+        v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 1)), "concat.p2a");
+        v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 2)), "concat.p2b");
+        v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 4)), "concat.p2c");
+        v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 8)), "concat.p2d");
+        v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 16)), "concat.p2e");
+        v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 32)), "concat.p2f");
+        llvm::Value* allocSize = builder->CreateAdd(v, one64, "concat.allocsize");
+        llvm::Value* minCap = llvm::ConstantInt::get(getDefaultType(), 32);
+        llvm::Value* useMin = builder->CreateICmpSLT(allocSize, minCap, "concat.usemin");
+        allocSize = builder->CreateSelect(useMin, minCap, allocSize, "concat.finalcap");
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {allocSize}, "concat.buf");
-        // Use memcpy instead of strcpy+strcat to avoid O(n) rescan of the buffer.
         // memcpy(buf, lhs, len1)
         builder->CreateCall(getOrDeclareMemcpy(), {buf, lhsPtr, len1});
         // memcpy(buf + len1, rhs, len2)
