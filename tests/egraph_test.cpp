@@ -283,8 +283,8 @@ TEST(EGraphTest, DivPow2ToShift) {
     auto rules = getAlgebraicRules();
     g.saturate(rules);
 
-    // x/4 should NOT be equivalent to x>>2 for signed integers
-    // (e.g. -7/4 = -1, but -7>>2 = -2 due to rounding toward -inf).
+    // x/4 should NOT be equivalent to x>>2 for signed integers.
+    // With logical (unsigned) shift: -7/4 = -1, but -7>>2 = (uint64)(-7)>>2 (a huge number).
     // The div_pow2 rules were removed to fix this signed-division bug.
     ClassId two = g.addConst(2);
     ClassId shiftExpr = g.addBinOp(Op::Shr, x, two);

@@ -563,7 +563,7 @@ Operators are listed from **highest** to **lowest** precedence:
 | 4 | `**` | Right | Exponentiation |
 | 5 | `*` `/` `%` | Left | Multiplication, division, modulo |
 | 6 | `+` `-` | Left | Addition, subtraction |
-| 7 | `<<` `>>` | Left | Bitwise left shift, arithmetic right shift |
+| 7 | `<<` `>>` | Left | Bitwise left shift, logical right shift |
 | 8 | `<` `<=` `>` `>=` | Left | Relational comparison |
 | 9 | `==` `!=` | Left | Equality comparison |
 | 10 | `&` | Left | Bitwise AND |
@@ -642,7 +642,7 @@ if (1 || (y = 2)) { }
 | `^` | `a ^ b` | Bitwise XOR |
 | `~` | `~a` | Bitwise NOT (complement) |
 | `<<` | `a << n` | Left shift |
-| `>>` | `a >> n` | Arithmetic right shift (sign-extending) |
+| `>>` | `a >> n` | Logical right shift (zero-filling) |
 
 ```javascript
 var a = 12 & 10;     // 1100 & 1010 = 1000 = 8

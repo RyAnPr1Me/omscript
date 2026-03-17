@@ -15,7 +15,7 @@ fn main() {
     // Left shift
     var e = 1 << 4;       // 16
 
-    // Right shift (arithmetic)
+    // Right shift (logical)
     var f = 32 >> 2;      // 8
 
     // Combined: (-1 + 8 + 14 + 6 + 16 + 8) = 51

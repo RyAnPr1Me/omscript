@@ -339,11 +339,11 @@ void EGraph::foldConstants(ClassId cls) {
                 case Op::BitOr:  result = lv | rv; break;
                 case Op::BitXor: result = lv ^ rv; break;
                 case Op::Shl:
-                    if (rv >= 0 && rv < 64) result = lv << rv;
+                    if (rv >= 0 && rv < 64) result = static_cast<long long>(static_cast<unsigned long long>(lv) << static_cast<unsigned long long>(rv));
                     else valid = false;
                     break;
                 case Op::Shr:
-                    if (rv >= 0 && rv < 64) result = lv >> rv;
+                    if (rv >= 0 && rv < 64) result = static_cast<long long>(static_cast<unsigned long long>(lv) >> static_cast<unsigned long long>(rv));
                     else valid = false;
                     break;
                 case Op::Eq:     result = (lv == rv) ? 1 : 0; break;
@@ -5318,25 +5318,10 @@ std::vector<RewriteRule> getAdvancedBitwiseRules() {
     // Additional constants with bitwise ops
     // ─────────────────────────────────────────────────────────────────────
 
-    // x & 255 → x % 256 (mask to byte)
-    rules.emplace_back("and_255_to_mod256",
-        P::OpPat(Op::BitAnd, {P::Wild("x"), P::ConstPat(255)}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Mod, s.at("x"), g.addConst(256)); });
-
-    // x % 256 → x & 255
-    rules.emplace_back("mod256_to_and_255",
-        P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(256)}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(255)); });
-
-    // x & 65535 → x % 65536
-    rules.emplace_back("and_65535_to_mod",
-        P::OpPat(Op::BitAnd, {P::Wild("x"), P::ConstPat(65535LL)}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Mod, s.at("x"), g.addConst(65536LL)); });
-
-    // x % 65536 → x & 65535
-    rules.emplace_back("mod65536_to_and",
-        P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(65536LL)}),
-        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(65535LL)); });
+    // NOTE: x & 255 and x % 256 (and the 65535/65536 variants) are NOT
+    // equivalent for negative x under signed (truncating) modulo:
+    //   -1 & 255 == 255, but -1 % 256 == -1.
+    // These rules are intentionally omitted to avoid miscompilation.
 
     // ─────────────────────────────────────────────────────────────────────
     // Bitwise with shifts - additional patterns
