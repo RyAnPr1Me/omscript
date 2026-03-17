@@ -21,15 +21,15 @@ fn heavy_math(n:int) {
     return acc;
 }
 
-fn array_work(n:int) {
-    var arr = [0];
+fn array_work(n:int) -> int {
+    var arr:int[] = [0];
     for (i:int in 0...n) {
         arr = push(arr, (i * 3) % 12345);
     }
 
-    var mapped = array_map(arr, |x:int| (x * x) % 1000);
-    var filtered = array_filter(mapped, |x:int| x % 2 == 0);
-    var reduced = array_reduce(filtered, |a:int, b:int| a + b, 0);
+    var mapped:int[] = array_map(arr, |x:int| (x * x) % 1000);
+    var filtered:int[] = array_filter(mapped, |x:int| x % 2 == 0);
+    var reduced:int = array_reduce(filtered, |a:int, b:int| a + b, 0);
 
     return reduced + len(filtered);
 }
@@ -43,7 +43,7 @@ fn string_work(n:int) -> int {
 }
 
 fn struct_work(n:int) -> int {
-    var: Point  = Point { x: 1, y: 2 };
+    var p:ptr = Point { x: 1, y: 2 };
     var sum:int = 0;
     for (i:int in 0...n) {
         p.x += i;
