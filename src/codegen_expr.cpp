@@ -1099,12 +1099,15 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         // Mask shift amount to [0, 63] to prevent undefined behavior
         llvm::Value* mask = llvm::ConstantInt::get(getDefaultType(), 63);
         llvm::Value* safeShift = builder->CreateAnd(right, mask, "shlmask");
-        return builder->CreateShl(left, safeShift, "shltmp", /*HasNUW=*/false, /*HasNSW=*/true);
+        // Do NOT set nsw/nuw: left-shifts on arbitrary values can overflow,
+        // and marking nsw would let LLVM treat overflowing shifts as poison.
+        return builder->CreateShl(left, safeShift, "shltmp");
     } else if (expr->op == ">>") {
         // Mask shift amount to [0, 63] to prevent undefined behavior
         llvm::Value* mask = llvm::ConstantInt::get(getDefaultType(), 63);
         llvm::Value* safeShift = builder->CreateAnd(right, mask, "shrmask");
-        return builder->CreateAShr(left, safeShift, "ashrtmp");
+        // Logical (unsigned) shift right: fills high bits with 0.
+        return builder->CreateLShr(left, safeShift, "lshrtmp");
     } else if (expr->op == "**") {
         // Small constant exponent specialization — emit inline multiplications
         // instead of the general binary-exponentiation loop.  This eliminates

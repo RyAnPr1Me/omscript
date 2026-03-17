@@ -32,7 +32,7 @@ uint64_t stress(uint64_t n) {
 
 int main() {
     uint64_t r = stress(100000000);
-    printf("%llu\n", (unsigned long long)r);
+    printf("%lld\n", (long long)r);
 }
 EOF
 
