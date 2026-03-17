@@ -27,14 +27,14 @@ fn array_work(n:int) {
         arr = push(arr, (i * 3) % 12345);
     }
 
-    var mapped = array_map(arr, |x:int| (x:int * x:int) % 1000);
-    var filtered = array_filter(mapped, |x:int| x:int % 2 == 0);
-    var reduced = array_reduce(filtered, |a:int, b:int| a:int + b:int, 0);
+    var mapped = array_map(arr, |x:int| (x * x) % 1000);
+    var filtered = array_filter(mapped, |x:int| x % 2 == 0);
+    var reduced = array_reduce(filtered, |a:int, b:int| a + b, 0);
 
     return reduced + len(filtered);
 }
 
-fn string_work(n) {
+fn string_work(n:int) -> int {
     var s: = "bench";
     for (i in 0...n) {
         s = str_concat(s, to_string(i % 10));
@@ -42,7 +42,7 @@ fn string_work(n) {
     return str_len(s);
 }
 
-fn struct_work(n) {
+fn struct_work(n) -> int {
     var p = Point { x: 1, y: 2 };
     var sum:int = 0;
     for (i:int in 0...n) {
@@ -53,7 +53,7 @@ fn struct_work(n) {
     return sum;
 }
 
-fn branching(n) {
+fn branching(n:int) -> int {
     var sum:int = 0;
     for (i:int in 0...n) {
         switch (i % 4) {
@@ -66,7 +66,7 @@ fn branching(n) {
     return sum;
 }
 
-fn edge_cases() {
+fn edge_cases() -> int {
     assert(gcd(0, 5) == 5);
     assert(log2(1) == 0);
     assert(is_even(4) == 1);
@@ -75,7 +75,7 @@ fn edge_cases() {
     return 1;
 }
 
-fn main() {
+fn main() -> int {
     var n:int = input();
 
     var total:int =
