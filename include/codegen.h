@@ -263,6 +263,10 @@ class CodeGenerator {
     std::unordered_set<std::string> stringReturningFunctions_;
     std::unordered_map<std::string, std::unordered_set<size_t>> funcParamStringTypes_;
     std::unordered_set<std::string> stringArrayVars_;
+    // stringLenCache_: maps string variable names to an alloca that caches the
+    // current strlen of the variable's value.  Used by str_concat to avoid
+    // O(n) strlen calls on growing strings in append loops.
+    std::unordered_map<std::string, llvm::AllocaInst*> stringLenCache_;
 
     /// Classify a function into its execution tier based on type annotations,
     /// OPTMAX status, and whether it is a special function (main/stdlib).

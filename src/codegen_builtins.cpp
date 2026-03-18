@@ -780,15 +780,69 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             rhsArg->getType()->isPointerTy()
                 ? rhsArg
                 : builder->CreateIntToPtr(rhsArg, llvm::PointerType::getUnqual(*context), "concat.rhs");
-        llvm::Value* len1 = builder->CreateCall(getOrDeclareStrlen(), {lhsPtr}, "concat.len1");
+
+        // Optimization: use a length-cache alloca for the LHS string variable.
+        // On the first call, we compute strlen and store the result; on
+        // subsequent loop iterations (at runtime), the cached value is loaded
+        // instead of calling strlen again.  This turns O(n²) append loops
+        // into amortized O(n).
+        std::string lhsVarName;
+        llvm::AllocaInst* lenCacheAlloca = nullptr;
+        if (expr->arguments[0]->type == ASTNodeType::IDENTIFIER_EXPR) {
+            auto* id = static_cast<IdentifierExpr*>(expr->arguments[0].get());
+            lhsVarName = id->name;
+            auto cacheIt = stringLenCache_.find(lhsVarName);
+            if (cacheIt != stringLenCache_.end()) {
+                lenCacheAlloca = cacheIt->second;
+            } else {
+                // Lazily create the cache alloca in the entry block.
+                llvm::Function* fn = builder->GetInsertBlock()->getParent();
+                lenCacheAlloca = createEntryBlockAlloca(fn, lhsVarName + ".strlen");
+                // Initialize with -1 sentinel (meaning "not yet computed").
+                // Insert the store right after the alloca in the entry block.
+                llvm::IRBuilder<> entryBuilder(lenCacheAlloca->getNextNode());
+                entryBuilder.CreateStore(
+                    llvm::ConstantInt::get(getDefaultType(), -1, true), lenCacheAlloca);
+                stringLenCache_[lhsVarName] = lenCacheAlloca;
+            }
+        }
+
+        llvm::Value* len1;
+        if (lenCacheAlloca) {
+            // Load cached length; if -1 (sentinel), fall back to strlen.
+            llvm::Value* cachedLen = builder->CreateLoad(getDefaultType(), lenCacheAlloca, "concat.cachedlen1");
+            llvm::Value* isSentinel = builder->CreateICmpEQ(
+                cachedLen, llvm::ConstantInt::get(getDefaultType(), -1, true), "concat.issent");
+            llvm::Function* fn = builder->GetInsertBlock()->getParent();
+            llvm::BasicBlock* cachedBB = builder->GetInsertBlock();
+            llvm::BasicBlock* strlenBB = llvm::BasicBlock::Create(*context, "concat.strlen", fn);
+            llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "concat.merge", fn);
+            builder->CreateCondBr(isSentinel, strlenBB, mergeBB);
+
+            builder->SetInsertPoint(strlenBB);
+            llvm::Value* realLen = builder->CreateCall(getOrDeclareStrlen(), {lhsPtr}, "concat.len1.real");
+            builder->CreateBr(mergeBB);
+
+            builder->SetInsertPoint(mergeBB);
+            llvm::PHINode* phi = builder->CreatePHI(getDefaultType(), 2, "concat.len1");
+            phi->addIncoming(cachedLen, cachedBB);
+            phi->addIncoming(realLen, strlenBB);
+            len1 = phi;
+        } else {
+            len1 = builder->CreateCall(getOrDeclareStrlen(), {lhsPtr}, "concat.len1");
+        }
         llvm::Value* len2 = builder->CreateCall(getOrDeclareStrlen(), {rhsPtr}, "concat.len2");
         llvm::Value* totalLen = builder->CreateAdd(len1, len2, "concat.totallen");
+
+        // Update the string length cache for the LHS variable.
+        if (lenCacheAlloca) {
+            builder->CreateStore(totalLen, lenCacheAlloca);
+        }
+
         // Determine whether the LHS came from a heap allocation (variable load
         // or call return) vs a string literal in read-only memory.  If heap,
         // we can realloc in-place with power-of-2 capacity to avoid copying the
-        // entire LHS on every append — this turns the common
-        //   s = str_concat(s, "y")
-        // loop from O(n²) to amortized O(n).
+        // entire LHS on every append.
         bool lhsIsHeap = false;
         if (expr->arguments[0]->type == ASTNodeType::IDENTIFIER_EXPR) {
             auto* id = static_cast<IdentifierExpr*>(expr->arguments[0].get());
