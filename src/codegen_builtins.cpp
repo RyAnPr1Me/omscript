@@ -783,16 +783,48 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* len1 = builder->CreateCall(getOrDeclareStrlen(), {lhsPtr}, "concat.len1");
         llvm::Value* len2 = builder->CreateCall(getOrDeclareStrlen(), {rhsPtr}, "concat.len2");
         llvm::Value* totalLen = builder->CreateAdd(len1, len2, "concat.totallen");
-        llvm::Value* allocSize =
-            builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "concat.allocsize");
-        // Always use malloc for the new buffer.  The LHS pointer may refer to
-        // a string literal in read-only memory, so realloc would segfault.
-        llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {allocSize}, "concat.buf");
-        // memcpy(buf, lhs, len1) — copy LHS into the new buffer
-        builder->CreateCall(getOrDeclareMemcpy(), {buf, lhsPtr, len1});
-        // memcpy(buf + len1, rhs, len2) — append RHS
-        llvm::Value* dst2 = builder->CreateGEP(builder->getInt8Ty(), buf, len1, "concat.dst2");
-        builder->CreateCall(getOrDeclareMemcpy(), {dst2, rhsPtr, len2});
+        // Determine whether the LHS came from a heap allocation (variable load
+        // or call return) vs a string literal in read-only memory.  If heap,
+        // we can realloc in-place with power-of-2 capacity to avoid copying the
+        // entire LHS on every append — this turns the common
+        //   s = str_concat(s, "y")
+        // loop from O(n²) to amortized O(n).
+        bool lhsIsHeap = false;
+        if (expr->arguments[0]->type == ASTNodeType::IDENTIFIER_EXPR) {
+            auto* id = static_cast<IdentifierExpr*>(expr->arguments[0].get());
+            if (stringVars_.count(id->name))
+                lhsIsHeap = true;
+        } else if (expr->arguments[0]->type == ASTNodeType::CALL_EXPR) {
+            lhsIsHeap = true;
+        }
+        llvm::Value* buf;
+        if (lhsIsHeap) {
+            // Round allocation up to next power of 2 for amortized O(1) realloc.
+            llvm::Value* minSize =
+                builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "concat.minsize");
+            llvm::Value* one64 = llvm::ConstantInt::get(getDefaultType(), 1);
+            llvm::Value* v = builder->CreateSub(minSize, one64, "concat.pm1");
+            v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 1)));
+            v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 2)));
+            v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 4)));
+            v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 8)));
+            v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 16)));
+            v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 32)));
+            llvm::Value* allocSize = builder->CreateAdd(v, one64, "concat.allocsize");
+            buf = builder->CreateCall(getOrDeclareRealloc(), {lhsPtr, allocSize}, "concat.buf");
+            // memcpy(buf + len1, rhs, len2) — only append the RHS portion
+            llvm::Value* dst2 = builder->CreateGEP(builder->getInt8Ty(), buf, len1, "concat.dst2");
+            builder->CreateCall(getOrDeclareMemcpy(), {dst2, rhsPtr, len2});
+        } else {
+            llvm::Value* allocSize =
+                builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "concat.allocsize");
+            buf = builder->CreateCall(getOrDeclareMalloc(), {allocSize}, "concat.buf");
+            // memcpy(buf, lhs, len1) — copy LHS into the new buffer
+            builder->CreateCall(getOrDeclareMemcpy(), {buf, lhsPtr, len1});
+            // memcpy(buf + len1, rhs, len2) — append RHS
+            llvm::Value* dst2 = builder->CreateGEP(builder->getInt8Ty(), buf, len1, "concat.dst2");
+            builder->CreateCall(getOrDeclareMemcpy(), {dst2, rhsPtr, len2});
+        }
         // null-terminate: buf[totalLen] = '\0'
         llvm::Value* endPtr = builder->CreateGEP(builder->getInt8Ty(), buf, totalLen, "concat.end");
         builder->CreateStore(builder->getInt8(0), endPtr);
