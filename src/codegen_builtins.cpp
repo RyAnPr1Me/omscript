@@ -783,28 +783,13 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* len1 = builder->CreateCall(getOrDeclareStrlen(), {lhsPtr}, "concat.len1");
         llvm::Value* len2 = builder->CreateCall(getOrDeclareStrlen(), {rhsPtr}, "concat.len2");
         llvm::Value* totalLen = builder->CreateAdd(len1, len2, "concat.totallen");
-        // Allocate with power-of-2 rounding for amortized O(1) growth.
-        // This matches C's realloc(cap*=2) strategy: the extra capacity
-        // means subsequent realloc calls (below) often extend in-place.
-        llvm::Value* rawSize =
-            builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "concat.rawsize");
-        // Round up to next power of 2 (minimum 32) to reduce realloc frequency
-        llvm::Value* one64 = llvm::ConstantInt::get(getDefaultType(), 1);
-        llvm::Value* v = builder->CreateSub(rawSize, one64, "concat.pm1");
-        v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 1)), "concat.p2a");
-        v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 2)), "concat.p2b");
-        v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 4)), "concat.p2c");
-        v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 8)), "concat.p2d");
-        v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 16)), "concat.p2e");
-        v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 32)), "concat.p2f");
-        llvm::Value* allocSize = builder->CreateAdd(v, one64, "concat.allocsize");
-        llvm::Value* minCap = llvm::ConstantInt::get(getDefaultType(), 32);
-        llvm::Value* useMin = builder->CreateICmpSLT(allocSize, minCap, "concat.usemin");
-        allocSize = builder->CreateSelect(useMin, minCap, allocSize, "concat.finalcap");
-        llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {allocSize}, "concat.buf");
-        // memcpy(buf, lhs, len1)
-        builder->CreateCall(getOrDeclareMemcpy(), {buf, lhsPtr, len1});
-        // memcpy(buf + len1, rhs, len2)
+        llvm::Value* allocSize =
+            builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "concat.allocsize");
+        // Use realloc on the LHS buffer.  String variables are heap-allocated
+        // (literals use strdup at declaration), so realloc is safe.  When the
+        // allocator can extend in-place, this avoids copying the entire LHS.
+        llvm::Value* buf = builder->CreateCall(getOrDeclareRealloc(), {lhsPtr, allocSize}, "concat.buf");
+        // memcpy(buf + len1, rhs, len2)  — only append the RHS portion
         llvm::Value* dst2 = builder->CreateGEP(builder->getInt8Ty(), buf, len1, "concat.dst2");
         builder->CreateCall(getOrDeclareMemcpy(), {dst2, rhsPtr, len2});
         // null-terminate: buf[totalLen] = '\0'
@@ -1687,11 +1672,37 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* arrPtr = builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "push.arrptr");
         llvm::Value* oldLen = builder->CreateLoad(getDefaultType(), arrPtr, "push.oldlen");
         llvm::Value* newLen = builder->CreateAdd(oldLen, llvm::ConstantInt::get(getDefaultType(), 1), "push.newlen");
-        // Round allocation up to next power of 2 for amortized O(1) growth.
-        // Compute slots = newLen + 1 (header + elements), then round to next power of 2.
-        llvm::Value* slots = builder->CreateAdd(newLen, llvm::ConstantInt::get(getDefaultType(), 1), "push.slots");
-        // capacity = max(16, nextPow2(slots)): subtract 1, OR-cascade, add 1
+        // Only call realloc when the new slot count crosses a power-of-2
+        // boundary.  The allocation capacity is always max(16, nextPow2(slots)).
+        // We need to grow when nextPow2(newSlots) > nextPow2(oldSlots), which
+        // happens when oldSlots (= oldLen + 1) is a power of 2 AND >= 16.
+        // For oldSlots < 16 we still realloc for the very first push (oldLen==0)
+        // to ensure the buffer is large enough for the minimum capacity of 16.
         llvm::Value* one64 = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* oldSlots = builder->CreateAdd(oldLen, one64, "push.oldslots");
+        llvm::Value* minSlots = llvm::ConstantInt::get(getDefaultType(), 16);
+        // Check: oldSlots is a power of 2 → (oldSlots & (oldSlots - 1)) == 0
+        llvm::Value* oldSlotsM1 = builder->CreateSub(oldSlots, one64, "push.osm1");
+        llvm::Value* andCheck = builder->CreateAnd(oldSlots, oldSlotsM1, "push.ispow2");
+        llvm::Value* zero64 = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* isPow2 = builder->CreateICmpEQ(andCheck, zero64, "push.ispow2cmp");
+        // Need to grow when oldSlots >= 16 AND is power of 2, OR when oldSlots < 16
+        llvm::Value* belowMin = builder->CreateICmpSLT(oldSlots, minSlots, "push.belowmin");
+        llvm::Value* atBoundary = builder->CreateAnd(isPow2,
+            builder->CreateNot(belowMin, "push.abovemin"), "push.atbound");
+        llvm::Value* needsGrow = builder->CreateOr(belowMin, atBoundary, "push.needsgrow");
+
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* growBB = llvm::BasicBlock::Create(*context, "push.grow", function);
+        llvm::BasicBlock* nogrowBB = llvm::BasicBlock::Create(*context, "push.nogrow", function);
+        llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "push.merge", function);
+
+        builder->CreateCondBr(needsGrow, growBB, nogrowBB);
+
+        // Grow path: compute new capacity and realloc
+        builder->SetInsertPoint(growBB);
+        llvm::Value* slots = builder->CreateAdd(newLen, one64, "push.slots");
+        // nextPow2 via OR-cascade (covers 64-bit values)
         llvm::Value* v = builder->CreateSub(slots, one64, "push.pm1");
         v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 1)), "push.p2a");
         v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 2)), "push.p2b");
@@ -1700,13 +1711,23 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 16)), "push.p2e");
         v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 32)), "push.p2f");
         llvm::Value* cap = builder->CreateAdd(v, one64, "push.cap");
-        // Ensure minimum capacity of 16 slots
-        llvm::Value* minCap = llvm::ConstantInt::get(getDefaultType(), 16);
-        llvm::Value* useMin = builder->CreateICmpSLT(cap, minCap, "push.usemin");
-        cap = builder->CreateSelect(useMin, minCap, cap, "push.finalcap");
+        llvm::Value* useMin = builder->CreateICmpSLT(cap, minSlots, "push.usemin");
+        cap = builder->CreateSelect(useMin, minSlots, cap, "push.finalcap");
         llvm::Value* newSize = builder->CreateMul(cap,
             llvm::ConstantInt::get(getDefaultType(), 8), "push.bytes");
-        llvm::Value* newBuf = builder->CreateCall(getOrDeclareRealloc(), {arrPtr, newSize}, "push.newbuf");
+        llvm::Value* grownBuf = builder->CreateCall(getOrDeclareRealloc(), {arrPtr, newSize}, "push.newbuf");
+        builder->CreateBr(mergeBB);
+
+        // No-grow path: reuse existing buffer
+        builder->SetInsertPoint(nogrowBB);
+        builder->CreateBr(mergeBB);
+
+        // Merge: select the buffer pointer
+        builder->SetInsertPoint(mergeBB);
+        llvm::PHINode* newBuf = builder->CreatePHI(llvm::PointerType::getUnqual(*context), 2, "push.buf");
+        newBuf->addIncoming(grownBuf, growBB);
+        newBuf->addIncoming(arrPtr, nogrowBB);
+
         // Update length
         builder->CreateStore(newLen, newBuf);
         // Store new value at index oldLen + 1 (after header)

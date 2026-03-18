@@ -449,6 +449,7 @@ class CodeGenerator {
     llvm::Function* getOrDeclareIsspace();
     llvm::Function* getOrDeclareStrtoll();
     llvm::Function* getOrDeclareStrtod();
+    llvm::Function* getOrDeclareStrdup();
     llvm::Function* getOrDeclareFloor();
     llvm::Function* getOrDeclareCeil();
     llvm::Function* getOrDeclareRound();

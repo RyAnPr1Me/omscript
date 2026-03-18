@@ -20,6 +20,20 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
     if (stmt->initializer) {
         initValue = generateExpression(stmt->initializer.get());
         allocaType = initValue->getType();
+
+        // When a string literal is assigned to a mutable string variable,
+        // heap-allocate a copy via strdup().  This ensures the variable always
+        // points to heap memory, allowing str_concat to use realloc() for
+        // amortized O(1) appending (the common `s = str_concat(s, "x")` loop
+        // pattern).  Without this, the first str_concat would receive a pointer
+        // to read-only global memory and realloc would be undefined behaviour.
+        if (!stmt->isConst &&
+            stmt->initializer->type == ASTNodeType::LITERAL_EXPR &&
+            static_cast<LiteralExpr*>(stmt->initializer.get())->literalType ==
+                LiteralExpr::LiteralType::STRING) {
+            initValue = builder->CreateCall(getOrDeclareStrdup(), {initValue}, "strdup.init");
+            allocaType = initValue->getType();
+        }
     }
 
     llvm::AllocaInst* alloca = createEntryBlockAlloca(function, stmt->name, allocaType);
@@ -341,9 +355,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         }
         if (ascending) {
             stepVal = llvm::ConstantInt::get(*context, llvm::APInt(64, 1));
-            // Don't set stepKnownPositive — keep the bi-directional loop
-            // condition so that LLVM's loop interleaver doesn't aggressively
-            // speculate loops whose bodies contain non-vectorizable calls.
+            stepKnownPositive = true;
             stepKnownNonZero = true;
         } else {
             llvm::Value* isDesc = builder->CreateICmpSGT(startVal, endVal, "for.isdesc");

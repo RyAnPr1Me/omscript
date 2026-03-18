@@ -1165,6 +1165,21 @@ llvm::Function* CodeGenerator::getOrDeclareStrtod() {
     return fn;
 }
 
+llvm::Function* CodeGenerator::getOrDeclareStrdup() {
+    if (auto* fn = module->getFunction("strdup"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy}, false);
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strdup", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addRetAttr(llvm::Attribute::NoAlias);
+    fn->addParamAttr(0, llvm::Attribute::ReadOnly);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    OMSC_ADD_NOCAPTURE(fn, 0);
+    return fn;
+}
+
 llvm::Function* CodeGenerator::getOrDeclareFloor() {
     if (auto* fn = module->getFunction("floor"))
         return fn;
@@ -2224,7 +2239,7 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     // recursive function causes the inliner to loop infinitely.
     static constexpr size_t kMaxInlineHintStatements = 10;
     static constexpr size_t kMaxInlineHintStatementsO3 = 20;
-    static constexpr size_t kAlwaysInlineStatements = 4;
+    static constexpr size_t kAlwaysInlineStatements = 8;
     size_t inlineThreshold =
         (optimizationLevel >= OptimizationLevel::O3) ? kMaxInlineHintStatementsO3 : kMaxInlineHintStatements;
     if (func->name != "main" && optimizationLevel >= OptimizationLevel::O2 && func->body &&
