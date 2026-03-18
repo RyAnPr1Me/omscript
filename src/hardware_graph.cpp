@@ -2472,6 +2472,8 @@ HGOEStats optimizeFunction(llvm::Function& func, const HGOEConfig& config) {
         // Accept the transformation: log the cost delta for diagnostics.
         if (costAfter < costBefore)
             stats.totalScheduledCycles = costBefore - costAfter; // cycles saved
+        else
+            stats.totalScheduledCycles = 0;
         stats.loopsUnrolled = stats.transforms.vectorExpanded;
     }
 
