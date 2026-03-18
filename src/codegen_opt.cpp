@@ -603,6 +603,16 @@ void CodeGenerator::runOptimizationPasses() {
     if (verbose_) {
         std::cout << "    Running LLVM module pass pipeline..." << std::endl;
     }
+    // Pre-pipeline srem→urem conversion: run BEFORE the LLVM pipeline so the
+    // loop vectorizer (which runs as part of the pipeline) sees urem instead
+    // of srem.  The vectorizer's cost model treats urem-by-constant as cheaper
+    // than srem-by-constant (urem avoids the signed-correction fixup), enabling
+    // vectorization of inner loops like `sum += ((i^j) + k) % 37`.
+    if (enableSuperopt_ && optimizationLevel >= OptimizationLevel::O2) {
+        for (auto& func : *module) {
+            superopt::convertSRemToURem(func);
+        }
+    }
     MPM.run(*module, MAM);
     if (verbose_) {
         std::cout << "    LLVM pass pipeline complete" << std::endl;

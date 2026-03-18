@@ -2715,4 +2715,29 @@ SuperoptimizerStats superoptimizeModule(llvm::Module& module,
 }
 
 } // namespace superopt
+
+unsigned superopt::convertSRemToURem(llvm::Function& func) {
+    if (func.isDeclaration()) return 0;
+    unsigned count = 0;
+    const llvm::DataLayout& DL = func.getParent()->getDataLayout();
+    llvm::SmallVector<llvm::Instruction*, 16> toErase;
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::SRem) {
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1))) {
+                    if (ci->getSExtValue() > 0 && isValueNonNegative(inst.getOperand(0), DL)) {
+                        llvm::IRBuilder<> builder(&inst);
+                        auto* urem = builder.CreateURem(inst.getOperand(0), inst.getOperand(1), "srem_to_urem");
+                        inst.replaceAllUsesWith(urem);
+                        toErase.push_back(&inst);
+                        ++count;
+                    }
+                }
+            }
+        }
+    }
+    for (auto* inst : toErase) inst->eraseFromParent();
+    return count;
+}
+
 } // namespace omscript
