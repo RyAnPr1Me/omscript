@@ -276,6 +276,129 @@ static std::optional<int64_t> getConstIntValue(llvm::Value* v) {
     return std::nullopt;
 }
 
+/// Recursively check if a value is known to be non-negative (sign bit = 0).
+/// This goes beyond computeKnownBits by tracking through nuw-flagged arithmetic,
+/// XOR of non-negative values, and loop induction variable PHI nodes that
+/// start from 0 and increment by a positive step.
+static bool isValueNonNegative(llvm::Value* v, const llvm::DataLayout& DL, unsigned depth = 0) {
+    if (depth > 6) return false;  // prevent infinite recursion
+
+    // Non-negative constant
+    if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(v))
+        return ci->getSExtValue() >= 0;
+
+    // computeKnownBits check (handles many cases including zext, and)
+    llvm::KnownBits KB = llvm::computeKnownBits(v, DL, /*Depth=*/0);
+    if (KB.isNonNegative()) return true;
+
+    auto* inst = llvm::dyn_cast<llvm::Instruction>(v);
+    if (!inst) return false;
+
+    unsigned op = inst->getOpcode();
+
+    // add nuw: if both operands are non-negative, result is non-negative
+    // (nuw guarantees no unsigned wrap, so the sum stays within [0, 2^64))
+    if (op == llvm::Instruction::Add) {
+        if (auto* bo = llvm::dyn_cast<llvm::BinaryOperator>(inst)) {
+            if (bo->hasNoUnsignedWrap()) {
+                return isValueNonNegative(bo->getOperand(0), DL, depth + 1) &&
+                       isValueNonNegative(bo->getOperand(1), DL, depth + 1);
+            }
+        }
+    }
+
+    // xor: if both operands are non-negative (sign bit = 0), result has sign bit = 0
+    if (op == llvm::Instruction::Xor) {
+        return isValueNonNegative(inst->getOperand(0), DL, depth + 1) &&
+               isValueNonNegative(inst->getOperand(1), DL, depth + 1);
+    }
+
+    // and: if either operand is non-negative, result is non-negative
+    if (op == llvm::Instruction::And) {
+        return isValueNonNegative(inst->getOperand(0), DL, depth + 1) ||
+               isValueNonNegative(inst->getOperand(1), DL, depth + 1);
+    }
+
+    // or: if both operands are non-negative, result is non-negative
+    if (op == llvm::Instruction::Or) {
+        return isValueNonNegative(inst->getOperand(0), DL, depth + 1) &&
+               isValueNonNegative(inst->getOperand(1), DL, depth + 1);
+    }
+
+    // lshr (logical shift right): always non-negative (fills with 0s)
+    if (op == llvm::Instruction::LShr) return true;
+
+    // zext: always non-negative
+    if (op == llvm::Instruction::ZExt) return true;
+
+    // mul nsw nuw: if both non-negative, result is non-negative
+    if (op == llvm::Instruction::Mul) {
+        if (auto* bo = llvm::dyn_cast<llvm::BinaryOperator>(inst)) {
+            if (bo->hasNoSignedWrap() || bo->hasNoUnsignedWrap()) {
+                return isValueNonNegative(bo->getOperand(0), DL, depth + 1) &&
+                       isValueNonNegative(bo->getOperand(1), DL, depth + 1);
+            }
+        }
+    }
+
+    // shl nuw: if operand is non-negative, result is non-negative
+    if (op == llvm::Instruction::Shl) {
+        if (auto* bo = llvm::dyn_cast<llvm::BinaryOperator>(inst)) {
+            if (bo->hasNoUnsignedWrap()) {
+                return isValueNonNegative(bo->getOperand(0), DL, depth + 1);
+            }
+        }
+    }
+
+    // PHI node: check if it's a simple loop induction variable
+    // Pattern: phi [0, preheader], [inc, latch] where inc = phi + positive
+    if (auto* phi = llvm::dyn_cast<llvm::PHINode>(inst)) {
+        // All incoming values must be non-negative
+        bool allNonNeg = true;
+        for (unsigned i = 0; i < phi->getNumIncomingValues(); i++) {
+            llvm::Value* incoming = phi->getIncomingValue(i);
+            if (incoming == phi) continue;  // self-reference (back edge)
+            // Check if the incoming value is a non-negative constant or
+            // an add nuw/nsw of the phi itself (loop increment)
+            if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(incoming)) {
+                if (ci->getSExtValue() < 0) { allNonNeg = false; break; }
+            } else if (auto* addInst = llvm::dyn_cast<llvm::BinaryOperator>(incoming)) {
+                // Increment pattern: phi + positive_constant (with nsw or nuw)
+                if (addInst->getOpcode() == llvm::Instruction::Add &&
+                    (addInst->hasNoSignedWrap() || addInst->hasNoUnsignedWrap())) {
+                    bool usesPhi = (addInst->getOperand(0) == phi || addInst->getOperand(1) == phi);
+                    llvm::Value* step = (addInst->getOperand(0) == phi) ?
+                                         addInst->getOperand(1) : addInst->getOperand(0);
+                    if (usesPhi) {
+                        if (auto* stepCI = llvm::dyn_cast<llvm::ConstantInt>(step)) {
+                            if (stepCI->getSExtValue() <= 0) { allNonNeg = false; break; }
+                        } else {
+                            allNonNeg = false; break;
+                        }
+                    } else {
+                        allNonNeg = false; break;
+                    }
+                } else if (addInst->getOpcode() == llvm::Instruction::Or) {
+                    // After unrolling, LLVM uses `or disjoint` instead of add
+                    bool usesPhi = false;
+                    for (unsigned j = 0; j < addInst->getNumOperands(); j++) {
+                        if (addInst->getOperand(j) == phi) { usesPhi = true; break; }
+                    }
+                    if (!usesPhi) { allNonNeg = false; break; }
+                    // or disjoint with a positive constant is fine
+                } else {
+                    allNonNeg = false; break;
+                }
+            } else {
+                allNonNeg = false; break;
+            }
+        }
+        if (allNonNeg && phi->getNumIncomingValues() > 0) return true;
+    }
+
+    return false;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Idiom detection — bit rotation
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1219,10 +1342,7 @@ static unsigned applyAlgebraicSimplifications(llvm::Function& func) {
                 if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1))) {
                     if (ci->getSExtValue() > 0) {
                         const llvm::DataLayout& DL = inst.getModule()->getDataLayout();
-                        llvm::KnownBits KB = llvm::computeKnownBits(
-                            inst.getOperand(0), DL, /*Depth=*/0,
-                            /*AC=*/nullptr, /*CxtI=*/&inst);
-                        if (KB.isNonNegative()) {
+                        if (isValueNonNegative(inst.getOperand(0), DL)) {
                             llvm::IRBuilder<> builder(&inst);
                             simplified = builder.CreateURem(
                                 inst.getOperand(0), inst.getOperand(1),
@@ -1238,10 +1358,7 @@ static unsigned applyAlgebraicSimplifications(llvm::Function& func) {
                 if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1))) {
                     if (ci->getSExtValue() > 0) {
                         const llvm::DataLayout& DL = inst.getModule()->getDataLayout();
-                        llvm::KnownBits KB = llvm::computeKnownBits(
-                            inst.getOperand(0), DL, /*Depth=*/0,
-                            /*AC=*/nullptr, /*CxtI=*/&inst);
-                        if (KB.isNonNegative()) {
+                        if (isValueNonNegative(inst.getOperand(0), DL)) {
                             llvm::IRBuilder<> builder(&inst);
                             simplified = builder.CreateUDiv(
                                 inst.getOperand(0), inst.getOperand(1),
