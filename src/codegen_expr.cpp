@@ -1886,9 +1886,16 @@ llvm::Value* CodeGenerator::generateStructLiteral(StructLiteralExpr* expr) {
     const auto& fields = it->second;
     size_t numFields = fields.size();
 
-    // Allocate: numFields * 8 bytes (each field is an i64 slot)
-    llvm::Value* byteSize = llvm::ConstantInt::get(getDefaultType(), numFields * 8);
-    llvm::Value* ptr = builder->CreateCall(getOrDeclareMalloc(), {byteSize}, "struct.alloc");
+    // Use stack allocation (alloca) for structs.  This avoids malloc overhead
+    // and allows LLVM's mem2reg / SROA passes to promote small structs to
+    // SSA registers, matching C's plain-variable performance.
+    llvm::Function* curFn = builder->GetInsertBlock()->getParent();
+    llvm::IRBuilder<> tmpBuilder(&curFn->getEntryBlock(), curFn->getEntryBlock().begin());
+    llvm::Type* slotTy = getDefaultType();
+    llvm::Value* ptr = tmpBuilder.CreateAlloca(
+        llvm::ArrayType::get(slotTy, numFields), nullptr, "struct.alloca");
+    // Cast to pointer for GEP
+    ptr = builder->CreateBitOrPointerCast(ptr, llvm::PointerType::getUnqual(*context), "struct.ptr");
 
     // Build field name → index map
     std::unordered_map<std::string, size_t> fieldIndex;
