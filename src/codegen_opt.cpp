@@ -735,11 +735,14 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     fpm.add(llvm::createLoopDataPrefetchPass());
     fpm.add(llvm::createLoopStrengthReducePass());
     fpm.add(llvm::createLoopUnrollPass());
-    // Phase 2.5: Additional aggressive cleanup after loop optimizations.
-    // A second GVN + instcombine round catches patterns exposed by loop
-    // strength reduction, unrolling, and LICM that the first round missed.
-    fpm.add(llvm::createGVNPass());
-    fpm.add(llvm::createInstructionCombiningPass());
+    // Phase 2.5: Post-loop cleanup.  Loop strength reduction, unrolling,
+    // and LICM can expose redundancies and dead code.  A lightweight
+    // CFG simplification + DCE pass is sufficient here; the heavier GVN
+    // and InstCombine passes are already in Phase 4 below and the full
+    // pipeline runs 3× per function, so duplicating them here only adds
+    // compile-time without improving generated code quality.
+    fpm.add(llvm::createCFGSimplificationPass());
+    fpm.add(llvm::createDeadCodeEliminationPass());
     // Phase 3: Post-loop optimizations
 #if LLVM_VERSION_MAJOR < 18
     fpm.add(llvm::createMergedLoadStoreMotionPass());

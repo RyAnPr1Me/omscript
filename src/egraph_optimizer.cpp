@@ -339,6 +339,18 @@ static bool canRepresentInEGraph(const Expression* expr) {
 
     case ASTNodeType::CALL_EXPR: {
         auto* call = static_cast<const CallExpr*>(expr);
+        // Only allow known-pure builtins (no side effects, no I/O).
+        // Functions like print, input, swap, reverse, assert are excluded
+        // because they have observable side effects that the e-graph's
+        // rewrite rules could incorrectly eliminate or reorder.
+        static const std::unordered_set<std::string> pureBuiltins = {
+            "abs", "min", "max", "sign", "clamp", "pow", "sqrt",
+            "is_even", "is_odd", "len", "str_len", "to_string",
+            "to_int", "to_float", "typeof", "log2", "gcd",
+            "char_at", "str_eq", "str_find", "floor", "ceil", "round"
+        };
+        if (pureBuiltins.find(call->callee) == pureBuiltins.end())
+            return false;
         for (const auto& arg : call->arguments) {
             if (!canRepresentInEGraph(arg.get())) return false;
         }

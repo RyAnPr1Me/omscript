@@ -2349,7 +2349,22 @@ static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
             }
         }
 
-        ++currentCycle;
+        // Advance the cycle counter.  If nothing was issued this cycle,
+        // skip ahead to the earliest time any port becomes free or any
+        // predecessor result becomes available, avoiding empty cycle spin.
+        if (issued == 0) {
+            unsigned nextEvent = currentCycle + 1;
+            for (auto& [key, portSlots] : hwPorts)
+                for (auto& slot : portSlots)
+                    if (slot.nextFree > currentCycle)
+                        nextEvent = std::min(nextEvent, slot.nextFree);
+            for (unsigned id = 0; id < n; ++id)
+                if (!done[id] && avail[id] > currentCycle)
+                    nextEvent = std::min(nextEvent, avail[id]);
+            currentCycle = nextEvent;
+        } else {
+            ++currentCycle;
+        }
     }
 
     // ── 8. Apply schedule: reorder LLVM IR within the basic block ────────────
