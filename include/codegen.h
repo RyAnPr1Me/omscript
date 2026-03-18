@@ -267,6 +267,10 @@ class CodeGenerator {
     // current strlen of the variable's value.  Used by str_concat to avoid
     // O(n) strlen calls on growing strings in append loops.
     std::unordered_map<std::string, llvm::AllocaInst*> stringLenCache_;
+    // stringCapCache_: maps string variable names to an alloca that caches the
+    // allocated buffer capacity.  Used by str_concat to skip realloc calls
+    // when the existing buffer has enough space (amortized O(1) appends).
+    std::unordered_map<std::string, llvm::AllocaInst*> stringCapCache_;
 
     /// Classify a function into its execution tier based on type annotations,
     /// OPTMAX status, and whether it is a special function (main/stdlib).

@@ -841,19 +841,72 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         // Determine whether the LHS came from a heap allocation (variable load
         // or call return) vs a string literal in read-only memory.  If heap,
-        // we can realloc in-place with power-of-2 capacity to avoid copying the
-        // entire LHS on every append.
+        // we can realloc in-place with capacity tracking to avoid calling
+        // realloc on every append.
         bool lhsIsHeap = false;
+        llvm::AllocaInst* capCacheAlloca = nullptr;
         if (expr->arguments[0]->type == ASTNodeType::IDENTIFIER_EXPR) {
             auto* id = static_cast<IdentifierExpr*>(expr->arguments[0].get());
-            if (stringVars_.count(id->name))
+            if (stringVars_.count(id->name)) {
                 lhsIsHeap = true;
+                // Look up or create a capacity cache alloca for this variable.
+                auto capIt = stringCapCache_.find(id->name);
+                if (capIt != stringCapCache_.end()) {
+                    capCacheAlloca = capIt->second;
+                } else {
+                    llvm::Function* fn = builder->GetInsertBlock()->getParent();
+                    capCacheAlloca = createEntryBlockAlloca(fn, id->name + ".strcap");
+                    // Initialize capacity to 0 (forces first realloc).
+                    llvm::IRBuilder<> entryBuilder(capCacheAlloca->getNextNode());
+                    entryBuilder.CreateStore(
+                        llvm::ConstantInt::get(getDefaultType(), 0), capCacheAlloca);
+                    stringCapCache_[id->name] = capCacheAlloca;
+                }
+            }
         } else if (expr->arguments[0]->type == ASTNodeType::CALL_EXPR) {
             lhsIsHeap = true;
         }
         llvm::Value* buf;
-        if (lhsIsHeap) {
-            // Round allocation up to next power of 2 for amortized O(1) realloc.
+        if (lhsIsHeap && capCacheAlloca) {
+            // Capacity-tracked path: only realloc when buffer is too small.
+            // This matches the C pattern: if (len+1 > cap) { cap*=2; realloc; }
+            llvm::Value* needed =
+                builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "concat.needed");
+            llvm::Value* curCap = builder->CreateLoad(getDefaultType(), capCacheAlloca, "concat.curcap");
+            llvm::Value* needGrow = builder->CreateICmpUGT(needed, curCap, "concat.needgrow");
+
+            llvm::Function* fn = builder->GetInsertBlock()->getParent();
+            llvm::BasicBlock* growBB = llvm::BasicBlock::Create(*context, "concat.grow", fn);
+            llvm::BasicBlock* appendBB = llvm::BasicBlock::Create(*context, "concat.append", fn);
+            llvm::BasicBlock* curBB = builder->GetInsertBlock();
+            builder->CreateCondBr(needGrow, growBB, appendBB);
+
+            // Grow path: double capacity until sufficient, then realloc.
+            builder->SetInsertPoint(growBB);
+            // newCap = max(curCap * 2, needed); but at least 16
+            llvm::Value* doubled = builder->CreateShl(curCap, llvm::ConstantInt::get(getDefaultType(), 1), "concat.doubled");
+            llvm::Value* sixteen = llvm::ConstantInt::get(getDefaultType(), 16);
+            llvm::Value* minCap = builder->CreateSelect(
+                builder->CreateICmpUGT(doubled, sixteen), doubled, sixteen, "concat.mincap");
+            llvm::Value* newCap = builder->CreateSelect(
+                builder->CreateICmpUGT(needed, minCap), needed, minCap, "concat.newcap");
+            builder->CreateStore(newCap, capCacheAlloca);
+            llvm::Value* grownBuf = builder->CreateCall(getOrDeclareRealloc(), {lhsPtr, newCap}, "concat.grown");
+            llvm::BasicBlock* growExitBB = builder->GetInsertBlock();
+            builder->CreateBr(appendBB);
+
+            // Append path: merge buffer pointer from grow / no-grow paths.
+            builder->SetInsertPoint(appendBB);
+            llvm::PHINode* bufPhi = builder->CreatePHI(lhsPtr->getType(), 2, "concat.buf");
+            bufPhi->addIncoming(lhsPtr, curBB);
+            bufPhi->addIncoming(grownBuf, growExitBB);
+            buf = bufPhi;
+
+            // memcpy(buf + len1, rhs, len2) — only append the RHS portion
+            llvm::Value* dst2 = builder->CreateGEP(builder->getInt8Ty(), buf, len1, "concat.dst2");
+            builder->CreateCall(getOrDeclareMemcpy(), {dst2, rhsPtr, len2});
+        } else if (lhsIsHeap) {
+            // Heap LHS without capacity tracking: use power-of-2 realloc.
             llvm::Value* minSize =
                 builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "concat.minsize");
             llvm::Value* one64 = llvm::ConstantInt::get(getDefaultType(), 1);
