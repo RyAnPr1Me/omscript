@@ -697,7 +697,11 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     // Phase 0: Apply aggressive function attributes to OPTMAX functions.
     // - nounwind: guaranteed no exceptions (enables tail call, smaller EH tables)
     // - optsize is NOT set (we want max speed, not size)
-    static constexpr unsigned kAlwaysInlineThreshold = 50; // instruction count
+    // alwaysinline threshold is intentionally low: force-inlining large
+    // functions into call sites with many other inlined functions inflates
+    // code size and causes I-cache pressure.  The inliner already handles
+    // profitable inlining decisions via inlinehint + cost model.
+    static constexpr unsigned kAlwaysInlineThreshold = 15; // instruction count
     for (auto& func : module->functions()) {
         if (!func.isDeclaration() && optMaxFunctions.count(std::string(func.getName()))) {
             func.addFnAttr(llvm::Attribute::NoUnwind);

@@ -2247,14 +2247,44 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     // overhead for tiny predicates, accessors, and single-operation helpers.
     // Recursive functions are explicitly excluded: alwaysinline on a directly
     // recursive function causes the inliner to loop infinitely.
+    // The "deep" statement count walks into nested blocks/loops to capture
+    // the true code complexity.  A function with 3 top-level statements that
+    // contains triple-nested for-loops has a deep count of ~9, preventing
+    // it from being unconditionally inlined where it would inflate code size
+    // and cause I-cache pressure.
     static constexpr size_t kMaxInlineHintStatements = 10;
     static constexpr size_t kMaxInlineHintStatementsO3 = 20;
     static constexpr size_t kAlwaysInlineStatements = 8;
+    // Recursive deep statement counter — counts all statements in nested
+    // blocks, loops, and if/else chains.  Loop bodies are double-counted
+    // because loop codegen (header, latch, condition, increment, metadata)
+    // emits roughly 2× more IR than a plain statement.
+    std::function<size_t(Statement*)> deepStmtCount = [&](Statement* s) -> size_t {
+        if (!s) return 0;
+        if (auto* blk = dynamic_cast<BlockStmt*>(s)) {
+            size_t cnt = 0;
+            for (auto& st : blk->statements) cnt += deepStmtCount(st.get());
+            return cnt;
+        }
+        if (auto* ifS = dynamic_cast<IfStmt*>(s))
+            return 1 + deepStmtCount(ifS->thenBranch.get()) + deepStmtCount(ifS->elseBranch.get());
+        if (auto* wh = dynamic_cast<WhileStmt*>(s))
+            return 2 + 2 * deepStmtCount(wh->body.get());
+        if (auto* dw = dynamic_cast<DoWhileStmt*>(s))
+            return 2 + 2 * deepStmtCount(dw->body.get());
+        if (auto* fr = dynamic_cast<ForStmt*>(s))
+            return 2 + 2 * deepStmtCount(fr->body.get());
+        if (auto* fe = dynamic_cast<ForEachStmt*>(s))
+            return 2 + 2 * deepStmtCount(fe->body.get());
+        return 1;
+    };
+    size_t shallowCount = func->body ? func->body->statements.size() : 0;
+    size_t deepCount = func->body ? deepStmtCount(func->body.get()) : 0;
     size_t inlineThreshold =
         (optimizationLevel >= OptimizationLevel::O3) ? kMaxInlineHintStatementsO3 : kMaxInlineHintStatements;
     if (func->name != "main" && optimizationLevel >= OptimizationLevel::O2 && func->body &&
-        func->body->statements.size() <= inlineThreshold) {
-        if (optimizationLevel >= OptimizationLevel::O3 && func->body->statements.size() <= kAlwaysInlineStatements &&
+        shallowCount <= inlineThreshold) {
+        if (optimizationLevel >= OptimizationLevel::O3 && deepCount <= kAlwaysInlineStatements &&
             !isSelfRecursive) {
             function->addFnAttr(llvm::Attribute::AlwaysInline);
         } else {
