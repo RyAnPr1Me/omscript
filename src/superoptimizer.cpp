@@ -350,47 +350,36 @@ static bool isValueNonNegative(llvm::Value* v, const llvm::DataLayout& DL, unsig
         }
     }
 
-    // PHI node: check if it's a simple loop induction variable
-    // Pattern: phi [0, preheader], [inc, latch] where inc = phi + positive
+    // PHI node: check if all incoming values (excluding self-references) are
+    // non-negative.  This handles loop induction variables that start from 0
+    // and increment by a positive step, as well as PHIs from loop unrolling
+    // where incoming values are other PHI nodes or or-disjoint increments.
     if (auto* phi = llvm::dyn_cast<llvm::PHINode>(inst)) {
-        // All incoming values must be non-negative
         bool allNonNeg = true;
         for (unsigned i = 0; i < phi->getNumIncomingValues(); i++) {
             llvm::Value* incoming = phi->getIncomingValue(i);
             if (incoming == phi) continue;  // self-reference (back edge)
-            // Check if the incoming value is a non-negative constant or
-            // an add nuw/nsw of the phi itself (loop increment)
-            if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(incoming)) {
-                if (ci->getSExtValue() < 0) { allNonNeg = false; break; }
-            } else if (auto* addInst = llvm::dyn_cast<llvm::BinaryOperator>(incoming)) {
-                // Increment pattern: phi + positive_constant (with nsw or nuw)
+            // Fast path: loop increment pattern (phi + positive_constant)
+            if (auto* addInst = llvm::dyn_cast<llvm::BinaryOperator>(incoming)) {
                 if (addInst->getOpcode() == llvm::Instruction::Add &&
-                    (addInst->hasNoSignedWrap() || addInst->hasNoUnsignedWrap())) {
-                    bool usesPhi = (addInst->getOperand(0) == phi || addInst->getOperand(1) == phi);
+                    (addInst->hasNoSignedWrap() || addInst->hasNoUnsignedWrap()) &&
+                    (addInst->getOperand(0) == phi || addInst->getOperand(1) == phi)) {
                     llvm::Value* step = (addInst->getOperand(0) == phi) ?
                                          addInst->getOperand(1) : addInst->getOperand(0);
-                    if (usesPhi) {
-                        if (auto* stepCI = llvm::dyn_cast<llvm::ConstantInt>(step)) {
-                            if (stepCI->getSExtValue() <= 0) { allNonNeg = false; break; }
-                        } else {
-                            allNonNeg = false; break;
-                        }
-                    } else {
-                        allNonNeg = false; break;
+                    if (auto* stepCI = llvm::dyn_cast<llvm::ConstantInt>(step)) {
+                        if (stepCI->getSExtValue() > 0) continue;  // positive step ✓
                     }
-                } else if (addInst->getOpcode() == llvm::Instruction::Or) {
-                    // After unrolling, LLVM uses `or disjoint` instead of add
-                    bool usesPhi = false;
-                    for (unsigned j = 0; j < addInst->getNumOperands(); j++) {
-                        if (addInst->getOperand(j) == phi) { usesPhi = true; break; }
-                    }
-                    if (!usesPhi) { allNonNeg = false; break; }
-                    // or disjoint with a positive constant is fine
-                } else {
-                    allNonNeg = false; break;
                 }
-            } else {
-                allNonNeg = false; break;
+                // or disjoint used by loop unroller as add substitute
+                if (addInst->getOpcode() == llvm::Instruction::Or &&
+                    (addInst->getOperand(0) == phi || addInst->getOperand(1) == phi)) {
+                    continue;  // or disjoint with phi is non-negative if phi is ✓
+                }
+            }
+            // General case: recursively check if incoming value is non-negative
+            if (!isValueNonNegative(incoming, DL, depth + 1)) {
+                allNonNeg = false;
+                break;
             }
         }
         if (allNonNeg && phi->getNumIncomingValues() > 0) return true;

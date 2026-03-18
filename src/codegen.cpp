@@ -1907,13 +1907,11 @@ void CodeGenerator::generate(Program* program) {
         //              unlocks loop-idiom recognition (auto-memset/memcpy detection).
         function->addFnAttr(llvm::Attribute::NoUnwind);
         function->addFnAttr(llvm::Attribute::MustProgress);
-        // prefer-vector-width=128 — prevent the loop vectorizer from choosing
-        // wide vector factors that cause integer types to be promoted to i128
-        // for division/modulo-by-constant patterns.  On x86-64, i128 multiply
-        // is lowered to multiple scalar instructions and vectorizing modulo
-        // at VF=8 with i128 intermediates is far slower than the scalar loop.
-        // 128-bit vectors still enable SSE/NEON vectorization.
-        function->addFnAttr("prefer-vector-width", "128");
+        // prefer-vector-width=256 — allow AVX2-width vectorization (4×i64)
+        // while preventing VF=8 that causes i128 promotion for division/modulo.
+        // This balances vectorization throughput with avoiding expensive i128
+        // multiply sequences on x86-64.
+        function->addFnAttr("prefer-vector-width", "256");
         // nosync, nofree, willreturn — these promise the optimizer that the
         // function never synchronizes, never frees memory, and always returns.
         // These promises are WRONG for functions that use concurrency
