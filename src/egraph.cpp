@@ -488,16 +488,28 @@ EGraph::extractAll(ClassId root, const CostModel& model) {
     root = find(root);
     std::unordered_map<ClassId, ExtractionResult> best;
 
+    // Collect only e-classes reachable from root to avoid wasted work.
+    std::unordered_set<ClassId> reachable;
+    {
+        std::vector<ClassId> worklist = {root};
+        while (!worklist.empty()) {
+            ClassId cls = find(worklist.back());
+            worklist.pop_back();
+            if (!reachable.insert(cls).second) continue;
+            for (const auto& node : classes_[cls].nodes)
+                for (auto child : node.children)
+                    worklist.push_back(find(child));
+        }
+    }
+
     // Iterative cost computation: repeat until stable.
     // We use a simple fixed-point iteration (like Bellman-Ford).
-    // Each iteration, for each class, we pick the node with the lowest
-    // total cost (node cost + sum of children's best costs).
+    // Each iteration, for each reachable class, we pick the node with the
+    // lowest total cost (node cost + sum of children's best costs).
     bool changed = true;
     for (int pass = 0; pass < 100 && changed; ++pass) {
         changed = false;
-        for (ClassId i = 0; i < classes_.size(); ++i) {
-            ClassId cls = find(i);
-            if (cls != i) continue;
+        for (ClassId cls : reachable) {
 
             for (const auto& node : classes_[cls].nodes) {
                 Cost total = model.nodeCost(node);
