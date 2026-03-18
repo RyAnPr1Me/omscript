@@ -1821,19 +1821,22 @@ void CodeGenerator::generate(Program* program) {
     }
 
     // Detect preferred SIMD vector width from the target's CPU features.
-    // AVX-512 supports 16-lane i32/float (64-byte vectors), AVX2 supports
-    // 8-lane, and SSE/NEON supports 4-lane.  Using the target-native width
-    // for loop vectorization hints allows the vectorizer to use the widest
-    // available SIMD registers without over-requesting on narrow targets.
+    // The width is expressed in *i64 lanes* since OmScript's default type
+    // is i64.  AVX-512 has 512-bit registers → 8 × i64; AVX2 has 256-bit
+    // registers → 4 × i64; SSE2/NEON has 128-bit registers → 2 × i64.
+    // Using the correct width avoids over-requesting: for example, hinting
+    // VF=8 on AVX2 would require the vectorizer to split across two
+    // registers and may cause harmful type widening (i64 → i128 for
+    // modulo-by-constant patterns) that has no native hardware support.
     {
         std::string cpu, features;
         resolveTargetCPU(cpu, features);
         if (features.find("+avx512f") != std::string::npos) {
-            preferredVectorWidth_ = 16;
+            preferredVectorWidth_ = 8;  // 8 × i64 = 512 bits
         } else if (features.find("+avx2") != std::string::npos) {
-            preferredVectorWidth_ = 8;
+            preferredVectorWidth_ = 4;  // 4 × i64 = 256 bits
         } else {
-            preferredVectorWidth_ = 4;  // SSE2 / NEON fallback
+            preferredVectorWidth_ = 2;  // 2 × i64 = 128 bits (SSE2 / NEON)
         }
     }
 
@@ -1904,6 +1907,13 @@ void CodeGenerator::generate(Program* program) {
         //              unlocks loop-idiom recognition (auto-memset/memcpy detection).
         function->addFnAttr(llvm::Attribute::NoUnwind);
         function->addFnAttr(llvm::Attribute::MustProgress);
+        // prefer-vector-width=128 — prevent the loop vectorizer from choosing
+        // wide vector factors that cause integer types to be promoted to i128
+        // for division/modulo-by-constant patterns.  On x86-64, i128 multiply
+        // is lowered to multiple scalar instructions and vectorizing modulo
+        // at VF=8 with i128 intermediates is far slower than the scalar loop.
+        // 128-bit vectors still enable SSE/NEON vectorization.
+        function->addFnAttr("prefer-vector-width", "128");
         // nosync, nofree, willreturn — these promise the optimizer that the
         // function never synchronizes, never frees memory, and always returns.
         // These promises are WRONG for functions that use concurrency

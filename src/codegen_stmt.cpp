@@ -200,14 +200,12 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
                            llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), preferredVectorWidth_))});
             loopMDs.push_back(interleave);
         }
-        if (optimizationLevel >= OptimizationLevel::O3 && enableVectorize_) {
-            // Use the target-aware preferred vector width to fully utilise
-            // the widest available SIMD registers (SSE=4, AVX2=8, AVX-512=16).
-            llvm::MDNode* vecWidth = llvm::MDNode::get(
-                *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.width"),
-                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), preferredVectorWidth_))});
-            loopMDs.push_back(vecWidth);
-        }
+        // NOTE: llvm.loop.vectorize.width is intentionally NOT set here.
+        // Forcing a specific VF overrides the vectorizer's cost model, which
+        // can cause harmful type widening (e.g. i64 → i128 for modulo-by-
+        // constant patterns) that has no native hardware support on most
+        // targets.  The prefer-vector-width function attribute already guides
+        // the vectorizer toward the correct register width.
         llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
         loopMD->replaceOperandWith(0, loopMD);
         backBrWhile->setMetadata(llvm::LLVMContext::MD_loop, loopMD);
@@ -276,12 +274,8 @@ void CodeGenerator::generateDoWhile(DoWhileStmt* stmt) {
                            llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), preferredVectorWidth_))});
             loopMDs.push_back(interleave);
         }
-        if (optimizationLevel >= OptimizationLevel::O3 && enableVectorize_) {
-            llvm::MDNode* vecWidth = llvm::MDNode::get(
-                *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.width"),
-                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), preferredVectorWidth_))});
-            loopMDs.push_back(vecWidth);
-        }
+        // NOTE: llvm.loop.vectorize.width is intentionally NOT set here.
+        // See the while-loop comment for rationale.
         llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
         loopMD->replaceOperandWith(0, loopMD);
         backBrDoWhile->setMetadata(llvm::LLVMContext::MD_loop, loopMD);
@@ -448,14 +442,8 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
                            llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), preferredVectorWidth_))});
             loopMDs.push_back(interleave);
         }
-        if (optimizationLevel >= OptimizationLevel::O3 && enableVectorize_) {
-            // Use the target-aware preferred vector width to fully utilise
-            // the widest available SIMD registers (SSE=4, AVX2=8, AVX-512=16).
-            llvm::MDNode* vecWidth = llvm::MDNode::get(
-                *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.width"),
-                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), preferredVectorWidth_))});
-            loopMDs.push_back(vecWidth);
-        }
+        // NOTE: llvm.loop.vectorize.width is intentionally NOT set here.
+        // See the while-loop comment for rationale (modulo type widening).
         // At O3, hint the unroller for small constant-trip-count loops.
         // When both start and end are compile-time constants, the trip count
         // is known; if it's ≤ 64, suggest full unrolling to eliminate loop
