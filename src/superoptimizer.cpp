@@ -13,6 +13,7 @@
 
 #include "superoptimizer.h"
 #include <llvm/Config/llvm-config.h>
+#include <llvm/Analysis/ValueTracking.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/Dominators.h>
 #include <llvm/IR/InstrTypes.h>
@@ -1204,6 +1205,49 @@ static unsigned applyAlgebraicSimplifications(llvm::Function& func) {
             if (!simplified && inst.getOpcode() == llvm::Instruction::SRem) {
                 if (isConstInt(inst.getOperand(1), 1)) {
                     simplified = llvm::ConstantInt::get(inst.getType(), 0);
+                }
+            }
+
+            // Pattern: srem x, C → urem x, C  when x is known non-negative
+            // and C is a positive constant.  Unsigned remainder avoids the
+            // sign-correction fixup that srem requires (saves ~6 instructions
+            // in the lowered code for non-power-of-2 divisors like 37).
+            // This is a key advantage the superoptimizer provides over
+            // standard LLVM passes that may not prove non-negativity across
+            // complex expressions involving loop induction variables.
+            if (!simplified && inst.getOpcode() == llvm::Instruction::SRem) {
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1))) {
+                    if (ci->getSExtValue() > 0) {
+                        const llvm::DataLayout& DL = inst.getModule()->getDataLayout();
+                        llvm::KnownBits KB = llvm::computeKnownBits(
+                            inst.getOperand(0), DL, /*Depth=*/0,
+                            /*AC=*/nullptr, /*CxtI=*/&inst);
+                        if (KB.isNonNegative()) {
+                            llvm::IRBuilder<> builder(&inst);
+                            simplified = builder.CreateURem(
+                                inst.getOperand(0), inst.getOperand(1),
+                                "srem_to_urem");
+                        }
+                    }
+                }
+            }
+
+            // Pattern: sdiv x, C → udiv x, C  when x is known non-negative
+            // and C is a positive constant.  Same rationale as srem→urem.
+            if (!simplified && inst.getOpcode() == llvm::Instruction::SDiv) {
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1))) {
+                    if (ci->getSExtValue() > 0) {
+                        const llvm::DataLayout& DL = inst.getModule()->getDataLayout();
+                        llvm::KnownBits KB = llvm::computeKnownBits(
+                            inst.getOperand(0), DL, /*Depth=*/0,
+                            /*AC=*/nullptr, /*CxtI=*/&inst);
+                        if (KB.isNonNegative()) {
+                            llvm::IRBuilder<> builder(&inst);
+                            simplified = builder.CreateUDiv(
+                                inst.getOperand(0), inst.getOperand(1),
+                                "sdiv_to_udiv");
+                        }
+                    }
                 }
             }
 
