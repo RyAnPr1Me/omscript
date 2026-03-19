@@ -316,6 +316,10 @@ class CodeGenerator {
     void generateSwitch(SwitchStmt* stmt);
     void generateTryCatch(TryCatchStmt* stmt);
     void generateThrow(ThrowStmt* stmt);
+    void generateInvalidate(InvalidateStmt* stmt);
+    void generateMoveDecl(MoveDecl* stmt);
+    llvm::Value* generateMoveExpr(MoveExpr* expr);
+    llvm::Value* generateBorrowExpr(BorrowExpr* expr);
 
     // Helper methods
     llvm::Type* getDefaultType();

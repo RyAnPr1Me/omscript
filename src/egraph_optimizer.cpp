@@ -357,6 +357,16 @@ static bool canRepresentInEGraph(const Expression* expr) {
         return true;
     }
 
+    // MoveExpr / BorrowExpr — delegate to inner expression.
+    case ASTNodeType::MOVE_EXPR: {
+        auto* mv = static_cast<const MoveExpr*>(expr);
+        return canRepresentInEGraph(mv->source.get());
+    }
+    case ASTNodeType::BORROW_EXPR: {
+        auto* bw = static_cast<const BorrowExpr*>(expr);
+        return canRepresentInEGraph(bw->source.get());
+    }
+
     default:
         // IndexExpr, AssignExpr, etc. — cannot be represented.
         return false;
@@ -457,6 +467,16 @@ static void optimizeStatement(Statement* stmt) {
         }
         break;
     }
+    case ASTNodeType::MOVE_DECL: {
+        auto* moveDecl = static_cast<MoveDecl*>(stmt);
+        if (moveDecl->initializer) {
+            moveDecl->initializer = tryOptimize(std::move(moveDecl->initializer));
+        }
+        break;
+    }
+    case ASTNodeType::INVALIDATE_STMT:
+        // Nothing to optimize for invalidate statements.
+        break;
     default:
         break;
     }

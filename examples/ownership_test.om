@@ -1,0 +1,32 @@
+// Test ownership system features: move, invalidate, borrow
+
+fn main() {
+    // Test 1: Basic move semantics
+    var a = 42;
+    move var b = a;
+    // a is now dead (logically invalid), b has the value
+    println(b);  // 42
+
+    // Test 2: move expression in assignment
+    var x = 100;
+    var y = move x;
+    println(y);  // 100
+
+    // Test 3: invalidate
+    var c = 99;
+    println(c);  // 99
+    invalidate c;
+    // c is now dead — using it would be undefined behavior
+
+    // Test 4: borrow
+    var d = 77;
+    borrow var ref = d;
+    println(ref);  // 77
+
+    // Test 5: move in return
+    var e = 55;
+    var f = move e;
+    println(f);  // 55
+
+    return 0;
+}

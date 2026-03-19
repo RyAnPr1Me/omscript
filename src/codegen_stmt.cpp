@@ -831,4 +831,137 @@ void CodeGenerator::generateThrow(ThrowStmt* stmt) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Ownership system codegen
+// ---------------------------------------------------------------------------
+
+void CodeGenerator::generateInvalidate(InvalidateStmt* stmt) {
+    // Look up the variable's alloca
+    auto it = namedValues.find(stmt->varName);
+    if (it == namedValues.end()) {
+        codegenError("Variable '" + stmt->varName + "' not found for invalidate", stmt);
+    }
+    llvm::Value* alloca = it->second;
+
+    // Emit llvm.lifetime.end to mark the variable as dead.
+    // This allows LLVM to reuse the stack slot and eliminate dead stores.
+    auto* allocaInst = llvm::dyn_cast<llvm::AllocaInst>(alloca);
+    if (allocaInst) {
+        auto* allocaTy = allocaInst->getAllocatedType();
+        uint64_t size = module->getDataLayout().getTypeAllocSize(allocaTy);
+        auto* sizeVal = llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), size);
+        auto* lifetimeEnd = llvm::Intrinsic::getDeclaration(
+            module.get(), llvm::Intrinsic::lifetime_end,
+            {llvm::PointerType::getUnqual(*context)});
+        builder->CreateCall(lifetimeEnd, {sizeVal, allocaInst});
+    }
+
+    // Store an undef/poison value to enable dead-store elimination.
+    auto* allocaType = llvm::cast<llvm::AllocaInst>(alloca)->getAllocatedType();
+    builder->CreateStore(llvm::UndefValue::get(allocaType), alloca);
+}
+
+void CodeGenerator::generateMoveDecl(MoveDecl* stmt) {
+    llvm::Function* function = builder->GetInsertBlock()->getParent();
+    if (!function) {
+        codegenError("Move declaration outside of function", stmt);
+    }
+
+    llvm::Value* initValue = nullptr;
+    llvm::Type* allocaType = stmt->typeName.empty()
+                                 ? getDefaultType()
+                                 : resolveAnnotatedType(stmt->typeName);
+
+    if (stmt->initializer) {
+        initValue = generateExpression(stmt->initializer.get());
+        if (stmt->typeName.empty())
+            allocaType = initValue->getType();
+        if (!stmt->typeName.empty())
+            initValue = convertTo(initValue, allocaType);
+    }
+
+    llvm::AllocaInst* alloca = createEntryBlockAlloca(function, stmt->name, allocaType);
+    bindVariable(stmt->name, alloca);
+
+    if (initValue) {
+        builder->CreateStore(initValue, alloca);
+
+        // If the source is an identifier, mark the source as dead (emit
+        // lifetime.end + store undef) to enable LLVM to elide the copy
+        // and reuse the register/stack slot.
+        if (stmt->initializer->type == ASTNodeType::IDENTIFIER_EXPR) {
+            auto* srcId = static_cast<IdentifierExpr*>(stmt->initializer.get());
+            auto srcIt = namedValues.find(srcId->name);
+            if (srcIt != namedValues.end()) {
+                auto* srcAlloca = llvm::dyn_cast<llvm::AllocaInst>(srcIt->second);
+                if (srcAlloca) {
+                    auto* srcTy = srcAlloca->getAllocatedType();
+                    uint64_t sz = module->getDataLayout().getTypeAllocSize(srcTy);
+                    auto* szVal = llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), sz);
+                    auto* lifetimeEnd = llvm::Intrinsic::getDeclaration(
+                        module.get(), llvm::Intrinsic::lifetime_end,
+                        {llvm::PointerType::getUnqual(*context)});
+                    builder->CreateCall(lifetimeEnd, {szVal, srcAlloca});
+                    builder->CreateStore(llvm::UndefValue::get(srcTy), srcAlloca);
+                }
+            }
+        }
+    } else {
+        if (allocaType->isDoubleTy())
+            builder->CreateStore(llvm::ConstantFP::get(allocaType, 0.0), alloca);
+        else
+            builder->CreateStore(llvm::ConstantInt::get(*context, llvm::APInt(64, 0)), alloca);
+    }
+}
+
+llvm::Value* CodeGenerator::generateMoveExpr(MoveExpr* expr) {
+    // Generate the source value.
+    llvm::Value* val = generateExpression(expr->source.get());
+
+    // If the source is an identifier, mark it dead after the move.
+    if (expr->source->type == ASTNodeType::IDENTIFIER_EXPR) {
+        auto* srcId = static_cast<IdentifierExpr*>(expr->source.get());
+        auto srcIt = namedValues.find(srcId->name);
+        if (srcIt != namedValues.end()) {
+            auto* srcAlloca = llvm::dyn_cast<llvm::AllocaInst>(srcIt->second);
+            if (srcAlloca) {
+                auto* srcTy = srcAlloca->getAllocatedType();
+                uint64_t sz = module->getDataLayout().getTypeAllocSize(srcTy);
+                auto* szVal = llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), sz);
+                auto* lifetimeEnd = llvm::Intrinsic::getDeclaration(
+                    module.get(), llvm::Intrinsic::lifetime_end,
+                    {llvm::PointerType::getUnqual(*context)});
+                builder->CreateCall(lifetimeEnd, {szVal, srcAlloca});
+                builder->CreateStore(llvm::UndefValue::get(srcTy), srcAlloca);
+            }
+        }
+    }
+
+    return val;
+}
+
+llvm::Value* CodeGenerator::generateBorrowExpr(BorrowExpr* expr) {
+    // Generate the source value.
+    llvm::Value* val = generateExpression(expr->source.get());
+
+    // If the source is an identifier, attach !noalias metadata to the load
+    // as a hint that this borrow does not alias other pointers.
+    // The noalias.scope metadata requires a valid scope domain structure:
+    //   !scope = !{!scope, !domain, !"name"}
+    //   !domain = !{!domain, !"domain_name"}
+    if (auto* loadInst = llvm::dyn_cast<llvm::LoadInst>(val)) {
+        llvm::MDNode* domain = llvm::MDNode::getDistinct(
+            *context, {llvm::MDString::get(*context, "omscript.borrow.domain")});
+        // Patch self-ref: domain = !{domain, !"..."}
+        domain->replaceOperandWith(0, domain);
+        llvm::MDNode* scope = llvm::MDNode::getDistinct(
+            *context, {nullptr, domain, llvm::MDString::get(*context, "omscript.borrow.scope")});
+        scope->replaceOperandWith(0, scope);
+        llvm::MDNode* scopeList = llvm::MDNode::get(*context, {scope});
+        loadInst->setMetadata(llvm::LLVMContext::MD_noalias, scopeList);
+    }
+
+    return val;
+}
+
 } // namespace omscript

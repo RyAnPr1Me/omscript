@@ -2516,6 +2516,12 @@ void CodeGenerator::generateStatement(Statement* stmt) {
     case ASTNodeType::STRUCT_DECL:
         // Structs are handled at program level, nothing to do here
         break;
+    case ASTNodeType::INVALIDATE_STMT:
+        generateInvalidate(static_cast<InvalidateStmt*>(stmt));
+        break;
+    case ASTNodeType::MOVE_DECL:
+        generateMoveDecl(static_cast<MoveDecl*>(stmt));
+        break;
     default:
         codegenError("Unknown statement type", stmt);
     }
@@ -2571,6 +2577,10 @@ llvm::Value* CodeGenerator::generateExpression(Expression* expr) {
     case ASTNodeType::SPREAD_EXPR:
         // Spread expressions are only valid inside array literals
         codegenError("Spread operator '...' is only valid inside array literals", expr);
+    case ASTNodeType::MOVE_EXPR:
+        return generateMoveExpr(static_cast<MoveExpr*>(expr));
+    case ASTNodeType::BORROW_EXPR:
+        return generateBorrowExpr(static_cast<BorrowExpr*>(expr));
     default:
         codegenError("Unknown expression type", expr);
     }

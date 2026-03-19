@@ -44,7 +44,11 @@ enum class ASTNodeType {
     INDEX_ASSIGN_EXPR,
     LAMBDA_EXPR,
     SPREAD_EXPR,
-    PIPE_EXPR
+    PIPE_EXPR,
+    MOVE_EXPR,
+    BORROW_EXPR,
+    INVALIDATE_STMT,
+    MOVE_DECL
 };
 
 class ASTNode {
@@ -359,13 +363,40 @@ class EnumDecl : public Statement {
         : Statement(ASTNodeType::ENUM_DECL), name(n), members(std::move(m)) {}
 };
 
+/// Field attribute flags for optimization hints.
+struct FieldAttrs {
+    bool hot = false;       ///< Hint: frequently accessed — guide cache layout
+    bool cold = false;      ///< Hint: rarely accessed
+    bool noalias = false;   ///< Hint: pointer does not alias any other pointer
+    bool immut = false;     ///< Hint: field never modified after initialization
+    bool isMove = false;    ///< Hint: field participates in ownership transfer
+    int align = 0;          ///< Alignment hint (0 = default)
+    long long rangeMin = 0; ///< Value range lower bound (0 if unset)
+    long long rangeMax = 0; ///< Value range upper bound (0 if unset)
+    bool hasRange = false;  ///< Whether range(min,max) was specified
+};
+
+/// A single field within a struct declaration, with optional attributes.
+struct StructField {
+    std::string name;
+    std::string typeName;   ///< Optional type annotation
+    FieldAttrs attrs;
+
+    StructField(const std::string& n, const std::string& t = "", FieldAttrs a = {})
+        : name(n), typeName(t), attrs(a) {}
+};
+
 class StructDecl : public Statement {
   public:
     std::string name;
-    std::vector<std::string> fields;
+    std::vector<std::string> fields;       ///< Field names (for backwards compat)
+    std::vector<StructField> fieldDecls;   ///< Rich field info with attributes
 
     StructDecl(const std::string& n, std::vector<std::string> f)
         : Statement(ASTNodeType::STRUCT_DECL), name(n), fields(std::move(f)) {}
+
+    StructDecl(const std::string& n, std::vector<std::string> f, std::vector<StructField> fd)
+        : Statement(ASTNodeType::STRUCT_DECL), name(n), fields(std::move(f)), fieldDecls(std::move(fd)) {}
 };
 
 class StructLiteralExpr : public Expression {
@@ -454,6 +485,48 @@ class Program : public ASTNode {
             std::vector<std::unique_ptr<StructDecl>> strcts = {})
         : ASTNode(ASTNodeType::PROGRAM), functions(std::move(funcs)), enums(std::move(enms)),
           structs(std::move(strcts)) {}
+};
+
+// ---------------------------------------------------------------------------
+// Ownership system nodes
+// ---------------------------------------------------------------------------
+
+/// `move x` — transfer ownership, source becomes logically dead.
+class MoveExpr : public Expression {
+  public:
+    std::unique_ptr<Expression> source;
+
+    explicit MoveExpr(std::unique_ptr<Expression> src)
+        : Expression(ASTNodeType::MOVE_EXPR), source(std::move(src)) {}
+};
+
+/// `borrow ref = &x` — non-owning reference hint for alias analysis.
+class BorrowExpr : public Expression {
+  public:
+    std::unique_ptr<Expression> source;
+
+    explicit BorrowExpr(std::unique_ptr<Expression> src)
+        : Expression(ASTNodeType::BORROW_EXPR), source(std::move(src)) {}
+};
+
+/// `invalidate x;` — explicitly mark a variable as dead.
+class InvalidateStmt : public Statement {
+  public:
+    std::string varName;
+
+    explicit InvalidateStmt(const std::string& name)
+        : Statement(ASTNodeType::INVALIDATE_STMT), varName(name) {}
+};
+
+/// `move T a = b;` — variable declaration with move semantics.
+class MoveDecl : public Statement {
+  public:
+    std::string name;
+    std::string typeName;
+    std::unique_ptr<Expression> initializer;
+
+    MoveDecl(const std::string& n, const std::string& t, std::unique_ptr<Expression> init)
+        : Statement(ASTNodeType::MOVE_DECL), name(n), typeName(t), initializer(std::move(init)) {}
 };
 
 } // namespace omscript

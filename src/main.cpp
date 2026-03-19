@@ -1584,6 +1584,12 @@ const char* tokenTypeToString(omscript::TokenType type) {
         return "STRUCT";
     case omscript::TokenType::IMPORT:
         return "IMPORT";
+    case omscript::TokenType::MOVE:
+        return "MOVE";
+    case omscript::TokenType::INVALIDATE:
+        return "INVALIDATE";
+    case omscript::TokenType::BORROW:
+        return "BORROW";
     case omscript::TokenType::PLUS:
         return "PLUS";
     case omscript::TokenType::MINUS:
@@ -1845,6 +1851,18 @@ void dumpExpression(const omscript::Expression* expr, int indent) {
         dumpExpression(ia->value.get(), indent + 1);
         break;
     }
+    case omscript::ASTNodeType::MOVE_EXPR: {
+        auto* mv = static_cast<const omscript::MoveExpr*>(expr);
+        std::cout << "MoveExpr\n";
+        dumpExpression(mv->source.get(), indent + 1);
+        break;
+    }
+    case omscript::ASTNodeType::BORROW_EXPR: {
+        auto* bw = static_cast<const omscript::BorrowExpr*>(expr);
+        std::cout << "BorrowExpr\n";
+        dumpExpression(bw->source.get(), indent + 1);
+        break;
+    }
     default:
         std::cout << "Expression(unknown)\n";
         break;
@@ -1990,6 +2008,22 @@ void dumpStatement(const omscript::Statement* stmt, int indent) {
         auto* es = static_cast<const omscript::ExprStmt*>(stmt);
         std::cout << "ExprStmt\n";
         dumpExpression(es->expression.get(), indent + 1);
+        break;
+    }
+    case omscript::ASTNodeType::INVALIDATE_STMT: {
+        auto* inv = static_cast<const omscript::InvalidateStmt*>(stmt);
+        std::cout << "InvalidateStmt '" << inv->varName << "'\n";
+        break;
+    }
+    case omscript::ASTNodeType::MOVE_DECL: {
+        auto* md = static_cast<const omscript::MoveDecl*>(stmt);
+        std::cout << "MoveDecl '" << md->name << "'";
+        if (!md->typeName.empty())
+            std::cout << " type=" << md->typeName;
+        std::cout << "\n";
+        if (md->initializer) {
+            dumpExpression(md->initializer.get(), indent + 1);
+        }
         break;
     }
     default:

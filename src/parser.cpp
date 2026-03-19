@@ -405,6 +405,66 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         stmt->column = kw.column;
         return stmt;
     }
+    if (match(TokenType::INVALIDATE)) {
+        Token kw = tokens[current - 1];
+        Token varName = consume(TokenType::IDENTIFIER, "Expected variable name after 'invalidate'");
+        consume(TokenType::SEMICOLON, "Expected ';' after invalidate statement");
+        auto stmt = std::make_unique<InvalidateStmt>(varName.lexeme);
+        stmt->line = kw.line;
+        stmt->column = kw.column;
+        return stmt;
+    }
+    if (match(TokenType::MOVE)) {
+        // move semantics: either `move var x = expr;` or `move x = expr;`
+        Token kw = tokens[current - 1];
+        // Could be: move <type> <name> = <expr>;
+        // or just: move used as expression context (handled elsewhere)
+        if (check(TokenType::VAR) || (check(TokenType::IDENTIFIER) && current + 1 < tokens.size() &&
+            tokens[current + 1].type == TokenType::IDENTIFIER)) {
+            // `move var x = expr;` or `move int x = expr;`
+            std::string typeName;
+            if (match(TokenType::VAR)) {
+                typeName = "";
+            } else {
+                typeName = advance().lexeme; // consume type name
+            }
+            Token name = consume(TokenType::IDENTIFIER, "Expected variable name in move declaration");
+            consume(TokenType::ASSIGN, "Expected '=' in move declaration");
+            auto init = parseExpression();
+            consume(TokenType::SEMICOLON, "Expected ';' after move declaration");
+            auto stmt = std::make_unique<MoveDecl>(name.lexeme, typeName, std::move(init));
+            stmt->line = kw.line;
+            stmt->column = kw.column;
+            return stmt;
+        }
+        // Otherwise treat as expression statement: move <expr> used in assignment
+        // e.g. `x = move y;`  — rewind and let expression parsing handle it
+        current--; // put back 'move' token
+        return parseExprStmt();
+    }
+    if (match(TokenType::BORROW)) {
+        // `borrow var ref = &x;` or `borrow ref = &x;`
+        Token kw = tokens[current - 1];
+        std::string typeName;
+        if (match(TokenType::VAR)) {
+            typeName = "";
+        } else if (check(TokenType::IDENTIFIER) && current + 1 < tokens.size() &&
+                   tokens[current + 1].type == TokenType::IDENTIFIER) {
+            typeName = advance().lexeme;
+        }
+        Token name = consume(TokenType::IDENTIFIER, "Expected variable name in borrow declaration");
+        consume(TokenType::ASSIGN, "Expected '=' in borrow declaration");
+        auto init = parseExpression();
+        consume(TokenType::SEMICOLON, "Expected ';' after borrow declaration");
+        // Create a VarDecl with a BorrowExpr wrapper
+        auto borrowExpr = std::make_unique<BorrowExpr>(std::move(init));
+        borrowExpr->line = kw.line;
+        borrowExpr->column = kw.column;
+        auto stmt = std::make_unique<VarDecl>(name.lexeme, std::move(borrowExpr), false, typeName);
+        stmt->line = kw.line;
+        stmt->column = kw.column;
+        return stmt;
+    }
 
     return parseExprStmt();
 }
@@ -634,20 +694,63 @@ std::unique_ptr<StructDecl> Parser::parseStructDecl() {
     consume(TokenType::LBRACE, "Expected '{' after struct name");
 
     std::vector<std::string> fields;
+    std::vector<StructField> fieldDecls;
 
     while (!check(TokenType::RBRACE) && !isAtEnd()) {
+        // Parse optional field attributes before the field name.
+        FieldAttrs attrs;
+        while ((check(TokenType::IDENTIFIER) || check(TokenType::MOVE)) && !isAtEnd()) {
+            // Handle 'move' keyword as field attribute first
+            if (check(TokenType::MOVE)) { attrs.isMove = true; advance(); continue; }
+            const std::string& kw = peek().lexeme;
+            if (kw == "hot") { attrs.hot = true; advance(); continue; }
+            if (kw == "cold") { attrs.cold = true; advance(); continue; }
+            if (kw == "noalias") { attrs.noalias = true; advance(); continue; }
+            if (kw == "immut") { attrs.immut = true; advance(); continue; }
+            if (kw == "align") {
+                advance(); // consume 'align'
+                consume(TokenType::LPAREN, "Expected '(' after 'align'");
+                Token val = consume(TokenType::INTEGER, "Expected integer alignment");
+                attrs.align = static_cast<int>(val.intValue);
+                consume(TokenType::RPAREN, "Expected ')' after alignment value");
+                continue;
+            }
+            if (kw == "range") {
+                advance(); // consume 'range'
+                consume(TokenType::LPAREN, "Expected '(' after 'range'");
+                Token minVal = consume(TokenType::INTEGER, "Expected integer min");
+                consume(TokenType::COMMA, "Expected ',' between range values");
+                Token maxVal = consume(TokenType::INTEGER, "Expected integer max");
+                consume(TokenType::RPAREN, "Expected ')' after range values");
+                attrs.hasRange = true;
+                attrs.rangeMin = minVal.intValue;
+                attrs.rangeMax = maxVal.intValue;
+                continue;
+            }
+            break; // not an attribute, must be field name or type
+        }
+
+        // Parse optional type name before field name
+        std::string typeName;
+        // If current is an identifier and next is also an identifier, current is the type
+        if (check(TokenType::IDENTIFIER) && current + 1 < tokens.size() &&
+            tokens[current + 1].type == TokenType::IDENTIFIER) {
+            typeName = advance().lexeme;
+        }
+
         Token fieldToken = consume(TokenType::IDENTIFIER, "Expected field name");
         fields.push_back(fieldToken.lexeme);
-        // Skip optional type annotation (e.g. x:int)
+        // Skip optional type annotation (e.g. x:int) — alternative syntax
         if (match(TokenType::COLON)) {
-            parseTypeAnnotation();
+            typeName = parseTypeAnnotation();
         }
+        fieldDecls.push_back(StructField(fieldToken.lexeme, typeName, attrs));
         match(TokenType::COMMA);
     }
 
     consume(TokenType::RBRACE, "Expected '}' after struct body");
     structNames_.insert(nameToken.lexeme);
-    return std::make_unique<StructDecl>(nameToken.lexeme, std::move(fields));
+    return std::make_unique<StructDecl>(nameToken.lexeme, std::move(fields), std::move(fieldDecls));
 }
 
 std::unique_ptr<Expression> Parser::parseStructLiteral(const std::string& name, int line, int col) {
@@ -1033,6 +1136,16 @@ std::unique_ptr<Expression> Parser::parseUnary() {
         auto node = std::make_unique<PrefixExpr>(opToken.lexeme, std::move(operand));
         node->line = opToken.line;
         node->column = opToken.column;
+        return node;
+    }
+
+    // `move <expr>` as a prefix expression (e.g. `return move x;`, `a = move b;`)
+    if (match(TokenType::MOVE)) {
+        Token kw = tokens[current - 1];
+        auto operand = parseUnary();
+        auto node = std::make_unique<MoveExpr>(std::move(operand));
+        node->line = kw.line;
+        node->column = kw.column;
         return node;
     }
 
