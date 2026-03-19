@@ -1702,6 +1702,24 @@ void CodeGenerator::scanStmtForStringCalls(Statement* stmt) {
 }
 
 void CodeGenerator::preAnalyzeStringTypes(Program* program) {
+    // Seed string type information from explicit type annotations.
+    // When a parameter is annotated as `: string` or a function has
+    // `-> string` return type, we know the type without flow analysis.
+    // This bootstraps the fixpoint loop so that downstream callers/callees
+    // of annotated functions get correct string type propagation immediately.
+    for (auto& func : program->functions) {
+        // Seed string-returning functions from return type annotations.
+        if (func->returnType == "string") {
+            stringReturningFunctions_.insert(func->name);
+        }
+        // Seed string parameter types from parameter type annotations.
+        for (size_t i = 0; i < func->parameters.size(); ++i) {
+            if (func->parameters[i].typeName == "string") {
+                funcParamStringTypes_[func->name].insert(i);
+            }
+        }
+    }
+
     // Iteratively propagate string type information until no new facts are learned.
     // Each iteration may uncover new string-returning functions or string parameters,
     // which in turn enables further propagation in the next iteration.
