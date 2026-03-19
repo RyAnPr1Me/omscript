@@ -64,6 +64,7 @@
 #include <llvm/Transforms/Scalar/JumpThreading.h>
 #include <llvm/Transforms/Scalar/StraightLineStrengthReduce.h>
 #include <llvm/Transforms/Scalar/TailRecursionElimination.h>
+#include <llvm/Transforms/Scalar/LoopUnrollPass.h>
 #include <llvm/Transforms/Scalar/SimpleLoopUnswitch.h>
 #include <llvm/Transforms/Scalar/SpeculativeExecution.h>
 #include <llvm/Transforms/Scalar/DivRemPairs.h>
@@ -241,14 +242,12 @@ void CodeGenerator::runOptimizationPasses() {
     llvm::PipelineTuningOptions PTO;
     PTO.LoopVectorization = enableVectorize_;
     PTO.SLPVectorization = enableVectorize_;
-    // Disable LLVM's automatic aggressive loop unrolling in the standard
-    // pipeline.  LLVM O3 over-unrolls loops with operations that expand
-    // during ISel (e.g. srem-by-constant → 6 µops), causing register
-    // spills.  Instead we add a LoopUnrollPass with conservative settings
-    // via a late pipeline callback, and rely on the post-pipeline HGOE
-    // softwarePipelineLoops to annotate remaining loops with target-optimal
-    // unroll counts.
-    PTO.LoopUnrolling = false;
+    // Re-enable LLVM's cost-model-driven loop unrolling.  The standard O3
+    // pipeline has excellent register-pressure-aware unrolling heuristics.
+    // We previously disabled this because the HGOE pre-pipeline was injecting
+    // bad unroll metadata that caused over-unrolling; now that pre-pipeline
+    // annotation is disabled, LLVM's own unroller makes good decisions.
+    PTO.LoopUnrolling = enableUnrollLoops_;
     PTO.LoopInterleaving = enableVectorize_; // enable loop interleaving at O2+
 
     if (verbose_) {
