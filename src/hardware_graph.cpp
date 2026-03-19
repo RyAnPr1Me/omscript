@@ -610,17 +610,17 @@ static MicroarchProfile skylakeProfile() {
     MicroarchProfile p;
     p.name = "skylake";
     p.isa = ISAFamily::X86_64;
-    p.decodeWidth = 6;
-    p.issueWidth = 6;
-    p.pipelineDepth = 14;
-    p.intALUs = 4;
-    p.vecUnits = 2;
-    p.fmaUnits = 2;
-    p.loadPorts = 2;
-    p.storePorts = 1;
-    p.branchUnits = 1;
-    p.agus = 2;
-    p.dividers = 1;
+    p.decodeWidth = 6;       // µop cache delivers 6/cycle; legacy decode 4/cycle
+    p.issueWidth = 6;        // 6 µops dispatched per cycle
+    p.pipelineDepth = 14;    // front-end to retire (from µop cache path)
+    p.intALUs = 4;           // P0, P1, P5, P6
+    p.vecUnits = 3;          // P0, P1, P5 (vector ALU)
+    p.fmaUnits = 2;          // P0, P1
+    p.loadPorts = 2;         // P2, P3
+    p.storePorts = 2;        // P4, P7 (store data)
+    p.branchUnits = 2;       // P0 (branch2), P6 (branch1)
+    p.agus = 2;              // P2, P3 also do AGU
+    p.dividers = 1;          // shared divider on P0
     // Skylake: integer multiply on ports P0 and P1 only (2 of the 4 ALU ports).
     p.mulPortCount = 2;
     p.latIntAdd = 1; p.latIntMul = 3; p.latIntDiv = 26;
@@ -629,7 +629,7 @@ static MicroarchProfile skylakeProfile() {
     p.tputIntAdd = 0.25; p.tputIntMul = 1.0;
     p.tputFPAdd = 0.5; p.tputFPMul = 0.5;
     p.tputLoad = 0.5; p.tputStore = 1.0;
-    p.l1DSize = 32; p.l1DLatency = 5;
+    p.l1DSize = 32; p.l1DLatency = 4;   // 4-cycle load-to-use
     p.l2Size = 256; p.l2Latency = 12;
     p.l3Size = 8192; p.l3Latency = 42;
     p.cacheLineSize = 64;
@@ -654,18 +654,41 @@ static MicroarchProfile haswellProfile() {
     return p;
 }
 
-/// Return an Intel Alder Lake / Raptor Lake (big core) profile.
+/// Return an Intel Alder Lake / Raptor Lake (Golden Cove P-core) profile.
 static MicroarchProfile alderlakeProfile() {
-    MicroarchProfile p = skylakeProfile();
+    MicroarchProfile p;
     p.name = "alderlake";
-    p.decodeWidth = 6;
-    p.issueWidth = 6;
-    p.intALUs = 5;
-    p.loadPorts = 2;
-    p.storePorts = 2;
-    p.l1DSize = 48;
-    p.l3Size = 30720; // 30MB shared
+    p.isa = ISAFamily::X86_64;
+    p.decodeWidth = 6;        // 6-wide decode from µop cache
+    p.issueWidth = 6;         // 6 µops dispatched per cycle
+    p.pipelineDepth = 14;     // similar depth to Skylake, improved prediction
+    p.intALUs = 5;            // 5 integer execution ports
+    p.vecUnits = 3;           // 3 vector ALU ports
+    p.fmaUnits = 2;           // 2 FMA units
+    p.loadPorts = 2;          // 2 load ports
+    p.storePorts = 2;         // 2 store data ports
+    p.branchUnits = 2;
+    p.agus = 3;               // 3 AGU ports (2 load + 1 store address)
+    p.dividers = 1;
+    p.mulPortCount = 2;
+    p.latIntAdd = 1; p.latIntMul = 3; p.latIntDiv = 23;
+    p.latFPAdd = 3; p.latFPMul = 4; p.latFPDiv = 11; p.latFMA = 4;
+    p.latLoad = 5; p.latStore = 5; p.latBranch = 1; p.latShift = 1;
+    p.tputIntAdd = 0.20; p.tputIntMul = 1.0;
+    p.tputFPAdd = 0.5; p.tputFPMul = 0.5;
+    p.tputLoad = 0.5; p.tputStore = 1.0;
+    p.l1DSize = 48;           // 48 KB L1D
+    p.l1DLatency = 5;
+    p.l2Size = 1280;          // 1.25 MB L2 per P-core
+    p.l2Latency = 12;
+    p.l3Size = 30720;         // 30 MB shared L3
     p.l3Latency = 44;
+    p.cacheLineSize = 64;
+    p.vectorWidth = 256;      // AVX2
+    p.intRegisters = 16; p.vecRegisters = 16; p.fpRegisters = 16;
+    p.branchMispredictPenalty = 14.0;
+    p.btbEntries = 12288;     // much larger BTB
+    p.memoryLatency = 180;
     return p;
 }
 
@@ -674,14 +697,14 @@ static MicroarchProfile zen4Profile() {
     MicroarchProfile p;
     p.name = "znver4";
     p.isa = ISAFamily::X86_64;
-    p.decodeWidth = 4;
-    p.issueWidth = 6;
-    p.pipelineDepth = 13;
-    p.intALUs = 4;
-    p.vecUnits = 2;
-    p.fmaUnits = 2;
-    p.loadPorts = 3;
-    p.storePorts = 2;
+    p.decodeWidth = 4;        // 4-wide x86 decode
+    p.issueWidth = 6;         // 6-wide dispatch to backend
+    p.pipelineDepth = 19;     // integer pipeline ~19 stages (fetch to retire)
+    p.intALUs = 4;            // 4 integer ALU pipes
+    p.vecUnits = 2;           // 2× 256-bit FP/SIMD pipes
+    p.fmaUnits = 2;           // 2 FMA units
+    p.loadPorts = 3;          // 3 load/store AGU units
+    p.storePorts = 2;         // 2 store data units
     p.branchUnits = 1;
     p.agus = 3;
     p.dividers = 1;
@@ -697,7 +720,7 @@ static MicroarchProfile zen4Profile() {
     p.l2Size = 1024; p.l2Latency = 12;
     p.l3Size = 32768; p.l3Latency = 50;
     p.cacheLineSize = 64;
-    p.vectorWidth = 256; // AVX2 (256-bit AVX-512 throughput on Zen 4)
+    p.vectorWidth = 256; // AVX2 natively (AVX-512 double-pumped from 256-bit)
     p.intRegisters = 16; p.vecRegisters = 32; p.fpRegisters = 32;
     p.branchMispredictPenalty = 13.0;
     p.btbEntries = 6144;
@@ -709,16 +732,16 @@ static MicroarchProfile zen4Profile() {
 static MicroarchProfile zen3Profile() {
     MicroarchProfile p = zen4Profile();
     p.name = "znver3";
-    p.pipelineDepth = 13;
+    p.pipelineDepth = 19;     // similar pipeline depth to Zen 4
     p.loadPorts = 3;
     p.storePorts = 2;
     p.latIntDiv = 18;
     p.latFPDiv = 15;
-    p.l2Size = 512;
+    p.l2Size = 512;           // 512 KB L2 per core (vs 1 MB on Zen 4)
     p.l3Size = 32768;
     p.l3Latency = 46;
     p.vectorWidth = 256;
-    p.vecRegisters = 16;
+    p.vecRegisters = 16;      // no AVX-512 support
     p.fpRegisters = 16;
     return p;
 }
@@ -902,14 +925,18 @@ std::optional<MicroarchProfile> lookupMicroarch(const std::string& cpuName) {
     if (normalized == "znver2" || normalized == "zen2") {
         auto p = zen3Profile();
         p.name = "znver2";
+        p.pipelineDepth = 19;
         p.l2Size = 512;
+        p.l3Latency = 42;
         return p;
     }
     if (normalized == "znver1" || normalized == "zen") {
         auto p = zen3Profile();
         p.name = "znver1";
+        p.pipelineDepth = 19;
         p.l2Size = 512;
         p.loadPorts = 2;
+        p.l3Latency = 40;
         return p;
     }
     if (normalized == "znver5" || normalized == "zen5") {
@@ -1942,7 +1969,7 @@ static unsigned softwarePipelineLoops(llvm::Function& func,
         // Upper-bound prevents excessive code-size growth from very deep pipelines
         // combined with very short MII (e.g. a 14-stage pipeline with MII=1 would
         // otherwise produce 14 unrolled copies).
-        constexpr unsigned kMaxUnrollCount = 16;
+        constexpr unsigned kMaxUnrollCount = 8;
         unsigned unroll = (profile.pipelineDepth + resMII - 1) / resMII;
         unroll = std::max(unroll, 2u);
         unroll = std::min(unroll, kMaxUnrollCount);
@@ -2735,42 +2762,75 @@ static unsigned annotateLoopsForTargetInFunc(llvm::Function& func,
         if (totalNativeOps == 0) continue;
 
         // ── Constraint 1: Register pressure ──────────────────────────────
-        // On x86-64: 16 GPRs minus rsp (stack), rbp (frame), and 1-2 for
-        // the loop induction variable and end value ≈ 12 usable.
-        // On AArch64: 31 GPRs minus x29 (fp), x30 (lr) ≈ 28 usable.
-        unsigned usableRegs = (profile.isa == ISAFamily::AArch64)
-            ? (profile.intRegisters > 3 ? profile.intRegisters - 3 : 12)
-            : (profile.intRegisters > 4 ? profile.intRegisters - 4 : 12);
+        // On x86-64: 16 GPRs minus rsp (stack), rbp (frame) = 14 raw.
+        // Subtract baseline registers for loop induction variable, bound,
+        // and a conservative estimate for outer-loop context:
+        //   - PHI nodes in the header each hold a live value across the
+        //     back-edge (induction vars, accumulators)
+        //   - Each predecessor block may contribute additional live-ins
+        // We count PHI nodes + 2 (for the induction var's bound and step)
+        // as baseline, then subtract from the raw register budget.
+        unsigned rawRegs = (profile.isa == ISAFamily::AArch64)
+            ? (profile.intRegisters > 2 ? profile.intRegisters - 2 : 16)
+            : (profile.intRegisters > 2 ? profile.intRegisters - 2 : 14);
+
+        unsigned phiCount = 0;
+        for (auto& inst : bb) {
+            if (llvm::isa<llvm::PHINode>(inst)) ++phiCount;
+            else break; // PHIs are always at the start
+        }
+        // Each PHI occupies a register across the loop.  Add 2 for the
+        // induction variable's bound and step (which are loop-invariant
+        // but still occupy registers during the loop body).
+        unsigned baselineRegs = phiCount + 2;
+        unsigned usableRegs = rawRegs > baselineRegs
+            ? rawRegs - baselineRegs : 2;
 
         // Each unrolled iteration adds regsProduced live values.  The limit
         // is the largest N such that N * regsPerIter ≤ usableRegs.
         unsigned regUnroll = totalRegsProduced > 0
             ? usableRegs / totalRegsProduced
-            : 16;
+            : 8;
 
         // ── Constraint 2: L1 I-cache footprint ───────────────────────────
         // L1I is typically 32-64KB.  Each x86 instruction averages ~4.5
-        // bytes (shorter for ALU, longer for memory+displacement).
-        // We budget 40% of L1I for the hot loop to leave room for outer
-        // loops, function prologs, and OS code.
+        // bytes.  We budget 5% of L1I for the hot inner loop — conserv-
+        // ative because the remainder is needed for outer loops, function
+        // prologs, branch-miss recovery paths, and OS code.
         unsigned l1iBytes = profile.l1DSize * 1024; // approximate L1I ≈ L1D
-        unsigned iCacheBudget = (l1iBytes * 40) / (100 * 5); // 40% / 5 bytes per op
+        unsigned iCacheBudget = (l1iBytes * 5) / (100 * 5); // 5% / 5 bytes per op
         unsigned iCacheUnroll = totalNativeOps > 0
             ? iCacheBudget / totalNativeOps
-            : 16;
+            : 8;
 
         // ── Constraint 3: Pipeline saturation ────────────────────────────
-        // We want enough iterations in-flight to hide the pipeline latency
-        // of the loop body.  For an OOO core, this is:
-        //   minUnroll = ceil(maxLatency / (issueWidth * tputPerOp))
-        // Simplified: at least ceil(pipelineDepth / 4) iterations.
-        unsigned pipelineMin = (profile.pipelineDepth + 3) / 4;
+        // For an OOO core, unrolling helps fill the reorder buffer.
+        // Minimum 2, but don't force more than 4 — OOO scheduling
+        // already hides most latency without excessive unrolling.
+        unsigned pipelineMin = std::min((profile.pipelineDepth + 7) / 8, 4u);
+        pipelineMin = std::max(pipelineMin, 2u);
 
         // ── Combine constraints ──────────────────────────────────────────
         unsigned unroll = std::min(regUnroll, iCacheUnroll);
         unroll = std::max(unroll, pipelineMin);
         unroll = std::max(unroll, 2u);
-        unroll = std::min(unroll, 16u);
+        unroll = std::min(unroll, 8u);  // cap at 8 (GCC's typical max)
+
+        // Loops with remainder/division by constant: LLVM expands these
+        // to multiply+shift sequences (5-6 µops each).  The pre-pipeline
+        // IR undercounts their cost, so clamp to avoid over-unrolling.
+        bool hasRemByConst = false;
+        for (auto& inst : bb) {
+            if ((inst.getOpcode() == llvm::Instruction::SRem ||
+                 inst.getOpcode() == llvm::Instruction::URem ||
+                 inst.getOpcode() == llvm::Instruction::SDiv ||
+                 inst.getOpcode() == llvm::Instruction::UDiv) &&
+                llvm::isa<llvm::ConstantInt>(inst.getOperand(1))) {
+                hasRemByConst = true;
+                break;
+            }
+        }
+        if (hasRemByConst) unroll = std::min(unroll, 4u);
 
         // Loops with divider instructions: the divider is a scarce resource
         // (usually 1 unit, not pipelined).  Over-unrolling creates a

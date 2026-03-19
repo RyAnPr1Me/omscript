@@ -241,7 +241,14 @@ void CodeGenerator::runOptimizationPasses() {
     llvm::PipelineTuningOptions PTO;
     PTO.LoopVectorization = enableVectorize_;
     PTO.SLPVectorization = enableVectorize_;
-    PTO.LoopUnrolling = enableUnrollLoops_;
+    // Disable LLVM's automatic aggressive loop unrolling in the standard
+    // pipeline.  LLVM O3 over-unrolls loops with operations that expand
+    // during ISel (e.g. srem-by-constant → 6 µops), causing register
+    // spills.  Instead we add a LoopUnrollPass with conservative settings
+    // via a late pipeline callback, and rely on the post-pipeline HGOE
+    // softwarePipelineLoops to annotate remaining loops with target-optimal
+    // unroll counts.
+    PTO.LoopUnrolling = false;
     PTO.LoopInterleaving = enableVectorize_; // enable loop interleaving at O2+
 
     if (verbose_) {
@@ -620,16 +627,16 @@ void CodeGenerator::runOptimizationPasses() {
     // CPU's resource constraints (register count, I-cache size, pipeline
     // depth) instead of using generic heuristics that over-unroll for CPUs
     // with expensive modulo/division sequences.
-    if (enableHGOE_ && optimizationLevel >= OptimizationLevel::O2) {
-        hgoe::HGOEConfig preConfig;
-        preConfig.marchCpu = marchCpu_;
-        preConfig.mtuneCpu = mtuneCpu_;
-        unsigned loopsAnnotated = hgoe::annotateLoopsForTarget(*module, preConfig);
-        if (verbose_ && loopsAnnotated > 0) {
-            std::cout << "    Pre-pipeline HGOE: annotated " << loopsAnnotated
-                      << " loops with target-optimal metadata" << std::endl;
-        }
-    }
+    //
+    // NOTE: Disabled because LLVM's O3 pipeline already has excellent
+    // unroll heuristics with register pressure modeling.  Our pre-pipeline
+    // metadata was being overridden by LLVM's aggressive multi-pass
+    // unrolling anyway, and when it wasn't overridden, it often led to
+    // suboptimal results because the cost model runs on pre-lowered IR
+    // where operations like srem/sdiv appear as single instructions but
+    // expand to 5-6 µops during selection.  The post-pipeline HGOE
+    // (softwarePipelineLoops) runs on fully-optimized IR and gives more
+    // accurate annotations for loops that escape LLVM's unroller.
     MPM.run(*module, MAM);
     if (verbose_) {
         std::cout << "    LLVM pass pipeline complete" << std::endl;
