@@ -2086,7 +2086,8 @@ static void applyTargetAttributes(llvm::Function& func,
 }
 
 TransformStats applyHardwareTransforms(llvm::Function& func,
-                                        const MicroarchProfile& profile) {
+                                        const MicroarchProfile& profile,
+                                        bool enableLoopAnnotation) {
     TransformStats stats;
 
 
@@ -2095,7 +2096,12 @@ TransformStats applyHardwareTransforms(llvm::Function& func,
     stats.prefetchesInserted = insertPrefetches(func, profile);
     stats.branchesOptimized  = optimizeBranchLayout(func, profile);
     stats.loadsStorePaired   = markLoadStorePairs(func, profile);
-    stats.vectorExpanded     = softwarePipelineLoops(func, profile);
+    // Skip loop annotation when LTO is active — the LTO linker runs its own
+    // loop optimizer and forced unroll/vectorize metadata causes the LTO
+    // pipeline to spend excessive time or hang.
+    stats.vectorExpanded     = enableLoopAnnotation
+                                 ? softwarePipelineLoops(func, profile)
+                                 : 0;
     // Integer strength reduction runs last so mul→shift replacements do not
     // interfere with the FMA scan above (which looks at FMul, not int Mul).
     stats.intStrengthReduced = integerStrengthReduce(func, profile);
@@ -2513,7 +2519,8 @@ HGOEStats optimizeFunction(llvm::Function& func, const HGOEConfig& config) {
         };
 
         unsigned costBefore = estimateFuncCost(func);
-        stats.transforms = applyHardwareTransforms(func, profile);
+        stats.transforms = applyHardwareTransforms(func, profile,
+                                                    config.enableLoopAnnotation);
         unsigned costAfter = estimateFuncCost(func);
 
         // Accept the transformation: log the cost delta for diagnostics.

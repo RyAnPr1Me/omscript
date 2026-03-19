@@ -392,6 +392,11 @@ struct HGOEConfig {
     bool enableScheduling = true;    ///< Graph-based instruction scheduling
     bool enableTransforms = true;    ///< Hardware-aware transformations
     bool enableCostModel = true;     ///< Hardware-aware cost model
+    bool enableLoopAnnotation = true; ///< Add loop unroll/vectorize metadata.
+                                      ///< Disable when LTO is active — the LTO
+                                      ///< linker has its own loop optimizer and
+                                      ///< forced hints cause excessive compile
+                                      ///< time or hangs.
 };
 
 /// Apply hardware-graph-driven instruction scheduling to all basic blocks in a
