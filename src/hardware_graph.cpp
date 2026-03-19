@@ -2555,5 +2555,284 @@ HGOEStats optimizeModule(llvm::Module& module, const HGOEConfig& config) {
     return total;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// Pre-pipeline loop annotation for target-aware unrolling/vectorization
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Estimate the native instruction cost of a single LLVM IR instruction,
+/// including the number of micro-ops it expands to and the registers it
+/// consumes.  Used pre-pipeline to predict resource pressure.
+struct NativeCostInfo {
+    unsigned nativeOps;      // Number of backend micro-ops
+    unsigned regsProduced;   // Number of output registers consumed
+    unsigned latency;        // Estimated latency in cycles
+    bool     usesDivider;    // Uses the divider execution unit
+};
+
+static NativeCostInfo estimateNativeCostDetailed(const llvm::Instruction& inst,
+                                                   const MicroarchProfile& profile) {
+    NativeCostInfo info{1, 1, 1, false};
+    switch (inst.getOpcode()) {
+    case llvm::Instruction::URem:
+    case llvm::Instruction::SRem:
+        if (llvm::isa<llvm::ConstantInt>(inst.getOperand(1))) {
+            // Remainder-by-constant: mul(magic) + shr + lea + sub ≈ 5-6 µops
+            info.nativeOps = 6;
+            info.regsProduced = 2; // result + scratch for multiply high
+            info.latency = profile.latIntMul + 3;
+        } else {
+            info.nativeOps = 1;
+            info.regsProduced = 2;
+            info.latency = profile.latIntDiv;
+            info.usesDivider = true;
+        }
+        break;
+    case llvm::Instruction::UDiv:
+    case llvm::Instruction::SDiv:
+        if (llvm::isa<llvm::ConstantInt>(inst.getOperand(1))) {
+            info.nativeOps = 4;
+            info.regsProduced = 2;
+            info.latency = profile.latIntMul + 2;
+        } else {
+            info.nativeOps = 1;
+            info.regsProduced = 2;
+            info.latency = profile.latIntDiv;
+            info.usesDivider = true;
+        }
+        break;
+    case llvm::Instruction::Mul:
+        info.nativeOps = 1;
+        info.latency = profile.latIntMul;
+        break;
+    case llvm::Instruction::Add:
+    case llvm::Instruction::Sub:
+    case llvm::Instruction::And:
+    case llvm::Instruction::Or:
+    case llvm::Instruction::Xor:
+        info.nativeOps = 1;
+        info.latency = profile.latIntAdd;
+        break;
+    case llvm::Instruction::Shl:
+    case llvm::Instruction::LShr:
+    case llvm::Instruction::AShr:
+        info.nativeOps = 1;
+        info.latency = profile.latShift;
+        break;
+    case llvm::Instruction::ICmp:
+    case llvm::Instruction::FCmp:
+        info.nativeOps = 1;
+        info.regsProduced = 0; // flags, not a GPR
+        break;
+    case llvm::Instruction::Load:
+        info.nativeOps = 1;
+        info.latency = profile.latLoad;
+        break;
+    case llvm::Instruction::Store:
+        info.nativeOps = 1;
+        info.regsProduced = 0;
+        info.latency = profile.latStore;
+        break;
+    case llvm::Instruction::Call:
+        if (llvm::isa<llvm::IntrinsicInst>(inst)) {
+            info.nativeOps = 1;
+        } else {
+            info.nativeOps = 5;
+            info.regsProduced = 1;
+            info.latency = 5;
+        }
+        break;
+    case llvm::Instruction::PHI:
+    case llvm::Instruction::Select:
+        info.nativeOps = 1;
+        break;
+    default:
+        info.nativeOps = 1;
+        break;
+    }
+    return info;
+}
+
+/// Annotate loops in a single function with target-optimal metadata.
+/// Must run BEFORE the LLVM optimization pipeline.
+///
+/// The algorithm models the target CPU's three main constraints:
+///   1. Register pressure: unrolled body must not exceed available GPRs
+///   2. I-cache footprint: unrolled body must fit in L1I with headroom
+///   3. Execution throughput: enough iterations to saturate the pipeline
+///
+/// For each loop, it computes per-iteration resource demands (µops,
+/// registers, divider usage) and selects the largest unroll factor that
+/// stays within all three budgets.
+static unsigned annotateLoopsForTargetInFunc(llvm::Function& func,
+                                              const MicroarchProfile& profile) {
+    if (func.isDeclaration()) return 0;
+
+    // Assign linear order to each basic block for loop detection.
+    std::unordered_map<llvm::BasicBlock*, unsigned> bbOrder;
+    {
+        unsigned ord = 0;
+        for (auto& bb : func) bbOrder[&bb] = ord++;
+    }
+
+    unsigned count = 0;
+    llvm::LLVMContext& ctx = func.getContext();
+
+    for (auto& bb : func) {
+        // Detect loop headers via back-edges.
+        llvm::BasicBlock* latch = nullptr;
+        for (auto* pred : llvm::predecessors(&bb)) {
+            if (bbOrder[pred] >= bbOrder[&bb]) { latch = pred; break; }
+        }
+        if (!latch) continue;
+
+        auto* latchTerm = latch->getTerminator();
+        if (!latchTerm) continue;
+
+        // Skip if existing metadata already has an unroll count (user-specified).
+        if (auto* existingMD = latchTerm->getMetadata(llvm::LLVMContext::MD_loop)) {
+            bool hasUnrollCount = false;
+            for (unsigned i = 1, e = existingMD->getNumOperands(); i < e; ++i) {
+                if (auto* inner = llvm::dyn_cast<llvm::MDNode>(existingMD->getOperand(i))) {
+                    if (inner->getNumOperands() > 0) {
+                        if (auto* str = llvm::dyn_cast<llvm::MDString>(inner->getOperand(0))) {
+                            if (str->getString() == "llvm.loop.unroll.count") {
+                                hasUnrollCount = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            if (hasUnrollCount) continue;
+        }
+
+        // ── Analyse the loop body's resource demands ──────────────────────
+        // Scan all blocks that belong to the loop body (header + any blocks
+        // between header and latch inclusive).
+        unsigned totalNativeOps = 0;
+        unsigned totalRegsProduced = 0;
+        unsigned maxLatency = 0;
+        bool usesDivider = false;
+        bool hasCall = false;
+
+        // Helper to accumulate cost from a basic block.
+        auto accumulateBB = [&](llvm::BasicBlock& blk) {
+            for (auto& inst : blk) {
+                if (llvm::isa<llvm::PHINode>(inst) || inst.isTerminator()) continue;
+                auto ci = estimateNativeCostDetailed(inst, profile);
+                totalNativeOps += ci.nativeOps;
+                totalRegsProduced += ci.regsProduced;
+                if (ci.latency > maxLatency) maxLatency = ci.latency;
+                if (ci.usesDivider) usesDivider = true;
+                if (llvm::isa<llvm::CallInst>(inst) && !llvm::isa<llvm::IntrinsicInst>(inst))
+                    hasCall = true;
+            }
+        };
+
+        accumulateBB(bb);
+        if (latch != &bb) accumulateBB(*latch);
+
+        if (totalNativeOps == 0) continue;
+
+        // ── Constraint 1: Register pressure ──────────────────────────────
+        // On x86-64: 16 GPRs minus rsp (stack), rbp (frame), and 1-2 for
+        // the loop induction variable and end value ≈ 12 usable.
+        // On AArch64: 31 GPRs minus x29 (fp), x30 (lr) ≈ 28 usable.
+        unsigned usableRegs = (profile.isa == ISAFamily::AArch64)
+            ? (profile.intRegisters > 3 ? profile.intRegisters - 3 : 12)
+            : (profile.intRegisters > 4 ? profile.intRegisters - 4 : 12);
+
+        // Each unrolled iteration adds regsProduced live values.  The limit
+        // is the largest N such that N * regsPerIter ≤ usableRegs.
+        unsigned regUnroll = totalRegsProduced > 0
+            ? usableRegs / totalRegsProduced
+            : 16;
+
+        // ── Constraint 2: L1 I-cache footprint ───────────────────────────
+        // L1I is typically 32-64KB.  Each x86 instruction averages ~4.5
+        // bytes (shorter for ALU, longer for memory+displacement).
+        // We budget 40% of L1I for the hot loop to leave room for outer
+        // loops, function prologs, and OS code.
+        unsigned l1iBytes = profile.l1DSize * 1024; // approximate L1I ≈ L1D
+        unsigned iCacheBudget = (l1iBytes * 40) / (100 * 5); // 40% / 5 bytes per op
+        unsigned iCacheUnroll = totalNativeOps > 0
+            ? iCacheBudget / totalNativeOps
+            : 16;
+
+        // ── Constraint 3: Pipeline saturation ────────────────────────────
+        // We want enough iterations in-flight to hide the pipeline latency
+        // of the loop body.  For an OOO core, this is:
+        //   minUnroll = ceil(maxLatency / (issueWidth * tputPerOp))
+        // Simplified: at least ceil(pipelineDepth / 4) iterations.
+        unsigned pipelineMin = (profile.pipelineDepth + 3) / 4;
+
+        // ── Combine constraints ──────────────────────────────────────────
+        unsigned unroll = std::min(regUnroll, iCacheUnroll);
+        unroll = std::max(unroll, pipelineMin);
+        unroll = std::max(unroll, 2u);
+        unroll = std::min(unroll, 16u);
+
+        // Loops with divider instructions: the divider is a scarce resource
+        // (usually 1 unit, not pipelined).  Over-unrolling creates a
+        // bottleneck waiting for the divider, wasting issue slots.
+        if (usesDivider) unroll = std::min(unroll, 4u);
+
+        // Loops with function calls: don't over-unroll because each call
+        // saves/restores many registers, negating the unroll benefit.
+        if (hasCall) unroll = std::min(unroll, 2u);
+
+        // Interleave count: for wide-issue OOO cores (issueWidth > 2),
+        // match the unroll count so the CPU can fill dispatch slots from
+        // independent iterations.  For narrow in-order cores, keep it low.
+        unsigned interleave = (profile.issueWidth > 2) ? unroll : 2u;
+
+        // Build loop metadata, preserving any existing entries (e.g. mustprogress).
+        llvm::SmallVector<llvm::Metadata*, 8> mds;
+        mds.push_back(nullptr); // self-reference placeholder
+
+        // Copy existing metadata entries (skip self-reference at index 0).
+        if (auto* existingMD = latchTerm->getMetadata(llvm::LLVMContext::MD_loop)) {
+            for (unsigned i = 1, e = existingMD->getNumOperands(); i < e; ++i) {
+                mds.push_back(existingMD->getOperand(i));
+            }
+        }
+
+        mds.push_back(llvm::MDNode::get(ctx, {
+            llvm::MDString::get(ctx, "llvm.loop.unroll.count"),
+            llvm::ConstantAsMetadata::get(
+                llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), unroll))
+        }));
+
+        mds.push_back(llvm::MDNode::get(ctx, {
+            llvm::MDString::get(ctx, "llvm.loop.interleave.count"),
+            llvm::ConstantAsMetadata::get(
+                llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), interleave))
+        }));
+
+        llvm::MDNode* loopID = llvm::MDNode::get(ctx, mds);
+        loopID->replaceOperandWith(0, loopID);
+        latchTerm->setMetadata(llvm::LLVMContext::MD_loop, loopID);
+        ++count;
+    }
+
+    return count;
+}
+
+unsigned annotateLoopsForTarget(llvm::Module& module, const HGOEConfig& config) {
+    if (!shouldActivate(config)) return 0;
+
+    std::string marchResolved = resolveNativeCpu(config.marchCpu);
+    std::string mtuneResolved = resolveNativeCpu(config.mtuneCpu);
+    std::string cpuName = mtuneResolved.empty() ? marchResolved : mtuneResolved;
+    auto profileOpt = lookupMicroarch(cpuName);
+    if (!profileOpt) return 0;
+
+    unsigned total = 0;
+    for (auto& func : module) {
+        total += annotateLoopsForTargetInFunc(func, *profileOpt);
+    }
+    return total;
+}
+
 } // namespace hgoe
 } // namespace omscript

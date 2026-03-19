@@ -428,6 +428,14 @@ HGOEStats optimizeModule(llvm::Module& module, const HGOEConfig& config);
 /// Run the HGOE on a single function.
 HGOEStats optimizeFunction(llvm::Function& func, const HGOEConfig& config);
 
+/// Pre-pipeline loop annotation: set llvm.loop metadata (unroll count,
+/// interleave count, vector width) on loops in the module based on the
+/// target CPU's characteristics.  This must run BEFORE the LLVM
+/// optimization pipeline so that the unroller and vectorizer respect the
+/// hardware-optimal parameters instead of using generic heuristics.
+/// Returns the number of loops annotated.
+unsigned annotateLoopsForTarget(llvm::Module& module, const HGOEConfig& config);
+
 } // namespace hgoe
 } // namespace omscript
 

@@ -614,6 +614,22 @@ void CodeGenerator::runOptimizationPasses() {
             superopt::convertSRemToURem(func);
         }
     }
+    // Pre-pipeline HGOE loop annotation: set target-optimal unroll count,
+    // interleave count, and vector width on loops BEFORE the LLVM pipeline
+    // runs.  This ensures the unroller and vectorizer respect the target
+    // CPU's resource constraints (register count, I-cache size, pipeline
+    // depth) instead of using generic heuristics that over-unroll for CPUs
+    // with expensive modulo/division sequences.
+    if (enableHGOE_ && optimizationLevel >= OptimizationLevel::O2) {
+        hgoe::HGOEConfig preConfig;
+        preConfig.marchCpu = marchCpu_;
+        preConfig.mtuneCpu = mtuneCpu_;
+        unsigned loopsAnnotated = hgoe::annotateLoopsForTarget(*module, preConfig);
+        if (verbose_ && loopsAnnotated > 0) {
+            std::cout << "    Pre-pipeline HGOE: annotated " << loopsAnnotated
+                      << " loops with target-optimal metadata" << std::endl;
+        }
+    }
     MPM.run(*module, MAM);
     if (verbose_) {
         std::cout << "    LLVM pass pipeline complete" << std::endl;
@@ -629,11 +645,17 @@ void CodeGenerator::runOptimizationPasses() {
     // matching GCC -O3's behavior for naive recursive algorithms like fib.
     if (optimizationLevel >= OptimizationLevel::O3) {
         static constexpr unsigned kRecursiveInlineDepth = 3;
-        static constexpr unsigned kMaxFunctionSize = 2000; // instruction count limit
+        // Conservative size limit: the function BEFORE inlining must be
+        // small enough that inlining won't create a huge function.
+        // After inlining, each copy roughly doubles the size. So we limit
+        // the pre-inline size to 200 instructions (~200 * 2^3 = 1600 max).
+        static constexpr unsigned kMaxPreInlineSize = 200;
         for (auto& F : *module) {
             if (F.isDeclaration() || F.getName() == "main") continue;
-            // Only inline functions that the pipeline has identified as
-            // self-recursive (still contain a call to themselves).
+            unsigned preSize = F.getInstructionCount();
+            if (preSize > kMaxPreInlineSize) continue;
+
+            // Only inline functions that still contain a self-call.
             bool hasSelfCall = false;
             for (auto& BB : F) {
                 for (auto& I : BB) {
@@ -649,10 +671,7 @@ void CodeGenerator::runOptimizationPasses() {
             if (!hasSelfCall) continue;
 
             for (unsigned level = 0; level < kRecursiveInlineDepth; ++level) {
-                // Bail if function has grown too large
-                if (F.getInstructionCount() > kMaxFunctionSize) break;
-
-                llvm::SmallVector<llvm::CallBase*, 8> selfCalls;
+                llvm::SmallVector<llvm::CallBase*, 4> selfCalls;
                 for (auto& BB : F) {
                     for (auto& I : BB) {
                         if (auto* CB = llvm::dyn_cast<llvm::CallBase>(&I)) {
@@ -664,8 +683,12 @@ void CodeGenerator::runOptimizationPasses() {
                 }
                 if (selfCalls.empty()) break;
 
+                // Only inline the first self-call per level to avoid
+                // exponential blowup (fib has two calls: fib(n-1)+fib(n-2),
+                // but LLVM's TCO eliminates one, leaving exactly one).
                 unsigned inlined = 0;
                 for (auto* CB : selfCalls) {
+                    if (F.getInstructionCount() > preSize * 8) break;
                     llvm::InlineFunctionInfo IFI;
                     auto result = llvm::InlineFunction(*CB, IFI);
                     if (result.isSuccess()) ++inlined;
