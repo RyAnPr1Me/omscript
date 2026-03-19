@@ -17,6 +17,7 @@
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/IRBuilder.h>
+#include <llvm/IR/MDBuilder.h>
 #include <llvm/IR/PatternMatch.h>
 
 // LLVM 19 introduced getOrInsertDeclaration; older versions only have getDeclaration.
@@ -1649,11 +1650,30 @@ static unsigned optimizeBranchLayout(llvm::Function& func,
                 falseIsExit = true;
         }
 
-        // If the true branch is an exit (unlikely path), swap so the common
-        // path falls through.
+        // If the true branch is an exit (unlikely path), swap successors so
+        // the hot (non-exit) path is the fall-through.  To preserve semantics
+        // we must also invert the branch condition.  When the condition is a
+        // compare instruction (ICmp/FCmp), we invert its predicate directly
+        // — this is a zero-cost transformation that produces no extra
+        // instructions.  Otherwise fall back to branch-weight metadata which
+        // hints the backend without modifying control flow.
         if (trueIsExit && !falseIsExit) {
-            br->swapSuccessors();
-            count++;
+            llvm::Value* cond = br->getCondition();
+            if (auto* icmp = llvm::dyn_cast<llvm::ICmpInst>(cond)) {
+                icmp->setPredicate(icmp->getInversePredicate());
+                br->swapSuccessors();
+                count++;
+            } else if (auto* fcmp = llvm::dyn_cast<llvm::FCmpInst>(cond)) {
+                fcmp->setPredicate(fcmp->getInversePredicate());
+                br->swapSuccessors();
+                count++;
+            } else {
+                // Non-compare condition: use branch weights as a layout hint.
+                llvm::MDBuilder mdBuilder(func.getContext());
+                auto* brWeights = mdBuilder.createBranchWeights(1, 99);
+                br->setMetadata(llvm::LLVMContext::MD_prof, brWeights);
+                count++;
+            }
         }
     }
 

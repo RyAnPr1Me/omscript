@@ -1898,8 +1898,18 @@ void CodeGenerator::generate(Program* program) {
     for (auto& func : program->functions) {
         std::vector<llvm::Type*> paramTypes(func->parameters.size(), getDefaultType());
         llvm::FunctionType* funcType = llvm::FunctionType::get(getDefaultType(), paramTypes, false);
+        // Non-main functions use InternalLinkage at O2+ (equivalent to C's
+        // `static`).  This tells the optimizer that no external code can call
+        // the function, enabling:
+        //   - fastcc calling convention (GlobalOpt promotes eligible internals)
+        //   - deeper recursive inlining (the inliner has full visibility)
+        //   - better alias analysis (no escaping through external callers)
+        // "main" must remain ExternalLinkage so the linker can find it.
+        auto linkage = (func->name != "main" && optimizationLevel >= OptimizationLevel::O2)
+                           ? llvm::Function::InternalLinkage
+                           : llvm::Function::ExternalLinkage;
         llvm::Function* function =
-            llvm::Function::Create(funcType, llvm::Function::ExternalLinkage, func->name, module.get());
+            llvm::Function::Create(funcType, linkage, func->name, module.get());
         // Optimization-enabling attributes for all user functions:
         // nounwind   – omscript has no C++ exceptions; elides LSDA / unwind tables
         //              and turns calls into simpler instructions.

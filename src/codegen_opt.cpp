@@ -68,6 +68,7 @@
 #include <llvm/Transforms/Scalar/SpeculativeExecution.h>
 #include <llvm/Transforms/Scalar/DivRemPairs.h>
 #include <llvm/Transforms/Utils.h>
+#include <llvm/Transforms/Utils/Cloning.h>
 #include <llvm/Transforms/Vectorize/VectorCombine.h>
 #include <optional>
 #include <stdexcept>
@@ -616,6 +617,65 @@ void CodeGenerator::runOptimizationPasses() {
     MPM.run(*module, MAM);
     if (verbose_) {
         std::cout << "    LLVM pass pipeline complete" << std::endl;
+    }
+
+    // Bounded recursive inlining: replicate GCC's deep recursive inlining
+    // by manually inlining self-recursive calls a fixed number of levels.
+    // LLVM's inliner refuses to inline self-recursive calls (to prevent
+    // infinite expansion), so after the standard pipeline has converted one
+    // branch to a tail-call loop, we manually inline the remaining recursive
+    // call.  Each level doubles the work done per actual function call,
+    // reducing call overhead by ~2^depth.  3 levels gives ~8x fewer calls,
+    // matching GCC -O3's behavior for naive recursive algorithms like fib.
+    if (optimizationLevel >= OptimizationLevel::O3) {
+        static constexpr unsigned kRecursiveInlineDepth = 3;
+        static constexpr unsigned kMaxFunctionSize = 2000; // instruction count limit
+        for (auto& F : *module) {
+            if (F.isDeclaration() || F.getName() == "main") continue;
+            // Only inline functions that the pipeline has identified as
+            // self-recursive (still contain a call to themselves).
+            bool hasSelfCall = false;
+            for (auto& BB : F) {
+                for (auto& I : BB) {
+                    if (auto* CB = llvm::dyn_cast<llvm::CallBase>(&I)) {
+                        if (CB->getCalledFunction() == &F) {
+                            hasSelfCall = true;
+                            break;
+                        }
+                    }
+                }
+                if (hasSelfCall) break;
+            }
+            if (!hasSelfCall) continue;
+
+            for (unsigned level = 0; level < kRecursiveInlineDepth; ++level) {
+                // Bail if function has grown too large
+                if (F.getInstructionCount() > kMaxFunctionSize) break;
+
+                llvm::SmallVector<llvm::CallBase*, 8> selfCalls;
+                for (auto& BB : F) {
+                    for (auto& I : BB) {
+                        if (auto* CB = llvm::dyn_cast<llvm::CallBase>(&I)) {
+                            if (CB->getCalledFunction() == &F) {
+                                selfCalls.push_back(CB);
+                            }
+                        }
+                    }
+                }
+                if (selfCalls.empty()) break;
+
+                unsigned inlined = 0;
+                for (auto* CB : selfCalls) {
+                    llvm::InlineFunctionInfo IFI;
+                    auto result = llvm::InlineFunction(*CB, IFI);
+                    if (result.isSuccess()) ++inlined;
+                }
+                if (inlined == 0) break;
+            }
+        }
+        if (verbose_) {
+            std::cout << "    Bounded recursive inlining complete" << std::endl;
+        }
     }
 
     // Superoptimizer: run after the standard LLVM pipeline to catch patterns
