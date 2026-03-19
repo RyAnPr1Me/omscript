@@ -34,6 +34,7 @@
 #include <cmath>
 #include <numeric>
 #include <queue>
+#include <set>
 #include <unordered_set>
 
 namespace omscript {
@@ -2901,7 +2902,7 @@ unsigned annotateLoopsForTarget(llvm::Module& module, const HGOEConfig& config) 
     return total;
 }
 
-} // end annotateLoopsForTarget
+
 
 // ═════════════════════════════════════════════════════════════════════════════
 // Precision metadata helpers
@@ -3035,7 +3036,7 @@ static unsigned estimateWorkingSet(llvm::BasicBlock& bb, unsigned elementSize) {
 /// Unlike the simpler insertPrefetches in hardware transforms, this version
 /// uses the CacheModel to compute prefetch distances based on cache latencies.
 static unsigned insertCacheAwarePrefetches(llvm::Function& func,
-                                            const MicroarchProfile& profile,
+                                            const MicroarchProfile& /*profile*/,
                                             const CacheModel& cache) {
     unsigned count = 0;
 

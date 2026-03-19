@@ -454,7 +454,8 @@ struct TransformStats {
 
 /// Apply hardware-aware transformations to a function.
 TransformStats applyHardwareTransforms(llvm::Function& func,
-                                        const MicroarchProfile& profile);
+                                        const MicroarchProfile& profile,
+                                        bool enableLoopAnnotation = true);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Step 6 & 10 — Top-level HGOE API
