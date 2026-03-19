@@ -31,6 +31,79 @@ namespace omscript {
 namespace hgoe {
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Floating-point precision levels for per-variable / per-operation control
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Fine-grained floating-point precision levels.
+/// These levels allow per-variable and per-operation control over which FP
+/// optimizations are permitted, as an alternative to the global -ffast-math flag.
+enum class FPPrecision {
+    Strict,  ///< Full IEEE-754 compliance: no reassociation, no NaN/Inf assumptions.
+    Medium,  ///< Allow limited reassociation and some vectorization; preserve NaN/Inf.
+    Fast,    ///< Equivalent to -ffast-math: reassociation, reciprocal transforms,
+             ///< ignoring NaN/Inf, fused operations all permitted.
+};
+
+/// Return a human-readable name for an FPPrecision level.
+inline const char* fpPrecisionName(FPPrecision p) {
+    switch (p) {
+    case FPPrecision::Strict: return "strict";
+    case FPPrecision::Medium: return "medium";
+    case FPPrecision::Fast:   return "fast";
+    }
+    return "unknown";
+}
+
+/// Resolve conflicting precision levels from two operands.
+/// Uses a conservative meet: the stricter (lower) level wins so that
+/// combining a strict operand with a fast operand yields strict semantics.
+inline FPPrecision resolvePrecision(FPPrecision a, FPPrecision b) {
+    // Strict < Medium < Fast  — lower enum value is stricter.
+    return (a < b) ? a : b;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cache model for cache-aware optimization
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Hardware cache model derived from the microarchitecture profile.
+/// Used by the cache-aware optimization pass to choose tile sizes and
+/// prefetch distances.
+struct CacheModel {
+    unsigned l1Size = 32;       ///< L1D size in KB
+    unsigned l1Latency = 4;     ///< L1D hit latency in cycles
+    unsigned l1LineSize = 64;   ///< L1 cache line size in bytes
+    unsigned l2Size = 256;      ///< L2 size in KB
+    unsigned l2Latency = 12;    ///< L2 hit latency in cycles
+    unsigned l3Size = 8192;     ///< L3 size in KB
+    unsigned l3Latency = 40;    ///< L3 hit latency in cycles
+    unsigned memLatency = 200;  ///< Main memory latency in cycles
+    double   memBandwidth = 40.0; ///< Memory bandwidth in GB/s (approximate)
+};
+
+/// Build a CacheModel from a MicroarchProfile (forward-declared; defined after
+/// MicroarchProfile below).
+struct MicroarchProfile;
+CacheModel buildCacheModel(const MicroarchProfile& profile);
+
+/// Memory access pattern classification.
+enum class AccessPattern {
+    Unknown,    ///< Cannot classify
+    Sequential, ///< Unit-stride sequential access (best locality)
+    Strided,    ///< Constant-stride access (predictable, may miss cache)
+    Random,     ///< Irregular / data-dependent access (poor locality)
+    Streaming,  ///< Write-once or read-once streaming (bypass-friendly)
+};
+
+/// Statistics from the cache-aware optimization pass.
+struct CacheOptStats {
+    unsigned loopsTiled = 0;         ///< Loops with tiling metadata added
+    unsigned loopsInterchanged = 0;  ///< Loops reordered for locality
+    unsigned prefetchesInserted = 0; ///< Software prefetch hints added
+    unsigned layoutHints = 0;        ///< AoS→SoA suggestions emitted
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Step 1 — Hardware execution graph types
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -151,6 +224,7 @@ struct ProgramNode {
     double estimatedThroughput = 1.0;   ///< Throughput from hardware profile
     unsigned scheduledCycle = 0;        ///< Cycle assigned by scheduler
     unsigned assignedPort = 0;          ///< Hardware port assigned by mapper
+    FPPrecision fpPrecision = FPPrecision::Medium; ///< FP precision level for this operation
 };
 
 /// Dependency type between program operations.
@@ -375,6 +449,7 @@ struct TransformStats {
     unsigned branchesOptimized = 0;   ///< Branch layout improvements
     unsigned vectorExpanded = 0;      ///< Vector width expansions
     unsigned intStrengthReduced = 0;  ///< Integer multiplies replaced by shift+add
+    CacheOptStats cacheOpt;           ///< Cache-aware optimization stats
 };
 
 /// Apply hardware-aware transformations to a function.
@@ -440,6 +515,36 @@ HGOEStats optimizeFunction(llvm::Function& func, const HGOEConfig& config);
 /// hardware-optimal parameters instead of using generic heuristics.
 /// Returns the number of loops annotated.
 unsigned annotateLoopsForTarget(llvm::Module& module, const HGOEConfig& config);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cache-aware optimization pass
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Run the cache-aware optimization pass on a single function.
+/// Analyses memory access patterns and inserts prefetch hints tuned to the
+/// target cache hierarchy.  Uses precision metadata on instructions to
+/// control aggressiveness: fast regions get longer prefetch distances and
+/// more aggressive tiling, while strict regions are left untouched to
+/// preserve numerical stability.
+CacheOptStats optimizeCacheLocality(llvm::Function& func,
+                                     const MicroarchProfile& profile,
+                                     const CacheModel& cache);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Precision metadata helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Read the FP precision level attached to an LLVM instruction via metadata.
+/// Returns Medium if no metadata is present.
+FPPrecision getInstructionPrecision(const llvm::Instruction* inst);
+
+/// Attach FP precision metadata to an LLVM instruction.
+void setInstructionPrecision(llvm::Instruction* inst, FPPrecision prec);
+
+/// Propagate precision metadata through a function: instructions without
+/// explicit precision inherit from their operands using the conservative
+/// meet (strictest wins).
+void propagatePrecision(llvm::Function& func);
 
 } // namespace hgoe
 } // namespace omscript

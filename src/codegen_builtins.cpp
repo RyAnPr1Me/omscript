@@ -1,5 +1,6 @@
 #include "codegen.h"
 #include "diagnostic.h"
+#include "hardware_graph.h"
 #include <cstdlib>
 #include <iostream>
 #include <llvm/Config/llvm-config.h>
@@ -403,6 +404,77 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Function* sqrtIntrinsic = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::sqrt, {getFloatType()});
         llvm::Value* result = builder->CreateCall(sqrtIntrinsic, {fval}, "sqrt.result");
         return builder->CreateFPToSI(result, getDefaultType(), "sqrt.int");
+    }
+
+    // -----------------------------------------------------------------------
+    // Per-variable precision control builtins
+    // -----------------------------------------------------------------------
+    // fast_add / fast_sub / fast_mul / fast_div:
+    //   Perform the FP operation with full -ffast-math flags (reassociation,
+    //   reciprocal transforms, NaN/Inf assumptions, fused operations).
+    //   Use in hot loops where numerical accuracy is less important.
+    //
+    // precise_add / precise_sub / precise_mul / precise_div:
+    //   Perform the FP operation with strict IEEE-754 semantics — no
+    //   reassociation, no NaN/Inf assumptions, no implicit fusing.
+    //   Use when numerical stability is critical.
+    //
+    // Both families accept two arguments, convert them to double, perform
+    // the operation, and return the result as an integer (consistent with
+    // OmScript's convention of i64-encoded floats for interop).
+
+    if (expr->callee == "fast_add" || expr->callee == "fast_sub" ||
+        expr->callee == "fast_mul" || expr->callee == "fast_div") {
+        if (expr->arguments.size() != 2) {
+            codegenError("Built-in function '" + expr->callee + "' expects 2 arguments, but " +
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
+        }
+        llvm::Value* lhs = ensureFloat(generateExpression(expr->arguments[0].get()));
+        llvm::Value* rhs = ensureFloat(generateExpression(expr->arguments[1].get()));
+        llvm::Value* result = nullptr;
+        if (expr->callee == "fast_add")
+            result = builder->CreateFAdd(lhs, rhs, "fast.add");
+        else if (expr->callee == "fast_sub")
+            result = builder->CreateFSub(lhs, rhs, "fast.sub");
+        else if (expr->callee == "fast_mul")
+            result = builder->CreateFMul(lhs, rhs, "fast.mul");
+        else
+            result = builder->CreateFDiv(lhs, rhs, "fast.div");
+        // Set all fast-math flags on the instruction.
+        if (auto* fpInst = llvm::dyn_cast<llvm::Instruction>(result)) {
+            fpInst->setFastMathFlags(llvm::FastMathFlags::getFast());
+            hgoe::setInstructionPrecision(fpInst, hgoe::FPPrecision::Fast);
+        }
+        return builder->CreateFPToSI(result, getDefaultType(), "fast.result");
+    }
+
+    if (expr->callee == "precise_add" || expr->callee == "precise_sub" ||
+        expr->callee == "precise_mul" || expr->callee == "precise_div") {
+        if (expr->arguments.size() != 2) {
+            codegenError("Built-in function '" + expr->callee + "' expects 2 arguments, but " +
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
+        }
+        llvm::Value* lhs = ensureFloat(generateExpression(expr->arguments[0].get()));
+        llvm::Value* rhs = ensureFloat(generateExpression(expr->arguments[1].get()));
+        llvm::Value* result = nullptr;
+        if (expr->callee == "precise_add")
+            result = builder->CreateFAdd(lhs, rhs, "precise.add");
+        else if (expr->callee == "precise_sub")
+            result = builder->CreateFSub(lhs, rhs, "precise.sub");
+        else if (expr->callee == "precise_mul")
+            result = builder->CreateFMul(lhs, rhs, "precise.mul");
+        else
+            result = builder->CreateFDiv(lhs, rhs, "precise.div");
+        // Strict: explicitly clear all fast-math flags for IEEE compliance.
+        if (auto* fpInst = llvm::dyn_cast<llvm::Instruction>(result)) {
+            llvm::FastMathFlags strictFlags;
+            // All flags default to off — full IEEE compliance.
+            fpInst->setFastMathFlags(strictFlags);
+            hgoe::setInstructionPrecision(fpInst, hgoe::FPPrecision::Strict);
+        }
+        return builder->CreateFPToSI(result, getDefaultType(), "precise.result");
     }
 
     if (expr->callee == "is_even") {
