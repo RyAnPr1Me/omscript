@@ -20,6 +20,20 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
     if (stmt->initializer) {
         initValue = generateExpression(stmt->initializer.get());
         allocaType = initValue->getType();
+
+        // When a string literal is assigned to a mutable string variable,
+        // heap-allocate a copy via strdup().  This ensures the variable always
+        // points to heap memory, allowing str_concat to use realloc() for
+        // amortized O(1) appending (the common `s = str_concat(s, "x")` loop
+        // pattern).  Without this, the first str_concat would receive a pointer
+        // to read-only global memory and realloc would be undefined behaviour.
+        if (!stmt->isConst &&
+            stmt->initializer->type == ASTNodeType::LITERAL_EXPR &&
+            static_cast<LiteralExpr*>(stmt->initializer.get())->literalType ==
+                LiteralExpr::LiteralType::STRING) {
+            initValue = builder->CreateCall(getOrDeclareStrdup(), {initValue}, "strdup.init");
+            allocaType = initValue->getType();
+        }
     }
 
     llvm::AllocaInst* alloca = createEntryBlockAlloca(function, stmt->name, allocaType);
@@ -173,27 +187,17 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
     if (!builder->GetInsertBlock()->getTerminator()) {
         auto* backBrWhile = builder->CreateBr(condBB);
         // Attach loop metadata to the while-loop back-edge, matching for-loop
-        // hints: mustprogress for loop-idiom recognition, plus interleave/
-        // vectorize hints at O2+/O3 to improve SIMD throughput.
+        // hints: mustprogress for loop-idiom recognition.
+        // NOTE: Interleave count and vectorize width are intentionally NOT
+        // forced here.  Forcing these values overrides the vectorizer's cost
+        // model, which can cause harmful code bloat and type widening.
+        // The prefer-vector-width function attribute already guides the
+        // vectorizer toward the correct register width.
         llvm::MDNode* mustProgress =
             llvm::MDNode::get(*context, {llvm::MDString::get(*context, "llvm.loop.mustprogress")});
         llvm::SmallVector<llvm::Metadata*, 4> loopMDs;
         loopMDs.push_back(nullptr);
         loopMDs.push_back(mustProgress);
-        if (optimizationLevel >= OptimizationLevel::O2 && enableVectorize_) {
-            llvm::MDNode* interleave = llvm::MDNode::get(
-                *context, {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
-                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), preferredVectorWidth_))});
-            loopMDs.push_back(interleave);
-        }
-        if (optimizationLevel >= OptimizationLevel::O3 && enableVectorize_) {
-            // Use the target-aware preferred vector width to fully utilise
-            // the widest available SIMD registers (SSE=4, AVX2=8, AVX-512=16).
-            llvm::MDNode* vecWidth = llvm::MDNode::get(
-                *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.width"),
-                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), preferredVectorWidth_))});
-            loopMDs.push_back(vecWidth);
-        }
         llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
         loopMD->replaceOperandWith(0, loopMD);
         backBrWhile->setMetadata(llvm::LLVMContext::MD_loop, loopMD);
@@ -256,18 +260,6 @@ void CodeGenerator::generateDoWhile(DoWhileStmt* stmt) {
         llvm::SmallVector<llvm::Metadata*, 4> loopMDs;
         loopMDs.push_back(nullptr);
         loopMDs.push_back(mustProgress);
-        if (optimizationLevel >= OptimizationLevel::O2 && enableVectorize_) {
-            llvm::MDNode* interleave = llvm::MDNode::get(
-                *context, {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
-                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), preferredVectorWidth_))});
-            loopMDs.push_back(interleave);
-        }
-        if (optimizationLevel >= OptimizationLevel::O3 && enableVectorize_) {
-            llvm::MDNode* vecWidth = llvm::MDNode::get(
-                *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.width"),
-                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), preferredVectorWidth_))});
-            loopMDs.push_back(vecWidth);
-        }
         llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
         loopMD->replaceOperandWith(0, loopMD);
         backBrDoWhile->setMetadata(llvm::LLVMContext::MD_loop, loopMD);
@@ -316,49 +308,86 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     // (start < end) and -1 for descending ranges (start > end) so that
     // `for (i in 5...0)` iterates 5,4,3,2,1 as users would expect.
     llvm::Value* stepVal;
+    bool stepKnownPositive = false;
+    bool stepKnownNonZero = false;
     if (stmt->step) {
         stepVal = generateExpression(stmt->step.get());
         // Convert to integer since loop step is always integer
         stepVal = toDefaultType(stepVal);
+        if (auto* stepCI = llvm::dyn_cast<llvm::ConstantInt>(stepVal)) {
+            stepKnownPositive = stepCI->getSExtValue() > 0;
+            stepKnownNonZero = stepCI->getSExtValue() != 0;
+        }
     } else {
-        llvm::Value* isDesc = builder->CreateICmpSGT(startVal, endVal, "for.isdesc");
-        llvm::Value* posOne = llvm::ConstantInt::get(*context, llvm::APInt(64, 1));
-        llvm::Value* negOne = llvm::ConstantInt::get(*context, llvm::APInt(64, static_cast<uint64_t>(-1), true));
-        stepVal = builder->CreateSelect(isDesc, negOne, posOne, "for.autostep");
+        // Detect compile-time ascending ranges and emit simpler loop code.
+        bool ascending = false;
+        if (auto* startCI = llvm::dyn_cast<llvm::ConstantInt>(startVal)) {
+            if (auto* endCI = llvm::dyn_cast<llvm::ConstantInt>(endVal)) {
+                // Both bounds known: ascending when start < end.
+                ascending = startCI->getSExtValue() < endCI->getSExtValue();
+            } else if (startCI->getSExtValue() == 0) {
+                // Common pattern: for (i in 0...n).  Step is always +1;
+                // when n <= 0 the loop condition (i < n) fails immediately.
+                ascending = true;
+            }
+        }
+        if (ascending) {
+            stepVal = llvm::ConstantInt::get(*context, llvm::APInt(64, 1));
+            stepKnownPositive = true;
+            stepKnownNonZero = true;
+        } else {
+            llvm::Value* isDesc = builder->CreateICmpSGT(startVal, endVal, "for.isdesc");
+            llvm::Value* posOne = llvm::ConstantInt::get(*context, llvm::APInt(64, 1));
+            llvm::Value* negOne = llvm::ConstantInt::get(*context, llvm::APInt(64, static_cast<uint64_t>(-1), true));
+            stepVal = builder->CreateSelect(isDesc, negOne, posOne, "for.autostep");
+            // Auto-computed step is always +1 or -1, never zero.
+            stepKnownNonZero = true;
+        }
     }
 
     llvm::Value* zero = llvm::ConstantInt::get(stepVal->getType(), 0, true);
 
     // Create blocks
-    llvm::BasicBlock* stepCheckBB = llvm::BasicBlock::Create(*context, "forstepcheck", function);
-    llvm::BasicBlock* stepFailBB = llvm::BasicBlock::Create(*context, "forstepfail", function);
     llvm::BasicBlock* condBB = llvm::BasicBlock::Create(*context, "forcond", function);
     llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "forbody", function);
     llvm::BasicBlock* incBB = llvm::BasicBlock::Create(*context, "forinc", function);
     llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "forend", function);
 
-    builder->CreateBr(stepCheckBB);
+    // Skip the step-zero check when step is known non-zero at compile time.
+    if (stepKnownNonZero) {
+        builder->CreateBr(condBB);
+    } else {
+        llvm::BasicBlock* stepCheckBB = llvm::BasicBlock::Create(*context, "forstepcheck", function);
+        llvm::BasicBlock* stepFailBB = llvm::BasicBlock::Create(*context, "forstepfail", function);
+        builder->CreateBr(stepCheckBB);
+        builder->SetInsertPoint(stepCheckBB);
+        llvm::Value* stepNonZero = builder->CreateICmpNE(stepVal, zero, "stepnonzero");
+        builder->CreateCondBr(stepNonZero, condBB, stepFailBB);
 
-    builder->SetInsertPoint(stepCheckBB);
-    llvm::Value* stepNonZero = builder->CreateICmpNE(stepVal, zero, "stepnonzero");
-    builder->CreateCondBr(stepNonZero, condBB, stepFailBB);
+        builder->SetInsertPoint(stepFailBB);
+        std::string errorMessage = "Runtime error: for-loop step cannot be zero for iterator '" + stmt->iteratorVar + "'\n";
+        llvm::GlobalVariable* messageVar = builder->CreateGlobalString(errorMessage, "forstepmsg");
+        llvm::Constant* zeroIndex = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0);
+        llvm::Constant* indices[] = {zeroIndex, zeroIndex};
+        llvm::Constant* message =
+            llvm::ConstantExpr::getInBoundsGetElementPtr(messageVar->getValueType(), messageVar, indices);
+        builder->CreateCall(getPrintfFunction(), {message});
+        builder->CreateCall(getOrDeclareAbort());
+        builder->CreateUnreachable();
+    }
 
-    builder->SetInsertPoint(stepFailBB);
-    std::string errorMessage = "Runtime error: for-loop step cannot be zero for iterator '" + stmt->iteratorVar + "'\n";
-    llvm::GlobalVariable* messageVar = builder->CreateGlobalString(errorMessage, "forstepmsg");
-    llvm::Constant* zeroIndex = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0);
-    llvm::Constant* indices[] = {zeroIndex, zeroIndex};
-    llvm::Constant* message =
-        llvm::ConstantExpr::getInBoundsGetElementPtr(messageVar->getValueType(), messageVar, indices);
-    builder->CreateCall(getPrintfFunction(), {message});
-    builder->CreateCall(getOrDeclareAbort());
-    builder->CreateUnreachable();
     builder->SetInsertPoint(condBB);
     llvm::Value* curVal = builder->CreateLoad(getDefaultType(), iterAlloca, stmt->iteratorVar.c_str());
-    llvm::Value* stepPositive = builder->CreateICmpSGT(stepVal, zero, "steppositive");
-    llvm::Value* forwardCond = builder->CreateICmpSLT(curVal, endVal, "forcond_lt");
-    llvm::Value* backwardCond = builder->CreateICmpSGT(curVal, endVal, "forcond_gt");
-    llvm::Value* continueCond = builder->CreateSelect(stepPositive, forwardCond, backwardCond, "forcond_range");
+    llvm::Value* continueCond;
+    if (stepKnownPositive) {
+        // Fast path: known ascending loop, just compare i < end.
+        continueCond = builder->CreateICmpSLT(curVal, endVal, "forcond_lt");
+    } else {
+        llvm::Value* stepPositive = builder->CreateICmpSGT(stepVal, zero, "steppositive");
+        llvm::Value* forwardCond = builder->CreateICmpSLT(curVal, endVal, "forcond_lt");
+        llvm::Value* backwardCond = builder->CreateICmpSGT(curVal, endVal, "forcond_gt");
+        continueCond = builder->CreateSelect(stepPositive, forwardCond, backwardCond, "forcond_range");
+    }
     builder->CreateCondBr(continueCond, bodyBB, endBB);
 
     // Body block
@@ -391,20 +420,8 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         llvm::SmallVector<llvm::Metadata*, 6> loopMDs;
         loopMDs.push_back(nullptr); // self-reference placeholder (fixed below)
         loopMDs.push_back(mustProgress);
-        if (optimizationLevel >= OptimizationLevel::O2 && enableVectorize_) {
-            llvm::MDNode* interleave = llvm::MDNode::get(
-                *context, {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
-                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), preferredVectorWidth_))});
-            loopMDs.push_back(interleave);
-        }
-        if (optimizationLevel >= OptimizationLevel::O3 && enableVectorize_) {
-            // Use the target-aware preferred vector width to fully utilise
-            // the widest available SIMD registers (SSE=4, AVX2=8, AVX-512=16).
-            llvm::MDNode* vecWidth = llvm::MDNode::get(
-                *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.width"),
-                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), preferredVectorWidth_))});
-            loopMDs.push_back(vecWidth);
-        }
+        // NOTE: interleave.count and vectorize.width are intentionally NOT
+        // forced here — see the while-loop comment for rationale.
         // At O3, hint the unroller for small constant-trip-count loops.
         // When both start and end are compile-time constants, the trip count
         // is known; if it's ≤ 64, suggest full unrolling to eliminate loop

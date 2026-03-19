@@ -2801,7 +2801,14 @@ int main(int argc, char* argv[]) {
         compiler.setPIC(flagPIC);
         compiler.setFastMath(flagFastMath);
         compiler.setOptMax(flagOptMax);
-        compiler.setJIT(flagJIT);
+        // For AOT compilation (compile/build), always use the full LLVM
+        // optimization pipeline including IPO.  The JIT-friendly
+        // generateHybrid() path skips interprocedural optimizations
+        // (inlining, IPSCCP, GlobalOpt) to preserve function boundaries
+        // for hot-patching — this is only needed for `omsc run`.
+        // For the compile command, the Run path with adaptive JIT is
+        // handled separately above; here we always want full AOT.
+        compiler.setJIT(command == Command::Run && flagJIT);
         compiler.setStaticLinking(flagStatic);
         compiler.setStrip(flagStrip);
         compiler.setStackProtector(flagStackProtector);

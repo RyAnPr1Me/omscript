@@ -263,6 +263,14 @@ class CodeGenerator {
     std::unordered_set<std::string> stringReturningFunctions_;
     std::unordered_map<std::string, std::unordered_set<size_t>> funcParamStringTypes_;
     std::unordered_set<std::string> stringArrayVars_;
+    // stringLenCache_: maps string variable names to an alloca that caches the
+    // current strlen of the variable's value.  Used by str_concat to avoid
+    // O(n) strlen calls on growing strings in append loops.
+    std::unordered_map<std::string, llvm::AllocaInst*> stringLenCache_;
+    // stringCapCache_: maps string variable names to an alloca that caches the
+    // allocated buffer capacity.  Used by str_concat to skip realloc calls
+    // when the existing buffer has enough space (amortized O(1) appends).
+    std::unordered_map<std::string, llvm::AllocaInst*> stringCapCache_;
 
     /// Classify a function into its execution tier based on type annotations,
     /// OPTMAX status, and whether it is a special function (main/stdlib).
@@ -449,6 +457,7 @@ class CodeGenerator {
     llvm::Function* getOrDeclareIsspace();
     llvm::Function* getOrDeclareStrtoll();
     llvm::Function* getOrDeclareStrtod();
+    llvm::Function* getOrDeclareStrdup();
     llvm::Function* getOrDeclareFloor();
     llvm::Function* getOrDeclareCeil();
     llvm::Function* getOrDeclareRound();

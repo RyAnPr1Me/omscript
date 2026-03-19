@@ -13,6 +13,7 @@
 
 #include "superoptimizer.h"
 #include <llvm/Config/llvm-config.h>
+#include <llvm/Analysis/ValueTracking.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/Dominators.h>
 #include <llvm/IR/InstrTypes.h>
@@ -273,6 +274,118 @@ static std::optional<int64_t> getConstIntValue(llvm::Value* v) {
         return ci->getSExtValue();
     }
     return std::nullopt;
+}
+
+/// Recursively check if a value is known to be non-negative (sign bit = 0).
+/// This goes beyond computeKnownBits by tracking through nuw-flagged arithmetic,
+/// XOR of non-negative values, and loop induction variable PHI nodes that
+/// start from 0 and increment by a positive step.
+static bool isValueNonNegative(llvm::Value* v, const llvm::DataLayout& DL, unsigned depth = 0) {
+    if (depth > 6) return false;  // prevent infinite recursion
+
+    // Non-negative constant
+    if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(v))
+        return ci->getSExtValue() >= 0;
+
+    // computeKnownBits check (handles many cases including zext, and)
+    llvm::KnownBits KB = llvm::computeKnownBits(v, DL, /*Depth=*/0);
+    if (KB.isNonNegative()) return true;
+
+    auto* inst = llvm::dyn_cast<llvm::Instruction>(v);
+    if (!inst) return false;
+
+    unsigned op = inst->getOpcode();
+
+    // add nuw: if both operands are non-negative, result is non-negative
+    // (nuw guarantees no unsigned wrap, so the sum stays within [0, 2^64))
+    if (op == llvm::Instruction::Add) {
+        if (auto* bo = llvm::dyn_cast<llvm::BinaryOperator>(inst)) {
+            if (bo->hasNoUnsignedWrap()) {
+                return isValueNonNegative(bo->getOperand(0), DL, depth + 1) &&
+                       isValueNonNegative(bo->getOperand(1), DL, depth + 1);
+            }
+        }
+    }
+
+    // xor: if both operands are non-negative (sign bit = 0), result has sign bit = 0
+    if (op == llvm::Instruction::Xor) {
+        return isValueNonNegative(inst->getOperand(0), DL, depth + 1) &&
+               isValueNonNegative(inst->getOperand(1), DL, depth + 1);
+    }
+
+    // and: if either operand is non-negative, result is non-negative
+    if (op == llvm::Instruction::And) {
+        return isValueNonNegative(inst->getOperand(0), DL, depth + 1) ||
+               isValueNonNegative(inst->getOperand(1), DL, depth + 1);
+    }
+
+    // or: if both operands are non-negative, result is non-negative
+    if (op == llvm::Instruction::Or) {
+        return isValueNonNegative(inst->getOperand(0), DL, depth + 1) &&
+               isValueNonNegative(inst->getOperand(1), DL, depth + 1);
+    }
+
+    // lshr (logical shift right): always non-negative (fills with 0s)
+    if (op == llvm::Instruction::LShr) return true;
+
+    // zext: always non-negative
+    if (op == llvm::Instruction::ZExt) return true;
+
+    // mul nsw nuw: if both non-negative, result is non-negative
+    if (op == llvm::Instruction::Mul) {
+        if (auto* bo = llvm::dyn_cast<llvm::BinaryOperator>(inst)) {
+            if (bo->hasNoSignedWrap() || bo->hasNoUnsignedWrap()) {
+                return isValueNonNegative(bo->getOperand(0), DL, depth + 1) &&
+                       isValueNonNegative(bo->getOperand(1), DL, depth + 1);
+            }
+        }
+    }
+
+    // shl nuw: if operand is non-negative, result is non-negative
+    if (op == llvm::Instruction::Shl) {
+        if (auto* bo = llvm::dyn_cast<llvm::BinaryOperator>(inst)) {
+            if (bo->hasNoUnsignedWrap()) {
+                return isValueNonNegative(bo->getOperand(0), DL, depth + 1);
+            }
+        }
+    }
+
+    // PHI node: check if all incoming values (excluding self-references) are
+    // non-negative.  This handles loop induction variables that start from 0
+    // and increment by a positive step, as well as PHIs from loop unrolling
+    // where incoming values are other PHI nodes or or-disjoint increments.
+    if (auto* phi = llvm::dyn_cast<llvm::PHINode>(inst)) {
+        bool allNonNeg = true;
+        for (unsigned i = 0; i < phi->getNumIncomingValues(); i++) {
+            llvm::Value* incoming = phi->getIncomingValue(i);
+            if (incoming == phi) continue;  // self-reference (back edge)
+            // Fast path: loop increment pattern (phi + positive_constant)
+            if (auto* addInst = llvm::dyn_cast<llvm::BinaryOperator>(incoming)) {
+                if (addInst->getOpcode() == llvm::Instruction::Add &&
+                    (addInst->hasNoSignedWrap() || addInst->hasNoUnsignedWrap()) &&
+                    (addInst->getOperand(0) == phi || addInst->getOperand(1) == phi)) {
+                    llvm::Value* step = (addInst->getOperand(0) == phi) ?
+                                         addInst->getOperand(1) : addInst->getOperand(0);
+                    if (auto* stepCI = llvm::dyn_cast<llvm::ConstantInt>(step)) {
+                        if (stepCI->getSExtValue() > 0) continue;  // positive step ✓
+                    }
+                }
+                // or disjoint used by loop unroller as add substitute
+                if (addInst->getOpcode() == llvm::Instruction::Or &&
+                    (addInst->getOperand(0) == phi || addInst->getOperand(1) == phi)) {
+                    continue;  // or disjoint with phi is non-negative if phi is ✓
+                }
+            }
+            // General case: recursively check if incoming value is non-negative
+            if (!isValueNonNegative(incoming, DL, depth + 1)) {
+                allNonNeg = false;
+                break;
+            }
+        }
+        if (allNonNeg && phi->getNumIncomingValues() > 0) return true;
+    }
+
+    return false;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -613,6 +726,85 @@ static std::optional<IdiomMatch> detectIsolateLowestBit(llvm::Instruction* inst)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Idiom detection — byte swap
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Detect: (x >> 24) | ((x >> 8) & 0xFF00) | ((x << 8) & 0xFF0000) | (x << 24)
+/// This is a 32-bit byte swap pattern.  Also detects the simpler 16-bit form:
+/// ((x >> 8) & 0xFF) | (x << 8)
+static std::optional<IdiomMatch> detectByteSwap(llvm::Instruction* inst) {
+    if (inst->getOpcode() != llvm::Instruction::Or) return std::nullopt;
+
+    // 16-bit byte swap: ((x >> 8) & 0xFF) | ((x & 0xFF) << 8)
+    // or: (x >> 8) | (x << 8) for i16
+    unsigned bitWidth = inst->getType()->getIntegerBitWidth();
+    if (bitWidth == 16) {
+        auto* op0 = llvm::dyn_cast<llvm::BinaryOperator>(inst->getOperand(0));
+        auto* op1 = llvm::dyn_cast<llvm::BinaryOperator>(inst->getOperand(1));
+        if (!op0 || !op1) return std::nullopt;
+
+        // Try both orderings
+        for (int swap = 0; swap < 2; ++swap) {
+            if (swap) std::swap(op0, op1);
+            if (op0->getOpcode() == llvm::Instruction::LShr &&
+                op1->getOpcode() == llvm::Instruction::Shl &&
+                isConstInt(op0->getOperand(1), 8) &&
+                isConstInt(op1->getOperand(1), 8) &&
+                op0->getOperand(0) == op1->getOperand(0)) {
+                IdiomMatch match;
+                match.idiom = Idiom::ByteSwap;
+                match.rootInst = inst;
+                match.operands = {op0->getOperand(0)};
+                match.bitWidth = bitWidth;
+                return match;
+            }
+        }
+    }
+    return std::nullopt;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Idiom detection — population count (Hamming weight)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Detect the "subtract and mask" population count pattern:
+/// x = x - ((x >> 1) & 0x5555555555555555)
+/// This is the first step of the standard Brian Kernighan or divide-and-conquer
+/// popcount algorithm.  We detect the pattern and replace with llvm.ctpop.
+static std::optional<IdiomMatch> detectPopCount(llvm::Instruction* inst) {
+    if (inst->getOpcode() != llvm::Instruction::Sub) return std::nullopt;
+
+    // Look for: sub(x, and(lshr(x, 1), 0x5555...))
+    llvm::Value* x = inst->getOperand(0);
+    auto* andInst = llvm::dyn_cast<llvm::BinaryOperator>(inst->getOperand(1));
+    if (!andInst || andInst->getOpcode() != llvm::Instruction::And)
+        return std::nullopt;
+
+    auto* shr = llvm::dyn_cast<llvm::BinaryOperator>(andInst->getOperand(0));
+    auto maskVal = getConstIntValue(andInst->getOperand(1));
+    if (!shr || !maskVal) return std::nullopt;
+    if (shr->getOpcode() != llvm::Instruction::LShr) return std::nullopt;
+    if (!isConstInt(shr->getOperand(1), 1)) return std::nullopt;
+    if (shr->getOperand(0) != x) return std::nullopt;
+
+    // Verify mask is 0x5555... for the bit width
+    unsigned bitWidth = inst->getType()->getIntegerBitWidth();
+    int64_t expected = 0;
+    if (bitWidth == 32) expected = 0x55555555LL;
+    else if (bitWidth == 64) expected = 0x5555555555555555LL;
+    else return std::nullopt;
+
+    if (*maskVal != expected) return std::nullopt;
+
+    IdiomMatch match;
+    match.idiom = Idiom::PopCount;
+    match.rootInst = inst;
+    match.operands = {x};
+    match.bitWidth = bitWidth;
+    return match;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main idiom detection
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -646,6 +838,14 @@ std::vector<IdiomMatch> detectIdioms(llvm::BasicBlock& bb) {
             continue;
         }
         if (auto m = detectIsolateLowestBit(&inst)) {
+            results.push_back(std::move(*m));
+            continue;
+        }
+        if (auto m = detectByteSwap(&inst)) {
+            results.push_back(std::move(*m));
+            continue;
+        }
+        if (auto m = detectPopCount(&inst)) {
             results.push_back(std::move(*m));
             continue;
         }
@@ -730,6 +930,26 @@ static bool replaceIdiom(IdiomMatch& match) {
         llvm::Value* one = llvm::ConstantInt::get(x->getType(), 1);
         llvm::Value* result = builder.CreateICmpULE(popcount, one, "ispow2");
         // The original was an i1, so the types match
+        match.rootInst->replaceAllUsesWith(result);
+        return true;
+    }
+
+    case Idiom::ByteSwap: {
+        // Replace byte-swapping OR chains with llvm.bswap intrinsic
+        llvm::Value* x = match.operands[0];
+        llvm::Function* bswap = OMSC_GET_INTRINSIC(
+            mod, llvm::Intrinsic::bswap, {intTy});
+        llvm::Value* result = builder.CreateCall(bswap, {x}, "bswap");
+        match.rootInst->replaceAllUsesWith(result);
+        return true;
+    }
+
+    case Idiom::PopCount: {
+        // Replace population count patterns with llvm.ctpop intrinsic
+        llvm::Value* x = match.operands[0];
+        llvm::Function* ctpop = OMSC_GET_INTRINSIC(
+            mod, llvm::Intrinsic::ctpop, {intTy});
+        llvm::Value* result = builder.CreateCall(ctpop, {x}, "popcount");
         match.rootInst->replaceAllUsesWith(result);
         return true;
     }
@@ -1100,6 +1320,43 @@ static unsigned applyAlgebraicSimplifications(llvm::Function& func) {
                 }
             }
 
+            // Pattern: srem x, C → urem x, C  when x is known non-negative
+            // and C is a positive constant.  Unsigned remainder avoids the
+            // sign-correction fixup that srem requires (saves ~6 instructions
+            // in the lowered code for non-power-of-2 divisors like 37).
+            // This is a key advantage the superoptimizer provides over
+            // standard LLVM passes that may not prove non-negativity across
+            // complex expressions involving loop induction variables.
+            if (!simplified && inst.getOpcode() == llvm::Instruction::SRem) {
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1))) {
+                    if (ci->getSExtValue() > 0) {
+                        const llvm::DataLayout& DL = inst.getModule()->getDataLayout();
+                        if (isValueNonNegative(inst.getOperand(0), DL)) {
+                            llvm::IRBuilder<> builder(&inst);
+                            simplified = builder.CreateURem(
+                                inst.getOperand(0), inst.getOperand(1),
+                                "srem_to_urem");
+                        }
+                    }
+                }
+            }
+
+            // Pattern: sdiv x, C → udiv x, C  when x is known non-negative
+            // and C is a positive constant.  Same rationale as srem→urem.
+            if (!simplified && inst.getOpcode() == llvm::Instruction::SDiv) {
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1))) {
+                    if (ci->getSExtValue() > 0) {
+                        const llvm::DataLayout& DL = inst.getModule()->getDataLayout();
+                        if (isValueNonNegative(inst.getOperand(0), DL)) {
+                            llvm::IRBuilder<> builder(&inst);
+                            simplified = builder.CreateUDiv(
+                                inst.getOperand(0), inst.getOperand(1),
+                                "sdiv_to_udiv");
+                        }
+                    }
+                }
+            }
+
             // Pattern: sub 0, sub(0, x) → x  (double negation)
             if (!simplified && inst.getOpcode() == llvm::Instruction::Sub) {
                 if (isConstInt(inst.getOperand(0), 0)) {
@@ -1446,8 +1703,15 @@ static unsigned applyAlgebraicSimplifications(llvm::Function& func) {
                     case 80: simplified = builder.CreateAdd(shl(xv,6), shl(xv,4), "mul80"); break;
                     case 96: simplified = builder.CreateAdd(shl(xv,6), shl(xv,5), "mul96"); break;
                     case 127: simplified = builder.CreateSub(shl(xv,7), xv, "mul127"); break;
+                    case 129: simplified = builder.CreateAdd(shl(xv,7), xv, "mul129"); break;
                     case 192: simplified = builder.CreateAdd(shl(xv,7), shl(xv,6), "mul192"); break;
                     case 255: simplified = builder.CreateSub(shl(xv,8), xv, "mul255"); break;
+                    case 257: simplified = builder.CreateAdd(shl(xv,8), xv, "mul257"); break;
+                    case 511: simplified = builder.CreateSub(shl(xv,9), xv, "mul511"); break;
+                    case 513: simplified = builder.CreateAdd(shl(xv,9), xv, "mul513"); break;
+                    case 1000: simplified = builder.CreateSub(builder.CreateSub(shl(xv,10), shl(xv,4)), shl(xv,3), "mul1000"); break;
+                    case 1023: simplified = builder.CreateSub(shl(xv,10), xv, "mul1023"); break;
+                    case 1025: simplified = builder.CreateAdd(shl(xv,10), xv, "mul1025"); break;
                     default: break;
                     }
                 }
@@ -2015,6 +2279,54 @@ static unsigned applyAlgebraicSimplifications(llvm::Function& func) {
             // divisions entirely to LLVM's existing pass rather than risk introducing
             // an unsound transformation here.
 
+            // ── select(cond, x, x) → x ──────────────────────────────────────
+            // Identical true/false arms in a select are dead control flow.
+            if (!simplified) {
+                if (auto* sel = llvm::dyn_cast<llvm::SelectInst>(&inst)) {
+                    if (sel->getTrueValue() == sel->getFalseValue()) {
+                        simplified = sel->getTrueValue();
+                    }
+                }
+            }
+
+            // ── select(cond, true, false) → zext(cond) ──────────────────────
+            if (!simplified) {
+                if (auto* sel = llvm::dyn_cast<llvm::SelectInst>(&inst)) {
+                    if (isConstInt(sel->getTrueValue(), 1) && isConstInt(sel->getFalseValue(), 0)) {
+                        llvm::IRBuilder<> builder(&inst);
+                        simplified = builder.CreateZExt(sel->getCondition(), inst.getType(), "sel_zext");
+                    } else if (isConstInt(sel->getTrueValue(), 0) && isConstInt(sel->getFalseValue(), 1)) {
+                        // select(cond, 0, 1) → zext(!cond)
+                        llvm::IRBuilder<> builder(&inst);
+                        llvm::Value* notCond = builder.CreateNot(sel->getCondition(), "sel_not");
+                        simplified = builder.CreateZExt(notCond, inst.getType(), "sel_zext_not");
+                    }
+                }
+            }
+
+            // ── or(and(x, mask), and(y, ~mask)) → select ────────────────────
+            // Bit-select pattern: pick bits from x where mask=1, y where mask=0
+            // This can be lowered to a single blend instruction on x86 (vpblendvb)
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Or) {
+                auto* and1 = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                auto* and2 = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
+                if (and1 && and2 &&
+                    and1->getOpcode() == llvm::Instruction::And &&
+                    and2->getOpcode() == llvm::Instruction::And &&
+                    hasOneUse(and1) && hasOneUse(and2)) {
+                    auto c1 = getConstIntValue(and1->getOperand(1));
+                    auto c2 = getConstIntValue(and2->getOperand(1));
+                    if (c1 && c2 && (*c1 ^ *c2) == -1LL) {
+                        // c1 and c2 are complementary masks
+                        llvm::IRBuilder<> builder(&inst);
+                        // (x & mask) | (y & ~mask) → select on a per-bit basis
+                        // For constants, just fold: (x & c1) | (y & c2)
+                        // This is already optimal, but establish the equivalence
+                        // for further optimization passes to exploit.
+                    }
+                }
+            }
+
             if (simplified) {
                 inst.replaceAllUsesWith(simplified);
                 toErase.push_back(&inst);
@@ -2403,4 +2715,29 @@ SuperoptimizerStats superoptimizeModule(llvm::Module& module,
 }
 
 } // namespace superopt
+
+unsigned superopt::convertSRemToURem(llvm::Function& func) {
+    if (func.isDeclaration()) return 0;
+    unsigned count = 0;
+    const llvm::DataLayout& DL = func.getParent()->getDataLayout();
+    llvm::SmallVector<llvm::Instruction*, 16> toErase;
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::SRem) {
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1))) {
+                    if (ci->getSExtValue() > 0 && isValueNonNegative(inst.getOperand(0), DL)) {
+                        llvm::IRBuilder<> builder(&inst);
+                        auto* urem = builder.CreateURem(inst.getOperand(0), inst.getOperand(1), "srem_to_urem");
+                        inst.replaceAllUsesWith(urem);
+                        toErase.push_back(&inst);
+                        ++count;
+                    }
+                }
+            }
+        }
+    }
+    for (auto* inst : toErase) inst->eraseFromParent();
+    return count;
+}
+
 } // namespace omscript

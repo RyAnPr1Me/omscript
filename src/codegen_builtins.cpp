@@ -780,14 +780,161 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             rhsArg->getType()->isPointerTy()
                 ? rhsArg
                 : builder->CreateIntToPtr(rhsArg, llvm::PointerType::getUnqual(*context), "concat.rhs");
-        llvm::Value* len1 = builder->CreateCall(getOrDeclareStrlen(), {lhsPtr}, "concat.len1");
+
+        // Optimization: use a length-cache alloca for the LHS string variable.
+        // On the first call, we compute strlen and store the result; on
+        // subsequent loop iterations (at runtime), the cached value is loaded
+        // instead of calling strlen again.  This turns O(n²) append loops
+        // into amortized O(n).
+        std::string lhsVarName;
+        llvm::AllocaInst* lenCacheAlloca = nullptr;
+        if (expr->arguments[0]->type == ASTNodeType::IDENTIFIER_EXPR) {
+            auto* id = static_cast<IdentifierExpr*>(expr->arguments[0].get());
+            lhsVarName = id->name;
+            auto cacheIt = stringLenCache_.find(lhsVarName);
+            if (cacheIt != stringLenCache_.end()) {
+                lenCacheAlloca = cacheIt->second;
+            } else {
+                // Lazily create the cache alloca in the entry block.
+                llvm::Function* fn = builder->GetInsertBlock()->getParent();
+                lenCacheAlloca = createEntryBlockAlloca(fn, lhsVarName + ".strlen");
+                // Initialize with -1 sentinel (meaning "not yet computed").
+                // Insert the store right after the alloca in the entry block.
+                llvm::IRBuilder<> entryBuilder(lenCacheAlloca->getNextNode());
+                entryBuilder.CreateStore(
+                    llvm::ConstantInt::get(getDefaultType(), -1, true), lenCacheAlloca);
+                stringLenCache_[lhsVarName] = lenCacheAlloca;
+            }
+        }
+
+        llvm::Value* len1;
+        if (lenCacheAlloca) {
+            // Load cached length; if -1 (sentinel), fall back to strlen.
+            llvm::Value* cachedLen = builder->CreateLoad(getDefaultType(), lenCacheAlloca, "concat.cachedlen1");
+            llvm::Value* isSentinel = builder->CreateICmpEQ(
+                cachedLen, llvm::ConstantInt::get(getDefaultType(), -1, true), "concat.issent");
+            llvm::Function* fn = builder->GetInsertBlock()->getParent();
+            llvm::BasicBlock* cachedBB = builder->GetInsertBlock();
+            llvm::BasicBlock* strlenBB = llvm::BasicBlock::Create(*context, "concat.strlen", fn);
+            llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "concat.merge", fn);
+            builder->CreateCondBr(isSentinel, strlenBB, mergeBB);
+
+            builder->SetInsertPoint(strlenBB);
+            llvm::Value* realLen = builder->CreateCall(getOrDeclareStrlen(), {lhsPtr}, "concat.len1.real");
+            builder->CreateBr(mergeBB);
+
+            builder->SetInsertPoint(mergeBB);
+            llvm::PHINode* phi = builder->CreatePHI(getDefaultType(), 2, "concat.len1");
+            phi->addIncoming(cachedLen, cachedBB);
+            phi->addIncoming(realLen, strlenBB);
+            len1 = phi;
+        } else {
+            len1 = builder->CreateCall(getOrDeclareStrlen(), {lhsPtr}, "concat.len1");
+        }
         llvm::Value* len2 = builder->CreateCall(getOrDeclareStrlen(), {rhsPtr}, "concat.len2");
         llvm::Value* totalLen = builder->CreateAdd(len1, len2, "concat.totallen");
-        llvm::Value* allocSize =
-            builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "concat.allocsize");
-        llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {allocSize}, "concat.buf");
-        builder->CreateCall(getOrDeclareStrcpy(), {buf, lhsPtr});
-        builder->CreateCall(getOrDeclareStrcat(), {buf, rhsPtr});
+
+        // Update the string length cache for the LHS variable.
+        if (lenCacheAlloca) {
+            builder->CreateStore(totalLen, lenCacheAlloca);
+        }
+
+        // Determine whether the LHS came from a heap allocation (variable load
+        // or call return) vs a string literal in read-only memory.  If heap,
+        // we can realloc in-place with capacity tracking to avoid calling
+        // realloc on every append.
+        bool lhsIsHeap = false;
+        llvm::AllocaInst* capCacheAlloca = nullptr;
+        if (expr->arguments[0]->type == ASTNodeType::IDENTIFIER_EXPR) {
+            auto* id = static_cast<IdentifierExpr*>(expr->arguments[0].get());
+            if (stringVars_.count(id->name)) {
+                lhsIsHeap = true;
+                // Look up or create a capacity cache alloca for this variable.
+                auto capIt = stringCapCache_.find(id->name);
+                if (capIt != stringCapCache_.end()) {
+                    capCacheAlloca = capIt->second;
+                } else {
+                    llvm::Function* fn = builder->GetInsertBlock()->getParent();
+                    capCacheAlloca = createEntryBlockAlloca(fn, id->name + ".strcap");
+                    // Initialize capacity to 0 (forces first realloc).
+                    llvm::IRBuilder<> entryBuilder(capCacheAlloca->getNextNode());
+                    entryBuilder.CreateStore(
+                        llvm::ConstantInt::get(getDefaultType(), 0), capCacheAlloca);
+                    stringCapCache_[id->name] = capCacheAlloca;
+                }
+            }
+        } else if (expr->arguments[0]->type == ASTNodeType::CALL_EXPR) {
+            lhsIsHeap = true;
+        }
+        llvm::Value* buf;
+        if (lhsIsHeap && capCacheAlloca) {
+            // Capacity-tracked path: only realloc when buffer is too small.
+            // This matches the C pattern: if (len+1 > cap) { cap*=2; realloc; }
+            llvm::Value* needed =
+                builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "concat.needed");
+            llvm::Value* curCap = builder->CreateLoad(getDefaultType(), capCacheAlloca, "concat.curcap");
+            llvm::Value* needGrow = builder->CreateICmpUGT(needed, curCap, "concat.needgrow");
+
+            llvm::Function* fn = builder->GetInsertBlock()->getParent();
+            llvm::BasicBlock* growBB = llvm::BasicBlock::Create(*context, "concat.grow", fn);
+            llvm::BasicBlock* appendBB = llvm::BasicBlock::Create(*context, "concat.append", fn);
+            llvm::BasicBlock* curBB = builder->GetInsertBlock();
+            builder->CreateCondBr(needGrow, growBB, appendBB);
+
+            // Grow path: double capacity until sufficient, then realloc.
+            builder->SetInsertPoint(growBB);
+            // newCap = max(curCap * 2, needed); but at least 16
+            llvm::Value* doubled = builder->CreateShl(curCap, llvm::ConstantInt::get(getDefaultType(), 1), "concat.doubled");
+            llvm::Value* sixteen = llvm::ConstantInt::get(getDefaultType(), 16);
+            llvm::Value* minCap = builder->CreateSelect(
+                builder->CreateICmpUGT(doubled, sixteen), doubled, sixteen, "concat.mincap");
+            llvm::Value* newCap = builder->CreateSelect(
+                builder->CreateICmpUGT(needed, minCap), needed, minCap, "concat.newcap");
+            builder->CreateStore(newCap, capCacheAlloca);
+            llvm::Value* grownBuf = builder->CreateCall(getOrDeclareRealloc(), {lhsPtr, newCap}, "concat.grown");
+            llvm::BasicBlock* growExitBB = builder->GetInsertBlock();
+            builder->CreateBr(appendBB);
+
+            // Append path: merge buffer pointer from grow / no-grow paths.
+            builder->SetInsertPoint(appendBB);
+            llvm::PHINode* bufPhi = builder->CreatePHI(lhsPtr->getType(), 2, "concat.buf");
+            bufPhi->addIncoming(lhsPtr, curBB);
+            bufPhi->addIncoming(grownBuf, growExitBB);
+            buf = bufPhi;
+
+            // memcpy(buf + len1, rhs, len2) — only append the RHS portion
+            llvm::Value* dst2 = builder->CreateGEP(builder->getInt8Ty(), buf, len1, "concat.dst2");
+            builder->CreateCall(getOrDeclareMemcpy(), {dst2, rhsPtr, len2});
+        } else if (lhsIsHeap) {
+            // Heap LHS without capacity tracking: use power-of-2 realloc.
+            llvm::Value* minSize =
+                builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "concat.minsize");
+            llvm::Value* one64 = llvm::ConstantInt::get(getDefaultType(), 1);
+            llvm::Value* v = builder->CreateSub(minSize, one64, "concat.pm1");
+            v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 1)));
+            v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 2)));
+            v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 4)));
+            v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 8)));
+            v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 16)));
+            v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 32)));
+            llvm::Value* allocSize = builder->CreateAdd(v, one64, "concat.allocsize");
+            buf = builder->CreateCall(getOrDeclareRealloc(), {lhsPtr, allocSize}, "concat.buf");
+            // memcpy(buf + len1, rhs, len2) — only append the RHS portion
+            llvm::Value* dst2 = builder->CreateGEP(builder->getInt8Ty(), buf, len1, "concat.dst2");
+            builder->CreateCall(getOrDeclareMemcpy(), {dst2, rhsPtr, len2});
+        } else {
+            llvm::Value* allocSize =
+                builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "concat.allocsize");
+            buf = builder->CreateCall(getOrDeclareMalloc(), {allocSize}, "concat.buf");
+            // memcpy(buf, lhs, len1) — copy LHS into the new buffer
+            builder->CreateCall(getOrDeclareMemcpy(), {buf, lhsPtr, len1});
+            // memcpy(buf + len1, rhs, len2) — append RHS
+            llvm::Value* dst2 = builder->CreateGEP(builder->getInt8Ty(), buf, len1, "concat.dst2");
+            builder->CreateCall(getOrDeclareMemcpy(), {dst2, rhsPtr, len2});
+        }
+        // null-terminate: buf[totalLen] = '\0'
+        llvm::Value* endPtr = builder->CreateGEP(builder->getInt8Ty(), buf, totalLen, "concat.end");
+        builder->CreateStore(builder->getInt8(0), endPtr);
         // Mark return as string-returning so callers can track it
         stringReturningFunctions_.insert("str_concat");
         return buf;
@@ -1568,10 +1715,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* allocSize =
             builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "repeat.alloc");
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {allocSize}, "repeat.buf");
-        // Null-terminate first byte so strcat works from empty
-        llvm::Value* zeroByte = llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0);
-        builder->CreateStore(zeroByte, buf);
-        // Loop: strcat(buf, str) `count` times
+        // Use memcpy with tracked offset instead of strcat to avoid O(n²) rescanning
         llvm::Function* function = builder->GetInsertBlock()->getParent();
         llvm::BasicBlock* preheader = builder->GetInsertBlock();
         llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "repeat.loop", function);
@@ -1582,14 +1726,23 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(loopBB);
         llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "repeat.idx");
         idx->addIncoming(zero, preheader);
+        llvm::PHINode* offset = builder->CreatePHI(getDefaultType(), 2, "repeat.off");
+        offset->addIncoming(zero, preheader);
         llvm::Value* cond = builder->CreateICmpSLT(idx, countArg, "repeat.cond");
         builder->CreateCondBr(cond, bodyBB, doneBB);
         builder->SetInsertPoint(bodyBB);
-        builder->CreateCall(getOrDeclareStrcat(), {buf, strPtr});
+        // memcpy(buf + offset, str, strLen)
+        llvm::Value* dst = builder->CreateGEP(builder->getInt8Ty(), buf, offset, "repeat.dst");
+        builder->CreateCall(getOrDeclareMemcpy(), {dst, strPtr, strLen});
+        llvm::Value* nextOffset = builder->CreateAdd(offset, strLen, "repeat.nextoff");
         llvm::Value* nextIdx = builder->CreateAdd(idx, one, "repeat.next");
         idx->addIncoming(nextIdx, bodyBB);
+        offset->addIncoming(nextOffset, bodyBB);
         builder->CreateBr(loopBB);
         builder->SetInsertPoint(doneBB);
+        // Null-terminate: buf[totalLen] = '\0'
+        llvm::Value* endPtr = builder->CreateGEP(builder->getInt8Ty(), buf, totalLen, "repeat.end");
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), endPtr);
         stringReturningFunctions_.insert("str_repeat");
         return buf;
     }
@@ -1659,11 +1812,62 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* arrPtr = builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "push.arrptr");
         llvm::Value* oldLen = builder->CreateLoad(getDefaultType(), arrPtr, "push.oldlen");
         llvm::Value* newLen = builder->CreateAdd(oldLen, llvm::ConstantInt::get(getDefaultType(), 1), "push.newlen");
-        // Use realloc to extend in-place when possible (avoids copy)
-        llvm::Value* newSize =
-            builder->CreateMul(builder->CreateAdd(newLen, llvm::ConstantInt::get(getDefaultType(), 1), "push.slots"),
-                               llvm::ConstantInt::get(getDefaultType(), 8), "push.bytes");
-        llvm::Value* newBuf = builder->CreateCall(getOrDeclareRealloc(), {arrPtr, newSize}, "push.newbuf");
+        // Only call realloc when the new slot count crosses a power-of-2
+        // boundary.  The allocation capacity is always max(16, nextPow2(slots)).
+        // We need to grow when nextPow2(newSlots) > nextPow2(oldSlots), which
+        // happens when oldSlots (= oldLen + 1) is a power of 2 AND >= 16.
+        // For oldSlots < 16 we still realloc for the very first push (oldLen==0)
+        // to ensure the buffer is large enough for the minimum capacity of 16.
+        llvm::Value* one64 = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* oldSlots = builder->CreateAdd(oldLen, one64, "push.oldslots");
+        llvm::Value* minSlots = llvm::ConstantInt::get(getDefaultType(), 16);
+        // Check: oldSlots is a power of 2 → (oldSlots & (oldSlots - 1)) == 0
+        llvm::Value* oldSlotsM1 = builder->CreateSub(oldSlots, one64, "push.osm1");
+        llvm::Value* andCheck = builder->CreateAnd(oldSlots, oldSlotsM1, "push.ispow2");
+        llvm::Value* zero64 = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* isPow2 = builder->CreateICmpEQ(andCheck, zero64, "push.ispow2cmp");
+        // Need to grow when oldSlots >= 16 AND is power of 2, OR when oldSlots < 16
+        llvm::Value* belowMin = builder->CreateICmpSLT(oldSlots, minSlots, "push.belowmin");
+        llvm::Value* atBoundary = builder->CreateAnd(isPow2,
+            builder->CreateNot(belowMin, "push.abovemin"), "push.atbound");
+        llvm::Value* needsGrow = builder->CreateOr(belowMin, atBoundary, "push.needsgrow");
+
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* growBB = llvm::BasicBlock::Create(*context, "push.grow", function);
+        llvm::BasicBlock* nogrowBB = llvm::BasicBlock::Create(*context, "push.nogrow", function);
+        llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "push.merge", function);
+
+        builder->CreateCondBr(needsGrow, growBB, nogrowBB);
+
+        // Grow path: compute new capacity and realloc
+        builder->SetInsertPoint(growBB);
+        llvm::Value* slots = builder->CreateAdd(newLen, one64, "push.slots");
+        // nextPow2 via OR-cascade (covers 64-bit values)
+        llvm::Value* v = builder->CreateSub(slots, one64, "push.pm1");
+        v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 1)), "push.p2a");
+        v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 2)), "push.p2b");
+        v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 4)), "push.p2c");
+        v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 8)), "push.p2d");
+        v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 16)), "push.p2e");
+        v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 32)), "push.p2f");
+        llvm::Value* cap = builder->CreateAdd(v, one64, "push.cap");
+        llvm::Value* useMin = builder->CreateICmpSLT(cap, minSlots, "push.usemin");
+        cap = builder->CreateSelect(useMin, minSlots, cap, "push.finalcap");
+        llvm::Value* newSize = builder->CreateMul(cap,
+            llvm::ConstantInt::get(getDefaultType(), 8), "push.bytes");
+        llvm::Value* grownBuf = builder->CreateCall(getOrDeclareRealloc(), {arrPtr, newSize}, "push.newbuf");
+        builder->CreateBr(mergeBB);
+
+        // No-grow path: reuse existing buffer
+        builder->SetInsertPoint(nogrowBB);
+        builder->CreateBr(mergeBB);
+
+        // Merge: select the buffer pointer
+        builder->SetInsertPoint(mergeBB);
+        llvm::PHINode* newBuf = builder->CreatePHI(llvm::PointerType::getUnqual(*context), 2, "push.buf");
+        newBuf->addIncoming(grownBuf, growBB);
+        newBuf->addIncoming(arrPtr, nogrowBB);
+
         // Update length
         builder->CreateStore(newLen, newBuf);
         // Store new value at index oldLen + 1 (after header)

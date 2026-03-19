@@ -1165,6 +1165,21 @@ llvm::Function* CodeGenerator::getOrDeclareStrtod() {
     return fn;
 }
 
+llvm::Function* CodeGenerator::getOrDeclareStrdup() {
+    if (auto* fn = module->getFunction("strdup"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy}, false);
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strdup", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addRetAttr(llvm::Attribute::NoAlias);
+    fn->addParamAttr(0, llvm::Attribute::ReadOnly);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    OMSC_ADD_NOCAPTURE(fn, 0);
+    return fn;
+}
+
 llvm::Function* CodeGenerator::getOrDeclareFloor() {
     if (auto* fn = module->getFunction("floor"))
         return fn;
@@ -1806,19 +1821,22 @@ void CodeGenerator::generate(Program* program) {
     }
 
     // Detect preferred SIMD vector width from the target's CPU features.
-    // AVX-512 supports 16-lane i32/float (64-byte vectors), AVX2 supports
-    // 8-lane, and SSE/NEON supports 4-lane.  Using the target-native width
-    // for loop vectorization hints allows the vectorizer to use the widest
-    // available SIMD registers without over-requesting on narrow targets.
+    // The width is expressed in *i64 lanes* since OmScript's default type
+    // is i64.  AVX-512 has 512-bit registers → 8 × i64; AVX2 has 256-bit
+    // registers → 4 × i64; SSE2/NEON has 128-bit registers → 2 × i64.
+    // Using the correct width avoids over-requesting: for example, hinting
+    // VF=8 on AVX2 would require the vectorizer to split across two
+    // registers and may cause harmful type widening (i64 → i128 for
+    // modulo-by-constant patterns) that has no native hardware support.
     {
         std::string cpu, features;
         resolveTargetCPU(cpu, features);
         if (features.find("+avx512f") != std::string::npos) {
-            preferredVectorWidth_ = 16;
+            preferredVectorWidth_ = 8;  // 8 × i64 = 512 bits
         } else if (features.find("+avx2") != std::string::npos) {
-            preferredVectorWidth_ = 8;
+            preferredVectorWidth_ = 4;  // 4 × i64 = 256 bits
         } else {
-            preferredVectorWidth_ = 4;  // SSE2 / NEON fallback
+            preferredVectorWidth_ = 2;  // 2 × i64 = 128 bits (SSE2 / NEON)
         }
     }
 
@@ -1880,8 +1898,18 @@ void CodeGenerator::generate(Program* program) {
     for (auto& func : program->functions) {
         std::vector<llvm::Type*> paramTypes(func->parameters.size(), getDefaultType());
         llvm::FunctionType* funcType = llvm::FunctionType::get(getDefaultType(), paramTypes, false);
+        // Non-main functions use InternalLinkage at O2+ (equivalent to C's
+        // `static`).  This tells the optimizer that no external code can call
+        // the function, enabling:
+        //   - fastcc calling convention (GlobalOpt promotes eligible internals)
+        //   - deeper recursive inlining (the inliner has full visibility)
+        //   - better alias analysis (no escaping through external callers)
+        // "main" must remain ExternalLinkage so the linker can find it.
+        auto linkage = (func->name != "main" && optimizationLevel >= OptimizationLevel::O2)
+                           ? llvm::Function::InternalLinkage
+                           : llvm::Function::ExternalLinkage;
         llvm::Function* function =
-            llvm::Function::Create(funcType, llvm::Function::ExternalLinkage, func->name, module.get());
+            llvm::Function::Create(funcType, linkage, func->name, module.get());
         // Optimization-enabling attributes for all user functions:
         // nounwind   – omscript has no C++ exceptions; elides LSDA / unwind tables
         //              and turns calls into simpler instructions.
@@ -1889,6 +1917,11 @@ void CodeGenerator::generate(Program* program) {
         //              unlocks loop-idiom recognition (auto-memset/memcpy detection).
         function->addFnAttr(llvm::Attribute::NoUnwind);
         function->addFnAttr(llvm::Attribute::MustProgress);
+        // prefer-vector-width=256 — allow AVX2-width vectorization (4×i64)
+        // while preventing VF=8 that causes i128 promotion for division/modulo.
+        // This balances vectorization throughput with avoiding expensive i128
+        // multiply sequences on x86-64.
+        function->addFnAttr("prefer-vector-width", "256");
         // nosync, nofree, willreturn — these promise the optimizer that the
         // function never synchronizes, never frees memory, and always returns.
         // These promises are WRONG for functions that use concurrency
@@ -2222,14 +2255,44 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     // overhead for tiny predicates, accessors, and single-operation helpers.
     // Recursive functions are explicitly excluded: alwaysinline on a directly
     // recursive function causes the inliner to loop infinitely.
+    // The "deep" statement count walks into nested blocks/loops to capture
+    // the true code complexity.  A function with 3 top-level statements that
+    // contains triple-nested for-loops has a deep count of ~9, preventing
+    // it from being unconditionally inlined where it would inflate code size
+    // and cause I-cache pressure.
     static constexpr size_t kMaxInlineHintStatements = 10;
     static constexpr size_t kMaxInlineHintStatementsO3 = 20;
-    static constexpr size_t kAlwaysInlineStatements = 4;
+    static constexpr size_t kAlwaysInlineStatements = 8;
+    // Recursive deep statement counter — counts all statements in nested
+    // blocks, loops, and if/else chains.  Loop bodies are double-counted
+    // because loop codegen (header, latch, condition, increment, metadata)
+    // emits roughly 2× more IR than a plain statement.
+    std::function<size_t(Statement*)> deepStmtCount = [&](Statement* s) -> size_t {
+        if (!s) return 0;
+        if (auto* blk = dynamic_cast<BlockStmt*>(s)) {
+            size_t cnt = 0;
+            for (auto& st : blk->statements) cnt += deepStmtCount(st.get());
+            return cnt;
+        }
+        if (auto* ifS = dynamic_cast<IfStmt*>(s))
+            return 1 + deepStmtCount(ifS->thenBranch.get()) + deepStmtCount(ifS->elseBranch.get());
+        if (auto* wh = dynamic_cast<WhileStmt*>(s))
+            return 2 + 2 * deepStmtCount(wh->body.get());
+        if (auto* dw = dynamic_cast<DoWhileStmt*>(s))
+            return 2 + 2 * deepStmtCount(dw->body.get());
+        if (auto* fr = dynamic_cast<ForStmt*>(s))
+            return 2 + 2 * deepStmtCount(fr->body.get());
+        if (auto* fe = dynamic_cast<ForEachStmt*>(s))
+            return 2 + 2 * deepStmtCount(fe->body.get());
+        return 1;
+    };
+    size_t shallowCount = func->body ? func->body->statements.size() : 0;
+    size_t deepCount = func->body ? deepStmtCount(func->body.get()) : 0;
     size_t inlineThreshold =
         (optimizationLevel >= OptimizationLevel::O3) ? kMaxInlineHintStatementsO3 : kMaxInlineHintStatements;
     if (func->name != "main" && optimizationLevel >= OptimizationLevel::O2 && func->body &&
-        func->body->statements.size() <= inlineThreshold) {
-        if (optimizationLevel >= OptimizationLevel::O3 && func->body->statements.size() <= kAlwaysInlineStatements &&
+        shallowCount <= inlineThreshold) {
+        if (optimizationLevel >= OptimizationLevel::O3 && deepCount <= kAlwaysInlineStatements &&
             !isSelfRecursive) {
             function->addFnAttr(llvm::Attribute::AlwaysInline);
         } else {
@@ -2249,6 +2312,8 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     constScopeStack.clear();
     stringVars_.clear();
     stringArrayVars_.clear();
+    stringLenCache_.clear();
+    stringCapCache_.clear();
 
     // Pre-populate stringVars_ for parameters known to receive string arguments.
     auto paramStrIt = funcParamStringTypes_.find(func->name);

@@ -147,6 +147,13 @@ SuperoptimizerStats superoptimizeFunction(llvm::Function& func,
 SuperoptimizerStats superoptimizeModule(llvm::Module& module,
                                          const SuperoptimizerConfig& config = {});
 
+/// Convert srem-by-positive-constant → urem when the dividend is provably
+/// non-negative.  This is factored out as a standalone pass so it can run
+/// before the loop vectorizer (the vectorizer's cost model favours urem
+/// over srem because urem avoids the signed-correction fixup).
+/// Returns the number of srem instructions converted.
+unsigned convertSRemToURem(llvm::Function& func);
+
 } // namespace superopt
 } // namespace omscript
 

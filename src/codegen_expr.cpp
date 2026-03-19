@@ -911,136 +911,18 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     } else if (expr->op == "/" || expr->op == "%") {
         bool isDivision = expr->op == "/";
 
-        // Strength reduction: division/modulo by a positive power-of-2 constant
-        // can be lowered to shift/mask sequences that are significantly faster
-        // than hardware division instructions.
+        // Division/modulo by a non-zero constant: let the LLVM optimizer handle
+        // strength reduction via InstCombine.  LLVM converts srem/sdiv by
+        // constants to magic-number multiply-shift sequences, AND converts
+        // srem → urem when it can prove the dividend is non-negative (via
+        // CorrelatedValuePropagation).  The unsigned path avoids the sign-
+        // correction fixup, saving ~2 instructions per operation.
         //
-        // Division: x / (2^n) → (x + ((x >> 63) & ((2^n)-1))) >> n
-        //   The correction term adds (2^n - 1) when x is negative so the result
-        //   rounds toward zero (C/LLVM semantics), not toward -infinity.
-        //
-        // Modulo: x % (2^n) → x - ((x / (2^n)) * (2^n))
-        //   Reuses the optimized division above, then subtracts the quotient
-        //   times the divisor.  For signed modulo, this is correct because
-        //   the sign of the remainder must match the sign of the dividend.
+        // Previously, the codegen emitted its own magic-number code with
+        // unconditional sign correction.  That prevented LLVM from applying
+        // the srem→urem optimisation, causing a ~2× slowdown on benchmarks
+        // like triple-nested loops with modulo (e.g. `((i^j)+k) % 37`).
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
-            int64_t rv = ci->getSExtValue();
-            int s = log2IfPowerOf2(rv);
-            if (s > 0) { // positive power-of-2 with shift > 0 (divisor=1 has s=0 and is
-                         // already handled as an algebraic identity above)
-                if (isDivision) {
-                    // Emit: (x + ((x >> 63) & (divisor-1))) >> n
-                    llvm::Value* signBit =
-                        builder->CreateAShr(left, llvm::ConstantInt::get(getDefaultType(), 63), "div.sign");
-                    llvm::Value* correction =
-                        builder->CreateAnd(signBit, llvm::ConstantInt::get(getDefaultType(), rv - 1), "div.corr");
-                    llvm::Value* adjusted = builder->CreateAdd(left, correction, "div.adj");
-                    return builder->CreateAShr(adjusted, llvm::ConstantInt::get(getDefaultType(), s), "div.shr");
-                }
-                // Modulo: x % (2^n) → x - ((x / (2^n)) * (2^n))
-                llvm::Value* signBit =
-                    builder->CreateAShr(left, llvm::ConstantInt::get(getDefaultType(), 63), "mod.sign");
-                llvm::Value* correction =
-                    builder->CreateAnd(signBit, llvm::ConstantInt::get(getDefaultType(), rv - 1), "mod.corr");
-                llvm::Value* adjusted = builder->CreateAdd(left, correction, "mod.adj");
-                llvm::Value* quotient =
-                    builder->CreateAShr(adjusted, llvm::ConstantInt::get(getDefaultType(), s), "mod.quot");
-                llvm::Value* product =
-                    builder->CreateShl(quotient, llvm::ConstantInt::get(getDefaultType(), s), "mod.prod");
-                return builder->CreateSub(left, product, "mod.rem");
-            }
-            // Negative constant divisor: x / (-d) → -(x / d), x % (-d) → x % d.
-            // For signed division, the quotient negates and the remainder keeps
-            // the dividend's sign.  We apply the magic-number algorithm to the
-            // absolute value and negate the quotient, avoiding hardware division.
-            if (rv <= -3) {
-                int64_t posDiv = -rv;
-                // Guard against INT64_MIN whose negation overflows.
-                if (posDiv > 0) {
-                    uint64_t d = static_cast<uint64_t>(posDiv);
-                    int l = (d <= 1) ? 0 : (64 - __builtin_clzll(d - 1));
-                    llvm::APInt twoN = llvm::APInt(128, 1).shl(63 + l);
-                    llvm::APInt dWide(128, d);
-                    llvm::APInt magicWide = (twoN + dWide - 1).udiv(dWide);
-                    uint64_t magicNum = magicWide.getLimitedValue();
-                    int shiftAmt = l - 1;
-
-                    llvm::Type* i128Ty = llvm::Type::getInt128Ty(*context);
-                    llvm::Value* xExt = builder->CreateSExt(left, i128Ty, "magdiv.xext");
-                    llvm::Value* mConst = llvm::ConstantInt::get(i128Ty, magicNum);
-                    llvm::Value* product = builder->CreateMul(xExt, mConst, "magdiv.prod");
-                    llvm::Value* hi = builder->CreateAShr(product, llvm::ConstantInt::get(i128Ty, 64), "magdiv.hi128");
-                    llvm::Value* q = builder->CreateTrunc(hi, getDefaultType(), "magdiv.hi");
-                    if (shiftAmt > 0)
-                        q = builder->CreateAShr(q, llvm::ConstantInt::get(getDefaultType(), shiftAmt), "magdiv.shr");
-                    llvm::Value* signBit = builder->CreateLShr(
-                        left, llvm::ConstantInt::get(getDefaultType(), 63), "magdiv.sign");
-                    q = builder->CreateAdd(q, signBit, "magdiv.q");
-
-                    if (isDivision) {
-                        // x / (-d) → -(x / d)
-                        return builder->CreateNeg(q, "negdiv");
-                    }
-                    // x % (-d) → x - (x/d)*d  (remainder keeps dividend sign)
-                    // Note: use the original negative divisor so the identity
-                    // x == (x/d)*d + (x%d) holds with the negated quotient.
-                    llvm::Value* negQ = builder->CreateNeg(q, "negdiv.q");
-                    llvm::Value* prod = builder->CreateMul(negQ, right, "magmod.prod");
-                    return builder->CreateSub(left, prod, "magmod.rem");
-                }
-            }
-            // Non-power-of-2 constant divisor: use magic-number multiplication.
-            // This is the same algorithm GCC and Clang use to avoid hardware
-            // division instructions.  For signed division by a constant d:
-            //   quotient ≈ mulhi(x, magic) >> shift
-            // with a correction for the sign.  This replaces a 20-90 cycle
-            // division with a 3-5 cycle multiply-high + shift sequence.
-            //
-            // The magic number M and shift S satisfy:
-            //   floor(x / d) = mulhi(x, M) >> S  (for positive x)
-            // with a sign-correction step for negative dividends.
-            if (!ci->isZero() && rv >= 3) {
-                // Compute magic number for signed division by positive constant.
-                // Algorithm: find M, S such that  mulhi(x, M) >> S ≈ x/d
-                // Based on "Division by Invariant Integers using Multiplication"
-                // (Granlund & Montgomery, 1994).
-                uint64_t d = static_cast<uint64_t>(rv);
-                // Find the shift amount: ceil(log2(d)) using __builtin_clzll
-                // for constant-time bit-scan on modern CPUs.
-                int l = (d <= 1) ? 0 : (64 - __builtin_clzll(d - 1));
-                // Magic number: (2^(63+l) + d - 1) / d  (rounded up)
-                // Use LLVM's APInt for portable 128-bit arithmetic.
-                llvm::APInt twoN = llvm::APInt(128, 1).shl(63 + l);
-                llvm::APInt dWide(128, d);
-                llvm::APInt magicWide = (twoN + dWide - 1).udiv(dWide);
-                uint64_t magicNum = magicWide.getLimitedValue();
-                int shiftAmt = l - 1;
-
-                // Emit: mulhi(x, magic) >> shift, with sign correction.
-                // On typical x86-64 hardware, this is 3-5 cycles vs 20-90 cycles
-                // for hardware division.
-                // Step 1: q = mulhi(x, M) — high 64 bits of 128-bit product
-                llvm::Type* i128Ty = llvm::Type::getInt128Ty(*context);
-                llvm::Value* xExt = builder->CreateSExt(left, i128Ty, "magdiv.xext");
-                llvm::Value* mConst = llvm::ConstantInt::get(i128Ty, magicNum);
-                llvm::Value* product = builder->CreateMul(xExt, mConst, "magdiv.prod");
-                llvm::Value* hi = builder->CreateAShr(product, llvm::ConstantInt::get(i128Ty, 64), "magdiv.hi128");
-                llvm::Value* q = builder->CreateTrunc(hi, getDefaultType(), "magdiv.hi");
-                // Step 2: arithmetic shift right by (l-1)
-                if (shiftAmt > 0)
-                    q = builder->CreateAShr(q, llvm::ConstantInt::get(getDefaultType(), shiftAmt), "magdiv.shr");
-                // Step 3: add 1 if dividend was negative (round toward zero)
-                llvm::Value* signBit = builder->CreateLShr(
-                    left, llvm::ConstantInt::get(getDefaultType(), 63), "magdiv.sign");
-                q = builder->CreateAdd(q, signBit, "magdiv.q");
-
-                if (isDivision) {
-                    return q;
-                }
-                // Modulo: x % d → x - (x/d) * d
-                llvm::Value* prod = builder->CreateMul(q, right, "magmod.prod");
-                return builder->CreateSub(left, prod, "magmod.rem");
-            }
             if (!ci->isZero()) {
                 return isDivision ? builder->CreateSDiv(left, right, "divtmp")
                                   : builder->CreateSRem(left, right, "modtmp");
@@ -1886,9 +1768,16 @@ llvm::Value* CodeGenerator::generateStructLiteral(StructLiteralExpr* expr) {
     const auto& fields = it->second;
     size_t numFields = fields.size();
 
-    // Allocate: numFields * 8 bytes (each field is an i64 slot)
-    llvm::Value* byteSize = llvm::ConstantInt::get(getDefaultType(), numFields * 8);
-    llvm::Value* ptr = builder->CreateCall(getOrDeclareMalloc(), {byteSize}, "struct.alloc");
+    // Use stack allocation (alloca) for structs.  This avoids malloc overhead
+    // and allows LLVM's mem2reg / SROA passes to promote small structs to
+    // SSA registers, matching C's plain-variable performance.
+    llvm::Function* curFn = builder->GetInsertBlock()->getParent();
+    llvm::IRBuilder<> tmpBuilder(&curFn->getEntryBlock(), curFn->getEntryBlock().begin());
+    llvm::Type* slotTy = getDefaultType();
+    llvm::Value* ptr = tmpBuilder.CreateAlloca(
+        llvm::ArrayType::get(slotTy, numFields), nullptr, "struct.alloca");
+    // Cast to pointer for GEP
+    ptr = builder->CreateBitOrPointerCast(ptr, llvm::PointerType::getUnqual(*context), "struct.ptr");
 
     // Build field name → index map
     std::unordered_map<std::string, size_t> fieldIndex;

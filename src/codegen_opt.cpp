@@ -64,10 +64,12 @@
 #include <llvm/Transforms/Scalar/JumpThreading.h>
 #include <llvm/Transforms/Scalar/StraightLineStrengthReduce.h>
 #include <llvm/Transforms/Scalar/TailRecursionElimination.h>
+#include <llvm/Transforms/Scalar/LoopUnrollPass.h>
 #include <llvm/Transforms/Scalar/SimpleLoopUnswitch.h>
 #include <llvm/Transforms/Scalar/SpeculativeExecution.h>
 #include <llvm/Transforms/Scalar/DivRemPairs.h>
 #include <llvm/Transforms/Utils.h>
+#include <llvm/Transforms/Utils/Cloning.h>
 #include <llvm/Transforms/Vectorize/VectorCombine.h>
 #include <optional>
 #include <stdexcept>
@@ -99,8 +101,13 @@ void CodeGenerator::resolveTargetCPU(std::string& cpu, std::string& features) co
     // unset.  When an explicit -march is given, it takes precedence because
     // LLVM's createTargetMachine uses a single CPU parameter for both
     // instruction selection and scheduling.
+    // "native" is resolved to the host CPU name just like -march=native.
     if (!mtuneCpu_.empty() && isNative) {
-        cpu = mtuneCpu_;
+        if (mtuneCpu_ == "native") {
+            cpu = llvm::sys::getHostCPUName().str();
+        } else {
+            cpu = mtuneCpu_;
+        }
     }
 }
 
@@ -235,6 +242,11 @@ void CodeGenerator::runOptimizationPasses() {
     llvm::PipelineTuningOptions PTO;
     PTO.LoopVectorization = enableVectorize_;
     PTO.SLPVectorization = enableVectorize_;
+    // Re-enable LLVM's cost-model-driven loop unrolling.  The standard O3
+    // pipeline has excellent register-pressure-aware unrolling heuristics.
+    // We previously disabled this because the HGOE pre-pipeline was injecting
+    // bad unroll metadata that caused over-unrolling; now that pre-pipeline
+    // annotation is disabled, LLVM's own unroller makes good decisions.
     PTO.LoopUnrolling = enableUnrollLoops_;
     PTO.LoopInterleaving = enableVectorize_; // enable loop interleaving at O2+
 
@@ -598,9 +610,101 @@ void CodeGenerator::runOptimizationPasses() {
     if (verbose_) {
         std::cout << "    Running LLVM module pass pipeline..." << std::endl;
     }
+    // Pre-pipeline srem→urem conversion: run BEFORE the LLVM pipeline so the
+    // loop vectorizer (which runs as part of the pipeline) sees urem instead
+    // of srem.  The vectorizer's cost model treats urem-by-constant as cheaper
+    // than srem-by-constant (urem avoids the signed-correction fixup), enabling
+    // vectorization of inner loops like `sum += ((i^j) + k) % 37`.
+    if (enableSuperopt_ && optimizationLevel >= OptimizationLevel::O2) {
+        for (auto& func : *module) {
+            superopt::convertSRemToURem(func);
+        }
+    }
+    // Pre-pipeline HGOE loop annotation: set target-optimal unroll count,
+    // interleave count, and vector width on loops BEFORE the LLVM pipeline
+    // runs.  This ensures the unroller and vectorizer respect the target
+    // CPU's resource constraints (register count, I-cache size, pipeline
+    // depth) instead of using generic heuristics that over-unroll for CPUs
+    // with expensive modulo/division sequences.
+    //
+    // NOTE: Disabled because LLVM's O3 pipeline already has excellent
+    // unroll heuristics with register pressure modeling.  Our pre-pipeline
+    // metadata was being overridden by LLVM's aggressive multi-pass
+    // unrolling anyway, and when it wasn't overridden, it often led to
+    // suboptimal results because the cost model runs on pre-lowered IR
+    // where operations like srem/sdiv appear as single instructions but
+    // expand to 5-6 µops during selection.  The post-pipeline HGOE
+    // (softwarePipelineLoops) runs on fully-optimized IR and gives more
+    // accurate annotations for loops that escape LLVM's unroller.
     MPM.run(*module, MAM);
     if (verbose_) {
         std::cout << "    LLVM pass pipeline complete" << std::endl;
+    }
+
+    // Bounded recursive inlining: replicate GCC's deep recursive inlining
+    // by manually inlining self-recursive calls a fixed number of levels.
+    // LLVM's inliner refuses to inline self-recursive calls (to prevent
+    // infinite expansion), so after the standard pipeline has converted one
+    // branch to a tail-call loop, we manually inline the remaining recursive
+    // call.  Each level doubles the work done per actual function call,
+    // reducing call overhead by ~2^depth.  3 levels gives ~8x fewer calls,
+    // matching GCC -O3's behavior for naive recursive algorithms like fib.
+    if (optimizationLevel >= OptimizationLevel::O3) {
+        static constexpr unsigned kRecursiveInlineDepth = 3;
+        // Conservative size limit: the function BEFORE inlining must be
+        // small enough that inlining won't create a huge function.
+        // After inlining, each copy roughly doubles the size. So we limit
+        // the pre-inline size to 200 instructions (~200 * 2^3 = 1600 max).
+        static constexpr unsigned kMaxPreInlineSize = 200;
+        for (auto& F : *module) {
+            if (F.isDeclaration() || F.getName() == "main") continue;
+            unsigned preSize = F.getInstructionCount();
+            if (preSize > kMaxPreInlineSize) continue;
+
+            // Only inline functions that still contain a self-call.
+            bool hasSelfCall = false;
+            for (auto& BB : F) {
+                for (auto& I : BB) {
+                    if (auto* CB = llvm::dyn_cast<llvm::CallBase>(&I)) {
+                        if (CB->getCalledFunction() == &F) {
+                            hasSelfCall = true;
+                            break;
+                        }
+                    }
+                }
+                if (hasSelfCall) break;
+            }
+            if (!hasSelfCall) continue;
+
+            for (unsigned level = 0; level < kRecursiveInlineDepth; ++level) {
+                llvm::SmallVector<llvm::CallBase*, 4> selfCalls;
+                for (auto& BB : F) {
+                    for (auto& I : BB) {
+                        if (auto* CB = llvm::dyn_cast<llvm::CallBase>(&I)) {
+                            if (CB->getCalledFunction() == &F) {
+                                selfCalls.push_back(CB);
+                            }
+                        }
+                    }
+                }
+                if (selfCalls.empty()) break;
+
+                // Only inline the first self-call per level to avoid
+                // exponential blowup (fib has two calls: fib(n-1)+fib(n-2),
+                // but LLVM's TCO eliminates one, leaving exactly one).
+                unsigned inlined = 0;
+                for (auto* CB : selfCalls) {
+                    if (F.getInstructionCount() > preSize * 8) break;
+                    llvm::InlineFunctionInfo IFI;
+                    auto result = llvm::InlineFunction(*CB, IFI);
+                    if (result.isSuccess()) ++inlined;
+                }
+                if (inlined == 0) break;
+            }
+        }
+        if (verbose_) {
+            std::cout << "    Bounded recursive inlining complete" << std::endl;
+        }
     }
 
     // Superoptimizer: run after the standard LLVM pipeline to catch patterns
@@ -692,7 +796,11 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     // Phase 0: Apply aggressive function attributes to OPTMAX functions.
     // - nounwind: guaranteed no exceptions (enables tail call, smaller EH tables)
     // - optsize is NOT set (we want max speed, not size)
-    static constexpr unsigned kAlwaysInlineThreshold = 50; // instruction count
+    // alwaysinline threshold is intentionally low: force-inlining large
+    // functions into call sites with many other inlined functions inflates
+    // code size and causes I-cache pressure.  The inliner already handles
+    // profitable inlining decisions via inlinehint + cost model.
+    static constexpr unsigned kAlwaysInlineThreshold = 15; // instruction count
     for (auto& func : module->functions()) {
         if (!func.isDeclaration() && optMaxFunctions.count(std::string(func.getName()))) {
             func.addFnAttr(llvm::Attribute::NoUnwind);
@@ -730,11 +838,14 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     fpm.add(llvm::createLoopDataPrefetchPass());
     fpm.add(llvm::createLoopStrengthReducePass());
     fpm.add(llvm::createLoopUnrollPass());
-    // Phase 2.5: Additional aggressive cleanup after loop optimizations.
-    // A second GVN + instcombine round catches patterns exposed by loop
-    // strength reduction, unrolling, and LICM that the first round missed.
-    fpm.add(llvm::createGVNPass());
-    fpm.add(llvm::createInstructionCombiningPass());
+    // Phase 2.5: Post-loop cleanup.  Loop strength reduction, unrolling,
+    // and LICM can expose redundancies and dead code.  A lightweight
+    // CFG simplification + DCE pass is sufficient here; the heavier GVN
+    // and InstCombine passes are already in Phase 4 below and the full
+    // pipeline runs 3× per function, so duplicating them here only adds
+    // compile-time without improving generated code quality.
+    fpm.add(llvm::createCFGSimplificationPass());
+    fpm.add(llvm::createDeadCodeEliminationPass());
     // Phase 3: Post-loop optimizations
 #if LLVM_VERSION_MAJOR < 18
     fpm.add(llvm::createMergedLoadStoreMotionPass());

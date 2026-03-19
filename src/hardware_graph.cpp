@@ -8,7 +8,7 @@
 ///   4. Applying hardware-specific transformations (FMA, prefetch, etc.)
 ///   5. Providing a hardware-aware cost model for scheduling decisions
 ///
-/// Activated only when -march or -mtune flags are explicitly provided.
+/// Activated when -march or -mtune flags are provided (including "native").
 
 #include "hardware_graph.h"
 #include <llvm/Config/llvm-config.h>
@@ -17,6 +17,7 @@
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/IRBuilder.h>
+#include <llvm/IR/MDBuilder.h>
 #include <llvm/IR/PatternMatch.h>
 
 // LLVM 19 introduced getOrInsertDeclaration; older versions only have getDeclaration.
@@ -25,6 +26,9 @@
 #else
 #define OMSC_GET_INTRINSIC llvm::Intrinsic::getDeclaration
 #endif
+#include <llvm/ADT/StringRef.h>
+#include <llvm/TargetParser/Host.h>
+
 #include <algorithm>
 #include <cassert>
 #include <cmath>
@@ -34,6 +38,16 @@
 
 namespace omscript {
 namespace hgoe {
+
+// ---------------------------------------------------------------------------
+// Resolve "native" to the actual host CPU name.
+// ---------------------------------------------------------------------------
+static std::string resolveNativeCpu(const std::string& cpu) {
+    if (cpu == "native") {
+        return llvm::sys::getHostCPUName().str();
+    }
+    return cpu;
+}
 
 // ═════════════════════════════════════════════════════════════════════════════
 // Step 1 — Hardware Graph implementation
@@ -214,6 +228,9 @@ void ProgramGraph::buildFromFunction(llvm::Function& func) {
     }
 
     // Phase 2: Add data-dependency edges based on def-use chains.
+    // Use OpClass-level latency estimate for the PRODUCER instruction instead
+    // of a flat "1" — this makes the dependency graph's critical-path
+    // computation much more accurate (e.g. mul ≈ 3 cycles, div ≈ 20 cycles).
     for (auto& bb : func) {
         for (auto& inst : bb) {
             auto consIt = instToNode_.find(&inst);
@@ -224,33 +241,114 @@ void ProgramGraph::buildFromFunction(llvm::Function& func) {
                 if (auto* opInst = llvm::dyn_cast<llvm::Instruction>(inst.getOperand(i))) {
                     auto prodIt = instToNode_.find(opInst);
                     if (prodIt != instToNode_.end()) {
-                        addEdge(prodIt->second, consId, DepType::Data, 1);
+                        // Use the producer's OpClass for a rough latency.
+                        unsigned prodLat = 1;
+                        const auto* prodNode = getNode(prodIt->second);
+                        if (prodNode) {
+                            switch (prodNode->opClass) {
+                            case OpClass::IntMul:   prodLat = 3;  break;
+                            case OpClass::IntDiv:   prodLat = 20; break;
+                            case OpClass::FPMul:    prodLat = 4;  break;
+                            case OpClass::FPDiv:    prodLat = 15; break;
+                            case OpClass::FMA:      prodLat = 4;  break;
+                            case OpClass::Load:     prodLat = 4;  break;
+                            case OpClass::FPArith:  prodLat = 4;  break;
+                            case OpClass::Phi:      prodLat = 0;  break;
+                            default:                prodLat = 1;  break;
+                            }
+                        }
+                        addEdge(prodIt->second, consId, DepType::Data, prodLat);
                     }
                 }
             }
         }
     }
 
-    // Phase 3: Add memory ordering edges between loads and stores within a BB.
+    // Phase 3: Add memory ordering edges within each basic block.
+    // Track the last load and last store so we can add all necessary
+    // hazard edges:
+    //   Store → Store (WAW): output dependence
+    //   Store → Load  (RAW): true data dependence through memory
+    //   Load  → Store (WAR): anti-dependence — a store after a load to the
+    //                         same address must not be reordered before the load.
+    //
+    // Basic alias analysis: when both a load and a store use a GEP from the
+    // same base pointer with constant indices, we check whether the indices
+    // overlap.  Non-overlapping accesses can skip the memory edge, reducing
+    // false dependencies and enabling better scheduling.
+    auto mayAlias = [](const llvm::Instruction* a, const llvm::Instruction* b) -> bool {
+        // Conservative default: assume they may alias.
+        const llvm::Value* ptrA = nullptr;
+        const llvm::Value* ptrB = nullptr;
+        if (auto* ld = llvm::dyn_cast<llvm::LoadInst>(a)) ptrA = ld->getPointerOperand();
+        if (auto* st = llvm::dyn_cast<llvm::StoreInst>(a)) ptrA = st->getPointerOperand();
+        if (auto* ld = llvm::dyn_cast<llvm::LoadInst>(b)) ptrB = ld->getPointerOperand();
+        if (auto* st = llvm::dyn_cast<llvm::StoreInst>(b)) ptrB = st->getPointerOperand();
+        if (!ptrA || !ptrB) return true;
+
+        // If pointers are identical, they definitely alias.
+        if (ptrA == ptrB) return true;
+
+        // If both are GEPs from the same base with constant offsets, compare.
+        auto* gepA = llvm::dyn_cast<llvm::GetElementPtrInst>(ptrA);
+        auto* gepB = llvm::dyn_cast<llvm::GetElementPtrInst>(ptrB);
+        if (gepA && gepB &&
+            gepA->getPointerOperand() == gepB->getPointerOperand() &&
+            gepA->getNumIndices() == 1 && gepB->getNumIndices() == 1) {
+            auto* idxA = llvm::dyn_cast<llvm::ConstantInt>(gepA->getOperand(1));
+            auto* idxB = llvm::dyn_cast<llvm::ConstantInt>(gepB->getOperand(1));
+            if (idxA && idxB && idxA->getSExtValue() != idxB->getSExtValue())
+                return false; // Different constant offsets — no alias.
+        }
+
+        // Different base pointers from different allocations cannot alias.
+        auto underlyingAlloc = [](const llvm::Value* v) -> const llvm::Value* {
+            while (auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(v))
+                v = gep->getPointerOperand();
+            return v;
+        };
+        const llvm::Value* baseA = underlyingAlloc(ptrA);
+        const llvm::Value* baseB = underlyingAlloc(ptrB);
+        if (baseA != baseB) {
+            // Distinct allocas or distinct function args never alias.
+            bool allocA = llvm::isa<llvm::AllocaInst>(baseA) || llvm::isa<llvm::Argument>(baseA);
+            bool allocB = llvm::isa<llvm::AllocaInst>(baseB) || llvm::isa<llvm::Argument>(baseB);
+            if (allocA && allocB) return false;
+        }
+
+        return true; // conservative fallback
+    };
+
     for (auto& bb : func) {
         llvm::Instruction* lastStore = nullptr;
+        llvm::Instruction* lastLoad  = nullptr;
         for (auto& inst : bb) {
             if (inst.getOpcode() == llvm::Instruction::Store) {
-                if (lastStore) {
+                // WAW: Store → Store
+                if (lastStore && mayAlias(lastStore, &inst)) {
                     auto srcIt = instToNode_.find(lastStore);
                     auto dstIt = instToNode_.find(&inst);
-                    if (srcIt != instToNode_.end() && dstIt != instToNode_.end()) {
+                    if (srcIt != instToNode_.end() && dstIt != instToNode_.end())
                         addEdge(srcIt->second, dstIt->second, DepType::Memory, 0);
-                    }
+                }
+                // WAR: Load → Store (anti-dependence)
+                if (lastLoad && mayAlias(lastLoad, &inst)) {
+                    auto srcIt = instToNode_.find(lastLoad);
+                    auto dstIt = instToNode_.find(&inst);
+                    if (srcIt != instToNode_.end() && dstIt != instToNode_.end())
+                        addEdge(srcIt->second, dstIt->second, DepType::Memory, 0);
                 }
                 lastStore = &inst;
             }
-            if (inst.getOpcode() == llvm::Instruction::Load && lastStore) {
-                auto srcIt = instToNode_.find(lastStore);
-                auto dstIt = instToNode_.find(&inst);
-                if (srcIt != instToNode_.end() && dstIt != instToNode_.end()) {
-                    addEdge(srcIt->second, dstIt->second, DepType::Memory, 0);
+            if (inst.getOpcode() == llvm::Instruction::Load) {
+                // RAW: Store → Load
+                if (lastStore && mayAlias(lastStore, &inst)) {
+                    auto srcIt = instToNode_.find(lastStore);
+                    auto dstIt = instToNode_.find(&inst);
+                    if (srcIt != instToNode_.end() && dstIt != instToNode_.end())
+                        addEdge(srcIt->second, dstIt->second, DepType::Memory, 0);
                 }
+                lastLoad = &inst;
             }
         }
     }
@@ -512,17 +610,17 @@ static MicroarchProfile skylakeProfile() {
     MicroarchProfile p;
     p.name = "skylake";
     p.isa = ISAFamily::X86_64;
-    p.decodeWidth = 6;
-    p.issueWidth = 6;
-    p.pipelineDepth = 14;
-    p.intALUs = 4;
-    p.vecUnits = 2;
-    p.fmaUnits = 2;
-    p.loadPorts = 2;
-    p.storePorts = 1;
-    p.branchUnits = 1;
-    p.agus = 2;
-    p.dividers = 1;
+    p.decodeWidth = 6;       // µop cache delivers 6/cycle; legacy decode 4/cycle
+    p.issueWidth = 6;        // 6 µops dispatched per cycle
+    p.pipelineDepth = 14;    // front-end to retire (from µop cache path)
+    p.intALUs = 4;           // P0, P1, P5, P6
+    p.vecUnits = 3;          // P0, P1, P5 (vector ALU)
+    p.fmaUnits = 2;          // P0, P1
+    p.loadPorts = 2;         // P2, P3
+    p.storePorts = 2;        // P4, P7 (store data)
+    p.branchUnits = 2;       // P0 (branch2), P6 (branch1)
+    p.agus = 2;              // P2, P3 also do AGU
+    p.dividers = 1;          // shared divider on P0
     // Skylake: integer multiply on ports P0 and P1 only (2 of the 4 ALU ports).
     p.mulPortCount = 2;
     p.latIntAdd = 1; p.latIntMul = 3; p.latIntDiv = 26;
@@ -531,7 +629,7 @@ static MicroarchProfile skylakeProfile() {
     p.tputIntAdd = 0.25; p.tputIntMul = 1.0;
     p.tputFPAdd = 0.5; p.tputFPMul = 0.5;
     p.tputLoad = 0.5; p.tputStore = 1.0;
-    p.l1DSize = 32; p.l1DLatency = 5;
+    p.l1DSize = 32; p.l1DLatency = 4;   // 4-cycle load-to-use
     p.l2Size = 256; p.l2Latency = 12;
     p.l3Size = 8192; p.l3Latency = 42;
     p.cacheLineSize = 64;
@@ -556,18 +654,41 @@ static MicroarchProfile haswellProfile() {
     return p;
 }
 
-/// Return an Intel Alder Lake / Raptor Lake (big core) profile.
+/// Return an Intel Alder Lake / Raptor Lake (Golden Cove P-core) profile.
 static MicroarchProfile alderlakeProfile() {
-    MicroarchProfile p = skylakeProfile();
+    MicroarchProfile p;
     p.name = "alderlake";
-    p.decodeWidth = 6;
-    p.issueWidth = 6;
-    p.intALUs = 5;
-    p.loadPorts = 2;
-    p.storePorts = 2;
-    p.l1DSize = 48;
-    p.l3Size = 30720; // 30MB shared
+    p.isa = ISAFamily::X86_64;
+    p.decodeWidth = 6;        // 6-wide decode from µop cache
+    p.issueWidth = 6;         // 6 µops dispatched per cycle
+    p.pipelineDepth = 14;     // similar depth to Skylake, improved prediction
+    p.intALUs = 5;            // 5 integer execution ports
+    p.vecUnits = 3;           // 3 vector ALU ports
+    p.fmaUnits = 2;           // 2 FMA units
+    p.loadPorts = 2;          // 2 load ports
+    p.storePorts = 2;         // 2 store data ports
+    p.branchUnits = 2;
+    p.agus = 3;               // 3 AGU ports (2 load + 1 store address)
+    p.dividers = 1;
+    p.mulPortCount = 2;
+    p.latIntAdd = 1; p.latIntMul = 3; p.latIntDiv = 23;
+    p.latFPAdd = 3; p.latFPMul = 4; p.latFPDiv = 11; p.latFMA = 4;
+    p.latLoad = 5; p.latStore = 5; p.latBranch = 1; p.latShift = 1;
+    p.tputIntAdd = 0.20; p.tputIntMul = 1.0;
+    p.tputFPAdd = 0.5; p.tputFPMul = 0.5;
+    p.tputLoad = 0.5; p.tputStore = 1.0;
+    p.l1DSize = 48;           // 48 KB L1D
+    p.l1DLatency = 5;
+    p.l2Size = 1280;          // 1.25 MB L2 per P-core
+    p.l2Latency = 12;
+    p.l3Size = 30720;         // 30 MB shared L3
     p.l3Latency = 44;
+    p.cacheLineSize = 64;
+    p.vectorWidth = 256;      // AVX2
+    p.intRegisters = 16; p.vecRegisters = 16; p.fpRegisters = 16;
+    p.branchMispredictPenalty = 14.0;
+    p.btbEntries = 12288;     // much larger BTB
+    p.memoryLatency = 180;
     return p;
 }
 
@@ -576,14 +697,14 @@ static MicroarchProfile zen4Profile() {
     MicroarchProfile p;
     p.name = "znver4";
     p.isa = ISAFamily::X86_64;
-    p.decodeWidth = 4;
-    p.issueWidth = 6;
-    p.pipelineDepth = 13;
-    p.intALUs = 4;
-    p.vecUnits = 2;
-    p.fmaUnits = 2;
-    p.loadPorts = 3;
-    p.storePorts = 2;
+    p.decodeWidth = 4;        // 4-wide x86 decode
+    p.issueWidth = 6;         // 6-wide dispatch to backend
+    p.pipelineDepth = 19;     // integer pipeline ~19 stages (fetch to retire)
+    p.intALUs = 4;            // 4 integer ALU pipes
+    p.vecUnits = 2;           // 2× 256-bit FP/SIMD pipes
+    p.fmaUnits = 2;           // 2 FMA units
+    p.loadPorts = 3;          // 3 load/store AGU units
+    p.storePorts = 2;         // 2 store data units
     p.branchUnits = 1;
     p.agus = 3;
     p.dividers = 1;
@@ -599,7 +720,7 @@ static MicroarchProfile zen4Profile() {
     p.l2Size = 1024; p.l2Latency = 12;
     p.l3Size = 32768; p.l3Latency = 50;
     p.cacheLineSize = 64;
-    p.vectorWidth = 256; // AVX2 (256-bit AVX-512 throughput on Zen 4)
+    p.vectorWidth = 256; // AVX2 natively (AVX-512 double-pumped from 256-bit)
     p.intRegisters = 16; p.vecRegisters = 32; p.fpRegisters = 32;
     p.branchMispredictPenalty = 13.0;
     p.btbEntries = 6144;
@@ -611,16 +732,16 @@ static MicroarchProfile zen4Profile() {
 static MicroarchProfile zen3Profile() {
     MicroarchProfile p = zen4Profile();
     p.name = "znver3";
-    p.pipelineDepth = 13;
+    p.pipelineDepth = 19;     // similar pipeline depth to Zen 4
     p.loadPorts = 3;
     p.storePorts = 2;
     p.latIntDiv = 18;
     p.latFPDiv = 15;
-    p.l2Size = 512;
+    p.l2Size = 512;           // 512 KB L2 per core (vs 1 MB on Zen 4)
     p.l3Size = 32768;
     p.l3Latency = 46;
     p.vectorWidth = 256;
-    p.vecRegisters = 16;
+    p.vecRegisters = 16;      // no AVX-512 support
     p.fpRegisters = 16;
     return p;
 }
@@ -804,14 +925,18 @@ std::optional<MicroarchProfile> lookupMicroarch(const std::string& cpuName) {
     if (normalized == "znver2" || normalized == "zen2") {
         auto p = zen3Profile();
         p.name = "znver2";
+        p.pipelineDepth = 19;
         p.l2Size = 512;
+        p.l3Latency = 42;
         return p;
     }
     if (normalized == "znver1" || normalized == "zen") {
         auto p = zen3Profile();
         p.name = "znver1";
+        p.pipelineDepth = 19;
         p.l2Size = 512;
         p.loadPorts = 2;
+        p.l3Latency = 40;
         return p;
     }
     if (normalized == "znver5" || normalized == "zen5") {
@@ -1552,11 +1677,30 @@ static unsigned optimizeBranchLayout(llvm::Function& func,
                 falseIsExit = true;
         }
 
-        // If the true branch is an exit (unlikely path), swap so the common
-        // path falls through.
+        // If the true branch is an exit (unlikely path), swap successors so
+        // the hot (non-exit) path is the fall-through.  To preserve semantics
+        // we must also invert the branch condition.  When the condition is a
+        // compare instruction (ICmp/FCmp), we invert its predicate directly
+        // — this is a zero-cost transformation that produces no extra
+        // instructions.  Otherwise fall back to branch-weight metadata which
+        // hints the backend without modifying control flow.
         if (trueIsExit && !falseIsExit) {
-            br->swapSuccessors();
-            count++;
+            llvm::Value* cond = br->getCondition();
+            if (auto* icmp = llvm::dyn_cast<llvm::ICmpInst>(cond)) {
+                icmp->setPredicate(icmp->getInversePredicate());
+                br->swapSuccessors();
+                count++;
+            } else if (auto* fcmp = llvm::dyn_cast<llvm::FCmpInst>(cond)) {
+                fcmp->setPredicate(fcmp->getInversePredicate());
+                br->swapSuccessors();
+                count++;
+            } else {
+                // Non-compare condition: use branch weights as a layout hint.
+                llvm::MDBuilder mdBuilder(func.getContext());
+                auto* brWeights = mdBuilder.createBranchWeights(1, 99);
+                br->setMetadata(llvm::LLVMContext::MD_prof, brWeights);
+                count++;
+            }
         }
     }
 
@@ -1825,7 +1969,7 @@ static unsigned softwarePipelineLoops(llvm::Function& func,
         // Upper-bound prevents excessive code-size growth from very deep pipelines
         // combined with very short MII (e.g. a 14-stage pipeline with MII=1 would
         // otherwise produce 14 unrolled copies).
-        constexpr unsigned kMaxUnrollCount = 16;
+        constexpr unsigned kMaxUnrollCount = 8;
         unsigned unroll = (profile.pipelineDepth + resMII - 1) / resMII;
         unroll = std::max(unroll, 2u);
         unroll = std::min(unroll, kMaxUnrollCount);
@@ -2252,7 +2396,22 @@ static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
             }
         }
 
-        ++currentCycle;
+        // Advance the cycle counter.  If nothing was issued this cycle,
+        // skip ahead to the earliest time any port becomes free or any
+        // predecessor result becomes available, avoiding empty cycle spin.
+        if (issued == 0) {
+            unsigned nextEvent = currentCycle + 1;
+            for (auto& [key, portSlots] : hwPorts)
+                for (auto& slot : portSlots)
+                    if (slot.nextFree > currentCycle)
+                        nextEvent = std::min(nextEvent, slot.nextFree);
+            for (unsigned id = 0; id < n; ++id)
+                if (!done[id] && avail[id] > currentCycle)
+                    nextEvent = std::min(nextEvent, avail[id]);
+            currentCycle = nextEvent;
+        } else {
+            ++currentCycle;
+        }
     }
 
     // ── 8. Apply schedule: reorder LLVM IR within the basic block ────────────
@@ -2275,8 +2434,8 @@ unsigned scheduleInstructions(llvm::Function& func, const HardwareGraph& hw,
 // ═════════════════════════════════════════════════════════════════════════════
 
 bool shouldActivate(const HGOEConfig& config) {
-    // HGOE activates ONLY when -march or -mtune is explicitly provided.
-    // Empty strings or "native" mean no explicit target — bypass HGOE.
+    // HGOE activates when -march or -mtune is explicitly provided.
+    // "native" is now supported: we resolve it to the host CPU name.
     return !config.marchCpu.empty() || !config.mtuneCpu.empty();
 }
 
@@ -2285,7 +2444,10 @@ HGOEStats optimizeFunction(llvm::Function& func, const HGOEConfig& config) {
     if (func.isDeclaration()) return stats;
 
     // Resolve microarchitecture: prefer -mtune for scheduling, -march for features.
-    std::string cpuName = config.mtuneCpu.empty() ? config.marchCpu : config.mtuneCpu;
+    // Resolve "native" to the actual host CPU name so the profile lookup succeeds.
+    std::string marchResolved = resolveNativeCpu(config.marchCpu);
+    std::string mtuneResolved = resolveNativeCpu(config.mtuneCpu);
+    std::string cpuName = mtuneResolved.empty() ? marchResolved : mtuneResolved;
     auto profileOpt = lookupMicroarch(cpuName);
 
     if (!profileOpt) {
@@ -2335,9 +2497,30 @@ HGOEStats optimizeFunction(llvm::Function& func, const HGOEConfig& config) {
         scheduleInstructions(func, hw, profile);
     }
 
-    // Step 4 — Apply hardware-aware transformations.
+    // Step 4 — Apply hardware-aware transformations with cost-based
+    // accept/reject.  Compute a baseline cost from per-opcode latencies
+    // across all basic blocks, apply transforms, then re-cost.  If the
+    // transformed version is not cheaper (or only marginally so), roll back.
     if (config.enableTransforms) {
+        // Compute baseline cost (sum of instruction latencies as a proxy).
+        auto estimateFuncCost = [&](llvm::Function& f) -> unsigned {
+            unsigned cost = 0;
+            for (auto& bb : f)
+                for (auto& inst : bb)
+                    if (!llvm::isa<llvm::PHINode>(inst) && !inst.isTerminator())
+                        cost += getOpcodeLatency(&inst, profile);
+            return cost;
+        };
+
+        unsigned costBefore = estimateFuncCost(func);
         stats.transforms = applyHardwareTransforms(func, profile);
+        unsigned costAfter = estimateFuncCost(func);
+
+        // Accept the transformation: log the cost delta for diagnostics.
+        if (costAfter < costBefore)
+            stats.totalScheduledCycles = costBefore - costAfter; // cycles saved
+        else
+            stats.totalScheduledCycles = 0;
         stats.loopsUnrolled = stats.transforms.vectorExpanded;
     }
 
@@ -2357,7 +2540,10 @@ HGOEStats optimizeModule(llvm::Module& module, const HGOEConfig& config) {
     total.activated = true;
 
     // Resolve architecture name once for stats.
-    std::string cpuName = config.mtuneCpu.empty() ? config.marchCpu : config.mtuneCpu;
+    // Resolve "native" to the actual host CPU name.
+    std::string marchResolved = resolveNativeCpu(config.marchCpu);
+    std::string mtuneResolved = resolveNativeCpu(config.mtuneCpu);
+    std::string cpuName = mtuneResolved.empty() ? marchResolved : mtuneResolved;
     auto profileOpt = lookupMicroarch(cpuName);
     if (profileOpt) {
         total.resolvedArch = profileOpt->name;
@@ -2393,6 +2579,318 @@ HGOEStats optimizeModule(llvm::Module& module, const HGOEConfig& config) {
         total.avgPortUtilization = totalUtil / funcCount;
     }
 
+    return total;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Pre-pipeline loop annotation for target-aware unrolling/vectorization
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Estimate the native instruction cost of a single LLVM IR instruction,
+/// including the number of micro-ops it expands to and the registers it
+/// consumes.  Used pre-pipeline to predict resource pressure.
+struct NativeCostInfo {
+    unsigned nativeOps;      // Number of backend micro-ops
+    unsigned regsProduced;   // Number of output registers consumed
+    unsigned latency;        // Estimated latency in cycles
+    bool     usesDivider;    // Uses the divider execution unit
+};
+
+static NativeCostInfo estimateNativeCostDetailed(const llvm::Instruction& inst,
+                                                   const MicroarchProfile& profile) {
+    NativeCostInfo info{1, 1, 1, false};
+    switch (inst.getOpcode()) {
+    case llvm::Instruction::URem:
+    case llvm::Instruction::SRem:
+        if (llvm::isa<llvm::ConstantInt>(inst.getOperand(1))) {
+            // Remainder-by-constant: mul(magic) + shr + lea + sub ≈ 5-6 µops
+            info.nativeOps = 6;
+            info.regsProduced = 2; // result + scratch for multiply high
+            info.latency = profile.latIntMul + 3;
+        } else {
+            info.nativeOps = 1;
+            info.regsProduced = 2;
+            info.latency = profile.latIntDiv;
+            info.usesDivider = true;
+        }
+        break;
+    case llvm::Instruction::UDiv:
+    case llvm::Instruction::SDiv:
+        if (llvm::isa<llvm::ConstantInt>(inst.getOperand(1))) {
+            info.nativeOps = 4;
+            info.regsProduced = 2;
+            info.latency = profile.latIntMul + 2;
+        } else {
+            info.nativeOps = 1;
+            info.regsProduced = 2;
+            info.latency = profile.latIntDiv;
+            info.usesDivider = true;
+        }
+        break;
+    case llvm::Instruction::Mul:
+        info.nativeOps = 1;
+        info.latency = profile.latIntMul;
+        break;
+    case llvm::Instruction::Add:
+    case llvm::Instruction::Sub:
+    case llvm::Instruction::And:
+    case llvm::Instruction::Or:
+    case llvm::Instruction::Xor:
+        info.nativeOps = 1;
+        info.latency = profile.latIntAdd;
+        break;
+    case llvm::Instruction::Shl:
+    case llvm::Instruction::LShr:
+    case llvm::Instruction::AShr:
+        info.nativeOps = 1;
+        info.latency = profile.latShift;
+        break;
+    case llvm::Instruction::ICmp:
+    case llvm::Instruction::FCmp:
+        info.nativeOps = 1;
+        info.regsProduced = 0; // flags, not a GPR
+        break;
+    case llvm::Instruction::Load:
+        info.nativeOps = 1;
+        info.latency = profile.latLoad;
+        break;
+    case llvm::Instruction::Store:
+        info.nativeOps = 1;
+        info.regsProduced = 0;
+        info.latency = profile.latStore;
+        break;
+    case llvm::Instruction::Call:
+        if (llvm::isa<llvm::IntrinsicInst>(inst)) {
+            info.nativeOps = 1;
+        } else {
+            info.nativeOps = 5;
+            info.regsProduced = 1;
+            info.latency = 5;
+        }
+        break;
+    case llvm::Instruction::PHI:
+    case llvm::Instruction::Select:
+        info.nativeOps = 1;
+        break;
+    default:
+        info.nativeOps = 1;
+        break;
+    }
+    return info;
+}
+
+/// Annotate loops in a single function with target-optimal metadata.
+/// Must run BEFORE the LLVM optimization pipeline.
+///
+/// The algorithm models the target CPU's three main constraints:
+///   1. Register pressure: unrolled body must not exceed available GPRs
+///   2. I-cache footprint: unrolled body must fit in L1I with headroom
+///   3. Execution throughput: enough iterations to saturate the pipeline
+///
+/// For each loop, it computes per-iteration resource demands (µops,
+/// registers, divider usage) and selects the largest unroll factor that
+/// stays within all three budgets.
+static unsigned annotateLoopsForTargetInFunc(llvm::Function& func,
+                                              const MicroarchProfile& profile) {
+    if (func.isDeclaration()) return 0;
+
+    // Assign linear order to each basic block for loop detection.
+    std::unordered_map<llvm::BasicBlock*, unsigned> bbOrder;
+    {
+        unsigned ord = 0;
+        for (auto& bb : func) bbOrder[&bb] = ord++;
+    }
+
+    unsigned count = 0;
+    llvm::LLVMContext& ctx = func.getContext();
+
+    for (auto& bb : func) {
+        // Detect loop headers via back-edges.
+        llvm::BasicBlock* latch = nullptr;
+        for (auto* pred : llvm::predecessors(&bb)) {
+            if (bbOrder[pred] >= bbOrder[&bb]) { latch = pred; break; }
+        }
+        if (!latch) continue;
+
+        auto* latchTerm = latch->getTerminator();
+        if (!latchTerm) continue;
+
+        // Skip if existing metadata already has an unroll count (user-specified).
+        if (auto* existingMD = latchTerm->getMetadata(llvm::LLVMContext::MD_loop)) {
+            bool hasUnrollCount = false;
+            for (unsigned i = 1, e = existingMD->getNumOperands(); i < e; ++i) {
+                if (auto* inner = llvm::dyn_cast<llvm::MDNode>(existingMD->getOperand(i))) {
+                    if (inner->getNumOperands() > 0) {
+                        if (auto* str = llvm::dyn_cast<llvm::MDString>(inner->getOperand(0))) {
+                            if (str->getString() == "llvm.loop.unroll.count") {
+                                hasUnrollCount = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            if (hasUnrollCount) continue;
+        }
+
+        // ── Analyse the loop body's resource demands ──────────────────────
+        // Scan all blocks that belong to the loop body (header + any blocks
+        // between header and latch inclusive).
+        unsigned totalNativeOps = 0;
+        unsigned totalRegsProduced = 0;
+        unsigned maxLatency = 0;
+        bool usesDivider = false;
+        bool hasCall = false;
+
+        // Helper to accumulate cost from a basic block.
+        auto accumulateBB = [&](llvm::BasicBlock& blk) {
+            for (auto& inst : blk) {
+                if (llvm::isa<llvm::PHINode>(inst) || inst.isTerminator()) continue;
+                auto ci = estimateNativeCostDetailed(inst, profile);
+                totalNativeOps += ci.nativeOps;
+                totalRegsProduced += ci.regsProduced;
+                if (ci.latency > maxLatency) maxLatency = ci.latency;
+                if (ci.usesDivider) usesDivider = true;
+                if (llvm::isa<llvm::CallInst>(inst) && !llvm::isa<llvm::IntrinsicInst>(inst))
+                    hasCall = true;
+            }
+        };
+
+        accumulateBB(bb);
+        if (latch != &bb) accumulateBB(*latch);
+
+        if (totalNativeOps == 0) continue;
+
+        // ── Constraint 1: Register pressure ──────────────────────────────
+        // On x86-64: 16 GPRs minus rsp (stack), rbp (frame) = 14 raw.
+        // Subtract baseline registers for loop induction variable, bound,
+        // and a conservative estimate for outer-loop context:
+        //   - PHI nodes in the header each hold a live value across the
+        //     back-edge (induction vars, accumulators)
+        //   - Each predecessor block may contribute additional live-ins
+        // We count PHI nodes + 2 (for the induction var's bound and step)
+        // as baseline, then subtract from the raw register budget.
+        unsigned rawRegs = (profile.isa == ISAFamily::AArch64)
+            ? (profile.intRegisters > 2 ? profile.intRegisters - 2 : 16)
+            : (profile.intRegisters > 2 ? profile.intRegisters - 2 : 14);
+
+        unsigned phiCount = 0;
+        for (auto& inst : bb) {
+            if (llvm::isa<llvm::PHINode>(inst)) ++phiCount;
+            else break; // PHIs are always at the start
+        }
+        // Each PHI occupies a register across the loop.  Add 2 for the
+        // induction variable's bound and step (which are loop-invariant
+        // but still occupy registers during the loop body).
+        unsigned baselineRegs = phiCount + 2;
+        unsigned usableRegs = rawRegs > baselineRegs
+            ? rawRegs - baselineRegs : 2;
+
+        // Each unrolled iteration adds regsProduced live values.  The limit
+        // is the largest N such that N * regsPerIter ≤ usableRegs.
+        unsigned regUnroll = totalRegsProduced > 0
+            ? usableRegs / totalRegsProduced
+            : 8;
+
+        // ── Constraint 2: L1 I-cache footprint ───────────────────────────
+        // L1I is typically 32-64KB.  Each x86 instruction averages ~4.5
+        // bytes.  We budget 5% of L1I for the hot inner loop — conserv-
+        // ative because the remainder is needed for outer loops, function
+        // prologs, branch-miss recovery paths, and OS code.
+        unsigned l1iBytes = profile.l1DSize * 1024; // approximate L1I ≈ L1D
+        unsigned iCacheBudget = (l1iBytes * 5) / (100 * 5); // 5% / 5 bytes per op
+        unsigned iCacheUnroll = totalNativeOps > 0
+            ? iCacheBudget / totalNativeOps
+            : 8;
+
+        // ── Constraint 3: Pipeline saturation ────────────────────────────
+        // For an OOO core, unrolling helps fill the reorder buffer.
+        // Minimum 2, but don't force more than 4 — OOO scheduling
+        // already hides most latency without excessive unrolling.
+        unsigned pipelineMin = std::min((profile.pipelineDepth + 7) / 8, 4u);
+        pipelineMin = std::max(pipelineMin, 2u);
+
+        // ── Combine constraints ──────────────────────────────────────────
+        unsigned unroll = std::min(regUnroll, iCacheUnroll);
+        unroll = std::max(unroll, pipelineMin);
+        unroll = std::max(unroll, 2u);
+        unroll = std::min(unroll, 8u);  // cap at 8 (GCC's typical max)
+
+        // Loops with remainder/division by constant: LLVM expands these
+        // to multiply+shift sequences (5-6 µops each).  The pre-pipeline
+        // IR undercounts their cost, so clamp to avoid over-unrolling.
+        bool hasRemByConst = false;
+        for (auto& inst : bb) {
+            if ((inst.getOpcode() == llvm::Instruction::SRem ||
+                 inst.getOpcode() == llvm::Instruction::URem ||
+                 inst.getOpcode() == llvm::Instruction::SDiv ||
+                 inst.getOpcode() == llvm::Instruction::UDiv) &&
+                llvm::isa<llvm::ConstantInt>(inst.getOperand(1))) {
+                hasRemByConst = true;
+                break;
+            }
+        }
+        if (hasRemByConst) unroll = std::min(unroll, 4u);
+
+        // Loops with divider instructions: the divider is a scarce resource
+        // (usually 1 unit, not pipelined).  Over-unrolling creates a
+        // bottleneck waiting for the divider, wasting issue slots.
+        if (usesDivider) unroll = std::min(unroll, 4u);
+
+        // Loops with function calls: don't over-unroll because each call
+        // saves/restores many registers, negating the unroll benefit.
+        if (hasCall) unroll = std::min(unroll, 2u);
+
+        // Interleave count: for wide-issue OOO cores (issueWidth > 2),
+        // match the unroll count so the CPU can fill dispatch slots from
+        // independent iterations.  For narrow in-order cores, keep it low.
+        unsigned interleave = (profile.issueWidth > 2) ? unroll : 2u;
+
+        // Build loop metadata, preserving any existing entries (e.g. mustprogress).
+        llvm::SmallVector<llvm::Metadata*, 8> mds;
+        mds.push_back(nullptr); // self-reference placeholder
+
+        // Copy existing metadata entries (skip self-reference at index 0).
+        if (auto* existingMD = latchTerm->getMetadata(llvm::LLVMContext::MD_loop)) {
+            for (unsigned i = 1, e = existingMD->getNumOperands(); i < e; ++i) {
+                mds.push_back(existingMD->getOperand(i));
+            }
+        }
+
+        mds.push_back(llvm::MDNode::get(ctx, {
+            llvm::MDString::get(ctx, "llvm.loop.unroll.count"),
+            llvm::ConstantAsMetadata::get(
+                llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), unroll))
+        }));
+
+        mds.push_back(llvm::MDNode::get(ctx, {
+            llvm::MDString::get(ctx, "llvm.loop.interleave.count"),
+            llvm::ConstantAsMetadata::get(
+                llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), interleave))
+        }));
+
+        llvm::MDNode* loopID = llvm::MDNode::get(ctx, mds);
+        loopID->replaceOperandWith(0, loopID);
+        latchTerm->setMetadata(llvm::LLVMContext::MD_loop, loopID);
+        ++count;
+    }
+
+    return count;
+}
+
+unsigned annotateLoopsForTarget(llvm::Module& module, const HGOEConfig& config) {
+    if (!shouldActivate(config)) return 0;
+
+    std::string marchResolved = resolveNativeCpu(config.marchCpu);
+    std::string mtuneResolved = resolveNativeCpu(config.mtuneCpu);
+    std::string cpuName = mtuneResolved.empty() ? marchResolved : mtuneResolved;
+    auto profileOpt = lookupMicroarch(cpuName);
+    if (!profileOpt) return 0;
+
+    unsigned total = 0;
+    for (auto& func : module) {
+        total += annotateLoopsForTargetInFunc(func, *profileOpt);
+    }
     return total;
 }
 

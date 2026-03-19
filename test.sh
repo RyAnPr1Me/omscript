@@ -655,8 +655,19 @@ int main(void) {
 CEOF
 
 # ─── COMPILE ──────────────────────────────────────────────────
-echo "Compiling OM (omsc -O3 -march=native) …"
-omsc bench.om -O3 -march=native -mtune=native -flto -ffast-math -fvectorize -funroll-loops -floop-optimize -o bench_om
+# Locate the omsc compiler: prefer the freshly-built binary in ./build/,
+# then fall back to whatever is on PATH (consistent with run_tests.sh).
+OMSC="./build/omsc"
+if [ ! -x "$OMSC" ]; then
+    OMSC="$(command -v omsc 2>/dev/null || true)"
+    if [ -z "$OMSC" ]; then
+        echo "ERROR: omsc not found.  Build it first:  mkdir -p build && cd build && cmake .. && make -j\$(nproc)" >&2
+        exit 1
+    fi
+fi
+
+echo "Compiling OM ($OMSC -O3 -march=native) …"
+"$OMSC" bench.om -O3 -march=native -mtune=native -flto -ffast-math -fvectorize -funroll-loops -floop-optimize -o bench_om
 
 echo "Compiling C  (gcc  -O3 -march=native -flto) …"
 gcc bench.c -O3 -march=native -mtune=native -funroll-loops -flto -o bench_c
