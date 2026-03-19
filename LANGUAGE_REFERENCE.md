@@ -190,16 +190,27 @@ The following values are **falsy**:
 
 Everything else is **truthy**, including negative numbers and non-empty strings.
 
-### 3.4 Optional Type Annotations
+### 3.4 Type Annotations
 
-Variable, parameter, and function return type declarations may include optional type hints. These are currently used for documentation and OPTMAX optimization hints but are not enforced at compile time. Type annotations support simple types, array types (with `[]` suffix), and struct names:
+Variable, parameter, and function return type declarations may include type annotations. When present, annotations control the LLVM IR type used for the value, enabling the optimizer to generate more efficient code (e.g. native `double` operations instead of integer bit-casting). Supported type annotations:
+
+| Annotation | LLVM Type | Description |
+|------------|-----------|-------------|
+| `int`, `i64` | `i64` | 64-bit signed integer (default) |
+| `i32` | `i32` | 32-bit signed integer |
+| `i16` | `i16` | 16-bit signed integer |
+| `i8` | `i8` | 8-bit signed integer |
+| `bool` | `i1` | Boolean (1-bit integer) |
+| `float`, `double` | `double` | 64-bit IEEE 754 floating-point |
+| `string` | `i64` | String pointer (stored as i64) |
+| *struct name* | `i64` | Struct pointer (stored as i64) |
+| *type*`[]` | `i64` | Array pointer (stored as i64) |
 
 ```javascript
-var x: int = 42;              // simple type hint
+var x: int = 42;              // i64 alloca
+var f: float = 3.14;          // double alloca (native FP ops)
 var arr: int[] = [1, 2, 3];   // array type hint
-var mat: int[][] = [[1]];     // nested array type hint
-fn add(a: int, b: int) -> int { return a + b; }          // return type
-fn getNames() -> string[] { return ["a", "b"]; }         // array return type
+fn add(a: float, b: float) -> float { return a + b; }    // double params & return
 fn process(pts: Point[]) -> Point { return pts[0]; }     // struct types
 ```
 

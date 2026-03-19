@@ -726,6 +726,54 @@ llvm::Type* CodeGenerator::getFloatType() {
     return llvm::Type::getDoubleTy(*context);
 }
 
+llvm::Type* CodeGenerator::resolveAnnotatedType(const std::string& annotation) {
+    if (annotation == "float" || annotation == "double")
+        return getFloatType();                                  // f64
+    if (annotation == "bool")
+        return llvm::Type::getInt1Ty(*context);                 // i1
+    if (annotation == "i8")
+        return llvm::Type::getInt8Ty(*context);                 // i8
+    if (annotation == "i16")
+        return llvm::Type::getInt16Ty(*context);                // i16
+    if (annotation == "i32")
+        return llvm::Type::getInt32Ty(*context);                // i32
+    // "int", "i64", "string", array types, struct names, generics, and empty
+    // annotations all map to the default i64 representation.
+    return getDefaultType();
+}
+
+llvm::Value* CodeGenerator::convertTo(llvm::Value* v, llvm::Type* targetTy) {
+    if (v->getType() == targetTy)
+        return v;
+    // float → int
+    if (v->getType()->isDoubleTy() && targetTy->isIntegerTy())
+        return builder->CreateFPToSI(v, targetTy, "ftoi");
+    // int → float
+    if (v->getType()->isIntegerTy() && targetTy->isDoubleTy())
+        return builder->CreateSIToFP(v, targetTy, "itof");
+    // ptr → int
+    if (v->getType()->isPointerTy() && targetTy->isIntegerTy())
+        return builder->CreatePtrToInt(v, targetTy, "ptoi");
+    // int → ptr
+    if (v->getType()->isIntegerTy() && targetTy->isPointerTy())
+        return builder->CreateIntToPtr(v, targetTy, "itop");
+    // int → int (widening)
+    if (v->getType()->isIntegerTy() && targetTy->isIntegerTy()) {
+        unsigned srcBits = v->getType()->getIntegerBitWidth();
+        unsigned dstBits = targetTy->getIntegerBitWidth();
+        if (srcBits < dstBits)
+            return builder->CreateSExt(v, targetTy, "sext");
+        if (srcBits > dstBits)
+            return builder->CreateTrunc(v, targetTy, "trunc");
+    }
+    // ptr → float (via int)
+    if (v->getType()->isPointerTy() && targetTy->isDoubleTy()) {
+        auto* intVal = builder->CreatePtrToInt(v, getDefaultType(), "ptoi");
+        return builder->CreateSIToFP(intVal, targetTy, "itof");
+    }
+    return v;
+}
+
 llvm::Value* CodeGenerator::toBool(llvm::Value* v) {
     if (v->getType()->isDoubleTy()) {
         return builder->CreateFCmpONE(v, llvm::ConstantFP::get(getFloatType(), 0.0), "tobool");
@@ -1922,8 +1970,15 @@ void CodeGenerator::generate(Program* program) {
     // Forward-declare all functions so that any function can reference any
     // other regardless of source-file ordering (enables mutual recursion).
     for (auto& func : program->functions) {
-        std::vector<llvm::Type*> paramTypes(func->parameters.size(), getDefaultType());
-        llvm::FunctionType* funcType = llvm::FunctionType::get(getDefaultType(), paramTypes, false);
+        // Resolve parameter types from annotations: "float" → double, else i64.
+        std::vector<llvm::Type*> paramTypes;
+        paramTypes.reserve(func->parameters.size());
+        for (auto& param : func->parameters) {
+            paramTypes.push_back(resolveAnnotatedType(param.typeName));
+        }
+        // Resolve return type from annotation (e.g. "-> float" → double).
+        llvm::Type* retType = resolveAnnotatedType(func->returnType);
+        llvm::FunctionType* funcType = llvm::FunctionType::get(retType, paramTypes, false);
         // Non-main functions use InternalLinkage at O2+ (equivalent to C's
         // `static`).  This tells the optimizer that no external code can call
         // the function, enabling:
@@ -1963,15 +2018,17 @@ void CodeGenerator::generate(Program* program) {
         // initializes every variable, so the optimizer can assume no undef/
         // poison values flow through function boundaries.  This strengthens
         // SCEV, value-range propagation, and alias analysis.
-        // signext on the return value — omscript always returns i64, and
-        // sign-extending the return enables better codegen on targets where
-        // the calling convention requires sign-extension (e.g. AArch64).
+        // signext on integer params/return — enables better codegen on targets
+        // where the calling convention requires sign-extension (e.g. AArch64).
+        // Float (double) params/return must NOT get signext.
         for (unsigned i = 0; i < func->parameters.size(); ++i) {
             function->addParamAttr(i, llvm::Attribute::NoUndef);
-            function->addParamAttr(i, llvm::Attribute::SExt);
+            if (paramTypes[i]->isIntegerTy())
+                function->addParamAttr(i, llvm::Attribute::SExt);
         }
         function->addRetAttr(llvm::Attribute::NoUndef);
-        function->addRetAttr(llvm::Attribute::SExt);
+        if (retType->isIntegerTy())
+            function->addRetAttr(llvm::Attribute::SExt);
         functions[func->name] = function;
         functionDecls_[func->name] = func.get();
     }
@@ -2348,7 +2405,8 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         auto& param = func->parameters[paramIdx];
         argIt->setName(param.name);
 
-        llvm::AllocaInst* alloca = createEntryBlockAlloca(function, param.name);
+        // Use the parameter's actual LLVM type (respects type annotations).
+        llvm::AllocaInst* alloca = createEntryBlockAlloca(function, param.name, argIt->getType());
         builder->CreateStore(&(*argIt), alloca);
         bindVariable(param.name, alloca);
 
@@ -2363,7 +2421,11 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
 
     // Add default return if needed
     if (!builder->GetInsertBlock()->getTerminator()) {
-        builder->CreateRet(llvm::ConstantInt::get(*context, llvm::APInt(64, 0)));
+        llvm::Type* retTy = function->getReturnType();
+        if (retTy->isDoubleTy())
+            builder->CreateRet(llvm::ConstantFP::get(retTy, 0.0));
+        else
+            builder->CreateRet(llvm::ConstantInt::get(*context, llvm::APInt(64, 0)));
     }
 
     // Verify function

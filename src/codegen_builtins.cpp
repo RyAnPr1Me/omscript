@@ -3945,16 +3945,17 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     std::vector<llvm::Value*> args;
     for (size_t i = 0; i < callee->arg_size(); ++i) {
+        llvm::Type* expectedTy = callee->getFunctionType()->getParamType(i);
         if (i < expr->arguments.size()) {
             llvm::Value* argVal = generateExpression(expr->arguments[i].get());
-            // Function parameters are i64, convert if needed
-            argVal = toDefaultType(argVal);
+            // Convert argument to the callee's declared parameter type.
+            argVal = convertTo(argVal, expectedTy);
             args.push_back(argVal);
         } else if (declIt != functionDecls_.end()) {
             auto& param = declIt->second->parameters[i];
             if (param.defaultValue) {
                 llvm::Value* argVal = generateExpression(param.defaultValue.get());
-                argVal = toDefaultType(argVal);
+                argVal = convertTo(argVal, expectedTy);
                 args.push_back(argVal);
             }
         }

@@ -320,8 +320,16 @@ class CodeGenerator {
     // Helper methods
     llvm::Type* getDefaultType();
     llvm::Type* getFloatType();
+    /// Map a type annotation string ("int", "float", "string", etc.) to the
+    /// corresponding LLVM type.  Unknown or empty annotations fall back to
+    /// getDefaultType() (i64).
+    llvm::Type* resolveAnnotatedType(const std::string& annotation);
     llvm::Value* toBool(llvm::Value* v);
     llvm::Value* toDefaultType(llvm::Value* v);
+    /// Convert \p v to \p targetTy, inserting appropriate casts (FPToSI,
+    /// SIToFP, PtrToInt, IntToPtr, etc.) as needed.  Returns \p v unchanged
+    /// when no conversion is required.
+    llvm::Value* convertTo(llvm::Value* v, llvm::Type* targetTy);
     llvm::Value* ensureFloat(llvm::Value* v);
     void setupPrintfDeclaration();
     llvm::Function* getPrintfFunction();

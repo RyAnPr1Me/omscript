@@ -14,12 +14,17 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
         codegenError("Variable declaration outside of function", stmt);
     }
 
-    llvm::Type* allocaType = getDefaultType();
+    // Resolve the alloca type from the type annotation if present.
+    llvm::Type* allocaType = stmt->typeName.empty()
+                                 ? getDefaultType()
+                                 : resolveAnnotatedType(stmt->typeName);
     llvm::Value* initValue = nullptr;
 
     if (stmt->initializer) {
         initValue = generateExpression(stmt->initializer.get());
-        allocaType = initValue->getType();
+        // When no annotation is present, infer the type from the initializer.
+        if (stmt->typeName.empty())
+            allocaType = initValue->getType();
 
         // When a string literal is assigned to a mutable string variable,
         // heap-allocate a copy via strdup().  This ensures the variable always
@@ -34,6 +39,11 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             initValue = builder->CreateCall(getOrDeclareStrdup(), {initValue}, "strdup.init");
             allocaType = initValue->getType();
         }
+
+        // Convert the initializer to match the declared type when an annotation
+        // is present (e.g. `var x: float = 42` should store 42.0 as double).
+        if (!stmt->typeName.empty())
+            initValue = convertTo(initValue, allocaType);
     }
 
     llvm::AllocaInst* alloca = createEntryBlockAlloca(function, stmt->name, allocaType);
@@ -64,7 +74,11 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             structVars_.erase(stmt->name);
         }
     } else {
-        builder->CreateStore(llvm::ConstantInt::get(*context, llvm::APInt(64, 0)), alloca);
+        // Default-initialize based on type annotation.
+        if (allocaType->isDoubleTy())
+            builder->CreateStore(llvm::ConstantFP::get(allocaType, 0.0), alloca);
+        else
+            builder->CreateStore(llvm::ConstantInt::get(*context, llvm::APInt(64, 0)), alloca);
     }
 }
 
@@ -77,11 +91,18 @@ void CodeGenerator::generateReturn(ReturnStmt* stmt) {
             if (builder->GetInsertBlock() && builder->GetInsertBlock()->getParent())
                 stringReturningFunctions_.insert(std::string(builder->GetInsertBlock()->getParent()->getName()));
         }
-        // Function return type is i64, so convert if needed
-        retValue = toDefaultType(retValue);
+        // Convert return value to match the function's declared return type.
+        llvm::Function* currentFn = builder->GetInsertBlock()->getParent();
+        llvm::Type* retTy = currentFn->getReturnType();
+        retValue = convertTo(retValue, retTy);
         builder->CreateRet(retValue);
     } else {
-        builder->CreateRet(llvm::ConstantInt::get(*context, llvm::APInt(64, 0)));
+        llvm::Function* currentFn = builder->GetInsertBlock()->getParent();
+        llvm::Type* retTy = currentFn->getReturnType();
+        if (retTy->isDoubleTy())
+            builder->CreateRet(llvm::ConstantFP::get(retTy, 0.0));
+        else
+            builder->CreateRet(llvm::ConstantInt::get(*context, llvm::APInt(64, 0)));
     }
 }
 
