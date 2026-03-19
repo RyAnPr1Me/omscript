@@ -13,21 +13,19 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Make script executable
-        run: chmod +x test.sh
-
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential clang
+          sudo apt-get install -y \
+            cmake \
+            build-essential \
+            llvm-18-dev \
+            gcc
 
-      # OPTIONAL: install omsc if needed
-      - name: Install omsc
+      - name: Build omsc from source
         run: |
-          curl -L -o omsc.tar.gz https://github.com/RyAnPr1Me/omscript/releases/download/v2.6.2/omsc-2.6.2-linux-x86_64.tar.gz
-          tar -xzf omsc.tar.gz
-          chmod +x omsc-linux-x86_64
-          sudo mv omsc-linux-x86_64 /usr/local/bin/omsc
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DLLVM_DIR=/usr/lib/llvm-18/cmake
+          cmake --build build --parallel $(nproc)
 
       - name: Run tests
         run: ./test.sh
