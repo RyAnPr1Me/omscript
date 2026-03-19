@@ -655,3 +655,41 @@ TEST(LexerTest, HexEscapeNullByteRejected) {
     // \x00 must be rejected to prevent C-string corruption
     EXPECT_THROW(lex("\"\\x00\""), std::runtime_error);
 }
+
+// ===========================================================================
+// Ownership keyword tests
+// ===========================================================================
+
+TEST(LexerTest, MoveKeyword) {
+    auto tokens = lex("move");
+    ASSERT_GE(tokens.size(), 2u);
+    EXPECT_EQ(tokens[0].type, TokenType::MOVE);
+    EXPECT_EQ(tokens[0].lexeme, "move");
+}
+
+TEST(LexerTest, InvalidateKeyword) {
+    auto tokens = lex("invalidate");
+    ASSERT_GE(tokens.size(), 2u);
+    EXPECT_EQ(tokens[0].type, TokenType::INVALIDATE);
+    EXPECT_EQ(tokens[0].lexeme, "invalidate");
+}
+
+TEST(LexerTest, BorrowKeyword) {
+    auto tokens = lex("borrow");
+    ASSERT_GE(tokens.size(), 2u);
+    EXPECT_EQ(tokens[0].type, TokenType::BORROW);
+    EXPECT_EQ(tokens[0].lexeme, "borrow");
+}
+
+TEST(LexerTest, OwnershipKeywordsInContext) {
+    auto tokens = lex("move var x = y; invalidate z; borrow var ref = w;");
+    int moveCount = 0, invalidateCount = 0, borrowCount = 0;
+    for (const auto& t : tokens) {
+        if (t.type == TokenType::MOVE) moveCount++;
+        if (t.type == TokenType::INVALIDATE) invalidateCount++;
+        if (t.type == TokenType::BORROW) borrowCount++;
+    }
+    EXPECT_EQ(moveCount, 1);
+    EXPECT_EQ(invalidateCount, 1);
+    EXPECT_EQ(borrowCount, 1);
+}

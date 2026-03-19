@@ -254,3 +254,83 @@ TEST(ASTTest, LineColumn) {
     EXPECT_EQ(lit.line, 10);
     EXPECT_EQ(lit.column, 5);
 }
+
+// ===========================================================================
+// Ownership AST node tests
+// ===========================================================================
+
+TEST(ASTTest, MoveExpr) {
+    auto src = std::make_unique<IdentifierExpr>("x");
+    MoveExpr move(std::move(src));
+    EXPECT_EQ(move.type, ASTNodeType::MOVE_EXPR);
+    ASSERT_NE(move.source, nullptr);
+    auto* id = dynamic_cast<IdentifierExpr*>(move.source.get());
+    ASSERT_NE(id, nullptr);
+    EXPECT_EQ(id->name, "x");
+}
+
+TEST(ASTTest, BorrowExpr) {
+    auto src = std::make_unique<IdentifierExpr>("y");
+    BorrowExpr borrow(std::move(src));
+    EXPECT_EQ(borrow.type, ASTNodeType::BORROW_EXPR);
+    ASSERT_NE(borrow.source, nullptr);
+}
+
+TEST(ASTTest, InvalidateStmt) {
+    InvalidateStmt inv("z");
+    EXPECT_EQ(inv.type, ASTNodeType::INVALIDATE_STMT);
+    EXPECT_EQ(inv.varName, "z");
+}
+
+TEST(ASTTest, MoveDecl) {
+    auto init = std::make_unique<IdentifierExpr>("a");
+    MoveDecl md("b", "int", std::move(init));
+    EXPECT_EQ(md.type, ASTNodeType::MOVE_DECL);
+    EXPECT_EQ(md.name, "b");
+    EXPECT_EQ(md.typeName, "int");
+    ASSERT_NE(md.initializer, nullptr);
+}
+
+TEST(ASTTest, FieldAttrs) {
+    FieldAttrs attrs;
+    attrs.hot = true;
+    attrs.cold = false;
+    attrs.noalias = true;
+    attrs.immut = true;
+    attrs.isMove = false;
+    attrs.align = 64;
+    attrs.hasRange = true;
+    attrs.rangeMin = 0;
+    attrs.rangeMax = 100;
+
+    EXPECT_TRUE(attrs.hot);
+    EXPECT_FALSE(attrs.cold);
+    EXPECT_TRUE(attrs.noalias);
+    EXPECT_TRUE(attrs.immut);
+    EXPECT_FALSE(attrs.isMove);
+    EXPECT_EQ(attrs.align, 64);
+    EXPECT_TRUE(attrs.hasRange);
+    EXPECT_EQ(attrs.rangeMin, 0);
+    EXPECT_EQ(attrs.rangeMax, 100);
+}
+
+TEST(ASTTest, StructField) {
+    FieldAttrs attrs;
+    attrs.hot = true;
+    StructField sf("score", "int", attrs);
+    EXPECT_EQ(sf.name, "score");
+    EXPECT_EQ(sf.typeName, "int");
+    EXPECT_TRUE(sf.attrs.hot);
+}
+
+TEST(ASTTest, StructDeclWithFieldDecls) {
+    std::vector<std::string> fields = {"x", "y"};
+    FieldAttrs a1; a1.hot = true;
+    FieldAttrs a2; a2.cold = true;
+    std::vector<StructField> fd = {StructField("x", "int", a1), StructField("y", "int", a2)};
+    StructDecl sd("Point", std::move(fields), std::move(fd));
+    EXPECT_EQ(sd.name, "Point");
+    ASSERT_EQ(sd.fieldDecls.size(), 2u);
+    EXPECT_TRUE(sd.fieldDecls[0].attrs.hot);
+    EXPECT_TRUE(sd.fieldDecls[1].attrs.cold);
+}

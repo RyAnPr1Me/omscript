@@ -272,6 +272,14 @@ class CodeGenerator {
     // when the existing buffer has enough space (amortized O(1) appends).
     std::unordered_map<std::string, llvm::AllocaInst*> stringCapCache_;
 
+    /// Variables that have been explicitly moved or invalidated.
+    /// Used to detect use-after-move and use-after-invalidate at compile time.
+    /// Only populated when the user writes `move` or `invalidate` — normal
+    /// code without ownership annotations is never affected.
+    std::unordered_set<std::string> deadVars_;
+    /// Tracks the reason a variable became dead: "moved" or "invalidated".
+    std::unordered_map<std::string, std::string> deadVarReason_;
+
     /// Classify a function into its execution tier based on type annotations,
     /// OPTMAX status, and whether it is a special function (main/stdlib).
     ExecutionTier classifyFunction(const FunctionDecl* func) const;
