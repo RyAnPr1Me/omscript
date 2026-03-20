@@ -85,8 +85,10 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
         // Default-initialize based on type annotation.
         if (allocaType->isDoubleTy())
             builder->CreateStore(llvm::ConstantFP::get(allocaType, 0.0), alloca);
-        else
-            builder->CreateStore(llvm::ConstantInt::get(*context, llvm::APInt(64, 0)), alloca);
+        else {
+            unsigned bits = allocaType->isIntegerTy() ? allocaType->getIntegerBitWidth() : 64;
+            builder->CreateStore(llvm::ConstantInt::get(*context, llvm::APInt(bits, 0)), alloca);
+        }
     }
 }
 
@@ -554,9 +556,9 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             startNonNeg = startCI->getSExtValue() >= 0;
         }
         if (startNonNeg) {
-            llvm::Value* iterVal = builder->CreateLoad(getDefaultType(), iterAlloca, "iter.assume");
+            llvm::Value* iterVal = builder->CreateLoad(iterType, iterAlloca, "iter.assume");
             llvm::Value* isNonNeg = builder->CreateICmpSGE(
-                iterVal, llvm::ConstantInt::get(getDefaultType(), 0), "iter.nonneg");
+                iterVal, llvm::ConstantInt::get(iterType, 0), "iter.nonneg");
             llvm::Function* assumeFn = OMSC_GET_INTRINSIC_STMT(
                 module.get(), llvm::Intrinsic::assume, {});
             builder->CreateCall(assumeFn, {isNonNeg});
