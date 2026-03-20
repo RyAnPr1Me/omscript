@@ -2478,7 +2478,10 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
 
         // @prefetch: emit llvm.prefetch at function entry for annotated params.
         // This hints to the CPU to load the parameter's memory into cache
-        // before it is accessed, reducing memory latency.
+        // before it is accessed, reducing memory latency.  The parameter
+        // value is interpreted as a memory address (i64 → ptr cast); the
+        // caller is responsible for passing a valid pointer-sized value
+        // (e.g. an array or string reference).
         if (param.hintPrefetch) {
             prefetchedParams_.insert(param.name);
             llvm::Value* ptrVal = builder->CreateLoad(argIt->getType(), alloca, param.name + ".pf.load");

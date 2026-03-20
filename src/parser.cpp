@@ -161,7 +161,7 @@ std::unique_ptr<Program> Parser::parse() {
                     hintFlatten = true;
                 } else {
                     error("Unknown function annotation '@" + ann.lexeme +
-                          "'; supported: @inline, @noinline, @cold, @hot, @pure, @noreturn, @static, @flatten");
+                          "'; supported: @inline, @noinline, @cold, @hot, @pure, @noreturn, @static, @flatten (use @prefetch on parameters)");
                 }
             }
             auto func = parseFunction(optMaxTagActive);
