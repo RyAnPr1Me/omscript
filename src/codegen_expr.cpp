@@ -1294,9 +1294,10 @@ llvm::Value* CodeGenerator::generateUnary(UnaryExpr* expr) {
         }
         return builder->CreateNot(operand, "bitnottmp");
     } else if (expr->op == "&") {
-        // Address-of operator: in borrow context, this is a no-op that
-        // passes through the value.  OmScript uses value semantics; the
-        // `&` is syntactic sugar for borrow declarations (e.g., `&x`).
+        // Address-of operator: in OmScript's value semantics, this is a
+        // pass-through — the operand is already the loaded value (not a
+        // pointer).  The `&` is syntactic sugar for borrow declarations
+        // (e.g., `borrow var j:&i32 = &x;`).
         return operand;
     }
 

@@ -944,7 +944,9 @@ void CodeGenerator::runOptimizationPasses() {
         // Final aggressive DCE + redundant intrinsic removal after prefetch
         // cleanup.  This catches any dead instructions exposed by prefetch
         // removal and strips lifetime intrinsics for values that no longer
-        // exist in memory.
+        // exist in memory.  DCE runs twice intentionally: the first pass
+        // catches immediately dead code, InstCombine + CFGSimplification
+        // may expose further dead code, and the second DCE catches that.
         llvm::legacy::FunctionPassManager cleanupFPM(module.get());
         cleanupFPM.add(llvm::createDeadCodeEliminationPass());
         cleanupFPM.add(llvm::createInstructionCombiningPass());
