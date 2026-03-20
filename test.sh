@@ -10,6 +10,9 @@ set -e
 
 RUNS=3          # iterations per benchmark for stable timing
 
+# Track wall-clock time for the entire script so we can report where time is spent.
+SCRIPT_START=$(date +%s%N)
+
 NUM_BENCHMARKS=16
 
 BENCH_NAME=(
@@ -50,24 +53,25 @@ BENCH_DESC=(
     "End-to-end workload exercising all subsystems"
 )
 
-# Input sizes – tuned so each test takes >= 30 ms in C.
+# Input sizes – tuned so each test takes ~30-200 ms in C.
+# Previous values were far too large (fib(44) alone could take 30+ sec).
 BENCH_N=(
-    2000000   #  0  integer_math
-    2000000   #  1  array_push
-    1000000   #  2  array_hof
-    50000     #  3  string_concat
-    2000000   #  4  string_ops
-    20000000  #  5  struct_access
-    20000000  #  6  switch_branch
-    44        #  7  recursion_fib
-    500       #  8  nested_loops  (500^3 = 125 M)
-    10000     #  9  array_sort    (bubble = O(n^2))
-    20000000  # 10  while_loop
-    20000000  # 11  if_else_chain
-    10000000  # 12  array_indexing
-    20000000  # 13  function_calls
-    20000000  # 14  bitwise_ops
-    500000    # 15  combined
+    500000    #  0  integer_math
+    500000    #  1  array_push
+    200000    #  2  array_hof
+    10000     #  3  string_concat
+    500000    #  4  string_ops
+    5000000   #  5  struct_access
+    5000000   #  6  switch_branch
+    35        #  7  recursion_fib   (fib(35) ~ 9 M calls, ~50 ms)
+    200       #  8  nested_loops    (200^3 = 8 M)
+    3000      #  9  array_sort     (bubble = O(n^2) = 9 M)
+    5000000   # 10  while_loop
+    5000000   # 11  if_else_chain
+    2000000   # 12  array_indexing
+    5000000   # 13  function_calls
+    5000000   # 14  bitwise_ops
+    100000    # 15  combined
 )
 
 BOTTLENECK_LABELS=(
@@ -88,6 +92,13 @@ BOTTLENECK_LABELS=(
     "bitwise-op codegen quality"
     "overall compiler performance"
 )
+
+# ─── COLOR CODES ──────────────────────────────────────────────
+RED='\033[0;31m'
+GRN='\033[0;32m'
+YEL='\033[0;33m'
+BLD='\033[1m'
+RST='\033[0m'
 
 # ─── GENERATE SOURCE ─────────────────────────────────────────
 echo "=== OmScript Benchmark Suite ==="
@@ -666,19 +677,35 @@ if [ ! -x "$OMSC" ]; then
     fi
 fi
 
+echo "────────────────────────────────────────────────────────────────"
+echo "  DEBUG: Compilation Timing"
+echo "────────────────────────────────────────────────────────────────"
+
 echo "Compiling OM ($OMSC -O3 -march=native) …"
-"$OMSC" bench.om -O3 -march=native -mtune=native -flto -ffast-math -fvectorize -funroll-loops -floop-optimize -o bench_om
+OM_COMP_START=$(date +%s%N)
+"$OMSC" bench.om -O3 -march=native -o bench_om
+OM_COMP_END=$(date +%s%N)
+OM_COMP_MS=$(( (OM_COMP_END - OM_COMP_START) / 1000000 ))
+echo "  OM compile time: ${OM_COMP_MS} ms"
 
 echo "Compiling C  (gcc  -O3 -march=native -flto) …"
-gcc bench.c -O3 -march=native -mtune=native -funroll-loops -flto -o bench_c
+C_COMP_START=$(date +%s%N)
+gcc bench.c -O3 -march=native -flto -o bench_c
+C_COMP_END=$(date +%s%N)
+C_COMP_MS=$(( (C_COMP_END - C_COMP_START) / 1000000 ))
+echo "  C  compile time: ${C_COMP_MS} ms"
+
+echo ""
+if [ "$OM_COMP_MS" -gt 10000 ]; then
+    echo -e "  ${RED}⚠ OM compilation took >10 s – compiler may be generating slow code paths${RST}"
+elif [ "$OM_COMP_MS" -gt 5000 ]; then
+    echo -e "  ${YEL}⚠ OM compilation took >5 s – consider profiling the compiler${RST}"
+else
+    echo -e "  ${GRN}✓ OM compilation completed in a reasonable time${RST}"
+fi
 echo ""
 
 # ─── HELPERS ──────────────────────────────────────────────────
-RED='\033[0;31m'
-GRN='\033[0;32m'
-YEL='\033[0;33m'
-BLD='\033[1m'
-RST='\033[0m'
 
 declare -a RATIOS
 declare -a C_TIMES
@@ -780,7 +807,7 @@ echo ""
 
 SCALE_IDS=(0 5 6 10 14)
 SCALE_NAMES=("integer_math" "struct_access" "switch_branch" "while_loop" "bitwise_ops")
-SCALE_BASE=(1000000 10000000 10000000 10000000 10000000)
+SCALE_BASE=(250000 2000000 2000000 2000000 2000000)
 
 for si in "${!SCALE_IDS[@]}"; do
     sid=${SCALE_IDS[$si]}
@@ -893,3 +920,25 @@ fi
 
 echo ""
 echo "=== DONE ==="
+
+# ─── DEBUG: TIME BREAKDOWN ────────────────────────────────────
+SCRIPT_END=$(date +%s%N)
+TOTAL_MS=$(( (SCRIPT_END - SCRIPT_START) / 1000000 ))
+BENCH_MS=$(( TOTAL_MS - OM_COMP_MS - C_COMP_MS ))
+echo ""
+echo "────────────────────────────────────────────────────────────────"
+echo "  DEBUG: Time Breakdown"
+echo "────────────────────────────────────────────────────────────────"
+printf "  OM compile:     %6d ms  (%d%%)\n" "$OM_COMP_MS" "$(( OM_COMP_MS * 100 / (TOTAL_MS > 0 ? TOTAL_MS : 1) ))"
+printf "  C  compile:     %6d ms  (%d%%)\n" "$C_COMP_MS"  "$(( C_COMP_MS  * 100 / (TOTAL_MS > 0 ? TOTAL_MS : 1) ))"
+printf "  Benchmarks:     %6d ms  (%d%%)\n" "$BENCH_MS"   "$(( BENCH_MS   * 100 / (TOTAL_MS > 0 ? TOTAL_MS : 1) ))"
+printf "  Total:          %6d ms\n" "$TOTAL_MS"
+echo ""
+if [ "$OM_COMP_MS" -gt "$BENCH_MS" ]; then
+    echo -e "  ${YEL}→ Most time was spent in the OM COMPILER, not running benchmarks.${RST}"
+    echo -e "  ${YEL}  The compiler itself is the bottleneck.${RST}"
+elif [ "$BENCH_MS" -gt $(( TOTAL_MS * 80 / 100 )) ]; then
+    echo -e "  ${GRN}→ Most time was spent RUNNING benchmarks (expected).${RST}"
+    echo -e "  ${GRN}  Compilation is fast; benchmark sizes drive total time.${RST}"
+fi
+echo "────────────────────────────────────────────────────────────────"
