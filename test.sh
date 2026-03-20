@@ -110,6 +110,7 @@ OPTMAX=:
 
 struct Point { hot int x, hot int y }
 
+@hot 
 fn bench_math(n:int) -> int {
     var acc:int = 0;
     for (i:int in 1...n) {
@@ -121,7 +122,7 @@ fn bench_math(n:int) -> int {
     return acc;
 }
 
-fn bench_push(n:int) -> int {
+fn bench_push(@prefetch n:int) -> int {
     var arr:int[] = [];
     for (i:int in 0...n) {
         arr = push(arr, (i * 3) % 12345);
@@ -131,7 +132,7 @@ fn bench_push(n:int) -> int {
     return result;
 }
 
-fn bench_hof(n:int) -> int {
+fn bench_hof(@prefetch n:int) -> int {
     var arr:int[] = array_fill(n, 0);
     for (i:int in 0...n) {
         arr[i] = (i * 7) % 1000;
@@ -145,8 +146,8 @@ fn bench_hof(n:int) -> int {
     invalidate filtered;
     return result;
 }
-
-fn bench_strcat(n:int) -> int {
+@hot
+fn bench_strcat(@prefetch n:int) -> int {
     var s:str = "x";
     for (i:int in 0...n) {
         s = str_concat(s, "y");
@@ -155,8 +156,8 @@ fn bench_strcat(n:int) -> int {
     invalidate s;
     return result;
 }
-
-fn bench_strops(n:int) -> int {
+@hot
+fn bench_strops(@prefetch n:int) -> int {
     var haystack:str = str_repeat("abcdefghij", 100);
     var count:int = 0;
     for (i:int in 0...n) {
@@ -166,9 +167,9 @@ fn bench_strops(n:int) -> int {
     invalidate haystack;
     return count;
 }
-
-fn bench_struct(n:int) -> int {
-    var p:struct = Point { x: 1, y: 2 };
+@hot
+fn bench_struct(@prefetch n:int) -> int {
+    prefetch var p:struct = Point { x: 1, y: 2 };
     var sum:int = 0;
     for (i:int in 0...n) {
         p.x = p.x + i;
@@ -177,8 +178,8 @@ fn bench_struct(n:int) -> int {
     }
     return sum;
 }
-
-fn bench_branch(n:int) -> int {
+@hot
+fn bench_branch(@prefetch n:int) -> int {
     var sum:int = 0;
     for (i:int in 0...n) {
         switch (i % 4) {
@@ -190,7 +191,7 @@ fn bench_branch(n:int) -> int {
     }
     return sum;
 }
-
+@hot
 fn fib(n:int) -> int {
     if (n <= 1) { return n; }
     return fib(n - 1) + fib(n - 2);
@@ -198,7 +199,7 @@ fn fib(n:int) -> int {
 fn bench_recurse(n:int) -> int {
     return fib(n);
 }
-
+@hot
 fn bench_nested(n:int) -> int {
     var sum:int = 0;
     for (i:int in 0...n) {
@@ -210,7 +211,7 @@ fn bench_nested(n:int) -> int {
     }
     return sum;
 }
-
+@hot
 fn bench_sort(n:int) -> int {
     var arr:int[] = [];
     for (i:int in 0...n) {
@@ -221,7 +222,7 @@ fn bench_sort(n:int) -> int {
     invalidate arr;
     return result;
 }
-
+@hot
 fn bench_while(n:int) -> int {
     var i:int = 0;
     var acc:int = 0;
@@ -232,7 +233,7 @@ fn bench_while(n:int) -> int {
     }
     return acc;
 }
-
+@hot
 fn classify(x:int) -> int {
     if (x < 10)    { return 1; }
     if (x < 100)   { return 2; }
@@ -241,6 +242,7 @@ fn classify(x:int) -> int {
     if (x < 100000){ return 5; }
     return 6;
 }
+@hot
 fn bench_ifelse(n:int) -> int {
     var sum:int = 0;
     for (i:int in 0...n) {
@@ -248,7 +250,7 @@ fn bench_ifelse(n:int) -> int {
     }
     return sum;
 }
-
+@hot
 fn bench_arrindex(n:int) -> int {
     var sz:int = 10000;
     var arr:int[] = array_fill(sz, 0);
@@ -275,7 +277,7 @@ fn bench_calls(n:int) -> int {
     }
     return sum;
 }
-
+@hot
 fn bench_bitwise(n:int) -> int {
     var a:int = 0;
     var b:int = 0;
@@ -287,7 +289,7 @@ fn bench_bitwise(n:int) -> int {
     }
     return a + b + c;
 }
-
+@hot
 fn bench_combined(n:int) -> int {
     var total:int = 0;
 
@@ -350,7 +352,7 @@ fn bench_combined(n:int) -> int {
 
     return total;
 }
-
+@flatten @hot 
 fn main() -> int {
     var test_id:int = input();
     var n:int = input();
