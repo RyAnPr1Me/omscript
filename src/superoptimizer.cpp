@@ -348,11 +348,41 @@ static bool isValueNonNegative(llvm::Value* v, const llvm::DataLayout& DL, unsig
                isValueNonNegative(inst->getOperand(1), DL, depth + 1);
     }
 
+    // urem: result of unsigned remainder is always in [0, divisor), so
+    // it's always non-negative.  This is critical for post-unroll srem→urem
+    // conversion: after loop unrolling, patterns like
+    //   %t = urem i64 %x, 37
+    //   %t2 = add i64 %t, 1
+    //   %t3 = srem i64 %t2, 37   ← can be converted to urem because t2 >= 0
+    // become provable.
+    if (op == llvm::Instruction::URem) return true;
+
+    // udiv: result of unsigned division is always non-negative
+    if (op == llvm::Instruction::UDiv) return true;
+
+    // srem by positive constant: result is always in (-(divisor-1), divisor-1)
+    // When the dividend is non-negative, srem is equivalent to urem and the
+    // result is in [0, divisor-1).  Even when the dividend is negative, the
+    // absolute value of srem is bounded.  For the non-negative case specifically:
+    if (op == llvm::Instruction::SRem) {
+        if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst->getOperand(1))) {
+            if (ci->getSExtValue() > 0 &&
+                isValueNonNegative(inst->getOperand(0), DL, depth + 1))
+                return true;
+        }
+    }
+
     // lshr (logical shift right): always non-negative (fills with 0s)
     if (op == llvm::Instruction::LShr) return true;
 
     // zext: always non-negative
     if (op == llvm::Instruction::ZExt) return true;
+
+    // select: if both possible values are non-negative, the result is too
+    if (auto* sel = llvm::dyn_cast<llvm::SelectInst>(inst)) {
+        return isValueNonNegative(sel->getTrueValue(), DL, depth + 1) &&
+               isValueNonNegative(sel->getFalseValue(), DL, depth + 1);
+    }
 
     // mul nsw nuw: if both non-negative, result is non-negative
     if (op == llvm::Instruction::Mul) {
@@ -2784,6 +2814,30 @@ unsigned superopt::convertSDivToUDiv(llvm::Function& func) {
         }
     }
     for (auto* inst : toErase) inst->eraseFromParent();
+    return count;
+}
+
+unsigned superopt::inferNonNegativeFlags(llvm::Function& func) {
+    if (func.isDeclaration()) return 0;
+    unsigned count = 0;
+    const llvm::DataLayout& DL = func.getParent()->getDataLayout();
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            auto* bo = llvm::dyn_cast<llvm::BinaryOperator>(&inst);
+            if (!bo) continue;
+            // Only process add instructions that don't already have nuw
+            if (bo->getOpcode() != llvm::Instruction::Add) continue;
+            if (bo->hasNoUnsignedWrap()) continue;
+            // If both operands are provably non-negative, add nuw.
+            // This is safe because: two non-negative i64 values have
+            // mathematical sum < 2^64, so the add never wraps unsigned.
+            if (isValueNonNegative(bo->getOperand(0), DL) &&
+                isValueNonNegative(bo->getOperand(1), DL)) {
+                bo->setHasNoUnsignedWrap(true);
+                ++count;
+            }
+        }
+    }
     return count;
 }
 

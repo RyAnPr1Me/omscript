@@ -484,7 +484,26 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     // Increment block
     builder->SetInsertPoint(incBB);
     llvm::Value* nextVal = builder->CreateLoad(getDefaultType(), iterAlloca, stmt->iteratorVar.c_str());
-    llvm::Value* incVal = builder->CreateNSWAdd(nextVal, stepVal, "nextvar");
+    // OmScript advantage: for ascending loops starting from a non-negative
+    // value, both nsw AND nuw flags are correct — the iterator starts ≥ 0,
+    // increments by a positive step, and the loop exits before overflow.
+    // The nuw flag is critical because LLVM's loop unroller propagates it
+    // to unrolled copies, enabling isValueNonNegative to prove non-negativity
+    // of derived expressions (which in turn enables srem→urem conversion
+    // in unrolled iterations).  C compilers can only safely set nsw.
+    llvm::Value* incVal;
+    bool startNonNegForInc = false;
+    if (stepKnownPositive) {
+        if (auto* startCI = llvm::dyn_cast<llvm::ConstantInt>(startVal)) {
+            startNonNegForInc = startCI->getSExtValue() >= 0;
+        }
+    }
+    if (startNonNegForInc) {
+        // Both nuw and nsw: iterator is in [0, end) and increments by positive step
+        incVal = builder->CreateAdd(nextVal, stepVal, "nextvar", /*HasNUW=*/true, /*HasNSW=*/true);
+    } else {
+        incVal = builder->CreateNSWAdd(nextVal, stepVal, "nextvar");
+    }
     builder->CreateStore(incVal, iterAlloca);
     auto* backBr = builder->CreateBr(condBB);
 

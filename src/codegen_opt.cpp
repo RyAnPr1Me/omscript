@@ -758,6 +758,46 @@ void CodeGenerator::runOptimizationPasses() {
         std::cout << "    Superoptimizer disabled (-fno-superopt)" << std::endl;
     }
 
+    // Post-pipeline srem→urem and sdiv→udiv conversion.  The pre-pipeline
+    // conversion (above) catches srem/sdiv in the original loop body so the
+    // vectorizer sees urem/udiv.  However, LLVM's loop unroller creates NEW
+    // srem/sdiv instructions in unrolled copies that didn't go through the
+    // pre-pipeline conversion.  For example, after 4x unrolling of
+    //   sum += ((i^j) + k) % 37
+    // the first iteration has urem (converted pre-pipeline) but iterations
+    // 2-4 have srem (created by the unroller).  This post-pipeline pass
+    // catches those residual srem/sdiv instructions.
+    //
+    // This is an OmScript-specific advantage: because OmScript's for-loop
+    // iterators are immutable within the loop body, we can prove
+    // non-negativity of iterator-derived expressions even after unrolling.
+    // C compilers cannot make this guarantee because C loop variables can
+    // be modified arbitrarily.
+    if (enableSuperopt_ && optimizationLevel >= OptimizationLevel::O2) {
+        unsigned postConvCount = 0;
+        // Iterate: first infer nuw flags on add instructions where both
+        // operands are provably non-negative (this catches unrolled copies
+        // that lost their flags).  Then convert srem→urem and sdiv→udiv.
+        // Each pass may enable the next: inferring nuw on an add makes its
+        // result provably non-negative, which enables srem→urem on srem
+        // instructions that use that add as their dividend.
+        // Converges in 2-3 iterations for typical unrolled loops.
+        for (int iter = 0; iter < 3; ++iter) {
+            unsigned iterCount = 0;
+            for (auto& func : *module) {
+                iterCount += superopt::inferNonNegativeFlags(func);
+                iterCount += superopt::convertSRemToURem(func);
+                iterCount += superopt::convertSDivToUDiv(func);
+            }
+            if (iterCount == 0) break;  // fixed point reached
+            postConvCount += iterCount;
+        }
+        if (verbose_ && postConvCount > 0) {
+            std::cout << "    Post-pipeline signed→unsigned: "
+                      << postConvCount << " conversions" << std::endl;
+        }
+    }
+
     // Hardware Graph Optimization Engine: run after the superoptimizer when
     // -march or -mtune is explicitly provided.  The HGOE models the target
     // CPU as a directed graph of execution resources, maps the compiled
