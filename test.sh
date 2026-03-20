@@ -209,9 +209,9 @@ fn bench_recurse(n:int) -> int {
 @hot
 fn bench_nested(n:int) -> int {
     var sum:int = 0;
-    for (i:int in 0...n) {
-        for (j:int in 0...n) {
-            for (k:int in 0...n) {
+    for (i:int in 0...n:int) {
+        for (j:int in 0...n:int) {
+            for (k:int in 0...n:int) {
                 sum += ((i ^ j) + k) % 37;
             }
         }
@@ -221,7 +221,7 @@ fn bench_nested(n:int) -> int {
 @hot
 fn bench_sort(n:int) -> int {
     var arr:int[] = [];
-    for (i:int in 0...n) {
+    for (i:int in 0...n:int) {
         arr = push(arr, (i * 2654435761) % 1000000);
     }
     sort(arr);
@@ -280,7 +280,7 @@ fn add_two(x:int) -> int { return add_one(add_one(x)); }
 fn add_four(x:int) -> int { return add_two(add_two(x)); }
 fn bench_calls(n:int) -> int {
     var sum:int = 0;
-    for (i:int in 0...n) {
+    for (i:int in 0...n:int) {
         sum += add_four(i % 1000);
     }
     invalidate n;
@@ -388,8 +388,9 @@ fn main() -> int {
         case 15: print(bench_combined(n)); break;
         default: print(0);
     }
+     invalidate n;
     return 0;
-    invalidate n;
+   
 }
 
 OPTMAX!:
