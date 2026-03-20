@@ -40,6 +40,9 @@ enum class TokenType {
     ENUM,
     STRUCT,
     IMPORT,
+    MOVE,
+    INVALIDATE,
+    BORROW,
 
     // Operators
     PLUS,

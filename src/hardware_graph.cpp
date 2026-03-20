@@ -34,6 +34,7 @@
 #include <cmath>
 #include <numeric>
 #include <queue>
+#include <set>
 #include <unordered_set>
 
 namespace omscript {
@@ -2086,7 +2087,8 @@ static void applyTargetAttributes(llvm::Function& func,
 }
 
 TransformStats applyHardwareTransforms(llvm::Function& func,
-                                        const MicroarchProfile& profile) {
+                                        const MicroarchProfile& profile,
+                                        bool enableLoopAnnotation) {
     TransformStats stats;
 
 
@@ -2095,7 +2097,12 @@ TransformStats applyHardwareTransforms(llvm::Function& func,
     stats.prefetchesInserted = insertPrefetches(func, profile);
     stats.branchesOptimized  = optimizeBranchLayout(func, profile);
     stats.loadsStorePaired   = markLoadStorePairs(func, profile);
-    stats.vectorExpanded     = softwarePipelineLoops(func, profile);
+    // Skip loop annotation when LTO is active — the LTO linker runs its own
+    // loop optimizer and forced unroll/vectorize metadata causes the LTO
+    // pipeline to spend excessive time or hang.
+    stats.vectorExpanded     = enableLoopAnnotation
+                                 ? softwarePipelineLoops(func, profile)
+                                 : 0;
     // Integer strength reduction runs last so mul→shift replacements do not
     // interfere with the FMA scan above (which looks at FMul, not int Mul).
     stats.intStrengthReduced = integerStrengthReduce(func, profile);
@@ -2513,7 +2520,8 @@ HGOEStats optimizeFunction(llvm::Function& func, const HGOEConfig& config) {
         };
 
         unsigned costBefore = estimateFuncCost(func);
-        stats.transforms = applyHardwareTransforms(func, profile);
+        stats.transforms = applyHardwareTransforms(func, profile,
+                                                    config.enableLoopAnnotation);
         unsigned costAfter = estimateFuncCost(func);
 
         // Accept the transformation: log the cost delta for diagnostics.
@@ -2892,6 +2900,302 @@ unsigned annotateLoopsForTarget(llvm::Module& module, const HGOEConfig& config) 
         total += annotateLoopsForTargetInFunc(func, *profileOpt);
     }
     return total;
+}
+
+
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Precision metadata helpers
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Metadata kind name used to store FP precision on individual instructions.
+static constexpr const char* kFPPrecisionMDName = "omsc.fp.precision";
+
+FPPrecision getInstructionPrecision(const llvm::Instruction* inst) {
+    if (!inst) return FPPrecision::Medium;
+    auto* md = inst->getMetadata(kFPPrecisionMDName);
+    if (!md || md->getNumOperands() == 0) return FPPrecision::Medium;
+    if (auto* str = llvm::dyn_cast<llvm::MDString>(md->getOperand(0))) {
+        llvm::StringRef s = str->getString();
+        if (s == "strict") return FPPrecision::Strict;
+        if (s == "fast")   return FPPrecision::Fast;
+    }
+    return FPPrecision::Medium;
+}
+
+void setInstructionPrecision(llvm::Instruction* inst, FPPrecision prec) {
+    if (!inst) return;
+    llvm::LLVMContext& ctx = inst->getContext();
+    llvm::MDNode* md = llvm::MDNode::get(
+        ctx, {llvm::MDString::get(ctx, fpPrecisionName(prec))});
+    inst->setMetadata(kFPPrecisionMDName, md);
+}
+
+void propagatePrecision(llvm::Function& func) {
+    // Iterate until a fixed point is reached.  In practice this converges in
+    // 1–2 passes because precision only moves toward stricter (lower) values.
+    bool changed = true;
+    unsigned maxIters = 8; // safety bound
+    while (changed && maxIters-- > 0) {
+        changed = false;
+        for (auto& bb : func) {
+            for (auto& inst : bb) {
+                if (!inst.getType()->isFloatingPointTy() &&
+                    !(inst.getType()->isIntegerTy() && inst.getOpcode() == llvm::Instruction::FPToSI))
+                    continue;
+                // Skip instructions that already have explicit precision metadata.
+                if (inst.getMetadata(kFPPrecisionMDName)) continue;
+
+                // Compute the meet of all operand precisions.
+                FPPrecision meet = FPPrecision::Fast; // start optimistic
+                bool hasFloatOperand = false;
+                for (unsigned i = 0; i < inst.getNumOperands(); ++i) {
+                    if (auto* opInst = llvm::dyn_cast<llvm::Instruction>(inst.getOperand(i))) {
+                        if (opInst->getMetadata(kFPPrecisionMDName)) {
+                            meet = resolvePrecision(meet, getInstructionPrecision(opInst));
+                            hasFloatOperand = true;
+                        }
+                    }
+                }
+                if (hasFloatOperand && meet != FPPrecision::Medium) {
+                    setInstructionPrecision(&inst, meet);
+                    changed = true;
+                }
+            }
+        }
+    }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Cache model construction
+// ═════════════════════════════════════════════════════════════════════════════
+
+CacheModel buildCacheModel(const MicroarchProfile& profile) {
+    CacheModel cm;
+    cm.l1Size = profile.l1DSize;
+    cm.l1Latency = profile.l1DLatency;
+    cm.l1LineSize = profile.cacheLineSize;
+    cm.l2Size = profile.l2Size;
+    cm.l2Latency = profile.l2Latency;
+    cm.l3Size = profile.l3Size;
+    cm.l3Latency = profile.l3Latency;
+    cm.memLatency = profile.memoryLatency;
+    // Rough bandwidth estimate: higher for wider memory buses.
+    // This is approximate — real bandwidth depends on many factors.
+    cm.memBandwidth = (profile.vectorWidth >= 512) ? 60.0
+                    : (profile.vectorWidth >= 256) ? 40.0
+                    : 25.0;
+    return cm;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Cache-aware optimization pass
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Classify a memory access pattern from a GEP + loop structure.
+static AccessPattern classifyAccess(llvm::GetElementPtrInst* gep) {
+    if (!gep) return AccessPattern::Unknown;
+
+    // Check if the last index is an induction variable (AddRec / simple add).
+    // A single-index GEP with a loop-variant operand is sequential.
+    // A GEP with constant stride is strided.
+    llvm::Value* lastIdx = gep->getOperand(gep->getNumOperands() - 1);
+
+    // If the index is a PHI or add-of-phi, it's likely sequential or strided.
+    if (llvm::isa<llvm::PHINode>(lastIdx))
+        return AccessPattern::Sequential;
+    if (auto* binOp = llvm::dyn_cast<llvm::BinaryOperator>(lastIdx)) {
+        if (binOp->getOpcode() == llvm::Instruction::Add ||
+            binOp->getOpcode() == llvm::Instruction::Mul) {
+            // If multiplied by a constant, it's strided.
+            if (binOp->getOpcode() == llvm::Instruction::Mul &&
+                llvm::isa<llvm::ConstantInt>(binOp->getOperand(1)))
+                return AccessPattern::Strided;
+            return AccessPattern::Sequential;
+        }
+    }
+    return AccessPattern::Unknown;
+}
+
+/// Estimate the working set size (in bytes) for a loop body.
+/// Counts distinct base pointers accessed via GEP and multiplies by
+/// an estimated iteration count.
+static unsigned estimateWorkingSet(llvm::BasicBlock& bb, unsigned elementSize) {
+    std::set<llvm::Value*> bases;
+    for (auto& inst : bb) {
+        if (auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(&inst)) {
+            bases.insert(gep->getPointerOperand());
+        }
+    }
+    // Each distinct array base contributes elementSize * estimatedTripCount.
+    // Use a conservative estimate of 1024 iterations for unknown trip counts.
+    return static_cast<unsigned>(bases.size()) * elementSize * 1024;
+}
+
+/// Insert cache-aware prefetch hints for strided loads in loop bodies.
+/// Unlike the simpler insertPrefetches in hardware transforms, this version
+/// uses the CacheModel to compute prefetch distances based on cache latencies.
+static unsigned insertCacheAwarePrefetches(llvm::Function& func,
+                                            const MicroarchProfile& /*profile*/,
+                                            const CacheModel& cache) {
+    unsigned count = 0;
+
+    // Assign linear order to each basic block.
+    std::unordered_map<llvm::BasicBlock*, unsigned> bbOrder;
+    {
+        unsigned ord = 0;
+        for (auto& bb : func) bbOrder[&bb] = ord++;
+    }
+
+    for (auto& bb : func) {
+        // Find loop headers (BBs with a back-edge predecessor).
+        bool isLoopHeader = false;
+        for (auto* pred : llvm::predecessors(&bb)) {
+            if (bbOrder.count(pred) && bbOrder[pred] >= bbOrder[&bb]) {
+                isLoopHeader = true;
+                break;
+            }
+        }
+        if (!isLoopHeader) continue;
+
+        for (auto& inst : bb) {
+            auto* load = llvm::dyn_cast<llvm::LoadInst>(&inst);
+            if (!load) continue;
+
+            auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(load->getPointerOperand());
+            if (!gep) continue;
+
+            AccessPattern pattern = classifyAccess(gep);
+            if (pattern == AccessPattern::Unknown || pattern == AccessPattern::Random)
+                continue;
+
+            // Check precision of surrounding instructions — only insert
+            // aggressive prefetches (longer distance) in fast regions.
+            FPPrecision prec = getInstructionPrecision(load);
+
+            // Compute prefetch distance based on cache model.
+            // distance = (L2_latency / memory_throughput) * stride
+            // For sequential access, use cache line size as stride.
+            unsigned stride = cache.l1LineSize;
+            unsigned distance;
+            if (prec == FPPrecision::Strict) {
+                // Conservative: prefetch 2 cache lines ahead.
+                distance = 2 * stride;
+            } else if (prec == FPPrecision::Fast) {
+                // Aggressive: prefetch based on L2 latency.
+                distance = std::max(4u, cache.l2Latency / 2) * stride;
+            } else {
+                // Medium: moderate prefetch distance.
+                distance = std::max(3u, cache.l2Latency / 4) * stride;
+            }
+
+            // Build prefetch: __builtin_prefetch(ptr + distance, 0/*read*/, 3/*L1*/)
+            llvm::IRBuilder<> builder(load);
+            llvm::Value* ptr = load->getPointerOperand();
+            llvm::Value* prefAddr = builder.CreateGEP(
+                builder.getInt8Ty(), ptr,
+                builder.getInt64(distance), "prefetch.addr");
+
+            llvm::Function* prefetchFn = OMSC_GET_INTRINSIC(
+                func.getParent(), llvm::Intrinsic::prefetch,
+                {llvm::PointerType::getUnqual(func.getContext())});
+            builder.CreateCall(prefetchFn, {
+                prefAddr,
+                builder.getInt32(0),  // read
+                builder.getInt32(3),  // high temporal locality
+                builder.getInt32(1)   // data cache
+            });
+            count++;
+        }
+    }
+
+    return count;
+}
+
+/// Add loop tiling metadata hints for loops whose working set exceeds L1.
+/// This doesn't transform the loop directly — it attaches metadata that
+/// downstream passes (LLVM's LoopTiling or Polly) can use.
+static unsigned addTilingHints(llvm::Function& func,
+                                const CacheModel& cache) {
+    unsigned count = 0;
+    llvm::LLVMContext& ctx = func.getContext();
+
+    // Assign linear order to each basic block.
+    std::unordered_map<llvm::BasicBlock*, unsigned> bbOrder;
+    {
+        unsigned ord = 0;
+        for (auto& bb : func) bbOrder[&bb] = ord++;
+    }
+
+    for (auto& bb : func) {
+        // Find loop headers.
+        llvm::BasicBlock* latch = nullptr;
+        for (auto* pred : llvm::predecessors(&bb)) {
+            if (bbOrder.count(pred) && bbOrder[pred] >= bbOrder[&bb]) {
+                latch = pred;
+                break;
+            }
+        }
+        if (!latch) continue;
+
+        // Skip if the loop already has metadata.
+        auto* latchTerm = latch->getTerminator();
+        if (!latchTerm || latchTerm->getMetadata(llvm::LLVMContext::MD_loop))
+            continue;
+
+        // Estimate working set.
+        unsigned ws = estimateWorkingSet(bb, 8); // 8 bytes per element (i64/double)
+        unsigned l1Bytes = cache.l1Size * 1024;
+
+        // Only add tiling hint if working set exceeds L1.
+        if (ws <= l1Bytes) continue;
+
+        // Compute tile size: aim to fit working set in L1.
+        // tileSize ≈ sqrt(l1Bytes / elementSize) for 2D arrays.
+        unsigned tileSize = 1;
+        for (unsigned t = 2; t <= 256; t *= 2) {
+            if (t * t * 8 <= l1Bytes) tileSize = t;
+            else break;
+        }
+
+        // Attach tiling metadata.
+        llvm::SmallVector<llvm::Metadata*, 4> mds;
+        mds.push_back(nullptr); // placeholder for self-reference
+        mds.push_back(llvm::MDNode::get(ctx, {
+            llvm::MDString::get(ctx, "omsc.cache.tile_size"),
+            llvm::ConstantAsMetadata::get(
+                llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), tileSize))
+        }));
+        mds.push_back(llvm::MDNode::get(ctx, {
+            llvm::MDString::get(ctx, "omsc.cache.working_set"),
+            llvm::ConstantAsMetadata::get(
+                llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), ws))
+        }));
+
+        llvm::MDNode* loopID = llvm::MDNode::get(ctx, mds);
+        loopID->replaceOperandWith(0, loopID);
+        latchTerm->setMetadata(llvm::LLVMContext::MD_loop, loopID);
+        ++count;
+    }
+    return count;
+}
+
+CacheOptStats optimizeCacheLocality(llvm::Function& func,
+                                     const MicroarchProfile& profile,
+                                     const CacheModel& cache) {
+    CacheOptStats stats;
+    if (func.isDeclaration()) return stats;
+
+    // Phase 1: Propagate precision metadata through the function.
+    propagatePrecision(func);
+
+    // Phase 2: Insert cache-aware prefetches with precision-guided distances.
+    stats.prefetchesInserted = insertCacheAwarePrefetches(func, profile, cache);
+
+    // Phase 3: Add tiling hints for loops with large working sets.
+    stats.loopsTiled = addTilingHints(func, cache);
+
+    return stats;
 }
 
 } // namespace hgoe

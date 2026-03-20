@@ -589,6 +589,10 @@ static const std::unordered_set<std::string> stdlibFunctions = {"abs",
                                                                 "char_code",
                                                                 "clamp",
                                                                 "exit_program",
+                                                                "fast_add",
+                                                                "fast_div",
+                                                                "fast_mul",
+                                                                "fast_sub",
                                                                 "file_append",
                                                                 "file_exists",
                                                                 "file_read",
@@ -617,6 +621,10 @@ static const std::unordered_set<std::string> stdlibFunctions = {"abs",
                                                                 "number_to_string",
                                                                 "pop",
                                                                 "pow",
+                                                                "precise_add",
+                                                                "precise_div",
+                                                                "precise_mul",
+                                                                "precise_sub",
                                                                 "print",
                                                                 "print_char",
                                                                 "println",
@@ -716,6 +724,54 @@ llvm::Type* CodeGenerator::getDefaultType() {
 
 llvm::Type* CodeGenerator::getFloatType() {
     return llvm::Type::getDoubleTy(*context);
+}
+
+llvm::Type* CodeGenerator::resolveAnnotatedType(const std::string& annotation) {
+    if (annotation == "float" || annotation == "double")
+        return getFloatType();                                  // f64
+    if (annotation == "bool")
+        return llvm::Type::getInt1Ty(*context);                 // i1
+    if (annotation == "i8")
+        return llvm::Type::getInt8Ty(*context);                 // i8
+    if (annotation == "i16")
+        return llvm::Type::getInt16Ty(*context);                // i16
+    if (annotation == "i32")
+        return llvm::Type::getInt32Ty(*context);                // i32
+    // "int", "i64", "string", array types, struct names, generics, and empty
+    // annotations all map to the default i64 representation.
+    return getDefaultType();
+}
+
+llvm::Value* CodeGenerator::convertTo(llvm::Value* v, llvm::Type* targetTy) {
+    if (v->getType() == targetTy)
+        return v;
+    // float → int
+    if (v->getType()->isDoubleTy() && targetTy->isIntegerTy())
+        return builder->CreateFPToSI(v, targetTy, "ftoi");
+    // int → float
+    if (v->getType()->isIntegerTy() && targetTy->isDoubleTy())
+        return builder->CreateSIToFP(v, targetTy, "itof");
+    // ptr → int
+    if (v->getType()->isPointerTy() && targetTy->isIntegerTy())
+        return builder->CreatePtrToInt(v, targetTy, "ptoi");
+    // int → ptr
+    if (v->getType()->isIntegerTy() && targetTy->isPointerTy())
+        return builder->CreateIntToPtr(v, targetTy, "itop");
+    // int → int (widening)
+    if (v->getType()->isIntegerTy() && targetTy->isIntegerTy()) {
+        unsigned srcBits = v->getType()->getIntegerBitWidth();
+        unsigned dstBits = targetTy->getIntegerBitWidth();
+        if (srcBits < dstBits)
+            return builder->CreateSExt(v, targetTy, "sext");
+        if (srcBits > dstBits)
+            return builder->CreateTrunc(v, targetTy, "trunc");
+    }
+    // ptr → float (via int)
+    if (v->getType()->isPointerTy() && targetTy->isDoubleTy()) {
+        auto* intVal = builder->CreatePtrToInt(v, getDefaultType(), "ptoi");
+        return builder->CreateSIToFP(intVal, targetTy, "itof");
+    }
+    return v;
 }
 
 llvm::Value* CodeGenerator::toBool(llvm::Value* v) {
@@ -1694,6 +1750,24 @@ void CodeGenerator::scanStmtForStringCalls(Statement* stmt) {
 }
 
 void CodeGenerator::preAnalyzeStringTypes(Program* program) {
+    // Seed string type information from explicit type annotations.
+    // When a parameter is annotated as `: string` or a function has
+    // `-> string` return type, we know the type without flow analysis.
+    // This bootstraps the fixpoint loop so that downstream callers/callees
+    // of annotated functions get correct string type propagation immediately.
+    for (auto& func : program->functions) {
+        // Seed string-returning functions from return type annotations.
+        if (func->returnType == "string") {
+            stringReturningFunctions_.insert(func->name);
+        }
+        // Seed string parameter types from parameter type annotations.
+        for (size_t i = 0; i < func->parameters.size(); ++i) {
+            if (func->parameters[i].typeName == "string") {
+                funcParamStringTypes_[func->name].insert(i);
+            }
+        }
+    }
+
     // Iteratively propagate string type information until no new facts are learned.
     // Each iteration may uncover new string-returning functions or string parameters,
     // which in turn enables further propagation in the next iteration.
@@ -1896,8 +1970,15 @@ void CodeGenerator::generate(Program* program) {
     // Forward-declare all functions so that any function can reference any
     // other regardless of source-file ordering (enables mutual recursion).
     for (auto& func : program->functions) {
-        std::vector<llvm::Type*> paramTypes(func->parameters.size(), getDefaultType());
-        llvm::FunctionType* funcType = llvm::FunctionType::get(getDefaultType(), paramTypes, false);
+        // Resolve parameter types from annotations: "float" → double, else i64.
+        std::vector<llvm::Type*> paramTypes;
+        paramTypes.reserve(func->parameters.size());
+        for (auto& param : func->parameters) {
+            paramTypes.push_back(resolveAnnotatedType(param.typeName));
+        }
+        // Resolve return type from annotation (e.g. "-> float" → double).
+        llvm::Type* retType = resolveAnnotatedType(func->returnType);
+        llvm::FunctionType* funcType = llvm::FunctionType::get(retType, paramTypes, false);
         // Non-main functions use InternalLinkage at O2+ (equivalent to C's
         // `static`).  This tells the optimizer that no external code can call
         // the function, enabling:
@@ -1937,15 +2018,17 @@ void CodeGenerator::generate(Program* program) {
         // initializes every variable, so the optimizer can assume no undef/
         // poison values flow through function boundaries.  This strengthens
         // SCEV, value-range propagation, and alias analysis.
-        // signext on the return value — omscript always returns i64, and
-        // sign-extending the return enables better codegen on targets where
-        // the calling convention requires sign-extension (e.g. AArch64).
+        // signext on integer params/return — enables better codegen on targets
+        // where the calling convention requires sign-extension (e.g. AArch64).
+        // Float (double) params/return must NOT get signext.
         for (unsigned i = 0; i < func->parameters.size(); ++i) {
             function->addParamAttr(i, llvm::Attribute::NoUndef);
-            function->addParamAttr(i, llvm::Attribute::SExt);
+            if (paramTypes[i]->isIntegerTy())
+                function->addParamAttr(i, llvm::Attribute::SExt);
         }
         function->addRetAttr(llvm::Attribute::NoUndef);
-        function->addRetAttr(llvm::Attribute::SExt);
+        if (retType->isIntegerTy())
+            function->addRetAttr(llvm::Attribute::SExt);
         functions[func->name] = function;
         functionDecls_[func->name] = func.get();
     }
@@ -1961,6 +2044,9 @@ void CodeGenerator::generate(Program* program) {
     // Process struct declarations: store field layouts for struct operations.
     for (auto& structDecl : program->structs) {
         structDefs_[structDecl->name] = structDecl->fields;
+        if (!structDecl->fieldDecls.empty()) {
+            structFieldDecls_[structDecl->name] = structDecl->fieldDecls;
+        }
     }
 
     // Pre-analyze string types: determine which functions return strings and
@@ -2314,6 +2400,8 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     stringArrayVars_.clear();
     stringLenCache_.clear();
     stringCapCache_.clear();
+    deadVars_.clear();
+    deadVarReason_.clear();
 
     // Pre-populate stringVars_ for parameters known to receive string arguments.
     auto paramStrIt = funcParamStringTypes_.find(func->name);
@@ -2322,7 +2410,8 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         auto& param = func->parameters[paramIdx];
         argIt->setName(param.name);
 
-        llvm::AllocaInst* alloca = createEntryBlockAlloca(function, param.name);
+        // Use the parameter's actual LLVM type (respects type annotations).
+        llvm::AllocaInst* alloca = createEntryBlockAlloca(function, param.name, argIt->getType());
         builder->CreateStore(&(*argIt), alloca);
         bindVariable(param.name, alloca);
 
@@ -2337,7 +2426,11 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
 
     // Add default return if needed
     if (!builder->GetInsertBlock()->getTerminator()) {
-        builder->CreateRet(llvm::ConstantInt::get(*context, llvm::APInt(64, 0)));
+        llvm::Type* retTy = function->getReturnType();
+        if (retTy->isDoubleTy())
+            builder->CreateRet(llvm::ConstantFP::get(retTy, 0.0));
+        else
+            builder->CreateRet(llvm::ConstantInt::get(*context, llvm::APInt(64, 0)));
     }
 
     // Verify function
@@ -2428,6 +2521,12 @@ void CodeGenerator::generateStatement(Statement* stmt) {
     case ASTNodeType::STRUCT_DECL:
         // Structs are handled at program level, nothing to do here
         break;
+    case ASTNodeType::INVALIDATE_STMT:
+        generateInvalidate(static_cast<InvalidateStmt*>(stmt));
+        break;
+    case ASTNodeType::MOVE_DECL:
+        generateMoveDecl(static_cast<MoveDecl*>(stmt));
+        break;
     default:
         codegenError("Unknown statement type", stmt);
     }
@@ -2483,6 +2582,10 @@ llvm::Value* CodeGenerator::generateExpression(Expression* expr) {
     case ASTNodeType::SPREAD_EXPR:
         // Spread expressions are only valid inside array literals
         codegenError("Spread operator '...' is only valid inside array literals", expr);
+    case ASTNodeType::MOVE_EXPR:
+        return generateMoveExpr(static_cast<MoveExpr*>(expr));
+    case ASTNodeType::BORROW_EXPR:
+        return generateBorrowExpr(static_cast<BorrowExpr*>(expr));
     default:
         codegenError("Unknown expression type", expr);
     }

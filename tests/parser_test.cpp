@@ -1444,3 +1444,103 @@ TEST(ParserTest, ForLoopIteratorArrayType) {
     ASSERT_NE(forStmt, nullptr);
     EXPECT_EQ(forStmt->iteratorType, "int[]");
 }
+
+// ===========================================================================
+// Ownership system parser tests
+// ===========================================================================
+
+TEST(ParserTest, InvalidateStatement) {
+    auto program = parse("fn main() { var x = 1; invalidate x; return 0; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    auto* inv = dynamic_cast<InvalidateStmt*>(program->functions[0]->body->statements[1].get());
+    ASSERT_NE(inv, nullptr);
+    EXPECT_EQ(inv->varName, "x");
+}
+
+TEST(ParserTest, MoveDeclaration) {
+    auto program = parse("fn main() { var a = 1; move var b = a; return 0; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    auto* md = dynamic_cast<MoveDecl*>(program->functions[0]->body->statements[1].get());
+    ASSERT_NE(md, nullptr);
+    EXPECT_EQ(md->name, "b");
+    ASSERT_NE(md->initializer, nullptr);
+}
+
+TEST(ParserTest, MoveExprInAssignment) {
+    auto program = parse("fn main() { var x = 1; var y = move x; return 0; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    auto* vd = dynamic_cast<VarDecl*>(program->functions[0]->body->statements[1].get());
+    ASSERT_NE(vd, nullptr);
+    EXPECT_EQ(vd->name, "y");
+    auto* mv = dynamic_cast<MoveExpr*>(vd->initializer.get());
+    ASSERT_NE(mv, nullptr);
+}
+
+TEST(ParserTest, MoveExprInReturn) {
+    auto program = parse("fn main() { var x = 1; return move x; }");
+    auto* ret = dynamic_cast<ReturnStmt*>(program->functions[0]->body->statements[1].get());
+    ASSERT_NE(ret, nullptr);
+    auto* mv = dynamic_cast<MoveExpr*>(ret->value.get());
+    ASSERT_NE(mv, nullptr);
+}
+
+TEST(ParserTest, BorrowDeclaration) {
+    auto program = parse("fn main() { var x = 1; borrow var ref = x; return 0; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    auto* vd = dynamic_cast<VarDecl*>(program->functions[0]->body->statements[1].get());
+    ASSERT_NE(vd, nullptr);
+    EXPECT_EQ(vd->name, "ref");
+    auto* bw = dynamic_cast<BorrowExpr*>(vd->initializer.get());
+    ASSERT_NE(bw, nullptr);
+}
+
+TEST(ParserTest, StructFieldAttrsHotCold) {
+    auto program = parse("struct Foo { hot int x, cold int y } fn main() { return 0; }");
+    ASSERT_EQ(program->structs.size(), 1u);
+    ASSERT_EQ(program->structs[0]->fieldDecls.size(), 2u);
+    EXPECT_TRUE(program->structs[0]->fieldDecls[0].attrs.hot);
+    EXPECT_FALSE(program->structs[0]->fieldDecls[0].attrs.cold);
+    EXPECT_FALSE(program->structs[0]->fieldDecls[1].attrs.hot);
+    EXPECT_TRUE(program->structs[0]->fieldDecls[1].attrs.cold);
+}
+
+TEST(ParserTest, StructFieldAttrsNoalias) {
+    auto program = parse("struct Foo { noalias int ptr } fn main() { return 0; }");
+    ASSERT_EQ(program->structs[0]->fieldDecls.size(), 1u);
+    EXPECT_TRUE(program->structs[0]->fieldDecls[0].attrs.noalias);
+}
+
+TEST(ParserTest, StructFieldAttrsImmut) {
+    auto program = parse("struct Foo { immut int id } fn main() { return 0; }");
+    ASSERT_EQ(program->structs[0]->fieldDecls.size(), 1u);
+    EXPECT_TRUE(program->structs[0]->fieldDecls[0].attrs.immut);
+}
+
+TEST(ParserTest, StructFieldAttrsAlign) {
+    auto program = parse("struct Foo { align(64) int buf } fn main() { return 0; }");
+    ASSERT_EQ(program->structs[0]->fieldDecls.size(), 1u);
+    EXPECT_EQ(program->structs[0]->fieldDecls[0].attrs.align, 64);
+}
+
+TEST(ParserTest, StructFieldAttrsRange) {
+    auto program = parse("struct Foo { range(0,100) int score } fn main() { return 0; }");
+    ASSERT_EQ(program->structs[0]->fieldDecls.size(), 1u);
+    EXPECT_TRUE(program->structs[0]->fieldDecls[0].attrs.hasRange);
+    EXPECT_EQ(program->structs[0]->fieldDecls[0].attrs.rangeMin, 0);
+    EXPECT_EQ(program->structs[0]->fieldDecls[0].attrs.rangeMax, 100);
+}
+
+TEST(ParserTest, StructFieldAttrsMove) {
+    auto program = parse("struct Foo { move int inner } fn main() { return 0; }");
+    ASSERT_EQ(program->structs[0]->fieldDecls.size(), 1u);
+    EXPECT_TRUE(program->structs[0]->fieldDecls[0].attrs.isMove);
+}
+
+TEST(ParserTest, StructFieldMultipleAttrs) {
+    auto program = parse("struct Foo { hot immut int id, cold noalias int ptr } fn main() { return 0; }");
+    ASSERT_EQ(program->structs[0]->fieldDecls.size(), 2u);
+    EXPECT_TRUE(program->structs[0]->fieldDecls[0].attrs.hot);
+    EXPECT_TRUE(program->structs[0]->fieldDecls[0].attrs.immut);
+    EXPECT_TRUE(program->structs[0]->fieldDecls[1].attrs.cold);
+    EXPECT_TRUE(program->structs[0]->fieldDecls[1].attrs.noalias);
+}

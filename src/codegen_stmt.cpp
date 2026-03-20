@@ -14,12 +14,17 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
         codegenError("Variable declaration outside of function", stmt);
     }
 
-    llvm::Type* allocaType = getDefaultType();
+    // Resolve the alloca type from the type annotation if present.
+    llvm::Type* allocaType = stmt->typeName.empty()
+                                 ? getDefaultType()
+                                 : resolveAnnotatedType(stmt->typeName);
     llvm::Value* initValue = nullptr;
 
     if (stmt->initializer) {
         initValue = generateExpression(stmt->initializer.get());
-        allocaType = initValue->getType();
+        // When no annotation is present, infer the type from the initializer.
+        if (stmt->typeName.empty())
+            allocaType = initValue->getType();
 
         // When a string literal is assigned to a mutable string variable,
         // heap-allocate a copy via strdup().  This ensures the variable always
@@ -34,6 +39,11 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             initValue = builder->CreateCall(getOrDeclareStrdup(), {initValue}, "strdup.init");
             allocaType = initValue->getType();
         }
+
+        // Convert the initializer to match the declared type when an annotation
+        // is present (e.g. `var x: float = 42` should store 42.0 as double).
+        if (!stmt->typeName.empty())
+            initValue = convertTo(initValue, allocaType);
     }
 
     llvm::AllocaInst* alloca = createEntryBlockAlloca(function, stmt->name, allocaType);
@@ -64,7 +74,11 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             structVars_.erase(stmt->name);
         }
     } else {
-        builder->CreateStore(llvm::ConstantInt::get(*context, llvm::APInt(64, 0)), alloca);
+        // Default-initialize based on type annotation.
+        if (allocaType->isDoubleTy())
+            builder->CreateStore(llvm::ConstantFP::get(allocaType, 0.0), alloca);
+        else
+            builder->CreateStore(llvm::ConstantInt::get(*context, llvm::APInt(64, 0)), alloca);
     }
 }
 
@@ -77,11 +91,27 @@ void CodeGenerator::generateReturn(ReturnStmt* stmt) {
             if (builder->GetInsertBlock() && builder->GetInsertBlock()->getParent())
                 stringReturningFunctions_.insert(std::string(builder->GetInsertBlock()->getParent()->getName()));
         }
-        // Function return type is i64, so convert if needed
-        retValue = toDefaultType(retValue);
+        // Convert return value to match the function's declared return type.
+        llvm::Function* currentFn = builder->GetInsertBlock()->getParent();
+        llvm::Type* retTy = currentFn->getReturnType();
+        retValue = convertTo(retValue, retTy);
+
+        // Tail call optimization: if the return value is a direct function
+        // call, mark it as a tail call so LLVM can eliminate the stack frame.
+        if (optimizationLevel >= OptimizationLevel::O2) {
+            if (auto* callInst = llvm::dyn_cast<llvm::CallInst>(retValue)) {
+                callInst->setTailCallKind(llvm::CallInst::TCK_Tail);
+            }
+        }
+
         builder->CreateRet(retValue);
     } else {
-        builder->CreateRet(llvm::ConstantInt::get(*context, llvm::APInt(64, 0)));
+        llvm::Function* currentFn = builder->GetInsertBlock()->getParent();
+        llvm::Type* retTy = currentFn->getReturnType();
+        if (retTy->isDoubleTy())
+            builder->CreateRet(llvm::ConstantFP::get(retTy, 0.0));
+        else
+            builder->CreateRet(llvm::ConstantInt::get(*context, llvm::APInt(64, 0)));
     }
 }
 
@@ -176,7 +206,12 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
     builder->SetInsertPoint(condBB);
     llvm::Value* condition = generateExpression(stmt->condition.get());
     llvm::Value* condBool = toBool(condition);
-    builder->CreateCondBr(condBool, bodyBB, endBB);
+    // Loop condition branches: hint the back-edge (body) as likely-taken.
+    auto* whileCondBr = builder->CreateCondBr(condBool, bodyBB, endBB);
+    if (optimizationLevel >= OptimizationLevel::O2) {
+        llvm::MDNode* brWeights = llvm::MDBuilder(*context).createBranchWeights(2000, 1);
+        whileCondBr->setMetadata(llvm::LLVMContext::MD_prof, brWeights);
+    }
 
 
     // Body block
@@ -252,6 +287,11 @@ void CodeGenerator::generateDoWhile(DoWhileStmt* stmt) {
 
     llvm::Value* condBool = toBool(condition);
     auto* backBrDoWhile = builder->CreateCondBr(condBool, bodyBB, endBB);
+    // Hint the back-edge (body) as likely-taken for branch prediction.
+    if (optimizationLevel >= OptimizationLevel::O2) {
+        llvm::MDNode* brWeights = llvm::MDBuilder(*context).createBranchWeights(2000, 1);
+        backBrDoWhile->setMetadata(llvm::LLVMContext::MD_prof, brWeights);
+    }
     // Attach loop metadata to the do-while back-edge, matching for-loop and
     // while-loop hints for consistent vectorization across all loop forms.
     {
@@ -388,7 +428,12 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         llvm::Value* backwardCond = builder->CreateICmpSGT(curVal, endVal, "forcond_gt");
         continueCond = builder->CreateSelect(stepPositive, forwardCond, backwardCond, "forcond_range");
     }
-    builder->CreateCondBr(continueCond, bodyBB, endBB);
+    auto* forCondBr = builder->CreateCondBr(continueCond, bodyBB, endBB);
+    // Hint loop back-edge as likely-taken for branch prediction.
+    if (optimizationLevel >= OptimizationLevel::O2) {
+        llvm::MDNode* brWeights = llvm::MDBuilder(*context).createBranchWeights(2000, 1);
+        forCondBr->setMetadata(llvm::LLVMContext::MD_prof, brWeights);
+    }
 
     // Body block
     builder->SetInsertPoint(bodyBB);
@@ -515,7 +560,12 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
     builder->SetInsertPoint(condBB);
     llvm::Value* curIdx = builder->CreateLoad(getDefaultType(), idxAlloca, "foreach.idx");
     llvm::Value* cond = builder->CreateICmpSLT(curIdx, lenVal, "foreach.cmp");
-    builder->CreateCondBr(cond, bodyBB, endBB);
+    auto* foreachCondBr = builder->CreateCondBr(cond, bodyBB, endBB);
+    // Hint the back-edge (body) as likely-taken.
+    if (optimizationLevel >= OptimizationLevel::O2) {
+        llvm::MDNode* brWeights = llvm::MDBuilder(*context).createBranchWeights(2000, 1);
+        foreachCondBr->setMetadata(llvm::LLVMContext::MD_prof, brWeights);
+    }
 
     // Body: load current element into iterator variable, then execute body
     builder->SetInsertPoint(bodyBB);
@@ -808,6 +858,140 @@ void CodeGenerator::generateThrow(ThrowStmt* stmt) {
     } else {
         builder->CreateRet(llvm::ConstantInt::get(getDefaultType(), 0));
     }
+}
+
+// ---------------------------------------------------------------------------
+// Ownership system codegen
+// ---------------------------------------------------------------------------
+
+void CodeGenerator::generateInvalidate(InvalidateStmt* stmt) {
+    // Look up the variable's alloca
+    auto it = namedValues.find(stmt->varName);
+    if (it == namedValues.end()) {
+        codegenError("Variable '" + stmt->varName + "' not found for invalidate", stmt);
+    }
+    llvm::Value* alloca = it->second;
+
+    // Emit llvm.lifetime.end to mark the variable as dead.
+    // This allows LLVM to reuse the stack slot and eliminate dead stores.
+    auto* allocaInst = llvm::dyn_cast<llvm::AllocaInst>(alloca);
+    if (allocaInst) {
+        auto* allocaTy = allocaInst->getAllocatedType();
+        uint64_t size = module->getDataLayout().getTypeAllocSize(allocaTy);
+        auto* sizeVal = llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), size);
+        auto* lifetimeEnd = llvm::Intrinsic::getDeclaration(
+            module.get(), llvm::Intrinsic::lifetime_end,
+            {llvm::PointerType::getUnqual(*context)});
+        builder->CreateCall(lifetimeEnd, {sizeVal, allocaInst});
+    }
+
+    // Store an undef/poison value to enable dead-store elimination.
+    auto* allocaType = llvm::cast<llvm::AllocaInst>(alloca)->getAllocatedType();
+    builder->CreateStore(llvm::UndefValue::get(allocaType), alloca);
+
+    // Mark the variable as dead for use-after-invalidate detection.
+    deadVars_.insert(stmt->varName);
+    deadVarReason_[stmt->varName] = "invalidated";
+}
+
+void CodeGenerator::generateMoveDecl(MoveDecl* stmt) {
+    llvm::Function* function = builder->GetInsertBlock()->getParent();
+    if (!function) {
+        codegenError("Move declaration outside of function", stmt);
+    }
+
+    llvm::Value* initValue = nullptr;
+    llvm::Type* allocaType = stmt->typeName.empty()
+                                 ? getDefaultType()
+                                 : resolveAnnotatedType(stmt->typeName);
+
+    if (stmt->initializer) {
+        initValue = generateExpression(stmt->initializer.get());
+        if (stmt->typeName.empty())
+            allocaType = initValue->getType();
+        if (!stmt->typeName.empty())
+            initValue = convertTo(initValue, allocaType);
+    }
+
+    llvm::AllocaInst* alloca = createEntryBlockAlloca(function, stmt->name, allocaType);
+    bindVariable(stmt->name, alloca);
+
+    if (initValue) {
+        builder->CreateStore(initValue, alloca);
+
+        // If the source is an identifier, mark the source as dead (emit
+        // lifetime.end + store undef) to enable LLVM to elide the copy
+        // and reuse the register/stack slot.
+        if (stmt->initializer->type == ASTNodeType::IDENTIFIER_EXPR) {
+            auto* srcId = static_cast<IdentifierExpr*>(stmt->initializer.get());
+            markVariableMoved(srcId->name);
+        }
+    } else {
+        if (allocaType->isDoubleTy())
+            builder->CreateStore(llvm::ConstantFP::get(allocaType, 0.0), alloca);
+        else
+            builder->CreateStore(llvm::ConstantInt::get(*context, llvm::APInt(64, 0)), alloca);
+    }
+}
+
+llvm::Value* CodeGenerator::generateMoveExpr(MoveExpr* expr) {
+    // Generate the source value.
+    llvm::Value* val = generateExpression(expr->source.get());
+
+    // If the source is an identifier, mark it dead after the move.
+    if (expr->source->type == ASTNodeType::IDENTIFIER_EXPR) {
+        auto* srcId = static_cast<IdentifierExpr*>(expr->source.get());
+        markVariableMoved(srcId->name);
+    }
+
+    return val;
+}
+
+llvm::Value* CodeGenerator::generateBorrowExpr(BorrowExpr* expr) {
+    // Generate the source value.
+    llvm::Value* val = generateExpression(expr->source.get());
+
+    // If the source is an identifier, attach !noalias metadata to the load
+    // as a hint that this borrow does not alias other pointers.
+    // The noalias.scope metadata requires a valid scope domain structure:
+    //   !scope = !{!scope, !domain, !"name"}
+    //   !domain = !{!domain, !"domain_name"}
+    if (auto* loadInst = llvm::dyn_cast<llvm::LoadInst>(val)) {
+        llvm::MDNode* domain = llvm::MDNode::getDistinct(
+            *context, {llvm::MDString::get(*context, "omscript.borrow.domain")});
+        // Patch self-ref: domain = !{domain, !"..."}
+        domain->replaceOperandWith(0, domain);
+        llvm::MDNode* scope = llvm::MDNode::getDistinct(
+            *context, {nullptr, domain, llvm::MDString::get(*context, "omscript.borrow.scope")});
+        scope->replaceOperandWith(0, scope);
+        llvm::MDNode* scopeList = llvm::MDNode::get(*context, {scope});
+        loadInst->setMetadata(llvm::LLVMContext::MD_noalias, scopeList);
+    }
+
+    return val;
+}
+
+void CodeGenerator::markVariableMoved(const std::string& varName) {
+    auto srcIt = namedValues.find(varName);
+    if (srcIt != namedValues.end()) {
+        auto* srcAlloca = llvm::dyn_cast<llvm::AllocaInst>(srcIt->second);
+        if (srcAlloca) {
+            auto* srcTy = srcAlloca->getAllocatedType();
+            uint64_t sz = module->getDataLayout().getTypeAllocSize(srcTy);
+            auto* szVal = llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), sz);
+#if LLVM_VERSION_MAJOR >= 19
+            auto* lifetimeEnd = llvm::Intrinsic::getOrInsertDeclaration(
+#else
+            auto* lifetimeEnd = llvm::Intrinsic::getDeclaration(
+#endif
+                module.get(), llvm::Intrinsic::lifetime_end,
+                {llvm::PointerType::getUnqual(*context)});
+            builder->CreateCall(lifetimeEnd, {szVal, srcAlloca});
+            builder->CreateStore(llvm::UndefValue::get(srcTy), srcAlloca);
+        }
+    }
+    deadVars_.insert(varName);
+    deadVarReason_[varName] = "moved";
 }
 
 } // namespace omscript

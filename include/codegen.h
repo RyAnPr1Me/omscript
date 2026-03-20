@@ -241,6 +241,8 @@ class CodeGenerator {
 
     // Struct type definitions: struct name → ordered list of field names.
     std::unordered_map<std::string, std::vector<std::string>> structDefs_;
+    // Rich struct field metadata: struct name → ordered list of StructField with attributes.
+    std::unordered_map<std::string, std::vector<StructField>> structFieldDecls_;
     // Variables known to hold struct values, maps var name → struct type name.
     std::unordered_map<std::string, std::string> structVars_;
 
@@ -271,6 +273,14 @@ class CodeGenerator {
     // allocated buffer capacity.  Used by str_concat to skip realloc calls
     // when the existing buffer has enough space (amortized O(1) appends).
     std::unordered_map<std::string, llvm::AllocaInst*> stringCapCache_;
+
+    /// Variables that have been explicitly moved or invalidated.
+    /// Used to detect use-after-move and use-after-invalidate at compile time.
+    /// Only populated when the user writes `move` or `invalidate` — normal
+    /// code without ownership annotations is never affected.
+    std::unordered_set<std::string> deadVars_;
+    /// Tracks the reason a variable became dead: "moved" or "invalidated".
+    std::unordered_map<std::string, std::string> deadVarReason_;
 
     /// Classify a function into its execution tier based on type annotations,
     /// OPTMAX status, and whether it is a special function (main/stdlib).
@@ -316,12 +326,28 @@ class CodeGenerator {
     void generateSwitch(SwitchStmt* stmt);
     void generateTryCatch(TryCatchStmt* stmt);
     void generateThrow(ThrowStmt* stmt);
+    void generateInvalidate(InvalidateStmt* stmt);
+    void generateMoveDecl(MoveDecl* stmt);
+    llvm::Value* generateMoveExpr(MoveExpr* expr);
+    llvm::Value* generateBorrowExpr(BorrowExpr* expr);
+
+    /// Mark a variable as moved: emit lifetime.end + store undef on its alloca,
+    /// and record it in deadVars_ for use-after-move detection.
+    void markVariableMoved(const std::string& varName);
 
     // Helper methods
     llvm::Type* getDefaultType();
     llvm::Type* getFloatType();
+    /// Map a type annotation string ("int", "float", "string", etc.) to the
+    /// corresponding LLVM type.  Unknown or empty annotations fall back to
+    /// getDefaultType() (i64).
+    llvm::Type* resolveAnnotatedType(const std::string& annotation);
     llvm::Value* toBool(llvm::Value* v);
     llvm::Value* toDefaultType(llvm::Value* v);
+    /// Convert \p v to \p targetTy, inserting appropriate casts (FPToSI,
+    /// SIToFP, PtrToInt, IntToPtr, etc.) as needed.  Returns \p v unchanged
+    /// when no conversion is required.
+    llvm::Value* convertTo(llvm::Value* v, llvm::Type* targetTy);
     llvm::Value* ensureFloat(llvm::Value* v);
     void setupPrintfDeclaration();
     llvm::Function* getPrintfFunction();

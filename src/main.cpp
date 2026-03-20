@@ -1492,6 +1492,9 @@ void printUsage(const char* progName) {
                  "  -foptmax         OPTMAX block optimization (default: on)\n"
                  "  -fjit            Hybrid JIT mode (default: on)\n"
                  "  -fstack-protector Stack protection\n"
+                 "  -fegraph         E-graph equality saturation (default: on at O2+)\n"
+                 "  -fsuperopt       Superoptimizer pass (default: on at O2+)\n"
+                 "  -fhgoe           Hardware graph optimization (default: on)\n"
                  "\n"
                  "Linker:\n"
                  "  -static          Static linking\n"
@@ -1584,6 +1587,12 @@ const char* tokenTypeToString(omscript::TokenType type) {
         return "STRUCT";
     case omscript::TokenType::IMPORT:
         return "IMPORT";
+    case omscript::TokenType::MOVE:
+        return "MOVE";
+    case omscript::TokenType::INVALIDATE:
+        return "INVALIDATE";
+    case omscript::TokenType::BORROW:
+        return "BORROW";
     case omscript::TokenType::PLUS:
         return "PLUS";
     case omscript::TokenType::MINUS:
@@ -1845,6 +1854,18 @@ void dumpExpression(const omscript::Expression* expr, int indent) {
         dumpExpression(ia->value.get(), indent + 1);
         break;
     }
+    case omscript::ASTNodeType::MOVE_EXPR: {
+        auto* mv = static_cast<const omscript::MoveExpr*>(expr);
+        std::cout << "MoveExpr\n";
+        dumpExpression(mv->source.get(), indent + 1);
+        break;
+    }
+    case omscript::ASTNodeType::BORROW_EXPR: {
+        auto* bw = static_cast<const omscript::BorrowExpr*>(expr);
+        std::cout << "BorrowExpr\n";
+        dumpExpression(bw->source.get(), indent + 1);
+        break;
+    }
     default:
         std::cout << "Expression(unknown)\n";
         break;
@@ -1992,6 +2013,22 @@ void dumpStatement(const omscript::Statement* stmt, int indent) {
         dumpExpression(es->expression.get(), indent + 1);
         break;
     }
+    case omscript::ASTNodeType::INVALIDATE_STMT: {
+        auto* inv = static_cast<const omscript::InvalidateStmt*>(stmt);
+        std::cout << "InvalidateStmt '" << inv->varName << "'\n";
+        break;
+    }
+    case omscript::ASTNodeType::MOVE_DECL: {
+        auto* md = static_cast<const omscript::MoveDecl*>(stmt);
+        std::cout << "MoveDecl '" << md->name << "'";
+        if (!md->typeName.empty())
+            std::cout << " type=" << md->typeName;
+        std::cout << "\n";
+        if (md->initializer) {
+            dumpExpression(md->initializer.get(), indent + 1);
+        }
+        break;
+    }
     default:
         std::cout << "Statement(unknown)\n";
         break;
@@ -2061,6 +2098,9 @@ int main(int argc, char* argv[]) {
     bool flagVectorize = true;
     bool flagUnrollLoops = true;
     bool flagLoopOptimize = true;
+    bool flagEGraph = true;
+    bool flagSuperopt = true;
+    bool flagHGOE = true;
     bool flagDebug = false;
     const auto tryParseOptimizationFlag = [](const std::string& arg) -> std::optional<omscript::OptimizationLevel> {
         if (arg == "-Ofast") {
@@ -2156,6 +2196,30 @@ int main(int argc, char* argv[]) {
         }
         if (arg == "-fno-loop-optimize") {
             flagLoopOptimize = false;
+            return true;
+        }
+        if (arg == "-fegraph") {
+            flagEGraph = true;
+            return true;
+        }
+        if (arg == "-fno-egraph") {
+            flagEGraph = false;
+            return true;
+        }
+        if (arg == "-fsuperopt") {
+            flagSuperopt = true;
+            return true;
+        }
+        if (arg == "-fno-superopt") {
+            flagSuperopt = false;
+            return true;
+        }
+        if (arg == "-fhgoe") {
+            flagHGOE = true;
+            return true;
+        }
+        if (arg == "-fno-hgoe") {
+            flagHGOE = false;
             return true;
         }
         if (arg == "-static") {
@@ -2527,6 +2591,9 @@ int main(int argc, char* argv[]) {
             codegen.setVectorize(flagVectorize);
             codegen.setUnrollLoops(flagUnrollLoops);
             codegen.setLoopOptimize(flagLoopOptimize);
+            codegen.setEGraphOptimize(flagEGraph);
+            codegen.setSuperoptimize(flagSuperopt);
+            codegen.setHardwareGraphOpt(flagHGOE);
             codegen.setDebugMode(flagDebug);
             codegen.setSourceFilename(sourceFile);
             codegen.generate(program.get());
@@ -2583,6 +2650,9 @@ int main(int argc, char* argv[]) {
             codegen.setVectorize(flagVectorize);
             codegen.setUnrollLoops(flagUnrollLoops);
             codegen.setLoopOptimize(flagLoopOptimize);
+            codegen.setEGraphOptimize(flagEGraph);
+            codegen.setSuperoptimize(flagSuperopt);
+            codegen.setHardwareGraphOpt(flagHGOE);
             codegen.setDebugMode(flagDebug);
             codegen.setSourceFilename(sourceFile);
             if (flagJIT) {
@@ -2628,6 +2698,9 @@ int main(int argc, char* argv[]) {
             codegen.setVectorize(flagVectorize);
             codegen.setUnrollLoops(flagUnrollLoops);
             codegen.setLoopOptimize(flagLoopOptimize);
+            codegen.setEGraphOptimize(flagEGraph);
+            codegen.setSuperoptimize(flagSuperopt);
+            codegen.setHardwareGraphOpt(flagHGOE);
             codegen.setDebugMode(flagDebug);
             codegen.setSourceFilename(sourceFile);
             if (flagJIT) {
