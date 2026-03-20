@@ -895,23 +895,7 @@ void CodeGenerator::generateMoveDecl(MoveDecl* stmt) {
         // and reuse the register/stack slot.
         if (stmt->initializer->type == ASTNodeType::IDENTIFIER_EXPR) {
             auto* srcId = static_cast<IdentifierExpr*>(stmt->initializer.get());
-            auto srcIt = namedValues.find(srcId->name);
-            if (srcIt != namedValues.end()) {
-                auto* srcAlloca = llvm::dyn_cast<llvm::AllocaInst>(srcIt->second);
-                if (srcAlloca) {
-                    auto* srcTy = srcAlloca->getAllocatedType();
-                    uint64_t sz = module->getDataLayout().getTypeAllocSize(srcTy);
-                    auto* szVal = llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), sz);
-                    auto* lifetimeEnd = llvm::Intrinsic::getDeclaration(
-                        module.get(), llvm::Intrinsic::lifetime_end,
-                        {llvm::PointerType::getUnqual(*context)});
-                    builder->CreateCall(lifetimeEnd, {szVal, srcAlloca});
-                    builder->CreateStore(llvm::UndefValue::get(srcTy), srcAlloca);
-                }
-            }
-            // Mark the source variable as dead for use-after-move detection.
-            deadVars_.insert(srcId->name);
-            deadVarReason_[srcId->name] = "moved";
+            markVariableMoved(srcId->name);
         }
     } else {
         if (allocaType->isDoubleTy())
@@ -928,23 +912,7 @@ llvm::Value* CodeGenerator::generateMoveExpr(MoveExpr* expr) {
     // If the source is an identifier, mark it dead after the move.
     if (expr->source->type == ASTNodeType::IDENTIFIER_EXPR) {
         auto* srcId = static_cast<IdentifierExpr*>(expr->source.get());
-        auto srcIt = namedValues.find(srcId->name);
-        if (srcIt != namedValues.end()) {
-            auto* srcAlloca = llvm::dyn_cast<llvm::AllocaInst>(srcIt->second);
-            if (srcAlloca) {
-                auto* srcTy = srcAlloca->getAllocatedType();
-                uint64_t sz = module->getDataLayout().getTypeAllocSize(srcTy);
-                auto* szVal = llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), sz);
-                auto* lifetimeEnd = llvm::Intrinsic::getDeclaration(
-                    module.get(), llvm::Intrinsic::lifetime_end,
-                    {llvm::PointerType::getUnqual(*context)});
-                builder->CreateCall(lifetimeEnd, {szVal, srcAlloca});
-                builder->CreateStore(llvm::UndefValue::get(srcTy), srcAlloca);
-            }
-        }
-        // Mark the source variable as dead for use-after-move detection.
-        deadVars_.insert(srcId->name);
-        deadVarReason_[srcId->name] = "moved";
+        markVariableMoved(srcId->name);
     }
 
     return val;
@@ -972,6 +940,29 @@ llvm::Value* CodeGenerator::generateBorrowExpr(BorrowExpr* expr) {
     }
 
     return val;
+}
+
+void CodeGenerator::markVariableMoved(const std::string& varName) {
+    auto srcIt = namedValues.find(varName);
+    if (srcIt != namedValues.end()) {
+        auto* srcAlloca = llvm::dyn_cast<llvm::AllocaInst>(srcIt->second);
+        if (srcAlloca) {
+            auto* srcTy = srcAlloca->getAllocatedType();
+            uint64_t sz = module->getDataLayout().getTypeAllocSize(srcTy);
+            auto* szVal = llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), sz);
+#if LLVM_VERSION_MAJOR >= 19
+            auto* lifetimeEnd = llvm::Intrinsic::getOrInsertDeclaration(
+#else
+            auto* lifetimeEnd = llvm::Intrinsic::getDeclaration(
+#endif
+                module.get(), llvm::Intrinsic::lifetime_end,
+                {llvm::PointerType::getUnqual(*context)});
+            builder->CreateCall(lifetimeEnd, {szVal, srcAlloca});
+            builder->CreateStore(llvm::UndefValue::get(srcTy), srcAlloca);
+        }
+    }
+    deadVars_.insert(varName);
+    deadVarReason_[varName] = "moved";
 }
 
 } // namespace omscript

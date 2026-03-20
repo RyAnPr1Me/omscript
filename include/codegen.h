@@ -329,6 +329,10 @@ class CodeGenerator {
     llvm::Value* generateMoveExpr(MoveExpr* expr);
     llvm::Value* generateBorrowExpr(BorrowExpr* expr);
 
+    /// Mark a variable as moved: emit lifetime.end + store undef on its alloca,
+    /// and record it in deadVars_ for use-after-move detection.
+    void markVariableMoved(const std::string& varName);
+
     // Helper methods
     llvm::Type* getDefaultType();
     llvm::Type* getFloatType();
