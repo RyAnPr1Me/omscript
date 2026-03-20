@@ -485,8 +485,17 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     builder->SetInsertPoint(incBB);
     llvm::Value* nextVal = builder->CreateLoad(getDefaultType(), iterAlloca, stmt->iteratorVar.c_str());
     // OmScript advantage: for ascending loops starting from a non-negative
-    // value, both nsw AND nuw flags are correct — the iterator starts ≥ 0,
-    // increments by a positive step, and the loop exits before overflow.
+    // value, both nsw AND nuw flags are correct on the increment.
+    //
+    // nsw is correct because OmScript's for-loop semantics guarantee the
+    // iterator stays within representable signed range (the loop condition
+    // `iter < end` is checked with ICmpSLT before each iteration).
+    //
+    // nuw is also correct because: the iterator starts ≥ 0 and nsw
+    // guarantees no signed overflow, so the result is always in
+    // [0, 2^63-1].  Values in this range cannot wrap unsigned (they are
+    // well below UINT64_MAX = 2^64-1).
+    //
     // The nuw flag is critical because LLVM's loop unroller propagates it
     // to unrolled copies, enabling isValueNonNegative to prove non-negativity
     // of derived expressions (which in turn enables srem→urem conversion
@@ -499,7 +508,6 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         }
     }
     if (startNonNegForInc) {
-        // Both nuw and nsw: iterator is in [0, end) and increments by positive step
         incVal = builder->CreateAdd(nextVal, stepVal, "nextvar", /*HasNUW=*/true, /*HasNSW=*/true);
     } else {
         incVal = builder->CreateNSWAdd(nextVal, stepVal, "nextvar");

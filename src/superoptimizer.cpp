@@ -2829,8 +2829,11 @@ unsigned superopt::inferNonNegativeFlags(llvm::Function& func) {
             if (bo->getOpcode() != llvm::Instruction::Add) continue;
             if (bo->hasNoUnsignedWrap()) continue;
             // If both operands are provably non-negative, add nuw.
-            // This is safe because: two non-negative i64 values have
-            // mathematical sum < 2^64, so the add never wraps unsigned.
+            // Safety proof: isValueNonNegative guarantees each operand is
+            // in [0, 2^63-1] (non-negative signed i64).  Their sum is
+            // therefore in [0, 2^64-2], which fits in 64 unsigned bits
+            // without wrapping.  (The maximum is 2^63-1 + 2^63-1 = 2^64-2
+            // < 2^64 = UINT64_MAX + 1, so nuw is correct.)
             if (isValueNonNegative(bo->getOperand(0), DL) &&
                 isValueNonNegative(bo->getOperand(1), DL)) {
                 bo->setHasNoUnsignedWrap(true);
