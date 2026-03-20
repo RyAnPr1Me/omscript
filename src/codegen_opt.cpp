@@ -832,6 +832,132 @@ void CodeGenerator::runOptimizationPasses() {
             }
         }
     }
+
+    // -----------------------------------------------------------------------
+    // Post-Optimization Prefetch Cleanup
+    // -----------------------------------------------------------------------
+    // After all major optimizations (constant folding, loop elimination,
+    // inlining, superoptimizer, HGOE), remove prefetch intrinsics that are
+    // no longer meaningful:
+    //   1. Target is a constant or derived from a constant (inttoptr of literal).
+    //   2. Target is a stack allocation (alloca) or register-promoted value.
+    //   3. The prefetched value has no remaining memory-accessing users.
+    //   4. The associated computation was constant-folded or eliminated.
+    //   5. Pure functions with no memory side effects need no prefetch.
+    if (optimizationLevel >= OptimizationLevel::O2) {
+        unsigned prefetchesRemoved = 0;
+        for (auto& F : *module) {
+            if (F.isDeclaration()) continue;
+            llvm::SmallVector<llvm::CallInst*, 8> toRemove;
+            for (auto& BB : F) {
+                for (auto& I : BB) {
+                    auto* call = llvm::dyn_cast<llvm::CallInst>(&I);
+                    if (!call) continue;
+                    auto* callee = call->getCalledFunction();
+                    if (!callee || callee->getIntrinsicID() != llvm::Intrinsic::prefetch)
+                        continue;
+
+                    llvm::Value* ptr = call->getArgOperand(0);
+                    bool shouldRemove = false;
+
+                    // Rule 1: Target is a constant or inttoptr of a constant.
+                    if (llvm::isa<llvm::Constant>(ptr)) {
+                        shouldRemove = true;
+                    }
+
+                    // Rule 1b: inttoptr of a constant integer.
+                    if (!shouldRemove) {
+                        if (auto* i2p = llvm::dyn_cast<llvm::IntToPtrInst>(ptr)) {
+                            if (llvm::isa<llvm::ConstantInt>(i2p->getOperand(0))) {
+                                shouldRemove = true;
+                            }
+                        }
+                        // Also check ConstantExpr inttoptr
+                        if (auto* ce = llvm::dyn_cast<llvm::ConstantExpr>(ptr)) {
+                            if (ce->getOpcode() == llvm::Instruction::IntToPtr) {
+                                shouldRemove = true;
+                            }
+                        }
+                    }
+
+                    // Rule 2: Target is a stack allocation (alloca).
+                    if (!shouldRemove) {
+                        llvm::Value* underlying = ptr->stripPointerCasts();
+                        if (llvm::isa<llvm::AllocaInst>(underlying)) {
+                            shouldRemove = true;
+                        }
+                    }
+
+                    // Rule 3: No remaining memory-accessing users of the
+                    // prefetch target (the prefetch itself is not useful).
+                    if (!shouldRemove) {
+                        llvm::Value* underlying = ptr->stripPointerCasts();
+                        bool hasMemoryUser = false;
+                        for (auto* user : underlying->users()) {
+                            if (user == call) continue; // skip the prefetch itself
+                            if (llvm::isa<llvm::LoadInst>(user) ||
+                                llvm::isa<llvm::StoreInst>(user)) {
+                                hasMemoryUser = true;
+                                break;
+                            }
+                            // GEPs with load/store users also count
+                            if (auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(user)) {
+                                for (auto* gepUser : gep->users()) {
+                                    if (llvm::isa<llvm::LoadInst>(gepUser) ||
+                                        llvm::isa<llvm::StoreInst>(gepUser)) {
+                                        hasMemoryUser = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            if (hasMemoryUser) break;
+                        }
+                        if (!hasMemoryUser) {
+                            shouldRemove = true;
+                        }
+                    }
+
+                    // Rule 5: Prefetch inside a function with no memory side
+                    // effects (readnone/pure) is meaningless.
+                    if (!shouldRemove) {
+                        if (F.doesNotAccessMemory()) {
+                            shouldRemove = true;
+                        }
+                    }
+
+                    if (shouldRemove) {
+                        toRemove.push_back(call);
+                    }
+                }
+            }
+            for (auto* call : toRemove) {
+                call->eraseFromParent();
+                ++prefetchesRemoved;
+            }
+        }
+        if (verbose_ && prefetchesRemoved > 0) {
+            std::cout << "    Post-optimization prefetch cleanup: "
+                      << prefetchesRemoved << " redundant prefetch(es) removed"
+                      << std::endl;
+        }
+
+        // Final aggressive DCE + redundant intrinsic removal after prefetch
+        // cleanup.  This catches any dead instructions exposed by prefetch
+        // removal and strips lifetime intrinsics for values that no longer
+        // exist in memory.
+        llvm::legacy::FunctionPassManager cleanupFPM(module.get());
+        cleanupFPM.add(llvm::createDeadCodeEliminationPass());
+        cleanupFPM.add(llvm::createInstructionCombiningPass());
+        cleanupFPM.add(llvm::createCFGSimplificationPass());
+        cleanupFPM.add(llvm::createDeadCodeEliminationPass());
+        cleanupFPM.doInitialization();
+        for (auto& func : *module) {
+            if (!func.isDeclaration()) {
+                cleanupFPM.run(func);
+            }
+        }
+        cleanupFPM.doFinalization();
+    }
 }
 
 void CodeGenerator::optimizeFunction(llvm::Function* func) {

@@ -728,15 +728,21 @@ llvm::Type* CodeGenerator::getFloatType() {
 }
 
 llvm::Type* CodeGenerator::resolveAnnotatedType(const std::string& annotation) {
-    if (annotation == "float" || annotation == "double")
+    // Strip reference prefix '&' — borrowed references share the same
+    // underlying type (e.g., &i32 → i32).
+    std::string ann = annotation;
+    if (!ann.empty() && ann[0] == '&') {
+        ann = ann.substr(1);
+    }
+    if (ann == "float" || ann == "double")
         return getFloatType();                                  // f64
-    if (annotation == "bool")
+    if (ann == "bool")
         return llvm::Type::getInt1Ty(*context);                 // i1
-    if (annotation == "i8" || annotation == "u8")
+    if (ann == "i8" || ann == "u8")
         return llvm::Type::getInt8Ty(*context);                 // i8/u8
-    if (annotation == "i16" || annotation == "u16")
+    if (ann == "i16" || ann == "u16")
         return llvm::Type::getInt16Ty(*context);                // i16/u16
-    if (annotation == "i32" || annotation == "u32")
+    if (ann == "i32" || ann == "u32")
         return llvm::Type::getInt32Ty(*context);                // i32/u32
     // "int", "i64", "u64", "string", array types, struct names, generics,
     // and empty annotations all map to the default i64 representation.

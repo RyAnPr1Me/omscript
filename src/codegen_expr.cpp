@@ -1293,6 +1293,11 @@ llvm::Value* CodeGenerator::generateUnary(UnaryExpr* expr) {
             operand = builder->CreateFPToSI(operand, getDefaultType(), "ftoi");
         }
         return builder->CreateNot(operand, "bitnottmp");
+    } else if (expr->op == "&") {
+        // Address-of operator: in borrow context, this is a no-op that
+        // passes through the value.  OmScript uses value semantics; the
+        // `&` is syntactic sugar for borrow declarations (e.g., `&x`).
+        return operand;
     }
 
     codegenError("Unknown unary operator: " + expr->op, expr);

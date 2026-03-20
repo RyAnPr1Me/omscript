@@ -6027,3 +6027,20 @@ TEST(CodegenTest, ZeroDividedByZeroNotFolded) {
     // that the module compiled successfully.
     EXPECT_NE(mod->getFunction("main"), nullptr);
 }
+
+// ===========================================================================
+// Borrow with reference type annotation and address-of operator
+// ===========================================================================
+
+TEST(CodegenTest, BorrowWithRefTypeAndAddressOf) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    const char* src =
+        "fn main() {"
+        "    var x :i32 = 5;"
+        "    borrow var j:&i32 = &x;"
+        "    return j;"
+        "}";
+    auto* mod = generateIR(src, codegen);
+    ASSERT_NE(mod, nullptr);
+    EXPECT_NE(mod->getFunction("main"), nullptr);
+}

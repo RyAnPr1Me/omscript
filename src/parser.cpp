@@ -285,6 +285,11 @@ void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
 }
 
 std::string Parser::parseTypeAnnotation() {
+    // Support reference type annotations: &type (e.g., &i32, &f64)
+    std::string prefix;
+    if (match(TokenType::AMPERSAND)) {
+        prefix = "&";
+    }
     // Accept identifiers and the 'struct' keyword as type names
     std::string typeName;
     if (check(TokenType::STRUCT)) {
@@ -299,7 +304,7 @@ std::string Parser::parseTypeAnnotation() {
         advance(); // consume ']'
         typeName += "[]";
     }
-    return typeName;
+    return prefix + typeName;
 }
 
 std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
@@ -1284,6 +1289,16 @@ std::unique_ptr<Expression> Parser::parsePower() {
 
 std::unique_ptr<Expression> Parser::parseUnary() {
     if (match(TokenType::MINUS) || match(TokenType::NOT) || match(TokenType::TILDE)) {
+        Token opToken = tokens[current - 1];
+        auto operand = parseUnary();
+        auto node = std::make_unique<UnaryExpr>(opToken.lexeme, std::move(operand));
+        node->line = opToken.line;
+        node->column = opToken.column;
+        return node;
+    }
+
+    // `&expr` — address-of / borrow operator (e.g. `&x` in `borrow var j:&i32 = &x;`)
+    if (match(TokenType::AMPERSAND)) {
         Token opToken = tokens[current - 1];
         auto operand = parseUnary();
         auto node = std::make_unique<UnaryExpr>(opToken.lexeme, std::move(operand));

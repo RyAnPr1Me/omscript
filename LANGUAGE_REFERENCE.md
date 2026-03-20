@@ -1465,6 +1465,19 @@ fn main() {
 }
 ```
 
+Borrow declarations also support reference type annotations with `&` and the address-of operator:
+
+```javascript
+fn main() {
+    var x :i32 = 5;
+    borrow var j:&i32 = &x;   // reference type &i32, address-of &x
+    println(j);               // 5
+    return 0;
+}
+```
+
+The `&type` annotation (e.g., `&i32`, `&i64`) denotes a borrowed reference type. The `&expr` operator in this context is syntactic sugar indicating the value is borrowed from the source variable. Under the hood, borrowed references share the same underlying type as the referent.
+
 The compiler attaches `!noalias` scope metadata to loads from borrowed variables, enabling LLVM's alias analysis to produce more aggressive optimizations.
 
 ### 14.4 Variable State Model
@@ -3287,7 +3300,7 @@ function_decl  = "fn" IDENTIFIER [ "<" type_param_list ">" ]
 type_param_list = IDENTIFIER { "," IDENTIFIER } ;
 param_list     = parameter { "," parameter } ;
 parameter      = IDENTIFIER [ ":" type_annotation ] [ "=" literal ] ;
-type_annotation = IDENTIFIER { "[]" } ;
+type_annotation = [ "&" ] IDENTIFIER { "[]" } ;
 
 block          = "{" { statement } "}" ;
 
@@ -3313,7 +3326,7 @@ var_decl       = "var" IDENTIFIER [ ":" type_annotation ] [ "=" expression ] ";"
 const_decl     = "const" IDENTIFIER [ ":" type_annotation ] "=" expression ";" ;
 move_decl      = "move" ( "var" | IDENTIFIER ) IDENTIFIER "=" expression ";" ;
 invalidate_stmt = "invalidate" IDENTIFIER ";" ;
-borrow_decl    = "borrow" ( "var" | IDENTIFIER ) IDENTIFIER "=" expression ";" ;
+borrow_decl    = "borrow" ( "var" | IDENTIFIER ) IDENTIFIER [ ":" type_annotation ] "=" expression ";" ;
 return_stmt    = "return" [ expression ] ";" ;
 if_stmt        = "if" "(" expression ")" statement [ "else" statement ] ;
 while_stmt     = "while" "(" expression ")" statement ;
