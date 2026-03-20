@@ -1,0 +1,7 @@
+fn main() {
+    print(fast_add(10, 20));
+    print(fast_mul(5, 6));
+    print(precise_add(100, 200));
+    print(precise_sub(50, 25));
+    return 0;
+}

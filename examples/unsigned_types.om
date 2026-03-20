@@ -1,0 +1,8 @@
+fn add_unsigned(a: u64, b: u64) -> u64 {
+    return a + b;
+}
+
+fn main() {
+    print(add_unsigned(40, 2));
+    return 0;
+}

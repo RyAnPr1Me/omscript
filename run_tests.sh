@@ -341,6 +341,13 @@ test_program "examples/generic_test.om" 0
 test_program "examples/thread_test.om" 0
 test_program "examples/string_fold_test.om" 0
 test_program "examples/circular_import_test.om" 0
+test_program "examples/hint_inline.om" 0
+test_program "examples/hint_cold_hot.om" 0
+test_program "examples/hint_pure_static.om" 0
+test_program "examples/hint_prefetch.om" 0
+test_program "examples/hint_flatten.om" 0
+test_program "examples/unsigned_types.om" 0
+test_program "examples/precision_builtins.om" 0
 test_compile_fail "examples/const_fail.om"
 test_compile_fail "examples/break_outside_loop.om"
 test_compile_fail "examples/continue_outside_loop.om"
@@ -356,6 +363,7 @@ test_compile_fail "examples/missing_semicolon.om"
 test_compile_fail "examples/invalid_hex.om"
 test_compile_fail "examples/invalid_binary.om"
 test_compile_fail "examples/invalid_octal.om"
+test_compile_fail "examples/unknown_annotation.om"
 test_cli_output "error-line-info" "line" 1 ./build/omsc examples/undefined_var.om -o /tmp/test_err
 test_cli_output "error-includes-filename" "undefined_var.om" 1 ./build/omsc examples/undefined_var.om -o /tmp/test_err
 test_cli_output "missing-semicolon-msg" "Expected ';'" 1 ./build/omsc examples/missing_semicolon.om -o /tmp/test_semicolon
