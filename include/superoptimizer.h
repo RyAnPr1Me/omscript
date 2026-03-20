@@ -154,6 +154,12 @@ SuperoptimizerStats superoptimizeModule(llvm::Module& module,
 /// Returns the number of srem instructions converted.
 unsigned convertSRemToURem(llvm::Function& func);
 
+/// Convert sdiv-by-positive-constant → udiv when the dividend is provably
+/// non-negative.  Like convertSRemToURem, this runs before the LLVM pipeline
+/// so the vectorizer and loop optimizer see the cheaper unsigned operation.
+/// Returns the number of sdiv instructions converted.
+unsigned convertSDivToUDiv(llvm::Function& func);
+
 } // namespace superopt
 } // namespace omscript
 

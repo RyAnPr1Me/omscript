@@ -296,14 +296,35 @@ static bool isValueNonNegative(llvm::Value* v, const llvm::DataLayout& DL, unsig
 
     unsigned op = inst->getOpcode();
 
-    // add nuw: if both operands are non-negative, result is non-negative
-    // (nuw guarantees no unsigned wrap, so the sum stays within [0, 2^64))
+    // add: if both operands are non-negative, the result is non-negative when:
+    //   (a) nuw flag is set (guarantees no unsigned wrap), OR
+    //   (b) nsw flag is set (signed overflow is poison, so the result must be
+    //       representable as a non-negative i64), OR
+    //   (c) both operands have at least 2 leading zero bits known (i.e., both
+    //       are < 2^62), so their sum is < 2^63 and the sign bit stays 0.
+    //       This is a key OmScript advantage: for-loop iterators and their
+    //       derived expressions (XOR, AND, OR of loop vars) typically fit in
+    //       far fewer than 62 bits, so this handles patterns like
+    //       ((i^j) + k) where i,j,k are loop iterators.
     if (op == llvm::Instruction::Add) {
-        if (auto* bo = llvm::dyn_cast<llvm::BinaryOperator>(inst)) {
-            if (bo->hasNoUnsignedWrap()) {
-                return isValueNonNegative(bo->getOperand(0), DL, depth + 1) &&
-                       isValueNonNegative(bo->getOperand(1), DL, depth + 1);
-            }
+        if (isValueNonNegative(inst->getOperand(0), DL, depth + 1) &&
+            isValueNonNegative(inst->getOperand(1), DL, depth + 1)) {
+            auto* bo = llvm::dyn_cast<llvm::BinaryOperator>(inst);
+            if (bo && (bo->hasNoUnsignedWrap() || bo->hasNoSignedWrap()))
+                return true;
+            // No wrapping flags: check if both operands are small enough
+            // that their sum can't overflow into negative territory.
+            llvm::KnownBits kb0 = llvm::computeKnownBits(inst->getOperand(0), DL);
+            llvm::KnownBits kb1 = llvm::computeKnownBits(inst->getOperand(1), DL);
+            unsigned leadingZeros0 = kb0.countMinLeadingZeros();
+            unsigned leadingZeros1 = kb1.countMinLeadingZeros();
+            // Each operand fits in (bitWidth - leadingZeros) bits.
+            // Their sum fits in max(bw0, bw1) + 1 bits.
+            // If max(bw0, bw1) + 1 <= 63, the sum is < 2^63 (non-negative).
+            unsigned bw = kb0.getBitWidth();
+            unsigned maxBits = std::max(bw - leadingZeros0, bw - leadingZeros1) + 1;
+            if (maxBits <= bw - 1) // sign bit stays 0
+                return true;
         }
     }
 
@@ -2729,6 +2750,30 @@ unsigned superopt::convertSRemToURem(llvm::Function& func) {
                         llvm::IRBuilder<> builder(&inst);
                         auto* urem = builder.CreateURem(inst.getOperand(0), inst.getOperand(1), "srem_to_urem");
                         inst.replaceAllUsesWith(urem);
+                        toErase.push_back(&inst);
+                        ++count;
+                    }
+                }
+            }
+        }
+    }
+    for (auto* inst : toErase) inst->eraseFromParent();
+    return count;
+}
+
+unsigned superopt::convertSDivToUDiv(llvm::Function& func) {
+    if (func.isDeclaration()) return 0;
+    unsigned count = 0;
+    const llvm::DataLayout& DL = func.getParent()->getDataLayout();
+    llvm::SmallVector<llvm::Instruction*, 16> toErase;
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::SDiv) {
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1))) {
+                    if (ci->getSExtValue() > 0 && isValueNonNegative(inst.getOperand(0), DL)) {
+                        llvm::IRBuilder<> builder(&inst);
+                        auto* udiv = builder.CreateUDiv(inst.getOperand(0), inst.getOperand(1), "sdiv_to_udiv");
+                        inst.replaceAllUsesWith(udiv);
                         toErase.push_back(&inst);
                         ++count;
                     }

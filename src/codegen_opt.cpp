@@ -618,6 +618,7 @@ void CodeGenerator::runOptimizationPasses() {
     if (enableSuperopt_ && optimizationLevel >= OptimizationLevel::O2) {
         for (auto& func : *module) {
             superopt::convertSRemToURem(func);
+            superopt::convertSDivToUDiv(func);
         }
     }
     // Pre-pipeline HGOE loop annotation: set target-optimal unroll count,
@@ -639,6 +640,22 @@ void CodeGenerator::runOptimizationPasses() {
     MPM.run(*module, MAM);
     if (verbose_) {
         std::cout << "    LLVM pass pipeline complete" << std::endl;
+    }
+
+    // Strip `cold` and `minsize` attributes from user-defined functions.
+    // LLVM's HotColdSplitting pass (O3) can misidentify user functions as
+    // cold when there's no profile data, leading to minsize codegen that
+    // produces much slower code (register spills, no unrolling, etc.).
+    // The `cold` attribute was only intended for runtime helpers like exit()
+    // and abort() — not for user computation functions.  Stripping these
+    // attributes after the pipeline restores full-speed codegen while keeping
+    // the splitting pass's benefits for genuinely cold outlined blocks.
+    if (optimizationLevel >= OptimizationLevel::O3) {
+        for (auto& F : *module) {
+            if (F.isDeclaration()) continue;
+            F.removeFnAttr(llvm::Attribute::Cold);
+            F.removeFnAttr(llvm::Attribute::MinSize);
+        }
     }
 
     // Bounded recursive inlining: replicate GCC's deep recursive inlining
