@@ -449,6 +449,11 @@ class FunctionDecl : public ASTNode {
     bool isOptMax;
     std::string returnType;  // Optional return type annotation (e.g. "int", "int[]", "Point")
 
+    /// Compiler hint annotations: @inline, @noinline, @cold
+    bool hintInline = false;    ///< @inline — suggest inlining this function
+    bool hintNoInline = false;  ///< @noinline — prevent inlining this function
+    bool hintCold = false;      ///< @cold — mark function as rarely executed
+
     FunctionDecl(const std::string& n, std::vector<std::string> tps, std::vector<Parameter> params, std::unique_ptr<BlockStmt> b, bool optMax = false, const std::string& retType = "")
         : ASTNode(ASTNodeType::FUNCTION), name(n), typeParams(std::move(tps)), parameters(std::move(params)), body(std::move(b)), isOptMax(optMax), returnType(retType) {
     }

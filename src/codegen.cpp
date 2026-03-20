@@ -2386,6 +2386,21 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         }
     }
 
+    // Apply user-specified function annotations (@inline, @noinline, @cold).
+    // These override the automatic inlining heuristics above.
+    if (func->hintInline) {
+        function->removeFnAttr(llvm::Attribute::NoInline);
+        function->addFnAttr(llvm::Attribute::AlwaysInline);
+    }
+    if (func->hintNoInline) {
+        function->removeFnAttr(llvm::Attribute::AlwaysInline);
+        function->removeFnAttr(llvm::Attribute::InlineHint);
+        function->addFnAttr(llvm::Attribute::NoInline);
+    }
+    if (func->hintCold) {
+        function->addFnAttr(llvm::Attribute::Cold);
+    }
+
     // Create entry basic block
     llvm::BasicBlock* entry = llvm::BasicBlock::Create(*context, "entry", function);
     builder->SetInsertPoint(entry);

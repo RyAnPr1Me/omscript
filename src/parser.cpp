@@ -135,7 +135,27 @@ std::unique_ptr<Program> Parser::parse() {
             continue;
         }
         try {
-            functions.push_back(parseFunction(optMaxTagActive));
+            // Parse optional function annotations: @inline, @noinline, @cold
+            bool hintInline = false, hintNoInline = false, hintCold = false;
+            while (check(TokenType::AT)) {
+                advance(); // consume '@'
+                Token ann = consume(TokenType::IDENTIFIER, "Expected annotation name after '@'");
+                if (ann.lexeme == "inline") {
+                    hintInline = true;
+                } else if (ann.lexeme == "noinline") {
+                    hintNoInline = true;
+                } else if (ann.lexeme == "cold") {
+                    hintCold = true;
+                } else {
+                    error("Unknown function annotation '@" + ann.lexeme +
+                          "'; supported: @inline, @noinline, @cold");
+                }
+            }
+            auto func = parseFunction(optMaxTagActive);
+            func->hintInline = hintInline;
+            func->hintNoInline = hintNoInline;
+            func->hintCold = hintCold;
+            functions.push_back(std::move(func));
         } catch (const std::runtime_error& e) {
             errors_.push_back(e.what());
             synchronize();

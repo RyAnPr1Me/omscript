@@ -610,6 +610,10 @@ std::vector<Token> Lexer::tokenize() {
             tokens.push_back(makeToken(TokenType::TILDE, "~"));
             break;
 
+        case '@':
+            tokens.push_back(makeToken(TokenType::AT, "@"));
+            break;
+
         default:
             lexError("Unexpected character '" + std::string(1, c) + "'", tokenLine, tokenColumn);
             break;
