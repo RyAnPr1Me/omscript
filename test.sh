@@ -271,6 +271,7 @@ fn bench_arrindex(n:int) -> int {
         arr[idx] = sum % 100000;
     }
     invalidate arr;
+    invalidate n;
     return sum;
 }
 
@@ -282,7 +283,9 @@ fn bench_calls(n:int) -> int {
     for (i:int in 0...n) {
         sum += add_four(i % 1000);
     }
+    invalidate n
     return sum;
+    
 }
 @hot
 fn bench_bitwise(n:int) -> int {
@@ -294,6 +297,7 @@ fn bench_bitwise(n:int) -> int {
         b = (b | (i >> 1)) ^ (a & 65535);
         c += (a ^ b) & 1023;
     }
+    invalidate n;
     return a + b + c;
 }
 @hot
