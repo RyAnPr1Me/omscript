@@ -135,8 +135,11 @@ std::unique_ptr<Program> Parser::parse() {
             continue;
         }
         try {
-            // Parse optional function annotations: @inline, @noinline, @cold
+            // Parse optional function annotations: @inline, @noinline, @cold,
+            // @hot, @pure, @noreturn, @static, @flatten
             bool hintInline = false, hintNoInline = false, hintCold = false;
+            bool hintHot = false, hintPure = false, hintNoReturn = false;
+            bool hintStatic = false, hintFlatten = false;
             while (check(TokenType::AT)) {
                 advance(); // consume '@'
                 Token ann = consume(TokenType::IDENTIFIER, "Expected annotation name after '@'");
@@ -146,15 +149,30 @@ std::unique_ptr<Program> Parser::parse() {
                     hintNoInline = true;
                 } else if (ann.lexeme == "cold") {
                     hintCold = true;
+                } else if (ann.lexeme == "hot") {
+                    hintHot = true;
+                } else if (ann.lexeme == "pure") {
+                    hintPure = true;
+                } else if (ann.lexeme == "noreturn") {
+                    hintNoReturn = true;
+                } else if (ann.lexeme == "static") {
+                    hintStatic = true;
+                } else if (ann.lexeme == "flatten") {
+                    hintFlatten = true;
                 } else {
                     error("Unknown function annotation '@" + ann.lexeme +
-                          "'; supported: @inline, @noinline, @cold");
+                          "'; supported: @inline, @noinline, @cold, @hot, @pure, @noreturn, @static, @flatten");
                 }
             }
             auto func = parseFunction(optMaxTagActive);
             func->hintInline = hintInline;
             func->hintNoInline = hintNoInline;
             func->hintCold = hintCold;
+            func->hintHot = hintHot;
+            func->hintPure = hintPure;
+            func->hintNoReturn = hintNoReturn;
+            func->hintStatic = hintStatic;
+            func->hintFlatten = hintFlatten;
             functions.push_back(std::move(func));
         } catch (const std::runtime_error& e) {
             errors_.push_back(e.what());
@@ -296,6 +314,18 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
     bool hasDefault = false;
     if (!check(TokenType::RPAREN)) {
         do {
+            // Parse optional parameter annotation: @prefetch
+            bool paramPrefetch = false;
+            if (check(TokenType::AT)) {
+                advance(); // consume '@'
+                Token ann = consume(TokenType::IDENTIFIER, "Expected annotation name after '@'");
+                if (ann.lexeme == "prefetch") {
+                    paramPrefetch = true;
+                } else {
+                    error("Unknown parameter annotation '@" + ann.lexeme +
+                          "'; supported: @prefetch");
+                }
+            }
             Token paramName = consume(TokenType::IDENTIFIER, "Expected parameter name");
             std::string typeName;
             if (match(TokenType::COLON)) {
@@ -313,7 +343,9 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
             } else if (hasDefault) {
                 error("Non-default parameter '" + paramName.lexeme + "' cannot follow a default parameter");
             }
-            parameters.push_back(Parameter(paramName.lexeme, typeName, std::move(defaultVal)));
+            Parameter param(paramName.lexeme, typeName, std::move(defaultVal));
+            param.hintPrefetch = paramPrefetch;
+            parameters.push_back(std::move(param));
         } while (match(TokenType::COMMA));
     }
 

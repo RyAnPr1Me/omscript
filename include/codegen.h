@@ -282,6 +282,19 @@ class CodeGenerator {
     /// Tracks the reason a variable became dead: "moved" or "invalidated".
     std::unordered_map<std::string, std::string> deadVarReason_;
 
+    /// Functions explicitly annotated with @cold by the user.
+    /// These are preserved when the post-pipeline cold-stripping pass runs.
+    std::unordered_set<std::string> userAnnotatedColdFunctions_;
+
+    /// Functions explicitly annotated with @hot by the user.
+    std::unordered_set<std::string> userAnnotatedHotFunctions_;
+
+    /// Parameters annotated with @prefetch in the current function.
+    /// Tracks parameter names that were prefetched at function entry so that
+    /// the return statement codegen can emit cache invalidation for parameters
+    /// whose memory was not transferred out (returned).
+    std::unordered_set<std::string> prefetchedParams_;
+
     /// Classify a function into its execution tier based on type annotations,
     /// OPTMAX status, and whether it is a special function (main/stdlib).
     ExecutionTier classifyFunction(const FunctionDecl* func) const;

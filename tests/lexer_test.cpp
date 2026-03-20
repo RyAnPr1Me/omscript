@@ -323,7 +323,12 @@ TEST(LexerTest, LineColumnTracking) {
 // ---------------------------------------------------------------------------
 
 TEST(LexerTest, UnexpectedCharacter) {
-    EXPECT_THROW(lex("@"), std::runtime_error);
+    // @ is now a valid token (used for function annotations like @inline)
+    auto tokens = lex("@");
+    ASSERT_GE(tokens.size(), 2u); // AT + EOF
+    EXPECT_EQ(tokens[0].type, omscript::TokenType::AT);
+    // Other truly unexpected characters should still throw
+    EXPECT_THROW(lex("`"), std::runtime_error);
 }
 
 TEST(LexerTest, NonAsciiByteIsRejected) {

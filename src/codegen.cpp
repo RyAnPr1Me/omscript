@@ -731,14 +731,14 @@ llvm::Type* CodeGenerator::resolveAnnotatedType(const std::string& annotation) {
         return getFloatType();                                  // f64
     if (annotation == "bool")
         return llvm::Type::getInt1Ty(*context);                 // i1
-    if (annotation == "i8")
-        return llvm::Type::getInt8Ty(*context);                 // i8
-    if (annotation == "i16")
-        return llvm::Type::getInt16Ty(*context);                // i16
-    if (annotation == "i32")
-        return llvm::Type::getInt32Ty(*context);                // i32
-    // "int", "i64", "string", array types, struct names, generics, and empty
-    // annotations all map to the default i64 representation.
+    if (annotation == "i8" || annotation == "u8")
+        return llvm::Type::getInt8Ty(*context);                 // i8/u8
+    if (annotation == "i16" || annotation == "u16")
+        return llvm::Type::getInt16Ty(*context);                // i16/u16
+    if (annotation == "i32" || annotation == "u32")
+        return llvm::Type::getInt32Ty(*context);                // i32/u32
+    // "int", "i64", "u64", "string", array types, struct names, generics,
+    // and empty annotations all map to the default i64 representation.
     return getDefaultType();
 }
 
@@ -2018,17 +2018,30 @@ void CodeGenerator::generate(Program* program) {
         // initializes every variable, so the optimizer can assume no undef/
         // poison values flow through function boundaries.  This strengthens
         // SCEV, value-range propagation, and alias analysis.
-        // signext on integer params/return — enables better codegen on targets
-        // where the calling convention requires sign-extension (e.g. AArch64).
-        // Float (double) params/return must NOT get signext.
+        // signext/zeroext on integer params/return — enables better codegen on
+        // targets where the calling convention requires extension (e.g. AArch64).
+        // Unsigned type annotations (u8, u16, u32, u64) get zeroext instead
+        // of signext, which enables more efficient codegen and lets LLVM prove
+        // non-negativity for range analysis and strength reduction.
+        // Float (double) params/return must NOT get signext/zeroext.
         for (unsigned i = 0; i < func->parameters.size(); ++i) {
             function->addParamAttr(i, llvm::Attribute::NoUndef);
-            if (paramTypes[i]->isIntegerTy())
-                function->addParamAttr(i, llvm::Attribute::SExt);
+            if (paramTypes[i]->isIntegerTy()) {
+                const auto& tn = func->parameters[i].typeName;
+                if (tn == "u8" || tn == "u16" || tn == "u32" || tn == "u64")
+                    function->addParamAttr(i, llvm::Attribute::ZExt);
+                else
+                    function->addParamAttr(i, llvm::Attribute::SExt);
+            }
         }
         function->addRetAttr(llvm::Attribute::NoUndef);
-        if (retType->isIntegerTy())
-            function->addRetAttr(llvm::Attribute::SExt);
+        if (retType->isIntegerTy()) {
+            if (func->returnType == "u8" || func->returnType == "u16" ||
+                func->returnType == "u32" || func->returnType == "u64")
+                function->addRetAttr(llvm::Attribute::ZExt);
+            else
+                function->addRetAttr(llvm::Attribute::SExt);
+        }
         functions[func->name] = function;
         functionDecls_[func->name] = func.get();
     }
@@ -2386,7 +2399,7 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         }
     }
 
-    // Apply user-specified function annotations (@inline, @noinline, @cold).
+    // Apply user-specified function annotations.
     // These override the automatic inlining heuristics above.
     if (func->hintInline) {
         function->removeFnAttr(llvm::Attribute::NoInline);
@@ -2399,6 +2412,35 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     }
     if (func->hintCold) {
         function->addFnAttr(llvm::Attribute::Cold);
+        userAnnotatedColdFunctions_.insert(func->name);
+    }
+    if (func->hintHot) {
+        function->addFnAttr(llvm::Attribute::Hot);
+        userAnnotatedHotFunctions_.insert(func->name);
+    }
+    if (func->hintPure) {
+        // @pure: function has no side effects and does not read/write memory
+        // beyond its arguments.  Enables aggressive CSE, LICM, and dead call
+        // elimination.  memory(read) is the LLVM equivalent of "pure" — the
+        // function may read memory but does not write or have side effects.
+        function->setOnlyReadsMemory();
+        function->setDoesNotThrow();
+    }
+    if (func->hintNoReturn) {
+        function->addFnAttr(llvm::Attribute::NoReturn);
+    }
+    if (func->hintStatic) {
+        // @static: use internal linkage so the function is only visible within
+        // the translation unit.  Enables better interprocedural optimizations
+        // (constant propagation, dead argument elimination) because LLVM knows
+        // no external code can call it.
+        function->setLinkage(llvm::GlobalValue::InternalLinkage);
+    }
+    if (func->hintFlatten) {
+        // @flatten: inline all callees into this function.  This is the
+        // opposite of @noinline — it tells the optimizer to aggressively
+        // inline everything called from this function.
+        function->addFnAttr("flatten");
     }
 
     // Create entry basic block
@@ -2417,6 +2459,7 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     stringCapCache_.clear();
     deadVars_.clear();
     deadVarReason_.clear();
+    prefetchedParams_.clear();
 
     // Pre-populate stringVars_ for parameters known to receive string arguments.
     auto paramStrIt = funcParamStringTypes_.find(func->name);
@@ -2433,6 +2476,26 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         if (paramStrIt != funcParamStringTypes_.end() && paramStrIt->second.count(paramIdx))
             stringVars_.insert(param.name);
 
+        // @prefetch: emit llvm.prefetch at function entry for annotated params.
+        // This hints to the CPU to load the parameter's memory into cache
+        // before it is accessed, reducing memory latency.
+        if (param.hintPrefetch) {
+            prefetchedParams_.insert(param.name);
+            llvm::Value* ptrVal = builder->CreateLoad(argIt->getType(), alloca, param.name + ".pf.load");
+            // Cast to ptr for the prefetch intrinsic (parameter value is treated as a pointer)
+            llvm::Value* ptr = builder->CreateIntToPtr(ptrVal, llvm::PointerType::getUnqual(*context), param.name + ".pf.ptr");
+            llvm::Function* prefetchFn = OMSC_GET_INTRINSIC(
+                module.get(), llvm::Intrinsic::prefetch,
+                {llvm::PointerType::getUnqual(*context)});
+            // Args: ptr, rw (0=read), locality (3=keep in all cache levels), cache_type (1=data)
+            builder->CreateCall(prefetchFn, {
+                ptr,
+                builder->getInt32(0),  // read prefetch
+                builder->getInt32(3),  // high temporal locality
+                builder->getInt32(1)   // data cache
+            });
+        }
+
         ++argIt;
     }
 
@@ -2441,6 +2504,30 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
 
     // Add default return if needed
     if (!builder->GetInsertBlock()->getTerminator()) {
+        // @prefetch enforcement: at function exit, emit cache invalidation
+        // (prefetch with locality=0 "no temporal reuse") for any @prefetch
+        // parameters.  The default return path means the prefetched memory
+        // is NOT being transferred out (returned), so we evict it.
+        for (const auto& pfParam : prefetchedParams_) {
+            auto it = namedValues.find(pfParam);
+            if (it != namedValues.end()) {
+                llvm::Value* ptrVal = builder->CreateLoad(
+                    llvm::cast<llvm::AllocaInst>(it->second)->getAllocatedType(),
+                    it->second, pfParam + ".pf.exit");
+                llvm::Value* ptr = builder->CreateIntToPtr(
+                    ptrVal, llvm::PointerType::getUnqual(*context), pfParam + ".pf.evict");
+                llvm::Function* prefetchFn = OMSC_GET_INTRINSIC(
+                    module.get(), llvm::Intrinsic::prefetch,
+                    {llvm::PointerType::getUnqual(*context)});
+                // locality=0 means "no temporal reuse" — hint CPU to evict
+                builder->CreateCall(prefetchFn, {
+                    ptr,
+                    builder->getInt32(0),  // read
+                    builder->getInt32(0),  // locality=0: evict from cache
+                    builder->getInt32(1)   // data cache
+                });
+            }
+        }
         llvm::Type* retTy = function->getReturnType();
         if (retTy->isDoubleTy())
             builder->CreateRet(llvm::ConstantFP::get(retTy, 0.0));

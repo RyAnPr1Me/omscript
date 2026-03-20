@@ -650,9 +650,12 @@ void CodeGenerator::runOptimizationPasses() {
     // and abort() — not for user computation functions.  Stripping these
     // attributes after the pipeline restores full-speed codegen while keeping
     // the splitting pass's benefits for genuinely cold outlined blocks.
+    // NOTE: Functions explicitly annotated with @cold by the user are preserved.
     if (optimizationLevel >= OptimizationLevel::O3) {
         for (auto& F : *module) {
             if (F.isDeclaration()) continue;
+            std::string fname = std::string(F.getName());
+            if (userAnnotatedColdFunctions_.count(fname)) continue; // preserve @cold
             F.removeFnAttr(llvm::Attribute::Cold);
             F.removeFnAttr(llvm::Attribute::MinSize);
         }
