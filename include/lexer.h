@@ -43,6 +43,9 @@ enum class TokenType {
     MOVE,
     INVALIDATE,
     BORROW,
+    PREFETCH,
+    LIKELY,
+    UNLIKELY,
 
     // Operators
     PLUS,
@@ -82,6 +85,7 @@ enum class TokenType {
     LSHIFT,
     RSHIFT,
     RANGE,
+    DOT_DOT,
     ARROW,
     FAT_ARROW,
     PIPE_FORWARD,

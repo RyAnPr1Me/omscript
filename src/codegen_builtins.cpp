@@ -2665,15 +2665,21 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     // -----------------------------------------------------------------------
     // exit_program(code) — terminate the process with the given exit code
+    // exit() — terminate with exit code 0 (shorthand alias)
     // -----------------------------------------------------------------------
-    if (expr->callee == "exit_program") {
-        if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'exit_program' expects 1 argument, but " +
+    if (expr->callee == "exit_program" || expr->callee == "exit") {
+        llvm::Value* code;
+        if (expr->arguments.empty()) {
+            // exit() with no args defaults to exit code 0
+            code = llvm::ConstantInt::get(getDefaultType(), 0);
+        } else if (expr->arguments.size() == 1) {
+            code = generateExpression(expr->arguments[0].get());
+            code = toDefaultType(code);
+        } else {
+            codegenError("Built-in function '" + expr->callee + "' expects 0 or 1 arguments, but " +
                              std::to_string(expr->arguments.size()) + " provided",
                          expr);
         }
-        llvm::Value* code = generateExpression(expr->arguments[0].get());
-        code = toDefaultType(code);
         llvm::Value* code32 = builder->CreateTrunc(code, llvm::Type::getInt32Ty(*context), "exit.code");
         builder->CreateCall(getOrDeclareExit(), {code32});
         builder->CreateUnreachable();

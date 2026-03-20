@@ -48,7 +48,8 @@ enum class ASTNodeType {
     MOVE_EXPR,
     BORROW_EXPR,
     INVALIDATE_STMT,
-    MOVE_DECL
+    MOVE_DECL,
+    PREFETCH_STMT
 };
 
 class ASTNode {
@@ -250,10 +251,14 @@ class IfStmt : public Statement {
     std::unique_ptr<Statement> thenBranch;
     std::unique_ptr<Statement> elseBranch;
 
+    /// Branch prediction hints: `likely if (...)` / `unlikely if (...)`
+    bool hintLikely = false;    ///< Hint: then-branch is the common path
+    bool hintUnlikely = false;  ///< Hint: then-branch is the rare path
+
     IfStmt(std::unique_ptr<Expression> cond, std::unique_ptr<Statement> thenB,
-           std::unique_ptr<Statement> elseB = nullptr)
+           std::unique_ptr<Statement> elseB = nullptr, bool likely = false, bool unlikely = false)
         : Statement(ASTNodeType::IF_STMT), condition(std::move(cond)), thenBranch(std::move(thenB)),
-          elseBranch(std::move(elseB)) {}
+          elseBranch(std::move(elseB)), hintLikely(likely), hintUnlikely(unlikely) {}
 };
 
 class WhileStmt : public Statement {
@@ -538,6 +543,30 @@ class MoveDecl : public Statement {
 
     MoveDecl(const std::string& n, const std::string& t, std::unique_ptr<Expression> init)
         : Statement(ASTNodeType::MOVE_DECL), name(n), typeName(t), initializer(std::move(init)) {}
+};
+
+/// `prefetch x:u32;` — standalone prefetch hint for an existing variable.
+/// `prefetch [hot] [immut] var name:type = expr;` — variable declaration with prefetch hint.
+class PrefetchStmt : public Statement {
+  public:
+    /// For standalone prefetch of an existing variable (no declaration).
+    std::string varName;
+
+    /// For prefetch with variable declaration.
+    std::unique_ptr<VarDecl> varDecl;
+
+    /// Attribute hints.
+    bool hintHot = false;
+    bool hintImmut = false;
+
+    /// Constructor for standalone prefetch of an existing variable.
+    explicit PrefetchStmt(const std::string& name)
+        : Statement(ASTNodeType::PREFETCH_STMT), varName(name) {}
+
+    /// Constructor for prefetch with variable declaration.
+    PrefetchStmt(std::unique_ptr<VarDecl> decl, bool hot, bool immut)
+        : Statement(ASTNodeType::PREFETCH_STMT), varDecl(std::move(decl)),
+          hintHot(hot), hintImmut(immut) {}
 };
 
 } // namespace omscript

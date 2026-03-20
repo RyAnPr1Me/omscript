@@ -468,6 +468,20 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         right = builder->CreatePtrToInt(right, getDefaultType(), "ptoi");
     }
 
+    // Normalize integer widths: when operands have different integer bit widths
+    // (e.g. i8 from u8, i32 from u32, i64 from default), extend both to the
+    // wider of the two types so that LLVM binary instructions see matching types.
+    if (left->getType()->isIntegerTy() && right->getType()->isIntegerTy() &&
+        left->getType() != right->getType()) {
+        unsigned leftBits = left->getType()->getIntegerBitWidth();
+        unsigned rightBits = right->getType()->getIntegerBitWidth();
+        if (leftBits < rightBits) {
+            left = builder->CreateSExt(left, right->getType(), "sext");
+        } else {
+            right = builder->CreateSExt(right, left->getType(), "sext");
+        }
+    }
+
     // Constant folding optimization - if both operands are constants, compute at compile time
     if (llvm::isa<llvm::ConstantInt>(left) && llvm::isa<llvm::ConstantInt>(right)) {
         auto leftConst = llvm::dyn_cast<llvm::ConstantInt>(left);
@@ -1303,11 +1317,14 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
         if (allocaType->isDoubleTy() && value->getType()->isIntegerTy()) {
             value = builder->CreateSIToFP(value, getFloatType(), "itof");
         } else if (allocaType->isIntegerTy() && value->getType()->isDoubleTy()) {
-            value = builder->CreateFPToSI(value, getDefaultType(), "ftoi");
+            value = builder->CreateFPToSI(value, allocaType, "ftoi");
         } else if (allocaType->isIntegerTy() && value->getType()->isPointerTy()) {
-            value = builder->CreatePtrToInt(value, getDefaultType(), "ptoi");
+            value = builder->CreatePtrToInt(value, allocaType, "ptoi");
         } else if (allocaType->isPointerTy() && value->getType()->isIntegerTy()) {
             value = builder->CreateIntToPtr(value, llvm::PointerType::getUnqual(*context), "itop");
+        } else if (allocaType->isIntegerTy() && value->getType()->isIntegerTy() &&
+                   allocaType != value->getType()) {
+            value = convertTo(value, allocaType);
         }
     }
 

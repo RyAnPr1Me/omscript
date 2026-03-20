@@ -7,6 +7,16 @@
 
 namespace omscript {
 
+/// Check if a string is a known type annotation name.
+/// Used to disambiguate `x:u32` (type annotation on identifier) from other
+/// uses of colon in expression context.
+static bool isKnownTypeName(const std::string& name) {
+    return name == "u8" || name == "u16" || name == "u32" || name == "u64" ||
+           name == "i8" || name == "i16" || name == "i32" || name == "i64" ||
+           name == "int" || name == "float" || name == "double" || name == "bool" ||
+           name == "string";
+}
+
 Parser::Parser(const std::vector<Token>& tokens)
     : tokens(tokens), current(0), inOptMaxFunction(false),
       importedFiles_(std::make_shared<std::unordered_set<std::string>>()) {}
@@ -318,12 +328,18 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
             bool paramPrefetch = false;
             if (check(TokenType::AT)) {
                 advance(); // consume '@'
-                Token ann = consume(TokenType::IDENTIFIER, "Expected annotation name after '@'");
-                if (ann.lexeme == "prefetch") {
+                // Accept both IDENTIFIER and PREFETCH keyword for @prefetch
+                if (check(TokenType::PREFETCH)) {
+                    advance();
                     paramPrefetch = true;
                 } else {
-                    error("Unknown parameter annotation '@" + ann.lexeme +
-                          "'; supported: @prefetch");
+                    Token ann = consume(TokenType::IDENTIFIER, "Expected annotation name after '@'");
+                    if (ann.lexeme == "prefetch") {
+                        paramPrefetch = true;
+                    } else {
+                        error("Unknown parameter annotation '@" + ann.lexeme +
+                              "'; supported: @prefetch");
+                    }
                 }
             }
             Token paramName = consume(TokenType::IDENTIFIER, "Expected parameter name");
@@ -370,6 +386,23 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
 std::unique_ptr<Statement> Parser::parseStatement() {
     RecursionGuard guard(*this);
     // Capture the keyword token position for source location tracking.
+    if (match(TokenType::LIKELY) || match(TokenType::UNLIKELY)) {
+        Token hintKw = tokens[current - 1];
+        bool isLikely = (hintKw.type == TokenType::LIKELY);
+        if (!match(TokenType::IF)) {
+            error("Expected 'if' after '" + hintKw.lexeme + "'");
+        }
+        Token kw = tokens[current - 1];
+        auto stmt = parseIfStmt();
+        auto* ifStmt = dynamic_cast<IfStmt*>(stmt.get());
+        if (ifStmt) {
+            ifStmt->hintLikely = isLikely;
+            ifStmt->hintUnlikely = !isLikely;
+        }
+        stmt->line = hintKw.line;
+        stmt->column = hintKw.column;
+        return stmt;
+    }
     if (match(TokenType::IF)) {
         Token kw = tokens[current - 1];
         auto stmt = parseIfStmt();
@@ -466,6 +499,82 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         stmt->column = kw.column;
         return stmt;
     }
+    if (match(TokenType::PREFETCH)) {
+        Token kw = tokens[current - 1];
+        // Parse optional attributes: hot, immut
+        bool hintHot = false;
+        bool hintImmut = false;
+        while (check(TokenType::IDENTIFIER) && !isAtEnd()) {
+            const std::string& attrName = peek().lexeme;
+            if (attrName == "hot") { hintHot = true; advance(); continue; }
+            if (attrName == "immut") { hintImmut = true; advance(); continue; }
+            break;
+        }
+        // Determine if this is a variable declaration or standalone prefetch.
+        // Declaration forms:
+        //   prefetch [attrs] var name[:type] [= expr];
+        //   prefetch [attrs] name:type = expr;       (has '=')
+        //   prefetch [attrs] name = expr;             (has '=')
+        // Standalone forms (existing variable):
+        //   prefetch name[:type];                     (no '=' → just re-prefetch)
+        bool isDecl = false;
+        if (check(TokenType::VAR)) {
+            isDecl = true;
+        } else if (check(TokenType::IDENTIFIER)) {
+            // Look ahead past optional :type to see if there's an '='
+            size_t lookahead = current + 1;
+            if (lookahead < tokens.size() && tokens[lookahead].type == TokenType::COLON) {
+                lookahead++; // skip ':'
+                if (lookahead < tokens.size() && tokens[lookahead].type == TokenType::IDENTIFIER)
+                    lookahead++; // skip type name
+                // Skip optional array brackets []
+                while (lookahead + 1 < tokens.size() &&
+                       tokens[lookahead].type == TokenType::LBRACKET &&
+                       tokens[lookahead + 1].type == TokenType::RBRACKET)
+                    lookahead += 2;
+            }
+            if (lookahead < tokens.size() && tokens[lookahead].type == TokenType::ASSIGN)
+                isDecl = true;
+        }
+        if (isDecl) {
+            // prefetch [attrs] var name:type = expr; OR prefetch [attrs] name:type = expr;
+            bool isConst = hintImmut;
+            std::string typeName;
+            if (match(TokenType::VAR)) {
+                // consumed var
+            }
+            Token name = consume(TokenType::IDENTIFIER, "Expected variable name in prefetch declaration");
+            if (match(TokenType::COLON)) {
+                typeName = parseTypeAnnotation();
+            }
+            std::unique_ptr<Expression> init = nullptr;
+            if (match(TokenType::ASSIGN)) {
+                init = parseExpression();
+            }
+            consume(TokenType::SEMICOLON, "Expected ';' after prefetch declaration");
+            auto varDecl = std::make_unique<VarDecl>(name.lexeme, std::move(init), isConst, typeName);
+            varDecl->line = kw.line;
+            varDecl->column = kw.column;
+            auto stmt = std::make_unique<PrefetchStmt>(std::move(varDecl), hintHot, hintImmut);
+            stmt->line = kw.line;
+            stmt->column = kw.column;
+            return stmt;
+        }
+        // Standalone prefetch of existing variable: prefetch name[:type];
+        if (check(TokenType::IDENTIFIER)) {
+            Token varName = advance();
+            // Consume optional :type annotation
+            if (match(TokenType::COLON)) {
+                parseTypeAnnotation(); // consume and discard
+            }
+            consume(TokenType::SEMICOLON, "Expected ';' after prefetch statement");
+            auto stmt = std::make_unique<PrefetchStmt>(varName.lexeme);
+            stmt->line = kw.line;
+            stmt->column = kw.column;
+            return stmt;
+        }
+        error("Expected variable name or declaration after 'prefetch'");
+    }
     if (match(TokenType::MOVE)) {
         // move semantics: either `move var x = expr;` or `move x = expr;`
         Token kw = tokens[current - 1];
@@ -495,7 +604,7 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         return parseExprStmt();
     }
     if (match(TokenType::BORROW)) {
-        // `borrow var ref = &x;` or `borrow ref = &x;`
+        // `borrow var ref = expr;` or `borrow type ref = expr;` or `borrow ref:type = expr;`
         Token kw = tokens[current - 1];
         std::string typeName;
         if (match(TokenType::VAR)) {
@@ -505,6 +614,10 @@ std::unique_ptr<Statement> Parser::parseStatement() {
             typeName = advance().lexeme;
         }
         Token name = consume(TokenType::IDENTIFIER, "Expected variable name in borrow declaration");
+        // Support name:type syntax: borrow j:u32 = expr;
+        if (typeName.empty() && match(TokenType::COLON)) {
+            typeName = parseTypeAnnotation();
+        }
         consume(TokenType::ASSIGN, "Expected '=' in borrow declaration");
         auto init = parseExpression();
         consume(TokenType::SEMICOLON, "Expected ';' after borrow declaration");
@@ -617,8 +730,8 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
 
     auto firstExpr = parseExpression();
 
-    // If next token is '...', this is a range-based for loop
-    if (match(TokenType::RANGE)) {
+    // If next token is '...' or '..', this is a range-based for loop
+    if (match(TokenType::RANGE) || match(TokenType::DOT_DOT)) {
         auto end = parseExpression();
 
         std::unique_ptr<Expression> step = nullptr;
@@ -1324,6 +1437,16 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
         auto expr = std::make_unique<IdentifierExpr>(token.lexeme);
         expr->line = token.line;
         expr->column = token.column;
+        // Consume optional :type annotation on identifier in expression context
+        // (e.g. x:u32 in function call arguments, assignments, range bounds).
+        // Only consume when the type name is a known type to avoid ambiguity
+        // with ternary operator colons and other colon uses.
+        if (check(TokenType::COLON) && current + 1 < tokens.size() &&
+            tokens[current + 1].type == TokenType::IDENTIFIER &&
+            isKnownTypeName(tokens[current + 1].lexeme)) {
+            advance(); // consume ':'
+            advance(); // consume type name
+        }
         return expr;
     }
 

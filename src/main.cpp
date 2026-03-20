@@ -1593,6 +1593,12 @@ const char* tokenTypeToString(omscript::TokenType type) {
         return "INVALIDATE";
     case omscript::TokenType::BORROW:
         return "BORROW";
+    case omscript::TokenType::PREFETCH:
+        return "PREFETCH";
+    case omscript::TokenType::LIKELY:
+        return "LIKELY";
+    case omscript::TokenType::UNLIKELY:
+        return "UNLIKELY";
     case omscript::TokenType::PLUS:
         return "PLUS";
     case omscript::TokenType::MINUS:
@@ -1667,6 +1673,8 @@ const char* tokenTypeToString(omscript::TokenType type) {
         return "RSHIFT";
     case omscript::TokenType::RANGE:
         return "RANGE";
+    case omscript::TokenType::DOT_DOT:
+        return "DOT_DOT";
     case omscript::TokenType::ARROW:
         return "ARROW";
     case omscript::TokenType::FAT_ARROW:

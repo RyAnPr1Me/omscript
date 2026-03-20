@@ -295,6 +295,12 @@ class CodeGenerator {
     /// whose memory was not transferred out (returned).
     std::unordered_set<std::string> prefetchedParams_;
 
+    /// Variables declared with `prefetch` statement in the current function.
+    /// Tracks variable names that must be explicitly invalidated before the
+    /// function returns.  A compile-time error is emitted if any prefetched
+    /// variable is not found in deadVars_ at return time.
+    std::unordered_set<std::string> prefetchedVars_;
+
     /// Classify a function into its execution tier based on type annotations,
     /// OPTMAX status, and whether it is a special function (main/stdlib).
     ExecutionTier classifyFunction(const FunctionDecl* func) const;
@@ -341,6 +347,7 @@ class CodeGenerator {
     void generateThrow(ThrowStmt* stmt);
     void generateInvalidate(InvalidateStmt* stmt);
     void generateMoveDecl(MoveDecl* stmt);
+    void generatePrefetch(PrefetchStmt* stmt);
     llvm::Value* generateMoveExpr(MoveExpr* expr);
     llvm::Value* generateBorrowExpr(BorrowExpr* expr);
 
