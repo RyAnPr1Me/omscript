@@ -321,9 +321,11 @@ static bool isValueNonNegative(llvm::Value* v, const llvm::DataLayout& DL, unsig
             // Each operand fits in (bitWidth - leadingZeros) bits.
             // Their sum fits in max(bw0, bw1) + 1 bits.
             // If max(bw0, bw1) + 1 <= 63, the sum is < 2^63 (non-negative).
-            unsigned bw = kb0.getBitWidth();
+            unsigned bw = kb0.getBitWidth();  // typically 64 for i64
             unsigned maxBits = std::max(bw - leadingZeros0, bw - leadingZeros1) + 1;
-            if (maxBits <= bw - 1) // sign bit stays 0
+            // bw - 1 is the sign bit position (63 for i64); if the sum
+            // fits within that many bits, the sign bit stays 0.
+            if (maxBits <= bw - 1)
                 return true;
         }
     }
