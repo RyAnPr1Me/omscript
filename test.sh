@@ -181,6 +181,7 @@ fn bench_struct(@prefetch n:int) -> int {
         sum += p.x + p.y;
     }
     invalidate n;
+    invalidate p;
     return sum;
 }
 @hot
