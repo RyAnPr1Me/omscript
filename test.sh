@@ -108,7 +108,7 @@ echo "Generating source files …"
 cat > bench.om << 'OMEOF'
 OPTMAX=:
 
-struct Point { x:int, y:int }
+struct Point { hot int x, hot int y }
 
 fn bench_math(n:int) -> int {
     var acc:int = 0;
@@ -126,7 +126,9 @@ fn bench_push(n:int) -> int {
     for (i:int in 0...n) {
         arr = push(arr, (i * 3) % 12345);
     }
-    return len(arr);
+    var result:int = len(arr);
+    invalidate arr;
+    return result;
 }
 
 fn bench_hof(n:int) -> int {
@@ -135,9 +137,13 @@ fn bench_hof(n:int) -> int {
         arr[i] = (i * 7) % 1000;
     }
     var mapped:int[] = array_map(arr, |x:int| (x * x) % 997);
+    invalidate arr;
     var filtered:int[] = array_filter(mapped, |x:int| x % 2 == 0);
+    invalidate mapped;
     var reduced:int = array_reduce(filtered, |a:int, b:int| a + b, 0);
-    return reduced + len(filtered);
+    var result:int = reduced + len(filtered);
+    invalidate filtered;
+    return result;
 }
 
 fn bench_strcat(n:int) -> int {
@@ -145,7 +151,9 @@ fn bench_strcat(n:int) -> int {
     for (i:int in 0...n) {
         s = str_concat(s, "y");
     }
-    return str_len(s);
+    var result:int = str_len(s);
+    invalidate s;
+    return result;
 }
 
 fn bench_strops(n:int) -> int {
@@ -155,6 +163,7 @@ fn bench_strops(n:int) -> int {
         count += str_contains(haystack, "efg");
         count += str_index_of(haystack, "hij") % 100;
     }
+    invalidate haystack;
     return count;
 }
 
@@ -208,7 +217,9 @@ fn bench_sort(n:int) -> int {
         arr = push(arr, (i * 2654435761) % 1000000);
     }
     sort(arr);
-    return arr[0] + arr[n / 2] + arr[n - 1];
+    var result:int = arr[0] + arr[n / 2] + arr[n - 1];
+    invalidate arr;
+    return result;
 }
 
 fn bench_while(n:int) -> int {
@@ -250,6 +261,7 @@ fn bench_arrindex(n:int) -> int {
         sum += arr[idx];
         arr[idx] = sum % 100000;
     }
+    invalidate arr;
     return sum;
 }
 
@@ -294,8 +306,11 @@ fn bench_combined(n:int) -> int {
         arr = push(arr, (i * 3) % 12345);
     }
     var mapped:int[] = array_map(arr, |x:int| (x * x) % 997);
+    invalidate arr;
     var filtered:int[] = array_filter(mapped, |x:int| x % 2 == 0);
+    invalidate mapped;
     total += array_reduce(filtered, |a:int, b:int| a + b, 0) + len(filtered);
+    invalidate filtered;
 
     // struct
     var p:struct = Point { x: 1, y: 2 };
@@ -321,6 +336,7 @@ fn bench_combined(n:int) -> int {
         s = str_concat(s, "y");
     }
     total += str_len(s);
+    invalidate s;
 
     // nested loop (small)
     var ns:int = 50;
@@ -369,6 +385,8 @@ cat > bench.c << 'CEOF'
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+typedef struct { long x, y; } Point;
 
 /* helpers */
 static long gcd(long a, long b) {
@@ -455,9 +473,10 @@ static long bench_strops(long n) {
 
 /*  5 ── struct access ─────────────────────────── */
 static long bench_struct(long n) {
-    long x = 1, y = 2, sum = 0;
+    Point p = {1, 2};
+    long sum = 0;
     for (long i = 0; i < n; i++) {
-        x += i; y ^= i; sum += x + y;
+        p.x += i; p.y ^= i; sum += p.x + p.y;
     }
     return sum;
 }
@@ -598,9 +617,9 @@ static long bench_combined(long n) {
     free(arr); free(mapped);
 
     /* struct */
-    { long x = 1, y = 2;
+    { Point p = {1, 2};
       for (long i = 0; i < n; i++) {
-        x += i; y ^= i; total += x + y;
+        p.x += i; p.y ^= i; total += p.x + p.y;
       }
     }
 
@@ -681,16 +700,21 @@ echo "────────────────────────�
 echo "  DEBUG: Compilation Timing"
 echo "────────────────────────────────────────────────────────────────"
 
-echo "Compiling OM ($OMSC -O3 -march=native) …"
+# Note: omsc -flto + -march=native currently hangs, so -flto is omitted for OM.
+# All other max-optimization flags are enabled.  OPTMAX is set inside bench.om.
+OM_FLAGS="-O3 -march=native -mtune=native -ffast-math -fvectorize -funroll-loops -floop-optimize"
+C_FLAGS="-O3 -march=native -mtune=native -flto -ffast-math -funroll-loops"
+
+echo "Compiling OM ($OMSC $OM_FLAGS) …"
 OM_COMP_START=$(date +%s%N)
-"$OMSC" bench.om -O3 -march=native -o bench_om
+"$OMSC" bench.om $OM_FLAGS -o bench_om
 OM_COMP_END=$(date +%s%N)
 OM_COMP_MS=$(( (OM_COMP_END - OM_COMP_START) / 1000000 ))
 echo "  OM compile time: ${OM_COMP_MS} ms"
 
-echo "Compiling C  (gcc  -O3 -march=native -flto) …"
+echo "Compiling C  (gcc $C_FLAGS) …"
 C_COMP_START=$(date +%s%N)
-gcc bench.c -O3 -march=native -flto -o bench_c
+gcc bench.c $C_FLAGS -o bench_c
 C_COMP_END=$(date +%s%N)
 C_COMP_MS=$(( (C_COMP_END - C_COMP_START) / 1000000 ))
 echo "  C  compile time: ${C_COMP_MS} ms"
