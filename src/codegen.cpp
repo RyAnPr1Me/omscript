@@ -2044,6 +2044,9 @@ void CodeGenerator::generate(Program* program) {
     // Process struct declarations: store field layouts for struct operations.
     for (auto& structDecl : program->structs) {
         structDefs_[structDecl->name] = structDecl->fields;
+        if (!structDecl->fieldDecls.empty()) {
+            structFieldDecls_[structDecl->name] = structDecl->fieldDecls;
+        }
     }
 
     // Pre-analyze string types: determine which functions return strings and

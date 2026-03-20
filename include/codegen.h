@@ -241,6 +241,8 @@ class CodeGenerator {
 
     // Struct type definitions: struct name → ordered list of field names.
     std::unordered_map<std::string, std::vector<std::string>> structDefs_;
+    // Rich struct field metadata: struct name → ordered list of StructField with attributes.
+    std::unordered_map<std::string, std::vector<StructField>> structFieldDecls_;
     // Variables known to hold struct values, maps var name → struct type name.
     std::unordered_map<std::string, std::string> structVars_;
 

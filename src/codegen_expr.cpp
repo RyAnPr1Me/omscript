@@ -80,7 +80,18 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
     }
     auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(it->second);
     llvm::Type* loadType = alloca ? alloca->getAllocatedType() : getDefaultType();
-    return builder->CreateLoad(loadType, it->second, expr->name.c_str());
+    auto* load = builder->CreateLoad(loadType, it->second, expr->name.c_str());
+
+    // If this is a const variable, mark the load as invariant so LLVM knows
+    // the value never changes and can hoist/CSE it aggressively.
+    auto constIt = constValues.find(expr->name);
+    if (constIt != constValues.end() && constIt->second) {
+        if (auto* loadInst = llvm::dyn_cast<llvm::LoadInst>(load)) {
+            loadInst->setMetadata(llvm::LLVMContext::MD_invariant_load,
+                                  llvm::MDNode::get(*context, {}));
+        }
+    }
+    return load;
 }
 
 llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
@@ -1831,7 +1842,67 @@ llvm::Value* CodeGenerator::generateFieldAccess(FieldAccessExpr* expr) {
     llvm::Value* basePtr = builder->CreateIntToPtr(objVal, ptrTy, "struct.baseptr");
     llvm::Value* elemPtr = builder->CreateGEP(
         getDefaultType(), basePtr, llvm::ConstantInt::get(getDefaultType(), fieldIdx), "struct.field.load.ptr");
-    return builder->CreateLoad(getDefaultType(), elemPtr, "struct.field.val");
+
+    // Determine alignment from struct field attributes.
+    unsigned fieldAlign = 0;
+    auto declIt = structFieldDecls_.find(structType);
+    const FieldAttrs* attrs = nullptr;
+    if (declIt != structFieldDecls_.end() && fieldIdx < declIt->second.size()) {
+        attrs = &declIt->second[fieldIdx].attrs;
+        if (attrs->align > 0) {
+            fieldAlign = static_cast<unsigned>(attrs->align);
+        }
+    }
+
+    llvm::LoadInst* load;
+    if (fieldAlign > 0) {
+        load = builder->CreateAlignedLoad(getDefaultType(), elemPtr,
+                                          llvm::MaybeAlign(fieldAlign), "struct.field.val");
+    } else {
+        load = builder->CreateLoad(getDefaultType(), elemPtr, "struct.field.val");
+    }
+
+    // Apply LLVM metadata from struct field attributes.
+    if (attrs) {
+        // immut → !invariant.load metadata: tells LLVM the value never changes
+        if (attrs->immut) {
+            load->setMetadata(llvm::LLVMContext::MD_invariant_load,
+                              llvm::MDNode::get(*context, {}));
+        }
+        // noalias → !noalias scope metadata (similar to borrow)
+        if (attrs->noalias) {
+            llvm::MDNode* domain = llvm::MDNode::getDistinct(*context,
+                {llvm::MDString::get(*context, "struct.noalias.domain")});
+            domain->replaceOperandWith(0, domain);
+            llvm::MDNode* scope = llvm::MDNode::getDistinct(*context,
+                {llvm::MDString::get(*context, "struct.noalias.scope")});
+            scope->replaceOperandWith(0, scope);
+            llvm::MDNode* scopeList = llvm::MDNode::get(*context, {scope});
+            load->setMetadata(llvm::LLVMContext::MD_noalias, scopeList);
+        }
+        // range(min,max) → !range metadata for integer range propagation
+        if (attrs->hasRange) {
+            auto* i64Ty = llvm::Type::getInt64Ty(*context);
+            llvm::Metadata* rangeMD[] = {
+                llvm::ConstantAsMetadata::get(
+                    llvm::ConstantInt::get(i64Ty, static_cast<uint64_t>(attrs->rangeMin))),
+                llvm::ConstantAsMetadata::get(
+                    llvm::ConstantInt::get(i64Ty, static_cast<uint64_t>(attrs->rangeMax) + 1))
+            };
+            load->setMetadata(llvm::LLVMContext::MD_range,
+                              llvm::MDNode::get(*context, rangeMD));
+        }
+        // !nontemporal hint for cold fields — tells cache to skip caching
+        if (attrs->cold) {
+            llvm::Metadata* one[] = {
+                llvm::ConstantAsMetadata::get(
+                    llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 1))
+            };
+            load->setMetadata(llvm::LLVMContext::MD_nontemporal,
+                              llvm::MDNode::get(*context, one));
+        }
+    }
+    return load;
 }
 
 llvm::Value* CodeGenerator::generateFieldAssign(FieldAssignExpr* expr) {
@@ -1847,7 +1918,32 @@ llvm::Value* CodeGenerator::generateFieldAssign(FieldAssignExpr* expr) {
     llvm::Value* basePtr = builder->CreateIntToPtr(objVal, ptrTy, "struct.baseptr");
     llvm::Value* elemPtr = builder->CreateGEP(
         getDefaultType(), basePtr, llvm::ConstantInt::get(getDefaultType(), fieldIdx), "struct.field.store.ptr");
-    builder->CreateStore(newVal, elemPtr);
+
+    // Apply alignment from struct field attributes.
+    auto declIt = structFieldDecls_.find(structType);
+    const FieldAttrs* attrs = nullptr;
+    if (declIt != structFieldDecls_.end() && fieldIdx < declIt->second.size()) {
+        attrs = &declIt->second[fieldIdx].attrs;
+    }
+
+    llvm::StoreInst* store;
+    if (attrs && attrs->align > 0) {
+        store = builder->CreateAlignedStore(newVal, elemPtr,
+                                            llvm::MaybeAlign(static_cast<unsigned>(attrs->align)));
+    } else {
+        store = builder->CreateStore(newVal, elemPtr);
+    }
+
+    // !nontemporal hint for cold fields — bypass cache on write
+    if (attrs && attrs->cold) {
+        llvm::Metadata* one[] = {
+            llvm::ConstantAsMetadata::get(
+                llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 1))
+        };
+        store->setMetadata(llvm::LLVMContext::MD_nontemporal,
+                           llvm::MDNode::get(*context, one));
+    }
+
     return newVal;
 }
 
