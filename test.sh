@@ -346,6 +346,7 @@ fn bench_combined(n:int) -> int {
     }
     total += str_len(s);
     invalidate s;
+    invalidate n;
 
     // nested loop (small)
     var ns:int = 50;
@@ -384,6 +385,7 @@ fn main() -> int {
         default: print(0);
     }
     return 0;
+    invalidate n;
 }
 
 OPTMAX!:
