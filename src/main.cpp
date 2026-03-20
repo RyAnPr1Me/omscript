@@ -1595,6 +1595,10 @@ const char* tokenTypeToString(omscript::TokenType type) {
         return "BORROW";
     case omscript::TokenType::PREFETCH:
         return "PREFETCH";
+    case omscript::TokenType::LIKELY:
+        return "LIKELY";
+    case omscript::TokenType::UNLIKELY:
+        return "UNLIKELY";
     case omscript::TokenType::PLUS:
         return "PLUS";
     case omscript::TokenType::MINUS:

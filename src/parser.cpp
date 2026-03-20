@@ -386,6 +386,23 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
 std::unique_ptr<Statement> Parser::parseStatement() {
     RecursionGuard guard(*this);
     // Capture the keyword token position for source location tracking.
+    if (match(TokenType::LIKELY) || match(TokenType::UNLIKELY)) {
+        Token hintKw = tokens[current - 1];
+        bool isLikely = (hintKw.type == TokenType::LIKELY);
+        if (!match(TokenType::IF)) {
+            error("Expected 'if' after '" + hintKw.lexeme + "'");
+        }
+        Token kw = tokens[current - 1];
+        auto stmt = parseIfStmt();
+        auto* ifStmt = dynamic_cast<IfStmt*>(stmt.get());
+        if (ifStmt) {
+            ifStmt->hintLikely = isLikely;
+            ifStmt->hintUnlikely = !isLikely;
+        }
+        stmt->line = hintKw.line;
+        stmt->column = hintKw.column;
+        return stmt;
+    }
     if (match(TokenType::IF)) {
         Token kw = tokens[current - 1];
         auto stmt = parseIfStmt();

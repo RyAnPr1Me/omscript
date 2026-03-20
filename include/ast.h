@@ -251,10 +251,14 @@ class IfStmt : public Statement {
     std::unique_ptr<Statement> thenBranch;
     std::unique_ptr<Statement> elseBranch;
 
+    /// Branch prediction hints: `likely if (...)` / `unlikely if (...)`
+    bool hintLikely = false;    ///< Hint: then-branch is the common path
+    bool hintUnlikely = false;  ///< Hint: then-branch is the rare path
+
     IfStmt(std::unique_ptr<Expression> cond, std::unique_ptr<Statement> thenB,
-           std::unique_ptr<Statement> elseB = nullptr)
+           std::unique_ptr<Statement> elseB = nullptr, bool likely = false, bool unlikely = false)
         : Statement(ASTNodeType::IF_STMT), condition(std::move(cond)), thenBranch(std::move(thenB)),
-          elseBranch(std::move(elseB)) {}
+          elseBranch(std::move(elseB)), hintLikely(likely), hintUnlikely(unlikely) {}
 };
 
 class WhileStmt : public Statement {

@@ -91,6 +91,30 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
 }
 
 void CodeGenerator::generateReturn(ReturnStmt* stmt) {
+    // Prefetch invalidation enforcement: check that all prefetched variables
+    // have been explicitly invalidated before returning.  Variables that are
+    // being returned via `move` are exempt (ownership transfer).
+    if (!prefetchedVars_.empty()) {
+        std::string returnedVar;
+        if (stmt->value) {
+            if (auto* moveExpr = dynamic_cast<MoveExpr*>(stmt->value.get())) {
+                if (auto* ident = dynamic_cast<IdentifierExpr*>(moveExpr->source.get())) {
+                    returnedVar = ident->name;
+                }
+            } else if (auto* ident = dynamic_cast<IdentifierExpr*>(stmt->value.get())) {
+                returnedVar = ident->name;
+            }
+        }
+        for (const auto& pfVar : prefetchedVars_) {
+            if (pfVar == returnedVar) continue; // being returned — exempt
+            if (!deadVars_.count(pfVar)) {
+                codegenError("Prefetched variable '" + pfVar +
+                             "' must be explicitly invalidated before return "
+                             "(use 'invalidate " + pfVar + ";')", stmt);
+            }
+        }
+    }
+
     if (stmt->value) {
         llvm::Value* retValue = generateExpression(stmt->value.get());
         // Record that the current function returns a string value so that
@@ -201,10 +225,21 @@ void CodeGenerator::generateIf(IfStmt* stmt) {
     llvm::BasicBlock* elseBB = stmt->elseBranch ? llvm::BasicBlock::Create(*context, "else", function) : nullptr;
     llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "ifcont", function);
 
+    llvm::BranchInst* br;
     if (elseBB) {
-        builder->CreateCondBr(condBool, thenBB, elseBB);
+        br = builder->CreateCondBr(condBool, thenBB, elseBB);
     } else {
-        builder->CreateCondBr(condBool, thenBB, mergeBB);
+        br = builder->CreateCondBr(condBool, thenBB, mergeBB);
+    }
+
+    // Attach branch weight metadata for likely/unlikely hints.
+    // likely  → then-branch is hot (weight 2000:1)
+    // unlikely → then-branch is cold (weight 1:2000)
+    if (stmt->hintLikely || stmt->hintUnlikely) {
+        uint32_t thenWeight = stmt->hintLikely ? 2000 : 1;
+        uint32_t elseWeight = stmt->hintLikely ? 1 : 2000;
+        llvm::MDNode* brWeights = llvm::MDBuilder(*context).createBranchWeights(thenWeight, elseWeight);
+        br->setMetadata(llvm::LLVMContext::MD_prof, brWeights);
     }
 
     // Then block
@@ -378,20 +413,21 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
 
     ScopeGuard scope(*this);
 
-    // Allocate iterator variable
-    llvm::AllocaInst* iterAlloca = createEntryBlockAlloca(function, stmt->iteratorVar);
+    // Allocate iterator variable — use annotated type when present
+    llvm::Type* iterType = stmt->iteratorType.empty()
+                               ? getDefaultType()
+                               : resolveAnnotatedType(stmt->iteratorType);
+    llvm::AllocaInst* iterAlloca = createEntryBlockAlloca(function, stmt->iteratorVar, iterType);
     bindVariable(stmt->iteratorVar, iterAlloca);
 
     // Initialize iterator
     llvm::Value* startVal = generateExpression(stmt->start.get());
-    // For-loop iterator is always integer, convert to integer
-    startVal = toDefaultType(startVal);
+    startVal = convertTo(startVal, iterType);
     builder->CreateStore(startVal, iterAlloca);
 
     // Get end value
     llvm::Value* endVal = generateExpression(stmt->end.get());
-    // Convert to integer since loop bounds are always integer
-    endVal = toDefaultType(endVal);
+    endVal = convertTo(endVal, iterType);
 
     // Empty range elimination: when start and end are compile-time constants
     // and start == end, the loop body never executes (the condition check
@@ -413,8 +449,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     bool stepKnownNonZero = false;
     if (stmt->step) {
         stepVal = generateExpression(stmt->step.get());
-        // Convert to integer since loop step is always integer
-        stepVal = toDefaultType(stepVal);
+        stepVal = convertTo(stepVal, iterType);
         if (auto* stepCI = llvm::dyn_cast<llvm::ConstantInt>(stepVal)) {
             stepKnownPositive = stepCI->getSExtValue() > 0;
             stepKnownNonZero = stepCI->getSExtValue() != 0;
@@ -432,14 +467,15 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
                 ascending = true;
             }
         }
+        unsigned iterBits = iterType->getIntegerBitWidth();
         if (ascending) {
-            stepVal = llvm::ConstantInt::get(*context, llvm::APInt(64, 1));
+            stepVal = llvm::ConstantInt::get(iterType, 1);
             stepKnownPositive = true;
             stepKnownNonZero = true;
         } else {
             llvm::Value* isDesc = builder->CreateICmpSGT(startVal, endVal, "for.isdesc");
-            llvm::Value* posOne = llvm::ConstantInt::get(*context, llvm::APInt(64, 1));
-            llvm::Value* negOne = llvm::ConstantInt::get(*context, llvm::APInt(64, static_cast<uint64_t>(-1), true));
+            llvm::Value* posOne = llvm::ConstantInt::get(iterType, 1);
+            llvm::Value* negOne = llvm::ConstantInt::get(*context, llvm::APInt(iterBits, static_cast<uint64_t>(-1), true));
             stepVal = builder->CreateSelect(isDesc, negOne, posOne, "for.autostep");
             // Auto-computed step is always +1 or -1, never zero.
             stepKnownNonZero = true;
@@ -478,7 +514,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     }
 
     builder->SetInsertPoint(condBB);
-    llvm::Value* curVal = builder->CreateLoad(getDefaultType(), iterAlloca, stmt->iteratorVar.c_str());
+    llvm::Value* curVal = builder->CreateLoad(iterType, iterAlloca, stmt->iteratorVar.c_str());
     llvm::Value* continueCond;
     if (stepKnownPositive) {
         // Fast path: known ascending loop, just compare i < end.
@@ -536,7 +572,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
 
     // Increment block
     builder->SetInsertPoint(incBB);
-    llvm::Value* nextVal = builder->CreateLoad(getDefaultType(), iterAlloca, stmt->iteratorVar.c_str());
+    llvm::Value* nextVal = builder->CreateLoad(iterType, iterAlloca, stmt->iteratorVar.c_str());
     // OmScript advantage: for ascending loops starting from a non-negative
     // value, both nsw AND nuw flags are correct on the increment.
     //
@@ -1119,12 +1155,14 @@ void CodeGenerator::generatePrefetch(PrefetchStmt* stmt) {
         // Prefetch with variable declaration: generate the VarDecl first,
         // then emit a prefetch hint on its alloca.
         generateVarDecl(stmt->varDecl.get());
+        prefetchedVars_.insert(stmt->varDecl->name);
         auto it = namedValues.find(stmt->varDecl->name);
         if (it != namedValues.end()) {
             alloca = it->second;
         }
     } else {
         // Standalone prefetch of an existing variable.
+        prefetchedVars_.insert(stmt->varName);
         auto it = namedValues.find(stmt->varName);
         if (it != namedValues.end()) {
             alloca = it->second;

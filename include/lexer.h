@@ -44,6 +44,8 @@ enum class TokenType {
     INVALIDATE,
     BORROW,
     PREFETCH,
+    LIKELY,
+    UNLIKELY,
 
     // Operators
     PLUS,
