@@ -283,7 +283,7 @@ fn bench_calls(n:int) -> int {
     for (i:int in 0...n) {
         sum += add_four(i % 1000);
     }
-    invalidate n
+    invalidate n;
     return sum;
     
 }
