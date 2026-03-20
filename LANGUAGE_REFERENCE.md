@@ -1,7 +1,7 @@
 # OmScript Language Reference
 
-> **Version:** 2.3.9  
-> **Compiler:** `omsc` — OmScript Compiler v2.3.9  
+> **Version:** 2.4.0  
+> **Compiler:** `omsc` — OmScript Compiler v2.4.0  
 > **Standard:** C++17 · LLVM Backend · Ahead-of-Time Compilation  
 > **License:** See repository root
 
@@ -22,19 +22,21 @@
 11. [Structs](#11-structs)
 12. [Enums](#12-enums)
 13. [Maps](#13-maps)
-14. [Module Imports](#14-module-imports)
-15. [File I/O](#15-file-io)
-16. [Concurrency](#16-concurrency)
-17. [Standard Library](#17-standard-library)
-18. [Optimization Levels](#18-optimization-levels)
-19. [OPTMAX Directive](#19-optmax-directive)
-20. [Adaptive JIT Runtime](#20-adaptive-jit-runtime)
-21. [Memory Management](#21-memory-management)
-22. [CLI Reference](#22-cli-reference)
-23. [Building from Source](#23-building-from-source)
-24. [Error Handling and Diagnostics](#24-error-handling-and-diagnostics)
-25. [Complete Code Examples](#25-complete-code-examples)
-26. [Grammar Summary](#26-grammar-summary)
+14. [Ownership System](#14-ownership-system)
+15. [Module Imports](#15-module-imports)
+16. [File I/O](#16-file-io)
+17. [Concurrency](#17-concurrency)
+18. [Standard Library](#18-standard-library)
+19. [Optimization Levels](#19-optimization-levels)
+20. [OPTMAX Directive](#20-optmax-directive)
+21. [E-Graph & Superoptimizer](#21-e-graph--superoptimizer)
+22. [Adaptive JIT Runtime](#22-adaptive-jit-runtime)
+23. [Memory Management](#23-memory-management)
+24. [CLI Reference](#24-cli-reference)
+25. [Building from Source](#25-building-from-source)
+26. [Error Handling and Diagnostics](#26-error-handling-and-diagnostics)
+27. [Complete Code Examples](#27-complete-code-examples)
+28. [Grammar Summary](#28-grammar-summary)
 
 ---
 
@@ -47,8 +49,9 @@ OmScript is a **low-level, C-like programming language** featuring:
 - **Reference-counted memory management** — Automatic deterministic deallocation via malloc/free with reference counting on strings.
 - **Adaptive JIT runtime** — A lightweight JIT runtime monitors function call counts and recompiles hot functions at higher optimization levels with profile-guided hints, producing even faster native code for performance-critical paths.
 - **Aggressive optimization** — Four optimization levels (O0–O3) plus a special OPTMAX directive that applies exhaustive multi-pass optimization to marked functions.
+- **Ownership system** — Optional `move`, `invalidate`, and `borrow` keywords enable compiler optimizations and catch use-after-move/invalidate bugs at compile time — without requiring ownership annotations on normal code.
 - **92 built-in standard library functions** — Math, array manipulation, string, character classification, type conversion, map/dictionary, file I/O, concurrency, and system functions, all compiled to native machine code.
-- **Structs** — Named record types with field access and mutation.
+- **Structs** — Named record types with field access, mutation, and optional field-level optimization attributes.
 - **Module system** — `import` statements with circular-import detection.
 - **Generic function syntax** — Type-annotated generic parameters (type-erased at runtime).
 - **Concurrency primitives** — POSIX thread creation/join and mutex operations.
@@ -1189,6 +1192,33 @@ fn main() {
 - Field values may be any expression.
 - Structs are value types passed by reference internally — mutation via dot-assign affects the original variable.
 
+### 11.6 Field-Level Optimization Attributes
+
+Struct fields support optional attributes that enable compiler optimizations. These are **hints only** — they do not change runtime semantics:
+
+```javascript
+struct Particle {
+    hot immut int id,
+    cold int last_used,
+    align(64) int buffer,
+    noalias int ptr,
+    range(0,100) int score,
+    move int inner
+}
+```
+
+| Attribute | Meaning |
+|-----------|---------|
+| `hot` | Hint: field is frequently accessed — guide cache layout |
+| `cold` | Hint: field is rarely accessed |
+| `immut` | Hint: field never modified after initialization |
+| `noalias` | Hint: pointer field does not alias any other pointer |
+| `align(N)` | Hint: field should be aligned to N bytes |
+| `range(min,max)` | Hint: field value is always in [min, max] — enables range propagation |
+| `move` | Hint: field participates in ownership transfer |
+
+Multiple attributes may be combined on a single field. All attributes are optional and have no effect on correctness — they only enable LLVM to produce better code.
+
 ---
 
 ## 12. Enums
@@ -1265,9 +1295,143 @@ fn main() {
 
 ---
 
-## 14. Module Imports
+## 14. Ownership System
 
-### 14.1 Import Syntax
+OmScript provides an **optional, lightweight ownership system** that enables compiler optimizations and catches use-after-move/invalidate bugs at compile time. These features are **entirely optional** — normal code without ownership annotations is never affected.
+
+### 14.1 Move Semantics
+
+The `move` keyword transfers ownership of a value from source to destination. After a move, the source variable is logically dead — any use of it is a **compile-time error**.
+
+**Move declaration:**
+
+```javascript
+fn main() {
+    var a = 42;
+    move var b = a;  // b takes ownership; a is now dead
+    println(b);      // 42
+    // println(a);   // ERROR: Use of moved variable 'a'
+    return 0;
+}
+```
+
+**Move expression** (in assignment or return):
+
+```javascript
+fn make_value() {
+    var x = 42;
+    return move x;   // transfer ownership to caller; x is dead
+}
+
+fn main() {
+    var a = 100;
+    var b = move a;   // b = 100; a is now dead
+    println(b);       // 100
+    return 0;
+}
+```
+
+**What the compiler may do with `move`:**
+- Elide copies (construct directly in destination)
+- Reuse the source's stack slot / register
+- Enable RVO/NRVO for return values
+- Promote fields to registers (scalar replacement)
+
+### 14.2 Invalidate
+
+The `invalidate` statement explicitly marks a variable as dead without transferring its value. This lets the compiler reuse the variable's memory immediately.
+
+```javascript
+fn main() {
+    var x = 42;
+    println(x);      // 42
+    invalidate x;    // x is now dead
+    // println(x);   // ERROR: Use of invalidated variable 'x'
+
+    // Compiler can reuse x's stack slot for new variables
+    var y = 99;
+    println(y);      // 99
+    return 0;
+}
+```
+
+**What the compiler may do with `invalidate`:**
+- Emit `llvm.lifetime.end` to free the stack slot early
+- Eliminate dead stores to the variable
+- Reuse registers immediately
+
+### 14.3 Borrow
+
+The `borrow` keyword creates a non-owning reference hint for alias analysis. The compiler treats borrowed values as non-escaping, enabling better load/store optimization.
+
+```javascript
+fn main() {
+    var x = 42;
+    borrow var ref = x;   // ref holds x's value with noalias hint
+    println(ref);         // 42
+    return 0;
+}
+```
+
+The compiler attaches `!noalias` scope metadata to loads from borrowed variables, enabling LLVM's alias analysis to produce more aggressive optimizations.
+
+### 14.4 Variable State Model
+
+Each variable has a conceptual state:
+
+| State | Meaning |
+|-------|---------|
+| **Owned** | Valid, can be read and written |
+| **Moved** | Dead — moved to another variable. Use is a compile error |
+| **Invalidated** | Dead — explicitly destroyed. Use is a compile error |
+
+**Transitions:**
+
+```
+Owned ──move──→ Moved (dead)
+Owned ──invalidate──→ Invalidated (dead)
+Moved ──assign──→ Owned (revived)
+Invalidated ──assign──→ Owned (revived)
+```
+
+Re-assigning to a dead variable **revives** it:
+
+```javascript
+fn main() {
+    var x = 42;
+    var y = move x;   // x is dead
+    x = 99;           // x is revived
+    println(x);       // 99
+    return 0;
+}
+```
+
+### 14.5 Compile-Time Enforcement
+
+The compiler detects use-after-move and use-after-invalidate as **compile-time errors**:
+
+```
+error at line 4, column 13: Use of moved variable 'x'
+error at line 4, column 13: Use of invalidated variable 'x'
+```
+
+This detection is **automatic** — it does not require any special flags or annotations. It only triggers when the user explicitly writes `move` or `invalidate`. Normal code is never affected.
+
+### 14.6 LLVM IR Effects
+
+| Feature | IR Effect |
+|---------|-----------|
+| `move` | Source gets `llvm.lifetime.end` + `store undef` |
+| `invalidate` | Variable gets `llvm.lifetime.end` + `store undef` |
+| `borrow` | Load gets `!noalias` scope metadata |
+
+These IR annotations enable LLVM's optimization passes (SROA, mem2reg, GVN, alias analysis) to produce significantly better machine code.
+
+---
+
+## 15. Module Imports
+
+### 15.1 Import Syntax
 
 The `import` statement includes another `.om` source file before compilation:
 
@@ -1279,7 +1443,7 @@ import "path/to/module";
 - Paths are relative to the importing file's directory.
 - Circular imports are detected and silently skipped.
 
-### 14.2 Module Files
+### 15.2 Module Files
 
 A module is an ordinary `.om` file that exports functions:
 
@@ -1290,7 +1454,7 @@ fn cube(n)   { return n * n * n; }
 fn add(a, b) { return a + b; }
 ```
 
-### 14.3 Using Imported Functions
+### 15.3 Using Imported Functions
 
 After importing, all functions from the module are available in the current file:
 
@@ -1305,7 +1469,7 @@ fn main() {
 }
 ```
 
-### 14.4 Multiple Imports
+### 15.4 Multiple Imports
 
 ```javascript
 import "modules/math_utils";
@@ -1318,39 +1482,39 @@ fn main() {
 }
 ```
 
-### 14.5 Circular Import Detection
+### 15.5 Circular Import Detection
 
 If file A imports file B which imports file A, the second import of A is silently ignored. This prevents infinite recursion during compilation.
 
 ---
 
-## 15. File I/O
+## 16. File I/O
 
-### 15.1 Reading Files
+### 16.1 Reading Files
 
 ```javascript
 var content = file_read("data.txt");   // returns string, or "" on error
 ```
 
-### 15.2 Writing Files
+### 16.2 Writing Files
 
 ```javascript
 file_write("output.txt", "Hello, World!\n");   // overwrites the file
 ```
 
-### 15.3 Appending to Files
+### 16.3 Appending to Files
 
 ```javascript
 file_append("log.txt", "New entry\n");   // appends to existing file
 ```
 
-### 15.4 Checking File Existence
+### 16.4 Checking File Existence
 
 ```javascript
 var exists = file_exists("data.txt");   // 1 if exists, 0 otherwise
 ```
 
-### 15.5 Full Example
+### 16.5 Full Example
 
 ```javascript
 fn main() {
@@ -1366,11 +1530,11 @@ fn main() {
 
 ---
 
-## 16. Concurrency
+## 17. Concurrency
 
 OmScript provides POSIX thread and mutex primitives.
 
-### 16.1 Threads
+### 17.1 Threads
 
 #### Creating a Thread
 
@@ -1390,7 +1554,7 @@ thread_join(handle);
 
 Blocks until the thread completes.
 
-### 16.2 Mutexes
+### 17.2 Mutexes
 
 ```javascript
 var m = mutex_new();     // create a mutex
@@ -1400,7 +1564,7 @@ mutex_unlock(m);         // release the lock
 mutex_destroy(m);        // free the mutex
 ```
 
-### 16.3 Example
+### 17.3 Example
 
 ```javascript
 fn worker() {
@@ -1428,11 +1592,11 @@ fn main() {
 
 ---
 
-## 17. Standard Library
+## 18. Standard Library
 
 OmScript provides **92 built-in functions**. All stdlib functions are compiled directly to native machine code via LLVM IR.
 
-### 17.1 I/O Functions
+### 18.1 I/O Functions
 
 #### `print(value)`
 
@@ -1519,7 +1683,7 @@ if (error) {
 }
 ```
 
-### 17.2 Math Functions
+### 18.2 Math Functions
 
 #### `abs(x)`
 
@@ -1703,7 +1867,7 @@ to_float(10)  // 10.0
 to_float(-3)  // -3.0
 ```
 
-### 17.3 Array Functions
+### 18.3 Array Functions
 
 #### `len(array)`
 
@@ -1902,7 +2066,7 @@ fn main() {
 }
 ```
 
-### 17.4 Character Functions
+### 18.4 Character Functions
 
 #### `to_char(code)`
 
@@ -1933,7 +2097,7 @@ is_digit(57)    // 1  ('9')
 is_digit(65)    // 0  ('A')
 ```
 
-### 17.5 String Functions
+### 18.5 String Functions
 
 #### `str_len(s)`
 
@@ -2134,7 +2298,7 @@ var chars = str_chars("ABC");
 // chars == [65, 66, 67]
 ```
 
-### 17.5.1 System Functions
+### 28.5.1 System Functions
 
 #### `random()`
 
@@ -2160,7 +2324,7 @@ Pauses execution for the specified number of milliseconds.
 sleep(1000);  // sleep for 1 second
 ```
 
-### 17.6 Utility Functions
+### 18.6 Utility Functions
 
 #### `typeof(x)`
 
@@ -2194,7 +2358,7 @@ assert(x > 0);      // passes if x > 0, otherwise aborts
 assert(0);          // always aborts: "Runtime error: assertion failed"
 ```
 
-### 17.7 Stdlib Summary Table
+### 18.7 Stdlib Summary Table
 
 | Function | Args | Returns | Description |
 |----------|:----:|---------|-------------|
@@ -2293,22 +2457,22 @@ assert(0);          // always aborts: "Runtime error: assertion failed"
 
 ---
 
-## 18. Optimization Levels
+## 19. Optimization Levels
 
-### 18.1 O0 — No Optimization
+### 19.1 O0 — No Optimization
 
 - Fastest compilation, largest and slowest output.
 - LLVM IR is emitted directly without any transformation passes.
 - Useful for debugging.
 
-### 18.2 O1 — Basic Optimization
+### 19.2 O1 — Basic Optimization
 
 - Instruction combining and reassociation.
 - CFG simplification.
 - Dead code elimination.
 - Minor peephole optimizations.
 
-### 18.3 O2 — Moderate Optimization (Default)
+### 19.3 O2 — Moderate Optimization (Default)
 
 All O1 passes plus:
 
@@ -2318,7 +2482,7 @@ All O1 passes plus:
 - **Early CSE** — Common Subexpression Elimination.
 - Additional dead code elimination passes.
 
-### 18.4 O3 — Aggressive Optimization
+### 19.4 O3 — Aggressive Optimization
 
 All O2 passes plus:
 
@@ -2336,7 +2500,7 @@ All O2 passes plus:
 | **Tail Call Elimination** | Converts tail calls to jumps |
 | Second cleanup round | Instruction combining + CFG simplification + DCE |
 
-### 18.5 Constant Folding (AST-Level)
+### 19.5 Constant Folding (AST-Level)
 
 Before LLVM optimization, the code generator performs AST-level constant folding:
 
@@ -2349,9 +2513,9 @@ Before LLVM optimization, the code generator performs AST-level constant folding
 
 ---
 
-## 19. OPTMAX Directive
+## 20. OPTMAX Directive
 
-### 19.1 Overview
+### 20.1 Overview
 
 `OPTMAX` is a compiler directive that marks functions for **maximum optimization**. Functions between `OPTMAX=:` and `OPTMAX!:` receive:
 
@@ -2359,7 +2523,7 @@ Before LLVM optimization, the code generator performs AST-level constant folding
 2. **A 3-iteration fixed-point optimization pipeline** after code generation.
 3. **OPTMAX isolation** — non-OPTMAX user functions cannot be called from OPTMAX functions (stdlib functions are allowed).
 
-### 19.2 Syntax
+### 20.2 Syntax
 
 ```javascript
 OPTMAX=:
@@ -2377,7 +2541,7 @@ fn main() {
 }
 ```
 
-### 19.3 OPTMAX Optimization Pipeline
+### 20.3 OPTMAX Optimization Pipeline
 
 The OPTMAX pipeline runs **3 iterations**, each consisting of 4 phases:
 
@@ -2395,7 +2559,7 @@ Instruction combining, CFG simplification, dead code elimination.
 
 Each pass may expose new optimization opportunities that the next iteration can exploit.
 
-### 19.4 Restrictions
+### 20.4 Restrictions
 
 - OPTMAX functions **can** call other OPTMAX functions.
 - OPTMAX functions **can** call any stdlib built-in function (they compile to native code).
@@ -2403,13 +2567,54 @@ Each pass may expose new optimization opportunities that the next iteration can 
 
 ---
 
-## 20. Adaptive JIT Runtime
+## 21. E-Graph & Superoptimizer
 
-### 20.1 Overview
+OmScript's compiler includes two advanced optimization systems that run alongside the standard LLVM pipeline at O2+.
+
+### 21.1 E-Graph Equality Saturation
+
+An **e-graph** (equivalence graph) compactly represents many equivalent programs simultaneously. Instead of applying rewrites destructively, it adds new expressions alongside old ones, then extracts the cheapest equivalent using a cost model.
+
+The e-graph operates on the **AST** before LLVM code generation and includes **80+ rewrite rules** in three categories:
+
+| Category | Examples |
+|----------|---------|
+| **Algebraic** | `x + 0 → x`, `x * 1 → x`, `x - x → 0`, `x * 2 → x << 1`, `x * 3 → (x << 1) + x` |
+| **Comparison** | `x == x → 1`, `x != x → 0`, `!(a == b) → a != b`, `!!x → x` |
+| **Bitwise** | `x ^ x → 0`, `x & x → x`, `~(~x) → x`, De Morgan's laws, shift combination |
+
+Controlled via: `-fegraph` (default on at O2+) / `-fno-egraph`
+
+### 21.2 Superoptimizer
+
+The superoptimizer operates on **LLVM IR** after the standard pipeline and finds optimal instruction sequences through four phases:
+
+1. **Idiom Recognition** — Detects patterns like rotate, abs, min/max, popcount, and replaces them with optimal LLVM intrinsics.
+2. **Algebraic Simplification** — Applies identity simplifications that instcombine may miss across basic blocks.
+3. **Branch Simplification** — Converts simple diamond-shaped branches to branchless `select`.
+4. **Enumerative Synthesis** — For expensive instructions (multiply, divide), searches for cheaper equivalent sequences (e.g., `x * 7 → (x << 3) - x`).
+
+Controlled via: `-fsuperopt` (default on at O2+) / `-fno-superopt`
+
+### 21.3 Hardware Graph Optimizer (HGOE)
+
+At O2+ with `-march`/`-mtune`, the HGOE performs target-aware optimizations:
+
+- **FMA generation** — Fused multiply-add for supported architectures
+- **Prefetch insertion** — Software prefetching for memory access patterns
+- **Branch layout** — Reorders basic blocks for better branch prediction
+- **Integer strength reduction** — Target-specific multiply-to-shift transforms
+- **Instruction scheduling** — Microarchitecture-aware instruction ordering
+
+---
+
+## 22. Adaptive JIT Runtime
+
+### 22.1 Overview
 
 OmScript is an **AOT-compiled language** — all code compiles to native machine code through LLVM. When using `omsc run`, the program executes through a lightweight **adaptive JIT runtime** that automatically recompiles hot functions with even more aggressive optimizations.
 
-### 20.2 Two-Tier Execution Model
+### 22.2 Two-Tier Execution Model
 
 ```
 ┌─────────────────────────────────────────────────────┐
@@ -2430,7 +2635,7 @@ OmScript is an **AOT-compiled language** — all code compiles to native machine
 └─────────────────────────────────────────────────────┘
 ```
 
-### 20.3 How It Works
+### 22.3 How It Works
 
 1. **Initial compilation**: When `omsc run` is invoked, the module's LLVM IR is JIT-compiled at O2. Every non-`main` function receives a lightweight dispatch prolog that atomically increments a per-function call counter.
 
@@ -2444,7 +2649,7 @@ OmScript is an **AOT-compiled language** — all code compiles to native machine
 
 4. **Fast path**: After recompilation, future calls to the function take a fast path — one volatile load and a well-predicted branch, then a direct call to the O3-PGO-optimized native code with zero counter overhead.
 
-### 20.4 AOT Compilation Path
+### 22.4 AOT Compilation Path
 
 When compiling to an executable (the default `omsc build` path), all code is AOT-compiled through the standard LLVM pipeline:
 
@@ -2456,13 +2661,13 @@ The adaptive JIT runtime is only used during `omsc run` for interactive/developm
 
 ---
 
-## 21. Memory Management
+## 23. Memory Management
 
-### 21.1 Overview
+### 23.1 Overview
 
 OmScript uses **reference counting** for automatic memory management of heap-allocated data (strings).
 
-### 21.2 Stack Allocation
+### 23.2 Stack Allocation
 
 Most values (integers, array slots) are **stack-allocated** via LLVM `alloca` in the function's entry block. This means:
 
@@ -2470,7 +2675,7 @@ Most values (integers, array slots) are **stack-allocated** via LLVM `alloca` in
 - Local variables are stack-allocated.
 - No heap allocation for numeric types.
 
-### 21.3 Reference-Counted Strings
+### 23.3 Reference-Counted Strings
 
 Strings use a `RefCountedString` type with the following layout:
 
@@ -2492,7 +2697,7 @@ Strings use a `RefCountedString` type with the following layout:
 | Assignment | `release()` old, `retain()` new |
 | Destructor | `release()` → decrement refCount, `free` when 0 |
 
-### 21.4 Characteristics
+### 23.4 Characteristics
 
 - **Deterministic:** Objects are freed immediately when the last reference is released.
 - **No GC pauses:** No stop-the-world garbage collection.
@@ -2501,15 +2706,15 @@ Strings use a `RefCountedString` type with the following layout:
 
 ---
 
-## 22. CLI Reference
+## 24. CLI Reference
 
-### 22.1 Basic Usage
+### 24.1 Basic Usage
 
 ```bash
 omsc [command] <source.om> [options]
 ```
 
-### 22.2 Commands
+### 24.2 Commands
 
 | Command | Aliases | Description |
 |---------|---------|-------------|
@@ -2527,7 +2732,7 @@ omsc [command] <source.om> [options]
 | `help` | `-h`, `--help` | Show help message |
 | `version` | `-v`, `--version` | Show compiler version |
 
-### 22.3 Options
+### 24.3 Options
 
 | Option | Description |
 |--------|-------------|
@@ -2544,7 +2749,7 @@ omsc [command] <source.om> [options]
 | `-static` | Static linking |
 | `--` | Separator between compiler args and runtime args |
 
-### 22.3.1 Codegen Options
+### 28.3.1 Codegen Options
 
 | Option | Description |
 |--------|-------------|
@@ -2562,7 +2767,7 @@ omsc [command] <source.om> [options]
 
 Use `-fno-<flag>` to disable any `-f` flag (e.g., `-fno-lto`, `-fno-vectorize`).
 
-### 22.4 Examples
+### 24.4 Examples
 
 ```bash
 # Compile to executable
@@ -2600,7 +2805,7 @@ omsc pkg list
 omsc clean program.om
 ```
 
-### 22.5 Exit Codes
+### 24.5 Exit Codes
 
 | Code | Meaning |
 |------|---------|
@@ -2610,16 +2815,16 @@ omsc clean program.om
 
 ---
 
-## 23. Building from Source
+## 25. Building from Source
 
-### 23.1 Prerequisites
+### 25.1 Prerequisites
 
 - **CMake** 3.13 or later
 - **C++17** compatible compiler (GCC, Clang)
 - **LLVM** development libraries (headers + shared libraries)
 - **GCC** (used as the linker for final executable output)
 
-### 23.2 Build Steps
+### 25.2 Build Steps
 
 ```bash
 # Clone the repository
@@ -2638,7 +2843,7 @@ make -j$(nproc)
 # The compiler is now at ./build/omsc
 ```
 
-### 23.3 CMake Configuration
+### 25.3 CMake Configuration
 
 | Setting | Value |
 |---------|-------|
@@ -2646,7 +2851,7 @@ make -j$(nproc)
 | Target | `omsc` executable |
 | LLVM Components | core, executionengine, mcjit, interpreter, native, support, passes, target, transformutils, analysis, asmparser, codegen, mc, mcparser, bitreader |
 
-### 23.4 Running Tests
+### 25.4 Running Tests
 
 ```bash
 # From repository root
@@ -2661,9 +2866,9 @@ The test suite verifies:
 
 ---
 
-## 24. Error Handling and Diagnostics
+## 26. Error Handling and Diagnostics
 
-### 24.1 Compile-Time Errors
+### 26.1 Compile-Time Errors
 
 The compiler reports errors with **file, line, and column** information:
 
@@ -2674,7 +2879,7 @@ Error: 'break' statement outside of loop
 Error: 'continue' statement outside of loop
 ```
 
-### 24.2 Runtime Errors
+### 26.2 Runtime Errors
 
 Runtime errors print a message to stderr and terminate with exit code 1:
 
@@ -2686,7 +2891,7 @@ Runtime error: array index out of bounds
 
 Division by zero and modulo by zero are detected in generated code and call `exit(1)`. Array out-of-bounds triggers `llvm.trap` after printing the error.
 
-### 24.3 Lexer Errors
+### 26.3 Lexer Errors
 
 ```
 Unterminated string literal
@@ -2694,7 +2899,7 @@ Unterminated block comment
 Unterminated escape sequence at end of string
 ```
 
-### 24.4 Code Generator Errors
+### 26.4 Code Generator Errors
 
 ```
 Unknown function: nonexistent_func
@@ -2705,9 +2910,9 @@ OPTMAX function "optimized_fn" cannot invoke non-OPTMAX function "regular_fn"
 
 ---
 
-## 25. Complete Code Examples
+## 27. Complete Code Examples
 
-### 25.1 Hello World
+### 27.1 Hello World
 
 ```javascript
 fn main() {
@@ -2716,7 +2921,7 @@ fn main() {
 }
 ```
 
-### 25.2 Factorial (Recursion)
+### 27.2 Factorial (Recursion)
 
 ```javascript
 fn factorial(n) {
@@ -2733,7 +2938,7 @@ fn main() {
 }
 ```
 
-### 25.3 Fibonacci (Iteration)
+### 27.3 Fibonacci (Iteration)
 
 ```javascript
 fn fibonacci(n) {
@@ -2757,7 +2962,7 @@ fn main() {
 }
 ```
 
-### 25.4 GCD (Euclidean Algorithm)
+### 27.4 GCD (Euclidean Algorithm)
 
 ```javascript
 fn gcd(a, b) {
@@ -2774,7 +2979,7 @@ fn main() {
 }
 ```
 
-### 25.5 Array Operations
+### 27.5 Array Operations
 
 ```javascript
 fn main() {
@@ -2796,7 +3001,7 @@ fn main() {
 }
 ```
 
-### 25.6 Math Stdlib Demo
+### 27.6 Math Stdlib Demo
 
 ```javascript
 fn main() {
@@ -2814,7 +3019,7 @@ fn main() {
 }
 ```
 
-### 25.7 Character Classification
+### 27.7 Character Classification
 
 ```javascript
 fn main() {
@@ -2835,7 +3040,7 @@ fn main() {
 }
 ```
 
-### 25.8 OPTMAX Optimization
+### 27.8 OPTMAX Optimization
 
 ```javascript
 OPTMAX=:
@@ -2853,7 +3058,7 @@ fn main() {
 }
 ```
 
-### 25.9 All Control Flow
+### 27.9 All Control Flow
 
 ```javascript
 fn main() {
@@ -2897,7 +3102,7 @@ fn main() {
 }
 ```
 
-### 25.10 Descending Range with Step
+### 27.10 Descending Range with Step
 
 ```javascript
 fn sum_down(start, end, step) {
@@ -2915,9 +3120,9 @@ fn main() {
 
 ---
 
-## 26. Grammar Summary
+## 28. Grammar Summary
 
-### 26.1 EBNF Grammar
+### 28.1 EBNF Grammar
 
 ```ebnf
 program        = { import_stmt | enum_decl | struct_decl | function_decl } ;
@@ -2925,7 +3130,11 @@ program        = { import_stmt | enum_decl | struct_decl | function_decl } ;
 import_stmt    = "import" STRING ";" ;
 enum_decl      = "enum" IDENTIFIER "{" enum_member { "," enum_member } "}" ;
 enum_member    = IDENTIFIER [ "=" INTEGER ] ;
-struct_decl    = "struct" IDENTIFIER "{" IDENTIFIER { "," IDENTIFIER } "}" ;
+struct_decl    = "struct" IDENTIFIER "{" struct_field { "," struct_field } "}" ;
+struct_field   = { field_attr } [ IDENTIFIER ] IDENTIFIER ;
+field_attr     = "hot" | "cold" | "noalias" | "immut" | "move"
+               | "align" "(" INTEGER ")"
+               | "range" "(" INTEGER "," INTEGER ")" ;
 function_decl  = "fn" IDENTIFIER [ "<" type_param_list ">" ]
                  "(" [ param_list ] ")" [ "->" type_annotation ] block ;
 type_param_list = IDENTIFIER { "," IDENTIFIER } ;
@@ -2937,6 +3146,9 @@ block          = "{" { statement } "}" ;
 
 statement      = var_decl
                | const_decl
+               | move_decl
+               | invalidate_stmt
+               | borrow_decl
                | return_stmt
                | if_stmt
                | while_stmt
@@ -2952,6 +3164,9 @@ statement      = var_decl
 
 var_decl       = "var" IDENTIFIER [ ":" type_annotation ] [ "=" expression ] ";" ;
 const_decl     = "const" IDENTIFIER [ ":" type_annotation ] "=" expression ";" ;
+move_decl      = "move" ( "var" | IDENTIFIER ) IDENTIFIER "=" expression ";" ;
+invalidate_stmt = "invalidate" IDENTIFIER ";" ;
+borrow_decl    = "borrow" ( "var" | IDENTIFIER ) IDENTIFIER "=" expression ";" ;
 return_stmt    = "return" [ expression ] ";" ;
 if_stmt        = "if" "(" expression ")" statement [ "else" statement ] ;
 while_stmt     = "while" "(" expression ")" statement ;
@@ -2986,7 +3201,7 @@ shift          = additive { ( "<<" | ">>" ) additive } ;
 additive       = multiplicative { ( "+" | "-" ) multiplicative } ;
 multiplicative = power { ( "*" | "/" | "%" ) power } ;
 power          = unary [ "**" power ] ;
-unary          = ( "-" | "!" | "~" | "++" | "--" ) unary | postfix ;
+unary          = ( "-" | "!" | "~" | "++" | "--" | "move" ) unary | postfix ;
 postfix        = primary { "++" | "--" | "[" expression "]"
                          | "(" [ arg_list ] ")"
                          | "." IDENTIFIER } ;
@@ -3003,12 +3218,12 @@ lambda         = "|" [ param_list ] "|" expression ;
 arg_list       = expression { "," expression } ;
 ```
 
-### 26.2 Token Reference
+### 28.2 Token Reference
 
 | Category | Tokens |
 |----------|--------|
 | **Literals** | `INTEGER`, `FLOAT`, `STRING`, `IDENTIFIER` |
-| **Keywords** | `fn`, `return`, `if`, `else`, `while`, `do`, `for`, `var`, `const`, `break`, `continue`, `in`, `switch`, `case`, `default`, `try`, `catch`, `throw`, `enum`, `struct`, `import`, `true`, `false`, `null` |
+| **Keywords** | `fn`, `return`, `if`, `else`, `while`, `do`, `for`, `var`, `const`, `break`, `continue`, `in`, `switch`, `case`, `default`, `try`, `catch`, `throw`, `enum`, `struct`, `import`, `move`, `invalidate`, `borrow`, `true`, `false`, `null` |
 | **Arithmetic** | `+`, `-`, `*`, `/`, `%`, `**` |
 | **Comparison** | `==`, `!=`, `<`, `<=`, `>`, `>=` |
 | **Logical** | `&&`, `\|\|`, `!` |
@@ -3022,4 +3237,4 @@ arg_list       = expression { "," expression } ;
 
 ---
 
-*This document describes OmScript Compiler v2.3.9. For the latest updates, see the repository at [github.com/RyAnPr1Me/omscript](https://github.com/RyAnPr1Me/omscript).*
+*This document describes OmScript Compiler v2.4.0. For the latest updates, see the repository at [github.com/RyAnPr1Me/omscript](https://github.com/RyAnPr1Me/omscript).*

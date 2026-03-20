@@ -686,6 +686,5 @@ MIT License — see `LICENSE`.
 
 Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.  
 Detailed documentation:
-- [LANGUAGE_REFERENCE.md](LANGUAGE_REFERENCE.md) — full language and stdlib reference
-- [MEMORY_MANAGEMENT.md](MEMORY_MANAGEMENT.md) — reference counting details
-- [EGRAPH_OPTIMIZATION.md](EGRAPH_OPTIMIZATION.md) — E-graph optimizer internals
+- [LANGUAGE_REFERENCE.md](LANGUAGE_REFERENCE.md) — full language, ownership system, optimizers, memory management, and stdlib reference
+- [CHANGELOG.md](CHANGELOG.md) — version history
