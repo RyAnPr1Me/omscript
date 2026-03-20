@@ -175,7 +175,7 @@ fn bench_strops(@prefetch n:int) -> int {
 fn bench_struct(@prefetch n:int) -> int {
     prefetch var p:struct = Point { x: 1, y: 2 };
     var sum:int = 0;
-    for (i:int in 0...n) {
+    for (i:int in 0...n:int) {
         p.x = p.x + i;
         p.y = p.y ^ i;
         sum += p.x + p.y;
