@@ -967,7 +967,7 @@ void CodeGenerator::generateInvalidate(InvalidateStmt* stmt) {
         auto* allocaTy = allocaInst->getAllocatedType();
         uint64_t size = module->getDataLayout().getTypeAllocSize(allocaTy);
         auto* sizeVal = llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), size);
-        auto* lifetimeEnd = llvm::Intrinsic::getDeclaration(
+        auto* lifetimeEnd = OMSC_GET_INTRINSIC_STMT(
             module.get(), llvm::Intrinsic::lifetime_end,
             {llvm::PointerType::getUnqual(*context)});
         builder->CreateCall(lifetimeEnd, {sizeVal, allocaInst});

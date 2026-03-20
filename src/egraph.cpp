@@ -5024,6 +5024,71 @@ std::vector<RewriteRule> getAdvancedBitwiseRules() {
             return g.addBinOp(Op::Mul, s.at("x"), g.addConst(255));
         });
 
+    // (x << 8) + x → x * 257
+    rules.emplace_back("shl8_add_to_mul257",
+        P::OpPat(Op::Add, {P::OpPat(Op::Shl, {P::Wild("x"), P::ConstPat(8)}), P::Wild("x")}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Mul, s.at("x"), g.addConst(257));
+        });
+
+    // x + (x << 8) → x * 257
+    rules.emplace_back("add_shl8_to_mul257",
+        P::OpPat(Op::Add, {P::Wild("x"), P::OpPat(Op::Shl, {P::Wild("x"), P::ConstPat(8)})}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Mul, s.at("x"), g.addConst(257));
+        });
+
+    // (x << 9) - x → x * 511
+    rules.emplace_back("shl9_sub_to_mul511",
+        P::OpPat(Op::Sub, {P::OpPat(Op::Shl, {P::Wild("x"), P::ConstPat(9)}), P::Wild("x")}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Mul, s.at("x"), g.addConst(511));
+        });
+
+    // (x << 9) + x → x * 513
+    rules.emplace_back("shl9_add_to_mul513",
+        P::OpPat(Op::Add, {P::OpPat(Op::Shl, {P::Wild("x"), P::ConstPat(9)}), P::Wild("x")}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Mul, s.at("x"), g.addConst(513));
+        });
+
+    // (x << 10) - x → x * 1023
+    rules.emplace_back("shl10_sub_to_mul1023",
+        P::OpPat(Op::Sub, {P::OpPat(Op::Shl, {P::Wild("x"), P::ConstPat(10)}), P::Wild("x")}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Mul, s.at("x"), g.addConst(1023));
+        });
+
+    // (x << 10) + x → x * 1025
+    rules.emplace_back("shl10_add_to_mul1025",
+        P::OpPat(Op::Add, {P::OpPat(Op::Shl, {P::Wild("x"), P::ConstPat(10)}), P::Wild("x")}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Mul, s.at("x"), g.addConst(1025));
+        });
+
+    // Commuted add patterns for shifts 5-7 (shifts 3-4 already have commuted forms)
+
+    // x + (x << 5) → x * 33
+    rules.emplace_back("add_shl5_to_mul33",
+        P::OpPat(Op::Add, {P::Wild("x"), P::OpPat(Op::Shl, {P::Wild("x"), P::ConstPat(5)})}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Mul, s.at("x"), g.addConst(33));
+        });
+
+    // x + (x << 6) → x * 65
+    rules.emplace_back("add_shl6_to_mul65",
+        P::OpPat(Op::Add, {P::Wild("x"), P::OpPat(Op::Shl, {P::Wild("x"), P::ConstPat(6)})}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Mul, s.at("x"), g.addConst(65));
+        });
+
+    // x + (x << 7) → x * 129
+    rules.emplace_back("add_shl7_to_mul129",
+        P::OpPat(Op::Add, {P::Wild("x"), P::OpPat(Op::Shl, {P::Wild("x"), P::ConstPat(7)})}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Mul, s.at("x"), g.addConst(129));
+        });
+
     // ─────────────────────────────────────────────────────────────────────
     // More AND/OR/XOR identities
     // ─────────────────────────────────────────────────────────────────────

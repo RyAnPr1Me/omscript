@@ -14,10 +14,18 @@
 #include "parser.h"
 #include "superoptimizer.h"
 #include <gtest/gtest.h>
+#include <llvm/Config/llvm-config.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Verifier.h>
+
+// LLVM 19 introduced getOrInsertDeclaration; older versions only have getDeclaration.
+#if LLVM_VERSION_MAJOR >= 19
+#define OMSC_GET_INTRINSIC_TEST llvm::Intrinsic::getOrInsertDeclaration
+#else
+#define OMSC_GET_INTRINSIC_TEST llvm::Intrinsic::getDeclaration
+#endif
 
 using namespace omscript;
 using namespace omscript::superopt;
@@ -97,7 +105,7 @@ TEST(SuperoptimizerTest, CostModelIntrinsicsCheap) {
     TestModule tm;
     auto* a = tm.arg(0);
 
-    llvm::Function* ctpop = llvm::Intrinsic::getDeclaration(
+    llvm::Function* ctpop = OMSC_GET_INTRINSIC_TEST(
         tm.mod.get(), llvm::Intrinsic::ctpop, {tm.i64Ty()});
     auto* pop = tm.builder.CreateCall(ctpop, {a});
     tm.builder.CreateRet(pop);
