@@ -2298,7 +2298,7 @@ var chars = str_chars("ABC");
 // chars == [65, 66, 67]
 ```
 
-### 28.5.1 System Functions
+### 18.5.1 System Functions
 
 #### `random()`
 
@@ -2749,7 +2749,7 @@ omsc [command] <source.om> [options]
 | `-static` | Static linking |
 | `--` | Separator between compiler args and runtime args |
 
-### 28.3.1 Codegen Options
+### 24.3.1 Codegen Options
 
 | Option | Description |
 |--------|-------------|
