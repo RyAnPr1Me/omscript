@@ -757,6 +757,10 @@ void CodeGenerator::runOptimizationPasses() {
         hgoe::HGOEConfig hgoeConfig;
         hgoeConfig.marchCpu = marchCpu_;
         hgoeConfig.mtuneCpu = mtuneCpu_;
+        // Disable loop annotation when LTO is active — the LTO linker runs
+        // its own loop optimizer and forced unroll/vectorize metadata causes
+        // the LTO pipeline to spend excessive time or hang.
+        hgoeConfig.enableLoopAnnotation = !lto_;
         auto hgoeStats = hgoe::optimizeModule(*module, hgoeConfig);
         if (verbose_) {
             if (hgoeStats.activated) {
