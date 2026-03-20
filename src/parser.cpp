@@ -493,20 +493,40 @@ std::unique_ptr<Statement> Parser::parseStatement() {
             if (attrName == "immut") { hintImmut = true; advance(); continue; }
             break;
         }
-        // Check if this is a prefetch with variable declaration
-        if (match(TokenType::VAR) || (check(TokenType::IDENTIFIER) && current + 1 < tokens.size() &&
-            (tokens[current + 1].type == TokenType::COLON || tokens[current + 1].type == TokenType::ASSIGN))) {
+        // Determine if this is a variable declaration or standalone prefetch.
+        // Declaration forms:
+        //   prefetch [attrs] var name[:type] [= expr];
+        //   prefetch [attrs] name:type = expr;       (has '=')
+        //   prefetch [attrs] name = expr;             (has '=')
+        // Standalone forms (existing variable):
+        //   prefetch name[:type];                     (no '=' → just re-prefetch)
+        bool isDecl = false;
+        if (check(TokenType::VAR)) {
+            isDecl = true;
+        } else if (check(TokenType::IDENTIFIER)) {
+            // Look ahead past optional :type to see if there's an '='
+            size_t lookahead = current + 1;
+            if (lookahead < tokens.size() && tokens[lookahead].type == TokenType::COLON) {
+                lookahead++; // skip ':'
+                if (lookahead < tokens.size() && tokens[lookahead].type == TokenType::IDENTIFIER)
+                    lookahead++; // skip type name
+                // Skip optional array brackets []
+                while (lookahead + 1 < tokens.size() &&
+                       tokens[lookahead].type == TokenType::LBRACKET &&
+                       tokens[lookahead + 1].type == TokenType::RBRACKET)
+                    lookahead += 2;
+            }
+            if (lookahead < tokens.size() && tokens[lookahead].type == TokenType::ASSIGN)
+                isDecl = true;
+        }
+        if (isDecl) {
             // prefetch [attrs] var name:type = expr; OR prefetch [attrs] name:type = expr;
             bool isConst = hintImmut;
             std::string typeName;
-            Token name(TokenType::IDENTIFIER, "", 0, 0);
-            if (tokens[current - 1].type == TokenType::VAR) {
-                // prefetch var name...
-                name = consume(TokenType::IDENTIFIER, "Expected variable name in prefetch declaration");
-            } else {
-                // prefetch name:type = expr;
-                name = consume(TokenType::IDENTIFIER, "Expected variable name in prefetch declaration");
+            if (match(TokenType::VAR)) {
+                // consumed var
             }
+            Token name = consume(TokenType::IDENTIFIER, "Expected variable name in prefetch declaration");
             if (match(TokenType::COLON)) {
                 typeName = parseTypeAnnotation();
             }
@@ -523,9 +543,7 @@ std::unique_ptr<Statement> Parser::parseStatement() {
             stmt->column = kw.column;
             return stmt;
         }
-        // Standalone prefetch of existing variable: prefetch name;
-        // (attributes parsed above may have consumed the identifier as an attr)
-        // If we still see an identifier, it's the variable name
+        // Standalone prefetch of existing variable: prefetch name[:type];
         if (check(TokenType::IDENTIFIER)) {
             Token varName = advance();
             // Consume optional :type annotation

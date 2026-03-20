@@ -1317,11 +1317,14 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
         if (allocaType->isDoubleTy() && value->getType()->isIntegerTy()) {
             value = builder->CreateSIToFP(value, getFloatType(), "itof");
         } else if (allocaType->isIntegerTy() && value->getType()->isDoubleTy()) {
-            value = builder->CreateFPToSI(value, getDefaultType(), "ftoi");
+            value = builder->CreateFPToSI(value, allocaType, "ftoi");
         } else if (allocaType->isIntegerTy() && value->getType()->isPointerTy()) {
-            value = builder->CreatePtrToInt(value, getDefaultType(), "ptoi");
+            value = builder->CreatePtrToInt(value, allocaType, "ptoi");
         } else if (allocaType->isPointerTy() && value->getType()->isIntegerTy()) {
             value = builder->CreateIntToPtr(value, llvm::PointerType::getUnqual(*context), "itop");
+        } else if (allocaType->isIntegerTy() && value->getType()->isIntegerTy() &&
+                   allocaType != value->getType()) {
+            value = convertTo(value, allocaType);
         }
     }
 
