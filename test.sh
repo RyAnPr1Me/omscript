@@ -129,6 +129,7 @@ fn bench_push(@prefetch n:int) -> int {
     }
     var result:int = len(arr);
     invalidate arr;
+    invalidate n;
     return result;
 }
 
@@ -144,6 +145,7 @@ fn bench_hof(@prefetch n:int) -> int {
     var reduced:int = array_reduce(filtered, |a:int, b:int| a + b, 0);
     var result:int = reduced + len(filtered);
     invalidate filtered;
+    invalidate n;
     return result;
 }
 @hot
@@ -154,6 +156,7 @@ fn bench_strcat(@prefetch n:int) -> int {
     }
     var result:int = str_len(s);
     invalidate s;
+    invalidate n;
     return result;
 }
 @hot
@@ -165,6 +168,7 @@ fn bench_strops(@prefetch n:int) -> int {
         count += str_index_of(haystack, "hij") % 100;
     }
     invalidate haystack;
+    invalidate n;
     return count;
 }
 @hot
@@ -176,6 +180,7 @@ fn bench_struct(@prefetch n:int) -> int {
         p.y = p.y ^ i;
         sum += p.x + p.y;
     }
+    invalidate n;
     return sum;
 }
 @hot
@@ -189,6 +194,7 @@ fn bench_branch(@prefetch n:int) -> int {
             default: sum += (i * 2);
         }
     }
+    invalidate n;
     return sum;
 }
 @hot
@@ -355,7 +361,7 @@ fn bench_combined(n:int) -> int {
 @flatten @hot 
 fn main() -> int {
     var test_id:int = input();
-    var n:int = input();
+    prefetch var n:int = input();
 
     switch (test_id) {
         case 0:  print(bench_math(n));     break;
