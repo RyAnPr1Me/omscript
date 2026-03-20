@@ -2764,6 +2764,9 @@ omsc [command] <source.om> [options]
 | `-foptmax` | OPTMAX block optimization (default: on) |
 | `-fjit` | Adaptive JIT runtime (default: on) |
 | `-fstack-protector` | Stack protection |
+| `-fegraph` | E-graph equality saturation (default: on at O2+) |
+| `-fsuperopt` | Superoptimizer pass (default: on at O2+) |
+| `-fhgoe` | Hardware graph optimization engine (default: on) |
 
 Use `-fno-<flag>` to disable any `-f` flag (e.g., `-fno-lto`, `-fno-vectorize`).
 

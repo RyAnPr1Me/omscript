@@ -5,6 +5,29 @@ All notable changes to the OmScript compiler will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.0] - 2026-03-20
+
+### Added
+- **Use-after-move/invalidate detection**: Compile-time enforcement of ownership safety — accessing a variable after `move` or `invalidate` now produces a compile error with clear diagnostic messages
+- **Ownership system codegen wiring**: `deadVars_`/`deadVarReason_` tracking infrastructure connected to `generateIdentifier`, `generateInvalidate`, `generateMoveDecl`, `generateMoveExpr`, and `generateAssign`
+- **Variable revival**: Re-assigning to a moved/invalidated variable revives it (clears dead state)
+- **CLI flags**: `-fegraph`/`-fno-egraph`, `-fsuperopt`/`-fno-superopt`, `-fhgoe`/`-fno-hgoe` for controlling optimization passes
+
+### Changed
+- **Documentation consolidation**: Merged 6 separate documentation files (EGRAPH_OPTIMIZATION.md, MEMORY_MANAGEMENT.md, OPTIMIZATIONS.md, etc.) into 3 files: LANGUAGE_REFERENCE.md (comprehensive reference), README.md (overview), CHANGELOG.md (history)
+- **LANGUAGE_REFERENCE.md** expanded with:
+  - Section 14: Ownership System (move/invalidate/borrow semantics, variable state model, compile-time enforcement)
+  - Section 11.6: Struct field-level optimization attributes
+  - Section 21: E-Graph & Superoptimizer (consolidated from deleted files)
+  - Updated grammar (section 28) with ownership productions
+  - Updated token reference with `move`, `invalidate`, `borrow` keywords
+- **Version bump** to 2.4.0
+
+### Removed
+- EGRAPH_OPTIMIZATION.md (content merged into LANGUAGE_REFERENCE.md section 21)
+- MEMORY_MANAGEMENT.md (content merged into LANGUAGE_REFERENCE.md section 23)
+- OPTIMIZATIONS.md (content merged into LANGUAGE_REFERENCE.md sections 19-21)
+
 ## [2.3.9] - 2026-03-07
 
 ### Added

@@ -18,6 +18,7 @@ A low-level, C-like programming language with dynamic typing and **automatic ref
 - **Switch/Case**: Multi-way branching with `switch`/`case`/`default`
 - **Do-While Loops**: Execute body at least once with `do { ... } while (cond);`
 - **Error Handling**: `try`/`catch`/`throw` for structured error handling
+- **Ownership System**: Optional `move`, `invalidate`, and `borrow` keywords for compile-time use-after-move/invalidate detection and LLVM optimization hints
 - **Enum Declarations**: Named integer constants with auto-increment
 - **Default Parameters**: Optional function parameters with default values
 - **Null Coalescing Operator**: `??` for concise null/zero fallback expressions

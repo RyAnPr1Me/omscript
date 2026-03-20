@@ -1492,6 +1492,9 @@ void printUsage(const char* progName) {
                  "  -foptmax         OPTMAX block optimization (default: on)\n"
                  "  -fjit            Hybrid JIT mode (default: on)\n"
                  "  -fstack-protector Stack protection\n"
+                 "  -fegraph         E-graph equality saturation (default: on at O2+)\n"
+                 "  -fsuperopt       Superoptimizer pass (default: on at O2+)\n"
+                 "  -fhgoe           Hardware graph optimization (default: on)\n"
                  "\n"
                  "Linker:\n"
                  "  -static          Static linking\n"
@@ -2095,6 +2098,9 @@ int main(int argc, char* argv[]) {
     bool flagVectorize = true;
     bool flagUnrollLoops = true;
     bool flagLoopOptimize = true;
+    bool flagEGraph = true;
+    bool flagSuperopt = true;
+    bool flagHGOE = true;
     bool flagDebug = false;
     const auto tryParseOptimizationFlag = [](const std::string& arg) -> std::optional<omscript::OptimizationLevel> {
         if (arg == "-Ofast") {
@@ -2190,6 +2196,30 @@ int main(int argc, char* argv[]) {
         }
         if (arg == "-fno-loop-optimize") {
             flagLoopOptimize = false;
+            return true;
+        }
+        if (arg == "-fegraph") {
+            flagEGraph = true;
+            return true;
+        }
+        if (arg == "-fno-egraph") {
+            flagEGraph = false;
+            return true;
+        }
+        if (arg == "-fsuperopt") {
+            flagSuperopt = true;
+            return true;
+        }
+        if (arg == "-fno-superopt") {
+            flagSuperopt = false;
+            return true;
+        }
+        if (arg == "-fhgoe") {
+            flagHGOE = true;
+            return true;
+        }
+        if (arg == "-fno-hgoe") {
+            flagHGOE = false;
             return true;
         }
         if (arg == "-static") {
@@ -2561,6 +2591,9 @@ int main(int argc, char* argv[]) {
             codegen.setVectorize(flagVectorize);
             codegen.setUnrollLoops(flagUnrollLoops);
             codegen.setLoopOptimize(flagLoopOptimize);
+            codegen.setEGraphOptimize(flagEGraph);
+            codegen.setSuperoptimize(flagSuperopt);
+            codegen.setHardwareGraphOpt(flagHGOE);
             codegen.setDebugMode(flagDebug);
             codegen.setSourceFilename(sourceFile);
             codegen.generate(program.get());
@@ -2617,6 +2650,9 @@ int main(int argc, char* argv[]) {
             codegen.setVectorize(flagVectorize);
             codegen.setUnrollLoops(flagUnrollLoops);
             codegen.setLoopOptimize(flagLoopOptimize);
+            codegen.setEGraphOptimize(flagEGraph);
+            codegen.setSuperoptimize(flagSuperopt);
+            codegen.setHardwareGraphOpt(flagHGOE);
             codegen.setDebugMode(flagDebug);
             codegen.setSourceFilename(sourceFile);
             if (flagJIT) {
@@ -2662,6 +2698,9 @@ int main(int argc, char* argv[]) {
             codegen.setVectorize(flagVectorize);
             codegen.setUnrollLoops(flagUnrollLoops);
             codegen.setLoopOptimize(flagLoopOptimize);
+            codegen.setEGraphOptimize(flagEGraph);
+            codegen.setSuperoptimize(flagSuperopt);
+            codegen.setHardwareGraphOpt(flagHGOE);
             codegen.setDebugMode(flagDebug);
             codegen.setSourceFilename(sourceFile);
             if (flagJIT) {
