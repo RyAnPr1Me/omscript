@@ -700,9 +700,8 @@ echo "────────────────────────�
 echo "  DEBUG: Compilation Timing"
 echo "────────────────────────────────────────────────────────────────"
 
-# Note: omsc -flto + -march=native currently hangs, so -flto is omitted for OM.
-# All other max-optimization flags are enabled.  OPTMAX is set inside bench.om.
-OM_FLAGS="-O3 -march=native -mtune=native -ffast-math -fvectorize -funroll-loops -floop-optimize"
+# All max-optimization flags are enabled.  OPTMAX is set inside bench.om.
+OM_FLAGS="-O3 -flto -march=native -mtune=native -ffast-math -fvectorize -funroll-loops -floop-optimize"
 C_FLAGS="-O3 -march=native -mtune=native -flto -ffast-math -funroll-loops"
 
 echo "Compiling OM ($OMSC $OM_FLAGS) …"

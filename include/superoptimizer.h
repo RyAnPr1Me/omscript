@@ -154,6 +154,20 @@ SuperoptimizerStats superoptimizeModule(llvm::Module& module,
 /// Returns the number of srem instructions converted.
 unsigned convertSRemToURem(llvm::Function& func);
 
+/// Convert sdiv-by-positive-constant → udiv when the dividend is provably
+/// non-negative.  Like convertSRemToURem, this runs before the LLVM pipeline
+/// so the vectorizer and loop optimizer see the cheaper unsigned operation.
+/// Returns the number of sdiv instructions converted.
+unsigned convertSDivToUDiv(llvm::Function& func);
+
+/// Infer nuw (no unsigned wrap) flags on add instructions where both operands
+/// are provably non-negative.  This is particularly useful after loop
+/// unrolling, where the unroller creates add instructions without flags for
+/// unrolled copies.  Setting nuw enables downstream convertSRemToURem to
+/// prove non-negativity through the add chain.
+/// Returns the number of instructions updated.
+unsigned inferNonNegativeFlags(llvm::Function& func);
+
 } // namespace superopt
 } // namespace omscript
 

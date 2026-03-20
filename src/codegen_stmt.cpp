@@ -2,9 +2,17 @@
 #include "diagnostic.h"
 #include <iostream>
 #include <llvm/Config/llvm-config.h>
+#include <llvm/IR/IntrinsicInst.h>
+#include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/MDBuilder.h>
 #include <set>
 #include <stdexcept>
+
+#if LLVM_VERSION_MAJOR >= 19
+#define OMSC_GET_INTRINSIC_STMT llvm::Intrinsic::getOrInsertDeclaration
+#else
+#define OMSC_GET_INTRINSIC_STMT llvm::Intrinsic::getDeclaration
+#endif
 
 namespace omscript {
 
@@ -437,6 +445,35 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
 
     // Body block
     builder->SetInsertPoint(bodyBB);
+
+    // OmScript-specific optimization: emit @llvm.assume(iter >= 0) for
+    // ascending for-loops.  Unlike C, OmScript's for-loop semantics guarantee
+    // that the iterator is ALWAYS in [start, end) and cannot be modified inside
+    // the loop body.  This assumption enables LLVM's CorrelatedValuePropagation
+    // and SCEV passes to prove non-negativity of expressions involving the
+    // iterator, which in turn enables srem→urem and sdiv→udiv conversions,
+    // better vectorization cost modeling, and elimination of sign-extension
+    // overhead.  C compilers cannot make this assumption because C loop
+    // variables can be arbitrarily modified in the loop body.
+    // Skip in JIT/dynamic mode: the assume adds raw instruction count that
+    // the JIT baseline passes may not eliminate, and the per-function
+    // optimization in JIT mode doesn't run the full CVP pipeline anyway.
+    if (optimizationLevel >= OptimizationLevel::O2 && stepKnownPositive && !dynamicCompilation_) {
+        // Check if start is known non-negative (common: for (i in 0...n))
+        bool startNonNeg = false;
+        if (auto* startCI = llvm::dyn_cast<llvm::ConstantInt>(startVal)) {
+            startNonNeg = startCI->getSExtValue() >= 0;
+        }
+        if (startNonNeg) {
+            llvm::Value* iterVal = builder->CreateLoad(getDefaultType(), iterAlloca, "iter.assume");
+            llvm::Value* isNonNeg = builder->CreateICmpSGE(
+                iterVal, llvm::ConstantInt::get(getDefaultType(), 0), "iter.nonneg");
+            llvm::Function* assumeFn = OMSC_GET_INTRINSIC_STMT(
+                module.get(), llvm::Intrinsic::assume, {});
+            builder->CreateCall(assumeFn, {isNonNeg});
+        }
+    }
+
     loopStack.push_back({endBB, incBB});
     generateStatement(stmt->body.get());
     loopStack.pop_back();
@@ -447,7 +484,34 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     // Increment block
     builder->SetInsertPoint(incBB);
     llvm::Value* nextVal = builder->CreateLoad(getDefaultType(), iterAlloca, stmt->iteratorVar.c_str());
-    llvm::Value* incVal = builder->CreateNSWAdd(nextVal, stepVal, "nextvar");
+    // OmScript advantage: for ascending loops starting from a non-negative
+    // value, both nsw AND nuw flags are correct on the increment.
+    //
+    // nsw is correct because OmScript's for-loop semantics guarantee the
+    // iterator stays within representable signed range (the loop condition
+    // `iter < end` is checked with ICmpSLT before each iteration).
+    //
+    // nuw is also correct because: the iterator starts ≥ 0 and nsw
+    // guarantees no signed overflow, so the result is always in
+    // [0, 2^63-1].  Values in this range cannot wrap unsigned (they are
+    // well below UINT64_MAX = 2^64-1).
+    //
+    // The nuw flag is critical because LLVM's loop unroller propagates it
+    // to unrolled copies, enabling isValueNonNegative to prove non-negativity
+    // of derived expressions (which in turn enables srem→urem conversion
+    // in unrolled iterations).  C compilers can only safely set nsw.
+    llvm::Value* incVal;
+    bool startNonNegForInc = false;
+    if (stepKnownPositive) {
+        if (auto* startCI = llvm::dyn_cast<llvm::ConstantInt>(startVal)) {
+            startNonNegForInc = startCI->getSExtValue() >= 0;
+        }
+    }
+    if (startNonNegForInc) {
+        incVal = builder->CreateAdd(nextVal, stepVal, "nextvar", /*HasNUW=*/true, /*HasNSW=*/true);
+    } else {
+        incVal = builder->CreateNSWAdd(nextVal, stepVal, "nextvar");
+    }
     builder->CreateStore(incVal, iterAlloca);
     auto* backBr = builder->CreateBr(condBB);
 
@@ -472,6 +536,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         // is known; if it's ≤ 64, suggest full unrolling to eliminate loop
         // overhead entirely.  For trip counts ≤ 16, this typically produces
         // straight-line code that fits in the I-cache.
+        bool addedUnrollHint = false;
         if (optimizationLevel >= OptimizationLevel::O3 && enableUnrollLoops_) {
             if (auto* startCI = llvm::dyn_cast<llvm::ConstantInt>(startVal)) {
                 if (auto* endCI = llvm::dyn_cast<llvm::ConstantInt>(endVal)) {
@@ -489,9 +554,32 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
                              llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
                                  llvm::Type::getInt32Ty(*context), static_cast<uint32_t>(tripCount)))});
                         loopMDs.push_back(unrollCount);
+                        addedUnrollHint = true;
                     }
                 }
             }
+        }
+        // For variable-trip-count for-loops at O3, cap the unroll factor
+        // to prevent LLVM's runtime unroller from over-unrolling.
+        // LLVM's O3 unroller can create 50-100 copies of the loop body for
+        // loops with expensive operations (urem, division), causing massive
+        // register pressure, stack spills, and I-cache misses.  OmScript
+        // knows the loop structure (ascending, step=+1) and can guide the
+        // unroller more precisely than C compilers.
+        //
+        // A factor of 2 is used instead of 4 because nested loops with
+        // unroll=4 at each level produce 4^3=64x code bloat for triple-
+        // nested loops, causing severe I-cache pressure.  An unroll factor
+        // of 2 keeps the code within L1 I-cache (2^3=8x worst case) while
+        // still amortizing loop overhead.  This matches GCC's conservative
+        // unrolling heuristic for loops with unknown trip counts.
+        if (!addedUnrollHint && optimizationLevel >= OptimizationLevel::O3 && enableUnrollLoops_ && !dynamicCompilation_) {
+            llvm::MDNode* unrollCount = llvm::MDNode::get(
+                *context,
+                {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
+                 llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                     llvm::Type::getInt32Ty(*context), 2))});
+            loopMDs.push_back(unrollCount);
         }
         llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
         loopMD->replaceOperandWith(0, loopMD);
