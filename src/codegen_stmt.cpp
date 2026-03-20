@@ -859,6 +859,10 @@ void CodeGenerator::generateInvalidate(InvalidateStmt* stmt) {
     // Store an undef/poison value to enable dead-store elimination.
     auto* allocaType = llvm::cast<llvm::AllocaInst>(alloca)->getAllocatedType();
     builder->CreateStore(llvm::UndefValue::get(allocaType), alloca);
+
+    // Mark the variable as dead for use-after-invalidate detection.
+    deadVars_.insert(stmt->varName);
+    deadVarReason_[stmt->varName] = "invalidated";
 }
 
 void CodeGenerator::generateMoveDecl(MoveDecl* stmt) {
@@ -905,6 +909,9 @@ void CodeGenerator::generateMoveDecl(MoveDecl* stmt) {
                     builder->CreateStore(llvm::UndefValue::get(srcTy), srcAlloca);
                 }
             }
+            // Mark the source variable as dead for use-after-move detection.
+            deadVars_.insert(srcId->name);
+            deadVarReason_[srcId->name] = "moved";
         }
     } else {
         if (allocaType->isDoubleTy())
@@ -935,6 +942,9 @@ llvm::Value* CodeGenerator::generateMoveExpr(MoveExpr* expr) {
                 builder->CreateStore(llvm::UndefValue::get(srcTy), srcAlloca);
             }
         }
+        // Mark the source variable as dead for use-after-move detection.
+        deadVars_.insert(srcId->name);
+        deadVarReason_[srcId->name] = "moved";
     }
 
     return val;

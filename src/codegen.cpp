@@ -2397,6 +2397,8 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     stringArrayVars_.clear();
     stringLenCache_.clear();
     stringCapCache_.clear();
+    deadVars_.clear();
+    deadVarReason_.clear();
 
     // Pre-populate stringVars_ for parameters known to receive string arguments.
     auto paramStrIt = funcParamStringTypes_.find(func->name);
