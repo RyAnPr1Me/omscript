@@ -552,20 +552,25 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             }
         }
         // For variable-trip-count for-loops at O3, cap the unroll factor
-        // at 4 to prevent LLVM's runtime unroller from over-unrolling.
+        // to prevent LLVM's runtime unroller from over-unrolling.
         // LLVM's O3 unroller can create 50-100 copies of the loop body for
         // loops with expensive operations (urem, division), causing massive
         // register pressure, stack spills, and I-cache misses.  OmScript
         // knows the loop structure (ascending, step=+1) and can guide the
-        // unroller more precisely than C compilers.  A factor of 4 matches
-        // GCC's typical behavior and keeps the loop body small enough to
-        // fit in the L1 I-cache while still amortizing loop overhead.
+        // unroller more precisely than C compilers.
+        //
+        // A factor of 2 is used instead of 4 because nested loops with
+        // unroll=4 at each level produce 4^3=64x code bloat for triple-
+        // nested loops, causing severe I-cache pressure.  An unroll factor
+        // of 2 keeps the code within L1 I-cache (2^3=8x worst case) while
+        // still amortizing loop overhead.  This matches GCC's conservative
+        // unrolling heuristic for loops with unknown trip counts.
         if (!addedUnrollHint && optimizationLevel >= OptimizationLevel::O3 && enableUnrollLoops_ && !dynamicCompilation_) {
             llvm::MDNode* unrollCount = llvm::MDNode::get(
                 *context,
                 {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
                  llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
-                     llvm::Type::getInt32Ty(*context), 4))});
+                     llvm::Type::getInt32Ty(*context), 2))});
             loopMDs.push_back(unrollCount);
         }
         llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
