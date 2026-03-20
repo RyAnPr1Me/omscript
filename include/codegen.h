@@ -341,6 +341,7 @@ class CodeGenerator {
     void generateThrow(ThrowStmt* stmt);
     void generateInvalidate(InvalidateStmt* stmt);
     void generateMoveDecl(MoveDecl* stmt);
+    void generatePrefetch(PrefetchStmt* stmt);
     llvm::Value* generateMoveExpr(MoveExpr* expr);
     llvm::Value* generateBorrowExpr(BorrowExpr* expr);
 

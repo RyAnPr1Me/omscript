@@ -589,6 +589,7 @@ static const std::unordered_set<std::string> stdlibFunctions = {"abs",
                                                                 "char_code",
                                                                 "clamp",
                                                                 "exit_program",
+                                                                "exit",
                                                                 "fast_add",
                                                                 "fast_div",
                                                                 "fast_mul",
@@ -2631,6 +2632,9 @@ void CodeGenerator::generateStatement(Statement* stmt) {
         break;
     case ASTNodeType::MOVE_DECL:
         generateMoveDecl(static_cast<MoveDecl*>(stmt));
+        break;
+    case ASTNodeType::PREFETCH_STMT:
+        generatePrefetch(static_cast<PrefetchStmt*>(stmt));
         break;
     default:
         codegenError("Unknown statement type", stmt);

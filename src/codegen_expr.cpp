@@ -468,6 +468,20 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         right = builder->CreatePtrToInt(right, getDefaultType(), "ptoi");
     }
 
+    // Normalize integer widths: when operands have different integer bit widths
+    // (e.g. i8 from u8, i32 from u32, i64 from default), extend both to the
+    // wider of the two types so that LLVM binary instructions see matching types.
+    if (left->getType()->isIntegerTy() && right->getType()->isIntegerTy() &&
+        left->getType() != right->getType()) {
+        unsigned leftBits = left->getType()->getIntegerBitWidth();
+        unsigned rightBits = right->getType()->getIntegerBitWidth();
+        if (leftBits < rightBits) {
+            left = builder->CreateSExt(left, right->getType(), "sext");
+        } else {
+            right = builder->CreateSExt(right, left->getType(), "sext");
+        }
+    }
+
     // Constant folding optimization - if both operands are constants, compute at compile time
     if (llvm::isa<llvm::ConstantInt>(left) && llvm::isa<llvm::ConstantInt>(right)) {
         auto leftConst = llvm::dyn_cast<llvm::ConstantInt>(left);

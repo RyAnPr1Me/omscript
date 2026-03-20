@@ -34,7 +34,8 @@ static const std::unordered_map<std::string, TokenType> keywords = {
     {"import", TokenType::IMPORT},
     {"move", TokenType::MOVE},
     {"invalidate", TokenType::INVALIDATE},
-    {"borrow", TokenType::BORROW}};
+    {"borrow", TokenType::BORROW},
+    {"prefetch", TokenType::PREFETCH}};
 
 /// Throw a DiagnosticError with the given message and source location.
 [[noreturn]] static void lexError(const std::string& msg, int ln, int col) {
@@ -194,9 +195,12 @@ Token Lexer::scanNumber() {
             continue;
         }
         if (peek() == '.') {
-            // Don't consume the dot if it's part of a range operator (...)
+            // Don't consume the dot if it's part of a range operator (... or ..)
             if (peek(1) == '.' && peek(2) == '.') {
                 break;
+            }
+            if (peek(1) == '.') {
+                break; // Don't consume dot if it's part of '..' range operator
             }
             if (isFloat)
                 break; // Second dot, stop
@@ -407,7 +411,7 @@ std::vector<Token> Lexer::tokenize() {
             continue;
         }
 
-        // Check for range operator ...
+        // Check for range operator ... or ..
         if (c == '.') {
             // peek() gives current position, peek(1) gives next
             if (peek(1) == '.' && peek(2) == '.') {
@@ -415,6 +419,12 @@ std::vector<Token> Lexer::tokenize() {
                 advance(); // consume second .
                 advance(); // consume third .
                 tokens.push_back(makeToken(TokenType::RANGE, "..."));
+                continue;
+            }
+            if (peek(1) == '.') {
+                advance(); // consume first .
+                advance(); // consume second .
+                tokens.push_back(makeToken(TokenType::DOT_DOT, ".."));
                 continue;
             }
         }

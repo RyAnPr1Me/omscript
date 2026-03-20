@@ -1112,6 +1112,42 @@ llvm::Value* CodeGenerator::generateBorrowExpr(BorrowExpr* expr) {
     return val;
 }
 
+void CodeGenerator::generatePrefetch(PrefetchStmt* stmt) {
+    llvm::Value* alloca = nullptr;
+
+    if (stmt->varDecl) {
+        // Prefetch with variable declaration: generate the VarDecl first,
+        // then emit a prefetch hint on its alloca.
+        generateVarDecl(stmt->varDecl.get());
+        auto it = namedValues.find(stmt->varDecl->name);
+        if (it != namedValues.end()) {
+            alloca = it->second;
+        }
+    } else {
+        // Standalone prefetch of an existing variable.
+        auto it = namedValues.find(stmt->varName);
+        if (it != namedValues.end()) {
+            alloca = it->second;
+        } else {
+            codegenError("Unknown variable '" + stmt->varName + "' in prefetch statement", stmt);
+        }
+    }
+
+    if (alloca) {
+        // Emit llvm.prefetch intrinsic on the variable's alloca pointer.
+        // Args: ptr, rw (0=read), locality (3=keep in all cache levels), cache_type (1=data)
+        llvm::Function* prefetchFn = OMSC_GET_INTRINSIC_STMT(
+            module.get(), llvm::Intrinsic::prefetch,
+            {llvm::PointerType::getUnqual(*context)});
+        builder->CreateCall(prefetchFn, {
+            alloca,
+            builder->getInt32(0),  // read prefetch
+            builder->getInt32(3),  // high temporal locality
+            builder->getInt32(1)   // data cache
+        });
+    }
+}
+
 void CodeGenerator::markVariableMoved(const std::string& varName) {
     auto srcIt = namedValues.find(varName);
     if (srcIt != namedValues.end()) {

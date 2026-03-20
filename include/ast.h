@@ -48,7 +48,8 @@ enum class ASTNodeType {
     MOVE_EXPR,
     BORROW_EXPR,
     INVALIDATE_STMT,
-    MOVE_DECL
+    MOVE_DECL,
+    PREFETCH_STMT
 };
 
 class ASTNode {
@@ -538,6 +539,30 @@ class MoveDecl : public Statement {
 
     MoveDecl(const std::string& n, const std::string& t, std::unique_ptr<Expression> init)
         : Statement(ASTNodeType::MOVE_DECL), name(n), typeName(t), initializer(std::move(init)) {}
+};
+
+/// `prefetch x:u32;` — standalone prefetch hint for an existing variable.
+/// `prefetch [hot] [immut] var name:type = expr;` — variable declaration with prefetch hint.
+class PrefetchStmt : public Statement {
+  public:
+    /// For standalone prefetch of an existing variable (no declaration).
+    std::string varName;
+
+    /// For prefetch with variable declaration.
+    std::unique_ptr<VarDecl> varDecl;
+
+    /// Attribute hints.
+    bool hintHot = false;
+    bool hintImmut = false;
+
+    /// Constructor for standalone prefetch of an existing variable.
+    explicit PrefetchStmt(const std::string& name)
+        : Statement(ASTNodeType::PREFETCH_STMT), varName(name) {}
+
+    /// Constructor for prefetch with variable declaration.
+    PrefetchStmt(std::unique_ptr<VarDecl> decl, bool hot, bool immut)
+        : Statement(ASTNodeType::PREFETCH_STMT), varDecl(std::move(decl)),
+          hintHot(hot), hintImmut(immut) {}
 };
 
 } // namespace omscript
