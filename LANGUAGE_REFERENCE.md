@@ -203,18 +203,26 @@ Variable, parameter, and function return type declarations may include type anno
 | `i32` | `i32` | 32-bit signed integer |
 | `i16` | `i16` | 16-bit signed integer |
 | `i8` | `i8` | 8-bit signed integer |
+| `u64` | `i64` | 64-bit unsigned integer (uses `zeroext`) |
+| `u32` | `i32` | 32-bit unsigned integer (uses `zeroext`) |
+| `u16` | `i16` | 16-bit unsigned integer (uses `zeroext`) |
+| `u8` | `i8` | 8-bit unsigned integer (uses `zeroext`) |
 | `bool` | `i1` | Boolean (1-bit integer) |
 | `float`, `double` | `double` | 64-bit IEEE 754 floating-point |
 | `string` | `i64` | String pointer (stored as i64) |
 | *struct name* | `i64` | Struct pointer (stored as i64) |
 | *type*`[]` | `i64` | Array pointer (stored as i64) |
 
+Unsigned type annotations (`u8`, `u16`, `u32`, `u64`) use the same LLVM integer types as their signed counterparts but apply `zeroext` instead of `signext` at function boundaries. This enables the optimizer to prove non-negativity, unlocking more aggressive strength reduction (e.g., `srem` → `urem`, `sdiv` → `udiv`).
+
 ```javascript
 var x: int = 42;              // i64 alloca
 var f: float = 3.14;          // double alloca (native FP ops)
 var arr: int[] = [1, 2, 3];   // array type hint
+var n: u64 = 100;             // unsigned i64 (zeroext at boundaries)
 fn add(a: float, b: float) -> float { return a + b; }    // double params & return
 fn process(pts: Point[]) -> Point { return pts[0]; }     // struct types
+fn count(x: u64) -> u64 { return x + 1; }               // unsigned params & return
 ```
 
 ---
@@ -564,6 +572,90 @@ fn factorial(n) {
     return n * factorial(n - 1);
 }
 ```
+
+### 6.8 Function Annotations (Compiler Hints)
+
+Functions can be annotated with `@` directives placed before the `fn` keyword. These annotations provide compiler hints that control optimization behavior. Multiple annotations can be combined on a single function.
+
+| Annotation | LLVM Attribute | Description |
+|------------|---------------|-------------|
+| `@inline` | `alwaysinline` | Force-inline this function at all call sites |
+| `@noinline` | `noinline` | Never inline this function (useful for debugging, code size) |
+| `@cold` | `cold` | Mark as rarely executed — optimize for size, place away from hot code |
+| `@hot` | `hot` | Mark as frequently executed — optimize aggressively, keep in I-cache |
+| `@pure` | `memory(read)` | Function has no side effects — enables CSE, LICM, dead call elimination |
+| `@noreturn` | `noreturn` | Function never returns (e.g., `exit_program`) — enables dead code after call |
+| `@static` | internal linkage | Not visible outside the module — enables constant propagation, dead arg elimination |
+| `@flatten` | `flatten` | Inline all callees within this function — maximizes optimization scope |
+
+```javascript
+@inline
+fn add(a: int, b: int) -> int {
+    return a + b;
+}
+
+@cold
+fn handle_error(code: int) {
+    print(code);
+    exit_program(1);
+}
+
+@hot
+fn compute(n: int) -> int {
+    var total: int = 0;
+    for (i: int in 0...n) {
+        total = total + i;
+    }
+    return total;
+}
+
+@pure
+fn square(x: int) -> int {
+    return x * x;
+}
+
+@static @noinline
+fn internal_helper(x: int) -> int {
+    return x + 1;
+}
+
+@noreturn
+fn die(msg) {
+    println(msg);
+    exit_program(1);
+}
+```
+
+**Notes:**
+- `@inline` and `@noinline` override the compiler's automatic inlining heuristics.
+- `@cold` functions are preserved through the post-pipeline attribute stripping (unlike LLVM's auto-detected cold functions which are stripped to prevent false positives).
+- `@pure` implies the function only reads memory and has no observable side effects. Do not use on functions that call `print`, modify arrays, or write to files.
+- `@static` changes the function's linkage to internal, which is only meaningful for AOT compilation — it has no effect in JIT mode.
+
+### 6.9 Parameter Annotations
+
+Parameters can be annotated with `@prefetch` to hint the CPU to load the parameter's memory into cache before it is accessed:
+
+```javascript
+fn process(@prefetch data: int, size: int) -> int {
+    var total: int = 0;
+    for (i: int in 0...size) {
+        total = total + data;
+    }
+    return total;
+}
+```
+
+| Annotation | Description |
+|------------|-------------|
+| `@prefetch` | Emit a software prefetch intrinsic at function entry for this parameter |
+
+**Prefetch Lifecycle:**
+1. At function **entry**, the compiler emits `llvm.prefetch` with high locality (keep in all cache levels) for the parameter value interpreted as a memory address.
+2. At function **exit**, if the prefetched parameter is **not** being returned (transferred out), the compiler emits a cache eviction hint (`llvm.prefetch` with locality=0) to free the cache line.
+3. If the prefetched parameter **is** the return value, the cache line is preserved — ownership of the cached data transfers to the caller.
+
+This provides a deterministic cache management model: prefetched data is automatically invalidated at scope exit unless explicitly transferred out via `return`.
 
 ---
 
@@ -1867,6 +1959,26 @@ to_float(10)  // 10.0
 to_float(-3)  // -3.0
 ```
 
+#### `fast_add(a, b)`, `fast_sub(a, b)`, `fast_mul(a, b)`, `fast_div(a, b)`
+
+Perform floating-point arithmetic with full fast-math flags enabled (reassociation, reciprocal transforms, NaN/Inf assumptions, fused operations). Use in hot loops where numerical accuracy is less important than speed.
+
+```javascript
+fast_add(3, 4)   // 7 (with fast-math FP semantics)
+fast_mul(5, 6)   // 30
+```
+
+#### `precise_add(a, b)`, `precise_sub(a, b)`, `precise_mul(a, b)`, `precise_div(a, b)`
+
+Perform floating-point arithmetic with strict IEEE-754 semantics — no reassociation, no NaN/Inf assumptions, no implicit fusing. Use when numerical stability is critical.
+
+```javascript
+precise_add(3, 4)   // 7 (strict IEEE-754 semantics)
+precise_mul(5, 6)   // 30
+```
+
+Both families accept two arguments, convert them to `double`, perform the operation, and return the result as an integer (consistent with OmScript's convention of `i64`-encoded floats for interop).
+
 ### 18.3 Array Functions
 
 #### `len(array)`
@@ -2454,6 +2566,14 @@ assert(0);          // always aborts: "Runtime error: assertion failed"
 | `mutex_lock(m)` | 1 | 0 | Acquire mutex `m` |
 | `mutex_unlock(m)` | 1 | 0 | Release mutex `m` |
 | `mutex_destroy(m)` | 1 | 0 | Destroy mutex `m` |
+| `fast_add(a, b)` | 2 | result | Fast-math FP addition (reassociable, fused) |
+| `fast_sub(a, b)` | 2 | result | Fast-math FP subtraction |
+| `fast_mul(a, b)` | 2 | result | Fast-math FP multiplication |
+| `fast_div(a, b)` | 2 | result | Fast-math FP division |
+| `precise_add(a, b)` | 2 | result | Strict IEEE-754 FP addition |
+| `precise_sub(a, b)` | 2 | result | Strict IEEE-754 FP subtraction |
+| `precise_mul(a, b)` | 2 | result | Strict IEEE-754 FP multiplication |
+| `precise_div(a, b)` | 2 | result | Strict IEEE-754 FP division |
 
 ---
 
@@ -2575,7 +2695,7 @@ OmScript's compiler includes two advanced optimization systems that run alongsid
 
 An **e-graph** (equivalence graph) compactly represents many equivalent programs simultaneously. Instead of applying rewrites destructively, it adds new expressions alongside old ones, then extracts the cheapest equivalent using a cost model.
 
-The e-graph operates on the **AST** before LLVM code generation and includes **80+ rewrite rules** in three categories:
+The e-graph operates on the **AST** before LLVM code generation and includes **640+ rewrite rules** in three categories:
 
 | Category | Examples |
 |----------|---------|
@@ -2767,8 +2887,32 @@ omsc [command] <source.om> [options]
 | `-fegraph` | E-graph equality saturation (default: on at O2+) |
 | `-fsuperopt` | Superoptimizer pass (default: on at O2+) |
 | `-fhgoe` | Hardware graph optimization engine (default: on) |
+| `-g`, `--debug` | Emit DWARF debug info (line tables, variable locations) |
 
 Use `-fno-<flag>` to disable any `-f` flag (e.g., `-fno-lto`, `-fno-vectorize`).
+
+### 24.3.2 Profile-Guided Optimization (PGO)
+
+OmScript supports two-phase PGO via LLVM's IR-level instrumentation:
+
+| Option | Description |
+|--------|-------------|
+| `--pgo-gen=<path>` | Insert instrumentation counters; write raw profile to `<path>` on program exit |
+| `--pgo-use=<path>` | Read merged `.profdata` and use branch/call counts for optimization |
+
+**Workflow:**
+
+```bash
+# Phase 1: Instrument and collect profile data
+omsc build program.om --pgo-gen=prog.profraw -O2
+./a.out                                    # run with representative workload
+llvm-profdata merge -output=prog.profdata prog.profraw
+
+# Phase 2: Optimize with collected profile
+omsc build program.om --pgo-use=prog.profdata -O3
+```
+
+PGO data guides inlining decisions (hot callees get larger budgets), branch layout (hot side in fall-through), loop trip-count estimation (better vectorization/unrolling), and cold-code sinking.
 
 ### 24.4 Examples
 

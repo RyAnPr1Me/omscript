@@ -435,6 +435,7 @@ class Parameter {
     std::string name;
     std::string typeName;
     std::unique_ptr<Expression> defaultValue; // nullptr if no default
+    bool hintPrefetch = false; ///< @prefetch — prefetch memory at function entry, invalidate at exit
 
     Parameter(const std::string& n, const std::string& t = "", std::unique_ptr<Expression> def = nullptr)
         : name(n), typeName(t), defaultValue(std::move(def)) {}
@@ -448,6 +449,16 @@ class FunctionDecl : public ASTNode {
     std::unique_ptr<BlockStmt> body;
     bool isOptMax;
     std::string returnType;  // Optional return type annotation (e.g. "int", "int[]", "Point")
+
+    /// Compiler hint annotations for functions.
+    bool hintInline = false;    ///< @inline — suggest inlining this function
+    bool hintNoInline = false;  ///< @noinline — prevent inlining this function
+    bool hintCold = false;      ///< @cold — mark function as rarely executed
+    bool hintHot = false;       ///< @hot — mark function as frequently executed
+    bool hintPure = false;      ///< @pure — function has no side effects
+    bool hintNoReturn = false;  ///< @noreturn — function never returns
+    bool hintStatic = false;    ///< @static — use internal linkage for better IPO
+    bool hintFlatten = false;   ///< @flatten — inline all callees within this function
 
     FunctionDecl(const std::string& n, std::vector<std::string> tps, std::vector<Parameter> params, std::unique_ptr<BlockStmt> b, bool optMax = false, const std::string& retType = "")
         : ASTNode(ASTNodeType::FUNCTION), name(n), typeParams(std::move(tps)), parameters(std::move(params)), body(std::move(b)), isOptMax(optMax), returnType(retType) {

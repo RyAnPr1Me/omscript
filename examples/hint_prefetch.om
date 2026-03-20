@@ -1,0 +1,13 @@
+fn process(@prefetch data: int, n: int) -> int {
+    return data + n;
+}
+
+fn transfer(@prefetch ptr: int) -> int {
+    return ptr;
+}
+
+fn main() {
+    print(process(42, 10));
+    print(transfer(99));
+    return 0;
+}

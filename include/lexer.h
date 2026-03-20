@@ -100,6 +100,7 @@ enum class TokenType {
     DOT,
 
     // Special
+    AT,  // @ — used for function annotations (@inline, @noinline, @cold)
     END_OF_FILE,
     INVALID
 };

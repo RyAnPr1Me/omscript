@@ -1,0 +1,17 @@
+fn add(a: int, b: int) -> int {
+    return a + b;
+}
+
+fn mul(a: int, b: int) -> int {
+    return a * b;
+}
+
+@flatten
+fn compute(x: int) -> int {
+    return add(x, mul(x, 2));
+}
+
+fn main() {
+    print(compute(3));
+    return 0;
+}

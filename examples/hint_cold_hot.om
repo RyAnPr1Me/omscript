@@ -1,0 +1,19 @@
+@cold
+fn rarely_used(x: int) -> int {
+    return x * 100;
+}
+
+@hot
+fn often_used(n: int) -> int {
+    var total: int = 0;
+    for (i: int in 0...n) {
+        total = total + i;
+    }
+    return total;
+}
+
+fn main() {
+    print(often_used(10));
+    print(rarely_used(5));
+    return 0;
+}

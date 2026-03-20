@@ -112,8 +112,61 @@ void CodeGenerator::generateReturn(ReturnStmt* stmt) {
             }
         }
 
+        // @prefetch enforcement: determine which prefetched parameter (if any)
+        // is being returned (transferred out).  All OTHER prefetched params
+        // get cache-eviction hints since their memory is no longer needed.
+        std::string transferredParam;
+        if (auto* ident = dynamic_cast<IdentifierExpr*>(stmt->value.get())) {
+            if (prefetchedParams_.count(ident->name)) {
+                transferredParam = ident->name;
+            }
+        }
+        for (const auto& pfParam : prefetchedParams_) {
+            if (pfParam == transferredParam) continue; // transferred out — keep in cache
+            auto it = namedValues.find(pfParam);
+            if (it != namedValues.end()) {
+                llvm::Value* ptrVal = builder->CreateLoad(
+                    llvm::cast<llvm::AllocaInst>(it->second)->getAllocatedType(),
+                    it->second, pfParam + ".pf.exit");
+                llvm::Value* ptr = builder->CreateIntToPtr(
+                    ptrVal, llvm::PointerType::getUnqual(*context), pfParam + ".pf.evict");
+                llvm::Function* prefetchFn = OMSC_GET_INTRINSIC_STMT(
+                    module.get(), llvm::Intrinsic::prefetch,
+                    {llvm::PointerType::getUnqual(*context)});
+                // locality=0: hint CPU to evict from cache (no temporal reuse)
+                builder->CreateCall(prefetchFn, {
+                    ptr,
+                    builder->getInt32(0),  // read
+                    builder->getInt32(0),  // locality=0: evict
+                    builder->getInt32(1)   // data cache
+                });
+            }
+        }
+
         builder->CreateRet(retValue);
     } else {
+        // @prefetch enforcement: no return value, so ALL prefetched params
+        // get cache-eviction hints.
+        for (const auto& pfParam : prefetchedParams_) {
+            auto it = namedValues.find(pfParam);
+            if (it != namedValues.end()) {
+                llvm::Value* ptrVal = builder->CreateLoad(
+                    llvm::cast<llvm::AllocaInst>(it->second)->getAllocatedType(),
+                    it->second, pfParam + ".pf.exit");
+                llvm::Value* ptr = builder->CreateIntToPtr(
+                    ptrVal, llvm::PointerType::getUnqual(*context), pfParam + ".pf.evict");
+                llvm::Function* prefetchFn = OMSC_GET_INTRINSIC_STMT(
+                    module.get(), llvm::Intrinsic::prefetch,
+                    {llvm::PointerType::getUnqual(*context)});
+                builder->CreateCall(prefetchFn, {
+                    ptr,
+                    builder->getInt32(0),
+                    builder->getInt32(0),
+                    builder->getInt32(1)
+                });
+            }
+        }
+
         llvm::Function* currentFn = builder->GetInsertBlock()->getParent();
         llvm::Type* retTy = currentFn->getReturnType();
         if (retTy->isDoubleTy())
@@ -967,7 +1020,7 @@ void CodeGenerator::generateInvalidate(InvalidateStmt* stmt) {
         auto* allocaTy = allocaInst->getAllocatedType();
         uint64_t size = module->getDataLayout().getTypeAllocSize(allocaTy);
         auto* sizeVal = llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), size);
-        auto* lifetimeEnd = llvm::Intrinsic::getDeclaration(
+        auto* lifetimeEnd = OMSC_GET_INTRINSIC_STMT(
             module.get(), llvm::Intrinsic::lifetime_end,
             {llvm::PointerType::getUnqual(*context)});
         builder->CreateCall(lifetimeEnd, {sizeVal, allocaInst});
