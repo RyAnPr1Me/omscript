@@ -95,6 +95,15 @@ void CodeGenerator::generateReturn(ReturnStmt* stmt) {
         llvm::Function* currentFn = builder->GetInsertBlock()->getParent();
         llvm::Type* retTy = currentFn->getReturnType();
         retValue = convertTo(retValue, retTy);
+
+        // Tail call optimization: if the return value is a direct function
+        // call, mark it as a tail call so LLVM can eliminate the stack frame.
+        if (optimizationLevel >= OptimizationLevel::O2) {
+            if (auto* callInst = llvm::dyn_cast<llvm::CallInst>(retValue)) {
+                callInst->setTailCallKind(llvm::CallInst::TCK_Tail);
+            }
+        }
+
         builder->CreateRet(retValue);
     } else {
         llvm::Function* currentFn = builder->GetInsertBlock()->getParent();
@@ -197,7 +206,12 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
     builder->SetInsertPoint(condBB);
     llvm::Value* condition = generateExpression(stmt->condition.get());
     llvm::Value* condBool = toBool(condition);
-    builder->CreateCondBr(condBool, bodyBB, endBB);
+    // Loop condition branches: hint the back-edge (body) as likely-taken.
+    auto* whileCondBr = builder->CreateCondBr(condBool, bodyBB, endBB);
+    if (optimizationLevel >= OptimizationLevel::O2) {
+        llvm::MDNode* brWeights = llvm::MDBuilder(*context).createBranchWeights(2000, 1);
+        whileCondBr->setMetadata(llvm::LLVMContext::MD_prof, brWeights);
+    }
 
 
     // Body block
@@ -273,6 +287,11 @@ void CodeGenerator::generateDoWhile(DoWhileStmt* stmt) {
 
     llvm::Value* condBool = toBool(condition);
     auto* backBrDoWhile = builder->CreateCondBr(condBool, bodyBB, endBB);
+    // Hint the back-edge (body) as likely-taken for branch prediction.
+    if (optimizationLevel >= OptimizationLevel::O2) {
+        llvm::MDNode* brWeights = llvm::MDBuilder(*context).createBranchWeights(2000, 1);
+        backBrDoWhile->setMetadata(llvm::LLVMContext::MD_prof, brWeights);
+    }
     // Attach loop metadata to the do-while back-edge, matching for-loop and
     // while-loop hints for consistent vectorization across all loop forms.
     {
@@ -409,7 +428,12 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         llvm::Value* backwardCond = builder->CreateICmpSGT(curVal, endVal, "forcond_gt");
         continueCond = builder->CreateSelect(stepPositive, forwardCond, backwardCond, "forcond_range");
     }
-    builder->CreateCondBr(continueCond, bodyBB, endBB);
+    auto* forCondBr = builder->CreateCondBr(continueCond, bodyBB, endBB);
+    // Hint loop back-edge as likely-taken for branch prediction.
+    if (optimizationLevel >= OptimizationLevel::O2) {
+        llvm::MDNode* brWeights = llvm::MDBuilder(*context).createBranchWeights(2000, 1);
+        forCondBr->setMetadata(llvm::LLVMContext::MD_prof, brWeights);
+    }
 
     // Body block
     builder->SetInsertPoint(bodyBB);
@@ -536,7 +560,12 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
     builder->SetInsertPoint(condBB);
     llvm::Value* curIdx = builder->CreateLoad(getDefaultType(), idxAlloca, "foreach.idx");
     llvm::Value* cond = builder->CreateICmpSLT(curIdx, lenVal, "foreach.cmp");
-    builder->CreateCondBr(cond, bodyBB, endBB);
+    auto* foreachCondBr = builder->CreateCondBr(cond, bodyBB, endBB);
+    // Hint the back-edge (body) as likely-taken.
+    if (optimizationLevel >= OptimizationLevel::O2) {
+        llvm::MDNode* brWeights = llvm::MDBuilder(*context).createBranchWeights(2000, 1);
+        foreachCondBr->setMetadata(llvm::LLVMContext::MD_prof, brWeights);
+    }
 
     // Body: load current element into iterator variable, then execute body
     builder->SetInsertPoint(bodyBB);
