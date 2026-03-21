@@ -332,6 +332,12 @@ std::unique_ptr<Expression> optimizeOptMaxBinary(const std::string& op, std::uni
                     return std::make_unique<LiteralExpr>(result);
                 // Fall through to emit a runtime BinaryExpr on overflow.
             } else {
+                // Negative exponent: base**(-n) = 1 / base**n in integer math.
+                // |base| > 1 → truncates to 0; base=1 → 1; base=-1 → ±1.
+                if (lval == 1)
+                    return std::make_unique<LiteralExpr>(static_cast<long long>(1));
+                if (lval == -1)
+                    return std::make_unique<LiteralExpr>(static_cast<long long>((rval & 1) ? -1 : 1));
                 return std::make_unique<LiteralExpr>(static_cast<long long>(0));
             }
         }

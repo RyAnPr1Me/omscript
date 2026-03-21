@@ -125,6 +125,27 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
 
     llvm::Value* left = generateExpression(expr->left.get());
     if (expr->op == "&&" || expr->op == "||") {
+        // Constant folding: when the left side is a known constant, we can
+        // skip branch generation entirely and either short-circuit or
+        // evaluate just the right side.
+        if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left)) {
+            bool leftTrue = !ci->isZero();
+            if (expr->op == "&&") {
+                if (!leftTrue)
+                    return llvm::ConstantInt::get(getDefaultType(), 0); // false && x → 0
+                // true && x → bool(x)
+                llvm::Value* right = generateExpression(expr->right.get());
+                llvm::Value* rightBool = toBool(right);
+                return builder->CreateZExt(rightBool, getDefaultType(), "booltmp");
+            } else {
+                if (leftTrue)
+                    return llvm::ConstantInt::get(getDefaultType(), 1); // true || x → 1
+                // false || x → bool(x)
+                llvm::Value* right = generateExpression(expr->right.get());
+                llvm::Value* rightBool = toBool(right);
+                return builder->CreateZExt(rightBool, getDefaultType(), "booltmp");
+            }
+        }
         llvm::Function* function = builder->GetInsertBlock()->getParent();
         llvm::Value* leftBool = toBool(left);
         llvm::BasicBlock* rhsBB = llvm::BasicBlock::Create(*context, "logic.rhs", function);
@@ -408,14 +429,37 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         llvm::Value* strPtr =
             strVal->getType()->isPointerTy() ? strVal : builder->CreateIntToPtr(strVal, ptrTy, "strmul.ptr");
         llvm::Value* strLen = builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "strmul.len");
-        llvm::Value* totalLen = builder->CreateMul(strLen, countVal, "strmul.total");
+
+        // Guard against multiplication overflow: strLen * countVal could wrap
+        // around the 64-bit range, causing a tiny allocation followed by a
+        // heap-buffer-overflow in the strcat loop.  Use umul.with.overflow to
+        // detect this and abort with a clear error message.
+        llvm::Function* umulOvf = OMSC_GET_INTRINSIC(
+            module.get(), llvm::Intrinsic::umul_with_overflow, {getDefaultType()});
+        llvm::Value* mulResult = builder->CreateCall(umulOvf, {strLen, countVal}, "strmul.ovf");
+        llvm::Value* totalLen = builder->CreateExtractValue(mulResult, 0, "strmul.total");
+        llvm::Value* overflowed = builder->CreateExtractValue(mulResult, 1, "strmul.ovflag");
+
+        llvm::Function* curFn = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* ovfBB = llvm::BasicBlock::Create(*context, "strmul.overflow", curFn);
+        llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "strmul.ok", curFn);
+        builder->CreateCondBr(overflowed, ovfBB, okBB);
+
+        builder->SetInsertPoint(ovfBB);
+        llvm::Value* ovfMsg = builder->CreateGlobalString(
+            "Runtime error: string repetition size overflow\n", "strmul_ovf_msg");
+        builder->CreateCall(getPrintfFunction(), {ovfMsg});
+        builder->CreateCall(getOrDeclareExit(),
+            {llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 1)});
+        builder->CreateUnreachable();
+
+        builder->SetInsertPoint(okBB);
         llvm::Value* allocSz =
             builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "strmul.alloc");
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {allocSz}, "strmul.buf");
         // Null-terminate first byte so strcat works from empty buffer
         builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), buf);
         // Loop countVal times, strcat'ing strPtr each iteration.
-        llvm::Function* curFn = builder->GetInsertBlock()->getParent();
         llvm::BasicBlock* preHdr = builder->GetInsertBlock();
         llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "strmul.loop", curFn);
         llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "strmul.body", curFn);
@@ -567,6 +611,12 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                     return llvm::ConstantInt::get(*context, llvm::APInt(64, result));
                 // Fall through to emit runtime power operation on overflow.
             } else {
+                // Negative exponent: base**(-n) = 1 / base**n in integer math.
+                // |base| > 1 → truncates to 0; base=1 → 1; base=-1 → ±1.
+                if (lval == 1)
+                    return llvm::ConstantInt::get(*context, llvm::APInt(64, 1));
+                if (lval == -1)
+                    return llvm::ConstantInt::get(*context, llvm::APInt(64, (rval & 1) ? -1 : 1));
                 return llvm::ConstantInt::get(*context, llvm::APInt(64, 0));
             }
         }
@@ -1025,6 +1075,12 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     } else if (expr->op == "^") {
         return builder->CreateXor(left, right, "xortmp");
     } else if (expr->op == "<<") {
+        // For constant shift amounts already in [0, 63], skip the mask.
+        if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
+            int64_t sv = ci->getSExtValue();
+            if (sv >= 0 && sv < 64)
+                return builder->CreateShl(left, right, "shltmp");
+        }
         // Mask shift amount to [0, 63] to prevent undefined behavior
         llvm::Value* mask = llvm::ConstantInt::get(getDefaultType(), 63);
         llvm::Value* safeShift = builder->CreateAnd(right, mask, "shlmask");
@@ -1032,6 +1088,12 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         // and marking nsw would let LLVM treat overflowing shifts as poison.
         return builder->CreateShl(left, safeShift, "shltmp");
     } else if (expr->op == ">>") {
+        // For constant shift amounts already in [0, 63], skip the mask.
+        if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
+            int64_t sv = ci->getSExtValue();
+            if (sv >= 0 && sv < 64)
+                return builder->CreateLShr(left, right, "lshrtmp");
+        }
         // Mask shift amount to [0, 63] to prevent undefined behavior
         llvm::Value* mask = llvm::ConstantInt::get(getDefaultType(), 63);
         llvm::Value* safeShift = builder->CreateAnd(right, mask, "shrmask");
@@ -1218,8 +1280,22 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         llvm::Value* isNegExp = builder->CreateICmpSLT(right, zero, "pow.isneg");
         builder->CreateCondBr(isNegExp, negExpBB, posExpBB);
 
-        // Negative exponent: integer result is 0 for |base| > 1
+        // Negative exponent: base**(-n) = 1 / base**n in integer math.
+        // |base| > 1 → truncates to 0; base=1 → 1; base=-1 → ±1.
         builder->SetInsertPoint(negExpBB);
+        llvm::Value* negOne = llvm::ConstantInt::get(getDefaultType(), -1ULL, true);
+        llvm::Value* isBaseOne = builder->CreateICmpEQ(left, one, "pow.isone");
+        llvm::Value* isBaseNegOne = builder->CreateICmpEQ(left, negOne, "pow.isnegone");
+        // For base=-1: result is -1 if exponent is odd, 1 if even.
+        // exponent is negative here, but parity of -n equals parity of n:
+        // negate, then check the low bit.
+        llvm::Value* absExp = builder->CreateNeg(right, "pow.absexp");
+        llvm::Value* expLowBit = builder->CreateAnd(absExp, one, "pow.lowbit");
+        llvm::Value* isExpOdd = builder->CreateICmpNE(expLowBit, zero, "pow.expodd");
+        llvm::Value* negOneResult = builder->CreateSelect(isExpOdd, negOne, one, "pow.negoneres");
+        // Pick result: base==1 → 1, base==-1 → ±1, else → 0.
+        llvm::Value* negResult = builder->CreateSelect(isBaseNegOne, negOneResult, zero, "pow.negsel");
+        negResult = builder->CreateSelect(isBaseOne, one, negResult, "pow.negfinal");
         builder->CreateBr(doneBB);
 
         builder->SetInsertPoint(posExpBB);
@@ -1256,7 +1332,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
 
         builder->SetInsertPoint(doneBB);
         llvm::PHINode* finalResult = builder->CreatePHI(getDefaultType(), 2, "pow.final");
-        finalResult->addIncoming(zero, negExpBB);
+        finalResult->addIncoming(negResult, negExpBB);
         finalResult->addIncoming(result, loopBB);
         return finalResult;
     }

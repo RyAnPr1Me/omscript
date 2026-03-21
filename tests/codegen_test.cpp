@@ -6205,3 +6205,201 @@ TEST(CodegenTest, RestrictAnnotationAddsArgMemOnly) {
     EXPECT_TRUE(fn->doesNotThrow())
         << "Function should have nothrow from @restrict";
 }
+
+// ===========================================================================
+// Negative exponent power operator
+// ===========================================================================
+
+TEST(CodegenTest, NegativeExponentConstantFolding) {
+    // Constant folding: 1 ** -5 should fold to 1, not 0.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return 1 ** -5; }", codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    // The function should constant-fold to return 1.
+    for (auto& bb : *mainFn) {
+        for (auto& inst : bb) {
+            if (auto* ret = llvm::dyn_cast<llvm::ReturnInst>(&inst)) {
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(ret->getReturnValue())) {
+                    EXPECT_EQ(ci->getSExtValue(), 1)
+                        << "1 ** -5 should constant-fold to 1";
+                }
+            }
+        }
+    }
+}
+
+TEST(CodegenTest, NegativeExponentNegOneOdd) {
+    // (-1) ** -3 should fold to -1 (odd exponent).
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return (-1) ** -3; }", codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    for (auto& bb : *mainFn) {
+        for (auto& inst : bb) {
+            if (auto* ret = llvm::dyn_cast<llvm::ReturnInst>(&inst)) {
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(ret->getReturnValue())) {
+                    EXPECT_EQ(ci->getSExtValue(), -1)
+                        << "(-1) ** -3 should constant-fold to -1";
+                }
+            }
+        }
+    }
+}
+
+TEST(CodegenTest, NegativeExponentNegOneEven) {
+    // (-1) ** -4 should fold to 1 (even exponent).
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return (-1) ** -4; }", codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    for (auto& bb : *mainFn) {
+        for (auto& inst : bb) {
+            if (auto* ret = llvm::dyn_cast<llvm::ReturnInst>(&inst)) {
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(ret->getReturnValue())) {
+                    EXPECT_EQ(ci->getSExtValue(), 1)
+                        << "(-1) ** -4 should constant-fold to 1";
+                }
+            }
+        }
+    }
+}
+
+TEST(CodegenTest, NegativeExponentLargeBase) {
+    // 5 ** -2 should fold to 0 (integer truncation of 0.04).
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return 5 ** -2; }", codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    for (auto& bb : *mainFn) {
+        for (auto& inst : bb) {
+            if (auto* ret = llvm::dyn_cast<llvm::ReturnInst>(&inst)) {
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(ret->getReturnValue())) {
+                    EXPECT_EQ(ci->getSExtValue(), 0)
+                        << "5 ** -2 should constant-fold to 0";
+                }
+            }
+        }
+    }
+}
+
+TEST(CodegenTest, NegativeExponentRuntimePath) {
+    // Runtime negative exponent: base 1 should still yield 1.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn neg_pow(b, e) { return b ** e; }\n"
+                           "fn main() { return neg_pow(1, -5); }",
+                           codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("neg_pow");
+    ASSERT_NE(fn, nullptr);
+    // Verify the function has the negative-exponent guard blocks.
+    bool hasNegExpBlock = false;
+    for (auto& bb : *fn) {
+        if (bb.getName().starts_with("pow.negexp"))
+            hasNegExpBlock = true;
+    }
+    EXPECT_TRUE(hasNegExpBlock)
+        << "Runtime power should have a negative-exponent guard block";
+}
+
+// ===========================================================================
+// Shift constant folding optimization
+// ===========================================================================
+
+TEST(CodegenTest, ShiftConstantNoMask) {
+    // Shift by a constant in [0, 63] should NOT generate an AND mask.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn shl5(x) { return x << 5; }\n"
+                           "fn main() { return shl5(1); }",
+                           codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("shl5");
+    ASSERT_NE(fn, nullptr);
+    bool hasAndMask = false;
+    for (auto& bb : *fn) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::And)
+                hasAndMask = true;
+        }
+    }
+    EXPECT_FALSE(hasAndMask)
+        << "Shift by constant 5 should not emit an AND mask instruction";
+}
+
+TEST(CodegenTest, ShiftVariableHasMask) {
+    // Shift by a variable should still generate an AND mask.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn shlv(x, n) { return x << n; }\n"
+                           "fn main() { return shlv(1, 5); }",
+                           codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("shlv");
+    ASSERT_NE(fn, nullptr);
+    bool hasAndMask = false;
+    for (auto& bb : *fn) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::And)
+                hasAndMask = true;
+        }
+    }
+    EXPECT_TRUE(hasAndMask)
+        << "Shift by variable should still emit an AND mask instruction";
+}
+
+// ===========================================================================
+// Short-circuit constant folding for && and ||
+// ===========================================================================
+
+TEST(CodegenTest, ShortCircuitAndFalse) {
+    // 0 && x should fold to 0 without evaluating x.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn f(x) { return 0 && x; }\n"
+                           "fn main() { return f(42); }",
+                           codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("f");
+    ASSERT_NE(fn, nullptr);
+    // Should be a single basic block (no branch needed).
+    int bbCount = std::distance(fn->begin(), fn->end());
+    EXPECT_EQ(bbCount, 1) << "0 && x should not generate branches";
+}
+
+TEST(CodegenTest, ShortCircuitOrTrue) {
+    // 1 || x should fold to 1 without evaluating x.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn f(x) { return 1 || x; }\n"
+                           "fn main() { return f(42); }",
+                           codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("f");
+    ASSERT_NE(fn, nullptr);
+    int bbCount = std::distance(fn->begin(), fn->end());
+    EXPECT_EQ(bbCount, 1) << "1 || x should not generate branches";
+}
+
+// ===========================================================================
+// String repeat overflow guard
+// ===========================================================================
+
+TEST(CodegenTest, StringRepeatOverflowGuard) {
+    // String repetition should have an overflow guard.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn f(n) { return \"abc\" * n; }\n"
+                           "fn main() { return 0; }",
+                           codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("f");
+    ASSERT_NE(fn, nullptr);
+    // Check for the overflow guard block.
+    bool hasOvfBlock = false;
+    for (auto& bb : *fn) {
+        if (bb.getName().starts_with("strmul.overflow"))
+            hasOvfBlock = true;
+    }
+    EXPECT_TRUE(hasOvfBlock)
+        << "String repetition should have an overflow guard block";
+}
