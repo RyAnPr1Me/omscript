@@ -108,8 +108,68 @@ jobs:
           
           cat include/version.h
           
-          # Configure and build
-          cmake -B build -DCMAKE_BUILD_TYPE=Release -DLLVM_DIR=/usr/lib/llvm-18/cmake "-DOMSC_VERSION=$NEW_VERSION"
+          # ── PGO + LTO optimized build ─────────────────────────────
+          # Step 1: Instrumented build for profile generation
+          cmake -B build-pgo-gen \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_DIR=/usr/lib/llvm-18/cmake \
+            -DPGO_GENERATE=ON \
+            -DPGO_PROFILE_DIR="$PWD/pgo-profiles" \
+            "-DOMSC_VERSION=$NEW_VERSION"
+          cmake --build build-pgo-gen --parallel $(nproc)
+          
+          # Step 2: Run instrumented compiler on representative workloads
+          mkdir -p pgo-profiles
+          cat > /tmp/pgo_workload.om << 'WORKLOAD'
+          OPTMAX=:
+          struct Point { hot int x, hot int y }
+          @hot fn add(int a, int b) -> int { return a + b; }
+          @hot fn fibonacci(int n) -> int {
+              if n <= 1 { return n; }
+              return fibonacci(n - 1) + fibonacci(n - 2);
+          }
+          @hot fn sum_squares(int n) -> int {
+              var total: int = 0;
+              for i in 0..n { total = total + i * i; }
+              return total;
+          }
+          fn main() -> int {
+              var x = add(40, 2);
+              var y = fibonacci(10);
+              var z = sum_squares(100);
+              var msg = "hello" + " " + "world";
+              var arr = [1, 2, 3, 4, 5];
+              for i in 0..5 { arr[i] = arr[i] * 2; }
+              var p = Point { x: x, y: 20 };
+              print(x + y + z + p.x);
+              return 0;
+          }
+          WORKLOAD
+          for opt in "-O1" "-O2" "-O3"; do
+            ./build-pgo-gen/omsc /tmp/pgo_workload.om $opt -o /tmp/pgo_out 2>/dev/null || true
+          done
+          ./build-pgo-gen/omsc /tmp/pgo_workload.om --dry-run 2>/dev/null || true
+          
+          # Step 3: Rebuild with PGO + LTO using the profile data
+          pgo_args=()
+          PROFDATA="$PWD/pgo-profiles/default.profdata"
+          # GCC generates .gcda files automatically; profdata merge is
+          # only needed for Clang.  Check for merged profdata first.
+          if command -v llvm-profdata-18 &>/dev/null; then
+            llvm-profdata-18 merge -output="$PROFDATA" pgo-profiles/*.profraw 2>/dev/null || true
+          elif command -v llvm-profdata &>/dev/null; then
+            llvm-profdata merge -output="$PROFDATA" pgo-profiles/*.profraw 2>/dev/null || true
+          fi
+          if [ -f "$PROFDATA" ]; then
+            pgo_args+=("-DPGO_USE=$PROFDATA")
+          fi
+          
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_DIR=/usr/lib/llvm-18/cmake \
+            -DLTO=ON \
+            "${pgo_args[@]}" \
+            "-DOMSC_VERSION=$NEW_VERSION"
           cmake --build build --parallel $(nproc)
           
           # Run tests

@@ -38,6 +38,68 @@ if(LTO)
     endif()
 endif()
 
+# Profile-Guided Optimization (PGO) for the compiler binary itself.
+# Usage:
+#   1. cmake -DPGO_GENERATE=ON -DPGO_PROFILE_DIR=/path/to/profiles ..
+#   2. make -j$(nproc)
+#   3. ./omsc <representative workload>     # generates .profraw files
+#   4. llvm-profdata merge -output=default.profdata /path/to/profiles/*.profraw
+#   5. cmake -DPGO_USE=/path/to/default.profdata ..
+#   6. make -j$(nproc)                      # recompiles using the profile
+option(PGO_GENERATE "Instrument build for PGO profile generation" OFF)
+set(PGO_PROFILE_DIR "" CACHE STRING "Directory for PGO raw profiles (PGO_GENERATE only)")
+set(PGO_USE "" CACHE FILEPATH "Path to merged PGO profile (default.profdata)")
+if(PGO_GENERATE AND PGO_USE)
+    message(FATAL_ERROR "PGO_GENERATE and PGO_USE are mutually exclusive")
+endif()
+if(PGO_GENERATE)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        set(_pgo_gen_flags "-fprofile-generate")
+        if(PGO_PROFILE_DIR)
+            set(_pgo_gen_flags "${_pgo_gen_flags}=${PGO_PROFILE_DIR}")
+        endif()
+        add_compile_options(${_pgo_gen_flags})
+        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${_pgo_gen_flags}")
+        message(STATUS "PGO instrumentation enabled (profile dir: ${PGO_PROFILE_DIR})")
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+        set(_pgo_gen_flags "-fprofile-generate")
+        if(PGO_PROFILE_DIR)
+            set(_pgo_gen_flags "${_pgo_gen_flags}=${PGO_PROFILE_DIR}")
+        endif()
+        add_compile_options(${_pgo_gen_flags})
+        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${_pgo_gen_flags}")
+        message(STATUS "PGO instrumentation enabled (GCC, profile dir: ${PGO_PROFILE_DIR})")
+    else()
+        message(WARNING "PGO_GENERATE requested but compiler does not support it")
+    endif()
+endif()
+if(PGO_USE)
+    if(NOT EXISTS "${PGO_USE}")
+        message(FATAL_ERROR "PGO profile not found: ${PGO_USE}")
+    endif()
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        add_compile_options(-fprofile-use=${PGO_USE})
+        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fprofile-use=${PGO_USE}")
+        message(STATUS "PGO profile-use enabled: ${PGO_USE}")
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+        add_compile_options(-fprofile-use=${PGO_USE} -fprofile-correction)
+        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fprofile-use=${PGO_USE}")
+        message(STATUS "PGO profile-use enabled (GCC): ${PGO_USE}")
+    else()
+        message(WARNING "PGO_USE requested but compiler does not support it")
+    endif()
+endif()
+
+# Target the host CPU for maximum performance (release builds only).
+# Enable with -DNATIVE=ON.  Not recommended for distributed binaries.
+option(NATIVE "Build with -march=native for host-specific optimizations" OFF)
+if(NATIVE)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        add_compile_options(-march=native)
+        message(STATUS "Native CPU targeting enabled (-march=native)")
+    endif()
+endif()
+
 # Code coverage configuration
 option(COVERAGE "Enable code coverage" OFF)
 if(COVERAGE)

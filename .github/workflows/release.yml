@@ -87,15 +87,123 @@ jobs:
             mingw-w64-x86_64-llvm
             mingw-w64-x86_64-ninja
 
-      - name: Configure CMake
-        if: runner.os != 'Windows'
+      # ── PGO + LTO optimized build (Linux) ──────────────────────────
+      # Step 1: Build an instrumented compiler to generate profile data.
+      - name: "PGO Step 1: Build instrumented compiler (Linux)"
+        if: runner.os == 'Linux'
         shell: bash
         run: |
-          cmake_args=(-DCMAKE_BUILD_TYPE=Release "-DOMSC_VERSION=${{ steps.version.outputs.VERSION }}")
+          cmake -B build-pgo-gen \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=gcc \
+            -DCMAKE_CXX_COMPILER=g++ \
+            -DLLVM_DIR="$LLVM_DIR" \
+            -DPGO_GENERATE=ON \
+            -DPGO_PROFILE_DIR="$PWD/pgo-profiles" \
+            "-DOMSC_VERSION=${{ steps.version.outputs.VERSION }}"
+          cmake --build build-pgo-gen --config Release --parallel "$(nproc)"
+
+      # Step 2: Run the instrumented compiler on representative workloads
+      # to generate profile data for hot code paths.
+      - name: "PGO Step 2: Generate profile data (Linux)"
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          mkdir -p pgo-profiles
+          OMSC="./build-pgo-gen/omsc"
+
+          # Generate a representative workload file exercising all major
+          # compiler subsystems: parsing, codegen, optimization, builtins.
+          cat > /tmp/pgo_workload.om << 'WORKLOAD'
+          OPTMAX=:
+          struct Point { hot int x, hot int y }
+          @hot fn add(int a, int b) -> int { return a + b; }
+          @hot fn fibonacci(int n) -> int {
+              if n <= 1 { return n; }
+              return fibonacci(n - 1) + fibonacci(n - 2);
+          }
+          @hot fn sum_squares(int n) -> int {
+              var total: int = 0;
+              for i in 0..n { total = total + i * i; }
+              return total;
+          }
+          fn main() -> int {
+              var x = add(40, 2);
+              var y = fibonacci(10);
+              var z = sum_squares(100);
+              var msg = "hello" + " " + "world";
+              var arr = [1, 2, 3, 4, 5];
+              for i in 0..5 { arr[i] = arr[i] * 2; }
+              var p = Point { x: x, y: 20 };
+              print(x + y + z + p.x);
+              return 0;
+          }
+          WORKLOAD
+
+          # Run the instrumented compiler multiple times with different
+          # optimization levels to profile all code paths.
+          for opt in "-O1" "-O2" "-O3"; do
+            "$OMSC" /tmp/pgo_workload.om $opt -o /tmp/pgo_out 2>/dev/null || true
+          done
+
+          # Also run --dry-run and --dump-ast to profile front-end paths.
+          "$OMSC" /tmp/pgo_workload.om --dry-run 2>/dev/null || true
+          "$OMSC" /tmp/pgo_workload.om --dump-ast 2>/dev/null || true
+
+          # Merge the raw profile data.
+          PROFDATA="$PWD/pgo-profiles/default.profdata"
+          if command -v llvm-profdata-18 &>/dev/null; then
+            llvm-profdata-18 merge -output="$PROFDATA" pgo-profiles/*.profraw 2>/dev/null || true
+          elif command -v llvm-profdata &>/dev/null; then
+            llvm-profdata merge -output="$PROFDATA" pgo-profiles/*.profraw 2>/dev/null || true
+          fi
+
+          # If profile merging produced no profdata (e.g. GCC generates
+          # .gcda files not .profraw), fall back to GCC's auto-detection.
+          if [ ! -f "$PROFDATA" ]; then
+            echo "PGO_PROFDATA=" >> "$GITHUB_ENV"
+            echo "Note: No merged profdata; GCC PGO will use .gcda files directly"
+          else
+            echo "PGO_PROFDATA=$PROFDATA" >> "$GITHUB_ENV"
+          fi
+
+      # Step 3: Rebuild the compiler with PGO profile + LTO for maximum
+      # optimization.  The profile data guides inlining, branch prediction,
+      # and code layout for the compiler's actual hot paths.
+      - name: "PGO Step 3: Rebuild with PGO + LTO (Linux)"
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          pgo_args=()
+          if [ -n "${PGO_PROFDATA:-}" ] && [ -f "${PGO_PROFDATA:-}" ]; then
+            pgo_args+=("-DPGO_USE=$PGO_PROFDATA")
+          fi
+
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=gcc \
+            -DCMAKE_CXX_COMPILER=g++ \
+            -DLLVM_DIR="$LLVM_DIR" \
+            -DLTO=ON \
+            "${pgo_args[@]}" \
+            "-DOMSC_VERSION=${{ steps.version.outputs.VERSION }}"
+          cmake --build build --config Release --parallel "$(nproc)"
+
+      # ── Standard build (macOS / Windows) ────────────────────────────
+      - name: Configure CMake (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          cmake_args=(-DCMAKE_BUILD_TYPE=Release -DLTO=ON "-DOMSC_VERSION=${{ steps.version.outputs.VERSION }}")
           if [ -n "${LLVM_DIR:-}" ]; then
             cmake_args+=("-DLLVM_DIR=$LLVM_DIR")
           fi
           cmake -B build "${cmake_args[@]}"
+
+      - name: Build compiler (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: cmake --build build --config Release --parallel 4
 
       - name: Configure CMake (Windows)
         if: runner.os == 'Windows'
@@ -104,11 +212,6 @@ jobs:
           cmake -G Ninja -B build \
             -DCMAKE_BUILD_TYPE=Release \
             "-DOMSC_VERSION=${{ steps.version.outputs.VERSION }}"
-
-      - name: Build compiler
-        if: runner.os != 'Windows'
-        shell: bash
-        run: cmake --build build --config Release --parallel 4
 
       - name: Build compiler (Windows)
         if: runner.os == 'Windows'

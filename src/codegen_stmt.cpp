@@ -1053,6 +1053,14 @@ void CodeGenerator::generateThrow(ThrowStmt* stmt) {
 // ---------------------------------------------------------------------------
 
 void CodeGenerator::generateInvalidate(InvalidateStmt* stmt) {
+    // Detect use-after-invalidate: the variable has already been
+    // invalidated or moved, so re-invalidating is a logic error.
+    if (deadVars_.count(stmt->varName)) {
+        auto reason = deadVarReason_.find(stmt->varName);
+        std::string hint = (reason != deadVarReason_.end()) ? reason->second : "invalidated";
+        codegenError("Variable '" + stmt->varName + "' has already been " + hint, stmt);
+    }
+
     // Look up the variable's alloca
     auto it = namedValues.find(stmt->varName);
     if (it == namedValues.end()) {

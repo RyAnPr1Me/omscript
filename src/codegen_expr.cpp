@@ -1564,6 +1564,7 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
         llvm::Value* len; // Length of spread array (if isSpread)
     };
     std::vector<ElemInfo> evalElems;
+    evalElems.reserve(expr->elements.size());
 
     for (const auto& elem : expr->elements) {
         if (elem->type == ASTNodeType::SPREAD_EXPR) {

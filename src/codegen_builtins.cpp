@@ -3950,6 +3950,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     std::vector<llvm::Value*> args;
+    args.reserve(callee->arg_size());
     for (size_t i = 0; i < callee->arg_size(); ++i) {
         llvm::Type* expectedTy = callee->getFunctionType()->getParamType(i);
         if (i < expr->arguments.size()) {
