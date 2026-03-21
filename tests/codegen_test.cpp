@@ -6049,8 +6049,10 @@ TEST(CodegenTest, BorrowWithRefTypeAndAddressOf) {
 // Prefetch: use-site prefetch and memory residency
 // ===========================================================================
 
-TEST(CodegenTest, PrefetchVarDeclEmitsPrefetchIntrinsic) {
-    // Prefetch var declaration should emit llvm.prefetch intrinsics.
+TEST(CodegenTest, PrefetchVarDeclRegistersNoAllocaPrefetch) {
+    // Prefetch var declaration should NOT emit llvm.prefetch on the alloca
+    // itself — the variable should be promoted to a register by SROA/mem2reg.
+    // For i32 variables (non-pointer), no prefetch intrinsic is emitted at all.
     CodeGenerator codegen(OptimizationLevel::O0);
     const char* src =
         "fn main() {"
@@ -6064,8 +6066,8 @@ TEST(CodegenTest, PrefetchVarDeclEmitsPrefetchIntrinsic) {
     auto* mainFn = mod->getFunction("main");
     ASSERT_NE(mainFn, nullptr);
 
-    // Count llvm.prefetch calls — at least one from declaration and one
-    // from use-site (loading x in `x + 1`).
+    // Count llvm.prefetch calls — for i32 (non-pointer) variables, no
+    // prefetch should be emitted (the variable goes to a register).
     unsigned prefetchCount = 0;
     for (auto& BB : *mainFn) {
         for (auto& I : BB) {
@@ -6077,11 +6079,12 @@ TEST(CodegenTest, PrefetchVarDeclEmitsPrefetchIntrinsic) {
             }
         }
     }
-    EXPECT_GE(prefetchCount, 2u); // declaration + use-site
+    EXPECT_EQ(prefetchCount, 0u); // no alloca prefetch for register vars
 }
 
-TEST(CodegenTest, PrefetchUseSiteMetadata) {
-    // Use-site prefetches should carry !omscript.user_prefetch metadata.
+TEST(CodegenTest, PrefetchI64EmitsValuePrefetch) {
+    // Prefetch of an i64 variable should emit a value-based prefetch
+    // (the variable's value is treated as a pointer to prefetch).
     CodeGenerator codegen(OptimizationLevel::O0);
     const char* src =
         "fn main() {"
@@ -6095,24 +6098,28 @@ TEST(CodegenTest, PrefetchUseSiteMetadata) {
     auto* mainFn = mod->getFunction("main");
     ASSERT_NE(mainFn, nullptr);
 
-    unsigned userPrefetchCount = 0;
+    // Should have exactly one prefetch: the value-based prefetch for the
+    // i64 variable (its value is treated as a memory address).
+    unsigned prefetchCount = 0;
     for (auto& BB : *mainFn) {
         for (auto& I : BB) {
             if (auto* call = llvm::dyn_cast<llvm::CallInst>(&I)) {
-                if (call->getMetadata("omscript.user_prefetch"))
-                    ++userPrefetchCount;
+                if (auto* callee = call->getCalledFunction()) {
+                    if (callee->getIntrinsicID() == llvm::Intrinsic::prefetch)
+                        ++prefetchCount;
+                }
             }
         }
     }
-    EXPECT_GE(userPrefetchCount, 1u);
+    EXPECT_EQ(prefetchCount, 1u); // value-based prefetch only
 }
 
 TEST(CodegenTest, PrefetchHotUsesHighLocality) {
-    // `prefetch hot` should use locality=3 in the prefetch intrinsic.
+    // `prefetch hot` should use locality=3 in the value-based prefetch.
     CodeGenerator codegen(OptimizationLevel::O0);
     const char* src =
         "fn main() {"
-        "    prefetch hot var h:i32 = 7;"
+        "    prefetch hot var h:i64 = 7;"
         "    invalidate h;"
         "    return 0;"
         "}";

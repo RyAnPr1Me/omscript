@@ -672,6 +672,15 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
                      llvm::Type::getInt32Ty(*context), 2))});
             loopMDs.push_back(unrollCount);
         }
+        // @unroll / @nounroll: per-function loop unrolling overrides.
+        // @nounroll disables unrolling entirely; @unroll requests full unrolling.
+        if (currentFuncHintNoUnroll_) {
+            loopMDs.push_back(llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.unroll.disable")}));
+        } else if (currentFuncHintUnroll_ && !addedUnrollHint) {
+            loopMDs.push_back(llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.unroll.full")}));
+        }
         llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
         loopMD->replaceOperandWith(0, loopMD);
         backBr->setMetadata(llvm::LLVMContext::MD_loop, loopMD);
@@ -1155,8 +1164,7 @@ void CodeGenerator::generatePrefetch(PrefetchStmt* stmt) {
     std::string varName;
 
     if (stmt->varDecl) {
-        // Prefetch with variable declaration: generate the VarDecl first,
-        // then emit a prefetch hint on its alloca.
+        // Prefetch with variable declaration: generate the VarDecl first.
         generateVarDecl(stmt->varDecl.get());
         varName = stmt->varDecl->name;
         prefetchedVars_.insert(varName);
@@ -1177,40 +1185,32 @@ void CodeGenerator::generatePrefetch(PrefetchStmt* stmt) {
     }
 
     if (alloca) {
-        // Determine locality from hints: hot → locality 3 (keep in all cache
-        // levels), default → locality 2 (keep in L2+L3).
-        int32_t locality = stmt->hintHot ? 3 : 2;
-
-        // Emit llvm.prefetch on the variable's alloca pointer so the variable
-        // stays in memory (the prefetch call prevents SROA/mem2reg promotion).
-        // This is the "put a variable in memory" part of the prefetch contract.
-        llvm::Function* prefetchFn = OMSC_GET_INTRINSIC_STMT(
-            module.get(), llvm::Intrinsic::prefetch,
-            {llvm::PointerType::getUnqual(*context)});
-        llvm::CallInst* pfCall = builder->CreateCall(prefetchFn, {
-            alloca,
-            builder->getInt32(0),              // read prefetch
-            builder->getInt32(locality),       // temporal locality
-            builder->getInt32(1)               // data cache
-        });
-        // Tag with metadata so the post-optimization cleanup preserves this
-        // user-requested prefetch (distinguished from HGOE-generated ones).
-        pfCall->setMetadata("omscript.user_prefetch",
-                            llvm::MDNode::get(*context, {}));
-
-        // If hintImmut is set, mark the variable's alloca loads as invariant
-        // so LLVM knows the value never changes and can hoist/CSE aggressively.
+        // If hintImmut is set, mark the variable's loads as invariant so LLVM
+        // knows the value never changes and can hoist/CSE aggressively.
         if (stmt->hintImmut) {
             prefetchedImmutVars_.insert(varName);
         }
 
-        // For variables that hold pointer-sized values (i64/ptr), also prefetch
-        // the pointed-to memory — the variable's VALUE is treated as a memory
-        // address, similar to @prefetch parameter handling.
+        // Register promotion strategy: do NOT emit llvm.prefetch on the
+        // alloca itself — that would anchor the variable to memory and
+        // prevent SROA/mem2reg from promoting it to an SSA register.
+        // Instead, the variable goes straight to a register and stays
+        // there until explicitly invalidated.  The prefetched variable
+        // is kept live by the invalidation enforcement in generateReturn
+        // (which errors if the variable is not invalidated before return).
+        //
+        // For variables that hold pointer-sized values (i64/ptr), emit
+        // a prefetch on the *pointed-to* memory — the variable's VALUE
+        // is treated as a memory address.  This is the only case where
+        // an actual llvm.prefetch intrinsic is emitted.
         auto* allocaInst = llvm::dyn_cast<llvm::AllocaInst>(alloca);
         if (allocaInst) {
             llvm::Type* elemTy = allocaInst->getAllocatedType();
             if (elemTy->isIntegerTy(64) || elemTy->isPointerTy()) {
+                int32_t locality = stmt->hintHot ? 3 : 2;
+                llvm::Function* prefetchFn = OMSC_GET_INTRINSIC_STMT(
+                    module.get(), llvm::Intrinsic::prefetch,
+                    {llvm::PointerType::getUnqual(*context)});
                 llvm::Value* val = builder->CreateLoad(elemTy, alloca,
                                                         varName + ".pf.val");
                 llvm::Value* ptr = val;
@@ -1219,14 +1219,12 @@ void CodeGenerator::generatePrefetch(PrefetchStmt* stmt) {
                         val, llvm::PointerType::getUnqual(*context),
                         varName + ".pf.ptr");
                 }
-                llvm::CallInst* valPf = builder->CreateCall(prefetchFn, {
+                builder->CreateCall(prefetchFn, {
                     ptr,
                     builder->getInt32(0),          // read prefetch
                     builder->getInt32(locality),   // temporal locality
                     builder->getInt32(1)           // data cache
                 });
-                valPf->setMetadata("omscript.user_prefetch",
-                                   llvm::MDNode::get(*context, {}));
             }
         }
     }

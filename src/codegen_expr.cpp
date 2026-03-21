@@ -79,25 +79,11 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
         codegenError(msg, expr);
     }
 
-    // Use-site prefetch: when a prefetched variable is about to be loaded,
-    // emit a prefetch hint so the CPU brings the data into cache just before
-    // it is needed.  This is the "when it is used" part of the prefetch
-    // contract — the variable stays in memory (the alloca is kept alive by
-    // the prefetch call) and is prefetched at each access point.
+    // Register-promotion strategy: prefetched variables go straight to
+    // registers (promoted by SROA/mem2reg) and stay there until invalidated.
+    // No use-site llvm.prefetch is emitted on the alloca — that would anchor
+    // the variable to memory and defeat register promotion.
     auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(it->second);
-    if (alloca && prefetchedVars_.count(expr->name)) {
-        llvm::Function* prefetchFn = OMSC_GET_INTRINSIC(
-            module.get(), llvm::Intrinsic::prefetch,
-            {llvm::PointerType::getUnqual(*context)});
-        llvm::CallInst* pfCall = builder->CreateCall(prefetchFn, {
-            alloca,
-            builder->getInt32(0),  // read prefetch
-            builder->getInt32(3),  // high temporal locality (use-site)
-            builder->getInt32(1)   // data cache
-        });
-        pfCall->setMetadata("omscript.user_prefetch",
-                            llvm::MDNode::get(*context, {}));
-    }
 
     llvm::Type* loadType = alloca ? alloca->getAllocatedType() : getDefaultType();
     auto* load = builder->CreateLoad(loadType, it->second, expr->name.c_str());

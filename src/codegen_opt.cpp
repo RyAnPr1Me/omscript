@@ -840,12 +840,12 @@ void CodeGenerator::runOptimizationPasses() {
     // inlining, superoptimizer, HGOE), remove prefetch intrinsics that are
     // no longer meaningful:
     //   1. Target is a constant or derived from a constant (inttoptr of literal).
-    //   2. Target is a stack allocation (alloca) or register-promoted value
-    //      — EXCEPT user-requested prefetches (tagged with !omscript.user_prefetch)
-    //      which intentionally keep the variable in memory.
+    //   2. Target is a stack allocation (alloca) or register-promoted value.
     //   3. The prefetched value has no remaining memory-accessing users.
     //   4. The associated computation was constant-folded or eliminated.
     //   5. Pure functions with no memory side effects need no prefetch.
+    // Prefetch-tagged variables go to registers (promoted by SROA/mem2reg)
+    // and stay there until invalidated — no special metadata bypass needed.
     if (optimizationLevel >= OptimizationLevel::O2) {
         unsigned prefetchesRemoved = 0;
         for (auto& F : *module) {
@@ -857,13 +857,6 @@ void CodeGenerator::runOptimizationPasses() {
                     if (!call) continue;
                     auto* callee = call->getCalledFunction();
                     if (!callee || callee->getIntrinsicID() != llvm::Intrinsic::prefetch)
-                        continue;
-
-                    // Preserve user-requested prefetches: these are tagged with
-                    // !omscript.user_prefetch metadata from `prefetch var` or
-                    // use-site emissions.  The user explicitly asked the variable
-                    // to stay in memory, so we honour that request.
-                    if (call->getMetadata("omscript.user_prefetch"))
                         continue;
 
                     llvm::Value* ptr = call->getArgOperand(0);

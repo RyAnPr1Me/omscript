@@ -2450,6 +2450,11 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         function->addFnAttr("flatten");
     }
 
+    // @unroll / @nounroll: per-function loop unrolling control.
+    // These are stored and applied to every loop emitted within this function.
+    currentFuncHintUnroll_ = func->hintUnroll;
+    currentFuncHintNoUnroll_ = func->hintNoUnroll;
+
     // Create entry basic block
     llvm::BasicBlock* entry = llvm::BasicBlock::Create(*context, "entry", function);
     builder->SetInsertPoint(entry);
