@@ -77,7 +77,7 @@
 namespace omscript {
 
 void CodeGenerator::resolveTargetCPU(std::string& cpu, std::string& features) const {
-    bool isNative = marchCpu_.empty() || marchCpu_ == "native";
+    const bool isNative = marchCpu_.empty() || marchCpu_ == "native";
     if (isNative) {
         cpu = llvm::sys::getHostCPUName().str();
         llvm::SubtargetFeatures featureSet;
@@ -120,7 +120,7 @@ void CodeGenerator::resolveTargetCPU(std::string& cpu, std::string& features) co
 // createTargetMachine() call into a single place.
 
 std::unique_ptr<llvm::TargetMachine> CodeGenerator::createTargetMachine() const {
-    std::string targetTripleStr = llvm::sys::getDefaultTargetTriple();
+    const std::string targetTripleStr = llvm::sys::getDefaultTargetTriple();
 #if LLVM_VERSION_MAJOR >= 19
     llvm::Triple targetTriple(targetTripleStr);
 #endif
@@ -143,7 +143,7 @@ std::unique_ptr<llvm::TargetMachine> CodeGenerator::createTargetMachine() const 
         opt.NoNaNsFPMath = true;
         opt.NoSignedZerosFPMath = true;
     }
-    std::optional<llvm::Reloc::Model> RM = usePIC_ ? llvm::Reloc::PIC_ : llvm::Reloc::Static;
+    std::optional<llvm::Reloc::Model> const RM = usePIC_ ? llvm::Reloc::PIC_ : llvm::Reloc::Static;
 
     std::string cpu;
     std::string features;
@@ -203,7 +203,7 @@ void CodeGenerator::runOptimizationPasses() {
     llvm::InitializeNativeTargetAsmParser();
 
     // Set the target triple on the module.
-    std::string targetTripleStr = llvm::sys::getDefaultTargetTriple();
+    const std::string targetTripleStr = llvm::sys::getDefaultTargetTriple();
 #if LLVM_VERSION_MAJOR >= 19
     llvm::Triple targetTriple(targetTripleStr);
     module->setTargetTriple(targetTriple);
@@ -677,7 +677,7 @@ void CodeGenerator::runOptimizationPasses() {
         static constexpr unsigned kMaxPreInlineSize = 200;
         for (auto& F : *module) {
             if (F.isDeclaration() || F.getName() == "main") continue;
-            unsigned preSize = F.getInstructionCount();
+            const unsigned preSize = F.getInstructionCount();
             if (preSize > kMaxPreInlineSize) continue;
 
             // Only inline functions that still contain a self-call.
@@ -745,7 +745,7 @@ void CodeGenerator::runOptimizationPasses() {
         }
         auto superStats = superopt::superoptimizeModule(*module, superConfig);
         if (verbose_) {
-            unsigned totalOpts = superStats.idiomsReplaced + superStats.synthReplacements +
+            const unsigned totalOpts = superStats.idiomsReplaced + superStats.synthReplacements +
                                  superStats.algebraicSimplified + superStats.branchesSimplified +
                                  superStats.deadCodeEliminated;
             std::cout << "    Superoptimizer complete: "
@@ -1006,7 +1006,7 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     for (auto& func : module->functions()) {
         if (func.isDeclaration())
             continue;
-        llvm::StringRef name = func.getName();
+        const llvm::StringRef name = func.getName();
         if (!optMaxFunctions.count(std::string(name)))
             continue;
         func.addFnAttr(llvm::Attribute::NoUnwind);
@@ -1098,7 +1098,7 @@ void CodeGenerator::writeObjectFile(const std::string& filename) {
     llvm::InitializeNativeTargetAsmPrinter();
     llvm::InitializeNativeTargetAsmParser();
 
-    std::string targetTripleStr = llvm::sys::getDefaultTargetTriple();
+    const std::string targetTripleStr = llvm::sys::getDefaultTargetTriple();
 #if LLVM_VERSION_MAJOR >= 19
     llvm::Triple targetTriple(targetTripleStr);
     module->setTargetTriple(targetTriple);
@@ -1137,7 +1137,7 @@ void CodeGenerator::writeObjectFile(const std::string& filename) {
     dest.flush();
     // Detect errors during close (e.g. I/O errors that occurred during write).
     if (dest.has_error()) {
-        std::string errMsg = "Error writing object file '" + filename + "': " + dest.error().message();
+        const std::string errMsg = "Error writing object file '" + filename + "': " + dest.error().message();
         dest.clear_error();
         throw DiagnosticError(Diagnostic{DiagnosticSeverity::Error, {"", 0, 0}, errMsg});
     }
@@ -1147,7 +1147,7 @@ void CodeGenerator::writeBitcodeFile(const std::string& filename) {
     // Initialize native target so the data layout can be set correctly.
     llvm::InitializeNativeTarget();
 
-    std::string targetTripleStr = llvm::sys::getDefaultTargetTriple();
+    const std::string targetTripleStr = llvm::sys::getDefaultTargetTriple();
 #if LLVM_VERSION_MAJOR >= 19
     llvm::Triple targetTriple(targetTripleStr);
     module->setTargetTriple(targetTriple);
@@ -1170,7 +1170,7 @@ void CodeGenerator::writeBitcodeFile(const std::string& filename) {
     llvm::WriteBitcodeToFile(*module, dest);
     dest.flush();
     if (dest.has_error()) {
-        std::string errMsg = "Error writing bitcode file '" + filename + "': " + dest.error().message();
+        const std::string errMsg = "Error writing bitcode file '" + filename + "': " + dest.error().message();
         dest.clear_error();
         throw DiagnosticError(Diagnostic{DiagnosticSeverity::Error, {"", 0, 0}, errMsg});
     }
@@ -1279,7 +1279,7 @@ void CodeGenerator::runJITBaselinePasses() {
     // new optimization opportunities (e.g., strength reduction creates patterns
     // that instcombine can simplify further).  Two iterations is the sweet spot
     // for per-function JIT optimization without excessive compile time.
-    int iterations = (optimizationLevel >= OptimizationLevel::O3) ? 2 : 1;
+    const int iterations = (optimizationLevel >= OptimizationLevel::O3) ? 2 : 1;
     for (auto& func : module->functions()) {
         if (!func.isDeclaration()) {
             for (int i = 0; i < iterations; ++i) {

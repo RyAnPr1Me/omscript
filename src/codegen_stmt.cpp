@@ -86,7 +86,7 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
         if (allocaType->isDoubleTy())
             builder->CreateStore(llvm::ConstantFP::get(allocaType, 0.0), alloca);
         else {
-            unsigned bits = allocaType->isIntegerTy() ? allocaType->getIntegerBitWidth() : 64;
+            const unsigned bits = allocaType->isIntegerTy() ? allocaType->getIntegerBitWidth() : 64;
             builder->CreateStore(llvm::ConstantInt::get(*context, llvm::APInt(bits, 0)), alloca);
         }
     }
@@ -238,8 +238,8 @@ void CodeGenerator::generateIf(IfStmt* stmt) {
     // likely  → then-branch is hot (weight 2000:1)
     // unlikely → then-branch is cold (weight 1:2000)
     if (stmt->hintLikely || stmt->hintUnlikely) {
-        uint32_t thenWeight = stmt->hintLikely ? 2000 : 1;
-        uint32_t elseWeight = stmt->hintLikely ? 1 : 2000;
+        const uint32_t thenWeight = stmt->hintLikely ? 2000 : 1;
+        const uint32_t elseWeight = stmt->hintLikely ? 1 : 2000;
         llvm::MDNode* brWeights = llvm::MDBuilder(*context).createBranchWeights(thenWeight, elseWeight);
         br->setMetadata(llvm::LLVMContext::MD_prof, brWeights);
     }
@@ -267,7 +267,7 @@ void CodeGenerator::generateIf(IfStmt* stmt) {
 void CodeGenerator::generateWhile(WhileStmt* stmt) {
     llvm::Function* function = builder->GetInsertBlock()->getParent();
 
-    ScopeGuard scope(*this);
+    const ScopeGuard scope(*this);
 
     // Constant condition elimination — match generateIf's dead-branch pruning.
     // Evaluate the condition once; if it folds to a constant we can avoid
@@ -355,7 +355,7 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
 void CodeGenerator::generateDoWhile(DoWhileStmt* stmt) {
     llvm::Function* function = builder->GetInsertBlock()->getParent();
 
-    ScopeGuard scope(*this);
+    const ScopeGuard scope(*this);
 
     llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "dowhilebody", function);
     // Create condBB upfront so that 'continue' inside the body jumps to the
@@ -437,7 +437,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         codegenError("For loop outside of function", stmt);
     }
 
-    ScopeGuard scope(*this);
+    const ScopeGuard scope(*this);
 
     // Allocate iterator variable — use annotated type when present
     llvm::Type* iterType = stmt->iteratorType.empty()
@@ -493,7 +493,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
                 ascending = true;
             }
         }
-        unsigned iterBits = iterType->getIntegerBitWidth();
+        const unsigned iterBits = iterType->getIntegerBitWidth();
         if (ascending) {
             stepVal = llvm::ConstantInt::get(iterType, 1);
             stepKnownPositive = true;
@@ -528,7 +528,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         builder->CreateCondBr(stepNonZero, condBB, stepFailBB);
 
         builder->SetInsertPoint(stepFailBB);
-        std::string errorMessage = "Runtime error: for-loop step cannot be zero for iterator '" + stmt->iteratorVar + "'\n";
+        const std::string errorMessage = "Runtime error: for-loop step cannot be zero for iterator '" + stmt->iteratorVar + "'\n";
         llvm::GlobalVariable* messageVar = builder->CreateGlobalString(errorMessage, "forstepmsg");
         llvm::Constant* zeroIndex = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0);
         llvm::Constant* indices[] = {zeroIndex, zeroIndex};
@@ -655,11 +655,11 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         if (optimizationLevel >= OptimizationLevel::O3 && enableUnrollLoops_) {
             if (auto* startCI = llvm::dyn_cast<llvm::ConstantInt>(startVal)) {
                 if (auto* endCI = llvm::dyn_cast<llvm::ConstantInt>(endVal)) {
-                    int64_t startV = startCI->getSExtValue();
-                    int64_t endV = endCI->getSExtValue();
+                    const int64_t startV = startCI->getSExtValue();
+                    const int64_t endV = endCI->getSExtValue();
                     // Compute trip count safely using unsigned subtraction to
                     // avoid signed overflow when start and end are far apart.
-                    uint64_t tripCount = (endV >= startV)
+                    const uint64_t tripCount = (endV >= startV)
                         ? static_cast<uint64_t>(endV) - static_cast<uint64_t>(startV)
                         : static_cast<uint64_t>(startV) - static_cast<uint64_t>(endV);
                     if (tripCount > 0 && tripCount <= 64) {
@@ -732,16 +732,16 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
         codegenError("For-each loop outside of function", stmt);
     }
 
-    ScopeGuard scope(*this);
+    const ScopeGuard scope(*this);
 
     // Evaluate the collection (array or string)
     llvm::Value* collVal = generateExpression(stmt->collection.get());
 
     // Detect whether the collection is a string.  Strings are raw char
     // pointers without a length header; arrays use [length, e0, e1, ...].
-    bool isStr = collVal->getType()->isPointerTy() || isStringExpr(stmt->collection.get());
+    const bool isStr = collVal->getType()->isPointerTy() || isStringExpr(stmt->collection.get());
     // Detect whether this is an array whose elements are string pointers.
-    bool isStrArray = !isStr && isStringArrayExpr(stmt->collection.get());
+    const bool isStrArray = !isStr && isStringArrayExpr(stmt->collection.get());
 
     // Normalise to i64 for uniformity; we'll re-cast to ptr below.
     collVal = toDefaultType(collVal);
@@ -828,7 +828,7 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
 }
 
 void CodeGenerator::generateBlock(BlockStmt* stmt) {
-    ScopeGuard scope(*this);
+    const ScopeGuard scope(*this);
     for (auto& statement : stmt->statements) {
         if (builder->GetInsertBlock()->getTerminator()) {
             break; // Don't generate unreachable code
@@ -871,7 +871,7 @@ void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
             // Generate default block body.
             builder->SetInsertPoint(defaultBB);
             {
-                ScopeGuard scope(*this);
+                const ScopeGuard scope(*this);
                 for (auto& s : sc.body) {
                     generateStatement(s.get());
                     if (builder->GetInsertBlock()->getTerminator())
@@ -892,7 +892,7 @@ void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
                 codegenError("case value must be a compile-time integer constant", sc.value.get());
             }
 
-            int64_t cv = caseConst->getSExtValue();
+            const int64_t cv = caseConst->getSExtValue();
             if (!seenCaseValues.insert(cv).second) {
                 codegenError("duplicate case value " + std::to_string(cv) + " in switch statement", sc.value.get());
             }
@@ -902,7 +902,7 @@ void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
 
             builder->SetInsertPoint(caseBB);
             {
-                ScopeGuard scope(*this);
+                const ScopeGuard scope(*this);
                 for (auto& s : sc.body) {
                     generateStatement(s.get());
                     if (builder->GetInsertBlock()->getTerminator())
@@ -976,7 +976,7 @@ void CodeGenerator::generateTryCatch(TryCatchStmt* stmt) {
     // within this scope) branches directly here.
     tryCatchStack_.push_back(catchBB);
     {
-        ScopeGuard scope(*this);
+        const ScopeGuard scope(*this);
         for (auto& s : stmt->tryBlock->statements) {
             // Stop if the current block already has a terminator (e.g. a direct
             // `throw` branched to catchBB or a `return`).
@@ -1016,7 +1016,7 @@ void CodeGenerator::generateTryCatch(TryCatchStmt* stmt) {
     // --- Catch block ---
     builder->SetInsertPoint(catchBB);
     {
-        ScopeGuard scope(*this);
+        const ScopeGuard scope(*this);
         llvm::Value* errValLoaded = builder->CreateLoad(getDefaultType(), errVal, "catch.errval");
         llvm::AllocaInst* catchVar = createEntryBlockAlloca(function, stmt->catchVar);
         builder->CreateStore(errValLoaded, catchVar);
@@ -1093,7 +1093,7 @@ void CodeGenerator::generateInvalidate(InvalidateStmt* stmt) {
     // invalidated or moved, so re-invalidating is a logic error.
     if (deadVars_.count(stmt->varName)) {
         auto reason = deadVarReason_.find(stmt->varName);
-        std::string hint = (reason != deadVarReason_.end()) ? reason->second : "invalidated";
+        const std::string hint = (reason != deadVarReason_.end()) ? reason->second : "invalidated";
         codegenError("Variable '" + stmt->varName + "' has already been " + hint, stmt);
     }
 
@@ -1109,7 +1109,7 @@ void CodeGenerator::generateInvalidate(InvalidateStmt* stmt) {
     auto* allocaInst = llvm::dyn_cast<llvm::AllocaInst>(alloca);
     if (allocaInst) {
         auto* allocaTy = allocaInst->getAllocatedType();
-        uint64_t size = module->getDataLayout().getTypeAllocSize(allocaTy);
+        const uint64_t size = module->getDataLayout().getTypeAllocSize(allocaTy);
         auto* sizeVal = llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), size);
         auto* lifetimeEnd = OMSC_GET_INTRINSIC_STMT(
             module.get(), llvm::Intrinsic::lifetime_end,
@@ -1238,7 +1238,7 @@ void CodeGenerator::generatePrefetch(PrefetchStmt* stmt) {
         auto* allocaInst = llvm::dyn_cast<llvm::AllocaInst>(alloca);
         if (allocaInst) {
             llvm::Type* elemTy = allocaInst->getAllocatedType();
-            int32_t locality = stmt->hintHot ? 3 : 2;
+            const int32_t locality = stmt->hintHot ? 3 : 2;
 
             // Determine if this is a "large" type that cannot fit in a
             // register (e.g. arrays, structs stored as multi-slot allocas).
@@ -1278,10 +1278,10 @@ void CodeGenerator::generatePrefetch(PrefetchStmt* stmt) {
                 // cache lines to cover the full object.  Each cache line is
                 // typically 64 bytes = 8 × i64 slots.
                 if (auto* arrTy = llvm::dyn_cast<llvm::ArrayType>(elemTy)) {
-                    uint64_t numSlots = arrTy->getNumElements();
-                    uint64_t slotSize = module->getDataLayout().getTypeAllocSize(
+                    const uint64_t numSlots = arrTy->getNumElements();
+                    const uint64_t slotSize = module->getDataLayout().getTypeAllocSize(
                         arrTy->getElementType());
-                    uint64_t totalBytes = numSlots * slotSize;
+                    const uint64_t totalBytes = numSlots * slotSize;
                     // Prefetch every 64 bytes (one cache line) beyond the first.
                     for (uint64_t offset = 64; offset < totalBytes; offset += 64) {
                         llvm::Value* gepIdx = llvm::ConstantInt::get(
@@ -1339,7 +1339,7 @@ void CodeGenerator::markVariableMoved(const std::string& varName) {
         auto* srcAlloca = llvm::dyn_cast<llvm::AllocaInst>(srcIt->second);
         if (srcAlloca) {
             auto* srcTy = srcAlloca->getAllocatedType();
-            uint64_t sz = module->getDataLayout().getTypeAllocSize(srcTy);
+            const uint64_t sz = module->getDataLayout().getTypeAllocSize(srcTy);
             auto* szVal = llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), sz);
 #if LLVM_VERSION_MAJOR >= 19
             auto* lifetimeEnd = llvm::Intrinsic::getOrInsertDeclaration(

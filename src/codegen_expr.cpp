@@ -54,7 +54,7 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
     auto deadIt = deadVars_.find(expr->name);
     if (deadIt != deadVars_.end()) {
         auto reasonIt = deadVarReason_.find(expr->name);
-        std::string reason = (reasonIt != deadVarReason_.end()) ? reasonIt->second : "moved or invalidated";
+        const std::string reason = (reasonIt != deadVarReason_.end()) ? reasonIt->second : "moved or invalidated";
         codegenError("Use of " + reason + " variable '" + expr->name + "'", expr);
     }
 
@@ -73,7 +73,7 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
             if (kv.second)
                 candidates.push_back(kv.first);
         }
-        std::string suggestion = suggestSimilar(expr->name, candidates);
+        const std::string suggestion = suggestSimilar(expr->name, candidates);
         if (!suggestion.empty()) {
             msg += " (did you mean '" + suggestion + "'?)";
         }
@@ -118,7 +118,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         auto* rightLit = dynamic_cast<LiteralExpr*>(expr->right.get());
         if (leftLit && rightLit && leftLit->literalType == LiteralExpr::LiteralType::STRING &&
             rightLit->literalType == LiteralExpr::LiteralType::STRING) {
-            std::string folded = leftLit->stringValue + rightLit->stringValue;
+            const std::string folded = leftLit->stringValue + rightLit->stringValue;
             return builder->CreateGlobalString(folded, "strfold");
         }
     }
@@ -130,7 +130,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         // skip branch generation entirely and either short-circuit or
         // evaluate just the right side.
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left)) {
-            bool leftTrue = !ci->isZero();
+            const bool leftTrue = !ci->isZero();
             if (expr->op == "&&") {
                 if (!leftTrue)
                     return llvm::ConstantInt::get(getDefaultType(), 0); // false && x → 0
@@ -213,13 +213,13 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
 
     llvm::Value* right = generateExpression(expr->right.get());
 
-    bool leftIsFloat = left->getType()->isDoubleTy();
-    bool rightIsFloat = right->getType()->isDoubleTy();
+    const bool leftIsFloat = left->getType()->isDoubleTy();
+    const bool rightIsFloat = right->getType()->isDoubleTy();
 
     // Pre-compute string flags once, used by both the float-skip guard below
     // and the string concatenation block that follows.
-    bool leftIsStr = left->getType()->isPointerTy() || isStringExpr(expr->left.get());
-    bool rightIsStr = right->getType()->isPointerTy() || isStringExpr(expr->right.get());
+    const bool leftIsStr = left->getType()->isPointerTy() || isStringExpr(expr->left.get());
+    const bool rightIsStr = right->getType()->isPointerTy() || isStringExpr(expr->right.get());
 
     // Float operations path — but only when neither operand is a string.
     // When the '+' operator has one string and one float (e.g. "pi=" + 3.14),
@@ -236,8 +236,8 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         // are known constants, avoiding runtime FP instructions entirely.
         if (auto* lc = llvm::dyn_cast<llvm::ConstantFP>(left)) {
             if (auto* rc = llvm::dyn_cast<llvm::ConstantFP>(right)) {
-                double lv = lc->getValueAPF().convertToDouble();
-                double rv = rc->getValueAPF().convertToDouble();
+                const double lv = lc->getValueAPF().convertToDouble();
+                const double rv = rc->getValueAPF().convertToDouble();
                 if (expr->op == "+")
                     return llvm::ConstantFP::get(getFloatType(), lv + rv);
                 if (expr->op == "-")
@@ -274,7 +274,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         // operations when one operand is a known constant.  These supplement
         // LLVM's InstCombine by catching patterns at the IR emission level.
         if (auto* rc = llvm::dyn_cast<llvm::ConstantFP>(right)) {
-            double rv = rc->getValueAPF().convertToDouble();
+            const double rv = rc->getValueAPF().convertToDouble();
             if (rv == 0.0 && (expr->op == "+" || expr->op == "-"))
                 return left;  // x+0.0, x-0.0 → x
             if (rv == 1.0 && (expr->op == "*" || expr->op == "/"))
@@ -300,25 +300,25 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             // vs 15-25 cyc).  Only applies to exact powers of 2 where the
             // reciprocal is exactly representable in IEEE-754 (no rounding error).
             if (expr->op == "/" && rv != 0.0) {
-                double abs_rv = rv < 0 ? -rv : rv;
+                const double abs_rv = rv < 0 ? -rv : rv;
                 bool isPow2 = false;
                 if (abs_rv >= 1.0 && abs_rv <= 4503599627370496.0) { // 2^52 max exact int in double
                     auto u = static_cast<uint64_t>(abs_rv);
                     // Verify the cast is exact (no truncation of fractional part)
                     isPow2 = (static_cast<double>(u) == abs_rv) && u > 0 && (u & (u - 1)) == 0;
                 } else if (abs_rv > 0.0 && abs_rv < 1.0) {
-                    double inv = 1.0 / abs_rv;
+                    const double inv = 1.0 / abs_rv;
                     auto u = static_cast<uint64_t>(inv);
                     isPow2 = (static_cast<double>(u) == inv) && u > 0 && (u & (u - 1)) == 0;
                 }
                 if (isPow2) {
-                    double recip = 1.0 / rv;
+                    const double recip = 1.0 / rv;
                     return builder->CreateFMul(left, llvm::ConstantFP::get(getFloatType(), recip), "fdivrecip");
                 }
             }
         }
         if (auto* lc = llvm::dyn_cast<llvm::ConstantFP>(left)) {
-            double lv = lc->getValueAPF().convertToDouble();
+            const double lv = lc->getValueAPF().convertToDouble();
             if (lv == 0.0 && expr->op == "+")
                 return right; // 0.0+x → x
             if (lv == 0.0 && expr->op == "-")
@@ -372,7 +372,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             // Float exponent specialization: emit cheaper inline sequences
             // for common small-integer and half-integer exponents.
             if (auto* rc = llvm::dyn_cast<llvm::ConstantFP>(right)) {
-                double rv = rc->getValueAPF().convertToDouble();
+                const double rv = rc->getValueAPF().convertToDouble();
                 if (rv == 0.5) {
                     // x**0.5 → sqrt(x): single-instruction latency vs llvm.pow call
                     llvm::Function* sqrtFn =
@@ -552,8 +552,8 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     // wider of the two types so that LLVM binary instructions see matching types.
     if (left->getType()->isIntegerTy() && right->getType()->isIntegerTy() &&
         left->getType() != right->getType()) {
-        unsigned leftBits = left->getType()->getIntegerBitWidth();
-        unsigned rightBits = right->getType()->getIntegerBitWidth();
+        const unsigned leftBits = left->getType()->getIntegerBitWidth();
+        const unsigned rightBits = right->getType()->getIntegerBitWidth();
         if (leftBits < rightBits) {
             left = builder->CreateSExt(left, right->getType(), "sext");
         } else {
@@ -565,8 +565,8 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     if (llvm::isa<llvm::ConstantInt>(left) && llvm::isa<llvm::ConstantInt>(right)) {
         auto leftConst = llvm::dyn_cast<llvm::ConstantInt>(left);
         auto rightConst = llvm::dyn_cast<llvm::ConstantInt>(right);
-        int64_t lval = leftConst->getSExtValue();
-        int64_t rval = rightConst->getSExtValue();
+        const int64_t lval = leftConst->getSExtValue();
+        const int64_t rval = rightConst->getSExtValue();
         // Use unsigned arithmetic for +, -, * to avoid signed overflow UB.
         // The unsigned result, when reinterpreted as signed, gives the correct
         // two's-complement wrapping behavior that matches LLVM's add/sub/mul.
@@ -626,9 +626,9 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 bool overflow = false;
                 for (int64_t i = 0; i < rval; i++) {
                     if (lval != 0 && lval != 1 && lval != -1) {
-                        uint64_t ab = (lval < 0) ? static_cast<uint64_t>(-static_cast<uint64_t>(lval))
+                        const uint64_t ab = (lval < 0) ? static_cast<uint64_t>(-static_cast<uint64_t>(lval))
                                                  : static_cast<uint64_t>(lval);
-                        uint64_t ar = (result < 0) ? static_cast<uint64_t>(-static_cast<uint64_t>(result))
+                        const uint64_t ar = (result < 0) ? static_cast<uint64_t>(-static_cast<uint64_t>(result))
                                                    : static_cast<uint64_t>(result);
                         if (ar > static_cast<uint64_t>(INT64_MAX) / ab) {
                             overflow = true;
@@ -655,7 +655,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     // Algebraic identity optimizations — when one operand is a known constant,
     // many operations can be simplified without emitting any instruction.
     if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
-        int64_t rv = ci->getSExtValue();
+        const int64_t rv = ci->getSExtValue();
         if (rv == 0) {
             if (expr->op == "+" || expr->op == "-" || expr->op == "|" || expr->op == "^" || expr->op == "<<" ||
                 expr->op == ">>")
@@ -683,7 +683,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             return llvm::ConstantInt::get(getDefaultType(), -1);
     }
     if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left)) {
-        int64_t lv = ci->getSExtValue();
+        const int64_t lv = ci->getSExtValue();
         if (lv == 0) {
             if (expr->op == "+" || expr->op == "|" || expr->op == "^")
                 return right; // 0+x, 0|x, 0^x → x
@@ -816,12 +816,12 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     } else if (expr->op == "*") {
         // Strength reduction: multiply by power of 2 → left shift
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
-            int s = log2IfPowerOf2(ci->getSExtValue());
+            const int s = log2IfPowerOf2(ci->getSExtValue());
             if (s >= 0)
                 return builder->CreateShl(left, llvm::ConstantInt::get(getDefaultType(), s), "shltmp");
         }
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left)) {
-            int s = log2IfPowerOf2(ci->getSExtValue());
+            const int s = log2IfPowerOf2(ci->getSExtValue());
             if (s >= 0)
                 return builder->CreateShl(right, llvm::ConstantInt::get(getDefaultType(), s), "shltmp");
         }
@@ -1026,7 +1026,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             // This leverages the existing shift+add patterns for the absolute
             // value, then negates the result.  A single neg (sub 0, x) is far
             // cheaper than a hardware multiply.
-            int64_t rv = ci->getSExtValue();
+            const int64_t rv = ci->getSExtValue();
             if (rv < -1) {
                 if (auto* posResult = emitShiftAdd(left, -rv)) {
                     return builder->CreateNeg(posResult, "mulneg");
@@ -1036,7 +1036,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left)) {
             if (auto* result = emitShiftAdd(right, ci->getSExtValue()))
                 return result;
-            int64_t lv = ci->getSExtValue();
+            const int64_t lv = ci->getSExtValue();
             if (lv < -1) {
                 if (auto* posResult = emitShiftAdd(right, -lv)) {
                     return builder->CreateNeg(posResult, "mulneg");
@@ -1045,7 +1045,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         }
         return builder->CreateMul(left, right, "multmp");
     } else if (expr->op == "/" || expr->op == "%") {
-        bool isDivision = expr->op == "/";
+        const bool isDivision = expr->op == "/";
 
         // Division/modulo by a non-zero constant: let the LLVM optimizer handle
         // strength reduction via InstCombine.  LLVM converts srem/sdiv by
@@ -1116,7 +1116,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     } else if (expr->op == "<<") {
         // For constant shift amounts already in [0, 63], skip the mask.
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
-            int64_t sv = ci->getSExtValue();
+            const int64_t sv = ci->getSExtValue();
             if (sv >= 0 && sv < 64)
                 return builder->CreateShl(left, right, "shltmp");
         }
@@ -1129,7 +1129,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     } else if (expr->op == ">>") {
         // For constant shift amounts already in [0, 63], skip the mask.
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
-            int64_t sv = ci->getSExtValue();
+            const int64_t sv = ci->getSExtValue();
             if (sv >= 0 && sv < 64)
                 return builder->CreateLShr(left, right, "lshrtmp");
         }
@@ -1144,7 +1144,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         // loop overhead and branches for the most common exponents,
         // producing straight-line code that the backend can schedule optimally.
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
-            int64_t exp = ci->getSExtValue();
+            const int64_t exp = ci->getSExtValue();
             if (exp == 2) {
                 // x**2 → x*x  (1 mul)
                 return builder->CreateMul(left, left, "pow2");
@@ -1392,7 +1392,7 @@ llvm::Value* CodeGenerator::generateUnary(UnaryExpr* expr) {
 
     // Constant folding for unary operations
     if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(operand)) {
-        int64_t val = ci->getSExtValue();
+        const int64_t val = ci->getSExtValue();
         if (expr->op == "-") {
             if (val != INT64_MIN)
                 return llvm::ConstantInt::get(*context, llvm::APInt(64, -val));
@@ -1645,8 +1645,8 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
 
     if (!hasSpread) {
         // Original fast path: all elements are plain expressions with known count
-        size_t numElements = expr->elements.size();
-        size_t totalSlots = 1 + numElements;
+        const size_t numElements = expr->elements.size();
+        const size_t totalSlots = 1 + numElements;
 
         llvm::Value* byteSize = llvm::ConstantInt::get(getDefaultType(), totalSlots * 8);
         llvm::Value* arrPtr = builder->CreateCall(getOrDeclareMalloc(), {byteSize}, "arr");
@@ -1772,7 +1772,7 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
     // Detect whether the base expression is a string.  Strings are raw char
     // pointers without a length header; arrays have the layout [length, e0,
     // e1, ...] and each element is 8 bytes (i64).
-    bool isStr = arrVal->getType()->isPointerTy() || isStringExpr(expr->array.get());
+    const bool isStr = arrVal->getType()->isPointerTy() || isStringExpr(expr->array.get());
 
     // Convert i64 → pointer (strings may arrive as i64 via ptrtoint)
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
@@ -1830,7 +1830,7 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
     idxVal = toDefaultType(idxVal);
 
     // Detect whether the base is a string (raw char* without a length header).
-    bool isStr = arrVal->getType()->isPointerTy() || isStringExpr(expr->array.get());
+    const bool isStr = arrVal->getType()->isPointerTy() || isStringExpr(expr->array.get());
 
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     llvm::Value* basePtr =
@@ -1942,7 +1942,7 @@ llvm::Value* CodeGenerator::generateStructLiteral(StructLiteralExpr* expr) {
         codegenError("Unknown struct type '" + expr->structName + "'", expr);
     }
     const auto& fields = it->second;
-    size_t numFields = fields.size();
+    const size_t numFields = fields.size();
 
     // Use stack allocation (alloca) for structs.  This avoids malloc overhead
     // and allows LLVM's mem2reg / SROA passes to promote small structs to
@@ -1985,8 +1985,8 @@ llvm::Value* CodeGenerator::generateStructLiteral(StructLiteralExpr* expr) {
 }
 
 llvm::Value* CodeGenerator::generateFieldAccess(FieldAccessExpr* expr) {
-    std::string structType = resolveStructType(expr->object.get());
-    size_t fieldIdx = resolveFieldIndex(structType, expr->fieldName, expr);
+    const std::string structType = resolveStructType(expr->object.get());
+    const size_t fieldIdx = resolveFieldIndex(structType, expr->fieldName, expr);
 
     llvm::Value* objVal = generateExpression(expr->object.get());
     objVal = toDefaultType(objVal);
@@ -2059,8 +2059,8 @@ llvm::Value* CodeGenerator::generateFieldAccess(FieldAccessExpr* expr) {
 }
 
 llvm::Value* CodeGenerator::generateFieldAssign(FieldAssignExpr* expr) {
-    std::string structType = resolveStructType(expr->object.get());
-    size_t fieldIdx = resolveFieldIndex(structType, expr->fieldName, expr);
+    const std::string structType = resolveStructType(expr->object.get());
+    const size_t fieldIdx = resolveFieldIndex(structType, expr->fieldName, expr);
 
     llvm::Value* objVal = generateExpression(expr->object.get());
     objVal = toDefaultType(objVal);

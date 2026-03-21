@@ -53,7 +53,7 @@ Lexer::Lexer(const std::string& source) : source(source), pos(0), line(1), colum
 Lexer::Lexer(std::string&& source) : source(std::move(source)), pos(0), line(1), column(1) {}
 
 char Lexer::peek(int offset) const noexcept {
-    size_t index = pos + offset;
+    const size_t index = pos + offset;
     if (index >= source.length()) {
         return '\0';
     }
@@ -63,7 +63,7 @@ char Lexer::peek(int offset) const noexcept {
 char Lexer::advance() noexcept {
     if (isAtEnd())
         return '\0';
-    char c = source[pos++];
+    const char c = source[pos++];
     if (c == '\n') {
         line++;
         column = 1;
@@ -79,7 +79,7 @@ bool Lexer::isAtEnd() const noexcept {
 
 void Lexer::skipWhitespace() {
     while (!isAtEnd()) {
-        char c = peek();
+        const char c = peek();
         if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
             advance();
         } else if (c == '/' && peek(1) == '/') {
@@ -102,8 +102,8 @@ void Lexer::skipComment() {
 }
 
 void Lexer::skipBlockComment() {
-    int startLine = line;
-    int startColumn = column;
+    const int startLine = line;
+    const int startColumn = column;
     // Skip /*
     advance();
     advance();
@@ -128,7 +128,7 @@ Token Lexer::scanNumber() {
 
     // Check for hex (0x), octal (0o), or binary (0b) prefix
     if (peek() == '0') {
-        char prefix = peek(1);
+        const char prefix = peek(1);
         if (prefix == 'x' || prefix == 'X') {
             // Hex literal: 0x...
             num += advance(); // '0'
@@ -137,7 +137,7 @@ Token Lexer::scanNumber() {
                 lexError("Expected hex digit after '0x'", line, column);
             }
             while (!isAtEnd() && (isHexDigit(peek()) || peek() == '_')) {
-                char c = advance();
+                const char c = advance();
                 if (c != '_')
                     num += c;
             }
@@ -156,7 +156,7 @@ Token Lexer::scanNumber() {
                 lexError("Expected octal digit after '0o'", line, column);
             }
             while (!isAtEnd() && ((peek() >= '0' && peek() <= '7') || peek() == '_')) {
-                char c = advance();
+                const char c = advance();
                 if (c != '_')
                     num += c;
             }
@@ -175,7 +175,7 @@ Token Lexer::scanNumber() {
                 lexError("Expected binary digit after '0b'", line, column);
             }
             while (!isAtEnd() && (peek() == '0' || peek() == '1' || peek() == '_')) {
-                char c = advance();
+                const char c = advance();
                 if (c != '_')
                     num += c;
             }
@@ -191,7 +191,7 @@ Token Lexer::scanNumber() {
 
     // Fast path for common decimal numbers: record start position and
     // try to scan all digits/dots without underscores in one pass.
-    size_t numStart = pos;
+    const size_t numStart = pos;
     bool hasUnderscore = false;
 
     while (!isAtEnd() && (isDigit(peek()) || peek() == '.' || peek() == '_')) {
@@ -243,7 +243,7 @@ Token Lexer::scanNumber() {
 }
 
 Token Lexer::scanIdentifier() {
-    size_t start = pos;
+    const size_t start = pos;
 
     while (!isAtEnd() && (isAlnum(peek()) || peek() == '_')) {
         advance();
@@ -251,7 +251,7 @@ Token Lexer::scanIdentifier() {
 
     // Look up the identifier in the keyword map using a string_view
     // to avoid allocating a std::string for every keyword check.
-    std::string_view idView(source.data() + start, pos - start);
+    const std::string_view idView(source.data() + start, pos - start);
     auto it = keywords.find(idView);
     if (it != keywords.end()) {
         return makeToken(it->second, std::string(idView));
@@ -262,8 +262,8 @@ Token Lexer::scanIdentifier() {
 
 Token Lexer::scanString() {
     std::string str;
-    int startLine = line;
-    int startColumn = column;
+    const int startLine = line;
+    const int startColumn = column;
     advance(); // Skip opening quote
 
     while (!isAtEnd() && peek() != '"') {
@@ -272,7 +272,7 @@ Token Lexer::scanString() {
             if (isAtEnd()) {
                 lexError("Unterminated escape sequence in string", startLine, startColumn);
             }
-            char escaped = advance();
+            const char escaped = advance();
             switch (escaped) {
             case 'n':
                 str += '\n';
@@ -309,13 +309,13 @@ Token Lexer::scanString() {
                 if (isAtEnd() || !isHexDigit(peek())) {
                     lexError("Expected hex digit after '\\x' in string", line, column);
                 }
-                char h1 = advance();
+                const char h1 = advance();
                 if (isAtEnd() || !isHexDigit(peek())) {
                     lexError("Expected two hex digits after '\\x' in string", line, column);
                 }
-                char h2 = advance();
-                std::string hex{h1, h2};
-                int val = std::stoi(hex, nullptr, 16);
+                const char h2 = advance();
+                const std::string hex{h1, h2};
+                const int val = std::stoi(hex, nullptr, 16);
                 // Reject embedded null bytes — they would silently truncate
                 // C-strings at runtime, causing data loss or subtle bugs.
                 if (val == 0) {
@@ -344,8 +344,8 @@ Token Lexer::scanString() {
 
 Token Lexer::scanMultiLineString() {
     std::string str;
-    int startLine = line;
-    int startColumn = column;
+    const int startLine = line;
+    const int startColumn = column;
     // Skip opening """
     advance(); // first "
     advance(); // second "
@@ -377,7 +377,7 @@ std::vector<Token> Lexer::tokenize() {
         if (isAtEnd())
             break;
 
-        char c = peek();
+        const char c = peek();
 
         if (c == 'O' && pos + 8 <= source.length()) {
             if (source.compare(pos, 8, "OPTMAX=:") == 0) {
@@ -437,8 +437,8 @@ std::vector<Token> Lexer::tokenize() {
         }
 
         // Single character tokens
-        int tokenLine = line;
-        int tokenColumn = column;
+        const int tokenLine = line;
+        const int tokenColumn = column;
         advance();
         switch (c) {
         case '+':

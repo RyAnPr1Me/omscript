@@ -30,7 +30,7 @@ const Token& Parser::peek(int offset) const {
     if (tokens.empty()) {
         return eofToken;
     }
-    size_t index = current + offset;
+    const size_t index = current + offset;
     if (index >= tokens.size()) {
         return tokens.back();
     }
@@ -156,7 +156,7 @@ std::unique_ptr<Program> Parser::parse() {
             bool hintVectorize = false, hintNoVectorize = false;
             while (check(TokenType::AT)) {
                 advance(); // consume '@'
-                Token ann = consume(TokenType::IDENTIFIER, "Expected annotation name after '@'");
+                const Token ann = consume(TokenType::IDENTIFIER, "Expected annotation name after '@'");
                 if (ann.lexeme == "inline") {
                     hintInline = true;
                 } else if (ann.lexeme == "noinline") {
@@ -238,7 +238,7 @@ std::unique_ptr<Program> Parser::parse() {
 void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
                          std::vector<std::unique_ptr<EnumDecl>>& enums,
                          std::vector<std::unique_ptr<StructDecl>>& structs) {
-    Token fileToken = consume(TokenType::STRING, "Expected filename string after 'import'");
+    const Token fileToken = consume(TokenType::STRING, "Expected filename string after 'import'");
     consume(TokenType::SEMICOLON, "Expected ';' after import statement");
 
     std::string filename = fileToken.lexeme;
@@ -258,7 +258,7 @@ void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
     // Normalize the path to a canonical form for circular import detection
     std::error_code ec;
     auto canonicalPath = std::filesystem::weakly_canonical(fullPath, ec);
-    std::string normalizedPath = ec ? fullPath : canonicalPath.string();
+    const std::string normalizedPath = ec ? fullPath : canonicalPath.string();
 
     // Check for circular/duplicate imports
     if (importedFiles_->count(normalizedPath)) {
@@ -280,7 +280,7 @@ void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
 
     // Parse the imported file
     Parser importParser(std::move(importTokens));
-    std::string importDir = std::filesystem::path(fullPath).parent_path().string();
+    const std::string importDir = std::filesystem::path(fullPath).parent_path().string();
     importParser.setBaseDir(importDir);
     importParser.importedFiles_ = importedFiles_; // Share import tracking
 
@@ -327,16 +327,16 @@ std::string Parser::parseTypeAnnotation() {
 }
 
 std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
-    bool savedOptMaxState = inOptMaxFunction;
+    const bool savedOptMaxState = inOptMaxFunction;
     inOptMaxFunction = isOptMax;
     consume(TokenType::FN, "Expected 'fn'");
-    Token name = consume(TokenType::IDENTIFIER, "Expected function name");
+    const Token name = consume(TokenType::IDENTIFIER, "Expected function name");
 
     // Parse optional type parameters: <T, R, ...>
     std::vector<std::string> typeParams;
     if (match(TokenType::LT)) {
         do {
-            Token tp = consume(TokenType::IDENTIFIER, "Expected type parameter name");
+            const Token tp = consume(TokenType::IDENTIFIER, "Expected type parameter name");
             typeParams.push_back(tp.lexeme);
         } while (match(TokenType::COMMA));
         consume(TokenType::GT, "Expected '>' after type parameters");
@@ -357,7 +357,7 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
                     advance();
                     paramPrefetch = true;
                 } else {
-                    Token ann = consume(TokenType::IDENTIFIER, "Expected annotation name after '@'");
+                    const Token ann = consume(TokenType::IDENTIFIER, "Expected annotation name after '@'");
                     if (ann.lexeme == "prefetch") {
                         paramPrefetch = true;
                     } else {
@@ -366,7 +366,7 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
                     }
                 }
             }
-            Token paramName = consume(TokenType::IDENTIFIER, "Expected parameter name");
+            const Token paramName = consume(TokenType::IDENTIFIER, "Expected parameter name");
             std::string typeName;
             if (match(TokenType::COLON)) {
                 typeName = parseTypeAnnotation();
@@ -408,15 +408,15 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
 }
 
 std::unique_ptr<Statement> Parser::parseStatement() {
-    RecursionGuard guard(*this);
+    const RecursionGuard guard(*this);
     // Capture the keyword token position for source location tracking.
     if (match(TokenType::LIKELY) || match(TokenType::UNLIKELY)) {
-        Token hintKw = tokens[current - 1];
-        bool isLikely = (hintKw.type == TokenType::LIKELY);
+        const Token hintKw = tokens[current - 1];
+        const bool isLikely = (hintKw.type == TokenType::LIKELY);
         if (!match(TokenType::IF)) {
             error("Expected 'if' after '" + hintKw.lexeme + "'");
         }
-        Token kw = tokens[current - 1];
+        const Token kw = tokens[current - 1];
         auto stmt = parseIfStmt();
         auto* ifStmt = dynamic_cast<IfStmt*>(stmt.get());
         if (ifStmt) {
@@ -428,56 +428,56 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         return stmt;
     }
     if (match(TokenType::IF)) {
-        Token kw = tokens[current - 1];
+        const Token kw = tokens[current - 1];
         auto stmt = parseIfStmt();
         stmt->line = kw.line;
         stmt->column = kw.column;
         return stmt;
     }
     if (match(TokenType::WHILE)) {
-        Token kw = tokens[current - 1];
+        const Token kw = tokens[current - 1];
         auto stmt = parseWhileStmt();
         stmt->line = kw.line;
         stmt->column = kw.column;
         return stmt;
     }
     if (match(TokenType::DO)) {
-        Token kw = tokens[current - 1];
+        const Token kw = tokens[current - 1];
         auto stmt = parseDoWhileStmt();
         stmt->line = kw.line;
         stmt->column = kw.column;
         return stmt;
     }
     if (match(TokenType::FOR)) {
-        Token kw = tokens[current - 1];
+        const Token kw = tokens[current - 1];
         auto stmt = parseForStmt();
         stmt->line = kw.line;
         stmt->column = kw.column;
         return stmt;
     }
     if (match(TokenType::RETURN)) {
-        Token kw = tokens[current - 1];
+        const Token kw = tokens[current - 1];
         auto stmt = parseReturnStmt();
         stmt->line = kw.line;
         stmt->column = kw.column;
         return stmt;
     }
     if (match(TokenType::BREAK)) {
-        Token kw = tokens[current - 1];
+        const Token kw = tokens[current - 1];
         auto stmt = parseBreakStmt();
         stmt->line = kw.line;
         stmt->column = kw.column;
         return stmt;
     }
     if (match(TokenType::CONTINUE)) {
-        Token kw = tokens[current - 1];
+        const Token kw = tokens[current - 1];
         auto stmt = parseContinueStmt();
         stmt->line = kw.line;
         stmt->column = kw.column;
         return stmt;
     }
     if (match(TokenType::SWITCH)) {
-        Token kw = tokens[current - 1];
+        const Token kw = tokens[current - 1];
         auto stmt = parseSwitchStmt();
         stmt->line = kw.line;
         stmt->column = kw.column;
@@ -494,29 +494,29 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         return decl;
     }
     if (check(TokenType::LBRACE)) {
-        Token kw = peek();
+        const Token kw = peek();
         auto stmt = parseBlock();
         stmt->line = kw.line;
         stmt->column = kw.column;
         return stmt;
     }
     if (match(TokenType::TRY)) {
-        Token kw = tokens[current - 1];
+        const Token kw = tokens[current - 1];
         auto stmt = parseTryCatchStmt();
         stmt->line = kw.line;
         stmt->column = kw.column;
         return stmt;
     }
     if (match(TokenType::THROW)) {
-        Token kw = tokens[current - 1];
+        const Token kw = tokens[current - 1];
         auto stmt = parseThrowStmt();
         stmt->line = kw.line;
         stmt->column = kw.column;
         return stmt;
     }
     if (match(TokenType::INVALIDATE)) {
-        Token kw = tokens[current - 1];
-        Token varName = consume(TokenType::IDENTIFIER, "Expected variable name after 'invalidate'");
+        const Token kw = tokens[current - 1];
+        const Token varName = consume(TokenType::IDENTIFIER, "Expected variable name after 'invalidate'");
         consume(TokenType::SEMICOLON, "Expected ';' after invalidate statement");
         auto stmt = std::make_unique<InvalidateStmt>(varName.lexeme);
         stmt->line = kw.line;
@@ -524,7 +524,7 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         return stmt;
     }
     if (match(TokenType::PREFETCH)) {
-        Token kw = tokens[current - 1];
+        const Token kw = tokens[current - 1];
         // Parse optional attributes: hot, immut
         bool hintHot = false;
         bool hintImmut = false;
@@ -562,12 +562,12 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         }
         if (isDecl) {
             // prefetch [attrs] var name:type = expr; OR prefetch [attrs] name:type = expr;
-            bool isConst = hintImmut;
+            const bool isConst = hintImmut;
             std::string typeName;
             if (match(TokenType::VAR)) {
                 // consumed var
             }
-            Token name = consume(TokenType::IDENTIFIER, "Expected variable name in prefetch declaration");
+            const Token name = consume(TokenType::IDENTIFIER, "Expected variable name in prefetch declaration");
             if (match(TokenType::COLON)) {
                 typeName = parseTypeAnnotation();
             }
@@ -586,7 +586,7 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         }
         // Standalone prefetch of existing variable: prefetch name[:type];
         if (check(TokenType::IDENTIFIER)) {
-            Token varName = advance();
+            const Token varName = advance();
             // Consume optional :type annotation
             if (match(TokenType::COLON)) {
                 parseTypeAnnotation(); // consume and discard
@@ -601,7 +601,7 @@ std::unique_ptr<Statement> Parser::parseStatement() {
     }
     if (match(TokenType::MOVE)) {
         // move semantics: either `move var x = expr;` or `move x = expr;`
-        Token kw = tokens[current - 1];
+        const Token kw = tokens[current - 1];
         // Could be: move <type> <name> = <expr>;
         // or just: move used as expression context (handled elsewhere)
         if (check(TokenType::VAR) || (check(TokenType::IDENTIFIER) && current + 1 < tokens.size() &&
@@ -613,7 +613,7 @@ std::unique_ptr<Statement> Parser::parseStatement() {
             } else {
                 typeName = advance().lexeme; // consume type name
             }
-            Token name = consume(TokenType::IDENTIFIER, "Expected variable name in move declaration");
+            const Token name = consume(TokenType::IDENTIFIER, "Expected variable name in move declaration");
             consume(TokenType::ASSIGN, "Expected '=' in move declaration");
             auto init = parseExpression();
             consume(TokenType::SEMICOLON, "Expected ';' after move declaration");
@@ -629,7 +629,7 @@ std::unique_ptr<Statement> Parser::parseStatement() {
     }
     if (match(TokenType::BORROW)) {
         // `borrow var ref = expr;` or `borrow type ref = expr;` or `borrow ref:type = expr;`
-        Token kw = tokens[current - 1];
+        const Token kw = tokens[current - 1];
         std::string typeName;
         if (match(TokenType::VAR)) {
             typeName = "";
@@ -637,7 +637,7 @@ std::unique_ptr<Statement> Parser::parseStatement() {
                    tokens[current + 1].type == TokenType::IDENTIFIER) {
             typeName = advance().lexeme;
         }
-        Token name = consume(TokenType::IDENTIFIER, "Expected variable name in borrow declaration");
+        const Token name = consume(TokenType::IDENTIFIER, "Expected variable name in borrow declaration");
         // Support name:type syntax: borrow j:u32 = expr;
         if (typeName.empty() && match(TokenType::COLON)) {
             typeName = parseTypeAnnotation();
@@ -665,7 +665,7 @@ std::unique_ptr<BlockStmt> Parser::parseBlock() {
     while (!check(TokenType::RBRACE) && !isAtEnd()) {
         // Multi-variable declarations: var a = 1, b = 2;
         if (check(TokenType::VAR) || check(TokenType::CONST)) {
-            bool isConst = check(TokenType::CONST);
+            const bool isConst = check(TokenType::CONST);
             advance(); // consume var/const
             statements.push_back(parseVarDecl(isConst));
             while (match(TokenType::COMMA)) {
@@ -683,7 +683,7 @@ std::unique_ptr<BlockStmt> Parser::parseBlock() {
 }
 
 std::unique_ptr<Statement> Parser::parseVarDecl(bool isConst) {
-    Token name = consume(TokenType::IDENTIFIER, "Expected variable name");
+    const Token name = consume(TokenType::IDENTIFIER, "Expected variable name");
     std::string typeName;
     if (match(TokenType::COLON)) {
         typeName = parseTypeAnnotation();
@@ -743,7 +743,7 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
 
     // Parse: for (var in start...end) or for (var in start...end...step)
     //    or: for (var in collection)  -- for-each over array
-    Token varName = consume(TokenType::IDENTIFIER, "Expected iterator variable");
+    const Token varName = consume(TokenType::IDENTIFIER, "Expected iterator variable");
     std::string iteratorType;
     if (match(TokenType::COLON)) {
         iteratorType = parseTypeAnnotation();
@@ -842,7 +842,7 @@ std::unique_ptr<Statement> Parser::parseTryCatchStmt() {
     auto tryBlock = parseBlock();
     consume(TokenType::CATCH, "Expected 'catch' after try block");
     consume(TokenType::LPAREN, "Expected '(' after 'catch'");
-    Token varToken = consume(TokenType::IDENTIFIER, "Expected error variable name in catch");
+    const Token varToken = consume(TokenType::IDENTIFIER, "Expected error variable name in catch");
     consume(TokenType::RPAREN, "Expected ')' after catch variable");
     auto catchBlock = parseBlock();
     return std::make_unique<TryCatchStmt>(std::move(tryBlock), varToken.lexeme, std::move(catchBlock));
@@ -855,17 +855,17 @@ std::unique_ptr<Statement> Parser::parseThrowStmt() {
 }
 
 std::unique_ptr<EnumDecl> Parser::parseEnumDecl() {
-    Token nameToken = consume(TokenType::IDENTIFIER, "Expected enum name");
+    const Token nameToken = consume(TokenType::IDENTIFIER, "Expected enum name");
     consume(TokenType::LBRACE, "Expected '{' after enum name");
 
     std::vector<std::pair<std::string, long long>> members;
     long long nextValue = 0;
 
     while (!check(TokenType::RBRACE) && !isAtEnd()) {
-        Token memberToken = consume(TokenType::IDENTIFIER, "Expected enum member name");
+        const Token memberToken = consume(TokenType::IDENTIFIER, "Expected enum member name");
         long long memberValue = nextValue;
         if (match(TokenType::ASSIGN)) {
-            Token valToken = consume(TokenType::INTEGER, "Expected integer value for enum member");
+            const Token valToken = consume(TokenType::INTEGER, "Expected integer value for enum member");
             memberValue = valToken.intValue;
         }
         members.push_back({memberToken.lexeme, memberValue});
@@ -879,7 +879,7 @@ std::unique_ptr<EnumDecl> Parser::parseEnumDecl() {
 }
 
 std::unique_ptr<StructDecl> Parser::parseStructDecl() {
-    Token nameToken = consume(TokenType::IDENTIFIER, "Expected struct name");
+    const Token nameToken = consume(TokenType::IDENTIFIER, "Expected struct name");
     consume(TokenType::LBRACE, "Expected '{' after struct name");
 
     std::vector<std::string> fields;
@@ -899,7 +899,7 @@ std::unique_ptr<StructDecl> Parser::parseStructDecl() {
             if (kw == "align") {
                 advance(); // consume 'align'
                 consume(TokenType::LPAREN, "Expected '(' after 'align'");
-                Token val = consume(TokenType::INTEGER, "Expected integer alignment");
+                const Token val = consume(TokenType::INTEGER, "Expected integer alignment");
                 attrs.align = static_cast<int>(val.intValue);
                 consume(TokenType::RPAREN, "Expected ')' after alignment value");
                 continue;
@@ -907,9 +907,9 @@ std::unique_ptr<StructDecl> Parser::parseStructDecl() {
             if (kw == "range") {
                 advance(); // consume 'range'
                 consume(TokenType::LPAREN, "Expected '(' after 'range'");
-                Token minVal = consume(TokenType::INTEGER, "Expected integer min");
+                const Token minVal = consume(TokenType::INTEGER, "Expected integer min");
                 consume(TokenType::COMMA, "Expected ',' between range values");
-                Token maxVal = consume(TokenType::INTEGER, "Expected integer max");
+                const Token maxVal = consume(TokenType::INTEGER, "Expected integer max");
                 consume(TokenType::RPAREN, "Expected ')' after range values");
                 attrs.hasRange = true;
                 attrs.rangeMin = minVal.intValue;
@@ -927,7 +927,7 @@ std::unique_ptr<StructDecl> Parser::parseStructDecl() {
             typeName = advance().lexeme;
         }
 
-        Token fieldToken = consume(TokenType::IDENTIFIER, "Expected field name");
+        const Token fieldToken = consume(TokenType::IDENTIFIER, "Expected field name");
         fields.push_back(fieldToken.lexeme);
         // Skip optional type annotation (e.g. x:int) — alternative syntax
         if (match(TokenType::COLON)) {
@@ -946,7 +946,7 @@ std::unique_ptr<Expression> Parser::parseStructLiteral(const std::string& name, 
     std::vector<std::pair<std::string, std::unique_ptr<Expression>>> fieldValues;
 
     while (!check(TokenType::RBRACE) && !isAtEnd()) {
-        Token fieldToken = consume(TokenType::IDENTIFIER, "Expected field name in struct literal");
+        const Token fieldToken = consume(TokenType::IDENTIFIER, "Expected field name in struct literal");
         consume(TokenType::COLON, "Expected ':' after field name");
         auto value = parseExpression();
         fieldValues.push_back({fieldToken.lexeme, std::move(value)});
@@ -961,7 +961,7 @@ std::unique_ptr<Expression> Parser::parseStructLiteral(const std::string& name, 
 }
 
 std::unique_ptr<Statement> Parser::parseExprStmt() {
-    Token start = peek();
+    const Token start = peek();
     auto expr = parseExpression();
     consume(TokenType::SEMICOLON, "Expected ';' after expression");
 
@@ -972,7 +972,7 @@ std::unique_ptr<Statement> Parser::parseExprStmt() {
 }
 
 std::unique_ptr<Expression> Parser::parseExpression() {
-    RecursionGuard guard(*this);
+    const RecursionGuard guard(*this);
     return parseAssignment();
 }
 
@@ -1001,7 +1001,7 @@ std::unique_ptr<Expression> Parser::parseAssignment() {
             auto* fieldExpr = static_cast<FieldAccessExpr*>(expr.get());
             auto value = parseAssignment();
             auto objClone = std::move(fieldExpr->object);
-            std::string fieldName = fieldExpr->fieldName;
+            const std::string fieldName = fieldExpr->fieldName;
             auto node = std::make_unique<FieldAssignExpr>(std::move(objClone), fieldName, std::move(value));
             node->line = expr->line;
             node->column = expr->column;
@@ -1016,8 +1016,8 @@ std::unique_ptr<Expression> Parser::parseAssignment() {
         match(TokenType::SLASH_ASSIGN) || match(TokenType::PERCENT_ASSIGN) || match(TokenType::AMPERSAND_ASSIGN) ||
         match(TokenType::PIPE_ASSIGN) || match(TokenType::CARET_ASSIGN) || match(TokenType::LSHIFT_ASSIGN) ||
         match(TokenType::RSHIFT_ASSIGN)) {
-        TokenType opType = tokens[current - 1].type;
-        std::string opLexeme = tokens[current - 1].lexeme;
+        const TokenType opType = tokens[current - 1].type;
+        const std::string opLexeme = tokens[current - 1].lexeme;
 
         // Determine the binary operator from the compound operator
         std::string binOp;
@@ -1059,7 +1059,7 @@ std::unique_ptr<Expression> Parser::parseAssignment() {
 
         if (expr->type == ASTNodeType::IDENTIFIER_EXPR) {
             auto idExpr = dynamic_cast<IdentifierExpr*>(expr.get());
-            std::string name = idExpr->name;
+            const std::string name = idExpr->name;
             auto rhs = parseAssignment();
 
             // Desugar: x += expr  =>  x = x + expr
@@ -1147,7 +1147,7 @@ std::unique_ptr<Expression> Parser::parseTernary() {
     auto expr = parseNullCoalesce();
 
     if (match(TokenType::QUESTION)) {
-        Token questionToken = tokens[current - 1];
+        const Token questionToken = tokens[current - 1];
         auto thenExpr = parseExpression();
         consume(TokenType::COLON, "Expected ':' in ternary expression");
         auto elseExpr = parseTernary();
@@ -1178,7 +1178,7 @@ std::unique_ptr<Expression> Parser::parseLogicalOr() {
     auto left = parseLogicalAnd();
 
     while (match(TokenType::OR)) {
-        std::string op = tokens[current - 1].lexeme;
+        const std::string op = tokens[current - 1].lexeme;
         auto right = parseLogicalAnd();
         left = std::make_unique<BinaryExpr>(op, std::move(left), std::move(right));
     }
@@ -1190,7 +1190,7 @@ std::unique_ptr<Expression> Parser::parseLogicalAnd() {
     auto left = parseBitwiseOr();
 
     while (match(TokenType::AND)) {
-        std::string op = tokens[current - 1].lexeme;
+        const std::string op = tokens[current - 1].lexeme;
         auto right = parseBitwiseOr();
         left = std::make_unique<BinaryExpr>(op, std::move(left), std::move(right));
     }
@@ -1202,7 +1202,7 @@ std::unique_ptr<Expression> Parser::parseBitwiseOr() {
     auto left = parseBitwiseXor();
 
     while (match(TokenType::PIPE)) {
-        std::string op = tokens[current - 1].lexeme;
+        const std::string op = tokens[current - 1].lexeme;
         auto right = parseBitwiseXor();
         left = std::make_unique<BinaryExpr>(op, std::move(left), std::move(right));
     }
@@ -1214,7 +1214,7 @@ std::unique_ptr<Expression> Parser::parseBitwiseXor() {
     auto left = parseBitwiseAnd();
 
     while (match(TokenType::CARET)) {
-        std::string op = tokens[current - 1].lexeme;
+        const std::string op = tokens[current - 1].lexeme;
         auto right = parseBitwiseAnd();
         left = std::make_unique<BinaryExpr>(op, std::move(left), std::move(right));
     }
@@ -1226,7 +1226,7 @@ std::unique_ptr<Expression> Parser::parseBitwiseAnd() {
     auto left = parseEquality();
 
     while (match(TokenType::AMPERSAND)) {
-        std::string op = tokens[current - 1].lexeme;
+        const std::string op = tokens[current - 1].lexeme;
         auto right = parseEquality();
         left = std::make_unique<BinaryExpr>(op, std::move(left), std::move(right));
     }
@@ -1238,7 +1238,7 @@ std::unique_ptr<Expression> Parser::parseEquality() {
     auto left = parseComparison();
 
     while (match(TokenType::EQ) || match(TokenType::NE)) {
-        std::string op = tokens[current - 1].lexeme;
+        const std::string op = tokens[current - 1].lexeme;
         auto right = parseComparison();
         left = std::make_unique<BinaryExpr>(op, std::move(left), std::move(right));
     }
@@ -1250,7 +1250,7 @@ std::unique_ptr<Expression> Parser::parseComparison() {
     auto left = parseShift();
 
     while (match(TokenType::LT) || match(TokenType::LE) || match(TokenType::GT) || match(TokenType::GE)) {
-        std::string op = tokens[current - 1].lexeme;
+        const std::string op = tokens[current - 1].lexeme;
         auto right = parseShift();
         left = std::make_unique<BinaryExpr>(op, std::move(left), std::move(right));
     }
@@ -1262,7 +1262,7 @@ std::unique_ptr<Expression> Parser::parseShift() {
     auto left = parseAddition();
 
     while (match(TokenType::LSHIFT) || match(TokenType::RSHIFT)) {
-        std::string op = tokens[current - 1].lexeme;
+        const std::string op = tokens[current - 1].lexeme;
         auto right = parseAddition();
         left = std::make_unique<BinaryExpr>(op, std::move(left), std::move(right));
     }
@@ -1274,7 +1274,7 @@ std::unique_ptr<Expression> Parser::parseAddition() {
     auto left = parseMultiplication();
 
     while (match(TokenType::PLUS) || match(TokenType::MINUS)) {
-        std::string op = tokens[current - 1].lexeme;
+        const std::string op = tokens[current - 1].lexeme;
         auto right = parseMultiplication();
         left = std::make_unique<BinaryExpr>(op, std::move(left), std::move(right));
     }
@@ -1286,7 +1286,7 @@ std::unique_ptr<Expression> Parser::parseMultiplication() {
     auto left = parsePower();
 
     while (match(TokenType::STAR) || match(TokenType::SLASH) || match(TokenType::PERCENT)) {
-        std::string op = tokens[current - 1].lexeme;
+        const std::string op = tokens[current - 1].lexeme;
         auto right = parsePower();
         left = std::make_unique<BinaryExpr>(op, std::move(left), std::move(right));
     }
@@ -1308,7 +1308,7 @@ std::unique_ptr<Expression> Parser::parsePower() {
 
 std::unique_ptr<Expression> Parser::parseUnary() {
     if (match(TokenType::MINUS) || match(TokenType::NOT) || match(TokenType::TILDE)) {
-        Token opToken = tokens[current - 1];
+        const Token opToken = tokens[current - 1];
         auto operand = parseUnary();
         auto node = std::make_unique<UnaryExpr>(opToken.lexeme, std::move(operand));
         node->line = opToken.line;
@@ -1318,7 +1318,7 @@ std::unique_ptr<Expression> Parser::parseUnary() {
 
     // `&expr` — address-of / borrow operator (e.g. `&x` in `borrow var j:&i32 = &x;`)
     if (match(TokenType::AMPERSAND)) {
-        Token opToken = tokens[current - 1];
+        const Token opToken = tokens[current - 1];
         auto operand = parseUnary();
         auto node = std::make_unique<UnaryExpr>(opToken.lexeme, std::move(operand));
         node->line = opToken.line;
@@ -1327,7 +1327,7 @@ std::unique_ptr<Expression> Parser::parseUnary() {
     }
 
     if (match(TokenType::PLUSPLUS) || match(TokenType::MINUSMINUS)) {
-        Token opToken = tokens[current - 1];
+        const Token opToken = tokens[current - 1];
         auto operand = parseUnary();
         if (operand->type != ASTNodeType::IDENTIFIER_EXPR && operand->type != ASTNodeType::INDEX_EXPR) {
             error("Prefix " + opToken.lexeme + " requires an lvalue operand");
@@ -1340,7 +1340,7 @@ std::unique_ptr<Expression> Parser::parseUnary() {
 
     // `move <expr>` as a prefix expression (e.g. `return move x;`, `a = move b;`)
     if (match(TokenType::MOVE)) {
-        Token kw = tokens[current - 1];
+        const Token kw = tokens[current - 1];
         auto operand = parseUnary();
         auto node = std::make_unique<MoveExpr>(std::move(operand));
         node->line = kw.line;
@@ -1357,7 +1357,7 @@ std::unique_ptr<Expression> Parser::parsePostfix() {
     while (true) {
         // Handle postfix operators
         if (match(TokenType::PLUSPLUS) || match(TokenType::MINUSMINUS)) {
-            Token opToken = tokens[current - 1];
+            const Token opToken = tokens[current - 1];
             if (expr->type != ASTNodeType::IDENTIFIER_EXPR && expr->type != ASTNodeType::INDEX_EXPR) {
                 error("Postfix " + opToken.lexeme + " requires an lvalue operand");
             }
@@ -1367,7 +1367,7 @@ std::unique_ptr<Expression> Parser::parsePostfix() {
         }
         // Handle array indexing
         else if (match(TokenType::LBRACKET)) {
-            Token bracketToken = tokens[current - 1];
+            const Token bracketToken = tokens[current - 1];
             auto index = parseExpression();
             consume(TokenType::RBRACKET, "Expected ']' after array index");
             auto indexExpr = std::make_unique<IndexExpr>(std::move(expr), std::move(index));
@@ -1377,8 +1377,8 @@ std::unique_ptr<Expression> Parser::parsePostfix() {
         }
         // Handle field access (dot notation)
         else if (match(TokenType::DOT)) {
-            Token dotToken = tokens[current - 1];
-            Token fieldToken = consume(TokenType::IDENTIFIER, "Expected field name after '.'");
+            const Token dotToken = tokens[current - 1];
+            const Token fieldToken = consume(TokenType::IDENTIFIER, "Expected field name after '.'");
             auto fieldExpr = std::make_unique<FieldAccessExpr>(std::move(expr), fieldToken.lexeme);
             fieldExpr->line = dotToken.line;
             fieldExpr->column = dotToken.column;
@@ -1422,7 +1422,7 @@ std::unique_ptr<Expression> Parser::parseCall() {
 
 std::unique_ptr<Expression> Parser::parsePrimary() {
     if (match(TokenType::INTEGER)) {
-        Token token = tokens[current - 1];
+        const Token token = tokens[current - 1];
         auto expr = std::make_unique<LiteralExpr>(token.intValue);
         expr->line = token.line;
         expr->column = token.column;
@@ -1430,7 +1430,7 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
     }
 
     if (match(TokenType::FLOAT)) {
-        Token token = tokens[current - 1];
+        const Token token = tokens[current - 1];
         auto expr = std::make_unique<LiteralExpr>(token.floatValue);
         expr->line = token.line;
         expr->column = token.column;
@@ -1438,7 +1438,7 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
     }
 
     if (match(TokenType::STRING)) {
-        Token token = tokens[current - 1];
+        const Token token = tokens[current - 1];
         auto expr = std::make_unique<LiteralExpr>(token.lexeme);
         expr->line = token.line;
         expr->column = token.column;
@@ -1446,7 +1446,7 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
     }
 
     if (match(TokenType::TRUE)) {
-        Token token = tokens[current - 1];
+        const Token token = tokens[current - 1];
         auto expr = std::make_unique<LiteralExpr>(static_cast<long long>(1));
         expr->line = token.line;
         expr->column = token.column;
@@ -1454,7 +1454,7 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
     }
 
     if (match(TokenType::FALSE) || match(TokenType::NULL_LITERAL)) {
-        Token token = tokens[current - 1];
+        const Token token = tokens[current - 1];
         auto expr = std::make_unique<LiteralExpr>(static_cast<long long>(0));
         expr->line = token.line;
         expr->column = token.column;
@@ -1462,7 +1462,7 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
     }
 
     if (match(TokenType::IDENTIFIER)) {
-        Token token = tokens[current - 1];
+        const Token token = tokens[current - 1];
         // Check if this is a struct literal: StructName { field: value, ... }
         if (structNames_.count(token.lexeme) && check(TokenType::LBRACE)) {
             advance(); // consume '{'
@@ -1491,7 +1491,7 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
     }
 
     if (match(TokenType::LBRACKET)) {
-        Token bracketToken = tokens[current - 1];
+        const Token bracketToken = tokens[current - 1];
         auto arrayExpr = parseArrayLiteral();
         arrayExpr->line = bracketToken.line;
         arrayExpr->column = bracketToken.column;
@@ -1506,14 +1506,14 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
     // Lambda with || (empty params): || body
     if (match(TokenType::OR)) {
         // || is the empty-parameter lambda: || expr
-        Token orToken = tokens[current - 1];
+        const Token orToken = tokens[current - 1];
         auto body = parseExpression();
         auto node = std::make_unique<LambdaExpr>(std::vector<std::string>{}, std::move(body));
         node->line = orToken.line;
         node->column = orToken.column;
 
         // Desugar to named function
-        std::string lambdaName = "__lambda_" + std::to_string(lambdaCounter_++);
+        const std::string lambdaName = "__lambda_" + std::to_string(lambdaCounter_++);
         std::vector<Parameter> fnParams;
         auto returnStmt = std::make_unique<ReturnStmt>(std::move(node->body));
         returnStmt->line = orToken.line;
@@ -1545,7 +1545,7 @@ std::unique_ptr<Expression> Parser::parseArrayLiteral() {
         do {
             // Handle spread operator: ...expr
             if (match(TokenType::RANGE)) {
-                Token spreadToken = tokens[current - 1];
+                const Token spreadToken = tokens[current - 1];
                 auto operand = parseExpression();
                 auto node = std::make_unique<SpreadExpr>(std::move(operand));
                 node->line = spreadToken.line;
@@ -1566,8 +1566,8 @@ std::unique_ptr<Expression> Parser::parsePipe() {
     auto expr = parseTernary();
 
     while (match(TokenType::PIPE_FORWARD)) {
-        Token pipeToken = tokens[current - 1];
-        Token fnName = consume(TokenType::IDENTIFIER, "Expected function name after '|>'");
+        const Token pipeToken = tokens[current - 1];
+        const Token fnName = consume(TokenType::IDENTIFIER, "Expected function name after '|>'");
         auto node = std::make_unique<PipeExpr>(std::move(expr), fnName.lexeme);
         node->line = pipeToken.line;
         node->column = pipeToken.column;
@@ -1578,13 +1578,13 @@ std::unique_ptr<Expression> Parser::parsePipe() {
 }
 
 std::unique_ptr<Expression> Parser::parseLambda() {
-    Token pipeToken = tokens[current - 1]; // the opening |
+    const Token pipeToken = tokens[current - 1]; // the opening |
     std::vector<std::string> params;
 
     // Parse lambda parameters: |x| or |x, y| or || or |x:int| or |x:int, y:int|
     if (!check(TokenType::PIPE)) {
         do {
-            Token paramName = consume(TokenType::IDENTIFIER, "Expected parameter name in lambda");
+            const Token paramName = consume(TokenType::IDENTIFIER, "Expected parameter name in lambda");
             params.push_back(paramName.lexeme);
             // Skip optional type annotation (e.g. |x:int|)
             if (match(TokenType::COLON)) {
@@ -1603,7 +1603,7 @@ std::unique_ptr<Expression> Parser::parseLambda() {
     node->column = pipeToken.column;
 
     // Desugar: generate a named function and return its name as a string literal
-    std::string lambdaName = "__lambda_" + std::to_string(lambdaCounter_++);
+    const std::string lambdaName = "__lambda_" + std::to_string(lambdaCounter_++);
 
     // Create the function: fn __lambda_N(params...) { return body; }
     std::vector<Parameter> fnParams;
