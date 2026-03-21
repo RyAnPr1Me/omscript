@@ -1,7 +1,7 @@
 # OmScript Language Reference
 
-> **Version:** 2.4.1  
-> **Compiler:** `omsc` — OmScript Compiler v2.4.1  
+> **Version:** 2.7.9  
+> **Compiler:** `omsc` — OmScript Compiler v2.7.9  
 > **Standard:** C++17 · LLVM Backend · Ahead-of-Time Compilation  
 > **License:** See repository root
 
@@ -2768,6 +2768,7 @@ Before LLVM optimization, the code generator performs AST-level constant folding
 - **Identity:** `x + 0` → `x`, `x * 1` → `x`, `x * 0` → `0`, `x % 1` → `0`
 - **Negation:** `0 - x` → `-x`, `x * (-1)` → `-x`, `x / (-1)` → `-x`
 - **Self-identity:** `x == x` → `1`, `x != x` → `0`, `x - x` → `0`, `x / x` → `1`, `x % x` → `0`
+- **Logical:** `3 && 5` → `1`, `0 && 5` → `0`, `0 || 7` → `1`, `0 || 0` → `0`
 - **Float negation:** `x * (-1.0)` → `-x`, `x / (-1.0)` → `-x`
 - **Null coalescing:** `42 ?? y` → `42`, `0 ?? y` → `y`
 - **Ternary:** `1 ? a : b` → `a`, `0 ? a : b` → `b`
@@ -2841,7 +2842,7 @@ The e-graph operates on the **AST** before LLVM code generation and includes **6
 | Category | Examples |
 |----------|---------|
 | **Algebraic** | `x + 0 → x`, `x * 1 → x`, `x - x → 0`, `x * 2 → x << 1`, `x * 3 → (x << 1) + x` |
-| **Comparison** | `x == x → 1`, `x != x → 0`, `!(a == b) → a != b`, `!!x → x` |
+| **Comparison** | `x == x → 1`, `x != x → 0`, `!(a == b) → a != b`, `!!x → x`, `x && 1 → bool(x)`, `0 \|\| x → bool(x)` |
 | **Bitwise** | `x ^ x → 0`, `x & x → x`, `~(~x) → x`, De Morgan's laws, shift combination |
 
 Controlled via: `-fegraph` (default on at O2+) / `-fno-egraph`
@@ -3525,4 +3526,4 @@ arg_list       = expression { "," expression } ;
 
 ---
 
-*This document describes OmScript Compiler v2.4.1. For the latest updates, see the repository at [github.com/RyAnPr1Me/omscript](https://github.com/RyAnPr1Me/omscript).*
+*This document describes OmScript Compiler v2.7.9. For the latest updates, see the repository at [github.com/RyAnPr1Me/omscript](https://github.com/RyAnPr1Me/omscript).*

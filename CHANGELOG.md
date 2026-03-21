@@ -5,6 +5,21 @@ All notable changes to the OmScript compiler will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.7.9] - 2026-03-21
+
+### Fixed
+- **Critical: E-graph logical operator miscompilation** — Six e-graph rewrite rules for `&&`/`||` incorrectly returned raw operand values instead of boolean (0/1) results. For example, `0 || 7` produced `7` instead of `1` at O2 optimization level. Affected rules: `x && x`, `x || x`, `x || 0`, `0 || x`, `x && 1`, `1 && x` — all now correctly produce boolean conversions via `x != 0`.
+- **Undefined behavior in left-shift constant folding** — `(-1) << 3` triggered C++ signed left-shift UB at compile time. Now uses unsigned arithmetic for the shift, producing correct results (-8 in this case).
+
+### Added
+- **Complete `&&`/`||` constant folding** — When both operands of `&&` or `||` are compile-time constants, the result is now folded to a single constant without any ICmp/ZExt/branch instructions.
+- New integration test `neg_shift_test.om` covering negative shift and logical constant folding
+- 6 new unit tests: `LeftShiftNegativeConstFold`, `LeftShiftLargeNegativeConstFold`, `LogicalAndConstantFold`, `LogicalOrConstantFold`, `LogicalAndFalseConstantFold`, `LogicalOrBothZeroConstantFold`
+
+### Changed
+- **Version bump** to 2.7.9
+- Updated e-graph unit tests to verify correct boolean semantics
+
 ## [2.4.1] - 2026-03-21
 
 ### Added
