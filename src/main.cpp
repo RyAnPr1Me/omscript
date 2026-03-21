@@ -1707,6 +1707,8 @@ const char* tokenTypeToString(omscript::TokenType type) {
         return "END_OF_FILE";
     case omscript::TokenType::INVALID:
         return "INVALID";
+    case omscript::TokenType::AT:
+        return "AT";
     }
     return "UNKNOWN";
 }

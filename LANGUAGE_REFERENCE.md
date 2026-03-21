@@ -596,6 +596,8 @@ Functions can be annotated with `@` directives placed before the `fn` keyword. T
 | `@flatten` | `flatten` | Inline all callees within this function — maximizes optimization scope |
 | `@unroll` | `llvm.loop.unroll.full` | Aggressively unroll all loops in this function — eliminates loop overhead |
 | `@nounroll` | `llvm.loop.unroll.disable` | Disable loop unrolling in this function — reduces code size, I-cache pressure |
+| `@vectorize` | `llvm.loop.vectorize.enable` | Enable loop vectorization for all loops in this function |
+| `@novectorize` | `llvm.loop.vectorize.enable=false` | Disable loop vectorization for all loops in this function |
 
 ```javascript
 @inline
@@ -642,6 +644,24 @@ fn fast_sum(n: int) -> int {
     }
     return total;
 }
+
+@vectorize
+fn vec_add(n: int) -> int {
+    var total: int = 0;
+    for (i: int in 0...n) {
+        total = total + i * 2;
+    }
+    return total;
+}
+
+@novectorize @unroll
+fn scalar_work(n: int) -> int {
+    var total: int = 0;
+    for (i: int in 0...n) {
+        total = total + i;
+    }
+    return total;
+}
 ```
 
 **Notes:**
@@ -650,6 +670,7 @@ fn fast_sum(n: int) -> int {
 - `@pure` implies the function only reads memory and has no observable side effects. Do not use on functions that call `print`, modify arrays, or write to files.
 - `@static` changes the function's linkage to internal, which is only meaningful for AOT compilation — it has no effect in JIT mode.
 - `@unroll` and `@nounroll` apply to **all** loops within the annotated function. `@unroll` is most effective on small constant-trip-count loops; on large or variable-trip-count loops, the optimizer may ignore the hint if full unrolling would exceed code-size thresholds.
+- `@vectorize` and `@novectorize` apply to **all** loops within the annotated function. `@vectorize` hints the LLVM vectorizer to attempt vectorization even when the cost model is uncertain. `@novectorize` prevents vectorization when it hurts performance (e.g., small iteration counts, complex control flow, or high register pressure).
 
 ### 6.9 Parameter Annotations
 

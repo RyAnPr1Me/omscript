@@ -308,6 +308,8 @@ class CodeGenerator {
     /// Per-function loop unrolling hints from @unroll / @nounroll annotations.
     bool currentFuncHintUnroll_ = false;
     bool currentFuncHintNoUnroll_ = false;
+    bool currentFuncHintVectorize_ = false;
+    bool currentFuncHintNoVectorize_ = false;
 
     /// Classify a function into its execution tier based on type annotations,
     /// OPTMAX status, and whether it is a special function (main/stdlib).
