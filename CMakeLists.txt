@@ -39,16 +39,24 @@ if(LTO)
 endif()
 
 # Profile-Guided Optimization (PGO) for the compiler binary itself.
-# Usage:
+#
+# GCC workflow:
 #   1. cmake -DPGO_GENERATE=ON -DPGO_PROFILE_DIR=/path/to/profiles ..
 #   2. make -j$(nproc)
-#   3. ./omsc <representative workload>     # generates .profraw files
+#   3. ./omsc <representative workloads>   # generates .gcda files in profile dir
+#   4. cmake -DPGO_USE=/path/to/profiles ..   # directory containing .gcda files
+#   5. make -j$(nproc)                        # recompiles using the profile
+#
+# Clang workflow:
+#   1. cmake -DPGO_GENERATE=ON -DPGO_PROFILE_DIR=/path/to/profiles ..
+#   2. make -j$(nproc)
+#   3. ./omsc <representative workloads>   # generates .profraw files in profile dir
 #   4. llvm-profdata merge -output=default.profdata /path/to/profiles/*.profraw
-#   5. cmake -DPGO_USE=/path/to/default.profdata ..
-#   6. make -j$(nproc)                      # recompiles using the profile
+#   5. cmake -DPGO_USE=/path/to/default.profdata ..  # merged profdata file
+#   6. make -j$(nproc)
 option(PGO_GENERATE "Instrument build for PGO profile generation" OFF)
 set(PGO_PROFILE_DIR "" CACHE STRING "Directory for PGO raw profiles (PGO_GENERATE only)")
-set(PGO_USE "" CACHE FILEPATH "Path to merged PGO profile (default.profdata)")
+set(PGO_USE "" CACHE STRING "PGO profile path: directory of .gcda files (GCC) or merged .profdata file (Clang)")
 if(PGO_GENERATE AND PGO_USE)
     message(FATAL_ERROR "PGO_GENERATE and PGO_USE are mutually exclusive")
 endif()
@@ -60,7 +68,7 @@ if(PGO_GENERATE)
         endif()
         add_compile_options(${_pgo_gen_flags})
         set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${_pgo_gen_flags}")
-        message(STATUS "PGO instrumentation enabled (profile dir: ${PGO_PROFILE_DIR})")
+        message(STATUS "PGO instrumentation enabled (Clang, profile dir: ${PGO_PROFILE_DIR})")
     elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
         set(_pgo_gen_flags "-fprofile-generate")
         if(PGO_PROFILE_DIR)
@@ -80,11 +88,14 @@ if(PGO_USE)
     if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
         add_compile_options(-fprofile-use=${PGO_USE})
         set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fprofile-use=${PGO_USE}")
-        message(STATUS "PGO profile-use enabled: ${PGO_USE}")
+        message(STATUS "PGO profile-use enabled (Clang): ${PGO_USE}")
     elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+        # GCC expects a directory containing .gcda files, not a single file.
+        # -fprofile-correction compensates for profile/code mismatches from
+        # multi-threaded execution or minor code changes since profiling.
         add_compile_options(-fprofile-use=${PGO_USE} -fprofile-correction)
         set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fprofile-use=${PGO_USE}")
-        message(STATUS "PGO profile-use enabled (GCC): ${PGO_USE}")
+        message(STATUS "PGO profile-use enabled (GCC, profile dir): ${PGO_USE}")
     else()
         message(WARNING "PGO_USE requested but compiler does not support it")
     endif()
