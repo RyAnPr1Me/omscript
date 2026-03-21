@@ -112,7 +112,7 @@ struct Point { hot int x, hot int y }
 
 @hot 
 fn bench_math(n:int) -> int {
-    var acc:int = 0;
+   prefetch hot var acc:int = 0;
     for (i:int in 1...n) {
         acc += (i * i) % 97;
         acc ^= (i << 2);
@@ -123,7 +123,7 @@ fn bench_math(n:int) -> int {
 }
 
 fn bench_push(@prefetch n:int) -> int {
-    var arr:int[] = [];
+    prefetch var arr:int[] align(64) = [];
     for (i:int in 0...n) {
         arr = push(arr, (i * 3) % 12345);
     }
@@ -132,23 +132,23 @@ fn bench_push(@prefetch n:int) -> int {
     invalidate n;
     return result;
 }
-
+@hot @flatten @pure @unroll
 fn bench_hof(@prefetch n:int) -> int {
-    var arr:int[] = array_fill(n, 0);
+    prefetch hot var arr:int[] align(64) = array_fill(n, 0);
     for (i:int in 0...n) {
         arr[i] = (i * 7) % 1000;
     }
     var mapped:int[] = array_map(arr, |x:int| (x * x) % 997);
     invalidate arr;
-    var filtered:int[] = array_filter(mapped, |x:int| x % 2 == 0);
+    var filtered:int[] align(64) = array_filter(mapped, |x:int| x % 2 == 0);
     invalidate mapped;
-    var reduced:int = array_reduce(filtered, |a:int, b:int| a + b, 0);
-    var result:int = reduced + len(filtered);
+    var reduced:int align(64) = array_reduce(filtered, |a:int, b:int| a + b, 0);
+    var result:int align(64) = reduced + len(filtered);
     invalidate filtered;
     invalidate n;
     return result;
 }
-@hot
+@hot @unroll @flatten @pure
 fn bench_strcat(@prefetch n:int) -> int {
     var s:str = "x";
     for (i:int in 0...n) {
@@ -171,7 +171,7 @@ fn bench_strops(@prefetch n:int) -> int {
     invalidate n;
     return count;
 }
-@hot
+@hot @flatten @pure @unroll
 fn bench_struct(@prefetch n:int) -> int {
     prefetch var p:struct = Point { x: 1, y: 2 };
     var sum:int = 0;
@@ -184,7 +184,7 @@ fn bench_struct(@prefetch n:int) -> int {
     invalidate p;
     return sum;
 }
-@hot
+@hot 
 fn bench_branch(@prefetch n:int) -> int {
     var sum:int = 0;
     for (i:int in 0...n) {
@@ -206,13 +206,13 @@ fn fib(n:int) -> int {
 fn bench_recurse(n:int) -> int {
     return fib(n);
 }
-@hot
+@hot @flatten @pure @unroll
 fn bench_nested(n:int) -> int {
-    var sum:int = 0;
+    hot var sum:int = 0;
     for (i:int in 0...n:int) {
         for (j:int in 0...n:int) {
             for (k:int in 0...n:int) {
-                sum += ((i ^ j) + k) % 37;
+                 sum += ((i ^ j) + k) % 37;
             }
         }
     }
