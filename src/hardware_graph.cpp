@@ -1312,8 +1312,11 @@ static unsigned getOpcodeLatency(const llvm::Instruction* inst,
     case llvm::Instruction::BitCast:
     case llvm::Instruction::IntToPtr:
     case llvm::Instruction::PtrToInt:
+        return 0; // free — handled by register rename on modern CPUs
+
+    // ── PHI ─────────────────────────────────────────────────────────────────
     case llvm::Instruction::PHI:
-        return 0; // free — handled by register rename / resolved at predecessor edge
+        return 0; // resolved at the predecessor edge, not at the node itself
 
     // ── Calls / intrinsics ───────────────────────────────────────────────────
     case llvm::Instruction::Call: {
