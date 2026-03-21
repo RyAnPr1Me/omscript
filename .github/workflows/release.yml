@@ -166,14 +166,36 @@ jobs:
             examples/foreach_test.om
             examples/switch_test.om
             examples/type_annotation_test.om
+            examples/hint_cold_hot.om
+            examples/hint_flatten.om
+            examples/hint_prefetch.om
+            examples/hint_pure_static.om
+            examples/optmax_div_zero.om
+            examples/prefetch_use_site.om
+            examples/bitwise.om
+            examples/benchmark.om
+            examples/arithmetic.om
+            examples/advanced.om
           )
           for f in "${FEATURE_FILES[@]}"; do
             [ -f "$f" ] || continue
             "$OMSC" "$f" -O3 -o /tmp/pgo_out 2>/dev/null || true
           done
 
-          # ── Phase D: Exercise CLI paths (help, version, errors).
-          echo "=== PGO Phase D: CLI and error paths ==="
+          # ── Phase D: Exercise e-graph / superoptimizer paths by compiling
+          # ALL example files at -O2 (which enables the e-graph equality
+          # saturation engine and superoptimizer).  This profiles the hundreds
+          # of lambda-based rewrite rules in egraph.cpp.
+          echo "=== PGO Phase D: E-graph & superoptimizer profiling ==="
+          EGRAPH_COUNT=0
+          for f in examples/*.om; do
+            [ -f "$f" ] || continue
+            "$OMSC" "$f" -O2 -o /tmp/pgo_out 2>/dev/null && EGRAPH_COUNT=$((EGRAPH_COUNT + 1)) || true
+          done
+          echo "  E-graph profiled $EGRAPH_COUNT files at -O2"
+
+          # ── Phase E: Exercise CLI paths (help, version, errors).
+          echo "=== PGO Phase E: CLI and error paths ==="
           "$OMSC" --help > /dev/null 2>&1 || true
           "$OMSC" --version > /dev/null 2>&1 || true
           "$OMSC" /dev/null 2>/dev/null || true  # error: empty file

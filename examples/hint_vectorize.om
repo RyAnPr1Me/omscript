@@ -1,0 +1,33 @@
+@vectorize
+fn sum_vectorized(n: int) -> int {
+    var total: int = 0;
+    for (i: int in 0...n) {
+        total = total + i * 2;
+    }
+    return total;
+}
+
+@novectorize
+fn sum_scalar(n: int) -> int {
+    var total: int = 0;
+    for (i: int in 0...n) {
+        total = total + i * 2;
+    }
+    return total;
+}
+
+@vectorize @unroll
+fn sum_vec_unroll(n: int) -> int {
+    var total: int = 0;
+    for (i: int in 0...n) {
+        total = total + i * 2;
+    }
+    return total;
+}
+
+fn main() {
+    print(sum_vectorized(100));
+    print(sum_scalar(100));
+    print(sum_vec_unroll(100));
+    return 0;
+}

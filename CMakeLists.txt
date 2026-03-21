@@ -83,21 +83,23 @@ if(PGO_GENERATE)
 endif()
 if(PGO_USE)
     if(NOT EXISTS "${PGO_USE}")
-        message(WARNING "PGO profile not found: ${PGO_USE} — building without PGO")
-        set(PGO_USE "" CACHE STRING "" FORCE)
+        message(FATAL_ERROR "PGO profile not found: ${PGO_USE}")
     endif()
-endif()
-if(PGO_USE)
     if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-        add_compile_options(-fprofile-use=${PGO_USE})
-        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fprofile-use=${PGO_USE}")
+        # Store PGO flags for per-target application (avoids -Wmissing-profile
+        # warnings on test targets that were never profiled).
+        set(_PGO_USE_COMPILE_FLAGS -fprofile-use=${PGO_USE})
+        set(_PGO_USE_LINK_FLAGS -fprofile-use=${PGO_USE})
         message(STATUS "PGO profile-use enabled (Clang): ${PGO_USE}")
     elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
         # GCC expects a directory containing .gcda files, not a single file.
         # -fprofile-correction compensates for profile/code mismatches from
         # multi-threaded execution or minor code changes since profiling.
-        add_compile_options(-fprofile-use=${PGO_USE} -fprofile-correction)
-        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fprofile-use=${PGO_USE}")
+        # -Wno-missing-profile suppresses warnings for functions (especially
+        # lambdas in egraph.cpp) that were not exercised during profiling —
+        # -fprofile-correction already handles these cases gracefully.
+        set(_PGO_USE_COMPILE_FLAGS -fprofile-use=${PGO_USE} -fprofile-correction -Wno-missing-profile)
+        set(_PGO_USE_LINK_FLAGS -fprofile-use=${PGO_USE})
         message(STATUS "PGO profile-use enabled (GCC, profile dir): ${PGO_USE}")
     else()
         message(WARNING "PGO_USE requested but compiler does not support it")
@@ -201,6 +203,15 @@ set(RUNTIME_SOURCES
 # Compiler executable
 add_executable(omsc ${COMPILER_SOURCES} ${RUNTIME_SOURCES})
 
+# Apply PGO profile-use flags only to the compiler targets (omsc and
+# omscript_lib).  Test targets are not profiled, so applying PGO flags
+# to them causes hundreds of -Wmissing-profile warnings and does not
+# improve test binary performance.
+if(_PGO_USE_COMPILE_FLAGS)
+    target_compile_options(omsc PRIVATE ${_PGO_USE_COMPILE_FLAGS})
+    target_link_options(omsc PRIVATE ${_PGO_USE_LINK_FLAGS})
+endif()
+
 # Pass Polly plugin path as a compile-time define so the optimizer can load it.
 if(POLLY_LIB)
     target_compile_definitions(omsc PRIVATE "POLLY_LIB_PATH=\"${POLLY_LIB}\"")
@@ -300,6 +311,9 @@ if(GTest_FOUND)
     target_link_libraries(omscript_lib ${llvm_libs})
     if(POLLY_LIB)
         target_compile_definitions(omscript_lib PRIVATE "POLLY_LIB_PATH=\"${POLLY_LIB}\"")
+    endif()
+    if(_PGO_USE_COMPILE_FLAGS)
+        target_compile_options(omscript_lib PRIVATE ${_PGO_USE_COMPILE_FLAGS})
     endif()
 
     # Collect all test source files
