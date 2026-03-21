@@ -189,6 +189,20 @@ jobs:
           pgo_args=()
           if [ "$GCDA_COUNT" -gt 0 ]; then
             # GCC: pass profile directory
+            # The omsc executable and omscript_lib library compile the same
+            # source files into different object directories (omsc.dir/ vs
+            # omscript_lib.dir/), so the #-mangled .gcda filenames differ.
+            # Copy profiles so both targets find matching profile data.
+            DUP_COUNT=0
+            for f in pgo-profiles/*omsc.dir*; do
+              [ -f "$f" ] || continue
+              dest="${f//omsc.dir/omscript_lib.dir}"
+              if [ ! -f "$dest" ]; then
+                cp "$f" "$dest"
+                DUP_COUNT=$((DUP_COUNT + 1))
+              fi
+            done
+            echo "  Duplicated $DUP_COUNT profiles for omscript_lib target"
             pgo_args+=("-DPGO_USE=$PWD/pgo-profiles")
             echo "  → GCC profiles detected; using directory for PGO rebuild"
           elif [ "$PROFRAW_COUNT" -gt 0 ]; then
