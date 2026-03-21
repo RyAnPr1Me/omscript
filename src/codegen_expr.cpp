@@ -177,6 +177,14 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     // Null coalescing operator: x ?? y → x != 0 ? x : y (short-circuit)
     if (expr->op == "??") {
         left = toDefaultType(left);
+        // Constant folding: when the left side is a known constant, skip branches.
+        if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left)) {
+            if (!ci->isZero())
+                return left;  // nonzero ?? y → nonzero
+            // 0 ?? y → y
+            llvm::Value* right = generateExpression(expr->right.get());
+            return toDefaultType(right);
+        }
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
         llvm::Value* isNonZero = builder->CreateICmpNE(left, zero, "coalesce.nz");
         llvm::Function* function = builder->GetInsertBlock()->getParent();
@@ -265,6 +273,10 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 return left;  // x+0.0, x-0.0 → x
             if (rv == 1.0 && (expr->op == "*" || expr->op == "/"))
                 return left;  // x*1.0, x/1.0 → x
+            if (rv == -1.0 && expr->op == "*")
+                return builder->CreateFNeg(left, "fnegtmp"); // x*(-1.0) → -x
+            if (rv == -1.0 && expr->op == "/")
+                return builder->CreateFNeg(left, "fnegtmp"); // x/(-1.0) → -x
             // Note: x*0.0 → 0.0 is NOT valid under IEEE-754: NaN*0=NaN,
             // Inf*0=NaN, and (-x)*0 = -0.0 (not +0.0).  We leave this to
             // LLVM InstCombine with fast-math flags if the user opts in.
@@ -307,6 +319,8 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 return builder->CreateFNeg(right, "fnegtmp"); // 0.0-x → -x
             if (lv == 1.0 && expr->op == "*")
                 return right; // 1.0*x → x
+            if (lv == -1.0 && expr->op == "*")
+                return builder->CreateFNeg(right, "fnegtmp"); // (-1.0)*x → -x
             // Note: 0.0*x → 0.0 is NOT valid under IEEE-754: 0*NaN=NaN,
             // 0*Inf=NaN, and 0*(-x) = -0.0 (not +0.0).
             if (lv == 2.0 && expr->op == "*")

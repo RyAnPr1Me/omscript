@@ -5,6 +5,21 @@ All notable changes to the OmScript compiler will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.1] - 2026-03-21
+
+### Added
+- **AST-level self-identity optimizations**: `x == x → 1`, `x != x → 0`, `x < x → 0`, `x > x → 0`, `x <= x → 1`, `x >= x → 1`, `x / x → 1`, `x % x → 0` in OPTMAX constant folder
+- **AST-level negation identities**: `0 - x → -x`, `x * (-1) → -x`, `x / (-1) → -x`, `(-1) * x → -x` in OPTMAX constant folder
+- **AST-level modulo identity**: `x % 1 → 0` in OPTMAX constant folder
+- **IR-level float constant folding**: `%` (fmod) and `**` (pow) now folded at compile time when both operands are constants
+- **IR-level float negation identities**: `x * (-1.0) → -x`, `x / (-1.0) → -x`, `(-1.0) * x → -x`
+- **Null coalescing constant folding**: `42 ?? y → 42`, `0 ?? y → y` — eliminates branches when the left operand is a compile-time constant
+- New unit tests: `FloatConstantFoldMod`, `FloatConstantFoldPow`, `NullCoalesceConstFoldNonzero`, `NullCoalesceConstFoldZero`, `FloatNegOneMultFold`
+
+### Changed
+- **LANGUAGE_REFERENCE.md** updated to document new constant folding and identity optimizations (sections 19–21)
+- **Version bump** to 2.4.1
+
 ## [2.4.0] - 2026-03-20
 
 ### Added

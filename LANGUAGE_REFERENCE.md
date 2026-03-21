@@ -1,7 +1,7 @@
 # OmScript Language Reference
 
-> **Version:** 2.4.0  
-> **Compiler:** `omsc` — OmScript Compiler v2.4.0  
+> **Version:** 2.4.1  
+> **Compiler:** `omsc` — OmScript Compiler v2.4.1  
 > **Standard:** C++17 · LLVM Backend · Ahead-of-Time Compilation  
 > **License:** See repository root
 
@@ -2760,11 +2760,16 @@ All O2 passes plus:
 
 Before LLVM optimization, the code generator performs AST-level constant folding:
 
-- **Arithmetic:** `3 + 4` → `7`, `10 * 2` → `20`
+- **Arithmetic:** `3 + 4` → `7`, `10 * 2` → `20`, `10 % 3` → `1`
 - **Comparison:** `5 > 3` → `1`
 - **Bitwise:** `0xFF & 0x0F` → `15`
+- **Float:** `1.5 + 2.5` → `4.0`, `7.0 % 3.0` → `1.0`, `2.0 ** 3.0` → `8.0`
 - **Unary:** `-(-5)` → `5`, `!0` → `1`, `~0` → `-1`
-- **Identity:** `x + 0` → `x`, `x * 1` → `x`, `x * 0` → `0`
+- **Identity:** `x + 0` → `x`, `x * 1` → `x`, `x * 0` → `0`, `x % 1` → `0`
+- **Negation:** `0 - x` → `-x`, `x * (-1)` → `-x`, `x / (-1)` → `-x`
+- **Self-identity:** `x == x` → `1`, `x != x` → `0`, `x - x` → `0`, `x / x` → `1`, `x % x` → `0`
+- **Float negation:** `x * (-1.0)` → `-x`, `x / (-1.0)` → `-x`
+- **Null coalescing:** `42 ?? y` → `42`, `0 ?? y` → `y`
 - **Ternary:** `1 ? a : b` → `a`, `0 ? a : b` → `b`
 
 ---
@@ -3520,4 +3525,4 @@ arg_list       = expression { "," expression } ;
 
 ---
 
-*This document describes OmScript Compiler v2.4.0. For the latest updates, see the repository at [github.com/RyAnPr1Me/omscript](https://github.com/RyAnPr1Me/omscript).*
+*This document describes OmScript Compiler v2.4.1. For the latest updates, see the repository at [github.com/RyAnPr1Me/omscript](https://github.com/RyAnPr1Me/omscript).*

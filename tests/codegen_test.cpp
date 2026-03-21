@@ -4316,6 +4316,46 @@ TEST(CodegenTest, FloatConstantFoldPow) {
     EXPECT_FALSE(hasPowCall) << "Float power of constants should be folded at compile time";
 }
 
+TEST(CodegenTest, NullCoalesceConstFoldNonzero) {
+    // 42 ?? expr → 42  (no branch generated)
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return 42 ?? 99; }", codegen);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    // Should be a single basic block — no branch needed
+    EXPECT_EQ(mainFn->size(), 1u)
+        << "Nonzero ?? y should fold to the nonzero value without branches";
+}
+
+TEST(CodegenTest, NullCoalesceConstFoldZero) {
+    // 0 ?? expr → expr  (no branch generated)
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return 0 ?? 99; }", codegen);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    // Should be a single basic block — evaluates right side directly
+    EXPECT_EQ(mainFn->size(), 1u)
+        << "0 ?? y should fold to y without branches";
+}
+
+TEST(CodegenTest, FloatNegOneMultFold) {
+    // x * (-1.0) should fold to -x (FNeg) instead of FMul
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn f(x) { return x * (-1.0); }\n"
+                           "fn main() { return 0; }",
+                           codegen);
+    auto* fn = mod->getFunction("f");
+    ASSERT_NE(fn, nullptr);
+    bool hasFMul = false;
+    for (auto& BB : *fn) {
+        for (auto& I : BB) {
+            if (I.getOpcode() == llvm::Instruction::FMul)
+                hasFMul = true;
+        }
+    }
+    EXPECT_FALSE(hasFMul) << "x * (-1.0) should fold to FNeg, not FMul";
+}
+
 // ===========================================================================
 // Same-value comparison identities
 // ===========================================================================
