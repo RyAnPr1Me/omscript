@@ -135,7 +135,7 @@ fn bench_push(@prefetch n:int) -> int {
 }
 @hot @flatten @pure @unroll
 fn bench_hof(@prefetch n:int) -> int {
-    hot var arr:int[] align(64) = array_fill(n, 0);
+    hot var arr:int[] = array_fill(n, 0);
     prefetch arr;
     for (i:int in 0...n) {
         arr[i] = (i * 7) % 1000;
@@ -161,7 +161,7 @@ fn bench_strcat(@prefetch n:int) -> int {
     invalidate n;
     return result;
 }
-@hot
+@hot @flatten
 fn bench_strops(@prefetch n:int) -> int {
     var haystack:str = str_repeat("abcdefghij", 100);
     var count:int = 0;
@@ -246,11 +246,11 @@ fn bench_while(n:int) -> int {
 }
 @hot
 fn classify(x:int) -> int {
-    if (x < 10)    { return 1; }
-    if (x < 100)   { return 2; }
-    if (x < 1000)  { return 3; }
-    if (x < 10000) { return 4; }
-    if (x < 100000){ return 5; }
+    if (x < 10)    { return 1; };
+    if (x < 100)   { return 2; };
+    if (x < 1000)  { return 3; };
+    if (x < 10000) { return 4; };
+    if (x < 100000){ return 5; };
     return 6;
 }
 @hot
@@ -263,8 +263,8 @@ fn bench_ifelse(n:int) -> int {
 }
 @hot
 fn bench_arrindex(n:int) -> int {
-    var sz:int = 10000;
-    var arr:int[] align(64) = array_fill(sz, 0);
+    const sz:int = 10000;
+    var arr:int[] align(64) = (array_fill(sz, 0));
     for (i:int in 0...sz) {
         arr[i] = i * 3;
     }
@@ -287,7 +287,7 @@ fn bench_calls(n:int) -> int {
     for (i:int in 0...n:int) {
         sum += add_four(i % 1000);
     }
-    invalidate n;
+    
     return sum;
     
 }
@@ -326,7 +326,7 @@ fn bench_combined(n:int) -> int {
     invalidate arr;
     var filtered:int[] = array_filter(mapped, |x:int| x % 2 == 0);
     invalidate mapped;
-    total += array_reduce(filtered, |a:int, b:int| a + b, 0) + len(filtered);
+    total += (array_reduce(filtered, |a:int, b:int| a + b, 0) + len(filtered));
     invalidate filtered;
 
     // struct
