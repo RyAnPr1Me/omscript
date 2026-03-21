@@ -6044,3 +6044,99 @@ TEST(CodegenTest, BorrowWithRefTypeAndAddressOf) {
     ASSERT_NE(mod, nullptr);
     EXPECT_NE(mod->getFunction("main"), nullptr);
 }
+
+// ===========================================================================
+// Prefetch: use-site prefetch and memory residency
+// ===========================================================================
+
+TEST(CodegenTest, PrefetchVarDeclEmitsPrefetchIntrinsic) {
+    // Prefetch var declaration should emit llvm.prefetch intrinsics.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    const char* src =
+        "fn main() {"
+        "    prefetch var x:i32 = 5;"
+        "    var y = x + 1;"
+        "    invalidate x;"
+        "    return y;"
+        "}";
+    auto* mod = generateIR(src, codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+
+    // Count llvm.prefetch calls — at least one from declaration and one
+    // from use-site (loading x in `x + 1`).
+    unsigned prefetchCount = 0;
+    for (auto& BB : *mainFn) {
+        for (auto& I : BB) {
+            if (auto* call = llvm::dyn_cast<llvm::CallInst>(&I)) {
+                if (auto* callee = call->getCalledFunction()) {
+                    if (callee->getIntrinsicID() == llvm::Intrinsic::prefetch)
+                        ++prefetchCount;
+                }
+            }
+        }
+    }
+    EXPECT_GE(prefetchCount, 2u); // declaration + use-site
+}
+
+TEST(CodegenTest, PrefetchUseSiteMetadata) {
+    // Use-site prefetches should carry !omscript.user_prefetch metadata.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    const char* src =
+        "fn main() {"
+        "    prefetch var v:i64 = 10;"
+        "    var a = v;"
+        "    invalidate v;"
+        "    return a;"
+        "}";
+    auto* mod = generateIR(src, codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+
+    unsigned userPrefetchCount = 0;
+    for (auto& BB : *mainFn) {
+        for (auto& I : BB) {
+            if (auto* call = llvm::dyn_cast<llvm::CallInst>(&I)) {
+                if (call->getMetadata("omscript.user_prefetch"))
+                    ++userPrefetchCount;
+            }
+        }
+    }
+    EXPECT_GE(userPrefetchCount, 1u);
+}
+
+TEST(CodegenTest, PrefetchHotUsesHighLocality) {
+    // `prefetch hot` should use locality=3 in the prefetch intrinsic.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    const char* src =
+        "fn main() {"
+        "    prefetch hot var h:i32 = 7;"
+        "    invalidate h;"
+        "    return 0;"
+        "}";
+    auto* mod = generateIR(src, codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+
+    bool foundHighLocality = false;
+    for (auto& BB : *mainFn) {
+        for (auto& I : BB) {
+            if (auto* call = llvm::dyn_cast<llvm::CallInst>(&I)) {
+                if (auto* callee = call->getCalledFunction()) {
+                    if (callee->getIntrinsicID() == llvm::Intrinsic::prefetch) {
+                        // Arg 2 is the locality hint
+                        if (auto* loc = llvm::dyn_cast<llvm::ConstantInt>(
+                                call->getArgOperand(2))) {
+                            if (loc->getZExtValue() == 3)
+                                foundHighLocality = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    EXPECT_TRUE(foundHighLocality);
+}

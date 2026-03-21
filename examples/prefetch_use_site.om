@@ -1,0 +1,30 @@
+fn compute(x: int) -> int {
+    prefetch var val:i32 = x;
+    var result = val + 10;
+    var doubled = val * 2;
+    invalidate val;
+    return result + doubled;
+}
+
+fn compute_hot(x: int) -> int {
+    prefetch hot var v:i64 = x;
+    var a = v + 1;
+    var b = v * 3;
+    invalidate v;
+    return a + b;
+}
+
+fn compute_immut(x: int) -> int {
+    prefetch immut var c:i32 = x;
+    var r1 = c + c;
+    var r2 = c * c;
+    invalidate c;
+    return r1 + r2;
+}
+
+fn main() {
+    println(compute(5));
+    println(compute_hot(10));
+    println(compute_immut(4));
+    return 0;
+}

@@ -1582,3 +1582,43 @@ TEST(ParserTest, RefTypeAnnotation) {
     EXPECT_EQ(vd->name, "k");
     EXPECT_EQ(vd->typeName, "&i64");
 }
+
+// ---------------------------------------------------------------------------
+// Prefetch statement parsing
+// ---------------------------------------------------------------------------
+
+TEST(ParserTest, PrefetchVarDecl) {
+    auto program = parse("fn main() { prefetch var x:i32 = 5; invalidate x; return 0; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    auto* pf = dynamic_cast<PrefetchStmt*>(program->functions[0]->body->statements[0].get());
+    ASSERT_NE(pf, nullptr);
+    ASSERT_NE(pf->varDecl, nullptr);
+    EXPECT_EQ(pf->varDecl->name, "x");
+    EXPECT_EQ(pf->varDecl->typeName, "i32");
+    EXPECT_FALSE(pf->hintHot);
+    EXPECT_FALSE(pf->hintImmut);
+}
+
+TEST(ParserTest, PrefetchHotAttr) {
+    auto program = parse("fn main() { prefetch hot var v:i64 = 10; invalidate v; return 0; }");
+    auto* pf = dynamic_cast<PrefetchStmt*>(program->functions[0]->body->statements[0].get());
+    ASSERT_NE(pf, nullptr);
+    EXPECT_TRUE(pf->hintHot);
+    EXPECT_FALSE(pf->hintImmut);
+}
+
+TEST(ParserTest, PrefetchImmutAttr) {
+    auto program = parse("fn main() { prefetch immut var c:i32 = 3; invalidate c; return 0; }");
+    auto* pf = dynamic_cast<PrefetchStmt*>(program->functions[0]->body->statements[0].get());
+    ASSERT_NE(pf, nullptr);
+    EXPECT_FALSE(pf->hintHot);
+    EXPECT_TRUE(pf->hintImmut);
+}
+
+TEST(ParserTest, PrefetchStandaloneExistingVar) {
+    auto program = parse("fn main() { var x = 1; prefetch x; invalidate x; return 0; }");
+    auto* pf = dynamic_cast<PrefetchStmt*>(program->functions[0]->body->statements[1].get());
+    ASSERT_NE(pf, nullptr);
+    EXPECT_EQ(pf->varDecl, nullptr);
+    EXPECT_EQ(pf->varName, "x");
+}

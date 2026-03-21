@@ -78,14 +78,42 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
         }
         codegenError(msg, expr);
     }
+
+    // Use-site prefetch: when a prefetched variable is about to be loaded,
+    // emit a prefetch hint so the CPU brings the data into cache just before
+    // it is needed.  This is the "when it is used" part of the prefetch
+    // contract — the variable stays in memory (the alloca is kept alive by
+    // the prefetch call) and is prefetched at each access point.
     auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(it->second);
+    if (alloca && prefetchedVars_.count(expr->name)) {
+        llvm::Function* prefetchFn = OMSC_GET_INTRINSIC(
+            module.get(), llvm::Intrinsic::prefetch,
+            {llvm::PointerType::getUnqual(*context)});
+        llvm::CallInst* pfCall = builder->CreateCall(prefetchFn, {
+            alloca,
+            builder->getInt32(0),  // read prefetch
+            builder->getInt32(3),  // high temporal locality (use-site)
+            builder->getInt32(1)   // data cache
+        });
+        pfCall->setMetadata("omscript.user_prefetch",
+                            llvm::MDNode::get(*context, {}));
+    }
+
     llvm::Type* loadType = alloca ? alloca->getAllocatedType() : getDefaultType();
     auto* load = builder->CreateLoad(loadType, it->second, expr->name.c_str());
 
-    // If this is a const variable, mark the load as invariant so LLVM knows
-    // the value never changes and can hoist/CSE it aggressively.
+    // If this is a const variable or a prefetch-immut variable, mark the
+    // load as invariant so LLVM knows the value never changes and can
+    // hoist/CSE it aggressively.
+    bool isInvariant = false;
     auto constIt = constValues.find(expr->name);
     if (constIt != constValues.end() && constIt->second) {
+        isInvariant = true;
+    }
+    if (prefetchedImmutVars_.count(expr->name)) {
+        isInvariant = true;
+    }
+    if (isInvariant) {
         if (auto* loadInst = llvm::dyn_cast<llvm::LoadInst>(load)) {
             loadInst->setMetadata(llvm::LLVMContext::MD_invariant_load,
                                   llvm::MDNode::get(*context, {}));

@@ -1152,39 +1152,83 @@ llvm::Value* CodeGenerator::generateBorrowExpr(BorrowExpr* expr) {
 
 void CodeGenerator::generatePrefetch(PrefetchStmt* stmt) {
     llvm::Value* alloca = nullptr;
+    std::string varName;
 
     if (stmt->varDecl) {
         // Prefetch with variable declaration: generate the VarDecl first,
         // then emit a prefetch hint on its alloca.
         generateVarDecl(stmt->varDecl.get());
-        prefetchedVars_.insert(stmt->varDecl->name);
-        auto it = namedValues.find(stmt->varDecl->name);
+        varName = stmt->varDecl->name;
+        prefetchedVars_.insert(varName);
+        auto it = namedValues.find(varName);
         if (it != namedValues.end()) {
             alloca = it->second;
         }
     } else {
         // Standalone prefetch of an existing variable.
-        prefetchedVars_.insert(stmt->varName);
-        auto it = namedValues.find(stmt->varName);
+        varName = stmt->varName;
+        prefetchedVars_.insert(varName);
+        auto it = namedValues.find(varName);
         if (it != namedValues.end()) {
             alloca = it->second;
         } else {
-            codegenError("Unknown variable '" + stmt->varName + "' in prefetch statement", stmt);
+            codegenError("Unknown variable '" + varName + "' in prefetch statement", stmt);
         }
     }
 
     if (alloca) {
-        // Emit llvm.prefetch intrinsic on the variable's alloca pointer.
-        // Args: ptr, rw (0=read), locality (3=keep in all cache levels), cache_type (1=data)
+        // Determine locality from hints: hot → locality 3 (keep in all cache
+        // levels), default → locality 2 (keep in L2+L3).
+        int32_t locality = stmt->hintHot ? 3 : 2;
+
+        // Emit llvm.prefetch on the variable's alloca pointer so the variable
+        // stays in memory (the prefetch call prevents SROA/mem2reg promotion).
+        // This is the "put a variable in memory" part of the prefetch contract.
         llvm::Function* prefetchFn = OMSC_GET_INTRINSIC_STMT(
             module.get(), llvm::Intrinsic::prefetch,
             {llvm::PointerType::getUnqual(*context)});
-        builder->CreateCall(prefetchFn, {
+        llvm::CallInst* pfCall = builder->CreateCall(prefetchFn, {
             alloca,
-            builder->getInt32(0),  // read prefetch
-            builder->getInt32(3),  // high temporal locality
-            builder->getInt32(1)   // data cache
+            builder->getInt32(0),              // read prefetch
+            builder->getInt32(locality),       // temporal locality
+            builder->getInt32(1)               // data cache
         });
+        // Tag with metadata so the post-optimization cleanup preserves this
+        // user-requested prefetch (distinguished from HGOE-generated ones).
+        pfCall->setMetadata("omscript.user_prefetch",
+                            llvm::MDNode::get(*context, {}));
+
+        // If hintImmut is set, mark the variable's alloca loads as invariant
+        // so LLVM knows the value never changes and can hoist/CSE aggressively.
+        if (stmt->hintImmut) {
+            prefetchedImmutVars_.insert(varName);
+        }
+
+        // For variables that hold pointer-sized values (i64/ptr), also prefetch
+        // the pointed-to memory — the variable's VALUE is treated as a memory
+        // address, similar to @prefetch parameter handling.
+        auto* allocaInst = llvm::dyn_cast<llvm::AllocaInst>(alloca);
+        if (allocaInst) {
+            llvm::Type* elemTy = allocaInst->getAllocatedType();
+            if (elemTy->isIntegerTy(64) || elemTy->isPointerTy()) {
+                llvm::Value* val = builder->CreateLoad(elemTy, alloca,
+                                                        varName + ".pf.val");
+                llvm::Value* ptr = val;
+                if (!elemTy->isPointerTy()) {
+                    ptr = builder->CreateIntToPtr(
+                        val, llvm::PointerType::getUnqual(*context),
+                        varName + ".pf.ptr");
+                }
+                llvm::CallInst* valPf = builder->CreateCall(prefetchFn, {
+                    ptr,
+                    builder->getInt32(0),          // read prefetch
+                    builder->getInt32(locality),   // temporal locality
+                    builder->getInt32(1)           // data cache
+                });
+                valPf->setMetadata("omscript.user_prefetch",
+                                   llvm::MDNode::get(*context, {}));
+            }
+        }
     }
 }
 
