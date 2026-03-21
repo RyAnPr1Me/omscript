@@ -2465,6 +2465,11 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     currentFuncHintUnroll_ = func->hintUnroll;
     currentFuncHintNoUnroll_ = func->hintNoUnroll;
 
+    // @vectorize / @novectorize: per-function loop vectorization control.
+    // These are stored and applied to every loop emitted within this function.
+    currentFuncHintVectorize_ = func->hintVectorize;
+    currentFuncHintNoVectorize_ = func->hintNoVectorize;
+
     // Create entry basic block
     llvm::BasicBlock* entry = llvm::BasicBlock::Create(*context, "entry", function);
     builder->SetInsertPoint(entry);
