@@ -597,7 +597,7 @@ Functions can be annotated with `@` directives placed before the `fn` keyword. T
 | `@unroll` | `llvm.loop.unroll.full` | Aggressively unroll all loops in this function — eliminates loop overhead |
 | `@nounroll` | `llvm.loop.unroll.disable` | Disable loop unrolling in this function — reduces code size, I-cache pressure |
 | `@vectorize` | `llvm.loop.vectorize.enable` | Enable loop vectorization for all loops in this function |
-| `@novectorize` | `llvm.loop.vectorize.disable` | Disable loop vectorization for all loops in this function |
+| `@novectorize` | `llvm.loop.vectorize.enable=false` | Disable loop vectorization for all loops in this function |
 
 ```javascript
 @inline
