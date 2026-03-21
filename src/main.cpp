@@ -324,7 +324,7 @@ std::string fetchLatestReleaseTag() {
     const std::string tmpFile(tmpBuf.data());
 
     const std::string timeoutStr = std::to_string(kApiTimeoutSeconds);
-    std::vector<std::string> const args = {curlBin,
+    const std::vector<std::string> args = {curlBin,
                                      "-s",
                                      "-L",
                                      "--max-time",
@@ -431,7 +431,7 @@ bool downloadAndInstallRelease(const std::string& tagName, const std::string& in
 
     // Download tarball
     const std::string downloadTimeout = std::to_string(kDownloadTimeoutSeconds);
-    std::vector<std::string> const dlArgs = {
+    const std::vector<std::string> dlArgs = {
         curlBin, "-L", "--max-time", downloadTimeout, "-H", "User-Agent: omsc-updater", "-o", tmpTarball, downloadUrl};
     llvm::SmallVector<llvm::StringRef, 10> dlArgRefs;
     for (const auto& a : dlArgs) {
@@ -465,7 +465,7 @@ bool downloadAndInstallRelease(const std::string& tagName, const std::string& in
         "Expand-Archive -Path '" + psEscape(tmpTarball) + "' -DestinationPath '" + psEscape(tmpDir) + "' -Force";
     std::vector<std::string> extractArgs = {extractBin, "-NoProfile", "-Command", psCmd};
 #else
-    std::vector<std::string> const extractArgs = {extractBin, "-xzf", tmpTarball, "-C", tmpDir};
+    const std::vector<std::string> extractArgs = {extractBin, "-xzf", tmpTarball, "-C", tmpDir};
 #endif
     llvm::SmallVector<llvm::StringRef, 6> tarArgRefs;
     for (const auto& a : extractArgs) {
@@ -810,7 +810,7 @@ void doUninstall() {
 #ifndef _WIN32
     const std::string home = getHomeDir();
     if (!home.empty()) {
-        std::vector<std::string> const shellConfigs = {home + "/.bashrc", home + "/.profile", home + "/.zshrc"};
+        const std::vector<std::string> shellConfigs = {home + "/.bashrc", home + "/.profile", home + "/.zshrc"};
         for (const auto& configPath : shellConfigs) {
             std::ifstream in(configPath);
             if (!in.is_open()) {
@@ -1099,7 +1099,7 @@ bool downloadFile(const std::string& url, const std::string& destPath) {
     }
     const std::string curlBin = *curlPathOrErr;
     const std::string timeoutStr = std::to_string(kDownloadTimeoutSeconds);
-    std::vector<std::string> const args = {curlBin,    "-s", "-f",     "-L", "--max-redirs", "5", "--max-time",
+    const std::vector<std::string> args = {curlBin,    "-s", "-f",     "-L", "--max-redirs", "5", "--max-time",
                                      timeoutStr, "-o", destPath, url};
     llvm::SmallVector<llvm::StringRef, 12> argRefs;
     for (const auto& a : args) {
@@ -1130,7 +1130,7 @@ std::string downloadString(const std::string& url) {
     const std::string tmpFile(tmpBuf.data());
 
     const std::string timeoutStr = std::to_string(kApiTimeoutSeconds);
-    std::vector<std::string> const args = {curlBin,    "-s", "-f",    "-L", "--max-redirs", "5", "--max-time",
+    const std::vector<std::string> args = {curlBin,    "-s", "-f",    "-L", "--max-redirs", "5", "--max-time",
                                      timeoutStr, "-o", tmpFile, url};
     llvm::SmallVector<llvm::StringRef, 12> argRefs;
     for (const auto& a : args) {
@@ -2824,7 +2824,7 @@ int main(int argc, char* argv[]) {
                         std::cerr << "Warning: --keep-temps: no C linker found (tried gcc, cc, clang); "
                                      "AOT binary not written\n";
                     } else {
-                        std::vector<std::string> const linkArgs = {objFile, "-o", outputFile, "-lm", "-lpthread"};
+                        const std::vector<std::string> linkArgs = {objFile, "-o", outputFile, "-lm", "-lpthread"};
                         llvm::SmallVector<llvm::StringRef, 8> laRefs;
                         laRefs.push_back(linkerProgram);
                         for (const auto& a : linkArgs)

@@ -143,7 +143,7 @@ std::unique_ptr<llvm::TargetMachine> CodeGenerator::createTargetMachine() const 
         opt.NoNaNsFPMath = true;
         opt.NoSignedZerosFPMath = true;
     }
-    std::optional<llvm::Reloc::Model> const RM = usePIC_ ? llvm::Reloc::PIC_ : llvm::Reloc::Static;
+    const std::optional<llvm::Reloc::Model> RM = usePIC_ ? llvm::Reloc::PIC_ : llvm::Reloc::Static;
 
     std::string cpu;
     std::string features;
