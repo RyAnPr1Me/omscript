@@ -485,15 +485,11 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     // order, giving results that depend on allocation order rather than content.
     if (leftIsStr || rightIsStr) {
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
-        auto toStrPtr = [&](llvm::Value* v, bool isStr) -> llvm::Value* {
-            if (!isStr) {
-                // Non-string operand in a mixed comparison: treat as pointer.
-                return v->getType()->isPointerTy() ? v : builder->CreateIntToPtr(v, ptrTy, "strcmp.cast");
-            }
+        auto toStrPtr = [&](llvm::Value* v) -> llvm::Value* {
             return v->getType()->isPointerTy() ? v : builder->CreateIntToPtr(v, ptrTy, "strcmp.cast");
         };
-        llvm::Value* lPtr = toStrPtr(left, leftIsStr);
-        llvm::Value* rPtr = toStrPtr(right, rightIsStr);
+        llvm::Value* lPtr = toStrPtr(left);
+        llvm::Value* rPtr = toStrPtr(right);
         llvm::Value* cmpResult = builder->CreateCall(getOrDeclareStrcmp(), {lPtr, rPtr}, "strcmp.res");
         llvm::Value* zero32 = builder->getInt32(0);
         llvm::Value* cmpBool;
@@ -643,6 +639,8 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         }
         if (rv == -1 && expr->op == "*")
             return builder->CreateNeg(left, "negtmp"); // x*(-1) → -x
+        if (rv == -1 && expr->op == "/")
+            return builder->CreateNeg(left, "negtmp"); // x/(-1) → -x
         // x & -1 (all ones) → x
         if (rv == -1 && expr->op == "&")
             return left;
@@ -666,6 +664,13 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             return llvm::ConstantInt::get(getDefaultType(), 1); // 1**x → 1
         if (lv == -1 && expr->op == "*")
             return builder->CreateNeg(right, "negtmp"); // (-1)*x → -x
+        if (lv == -1 && expr->op == "**") {
+            // (-1)**x → 1 if x is even, -1 if x is odd
+            llvm::Value* bit = builder->CreateAnd(right, llvm::ConstantInt::get(getDefaultType(), 1), "pow.bit");
+            llvm::Value* isOdd = builder->CreateICmpNE(bit, llvm::ConstantInt::get(getDefaultType(), 0), "pow.isodd");
+            return builder->CreateSelect(isOdd, llvm::ConstantInt::get(getDefaultType(), -1),
+                                         llvm::ConstantInt::get(getDefaultType(), 1), "pow.negone");
+        }
         // -1 & x → x
         if (lv == -1 && expr->op == "&")
             return right;
