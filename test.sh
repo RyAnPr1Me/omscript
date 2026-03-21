@@ -279,9 +279,9 @@ fn bench_arrindex(n:int) -> int {
     return sum;
 }
 
-fn add_one(x:int) -> int { return x + 1; }
-fn add_two(x:int) -> int { return add_one(add_one(x)); }
-fn add_four(x:int) -> int { return add_two(add_two(x)); }
+fn add_one(x:int) -> int { return x + 1; };
+fn add_two(x:int) -> int { return add_one(add_one(x)); };
+fn add_four(x:int) -> int { return add_two(add_two(x)); };
 fn bench_calls(n:int) -> int {
     var sum:int = 0;
     for (i:int in 0...n:int) {
@@ -304,7 +304,7 @@ fn bench_bitwise(n:int) -> int {
     invalidate n;
     return a + b + c;
 }
-@hot
+@hot @unroll @flatten
 fn bench_combined(n:int) -> int {
     var total:int = 0;
 
@@ -330,7 +330,7 @@ fn bench_combined(n:int) -> int {
     invalidate filtered;
 
     // struct
-    var p:struct = Point { x: 1, y: 2 };
+    hot var p:struct = Point { x: 1, y: 2 };
     for (i:int in 0...n) {
         p.x = p.x + i;
         p.y = p.y ^ i;
