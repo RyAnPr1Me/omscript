@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.13)
-project(OmScript VERSION 2.4.1)
+project(OmScript VERSION 2.7.9)
 
 # Allow overriding the compiler version string at build time (e.g. -DOMSC_VERSION=1.2.3)
 if(NOT DEFINED OMSC_VERSION)

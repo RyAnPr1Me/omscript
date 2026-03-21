@@ -240,6 +240,7 @@ test_program "examples/fibonacci.om" 55
 test_program "examples/arithmetic.om" 240
 test_program "examples/neg_div_test.om" 6
 test_program "examples/neg_pow_test.om" 11
+test_program "examples/neg_shift_test.om" 0
 test_program "examples/test.om" 84
 test_program "examples/optimized_loops.om" 5040
 test_program "examples/descending_range.om" 15

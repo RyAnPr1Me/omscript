@@ -136,6 +136,9 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                     return llvm::ConstantInt::get(getDefaultType(), 0); // false && x → 0
                 // true && x → bool(x)
                 llvm::Value* right = generateExpression(expr->right.get());
+                // Fold entirely when right side is also a constant.
+                if (auto* ri = llvm::dyn_cast<llvm::ConstantInt>(right))
+                    return llvm::ConstantInt::get(getDefaultType(), ri->isZero() ? 0 : 1);
                 llvm::Value* rightBool = toBool(right);
                 return builder->CreateZExt(rightBool, getDefaultType(), "booltmp");
             } else {
@@ -143,6 +146,9 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                     return llvm::ConstantInt::get(getDefaultType(), 1); // true || x → 1
                 // false || x → bool(x)
                 llvm::Value* right = generateExpression(expr->right.get());
+                // Fold entirely when right side is also a constant.
+                if (auto* ri = llvm::dyn_cast<llvm::ConstantInt>(right))
+                    return llvm::ConstantInt::get(getDefaultType(), ri->isZero() ? 0 : 1);
                 llvm::Value* rightBool = toBool(right);
                 return builder->CreateZExt(rightBool, getDefaultType(), "booltmp");
             }
@@ -599,11 +605,20 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             return llvm::ConstantInt::get(*context, llvm::APInt(64, lval | rval));
         } else if (expr->op == "^") {
             return llvm::ConstantInt::get(*context, llvm::APInt(64, lval ^ rval));
+        } else if (expr->op == "&&") {
+            return llvm::ConstantInt::get(*context, llvm::APInt(64, (lval != 0 && rval != 0) ? 1 : 0));
+        } else if (expr->op == "||") {
+            return llvm::ConstantInt::get(*context, llvm::APInt(64, (lval != 0 || rval != 0) ? 1 : 0));
         } else if (expr->op == "<<") {
             if (rval >= 0 && rval < 64)
-                return llvm::ConstantInt::get(*context, llvm::APInt(64, lval << rval));
+                // Use unsigned shift to avoid UB when lval is negative.
+                return llvm::ConstantInt::get(*context, llvm::APInt(64, ulval << static_cast<unsigned>(rval)));
         } else if (expr->op == ">>") {
             if (rval >= 0 && rval < 64)
+                // Arithmetic (signed) right shift: sign-extending, matching
+                // LLVM's AShr semantics.  C++ guarantees arithmetic shift for
+                // signed types since C++20; pre-C++20 it is implementation-
+                // defined but every supported compiler uses arithmetic shift.
                 return llvm::ConstantInt::get(*context, llvm::APInt(64, lval >> rval));
         } else if (expr->op == "**") {
             if (rval >= 0) {

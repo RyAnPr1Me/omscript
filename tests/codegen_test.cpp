@@ -6480,3 +6480,85 @@ TEST(CodegenTest, StringRepeatOverflowGuard) {
     EXPECT_TRUE(hasOvfBlock)
         << "String repetition should have an overflow guard block";
 }
+
+// ===========================================================================
+// Left-shift constant folding with negative operands (UB fix)
+// ===========================================================================
+
+TEST(CodegenTest, LeftShiftNegativeConstFold) {
+    // (-1) << 3 should be folded to -8 at compile time.
+    // This previously triggered undefined behavior (signed left shift of negative).
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return (-1) << 3; }", codegen);
+    auto* func = mod->getFunction("main");
+    ASSERT_NE(func, nullptr);
+    bool hasShl = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::Shl)
+                hasShl = true;
+        }
+    }
+    EXPECT_FALSE(hasShl) << "(-1) << 3 should be constant-folded (no Shl instruction)";
+}
+
+TEST(CodegenTest, LeftShiftLargeNegativeConstFold) {
+    // (-2) << 4 should be folded to -32 at compile time.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return (-2) << 4; }", codegen);
+    auto* func = mod->getFunction("main");
+    ASSERT_NE(func, nullptr);
+    bool hasShl = false;
+    for (auto& bb : *func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() == llvm::Instruction::Shl)
+                hasShl = true;
+        }
+    }
+    EXPECT_FALSE(hasShl) << "(-2) << 4 should be constant-folded (no Shl instruction)";
+}
+
+// ===========================================================================
+// Logical && and || constant folding in integer path
+// ===========================================================================
+
+TEST(CodegenTest, LogicalAndConstantFold) {
+    // 3 && 5 with both operands constant should fold to 1 (no branches)
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return 3 && 5; }", codegen);
+    auto* func = mod->getFunction("main");
+    ASSERT_NE(func, nullptr);
+    // With constant folding, this should be a single block returning 1
+    EXPECT_EQ(func->size(), 1u)
+        << "3 && 5 should be constant-folded to 1 (single basic block)";
+}
+
+TEST(CodegenTest, LogicalOrConstantFold) {
+    // 0 || 7 with both operands constant should fold to 1 (no branches)
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return 0 || 7; }", codegen);
+    auto* func = mod->getFunction("main");
+    ASSERT_NE(func, nullptr);
+    EXPECT_EQ(func->size(), 1u)
+        << "0 || 7 should be constant-folded to 1 (single basic block)";
+}
+
+TEST(CodegenTest, LogicalAndFalseConstantFold) {
+    // 0 && 5 should fold to 0 (no branches)
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return 0 && 5; }", codegen);
+    auto* func = mod->getFunction("main");
+    ASSERT_NE(func, nullptr);
+    EXPECT_EQ(func->size(), 1u)
+        << "0 && 5 should be constant-folded to 0 (single basic block)";
+}
+
+TEST(CodegenTest, LogicalOrBothZeroConstantFold) {
+    // 0 || 0 should fold to 0 (no branches)
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return 0 || 0; }", codegen);
+    auto* func = mod->getFunction("main");
+    ASSERT_NE(func, nullptr);
+    EXPECT_EQ(func->size(), 1u)
+        << "0 || 0 should be constant-folded to 0 (single basic block)";
+}
