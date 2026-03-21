@@ -109,19 +109,24 @@ jobs:
           cat include/version.h
           
           # ── PGO + LTO optimized build ─────────────────────────────
+          # IMPORTANT: GCC embeds the build directory path in .gcda
+          # profile filenames.  Both the instrumented build and the
+          # PGO-use rebuild MUST use the same build directory (`build/`)
+          # or GCC silently ignores all profile data.
+          
           # Step 1: Instrumented build for profile generation
-          cmake -B build-pgo-gen \
+          cmake -B build \
             -DCMAKE_BUILD_TYPE=Release \
             -DLLVM_DIR=/usr/lib/llvm-18/cmake \
             -DPGO_GENERATE=ON \
             -DPGO_PROFILE_DIR="$PWD/pgo-profiles" \
             "-DOMSC_VERSION=$NEW_VERSION"
-          cmake --build build-pgo-gen --parallel $(nproc)
+          cmake --build build --parallel $(nproc)
           
           # Step 2: Run instrumented compiler on comprehensive workloads
           # to generate accurate profile data covering all compiler paths.
           mkdir -p pgo-profiles
-          OMSC="./build-pgo-gen/omsc"
+          OMSC="./build/omsc"
           PGO_COUNT=0
 
           # Phase A: Compile ALL example .om files at multiple opt levels
@@ -180,7 +185,7 @@ jobs:
           echo "  .profraw files: $PROFRAW_COUNT"
           echo "  Total compilations: $PGO_COUNT"
           
-          # Step 3: Rebuild with PGO + LTO using the profile data
+          # Step 3: Reconfigure SAME build dir with PGO-use + LTO
           pgo_args=()
           if [ "$GCDA_COUNT" -gt 0 ]; then
             # GCC: pass profile directory
@@ -206,6 +211,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DLLVM_DIR=/usr/lib/llvm-18/cmake \
             -DLTO=ON \
+            -DPGO_GENERATE=OFF \
             "${pgo_args[@]}" \
             "-DOMSC_VERSION=$NEW_VERSION"
           cmake --build build --parallel $(nproc)

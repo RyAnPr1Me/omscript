@@ -93,13 +93,19 @@ jobs:
       # (~100+ .om files) to produce accurate profile data covering every
       # compiler subsystem: lexer, parser, codegen, optimizer, e-graph,
       # superoptimizer, builtins, and all optimization levels.
+      #
+      # IMPORTANT: GCC names .gcda profile files after the object file
+      # path, so both the instrumented build and the PGO-use rebuild MUST
+      # use the same build directory.  Using different directories (e.g.
+      # build-pgo-gen/ vs build/) causes a silent path mismatch and GCC
+      # ignores all profile data.
 
       # Step 1: Build an instrumented compiler to generate profile data.
       - name: "PGO Step 1: Build instrumented compiler (Linux)"
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          cmake -B build-pgo-gen \
+          cmake -B build \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER=gcc \
             -DCMAKE_CXX_COMPILER=g++ \
@@ -107,7 +113,7 @@ jobs:
             -DPGO_GENERATE=ON \
             -DPGO_PROFILE_DIR="$PWD/pgo-profiles" \
             "-DOMSC_VERSION=${{ steps.version.outputs.VERSION }}"
-          cmake --build build-pgo-gen --config Release --parallel "$(nproc)"
+          cmake --build build --config Release --parallel "$(nproc)"
 
       # Step 2: Run the instrumented compiler on comprehensive, real-world
       # workloads to generate accurate profile data for all hot code paths.
@@ -116,7 +122,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p pgo-profiles
-          OMSC="./build-pgo-gen/omsc"
+          OMSC="./build/omsc"
           PGO_COUNT=0
 
           # ── Phase A: Compile ALL example .om files at multiple optimization
@@ -204,9 +210,9 @@ jobs:
             echo "::warning::No PGO profile data generated; building without PGO"
           fi
 
-      # Step 3: Rebuild the compiler with PGO profile + LTO for maximum
-      # optimization.  The profile data guides inlining, branch prediction,
-      # and code layout for the compiler's actual hot paths.
+      # Step 3: Reconfigure the SAME build directory with PGO-use + LTO.
+      # Using the same directory is critical: GCC embeds the build-dir path
+      # in .gcda filenames, so a different directory causes a silent mismatch.
       - name: "PGO Step 3: Rebuild with PGO + LTO (Linux)"
         if: runner.os == 'Linux'
         shell: bash
@@ -225,6 +231,7 @@ jobs:
             -DCMAKE_CXX_COMPILER=g++ \
             -DLLVM_DIR="$LLVM_DIR" \
             -DLTO=ON \
+            -DPGO_GENERATE=OFF \
             "${pgo_args[@]}" \
             "-DOMSC_VERSION=${{ steps.version.outputs.VERSION }}"
           cmake --build build --config Release --parallel "$(nproc)"
