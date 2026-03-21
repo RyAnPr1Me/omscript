@@ -108,7 +108,7 @@ echo "Generating source files …"
 cat > bench.om << 'OMEOF'
 OPTMAX=:
 
-struct Point { hot int x, hot int y }
+struct Point { hot int x, hot int y };
 
 @hot 
 fn bench_math(n:int) -> int {
@@ -209,7 +209,7 @@ fn fib(n:int) -> int {
 fn bench_recurse(n:int) -> int {
     return fib(n);
 }
-@hot @flatten @pure @unroll
+@hot @flatten @pure @unroll @vectorize
 fn bench_nested(n:int) -> int {
     hot var sum:int = 0;
     for (i:int in 0...n:int) {
