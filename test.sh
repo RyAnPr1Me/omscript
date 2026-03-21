@@ -221,7 +221,7 @@ fn bench_nested(n:int) -> int {
     }
     return sum;
 }
-@hot @flatten
+@hot @flatten @vectorize
 fn bench_sort(n:int) -> int {
     var arr:int[] align(64) = [];
     prefetch arr;
@@ -291,7 +291,7 @@ fn bench_calls(n:int) -> int {
     return sum;
     
 }
-@hot
+@hot @vectorize @unroll
 fn bench_bitwise(n:int) -> int {
     var a:int = 0;
     var b:int = 0;
