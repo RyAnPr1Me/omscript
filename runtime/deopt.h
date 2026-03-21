@@ -1,3 +1,5 @@
+#pragma once
+
 #ifndef DEOPT_H
 #define DEOPT_H
 

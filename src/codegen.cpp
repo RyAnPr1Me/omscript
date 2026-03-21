@@ -182,7 +182,7 @@ std::unique_ptr<Expression> optimizeOptMaxUnary(const std::string& op, std::uniq
     }
 
     if (literal->literalType == LiteralExpr::LiteralType::INTEGER) {
-        long long value = literal->intValue;
+        const long long value = literal->intValue;
         if (op == "-") {
             if (value == LLONG_MIN)
                 return std::make_unique<UnaryExpr>(op, std::move(operand));
@@ -195,7 +195,7 @@ std::unique_ptr<Expression> optimizeOptMaxUnary(const std::string& op, std::uniq
             return std::make_unique<LiteralExpr>(~value);
         }
     } else if (literal->literalType == LiteralExpr::LiteralType::FLOAT) {
-        double value = literal->floatValue;
+        const double value = literal->floatValue;
         if (op == "-") {
             return std::make_unique<LiteralExpr>(-value);
         }
@@ -219,7 +219,7 @@ std::unique_ptr<Expression> optimizeOptMaxBinary(const std::string& op, std::uni
     // (e.g. 0*x→0, x*0→0, 1**x→1, x**0→1), we only apply the optimization
     // if the dropped operand is pure (no side effects like function calls).
     if (leftLiteral && leftLiteral->literalType == LiteralExpr::LiteralType::INTEGER) {
-        long long lval = leftLiteral->intValue;
+        const long long lval = leftLiteral->intValue;
         if (lval == 0 && op == "+")
             return right; // 0 + x → x
         if (lval == 0 && op == "-")
@@ -236,7 +236,7 @@ std::unique_ptr<Expression> optimizeOptMaxBinary(const std::string& op, std::uni
             return std::make_unique<UnaryExpr>("-", std::move(right)); // -1 * x → -x
     }
     if (rightLiteral && rightLiteral->literalType == LiteralExpr::LiteralType::INTEGER) {
-        long long rval = rightLiteral->intValue;
+        const long long rval = rightLiteral->intValue;
         if (rval == 0 && op == "+")
             return left; // x + 0 → x
         if (rval == 0 && op == "-")
@@ -296,17 +296,17 @@ std::unique_ptr<Expression> optimizeOptMaxBinary(const std::string& op, std::uni
 
     if (leftLiteral->literalType == LiteralExpr::LiteralType::INTEGER &&
         rightLiteral->literalType == LiteralExpr::LiteralType::INTEGER) {
-        long long lval = leftLiteral->intValue;
-        long long rval = rightLiteral->intValue;
+        const long long lval = leftLiteral->intValue;
+        const long long rval = rightLiteral->intValue;
         if (op == "+")
             return std::make_unique<LiteralExpr>(lval + rval);
         if (op == "-")
             return std::make_unique<LiteralExpr>(lval - rval);
         if (op == "*")
             return std::make_unique<LiteralExpr>(lval * rval);
-        if (op == "/" && rval != 0 && !(lval == LLONG_MIN && rval == -1))
+        if (op == "/" && rval != 0 && (lval != LLONG_MIN || rval != -1))
             return std::make_unique<LiteralExpr>(lval / rval);
-        if (op == "%" && rval != 0 && !(lval == LLONG_MIN && rval == -1))
+        if (op == "%" && rval != 0 && (lval != LLONG_MIN || rval != -1))
             return std::make_unique<LiteralExpr>(lval % rval);
         if (op == "==")
             return std::make_unique<LiteralExpr>(static_cast<long long>(lval == rval));
@@ -340,9 +340,9 @@ std::unique_ptr<Expression> optimizeOptMaxBinary(const std::string& op, std::uni
                 bool overflow = false;
                 for (long long i = 0; i < rval; i++) {
                     if (lval != 0 && lval != 1 && lval != -1) {
-                        uint64_t ab = (lval < 0) ? static_cast<uint64_t>(-static_cast<uint64_t>(lval))
+                        const uint64_t ab = (lval < 0) ? static_cast<uint64_t>(-static_cast<uint64_t>(lval))
                                                  : static_cast<uint64_t>(lval);
-                        uint64_t ar = (result < 0) ? static_cast<uint64_t>(-static_cast<uint64_t>(result))
+                        const uint64_t ar = (result < 0) ? static_cast<uint64_t>(-static_cast<uint64_t>(result))
                                                    : static_cast<uint64_t>(result);
                         if (ar > static_cast<uint64_t>(LLONG_MAX) / ab) {
                             overflow = true;
@@ -366,8 +366,8 @@ std::unique_ptr<Expression> optimizeOptMaxBinary(const std::string& op, std::uni
         }
     } else if (leftLiteral->literalType == LiteralExpr::LiteralType::FLOAT &&
                rightLiteral->literalType == LiteralExpr::LiteralType::FLOAT) {
-        double lval = leftLiteral->floatValue;
-        double rval = rightLiteral->floatValue;
+        const double lval = leftLiteral->floatValue;
+        const double rval = rightLiteral->floatValue;
         if (op == "+")
             return std::make_unique<LiteralExpr>(lval + rval);
         if (op == "-")
@@ -398,10 +398,10 @@ std::unique_ptr<Expression> optimizeOptMaxBinary(const std::string& op, std::uni
             return std::make_unique<LiteralExpr>(std::pow(lval, rval));
     } else {
         // Mixed int/float constant folding: promote the integer operand to double
-        double leftDouble = (leftLiteral->literalType == LiteralExpr::LiteralType::FLOAT)
+        const double leftDouble = (leftLiteral->literalType == LiteralExpr::LiteralType::FLOAT)
                                 ? leftLiteral->floatValue
                                 : static_cast<double>(leftLiteral->intValue);
-        double rightDouble = (rightLiteral->literalType == LiteralExpr::LiteralType::FLOAT)
+        const double rightDouble = (rightLiteral->literalType == LiteralExpr::LiteralType::FLOAT)
                                  ? rightLiteral->floatValue
                                  : static_cast<double>(rightLiteral->intValue);
         if (op == "+")
@@ -795,8 +795,8 @@ llvm::Value* CodeGenerator::convertTo(llvm::Value* v, llvm::Type* targetTy) {
         return builder->CreateIntToPtr(v, targetTy, "itop");
     // int → int (widening)
     if (v->getType()->isIntegerTy() && targetTy->isIntegerTy()) {
-        unsigned srcBits = v->getType()->getIntegerBitWidth();
-        unsigned dstBits = targetTy->getIntegerBitWidth();
+        const unsigned srcBits = v->getType()->getIntegerBitWidth();
+        const unsigned dstBits = targetTy->getIntegerBitWidth();
         if (srcBits < dstBits)
             return builder->CreateSExt(v, targetTy, "sext");
         if (srcBits > dstBits)
@@ -1920,7 +1920,7 @@ void CodeGenerator::generate(Program* program) {
     // --- DWARF debug info initialization ---
     if (debugMode_) {
         debugBuilder_ = std::make_unique<llvm::DIBuilder>(*module);
-        std::string filename = sourceFilename_.empty() ? "source.om" : sourceFilename_;
+        const std::string filename = sourceFilename_.empty() ? "source.om" : sourceFilename_;
         debugFile_ = debugBuilder_->createFile(filename, ".");
         debugCU_ = debugBuilder_->createCompileUnit(llvm::dwarf::DW_LANG_C, debugFile_, "OmScript Compiler",
                                                     optimizationLevel != OptimizationLevel::O0, /*Flags=*/"", /*RV=*/0);
@@ -2085,7 +2085,7 @@ void CodeGenerator::generate(Program* program) {
     // Process enum declarations: store constant values for identifier resolution.
     for (auto& enumDecl : program->enums) {
         for (auto& [memberName, memberValue] : enumDecl->members) {
-            std::string fullName = enumDecl->name + "_" + memberName;
+            const std::string fullName = enumDecl->name + "_" + memberName;
             enumConstants_[fullName] = memberValue;
         }
     }
@@ -2258,7 +2258,7 @@ void CodeGenerator::generate(Program* program) {
         llvm::InitializeNativeTarget();
         llvm::InitializeNativeTargetAsmPrinter();
         llvm::InitializeNativeTargetAsmParser();
-        std::string targetTripleStr = llvm::sys::getDefaultTargetTriple();
+        const std::string targetTripleStr = llvm::sys::getDefaultTargetTriple();
 #if LLVM_VERSION_MAJOR >= 19
         llvm::Triple targetTriple(targetTripleStr);
         module->setTargetTriple(targetTriple);
@@ -2421,9 +2421,9 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
             return 2 + 2 * deepStmtCount(fe->body.get());
         return 1;
     };
-    size_t shallowCount = func->body ? func->body->statements.size() : 0;
-    size_t deepCount = func->body ? deepStmtCount(func->body.get()) : 0;
-    size_t inlineThreshold =
+    const size_t shallowCount = func->body ? func->body->statements.size() : 0;
+    const size_t deepCount = func->body ? deepStmtCount(func->body.get()) : 0;
+    const size_t inlineThreshold =
         (optimizationLevel >= OptimizationLevel::O3) ? kMaxInlineHintStatementsO3 : kMaxInlineHintStatements;
     if (func->name != "main" && optimizationLevel >= OptimizationLevel::O2 && func->body &&
         shallowCount <= inlineThreshold) {
@@ -2679,10 +2679,8 @@ void CodeGenerator::generateStatement(Statement* stmt) {
         generateThrow(static_cast<ThrowStmt*>(stmt));
         break;
     case ASTNodeType::ENUM_DECL:
-        // Enums are handled at program level, nothing to do here
-        break;
     case ASTNodeType::STRUCT_DECL:
-        // Structs are handled at program level, nothing to do here
+        // Enums and structs are handled at program level, nothing to do here.
         break;
     case ASTNodeType::INVALIDATE_STMT:
         generateInvalidate(static_cast<InvalidateStmt*>(stmt));

@@ -122,7 +122,8 @@ std::string getExecutablePath() {
     // Linux: /proc/self/exe
     try {
         return std::filesystem::read_symlink("/proc/self/exe").string();
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
+        // Fall through to return empty string below.
     }
 #endif
     return "";
@@ -273,7 +274,7 @@ bool versionGreaterThan(const Version& a, const Version& b) {
 // Extract the value of a simple JSON string field.
 // Handles both compact ("key":"value") and pretty ("key": "value") JSON.
 std::string extractJsonStringField(const std::string& json, const std::string& key) {
-    std::string searchKey = "\"" + key + "\"";
+    const std::string searchKey = "\"" + key + "\"";
     size_t pos = json.find(searchKey);
     if (pos == std::string::npos) {
         return "";
@@ -295,7 +296,7 @@ std::string extractJsonStringField(const std::string& json, const std::string& k
         return "";
     }
     ++pos;
-    size_t end = json.find('"', pos);
+    const size_t end = json.find('"', pos);
     if (end == std::string::npos) {
         return "";
     }
@@ -309,21 +310,21 @@ std::string fetchLatestReleaseTag() {
     if (!curlPathOrErr) {
         return "";
     }
-    std::string curlBin = *curlPathOrErr;
+    const std::string curlBin = *curlPathOrErr;
 
     // Create a secure temporary file.
     std::string tmpTemplate = std::filesystem::temp_directory_path().string() + "/omsc_release_XXXXXX";
     std::vector<char> tmpBuf(tmpTemplate.begin(), tmpTemplate.end());
     tmpBuf.push_back('\0');
-    int fd = portableMkstemp(tmpBuf);
+    const int fd = portableMkstemp(tmpBuf);
     if (fd == -1) {
         return "";
     }
     portableClose(fd);
-    std::string tmpFile(tmpBuf.data());
+    const std::string tmpFile(tmpBuf.data());
 
-    std::string timeoutStr = std::to_string(kApiTimeoutSeconds);
-    std::vector<std::string> args = {curlBin,
+    const std::string timeoutStr = std::to_string(kApiTimeoutSeconds);
+    const std::vector<std::string> args = {curlBin,
                                      "-s",
                                      "-L",
                                      "--max-time",
@@ -340,7 +341,7 @@ std::string fetchLatestReleaseTag() {
         argRefs.push_back(a);
     }
 
-    int rc = llvm::sys::ExecuteAndWait(curlBin, argRefs);
+    const int rc = llvm::sys::ExecuteAndWait(curlBin, argRefs);
     if (rc != 0) {
         std::error_code ec;
         std::filesystem::remove(tmpFile, ec);
@@ -353,7 +354,7 @@ std::string fetchLatestReleaseTag() {
         std::filesystem::remove(tmpFile, ec);
         return "";
     }
-    std::string json((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    const std::string json((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     f.close();
     std::error_code ec;
     std::filesystem::remove(tmpFile, ec);
@@ -371,7 +372,7 @@ bool downloadAndInstallRelease(const std::string& tagName, const std::string& in
         std::cerr << "Error: curl is required to download updates but was not found\n";
         return false;
     }
-    std::string curlBin = *curlPathOrErr;
+    const std::string curlBin = *curlPathOrErr;
 
 #ifdef _WIN32
     // On Windows, use PowerShell to extract .zip archives.
@@ -387,32 +388,32 @@ bool downloadAndInstallRelease(const std::string& tagName, const std::string& in
         std::cerr << "Error: tar is required to extract updates but was not found\n";
         return false;
     }
-    std::string extractBin = *tarPathOrErr;
+    const std::string extractBin = *tarPathOrErr;
 #endif
 
     // Detect platform/architecture for the asset name.
-    std::string platformArch = getPlatformArch();
+    const std::string platformArch = getPlatformArch();
 
     // Build the download URL: e.g. .../download/v0.9.4/omsc-0.9.4-linux-x86_64.tar.gz
     std::string version = tagName;
     if (!version.empty() && version[0] == 'v') {
         version = version.substr(1);
     }
-    std::string assetName = "omsc-" + version + "-" + platformArch + std::string(kArchiveExtension);
-    std::string downloadUrl = std::string(kGitHubReleasesDownloadBase) + "/" + tagName + "/" + assetName;
+    const std::string assetName = "omsc-" + version + "-" + platformArch + std::string(kArchiveExtension);
+    const std::string downloadUrl = std::string(kGitHubReleasesDownloadBase) + "/" + tagName + "/" + assetName;
 
     // Create a secure temporary file for the tarball.
-    std::string tmpBase = std::filesystem::temp_directory_path().string();
+    const std::string tmpBase = std::filesystem::temp_directory_path().string();
     std::string tarTemplate = tmpBase + "/omsc_update_XXXXXX";
     std::vector<char> tarBuf(tarTemplate.begin(), tarTemplate.end());
     tarBuf.push_back('\0');
-    int tarFd = portableMkstemp(tarBuf);
+    const int tarFd = portableMkstemp(tarBuf);
     if (tarFd == -1) {
         std::cerr << "Error: failed to create temporary file for download\n";
         return false;
     }
     portableClose(tarFd);
-    std::string tmpTarball(tarBuf.data());
+    const std::string tmpTarball(tarBuf.data());
 
     // Create a secure temporary directory for extraction.
     std::string dirTemplate = tmpBase + "/omsc_extract_XXXXXX";
@@ -424,13 +425,13 @@ bool downloadAndInstallRelease(const std::string& tagName, const std::string& in
         std::filesystem::remove(tmpTarball, ec);
         return false;
     }
-    std::string tmpDir(dirBuf.data());
+    const std::string tmpDir(dirBuf.data());
 
     std::cout << "Downloading " << assetName << "...\n";
 
     // Download tarball
-    std::string downloadTimeout = std::to_string(kDownloadTimeoutSeconds);
-    std::vector<std::string> dlArgs = {
+    const std::string downloadTimeout = std::to_string(kDownloadTimeoutSeconds);
+    const std::vector<std::string> dlArgs = {
         curlBin, "-L", "--max-time", downloadTimeout, "-H", "User-Agent: omsc-updater", "-o", tmpTarball, downloadUrl};
     llvm::SmallVector<llvm::StringRef, 10> dlArgRefs;
     for (const auto& a : dlArgs) {
@@ -464,7 +465,7 @@ bool downloadAndInstallRelease(const std::string& tagName, const std::string& in
         "Expand-Archive -Path '" + psEscape(tmpTarball) + "' -DestinationPath '" + psEscape(tmpDir) + "' -Force";
     std::vector<std::string> extractArgs = {extractBin, "-NoProfile", "-Command", psCmd};
 #else
-    std::vector<std::string> extractArgs = {extractBin, "-xzf", tmpTarball, "-C", tmpDir};
+    const std::vector<std::string> extractArgs = {extractBin, "-xzf", tmpTarball, "-C", tmpDir};
 #endif
     llvm::SmallVector<llvm::StringRef, 6> tarArgRefs;
     for (const auto& a : extractArgs) {
@@ -483,7 +484,7 @@ bool downloadAndInstallRelease(const std::string& tagName, const std::string& in
     std::string binaryPath;
     try {
         for (const auto& entry : std::filesystem::recursive_directory_iterator(tmpDir)) {
-            std::string name = entry.path().filename().string();
+            const std::string name = entry.path().filename().string();
             if (name == kBinaryName || name == "omsc-" + platformArch ||
                 name == std::string("omsc-") + platformArch + ".exe") {
                 binaryPath = entry.path().string();
@@ -502,18 +503,18 @@ bool downloadAndInstallRelease(const std::string& tagName, const std::string& in
     }
 
     // Install the binary atomically: copy to temp file then rename.
-    std::string targetPath = installDir + "/" + std::string(kBinaryName);
+    const std::string targetPath = installDir + "/" + std::string(kBinaryName);
     std::string tmpTemplate = installDir + "/omsc_update_XXXXXX";
     std::vector<char> installTmpBuf(tmpTemplate.begin(), tmpTemplate.end());
     installTmpBuf.push_back('\0');
-    int installTmpFd = portableMkstemp(installTmpBuf);
+    const int installTmpFd = portableMkstemp(installTmpBuf);
     if (installTmpFd == -1) {
         std::cerr << "Error: failed to create temporary file for installation in " << installDir << "\n";
         std::filesystem::remove_all(tmpDir, ec);
         return false;
     }
     portableClose(installTmpFd);
-    std::string installTmpPath(installTmpBuf.data());
+    const std::string installTmpPath(installTmpBuf.data());
     try {
         std::filesystem::copy_file(binaryPath, installTmpPath, std::filesystem::copy_options::overwrite_existing);
         std::filesystem::permissions(installTmpPath,
@@ -575,7 +576,7 @@ std::string getInstallPrefix(bool system) {
     if (system) {
         return "/usr/local";
     }
-    std::string home = getHomeDir();
+    const std::string home = getHomeDir();
     return home + "/.local";
 #endif
 }
@@ -623,7 +624,7 @@ bool isSymlinkOrCopy(const std::string& path, const std::string& target) {
 }
 
 bool installToSystem(const std::string& targetDir, bool force) {
-    std::string exePath = getExecutablePath();
+    const std::string exePath = getExecutablePath();
 
     if (exePath.empty() || !fileExists(exePath)) {
         std::cerr << "Error: Cannot determine own executable path\n";
@@ -635,7 +636,7 @@ bool installToSystem(const std::string& targetDir, bool force) {
         return false;
     }
 
-    std::string targetPath = targetDir + "/" + std::string(kBinaryName);
+    const std::string targetPath = targetDir + "/" + std::string(kBinaryName);
 
     if (!force && isSymlinkOrCopy(targetPath, exePath)) {
         std::cout << "OmScript is already installed at " << targetPath << "\n";
@@ -647,13 +648,13 @@ bool installToSystem(const std::string& targetDir, bool force) {
     std::string tmpTemplate = targetDir + "/omsc_install_XXXXXX";
     std::vector<char> tmpBuf(tmpTemplate.begin(), tmpTemplate.end());
     tmpBuf.push_back('\0');
-    int tmpFd = portableMkstemp(tmpBuf);
+    const int tmpFd = portableMkstemp(tmpBuf);
     if (tmpFd == -1) {
         std::cerr << "Error: failed to create temporary file in " << targetDir << "\n";
         return false;
     }
     portableClose(tmpFd);
-    std::string tmpPath(tmpBuf.data());
+    const std::string tmpPath(tmpBuf.data());
 
     try {
         std::filesystem::copy_file(exePath, tmpPath, std::filesystem::copy_options::overwrite_existing);
@@ -675,26 +676,26 @@ bool installToSystem(const std::string& targetDir, bool force) {
 }
 
 void doInstall() {
-    std::string distro = detectDistro();
+    const std::string distro = detectDistro();
     std::cout << "Detected distribution: " << distro << "\n";
 
     // Determine install directory up front so the update path can use it.
-    std::string installDir = isRoot() ? "/usr/local/bin" : getInstallBinDir(false);
+    const std::string installDir = isRoot() ? "/usr/local/bin" : getInstallBinDir(false);
 
     // Check GitHub releases for a newer version.
     std::cout << "Checking for updates...\n";
-    std::string latestTag = fetchLatestReleaseTag();
+    const std::string latestTag = fetchLatestReleaseTag();
     if (!latestTag.empty()) {
         // Extract the version tag from the compiled-in version string (e.g. "v0.9.3").
         std::string currentTag;
-        std::string versionStr(kCompilerVersion);
-        size_t vPos = versionStr.rfind('v');
+        const std::string versionStr(kCompilerVersion);
+        const size_t vPos = versionStr.rfind('v');
         if (vPos != std::string::npos) {
             currentTag = versionStr.substr(vPos);
         }
 
-        Version currentVer = parseVersion(currentTag);
-        Version latestVer = parseVersion(latestTag);
+        const Version currentVer = parseVersion(currentTag);
+        const Version latestVer = parseVersion(latestTag);
 
         if (currentVer.valid && latestVer.valid && versionGreaterThan(latestVer, currentVer)) {
             std::cout << "New version available: " << latestTag << " (current: " << currentTag << ")\n";
@@ -718,19 +719,19 @@ void doInstall() {
         std::cout << "Could not check for updates (network unavailable or curl not found).\n";
     }
 
-    std::string exePath = getExecutablePath();
+    const std::string exePath = getExecutablePath();
 
     if (exePath.empty() || !fileExists(exePath)) {
         std::cerr << "Error: Cannot determine own executable path\n";
         return;
     }
 
-    std::string binDir = getInstallBinDir(false);
-    std::string userPath = binDir + "/" + std::string(kBinaryName);
+    const std::string binDir = getInstallBinDir(false);
+    const std::string userPath = binDir + "/" + std::string(kBinaryName);
 
     if (isRoot()) {
-        std::string sysBinDir = getInstallBinDir(true);
-        std::string sysPath = sysBinDir + "/" + std::string(kBinaryName);
+        const std::string sysBinDir = getInstallBinDir(true);
+        const std::string sysPath = sysBinDir + "/" + std::string(kBinaryName);
         if (fileExists(sysPath)) {
             std::cout << "Updating system installation at " << sysPath << "...\n";
         } else {
@@ -772,7 +773,7 @@ void doInstall() {
 void doUninstall() {
     // Candidate paths to check, in priority order.
     std::vector<std::string> candidates;
-    std::string bn(kBinaryName);
+    const std::string bn(kBinaryName);
     if (isRoot()) {
         candidates.push_back(getInstallBinDir(true) + "/" + bn);
 #ifndef _WIN32
@@ -807,9 +808,9 @@ void doUninstall() {
 
     // Remove PATH entries added by omsc install from shell config files.
 #ifndef _WIN32
-    std::string home = getHomeDir();
+    const std::string home = getHomeDir();
     if (!home.empty()) {
-        std::vector<std::string> shellConfigs = {home + "/.bashrc", home + "/.profile", home + "/.zshrc"};
+        const std::vector<std::string> shellConfigs = {home + "/.bashrc", home + "/.profile", home + "/.zshrc"};
         for (const auto& configPath : shellConfigs) {
             std::ifstream in(configPath);
             if (!in.is_open()) {
@@ -846,13 +847,13 @@ void doUninstall() {
             std::string tmpTemplate = configPath + ".omsc_XXXXXX";
             std::vector<char> cfgTmpBuf(tmpTemplate.begin(), tmpTemplate.end());
             cfgTmpBuf.push_back('\0');
-            int cfgTmpFd = portableMkstemp(cfgTmpBuf);
+            const int cfgTmpFd = portableMkstemp(cfgTmpBuf);
             if (cfgTmpFd == -1) {
                 std::cerr << "Warning: could not create temp file to update " << configPath << "\n";
                 continue;
             }
             portableClose(cfgTmpFd);
-            std::string cfgTmpPath(cfgTmpBuf.data());
+            const std::string cfgTmpPath(cfgTmpBuf.data());
             {
                 std::ofstream out(cfgTmpPath, std::ios::trunc);
                 if (!out.is_open()) {
@@ -891,7 +892,7 @@ void ensureInPath() {
         return;
     }
 
-    std::string binaryDir = std::filesystem::path(binaryPath).parent_path().string();
+    const std::string binaryDir = std::filesystem::path(binaryPath).parent_path().string();
     if (binaryDir.empty()) {
         return;
     }
@@ -904,7 +905,7 @@ void ensureInPath() {
         return;
     }
 
-    std::string home = getHomeDir();
+    const std::string home = getHomeDir();
     if (home.empty()) {
         return;
     }
@@ -943,7 +944,7 @@ void ensureInPath() {
     }
 
     if (exePath != binaryDir + "/omsc") {
-        std::string linkPath = binaryDir + "/omsc";
+        const std::string linkPath = binaryDir + "/omsc";
         std::error_code ec;
         std::filesystem::create_symlink(exePath, linkPath, ec);
         if (ec) {
@@ -990,7 +991,7 @@ void signalHandler(int sig) {
 /// Minimal JSON string field extractor.
 /// Handles arbitrary whitespace between key, colon, and value.
 std::string jsonField(const std::string& json, const std::string& key) {
-    std::string searchKey = "\"" + key + "\"";
+    const std::string searchKey = "\"" + key + "\"";
     size_t pos = json.find(searchKey);
     if (pos == std::string::npos) {
         return "";
@@ -1012,7 +1013,7 @@ std::string jsonField(const std::string& json, const std::string& key) {
         return "";
     }
     ++pos;
-    size_t end = json.find('"', pos);
+    const size_t end = json.find('"', pos);
     if (end == std::string::npos) {
         return "";
     }
@@ -1022,7 +1023,7 @@ std::string jsonField(const std::string& json, const std::string& key) {
 /// Extract a JSON array of strings, e.g. "files": ["a.om", "b.om"]
 std::vector<std::string> jsonArrayField(const std::string& json, const std::string& key) {
     std::vector<std::string> result;
-    std::string pattern = "\"" + key + "\"";
+    const std::string pattern = "\"" + key + "\"";
     size_t pos = json.find(pattern);
     if (pos == std::string::npos) {
         return result;
@@ -1031,18 +1032,18 @@ std::vector<std::string> jsonArrayField(const std::string& json, const std::stri
     if (pos == std::string::npos) {
         return result;
     }
-    size_t end = json.find(']', pos);
+    const size_t end = json.find(']', pos);
     if (end == std::string::npos) {
         return result;
     }
-    std::string arr = json.substr(pos + 1, end - pos - 1);
+    const std::string arr = json.substr(pos + 1, end - pos - 1);
     // Parse simple quoted strings from the array
     size_t i = 0;
     while (i < arr.size()) {
-        size_t q1 = arr.find('"', i);
+        const size_t q1 = arr.find('"', i);
         if (q1 == std::string::npos)
             break;
-        size_t q2 = arr.find('"', q1 + 1);
+        const size_t q2 = arr.find('"', q1 + 1);
         if (q2 == std::string::npos)
             break;
         result.push_back(arr.substr(q1 + 1, q2 - q1 - 1));
@@ -1078,7 +1079,7 @@ PackageInfo readPackageManifest(const std::string& manifestPath) {
     if (!f.is_open()) {
         return PackageInfo{};
     }
-    std::string json((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    const std::string json((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     f.close();
     return parsePackageManifest(json);
 }
@@ -1096,15 +1097,15 @@ bool downloadFile(const std::string& url, const std::string& destPath) {
         std::cerr << "  Install with: apt-get install curl (Debian/Ubuntu) or brew install curl (macOS)\n";
         return false;
     }
-    std::string curlBin = *curlPathOrErr;
-    std::string timeoutStr = std::to_string(kDownloadTimeoutSeconds);
-    std::vector<std::string> args = {curlBin,    "-s", "-f",     "-L", "--max-redirs", "5", "--max-time",
+    const std::string curlBin = *curlPathOrErr;
+    const std::string timeoutStr = std::to_string(kDownloadTimeoutSeconds);
+    const std::vector<std::string> args = {curlBin,    "-s", "-f",     "-L", "--max-redirs", "5", "--max-time",
                                      timeoutStr, "-o", destPath, url};
     llvm::SmallVector<llvm::StringRef, 12> argRefs;
     for (const auto& a : args) {
         argRefs.push_back(a);
     }
-    int rc = llvm::sys::ExecuteAndWait(curlBin, argRefs);
+    const int rc = llvm::sys::ExecuteAndWait(curlBin, argRefs);
     return rc == 0;
 }
 
@@ -1115,27 +1116,27 @@ std::string downloadString(const std::string& url) {
     if (!curlPathOrErr) {
         return "";
     }
-    std::string curlBin = *curlPathOrErr;
+    const std::string curlBin = *curlPathOrErr;
 
     // Create a secure temporary file
     std::string tmpTemplate = std::filesystem::temp_directory_path().string() + "/omsc_pkg_XXXXXX";
     std::vector<char> tmpBuf(tmpTemplate.begin(), tmpTemplate.end());
     tmpBuf.push_back('\0');
-    int fd = portableMkstemp(tmpBuf);
+    const int fd = portableMkstemp(tmpBuf);
     if (fd == -1) {
         return "";
     }
     portableClose(fd);
-    std::string tmpFile(tmpBuf.data());
+    const std::string tmpFile(tmpBuf.data());
 
-    std::string timeoutStr = std::to_string(kApiTimeoutSeconds);
-    std::vector<std::string> args = {curlBin,    "-s", "-f",    "-L", "--max-redirs", "5", "--max-time",
+    const std::string timeoutStr = std::to_string(kApiTimeoutSeconds);
+    const std::vector<std::string> args = {curlBin,    "-s", "-f",    "-L", "--max-redirs", "5", "--max-time",
                                      timeoutStr, "-o", tmpFile, url};
     llvm::SmallVector<llvm::StringRef, 12> argRefs;
     for (const auto& a : args) {
         argRefs.push_back(a);
     }
-    int rc = llvm::sys::ExecuteAndWait(curlBin, argRefs);
+    const int rc = llvm::sys::ExecuteAndWait(curlBin, argRefs);
     if (rc != 0) {
         std::error_code ec;
         std::filesystem::remove(tmpFile, ec);
@@ -1160,7 +1161,7 @@ std::string downloadString(const std::string& url) {
 std::vector<PackageInfo> parseRegistryIndex(const std::string& json) {
     std::vector<PackageInfo> packages;
     // Find the "packages" array
-    std::string key = "\"packages\"";
+    const std::string key = "\"packages\"";
     size_t pos = json.find(key);
     if (pos == std::string::npos) {
         return packages;
@@ -1173,7 +1174,7 @@ std::vector<PackageInfo> parseRegistryIndex(const std::string& json) {
     size_t depth = 0;
     size_t objStart = std::string::npos;
     for (size_t i = pos + 1; i < json.size(); ++i) {
-        char c = json[i];
+        const char c = json[i];
         if (c == '{') {
             if (depth == 0) {
                 objStart = i;
@@ -1182,7 +1183,7 @@ std::vector<PackageInfo> parseRegistryIndex(const std::string& json) {
         } else if (c == '}') {
             depth--;
             if (depth == 0 && objStart != std::string::npos) {
-                std::string obj = json.substr(objStart, i - objStart + 1);
+                const std::string obj = json.substr(objStart, i - objStart + 1);
                 auto info = parsePackageManifest(obj);
                 if (info.valid) {
                     packages.push_back(info);
@@ -1206,7 +1207,7 @@ bool isValidPackageName(const std::string& name) {
     if (name.empty() || name.size() > kMaxPackageNameLength) {
         return false;
     }
-    for (char c : name) {
+    for (const char c : name) {
         if (!std::isalnum(static_cast<unsigned char>(c)) && c != '-' && c != '_') {
             return false;
         }
@@ -1224,9 +1225,9 @@ int doPkgInstall(const std::string& pkgName, bool quiet) {
     }
 
     // Download the package manifest from GitHub
-    std::string registryBase = getRegistryBaseUrl();
-    std::string manifestUrl = registryBase + "/" + pkgName + "/package.json";
-    std::string manifestJson = downloadString(manifestUrl);
+    const std::string registryBase = getRegistryBaseUrl();
+    const std::string manifestUrl = registryBase + "/" + pkgName + "/package.json";
+    const std::string manifestJson = downloadString(manifestUrl);
     if (manifestJson.empty()) {
         std::cerr << "Error: package '" << pkgName << "' not found in registry\n";
         return 1;
@@ -1248,13 +1249,13 @@ int doPkgInstall(const std::string& pkgName, bool quiet) {
     }
 
     // Create local install directory
-    std::string localDir = std::string(kLocalPackagesDir) + "/" + pkgName;
+    const std::string localDir = std::string(kLocalPackagesDir) + "/" + pkgName;
     std::filesystem::create_directories(localDir);
 
     // Download each file from GitHub
     for (const auto& file : files) {
-        std::string fileUrl = registryBase + "/" + pkgName + "/" + file;
-        std::string dst = localDir + "/" + file;
+        const std::string fileUrl = registryBase + "/" + pkgName + "/" + file;
+        const std::string dst = localDir + "/" + file;
         if (!downloadFile(fileUrl, dst)) {
             std::cerr << "Error: failed to download '" << file << "'\n";
             // Clean up partial install
@@ -1283,7 +1284,7 @@ int doPkgRemove(const std::string& pkgName, bool quiet) {
         std::cerr << "Error: invalid package name '" << pkgName << "'\n";
         return 1;
     }
-    std::string localDir = std::string(kLocalPackagesDir) + "/" + pkgName;
+    const std::string localDir = std::string(kLocalPackagesDir) + "/" + pkgName;
     if (!std::filesystem::is_directory(localDir)) {
         std::cerr << "Error: package '" << pkgName << "' is not installed\n";
         return 1;
@@ -1332,7 +1333,7 @@ int doPkgList(bool quiet) {
 }
 
 int doPkgSearch(const std::string& query, bool quiet) {
-    std::string indexJson = downloadString(getRegistryBaseUrl() + "/index.json");
+    const std::string indexJson = downloadString(getRegistryBaseUrl() + "/index.json");
     if (indexJson.empty()) {
         std::cerr << "Error: failed to fetch package registry (check your internet connection)\n";
         return 1;
@@ -1371,16 +1372,16 @@ int doPkgInfo(const std::string& pkgName) {
         return 1;
     }
     // First check installed packages
-    std::string localManifest = std::string(kLocalPackagesDir) + "/" + pkgName + "/package.json";
-    bool installed = std::filesystem::exists(localManifest);
+    const std::string localManifest = std::string(kLocalPackagesDir) + "/" + pkgName + "/package.json";
+    const bool installed = std::filesystem::exists(localManifest);
 
     PackageInfo info;
     if (installed) {
         info = readPackageManifest(localManifest);
     } else {
         // Download manifest from remote registry
-        std::string manifestUrl = getRegistryBaseUrl() + "/" + pkgName + "/package.json";
-        std::string manifestJson = downloadString(manifestUrl);
+        const std::string manifestUrl = getRegistryBaseUrl() + "/" + pkgName + "/package.json";
+        const std::string manifestJson = downloadString(manifestUrl);
         if (!manifestJson.empty()) {
             info = parsePackageManifest(manifestJson);
         }
@@ -1415,7 +1416,7 @@ int doPkg(int argc, char* argv[], int startIndex, bool quiet) {
         std::cerr << "Error: missing pkg subcommand (install, remove, list, search, info)\n";
         return 1;
     }
-    std::string sub = argv[startIndex];
+    const std::string sub = argv[startIndex];
     if (sub == "install" || sub == "add") {
         if (startIndex + 1 >= argc) {
             std::cerr << "Error: pkg install requires a package name\n";
@@ -2249,7 +2250,7 @@ int main(int argc, char* argv[]) {
 
     // Allow global options before commands/input (e.g. `omsc -V parse file.om`).
     while (argIndex < argc) {
-        std::string arg = argv[argIndex];
+        const std::string arg = argv[argIndex];
         if (arg == "-V" || arg == "--verbose") {
             verbose = true;
             argIndex++;
@@ -2350,7 +2351,7 @@ int main(int argc, char* argv[]) {
     }
 
     if (!commandMatched && !firstArg.empty() && firstArg[0] != '-') {
-        bool hasOmExtension = firstArg.size() >= 3 && firstArg.substr(firstArg.size() - 3) == ".om";
+        const bool hasOmExtension = firstArg.size() >= 3 && firstArg.substr(firstArg.size() - 3) == ".om";
         if (!hasOmExtension && !std::filesystem::exists(firstArg)) {
             std::cerr << "Error: unknown command '" << firstArg << "'\n";
             printUsage(argv[0]);
@@ -2397,7 +2398,7 @@ int main(int argc, char* argv[]) {
     std::string sourceFile;
     std::string outputFile = command == Command::EmitIR ? "" : "a.out";
     bool outputSpecified = false;
-    bool supportsOutputOption = command == Command::Compile || command == Command::Run || command == Command::EmitIR ||
+    const bool supportsOutputOption = command == Command::Compile || command == Command::Run || command == Command::EmitIR ||
                                 command == Command::Clean;
     bool parsingRunArgs = false;
     bool keepTemps = false;
@@ -2534,7 +2535,7 @@ int main(int argc, char* argv[]) {
         if (command == Command::Lex || command == Command::Parse || command == Command::EmitIR ||
             command == Command::Check) {
             auto lexStart = std::chrono::steady_clock::now();
-            std::string source = readSourceFile(sourceFile);
+            const std::string source = readSourceFile(sourceFile);
             omscript::Lexer lexer(source);
             auto tokens = lexer.tokenize();
             auto lexEnd = std::chrono::steady_clock::now();
@@ -2639,7 +2640,7 @@ int main(int argc, char* argv[]) {
         if (dryRun) {
             // For compile/run with --dry-run: lex, parse, codegen but don't write files.
             auto lexStart = std::chrono::steady_clock::now();
-            std::string source = readSourceFile(sourceFile);
+            const std::string source = readSourceFile(sourceFile);
             omscript::Lexer lexer(source);
             auto tokens = lexer.tokenize();
             auto lexEnd = std::chrono::steady_clock::now();
@@ -2693,7 +2694,7 @@ int main(int argc, char* argv[]) {
 
         if (emitObjOnly) {
             // Compile to object file only (no linking).
-            std::string source = readSourceFile(sourceFile);
+            const std::string source = readSourceFile(sourceFile);
             omscript::Lexer lexer(source);
             auto tokens = lexer.tokenize();
             omscript::Parser parser(tokens);
@@ -2719,7 +2720,7 @@ int main(int argc, char* argv[]) {
                 codegen.generate(program.get());
             }
 
-            std::string objFile =
+            const std::string objFile =
                 outputSpecified ? outputFile : (std::filesystem::path(sourceFile).stem().string() + ".o");
             codegen.writeObjectFile(objFile);
             if (!quiet) {
@@ -2751,7 +2752,7 @@ int main(int argc, char* argv[]) {
         // the dispatch prolog uses a regular (non-tail) call so that Tier-2
         // hot-patches are safe even when Tier-1 frames are on the call stack.
         if (command == Command::Run && flagJIT) {
-            std::string source = readSourceFile(sourceFile);
+            const std::string source = readSourceFile(sourceFile);
 
             if (verbose) {
                 std::cout << "Running " << sourceFile << " (JIT mode)..." << std::endl;
@@ -2806,7 +2807,7 @@ int main(int argc, char* argv[]) {
             // generated LLVM IR to a native object file and link it.  The JIT
             // still runs in-process from the same module — no recompilation.
             if (keepTemps) {
-                std::string objFile = outputFile + ".o";
+                const std::string objFile = outputFile + ".o";
                 bool objWritten = false;
                 try {
                     cg.writeObjectFile(objFile);
@@ -2823,12 +2824,12 @@ int main(int argc, char* argv[]) {
                         std::cerr << "Warning: --keep-temps: no C linker found (tried gcc, cc, clang); "
                                      "AOT binary not written\n";
                     } else {
-                        std::vector<std::string> linkArgs = {objFile, "-o", outputFile, "-lm", "-lpthread"};
+                        const std::vector<std::string> linkArgs = {objFile, "-o", outputFile, "-lm", "-lpthread"};
                         llvm::SmallVector<llvm::StringRef, 8> laRefs;
                         laRefs.push_back(linkerProgram);
                         for (const auto& a : linkArgs)
                             laRefs.push_back(a);
-                        int linkResult = llvm::sys::ExecuteAndWait(linkerProgram, laRefs);
+                        const int linkResult = llvm::sys::ExecuteAndWait(linkerProgram, laRefs);
                         if (linkResult != 0)
                             std::cerr << "Warning: --keep-temps: linker exited with code " << linkResult
                                       << "; AOT binary may be incomplete\n";
@@ -2915,22 +2916,22 @@ int main(int argc, char* argv[]) {
 
         if (command == Command::Run) {
             // Register temp files for cleanup on signal (Ctrl+C during program run).
-            std::string objExt = flagLTO ? ".bc" : ".o";
+            const std::string objExt = flagLTO ? ".bc" : ".o";
             if (!outputSpecified && !keepTemps) {
-                std::string objPath = outputFile + objExt;
+                const std::string objPath = outputFile + objExt;
                 std::strncpy(g_tempOutputFile, outputFile.c_str(), kMaxTempPathLen - 1);
                 g_tempOutputFile[kMaxTempPathLen - 1] = '\0';
                 std::strncpy(g_tempObjectFile, objPath.c_str(), kMaxTempPathLen - 1);
                 g_tempObjectFile[kMaxTempPathLen - 1] = '\0';
             }
-            std::filesystem::path runPath = std::filesystem::absolute(outputFile);
-            std::string runProgram = runPath.string();
+            const std::filesystem::path runPath = std::filesystem::absolute(outputFile);
+            const std::string runProgram = runPath.string();
             llvm::SmallVector<llvm::StringRef, 8> argRefs;
             argRefs.push_back(runProgram);
             for (const auto& arg : runArgs) {
                 argRefs.push_back(arg);
             }
-            int result = llvm::sys::ExecuteAndWait(runProgram, argRefs);
+            const int result = llvm::sys::ExecuteAndWait(runProgram, argRefs);
             if (result < 0) {
                 std::cerr << "Error: program terminated by signal " << (-result) << "\n";
                 // Clean up temp files even on signal failure.

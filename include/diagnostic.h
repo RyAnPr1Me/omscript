@@ -1,3 +1,5 @@
+#pragma once
+
 #ifndef DIAGNOSTIC_H
 #define DIAGNOSTIC_H
 
@@ -66,7 +68,7 @@ inline size_t editDistance(const std::string& a, const std::string& b) {
     for (size_t i = 1; i <= m; ++i) {
         curr[0] = i;
         for (size_t j = 1; j <= n; ++j) {
-            size_t cost = (a[i - 1] == b[j - 1]) ? 0 : 1;
+            const size_t cost = (a[i - 1] == b[j - 1]) ? 0 : 1;
             curr[j] = std::min({prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost});
         }
         std::swap(prev, curr);
@@ -82,7 +84,7 @@ inline std::string suggestSimilar(const std::string& name,
     std::string best;
     size_t bestDist = threshold + 1;
     for (const auto& c : candidates) {
-        size_t dist = editDistance(name, c);
+        const size_t dist = editDistance(name, c);
         if (dist < bestDist) {
             bestDist = dist;
             best = c;

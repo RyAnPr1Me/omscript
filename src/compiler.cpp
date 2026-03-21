@@ -234,7 +234,7 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
         for (const auto& arg : linkArgs) {
             argRefs.push_back(arg);
         }
-        int result = llvm::sys::ExecuteAndWait(linkerProgram, argRefs);
+        const int result = llvm::sys::ExecuteAndWait(linkerProgram, argRefs);
 
         if (result != 0) {
             cleanupObject();

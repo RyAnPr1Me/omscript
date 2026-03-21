@@ -41,9 +41,6 @@ Cost CostModel::nodeCost(const ENode& node) const {
     case Op::BitOr:
     case Op::BitXor:
     case Op::BitNot:
-        return 1.0;
-
-    // Shifts — 1 cycle but slightly prefer over multiply
     case Op::Shl:
     case Op::Shr:
         return 1.0;
@@ -113,7 +110,7 @@ ClassId EGraph::add(ENode node) {
     }
 
     // Create a new e-class
-    ClassId id = static_cast<ClassId>(classes_.size());
+    auto id = static_cast<ClassId>(classes_.size());
     parent_.push_back(id);
 
     EClass cls;

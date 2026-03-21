@@ -55,7 +55,7 @@ jobs:
       - name: Run clang-tidy with auto-fix
         run: |
           cd build
-          find ../src ../runtime -name '*.cpp' | head -5 | xargs -I{} clang-tidy -p . --fix {} 2>&1 | tee tidy.log || true
+          find ../src ../runtime -name '*.cpp' | xargs -I{} clang-tidy -p . --fix {} 2>&1 | tee tidy.log || true
           if grep -E "^\.\./[a-z]+/[a-z]+\.cpp:[0-9]+:[0-9]+: error:" tidy.log; then
             echo "clang-tidy errors found (could not auto-fix all issues)"
             cat tidy.log

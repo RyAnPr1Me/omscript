@@ -66,9 +66,6 @@ double instructionCost(const llvm::Instruction* inst) {
     case llvm::Instruction::Trunc:
     case llvm::Instruction::ZExt:
     case llvm::Instruction::SExt:
-        return 1.0;
-
-    // Shifts: 1 cycle
     case llvm::Instruction::Shl:
     case llvm::Instruction::LShr:
     case llvm::Instruction::AShr:
@@ -92,7 +89,6 @@ double instructionCost(const llvm::Instruction* inst) {
     // Floating point
     case llvm::Instruction::FAdd:
     case llvm::Instruction::FSub:
-        return 4.0;
     case llvm::Instruction::FMul:
         return 4.0;
     case llvm::Instruction::FDiv:
@@ -102,9 +98,8 @@ double instructionCost(const llvm::Instruction* inst) {
 
     // Memory
     case llvm::Instruction::Load:
-        return 4.0; // L1 cache hit
     case llvm::Instruction::Store:
-        return 4.0;
+        return 4.0; // L1 cache hit
     case llvm::Instruction::GetElementPtr:
         return 0.5; // Usually folded into addressing mode
 
@@ -120,22 +115,18 @@ double instructionCost(const llvm::Instruction* inst) {
         if (auto* intrinsic = llvm::dyn_cast<llvm::IntrinsicInst>(call)) {
             switch (intrinsic->getIntrinsicID()) {
             case llvm::Intrinsic::ctpop:
-                return 1.0; // POPCNT instruction
             case llvm::Intrinsic::ctlz:
             case llvm::Intrinsic::cttz:
-                return 1.0; // BSR/BSF or LZCNT/TZCNT
             case llvm::Intrinsic::bswap:
-                return 1.0; // BSWAP instruction
             case llvm::Intrinsic::fshl:
             case llvm::Intrinsic::fshr:
-                return 1.0; // ROL/ROR instructions
-            case llvm::Intrinsic::abs:
-                return 2.0;
+                return 1.0;
             case llvm::Intrinsic::smin:
             case llvm::Intrinsic::smax:
             case llvm::Intrinsic::umin:
             case llvm::Intrinsic::umax:
                 return 1.5;
+            case llvm::Intrinsic::abs:
             case llvm::Intrinsic::sadd_sat:
             case llvm::Intrinsic::uadd_sat:
             case llvm::Intrinsic::ssub_sat:
@@ -240,7 +231,7 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
         auto rhs = getVal(inst->getOperand(1));
         if (lhs && rhs && *rhs < 64) {
             // Arithmetic shift right (sign-extending)
-            int64_t signed_lhs = static_cast<int64_t>(*lhs);
+            auto signed_lhs = static_cast<int64_t>(*lhs);
             return static_cast<uint64_t>(signed_lhs >> *rhs);
         }
         break;
@@ -1124,18 +1115,14 @@ static unsigned applyAlgebraicSimplifications(llvm::Function& func) {
 
             // Pattern: x * 0 → 0 (integer only)
             if (!simplified && inst.getOpcode() == llvm::Instruction::Mul) {
-                if (isConstInt(inst.getOperand(1), 0)) {
-                    simplified = llvm::ConstantInt::get(inst.getType(), 0);
-                } else if (isConstInt(inst.getOperand(0), 0)) {
+                if (isConstInt(inst.getOperand(1), 0) || isConstInt(inst.getOperand(0), 0)) {
                     simplified = llvm::ConstantInt::get(inst.getType(), 0);
                 }
             }
 
             // Pattern: x & 0 → 0
             if (!simplified && inst.getOpcode() == llvm::Instruction::And) {
-                if (isConstInt(inst.getOperand(1), 0)) {
-                    simplified = llvm::ConstantInt::get(inst.getType(), 0);
-                } else if (isConstInt(inst.getOperand(0), 0)) {
+                if (isConstInt(inst.getOperand(1), 0) || isConstInt(inst.getOperand(0), 0)) {
                     simplified = llvm::ConstantInt::get(inst.getType(), 0);
                 }
             }
@@ -1508,9 +1495,7 @@ static unsigned applyAlgebraicSimplifications(llvm::Function& func) {
 
             // Pattern: mul(x, 0) → 0  (integer only)
             if (!simplified && inst.getOpcode() == llvm::Instruction::Mul) {
-                if (isConstInt(inst.getOperand(1), 0)) {
-                    simplified = llvm::ConstantInt::get(inst.getType(), 0);
-                } else if (isConstInt(inst.getOperand(0), 0)) {
+                if (isConstInt(inst.getOperand(1), 0) || isConstInt(inst.getOperand(0), 0)) {
                     simplified = llvm::ConstantInt::get(inst.getType(), 0);
                 }
             }

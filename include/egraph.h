@@ -1,3 +1,5 @@
+#pragma once
+
 #ifndef EGRAPH_H
 #define EGRAPH_H
 

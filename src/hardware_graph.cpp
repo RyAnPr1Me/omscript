@@ -57,7 +57,7 @@ static std::string resolveNativeCpu(const std::string& cpu) {
 unsigned HardwareGraph::addNode(ResourceType type, const std::string& name,
                                  unsigned count, double latency,
                                  double throughput, unsigned pipelineDepth) {
-    unsigned id = static_cast<unsigned>(nodes_.size());
+    auto id = static_cast<unsigned>(nodes_.size());
     nodes_.push_back({id, type, name, count, latency, throughput, pipelineDepth});
     return id;
 }
@@ -174,7 +174,7 @@ static OpClass classifyOp(const llvm::Instruction* inst) {
 }
 
 unsigned ProgramGraph::addNode(OpClass opClass, llvm::Instruction* inst) {
-    unsigned id = static_cast<unsigned>(nodes_.size());
+    auto id = static_cast<unsigned>(nodes_.size());
     ProgramNode node;
     node.id = id;
     node.opClass = opClass;
@@ -249,11 +249,11 @@ void ProgramGraph::buildFromFunction(llvm::Function& func) {
                             switch (prodNode->opClass) {
                             case OpClass::IntMul:   prodLat = 3;  break;
                             case OpClass::IntDiv:   prodLat = 20; break;
-                            case OpClass::FPMul:    prodLat = 4;  break;
-                            case OpClass::FPDiv:    prodLat = 15; break;
-                            case OpClass::FMA:      prodLat = 4;  break;
-                            case OpClass::Load:     prodLat = 4;  break;
+                            case OpClass::FPMul:
+                            case OpClass::FMA:
+                            case OpClass::Load:
                             case OpClass::FPArith:  prodLat = 4;  break;
+                            case OpClass::FPDiv:    prodLat = 15; break;
                             case OpClass::Phi:      prodLat = 0;  break;
                             default:                prodLat = 1;  break;
                             }
@@ -1165,11 +1165,10 @@ HardwareGraph buildHardwareGraph(const MicroarchProfile& profile) {
 static ResourceType mapOpToResource(OpClass op) {
     switch (op) {
     case OpClass::IntArith:
+    case OpClass::IntMul:
     case OpClass::Shift:
     case OpClass::Comparison:
     case OpClass::Conversion:
-        return ResourceType::IntegerALU;
-    case OpClass::IntMul:
         return ResourceType::IntegerALU;
     case OpClass::IntDiv:
         return ResourceType::DividerUnit;
@@ -1456,7 +1455,7 @@ MappingResult mapProgramToHardware(ProgramGraph& pg, const HardwareGraph& hw,
             unsigned earliest = 0;
             for (const auto& e : pg.edges()) {
                 if (e.dstId == nodeId && scheduled[e.srcId]) {
-                    unsigned lat = static_cast<unsigned>(
+                    auto lat = static_cast<unsigned>(
                         pg.getNode(e.srcId) ? pg.getNode(e.srcId)->estimatedLatency : 1);
                     unsigned predEnd = scheduledCycle[e.srcId] + lat;
                     if (predEnd > earliest) earliest = predEnd;
@@ -2155,7 +2154,7 @@ static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
         if (!llvm::isa<llvm::PHINode>(inst) && !inst.isTerminator())
             moveable.push_back(&inst);
 
-    unsigned n = static_cast<unsigned>(moveable.size());
+    auto n = static_cast<unsigned>(moveable.size());
     if (n < 2) return n;
 
     // ── 2. Build index map ────────────────────────────────────────────────────
@@ -2206,7 +2205,7 @@ static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
     // ── 5. Critical-path depth (bottom-up, longest latency path to any sink) ──
     std::vector<unsigned> critPath(n, 0);
     for (int i = static_cast<int>(n) - 1; i >= 0; --i) {
-        unsigned ui = static_cast<unsigned>(i);
+        auto ui = static_cast<unsigned>(i);
         unsigned maxSucc = 0;
         for (unsigned s : succ[ui])
             if (critPath[s] > maxSucc) maxSucc = critPath[s];
@@ -2678,8 +2677,6 @@ static NativeCostInfo estimateNativeCostDetailed(const llvm::Instruction& inst,
         break;
     case llvm::Instruction::PHI:
     case llvm::Instruction::Select:
-        info.nativeOps = 1;
-        break;
     default:
         info.nativeOps = 1;
         break;
@@ -2941,7 +2938,7 @@ void propagatePrecision(llvm::Function& func) {
         for (auto& bb : func) {
             for (auto& inst : bb) {
                 if (!inst.getType()->isFloatingPointTy() &&
-                    !(inst.getType()->isIntegerTy() && inst.getOpcode() == llvm::Instruction::FPToSI))
+                    (!inst.getType()->isIntegerTy() || inst.getOpcode() != llvm::Instruction::FPToSI))
                     continue;
                 // Skip instructions that already have explicit precision metadata.
                 if (inst.getMetadata(kFPPrecisionMDName)) continue;
