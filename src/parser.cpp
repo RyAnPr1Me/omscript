@@ -146,11 +146,13 @@ std::unique_ptr<Program> Parser::parse() {
         }
         try {
             // Parse optional function annotations: @inline, @noinline, @cold,
-            // @hot, @pure, @noreturn, @static, @flatten, @unroll, @nounroll
+            // @hot, @pure, @noreturn, @static, @flatten, @unroll, @nounroll,
+            // @restrict
             bool hintInline = false, hintNoInline = false, hintCold = false;
             bool hintHot = false, hintPure = false, hintNoReturn = false;
             bool hintStatic = false, hintFlatten = false;
             bool hintUnroll = false, hintNoUnroll = false;
+            bool hintRestrict = false;
             while (check(TokenType::AT)) {
                 advance(); // consume '@'
                 Token ann = consume(TokenType::IDENTIFIER, "Expected annotation name after '@'");
@@ -174,9 +176,11 @@ std::unique_ptr<Program> Parser::parse() {
                     hintUnroll = true;
                 } else if (ann.lexeme == "nounroll") {
                     hintNoUnroll = true;
+                } else if (ann.lexeme == "restrict") {
+                    hintRestrict = true;
                 } else {
                     error("Unknown function annotation '@" + ann.lexeme +
-                          "'; supported: @inline, @noinline, @cold, @hot, @pure, @noreturn, @static, @flatten, @unroll, @nounroll (use @prefetch on parameters)");
+                          "'; supported: @inline, @noinline, @cold, @hot, @pure, @noreturn, @static, @flatten, @unroll, @nounroll, @restrict (use @prefetch on parameters)");
                 }
             }
             auto func = parseFunction(optMaxTagActive);
@@ -190,6 +194,7 @@ std::unique_ptr<Program> Parser::parse() {
             func->hintFlatten = hintFlatten;
             func->hintUnroll = hintUnroll;
             func->hintNoUnroll = hintNoUnroll;
+            func->hintRestrict = hintRestrict;
             functions.push_back(std::move(func));
         } catch (const std::runtime_error& e) {
             errors_.push_back(e.what());

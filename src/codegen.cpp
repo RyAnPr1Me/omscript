@@ -2449,6 +2449,16 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         // inline everything called from this function.
         function->addFnAttr("flatten");
     }
+    if (func->hintRestrict) {
+        // @restrict: tell LLVM this function only accesses memory through
+        // its arguments (argmem).  This enables aggressive alias-based
+        // optimizations: the optimizer can prove that separate call sites
+        // don't alias, enabling load/store reordering and vectorization.
+        // This is equivalent to C's __restrict__ semantics applied to
+        // all pointer parameters — no external side effects.
+        function->setOnlyAccessesArgMemory();
+        function->setDoesNotThrow();
+    }
 
     // @unroll / @nounroll: per-function loop unrolling control.
     // These are stored and applied to every loop emitted within this function.

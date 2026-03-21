@@ -466,6 +466,7 @@ class FunctionDecl : public ASTNode {
     bool hintFlatten = false;   ///< @flatten — inline all callees within this function
     bool hintUnroll = false;    ///< @unroll — aggressively unroll all loops in this function
     bool hintNoUnroll = false;  ///< @nounroll — disable loop unrolling in this function
+    bool hintRestrict = false;  ///< @restrict — all pointer params are noalias (no aliasing)
 
     FunctionDecl(const std::string& n, std::vector<std::string> tps, std::vector<Parameter> params, std::unique_ptr<BlockStmt> b, bool optMax = false, const std::string& retType = "")
         : ASTNode(ASTNodeType::FUNCTION), name(n), typeParams(std::move(tps)), parameters(std::move(params)), body(std::move(b)), isOptMax(optMax), returnType(retType) {

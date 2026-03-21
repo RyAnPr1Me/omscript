@@ -6147,3 +6147,61 @@ TEST(CodegenTest, PrefetchHotUsesHighLocality) {
     }
     EXPECT_TRUE(foundHighLocality);
 }
+
+TEST(CodegenTest, PrefetchStructEmitsMemoryPrefetch) {
+    // Prefetch of a struct variable (stored as an array alloca) should emit
+    // llvm.prefetch directly on the alloca — memory-resident prefetch for
+    // large types that cannot fit in registers.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    const char* src =
+        "struct Point { x, y }\n"
+        "fn main() {\n"
+        "    var p = Point { x: 1, y: 2 };\n"
+        "    prefetch p;\n"
+        "    var r = p.x + p.y;\n"
+        "    invalidate p;\n"
+        "    return r;\n"
+        "}\n";
+    auto* mod = generateIR(src, codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+
+    // Should have at least one llvm.prefetch call (memory-resident prefetch
+    // on the struct's alloca).
+    unsigned prefetchCount = 0;
+    for (auto& BB : *mainFn) {
+        for (auto& I : BB) {
+            if (auto* call = llvm::dyn_cast<llvm::CallInst>(&I)) {
+                if (auto* callee = call->getCalledFunction()) {
+                    if (callee->getIntrinsicID() == llvm::Intrinsic::prefetch)
+                        ++prefetchCount;
+                }
+            }
+        }
+    }
+    EXPECT_GE(prefetchCount, 1u); // memory-resident prefetch for struct
+}
+
+TEST(CodegenTest, RestrictAnnotationAddsArgMemOnly) {
+    // @restrict should set argmem-only memory effects for alias optimization.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    const char* src =
+        "@restrict\n"
+        "fn process(a: int, b: int) -> int {\n"
+        "    return a + b;\n"
+        "}\n"
+        "fn main() {\n"
+        "    return process(1, 2);\n"
+        "}\n";
+    auto* mod = generateIR(src, codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("process");
+    ASSERT_NE(fn, nullptr);
+
+    // The function should only access argument memory.
+    EXPECT_TRUE(fn->onlyAccessesArgMemory())
+        << "Function should have argmem-only memory effect from @restrict";
+    EXPECT_TRUE(fn->doesNotThrow())
+        << "Function should have nothrow from @restrict";
+}

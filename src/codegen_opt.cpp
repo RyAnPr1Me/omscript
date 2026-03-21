@@ -883,10 +883,15 @@ void CodeGenerator::runOptimizationPasses() {
                     }
 
                     // Rule 2: Target is a stack allocation (alloca).
+                    // Skip if tagged with !omscript.memory_prefetch — these are
+                    // intentional memory-resident prefetches for large types
+                    // (structs, arrays) that cannot fit in registers.
                     if (!shouldRemove) {
                         llvm::Value* underlying = ptr->stripPointerCasts();
                         if (llvm::isa<llvm::AllocaInst>(underlying)) {
-                            shouldRemove = true;
+                            if (!call->getMetadata("omscript.memory_prefetch")) {
+                                shouldRemove = true;
+                            }
                         }
                     }
 
