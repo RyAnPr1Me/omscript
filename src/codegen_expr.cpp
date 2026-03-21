@@ -570,8 +570,8 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         // Use unsigned arithmetic for +, -, * to avoid signed overflow UB.
         // The unsigned result, when reinterpreted as signed, gives the correct
         // two's-complement wrapping behavior that matches LLVM's add/sub/mul.
-        uint64_t ulval = static_cast<uint64_t>(lval);
-        uint64_t urval = static_cast<uint64_t>(rval);
+        auto ulval = static_cast<uint64_t>(lval);
+        auto urval = static_cast<uint64_t>(rval);
 
         if (expr->op == "+") {
             return llvm::ConstantInt::get(*context, llvm::APInt(64, ulval + urval));
@@ -580,11 +580,11 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         } else if (expr->op == "*") {
             return llvm::ConstantInt::get(*context, llvm::APInt(64, ulval * urval));
         } else if (expr->op == "/") {
-            if (rval != 0 && !(lval == INT64_MIN && rval == -1)) {
+            if (rval != 0 && (lval != INT64_MIN || rval != -1)) {
                 return llvm::ConstantInt::get(*context, llvm::APInt(64, lval / rval));
             }
         } else if (expr->op == "%") {
-            if (rval != 0 && !(lval == INT64_MIN && rval == -1)) {
+            if (rval != 0 && (lval != INT64_MIN || rval != -1)) {
                 return llvm::ConstantInt::get(*context, llvm::APInt(64, lval % rval));
             }
         } else if (expr->op == "==") {

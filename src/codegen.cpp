@@ -304,9 +304,9 @@ std::unique_ptr<Expression> optimizeOptMaxBinary(const std::string& op, std::uni
             return std::make_unique<LiteralExpr>(lval - rval);
         if (op == "*")
             return std::make_unique<LiteralExpr>(lval * rval);
-        if (op == "/" && rval != 0 && !(lval == LLONG_MIN && rval == -1))
+        if (op == "/" && rval != 0 && (lval != LLONG_MIN || rval != -1))
             return std::make_unique<LiteralExpr>(lval / rval);
-        if (op == "%" && rval != 0 && !(lval == LLONG_MIN && rval == -1))
+        if (op == "%" && rval != 0 && (lval != LLONG_MIN || rval != -1))
             return std::make_unique<LiteralExpr>(lval % rval);
         if (op == "==")
             return std::make_unique<LiteralExpr>(static_cast<long long>(lval == rval));
@@ -2679,10 +2679,8 @@ void CodeGenerator::generateStatement(Statement* stmt) {
         generateThrow(static_cast<ThrowStmt*>(stmt));
         break;
     case ASTNodeType::ENUM_DECL:
-        // Enums are handled at program level, nothing to do here
-        break;
     case ASTNodeType::STRUCT_DECL:
-        // Structs are handled at program level, nothing to do here
+        // Enums and structs are handled at program level, nothing to do here.
         break;
     case ASTNodeType::INVALIDATE_STMT:
         generateInvalidate(static_cast<InvalidateStmt*>(stmt));

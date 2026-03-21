@@ -772,7 +772,7 @@ void AdaptiveJITRunner::doRecompileWholeModule() {
         const std::string name = fn.getName().str();
 
         // PGO entry count: use measured call count if available, else threshold.
-        uint64_t entryCount = static_cast<uint64_t>(kTier2Threshold);
+        auto entryCount = static_cast<uint64_t>(kTier2Threshold);
         auto pit = profileSnapshot.find(name);
         if (pit != profileSnapshot.end() && pit->second.callCount > 0)
             entryCount = static_cast<uint64_t>(pit->second.callCount);
@@ -1197,7 +1197,7 @@ void AdaptiveJITRunner::doRecompileWholeModule() {
                         }
                         // Run the function.
                         llvm::GenericValue result = EE->runFunction(ifn, gvArgs);
-                        int64_t resultVal = static_cast<int64_t>(result.IntVal.getSExtValue());
+                        auto resultVal = static_cast<int64_t>(result.IntVal.getSExtValue());
                         evalResults[callee] = {resultVal, true};
                         if (verbose_) {
                             std::cerr << "JIT: compile-time eval '" << callee->getName().str()

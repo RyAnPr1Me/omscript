@@ -122,7 +122,8 @@ std::string getExecutablePath() {
     // Linux: /proc/self/exe
     try {
         return std::filesystem::read_symlink("/proc/self/exe").string();
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
+        // Fall through to return empty string below.
     }
 #endif
     return "";

@@ -6,6 +6,7 @@ Checks: >
   bugprone-*,
   -bugprone-easily-swappable-parameters,
   -bugprone-narrowing-conversions,
+  -bugprone-reserved-identifier,
   misc-redundant-expression,
   misc-unused-using-decls,
   modernize-use-nullptr,

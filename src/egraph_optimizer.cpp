@@ -477,9 +477,8 @@ static void optimizeStatement(Statement* stmt) {
         break;
     }
     case ASTNodeType::INVALIDATE_STMT:
-        // Nothing to optimize for invalidate statements.
-        break;
     default:
+        // Nothing to optimize for invalidate or unrecognized statements.
         break;
     }
 }

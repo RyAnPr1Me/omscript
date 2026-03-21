@@ -399,7 +399,11 @@ class CodeGenerator {
             cg_.beginScope();
         }
         ~ScopeGuard() noexcept {
-            cg_.endScope();
+            try {
+                cg_.endScope();
+            } catch (...) { // NOLINT(bugprone-empty-catch)
+                // Swallow exceptions to satisfy noexcept destructor contract.
+            }
         }
         ScopeGuard(const ScopeGuard&) = delete;
         ScopeGuard& operator=(const ScopeGuard&) = delete;
