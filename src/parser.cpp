@@ -146,10 +146,13 @@ std::unique_ptr<Program> Parser::parse() {
         }
         try {
             // Parse optional function annotations: @inline, @noinline, @cold,
-            // @hot, @pure, @noreturn, @static, @flatten
+            // @hot, @pure, @noreturn, @static, @flatten, @unroll, @nounroll,
+            // @restrict
             bool hintInline = false, hintNoInline = false, hintCold = false;
             bool hintHot = false, hintPure = false, hintNoReturn = false;
             bool hintStatic = false, hintFlatten = false;
+            bool hintUnroll = false, hintNoUnroll = false;
+            bool hintRestrict = false;
             while (check(TokenType::AT)) {
                 advance(); // consume '@'
                 Token ann = consume(TokenType::IDENTIFIER, "Expected annotation name after '@'");
@@ -169,9 +172,15 @@ std::unique_ptr<Program> Parser::parse() {
                     hintStatic = true;
                 } else if (ann.lexeme == "flatten") {
                     hintFlatten = true;
+                } else if (ann.lexeme == "unroll") {
+                    hintUnroll = true;
+                } else if (ann.lexeme == "nounroll") {
+                    hintNoUnroll = true;
+                } else if (ann.lexeme == "restrict") {
+                    hintRestrict = true;
                 } else {
                     error("Unknown function annotation '@" + ann.lexeme +
-                          "'; supported: @inline, @noinline, @cold, @hot, @pure, @noreturn, @static, @flatten (use @prefetch on parameters)");
+                          "'; supported: @inline, @noinline, @cold, @hot, @pure, @noreturn, @static, @flatten, @unroll, @nounroll, @restrict (use @prefetch on parameters)");
                 }
             }
             auto func = parseFunction(optMaxTagActive);
@@ -183,6 +192,9 @@ std::unique_ptr<Program> Parser::parse() {
             func->hintNoReturn = hintNoReturn;
             func->hintStatic = hintStatic;
             func->hintFlatten = hintFlatten;
+            func->hintUnroll = hintUnroll;
+            func->hintNoUnroll = hintNoUnroll;
+            func->hintRestrict = hintRestrict;
             functions.push_back(std::move(func));
         } catch (const std::runtime_error& e) {
             errors_.push_back(e.what());
@@ -285,6 +297,11 @@ void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
 }
 
 std::string Parser::parseTypeAnnotation() {
+    // Support reference type annotations: &type (e.g., &i32, &f64)
+    std::string prefix;
+    if (match(TokenType::AMPERSAND)) {
+        prefix = "&";
+    }
     // Accept identifiers and the 'struct' keyword as type names
     std::string typeName;
     if (check(TokenType::STRUCT)) {
@@ -299,7 +316,7 @@ std::string Parser::parseTypeAnnotation() {
         advance(); // consume ']'
         typeName += "[]";
     }
-    return typeName;
+    return prefix + typeName;
 }
 
 std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
@@ -1284,6 +1301,16 @@ std::unique_ptr<Expression> Parser::parsePower() {
 
 std::unique_ptr<Expression> Parser::parseUnary() {
     if (match(TokenType::MINUS) || match(TokenType::NOT) || match(TokenType::TILDE)) {
+        Token opToken = tokens[current - 1];
+        auto operand = parseUnary();
+        auto node = std::make_unique<UnaryExpr>(opToken.lexeme, std::move(operand));
+        node->line = opToken.line;
+        node->column = opToken.column;
+        return node;
+    }
+
+    // `&expr` — address-of / borrow operator (e.g. `&x` in `borrow var j:&i32 = &x;`)
+    if (match(TokenType::AMPERSAND)) {
         Token opToken = tokens[current - 1];
         auto operand = parseUnary();
         auto node = std::make_unique<UnaryExpr>(opToken.lexeme, std::move(operand));

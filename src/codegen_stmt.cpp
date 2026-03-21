@@ -672,6 +672,15 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
                      llvm::Type::getInt32Ty(*context), 2))});
             loopMDs.push_back(unrollCount);
         }
+        // @unroll / @nounroll: per-function loop unrolling overrides.
+        // @nounroll disables unrolling entirely; @unroll requests full unrolling.
+        if (currentFuncHintNoUnroll_) {
+            loopMDs.push_back(llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.unroll.disable")}));
+        } else if (currentFuncHintUnroll_ && !addedUnrollHint) {
+            loopMDs.push_back(llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.unroll.full")}));
+        }
         llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
         loopMD->replaceOperandWith(0, loopMD);
         backBr->setMetadata(llvm::LLVMContext::MD_loop, loopMD);
@@ -1152,39 +1161,131 @@ llvm::Value* CodeGenerator::generateBorrowExpr(BorrowExpr* expr) {
 
 void CodeGenerator::generatePrefetch(PrefetchStmt* stmt) {
     llvm::Value* alloca = nullptr;
+    std::string varName;
 
     if (stmt->varDecl) {
-        // Prefetch with variable declaration: generate the VarDecl first,
-        // then emit a prefetch hint on its alloca.
+        // Prefetch with variable declaration: generate the VarDecl first.
         generateVarDecl(stmt->varDecl.get());
-        prefetchedVars_.insert(stmt->varDecl->name);
-        auto it = namedValues.find(stmt->varDecl->name);
+        varName = stmt->varDecl->name;
+        prefetchedVars_.insert(varName);
+        auto it = namedValues.find(varName);
         if (it != namedValues.end()) {
             alloca = it->second;
         }
     } else {
         // Standalone prefetch of an existing variable.
-        prefetchedVars_.insert(stmt->varName);
-        auto it = namedValues.find(stmt->varName);
+        varName = stmt->varName;
+        prefetchedVars_.insert(varName);
+        auto it = namedValues.find(varName);
         if (it != namedValues.end()) {
             alloca = it->second;
         } else {
-            codegenError("Unknown variable '" + stmt->varName + "' in prefetch statement", stmt);
+            codegenError("Unknown variable '" + varName + "' in prefetch statement", stmt);
         }
     }
 
     if (alloca) {
-        // Emit llvm.prefetch intrinsic on the variable's alloca pointer.
-        // Args: ptr, rw (0=read), locality (3=keep in all cache levels), cache_type (1=data)
-        llvm::Function* prefetchFn = OMSC_GET_INTRINSIC_STMT(
-            module.get(), llvm::Intrinsic::prefetch,
-            {llvm::PointerType::getUnqual(*context)});
-        builder->CreateCall(prefetchFn, {
-            alloca,
-            builder->getInt32(0),  // read prefetch
-            builder->getInt32(3),  // high temporal locality
-            builder->getInt32(1)   // data cache
-        });
+        // If hintImmut is set, mark the variable's loads as invariant so LLVM
+        // knows the value never changes and can hoist/CSE aggressively.
+        if (stmt->hintImmut) {
+            prefetchedImmutVars_.insert(varName);
+        }
+
+        auto* allocaInst = llvm::dyn_cast<llvm::AllocaInst>(alloca);
+        if (allocaInst) {
+            llvm::Type* elemTy = allocaInst->getAllocatedType();
+            int32_t locality = stmt->hintHot ? 3 : 2;
+
+            // Determine if this is a "large" type that cannot fit in a
+            // register (e.g. arrays, structs stored as multi-slot allocas).
+            // Large types are identified by:
+            //   - ArrayType allocas (struct instances stored as i64 arrays)
+            //   - StructType allocas
+            //   - Allocas with array size > 1
+            bool isLargeType = elemTy->isArrayTy() || elemTy->isStructTy();
+            if (auto* arraySize = allocaInst->getArraySize()) {
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(arraySize)) {
+                    if (ci->getZExtValue() > 1) isLargeType = true;
+                }
+            }
+
+            if (isLargeType) {
+                // Memory-resident prefetch: for large types (structs, arrays)
+                // that cannot fit in registers, emit llvm.prefetch directly
+                // on the alloca pointer.  This brings the variable's memory
+                // into CPU cache and keeps it hot for the duration of the
+                // scope.  The prefetch is tagged with !omscript.memory_prefetch
+                // metadata so the post-optimization cleanup preserves it
+                // (Rule 2 normally removes alloca-targeted prefetches).
+                llvm::Function* prefetchFn = OMSC_GET_INTRINSIC_STMT(
+                    module.get(), llvm::Intrinsic::prefetch,
+                    {llvm::PointerType::getUnqual(*context)});
+                auto* pfCall = builder->CreateCall(prefetchFn, {
+                    alloca,
+                    builder->getInt32(0),          // read prefetch
+                    builder->getInt32(locality),   // temporal locality
+                    builder->getInt32(1)           // data cache
+                });
+                // Tag with metadata so the cleanup pass preserves this.
+                pfCall->setMetadata("omscript.memory_prefetch",
+                    llvm::MDNode::get(*context, {}));
+
+                // For multi-slot arrays (structs), also prefetch subsequent
+                // cache lines to cover the full object.  Each cache line is
+                // typically 64 bytes = 8 × i64 slots.
+                if (auto* arrTy = llvm::dyn_cast<llvm::ArrayType>(elemTy)) {
+                    uint64_t numSlots = arrTy->getNumElements();
+                    uint64_t slotSize = module->getDataLayout().getTypeAllocSize(
+                        arrTy->getElementType());
+                    uint64_t totalBytes = numSlots * slotSize;
+                    // Prefetch every 64 bytes (one cache line) beyond the first.
+                    for (uint64_t offset = 64; offset < totalBytes; offset += 64) {
+                        llvm::Value* gepIdx = llvm::ConstantInt::get(
+                            getDefaultType(), offset / slotSize);
+                        llvm::Value* nextPtr = builder->CreateGEP(
+                            arrTy->getElementType(), alloca, gepIdx,
+                            varName + ".pf.cacheline");
+                        auto* pfCall2 = builder->CreateCall(prefetchFn, {
+                            nextPtr,
+                            builder->getInt32(0),
+                            builder->getInt32(locality),
+                            builder->getInt32(1)
+                        });
+                        pfCall2->setMetadata("omscript.memory_prefetch",
+                            llvm::MDNode::get(*context, {}));
+                    }
+                }
+            } else {
+                // Register promotion strategy: do NOT emit llvm.prefetch on
+                // the alloca itself — that would anchor the variable to memory
+                // and prevent SROA/mem2reg from promoting it to an SSA register.
+                // Instead, the variable goes straight to a register and stays
+                // there until explicitly invalidated.
+                //
+                // For variables that hold pointer-sized values (i64/ptr), emit
+                // a prefetch on the *pointed-to* memory — the variable's VALUE
+                // is treated as a memory address.
+                if (elemTy->isIntegerTy(64) || elemTy->isPointerTy()) {
+                    llvm::Function* prefetchFn = OMSC_GET_INTRINSIC_STMT(
+                        module.get(), llvm::Intrinsic::prefetch,
+                        {llvm::PointerType::getUnqual(*context)});
+                    llvm::Value* val = builder->CreateLoad(elemTy, alloca,
+                                                            varName + ".pf.val");
+                    llvm::Value* ptr = val;
+                    if (!elemTy->isPointerTy()) {
+                        ptr = builder->CreateIntToPtr(
+                            val, llvm::PointerType::getUnqual(*context),
+                            varName + ".pf.ptr");
+                    }
+                    builder->CreateCall(prefetchFn, {
+                        ptr,
+                        builder->getInt32(0),          // read prefetch
+                        builder->getInt32(locality),   // temporal locality
+                        builder->getInt32(1)           // data cache
+                    });
+                }
+            }
+        }
     }
 }
 

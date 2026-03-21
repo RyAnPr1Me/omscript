@@ -6027,3 +6027,181 @@ TEST(CodegenTest, ZeroDividedByZeroNotFolded) {
     // that the module compiled successfully.
     EXPECT_NE(mod->getFunction("main"), nullptr);
 }
+
+// ===========================================================================
+// Borrow with reference type annotation and address-of operator
+// ===========================================================================
+
+TEST(CodegenTest, BorrowWithRefTypeAndAddressOf) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    const char* src =
+        "fn main() {"
+        "    var x :i32 = 5;"
+        "    borrow var j:&i32 = &x;"
+        "    return j;"
+        "}";
+    auto* mod = generateIR(src, codegen);
+    ASSERT_NE(mod, nullptr);
+    EXPECT_NE(mod->getFunction("main"), nullptr);
+}
+
+// ===========================================================================
+// Prefetch: use-site prefetch and memory residency
+// ===========================================================================
+
+TEST(CodegenTest, PrefetchVarDeclRegistersNoAllocaPrefetch) {
+    // Prefetch var declaration should NOT emit llvm.prefetch on the alloca
+    // itself — the variable should be promoted to a register by SROA/mem2reg.
+    // For i32 variables (non-pointer), no prefetch intrinsic is emitted at all.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    const char* src =
+        "fn main() {"
+        "    prefetch var x:i32 = 5;"
+        "    var y = x + 1;"
+        "    invalidate x;"
+        "    return y;"
+        "}";
+    auto* mod = generateIR(src, codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+
+    // Count llvm.prefetch calls — for i32 (non-pointer) variables, no
+    // prefetch should be emitted (the variable goes to a register).
+    unsigned prefetchCount = 0;
+    for (auto& BB : *mainFn) {
+        for (auto& I : BB) {
+            if (auto* call = llvm::dyn_cast<llvm::CallInst>(&I)) {
+                if (auto* callee = call->getCalledFunction()) {
+                    if (callee->getIntrinsicID() == llvm::Intrinsic::prefetch)
+                        ++prefetchCount;
+                }
+            }
+        }
+    }
+    EXPECT_EQ(prefetchCount, 0u); // no alloca prefetch for register vars
+}
+
+TEST(CodegenTest, PrefetchI64EmitsValuePrefetch) {
+    // Prefetch of an i64 variable should emit a value-based prefetch
+    // (the variable's value is treated as a pointer to prefetch).
+    CodeGenerator codegen(OptimizationLevel::O0);
+    const char* src =
+        "fn main() {"
+        "    prefetch var v:i64 = 10;"
+        "    var a = v;"
+        "    invalidate v;"
+        "    return a;"
+        "}";
+    auto* mod = generateIR(src, codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+
+    // Should have exactly one prefetch: the value-based prefetch for the
+    // i64 variable (its value is treated as a memory address).
+    unsigned prefetchCount = 0;
+    for (auto& BB : *mainFn) {
+        for (auto& I : BB) {
+            if (auto* call = llvm::dyn_cast<llvm::CallInst>(&I)) {
+                if (auto* callee = call->getCalledFunction()) {
+                    if (callee->getIntrinsicID() == llvm::Intrinsic::prefetch)
+                        ++prefetchCount;
+                }
+            }
+        }
+    }
+    EXPECT_EQ(prefetchCount, 1u); // value-based prefetch only
+}
+
+TEST(CodegenTest, PrefetchHotUsesHighLocality) {
+    // `prefetch hot` should use locality=3 in the value-based prefetch.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    const char* src =
+        "fn main() {"
+        "    prefetch hot var h:i64 = 7;"
+        "    invalidate h;"
+        "    return 0;"
+        "}";
+    auto* mod = generateIR(src, codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+
+    bool foundHighLocality = false;
+    for (auto& BB : *mainFn) {
+        for (auto& I : BB) {
+            if (auto* call = llvm::dyn_cast<llvm::CallInst>(&I)) {
+                if (auto* callee = call->getCalledFunction()) {
+                    if (callee->getIntrinsicID() == llvm::Intrinsic::prefetch) {
+                        // Arg 2 is the locality hint
+                        if (auto* loc = llvm::dyn_cast<llvm::ConstantInt>(
+                                call->getArgOperand(2))) {
+                            if (loc->getZExtValue() == 3)
+                                foundHighLocality = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    EXPECT_TRUE(foundHighLocality);
+}
+
+TEST(CodegenTest, PrefetchStructEmitsMemoryPrefetch) {
+    // Prefetch of a struct variable (stored as an array alloca) should emit
+    // llvm.prefetch directly on the alloca — memory-resident prefetch for
+    // large types that cannot fit in registers.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    const char* src =
+        "struct Point { x, y }\n"
+        "fn main() {\n"
+        "    var p = Point { x: 1, y: 2 };\n"
+        "    prefetch p;\n"
+        "    var r = p.x + p.y;\n"
+        "    invalidate p;\n"
+        "    return r;\n"
+        "}\n";
+    auto* mod = generateIR(src, codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+
+    // Should have at least one llvm.prefetch call (memory-resident prefetch
+    // on the struct's alloca).
+    unsigned prefetchCount = 0;
+    for (auto& BB : *mainFn) {
+        for (auto& I : BB) {
+            if (auto* call = llvm::dyn_cast<llvm::CallInst>(&I)) {
+                if (auto* callee = call->getCalledFunction()) {
+                    if (callee->getIntrinsicID() == llvm::Intrinsic::prefetch)
+                        ++prefetchCount;
+                }
+            }
+        }
+    }
+    EXPECT_GE(prefetchCount, 1u); // memory-resident prefetch for struct
+}
+
+TEST(CodegenTest, RestrictAnnotationAddsArgMemOnly) {
+    // @restrict should set argmem-only memory effects for alias optimization.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    const char* src =
+        "@restrict\n"
+        "fn process(a: int, b: int) -> int {\n"
+        "    return a + b;\n"
+        "}\n"
+        "fn main() {\n"
+        "    return process(1, 2);\n"
+        "}\n";
+    auto* mod = generateIR(src, codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("process");
+    ASSERT_NE(fn, nullptr);
+
+    // The function should only access argument memory.
+    EXPECT_TRUE(fn->onlyAccessesArgMemory())
+        << "Function should have argmem-only memory effect from @restrict";
+    EXPECT_TRUE(fn->doesNotThrow())
+        << "Function should have nothrow from @restrict";
+}

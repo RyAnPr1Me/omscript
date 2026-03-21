@@ -1544,3 +1544,81 @@ TEST(ParserTest, StructFieldMultipleAttrs) {
     EXPECT_TRUE(program->structs[0]->fieldDecls[1].attrs.cold);
     EXPECT_TRUE(program->structs[0]->fieldDecls[1].attrs.noalias);
 }
+
+TEST(ParserTest, BorrowWithRefTypeAndAddressOf) {
+    // `borrow var j:&i32 = &x;`  — reference type annotation + address-of expr
+    auto program = parse("fn main() { var x :i32 = 5; borrow var j:&i32 = &x; return 0; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    auto* vd = dynamic_cast<VarDecl*>(program->functions[0]->body->statements[1].get());
+    ASSERT_NE(vd, nullptr);
+    EXPECT_EQ(vd->name, "j");
+    EXPECT_EQ(vd->typeName, "&i32");
+    auto* bw = dynamic_cast<BorrowExpr*>(vd->initializer.get());
+    ASSERT_NE(bw, nullptr);
+    // The source inside BorrowExpr should be a UnaryExpr with op "&"
+    auto* unary = dynamic_cast<UnaryExpr*>(bw->source.get());
+    ASSERT_NE(unary, nullptr);
+    EXPECT_EQ(unary->op, "&");
+}
+
+TEST(ParserTest, AddressOfUnaryOperator) {
+    // `&x` parsed as a unary expression
+    auto program = parse("fn main() { var x = 1; var y = &x; return 0; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    auto* vd = dynamic_cast<VarDecl*>(program->functions[0]->body->statements[1].get());
+    ASSERT_NE(vd, nullptr);
+    EXPECT_EQ(vd->name, "y");
+    auto* unary = dynamic_cast<UnaryExpr*>(vd->initializer.get());
+    ASSERT_NE(unary, nullptr);
+    EXPECT_EQ(unary->op, "&");
+}
+
+TEST(ParserTest, RefTypeAnnotation) {
+    // `&i64` reference type annotation in borrow declaration
+    auto program = parse("fn main() { var x = 10; borrow var k:&i64 = &x; return 0; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    auto* vd = dynamic_cast<VarDecl*>(program->functions[0]->body->statements[1].get());
+    ASSERT_NE(vd, nullptr);
+    EXPECT_EQ(vd->name, "k");
+    EXPECT_EQ(vd->typeName, "&i64");
+}
+
+// ---------------------------------------------------------------------------
+// Prefetch statement parsing
+// ---------------------------------------------------------------------------
+
+TEST(ParserTest, PrefetchVarDecl) {
+    auto program = parse("fn main() { prefetch var x:i32 = 5; invalidate x; return 0; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    auto* pf = dynamic_cast<PrefetchStmt*>(program->functions[0]->body->statements[0].get());
+    ASSERT_NE(pf, nullptr);
+    ASSERT_NE(pf->varDecl, nullptr);
+    EXPECT_EQ(pf->varDecl->name, "x");
+    EXPECT_EQ(pf->varDecl->typeName, "i32");
+    EXPECT_FALSE(pf->hintHot);
+    EXPECT_FALSE(pf->hintImmut);
+}
+
+TEST(ParserTest, PrefetchHotAttr) {
+    auto program = parse("fn main() { prefetch hot var v:i64 = 10; invalidate v; return 0; }");
+    auto* pf = dynamic_cast<PrefetchStmt*>(program->functions[0]->body->statements[0].get());
+    ASSERT_NE(pf, nullptr);
+    EXPECT_TRUE(pf->hintHot);
+    EXPECT_FALSE(pf->hintImmut);
+}
+
+TEST(ParserTest, PrefetchImmutAttr) {
+    auto program = parse("fn main() { prefetch immut var c:i32 = 3; invalidate c; return 0; }");
+    auto* pf = dynamic_cast<PrefetchStmt*>(program->functions[0]->body->statements[0].get());
+    ASSERT_NE(pf, nullptr);
+    EXPECT_FALSE(pf->hintHot);
+    EXPECT_TRUE(pf->hintImmut);
+}
+
+TEST(ParserTest, PrefetchStandaloneExistingVar) {
+    auto program = parse("fn main() { var x = 1; prefetch x; invalidate x; return 0; }");
+    auto* pf = dynamic_cast<PrefetchStmt*>(program->functions[0]->body->statements[1].get());
+    ASSERT_NE(pf, nullptr);
+    EXPECT_EQ(pf->varDecl, nullptr);
+    EXPECT_EQ(pf->varName, "x");
+}

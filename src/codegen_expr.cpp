@@ -78,14 +78,28 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
         }
         codegenError(msg, expr);
     }
+
+    // Register-promotion strategy: prefetched variables go straight to
+    // registers (promoted by SROA/mem2reg) and stay there until invalidated.
+    // No use-site llvm.prefetch is emitted on the alloca — that would anchor
+    // the variable to memory and defeat register promotion.
     auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(it->second);
+
     llvm::Type* loadType = alloca ? alloca->getAllocatedType() : getDefaultType();
     auto* load = builder->CreateLoad(loadType, it->second, expr->name.c_str());
 
-    // If this is a const variable, mark the load as invariant so LLVM knows
-    // the value never changes and can hoist/CSE it aggressively.
+    // If this is a const variable or a prefetch-immut variable, mark the
+    // load as invariant so LLVM knows the value never changes and can
+    // hoist/CSE it aggressively.
+    bool isInvariant = false;
     auto constIt = constValues.find(expr->name);
     if (constIt != constValues.end() && constIt->second) {
+        isInvariant = true;
+    }
+    if (prefetchedImmutVars_.count(expr->name)) {
+        isInvariant = true;
+    }
+    if (isInvariant) {
         if (auto* loadInst = llvm::dyn_cast<llvm::LoadInst>(load)) {
             loadInst->setMetadata(llvm::LLVMContext::MD_invariant_load,
                                   llvm::MDNode::get(*context, {}));
@@ -1293,6 +1307,12 @@ llvm::Value* CodeGenerator::generateUnary(UnaryExpr* expr) {
             operand = builder->CreateFPToSI(operand, getDefaultType(), "ftoi");
         }
         return builder->CreateNot(operand, "bitnottmp");
+    } else if (expr->op == "&") {
+        // Address-of operator: in OmScript's value semantics, this is a
+        // pass-through — the operand is already the loaded value (not a
+        // pointer).  The `&` is syntactic sugar for borrow declarations
+        // (e.g., `borrow var j:&i32 = &x;`).
+        return operand;
     }
 
     codegenError("Unknown unary operator: " + expr->op, expr);

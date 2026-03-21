@@ -301,6 +301,14 @@ class CodeGenerator {
     /// variable is not found in deadVars_ at return time.
     std::unordered_set<std::string> prefetchedVars_;
 
+    /// Variables declared with `prefetch immut` — their loads get invariant
+    /// metadata so LLVM can hoist/CSE them aggressively.
+    std::unordered_set<std::string> prefetchedImmutVars_;
+
+    /// Per-function loop unrolling hints from @unroll / @nounroll annotations.
+    bool currentFuncHintUnroll_ = false;
+    bool currentFuncHintNoUnroll_ = false;
+
     /// Classify a function into its execution tier based on type annotations,
     /// OPTMAX status, and whether it is a special function (main/stdlib).
     ExecutionTier classifyFunction(const FunctionDecl* func) const;
