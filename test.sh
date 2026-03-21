@@ -123,7 +123,8 @@ fn bench_math(n:int) -> int {
 }
 
 fn bench_push(@prefetch n:int) -> int {
-    prefetch var arr:int[] align(64) = [];
+    var arr:int[] align(64) = [];
+    prefetch arr;
     for (i:int in 0...n) {
         arr = push(arr, (i * 3) % 12345);
     }
@@ -134,7 +135,8 @@ fn bench_push(@prefetch n:int) -> int {
 }
 @hot @flatten @pure @unroll
 fn bench_hof(@prefetch n:int) -> int {
-    prefetch hot var arr:int[] align(64) = array_fill(n, 0);
+    hot var arr:int[] align(64) = array_fill(n, 0);
+    prefetch arr;
     for (i:int in 0...n) {
         arr[i] = (i * 7) % 1000;
     }
@@ -198,11 +200,12 @@ fn bench_branch(@prefetch n:int) -> int {
     invalidate n;
     return sum;
 }
-@hot
+@hot @pure
 fn fib(n:int) -> int {
-    if (n <= 1) { return n; }
+    if (n <= 1) { return n; };
     return fib(n - 1) + fib(n - 2);
 }
+@flatten @hot 
 fn bench_recurse(n:int) -> int {
     return fib(n);
 }
@@ -218,9 +221,10 @@ fn bench_nested(n:int) -> int {
     }
     return sum;
 }
-@hot
+@hot @flatten
 fn bench_sort(n:int) -> int {
-    var arr:int[] = [];
+    var arr:int[] align(64) = [];
+    prefetch arr;
     for (i:int in 0...n:int) {
         arr = push(arr, (i * 2654435761) % 1000000);
     }
@@ -260,7 +264,7 @@ fn bench_ifelse(n:int) -> int {
 @hot
 fn bench_arrindex(n:int) -> int {
     var sz:int = 10000;
-    var arr:int[] = array_fill(sz, 0);
+    var arr:int[] align(64) = array_fill(sz, 0);
     for (i:int in 0...sz) {
         arr[i] = i * 3;
     }
