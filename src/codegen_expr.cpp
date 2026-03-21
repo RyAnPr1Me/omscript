@@ -1,6 +1,7 @@
 #include "codegen.h"
 #include "diagnostic.h"
 #include <climits>
+#include <cmath>
 #include <cstdint>
 #include <iostream>
 #include <llvm/Config/llvm-config.h>
@@ -231,6 +232,10 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                     return llvm::ConstantFP::get(getFloatType(), lv * rv);
                 if (expr->op == "/" && rv != 0.0)
                     return llvm::ConstantFP::get(getFloatType(), lv / rv);
+                if (expr->op == "%" && rv != 0.0)
+                    return llvm::ConstantFP::get(getFloatType(), std::fmod(lv, rv));
+                if (expr->op == "**")
+                    return llvm::ConstantFP::get(getFloatType(), std::pow(lv, rv));
                 if (expr->op == "==" || expr->op == "!=" || expr->op == "<" || expr->op == "<=" || expr->op == ">" ||
                     expr->op == ">=") {
                     int64_t result = 0;

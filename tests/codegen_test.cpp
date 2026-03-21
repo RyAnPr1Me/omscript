@@ -4279,6 +4279,43 @@ TEST(CodegenTest, FloatConstantFoldComparison) {
     EXPECT_FALSE(hasFCmp) << "Float comparison of constants should be folded at compile time";
 }
 
+TEST(CodegenTest, FloatConstantFoldMod) {
+    // 7.0 % 3.0 should be folded to 1.0 at compile time (fmod)
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return 7.0 % 3.0; }", codegen);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    bool hasFRem = false;
+    for (auto& BB : *mainFn) {
+        for (auto& I : BB) {
+            if (I.getOpcode() == llvm::Instruction::FRem)
+                hasFRem = true;
+        }
+    }
+    EXPECT_FALSE(hasFRem) << "Float modulo of constants should be folded at compile time";
+}
+
+TEST(CodegenTest, FloatConstantFoldPow) {
+    // 2.0 ** 3.0 should be folded to 8.0 at compile time
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return 2.0 ** 3.0; }", codegen);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+    // After constant folding, there should be no call to llvm.pow
+    bool hasPowCall = false;
+    for (auto& BB : *mainFn) {
+        for (auto& I : BB) {
+            if (auto* call = llvm::dyn_cast<llvm::CallInst>(&I)) {
+                if (auto* callee = call->getCalledFunction()) {
+                    if (callee->getName().contains("pow"))
+                        hasPowCall = true;
+                }
+            }
+        }
+    }
+    EXPECT_FALSE(hasPowCall) << "Float power of constants should be folded at compile time";
+}
+
 // ===========================================================================
 // Same-value comparison identities
 // ===========================================================================
