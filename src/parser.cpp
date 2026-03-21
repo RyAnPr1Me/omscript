@@ -236,7 +236,7 @@ void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
 
     std::string filename = fileToken.lexeme;
     // Append .om extension if not already present
-    if (filename.size() < 3 || filename.substr(filename.size() - 3) != ".om") {
+    if (filename.size() < 3 || filename.compare(filename.size() - 3, 3, ".om") != 0) {
         filename += ".om";
     }
 

@@ -1,6 +1,9 @@
 # Build artifacts
 build/
 build_*/
+build-bench-*/
+bench-pgo-profiles/
+pgo-profiles/
 *.o
 *.a
 *.so

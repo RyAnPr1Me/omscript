@@ -2,6 +2,7 @@
 #include "diagnostic.h"
 #include <cctype>
 #include <stdexcept>
+#include <string_view>
 #include <unordered_map>
 
 namespace omscript {
@@ -21,7 +22,10 @@ inline bool isAlnum(char c) {
 }
 } // namespace
 
-static const std::unordered_map<std::string, TokenType> keywords = {
+// Use string_view keys so keyword lookups avoid allocating a std::string
+// for every identifier token.  The string literals have static storage
+// duration so the views remain valid for the lifetime of the program.
+static const std::unordered_map<std::string_view, TokenType> keywords = {
     {"fn", TokenType::FN},         {"return", TokenType::RETURN},     {"if", TokenType::IF},
     {"else", TokenType::ELSE},     {"while", TokenType::WHILE},       {"do", TokenType::DO},
     {"for", TokenType::FOR},       {"var", TokenType::VAR},           {"const", TokenType::CONST},
@@ -245,14 +249,15 @@ Token Lexer::scanIdentifier() {
         advance();
     }
 
-    std::string id = source.substr(start, pos - start);
-
-    auto it = keywords.find(id);
+    // Look up the identifier in the keyword map using a string_view
+    // to avoid allocating a std::string for every keyword check.
+    std::string_view idView(source.data() + start, pos - start);
+    auto it = keywords.find(idView);
     if (it != keywords.end()) {
-        return makeToken(it->second, id);
+        return makeToken(it->second, std::string(idView));
     }
 
-    return makeToken(TokenType::IDENTIFIER, id);
+    return makeToken(TokenType::IDENTIFIER, std::string(idView));
 }
 
 Token Lexer::scanString() {

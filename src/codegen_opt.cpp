@@ -654,8 +654,7 @@ void CodeGenerator::runOptimizationPasses() {
     if (optimizationLevel >= OptimizationLevel::O3) {
         for (auto& F : *module) {
             if (F.isDeclaration()) continue;
-            std::string fname = std::string(F.getName());
-            if (userAnnotatedColdFunctions_.count(fname)) continue; // preserve @cold
+            if (userAnnotatedColdFunctions_.count(std::string(F.getName()))) continue; // preserve @cold
             F.removeFnAttr(llvm::Attribute::Cold);
             F.removeFnAttr(llvm::Attribute::MinSize);
         }
@@ -999,15 +998,23 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     // functions into call sites with many other inlined functions inflates
     // code size and causes I-cache pressure.  The inliner already handles
     // profitable inlining decisions via inlinehint + cost model.
+    //
+    // We collect OPTMAX function pointers in a single pass so that the later
+    // optimization loop can skip the name→string conversion per function.
     static constexpr unsigned kAlwaysInlineThreshold = 15; // instruction count
+    llvm::SmallVector<llvm::Function*, 16> optMaxFuncs;
     for (auto& func : module->functions()) {
-        if (!func.isDeclaration() && optMaxFunctions.count(std::string(func.getName()))) {
-            func.addFnAttr(llvm::Attribute::NoUnwind);
-            // Mark small OPTMAX helpers as always-inline candidates
-            if (func.getInstructionCount() < kAlwaysInlineThreshold) {
-                func.addFnAttr(llvm::Attribute::AlwaysInline);
-            }
+        if (func.isDeclaration())
+            continue;
+        llvm::StringRef name = func.getName();
+        if (!optMaxFunctions.count(std::string(name)))
+            continue;
+        func.addFnAttr(llvm::Attribute::NoUnwind);
+        // Mark small OPTMAX helpers as always-inline candidates
+        if (func.getInstructionCount() < kAlwaysInlineThreshold) {
+            func.addFnAttr(llvm::Attribute::AlwaysInline);
         }
+        optMaxFuncs.push_back(&func);
     }
 
     llvm::legacy::FunctionPassManager fpm(module.get());
@@ -1070,18 +1077,16 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     fpm.add(llvm::createDeadCodeEliminationPass());
 
     fpm.doInitialization();
-    for (auto& func : module->functions()) {
-        if (!func.isDeclaration() && optMaxFunctions.count(std::string(func.getName()))) {
-            // OPTMAX runs the aggressive pass stack three times to maximize optimization.
-            // Each iteration can expose new patterns for subsequent passes to simplify.
-            // Three iterations is the sweet spot: the first pass does heavy lifting,
-            // the second catches patterns exposed by loop/strength-reduce transforms,
-            // and the third cleans up residuals.  Beyond three, passes reach a fixed
-            // point and additional iterations produce no further changes.
-            constexpr int optMaxIterations = 3;
-            for (int i = 0; i < optMaxIterations; ++i) {
-                fpm.run(func);
-            }
+    for (llvm::Function* func : optMaxFuncs) {
+        // OPTMAX runs the aggressive pass stack three times to maximize optimization.
+        // Each iteration can expose new patterns for subsequent passes to simplify.
+        // Three iterations is the sweet spot: the first pass does heavy lifting,
+        // the second catches patterns exposed by loop/strength-reduce transforms,
+        // and the third cleans up residuals.  Beyond three, passes reach a fixed
+        // point and additional iterations produce no further changes.
+        constexpr int optMaxIterations = 3;
+        for (int i = 0; i < optMaxIterations; ++i) {
+            fpm.run(*func);
         }
     }
     fpm.doFinalization();

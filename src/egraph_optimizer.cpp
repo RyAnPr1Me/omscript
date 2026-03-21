@@ -112,6 +112,7 @@ static ClassId astToEGraph(EGraph& graph, const Expression* expr) {
     case ASTNodeType::CALL_EXPR: {
         auto* call = static_cast<const CallExpr*>(expr);
         std::vector<ClassId> argIds;
+        argIds.reserve(call->arguments.size());
         for (const auto& arg : call->arguments) {
             argIds.push_back(astToEGraph(graph, arg.get()));
         }
@@ -250,6 +251,7 @@ static std::unique_ptr<Expression> eNodeToAST(EGraph& graph, ClassId cls,
     // Function call
     if (node.op == Op::Call) {
         std::vector<std::unique_ptr<Expression>> args;
+        args.reserve(node.children.size());
         for (auto child : node.children) {
             args.push_back(eNodeToAST(graph, child, model, cache));
         }

@@ -87,15 +87,170 @@ jobs:
             mingw-w64-x86_64-llvm
             mingw-w64-x86_64-ninja
 
-      - name: Configure CMake
-        if: runner.os != 'Windows'
+      # ── PGO + LTO optimized build (Linux) ──────────────────────────
+      # Three-phase build: instrument → profile → rebuild.
+      # The instrumented compiler is run on the full integration test suite
+      # (~100+ .om files) to produce accurate profile data covering every
+      # compiler subsystem: lexer, parser, codegen, optimizer, e-graph,
+      # superoptimizer, builtins, and all optimization levels.
+      #
+      # IMPORTANT: GCC names .gcda profile files after the object file
+      # path, so both the instrumented build and the PGO-use rebuild MUST
+      # use the same build directory.  Using different directories (e.g.
+      # build-pgo-gen/ vs build/) causes a silent path mismatch and GCC
+      # ignores all profile data.
+
+      # Step 1: Build an instrumented compiler to generate profile data.
+      - name: "PGO Step 1: Build instrumented compiler (Linux)"
+        if: runner.os == 'Linux'
         shell: bash
         run: |
-          cmake_args=(-DCMAKE_BUILD_TYPE=Release "-DOMSC_VERSION=${{ steps.version.outputs.VERSION }}")
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=gcc \
+            -DCMAKE_CXX_COMPILER=g++ \
+            -DLLVM_DIR="$LLVM_DIR" \
+            -DPGO_GENERATE=ON \
+            -DPGO_PROFILE_DIR="$PWD/pgo-profiles" \
+            "-DOMSC_VERSION=${{ steps.version.outputs.VERSION }}"
+          cmake --build build --config Release --parallel "$(nproc)"
+
+      # Step 2: Run the instrumented compiler on comprehensive, real-world
+      # workloads to generate accurate profile data for all hot code paths.
+      - name: "PGO Step 2: Generate profile data (Linux)"
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          mkdir -p pgo-profiles
+          OMSC="./build/omsc"
+          PGO_COUNT=0
+
+          # ── Phase A: Compile ALL example .om files at multiple optimization
+          # levels.  This exercises the full compilation pipeline including
+          # lexing, parsing, type resolution, codegen, LLVM optimization
+          # passes, object file emission, and linking.
+          echo "=== PGO Phase A: Compiling example files ==="
+          for f in examples/*.om; do
+            [ -f "$f" ] || continue
+            for opt in -O0 -O1 -O2 -O3; do
+              "$OMSC" "$f" $opt -o /tmp/pgo_out 2>/dev/null && PGO_COUNT=$((PGO_COUNT + 1)) || true
+            done
+          done
+          echo "  Compiled $PGO_COUNT file+opt-level combinations"
+
+          # ── Phase B: Exercise front-end-only paths (lex, parse, emit-ir,
+          # dump-ast, dry-run) to profile the lexer and parser hot loops.
+          echo "=== PGO Phase B: Front-end profiling ==="
+          for f in examples/*.om; do
+            [ -f "$f" ] || continue
+            "$OMSC" lex "$f" > /dev/null 2>&1 || true
+            "$OMSC" parse "$f" > /dev/null 2>&1 || true
+            "$OMSC" emit-ir "$f" > /dev/null 2>&1 || true
+          done
+
+          # ── Phase C: Compile feature-rich programs that stress specific
+          # subsystems: OPTMAX, struct field attributes, lambdas, string
+          # builtins, array higher-order functions, enum, try/catch, etc.
+          echo "=== PGO Phase C: Feature-specific workloads ==="
+          FEATURE_FILES=(
+            examples/optmax.om
+            examples/optimization_stress_test.om
+            examples/inlining_test.om
+            examples/array_higher_order_test.om
+            examples/enum_test.om
+            examples/lambda_test.om
+            examples/struct_test.om
+            examples/try_catch.om
+            examples/string_builtins_test.om
+            examples/float_test.om
+            examples/foreach_test.om
+            examples/switch_test.om
+            examples/type_annotation_test.om
+          )
+          for f in "${FEATURE_FILES[@]}"; do
+            [ -f "$f" ] || continue
+            "$OMSC" "$f" -O3 -o /tmp/pgo_out 2>/dev/null || true
+          done
+
+          # ── Phase D: Exercise CLI paths (help, version, errors).
+          echo "=== PGO Phase D: CLI and error paths ==="
+          "$OMSC" --help > /dev/null 2>&1 || true
+          "$OMSC" --version > /dev/null 2>&1 || true
+          "$OMSC" /dev/null 2>/dev/null || true  # error: empty file
+
+          # ── Verify profile data was generated ────────────────────────
+          # GCC creates .gcda files; Clang creates .profraw files.
+          GCDA_COUNT=$(find pgo-profiles -name '*.gcda' 2>/dev/null | wc -l)
+          PROFRAW_COUNT=$(find pgo-profiles -name '*.profraw' 2>/dev/null | wc -l)
+          echo ""
+          echo "=== PGO profile summary ==="
+          echo "  .gcda  files: $GCDA_COUNT"
+          echo "  .profraw files: $PROFRAW_COUNT"
+          echo "  Total compilations: $PGO_COUNT"
+
+          if [ "$GCDA_COUNT" -gt 0 ]; then
+            # GCC: PGO_USE takes the profile directory directly.
+            echo "PGO_PROFILE_PATH=$PWD/pgo-profiles" >> "$GITHUB_ENV"
+            echo "  → GCC profiles detected; will use directory for PGO rebuild"
+          elif [ "$PROFRAW_COUNT" -gt 0 ]; then
+            # Clang: merge .profraw → .profdata, then PGO_USE takes the file.
+            PROFDATA="$PWD/pgo-profiles/default.profdata"
+            if command -v llvm-profdata-18 &>/dev/null; then
+              llvm-profdata-18 merge -output="$PROFDATA" pgo-profiles/*.profraw
+            elif command -v llvm-profdata &>/dev/null; then
+              llvm-profdata merge -output="$PROFDATA" pgo-profiles/*.profraw
+            fi
+            if [ -f "$PROFDATA" ]; then
+              echo "PGO_PROFILE_PATH=$PROFDATA" >> "$GITHUB_ENV"
+              echo "  → Clang profiles merged to $PROFDATA"
+            else
+              echo "::warning::PGO profile merge failed; building without PGO"
+            fi
+          else
+            echo "::warning::No PGO profile data generated; building without PGO"
+          fi
+
+      # Step 3: Reconfigure the SAME build directory with PGO-use + LTO.
+      # Using the same directory is critical: GCC embeds the build-dir path
+      # in .gcda filenames, so a different directory causes a silent mismatch.
+      - name: "PGO Step 3: Rebuild with PGO + LTO (Linux)"
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          pgo_args=()
+          if [ -n "${PGO_PROFILE_PATH:-}" ] && [ -e "${PGO_PROFILE_PATH:-}" ]; then
+            pgo_args+=("-DPGO_USE=$PGO_PROFILE_PATH")
+            echo "PGO profile-use: $PGO_PROFILE_PATH"
+          else
+            echo "::warning::No PGO profile available; building with LTO only"
+          fi
+
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=gcc \
+            -DCMAKE_CXX_COMPILER=g++ \
+            -DLLVM_DIR="$LLVM_DIR" \
+            -DLTO=ON \
+            -DPGO_GENERATE=OFF \
+            "${pgo_args[@]}" \
+            "-DOMSC_VERSION=${{ steps.version.outputs.VERSION }}"
+          cmake --build build --config Release --parallel "$(nproc)"
+
+      # ── Standard build (macOS / Windows) ────────────────────────────
+      - name: Configure CMake (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          cmake_args=(-DCMAKE_BUILD_TYPE=Release -DLTO=ON "-DOMSC_VERSION=${{ steps.version.outputs.VERSION }}")
           if [ -n "${LLVM_DIR:-}" ]; then
             cmake_args+=("-DLLVM_DIR=$LLVM_DIR")
           fi
           cmake -B build "${cmake_args[@]}"
+
+      - name: Build compiler (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: cmake --build build --config Release --parallel 4
 
       - name: Configure CMake (Windows)
         if: runner.os == 'Windows'
@@ -104,11 +259,6 @@ jobs:
           cmake -G Ninja -B build \
             -DCMAKE_BUILD_TYPE=Release \
             "-DOMSC_VERSION=${{ steps.version.outputs.VERSION }}"
-
-      - name: Build compiler
-        if: runner.os != 'Windows'
-        shell: bash
-        run: cmake --build build --config Release --parallel 4
 
       - name: Build compiler (Windows)
         if: runner.os == 'Windows'
