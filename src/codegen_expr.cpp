@@ -434,9 +434,9 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         // around the 64-bit range, causing a tiny allocation followed by a
         // heap-buffer-overflow in the strcat loop.  Use umul.with.overflow to
         // detect this and abort with a clear error message.
-        llvm::Function* umulOvf = OMSC_GET_INTRINSIC(
+        llvm::Function* overflowIntrinsic = OMSC_GET_INTRINSIC(
             module.get(), llvm::Intrinsic::umul_with_overflow, {getDefaultType()});
-        llvm::Value* mulResult = builder->CreateCall(umulOvf, {strLen, countVal}, "strmul.ovf");
+        llvm::Value* mulResult = builder->CreateCall(overflowIntrinsic, {strLen, countVal}, "strmul.ovf");
         llvm::Value* totalLen = builder->CreateExtractValue(mulResult, 0, "strmul.total");
         llvm::Value* overflowed = builder->CreateExtractValue(mulResult, 1, "strmul.ovflag");
 
@@ -1283,7 +1283,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         // Negative exponent: base**(-n) = 1 / base**n in integer math.
         // |base| > 1 → truncates to 0; base=1 → 1; base=-1 → ±1.
         builder->SetInsertPoint(negExpBB);
-        llvm::Value* negOne = llvm::ConstantInt::get(getDefaultType(), -1ULL, true);
+        llvm::Value* negOne = llvm::ConstantInt::get(getDefaultType(), -1, true);
         llvm::Value* isBaseOne = builder->CreateICmpEQ(left, one, "pow.isone");
         llvm::Value* isBaseNegOne = builder->CreateICmpEQ(left, negOne, "pow.isnegone");
         // For base=-1: result is -1 if exponent is odd, 1 if even.
