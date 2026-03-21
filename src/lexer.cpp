@@ -25,11 +25,7 @@ inline bool isAlnum(char c) {
 // Use string_view keys so keyword lookups avoid allocating a std::string
 // for every identifier token.  The string literals have static storage
 // duration so the views remain valid for the lifetime of the program.
-struct StringViewHash {
-    using is_transparent = void;
-    size_t operator()(std::string_view sv) const { return std::hash<std::string_view>{}(sv); }
-};
-static const std::unordered_map<std::string_view, TokenType, StringViewHash> keywords = {
+static const std::unordered_map<std::string_view, TokenType> keywords = {
     {"fn", TokenType::FN},         {"return", TokenType::RETURN},     {"if", TokenType::IF},
     {"else", TokenType::ELSE},     {"while", TokenType::WHILE},       {"do", TokenType::DO},
     {"for", TokenType::FOR},       {"var", TokenType::VAR},           {"const", TokenType::CONST},
