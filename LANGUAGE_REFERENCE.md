@@ -254,7 +254,7 @@ identifier := [a-zA-Z_][a-zA-Z0-9_]*
 
 ### 4.4 Keywords
 
-The following 24 words are reserved:
+The following words are reserved:
 
 | Keyword | Purpose |
 |---------|---------|
@@ -282,6 +282,13 @@ The following 24 words are reserved:
 | `true` | Boolean true (1) |
 | `false` | Boolean false (0) |
 | `null` | Null literal |
+| `move` | Transfer ownership of a variable |
+| `invalidate` | Explicitly invalidate a variable (end its lifetime) |
+| `borrow` | Borrow a reference to a variable |
+| `prefetch` | Declare a register-pinned variable with optional cache prefetch |
+| `likely` | Branch prediction hint: then-branch is expected |
+| `unlikely` | Branch prediction hint: then-branch is rare |
+| `OPTMAX` | Begin exhaustive optimization block |
 
 ### 4.5 Literals
 
@@ -587,6 +594,8 @@ Functions can be annotated with `@` directives placed before the `fn` keyword. T
 | `@noreturn` | `noreturn` | Function never returns (e.g., `exit_program`) — enables dead code after call |
 | `@static` | internal linkage | Not visible outside the module — enables constant propagation, dead arg elimination |
 | `@flatten` | `flatten` | Inline all callees within this function — maximizes optimization scope |
+| `@unroll` | `llvm.loop.unroll.full` | Aggressively unroll all loops in this function — eliminates loop overhead |
+| `@nounroll` | `llvm.loop.unroll.disable` | Disable loop unrolling in this function — reduces code size, I-cache pressure |
 
 ```javascript
 @inline
@@ -624,6 +633,15 @@ fn die(msg) {
     println(msg);
     exit_program(1);
 }
+
+@unroll
+fn fast_sum(n: int) -> int {
+    var total: int = 0;
+    for (i: int in 0...16) {
+        total = total + i;
+    }
+    return total;
+}
 ```
 
 **Notes:**
@@ -631,6 +649,7 @@ fn die(msg) {
 - `@cold` functions are preserved through the post-pipeline attribute stripping (unlike LLVM's auto-detected cold functions which are stripped to prevent false positives).
 - `@pure` implies the function only reads memory and has no observable side effects. Do not use on functions that call `print`, modify arrays, or write to files.
 - `@static` changes the function's linkage to internal, which is only meaningful for AOT compilation — it has no effect in JIT mode.
+- `@unroll` and `@nounroll` apply to **all** loops within the annotated function. `@unroll` is most effective on small constant-trip-count loops; on large or variable-trip-count loops, the optimizer may ignore the hint if full unrolling would exceed code-size thresholds.
 
 ### 6.9 Parameter Annotations
 
@@ -656,6 +675,61 @@ fn process(@prefetch data: int, size: int) -> int {
 3. If the prefetched parameter **is** the return value, the cache line is preserved — ownership of the cached data transfers to the caller.
 
 This provides a deterministic cache management model: prefetched data is automatically invalidated at scope exit unless explicitly transferred out via `return`.
+
+### 6.10 Prefetch Variable Statements
+
+The `prefetch` keyword can also be used as a statement to declare or mark a variable for register pinning. Prefetch-tagged variables are promoted directly to CPU registers by SROA/mem2reg and remain live until explicitly invalidated. The prefetch hint is only meaningful if the containing function or loop survives past codegen (is not optimized away).
+
+**Declaration form:**
+
+```javascript
+prefetch [hot] [immut] var name[:type] = expr;
+```
+
+**Standalone form (existing variable):**
+
+```javascript
+prefetch name;
+```
+
+**Examples:**
+
+```javascript
+fn compute(x: int) -> int {
+    prefetch var val:i32 = x;        // register-pinned, promoted by mem2reg
+    var result = val + 10;
+    var doubled = val * 2;
+    invalidate val;                  // required before return
+    return result + doubled;
+}
+
+fn compute_hot(x: int) -> int {
+    prefetch hot var v:i64 = x;      // high-locality prefetch on pointed-to memory
+    var a = v + 1;
+    invalidate v;
+    return a;
+}
+
+fn compute_immut(x: int) -> int {
+    prefetch immut var c:i32 = x;    // invariant — LLVM can hoist/CSE loads
+    var r = c + c;
+    invalidate c;
+    return r;
+}
+```
+
+**Attributes:**
+
+| Attribute | Effect |
+|-----------|--------|
+| `hot` | For i64/ptr variables, the pointed-to memory is prefetched with locality=3 (keep in all cache levels). Default is locality=2. |
+| `immut` | Loads of this variable are marked with `!invariant.load` metadata, allowing LLVM to hoist and CSE them aggressively. |
+
+**Register Promotion Semantics:**
+- The `prefetch` statement does **not** emit `llvm.prefetch` on the variable's alloca — this would prevent SROA/mem2reg from promoting it to an SSA register.
+- For variables that hold pointer-sized values (i64 or ptr types), a value-based prefetch is emitted: the variable's value is treated as a memory address and `llvm.prefetch` is called on the pointed-to memory.
+- All prefetched variables must be explicitly invalidated (`invalidate name;`) before the function returns. The compiler emits a compile-time error if any prefetched variable is still live at a return statement.
+- Variables being returned (directly or via `move`) are exempt from the invalidation requirement.
 
 ---
 
@@ -903,6 +977,34 @@ if (condition) {
 if (x > 0) return x;
 else return -x;
 ```
+
+#### Branch Prediction Hints: `likely` / `unlikely`
+
+The `likely` and `unlikely` keywords can precede an `if` statement to provide branch prediction hints. The compiler emits LLVM branch weight metadata (2000:1 ratio) that guides the CPU's branch predictor and the code layout optimizer.
+
+```javascript
+// Hint: the condition is usually true — optimize for the then-branch
+likely if (n > 0) {
+    return compute(n);
+} else {
+    return 0;
+}
+
+// Hint: the condition is usually false — optimize for the else-branch
+unlikely if (error_code != 0) {
+    handle_error(error_code);
+}
+```
+
+| Keyword | Branch Weight | Effect |
+|---------|--------------|--------|
+| `likely` | then=2000, else=1 | Then-branch is the hot path; code layout favors fall-through to then |
+| `unlikely` | then=1, else=2000 | Then-branch is the cold path; else-branch (or fall-through) is hot |
+
+**Notes:**
+- `likely`/`unlikely` are pure hints — they do not change program semantics.
+- At O2+, the LLVM backend uses these weights for block placement, reducing branch mispredictions.
+- The HGOE (Hardware Graph Optimizer) also uses exit-block heuristics for branch layout when no explicit hints are provided.
 
 ### 8.2 While Loop
 
