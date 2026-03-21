@@ -2798,15 +2798,19 @@ std::vector<RewriteRule> getComparisonRules() {
             return g.addBinOp(Op::Lt, s.at("a"), s.at("b"));
         });
 
-    // ── Logical identity: x && x → x ────────────────────────────────────
+    // ── Logical identity: x && x → x != 0 (boolean conversion) ────────
     rules.emplace_back("logand_self",
         P::OpPat(Op::LogAnd, {P::Wild("x"), P::Wild("x")}),
-        [](EGraph&, const Subst& s) { return s.at("x"); });
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Ne, s.at("x"), g.addConst(0));
+        });
 
-    // ── Logical identity: x || x → x ────────────────────────────────────
+    // ── Logical identity: x || x → x != 0 (boolean conversion) ──────
     rules.emplace_back("logor_self",
         P::OpPat(Op::LogOr, {P::Wild("x"), P::Wild("x")}),
-        [](EGraph&, const Subst& s) { return s.at("x"); });
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Ne, s.at("x"), g.addConst(0));
+        });
 
     // ── Logical annihilation: x && 0 → 0 ────────────────────────────────
     rules.emplace_back("logand_zero",
@@ -2818,15 +2822,19 @@ std::vector<RewriteRule> getComparisonRules() {
         P::OpPat(Op::LogAnd, {P::ConstPat(0), P::Wild("x")}),
         [](EGraph& g, const Subst&) { return g.addConst(0); });
 
-    // ── Logical identity: x || 0 → x ────────────────────────────────────
+    // ── Logical identity: x || 0 → x != 0 (boolean conversion) ────────
     rules.emplace_back("logor_zero",
         P::OpPat(Op::LogOr, {P::Wild("x"), P::ConstPat(0)}),
-        [](EGraph&, const Subst& s) { return s.at("x"); });
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Ne, s.at("x"), g.addConst(0));
+        });
 
-    // ── Logical identity: 0 || x → x ────────────────────────────────────
+    // ── Logical identity: 0 || x → x != 0 (boolean conversion) ──────
     rules.emplace_back("logor_zero_left",
         P::OpPat(Op::LogOr, {P::ConstPat(0), P::Wild("x")}),
-        [](EGraph&, const Subst& s) { return s.at("x"); });
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Ne, s.at("x"), g.addConst(0));
+        });
 
     // ── Ternary same-branch: cond ? x : x → x ──────────────────────────
     rules.emplace_back("ternary_same",
@@ -2851,15 +2859,19 @@ std::vector<RewriteRule> getComparisonRules() {
             return g.add(ternaryNode);
         });
 
-    // ── Logical AND identity: x && 1 → x ────────────────────────────────
+    // ── Logical AND identity: x && 1 → x != 0 (boolean conversion) ────
     rules.emplace_back("logand_one",
         P::OpPat(Op::LogAnd, {P::Wild("x"), P::ConstPat(1)}),
-        [](EGraph&, const Subst& s) { return s.at("x"); });
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Ne, s.at("x"), g.addConst(0));
+        });
 
-    // ── Logical AND identity: 1 && x → x ────────────────────────────────
+    // ── Logical AND identity: 1 && x → x != 0 (boolean conversion) ──
     rules.emplace_back("logand_one_left",
         P::OpPat(Op::LogAnd, {P::ConstPat(1), P::Wild("x")}),
-        [](EGraph&, const Subst& s) { return s.at("x"); });
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Ne, s.at("x"), g.addConst(0));
+        });
 
     // ── Logical OR annihilation: x || 1 → 1 ─────────────────────────────
     rules.emplace_back("logor_one",

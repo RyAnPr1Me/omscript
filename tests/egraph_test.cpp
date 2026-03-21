@@ -946,25 +946,31 @@ TEST(EGraphTest, StrengthReductionMul7) {
 }
 
 TEST(EGraphTest, LogAndSelf) {
+    // x && x → x != 0 (boolean conversion)
     EGraph g;
     ClassId x = g.addVar("x");
     ClassId expr = g.addBinOp(Op::LogAnd, x, x);
+    ClassId zero = g.addConst(0);
+    ClassId expected = g.addBinOp(Op::Ne, x, zero);
 
     auto rules = getComparisonRules();
     g.saturate(rules);
 
-    EXPECT_EQ(g.find(expr), g.find(x));
+    EXPECT_EQ(g.find(expr), g.find(expected));
 }
 
 TEST(EGraphTest, LogOrSelf) {
+    // x || x → x != 0 (boolean conversion)
     EGraph g;
     ClassId x = g.addVar("x");
     ClassId expr = g.addBinOp(Op::LogOr, x, x);
+    ClassId zero = g.addConst(0);
+    ClassId expected = g.addBinOp(Op::Ne, x, zero);
 
     auto rules = getComparisonRules();
     g.saturate(rules);
 
-    EXPECT_EQ(g.find(expr), g.find(x));
+    EXPECT_EQ(g.find(expr), g.find(expected));
 }
 
 TEST(EGraphTest, LogAndZero) {
@@ -980,15 +986,17 @@ TEST(EGraphTest, LogAndZero) {
 }
 
 TEST(EGraphTest, LogOrZero) {
+    // x || 0 → x != 0 (boolean conversion)
     EGraph g;
     ClassId x = g.addVar("x");
     ClassId zero = g.addConst(0);
     ClassId expr = g.addBinOp(Op::LogOr, x, zero);
+    ClassId expected = g.addBinOp(Op::Ne, x, zero);
 
     auto rules = getComparisonRules();
     g.saturate(rules);
 
-    EXPECT_EQ(g.find(expr), g.find(x));
+    EXPECT_EQ(g.find(expr), g.find(expected));
 }
 
 TEST(EGraphTest, TernarySameBranch) {
@@ -1377,16 +1385,18 @@ TEST(EGraphTest, TernaryNotCondFlip) {
 }
 
 TEST(EGraphTest, LogAndOne) {
-    // x && 1 → x
+    // x && 1 → x != 0 (boolean conversion)
     EGraph g;
     ClassId x = g.addVar("x");
     ClassId one = g.addConst(1);
+    ClassId zero = g.addConst(0);
     ClassId expr = g.addBinOp(Op::LogAnd, x, one);
+    ClassId expected = g.addBinOp(Op::Ne, x, zero);
 
     auto rules = getComparisonRules();
     g.saturate(rules);
 
-    EXPECT_EQ(g.find(expr), g.find(x));
+    EXPECT_EQ(g.find(expr), g.find(expected));
 }
 
 TEST(EGraphTest, LogOrOne) {

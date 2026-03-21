@@ -222,6 +222,8 @@ std::unique_ptr<Expression> optimizeOptMaxBinary(const std::string& op, std::uni
         long long lval = leftLiteral->intValue;
         if (lval == 0 && op == "+")
             return right; // 0 + x → x
+        if (lval == 0 && op == "-")
+            return std::make_unique<UnaryExpr>("-", std::move(right)); // 0 - x → -x
         if (lval == 0 && (op == "*" || op == "&") && isPureExpression(right.get()))
             return std::make_unique<LiteralExpr>(static_cast<long long>(0)); // 0 * x, 0 & x → 0
         if (lval == 0 && (op == "|" || op == "^"))
@@ -230,6 +232,8 @@ std::unique_ptr<Expression> optimizeOptMaxBinary(const std::string& op, std::uni
             return right; // 1 * x → x
         if (lval == 1 && op == "**" && isPureExpression(right.get()))
             return std::make_unique<LiteralExpr>(static_cast<long long>(1)); // 1 ** x → 1
+        if (lval == -1 && op == "*")
+            return std::make_unique<UnaryExpr>("-", std::move(right)); // -1 * x → -x
     }
     if (rightLiteral && rightLiteral->literalType == LiteralExpr::LiteralType::INTEGER) {
         long long rval = rightLiteral->intValue;
@@ -247,23 +251,42 @@ std::unique_ptr<Expression> optimizeOptMaxBinary(const std::string& op, std::uni
             return left; // x / 1 → x
         if (rval == 1 && op == "**")
             return left; // x ** 1 → x
+        if (rval == 1 && op == "%")
+            return std::make_unique<LiteralExpr>(static_cast<long long>(0)); // x % 1 → 0
+        if (rval == -1 && op == "*")
+            return std::make_unique<UnaryExpr>("-", std::move(left)); // x * -1 → -x
+        if (rval == -1 && op == "/")
+            return std::make_unique<UnaryExpr>("-", std::move(left)); // x / -1 → -x
         if (rval == 0 && op == "**" && isPureExpression(left.get()))
             return std::make_unique<LiteralExpr>(static_cast<long long>(1)); // x ** 0 → 1
     }
 
     // Self-identifier optimizations: when both sides are the same identifier
     // (pure, no side effects), several operations simplify to constants.
-    // x - x → 0, x ^ x → 0, x & x → x, x | x → x
     {
         auto* leftId = dynamic_cast<IdentifierExpr*>(left.get());
         auto* rightId = dynamic_cast<IdentifierExpr*>(right.get());
         if (leftId && rightId && leftId->name == rightId->name) {
+            // x - x → 0, x ^ x → 0
             if (op == "-" || op == "^")
                 return std::make_unique<LiteralExpr>(static_cast<long long>(0));
+            // x & x → x, x | x → x
             if (op == "&" || op == "|") {
                 auto result = std::make_unique<IdentifierExpr>(leftId->name);
                 return result;
             }
+            // x == x → 1, x <= x → 1, x >= x → 1
+            if (op == "==" || op == "<=" || op == ">=")
+                return std::make_unique<LiteralExpr>(static_cast<long long>(1));
+            // x != x → 0, x < x → 0, x > x → 0
+            if (op == "!=" || op == "<" || op == ">")
+                return std::make_unique<LiteralExpr>(static_cast<long long>(0));
+            // x / x → 1 (safe: OPTMAX requires the user to guarantee no division by zero)
+            if (op == "/")
+                return std::make_unique<LiteralExpr>(static_cast<long long>(1));
+            // x % x → 0
+            if (op == "%")
+                return std::make_unique<LiteralExpr>(static_cast<long long>(0));
         }
     }
 
@@ -332,6 +355,12 @@ std::unique_ptr<Expression> optimizeOptMaxBinary(const std::string& op, std::uni
                     return std::make_unique<LiteralExpr>(result);
                 // Fall through to emit a runtime BinaryExpr on overflow.
             } else {
+                // Negative exponent: base**(-n) = 1 / base**n in integer math.
+                // |base| > 1 → truncates to 0; base=1 → 1; base=-1 → ±1.
+                if (lval == 1)
+                    return std::make_unique<LiteralExpr>(static_cast<long long>(1));
+                if (lval == -1)
+                    return std::make_unique<LiteralExpr>(static_cast<long long>((rval & 1) ? -1 : 1));
                 return std::make_unique<LiteralExpr>(static_cast<long long>(0));
             }
         }
