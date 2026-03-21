@@ -1,3 +1,5 @@
+#pragma once
+
 #ifndef JIT_PROFILER_H
 #define JIT_PROFILER_H
 

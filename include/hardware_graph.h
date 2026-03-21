@@ -1,3 +1,5 @@
+#pragma once
+
 #ifndef HARDWARE_GRAPH_H
 #define HARDWARE_GRAPH_H
 

@@ -7,17 +7,25 @@ Checks: >
   -bugprone-easily-swappable-parameters,
   -bugprone-narrowing-conversions,
   -bugprone-reserved-identifier,
+  misc-const-correctness,
   misc-redundant-expression,
   misc-unused-using-decls,
   modernize-use-nullptr,
   modernize-use-override,
   modernize-use-auto,
-  performance-unnecessary-value-param,
+  modernize-use-using,
   performance-for-range-copy,
+  performance-move-const-arg,
+  performance-unnecessary-copy-initialization,
+  performance-unnecessary-value-param,
   readability-redundant-string-cstr,
   readability-simplify-boolean-expr
 
 WarningsAsErrors: ''
 
 HeaderFilterRegex: '(include|runtime)/.*\.h$'
+
+CheckOptions:
+  - key: misc-const-correctness.WarnPointersAsValues
+    value: false
 ---

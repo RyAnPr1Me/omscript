@@ -1,3 +1,5 @@
+#pragma once
+
 #ifndef AOT_PROFILE_H
 #define AOT_PROFILE_H
 
