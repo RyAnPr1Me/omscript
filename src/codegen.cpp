@@ -887,6 +887,38 @@ llvm::Value* CodeGenerator::ensureFloat(llvm::Value* v) {
     return v;
 }
 
+llvm::Value* CodeGenerator::convertToVectorElement(llvm::Value* v, llvm::Type* elemTy) {
+    if (v->getType() == elemTy)
+        return v;
+    if (elemTy->isFloatTy()) {
+        if (v->getType()->isDoubleTy())
+            return builder->CreateFPTrunc(v, elemTy, "elem.fptrunc");
+        if (v->getType()->isIntegerTy())
+            return builder->CreateSIToFP(v, elemTy, "elem.sitofp");
+    } else if (elemTy->isDoubleTy()) {
+        if (v->getType()->isIntegerTy())
+            return builder->CreateSIToFP(v, elemTy, "elem.sitofp");
+        if (v->getType()->isFloatTy())
+            return builder->CreateFPExt(v, elemTy, "elem.fpext");
+    } else if (elemTy->isIntegerTy()) {
+        if (v->getType()->isDoubleTy() || v->getType()->isFloatTy())
+            return builder->CreateFPToSI(v, elemTy, "elem.fptosi");
+        if (v->getType()->isIntegerTy())
+            return builder->CreateIntCast(v, elemTy, true, "elem.icast");
+    }
+    return v;
+}
+
+llvm::Value* CodeGenerator::splatScalarToVector(llvm::Value* scalar, llvm::Type* vecTy) {
+    auto* fvt = llvm::cast<llvm::FixedVectorType>(vecTy);
+    scalar = convertToVectorElement(scalar, fvt->getElementType());
+    llvm::Value* undef = llvm::UndefValue::get(vecTy);
+    llvm::Value* ins = builder->CreateInsertElement(undef, scalar,
+        llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0), "splat.ins");
+    llvm::SmallVector<int, 16> mask(fvt->getNumElements(), 0);
+    return builder->CreateShuffleVector(ins, mask, "splat");
+}
+
 void CodeGenerator::beginScope() {
     validateScopeStacksMatch(__func__);
     scopeStack.emplace_back();
@@ -2555,6 +2587,8 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     prefetchedParams_.clear();
     prefetchedVars_.clear();
     prefetchedImmutVars_.clear();
+    registerVars_.clear();
+    simdVars_.clear();
 
     // Pre-populate stringVars_ for parameters known to receive string arguments.
     auto paramStrIt = funcParamStringTypes_.find(func->name);

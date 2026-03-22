@@ -100,6 +100,11 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
     if (prefetchedImmutVars_.count(expr->name)) {
         isInvariant = true;
     }
+    // Register variables are a promise to keep the value in a register —
+    // mark their loads as invariant so LLVM can hoist/CSE aggressively.
+    if (registerVars_.count(expr->name)) {
+        isInvariant = true;
+    }
     if (isInvariant) {
         if (auto* loadInst = llvm::dyn_cast<llvm::LoadInst>(load)) {
             loadInst->setMetadata(llvm::LLVMContext::MD_invariant_load,
@@ -226,41 +231,9 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         }
         // If one side is scalar, splat it to match the vector type.
         if (leftIsVec && !rightIsVec) {
-            auto* vecTy = llvm::cast<llvm::FixedVectorType>(left->getType());
-            llvm::Type* elemTy = vecTy->getElementType();
-            if (right->getType() != elemTy) {
-                if (elemTy->isFloatingPointTy() && right->getType()->isIntegerTy())
-                    right = builder->CreateSIToFP(right, elemTy, "simd.splat.cvt");
-                else if (elemTy->isIntegerTy() && right->getType()->isFloatingPointTy())
-                    right = builder->CreateFPToSI(right, elemTy, "simd.splat.cvt");
-                else if (elemTy->isIntegerTy() && right->getType()->isIntegerTy())
-                    right = builder->CreateIntCast(right, elemTy, true, "simd.splat.cvt");
-                else if (elemTy->isFloatTy() && right->getType()->isDoubleTy())
-                    right = builder->CreateFPTrunc(right, elemTy, "simd.splat.cvt");
-            }
-            llvm::Value* splat = llvm::UndefValue::get(vecTy);
-            splat = builder->CreateInsertElement(splat, right,
-                llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0), "simd.splat.ins");
-            llvm::SmallVector<int, 16> mask(vecTy->getNumElements(), 0);
-            right = builder->CreateShuffleVector(splat, mask, "simd.splat");
+            right = splatScalarToVector(right, left->getType());
         } else if (rightIsVec && !leftIsVec) {
-            auto* vecTy = llvm::cast<llvm::FixedVectorType>(right->getType());
-            llvm::Type* elemTy = vecTy->getElementType();
-            if (left->getType() != elemTy) {
-                if (elemTy->isFloatingPointTy() && left->getType()->isIntegerTy())
-                    left = builder->CreateSIToFP(left, elemTy, "simd.splat.cvt");
-                else if (elemTy->isIntegerTy() && left->getType()->isFloatingPointTy())
-                    left = builder->CreateFPToSI(left, elemTy, "simd.splat.cvt");
-                else if (elemTy->isIntegerTy() && left->getType()->isIntegerTy())
-                    left = builder->CreateIntCast(left, elemTy, true, "simd.splat.cvt");
-                else if (elemTy->isFloatTy() && left->getType()->isDoubleTy())
-                    left = builder->CreateFPTrunc(left, elemTy, "simd.splat.cvt");
-            }
-            llvm::Value* splat = llvm::UndefValue::get(vecTy);
-            splat = builder->CreateInsertElement(splat, left,
-                llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0), "simd.splat.ins");
-            llvm::SmallVector<int, 16> mask(vecTy->getNumElements(), 0);
-            left = builder->CreateShuffleVector(splat, mask, "simd.splat");
+            left = splatScalarToVector(left, right->getType());
         }
 
         auto* vecTy = llvm::cast<llvm::FixedVectorType>(left->getType());
@@ -1123,6 +1096,44 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     } else if (expr->op == "/" || expr->op == "%") {
         const bool isDivision = expr->op == "/";
 
+        // Strength reduction: unsigned-compatible division/modulo by power of 2.
+        // For signed division by a positive power of 2, we can use an
+        // arithmetic right shift with sign-correction for correct rounding
+        // toward zero (C/OmScript semantics).  For modulo, we use
+        // AND with (divisor - 1) after similar sign correction.
+        if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
+            const int64_t rv = ci->getSExtValue();
+            if (rv > 0) {
+                const int s = log2IfPowerOf2(rv);
+                if (s > 0) {
+                    if (isDivision) {
+                        // Signed division by power-of-2: (x + (x >> 63 & (2^s - 1))) >> s
+                        // This handles negative values correctly (rounds toward zero).
+                        auto* signBit = builder->CreateAShr(left,
+                            llvm::ConstantInt::get(getDefaultType(), 63), "div.sign");
+                        auto* correction = builder->CreateAnd(signBit,
+                            llvm::ConstantInt::get(getDefaultType(), (1LL << s) - 1), "div.corr");
+                        auto* corrected = builder->CreateAdd(left, correction, "div.adj");
+                        return builder->CreateAShr(corrected,
+                            llvm::ConstantInt::get(getDefaultType(), s), "div.shr");
+                    } else {
+                        // Signed modulo by power-of-2: x - ((x + (x >> 63 & (2^s - 1))) >> s) * 2^s
+                        // Equivalent to: x - (x / 2^s) * 2^s, but fully in shifts.
+                        auto* signBit = builder->CreateAShr(left,
+                            llvm::ConstantInt::get(getDefaultType(), 63), "mod.sign");
+                        auto* correction = builder->CreateAnd(signBit,
+                            llvm::ConstantInt::get(getDefaultType(), (1LL << s) - 1), "mod.corr");
+                        auto* corrected = builder->CreateAdd(left, correction, "mod.adj");
+                        auto* quotient = builder->CreateAShr(corrected,
+                            llvm::ConstantInt::get(getDefaultType(), s), "mod.quot");
+                        auto* product = builder->CreateShl(quotient,
+                            llvm::ConstantInt::get(getDefaultType(), s), "mod.prod");
+                        return builder->CreateSub(left, product, "mod.rem");
+                    }
+                }
+            }
+        }
+
         // Division/modulo by a non-zero constant: let the LLVM optimizer handle
         // strength reduction via InstCombine.  LLVM converts srem/sdiv by
         // constants to magic-number multiply-shift sequences, AND converts
@@ -1516,6 +1527,13 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
         codegenError("Unknown variable: " + expr->name, expr);
     }
     checkConstModification(expr->name, "modify");
+
+    // Register variables are a promise — they cannot be reassigned.
+    if (registerVars_.count(expr->name)) {
+        codegenError("Cannot reassign 'register' variable '" + expr->name +
+                         "' — register variables are immutable after initialization",
+                     expr);
+    }
 
     // Re-assigning to a dead (moved/invalidated) variable revives it.
     deadVars_.erase(expr->name);
@@ -1933,16 +1951,7 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
                     idxVal = builder->CreateIntCast(idxVal, llvm::Type::getInt32Ty(*context), true, "simd.idx");
                 // Convert value to match vector element type
                 auto* elemTy = llvm::cast<llvm::FixedVectorType>(vecTy)->getElementType();
-                if (newVal->getType() != elemTy) {
-                    if (elemTy->isFloatingPointTy() && newVal->getType()->isIntegerTy())
-                        newVal = builder->CreateSIToFP(newVal, elemTy, "simd.cvt");
-                    else if (elemTy->isIntegerTy() && newVal->getType()->isFloatingPointTy())
-                        newVal = builder->CreateFPToSI(newVal, elemTy, "simd.cvt");
-                    else if (elemTy->isIntegerTy() && newVal->getType()->isIntegerTy())
-                        newVal = builder->CreateIntCast(newVal, elemTy, true, "simd.cvt");
-                    else if (elemTy->isFloatTy() && newVal->getType()->isDoubleTy())
-                        newVal = builder->CreateFPTrunc(newVal, elemTy, "simd.cvt");
-                }
+                newVal = convertToVectorElement(newVal, elemTy);
                 llvm::Value* updated = builder->CreateInsertElement(vec, newVal, idxVal, "simd.insert");
                 builder->CreateStore(updated, alloca);
                 return updated;

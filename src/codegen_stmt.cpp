@@ -52,21 +52,7 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             llvm::Value* vec = llvm::UndefValue::get(vecTy);
             for (unsigned i = 0; i < numElems; ++i) {
                 llvm::Value* elem = generateExpression(arrExpr->elements[i].get());
-                // Convert element to the vector's element type.
-                if (elemTy->isFloatTy()) {
-                    if (elem->getType()->isDoubleTy())
-                        elem = builder->CreateFPTrunc(elem, elemTy, "simd.fptrunc");
-                    else if (elem->getType()->isIntegerTy())
-                        elem = builder->CreateSIToFP(elem, elemTy, "simd.sitofp");
-                } else if (elemTy->isDoubleTy()) {
-                    if (elem->getType()->isIntegerTy())
-                        elem = builder->CreateSIToFP(elem, elemTy, "simd.sitofp");
-                } else if (elemTy->isIntegerTy()) {
-                    if (elem->getType()->isDoubleTy())
-                        elem = builder->CreateFPToSI(elem, elemTy, "simd.fptosi");
-                    else if (elem->getType() != elemTy)
-                        elem = builder->CreateIntCast(elem, elemTy, true, "simd.icast");
-                }
+                elem = convertToVectorElement(elem, elemTy);
                 vec = builder->CreateInsertElement(vec, elem,
                     llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), i), "simd.ins");
             }
@@ -106,10 +92,21 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
     // LLVM's SROA/mem2reg will promote well-aligned scalar allocas to SSA
     // registers when possible.  We also track the variable so the optimizer
     // can apply additional hints.
+    // Register promise: `register var` guarantees the variable will be kept
+    // in a CPU register.  We enforce this by:
+    //   (1) marking the alloca with high alignment for SROA/mem2reg promotion
+    //   (2) treating the variable as immutable (reassignment is a compile error)
+    //   (3) marking loads with !invariant.load so LLVM can hoist/CSE them
+    // The variable must be initialized — uninitialized register vars are an error.
     if (stmt->isRegister) {
+        if (!stmt->initializer) {
+            codegenError("'register' variable '" + stmt->name + "' must be initialized", stmt);
+        }
         registerVars_.insert(stmt->name);
         if (allocaType->isIntegerTy() || allocaType->isDoubleTy() || allocaType->isFloatTy())
             alloca->setAlignment(llvm::Align(16));
+        if (allocaType->isVectorTy())
+            alloca->setAlignment(llvm::Align(32));
     }
 
     // Track SIMD variables for operator dispatch.
