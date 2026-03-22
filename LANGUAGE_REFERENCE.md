@@ -50,7 +50,7 @@ OmScript is a **low-level, C-like programming language** featuring:
 - **Adaptive JIT runtime** — A lightweight JIT runtime monitors function call counts and recompiles hot functions at higher optimization levels with profile-guided hints, producing even faster native code for performance-critical paths.
 - **Aggressive optimization** — Four optimization levels (O0–O3) plus a special OPTMAX directive that applies exhaustive multi-pass optimization to marked functions.
 - **Ownership system** — Optional `move`, `invalidate`, and `borrow` keywords enable compiler optimizations and catch use-after-move/invalidate bugs at compile time — without requiring ownership annotations on normal code.
-- **119 built-in standard library functions** — Math, array manipulation, string, character classification, type conversion, map/dictionary, file I/O, concurrency, and system functions, all compiled to native machine code.
+- **121 built-in standard library functions** — Math, array manipulation, string, character classification, type conversion, map/dictionary, file I/O, concurrency, and system functions, all compiled to native machine code.
 - **Structs** — Named record types with field access, mutation, and optional field-level optimization attributes.
 - **Module system** — `import` statements with circular-import detection.
 - **Generic function syntax** — Type-annotated generic parameters (type-erased at runtime).
@@ -1886,7 +1886,7 @@ fn main() {
 
 ## 18. Standard Library
 
-OmScript provides **119 built-in functions**. All stdlib functions are compiled directly to native machine code via LLVM IR.
+OmScript provides **121 built-in functions**. All stdlib functions are compiled directly to native machine code via LLVM IR.
 
 ### 18.1 I/O Functions
 
@@ -2717,11 +2717,11 @@ str_index_of("hello world", "xyz")    // -1
 
 #### `str_replace(s, old, new)`
 
-Returns a new string with the first occurrence of `old` replaced by `new`. If `old` is not found, returns a copy of the original string.
+Returns a new string with all occurrences of `old` replaced by `new`. If `old` is not found, returns a copy of the original string. If `old` is empty, returns a copy of the original string.
 
 ```javascript
 str_replace("hello world", "world", "there")  // "hello there"
-str_replace("abcabc", "b", "x")               // "axcabc"
+str_replace("abcabc", "b", "x")               // "axcaxc"
 ```
 
 #### `str_trim(s)`
@@ -2776,6 +2776,29 @@ Splits a string by a single-character delimiter, returning an array of substring
 ```javascript
 var parts = str_split("a,b,c", ",");
 // parts == ["a", "b", "c"], len(parts) == 3
+```
+
+#### `str_join(arr, delimiter)`
+
+Joins an array of strings into a single string, inserting `delimiter` between each element. This is the inverse of `str_split`.
+
+```javascript
+var parts = str_split("a,b,c", ",");
+str_join(parts, "-")     // "a-b-c"
+str_join(parts, "")      // "abc"
+str_join(parts, " :: ")  // "a :: b :: c"
+```
+
+#### `str_count(s, substring)`
+
+Counts the number of non-overlapping occurrences of `substring` in `s`. Returns `0` if `substring` is empty or not found.
+
+```javascript
+str_count("abcabcabc", "abc")  // 3
+str_count("hello", "l")        // 2
+str_count("aaa", "aa")         // 1 (non-overlapping)
+str_count("hello", "xyz")      // 0
+str_count("hello", "")         // 0
 ```
 
 #### `str_to_int(s)`
@@ -2907,7 +2930,7 @@ assert(0);          // always aborts: "Runtime error: assertion failed"
 | `str_lower(s)` | 1 | string | Lowercase version of string |
 | `str_contains(s, sub)` | 2 | 0/1 | Whether string contains substring |
 | `str_index_of(s, sub)` | 2 | index | Index of substring (-1 if not found) |
-| `str_replace(s, old, new)` | 3 | string | Replace first occurrence of `old` with `new` |
+| `str_replace(s, old, new)` | 3 | string | Replace all occurrences of `old` with `new` |
 | `str_trim(s)` | 1 | string | Remove leading/trailing whitespace |
 | `str_starts_with(s, p)` | 2 | 0/1 | Whether string starts with prefix |
 | `str_ends_with(s, p)` | 2 | 0/1 | Whether string ends with suffix |
@@ -2937,6 +2960,8 @@ assert(0);          // always aborts: "Runtime error: assertion failed"
 | `str_to_int(s)` | 1 | int | Parse string as base-10 integer |
 | `str_to_float(s)` | 1 | float | Parse string as float |
 | `str_split(s, delim)` | 2 | array | Split string by delimiter into array |
+| `str_join(arr, delim)` | 2 | string | Join array of strings with delimiter |
+| `str_count(s, sub)` | 2 | int | Count non-overlapping occurrences of substring |
 | `str_chars(s)` | 1 | array | Convert string to array of char codes |
 | `char_code(s, i)` | 2 | int | ASCII code of character at index `i` in string `s` |
 | `number_to_string(n)` | 1 | string | Convert integer or float to string |

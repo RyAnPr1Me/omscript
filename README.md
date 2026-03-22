@@ -23,7 +23,7 @@ A low-level, C-like programming language with dynamic typing and **automatic ref
 - **Default Parameters**: Optional function parameters with default values
 - **Null Coalescing Operator**: `??` for concise null/zero fallback expressions
 - **Multi-line Strings**: Triple-quoted `"""..."""` strings with embedded newlines
-- **119 Built-in Functions**: Math, array manipulation, strings, maps, file I/O, threading, character classification, type conversion, and system calls
+- **121 Built-in Functions**: Math, array manipulation, strings, maps, file I/O, threading, character classification, type conversion, and system calls
 - **Adaptive JIT Runtime**: Hot functions are automatically recompiled at higher optimization levels using runtime profiling data
 
 ## Optimization Pipeline
@@ -212,7 +212,9 @@ var sub = str_substr(s, 1, 3);            // "ell"
 var pos = str_index_of(s, "ll");          // 2
 var r = str_replace(s, "l", "r");         // "herro"
 var parts = str_split("a,b,c", ",");      // ["a", "b", "c"]
-var joined = str_concat("foo", "bar");    // "foobar"
+var joined = str_join(parts, "-");            // "a-b-c"
+var cnt = str_count("abcabc", "abc");         // 2
+var joined2 = str_concat("foo", "bar");       // "foobar"
 var trimmed = str_trim("  hi  ");         // "hi"
 var ts = to_string(42);                   // "42"
 var n2 = str_to_int("100");              // 100
@@ -308,7 +310,7 @@ OPTMAX!:
 var x = 10; /* inline */
 ```
 
-## Built-in Functions (110 total)
+## Built-in Functions (121 total)
 
 ### Math
 | Function | Description |
@@ -375,11 +377,13 @@ var x = 10; /* inline */
 | `str_substr(s, start, len)` | Substring |
 | `str_upper(s)` / `str_lower(s)` | Case conversion |
 | `str_trim(s)` | Strip leading/trailing whitespace |
-| `str_replace(s, old, new)` | Replace first occurrence |
+| `str_replace(s, old, new)` | Replace all occurrences |
 | `str_contains(s, sub)` | Substring test |
 | `str_starts_with(s, pre)` / `str_ends_with(s, suf)` | Prefix/suffix test |
 | `str_index_of(s, sub)` / `str_find(s, sub)` | Find position |
 | `str_split(s, delim)` | Split into array |
+| `str_join(arr, delim)` | Join array of strings with delimiter |
+| `str_count(s, sub)` | Count non-overlapping occurrences |
 | `str_chars(s)` | Array of character codes |
 | `str_repeat(s, n)` | Repeat n times |
 | `str_reverse(s)` | Reverse string |

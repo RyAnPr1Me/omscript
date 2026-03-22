@@ -289,6 +289,7 @@ test_program "examples/default_params_test.om" 8
 test_program "examples/array_copy_test.om" 21
 test_program "examples/float_test.om" 5
 test_program "examples/string_var_test.om" 0
+test_program "examples/string_join_count_test.om" 41
 test_program "examples/string_param_test.om" 0
 test_program "examples/print_return_test.om" 0
 test_program "examples/optmax_div_zero.om" 1

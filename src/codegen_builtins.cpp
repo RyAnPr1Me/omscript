@@ -55,7 +55,8 @@ enum class BuiltinId : uint8_t {
     THREAD_CREATE, THREAD_JOIN, MUTEX_NEW, MUTEX_LOCK, MUTEX_UNLOCK,
     MUTEX_DESTROY,
     SIN, COS, TAN, ASIN, ACOS, ATAN, ATAN2, EXP, LOG, LOG10, CBRT, HYPOT,
-    ARRAY_MIN, ARRAY_MAX, ARRAY_ANY, ARRAY_EVERY, ARRAY_FIND, ARRAY_COUNT
+    ARRAY_MIN, ARRAY_MAX, ARRAY_ANY, ARRAY_EVERY, ARRAY_FIND, ARRAY_COUNT,
+    STR_JOIN, STR_COUNT
 };
 
 static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
@@ -178,6 +179,8 @@ static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
     {"array_every", BuiltinId::ARRAY_EVERY},
     {"array_find", BuiltinId::ARRAY_FIND},
     {"array_count", BuiltinId::ARRAY_COUNT},
+    {"str_join", BuiltinId::STR_JOIN},
+    {"str_count", BuiltinId::STR_COUNT},
 };
 
 static BuiltinId lookupBuiltin(const std::string& name) {
@@ -3351,6 +3354,191 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         builder->SetInsertPoint(doneBB);
         return builder->CreatePtrToInt(buf, getDefaultType(), "chars.result");
+    }
+
+    // -----------------------------------------------------------------------
+    // str_join(arr, delim) — join array of strings with delimiter
+    // Inverse of str_split: concatenates array elements with delimiter between.
+    // -----------------------------------------------------------------------
+    if (bid == BuiltinId::STR_JOIN) {
+        validateArgCount(expr, "str_join", 2);
+        llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
+        llvm::Value* delimArg = generateExpression(expr->arguments[1].get());
+
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* arrPtr =
+            arrArg->getType()->isPointerTy()
+                ? arrArg
+                : builder->CreateIntToPtr(arrArg, ptrTy, "join.arrptr");
+        llvm::Value* delimPtr =
+            delimArg->getType()->isPointerTy()
+                ? delimArg
+                : builder->CreateIntToPtr(delimArg, ptrTy, "join.delim");
+
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one  = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* i8zero = llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0);
+
+        llvm::Value* arrLen  = builder->CreateLoad(getDefaultType(), arrPtr, "join.len");
+        llvm::Value* delimLen = builder->CreateCall(getOrDeclareStrlen(), {delimPtr}, "join.delimlen");
+
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+
+        // --- Pass 1: compute total output length ---
+        llvm::BasicBlock* lenPreBB = builder->GetInsertBlock();
+        llvm::BasicBlock* lenLoopBB = llvm::BasicBlock::Create(*context, "join.lenloop", function);
+        llvm::BasicBlock* lenBodyBB = llvm::BasicBlock::Create(*context, "join.lenbody", function);
+        llvm::BasicBlock* lenDoneBB = llvm::BasicBlock::Create(*context, "join.lendone", function);
+
+        builder->CreateBr(lenLoopBB);
+
+        builder->SetInsertPoint(lenLoopBB);
+        llvm::PHINode* li = builder->CreatePHI(getDefaultType(), 2, "join.li");
+        li->addIncoming(zero, lenPreBB);
+        llvm::PHINode* totalLen = builder->CreatePHI(getDefaultType(), 2, "join.totlen");
+        totalLen->addIncoming(zero, lenPreBB);
+        llvm::Value* lcond = builder->CreateICmpSLT(li, arrLen, "join.lcond");
+        builder->CreateCondBr(lcond, lenBodyBB, lenDoneBB);
+
+        builder->SetInsertPoint(lenBodyBB);
+        // Load string pointer from array slot (index li + 1)
+        llvm::Value* lslot = builder->CreateAdd(li, one, "join.lslot");
+        llvm::Value* lslotPtr = builder->CreateGEP(getDefaultType(), arrPtr, lslot, "join.lslotptr");
+        llvm::Value* elemInt = builder->CreateLoad(getDefaultType(), lslotPtr, "join.elemint");
+        llvm::Value* elemPtr = builder->CreateIntToPtr(elemInt, ptrTy, "join.elemptr");
+        llvm::Value* elemLen = builder->CreateCall(getOrDeclareStrlen(), {elemPtr}, "join.elemlen");
+        llvm::Value* newTotal = builder->CreateAdd(totalLen, elemLen, "join.newtot");
+        // Add delimiter length for all elements except the first
+        llvm::Value* isFirst = builder->CreateICmpEQ(li, zero, "join.isfirst");
+        llvm::Value* delimAdd = builder->CreateSelect(isFirst, zero, delimLen, "join.delimadd");
+        llvm::Value* newTotal2 = builder->CreateAdd(newTotal, delimAdd, "join.newtot2");
+        llvm::Value* nextLi = builder->CreateAdd(li, one, "join.nextli");
+        li->addIncoming(nextLi, lenBodyBB);
+        totalLen->addIncoming(newTotal2, lenBodyBB);
+        builder->CreateBr(lenLoopBB);
+
+        // --- Allocate output buffer ---
+        builder->SetInsertPoint(lenDoneBB);
+        llvm::Value* bufSize = builder->CreateAdd(totalLen, one, "join.bufsize");
+        llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bufSize}, "join.buf");
+        // Store null terminator at position 0 initially
+        builder->CreateStore(i8zero, buf);
+
+        // --- Pass 2: concatenate elements ---
+        llvm::BasicBlock* catPreBB = builder->GetInsertBlock();
+        llvm::BasicBlock* catLoopBB = llvm::BasicBlock::Create(*context, "join.catloop", function);
+        llvm::BasicBlock* catBodyBB = llvm::BasicBlock::Create(*context, "join.catbody", function);
+        llvm::BasicBlock* catDoneBB = llvm::BasicBlock::Create(*context, "join.catdone", function);
+
+        builder->CreateBr(catLoopBB);
+
+        builder->SetInsertPoint(catLoopBB);
+        llvm::PHINode* ci = builder->CreatePHI(getDefaultType(), 2, "join.ci");
+        ci->addIncoming(zero, catPreBB);
+        llvm::PHINode* writePos = builder->CreatePHI(getDefaultType(), 2, "join.wpos");
+        writePos->addIncoming(zero, catPreBB);
+        llvm::Value* ccond = builder->CreateICmpSLT(ci, arrLen, "join.ccond");
+        builder->CreateCondBr(ccond, catBodyBB, catDoneBB);
+
+        builder->SetInsertPoint(catBodyBB);
+        llvm::Value* dstPtr = builder->CreateGEP(llvm::Type::getInt8Ty(*context), buf, writePos, "join.dst");
+        // Copy delimiter before element (for all but first)
+        llvm::Value* ciIsFirst = builder->CreateICmpEQ(ci, zero, "join.cifirst");
+        llvm::Value* delimCopyLen = builder->CreateSelect(ciIsFirst, zero, delimLen, "join.dcplen");
+        // Conditionally copy delimiter
+        builder->CreateCall(getOrDeclareMemcpy(), {dstPtr, delimPtr, delimCopyLen});
+        llvm::Value* afterDelim = builder->CreateAdd(writePos, delimCopyLen, "join.afterdelim");
+        // Load and copy element
+        llvm::Value* cslot = builder->CreateAdd(ci, one, "join.cslot");
+        llvm::Value* cslotPtr = builder->CreateGEP(getDefaultType(), arrPtr, cslot, "join.cslotptr");
+        llvm::Value* celemInt = builder->CreateLoad(getDefaultType(), cslotPtr, "join.celemint");
+        llvm::Value* celemPtr = builder->CreateIntToPtr(celemInt, ptrTy, "join.celemptr");
+        llvm::Value* celemLen = builder->CreateCall(getOrDeclareStrlen(), {celemPtr}, "join.celemlen");
+        llvm::Value* elemDst = builder->CreateGEP(llvm::Type::getInt8Ty(*context), buf, afterDelim, "join.elemdst");
+        builder->CreateCall(getOrDeclareMemcpy(), {elemDst, celemPtr, celemLen});
+        llvm::Value* afterElem = builder->CreateAdd(afterDelim, celemLen, "join.afterelem");
+        llvm::Value* nextCi = builder->CreateAdd(ci, one, "join.nextci");
+        ci->addIncoming(nextCi, catBodyBB);
+        writePos->addIncoming(afterElem, catBodyBB);
+        builder->CreateBr(catLoopBB);
+
+        // --- Null-terminate and return ---
+        builder->SetInsertPoint(catDoneBB);
+        llvm::Value* endPtr = builder->CreateGEP(llvm::Type::getInt8Ty(*context), buf, writePos, "join.end");
+        builder->CreateStore(i8zero, endPtr);
+        stringReturningFunctions_.insert("str_join");
+        return buf;
+    }
+
+    // -----------------------------------------------------------------------
+    // str_count(s, sub) — count non-overlapping occurrences of substring
+    // -----------------------------------------------------------------------
+    if (bid == BuiltinId::STR_COUNT) {
+        validateArgCount(expr, "str_count", 2);
+        llvm::Value* strArg = generateExpression(expr->arguments[0].get());
+        llvm::Value* subArg = generateExpression(expr->arguments[1].get());
+
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* strPtr =
+            strArg->getType()->isPointerTy()
+                ? strArg
+                : builder->CreateIntToPtr(strArg, ptrTy, "scount.str");
+        llvm::Value* subPtr =
+            subArg->getType()->isPointerTy()
+                ? subArg
+                : builder->CreateIntToPtr(subArg, ptrTy, "scount.sub");
+
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* nullPtr = llvm::ConstantPointerNull::get(ptrTy);
+
+        llvm::Value* subLen = builder->CreateCall(getOrDeclareStrlen(), {subPtr}, "scount.sublen");
+
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+
+        // If sub is empty, return 0 (avoid infinite loop)
+        llvm::BasicBlock* emptySubBB = llvm::BasicBlock::Create(*context, "scount.emptysub", function);
+        llvm::BasicBlock* mainBB = llvm::BasicBlock::Create(*context, "scount.main", function);
+        llvm::Value* subIsEmpty = builder->CreateICmpEQ(subLen, zero, "scount.isempty");
+        llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "scount.merge", function);
+        builder->CreateCondBr(subIsEmpty, emptySubBB, mainBB);
+
+        builder->SetInsertPoint(emptySubBB);
+        builder->CreateBr(mergeBB);
+
+        // Main counting loop using strstr
+        builder->SetInsertPoint(mainBB);
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "scount.loop", function);
+        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "scount.body", function);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "scount.done", function);
+
+        builder->CreateBr(loopBB);
+
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* cursor = builder->CreatePHI(ptrTy, 2, "scount.cursor");
+        cursor->addIncoming(strPtr, mainBB);
+        llvm::PHINode* count = builder->CreatePHI(getDefaultType(), 2, "scount.count");
+        count->addIncoming(zero, mainBB);
+
+        llvm::Value* found = builder->CreateCall(getOrDeclareStrstr(), {cursor, subPtr}, "scount.found");
+        llvm::Value* isNull = builder->CreateICmpEQ(found, nullPtr, "scount.isnull");
+        builder->CreateCondBr(isNull, doneBB, bodyBB);
+
+        builder->SetInsertPoint(bodyBB);
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* newCount = builder->CreateAdd(count, one, "scount.newcount");
+        llvm::Value* nextCursor = builder->CreateGEP(llvm::Type::getInt8Ty(*context), found, subLen, "scount.next");
+        cursor->addIncoming(nextCursor, bodyBB);
+        count->addIncoming(newCount, bodyBB);
+        builder->CreateBr(loopBB);
+
+        builder->SetInsertPoint(doneBB);
+        builder->CreateBr(mergeBB);
+
+        builder->SetInsertPoint(mergeBB);
+        llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "scount.result");
+        result->addIncoming(zero, emptySubBB);
+        result->addIncoming(count, doneBB);
+        return result;
     }
 
     // -----------------------------------------------------------------------
