@@ -58,7 +58,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `array_count(arr, "fn")` — count of elements matching predicate
 - New integration tests: `trig_math_test.om`, `array_utility_test.om`
 - 20 new unit tests covering all new builtins
-- Standard library count increased from 97 to 119 built-in functions
+- Standard library count increased from 97 to 115 built-in functions
 
 ### Changed
 - **Version bump** to 2.8.0
