@@ -6743,6 +6743,12 @@ TEST(CodegenTest, RegisterVarDecl) {
     ASSERT_NE(mod, nullptr);
 }
 
+TEST(CodegenTest, RegisterVarReassign) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { register var x = 0; x = 42; return x; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
 // ===========================================================================
 // **= and ??= compound assignment
 // ===========================================================================

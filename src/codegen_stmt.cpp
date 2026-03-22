@@ -90,18 +90,10 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
 
     // Register hint: set high alignment to encourage register promotion.
     // LLVM's SROA/mem2reg will promote well-aligned scalar allocas to SSA
-    // registers when possible.  We also track the variable so the optimizer
-    // can apply additional hints.
-    // Register promise: `register var` guarantees the variable will be kept
-    // in a CPU register.  We enforce this by:
-    //   (1) marking the alloca with high alignment for SROA/mem2reg promotion
-    //   (2) treating the variable as immutable (reassignment is a compile error)
-    //   (3) marking loads with !invariant.load so LLVM can hoist/CSE them
-    // The variable must be initialized — uninitialized register vars are an error.
+    // registers when possible.  The variable remains mutable — `register`
+    // is an optimization hint, not an immutability guarantee (matching C
+    // semantics).
     if (stmt->isRegister) {
-        if (!stmt->initializer) {
-            codegenError("'register' variable '" + stmt->name + "' must be initialized", stmt);
-        }
         registerVars_.insert(stmt->name);
         if (allocaType->isIntegerTy() || allocaType->isDoubleTy() || allocaType->isFloatTy())
             alloca->setAlignment(llvm::Align(16));

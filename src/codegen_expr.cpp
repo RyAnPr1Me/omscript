@@ -100,11 +100,7 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
     if (prefetchedImmutVars_.count(expr->name)) {
         isInvariant = true;
     }
-    // Register variables are a promise to keep the value in a register —
-    // mark their loads as invariant so LLVM can hoist/CSE aggressively.
-    if (registerVars_.count(expr->name)) {
-        isInvariant = true;
-    }
+    // Register variables are mutable; do not mark loads as invariant.
     if (isInvariant) {
         if (auto* loadInst = llvm::dyn_cast<llvm::LoadInst>(load)) {
             loadInst->setMetadata(llvm::LLVMContext::MD_invariant_load,
@@ -1527,13 +1523,6 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
         codegenError("Unknown variable: " + expr->name, expr);
     }
     checkConstModification(expr->name, "modify");
-
-    // Register variables are a promise — they cannot be reassigned.
-    if (registerVars_.count(expr->name)) {
-        codegenError("Cannot reassign 'register' variable '" + expr->name +
-                         "' — register variables are immutable after initialization",
-                     expr);
-    }
 
     // Re-assigning to a dead (moved/invalidated) variable revives it.
     deadVars_.erase(expr->name);

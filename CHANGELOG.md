@@ -5,6 +5,16 @@ All notable changes to the OmScript compiler will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.0] - 2026-03-22
+
+### Changed
+- **`register` keyword semantics** — `register var` is now a mutable optimization hint (matching C semantics) rather than an immutability guarantee. Variables declared with `register` can be reassigned; the keyword only provides alignment hints to encourage LLVM's SROA/mem2reg promotion to CPU registers.
+- **Documentation corrections** — Updated built-in function count from 92 to 119 across README.md and LANGUAGE_REFERENCE.md; fixed stale compiler version references
+- **Version bump** to 3.0.0
+
+### Fixed
+- **`register var` reassignment** — `register var counter = 0; counter = counter + 1;` now compiles correctly. Previously emitted a spurious "Cannot reassign 'register' variable" error that prevented using register variables in loops and accumulators.
+
 ## [2.9.0] - 2026-03-22
 
 ### Added
@@ -48,7 +58,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `array_count(arr, "fn")` — count of elements matching predicate
 - New integration tests: `trig_math_test.om`, `array_utility_test.om`
 - 20 new unit tests covering all new builtins
-- Standard library count increased from 92 to 110 built-in functions
+- Standard library count increased from 97 to 119 built-in functions
 
 ### Changed
 - **Version bump** to 2.8.0

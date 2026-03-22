@@ -23,7 +23,7 @@ A low-level, C-like programming language with dynamic typing and **automatic ref
 - **Default Parameters**: Optional function parameters with default values
 - **Null Coalescing Operator**: `??` for concise null/zero fallback expressions
 - **Multi-line Strings**: Triple-quoted `"""..."""` strings with embedded newlines
-- **92 Built-in Functions**: Math, array manipulation, strings, maps, file I/O, threading, character classification, type conversion, and system calls
+- **119 Built-in Functions**: Math, array manipulation, strings, maps, file I/O, threading, character classification, type conversion, and system calls
 - **Adaptive JIT Runtime**: Hot functions are automatically recompiled at higher optimization levels using runtime profiling data
 
 ## Optimization Pipeline

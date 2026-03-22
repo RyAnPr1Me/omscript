@@ -1,7 +1,7 @@
 # OmScript Language Reference
 
-> **Version:** 2.9.0  
-> **Compiler:** `omsc` — OmScript Compiler v2.8.0  
+> **Version:** 3.0.0  
+> **Compiler:** `omsc` — OmScript Compiler v3.0.0  
 > **Standard:** C++17 · LLVM Backend · Ahead-of-Time Compilation  
 > **License:** See repository root
 
@@ -50,7 +50,7 @@ OmScript is a **low-level, C-like programming language** featuring:
 - **Adaptive JIT runtime** — A lightweight JIT runtime monitors function call counts and recompiles hot functions at higher optimization levels with profile-guided hints, producing even faster native code for performance-critical paths.
 - **Aggressive optimization** — Four optimization levels (O0–O3) plus a special OPTMAX directive that applies exhaustive multi-pass optimization to marked functions.
 - **Ownership system** — Optional `move`, `invalidate`, and `borrow` keywords enable compiler optimizations and catch use-after-move/invalidate bugs at compile time — without requiring ownership annotations on normal code.
-- **92 built-in standard library functions** — Math, array manipulation, string, character classification, type conversion, map/dictionary, file I/O, concurrency, and system functions, all compiled to native machine code.
+- **119 built-in standard library functions** — Math, array manipulation, string, character classification, type conversion, map/dictionary, file I/O, concurrency, and system functions, all compiled to native machine code.
 - **Structs** — Named record types with field access, mutation, and optional field-level optimization attributes.
 - **Module system** — `import` statements with circular-import detection.
 - **Generic function syntax** — Type-annotated generic parameters (type-erased at runtime).
@@ -470,14 +470,15 @@ x = 10;    // ERROR: Cannot modify constant 'x'
 
 ### 5.3 Register Variables
 
-The `register` keyword hints that a variable should be kept in a CPU register for maximum performance. LLVM's SROA/mem2reg passes will promote these allocas to SSA registers when possible.
+The `register` keyword hints that a variable should be kept in a CPU register for maximum performance. LLVM's SROA/mem2reg passes will promote these allocas to SSA registers when possible. Register variables are **mutable** — the keyword is an optimization hint, not an immutability guarantee.
 
 ```javascript
 register var counter = 0;         // Hint: keep in register
 register var acc: float = 0.0;    // Typed register variable
+counter = counter + 1;            // Reassignment is allowed
 ```
 
-### 5.3 Assignment
+### 5.4 Assignment
 
 ```javascript
 x = 42;             // Simple assignment
@@ -486,11 +487,13 @@ x -= 3;             // Compound: x = x - 3
 x *= 2;             // Compound: x = x * 2
 x /= 4;             // Compound: x = x / 4
 x %= 3;             // Compound: x = x % 3
+x **= 2;            // Compound: x = x ** 2 (power-assign)
+x ??= 10;           // Null-coalesce-assign: x = x ?? 10 (assign if x is falsy)
 ```
 
-Compound assignment operators (`+=`, `-=`, `*=`, `/=`, `%=`) are desugared by the parser into their equivalent binary + assignment form.
+Compound assignment operators (`+=`, `-=`, `*=`, `/=`, `%=`, `**=`, `??=`) are desugared by the parser into their equivalent binary + assignment form.  Compound assignment works on variables, array elements (`arr[i] += 1`), and struct fields (`s.x += 1`).
 
-### 5.4 Scoping
+### 5.5 Scoping
 
 OmScript uses **block scoping**. Variables declared inside a block `{ }` are not visible outside it:
 
@@ -1882,7 +1885,7 @@ fn main() {
 
 ## 18. Standard Library
 
-OmScript provides **92 built-in functions**. All stdlib functions are compiled directly to native machine code via LLVM IR.
+OmScript provides **119 built-in functions**. All stdlib functions are compiled directly to native machine code via LLVM IR.
 
 ### 18.1 I/O Functions
 
