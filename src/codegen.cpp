@@ -791,6 +791,25 @@ llvm::Type* CodeGenerator::resolveAnnotatedType(const std::string& annotation) {
         return llvm::Type::getInt16Ty(*context);                // i16/u16
     if (ann == "i32" || ann == "u32")
         return llvm::Type::getInt32Ty(*context);                // i32/u32
+    // -----------------------------------------------------------------------
+    // SIMD vector types — map to LLVM fixed-vector types for handwritten SIMD
+    // -----------------------------------------------------------------------
+    if (ann == "f32x4")
+        return llvm::FixedVectorType::get(llvm::Type::getFloatTy(*context), 4);
+    if (ann == "f32x8")
+        return llvm::FixedVectorType::get(llvm::Type::getFloatTy(*context), 8);
+    if (ann == "f64x2")
+        return llvm::FixedVectorType::get(llvm::Type::getDoubleTy(*context), 2);
+    if (ann == "f64x4")
+        return llvm::FixedVectorType::get(llvm::Type::getDoubleTy(*context), 4);
+    if (ann == "i32x4")
+        return llvm::FixedVectorType::get(llvm::Type::getInt32Ty(*context), 4);
+    if (ann == "i32x8")
+        return llvm::FixedVectorType::get(llvm::Type::getInt32Ty(*context), 8);
+    if (ann == "i64x2")
+        return llvm::FixedVectorType::get(llvm::Type::getInt64Ty(*context), 2);
+    if (ann == "i64x4")
+        return llvm::FixedVectorType::get(llvm::Type::getInt64Ty(*context), 4);
     // "int", "i64", "u64", "string", array types, struct names, generics,
     // and empty annotations all map to the default i64 representation.
     return getDefaultType();

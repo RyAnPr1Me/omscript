@@ -1600,6 +1600,8 @@ const char* tokenTypeToString(omscript::TokenType type) {
         return "LIKELY";
     case omscript::TokenType::UNLIKELY:
         return "UNLIKELY";
+    case omscript::TokenType::REGISTER:
+        return "REGISTER";
     case omscript::TokenType::PLUS:
         return "PLUS";
     case omscript::TokenType::MINUS:
@@ -1608,6 +1610,10 @@ const char* tokenTypeToString(omscript::TokenType type) {
         return "STAR";
     case omscript::TokenType::STAR_STAR:
         return "STAR_STAR";
+    case omscript::TokenType::STAR_STAR_ASSIGN:
+        return "STAR_STAR_ASSIGN";
+    case omscript::TokenType::NULL_COALESCE_ASSIGN:
+        return "NULL_COALESCE_ASSIGN";
     case omscript::TokenType::SLASH:
         return "SLASH";
     case omscript::TokenType::PERCENT:

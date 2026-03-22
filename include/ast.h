@@ -235,6 +235,7 @@ class VarDecl : public Statement {
     std::unique_ptr<Expression> initializer;
     bool isConst;
     std::string typeName;
+    bool isRegister = false; ///< `register var` — hint to keep value in CPU register
 
     VarDecl(const std::string& n, std::unique_ptr<Expression> init, bool cnst = false, const std::string& type = "")
         : Statement(ASTNodeType::VAR_DECL), name(n), initializer(std::move(init)), isConst(cnst), typeName(type) {}

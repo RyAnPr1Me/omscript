@@ -41,7 +41,8 @@ static const std::unordered_map<std::string_view, TokenType> keywords = {
     {"borrow", TokenType::BORROW},
     {"prefetch", TokenType::PREFETCH},
     {"likely", TokenType::LIKELY},
-    {"unlikely", TokenType::UNLIKELY}};
+    {"unlikely", TokenType::UNLIKELY},
+    {"register", TokenType::REGISTER}};
 
 /// Throw a DiagnosticError with the given message and source location.
 [[noreturn]] static void lexError(const std::string& msg, int ln, int col) {
@@ -530,7 +531,7 @@ std::vector<Token> Lexer::tokenize() {
                 advance();
                 if (peek() == '=') {
                     advance();
-                    tokens.push_back(makeToken(TokenType::NULL_COALESCE_ASSIGN, "??="));
+                    tokens.push_back(makeToken(TokenType::NULL_COALESCE_ASSIGN, "?\?="));
                 } else {
                     tokens.push_back(makeToken(TokenType::NULL_COALESCE, "??"));
                 }

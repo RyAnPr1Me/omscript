@@ -6702,3 +6702,69 @@ TEST(CodegenTest, ArrayCountGeneration) {
     auto* mod = generateIR("fn is_even(x) { return x % 2 == 0; }\nfn main() { var a = [1, 2, 3, 4]; return array_count(a, \"is_even\"); }", codegen);
     ASSERT_NE(mod, nullptr);
 }
+
+// ===========================================================================
+// SIMD vector types
+// ===========================================================================
+
+TEST(CodegenTest, SimdF32x4VectorAdd) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var a: f32x4 = [1.0, 2.0, 3.0, 4.0]; var b: f32x4 = [5.0, 6.0, 7.0, 8.0]; var c: f32x4 = a + b; return to_int(c[0]); }", codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+}
+
+TEST(CodegenTest, SimdI32x4VectorSub) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var x: i32x4 = [10, 20, 30, 40]; var y: i32x4 = [1, 2, 3, 4]; var z: i32x4 = x - y; return z[0]; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, SimdElementWrite) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var v: i32x4 = [0, 0, 0, 0]; v[0] = 5; return v[0]; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, SimdF64x2Vector) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var a: f64x2 = [1.5, 2.5]; var b: f64x2 = [3.5, 4.5]; var c: f64x2 = a * b; return to_int(c[0]); }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+// ===========================================================================
+// Register keyword
+// ===========================================================================
+
+TEST(CodegenTest, RegisterVarDecl) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { register var x = 42; return x; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+// ===========================================================================
+// **= and ??= compound assignment
+// ===========================================================================
+
+TEST(CodegenTest, PowerAssign) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var x = 2; x **= 3; return x; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, NullCoalesceAssign) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var x = 0; x ?\?= 42; return x; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+// ===========================================================================
+// Struct field compound assignment
+// ===========================================================================
+
+TEST(CodegenTest, StructFieldCompoundAssign) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("struct P { x, y }\nfn main() { var p = P { x: 10, y: 20 }; p.x += 5; return p.x; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}

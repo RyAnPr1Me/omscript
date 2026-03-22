@@ -1,0 +1,63 @@
+// Test SIMD vector types and register allocation hints
+fn main() {
+    var total = 0;
+
+    // ---- f32x4 float vector arithmetic ----
+    var a: f32x4 = [1.0, 2.0, 3.0, 4.0];
+    var b: f32x4 = [5.0, 6.0, 7.0, 8.0];
+
+    // Vector addition
+    var add: f32x4 = a + b;
+    total = total + to_int(add[0]);  // 6
+    total = total + to_int(add[3]);  // 12
+    // total = 18
+
+    // Vector multiplication
+    var mul: f32x4 = a * b;
+    total = total + to_int(mul[0]);  // 5
+    total = total + to_int(mul[1]);  // 12
+    // total = 35
+
+    // Vector subtraction
+    var sub: f32x4 = b - a;
+    total = total + to_int(sub[2]);  // 4
+    // total = 39
+
+    // ---- i32x4 integer vector arithmetic ----
+    var x: i32x4 = [10, 20, 30, 40];
+    var y: i32x4 = [1, 2, 3, 4];
+
+    var isub: i32x4 = x - y;
+    total = total + isub[0];  // 9
+    total = total + isub[3];  // 36
+    // total = 84
+
+    // Integer vector multiplication
+    var imul: i32x4 = x * y;
+    total = total + imul[0];  // 10
+    // total = 94
+
+    // ---- Element write/insert ----
+    var v: i32x4 = [0, 0, 0, 0];
+    v[0] = 3;
+    v[2] = 7;
+    total = total + v[0];  // 3
+    total = total + v[2];  // 7
+    // total = 104
+
+    // ---- register keyword ----
+    register var counter = 0;
+    var i = 0;
+    while (i < 5) {
+        counter = counter + 2;
+        i = i + 1;
+    }
+    total = total + counter;  // 10
+    // total = 114
+
+    // Subtract to get a reasonable exit code
+    total = total - 100;
+    // total = 14
+
+    return total;
+}

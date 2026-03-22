@@ -698,3 +698,37 @@ TEST(LexerTest, OwnershipKeywordsInContext) {
     EXPECT_EQ(invalidateCount, 1);
     EXPECT_EQ(borrowCount, 1);
 }
+
+// ---------------------------------------------------------------------------
+// New token types: **= and ??= compound assignment, register keyword
+// ---------------------------------------------------------------------------
+
+TEST(LexerTest, StarStarAssignToken) {
+    auto tokens = lex("**=");
+    ASSERT_GE(tokens.size(), 2u);
+    EXPECT_EQ(tokens[0].type, TokenType::STAR_STAR_ASSIGN);
+    EXPECT_EQ(tokens[0].lexeme, "**=");
+}
+
+TEST(LexerTest, StarStarVsStarStarAssign) {
+    // ** followed by = should produce ** then =
+    // **= should produce single STAR_STAR_ASSIGN
+    auto tokens = lex("** **=");
+    ASSERT_GE(tokens.size(), 3u);
+    EXPECT_EQ(tokens[0].type, TokenType::STAR_STAR);
+    EXPECT_EQ(tokens[1].type, TokenType::STAR_STAR_ASSIGN);
+}
+
+TEST(LexerTest, NullCoalesceAssignToken) {
+    auto tokens = lex("x ?\?= 5");
+    ASSERT_GE(tokens.size(), 4u);
+    EXPECT_EQ(tokens[1].type, TokenType::NULL_COALESCE_ASSIGN);
+}
+
+TEST(LexerTest, RegisterKeyword) {
+    auto tokens = lex("register var x = 0;");
+    ASSERT_GE(tokens.size(), 6u);
+    EXPECT_EQ(tokens[0].type, TokenType::REGISTER);
+    EXPECT_EQ(tokens[0].lexeme, "register");
+    EXPECT_EQ(tokens[1].type, TokenType::VAR);
+}

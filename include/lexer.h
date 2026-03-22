@@ -48,6 +48,7 @@ enum class TokenType {
     PREFETCH,
     LIKELY,
     UNLIKELY,
+    REGISTER,
 
     // Operators
     PLUS,

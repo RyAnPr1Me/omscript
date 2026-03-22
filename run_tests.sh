@@ -279,6 +279,8 @@ test_program "examples/trig_math_test.om" 32
 test_program "examples/string_builtins_test.om" 12
 test_program "examples/array_builtins_test.om" 20
 test_program "examples/array_utility_test.om" 18
+test_program "examples/simd_register_test.om" 14
+test_program "examples/compound_assign_test.om" 42
 test_program "examples/null_coalesce_test.om" 5
 test_program "examples/production_features_test.om" 14
 test_program "examples/enum_test.om" 9

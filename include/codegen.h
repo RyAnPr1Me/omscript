@@ -307,6 +307,12 @@ class CodeGenerator {
     /// metadata so LLVM can hoist/CSE them aggressively.
     std::unordered_set<std::string> prefetchedImmutVars_;
 
+    /// Variables declared with `register` keyword — hint for register allocation.
+    std::unordered_set<std::string> registerVars_;
+
+    /// Variables with SIMD vector types for operator dispatch.
+    std::unordered_set<std::string> simdVars_;
+
     /// Per-function loop unrolling hints from @unroll / @nounroll annotations.
     bool currentFuncHintUnroll_ = false;
     bool currentFuncHintNoUnroll_ = false;

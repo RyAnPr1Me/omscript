@@ -523,6 +523,30 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         stmt->column = kw.column;
         return stmt;
     }
+    // register var — hint to keep variable in a CPU register.
+    // Syntax: register var name[:type] = expr;
+    if (match(TokenType::REGISTER)) {
+        const Token kw = tokens[current - 1];
+        const bool isConst = check(TokenType::CONST);
+        if (!match(TokenType::VAR) && !match(TokenType::CONST)) {
+            error("Expected 'var' or 'const' after 'register'");
+        }
+        const Token name = consume(TokenType::IDENTIFIER, "Expected variable name after 'register var'");
+        std::string typeName;
+        if (match(TokenType::COLON)) {
+            typeName = parseTypeAnnotation();
+        }
+        std::unique_ptr<Expression> init = nullptr;
+        if (match(TokenType::ASSIGN)) {
+            init = parseExpression();
+        }
+        consume(TokenType::SEMICOLON, "Expected ';' after register variable declaration");
+        auto decl = std::make_unique<VarDecl>(name.lexeme, std::move(init), isConst, typeName);
+        decl->isRegister = true;
+        decl->line = kw.line;
+        decl->column = kw.column;
+        return decl;
+    }
     if (match(TokenType::PREFETCH)) {
         const Token kw = tokens[current - 1];
         // Parse optional attributes: hot, immut
@@ -1142,8 +1166,41 @@ std::unique_ptr<Expression> Parser::parseAssignment() {
             node->line = expr->line;
             node->column = expr->column;
             return node;
+        } else if (expr->type == ASTNodeType::FIELD_ACCESS_EXPR) {
+            // Desugar: s.field += expr  =>  s.field = s.field + expr
+            auto* fieldExpr = static_cast<FieldAccessExpr*>(expr.get());
+            auto rhs = parseAssignment();
+
+            auto objClone = std::move(fieldExpr->object);
+            const std::string fieldName = fieldExpr->fieldName;
+
+            // Build the read side: create a new FieldAccessExpr for s.field on the RHS.
+            // The object must be a simple identifier so we can duplicate it.
+            std::unique_ptr<Expression> objRef2;
+            if (objClone->type == ASTNodeType::IDENTIFIER_EXPR) {
+                auto* objId = static_cast<IdentifierExpr*>(objClone.get());
+                objRef2 = std::make_unique<IdentifierExpr>(objId->name);
+                objRef2->line = objClone->line;
+                objRef2->column = objClone->column;
+            } else {
+                error("Compound assignment to struct fields requires a simple struct variable (e.g., 's.x += 1')");
+            }
+
+            // Build: s.field + rhs
+            auto readExpr = std::make_unique<FieldAccessExpr>(std::move(objRef2), fieldName);
+            readExpr->line = expr->line;
+            readExpr->column = expr->column;
+            auto binExpr = std::make_unique<BinaryExpr>(binOp, std::move(readExpr), std::move(rhs));
+            binExpr->line = expr->line;
+            binExpr->column = expr->column;
+
+            // Build: s.field = (s.field + rhs)
+            auto node = std::make_unique<FieldAssignExpr>(std::move(objClone), fieldName, std::move(binExpr));
+            node->line = expr->line;
+            node->column = expr->column;
+            return node;
         } else {
-            error("Invalid compound assignment target");
+            error("Compound assignment (e.g., '+=') is only supported on variables, array elements (arr[i]), and struct fields (s.x)");
         }
     }
 

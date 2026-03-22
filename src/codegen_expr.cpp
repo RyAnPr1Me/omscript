@@ -213,6 +213,82 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
 
     llvm::Value* right = generateExpression(expr->right.get());
 
+    // -----------------------------------------------------------------------
+    // SIMD vector operations — when either operand is a vector type,
+    // dispatch to LLVM vector arithmetic instructions.
+    // -----------------------------------------------------------------------
+    const bool leftIsVec = left->getType()->isVectorTy();
+    const bool rightIsVec = right->getType()->isVectorTy();
+    if (leftIsVec || rightIsVec) {
+        // Both operands must be the same vector type for arithmetic.
+        if (leftIsVec && rightIsVec && left->getType() != right->getType()) {
+            codegenError("SIMD vector type mismatch in '" + expr->op + "' operation", expr);
+        }
+        // If one side is scalar, splat it to match the vector type.
+        if (leftIsVec && !rightIsVec) {
+            auto* vecTy = llvm::cast<llvm::FixedVectorType>(left->getType());
+            llvm::Type* elemTy = vecTy->getElementType();
+            if (right->getType() != elemTy) {
+                if (elemTy->isFloatingPointTy() && right->getType()->isIntegerTy())
+                    right = builder->CreateSIToFP(right, elemTy, "simd.splat.cvt");
+                else if (elemTy->isIntegerTy() && right->getType()->isFloatingPointTy())
+                    right = builder->CreateFPToSI(right, elemTy, "simd.splat.cvt");
+                else if (elemTy->isIntegerTy() && right->getType()->isIntegerTy())
+                    right = builder->CreateIntCast(right, elemTy, true, "simd.splat.cvt");
+                else if (elemTy->isFloatTy() && right->getType()->isDoubleTy())
+                    right = builder->CreateFPTrunc(right, elemTy, "simd.splat.cvt");
+            }
+            llvm::Value* splat = llvm::UndefValue::get(vecTy);
+            splat = builder->CreateInsertElement(splat, right,
+                llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0), "simd.splat.ins");
+            llvm::SmallVector<int, 16> mask(vecTy->getNumElements(), 0);
+            right = builder->CreateShuffleVector(splat, mask, "simd.splat");
+        } else if (rightIsVec && !leftIsVec) {
+            auto* vecTy = llvm::cast<llvm::FixedVectorType>(right->getType());
+            llvm::Type* elemTy = vecTy->getElementType();
+            if (left->getType() != elemTy) {
+                if (elemTy->isFloatingPointTy() && left->getType()->isIntegerTy())
+                    left = builder->CreateSIToFP(left, elemTy, "simd.splat.cvt");
+                else if (elemTy->isIntegerTy() && left->getType()->isFloatingPointTy())
+                    left = builder->CreateFPToSI(left, elemTy, "simd.splat.cvt");
+                else if (elemTy->isIntegerTy() && left->getType()->isIntegerTy())
+                    left = builder->CreateIntCast(left, elemTy, true, "simd.splat.cvt");
+                else if (elemTy->isFloatTy() && left->getType()->isDoubleTy())
+                    left = builder->CreateFPTrunc(left, elemTy, "simd.splat.cvt");
+            }
+            llvm::Value* splat = llvm::UndefValue::get(vecTy);
+            splat = builder->CreateInsertElement(splat, left,
+                llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0), "simd.splat.ins");
+            llvm::SmallVector<int, 16> mask(vecTy->getNumElements(), 0);
+            left = builder->CreateShuffleVector(splat, mask, "simd.splat");
+        }
+
+        auto* vecTy = llvm::cast<llvm::FixedVectorType>(left->getType());
+        const bool isFloatVec = vecTy->getElementType()->isFloatingPointTy();
+
+        if (expr->op == "+") return isFloatVec ? builder->CreateFAdd(left, right, "simd.fadd")
+                                               : builder->CreateAdd(left, right, "simd.add");
+        if (expr->op == "-") return isFloatVec ? builder->CreateFSub(left, right, "simd.fsub")
+                                               : builder->CreateSub(left, right, "simd.sub");
+        if (expr->op == "*") return isFloatVec ? builder->CreateFMul(left, right, "simd.fmul")
+                                               : builder->CreateMul(left, right, "simd.mul");
+        if (expr->op == "/") return isFloatVec ? builder->CreateFDiv(left, right, "simd.fdiv")
+                                               : builder->CreateSDiv(left, right, "simd.sdiv");
+        if (expr->op == "%") {
+            if (isFloatVec) return builder->CreateFRem(left, right, "simd.frem");
+            return builder->CreateSRem(left, right, "simd.srem");
+        }
+        // Bitwise operations on integer vectors
+        if (!isFloatVec) {
+            if (expr->op == "&") return builder->CreateAnd(left, right, "simd.and");
+            if (expr->op == "|") return builder->CreateOr(left, right, "simd.or");
+            if (expr->op == "^") return builder->CreateXor(left, right, "simd.xor");
+            if (expr->op == "<<") return builder->CreateShl(left, right, "simd.shl");
+            if (expr->op == ">>") return builder->CreateAShr(left, right, "simd.ashr");
+        }
+        codegenError("Unsupported operator '" + expr->op + "' for SIMD vector types", expr);
+    }
+
     const bool leftIsFloat = left->getType()->isDoubleTy();
     const bool rightIsFloat = right->getType()->isDoubleTy();
 
@@ -1767,6 +1843,22 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
 llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
     llvm::Value* arrVal = generateExpression(expr->array.get());
     llvm::Value* idxVal = generateExpression(expr->index.get());
+
+    // SIMD vector element extraction: v[i] → extractelement
+    if (arrVal->getType()->isVectorTy()) {
+        // Index must be i32 for extractelement.
+        if (idxVal->getType() != llvm::Type::getInt32Ty(*context))
+            idxVal = builder->CreateIntCast(idxVal, llvm::Type::getInt32Ty(*context), true, "simd.idx");
+        llvm::Value* elem = builder->CreateExtractElement(arrVal, idxVal, "simd.extract");
+        // Widen f32 → f64 and narrow integer types → i64 so the extracted
+        // value integrates with OmScript's standard type system (i64 / double).
+        if (elem->getType()->isFloatTy())
+            elem = builder->CreateFPExt(elem, getFloatType(), "simd.ext.f64");
+        else if (elem->getType()->isIntegerTy() && elem->getType() != getDefaultType())
+            elem = builder->CreateSExt(elem, getDefaultType(), "simd.ext.i64");
+        return elem;
+    }
+
     idxVal = toDefaultType(idxVal);
 
     // Detect whether the base expression is a string.  Strings are raw char
@@ -1823,6 +1915,41 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
 }
 
 llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
+    // SIMD vector element insertion: v[i] = x → insertelement.
+    // We must handle this before generating the array expression because
+    // SIMD vectors are values (not pointers) — we load the vector from its
+    // alloca, insert the new element, and store the updated vector back.
+    if (auto* idExpr = dynamic_cast<IdentifierExpr*>(expr->array.get())) {
+        auto it = namedValues.find(idExpr->name);
+        if (it != namedValues.end()) {
+            auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(it->second);
+            if (alloca && alloca->getAllocatedType()->isVectorTy()) {
+                auto* vecTy = alloca->getAllocatedType();
+                llvm::Value* vec = builder->CreateLoad(vecTy, alloca, "simd.load");
+                llvm::Value* idxVal = generateExpression(expr->index.get());
+                llvm::Value* newVal = generateExpression(expr->value.get());
+                // Convert index to i32
+                if (idxVal->getType() != llvm::Type::getInt32Ty(*context))
+                    idxVal = builder->CreateIntCast(idxVal, llvm::Type::getInt32Ty(*context), true, "simd.idx");
+                // Convert value to match vector element type
+                auto* elemTy = llvm::cast<llvm::FixedVectorType>(vecTy)->getElementType();
+                if (newVal->getType() != elemTy) {
+                    if (elemTy->isFloatingPointTy() && newVal->getType()->isIntegerTy())
+                        newVal = builder->CreateSIToFP(newVal, elemTy, "simd.cvt");
+                    else if (elemTy->isIntegerTy() && newVal->getType()->isFloatingPointTy())
+                        newVal = builder->CreateFPToSI(newVal, elemTy, "simd.cvt");
+                    else if (elemTy->isIntegerTy() && newVal->getType()->isIntegerTy())
+                        newVal = builder->CreateIntCast(newVal, elemTy, true, "simd.cvt");
+                    else if (elemTy->isFloatTy() && newVal->getType()->isDoubleTy())
+                        newVal = builder->CreateFPTrunc(newVal, elemTy, "simd.cvt");
+                }
+                llvm::Value* updated = builder->CreateInsertElement(vec, newVal, idxVal, "simd.insert");
+                builder->CreateStore(updated, alloca);
+                return updated;
+            }
+        }
+    }
+
     llvm::Value* arrVal = generateExpression(expr->array.get());
     llvm::Value* idxVal = generateExpression(expr->index.get());
     llvm::Value* newVal = generateExpression(expr->value.get());
