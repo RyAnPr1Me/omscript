@@ -694,6 +694,8 @@ TEST(HardwareGraphTest, MicroarchProfileConsistency) {
         "znver3", "znver4",
         "apple-m1", "apple-m3",
         "neoverse-v2", "neoverse-n2",
+        "graviton3", "graviton4",
+        "lunar-lake", "znver5",
         "generic-rv64", "sifive-u74"
     };
 
@@ -708,4 +710,50 @@ TEST(HardwareGraphTest, MicroarchProfileConsistency) {
         EXPECT_GT(profile->l1DLatency, 0u) << cpu;
         EXPECT_GT(profile->memoryLatency, 0u) << cpu;
     }
+}
+
+TEST(HardwareGraphTest, Graviton3ProfileAccuracy) {
+    auto profile = lookupMicroarch("graviton3");
+    ASSERT_TRUE(profile.has_value());
+    EXPECT_EQ(profile->isa, ISAFamily::AArch64);
+    EXPECT_EQ(profile->issueWidth, 8u);
+    EXPECT_EQ(profile->intALUs, 6u);
+    EXPECT_EQ(profile->vecUnits, 4u);
+    EXPECT_EQ(profile->vectorWidth, 256u); // SVE 256-bit
+    EXPECT_EQ(profile->loadPorts, 3u);
+    EXPECT_EQ(profile->l1DSize, 64u);
+}
+
+TEST(HardwareGraphTest, Graviton4ProfileAccuracy) {
+    auto profile = lookupMicroarch("graviton4");
+    ASSERT_TRUE(profile.has_value());
+    EXPECT_EQ(profile->isa, ISAFamily::AArch64);
+    EXPECT_EQ(profile->l2Size, 2048u);   // 2 MB L2
+    EXPECT_EQ(profile->l3Size, 36864u);  // 36 MB L3
+    EXPECT_LT(profile->memoryLatency, 140u); // DDR5-5600
+}
+
+TEST(HardwareGraphTest, LunarLakeProfileAccuracy) {
+    auto profile = lookupMicroarch("lunar-lake");
+    ASSERT_TRUE(profile.has_value());
+    EXPECT_EQ(profile->isa, ISAFamily::X86_64);
+    EXPECT_EQ(profile->decodeWidth, 8u);
+    EXPECT_EQ(profile->issueWidth, 8u);
+    EXPECT_EQ(profile->intALUs, 6u);
+    EXPECT_EQ(profile->loadPorts, 3u);
+    EXPECT_EQ(profile->l2Size, 2560u);   // 2.5 MB L2
+    EXPECT_EQ(profile->vectorWidth, 256u); // AVX2
+}
+
+TEST(HardwareGraphTest, Zen5ProfileAccuracy) {
+    auto profile = lookupMicroarch("znver5");
+    ASSERT_TRUE(profile.has_value());
+    EXPECT_EQ(profile->isa, ISAFamily::X86_64);
+    EXPECT_EQ(profile->issueWidth, 8u);
+    EXPECT_EQ(profile->intALUs, 6u);
+    EXPECT_EQ(profile->vecUnits, 4u);
+    EXPECT_EQ(profile->fmaUnits, 4u);
+    EXPECT_EQ(profile->loadPorts, 4u);
+    EXPECT_EQ(profile->vectorWidth, 512u); // AVX-512
+    EXPECT_EQ(profile->branchUnits, 2u);
 }

@@ -1936,3 +1936,249 @@ TEST(EGraphTest, XorAddAndEqualsOr) {
 
     EXPECT_EQ(g.find(sum), g.find(orAB));
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Relational e-graph infrastructure tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST(EGraphTest, GetConstValue) {
+    EGraph g;
+    ClassId c42 = g.addConst(42);
+    ClassId x   = g.addVar("x");
+    ClassId sum = g.addBinOp(Op::Add, c42, x);
+
+    EXPECT_EQ(g.getConstValue(c42), std::optional<long long>(42));
+    EXPECT_EQ(g.getConstValue(x), std::nullopt);
+    EXPECT_EQ(g.getConstValue(sum), std::nullopt);
+}
+
+TEST(EGraphTest, GetConstFValue) {
+    EGraph g;
+    ClassId cf = g.addConstF(3.14);
+    ClassId x  = g.addVar("x");
+
+    auto val = g.getConstFValue(cf);
+    ASSERT_TRUE(val.has_value());
+    EXPECT_DOUBLE_EQ(*val, 3.14);
+    EXPECT_EQ(g.getConstFValue(x), std::nullopt);
+}
+
+TEST(EGraphTest, GuardedRuleSkipsNonConstant) {
+    // Relational guard: mul_any_pow2_to_shl should NOT fire when the
+    // second operand is a variable (not a power-of-2 constant).
+    EGraph g;
+    ClassId x = g.addVar("x");
+    ClassId y = g.addVar("y");
+    ClassId mul = g.addBinOp(Op::Mul, x, y);
+
+    auto rules = getAdvancedBitwiseRules();
+    g.saturate(rules);
+
+    // x * y should NOT be merged with any shift, since y is not a constant.
+    // Check that the mul class doesn't contain a Shl node.
+    const auto& cls = g.getClass(g.find(mul));
+    bool hasShl = false;
+    for (const auto& node : cls.nodes) {
+        if (node.op == Op::Shl) hasShl = true;
+    }
+    EXPECT_FALSE(hasShl);
+}
+
+TEST(EGraphTest, GuardedRuleMulPow2ToShl) {
+    // x * 16 should be merged with x << 4 via the relational guard.
+    EGraph g;
+    ClassId x   = g.addVar("x");
+    ClassId c16 = g.addConst(16);
+    ClassId mul = g.addBinOp(Op::Mul, x, c16);
+    ClassId c4  = g.addConst(4);
+    ClassId shl = g.addBinOp(Op::Shl, x, c4);
+
+    auto rules = getAdvancedBitwiseRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(mul), g.find(shl));
+}
+
+TEST(EGraphTest, GuardedRuleMulNonPow2Skipped) {
+    // x * 6 should NOT fire the pow2-to-shl rule (6 is not a power of 2).
+    EGraph g;
+    ClassId x  = g.addVar("x");
+    ClassId c6 = g.addConst(6);
+    ClassId mul = g.addBinOp(Op::Mul, x, c6);
+
+    auto rules = getAdvancedBitwiseRules();
+    g.saturate(rules);
+
+    const auto& cls = g.getClass(g.find(mul));
+    bool hasShl = false;
+    for (const auto& node : cls.nodes) {
+        if (node.op == Op::Shl) hasShl = true;
+    }
+    EXPECT_FALSE(hasShl);
+}
+
+TEST(EGraphTest, GuardedRuleModPow2ToAnd) {
+    // x % 32 should be merged with x & 31 via the relational guard.
+    EGraph g;
+    ClassId x   = g.addVar("x");
+    ClassId c32 = g.addConst(32);
+    ClassId mod = g.addBinOp(Op::Mod, x, c32);
+    ClassId c31 = g.addConst(31);
+    ClassId and_ = g.addBinOp(Op::BitAnd, x, c31);
+
+    auto rules = getAdvancedBitwiseRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(mod), g.find(and_));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Comparison merging tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST(EGraphTest, LtOrEqToLe) {
+    // (a < b) || (a == b) should be merged with a <= b
+    EGraph g;
+    ClassId a  = g.addVar("a");
+    ClassId b  = g.addVar("b");
+    ClassId lt = g.addBinOp(Op::Lt, a, b);
+    ClassId eq = g.addBinOp(Op::Eq, a, b);
+    ClassId lor = g.addBinOp(Op::LogOr, lt, eq);
+    ClassId le = g.addBinOp(Op::Le, a, b);
+
+    auto rules = getAdvancedComparisonRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(lor), g.find(le));
+}
+
+TEST(EGraphTest, GtOrEqToGe) {
+    // (a > b) || (a == b) should be merged with a >= b
+    EGraph g;
+    ClassId a  = g.addVar("a");
+    ClassId b  = g.addVar("b");
+    ClassId gt = g.addBinOp(Op::Gt, a, b);
+    ClassId eq = g.addBinOp(Op::Eq, a, b);
+    ClassId lor = g.addBinOp(Op::LogOr, gt, eq);
+    ClassId ge = g.addBinOp(Op::Ge, a, b);
+
+    auto rules = getAdvancedComparisonRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(lor), g.find(ge));
+}
+
+TEST(EGraphTest, NeAndLtRedundant) {
+    // (a != b) && (a < b) should be merged with a < b
+    EGraph g;
+    ClassId a  = g.addVar("a");
+    ClassId b  = g.addVar("b");
+    ClassId ne = g.addBinOp(Op::Ne, a, b);
+    ClassId lt = g.addBinOp(Op::Lt, a, b);
+    ClassId land = g.addBinOp(Op::LogAnd, ne, lt);
+
+    auto rules = getAdvancedComparisonRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(land), g.find(lt));
+}
+
+TEST(EGraphTest, GtAndNeRedundant) {
+    // (a > b) && (a != b) should be merged with a > b
+    EGraph g;
+    ClassId a  = g.addVar("a");
+    ClassId b  = g.addVar("b");
+    ClassId gt = g.addBinOp(Op::Gt, a, b);
+    ClassId ne = g.addBinOp(Op::Ne, a, b);
+    ClassId land = g.addBinOp(Op::LogAnd, gt, ne);
+
+    auto rules = getAdvancedComparisonRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(land), g.find(gt));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Ternary factoring tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST(EGraphTest, TernaryAddFactor) {
+    // cond ? (a + c) : (b + c) should equal (cond ? a : b) + c
+    EGraph g;
+    ClassId cond = g.addVar("cond");
+    ClassId a    = g.addVar("a");
+    ClassId b    = g.addVar("b");
+    ClassId c    = g.addVar("c");
+    ClassId ac   = g.addBinOp(Op::Add, a, c);
+    ClassId bc   = g.addBinOp(Op::Add, b, c);
+    ENode ternNode(Op::Ternary, std::vector<ClassId>{cond, ac, bc});
+    ClassId tern = g.add(ternNode);
+
+    // Build expected: (cond ? a : b) + c
+    ENode selNode(Op::Ternary, std::vector<ClassId>{cond, a, b});
+    ClassId sel  = g.add(selNode);
+    ClassId expected = g.addBinOp(Op::Add, sel, c);
+
+    auto rules = getAdvancedComparisonRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(tern), g.find(expected));
+}
+
+TEST(EGraphTest, TernaryNegFactor) {
+    // cond ? (-a) : (-b) should equal -(cond ? a : b)
+    EGraph g;
+    ClassId cond = g.addVar("cond");
+    ClassId a    = g.addVar("a");
+    ClassId b    = g.addVar("b");
+    ClassId negA = g.addUnaryOp(Op::Neg, a);
+    ClassId negB = g.addUnaryOp(Op::Neg, b);
+    ENode ternNode(Op::Ternary, std::vector<ClassId>{cond, negA, negB});
+    ClassId tern = g.add(ternNode);
+
+    // Build expected: -(cond ? a : b)
+    ENode selNode(Op::Ternary, std::vector<ClassId>{cond, a, b});
+    ClassId sel  = g.add(selNode);
+    ClassId expected = g.addUnaryOp(Op::Neg, sel);
+
+    auto rules = getAdvancedComparisonRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(tern), g.find(expected));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Complement-based bitwise tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST(EGraphTest, ComplAndOr) {
+    // (~a) & (a | b) should be merged with (~a) & b
+    EGraph g;
+    ClassId a    = g.addVar("a");
+    ClassId b    = g.addVar("b");
+    ClassId notA = g.addUnaryOp(Op::BitNot, a);
+    ClassId orAB = g.addBinOp(Op::BitOr, a, b);
+    ClassId lhs  = g.addBinOp(Op::BitAnd, notA, orAB);
+    ClassId rhs  = g.addBinOp(Op::BitAnd, notA, b);
+
+    auto rules = getAdvancedBitwiseRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(lhs), g.find(rhs));
+}
+
+TEST(EGraphTest, ComplOrAnd) {
+    // (~a) | (a & b) should be merged with (~a) | b
+    EGraph g;
+    ClassId a    = g.addVar("a");
+    ClassId b    = g.addVar("b");
+    ClassId notA = g.addUnaryOp(Op::BitNot, a);
+    ClassId andAB = g.addBinOp(Op::BitAnd, a, b);
+    ClassId lhs  = g.addBinOp(Op::BitOr, notA, andAB);
+    ClassId rhs  = g.addBinOp(Op::BitOr, notA, b);
+
+    auto rules = getAdvancedBitwiseRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(lhs), g.find(rhs));
+}

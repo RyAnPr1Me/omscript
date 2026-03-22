@@ -399,13 +399,23 @@ private:
 /// constant folding, strength reduction, and expression normalization.
 std::vector<RewriteRule> getAlgebraicRules();
 
+/// Returns advanced algebraic rules including nested arithmetic and
+/// division/modulo simplifications.
+std::vector<RewriteRule> getAdvancedAlgebraicRules();
+
 /// Returns rewrite rules for comparison and branch simplification.
 std::vector<RewriteRule> getComparisonRules();
+
+/// Returns advanced comparison rules including boolean algebra,
+/// comparison merging, redundant comparison elimination, and ternary
+/// common-subexpression factoring.
+std::vector<RewriteRule> getAdvancedComparisonRules();
 
 /// Returns rewrite rules for bitwise operation simplification.
 std::vector<RewriteRule> getBitwiseRules();
 
-/// Returns advanced bitwise rules including arithmetic-bitwise identities.
+/// Returns advanced bitwise rules including arithmetic-bitwise identities
+/// and relational guard-predicate rules (power-of-2 strength reduction).
 std::vector<RewriteRule> getAdvancedBitwiseRules();
 
 /// Returns all optimization rules combined.

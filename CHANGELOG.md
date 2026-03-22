@@ -5,6 +5,29 @@ All notable changes to the OmScript compiler will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.0] - 2026-03-22
+
+### Added
+- **Relational e-graph pattern matching:** The e-graph equality saturation engine now supports **guard predicates** on rewrite rules, enabling relational optimizations where structural patterns are refined by semantic constraints on matched values. New infrastructure:
+  - `RuleGuard` predicate type on `RewriteRule` — checked before applying a rewrite
+  - `EGraph::getConstValue()` / `getConstFValue()` — extract constant values from e-classes for guard evaluation
+- **23 new e-graph rewrite rules:**
+  - **3 relational power-of-2 rules:** `x * C → x << log2(C)` and `x % C → x & (C-1)` for ANY power-of-2 constant (generalises the hardcoded rules for 2..1024)
+  - **4 comparison merging rules:** `(a < b) || (a == b) → a <= b`, `(a > b) || (a == b) → a >= b`, and commuted variants — eliminates redundant comparison pairs
+  - **4 redundant comparison elimination rules:** `(a != b) && (a < b) → a < b`, etc. — removes tautological conjuncts
+  - **4 ternary common-subexpression factoring rules:** `cond ? (a+c) : (b+c) → (cond ? a : b) + c`, and similarly for Sub, Mul, Neg — hoists common operations out of branches
+  - **4 complement-based bitwise rules:** `(~a) & (a | b) → (~a) & b`, `(~a) | (a & b) → (~a) | b`, and commuted variants — simplifies complement interactions using Boolean algebra
+  - **4 additional commuted variants** for the above rules
+- **4 new HGOE CPU microarchitecture profiles:**
+  - **AWS Graviton3** (Arm Neoverse V1, 8-wide, SVE 256-bit, DDR5)
+  - **AWS Graviton4** (Arm Neoverse V2, 8-wide, SVE2 256-bit, 2 MB L2, DDR5-5600)
+  - **Intel Lunar Lake** (Lion Cove P-cores, 8-wide decode/dispatch, 6 ALU, 3 load ports, 2.5 MB L2)
+  - **AMD Zen 5** — dedicated profile (replaces the previous zen4-derived approximation) with accurate 8-wide dispatch, 6 ALU pipes, 4 vector units, 4 FMA units, 4 load ports, AVX-512, 12-cycle branch mispredict penalty
+
+### Changed
+- **E-graph `applyRules()` now checks guard predicates** before applying each rewrite match, enabling fine-grained relational filtering without false merges
+- **AMD Zen 5 HGOE scheduling** now uses its own dedicated profile function (`zen5Profile()`) instead of a minimal derivation from Zen 4, giving more accurate instruction scheduling, port assignment, and throughput modelling
+
 ## [3.2.0] - 2026-03-22
 
 ### Changed
