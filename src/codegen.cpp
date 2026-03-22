@@ -585,6 +585,9 @@ void optimizeOptMaxStatement(Statement* stmt) {
             if (sc.value) {
                 sc.value = optimizeOptMaxExpression(std::move(sc.value));
             }
+            for (auto& v : sc.values) {
+                v = optimizeOptMaxExpression(std::move(v));
+            }
             for (auto& s : sc.body) {
                 optimizeOptMaxStatement(s.get());
             }

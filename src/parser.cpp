@@ -821,14 +821,19 @@ std::unique_ptr<Statement> Parser::parseSwitchStmt() {
 
     while (!check(TokenType::RBRACE) && !isAtEnd()) {
         if (match(TokenType::CASE)) {
-            auto value = parseExpression();
-            consume(TokenType::COLON, "Expected ':' after case value");
+            // Parse multiple comma-separated case values: case 1, 2, 3:
+            std::vector<std::unique_ptr<Expression>> caseValues;
+            caseValues.push_back(parseExpression());
+            while (match(TokenType::COMMA)) {
+                caseValues.push_back(parseExpression());
+            }
+            consume(TokenType::COLON, "Expected ':' after case value(s)");
 
             std::vector<std::unique_ptr<Statement>> body;
             while (!check(TokenType::CASE) && !check(TokenType::DEFAULT) && !check(TokenType::RBRACE) && !isAtEnd()) {
                 body.push_back(parseStatement());
             }
-            cases.emplace_back(std::move(value), std::move(body), false);
+            cases.emplace_back(std::move(caseValues), std::move(body), false);
         } else if (match(TokenType::DEFAULT)) {
             if (hasDefault) {
                 error("Duplicate default case in switch statement");

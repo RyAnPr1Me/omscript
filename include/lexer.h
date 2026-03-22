@@ -156,6 +156,7 @@ class Lexer {
     Token scanIdentifier();
     Token scanString();
     Token scanMultiLineString();
+    void scanInterpolatedString(std::vector<Token>& tokens);
 };
 
 } // namespace omscript

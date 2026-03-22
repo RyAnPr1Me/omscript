@@ -2009,6 +2009,9 @@ void dumpStatement(const omscript::Statement* stmt, int indent) {
             } else {
                 std::cout << "case:\n";
                 dumpExpression(sc.value.get(), indent + 2);
+                for (const auto& v : sc.values) {
+                    dumpExpression(v.get(), indent + 2);
+                }
             }
             for (const auto& s : sc.body) {
                 dumpStatement(s.get(), indent + 2);

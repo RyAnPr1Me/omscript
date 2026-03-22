@@ -732,3 +732,98 @@ TEST(LexerTest, RegisterKeyword) {
     EXPECT_EQ(tokens[0].lexeme, "register");
     EXPECT_EQ(tokens[1].type, TokenType::VAR);
 }
+
+// ---------------------------------------------------------------------------
+// String interpolation: $"..."
+// ---------------------------------------------------------------------------
+
+TEST(LexerTest, InterpStringSimple) {
+    // $"hello {name}" → STRING("hello ") PLUS LPAREN IDENTIFIER(name) RPAREN
+    auto tokens = lex("$\"hello {name}\"");
+    ASSERT_GE(tokens.size(), 6u); // STRING PLUS LPAREN IDENTIFIER RPAREN EOF
+    EXPECT_EQ(tokens[0].type, TokenType::STRING);
+    EXPECT_EQ(tokens[0].lexeme, "hello ");
+    EXPECT_EQ(tokens[1].type, TokenType::PLUS);
+    EXPECT_EQ(tokens[2].type, TokenType::LPAREN);
+    EXPECT_EQ(tokens[3].type, TokenType::IDENTIFIER);
+    EXPECT_EQ(tokens[3].lexeme, "name");
+    EXPECT_EQ(tokens[4].type, TokenType::RPAREN);
+}
+
+TEST(LexerTest, InterpStringNoExpressions) {
+    // $"plain string" → STRING("plain string")
+    auto tokens = lex("$\"plain string\"");
+    ASSERT_GE(tokens.size(), 2u);
+    EXPECT_EQ(tokens[0].type, TokenType::STRING);
+    EXPECT_EQ(tokens[0].lexeme, "plain string");
+}
+
+TEST(LexerTest, InterpStringEmpty) {
+    // $"" → STRING("")
+    auto tokens = lex("$\"\"");
+    ASSERT_GE(tokens.size(), 2u);
+    EXPECT_EQ(tokens[0].type, TokenType::STRING);
+    EXPECT_EQ(tokens[0].lexeme, "");
+}
+
+TEST(LexerTest, InterpStringExprOnly) {
+    // $"{x}" → STRING("") PLUS LPAREN IDENTIFIER(x) RPAREN
+    auto tokens = lex("$\"{x}\"");
+    ASSERT_GE(tokens.size(), 6u);
+    EXPECT_EQ(tokens[0].type, TokenType::STRING);
+    EXPECT_EQ(tokens[0].lexeme, ""); // empty leading literal
+    EXPECT_EQ(tokens[1].type, TokenType::PLUS);
+    EXPECT_EQ(tokens[2].type, TokenType::LPAREN);
+    EXPECT_EQ(tokens[3].type, TokenType::IDENTIFIER);
+    EXPECT_EQ(tokens[3].lexeme, "x");
+    EXPECT_EQ(tokens[4].type, TokenType::RPAREN);
+}
+
+TEST(LexerTest, InterpStringMultipleExprs) {
+    // $"{a} and {b}" → "" + (a) + " and " + (b)
+    auto tokens = lex("$\"{a} and {b}\"");
+    ASSERT_GE(tokens.size(), 10u);
+    EXPECT_EQ(tokens[0].type, TokenType::STRING);  // ""
+    EXPECT_EQ(tokens[1].type, TokenType::PLUS);
+    EXPECT_EQ(tokens[2].type, TokenType::LPAREN);
+    EXPECT_EQ(tokens[3].type, TokenType::IDENTIFIER); // a
+    EXPECT_EQ(tokens[4].type, TokenType::RPAREN);
+    EXPECT_EQ(tokens[5].type, TokenType::PLUS);
+    EXPECT_EQ(tokens[6].type, TokenType::STRING);  // " and "
+    EXPECT_EQ(tokens[6].lexeme, " and ");
+    EXPECT_EQ(tokens[7].type, TokenType::PLUS);
+    EXPECT_EQ(tokens[8].type, TokenType::LPAREN);
+    EXPECT_EQ(tokens[9].type, TokenType::IDENTIFIER); // b
+}
+
+TEST(LexerTest, InterpStringEscapedBraces) {
+    // $"use \{braces\}" → STRING("use {braces}")
+    auto tokens = lex("$\"use \\{braces\\}\"");
+    ASSERT_GE(tokens.size(), 2u);
+    EXPECT_EQ(tokens[0].type, TokenType::STRING);
+    EXPECT_EQ(tokens[0].lexeme, "use {braces}");
+}
+
+TEST(LexerTest, InterpStringWithExpression) {
+    // $"value is {x + 1}" → STRING("value is ") PLUS LPAREN IDENTIFIER(x) PLUS INTEGER(1) RPAREN
+    auto tokens = lex("$\"value is {x + 1}\"");
+    ASSERT_GE(tokens.size(), 8u);
+    EXPECT_EQ(tokens[0].type, TokenType::STRING);
+    EXPECT_EQ(tokens[0].lexeme, "value is ");
+    EXPECT_EQ(tokens[1].type, TokenType::PLUS);
+    EXPECT_EQ(tokens[2].type, TokenType::LPAREN);
+    EXPECT_EQ(tokens[3].type, TokenType::IDENTIFIER);
+    EXPECT_EQ(tokens[3].lexeme, "x");
+    EXPECT_EQ(tokens[4].type, TokenType::PLUS);
+    EXPECT_EQ(tokens[5].type, TokenType::INTEGER);
+    EXPECT_EQ(tokens[5].intValue, 1);
+    EXPECT_EQ(tokens[6].type, TokenType::RPAREN);
+}
+
+TEST(LexerTest, InterpStringUnterminated) {
+    EXPECT_THROW(lex("$\"hello {name"), std::runtime_error);
+}
+
+TEST(LexerTest, InterpStringUnterminatedExpr) {
+    EXPECT_THROW(lex("$\"hello {name\""), std::runtime_error);
+}

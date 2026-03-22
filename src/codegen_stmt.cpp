@@ -955,23 +955,37 @@ void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
                 builder->CreateBr(mergeBB);
             }
         } else {
-            llvm::Value* caseVal = generateExpression(sc.value.get());
-            if (caseVal->getType()->isDoubleTy()) {
-                codegenError("case value must be an integer constant, not a float", sc.value.get());
-            }
-            caseVal = toDefaultType(caseVal);
-            auto* caseConst = llvm::dyn_cast<llvm::ConstantInt>(caseVal);
-            if (!caseConst) {
-                codegenError("case value must be a compile-time integer constant", sc.value.get());
-            }
+            // Collect all case values (primary + additional) for multi-value case.
+            std::vector<llvm::ConstantInt*> caseConstants;
 
-            const int64_t cv = caseConst->getSExtValue();
-            if (!seenCaseValues.insert(cv).second) {
-                codegenError("duplicate case value " + std::to_string(cv) + " in switch statement", sc.value.get());
+            auto addCaseValue = [&](Expression* expr) {
+                llvm::Value* caseVal = generateExpression(expr);
+                if (caseVal->getType()->isDoubleTy()) {
+                    codegenError("case value must be an integer constant, not a float", expr);
+                }
+                caseVal = toDefaultType(caseVal);
+                auto* caseConst = llvm::dyn_cast<llvm::ConstantInt>(caseVal);
+                if (!caseConst) {
+                    codegenError("case value must be a compile-time integer constant", expr);
+                }
+                const int64_t cv = caseConst->getSExtValue();
+                if (!seenCaseValues.insert(cv).second) {
+                    codegenError("duplicate case value " + std::to_string(cv) + " in switch statement", expr);
+                }
+                caseConstants.push_back(caseConst);
+            };
+
+            // Primary value
+            addCaseValue(sc.value.get());
+            // Additional values (multi-value case)
+            for (auto& extraVal : sc.values) {
+                addCaseValue(extraVal.get());
             }
 
             llvm::BasicBlock* caseBB = llvm::BasicBlock::Create(*context, "switch.case", function, mergeBB);
-            switchInst->addCase(caseConst, caseBB);
+            for (auto* caseConst : caseConstants) {
+                switchInst->addCase(caseConst, caseBB);
+            }
 
             builder->SetInsertPoint(caseBB);
             {

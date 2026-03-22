@@ -1,0 +1,34 @@
+// Test multi-value case in switch statements and string interpolation
+fn classify(x) {
+    switch (x) {
+        case 1, 2, 3:
+            return 10;
+        case 4, 5:
+            return 20;
+        case 6:
+            return 30;
+        default:
+            return 0;
+    }
+}
+
+fn main() {
+    var total = 0;
+
+    // Multi-value case tests
+    total = total + classify(1);   // 10
+    total = total + classify(2);   // 10
+    total = total + classify(3);   // 10
+    total = total + classify(4);   // 20
+    total = total + classify(5);   // 20
+    total = total + classify(6);   // 30
+    total = total + classify(7);   // 0 (default)
+
+    // String interpolation test
+    var name = "test";
+    var s = $"hello {name}";
+    total = total + str_len(s);    // 10
+
+    // total = 10 + 10 + 10 + 20 + 20 + 30 + 0 + 10 = 110
+    return total;
+}

@@ -618,6 +618,18 @@ TEST(ParserTest, SwitchDuplicateDefault) {
     EXPECT_THROW(parse("fn main() { switch (x) { default: return 1; default: return 2; } }"), std::runtime_error);
 }
 
+TEST(ParserTest, SwitchMultiValueCase) {
+    auto program = parse("fn main() { switch (x) { case 1, 2, 3: return 10; default: return 0; } }");
+    EXPECT_EQ(program->functions.size(), 1u);
+    auto* sw = dynamic_cast<SwitchStmt*>(program->functions[0]->body->statements[0].get());
+    ASSERT_NE(sw, nullptr);
+    ASSERT_EQ(sw->cases.size(), 2u);
+    // First case should have value (1) + 2 additional values (2, 3)
+    EXPECT_FALSE(sw->cases[0].isDefault);
+    EXPECT_NE(sw->cases[0].value, nullptr);
+    EXPECT_EQ(sw->cases[0].values.size(), 2u);
+}
+
 // ---------------------------------------------------------------------------
 // Array element assignment
 // ---------------------------------------------------------------------------
