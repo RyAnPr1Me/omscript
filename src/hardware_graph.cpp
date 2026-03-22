@@ -931,7 +931,7 @@ static MicroarchProfile graviton4Profile() {
 /// Lion Cove: 8-wide decode, 8-wide dispatch, AVX2, improved branch pred.
 static MicroarchProfile lunarLakeProfile() {
     MicroarchProfile p;
-    p.name = "lunarlake";
+    p.name = "lunar-lake";
     p.isa = ISAFamily::X86_64;
     p.decodeWidth = 8;         // 8-wide decode
     p.issueWidth = 8;          // 8-wide dispatch
