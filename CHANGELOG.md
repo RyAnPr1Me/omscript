@@ -5,6 +5,16 @@ All notable changes to the OmScript compiler will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.2.0] - 2026-03-22
+
+### Changed
+- **Zero-cost abstraction guarantees:**
+  - Lambda functions (`|x| expr`) are now marked `alwaysinline` at O2+, guaranteeing zero call overhead when passed to `array_map`, `array_filter`, `array_reduce`, and other higher-order functions
+  - Small helper functions (≤4 deep statements) get `alwaysinline` at O2 (previously only at O3 with ≤8 threshold), ensuring struct accessors, predicates, and single-operation helpers are fully inlined
+  - `InferFunctionAttrsPass` lowered from O2+ to O1+, so `nocapture`, `readonly`, `nounwind`, and other library-function attributes are inferred at all optimization levels
+- **Fixed cross-platform release build failures:** Removed incorrect `LLVM_VERSION_MAJOR >= 21` version guards that assumed a `ThinOrFullLTOPhase` parameter in `PassBuilder` EP callbacks — this parameter was never added to the LLVM API, causing compilation failures on macOS (LLVM 22) and Windows (MSYS2 LLVM)
+- **Fixed deprecated `moveBefore(Instruction*)` call** in hardware graph instruction scheduler to use the iterator-based API, eliminating deprecation warnings on LLVM 18+
+
 ## [3.1.0] - 2026-03-22
 
 ### Added

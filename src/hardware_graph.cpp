@@ -2424,7 +2424,7 @@ static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
     if (scheduled.size() == n) {
         llvm::Instruction* term = bb.getTerminator();
         for (auto* inst : scheduled)
-            inst->moveBefore(term);
+            inst->moveBefore(bb, term->getIterator());
     }
 
     return maxCycle > 0 ? maxCycle : currentCycle;

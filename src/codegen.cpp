@@ -2499,10 +2499,18 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     const size_t deepCount = func->body ? deepStmtCount(func->body.get()) : 0;
     const size_t inlineThreshold =
         (optimizationLevel >= OptimizationLevel::O3) ? kMaxInlineHintStatementsO3 : kMaxInlineHintStatements;
+    // Zero-cost abstraction guarantee: lambda functions and very small
+    // helpers (struct accessors, predicates) get alwaysinline at O2+.
+    // This ensures that abstractions like lambdas passed to array_map /
+    // array_filter / array_reduce are fully inlined, eliminating all call
+    // overhead.  At O3, a higher deep-statement threshold is used.
+    static constexpr size_t kAlwaysInlineStatementsO2 = 4;
+    const bool isLambda = func->name.rfind("__lambda_", 0) == 0;
     if (func->name != "main" && optimizationLevel >= OptimizationLevel::O2 && func->body &&
         shallowCount <= inlineThreshold) {
-        if (optimizationLevel >= OptimizationLevel::O3 && deepCount <= kAlwaysInlineStatements &&
-            !isSelfRecursive) {
+        const size_t alwaysInlineThreshold =
+            (optimizationLevel >= OptimizationLevel::O3) ? kAlwaysInlineStatements : kAlwaysInlineStatementsO2;
+        if ((isLambda || deepCount <= alwaysInlineThreshold) && !isSelfRecursive) {
             function->addFnAttr(llvm::Attribute::AlwaysInline);
         } else {
             function->addFnAttr(llvm::Attribute::InlineHint);
