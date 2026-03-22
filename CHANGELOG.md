@@ -9,8 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - **`register` keyword forces register allocation** — `register var` now runs an immediate mem2reg pass after function codegen, guaranteeing that annotated variables are promoted to SSA registers regardless of the global optimization level. Variables remain mutable — the keyword forces register allocation, not immutability.
-- **Documentation corrections** — Updated built-in function count from 92 to 119 across README.md and LANGUAGE_REFERENCE.md; fixed stale compiler version references; documented `**=` and `??=` compound assignment operators
+- **`register` emits `llvm.lifetime.start`** — register variables now emit tight lifetime scoping via `llvm.lifetime.start` intrinsic, giving LLVM's register allocator precise live-range information for better register utilization.
+- **Compile-time warning for non-promotable register variables** — If a `register` variable has a type that cannot be promoted to a CPU register (arrays, structs, pointers), the compiler now emits a diagnostic warning instead of silently ignoring the annotation.
+- **Documentation corrections** — Updated built-in function count from 92 to 119 across README.md and LANGUAGE_REFERENCE.md; fixed stale compiler version references; documented `**=` and `??=` compound assignment operators; added `register` to the keywords table in LANGUAGE_REFERENCE.md
 - **Version bump** to 3.0.0
+
+### Added
+- New integration test: `register_test.om` — dedicated test for register keyword covering accumulation loops, countdown, typed register variables, and in-loop register reassignment
 
 ### Fixed
 - **`register var` reassignment** — `register var counter = 0; counter = counter + 1;` now compiles correctly. Previously emitted a spurious "Cannot reassign 'register' variable" error that prevented using register variables in loops and accumulators.

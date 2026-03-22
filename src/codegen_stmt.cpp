@@ -95,7 +95,27 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
     // regardless of the global optimization level.  The variable remains
     // mutable — `register` forces register allocation, not immutability.
     if (stmt->isRegister) {
-        registerVars_.insert(stmt->name);
+        // Warn at compile time if the type can't be promoted to a register
+        // (arrays, structs, pointers/strings are not promotable by mem2reg).
+        if (allocaType->isArrayTy() || allocaType->isStructTy() ||
+            allocaType->isPointerTy()) {
+            const Diagnostic warn{DiagnosticSeverity::Warning,
+                                  {"", stmt->line, stmt->column},
+                                  "'register' variable '" + stmt->name +
+                                      "' has a type that cannot be promoted to a CPU register; "
+                                      "the keyword will have no effect"};
+            std::cerr << warn.format() << "\n";
+        } else {
+            registerVars_.insert(stmt->name);
+            // Emit llvm.lifetime.start so the register live-range is tightly
+            // scoped, helping the register allocator.
+            const uint64_t sz = module->getDataLayout().getTypeAllocSize(allocaType);
+            auto* szVal = llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), sz);
+            auto* lifetimeStart = OMSC_GET_INTRINSIC_STMT(
+                module.get(), llvm::Intrinsic::lifetime_start,
+                {llvm::PointerType::getUnqual(*context)});
+            builder->CreateCall(lifetimeStart, {szVal, alloca});
+        }
         if (allocaType->isIntegerTy() || allocaType->isDoubleTy() || allocaType->isFloatTy())
             alloca->setAlignment(llvm::Align(16));
         if (allocaType->isVectorTy())

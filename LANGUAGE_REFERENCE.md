@@ -337,6 +337,7 @@ The following words are reserved:
 | `invalidate` | Explicitly invalidate a variable (end its lifetime) |
 | `borrow` | Borrow a reference to a variable |
 | `prefetch` | Declare a register-pinned variable with optional cache prefetch |
+| `register` | Force variable into a CPU register via immediate mem2reg promotion |
 | `likely` | Branch prediction hint: then-branch is expected |
 | `unlikely` | Branch prediction hint: then-branch is rare |
 | `OPTMAX` | Begin exhaustive optimization block |
