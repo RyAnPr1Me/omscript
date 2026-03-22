@@ -53,7 +53,8 @@ enum class BuiltinId : uint8_t {
     MAP_GET, MAP_HAS, MAP_REMOVE, MAP_KEYS, MAP_VALUES, MAP_SIZE,
     RANGE, RANGE_STEP, CHAR_CODE, NUMBER_TO_STRING, STRING_TO_NUMBER,
     THREAD_CREATE, THREAD_JOIN, MUTEX_NEW, MUTEX_LOCK, MUTEX_UNLOCK,
-    MUTEX_DESTROY
+    MUTEX_DESTROY,
+    SIN, COS, TAN, ASIN, ACOS, ATAN, ATAN2, EXP, LOG, LOG10, CBRT, HYPOT
 };
 
 static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
@@ -158,6 +159,18 @@ static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
     {"mutex_lock", BuiltinId::MUTEX_LOCK},
     {"mutex_unlock", BuiltinId::MUTEX_UNLOCK},
     {"mutex_destroy", BuiltinId::MUTEX_DESTROY},
+    {"sin", BuiltinId::SIN},
+    {"cos", BuiltinId::COS},
+    {"tan", BuiltinId::TAN},
+    {"asin", BuiltinId::ASIN},
+    {"acos", BuiltinId::ACOS},
+    {"atan", BuiltinId::ATAN},
+    {"atan2", BuiltinId::ATAN2},
+    {"exp", BuiltinId::EXP},
+    {"log", BuiltinId::LOG},
+    {"log10", BuiltinId::LOG10},
+    {"cbrt", BuiltinId::CBRT},
+    {"hypot", BuiltinId::HYPOT},
 };
 
 static BuiltinId lookupBuiltin(const std::string& name) {
@@ -1360,6 +1373,165 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Function* roundIntrinsic = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::round, {getFloatType()});
         llvm::Value* result = builder->CreateCall(roundIntrinsic, {fval}, "round.result");
         return builder->CreateFPToSI(result, getDefaultType(), "round.int");
+    }
+
+    // -----------------------------------------------------------------------
+    // Trigonometric and transcendental math built-ins
+    // -----------------------------------------------------------------------
+
+    if (bid == BuiltinId::SIN) {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'sin' expects 1 argument, but " + std::to_string(expr->arguments.size()) +
+                             " provided",
+                         expr);
+        }
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        llvm::Value* fval = ensureFloat(arg);
+        llvm::Function* sinIntrinsic = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::sin, {getFloatType()});
+        return builder->CreateCall(sinIntrinsic, {fval}, "sin.result");
+    }
+
+    if (bid == BuiltinId::COS) {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'cos' expects 1 argument, but " + std::to_string(expr->arguments.size()) +
+                             " provided",
+                         expr);
+        }
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        llvm::Value* fval = ensureFloat(arg);
+        llvm::Function* cosIntrinsic = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::cos, {getFloatType()});
+        return builder->CreateCall(cosIntrinsic, {fval}, "cos.result");
+    }
+
+    if (bid == BuiltinId::TAN) {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'tan' expects 1 argument, but " + std::to_string(expr->arguments.size()) +
+                             " provided",
+                         expr);
+        }
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        llvm::Value* fval = ensureFloat(arg);
+        llvm::FunctionType* ft = llvm::FunctionType::get(getFloatType(), {getFloatType()}, false);
+        llvm::FunctionCallee tanFn = module->getOrInsertFunction("tan", ft);
+        return builder->CreateCall(tanFn, {fval}, "tan.result");
+    }
+
+    if (bid == BuiltinId::ASIN) {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'asin' expects 1 argument, but " + std::to_string(expr->arguments.size()) +
+                             " provided",
+                         expr);
+        }
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        llvm::Value* fval = ensureFloat(arg);
+        llvm::FunctionType* ft = llvm::FunctionType::get(getFloatType(), {getFloatType()}, false);
+        llvm::FunctionCallee asinFn = module->getOrInsertFunction("asin", ft);
+        return builder->CreateCall(asinFn, {fval}, "asin.result");
+    }
+
+    if (bid == BuiltinId::ACOS) {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'acos' expects 1 argument, but " + std::to_string(expr->arguments.size()) +
+                             " provided",
+                         expr);
+        }
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        llvm::Value* fval = ensureFloat(arg);
+        llvm::FunctionType* ft = llvm::FunctionType::get(getFloatType(), {getFloatType()}, false);
+        llvm::FunctionCallee acosFn = module->getOrInsertFunction("acos", ft);
+        return builder->CreateCall(acosFn, {fval}, "acos.result");
+    }
+
+    if (bid == BuiltinId::ATAN) {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'atan' expects 1 argument, but " + std::to_string(expr->arguments.size()) +
+                             " provided",
+                         expr);
+        }
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        llvm::Value* fval = ensureFloat(arg);
+        llvm::FunctionType* ft = llvm::FunctionType::get(getFloatType(), {getFloatType()}, false);
+        llvm::FunctionCallee atanFn = module->getOrInsertFunction("atan", ft);
+        return builder->CreateCall(atanFn, {fval}, "atan.result");
+    }
+
+    if (bid == BuiltinId::ATAN2) {
+        if (expr->arguments.size() != 2) {
+            codegenError("Built-in function 'atan2' expects 2 arguments, but " + std::to_string(expr->arguments.size()) +
+                             " provided",
+                         expr);
+        }
+        llvm::Value* y = generateExpression(expr->arguments[0].get());
+        llvm::Value* x = generateExpression(expr->arguments[1].get());
+        llvm::Value* fy = ensureFloat(y);
+        llvm::Value* fx = ensureFloat(x);
+        llvm::FunctionType* ft = llvm::FunctionType::get(getFloatType(), {getFloatType(), getFloatType()}, false);
+        llvm::FunctionCallee atan2Fn = module->getOrInsertFunction("atan2", ft);
+        return builder->CreateCall(atan2Fn, {fy, fx}, "atan2.result");
+    }
+
+    if (bid == BuiltinId::EXP) {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'exp' expects 1 argument, but " + std::to_string(expr->arguments.size()) +
+                             " provided",
+                         expr);
+        }
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        llvm::Value* fval = ensureFloat(arg);
+        llvm::Function* expIntrinsic = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::exp, {getFloatType()});
+        return builder->CreateCall(expIntrinsic, {fval}, "exp.result");
+    }
+
+    if (bid == BuiltinId::LOG) {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'log' expects 1 argument, but " + std::to_string(expr->arguments.size()) +
+                             " provided",
+                         expr);
+        }
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        llvm::Value* fval = ensureFloat(arg);
+        llvm::Function* logIntrinsic = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::log, {getFloatType()});
+        return builder->CreateCall(logIntrinsic, {fval}, "log.result");
+    }
+
+    if (bid == BuiltinId::LOG10) {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'log10' expects 1 argument, but " + std::to_string(expr->arguments.size()) +
+                             " provided",
+                         expr);
+        }
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        llvm::Value* fval = ensureFloat(arg);
+        llvm::Function* log10Intrinsic = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::log10, {getFloatType()});
+        return builder->CreateCall(log10Intrinsic, {fval}, "log10.result");
+    }
+
+    if (bid == BuiltinId::CBRT) {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'cbrt' expects 1 argument, but " + std::to_string(expr->arguments.size()) +
+                             " provided",
+                         expr);
+        }
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        llvm::Value* fval = ensureFloat(arg);
+        llvm::FunctionType* ft = llvm::FunctionType::get(getFloatType(), {getFloatType()}, false);
+        llvm::FunctionCallee cbrtFn = module->getOrInsertFunction("cbrt", ft);
+        return builder->CreateCall(cbrtFn, {fval}, "cbrt.result");
+    }
+
+    if (bid == BuiltinId::HYPOT) {
+        if (expr->arguments.size() != 2) {
+            codegenError("Built-in function 'hypot' expects 2 arguments, but " + std::to_string(expr->arguments.size()) +
+                             " provided",
+                         expr);
+        }
+        llvm::Value* x = generateExpression(expr->arguments[0].get());
+        llvm::Value* y = generateExpression(expr->arguments[1].get());
+        llvm::Value* fx = ensureFloat(x);
+        llvm::Value* fy = ensureFloat(y);
+        llvm::FunctionType* ft = llvm::FunctionType::get(getFloatType(), {getFloatType(), getFloatType()}, false);
+        llvm::FunctionCallee hypotFn = module->getOrInsertFunction("hypot", ft);
+        return builder->CreateCall(hypotFn, {fx, fy}, "hypot.result");
     }
 
     // -----------------------------------------------------------------------
