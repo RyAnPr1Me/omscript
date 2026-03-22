@@ -391,6 +391,7 @@ class CodeGenerator {
     llvm::AllocaInst* createEntryBlockAlloca(llvm::Function* function, const std::string& name,
                                              llvm::Type* type = nullptr);
     [[noreturn]] void codegenError(const std::string& message, const ASTNode* node);
+    void validateArgCount(const CallExpr* expr, const std::string& funcName, size_t expected);
 
     /// RAII guard that calls beginScope() on construction and endScope()
     /// on destruction, ensuring scope stacks are always balanced even
