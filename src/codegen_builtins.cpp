@@ -54,7 +54,8 @@ enum class BuiltinId : uint8_t {
     RANGE, RANGE_STEP, CHAR_CODE, NUMBER_TO_STRING, STRING_TO_NUMBER,
     THREAD_CREATE, THREAD_JOIN, MUTEX_NEW, MUTEX_LOCK, MUTEX_UNLOCK,
     MUTEX_DESTROY,
-    SIN, COS, TAN, ASIN, ACOS, ATAN, ATAN2, EXP, LOG, LOG10, CBRT, HYPOT
+    SIN, COS, TAN, ASIN, ACOS, ATAN, ATAN2, EXP, LOG, LOG10, CBRT, HYPOT,
+    ARRAY_MIN, ARRAY_MAX, ARRAY_ANY, ARRAY_EVERY, ARRAY_FIND, ARRAY_COUNT
 };
 
 static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
@@ -171,6 +172,12 @@ static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
     {"log10", BuiltinId::LOG10},
     {"cbrt", BuiltinId::CBRT},
     {"hypot", BuiltinId::HYPOT},
+    {"array_min", BuiltinId::ARRAY_MIN},
+    {"array_max", BuiltinId::ARRAY_MAX},
+    {"array_any", BuiltinId::ARRAY_ANY},
+    {"array_every", BuiltinId::ARRAY_EVERY},
+    {"array_find", BuiltinId::ARRAY_FIND},
+    {"array_count", BuiltinId::ARRAY_COUNT},
 };
 
 static BuiltinId lookupBuiltin(const std::string& name) {
@@ -2901,6 +2908,395 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateBr(loopBB);
 
         // Done: return final accumulator
+        builder->SetInsertPoint(doneBB);
+        return acc;
+    }
+
+    // -----------------------------------------------------------------------
+    // array_min(arr) — return the minimum element of an array (0 for empty)
+    // -----------------------------------------------------------------------
+    if (bid == BuiltinId::ARRAY_MIN) {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'array_min' expects 1 argument, but " + std::to_string(expr->arguments.size()) +
+                             " provided",
+                         expr);
+        }
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        llvm::Value* arrPtr = builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "amin.arrptr");
+        llvm::Value* length = builder->CreateLoad(getDefaultType(), arrPtr, "amin.len");
+
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* entryBB = builder->GetInsertBlock();
+        llvm::BasicBlock* emptyBB = llvm::BasicBlock::Create(*context, "amin.empty", function);
+        llvm::BasicBlock* initBB = llvm::BasicBlock::Create(*context, "amin.init", function);
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "amin.loop", function);
+        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "amin.body", function);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "amin.done", function);
+
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+
+        // Check if empty
+        llvm::Value* isEmpty = builder->CreateICmpSLE(length, zero, "amin.isempty");
+        builder->CreateCondBr(isEmpty, emptyBB, initBB);
+
+        // Empty: return 0
+        builder->SetInsertPoint(emptyBB);
+        builder->CreateBr(doneBB);
+
+        // Init: load first element as initial min
+        builder->SetInsertPoint(initBB);
+        llvm::Value* firstPtr = builder->CreateGEP(getDefaultType(), arrPtr, one, "amin.firstptr");
+        llvm::Value* firstElem = builder->CreateLoad(getDefaultType(), firstPtr, "amin.first");
+        builder->CreateBr(loopBB);
+
+        // Loop header
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* curMin = builder->CreatePHI(getDefaultType(), 2, "amin.curmin");
+        llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "amin.idx");
+        curMin->addIncoming(firstElem, initBB);
+        idx->addIncoming(one, initBB);
+
+        llvm::Value* doneCheck = builder->CreateICmpSGE(idx, length, "amin.donecheck");
+        builder->CreateCondBr(doneCheck, doneBB, bodyBB);
+
+        // Body: compare and update min
+        builder->SetInsertPoint(bodyBB);
+        llvm::Value* offset = builder->CreateAdd(idx, one, "amin.offset");
+        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrPtr, offset, "amin.elemptr");
+        llvm::Value* elem = builder->CreateLoad(getDefaultType(), elemPtr, "amin.elem");
+        llvm::Value* isLess = builder->CreateICmpSLT(elem, curMin, "amin.isless");
+        llvm::Value* newMin = builder->CreateSelect(isLess, elem, curMin, "amin.newmin");
+        llvm::Value* newIdx = builder->CreateAdd(idx, one, "amin.newidx");
+        curMin->addIncoming(newMin, bodyBB);
+        idx->addIncoming(newIdx, bodyBB);
+        builder->CreateBr(loopBB);
+
+        // Done: return result
+        builder->SetInsertPoint(doneBB);
+        llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "amin.result");
+        result->addIncoming(zero, emptyBB);
+        result->addIncoming(curMin, loopBB);
+        return result;
+    }
+
+    // -----------------------------------------------------------------------
+    // array_max(arr) — return the maximum element of an array (0 for empty)
+    // -----------------------------------------------------------------------
+    if (bid == BuiltinId::ARRAY_MAX) {
+        if (expr->arguments.size() != 1) {
+            codegenError("Built-in function 'array_max' expects 1 argument, but " + std::to_string(expr->arguments.size()) +
+                             " provided",
+                         expr);
+        }
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        llvm::Value* arrPtr = builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "amax.arrptr");
+        llvm::Value* length = builder->CreateLoad(getDefaultType(), arrPtr, "amax.len");
+
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* entryBB = builder->GetInsertBlock();
+        llvm::BasicBlock* emptyBB = llvm::BasicBlock::Create(*context, "amax.empty", function);
+        llvm::BasicBlock* initBB = llvm::BasicBlock::Create(*context, "amax.init", function);
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "amax.loop", function);
+        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "amax.body", function);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "amax.done", function);
+
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+
+        // Check if empty
+        llvm::Value* isEmpty = builder->CreateICmpSLE(length, zero, "amax.isempty");
+        builder->CreateCondBr(isEmpty, emptyBB, initBB);
+
+        // Empty: return 0
+        builder->SetInsertPoint(emptyBB);
+        builder->CreateBr(doneBB);
+
+        // Init: load first element as initial max
+        builder->SetInsertPoint(initBB);
+        llvm::Value* firstPtr = builder->CreateGEP(getDefaultType(), arrPtr, one, "amax.firstptr");
+        llvm::Value* firstElem = builder->CreateLoad(getDefaultType(), firstPtr, "amax.first");
+        builder->CreateBr(loopBB);
+
+        // Loop header
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* curMax = builder->CreatePHI(getDefaultType(), 2, "amax.curmax");
+        llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "amax.idx");
+        curMax->addIncoming(firstElem, initBB);
+        idx->addIncoming(one, initBB);
+
+        llvm::Value* doneCheck = builder->CreateICmpSGE(idx, length, "amax.donecheck");
+        builder->CreateCondBr(doneCheck, doneBB, bodyBB);
+
+        // Body: compare and update max
+        builder->SetInsertPoint(bodyBB);
+        llvm::Value* offset = builder->CreateAdd(idx, one, "amax.offset");
+        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrPtr, offset, "amax.elemptr");
+        llvm::Value* elem = builder->CreateLoad(getDefaultType(), elemPtr, "amax.elem");
+        llvm::Value* isGreater = builder->CreateICmpSGT(elem, curMax, "amax.isgreater");
+        llvm::Value* newMax = builder->CreateSelect(isGreater, elem, curMax, "amax.newmax");
+        llvm::Value* newIdx = builder->CreateAdd(idx, one, "amax.newidx");
+        curMax->addIncoming(newMax, bodyBB);
+        idx->addIncoming(newIdx, bodyBB);
+        builder->CreateBr(loopBB);
+
+        // Done: return result
+        builder->SetInsertPoint(doneBB);
+        llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "amax.result");
+        result->addIncoming(zero, emptyBB);
+        result->addIncoming(curMax, loopBB);
+        return result;
+    }
+
+    // -----------------------------------------------------------------------
+    // array_any(arr, "fn_name") — return 1 if fn returns non-zero for any element
+    // -----------------------------------------------------------------------
+    if (bid == BuiltinId::ARRAY_ANY) {
+        if (expr->arguments.size() != 2) {
+            codegenError("Built-in function 'array_any' expects 2 arguments (array, function_name), but " +
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
+        }
+        auto* fnNameLit = dynamic_cast<LiteralExpr*>(expr->arguments[1].get());
+        if (!fnNameLit || fnNameLit->literalType != LiteralExpr::LiteralType::STRING) {
+            codegenError("array_any: second argument must be a string literal (function name)", expr);
+        }
+        std::string fnName = fnNameLit->stringValue;
+        auto calleeIt = functions.find(fnName);
+        if (calleeIt == functions.end() || !calleeIt->second) {
+            codegenError("array_any: unknown function '" + fnName + "'", expr);
+        }
+        llvm::Function* predFn = calleeIt->second;
+        if (predFn->arg_size() < 1) {
+            codegenError("array_any: function '" + fnName + "' must accept at least 1 argument", expr);
+        }
+
+        llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
+        arrArg = toDefaultType(arrArg);
+        llvm::Value* arrPtr = builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "aany.arrptr");
+        llvm::Value* length = builder->CreateLoad(getDefaultType(), arrPtr, "aany.len");
+
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* entryBB = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "aany.loop", function);
+        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "aany.body", function);
+        llvm::BasicBlock* foundBB = llvm::BasicBlock::Create(*context, "aany.found", function);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "aany.done", function);
+
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+
+        builder->CreateBr(loopBB);
+
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "aany.idx");
+        idx->addIncoming(zero, entryBB);
+        llvm::Value* doneCheck = builder->CreateICmpSGE(idx, length, "aany.donecheck");
+        builder->CreateCondBr(doneCheck, doneBB, bodyBB);
+
+        builder->SetInsertPoint(bodyBB);
+        llvm::Value* offset = builder->CreateAdd(idx, one, "aany.offset");
+        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrPtr, offset, "aany.elemptr");
+        llvm::Value* elem = builder->CreateLoad(getDefaultType(), elemPtr, "aany.elem");
+        llvm::Value* predResult = builder->CreateCall(predFn, {elem}, "aany.pred");
+        predResult = toDefaultType(predResult);
+        llvm::Value* isNonZero = builder->CreateICmpNE(predResult, zero, "aany.nz");
+        llvm::Value* newIdx = builder->CreateAdd(idx, one, "aany.newidx");
+        idx->addIncoming(newIdx, bodyBB);
+        builder->CreateCondBr(isNonZero, foundBB, loopBB);
+
+        builder->SetInsertPoint(foundBB);
+        builder->CreateBr(doneBB);
+
+        builder->SetInsertPoint(doneBB);
+        llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "aany.result");
+        result->addIncoming(zero, loopBB);
+        result->addIncoming(one, foundBB);
+        return result;
+    }
+
+    // -----------------------------------------------------------------------
+    // array_every(arr, "fn_name") — return 1 if fn returns non-zero for ALL elements
+    // -----------------------------------------------------------------------
+    if (bid == BuiltinId::ARRAY_EVERY) {
+        if (expr->arguments.size() != 2) {
+            codegenError("Built-in function 'array_every' expects 2 arguments (array, function_name), but " +
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
+        }
+        auto* fnNameLit = dynamic_cast<LiteralExpr*>(expr->arguments[1].get());
+        if (!fnNameLit || fnNameLit->literalType != LiteralExpr::LiteralType::STRING) {
+            codegenError("array_every: second argument must be a string literal (function name)", expr);
+        }
+        std::string fnName = fnNameLit->stringValue;
+        auto calleeIt = functions.find(fnName);
+        if (calleeIt == functions.end() || !calleeIt->second) {
+            codegenError("array_every: unknown function '" + fnName + "'", expr);
+        }
+        llvm::Function* predFn = calleeIt->second;
+        if (predFn->arg_size() < 1) {
+            codegenError("array_every: function '" + fnName + "' must accept at least 1 argument", expr);
+        }
+
+        llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
+        arrArg = toDefaultType(arrArg);
+        llvm::Value* arrPtr = builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "aevery.arrptr");
+        llvm::Value* length = builder->CreateLoad(getDefaultType(), arrPtr, "aevery.len");
+
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* entryBB = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "aevery.loop", function);
+        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "aevery.body", function);
+        llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "aevery.fail", function);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "aevery.done", function);
+
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+
+        builder->CreateBr(loopBB);
+
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "aevery.idx");
+        idx->addIncoming(zero, entryBB);
+        llvm::Value* doneCheck = builder->CreateICmpSGE(idx, length, "aevery.donecheck");
+        builder->CreateCondBr(doneCheck, doneBB, bodyBB);
+
+        builder->SetInsertPoint(bodyBB);
+        llvm::Value* offset = builder->CreateAdd(idx, one, "aevery.offset");
+        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrPtr, offset, "aevery.elemptr");
+        llvm::Value* elem = builder->CreateLoad(getDefaultType(), elemPtr, "aevery.elem");
+        llvm::Value* predResult = builder->CreateCall(predFn, {elem}, "aevery.pred");
+        predResult = toDefaultType(predResult);
+        llvm::Value* isZero = builder->CreateICmpEQ(predResult, zero, "aevery.iszero");
+        llvm::Value* newIdx = builder->CreateAdd(idx, one, "aevery.newidx");
+        idx->addIncoming(newIdx, bodyBB);
+        builder->CreateCondBr(isZero, failBB, loopBB);
+
+        builder->SetInsertPoint(failBB);
+        builder->CreateBr(doneBB);
+
+        builder->SetInsertPoint(doneBB);
+        llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "aevery.result");
+        result->addIncoming(one, loopBB);
+        result->addIncoming(zero, failBB);
+        return result;
+    }
+
+    // -----------------------------------------------------------------------
+    // array_find(arr, value) — return index of first matching element, or -1
+    // -----------------------------------------------------------------------
+    if (bid == BuiltinId::ARRAY_FIND) {
+        if (expr->arguments.size() != 2) {
+            codegenError("Built-in function 'array_find' expects 2 arguments (array, value), but " +
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
+        }
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        llvm::Value* target = generateExpression(expr->arguments[1].get());
+        target = toDefaultType(target);
+        llvm::Value* arrPtr = builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "afind.arrptr");
+        llvm::Value* length = builder->CreateLoad(getDefaultType(), arrPtr, "afind.len");
+
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* entryBB = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "afind.loop", function);
+        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "afind.body", function);
+        llvm::BasicBlock* foundBB = llvm::BasicBlock::Create(*context, "afind.found", function);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "afind.done", function);
+
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* negOne = llvm::ConstantInt::get(getDefaultType(), -1, true);
+
+        builder->CreateBr(loopBB);
+
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "afind.idx");
+        idx->addIncoming(zero, entryBB);
+
+        llvm::Value* doneCheck = builder->CreateICmpSGE(idx, length, "afind.donecheck");
+        builder->CreateCondBr(doneCheck, doneBB, bodyBB);
+
+        builder->SetInsertPoint(bodyBB);
+        llvm::Value* offset = builder->CreateAdd(idx, one, "afind.offset");
+        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrPtr, offset, "afind.elemptr");
+        llvm::Value* elem = builder->CreateLoad(getDefaultType(), elemPtr, "afind.elem");
+        llvm::Value* isEqual = builder->CreateICmpEQ(elem, target, "afind.iseq");
+        llvm::Value* newIdx = builder->CreateAdd(idx, one, "afind.newidx");
+        idx->addIncoming(newIdx, bodyBB);
+        builder->CreateCondBr(isEqual, foundBB, loopBB);
+
+        builder->SetInsertPoint(foundBB);
+        builder->CreateBr(doneBB);
+
+        builder->SetInsertPoint(doneBB);
+        llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "afind.result");
+        result->addIncoming(negOne, loopBB);
+        result->addIncoming(idx, foundBB);
+        return result;
+    }
+
+    // -----------------------------------------------------------------------
+    // array_count(arr, "fn_name") — count elements for which fn returns non-zero
+    // -----------------------------------------------------------------------
+    if (bid == BuiltinId::ARRAY_COUNT) {
+        if (expr->arguments.size() != 2) {
+            codegenError("Built-in function 'array_count' expects 2 arguments (array, function_name), but " +
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
+        }
+        auto* fnNameLit = dynamic_cast<LiteralExpr*>(expr->arguments[1].get());
+        if (!fnNameLit || fnNameLit->literalType != LiteralExpr::LiteralType::STRING) {
+            codegenError("array_count: second argument must be a string literal (function name)", expr);
+        }
+        std::string fnName = fnNameLit->stringValue;
+        auto calleeIt = functions.find(fnName);
+        if (calleeIt == functions.end() || !calleeIt->second) {
+            codegenError("array_count: unknown function '" + fnName + "'", expr);
+        }
+        llvm::Function* predFn = calleeIt->second;
+        if (predFn->arg_size() < 1) {
+            codegenError("array_count: function '" + fnName + "' must accept at least 1 argument", expr);
+        }
+
+        llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
+        arrArg = toDefaultType(arrArg);
+        llvm::Value* arrPtr = builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "acnt.arrptr");
+        llvm::Value* length = builder->CreateLoad(getDefaultType(), arrPtr, "acnt.len");
+
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* entryBB = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "acnt.loop", function);
+        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "acnt.body", function);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "acnt.done", function);
+
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+
+        builder->CreateBr(loopBB);
+
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* acc = builder->CreatePHI(getDefaultType(), 2, "acnt.acc");
+        llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "acnt.idx");
+        acc->addIncoming(zero, entryBB);
+        idx->addIncoming(zero, entryBB);
+        llvm::Value* doneCheck = builder->CreateICmpSGE(idx, length, "acnt.donecheck");
+        builder->CreateCondBr(doneCheck, doneBB, bodyBB);
+
+        builder->SetInsertPoint(bodyBB);
+        llvm::Value* offset = builder->CreateAdd(idx, one, "acnt.offset");
+        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrPtr, offset, "acnt.elemptr");
+        llvm::Value* elem = builder->CreateLoad(getDefaultType(), elemPtr, "acnt.elem");
+        llvm::Value* predResult = builder->CreateCall(predFn, {elem}, "acnt.pred");
+        predResult = toDefaultType(predResult);
+        llvm::Value* isNonZero = builder->CreateICmpNE(predResult, zero, "acnt.nz");
+        llvm::Value* incr = builder->CreateZExt(isNonZero, getDefaultType(), "acnt.incr");
+        llvm::Value* newAcc = builder->CreateAdd(acc, incr, "acnt.newacc");
+        llvm::Value* newIdx = builder->CreateAdd(idx, one, "acnt.newidx");
+        acc->addIncoming(newAcc, bodyBB);
+        idx->addIncoming(newIdx, bodyBB);
+        builder->CreateBr(loopBB);
+
         builder->SetInsertPoint(doneBB);
         return acc;
     }
