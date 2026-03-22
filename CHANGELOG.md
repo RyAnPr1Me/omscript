@@ -5,6 +5,23 @@ All notable changes to the OmScript compiler will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.0] - 2026-03-22
+
+### Added
+- **6 new superoptimizer algebraic simplification patterns:**
+  - **De Morgan's laws:** `~(a & b) → (~a) | (~b)` and `~(a | b) → (~a) & (~b)` — exposes further simplification opportunities when one of the operands is a known constant or can be folded
+  - **Boolean select→zext:** `select(cond, 1, 0) → zext(cond)` and `select(cond, 0, 1) → zext(!cond)` — eliminates conditional branches for boolean-to-integer conversions
+  - **Redundant truncation elimination:** `and(zext(x), mask) → zext(x)` when x's source type fits within the mask — removes no-op masking operations
+  - **Absolute value recognition:** `select(a > 0, a, -a)` and `select(a < 0, -a, a)` → branchless abs via `(x ^ (x >> 31)) - (x >> 31)` — eliminates a conditional branch per abs() call
+  - **Low-bit comparison simplification:** `icmp ne (and x, 1), 0 → trunc x to i1` — reduces instruction count for boolean testing patterns
+
+### Changed
+- **Post-recursive-inlining cleanup (O3):** After bounded recursive inlining, a GVN + InstCombine + CFGSimp + DCE pass now runs to eliminate redundant computations and dead code created by manual inlining. This catches duplicate computations that appear in both the original call site and inlined body.
+- **Early InferFunctionAttrs registration (O2+):** `InferFunctionAttrsPass` now runs early in the pipeline to annotate library functions with known attributes (noalias, nocapture, readonly, etc.) before the inliner and alias analysis passes, improving cost estimates and enabling more aggressive optimizations downstream.
+- **Dead argument elimination (O3):** `DeadArgumentEliminationPass` now runs late in the O3 pipeline to remove unused function parameters after inlining and constant propagation, reducing register pressure and enabling further inlining with smaller call signatures.
+- **Enhanced final cleanup pass:** GVN pass added before the final DCE + InstCombine + CFGSimp cleanup to catch redundant computations exposed by the superoptimizer and HGOE passes.
+- **Stronger OPTMAX function optimization:** Added `AggressiveInstCombine` and `BDCE` (Bit-tracking Dead Code Elimination) passes to the OPTMAX pipeline, catching multi-instruction patterns and unused-bit elimination that regular InstCombine misses.
+
 ## [3.0.0] - 2026-03-22
 
 ### Added
