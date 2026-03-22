@@ -35,22 +35,22 @@ BENCH_NAME=(
 )
 
 BENCH_DESC=(
-    "GCD, log2, modular arithmetic in a tight loop"
-    "Push N elements onto a dynamic array"
-    "array_map / array_filter / array_reduce with lambdas"
-    "Repeated str_concat to build a long string"
-    "str_contains + str_index_of on a 1000-char haystack"
+    "GCD, log2, and modular arithmetic in a tight loop"
+    "Push N elements onto a dynamically-growing array"
+    "Higher-order array_map / array_filter / array_reduce with lambdas"
+    "Repeated str_concat building a progressively longer string"
+    "str_contains and str_index_of on a 1000-character haystack"
     "Struct field read/write in a tight loop"
-    "Switch/case with 4 branches inside a loop"
-    "Naive recursive Fibonacci (exponential calls)"
-    "Triple-nested loop (N^3 iterations)"
-    "Bubble-sort a pseudo-random array"
-    "While-loop accumulator (vs for-in)"
-    "Cascading if/else classification"
-    "Pseudo-random array read + write access pattern"
-    "Deeply nested small-function calls"
-    "Shift, AND, OR, XOR intensive loop"
-    "End-to-end workload exercising all subsystems"
+    "Switch/case dispatch with 4 branches inside a loop"
+    "Naive recursive Fibonacci (exponential call tree)"
+    "Triple-nested loop with N^3 iterations"
+    "Bubble-sort a pseudo-random array of N elements"
+    "While-loop accumulator (compared to for-in)"
+    "Cascading if/else classification of integer ranges"
+    "Pseudo-random array read and write access pattern"
+    "Deeply nested small-function call chains"
+    "Shift, AND, OR, and XOR intensive loop"
+    "End-to-end combined workload exercising all subsystems"
 )
 
 # Input sizes – tuned so each test takes ~30-200 ms in C.
@@ -75,22 +75,22 @@ BENCH_N=(
 )
 
 BOTTLENECK_LABELS=(
-    "math builtins (gcd / log2 call overhead)"
-    "array reallocation strategy on push"
-    "lambda / higher-order function overhead"
-    "string allocation on every concat"
-    "string search / manipulation builtins"
-    "struct field-access indirection"
-    "switch codegen / branch prediction"
-    "function-call overhead (deep recursion)"
-    "loop body codegen / vectorisation"
-    "sort algorithm (bubble sort is O(n^2))"
+    "math builtin call overhead (gcd / log2)"
+    "array reallocation strategy during push"
+    "lambda / higher-order function dispatch overhead"
+    "string allocation overhead on each concat"
+    "string search and manipulation builtin overhead"
+    "struct field-access indirection overhead"
+    "switch codegen quality and branch prediction"
+    "function-call overhead in deep recursion"
+    "loop body codegen and auto-vectorization"
+    "sort algorithm complexity (bubble sort is O(n^2))"
     "while-loop codegen quality"
-    "branch codegen (if/else chains)"
+    "branch codegen quality (if/else chains)"
     "array bounds-check overhead"
-    "call / return overhead for small functions"
-    "bitwise-op codegen quality"
-    "overall compiler performance"
+    "call/return overhead for small inlined functions"
+    "bitwise operation codegen quality"
+    "overall compiler optimization quality"
 )
 
 # ─── COLOR CODES ──────────────────────────────────────────────
@@ -106,13 +106,13 @@ echo ""
 echo "Generating source files …"
 
 cat > bench.om << 'OMEOF'
+struct Point { hot int x, hot int y }
+
 OPTMAX=:
 
-struct Point { hot int x, hot int y };
-
-@hot 
+@hot
 fn bench_math(n:int) -> int {
-   prefetch hot var acc:int = 0;
+    prefetch var acc:int = 0;
     for (i:int in 1...n) {
         acc += (i * i) % 97;
         acc ^= (i << 2);
@@ -122,8 +122,9 @@ fn bench_math(n:int) -> int {
     return acc;
 }
 
+@hot
 fn bench_push(@prefetch n:int) -> int {
-    var arr:int[] align(64) = [];
+    var arr:int[] = [];
     prefetch arr;
     for (i:int in 0...n) {
         arr = push(arr, (i * 3) % 12345);
@@ -135,17 +136,17 @@ fn bench_push(@prefetch n:int) -> int {
 }
 @hot @flatten @pure @unroll
 fn bench_hof(@prefetch n:int) -> int {
-    hot var arr:int[] = array_fill(n, 0);
+    var arr:int[] = array_fill(n, 0);
     prefetch arr;
     for (i:int in 0...n) {
         arr[i] = (i * 7) % 1000;
     }
     var mapped:int[] = array_map(arr, |x:int| (x * x) % 997);
     invalidate arr;
-    var filtered:int[] align(64) = array_filter(mapped, |x:int| x % 2 == 0);
+    var filtered:int[] = array_filter(mapped, |x:int| x % 2 == 0);
     invalidate mapped;
-    var reduced:int align(64) = array_reduce(filtered, |a:int, b:int| a + b, 0);
-    var result:int align(64) = reduced + len(filtered);
+    var reduced:int = array_reduce(filtered, |a:int, b:int| a + b, 0);
+    var result:int = reduced + len(filtered);
     invalidate filtered;
     invalidate n;
     return result;
@@ -186,7 +187,7 @@ fn bench_struct(@prefetch n:int) -> int {
     invalidate p;
     return sum;
 }
-@hot 
+@hot
 fn bench_branch(@prefetch n:int) -> int {
     var sum:int = 0;
     for (i:int in 0...n) {
@@ -202,16 +203,16 @@ fn bench_branch(@prefetch n:int) -> int {
 }
 @hot @pure
 fn fib(n:int) -> int {
-    if (n <= 1) { return n; };
+    if (n <= 1) { return n; }
     return fib(n - 1) + fib(n - 2);
 }
-@flatten @hot 
+@flatten @hot
 fn bench_recurse(n:int) -> int {
     return fib(n);
 }
 @hot @flatten @pure @unroll @vectorize
 fn bench_nested(n:int) -> int {
-    hot var sum:int = 0;
+    var sum:int = 0;
     for (i:int in 0...n:int) {
         for (j:int in 0...n:int) {
             for (k:int in 0...n:int) {
@@ -223,7 +224,7 @@ fn bench_nested(n:int) -> int {
 }
 @hot @flatten @vectorize
 fn bench_sort(n:int) -> int {
-    var arr:int[] align(64) = [];
+    var arr:int[] = [];
     prefetch arr;
     for (i:int in 0...n:int) {
         arr = push(arr, (i * 2654435761) % 1000000);
@@ -246,11 +247,11 @@ fn bench_while(n:int) -> int {
 }
 @hot
 fn classify(x:int) -> int {
-    if (x < 10)    { return 1; };
-    if (x < 100)   { return 2; };
-    if (x < 1000)  { return 3; };
-    if (x < 10000) { return 4; };
-    if (x < 100000){ return 5; };
+    if (x < 10)    { return 1; }
+    if (x < 100)   { return 2; }
+    if (x < 1000)  { return 3; }
+    if (x < 10000) { return 4; }
+    if (x < 100000){ return 5; }
     return 6;
 }
 @hot
@@ -264,7 +265,7 @@ fn bench_ifelse(n:int) -> int {
 @hot
 fn bench_arrindex(n:int) -> int {
     const sz:int = 10000;
-    var arr:int[] align(64) = (array_fill(sz, 0));
+    var arr:int[] = array_fill(sz, 0);
     for (i:int in 0...sz) {
         arr[i] = i * 3;
     }
@@ -279,17 +280,20 @@ fn bench_arrindex(n:int) -> int {
     return sum;
 }
 
-fn add_one(x:int) -> int { return x + 1; };
-fn add_two(x:int) -> int { return add_one(add_one(x)); };
-fn add_four(x:int) -> int { return add_two(add_two(x)); };
+@hot @inline
+fn add_one(x:int) -> int { return x + 1; }
+@hot @inline
+fn add_two(x:int) -> int { return add_one(add_one(x)); }
+@hot @inline
+fn add_four(x:int) -> int { return add_two(add_two(x)); }
+@hot
 fn bench_calls(n:int) -> int {
     var sum:int = 0;
     for (i:int in 0...n:int) {
         sum += add_four(i % 1000);
     }
-    
+    invalidate n;
     return sum;
-    
 }
 @hot @vectorize @unroll
 fn bench_bitwise(n:int) -> int {
@@ -330,7 +334,7 @@ fn bench_combined(n:int) -> int {
     invalidate filtered;
 
     // struct
-    hot var p:struct = Point { x: 1, y: 2 };
+    var p:struct = Point { x: 1, y: 2 };
     for (i:int in 0...n) {
         p.x = p.x + i;
         p.y = p.y ^ i;
@@ -368,7 +372,9 @@ fn bench_combined(n:int) -> int {
 
     return total;
 }
-@flatten @hot 
+OPTMAX!:
+
+@flatten @hot
 fn main() -> int {
     var test_id:int = input();
     prefetch var n:int = input();
@@ -392,12 +398,9 @@ fn main() -> int {
         case 15: print(bench_combined(n)); break;
         default: print(0);
     }
-     invalidate n;
+    invalidate n;
     return 0;
-   
 }
-
-OPTMAX!:
 OMEOF
 
 # ─── C SOURCE ────────────────────────────────────────────────
@@ -717,7 +720,7 @@ if [ ! -x "$OMSC" ]; then
 fi
 
 echo "────────────────────────────────────────────────────────────────"
-echo "  DEBUG: Compilation Timing"
+echo "  Compilation Timing"
 echo "────────────────────────────────────────────────────────────────"
 
 # All max-optimization flags are enabled.  OPTMAX is set inside bench.om.
@@ -740,11 +743,11 @@ echo "  C  compile time: ${C_COMP_MS} ms"
 
 echo ""
 if [ "$OM_COMP_MS" -gt 10000 ]; then
-    echo -e "  ${RED}⚠ OM compilation took >10 s – compiler may be generating slow code paths${RST}"
+    echo -e "  ${RED}⚠ OM compilation took >10 s – compiler may be generating slow code paths.${RST}"
 elif [ "$OM_COMP_MS" -gt 5000 ]; then
-    echo -e "  ${YEL}⚠ OM compilation took >5 s – consider profiling the compiler${RST}"
+    echo -e "  ${YEL}⚠ OM compilation took >5 s – consider profiling the compiler.${RST}"
 else
-    echo -e "  ${GRN}✓ OM compilation completed in a reasonable time${RST}"
+    echo -e "  ${GRN}✓ OM compilation completed in a reasonable time.${RST}"
 fi
 echo ""
 
@@ -835,7 +838,7 @@ done
 
 if [ "$MISMATCH" -eq 1 ]; then
     echo ""
-    echo -e "${RED}ERROR: output mismatch – fix correctness before benchmarking.${RST}"
+    echo -e "${RED}ERROR: Output mismatch detected – fix correctness issues before benchmarking.${RST}"
     exit 1
 fi
 
@@ -845,7 +848,7 @@ echo "╔═══════════════════════�
 echo "║                    Loop Scaling  (x1  x2  x4)                           ║"
 echo "╚═══════════════════════════════════════════════════════════════════════════╝"
 echo ""
-echo "  Tests whether OM scales linearly like C as N grows."
+echo "  Tests whether OM runtime scales linearly with input size, like C."
 echo ""
 
 SCALE_IDS=(0 5 6 10 14)
@@ -947,30 +950,30 @@ printf "  Aggregate:  C: %d ms   OM: %d ms   (%d%%)\n" \
 
 if [ "$OVERALL" -lt 100 ]; then
     DIFF=$(( 100 - OVERALL ))
-    echo -e "  ${GRN}${BLD}OM is ${DIFF}% faster than C on average.${RST}"
+    echo -e "  ${GRN}${BLD}OM is ${DIFF}% faster than C on aggregate.${RST}"
 elif [ "$OVERALL" -gt 100 ]; then
     DIFF=$(( OVERALL - 100 ))
-    echo -e "  ${RED}${BLD}OM is ${DIFF}% slower than C on average.${RST}"
+    echo -e "  ${RED}${BLD}OM is ${DIFF}% slower than C on aggregate.${RST}"
 else
-    echo -e "  ${GRN}${BLD}OM is on par with C on average.${RST}"
+    echo -e "  ${GRN}${BLD}OM is on par with C on aggregate.${RST}"
 fi
 
 echo ""
-if   [ "$OVERALL" -le 120 ]; then echo -e "  Verdict:    ${GRN}${BLD}Excellent -- near-native performance${RST}"
-elif [ "$OVERALL" -le 200 ]; then echo -e "  Verdict:    ${YEL}${BLD}Acceptable -- room for improvement${RST}"
-else                               echo -e "  Verdict:    ${RED}${BLD}Needs work -- significant overhead${RST}"
+if   [ "$OVERALL" -le 120 ]; then echo -e "  Verdict:    ${GRN}${BLD}Excellent – near-native performance.${RST}"
+elif [ "$OVERALL" -le 200 ]; then echo -e "  Verdict:    ${YEL}${BLD}Acceptable – room for improvement.${RST}"
+else                               echo -e "  Verdict:    ${RED}${BLD}Needs work – significant overhead detected.${RST}"
 fi
 
 echo ""
 echo "=== DONE ==="
 
-# ─── DEBUG: TIME BREAKDOWN ────────────────────────────────────
+# ─── TIME BREAKDOWN ───────────────────────────────────────────
 SCRIPT_END=$(date +%s%N)
 TOTAL_MS=$(( (SCRIPT_END - SCRIPT_START) / 1000000 ))
 BENCH_MS=$(( TOTAL_MS - OM_COMP_MS - C_COMP_MS ))
 echo ""
 echo "────────────────────────────────────────────────────────────────"
-echo "  DEBUG: Time Breakdown"
+echo "  Time Breakdown"
 echo "────────────────────────────────────────────────────────────────"
 printf "  OM compile:     %6d ms  (%d%%)\n" "$OM_COMP_MS" "$(( OM_COMP_MS * 100 / (TOTAL_MS > 0 ? TOTAL_MS : 1) ))"
 printf "  C  compile:     %6d ms  (%d%%)\n" "$C_COMP_MS"  "$(( C_COMP_MS  * 100 / (TOTAL_MS > 0 ? TOTAL_MS : 1) ))"
@@ -978,10 +981,10 @@ printf "  Benchmarks:     %6d ms  (%d%%)\n" "$BENCH_MS"   "$(( BENCH_MS   * 100 
 printf "  Total:          %6d ms\n" "$TOTAL_MS"
 echo ""
 if [ "$OM_COMP_MS" -gt "$BENCH_MS" ]; then
-    echo -e "  ${YEL}→ Most time was spent in the OM COMPILER, not running benchmarks.${RST}"
-    echo -e "  ${YEL}  The compiler itself is the bottleneck.${RST}"
+    echo -e "  ${YEL}→ Most time was spent in the OM compiler, not running benchmarks.${RST}"
+    echo -e "  ${YEL}  The compiler itself is the primary bottleneck.${RST}"
 elif [ "$BENCH_MS" -gt $(( TOTAL_MS * 80 / 100 )) ]; then
-    echo -e "  ${GRN}→ Most time was spent RUNNING benchmarks (expected).${RST}"
-    echo -e "  ${GRN}  Compilation is fast; benchmark sizes drive total time.${RST}"
+    echo -e "  ${GRN}→ Most time was spent running benchmarks (expected).${RST}"
+    echo -e "  ${GRN}  Compilation is fast; benchmark input sizes drive total time.${RST}"
 fi
 echo "────────────────────────────────────────────────────────────────"
