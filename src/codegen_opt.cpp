@@ -38,6 +38,7 @@
 #include <llvm/Transforms/IPO/GlobalDCE.h>
 #include <llvm/Transforms/IPO/GlobalOpt.h>
 #include <llvm/Transforms/IPO/HotColdSplitting.h>
+#include <llvm/Transforms/IPO/DeadArgumentElimination.h>
 #include <llvm/Transforms/IPO/InferFunctionAttrs.h>
 #include <llvm/Transforms/InstCombine/InstCombine.h>
 #include <llvm/Transforms/Scalar.h>
@@ -331,6 +332,22 @@ void CodeGenerator::runOptimizationPasses() {
 
     llvm::PassBuilder PB(targetMachine.get(), PTO, pgoOpt);
 
+    // At O2+, register InferFunctionAttrs early in the pipeline to annotate
+    // library functions with known attributes (noalias, nocapture, readonly,
+    // etc.) before the inliner and other IPO passes run.  This enables the
+    // inliner to make better cost estimates and allows alias analysis to be
+    // more precise, unlocking further optimizations downstream.
+    if (optimizationLevel >= OptimizationLevel::O2) {
+        PB.registerPipelineStartEPCallback(
+#if LLVM_VERSION_MAJOR >= 21
+            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel, llvm::ThinOrFullLTOPhase) {
+#else
+            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel) {
+#endif
+            MPM.addPass(llvm::InferFunctionAttrsPass());
+        });
+    }
+
     // At O2+ with -floop-optimize, load the LLVM Polly polyhedral optimizer
     // plugin.  Polly provides high-level loop transformations (tiling, fusion,
     // interchange) based on the polyhedral model, improving data locality and
@@ -539,6 +556,22 @@ void CodeGenerator::runOptimizationPasses() {
         });
     }
 
+    // At O3, run dead argument elimination to remove unused function
+    // parameters.  After inlining and constant propagation, many functions
+    // have parameters that are never used in the function body.  Removing
+    // these eliminates register pressure from passing dead values and
+    // enables further inlining (smaller call signatures).
+    if (optimizationLevel >= OptimizationLevel::O3) {
+        PB.registerOptimizerLastEPCallback(
+#if LLVM_VERSION_MAJOR >= 21
+            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel, llvm::ThinOrFullLTOPhase) {
+#else
+            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel) {
+#endif
+            MPM.addPass(llvm::DeadArgumentEliminationPass());
+        });
+    }
+
     // At O3, run HotColdSplitting to outline cold code regions (error
     // handlers, assertion failures, rarely-taken branches) into separate
     // functions.  This improves I-cache density on the hot path and
@@ -723,6 +756,25 @@ void CodeGenerator::runOptimizationPasses() {
         }
         if (verbose_) {
             std::cout << "    Bounded recursive inlining complete" << std::endl;
+        }
+        // Post-recursive-inlining cleanup: GVN + InstCombine + ADCE to eliminate
+        // redundant computations and dead code created by manual inlining.
+        // The inlined copies create duplicate computations of the same values
+        // (e.g., fib(n-1) appears both at the original call site and in the
+        // inlined body), and GVN can often merge these.
+        {
+            llvm::legacy::FunctionPassManager postInlineFPM(module.get());
+            postInlineFPM.add(llvm::createGVNPass());
+            postInlineFPM.add(llvm::createInstructionCombiningPass());
+            postInlineFPM.add(llvm::createCFGSimplificationPass());
+            postInlineFPM.add(llvm::createDeadCodeEliminationPass());
+            postInlineFPM.doInitialization();
+            for (auto& F : *module) {
+                if (!F.isDeclaration() && F.getName() != "main") {
+                    postInlineFPM.run(F);
+                }
+            }
+            postInlineFPM.doFinalization();
         }
     }
 
@@ -954,6 +1006,7 @@ void CodeGenerator::runOptimizationPasses() {
         // catches immediately dead code, InstCombine + CFGSimplification
         // may expose further dead code, and the second DCE catches that.
         llvm::legacy::FunctionPassManager cleanupFPM(module.get());
+        cleanupFPM.add(llvm::createGVNPass());
         cleanupFPM.add(llvm::createDeadCodeEliminationPass());
         cleanupFPM.add(llvm::createInstructionCombiningPass());
         cleanupFPM.add(llvm::createCFGSimplificationPass());
@@ -1068,6 +1121,11 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     // the overhead of a full function call when the fast path applies.
     fpm.add(llvm::createPartiallyInlineLibCallsPass());
     fpm.add(llvm::createFlattenCFGPass());
+    // Phase 3.5: Aggressive cleanup passes for maximal optimization
+    // Extra DCE + CFG simplification to clean up patterns exposed by
+    // flattening — catches dead control flow and trivially dead instructions.
+    fpm.add(llvm::createDeadCodeEliminationPass());
+    fpm.add(llvm::createCFGSimplificationPass());
     // Phase 4: Final cleanup — InstSimplify, InstCombine, CFGSimplification,
     // and DCE remove dead code and simplify patterns exposed by loop and
     // control-flow transformations above.

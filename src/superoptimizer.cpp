@@ -2384,6 +2384,131 @@ static unsigned applyAlgebraicSimplifications(llvm::Function& func) {
                 }
             }
 
+            // ── De Morgan's laws ─────────────────────────────────────────
+            // ~(a & b) → (~a) | (~b)  when inner has one use
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Xor) {
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1))) {
+                    if (ci->isMinusOne()) {
+                        if (auto* inner = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0))) {
+                            if (inner->getOpcode() == llvm::Instruction::And && hasOneUse(inner)) {
+                                llvm::IRBuilder<> builder(&inst);
+                                llvm::Value* notA = builder.CreateNot(inner->getOperand(0), "demorgan.nota");
+                                llvm::Value* notB = builder.CreateNot(inner->getOperand(1), "demorgan.notb");
+                                simplified = builder.CreateOr(notA, notB, "demorgan.or");
+                            }
+                            // ~(a | b) → (~a) & (~b)
+                            else if (inner->getOpcode() == llvm::Instruction::Or && hasOneUse(inner)) {
+                                llvm::IRBuilder<> builder(&inst);
+                                llvm::Value* notA = builder.CreateNot(inner->getOperand(0), "demorgan.nota");
+                                llvm::Value* notB = builder.CreateNot(inner->getOperand(1), "demorgan.notb");
+                                simplified = builder.CreateAnd(notA, notB, "demorgan.and");
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── Boolean simplification on select ─────────────────────────
+            // select(cond, 1, 0) → zext(cond)
+            if (!simplified && llvm::isa<llvm::SelectInst>(inst)) {
+                auto* sel = llvm::cast<llvm::SelectInst>(&inst);
+                if (isConstInt(sel->getTrueValue(), 1) && isConstInt(sel->getFalseValue(), 0)) {
+                    llvm::IRBuilder<> builder(&inst);
+                    simplified = builder.CreateZExt(sel->getCondition(), sel->getType(), "bool_zext");
+                }
+                // select(cond, 0, 1) → zext(!cond)
+                if (!simplified && isConstInt(sel->getTrueValue(), 0) && isConstInt(sel->getFalseValue(), 1)) {
+                    llvm::IRBuilder<> builder(&inst);
+                    llvm::Value* notCond = builder.CreateNot(sel->getCondition(), "bool_not");
+                    simplified = builder.CreateZExt(notCond, sel->getType(), "bool_notzext");
+                }
+            }
+
+            // ── Redundant truncation elimination ─────────────────────────
+            // and(x, 0xFF) where x is known < 256 → x
+            // (More generally: and(x, mask) where x's value range fits in mask)
+            if (!simplified && inst.getOpcode() == llvm::Instruction::And) {
+                if (auto* maskCI = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1))) {
+                    uint64_t mask = maskCI->getZExtValue();
+                    // Check if mask is (2^n - 1) i.e. a bit-width mask
+                    if (mask > 0 && (mask & (mask + 1)) == 0) {
+                        llvm::Value* src = inst.getOperand(0);
+                        // If source is a zext from a smaller type that fits in the mask
+                        if (auto* zext = llvm::dyn_cast<llvm::ZExtInst>(src)) {
+                            unsigned srcBits = zext->getSrcTy()->getIntegerBitWidth();
+                            if ((1ULL << srcBits) - 1 <= mask) {
+                                simplified = src;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── min/max via select canonicalization ──────────────────────
+            // select(icmp slt a, b, a, b) → already handled by idiom recognizer
+            // select(icmp sgt a, 0, a, sub(0, a)) → abs(a)  [when not already caught]
+            if (!simplified && llvm::isa<llvm::SelectInst>(inst)) {
+                auto* sel = llvm::cast<llvm::SelectInst>(&inst);
+                if (auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(sel->getCondition())) {
+                    // select(a > 0, a, -a) → abs(a)
+                    if (cmp->getPredicate() == llvm::ICmpInst::ICMP_SGT &&
+                        isConstInt(cmp->getOperand(1), 0) &&
+                        sel->getTrueValue() == cmp->getOperand(0)) {
+                        if (auto* neg = llvm::dyn_cast<llvm::BinaryOperator>(sel->getFalseValue())) {
+                            if (neg->getOpcode() == llvm::Instruction::Sub &&
+                                isConstInt(neg->getOperand(0), 0) &&
+                                neg->getOperand(1) == cmp->getOperand(0)) {
+                                llvm::IRBuilder<> builder(&inst);
+                                llvm::Value* x = cmp->getOperand(0);
+                                // abs(x) = (x ^ (x >> 31)) - (x >> 31)  for 32-bit
+                                // But use LLVM's abs intrinsic if available
+                                unsigned bw = x->getType()->getIntegerBitWidth();
+                                llvm::Value* shift = builder.CreateAShr(x,
+                                    llvm::ConstantInt::get(x->getType(), bw - 1), "abs.sign");
+                                llvm::Value* xored = builder.CreateXor(x, shift, "abs.xor");
+                                simplified = builder.CreateSub(xored, shift, "abs.sub");
+                            }
+                        }
+                    }
+                    // select(a < 0, -a, a) → abs(a)
+                    if (!simplified && cmp->getPredicate() == llvm::ICmpInst::ICMP_SLT &&
+                        isConstInt(cmp->getOperand(1), 0) &&
+                        sel->getFalseValue() == cmp->getOperand(0)) {
+                        if (auto* neg = llvm::dyn_cast<llvm::BinaryOperator>(sel->getTrueValue())) {
+                            if (neg->getOpcode() == llvm::Instruction::Sub &&
+                                isConstInt(neg->getOperand(0), 0) &&
+                                neg->getOperand(1) == cmp->getOperand(0)) {
+                                llvm::IRBuilder<> builder(&inst);
+                                llvm::Value* x = cmp->getOperand(0);
+                                unsigned bw = x->getType()->getIntegerBitWidth();
+                                llvm::Value* shift = builder.CreateAShr(x,
+                                    llvm::ConstantInt::get(x->getType(), bw - 1), "abs.sign");
+                                llvm::Value* xored = builder.CreateXor(x, shift, "abs.xor");
+                                simplified = builder.CreateSub(xored, shift, "abs.sub");
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── Comparison with boolean → simpler form ──────────────────
+            // icmp ne (and x, 1), 0  →  trunc x to i1  (when only testing low bit)
+            if (!simplified && inst.getOpcode() == llvm::Instruction::ICmp) {
+                auto* cmp = llvm::cast<llvm::ICmpInst>(&inst);
+                if (cmp->getPredicate() == llvm::ICmpInst::ICMP_NE &&
+                    isConstInt(cmp->getOperand(1), 0)) {
+                    if (auto* andInst = llvm::dyn_cast<llvm::BinaryOperator>(cmp->getOperand(0))) {
+                        if (andInst->getOpcode() == llvm::Instruction::And &&
+                            isConstInt(andInst->getOperand(1), 1)) {
+                            llvm::IRBuilder<> builder(&inst);
+                            llvm::Value* trunc = builder.CreateTrunc(andInst->getOperand(0),
+                                builder.getInt1Ty(), "lowbit_trunc");
+                            simplified = trunc;
+                        }
+                    }
+                }
+            }
+
             if (simplified) {
                 inst.replaceAllUsesWith(simplified);
                 toErase.push_back(&inst);
