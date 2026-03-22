@@ -357,9 +357,13 @@ void CodeGenerator::runOptimizationPasses() {
     // redundant computations before the heavier optimization passes run,
     // reducing IR size and compilation time for the downstream pipeline.
     if (optimizationLevel >= OptimizationLevel::O1) {
-        PB.registerPeepholeEPCallback([](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) {
+        const bool useMemSSA = optimizationLevel >= OptimizationLevel::O2;
+        PB.registerPeepholeEPCallback([useMemSSA](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) {
             FPM.addPass(llvm::ReassociatePass());
-            FPM.addPass(llvm::EarlyCSEPass(/*UseMemorySSA=*/false));
+            // At O2+, enable MemorySSA for EarlyCSE so it can eliminate
+            // redundant loads/stores (at the cost of slightly higher compile
+            // time).  At O1 the lightweight version without MemorySSA is enough.
+            FPM.addPass(llvm::EarlyCSEPass(useMemSSA));
         });
     }
 

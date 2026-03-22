@@ -864,12 +864,12 @@ static std::optional<IdiomMatch> detectPopCount(llvm::Instruction* inst) {
 /// where the or-chain is at least one stage of or(x, lshr(x, k)).
 /// The de Bruijn lookup variant is left for future work.
 static std::optional<IdiomMatch> detectCountLeadingZeros(llvm::Instruction* inst) {
-    // Pattern 1: ~x & (x-1) has popcount = CTZ(x), related pattern
-    // Pattern 2: Detect bit-smear sequence ending with popcount subtraction
+    // Detect bit-smear sequence ending with popcount subtraction:
     //   x |= x >> 1; x |= x >> 2; x |= x >> 4; x |= x >> 8; x |= x >> 16; x |= x >> 32;
     //   return 64 - popcount(x);
+    // The de Bruijn lookup variant is left for future work.
 
-    // We'll detect the end of the pattern: sub(bitwidth, ctpop(...))
+    // We detect the end of the pattern: sub(bitwidth, ctpop(or-chain))
     if (inst->getOpcode() != llvm::Instruction::Sub) return std::nullopt;
 
     unsigned bitWidth = inst->getType()->getIntegerBitWidth();
@@ -1097,6 +1097,8 @@ static bool replaceIdiom(IdiomMatch& match) {
         llvm::Value* shift = match.operands.size() > 1 ? match.operands[1] : nullptr;
         if (shift) {
             llvm::Value* shifted = builder.CreateLShr(x, shift, "bfe.shr");
+            // Guard: (1ULL << 64) is undefined behavior in C++, so we
+            // special-case bitWidth >= 64 to produce an all-ones mask.
             uint64_t maskVal = match.bitWidth >= 64
                 ? ~uint64_t(0)
                 : (1ULL << match.bitWidth) - 1;

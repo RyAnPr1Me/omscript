@@ -14,6 +14,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Redundant truncation elimination:** `and(zext(x), mask) → zext(x)` when x's source type fits within the mask — removes no-op masking operations
   - **Absolute value recognition:** `select(a > 0, a, -a)` and `select(a < 0, -a, a)` → branchless abs via `(x ^ (x >> 31)) - (x >> 31)` — eliminates a conditional branch per abs() call
   - **Low-bit comparison simplification:** `icmp ne (and x, 1), 0 → trunc x to i1` — reduces instruction count for boolean testing patterns
+- **29 new e-graph rewrite rules:**
+  - **Modulo-by-power-of-2 conversion:** `x % 2 → x & 1`, `x % 4 → x & 3`, ..., `x % 1024 → x & 1023` — replaces expensive remainder operations with cheap bitwise AND for power-of-2 divisors (10 rules)
+  - **Comparison-with-subtraction elimination:** `(x - y) < 0 → x < y`, `(x - y) > 0 → x > y`, `(x - y) <= 0 → x <= y`, `(x - y) >= 0 → x >= y` — removes intermediate subtraction in comparison chains (4 rules)
+  - **Zero-comparison to boolean:** `x == 0 → !x`, `x != 0 → !!x` — normalizes zero-testing to logical operations for better downstream simplification (2 rules)
+  - **Multiply-add coalescing:** `x*2+x → x*3`, `x*4+x → x*5`, `x*8-x → x*7`, `x*8+x → x*9`, `x*16-x → x*15`, `x*16+x → x*17` — folds multiply+add/sub sequences into a single multiply, enabling subsequent shift-based strength reduction (9 rules with commutative variants)
+  - **Shift-mask interaction:** `(x >> a) << a → x & ~((1<<a)-1)` and `(x << a) >> a → x & ((1<<(64-a))-1)` — replaces double-shift sequences with a single AND against a constant mask, exposing further AND-merging opportunities (12 rules for shifts 1–6)
+- **Count Leading Zeros (CLZ) idiom detection** in superoptimizer — recognizes the bit-smear + popcount CLZ pattern (`64 - popcount(x | (x>>1) | ...)`) and replaces it with the `llvm.ctlz` intrinsic
+- **Count Trailing Zeros (CTZ) idiom replacement** — the existing `x & (-x)` isolation detection now emits `llvm.cttz` intrinsic for direct hardware CTZ support
+- **Bit-field extract idiom replacement** — shift-and-mask patterns now emit optimized shift+AND sequences
 
 ### Changed
 - **Post-recursive-inlining cleanup (O3):** After bounded recursive inlining, a GVN + InstCombine + CFGSimp + DCE pass now runs to eliminate redundant computations and dead code created by manual inlining. This catches duplicate computations that appear in both the original call site and inlined body.
@@ -21,6 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Dead argument elimination (O3):** `DeadArgumentEliminationPass` now runs late in the O3 pipeline to remove unused function parameters after inlining and constant propagation, reducing register pressure and enabling further inlining with smaller call signatures.
 - **Enhanced final cleanup pass:** GVN pass added before the final DCE + InstCombine + CFGSimp cleanup to catch redundant computations exposed by the superoptimizer and HGOE passes.
 - **Stronger OPTMAX function optimization:** Added `AggressiveInstCombine` and `BDCE` (Bit-tracking Dead Code Elimination) passes to the OPTMAX pipeline, catching multi-instruction patterns and unused-bit elimination that regular InstCombine misses.
+- **Reassociate + EarlyCSE at O1+:** Expression trees are canonicalized and trivially redundant computations are eliminated early in the pipeline via `ReassociatePass` and `EarlyCSEPass`, reducing IR size for downstream passes.
+- **SCCP at O2+:** Sparse Conditional Constant Propagation now runs late in the scalar optimizer to discover constants flowing through control-flow edges, proving some branches unreachable and some PHI values constant.
 
 ## [3.0.0] - 2026-03-22
 

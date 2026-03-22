@@ -2849,13 +2849,16 @@ std::vector<RewriteRule> getAdvancedAlgebraicRules() {
         [](EGraph& g, const Subst& s) {
             return g.addBinOp(Op::Ge, s.at("x"), s.at("y"));
         });
-    // x == 0 → !x (boolean equivalence)
+    // x == 0 → !x (boolean equivalence).
+    // Valid because OmScript's LogNot always produces 0 or 1:
+    //   !x = (x == 0) ? 1 : 0, which is exactly (x == 0).
     rules.emplace_back("eq_zero_to_lognot",
         P::OpPat(Op::Eq, {P::Wild("x"), P::ConstPat(0)}),
         [](EGraph& g, const Subst& s) {
             return g.addUnaryOp(Op::LogNot, s.at("x"));
         });
-    // x != 0 → !!x (boolean conversion)
+    // x != 0 → !!x (boolean conversion).
+    // Valid because LogNot is boolean: !!x = !(x==0 ? 1 : 0) = (x!=0 ? 1 : 0).
     rules.emplace_back("ne_zero_to_bool",
         P::OpPat(Op::Ne, {P::Wild("x"), P::ConstPat(0)}),
         [](EGraph& g, const Subst& s) {
