@@ -879,6 +879,131 @@ static MicroarchProfile sifiveU74Profile() {
     return p;
 }
 
+/// Return an AWS Graviton3 profile (Arm Neoverse V1-based).
+/// Graviton3: 64-core, 256-bit SVE, DDR5, 8-wide dispatch.
+static MicroarchProfile graviton3Profile() {
+    MicroarchProfile p;
+    p.name = "graviton3";
+    p.isa = ISAFamily::AArch64;
+    p.decodeWidth = 8;
+    p.issueWidth = 8;
+    p.pipelineDepth = 13;      // Neoverse V1 pipeline
+    p.intALUs = 6;
+    p.vecUnits = 4;            // 4× 128-bit NEON / 2× 256-bit SVE
+    p.fmaUnits = 4;
+    p.loadPorts = 3;
+    p.storePorts = 2;
+    p.branchUnits = 2;
+    p.agus = 3;
+    p.dividers = 2;
+    p.mulPortCount = 4;        // multiply on 4 of 6 integer pipes
+    p.latIntAdd = 1; p.latIntMul = 2; p.latIntDiv = 12;
+    p.latFPAdd = 2; p.latFPMul = 3; p.latFPDiv = 10; p.latFMA = 4;
+    p.latLoad = 4; p.latStore = 4; p.latBranch = 1; p.latShift = 1;
+    p.tputIntAdd = 0.17;       // 6 ALUs → ~6/cycle
+    p.tputIntMul = 0.5;
+    p.tputFPAdd = 0.25; p.tputFPMul = 0.25;
+    p.tputLoad = 0.33; p.tputStore = 0.5;
+    p.l1DSize = 64; p.l1DLatency = 4;
+    p.l2Size = 1024; p.l2Latency = 11;
+    p.l3Size = 32768; p.l3Latency = 40;
+    p.cacheLineSize = 64;
+    p.vectorWidth = 256;       // SVE at 256-bit
+    p.intRegisters = 31; p.vecRegisters = 32; p.fpRegisters = 32;
+    p.branchMispredictPenalty = 11.0;
+    p.btbEntries = 8192;
+    p.memoryLatency = 140;     // DDR5 latency
+    return p;
+}
+
+/// Return an AWS Graviton4 profile (Arm Neoverse V2-based).
+/// Graviton4: 96-core, 256-bit SVE2, DDR5-5600, wider backend.
+static MicroarchProfile graviton4Profile() {
+    MicroarchProfile p = neoverseV2Profile();
+    p.name = "graviton4";
+    p.l2Size = 2048;           // 2 MB L2 per core
+    p.l3Size = 36864;          // 36 MB shared L3
+    p.memoryLatency = 130;     // DDR5-5600
+    return p;
+}
+
+/// Return an Intel Lunar Lake profile (Lion Cove P-cores, 2024).
+/// Lion Cove: 8-wide decode, 8-wide dispatch, AVX2, improved branch pred.
+static MicroarchProfile lunarLakeProfile() {
+    MicroarchProfile p;
+    p.name = "lunarlake";
+    p.isa = ISAFamily::X86_64;
+    p.decodeWidth = 8;         // 8-wide decode
+    p.issueWidth = 8;          // 8-wide dispatch
+    p.pipelineDepth = 14;
+    p.intALUs = 6;             // 6 integer execution ports
+    p.vecUnits = 3;            // 3 vector ALU ports
+    p.fmaUnits = 2;
+    p.loadPorts = 3;           // 3 load ports
+    p.storePorts = 2;
+    p.branchUnits = 2;
+    p.agus = 3;
+    p.dividers = 1;
+    p.mulPortCount = 2;
+    p.latIntAdd = 1; p.latIntMul = 3; p.latIntDiv = 20;
+    p.latFPAdd = 3; p.latFPMul = 4; p.latFPDiv = 10; p.latFMA = 4;
+    p.latLoad = 5; p.latStore = 5; p.latBranch = 1; p.latShift = 1;
+    p.tputIntAdd = 0.17;      // 6 ALUs → ~6/cycle
+    p.tputIntMul = 0.5;
+    p.tputFPAdd = 0.5; p.tputFPMul = 0.5;
+    p.tputLoad = 0.33; p.tputStore = 0.5;
+    p.l1DSize = 48; p.l1DLatency = 5;
+    p.l2Size = 2560;           // 2.5 MB L2 per P-core
+    p.l2Latency = 12;
+    p.l3Size = 12288;          // 12 MB shared L3
+    p.l3Latency = 38;
+    p.cacheLineSize = 64;
+    p.vectorWidth = 256;       // AVX2
+    p.intRegisters = 16; p.vecRegisters = 16; p.fpRegisters = 16;
+    p.branchMispredictPenalty = 13.0;
+    p.btbEntries = 16384;      // larger BTB
+    p.memoryLatency = 170;     // LPDDR5x
+    return p;
+}
+
+/// Return an improved AMD Zen 5 profile (2024).
+/// Zen 5: 8-wide dispatch, 6 ALU pipes, 2× 256-bit vector, AVX-512
+/// via double-pump, improved branch prediction.
+static MicroarchProfile zen5Profile() {
+    MicroarchProfile p;
+    p.name = "znver5";
+    p.isa = ISAFamily::X86_64;
+    p.decodeWidth = 4;         // x86 decode still 4-wide
+    p.issueWidth = 8;          // 8-wide dispatch to backend
+    p.pipelineDepth = 18;      // slightly shorter than Zen 4
+    p.intALUs = 6;             // 6 integer ALU pipes (up from 4)
+    p.vecUnits = 4;            // 4× 256-bit SIMD pipes (up from 2)
+    p.fmaUnits = 4;            // 4 FMA units (up from 2)
+    p.loadPorts = 4;           // 4 load/store AGU units (up from 3)
+    p.storePorts = 2;
+    p.branchUnits = 2;         // 2 branch units (up from 1)
+    p.agus = 4;
+    p.dividers = 1;
+    p.mulPortCount = 2;
+    p.latIntAdd = 1; p.latIntMul = 3; p.latIntDiv = 15;
+    p.latFPAdd = 3; p.latFPMul = 3; p.latFPDiv = 12; p.latFMA = 4;
+    p.latLoad = 4; p.latStore = 4; p.latBranch = 1; p.latShift = 1;
+    p.tputIntAdd = 0.17;      // 6 ALUs
+    p.tputIntMul = 0.5;
+    p.tputFPAdd = 0.25; p.tputFPMul = 0.25;
+    p.tputLoad = 0.25; p.tputStore = 0.5;
+    p.l1DSize = 48; p.l1DLatency = 4;
+    p.l2Size = 1024; p.l2Latency = 12;
+    p.l3Size = 32768; p.l3Latency = 45;
+    p.cacheLineSize = 64;
+    p.vectorWidth = 512;       // AVX-512 native (not double-pumped)
+    p.intRegisters = 16; p.vecRegisters = 32; p.fpRegisters = 32;
+    p.branchMispredictPenalty = 12.0;
+    p.btbEntries = 8192;
+    p.memoryLatency = 170;
+    return p;
+}
+
 /// Normalize a CPU name for lookup: lowercase, strip hyphens.
 static std::string normalizeCpuName(const std::string& name) {
     std::string result;
@@ -907,6 +1032,9 @@ std::optional<MicroarchProfile> lookupMicroarch(const std::string& cpuName) {
     if (normalized == "alderlake" || normalized == "raptorlake" ||
         normalized == "meteorlake" || normalized == "arrowlake")
         return alderlakeProfile();
+
+    if (normalized == "lunarlake" || normalized == "pantherlake")
+        return lunarLakeProfile();
 
     if (normalized == "icelakeserver" || normalized == "icelakeclient" ||
         normalized == "tigerlake" || normalized == "sapphirerapids" ||
@@ -940,18 +1068,8 @@ std::optional<MicroarchProfile> lookupMicroarch(const std::string& cpuName) {
         p.l3Latency = 40;
         return p;
     }
-    if (normalized == "znver5" || normalized == "zen5") {
-        auto p = zen4Profile();
-        p.name = "znver5";
-        p.issueWidth = 8;
-        p.intALUs = 6;
-        p.vecUnits = 4;
-        p.fmaUnits = 4;
-        p.loadPorts = 4;
-        p.storePorts = 2;
-        p.vectorWidth = 512;
-        return p;
-    }
+    if (normalized == "znver5" || normalized == "zen5")
+        return zen5Profile();
 
     // ARM64 — Apple Silicon
     if (normalized == "applem1" || normalized == "applema14")
@@ -995,6 +1113,12 @@ std::optional<MicroarchProfile> lookupMicroarch(const std::string& cpuName) {
         p.pipelineDepth = 11;
         return p;
     }
+
+    // ARM64 — AWS Graviton (server)
+    if (normalized == "graviton3")
+        return graviton3Profile();
+    if (normalized == "graviton4")
+        return graviton4Profile();
 
     // ARM64 — Cortex
     if (normalized == "cortexa78" || normalized == "cortexa78c" ||

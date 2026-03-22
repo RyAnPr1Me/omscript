@@ -225,14 +225,26 @@ using Subst = std::unordered_map<std::string, ClassId>;
 class EGraph; // forward declaration
 using RhsBuilder = std::function<ClassId(EGraph&, const Subst&)>;
 
+/// Guard predicate for relational e-graph rules.  When set, the rule is
+/// only applied if the guard returns true for the matched substitution.
+/// This enables relational pattern matching: structural patterns matched
+/// by the LHS are refined by semantic predicates on bound values (e.g.,
+/// "matched constant is a power of two").
+using RuleGuard = std::function<bool(const EGraph&, const Subst&)>;
+
 /// A single rewrite rule: when the LHS pattern matches, apply the RHS builder.
 struct RewriteRule {
     std::string name;          ///< Human-readable rule name (for diagnostics)
     Pattern lhs;               ///< Left-hand side pattern to match
     RhsBuilder rhs;            ///< Builds the replacement expression
+    RuleGuard guard;           ///< Optional relational guard predicate
 
     RewriteRule(const std::string& n, Pattern l, RhsBuilder r)
         : name(n), lhs(std::move(l)), rhs(std::move(r)) {}
+
+    /// Construct a guarded (relational) rewrite rule.
+    RewriteRule(const std::string& n, Pattern l, RhsBuilder r, RuleGuard g)
+        : name(n), lhs(std::move(l)), rhs(std::move(r)), guard(std::move(g)) {}
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -331,6 +343,16 @@ public:
 
     /// Check if the node limit has been reached.
     bool atNodeLimit() const;
+
+    // ── Relational helpers ───────────────────────────────────────────
+
+    /// Extract the integer constant value from an e-class, if one exists.
+    /// Returns std::nullopt if the class contains no Const node.
+    std::optional<long long> getConstValue(ClassId cls) const;
+
+    /// Extract the float constant value from an e-class, if one exists.
+    /// Returns std::nullopt if the class contains no ConstF node.
+    std::optional<double> getConstFValue(ClassId cls) const;
 
 private:
     /// Union-find parent array.

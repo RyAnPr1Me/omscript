@@ -435,6 +435,9 @@ size_t EGraph::applyRules(const std::vector<RewriteRule>& rules) {
         for (auto& [cls, subst] : matches) {
             if (atNodeLimit()) break;
 
+            // Relational guard: skip this match if the predicate rejects it.
+            if (rule.guard && !rule.guard(*this, subst)) continue;
+
             ClassId rhsId = rule.rhs(*this, subst);
             ClassId lhsCls = find(cls);
             ClassId rhsCls = find(rhsId);
@@ -588,6 +591,24 @@ size_t EGraph::numNodes() const {
 
 bool EGraph::atNodeLimit() const {
     return totalNodes_ >= config_.maxNodes;
+}
+
+std::optional<long long> EGraph::getConstValue(ClassId cls) const {
+    cls = const_cast<EGraph*>(this)->find(cls);
+    if (cls >= classes_.size()) return std::nullopt;
+    for (const auto& node : classes_[cls].nodes) {
+        if (node.op == Op::Const) return node.value;
+    }
+    return std::nullopt;
+}
+
+std::optional<double> EGraph::getConstFValue(ClassId cls) const {
+    cls = const_cast<EGraph*>(this)->find(cls);
+    if (cls >= classes_.size()) return std::nullopt;
+    for (const auto& node : classes_[cls].nodes) {
+        if (node.op == Op::ConstF) return node.fvalue;
+    }
+    return std::nullopt;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4331,6 +4352,126 @@ std::vector<RewriteRule> getAdvancedComparisonRules() {
             return g.addBinOp(Op::Gt, s.at("a"), cmb);
         });
 
+    // ─────────────────────────────────────────────────────────────────────
+    // Comparison merging — combine two comparisons into one
+    // ─────────────────────────────────────────────────────────────────────
+
+    // (a < b) || (a == b) → a <= b
+    rules.emplace_back("lt_or_eq_to_le",
+        P::OpPat(Op::LogOr, {
+            P::OpPat(Op::Lt, {P::Wild("a"), P::Wild("b")}),
+            P::OpPat(Op::Eq, {P::Wild("a"), P::Wild("b")})
+        }),
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Le, s.at("a"), s.at("b")); });
+
+    // (a == b) || (a < b) → a <= b  (commuted OR)
+    rules.emplace_back("eq_or_lt_to_le",
+        P::OpPat(Op::LogOr, {
+            P::OpPat(Op::Eq, {P::Wild("a"), P::Wild("b")}),
+            P::OpPat(Op::Lt, {P::Wild("a"), P::Wild("b")})
+        }),
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Le, s.at("a"), s.at("b")); });
+
+    // (a > b) || (a == b) → a >= b
+    rules.emplace_back("gt_or_eq_to_ge",
+        P::OpPat(Op::LogOr, {
+            P::OpPat(Op::Gt, {P::Wild("a"), P::Wild("b")}),
+            P::OpPat(Op::Eq, {P::Wild("a"), P::Wild("b")})
+        }),
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Ge, s.at("a"), s.at("b")); });
+
+    // (a == b) || (a > b) → a >= b  (commuted OR)
+    rules.emplace_back("eq_or_gt_to_ge",
+        P::OpPat(Op::LogOr, {
+            P::OpPat(Op::Eq, {P::Wild("a"), P::Wild("b")}),
+            P::OpPat(Op::Gt, {P::Wild("a"), P::Wild("b")})
+        }),
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Ge, s.at("a"), s.at("b")); });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Redundant comparison elimination — a < b already implies a != b
+    // ─────────────────────────────────────────────────────────────────────
+
+    // (a != b) && (a < b) → a < b
+    rules.emplace_back("ne_and_lt_redundant",
+        P::OpPat(Op::LogAnd, {
+            P::OpPat(Op::Ne, {P::Wild("a"), P::Wild("b")}),
+            P::OpPat(Op::Lt, {P::Wild("a"), P::Wild("b")})
+        }),
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Lt, s.at("a"), s.at("b")); });
+
+    // (a < b) && (a != b) → a < b  (commuted AND)
+    rules.emplace_back("lt_and_ne_redundant",
+        P::OpPat(Op::LogAnd, {
+            P::OpPat(Op::Lt, {P::Wild("a"), P::Wild("b")}),
+            P::OpPat(Op::Ne, {P::Wild("a"), P::Wild("b")})
+        }),
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Lt, s.at("a"), s.at("b")); });
+
+    // (a != b) && (a > b) → a > b
+    rules.emplace_back("ne_and_gt_redundant",
+        P::OpPat(Op::LogAnd, {
+            P::OpPat(Op::Ne, {P::Wild("a"), P::Wild("b")}),
+            P::OpPat(Op::Gt, {P::Wild("a"), P::Wild("b")})
+        }),
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Gt, s.at("a"), s.at("b")); });
+
+    // (a > b) && (a != b) → a > b  (commuted AND)
+    rules.emplace_back("gt_and_ne_redundant",
+        P::OpPat(Op::LogAnd, {
+            P::OpPat(Op::Gt, {P::Wild("a"), P::Wild("b")}),
+            P::OpPat(Op::Ne, {P::Wild("a"), P::Wild("b")})
+        }),
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Gt, s.at("a"), s.at("b")); });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Ternary common-subexpression factoring
+    // ─────────────────────────────────────────────────────────────────────
+
+    // cond ? (a + c) : (b + c) → (cond ? a : b) + c
+    rules.emplace_back("ternary_add_factor",
+        P::OpPat(Op::Ternary, {P::Wild("cond"),
+            P::OpPat(Op::Add, {P::Wild("a"), P::Wild("c")}),
+            P::OpPat(Op::Add, {P::Wild("b"), P::Wild("c")})}),
+        [](EGraph& g, const Subst& s) {
+            ENode sel(Op::Ternary, std::vector<ClassId>{s.at("cond"), s.at("a"), s.at("b")});
+            ClassId selId = g.add(sel);
+            return g.addBinOp(Op::Add, selId, s.at("c"));
+        });
+
+    // cond ? (a - c) : (b - c) → (cond ? a : b) - c
+    rules.emplace_back("ternary_sub_factor",
+        P::OpPat(Op::Ternary, {P::Wild("cond"),
+            P::OpPat(Op::Sub, {P::Wild("a"), P::Wild("c")}),
+            P::OpPat(Op::Sub, {P::Wild("b"), P::Wild("c")})}),
+        [](EGraph& g, const Subst& s) {
+            ENode sel(Op::Ternary, std::vector<ClassId>{s.at("cond"), s.at("a"), s.at("b")});
+            ClassId selId = g.add(sel);
+            return g.addBinOp(Op::Sub, selId, s.at("c"));
+        });
+
+    // cond ? (a * c) : (b * c) → (cond ? a : b) * c
+    rules.emplace_back("ternary_mul_factor",
+        P::OpPat(Op::Ternary, {P::Wild("cond"),
+            P::OpPat(Op::Mul, {P::Wild("a"), P::Wild("c")}),
+            P::OpPat(Op::Mul, {P::Wild("b"), P::Wild("c")})}),
+        [](EGraph& g, const Subst& s) {
+            ENode sel(Op::Ternary, std::vector<ClassId>{s.at("cond"), s.at("a"), s.at("b")});
+            ClassId selId = g.add(sel);
+            return g.addBinOp(Op::Mul, selId, s.at("c"));
+        });
+
+    // cond ? (-a) : (-b) → -(cond ? a : b)
+    rules.emplace_back("ternary_neg_factor",
+        P::OpPat(Op::Ternary, {P::Wild("cond"),
+            P::OpPat(Op::Neg, {P::Wild("a")}),
+            P::OpPat(Op::Neg, {P::Wild("b")})}),
+        [](EGraph& g, const Subst& s) {
+            ENode sel(Op::Ternary, std::vector<ClassId>{s.at("cond"), s.at("a"), s.at("b")});
+            ClassId selId = g.add(sel);
+            return g.addUnaryOp(Op::Neg, selId);
+        });
+
 
     return rules;
 }
@@ -5798,6 +5939,111 @@ std::vector<RewriteRule> getAdvancedBitwiseRules() {
             P::OpPat(Op::BitXor, {P::Wild("a"), P::Wild("b")})
         }),
         [](EGraph& g, const Subst& s) { return g.addBinOp(Op::BitOr, s.at("a"), s.at("b")); });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Complement-based bitwise simplifications
+    // ─────────────────────────────────────────────────────────────────────
+
+    // (~a) & (a | b) → (~a) & b
+    // Proof: (~a) & (a | b) = ((~a) & a) | ((~a) & b) = 0 | ((~a) & b).
+    rules.emplace_back("compl_and_or",
+        P::OpPat(Op::BitAnd, {
+            P::OpPat(Op::BitNot, {P::Wild("a")}),
+            P::OpPat(Op::BitOr, {P::Wild("a"), P::Wild("b")})
+        }),
+        [](EGraph& g, const Subst& s) {
+            ClassId na = g.addUnaryOp(Op::BitNot, s.at("a"));
+            return g.addBinOp(Op::BitAnd, na, s.at("b"));
+        });
+
+    // (a | b) & (~a) → (~a) & b  (commuted outer AND)
+    rules.emplace_back("or_and_compl",
+        P::OpPat(Op::BitAnd, {
+            P::OpPat(Op::BitOr, {P::Wild("a"), P::Wild("b")}),
+            P::OpPat(Op::BitNot, {P::Wild("a")})
+        }),
+        [](EGraph& g, const Subst& s) {
+            ClassId na = g.addUnaryOp(Op::BitNot, s.at("a"));
+            return g.addBinOp(Op::BitAnd, na, s.at("b"));
+        });
+
+    // (~a) | (a & b) → (~a) | b
+    // Proof: (~a) | (a & b) = ((~a) | a) & ((~a) | b) = (-1) & ((~a) | b).
+    rules.emplace_back("compl_or_and",
+        P::OpPat(Op::BitOr, {
+            P::OpPat(Op::BitNot, {P::Wild("a")}),
+            P::OpPat(Op::BitAnd, {P::Wild("a"), P::Wild("b")})
+        }),
+        [](EGraph& g, const Subst& s) {
+            ClassId na = g.addUnaryOp(Op::BitNot, s.at("a"));
+            return g.addBinOp(Op::BitOr, na, s.at("b"));
+        });
+
+    // (a & b) | (~a) → (~a) | b  (commuted outer OR)
+    rules.emplace_back("and_or_compl",
+        P::OpPat(Op::BitOr, {
+            P::OpPat(Op::BitAnd, {P::Wild("a"), P::Wild("b")}),
+            P::OpPat(Op::BitNot, {P::Wild("a")})
+        }),
+        [](EGraph& g, const Subst& s) {
+            ClassId na = g.addUnaryOp(Op::BitNot, s.at("a"));
+            return g.addBinOp(Op::BitOr, na, s.at("b"));
+        });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Relational rules — guarded by predicates on matched constant values.
+    // These generalise the hardcoded mul_2_to_shl1 .. mul_1024_to_shl10
+    // and mod_2_to_and .. mod_1024_to_and families to ANY power of two.
+    // ─────────────────────────────────────────────────────────────────────
+
+    // x * C → x << log2(C)  when C is a power of 2  (C > 0)
+    rules.emplace_back("mul_any_pow2_to_shl",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::Wild("c")}),
+        [](EGraph& g, const Subst& s) {
+            auto cv = g.getConstValue(s.at("c"));
+            long long v = *cv;
+            int shift = 0;
+            while (v > 1) { v >>= 1; ++shift; }
+            return g.addBinOp(Op::Shl, s.at("x"), g.addConst(shift));
+        },
+        // Guard: c must be a positive power of 2 and > 1
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto cv = g.getConstValue(s.at("c"));
+            if (!cv) return false;
+            long long v = *cv;
+            return v > 1 && (v & (v - 1)) == 0;
+        });
+
+    // C * x → x << log2(C)  when C is a power of 2  (commuted)
+    rules.emplace_back("mul_any_pow2_to_shl_comm",
+        P::OpPat(Op::Mul, {P::Wild("c"), P::Wild("x")}),
+        [](EGraph& g, const Subst& s) {
+            auto cv = g.getConstValue(s.at("c"));
+            long long v = *cv;
+            int shift = 0;
+            while (v > 1) { v >>= 1; ++shift; }
+            return g.addBinOp(Op::Shl, s.at("x"), g.addConst(shift));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto cv = g.getConstValue(s.at("c"));
+            if (!cv) return false;
+            long long v = *cv;
+            return v > 1 && (v & (v - 1)) == 0;
+        });
+
+    // x % C → x & (C - 1)  when C is a power of 2  (C > 0)
+    rules.emplace_back("mod_any_pow2_to_and",
+        P::OpPat(Op::Mod, {P::Wild("x"), P::Wild("c")}),
+        [](EGraph& g, const Subst& s) {
+            auto cv = g.getConstValue(s.at("c"));
+            return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(*cv - 1));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto cv = g.getConstValue(s.at("c"));
+            if (!cv) return false;
+            long long v = *cv;
+            return v > 1 && (v & (v - 1)) == 0;
+        });
 
 
     return rules;
