@@ -1,0 +1,51 @@
+// Test string interpolation ($"...")
+fn main() {
+    var total = 0;
+
+    // Basic interpolation with variable
+    var name = "world";
+    var greeting = $"hello {name}";
+    total = total + str_len(greeting);  // "hello world" = 11
+
+    // Interpolation with expression
+    var x = 10;
+    var msg = $"value is {x + 5}";
+    total = total + str_len(msg);       // "value is 15" = 11
+
+    // Multiple interpolations
+    var a = 3;
+    var b = 4;
+    var result = $"{a} + {b} = {a + b}";
+    total = total + str_len(result);    // "3 + 4 = 7" = 9
+
+    // Interpolation with no expressions (plain string)
+    var plain = $"just a string";
+    total = total + str_len(plain);     // "just a string" = 13
+
+    // Empty interpolation
+    var empty = $"";
+    total = total + str_len(empty);     // "" = 0
+
+    // Adjacent interpolations
+    var p = "ab";
+    var q = "cd";
+    var adj = $"{p}{q}";
+    total = total + str_len(adj);       // "abcd" = 4
+
+    // Escaped braces
+    var esc = $"use \{curly\} braces";
+    total = total + str_len(esc);       // "use {curly} braces" = 18
+
+    // Interpolation with function call
+    var arr = [1, 2, 3];
+    var info = $"length is {len(arr)}";
+    total = total + str_len(info);      // "length is 3" = 11
+
+    // Interpolation with ternary
+    var flag = 1;
+    var tern = $"flag is {flag ? "on" : "off"}";
+    total = total + str_len(tern);      // "flag is on" = 10
+
+    // total = 11 + 11 + 9 + 13 + 0 + 4 + 18 + 11 + 10 = 87
+    return total;
+}

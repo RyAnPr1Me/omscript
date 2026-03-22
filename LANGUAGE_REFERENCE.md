@@ -1,7 +1,7 @@
 # OmScript Language Reference
 
-> **Version:** 2.7.9  
-> **Compiler:** `omsc` — OmScript Compiler v2.7.9  
+> **Version:** 3.0.0  
+> **Compiler:** `omsc` — OmScript Compiler v3.0.0  
 > **Standard:** C++17 · LLVM Backend · Ahead-of-Time Compilation  
 > **License:** See repository root
 
@@ -50,7 +50,7 @@ OmScript is a **low-level, C-like programming language** featuring:
 - **Adaptive JIT runtime** — A lightweight JIT runtime monitors function call counts and recompiles hot functions at higher optimization levels with profile-guided hints, producing even faster native code for performance-critical paths.
 - **Aggressive optimization** — Four optimization levels (O0–O3) plus a special OPTMAX directive that applies exhaustive multi-pass optimization to marked functions.
 - **Ownership system** — Optional `move`, `invalidate`, and `borrow` keywords enable compiler optimizations and catch use-after-move/invalidate bugs at compile time — without requiring ownership annotations on normal code.
-- **92 built-in standard library functions** — Math, array manipulation, string, character classification, type conversion, map/dictionary, file I/O, concurrency, and system functions, all compiled to native machine code.
+- **121 built-in standard library functions** — Math, array manipulation, string, character classification, type conversion, map/dictionary, file I/O, concurrency, and system functions, all compiled to native machine code.
 - **Structs** — Named record types with field access, mutation, and optional field-level optimization attributes.
 - **Module system** — `import` statements with circular-import detection.
 - **Generic function syntax** — Type-annotated generic parameters (type-erased at runtime).
@@ -212,6 +212,14 @@ Variable, parameter, and function return type declarations may include type anno
 | `string` | `i64` | String pointer (stored as i64) |
 | *struct name* | `i64` | Struct pointer (stored as i64) |
 | *type*`[]` | `i64` | Array pointer (stored as i64) |
+| `f32x4` | `<4 x float>` | 4-element f32 SIMD vector |
+| `f32x8` | `<8 x float>` | 8-element f32 SIMD vector |
+| `f64x2` | `<2 x double>` | 2-element f64 SIMD vector |
+| `f64x4` | `<4 x double>` | 4-element f64 SIMD vector |
+| `i32x4` | `<4 x i32>` | 4-element i32 SIMD vector |
+| `i32x8` | `<8 x i32>` | 8-element i32 SIMD vector |
+| `i64x2` | `<2 x i64>` | 2-element i64 SIMD vector |
+| `i64x4` | `<4 x i64>` | 4-element i64 SIMD vector |
 
 Unsigned type annotations (`u8`, `u16`, `u32`, `u64`) use the same LLVM integer types as their signed counterparts but apply `zeroext` instead of `signext` at function boundaries. This enables the optimizer to prove non-negativity, unlocking more aggressive strength reduction (e.g., `srem` → `urem`, `sdiv` → `udiv`).
 
@@ -223,6 +231,49 @@ var n: u64 = 100;             // unsigned i64 (zeroext at boundaries)
 fn add(a: float, b: float) -> float { return a + b; }    // double params & return
 fn process(pts: Point[]) -> Point { return pts[0]; }     // struct types
 fn count(x: u64) -> u64 { return x + 1; }               // unsigned params & return
+```
+
+#### 3.4.1 SIMD Vector Types
+
+SIMD (Single Instruction, Multiple Data) vector types enable handwritten SIMD programming. Variables declared with a SIMD type annotation map directly to LLVM fixed-vector types, generating native vector instructions (SSE, AVX, NEON, etc.) on supported hardware.
+
+**Vector initialization** uses array literal syntax:
+
+```javascript
+var a: f32x4 = [1.0, 2.0, 3.0, 4.0];   // 4 floats
+var b: i32x4 = [10, 20, 30, 40];        // 4 integers
+var c: f64x2 = [1.5, 2.5];              // 2 doubles
+```
+
+**Vector arithmetic** uses the standard operators. All operations are element-wise:
+
+```javascript
+var sum: f32x4 = a + b;    // element-wise add
+var diff: f32x4 = a - b;   // element-wise subtract
+var prod: f32x4 = a * b;   // element-wise multiply
+var quot: f32x4 = a / b;   // element-wise divide
+```
+
+**Scalar-to-vector broadcast** (splat): when a scalar operand is mixed with a vector operand, the scalar is automatically broadcast to all lanes:
+
+```javascript
+var scaled: f32x4 = a * 2.0;   // multiply all elements by 2.0
+```
+
+**Element access** via indexing:
+
+```javascript
+var first = v[0];    // extract element (returns standard float/int)
+v[2] = 99;           // insert element at index 2
+```
+
+**Bitwise operations** work on integer vectors (`i32x4`, `i32x8`, `i64x2`, `i64x4`):
+
+```javascript
+var x: i32x4 = [0xFF, 0x0F, 0xF0, 0x00];
+var y: i32x4 = [0x0F, 0x0F, 0x0F, 0x0F];
+var masked: i32x4 = x & y;   // bitwise AND
+var shifted: i32x4 = x << 4; // left shift all lanes
 ```
 
 ---
@@ -286,6 +337,7 @@ The following words are reserved:
 | `invalidate` | Explicitly invalidate a variable (end its lifetime) |
 | `borrow` | Borrow a reference to a variable |
 | `prefetch` | Declare a register-pinned variable with optional cache prefetch |
+| `register` | Force variable into a CPU register via immediate mem2reg promotion |
 | `likely` | Branch prediction hint: then-branch is expected |
 | `unlikely` | Branch prediction hint: then-branch is rare |
 | `OPTMAX` | Begin exhaustive optimization block |
@@ -378,6 +430,35 @@ And so are you.""";
 
 Multi-line strings preserve all characters between the opening and closing `"""` exactly as written, including newlines and spaces. They do **not** process escape sequences.
 
+#### String Interpolation
+
+Prefixing a string with `$` enables string interpolation. Expressions inside `{...}` are evaluated and automatically converted to strings:
+
+```javascript
+var name = "world";
+var greeting = $"hello {name}!";           // "hello world!"
+var x = 10;
+var msg = $"value is {x + 5}";             // "value is 15"
+var a = 3;
+var b = 4;
+var result = $"{a} + {b} = {a + b}";       // "3 + 4 = 7"
+```
+
+Interpolated strings support all escape sequences from regular strings, plus `\{` and `\}` for literal braces:
+
+```javascript
+$"use \{curly\} braces"   // "use {curly} braces"
+```
+
+Expressions inside `{...}` can include function calls, ternary operators, and nested strings:
+
+```javascript
+$"length is {len(arr)}"
+$"flag is {flag ? "on" : "off"}"
+```
+
+String interpolation desugars into `+` concatenation at compile time, so there is no runtime overhead beyond normal string operations.
+
 ### 4.6 Special Tokens
 
 | Token | Meaning |
@@ -417,7 +498,17 @@ const x = 5;
 x = 10;    // ERROR: Cannot modify constant 'x'
 ```
 
-### 5.3 Assignment
+### 5.3 Register Variables
+
+The `register` keyword forces the compiler to promote a variable into a CPU register. A mem2reg pass is run immediately after code generation for any function containing register variables, guaranteeing that the annotated allocas are promoted to SSA registers regardless of the global optimization level.  Register variables are **mutable** — the keyword forces register allocation, not immutability.
+
+```javascript
+register var counter = 0;         // Forced into a CPU register
+register var acc: float = 0.0;    // Typed register variable
+counter = counter + 1;            // Reassignment is allowed
+```
+
+### 5.4 Assignment
 
 ```javascript
 x = 42;             // Simple assignment
@@ -426,11 +517,13 @@ x -= 3;             // Compound: x = x - 3
 x *= 2;             // Compound: x = x * 2
 x /= 4;             // Compound: x = x / 4
 x %= 3;             // Compound: x = x % 3
+x **= 2;            // Compound: x = x ** 2 (power-assign)
+x ??= 10;           // Null-coalesce-assign: x = x ?? 10 (assign if x is falsy)
 ```
 
-Compound assignment operators (`+=`, `-=`, `*=`, `/=`, `%=`) are desugared by the parser into their equivalent binary + assignment form.
+Compound assignment operators (`+=`, `-=`, `*=`, `/=`, `%=`, `**=`, `??=`) are desugared by the parser into their equivalent binary + assignment form.  Compound assignment works on variables, array elements (`arr[i] += 1`), and struct fields (`s.x += 1`).
 
-### 5.4 Scoping
+### 5.5 Scoping
 
 OmScript uses **block scoping**. Variables declared inside a block `{ }` are not visible outside it:
 
@@ -1225,11 +1318,31 @@ fn classify(x) {
 }
 ```
 
+#### Multi-Value Case
+
+A single `case` arm can match multiple values using comma-separated constants:
+
+```javascript
+fn category(x) {
+    switch (x) {
+        case 1, 2, 3:
+            return "small";
+        case 4, 5:
+            return "medium";
+        default:
+            return "large";
+    }
+}
+```
+
+All values in a multi-value case must be unique across the entire switch statement. Duplicate values (even across different case arms) produce a compile error.
+
 **Key points:**
 - Case values must be integer constants (float literals produce a compile error).
 - Use `break` to exit a case (fall-through occurs without it).
 - The `default` case handles any value not matched by an explicit `case`.
 - `continue` inside a `switch` nested within a loop jumps to the enclosing loop's continue target.
+- When the switch condition is a compile-time constant, the compiler eliminates dead branches and generates only the matched case body.
 
 ---
 
@@ -1822,7 +1935,7 @@ fn main() {
 
 ## 18. Standard Library
 
-OmScript provides **92 built-in functions**. All stdlib functions are compiled directly to native machine code via LLVM IR.
+OmScript provides **121 built-in functions**. All stdlib functions are compiled directly to native machine code via LLVM IR.
 
 ### 18.1 I/O Functions
 
@@ -2076,6 +2189,117 @@ round(3.5)    // 4
 round(3.7)    // 4
 ```
 
+#### `sin(x)`
+
+Returns the sine of `x` (in radians). Returns a floating-point value.
+
+```javascript
+sin(0.0)          // 0.0
+sin(1.5707963)    // 1.0 (π/2)
+```
+
+#### `cos(x)`
+
+Returns the cosine of `x` (in radians). Returns a floating-point value.
+
+```javascript
+cos(0.0)          // 1.0
+cos(3.14159265)   // -1.0 (π)
+```
+
+#### `tan(x)`
+
+Returns the tangent of `x` (in radians). Returns a floating-point value.
+
+```javascript
+tan(0.0)          // 0.0
+tan(0.7853981)    // 1.0 (π/4)
+```
+
+#### `asin(x)`
+
+Returns the arc sine of `x` in radians. Input must be in range [-1, 1]. Returns a floating-point value.
+
+```javascript
+asin(0.0)    // 0.0
+asin(1.0)    // 1.5707963 (π/2)
+```
+
+#### `acos(x)`
+
+Returns the arc cosine of `x` in radians. Input must be in range [-1, 1]. Returns a floating-point value.
+
+```javascript
+acos(1.0)    // 0.0
+acos(0.0)    // 1.5707963 (π/2)
+```
+
+#### `atan(x)`
+
+Returns the arc tangent of `x` in radians. Returns a floating-point value.
+
+```javascript
+atan(0.0)    // 0.0
+atan(1.0)    // 0.7853981 (π/4)
+```
+
+#### `atan2(y, x)`
+
+Returns the arc tangent of `y/x` in radians, using the signs of both arguments to determine the correct quadrant. Returns a floating-point value.
+
+```javascript
+atan2(1.0, 1.0)    // 0.7853981 (π/4)
+atan2(0.0, 1.0)    // 0.0
+atan2(1.0, 0.0)    // 1.5707963 (π/2)
+```
+
+#### `exp(x)`
+
+Returns e raised to the power `x`. Returns a floating-point value.
+
+```javascript
+exp(0.0)    // 1.0
+exp(1.0)    // 2.71828...
+```
+
+#### `log(x)`
+
+Returns the natural logarithm (base e) of `x`. Returns a floating-point value.
+
+```javascript
+log(1.0)        // 0.0
+log(2.71828)    // 1.0
+```
+
+#### `log10(x)`
+
+Returns the base-10 logarithm of `x`. Returns a floating-point value.
+
+```javascript
+log10(1.0)      // 0.0
+log10(100.0)    // 2.0
+log10(1000.0)   // 3.0
+```
+
+#### `cbrt(x)`
+
+Returns the cube root of `x`. Returns a floating-point value.
+
+```javascript
+cbrt(27.0)    // 3.0
+cbrt(8.0)     // 2.0
+cbrt(1000.0)  // 10.0
+```
+
+#### `hypot(x, y)`
+
+Returns the hypotenuse — `sqrt(x² + y²)` — without undue overflow or underflow. Returns a floating-point value.
+
+```javascript
+hypot(3.0, 4.0)     // 5.0
+hypot(5.0, 12.0)    // 13.0
+```
+
 #### `to_int(x)`
 
 Converts a float to an integer by truncation (towards zero).
@@ -2314,6 +2538,90 @@ fn main() {
 }
 ```
 
+#### `array_min(array)`
+
+Returns the minimum element in the array. Returns 0 for empty arrays.
+
+```javascript
+var arr = [5, 3, 8, 1, 9];
+array_min(arr)    // 1
+array_min([])     // 0
+```
+
+#### `array_max(array)`
+
+Returns the maximum element in the array. Returns 0 for empty arrays.
+
+```javascript
+var arr = [5, 3, 8, 1, 9];
+array_max(arr)    // 9
+array_max([])     // 0
+```
+
+#### `array_find(array, value)`
+
+Returns the index of the first element equal to `value`, or -1 if not found.
+
+```javascript
+var arr = [10, 20, 30, 40];
+array_find(arr, 30)    // 2
+array_find(arr, 99)    // -1
+```
+
+#### `array_any(array, "function_name")`
+
+Returns 1 if the predicate function returns non-zero for **any** element in the array, 0 otherwise. The function name must be a string literal. Lambda expressions can also be used. Returns 0 for empty arrays.
+
+```javascript
+fn is_negative(x) { return x < 0; }
+fn main() {
+    var arr = [1, -2, 3];
+    array_any(arr, "is_negative")     // 1
+
+    var pos = [1, 2, 3];
+    array_any(pos, "is_negative")     // 0
+
+    // With lambda:
+    array_any(arr, |x| x < 0)        // 1
+    return 0;
+}
+```
+
+#### `array_every(array, "function_name")`
+
+Returns 1 if the predicate function returns non-zero for **all** elements in the array, 0 otherwise. The function name must be a string literal. Lambda expressions can also be used. Returns 1 for empty arrays (vacuous truth).
+
+```javascript
+fn is_even(x) { return x % 2 == 0; }
+fn main() {
+    var evens = [2, 4, 6];
+    array_every(evens, "is_even")     // 1
+
+    var mixed = [2, 3, 6];
+    array_every(mixed, "is_even")     // 0
+
+    // With lambda:
+    array_every(evens, |x| x % 2 == 0)  // 1
+    return 0;
+}
+```
+
+#### `array_count(array, "function_name")`
+
+Returns the count of elements for which the predicate function returns non-zero. The function name must be a string literal. Lambda expressions can also be used.
+
+```javascript
+fn is_even(x) { return x % 2 == 0; }
+fn main() {
+    var arr = [1, 2, 3, 4, 5, 6];
+    array_count(arr, "is_even")       // 3
+
+    // With lambda:
+    array_count(arr, |x| x > 3)      // 3
+    return 0;
+}
+```
+
 ### 18.4 Character Functions
 
 #### `to_char(code)`
@@ -2458,11 +2766,11 @@ str_index_of("hello world", "xyz")    // -1
 
 #### `str_replace(s, old, new)`
 
-Returns a new string with the first occurrence of `old` replaced by `new`. If `old` is not found, returns a copy of the original string.
+Returns a new string with all occurrences of `old` replaced by `new`. If `old` is not found, returns a copy of the original string. If `old` is empty, returns a copy of the original string.
 
 ```javascript
 str_replace("hello world", "world", "there")  // "hello there"
-str_replace("abcabc", "b", "x")               // "axcabc"
+str_replace("abcabc", "b", "x")               // "axcaxc"
 ```
 
 #### `str_trim(s)`
@@ -2517,6 +2825,29 @@ Splits a string by a single-character delimiter, returning an array of substring
 ```javascript
 var parts = str_split("a,b,c", ",");
 // parts == ["a", "b", "c"], len(parts) == 3
+```
+
+#### `str_join(arr, delimiter)`
+
+Joins an array of strings into a single string, inserting `delimiter` between each element. This is the inverse of `str_split`.
+
+```javascript
+var parts = str_split("a,b,c", ",");
+str_join(parts, "-")     // "a-b-c"
+str_join(parts, "")      // "abc"
+str_join(parts, " :: ")  // "a :: b :: c"
+```
+
+#### `str_count(s, substring)`
+
+Counts the number of non-overlapping occurrences of `substring` in `s`. Returns `0` if `substring` is empty or not found.
+
+```javascript
+str_count("abcabcabc", "abc")  // 3
+str_count("hello", "l")        // 2
+str_count("aaa", "aa")         // 1 (non-overlapping)
+str_count("hello", "xyz")      // 0
+str_count("hello", "")         // 0
 ```
 
 #### `str_to_int(s)`
@@ -2648,7 +2979,7 @@ assert(0);          // always aborts: "Runtime error: assertion failed"
 | `str_lower(s)` | 1 | string | Lowercase version of string |
 | `str_contains(s, sub)` | 2 | 0/1 | Whether string contains substring |
 | `str_index_of(s, sub)` | 2 | index | Index of substring (-1 if not found) |
-| `str_replace(s, old, new)` | 3 | string | Replace first occurrence of `old` with `new` |
+| `str_replace(s, old, new)` | 3 | string | Replace all occurrences of `old` with `new` |
 | `str_trim(s)` | 1 | string | Remove leading/trailing whitespace |
 | `str_starts_with(s, p)` | 2 | 0/1 | Whether string starts with prefix |
 | `str_ends_with(s, p)` | 2 | 0/1 | Whether string ends with suffix |
@@ -2678,6 +3009,8 @@ assert(0);          // always aborts: "Runtime error: assertion failed"
 | `str_to_int(s)` | 1 | int | Parse string as base-10 integer |
 | `str_to_float(s)` | 1 | float | Parse string as float |
 | `str_split(s, delim)` | 2 | array | Split string by delimiter into array |
+| `str_join(arr, delim)` | 2 | string | Join array of strings with delimiter |
+| `str_count(s, sub)` | 2 | int | Count non-overlapping occurrences of substring |
 | `str_chars(s)` | 1 | array | Convert string to array of char codes |
 | `char_code(s, i)` | 2 | int | ASCII code of character at index `i` in string `s` |
 | `number_to_string(n)` | 1 | string | Convert integer or float to string |
@@ -3463,7 +3796,7 @@ do_while_stmt  = "do" statement "while" "(" expression ")" ";" ;
 for_stmt       = "for" "(" IDENTIFIER [ ":" type_annotation ] "in"
                    expression [ "..." expression [ "..." expression ] ] ")" statement ;
 switch_stmt    = "switch" "(" expression ")" "{" { case_clause } [ default_clause ] "}" ;
-case_clause    = "case" INTEGER ":" { statement } ;
+case_clause    = "case" expression { "," expression } ":" { statement } ;
 default_clause = "default" ":" { statement } ;
 try_stmt       = "try" block "catch" "(" IDENTIFIER ")" block ;
 throw_stmt     = "throw" expression ";" ;

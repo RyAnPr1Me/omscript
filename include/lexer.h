@@ -48,6 +48,7 @@ enum class TokenType {
     PREFETCH,
     LIKELY,
     UNLIKELY,
+    REGISTER,
 
     // Operators
     PLUS,
@@ -78,6 +79,8 @@ enum class TokenType {
     CARET_ASSIGN,
     LSHIFT_ASSIGN,
     RSHIFT_ASSIGN,
+    STAR_STAR_ASSIGN,
+    NULL_COALESCE_ASSIGN,
     QUESTION,
     NULL_COALESCE,
     AMPERSAND,
@@ -153,6 +156,7 @@ class Lexer {
     Token scanIdentifier();
     Token scanString();
     Token scanMultiLineString();
+    void scanInterpolatedString(std::vector<Token>& tokens);
 };
 
 } // namespace omscript

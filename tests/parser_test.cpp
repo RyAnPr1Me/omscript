@@ -618,6 +618,18 @@ TEST(ParserTest, SwitchDuplicateDefault) {
     EXPECT_THROW(parse("fn main() { switch (x) { default: return 1; default: return 2; } }"), std::runtime_error);
 }
 
+TEST(ParserTest, SwitchMultiValueCase) {
+    auto program = parse("fn main() { switch (x) { case 1, 2, 3: return 10; default: return 0; } }");
+    EXPECT_EQ(program->functions.size(), 1u);
+    auto* sw = dynamic_cast<SwitchStmt*>(program->functions[0]->body->statements[0].get());
+    ASSERT_NE(sw, nullptr);
+    ASSERT_EQ(sw->cases.size(), 2u);
+    // First case should have value (1) + 2 additional values (2, 3)
+    EXPECT_FALSE(sw->cases[0].isDefault);
+    EXPECT_NE(sw->cases[0].value, nullptr);
+    EXPECT_EQ(sw->cases[0].values.size(), 2u);
+}
+
 // ---------------------------------------------------------------------------
 // Array element assignment
 // ---------------------------------------------------------------------------
@@ -1621,4 +1633,76 @@ TEST(ParserTest, PrefetchStandaloneExistingVar) {
     ASSERT_NE(pf, nullptr);
     EXPECT_EQ(pf->varDecl, nullptr);
     EXPECT_EQ(pf->varName, "x");
+}
+
+// ---------------------------------------------------------------------------
+// **= and ??= compound assignment operators
+// ---------------------------------------------------------------------------
+
+TEST(ParserTest, PowerAssignOperator) {
+    auto program = parse("fn main() { var x = 2; x **= 3; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    // Statement 1 should be an expression statement with an AssignExpr
+    auto* exprStmt = dynamic_cast<ExprStmt*>(program->functions[0]->body->statements[1].get());
+    ASSERT_NE(exprStmt, nullptr);
+    auto* assign = dynamic_cast<AssignExpr*>(exprStmt->expression.get());
+    ASSERT_NE(assign, nullptr);
+    EXPECT_EQ(assign->name, "x");
+    // The RHS should be a binary expr with op "**"
+    auto* bin = dynamic_cast<BinaryExpr*>(assign->value.get());
+    ASSERT_NE(bin, nullptr);
+    EXPECT_EQ(bin->op, "**");
+}
+
+TEST(ParserTest, NullCoalesceAssignOperator) {
+    auto program = parse("fn main() { var x = 0; x ?\?= 42; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    auto* exprStmt = dynamic_cast<ExprStmt*>(program->functions[0]->body->statements[1].get());
+    ASSERT_NE(exprStmt, nullptr);
+    auto* assign = dynamic_cast<AssignExpr*>(exprStmt->expression.get());
+    ASSERT_NE(assign, nullptr);
+    EXPECT_EQ(assign->name, "x");
+    auto* bin = dynamic_cast<BinaryExpr*>(assign->value.get());
+    ASSERT_NE(bin, nullptr);
+    EXPECT_EQ(bin->op, "??");
+}
+
+// ---------------------------------------------------------------------------
+// Struct field compound assignment
+// ---------------------------------------------------------------------------
+
+TEST(ParserTest, StructFieldCompoundAssignment) {
+    auto program = parse("struct S { x, y }\nfn main() { var s = S { x: 1, y: 2 }; s.x += 5; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    auto* exprStmt = dynamic_cast<ExprStmt*>(program->functions[0]->body->statements[1].get());
+    ASSERT_NE(exprStmt, nullptr);
+    // Should be a FieldAssignExpr
+    auto* fieldAssign = dynamic_cast<FieldAssignExpr*>(exprStmt->expression.get());
+    ASSERT_NE(fieldAssign, nullptr);
+    EXPECT_EQ(fieldAssign->fieldName, "x");
+}
+
+// ---------------------------------------------------------------------------
+// Register keyword
+// ---------------------------------------------------------------------------
+
+TEST(ParserTest, RegisterVarDecl) {
+    auto program = parse("fn main() { register var x = 42; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    auto* varDecl = dynamic_cast<VarDecl*>(program->functions[0]->body->statements[0].get());
+    ASSERT_NE(varDecl, nullptr);
+    EXPECT_EQ(varDecl->name, "x");
+    EXPECT_TRUE(varDecl->isRegister);
+}
+
+// ---------------------------------------------------------------------------
+// SIMD type annotation parsing
+// ---------------------------------------------------------------------------
+
+TEST(ParserTest, SimdTypeAnnotation) {
+    auto program = parse("fn main() { var v: f32x4 = [1.0, 2.0, 3.0, 4.0]; }");
+    ASSERT_EQ(program->functions.size(), 1u);
+    auto* varDecl = dynamic_cast<VarDecl*>(program->functions[0]->body->statements[0].get());
+    ASSERT_NE(varDecl, nullptr);
+    EXPECT_EQ(varDecl->typeName, "f32x4");
 }

@@ -15,15 +15,16 @@ A low-level, C-like programming language with dynamic typing and **automatic ref
 - **Spread Operator**: Array unpacking in literals with `[1, ...arr, 2]`
 - **For Loops with Ranges**: Modern range-based iteration with `for (i in start...end)` and `for (i in start...end...step)`
 - **For-Each Loops**: Iterate over arrays with `for (x in array)`
-- **Switch/Case**: Multi-way branching with `switch`/`case`/`default`
+- **Switch/Case**: Multi-way branching with `switch`/`case`/`default`, multi-value `case 1, 2, 3:`
 - **Do-While Loops**: Execute body at least once with `do { ... } while (cond);`
 - **Error Handling**: `try`/`catch`/`throw` for structured error handling
 - **Ownership System**: Optional `move`, `invalidate`, and `borrow` keywords for compile-time use-after-move/invalidate detection and LLVM optimization hints
 - **Enum Declarations**: Named integer constants with auto-increment
 - **Default Parameters**: Optional function parameters with default values
 - **Null Coalescing Operator**: `??` for concise null/zero fallback expressions
+- **String Interpolation**: `$"hello {name}, count = {n + 1}"` with auto type conversion
 - **Multi-line Strings**: Triple-quoted `"""..."""` strings with embedded newlines
-- **92 Built-in Functions**: Math, array manipulation, strings, maps, file I/O, threading, character classification, type conversion, and system calls
+- **121 Built-in Functions**: Math, array manipulation, strings, maps, file I/O, threading, character classification, type conversion, and system calls
 - **Adaptive JIT Runtime**: Hot functions are automatically recompiled at higher optimization levels using runtime profiling data
 
 ## Optimization Pipeline
@@ -160,11 +161,11 @@ for (x in arr) {
     println(x);
 }
 
-// Switch/case
+// Switch/case with multi-value matching
 switch (value) {
-    case 1:  println(1);  break;
-    case 2:  println(2);  break;
-    default: println(0);
+    case 1, 2, 3: println("small"); break;
+    case 4, 5:    println("medium"); break;
+    default:      println("large");
 }
 
 // Error handling
@@ -212,11 +213,18 @@ var sub = str_substr(s, 1, 3);            // "ell"
 var pos = str_index_of(s, "ll");          // 2
 var r = str_replace(s, "l", "r");         // "herro"
 var parts = str_split("a,b,c", ",");      // ["a", "b", "c"]
-var joined = str_concat("foo", "bar");    // "foobar"
+var joined = str_join(parts, "-");            // "a-b-c"
+var cnt = str_count("abcabc", "abc");         // 2
+var joined2 = str_concat("foo", "bar");       // "foobar"
 var trimmed = str_trim("  hi  ");         // "hi"
 var ts = to_string(42);                   // "42"
 var n2 = str_to_int("100");              // 100
 var f = str_to_float("3.14");            // 3.14
+
+// String interpolation
+var name = "world";
+var greeting = $"hello {name}!";          // "hello world!"
+var result = $"{n} + {f} = {n + f}";      // "5 + 3.14 = 8.14"
 ```
 
 ### File I/O
@@ -308,7 +316,7 @@ OPTMAX!:
 var x = 10; /* inline */
 ```
 
-## Built-in Functions (92 total)
+## Built-in Functions (121 total)
 
 ### Math
 | Function | Description |
@@ -320,6 +328,18 @@ var x = 10; /* inline */
 | `sqrt(x)` | Integer square root |
 | `pow(b, e)` | Integer exponentiation |
 | `log2(x)` | Integer log base 2 |
+| `log(x)` | Natural logarithm (float) |
+| `log10(x)` | Base-10 logarithm (float) |
+| `exp(x)` | Exponential e^x (float) |
+| `sin(x)` | Sine (float) |
+| `cos(x)` | Cosine (float) |
+| `tan(x)` | Tangent (float) |
+| `asin(x)` | Arc sine (float) |
+| `acos(x)` | Arc cosine (float) |
+| `atan(x)` | Arc tangent (float) |
+| `atan2(y, x)` | Two-argument arc tangent (float) |
+| `cbrt(x)` | Cube root (float) |
+| `hypot(x, y)` | Hypotenuse sqrt(x²+y²) (float) |
 | `gcd(a, b)` | Greatest common divisor |
 | `min(a, b)` | Minimum of two values |
 | `max(a, b)` | Maximum of two values |
@@ -338,6 +358,12 @@ var x = 10; /* inline */
 | `swap(arr, i, j)` | Swap two elements |
 | `index_of(arr, v)` | First index of value, or -1 |
 | `array_contains(arr, v)` | True if value is in array |
+| `array_min(arr)` | Minimum element of array |
+| `array_max(arr)` | Maximum element of array |
+| `array_find(arr, v)` | Index of first match, or -1 |
+| `array_any(arr, fn)` | True if any element matches predicate |
+| `array_every(arr, fn)` | True if all elements match predicate |
+| `array_count(arr, fn)` | Count elements matching predicate |
 | `array_map(arr, fn)` | Map function over elements |
 | `array_filter(arr, fn)` | Filter by predicate |
 | `array_reduce(arr, fn, init)` | Left-fold with initial value |
@@ -357,11 +383,13 @@ var x = 10; /* inline */
 | `str_substr(s, start, len)` | Substring |
 | `str_upper(s)` / `str_lower(s)` | Case conversion |
 | `str_trim(s)` | Strip leading/trailing whitespace |
-| `str_replace(s, old, new)` | Replace first occurrence |
+| `str_replace(s, old, new)` | Replace all occurrences |
 | `str_contains(s, sub)` | Substring test |
 | `str_starts_with(s, pre)` / `str_ends_with(s, suf)` | Prefix/suffix test |
 | `str_index_of(s, sub)` / `str_find(s, sub)` | Find position |
 | `str_split(s, delim)` | Split into array |
+| `str_join(arr, delim)` | Join array of strings with delimiter |
+| `str_count(s, sub)` | Count non-overlapping occurrences |
 | `str_chars(s)` | Array of character codes |
 | `str_repeat(s, n)` | Repeat n times |
 | `str_reverse(s)` | Reverse string |

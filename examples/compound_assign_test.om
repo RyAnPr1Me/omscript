@@ -1,0 +1,58 @@
+// Test compound assignment operators: **= and ??=
+// Also tests struct field compound assignment (s.x += 1)
+struct Point {
+    x,
+    y
+}
+
+fn main() {
+    var total = 0;
+
+    // Test **= (power assign)
+    var x = 2;
+    x **= 3;
+    total = total + x;  // 8
+    // total = 8
+
+    // Test **= with larger values
+    var y = 3;
+    y **= 2;
+    total = total + y;  // 9
+    // total = 17
+
+    // Test ??= (null coalesce assign)
+    var a = 0;
+    a ??= 42;
+    total = total + a;  // 42 (0 is falsy)
+    // total = 59
+
+    var b = 10;
+    b ??= 99;
+    total = total + b;  // 10 (non-zero stays)
+    // total = 69
+
+    // Test struct field compound assignment
+    var p = Point { x: 10, y: 20 };
+    p.x += 5;     // 15
+    p.y *= 2;     // 40
+    total = total + p.x;  // 15
+    total = total + p.y;  // 40
+    // total = 124
+
+    // Test struct field **=
+    var q = Point { x: 2, y: 3 };
+    q.x **= 4;    // 16
+    total = total + q.x;  // 16
+    // total = 140
+
+    // Test struct field -=
+    q.y -= 1;     // 2
+    total = total + q.y;  // 2
+    // total = 142
+
+    // Subtract to get reasonable exit code
+    total = total - 100;
+    // total = 42
+
+    return total;
+}

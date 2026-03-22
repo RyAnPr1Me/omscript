@@ -100,6 +100,7 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
     if (prefetchedImmutVars_.count(expr->name)) {
         isInvariant = true;
     }
+    // Register variables are mutable; do not mark loads as invariant.
     if (isInvariant) {
         if (auto* loadInst = llvm::dyn_cast<llvm::LoadInst>(load)) {
             loadInst->setMetadata(llvm::LLVMContext::MD_invariant_load,
@@ -212,6 +213,50 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     }
 
     llvm::Value* right = generateExpression(expr->right.get());
+
+    // -----------------------------------------------------------------------
+    // SIMD vector operations — when either operand is a vector type,
+    // dispatch to LLVM vector arithmetic instructions.
+    // -----------------------------------------------------------------------
+    const bool leftIsVec = left->getType()->isVectorTy();
+    const bool rightIsVec = right->getType()->isVectorTy();
+    if (leftIsVec || rightIsVec) {
+        // Both operands must be the same vector type for arithmetic.
+        if (leftIsVec && rightIsVec && left->getType() != right->getType()) {
+            codegenError("SIMD vector type mismatch in '" + expr->op + "' operation", expr);
+        }
+        // If one side is scalar, splat it to match the vector type.
+        if (leftIsVec && !rightIsVec) {
+            right = splatScalarToVector(right, left->getType());
+        } else if (rightIsVec && !leftIsVec) {
+            left = splatScalarToVector(left, right->getType());
+        }
+
+        auto* vecTy = llvm::cast<llvm::FixedVectorType>(left->getType());
+        const bool isFloatVec = vecTy->getElementType()->isFloatingPointTy();
+
+        if (expr->op == "+") return isFloatVec ? builder->CreateFAdd(left, right, "simd.fadd")
+                                               : builder->CreateAdd(left, right, "simd.add");
+        if (expr->op == "-") return isFloatVec ? builder->CreateFSub(left, right, "simd.fsub")
+                                               : builder->CreateSub(left, right, "simd.sub");
+        if (expr->op == "*") return isFloatVec ? builder->CreateFMul(left, right, "simd.fmul")
+                                               : builder->CreateMul(left, right, "simd.mul");
+        if (expr->op == "/") return isFloatVec ? builder->CreateFDiv(left, right, "simd.fdiv")
+                                               : builder->CreateSDiv(left, right, "simd.sdiv");
+        if (expr->op == "%") {
+            if (isFloatVec) return builder->CreateFRem(left, right, "simd.frem");
+            return builder->CreateSRem(left, right, "simd.srem");
+        }
+        // Bitwise operations on integer vectors
+        if (!isFloatVec) {
+            if (expr->op == "&") return builder->CreateAnd(left, right, "simd.and");
+            if (expr->op == "|") return builder->CreateOr(left, right, "simd.or");
+            if (expr->op == "^") return builder->CreateXor(left, right, "simd.xor");
+            if (expr->op == "<<") return builder->CreateShl(left, right, "simd.shl");
+            if (expr->op == ">>") return builder->CreateAShr(left, right, "simd.ashr");
+        }
+        codegenError("Unsupported operator '" + expr->op + "' for SIMD vector types", expr);
+    }
 
     const bool leftIsFloat = left->getType()->isDoubleTy();
     const bool rightIsFloat = right->getType()->isDoubleTy();
@@ -1047,6 +1092,44 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     } else if (expr->op == "/" || expr->op == "%") {
         const bool isDivision = expr->op == "/";
 
+        // Strength reduction: unsigned-compatible division/modulo by power of 2.
+        // For signed division by a positive power of 2, we can use an
+        // arithmetic right shift with sign-correction for correct rounding
+        // toward zero (C/OmScript semantics).  For modulo, we use
+        // AND with (divisor - 1) after similar sign correction.
+        if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
+            const int64_t rv = ci->getSExtValue();
+            if (rv > 0) {
+                const int s = log2IfPowerOf2(rv);
+                if (s > 0) {
+                    if (isDivision) {
+                        // Signed division by power-of-2: (x + (x >> 63 & (2^s - 1))) >> s
+                        // This handles negative values correctly (rounds toward zero).
+                        auto* signBit = builder->CreateAShr(left,
+                            llvm::ConstantInt::get(getDefaultType(), 63), "div.sign");
+                        auto* correction = builder->CreateAnd(signBit,
+                            llvm::ConstantInt::get(getDefaultType(), (1LL << s) - 1), "div.corr");
+                        auto* corrected = builder->CreateAdd(left, correction, "div.adj");
+                        return builder->CreateAShr(corrected,
+                            llvm::ConstantInt::get(getDefaultType(), s), "div.shr");
+                    } else {
+                        // Signed modulo by power-of-2: x - ((x + (x >> 63 & (2^s - 1))) >> s) * 2^s
+                        // Equivalent to: x - (x / 2^s) * 2^s, but fully in shifts.
+                        auto* signBit = builder->CreateAShr(left,
+                            llvm::ConstantInt::get(getDefaultType(), 63), "mod.sign");
+                        auto* correction = builder->CreateAnd(signBit,
+                            llvm::ConstantInt::get(getDefaultType(), (1LL << s) - 1), "mod.corr");
+                        auto* corrected = builder->CreateAdd(left, correction, "mod.adj");
+                        auto* quotient = builder->CreateAShr(corrected,
+                            llvm::ConstantInt::get(getDefaultType(), s), "mod.quot");
+                        auto* product = builder->CreateShl(quotient,
+                            llvm::ConstantInt::get(getDefaultType(), s), "mod.prod");
+                        return builder->CreateSub(left, product, "mod.rem");
+                    }
+                }
+            }
+        }
+
         // Division/modulo by a non-zero constant: let the LLVM optimizer handle
         // strength reduction via InstCombine.  LLVM converts srem/sdiv by
         // constants to magic-number multiply-shift sequences, AND converts
@@ -1767,6 +1850,22 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
 llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
     llvm::Value* arrVal = generateExpression(expr->array.get());
     llvm::Value* idxVal = generateExpression(expr->index.get());
+
+    // SIMD vector element extraction: v[i] → extractelement
+    if (arrVal->getType()->isVectorTy()) {
+        // Index must be i32 for extractelement.
+        if (idxVal->getType() != llvm::Type::getInt32Ty(*context))
+            idxVal = builder->CreateIntCast(idxVal, llvm::Type::getInt32Ty(*context), true, "simd.idx");
+        llvm::Value* elem = builder->CreateExtractElement(arrVal, idxVal, "simd.extract");
+        // Widen f32 → f64 and narrow integer types → i64 so the extracted
+        // value integrates with OmScript's standard type system (i64 / double).
+        if (elem->getType()->isFloatTy())
+            elem = builder->CreateFPExt(elem, getFloatType(), "simd.ext.f64");
+        else if (elem->getType()->isIntegerTy() && elem->getType() != getDefaultType())
+            elem = builder->CreateSExt(elem, getDefaultType(), "simd.ext.i64");
+        return elem;
+    }
+
     idxVal = toDefaultType(idxVal);
 
     // Detect whether the base expression is a string.  Strings are raw char
@@ -1823,6 +1922,32 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
 }
 
 llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
+    // SIMD vector element insertion: v[i] = x → insertelement.
+    // We must handle this before generating the array expression because
+    // SIMD vectors are values (not pointers) — we load the vector from its
+    // alloca, insert the new element, and store the updated vector back.
+    if (auto* idExpr = dynamic_cast<IdentifierExpr*>(expr->array.get())) {
+        auto it = namedValues.find(idExpr->name);
+        if (it != namedValues.end()) {
+            auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(it->second);
+            if (alloca && alloca->getAllocatedType()->isVectorTy()) {
+                auto* vecTy = alloca->getAllocatedType();
+                llvm::Value* vec = builder->CreateLoad(vecTy, alloca, "simd.load");
+                llvm::Value* idxVal = generateExpression(expr->index.get());
+                llvm::Value* newVal = generateExpression(expr->value.get());
+                // Convert index to i32
+                if (idxVal->getType() != llvm::Type::getInt32Ty(*context))
+                    idxVal = builder->CreateIntCast(idxVal, llvm::Type::getInt32Ty(*context), true, "simd.idx");
+                // Convert value to match vector element type
+                auto* elemTy = llvm::cast<llvm::FixedVectorType>(vecTy)->getElementType();
+                newVal = convertToVectorElement(newVal, elemTy);
+                llvm::Value* updated = builder->CreateInsertElement(vec, newVal, idxVal, "simd.insert");
+                builder->CreateStore(updated, alloca);
+                return updated;
+            }
+        }
+    }
+
     llvm::Value* arrVal = generateExpression(expr->array.get());
     llvm::Value* idxVal = generateExpression(expr->index.get());
     llvm::Value* newVal = generateExpression(expr->value.get());

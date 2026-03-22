@@ -1,0 +1,56 @@
+// Test register keyword — forces variable into CPU register via mem2reg.
+// At -O0, register vars use phi nodes (SSA) instead of alloca/load/store.
+fn accumulate(n) {
+    register var acc = 0;
+    register var i = 0;
+    while (i < n) {
+        acc = acc + i;
+        i = i + 1;
+    }
+    return acc;
+}
+
+fn countdown(start) {
+    register var val = start;
+    while (val > 0) {
+        val = val - 1;
+    }
+    return val;
+}
+
+fn register_with_type() {
+    register var x: int = 100;
+    register var y: float = 2.5;
+    x = x + 50;
+    return x;
+}
+
+fn main() {
+    var total = 0;
+
+    // Accumulate 0+1+2+...+9 = 45
+    total = total + accumulate(10);
+    // total = 45
+
+    // Countdown to zero
+    total = total + countdown(100);
+    // total = 45 (countdown returns 0)
+
+    // Register with type annotation
+    total = total + register_with_type();
+    // total = 195
+
+    // Register var in a loop with reassignment
+    register var counter = 0;
+    var j = 0;
+    while (j < 10) {
+        counter = counter + 3;
+        j = j + 1;
+    }
+    total = total + counter;
+    // total = 225
+
+    // Subtract 200 to get a small exit code
+    return total - 200;
+    // returns 25
+}

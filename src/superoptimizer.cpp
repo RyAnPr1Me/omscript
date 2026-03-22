@@ -849,6 +849,72 @@ static std::optional<IdiomMatch> detectPopCount(llvm::Instruction* inst) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Idiom detection — count leading zeros via bit-smearing
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Detect the "bit smear then popcount" CLZ pattern:
+///   x |= x >> 1; x |= x >> 2; x |= x >> 4; ... ; return bitwidth - popcount(x)
+///
+/// This function specifically detects the bit-smear-popcount CLZ idiom,
+/// where all bits below the highest set bit are smeared to 1 via a chain
+/// of OR-shift operations, and then popcount is subtracted from the bit
+/// width to yield the number of leading zeros.
+///
+/// We detect the end of the pattern: sub(bitwidth, ctpop(or-chain(x)))
+/// where the or-chain is at least one stage of or(x, lshr(x, k)).
+/// The de Bruijn lookup variant is left for future work.
+static std::optional<IdiomMatch> detectCountLeadingZeros(llvm::Instruction* inst) {
+    // Detect bit-smear sequence ending with popcount subtraction:
+    //   x |= x >> 1; x |= x >> 2; x |= x >> 4; x |= x >> 8; x |= x >> 16; x |= x >> 32;
+    //   return 64 - popcount(x);
+    // The de Bruijn lookup variant is left for future work.
+
+    // We detect the end of the pattern: sub(bitwidth, ctpop(or-chain))
+    if (inst->getOpcode() != llvm::Instruction::Sub) return std::nullopt;
+
+    unsigned bitWidth = inst->getType()->getIntegerBitWidth();
+    if (!isConstInt(inst->getOperand(0), static_cast<int64_t>(bitWidth)))
+        return std::nullopt;
+
+    // The second operand should be a ctpop call
+    auto* call = llvm::dyn_cast<llvm::CallInst>(inst->getOperand(1));
+    if (!call) return std::nullopt;
+    llvm::Function* callee = call->getCalledFunction();
+    if (!callee || callee->getIntrinsicID() != llvm::Intrinsic::ctpop)
+        return std::nullopt;
+
+    // The argument to ctpop should be the result of a bit-smearing OR chain
+    llvm::Value* smeared = call->getArgOperand(0);
+
+    // Walk back through OR-shift chain: x |= x >> k
+    // We need at least the first stage: or(x, lshr(x, 1))
+    auto* orInst = llvm::dyn_cast<llvm::BinaryOperator>(smeared);
+    if (!orInst || orInst->getOpcode() != llvm::Instruction::Or)
+        return std::nullopt;
+
+    // Check for or(x, lshr(x, k)) pattern
+    auto* lshr = llvm::dyn_cast<llvm::BinaryOperator>(orInst->getOperand(1));
+    if (!lshr || lshr->getOpcode() != llvm::Instruction::LShr)
+        return std::nullopt;
+
+    llvm::Value* x = orInst->getOperand(0);
+    // Walk up the OR chain to find the original x
+    // The chain looks like: or(or(or(x, lshr(x,1)), lshr(or(x,lshr(x,1)),2)), ...)
+    // Just find the deepest x
+    while (auto* innerOr = llvm::dyn_cast<llvm::BinaryOperator>(x)) {
+        if (innerOr->getOpcode() != llvm::Instruction::Or) break;
+        x = innerOr->getOperand(0);
+    }
+
+    IdiomMatch match;
+    match.idiom = Idiom::CountLeadingZeros;
+    match.rootInst = inst;
+    match.operands = {x};
+    match.bitWidth = bitWidth;
+    return match;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main idiom detection
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -890,6 +956,10 @@ std::vector<IdiomMatch> detectIdioms(llvm::BasicBlock& bb) {
             continue;
         }
         if (auto m = detectPopCount(&inst)) {
+            results.push_back(std::move(*m));
+            continue;
+        }
+        if (auto m = detectCountLeadingZeros(&inst)) {
             results.push_back(std::move(*m));
             continue;
         }
@@ -996,6 +1066,48 @@ static bool replaceIdiom(IdiomMatch& match) {
         llvm::Value* result = builder.CreateCall(ctpop, {x}, "popcount");
         match.rootInst->replaceAllUsesWith(result);
         return true;
+    }
+
+    case Idiom::CountLeadingZeros: {
+        // Replace bit-smear + popcount CLZ with llvm.ctlz intrinsic
+        llvm::Value* x = match.operands[0];
+        llvm::Function* ctlz = OMSC_GET_INTRINSIC(
+            mod, llvm::Intrinsic::ctlz, {intTy});
+        llvm::Value* falseConst = llvm::ConstantInt::getFalse(ctx);
+        llvm::Value* result = builder.CreateCall(ctlz, {x, falseConst}, "ctlz");
+        match.rootInst->replaceAllUsesWith(result);
+        return true;
+    }
+
+    case Idiom::CountTrailingZeros: {
+        // Replace isolate-lowest-bit with llvm.cttz intrinsic
+        llvm::Value* x = match.operands[0];
+        llvm::Function* cttz = OMSC_GET_INTRINSIC(
+            mod, llvm::Intrinsic::cttz, {intTy});
+        llvm::Value* falseConst = llvm::ConstantInt::getFalse(ctx);
+        llvm::Value* result = builder.CreateCall(cttz, {x, falseConst}, "cttz");
+        match.rootInst->replaceAllUsesWith(result);
+        return true;
+    }
+
+    case Idiom::BitFieldExtract: {
+        // Replace shift-and-mask with a single AND of a more targeted mask
+        // (this helps subsequent passes recognize the pattern)
+        llvm::Value* x = match.operands[0];
+        llvm::Value* shift = match.operands.size() > 1 ? match.operands[1] : nullptr;
+        if (shift) {
+            llvm::Value* shifted = builder.CreateLShr(x, shift, "bfe.shr");
+            // Guard: (1ULL << 64) is undefined behavior in C++, so we
+            // special-case bitWidth >= 64 to produce an all-ones mask.
+            uint64_t maskVal = match.bitWidth >= 64
+                ? ~uint64_t(0)
+                : (1ULL << match.bitWidth) - 1;
+            llvm::Value* mask = llvm::ConstantInt::get(intTy, maskVal);
+            llvm::Value* result = builder.CreateAnd(shifted, mask, "bfe.and");
+            match.rootInst->replaceAllUsesWith(result);
+            return true;
+        }
+        return false;
     }
 
     default:
@@ -2380,6 +2492,131 @@ static unsigned applyAlgebraicSimplifications(llvm::Function& func) {
                         // For constants, just fold: (x & c1) | (y & c2)
                         // This is already optimal, but establish the equivalence
                         // for further optimization passes to exploit.
+                    }
+                }
+            }
+
+            // ── De Morgan's laws ─────────────────────────────────────────
+            // ~(a & b) → (~a) | (~b)  when inner has one use
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Xor) {
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1))) {
+                    if (ci->isMinusOne()) {
+                        if (auto* inner = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0))) {
+                            if (inner->getOpcode() == llvm::Instruction::And && hasOneUse(inner)) {
+                                llvm::IRBuilder<> builder(&inst);
+                                llvm::Value* notA = builder.CreateNot(inner->getOperand(0), "demorgan.nota");
+                                llvm::Value* notB = builder.CreateNot(inner->getOperand(1), "demorgan.notb");
+                                simplified = builder.CreateOr(notA, notB, "demorgan.or");
+                            }
+                            // ~(a | b) → (~a) & (~b)
+                            else if (inner->getOpcode() == llvm::Instruction::Or && hasOneUse(inner)) {
+                                llvm::IRBuilder<> builder(&inst);
+                                llvm::Value* notA = builder.CreateNot(inner->getOperand(0), "demorgan.nota");
+                                llvm::Value* notB = builder.CreateNot(inner->getOperand(1), "demorgan.notb");
+                                simplified = builder.CreateAnd(notA, notB, "demorgan.and");
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── Boolean simplification on select ─────────────────────────
+            // select(cond, 1, 0) → zext(cond)
+            if (!simplified && llvm::isa<llvm::SelectInst>(inst)) {
+                auto* sel = llvm::cast<llvm::SelectInst>(&inst);
+                if (isConstInt(sel->getTrueValue(), 1) && isConstInt(sel->getFalseValue(), 0)) {
+                    llvm::IRBuilder<> builder(&inst);
+                    simplified = builder.CreateZExt(sel->getCondition(), sel->getType(), "bool_zext");
+                }
+                // select(cond, 0, 1) → zext(!cond)
+                if (!simplified && isConstInt(sel->getTrueValue(), 0) && isConstInt(sel->getFalseValue(), 1)) {
+                    llvm::IRBuilder<> builder(&inst);
+                    llvm::Value* notCond = builder.CreateNot(sel->getCondition(), "bool_not");
+                    simplified = builder.CreateZExt(notCond, sel->getType(), "bool_notzext");
+                }
+            }
+
+            // ── Redundant truncation elimination ─────────────────────────
+            // and(x, 0xFF) where x is known < 256 → x
+            // (More generally: and(x, mask) where x's value range fits in mask)
+            if (!simplified && inst.getOpcode() == llvm::Instruction::And) {
+                if (auto* maskCI = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1))) {
+                    uint64_t mask = maskCI->getZExtValue();
+                    // Check if mask is (2^n - 1) i.e. a bit-width mask
+                    if (mask > 0 && (mask & (mask + 1)) == 0) {
+                        llvm::Value* src = inst.getOperand(0);
+                        // If source is a zext from a smaller type that fits in the mask
+                        if (auto* zext = llvm::dyn_cast<llvm::ZExtInst>(src)) {
+                            unsigned srcBits = zext->getSrcTy()->getIntegerBitWidth();
+                            if ((1ULL << srcBits) - 1 <= mask) {
+                                simplified = src;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── min/max via select canonicalization ──────────────────────
+            // select(icmp slt a, b, a, b) → already handled by idiom recognizer
+            // select(icmp sgt a, 0, a, sub(0, a)) → abs(a)  [when not already caught]
+            if (!simplified && llvm::isa<llvm::SelectInst>(inst)) {
+                auto* sel = llvm::cast<llvm::SelectInst>(&inst);
+                if (auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(sel->getCondition())) {
+                    // select(a > 0, a, -a) → abs(a)
+                    if (cmp->getPredicate() == llvm::ICmpInst::ICMP_SGT &&
+                        isConstInt(cmp->getOperand(1), 0) &&
+                        sel->getTrueValue() == cmp->getOperand(0)) {
+                        if (auto* neg = llvm::dyn_cast<llvm::BinaryOperator>(sel->getFalseValue())) {
+                            if (neg->getOpcode() == llvm::Instruction::Sub &&
+                                isConstInt(neg->getOperand(0), 0) &&
+                                neg->getOperand(1) == cmp->getOperand(0)) {
+                                llvm::IRBuilder<> builder(&inst);
+                                llvm::Value* x = cmp->getOperand(0);
+                                // abs(x) = (x ^ (x >> 31)) - (x >> 31)  for 32-bit
+                                // But use LLVM's abs intrinsic if available
+                                unsigned bw = x->getType()->getIntegerBitWidth();
+                                llvm::Value* shift = builder.CreateAShr(x,
+                                    llvm::ConstantInt::get(x->getType(), bw - 1), "abs.sign");
+                                llvm::Value* xored = builder.CreateXor(x, shift, "abs.xor");
+                                simplified = builder.CreateSub(xored, shift, "abs.sub");
+                            }
+                        }
+                    }
+                    // select(a < 0, -a, a) → abs(a)
+                    if (!simplified && cmp->getPredicate() == llvm::ICmpInst::ICMP_SLT &&
+                        isConstInt(cmp->getOperand(1), 0) &&
+                        sel->getFalseValue() == cmp->getOperand(0)) {
+                        if (auto* neg = llvm::dyn_cast<llvm::BinaryOperator>(sel->getTrueValue())) {
+                            if (neg->getOpcode() == llvm::Instruction::Sub &&
+                                isConstInt(neg->getOperand(0), 0) &&
+                                neg->getOperand(1) == cmp->getOperand(0)) {
+                                llvm::IRBuilder<> builder(&inst);
+                                llvm::Value* x = cmp->getOperand(0);
+                                unsigned bw = x->getType()->getIntegerBitWidth();
+                                llvm::Value* shift = builder.CreateAShr(x,
+                                    llvm::ConstantInt::get(x->getType(), bw - 1), "abs.sign");
+                                llvm::Value* xored = builder.CreateXor(x, shift, "abs.xor");
+                                simplified = builder.CreateSub(xored, shift, "abs.sub");
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── Comparison with boolean → simpler form ──────────────────
+            // icmp ne (and x, 1), 0  →  trunc x to i1  (when only testing low bit)
+            if (!simplified && inst.getOpcode() == llvm::Instruction::ICmp) {
+                auto* cmp = llvm::cast<llvm::ICmpInst>(&inst);
+                if (cmp->getPredicate() == llvm::ICmpInst::ICMP_NE &&
+                    isConstInt(cmp->getOperand(1), 0)) {
+                    if (auto* andInst = llvm::dyn_cast<llvm::BinaryOperator>(cmp->getOperand(0))) {
+                        if (andInst->getOpcode() == llvm::Instruction::And &&
+                            isConstInt(andInst->getOperand(1), 1)) {
+                            llvm::IRBuilder<> builder(&inst);
+                            llvm::Value* trunc = builder.CreateTrunc(andInst->getOperand(0),
+                                builder.getInt1Ty(), "lowbit_trunc");
+                            simplified = trunc;
+                        }
                     }
                 }
             }

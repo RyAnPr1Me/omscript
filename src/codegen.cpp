@@ -585,6 +585,9 @@ void optimizeOptMaxStatement(Statement* stmt) {
             if (sc.value) {
                 sc.value = optimizeOptMaxExpression(std::move(sc.value));
             }
+            for (auto& v : sc.values) {
+                v = optimizeOptMaxExpression(std::move(v));
+            }
             for (auto& s : sc.body) {
                 optimizeOptMaxStatement(s.get());
             }
@@ -603,22 +606,35 @@ namespace omscript {
 // Canonical set of all stdlib built-in function names.
 // These functions are always compiled to native machine code via LLVM IR.
 static const std::unordered_set<std::string> stdlibFunctions = {"abs",
+                                                                "acos",
+                                                                "array_any",
                                                                 "array_concat",
                                                                 "array_contains",
                                                                 "array_copy",
+                                                                "array_count",
+                                                                "array_every",
                                                                 "array_fill",
                                                                 "array_filter",
+                                                                "array_find",
                                                                 "array_map",
+                                                                "array_max",
+                                                                "array_min",
                                                                 "array_reduce",
                                                                 "array_remove",
                                                                 "array_slice",
+                                                                "asin",
                                                                 "assert",
+                                                                "atan",
+                                                                "atan2",
+                                                                "cbrt",
                                                                 "ceil",
                                                                 "char_at",
                                                                 "char_code",
                                                                 "clamp",
+                                                                "cos",
                                                                 "exit_program",
                                                                 "exit",
+                                                                "exp",
                                                                 "fast_add",
                                                                 "fast_div",
                                                                 "fast_mul",
@@ -629,6 +645,7 @@ static const std::unordered_set<std::string> stdlibFunctions = {"abs",
                                                                 "file_write",
                                                                 "floor",
                                                                 "gcd",
+                                                                "hypot",
                                                                 "index_of",
                                                                 "input",
                                                                 "input_line",
@@ -637,6 +654,8 @@ static const std::unordered_set<std::string> stdlibFunctions = {"abs",
                                                                 "is_even",
                                                                 "is_odd",
                                                                 "len",
+                                                                "log",
+                                                                "log10",
                                                                 "log2",
                                                                 "map_get",
                                                                 "map_has",
@@ -665,16 +684,19 @@ static const std::unordered_set<std::string> stdlibFunctions = {"abs",
                                                                 "reverse",
                                                                 "round",
                                                                 "sign",
+                                                                "sin",
                                                                 "sleep",
                                                                 "sort",
                                                                 "sqrt",
                                                                 "str_chars",
                                                                 "str_concat",
                                                                 "str_contains",
+                                                                "str_count",
                                                                 "str_ends_with",
                                                                 "str_eq",
                                                                 "str_find",
                                                                 "str_index_of",
+                                                                "str_join",
                                                                 "str_len",
                                                                 "str_lower",
                                                                 "str_repeat",
@@ -690,6 +712,7 @@ static const std::unordered_set<std::string> stdlibFunctions = {"abs",
                                                                 "string_to_number",
                                                                 "sum",
                                                                 "swap",
+                                                                "tan",
                                                                 "time",
                                                                 "to_char",
                                                                 "to_float",
@@ -773,6 +796,25 @@ llvm::Type* CodeGenerator::resolveAnnotatedType(const std::string& annotation) {
         return llvm::Type::getInt16Ty(*context);                // i16/u16
     if (ann == "i32" || ann == "u32")
         return llvm::Type::getInt32Ty(*context);                // i32/u32
+    // -----------------------------------------------------------------------
+    // SIMD vector types — map to LLVM fixed-vector types for handwritten SIMD
+    // -----------------------------------------------------------------------
+    if (ann == "f32x4")
+        return llvm::FixedVectorType::get(llvm::Type::getFloatTy(*context), 4);
+    if (ann == "f32x8")
+        return llvm::FixedVectorType::get(llvm::Type::getFloatTy(*context), 8);
+    if (ann == "f64x2")
+        return llvm::FixedVectorType::get(llvm::Type::getDoubleTy(*context), 2);
+    if (ann == "f64x4")
+        return llvm::FixedVectorType::get(llvm::Type::getDoubleTy(*context), 4);
+    if (ann == "i32x4")
+        return llvm::FixedVectorType::get(llvm::Type::getInt32Ty(*context), 4);
+    if (ann == "i32x8")
+        return llvm::FixedVectorType::get(llvm::Type::getInt32Ty(*context), 8);
+    if (ann == "i64x2")
+        return llvm::FixedVectorType::get(llvm::Type::getInt64Ty(*context), 2);
+    if (ann == "i64x4")
+        return llvm::FixedVectorType::get(llvm::Type::getInt64Ty(*context), 4);
     // "int", "i64", "u64", "string", array types, struct names, generics,
     // and empty annotations all map to the default i64 representation.
     return getDefaultType();
@@ -848,6 +890,38 @@ llvm::Value* CodeGenerator::ensureFloat(llvm::Value* v) {
         return builder->CreateSIToFP(intVal, getFloatType(), "itof");
     }
     return v;
+}
+
+llvm::Value* CodeGenerator::convertToVectorElement(llvm::Value* v, llvm::Type* elemTy) {
+    if (v->getType() == elemTy)
+        return v;
+    if (elemTy->isFloatTy()) {
+        if (v->getType()->isDoubleTy())
+            return builder->CreateFPTrunc(v, elemTy, "elem.fptrunc");
+        if (v->getType()->isIntegerTy())
+            return builder->CreateSIToFP(v, elemTy, "elem.sitofp");
+    } else if (elemTy->isDoubleTy()) {
+        if (v->getType()->isIntegerTy())
+            return builder->CreateSIToFP(v, elemTy, "elem.sitofp");
+        if (v->getType()->isFloatTy())
+            return builder->CreateFPExt(v, elemTy, "elem.fpext");
+    } else if (elemTy->isIntegerTy()) {
+        if (v->getType()->isDoubleTy() || v->getType()->isFloatTy())
+            return builder->CreateFPToSI(v, elemTy, "elem.fptosi");
+        if (v->getType()->isIntegerTy())
+            return builder->CreateIntCast(v, elemTy, true, "elem.icast");
+    }
+    return v;
+}
+
+llvm::Value* CodeGenerator::splatScalarToVector(llvm::Value* scalar, llvm::Type* vecTy) {
+    auto* fvt = llvm::cast<llvm::FixedVectorType>(vecTy);
+    scalar = convertToVectorElement(scalar, fvt->getElementType());
+    llvm::Value* undef = llvm::UndefValue::get(vecTy);
+    llvm::Value* ins = builder->CreateInsertElement(undef, scalar,
+        llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0), "splat.ins");
+    llvm::SmallVector<int, 16> mask(fvt->getNumElements(), 0);
+    return builder->CreateShuffleVector(ins, mask, "splat");
 }
 
 void CodeGenerator::beginScope() {
@@ -2518,6 +2592,8 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     prefetchedParams_.clear();
     prefetchedVars_.clear();
     prefetchedImmutVars_.clear();
+    registerVars_.clear();
+    simdVars_.clear();
 
     // Pre-populate stringVars_ for parameters known to receive string arguments.
     auto paramStrIt = funcParamStringTypes_.find(func->name);
@@ -2608,6 +2684,17 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         throw DiagnosticError(Diagnostic{DiagnosticSeverity::Error,
                                          {"", func->line, func->column},
                                          "Function verification failed for '" + func->name + "': " + errorStr});
+    }
+
+    // Force register promotion for functions that use the `register` keyword.
+    // Run mem2reg immediately so register-annotated allocas are promoted to
+    // SSA registers regardless of the global optimization level.
+    if (!registerVars_.empty()) {
+        llvm::legacy::FunctionPassManager fpm(module.get());
+        fpm.add(llvm::createPromoteMemoryToRegisterPass());
+        fpm.doInitialization();
+        fpm.run(*function);
+        fpm.doFinalization();
     }
 
     inOptMaxFunction = false;

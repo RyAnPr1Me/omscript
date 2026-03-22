@@ -41,7 +41,8 @@ static const std::unordered_map<std::string_view, TokenType> keywords = {
     {"borrow", TokenType::BORROW},
     {"prefetch", TokenType::PREFETCH},
     {"likely", TokenType::LIKELY},
-    {"unlikely", TokenType::UNLIKELY}};
+    {"unlikely", TokenType::UNLIKELY},
+    {"register", TokenType::REGISTER}};
 
 /// Throw a DiagnosticError with the given message and source location.
 [[noreturn]] static void lexError(const std::string& msg, int ln, int col) {
@@ -408,6 +409,12 @@ std::vector<Token> Lexer::tokenize() {
             continue;
         }
 
+        // String interpolation: $"..." desugars into concatenation chain
+        if (c == '$' && peek(1) == '"') {
+            scanInterpolatedString(tokens);
+            continue;
+        }
+
         // String literals (check triple-quote first for multi-line strings)
         if (c == '"') {
             if (peek(1) == '"' && peek(2) == '"') {
@@ -469,7 +476,12 @@ std::vector<Token> Lexer::tokenize() {
         case '*':
             if (peek() == '*') {
                 advance();
-                tokens.push_back(makeToken(TokenType::STAR_STAR, "**"));
+                if (peek() == '=') {
+                    advance();
+                    tokens.push_back(makeToken(TokenType::STAR_STAR_ASSIGN, "**="));
+                } else {
+                    tokens.push_back(makeToken(TokenType::STAR_STAR, "**"));
+                }
             } else if (peek() == '=') {
                 advance();
                 tokens.push_back(makeToken(TokenType::STAR_ASSIGN, "*="));
@@ -523,7 +535,12 @@ std::vector<Token> Lexer::tokenize() {
         case '?':
             if (peek() == '?') {
                 advance();
-                tokens.push_back(makeToken(TokenType::NULL_COALESCE, "??"));
+                if (peek() == '=') {
+                    advance();
+                    tokens.push_back(makeToken(TokenType::NULL_COALESCE_ASSIGN, "?\?="));
+                } else {
+                    tokens.push_back(makeToken(TokenType::NULL_COALESCE, "??"));
+                }
             } else {
                 tokens.push_back(makeToken(TokenType::QUESTION, "?"));
             }
@@ -639,6 +656,184 @@ std::vector<Token> Lexer::tokenize() {
 
     tokens.push_back(makeToken(TokenType::END_OF_FILE, ""));
     return tokens;
+}
+
+// ---------------------------------------------------------------------------
+// String interpolation: $"hello {expr} world"
+// Desugars into a chain of '+' operations:
+//   "" + (expr1) + "literal" + (expr2) + ...
+// The leading empty string ensures we are always in string-concatenation
+// context, so integer/float expressions are auto-converted to strings.
+// ---------------------------------------------------------------------------
+void Lexer::scanInterpolatedString(std::vector<Token>& tokens) {
+    const int startLine = line;
+    const int startColumn = column;
+    advance(); // skip '$'
+    advance(); // skip opening '"'
+
+    // Collect alternating literal/expression segments.
+    struct Segment {
+        bool isLiteral;
+        std::string text;
+    };
+    std::vector<Segment> segments;
+    std::string currentLiteral;
+
+    while (!isAtEnd() && peek() != '"') {
+        if (peek() == '\\') {
+            // Escape sequences — same rules as normal strings, plus \{ and \}.
+            advance(); // skip backslash
+            if (isAtEnd()) {
+                lexError("Unterminated escape sequence in interpolated string", startLine, startColumn);
+            }
+            const char escaped = advance();
+            switch (escaped) {
+            case 'n':
+                currentLiteral += '\n';
+                break;
+            case 't':
+                currentLiteral += '\t';
+                break;
+            case 'r':
+                currentLiteral += '\r';
+                break;
+            case '0':
+                lexError("Null byte '\\0' is not allowed in string literals", line, column);
+                break;
+            case 'b':
+                currentLiteral += '\b';
+                break;
+            case 'f':
+                currentLiteral += '\f';
+                break;
+            case 'v':
+                currentLiteral += '\v';
+                break;
+            case '\\':
+                currentLiteral += '\\';
+                break;
+            case '"':
+                currentLiteral += '"';
+                break;
+            case '{':
+                currentLiteral += '{';
+                break;
+            case '}':
+                currentLiteral += '}';
+                break;
+            case 'x': {
+                if (isAtEnd() || !isHexDigit(peek())) {
+                    lexError("Expected hex digit after '\\x' in string", line, column);
+                }
+                const char h1 = advance();
+                if (isAtEnd() || !isHexDigit(peek())) {
+                    lexError("Expected two hex digits after '\\x' in string", line, column);
+                }
+                const char h2 = advance();
+                const std::string hex{h1, h2};
+                const int val = std::stoi(hex, nullptr, 16);
+                if (val == 0) {
+                    lexError("Null byte '\\x00' is not allowed in string literals", line, column);
+                }
+                currentLiteral += static_cast<char>(val);
+                break;
+            }
+            default:
+                lexError("Unknown escape sequence '\\" + std::string(1, escaped) + "' in interpolated string",
+                         line, column);
+            }
+        } else if (peek() == '{') {
+            advance(); // skip '{'
+            // Save current literal as a segment.
+            segments.push_back({true, currentLiteral});
+            currentLiteral.clear();
+
+            // Scan expression text until matching '}', tracking brace depth
+            // and skipping over nested string literals so that braces inside
+            // strings are not mis-counted.
+            std::string exprText;
+            int depth = 1;
+            while (!isAtEnd() && depth > 0) {
+                const char ch = peek();
+                if (ch == '{') {
+                    depth++;
+                    exprText += advance();
+                } else if (ch == '}') {
+                    depth--;
+                    if (depth == 0)
+                        break;
+                    exprText += advance();
+                } else if (ch == '"') {
+                    // Nested string literal inside the expression — scan it
+                    // verbatim so that any '{' or '}' inside is not counted.
+                    exprText += advance(); // opening quote
+                    while (!isAtEnd() && peek() != '"') {
+                        if (peek() == '\\') {
+                            exprText += advance(); // backslash
+                        }
+                        if (!isAtEnd())
+                            exprText += advance();
+                    }
+                    if (!isAtEnd())
+                        exprText += advance(); // closing quote
+                } else {
+                    exprText += advance();
+                }
+            }
+            if (isAtEnd()) {
+                lexError("Unterminated expression in interpolated string: missing closing '}'", startLine, startColumn);
+            }
+            advance(); // skip closing '}'
+            segments.push_back({false, exprText});
+        } else {
+            currentLiteral += advance();
+        }
+    }
+
+    if (isAtEnd()) {
+        lexError("Unterminated interpolated string literal", startLine, startColumn);
+    }
+    advance(); // skip closing '"'
+
+    // Don't forget the trailing literal.
+    if (!currentLiteral.empty()) {
+        segments.push_back({true, currentLiteral});
+    }
+
+    // Empty interpolated string: $""
+    if (segments.empty()) {
+        tokens.push_back(Token(TokenType::STRING, "", startLine, startColumn));
+        return;
+    }
+
+    // Ensure first segment is a literal so we start in string context.
+    // This guarantees that subsequent '+' operations use string concatenation
+    // (which auto-converts integers/floats to strings).
+    if (!segments[0].isLiteral) {
+        segments.insert(segments.begin(), Segment{true, ""});
+    }
+
+    // Emit tokens: seg0 + seg1 + seg2 + ...
+    for (size_t i = 0; i < segments.size(); ++i) {
+        if (i > 0) {
+            tokens.push_back(Token(TokenType::PLUS, "+", startLine, startColumn));
+        }
+        if (segments[i].isLiteral) {
+            tokens.push_back(Token(TokenType::STRING, segments[i].text, startLine, startColumn));
+        } else {
+            // Wrap expression in parentheses to preserve evaluation order.
+            tokens.push_back(Token(TokenType::LPAREN, "(", startLine, startColumn));
+            // Re-lex the expression text.
+            Lexer exprLexer(segments[i].text);
+            const auto exprTokens = exprLexer.tokenize();
+            for (const auto& tok : exprTokens) {
+                if (tok.type == TokenType::END_OF_FILE)
+                    break;
+                tokens.push_back(tok);
+            }
+            tokens.push_back(Token(TokenType::RPAREN, ")", startLine, startColumn));
+        }
+    }
 }
 
 } // namespace omscript

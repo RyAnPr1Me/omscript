@@ -53,7 +53,10 @@ enum class BuiltinId : uint8_t {
     MAP_GET, MAP_HAS, MAP_REMOVE, MAP_KEYS, MAP_VALUES, MAP_SIZE,
     RANGE, RANGE_STEP, CHAR_CODE, NUMBER_TO_STRING, STRING_TO_NUMBER,
     THREAD_CREATE, THREAD_JOIN, MUTEX_NEW, MUTEX_LOCK, MUTEX_UNLOCK,
-    MUTEX_DESTROY
+    MUTEX_DESTROY,
+    SIN, COS, TAN, ASIN, ACOS, ATAN, ATAN2, EXP, LOG, LOG10, CBRT, HYPOT,
+    ARRAY_MIN, ARRAY_MAX, ARRAY_ANY, ARRAY_EVERY, ARRAY_FIND, ARRAY_COUNT,
+    STR_JOIN, STR_COUNT
 };
 
 static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
@@ -158,11 +161,39 @@ static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
     {"mutex_lock", BuiltinId::MUTEX_LOCK},
     {"mutex_unlock", BuiltinId::MUTEX_UNLOCK},
     {"mutex_destroy", BuiltinId::MUTEX_DESTROY},
+    {"sin", BuiltinId::SIN},
+    {"cos", BuiltinId::COS},
+    {"tan", BuiltinId::TAN},
+    {"asin", BuiltinId::ASIN},
+    {"acos", BuiltinId::ACOS},
+    {"atan", BuiltinId::ATAN},
+    {"atan2", BuiltinId::ATAN2},
+    {"exp", BuiltinId::EXP},
+    {"log", BuiltinId::LOG},
+    {"log10", BuiltinId::LOG10},
+    {"cbrt", BuiltinId::CBRT},
+    {"hypot", BuiltinId::HYPOT},
+    {"array_min", BuiltinId::ARRAY_MIN},
+    {"array_max", BuiltinId::ARRAY_MAX},
+    {"array_any", BuiltinId::ARRAY_ANY},
+    {"array_every", BuiltinId::ARRAY_EVERY},
+    {"array_find", BuiltinId::ARRAY_FIND},
+    {"array_count", BuiltinId::ARRAY_COUNT},
+    {"str_join", BuiltinId::STR_JOIN},
+    {"str_count", BuiltinId::STR_COUNT},
 };
 
 static BuiltinId lookupBuiltin(const std::string& name) {
     auto it = builtinLookup.find(std::string_view(name));
     return it != builtinLookup.end() ? it->second : BuiltinId::NONE;
+}
+
+void CodeGenerator::validateArgCount(const CallExpr* expr, const std::string& funcName, size_t expected) {
+    if (expr->arguments.size() != expected) {
+        codegenError("Built-in function '" + funcName + "' expects " + std::to_string(expected) +
+                         " argument(s), but " + std::to_string(expr->arguments.size()) + " provided",
+                     expr);
+    }
 }
 
 llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
@@ -173,11 +204,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     // All stdlib built-in functions are compiled to native machine code below.
     if (bid == BuiltinId::PRINT) {
-        if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'print' expects 1 argument, but " + std::to_string(expr->arguments.size()) +
-                             " provided",
-                         expr);
-        }
+        validateArgCount(expr, "print", 1);
         Expression* argExpr = expr->arguments[0].get();
         llvm::Value* arg = generateExpression(argExpr);
         if (arg->getType()->isDoubleTy()) {
@@ -212,11 +239,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::ABS) {
-        if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'abs' expects 1 argument, but " + std::to_string(expr->arguments.size()) +
-                             " provided",
-                         expr);
-        }
+        validateArgCount(expr, "abs", 1);
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         if (arg->getType()->isDoubleTy()) {
             // Use llvm.fabs intrinsic for native hardware abs on floats
@@ -230,11 +253,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::LEN) {
-        if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'len' expects 1 argument, but " + std::to_string(expr->arguments.size()) +
-                             " provided",
-                         expr);
-        }
+        validateArgCount(expr, "len", 1);
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         Expression* argExpr = expr->arguments[0].get();
 
@@ -266,11 +285,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::MIN) {
-        if (expr->arguments.size() != 2) {
-            codegenError("Built-in function 'min' expects 2 arguments, but " + std::to_string(expr->arguments.size()) +
-                             " provided",
-                         expr);
-        }
+        validateArgCount(expr, "min", 2);
         llvm::Value* a = generateExpression(expr->arguments[0].get());
         llvm::Value* b = generateExpression(expr->arguments[1].get());
         if (a->getType()->isDoubleTy() || b->getType()->isDoubleTy()) {
@@ -288,11 +303,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::MAX) {
-        if (expr->arguments.size() != 2) {
-            codegenError("Built-in function 'max' expects 2 arguments, but " + std::to_string(expr->arguments.size()) +
-                             " provided",
-                         expr);
-        }
+        validateArgCount(expr, "max", 2);
         llvm::Value* a = generateExpression(expr->arguments[0].get());
         llvm::Value* b = generateExpression(expr->arguments[1].get());
         if (a->getType()->isDoubleTy() || b->getType()->isDoubleTy()) {
@@ -310,11 +321,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::SIGN) {
-        if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'sign' expects 1 argument, but " + std::to_string(expr->arguments.size()) +
-                             " provided",
-                         expr);
-        }
+        validateArgCount(expr, "sign", 1);
         llvm::Value* x = generateExpression(expr->arguments[0].get());
         if (x->getType()->isDoubleTy()) {
             llvm::Value* fzero = llvm::ConstantFP::get(getFloatType(), 0.0);
@@ -336,11 +343,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::CLAMP) {
-        if (expr->arguments.size() != 3) {
-            codegenError("Built-in function 'clamp' expects 3 arguments, but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "clamp", 3);
         llvm::Value* val = generateExpression(expr->arguments[0].get());
         llvm::Value* lo = generateExpression(expr->arguments[1].get());
         llvm::Value* hi = generateExpression(expr->arguments[2].get());
@@ -364,11 +367,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::POW) {
-        if (expr->arguments.size() != 2) {
-            codegenError("Built-in function 'pow' expects 2 arguments, but " + std::to_string(expr->arguments.size()) +
-                             " provided",
-                         expr);
-        }
+        validateArgCount(expr, "pow", 2);
         llvm::Value* base = generateExpression(expr->arguments[0].get());
         llvm::Value* exp  = generateExpression(expr->arguments[1].get());
 
@@ -445,11 +444,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::PRINT_CHAR) {
-        if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'print_char' expects 1 argument, but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "print_char", 1);
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         if (arg->getType()->isDoubleTy()) {
             arg = builder->CreateFPToSI(arg, getDefaultType(), "ftoi");
@@ -470,11 +465,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::INPUT) {
-        if (!expr->arguments.empty()) {
-            codegenError("Built-in function 'input' expects 0 arguments, but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "input", 0);
         llvm::Function* function = builder->GetInsertBlock()->getParent();
         llvm::AllocaInst* inputAlloca = createEntryBlockAlloca(function, "input_val");
         builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 0), inputAlloca);
@@ -487,11 +478,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::INPUT_LINE) {
-        if (!expr->arguments.empty()) {
-            codegenError("Built-in function 'input_line' expects 0 arguments, but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "input_line", 0);
         // Allocate a 1024-byte buffer
         llvm::Value* bufSize = llvm::ConstantInt::get(getDefaultType(), 1024);
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bufSize}, "inputln.buf");
@@ -533,11 +520,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::SQRT) {
-        if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'sqrt' expects 1 argument, but " + std::to_string(expr->arguments.size()) +
-                             " provided",
-                         expr);
-        }
+        validateArgCount(expr, "sqrt", 1);
         llvm::Value* x = generateExpression(expr->arguments[0].get());
         // Use the llvm.sqrt intrinsic which maps directly to hardware sqrtsd/sqrtss
         // instructions on x86, producing results in a single cycle on modern CPUs.
@@ -567,11 +550,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::FAST_ADD || bid == BuiltinId::FAST_SUB ||
         bid == BuiltinId::FAST_MUL || bid == BuiltinId::FAST_DIV) {
-        if (expr->arguments.size() != 2) {
-            codegenError("Built-in function '" + expr->callee + "' expects 2 arguments, but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, expr->callee, 2);
         llvm::Value* lhs = ensureFloat(generateExpression(expr->arguments[0].get()));
         llvm::Value* rhs = ensureFloat(generateExpression(expr->arguments[1].get()));
         llvm::Value* result = nullptr;
@@ -593,11 +572,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::PRECISE_ADD || bid == BuiltinId::PRECISE_SUB ||
         bid == BuiltinId::PRECISE_MUL || bid == BuiltinId::PRECISE_DIV) {
-        if (expr->arguments.size() != 2) {
-            codegenError("Built-in function '" + expr->callee + "' expects 2 arguments, but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, expr->callee, 2);
         llvm::Value* lhs = ensureFloat(generateExpression(expr->arguments[0].get()));
         llvm::Value* rhs = ensureFloat(generateExpression(expr->arguments[1].get()));
         llvm::Value* result = nullptr;
@@ -620,11 +595,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::IS_EVEN) {
-        if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'is_even' expects 1 argument, but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "is_even", 1);
         llvm::Value* x = generateExpression(expr->arguments[0].get());
         // Convert float to integer since is_even() is an integer operation
         x = toDefaultType(x);
@@ -636,11 +607,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::IS_ODD) {
-        if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'is_odd' expects 1 argument, but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "is_odd", 1);
         llvm::Value* x = generateExpression(expr->arguments[0].get());
         // Convert float to integer since is_odd() is an integer operation
         x = toDefaultType(x);
@@ -649,11 +616,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::SUM) {
-        if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'sum' expects 1 argument, but " + std::to_string(expr->arguments.size()) +
-                             " provided",
-                         expr);
-        }
+        validateArgCount(expr, "sum", 1);
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         // Array layout: [length, elem0, elem1, ...]
         llvm::Value* arrPtr = builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "sum.arrptr");
@@ -693,11 +656,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::SWAP) {
-        if (expr->arguments.size() != 3) {
-            codegenError("Built-in function 'swap' expects 3 arguments (array, i, j), but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "swap", 3);
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         llvm::Value* i = generateExpression(expr->arguments[1].get());
         llvm::Value* j = generateExpression(expr->arguments[2].get());
@@ -741,11 +700,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::REVERSE) {
-        if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'reverse' expects 1 argument, but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "reverse", 1);
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         llvm::Value* arrPtr = builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "rev.arrptr");
         llvm::Value* length = builder->CreateLoad(getDefaultType(), arrPtr, "rev.len");
@@ -790,11 +745,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::TO_CHAR) {
-        if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'to_char' expects 1 argument, but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "to_char", 1);
         // Allocate a 2-byte buffer [char, '\0'] and return a pointer to it,
         // so the result behaves like a one-character string.
         llvm::Value* code = generateExpression(expr->arguments[0].get());
@@ -812,11 +763,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::IS_ALPHA) {
-        if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'is_alpha' expects 1 argument, but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "is_alpha", 1);
         llvm::Value* x = generateExpression(expr->arguments[0].get());
         // Convert float to integer since is_alpha() is an integer operation
         x = toDefaultType(x);
@@ -832,11 +779,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::IS_DIGIT) {
-        if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'is_digit' expects 1 argument, but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "is_digit", 1);
         llvm::Value* x = generateExpression(expr->arguments[0].get());
         // Convert float to integer since is_digit() is an integer operation
         x = toDefaultType(x);
@@ -854,11 +797,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // (also i64 pointers) both return 1; floats stored as double return 2;
     // string literals and tracked string variables return 3.
     if (bid == BuiltinId::TYPEOF) {
-        if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'typeof' expects 1 argument, but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "typeof", 1);
         // Evaluate the argument for its side effects, then derive type tag.
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         long long tag;
@@ -875,11 +814,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     // assert(condition) — aborts with an error if the condition is falsy.
     if (bid == BuiltinId::ASSERT) {
-        if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'assert' expects 1 argument, but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "assert", 1);
         llvm::Value* condVal = generateExpression(expr->arguments[0].get());
         condVal = toBool(condVal);
 
@@ -900,11 +835,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::STR_LEN) {
-        if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'str_len' expects 1 argument, but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "str_len", 1);
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         // String may be a raw pointer (from a literal/local) or an i64 holding a pointer.
         llvm::Value* strPtr = arg->getType()->isPointerTy()
@@ -914,11 +845,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::CHAR_AT) {
-        if (expr->arguments.size() != 2) {
-            codegenError("Built-in function 'char_at' expects 2 arguments (string, index), but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "char_at", 2);
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* idxArg = generateExpression(expr->arguments[1].get());
         idxArg = toDefaultType(idxArg);
@@ -956,11 +883,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::STR_EQ) {
-        if (expr->arguments.size() != 2) {
-            codegenError("Built-in function 'str_eq' expects 2 arguments, but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "str_eq", 2);
         llvm::Value* lhsArg = generateExpression(expr->arguments[0].get());
         llvm::Value* rhsArg = generateExpression(expr->arguments[1].get());
         // Convert to pointers; the value may already be a pointer (literal/local).
@@ -979,11 +902,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::STR_CONCAT) {
-        if (expr->arguments.size() != 2) {
-            codegenError("Built-in function 'str_concat' expects 2 arguments, but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "str_concat", 2);
         llvm::Value* lhsArg = generateExpression(expr->arguments[0].get());
         llvm::Value* rhsArg = generateExpression(expr->arguments[1].get());
         llvm::Value* lhsPtr =
@@ -1155,11 +1074,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::LOG2) {
-        if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'log2' expects 1 argument, but " + std::to_string(expr->arguments.size()) +
-                             " provided",
-                         expr);
-        }
+        validateArgCount(expr, "log2", 1);
         llvm::Value* n = generateExpression(expr->arguments[0].get());
         n = toDefaultType(n);
         // Integer log2 via loop: count how many times we can right-shift before reaching 0.
@@ -1207,11 +1122,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::GCD) {
-        if (expr->arguments.size() != 2) {
-            codegenError("Built-in function 'gcd' expects 2 arguments, but " + std::to_string(expr->arguments.size()) +
-                             " provided",
-                         expr);
-        }
+        validateArgCount(expr, "gcd", 2);
         llvm::Value* a = generateExpression(expr->arguments[0].get());
         llvm::Value* b = generateExpression(expr->arguments[1].get());
         a = toDefaultType(a);
@@ -1254,11 +1165,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::TO_STRING) {
-        if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'to_string' expects 1 argument, but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "to_string", 1);
         llvm::Value* val = generateExpression(expr->arguments[0].get());
         bool isFloat = val->getType()->isDoubleTy();
         if (!isFloat)
@@ -1288,11 +1195,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::STR_FIND) {
-        if (expr->arguments.size() != 2) {
-            codegenError("Built-in function 'str_find' expects 2 arguments (string, char_code), but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "str_find", 2);
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* chArg = generateExpression(expr->arguments[1].get());
         chArg = toDefaultType(chArg);
@@ -1321,11 +1224,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // -----------------------------------------------------------------------
 
     if (bid == BuiltinId::FLOOR) {
-        if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'floor' expects 1 argument, but " + std::to_string(expr->arguments.size()) +
-                             " provided",
-                         expr);
-        }
+        validateArgCount(expr, "floor", 1);
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         llvm::Value* fval = ensureFloat(arg);
         // Use llvm.floor intrinsic for native hardware rounding
@@ -1335,11 +1234,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::CEIL) {
-        if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'ceil' expects 1 argument, but " + std::to_string(expr->arguments.size()) +
-                             " provided",
-                         expr);
-        }
+        validateArgCount(expr, "ceil", 1);
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         llvm::Value* fval = ensureFloat(arg);
         // Use llvm.ceil intrinsic for native hardware rounding
@@ -1349,11 +1244,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::ROUND) {
-        if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'round' expects 1 argument, but " + std::to_string(expr->arguments.size()) +
-                             " provided",
-                         expr);
-        }
+        validateArgCount(expr, "round", 1);
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         llvm::Value* fval = ensureFloat(arg);
         // Use llvm.round intrinsic for native hardware rounding
@@ -1363,15 +1254,122 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     // -----------------------------------------------------------------------
+    // Trigonometric and transcendental math built-ins
+    // -----------------------------------------------------------------------
+
+    if (bid == BuiltinId::SIN) {
+        validateArgCount(expr, "sin", 1);
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        llvm::Value* fval = ensureFloat(arg);
+        llvm::Function* sinIntrinsic = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::sin, {getFloatType()});
+        return builder->CreateCall(sinIntrinsic, {fval}, "sin.result");
+    }
+
+    if (bid == BuiltinId::COS) {
+        validateArgCount(expr, "cos", 1);
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        llvm::Value* fval = ensureFloat(arg);
+        llvm::Function* cosIntrinsic = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::cos, {getFloatType()});
+        return builder->CreateCall(cosIntrinsic, {fval}, "cos.result");
+    }
+
+    if (bid == BuiltinId::TAN) {
+        validateArgCount(expr, "tan", 1);
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        llvm::Value* fval = ensureFloat(arg);
+        llvm::FunctionType* ft = llvm::FunctionType::get(getFloatType(), {getFloatType()}, false);
+        llvm::FunctionCallee tanFn = module->getOrInsertFunction("tan", ft);
+        return builder->CreateCall(tanFn, {fval}, "tan.result");
+    }
+
+    if (bid == BuiltinId::ASIN) {
+        validateArgCount(expr, "asin", 1);
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        llvm::Value* fval = ensureFloat(arg);
+        llvm::FunctionType* ft = llvm::FunctionType::get(getFloatType(), {getFloatType()}, false);
+        llvm::FunctionCallee asinFn = module->getOrInsertFunction("asin", ft);
+        return builder->CreateCall(asinFn, {fval}, "asin.result");
+    }
+
+    if (bid == BuiltinId::ACOS) {
+        validateArgCount(expr, "acos", 1);
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        llvm::Value* fval = ensureFloat(arg);
+        llvm::FunctionType* ft = llvm::FunctionType::get(getFloatType(), {getFloatType()}, false);
+        llvm::FunctionCallee acosFn = module->getOrInsertFunction("acos", ft);
+        return builder->CreateCall(acosFn, {fval}, "acos.result");
+    }
+
+    if (bid == BuiltinId::ATAN) {
+        validateArgCount(expr, "atan", 1);
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        llvm::Value* fval = ensureFloat(arg);
+        llvm::FunctionType* ft = llvm::FunctionType::get(getFloatType(), {getFloatType()}, false);
+        llvm::FunctionCallee atanFn = module->getOrInsertFunction("atan", ft);
+        return builder->CreateCall(atanFn, {fval}, "atan.result");
+    }
+
+    if (bid == BuiltinId::ATAN2) {
+        validateArgCount(expr, "atan2", 2);
+        llvm::Value* y = generateExpression(expr->arguments[0].get());
+        llvm::Value* x = generateExpression(expr->arguments[1].get());
+        llvm::Value* fy = ensureFloat(y);
+        llvm::Value* fx = ensureFloat(x);
+        llvm::FunctionType* ft = llvm::FunctionType::get(getFloatType(), {getFloatType(), getFloatType()}, false);
+        llvm::FunctionCallee atan2Fn = module->getOrInsertFunction("atan2", ft);
+        return builder->CreateCall(atan2Fn, {fy, fx}, "atan2.result");
+    }
+
+    if (bid == BuiltinId::EXP) {
+        validateArgCount(expr, "exp", 1);
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        llvm::Value* fval = ensureFloat(arg);
+        llvm::Function* expIntrinsic = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::exp, {getFloatType()});
+        return builder->CreateCall(expIntrinsic, {fval}, "exp.result");
+    }
+
+    if (bid == BuiltinId::LOG) {
+        validateArgCount(expr, "log", 1);
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        llvm::Value* fval = ensureFloat(arg);
+        llvm::Function* logIntrinsic = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::log, {getFloatType()});
+        return builder->CreateCall(logIntrinsic, {fval}, "log.result");
+    }
+
+    if (bid == BuiltinId::LOG10) {
+        validateArgCount(expr, "log10", 1);
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        llvm::Value* fval = ensureFloat(arg);
+        llvm::Function* log10Intrinsic = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::log10, {getFloatType()});
+        return builder->CreateCall(log10Intrinsic, {fval}, "log10.result");
+    }
+
+    if (bid == BuiltinId::CBRT) {
+        validateArgCount(expr, "cbrt", 1);
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        llvm::Value* fval = ensureFloat(arg);
+        llvm::FunctionType* ft = llvm::FunctionType::get(getFloatType(), {getFloatType()}, false);
+        llvm::FunctionCallee cbrtFn = module->getOrInsertFunction("cbrt", ft);
+        return builder->CreateCall(cbrtFn, {fval}, "cbrt.result");
+    }
+
+    if (bid == BuiltinId::HYPOT) {
+        validateArgCount(expr, "hypot", 2);
+        llvm::Value* x = generateExpression(expr->arguments[0].get());
+        llvm::Value* y = generateExpression(expr->arguments[1].get());
+        llvm::Value* fx = ensureFloat(x);
+        llvm::Value* fy = ensureFloat(y);
+        llvm::FunctionType* ft = llvm::FunctionType::get(getFloatType(), {getFloatType(), getFloatType()}, false);
+        llvm::FunctionCallee hypotFn = module->getOrInsertFunction("hypot", ft);
+        return builder->CreateCall(hypotFn, {fx, fy}, "hypot.result");
+    }
+
+    // -----------------------------------------------------------------------
     // Type conversion built-ins: to_int, to_float
     // -----------------------------------------------------------------------
 
     if (bid == BuiltinId::TO_INT) {
-        if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'to_int' expects 1 argument, but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "to_int", 1);
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         if (arg->getType()->isDoubleTy()) {
             return builder->CreateFPToSI(arg, getDefaultType(), "toint.ftoi");
@@ -1390,11 +1388,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::TO_FLOAT) {
-        if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'to_float' expects 1 argument, but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "to_float", 1);
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         // If the argument is a string, parse it with strtod.
         if (arg->getType()->isPointerTy() || isStringExpr(expr->arguments[0].get())) {
@@ -1415,11 +1409,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // -----------------------------------------------------------------------
 
     if (bid == BuiltinId::STR_SUBSTR) {
-        if (expr->arguments.size() != 3) {
-            codegenError("Built-in function 'str_substr' expects 3 arguments (string, start, length), but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "str_substr", 3);
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* startArg = generateExpression(expr->arguments[1].get());
         llvm::Value* lenArg = generateExpression(expr->arguments[2].get());
@@ -1460,11 +1450,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::STR_UPPER) {
-        if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'str_upper' expects 1 argument, but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "str_upper", 1);
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* strPtr =
             strArg->getType()->isPointerTy()
@@ -1505,11 +1491,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::STR_LOWER) {
-        if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'str_lower' expects 1 argument, but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "str_lower", 1);
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* strPtr =
             strArg->getType()->isPointerTy()
@@ -1548,11 +1530,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::STR_CONTAINS) {
-        if (expr->arguments.size() != 2) {
-            codegenError("Built-in function 'str_contains' expects 2 arguments (haystack, needle), but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "str_contains", 2);
         llvm::Value* haystackArg = generateExpression(expr->arguments[0].get());
         llvm::Value* needleArg = generateExpression(expr->arguments[1].get());
         llvm::Value* haystackPtr =
@@ -1570,11 +1548,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::STR_INDEX_OF) {
-        if (expr->arguments.size() != 2) {
-            codegenError("Built-in function 'str_index_of' expects 2 arguments (haystack, needle), but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "str_index_of", 2);
         llvm::Value* haystackArg = generateExpression(expr->arguments[0].get());
         llvm::Value* needleArg = generateExpression(expr->arguments[1].get());
         llvm::Value* haystackPtr =
@@ -1596,11 +1570,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::STR_REPLACE) {
-        if (expr->arguments.size() != 3) {
-            codegenError("Built-in function 'str_replace' expects 3 arguments (string, old, new), but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "str_replace", 3);
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* oldArg = generateExpression(expr->arguments[1].get());
         llvm::Value* newArg = generateExpression(expr->arguments[2].get());
@@ -1746,11 +1716,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::STR_TRIM) {
-        if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'str_trim' expects 1 argument, but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "str_trim", 1);
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* strPtr = strArg->getType()->isPointerTy()
                                   ? strArg
@@ -1842,11 +1808,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::STR_STARTS_WITH) {
-        if (expr->arguments.size() != 2) {
-            codegenError("Built-in function 'str_starts_with' expects 2 arguments (string, prefix), but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "str_starts_with", 2);
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* prefixArg = generateExpression(expr->arguments[1].get());
         llvm::Value* strPtr =
@@ -1864,11 +1826,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::STR_ENDS_WITH) {
-        if (expr->arguments.size() != 2) {
-            codegenError("Built-in function 'str_ends_with' expects 2 arguments (string, suffix), but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "str_ends_with", 2);
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* suffixArg = generateExpression(expr->arguments[1].get());
         llvm::Value* strPtr =
@@ -1906,11 +1864,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::STR_REPEAT) {
-        if (expr->arguments.size() != 2) {
-            codegenError("Built-in function 'str_repeat' expects 2 arguments (string, count), but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "str_repeat", 2);
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* countArg = generateExpression(expr->arguments[1].get());
         countArg = toDefaultType(countArg);
@@ -1962,11 +1916,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::STR_REVERSE) {
-        if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'str_reverse' expects 1 argument, but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "str_reverse", 1);
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* strPtr =
             strArg->getType()->isPointerTy()
@@ -2013,11 +1963,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // -----------------------------------------------------------------------
 
     if (bid == BuiltinId::PUSH) {
-        if (expr->arguments.size() != 2) {
-            codegenError("Built-in function 'push' expects 2 arguments (array, value), but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "push", 2);
         llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
         llvm::Value* valArg = generateExpression(expr->arguments[1].get());
         arrArg = toDefaultType(arrArg);
@@ -2094,11 +2040,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::POP) {
-        if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'pop' expects 1 argument (array), but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "pop", 1);
         llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
         arrArg = toDefaultType(arrArg);
         llvm::Value* arrPtr = builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "pop.arrptr");
@@ -2132,11 +2074,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::INDEX_OF) {
-        if (expr->arguments.size() != 2) {
-            codegenError("Built-in function 'index_of' expects 2 arguments (array, value), but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "index_of", 2);
         llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
         llvm::Value* valArg = generateExpression(expr->arguments[1].get());
         arrArg = toDefaultType(arrArg);
@@ -2180,11 +2118,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::ARRAY_CONTAINS) {
-        if (expr->arguments.size() != 2) {
-            codegenError("Built-in function 'array_contains' expects 2 arguments (array, value), but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "array_contains", 2);
         llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
         llvm::Value* valArg = generateExpression(expr->arguments[1].get());
         arrArg = toDefaultType(arrArg);
@@ -2225,11 +2159,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::SORT) {
-        if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'sort' expects 1 argument (array), but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "sort", 1);
         bool sortStrings = isStringArrayExpr(expr->arguments[0].get());
         llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
         arrArg = toDefaultType(arrArg);
@@ -2303,11 +2233,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::ARRAY_FILL) {
-        if (expr->arguments.size() != 2) {
-            codegenError("Built-in function 'array_fill' expects 2 arguments (size, value), but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "array_fill", 2);
         llvm::Value* sizeArg = generateExpression(expr->arguments[0].get());
         llvm::Value* valArg = generateExpression(expr->arguments[1].get());
         sizeArg = toDefaultType(sizeArg);
@@ -2352,11 +2278,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::ARRAY_CONCAT) {
-        if (expr->arguments.size() != 2) {
-            codegenError("Built-in function 'array_concat' expects 2 arguments (array1, array2), but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "array_concat", 2);
         llvm::Value* arr1Arg = generateExpression(expr->arguments[0].get());
         llvm::Value* arr2Arg = generateExpression(expr->arguments[1].get());
         arr1Arg = toDefaultType(arr1Arg);
@@ -2389,11 +2311,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::ARRAY_SLICE) {
-        if (expr->arguments.size() != 3) {
-            codegenError("Built-in function 'array_slice' expects 3 arguments (array, start, end), but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "array_slice", 3);
         llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
         llvm::Value* startArg = generateExpression(expr->arguments[1].get());
         llvm::Value* endArg = generateExpression(expr->arguments[2].get());
@@ -2432,11 +2350,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::ARRAY_COPY) {
-        if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'array_copy' expects 1 argument (array), but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "array_copy", 1);
         llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
         arrArg = toDefaultType(arrArg);
         llvm::Value* arrPtr = builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "acopy.arrptr");
@@ -2453,11 +2367,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::ARRAY_REMOVE) {
-        if (expr->arguments.size() != 2) {
-            codegenError("Built-in function 'array_remove' expects 2 arguments (array, index), but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "array_remove", 2);
         llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
         llvm::Value* idxArg = generateExpression(expr->arguments[1].get());
         arrArg = toDefaultType(arrArg);
@@ -2505,11 +2415,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // array_map(arr, "fn_name") — apply named function to each element, return new array
     // -----------------------------------------------------------------------
     if (bid == BuiltinId::ARRAY_MAP) {
-        if (expr->arguments.size() != 2) {
-            codegenError("Built-in function 'array_map' expects 2 arguments (array, function_name), but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "array_map", 2);
         // The second argument must be a string literal (function name)
         auto* fnNameLit = dynamic_cast<LiteralExpr*>(expr->arguments[1].get());
         if (!fnNameLit || fnNameLit->literalType != LiteralExpr::LiteralType::STRING) {
@@ -2575,11 +2481,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // array_filter(arr, "fn_name") — return new array of elements where fn returns non-zero
     // -----------------------------------------------------------------------
     if (bid == BuiltinId::ARRAY_FILTER) {
-        if (expr->arguments.size() != 2) {
-            codegenError("Built-in function 'array_filter' expects 2 arguments (array, function_name), but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "array_filter", 2);
         auto* fnNameLit = dynamic_cast<LiteralExpr*>(expr->arguments[1].get());
         if (!fnNameLit || fnNameLit->literalType != LiteralExpr::LiteralType::STRING) {
             codegenError("array_filter: second argument must be a string literal (function name)", expr);
@@ -2668,11 +2570,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     //   fn_name must be a function that takes 2 arguments: (accumulator, element)
     // -----------------------------------------------------------------------
     if (bid == BuiltinId::ARRAY_REDUCE) {
-        if (expr->arguments.size() != 3) {
-            codegenError("Built-in function 'array_reduce' expects 3 arguments (array, function_name, initial), but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "array_reduce", 3);
         auto* fnNameLit = dynamic_cast<LiteralExpr*>(expr->arguments[1].get());
         if (!fnNameLit || fnNameLit->literalType != LiteralExpr::LiteralType::STRING) {
             codegenError("array_reduce: second argument must be a string literal (function name)", expr);
@@ -2734,14 +2632,375 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     // -----------------------------------------------------------------------
+    // array_min(arr) — return the minimum element of an array (0 for empty)
+    // -----------------------------------------------------------------------
+    if (bid == BuiltinId::ARRAY_MIN) {
+        validateArgCount(expr, "array_min", 1);
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        llvm::Value* arrPtr = builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "amin.arrptr");
+        llvm::Value* length = builder->CreateLoad(getDefaultType(), arrPtr, "amin.len");
+
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* entryBB = builder->GetInsertBlock();
+        llvm::BasicBlock* emptyBB = llvm::BasicBlock::Create(*context, "amin.empty", function);
+        llvm::BasicBlock* initBB = llvm::BasicBlock::Create(*context, "amin.init", function);
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "amin.loop", function);
+        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "amin.body", function);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "amin.done", function);
+
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+
+        // Check if empty
+        llvm::Value* isEmpty = builder->CreateICmpSLE(length, zero, "amin.isempty");
+        builder->CreateCondBr(isEmpty, emptyBB, initBB);
+
+        // Empty: return 0
+        builder->SetInsertPoint(emptyBB);
+        builder->CreateBr(doneBB);
+
+        // Init: load first element as initial min
+        builder->SetInsertPoint(initBB);
+        llvm::Value* firstPtr = builder->CreateGEP(getDefaultType(), arrPtr, one, "amin.firstptr");
+        llvm::Value* firstElem = builder->CreateLoad(getDefaultType(), firstPtr, "amin.first");
+        builder->CreateBr(loopBB);
+
+        // Loop header
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* curMin = builder->CreatePHI(getDefaultType(), 2, "amin.curmin");
+        llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "amin.idx");
+        curMin->addIncoming(firstElem, initBB);
+        idx->addIncoming(one, initBB);
+
+        llvm::Value* doneCheck = builder->CreateICmpSGE(idx, length, "amin.donecheck");
+        builder->CreateCondBr(doneCheck, doneBB, bodyBB);
+
+        // Body: compare and update min
+        builder->SetInsertPoint(bodyBB);
+        llvm::Value* offset = builder->CreateAdd(idx, one, "amin.offset");
+        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrPtr, offset, "amin.elemptr");
+        llvm::Value* elem = builder->CreateLoad(getDefaultType(), elemPtr, "amin.elem");
+        llvm::Value* isLess = builder->CreateICmpSLT(elem, curMin, "amin.isless");
+        llvm::Value* newMin = builder->CreateSelect(isLess, elem, curMin, "amin.newmin");
+        llvm::Value* newIdx = builder->CreateAdd(idx, one, "amin.newidx");
+        curMin->addIncoming(newMin, bodyBB);
+        idx->addIncoming(newIdx, bodyBB);
+        builder->CreateBr(loopBB);
+
+        // Done: return result
+        builder->SetInsertPoint(doneBB);
+        llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "amin.result");
+        result->addIncoming(zero, emptyBB);
+        result->addIncoming(curMin, loopBB);
+        return result;
+    }
+
+    // -----------------------------------------------------------------------
+    // array_max(arr) — return the maximum element of an array (0 for empty)
+    // -----------------------------------------------------------------------
+    if (bid == BuiltinId::ARRAY_MAX) {
+        validateArgCount(expr, "array_max", 1);
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        llvm::Value* arrPtr = builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "amax.arrptr");
+        llvm::Value* length = builder->CreateLoad(getDefaultType(), arrPtr, "amax.len");
+
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* entryBB = builder->GetInsertBlock();
+        llvm::BasicBlock* emptyBB = llvm::BasicBlock::Create(*context, "amax.empty", function);
+        llvm::BasicBlock* initBB = llvm::BasicBlock::Create(*context, "amax.init", function);
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "amax.loop", function);
+        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "amax.body", function);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "amax.done", function);
+
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+
+        // Check if empty
+        llvm::Value* isEmpty = builder->CreateICmpSLE(length, zero, "amax.isempty");
+        builder->CreateCondBr(isEmpty, emptyBB, initBB);
+
+        // Empty: return 0
+        builder->SetInsertPoint(emptyBB);
+        builder->CreateBr(doneBB);
+
+        // Init: load first element as initial max
+        builder->SetInsertPoint(initBB);
+        llvm::Value* firstPtr = builder->CreateGEP(getDefaultType(), arrPtr, one, "amax.firstptr");
+        llvm::Value* firstElem = builder->CreateLoad(getDefaultType(), firstPtr, "amax.first");
+        builder->CreateBr(loopBB);
+
+        // Loop header
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* curMax = builder->CreatePHI(getDefaultType(), 2, "amax.curmax");
+        llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "amax.idx");
+        curMax->addIncoming(firstElem, initBB);
+        idx->addIncoming(one, initBB);
+
+        llvm::Value* doneCheck = builder->CreateICmpSGE(idx, length, "amax.donecheck");
+        builder->CreateCondBr(doneCheck, doneBB, bodyBB);
+
+        // Body: compare and update max
+        builder->SetInsertPoint(bodyBB);
+        llvm::Value* offset = builder->CreateAdd(idx, one, "amax.offset");
+        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrPtr, offset, "amax.elemptr");
+        llvm::Value* elem = builder->CreateLoad(getDefaultType(), elemPtr, "amax.elem");
+        llvm::Value* isGreater = builder->CreateICmpSGT(elem, curMax, "amax.isgreater");
+        llvm::Value* newMax = builder->CreateSelect(isGreater, elem, curMax, "amax.newmax");
+        llvm::Value* newIdx = builder->CreateAdd(idx, one, "amax.newidx");
+        curMax->addIncoming(newMax, bodyBB);
+        idx->addIncoming(newIdx, bodyBB);
+        builder->CreateBr(loopBB);
+
+        // Done: return result
+        builder->SetInsertPoint(doneBB);
+        llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "amax.result");
+        result->addIncoming(zero, emptyBB);
+        result->addIncoming(curMax, loopBB);
+        return result;
+    }
+
+    // -----------------------------------------------------------------------
+    // array_any(arr, "fn_name") — return 1 if fn returns non-zero for any element
+    // -----------------------------------------------------------------------
+    if (bid == BuiltinId::ARRAY_ANY) {
+        validateArgCount(expr, "array_any", 2);
+        auto* fnNameLit = dynamic_cast<LiteralExpr*>(expr->arguments[1].get());
+        if (!fnNameLit || fnNameLit->literalType != LiteralExpr::LiteralType::STRING) {
+            codegenError("array_any: second argument must be a string literal (function name)", expr);
+        }
+        std::string fnName = fnNameLit->stringValue;
+        auto calleeIt = functions.find(fnName);
+        if (calleeIt == functions.end() || !calleeIt->second) {
+            codegenError("array_any: unknown function '" + fnName + "'", expr);
+        }
+        llvm::Function* predFn = calleeIt->second;
+        if (predFn->arg_size() < 1) {
+            codegenError("array_any: function '" + fnName + "' must accept at least 1 argument", expr);
+        }
+
+        llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
+        arrArg = toDefaultType(arrArg);
+        llvm::Value* arrPtr = builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "aany.arrptr");
+        llvm::Value* length = builder->CreateLoad(getDefaultType(), arrPtr, "aany.len");
+
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* entryBB = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "aany.loop", function);
+        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "aany.body", function);
+        llvm::BasicBlock* foundBB = llvm::BasicBlock::Create(*context, "aany.found", function);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "aany.done", function);
+
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+
+        builder->CreateBr(loopBB);
+
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "aany.idx");
+        idx->addIncoming(zero, entryBB);
+        llvm::Value* doneCheck = builder->CreateICmpSGE(idx, length, "aany.donecheck");
+        builder->CreateCondBr(doneCheck, doneBB, bodyBB);
+
+        builder->SetInsertPoint(bodyBB);
+        llvm::Value* offset = builder->CreateAdd(idx, one, "aany.offset");
+        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrPtr, offset, "aany.elemptr");
+        llvm::Value* elem = builder->CreateLoad(getDefaultType(), elemPtr, "aany.elem");
+        llvm::Value* predResult = builder->CreateCall(predFn, {elem}, "aany.pred");
+        predResult = toDefaultType(predResult);
+        llvm::Value* isNonZero = builder->CreateICmpNE(predResult, zero, "aany.nz");
+        llvm::Value* newIdx = builder->CreateAdd(idx, one, "aany.newidx");
+        idx->addIncoming(newIdx, bodyBB);
+        builder->CreateCondBr(isNonZero, foundBB, loopBB);
+
+        builder->SetInsertPoint(foundBB);
+        builder->CreateBr(doneBB);
+
+        builder->SetInsertPoint(doneBB);
+        llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "aany.result");
+        result->addIncoming(zero, loopBB);
+        result->addIncoming(one, foundBB);
+        return result;
+    }
+
+    // -----------------------------------------------------------------------
+    // array_every(arr, "fn_name") — return 1 if fn returns non-zero for ALL elements
+    // -----------------------------------------------------------------------
+    if (bid == BuiltinId::ARRAY_EVERY) {
+        validateArgCount(expr, "array_every", 2);
+        auto* fnNameLit = dynamic_cast<LiteralExpr*>(expr->arguments[1].get());
+        if (!fnNameLit || fnNameLit->literalType != LiteralExpr::LiteralType::STRING) {
+            codegenError("array_every: second argument must be a string literal (function name)", expr);
+        }
+        std::string fnName = fnNameLit->stringValue;
+        auto calleeIt = functions.find(fnName);
+        if (calleeIt == functions.end() || !calleeIt->second) {
+            codegenError("array_every: unknown function '" + fnName + "'", expr);
+        }
+        llvm::Function* predFn = calleeIt->second;
+        if (predFn->arg_size() < 1) {
+            codegenError("array_every: function '" + fnName + "' must accept at least 1 argument", expr);
+        }
+
+        llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
+        arrArg = toDefaultType(arrArg);
+        llvm::Value* arrPtr = builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "aevery.arrptr");
+        llvm::Value* length = builder->CreateLoad(getDefaultType(), arrPtr, "aevery.len");
+
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* entryBB = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "aevery.loop", function);
+        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "aevery.body", function);
+        llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "aevery.fail", function);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "aevery.done", function);
+
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+
+        builder->CreateBr(loopBB);
+
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "aevery.idx");
+        idx->addIncoming(zero, entryBB);
+        llvm::Value* doneCheck = builder->CreateICmpSGE(idx, length, "aevery.donecheck");
+        builder->CreateCondBr(doneCheck, doneBB, bodyBB);
+
+        builder->SetInsertPoint(bodyBB);
+        llvm::Value* offset = builder->CreateAdd(idx, one, "aevery.offset");
+        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrPtr, offset, "aevery.elemptr");
+        llvm::Value* elem = builder->CreateLoad(getDefaultType(), elemPtr, "aevery.elem");
+        llvm::Value* predResult = builder->CreateCall(predFn, {elem}, "aevery.pred");
+        predResult = toDefaultType(predResult);
+        llvm::Value* isZero = builder->CreateICmpEQ(predResult, zero, "aevery.iszero");
+        llvm::Value* newIdx = builder->CreateAdd(idx, one, "aevery.newidx");
+        idx->addIncoming(newIdx, bodyBB);
+        builder->CreateCondBr(isZero, failBB, loopBB);
+
+        builder->SetInsertPoint(failBB);
+        builder->CreateBr(doneBB);
+
+        builder->SetInsertPoint(doneBB);
+        llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "aevery.result");
+        result->addIncoming(one, loopBB);
+        result->addIncoming(zero, failBB);
+        return result;
+    }
+
+    // -----------------------------------------------------------------------
+    // array_find(arr, value) — return index of first matching element, or -1
+    // -----------------------------------------------------------------------
+    if (bid == BuiltinId::ARRAY_FIND) {
+        validateArgCount(expr, "array_find", 2);
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        llvm::Value* target = generateExpression(expr->arguments[1].get());
+        target = toDefaultType(target);
+        llvm::Value* arrPtr = builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "afind.arrptr");
+        llvm::Value* length = builder->CreateLoad(getDefaultType(), arrPtr, "afind.len");
+
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* entryBB = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "afind.loop", function);
+        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "afind.body", function);
+        llvm::BasicBlock* foundBB = llvm::BasicBlock::Create(*context, "afind.found", function);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "afind.done", function);
+
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* negOne = llvm::ConstantInt::get(getDefaultType(), -1, true);
+
+        builder->CreateBr(loopBB);
+
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "afind.idx");
+        idx->addIncoming(zero, entryBB);
+
+        llvm::Value* doneCheck = builder->CreateICmpSGE(idx, length, "afind.donecheck");
+        builder->CreateCondBr(doneCheck, doneBB, bodyBB);
+
+        builder->SetInsertPoint(bodyBB);
+        llvm::Value* offset = builder->CreateAdd(idx, one, "afind.offset");
+        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrPtr, offset, "afind.elemptr");
+        llvm::Value* elem = builder->CreateLoad(getDefaultType(), elemPtr, "afind.elem");
+        llvm::Value* isEqual = builder->CreateICmpEQ(elem, target, "afind.iseq");
+        llvm::Value* newIdx = builder->CreateAdd(idx, one, "afind.newidx");
+        idx->addIncoming(newIdx, bodyBB);
+        builder->CreateCondBr(isEqual, foundBB, loopBB);
+
+        builder->SetInsertPoint(foundBB);
+        builder->CreateBr(doneBB);
+
+        builder->SetInsertPoint(doneBB);
+        llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "afind.result");
+        result->addIncoming(negOne, loopBB);
+        result->addIncoming(idx, foundBB);
+        return result;
+    }
+
+    // -----------------------------------------------------------------------
+    // array_count(arr, "fn_name") — count elements for which fn returns non-zero
+    // -----------------------------------------------------------------------
+    if (bid == BuiltinId::ARRAY_COUNT) {
+        validateArgCount(expr, "array_count", 2);
+        auto* fnNameLit = dynamic_cast<LiteralExpr*>(expr->arguments[1].get());
+        if (!fnNameLit || fnNameLit->literalType != LiteralExpr::LiteralType::STRING) {
+            codegenError("array_count: second argument must be a string literal (function name)", expr);
+        }
+        std::string fnName = fnNameLit->stringValue;
+        auto calleeIt = functions.find(fnName);
+        if (calleeIt == functions.end() || !calleeIt->second) {
+            codegenError("array_count: unknown function '" + fnName + "'", expr);
+        }
+        llvm::Function* predFn = calleeIt->second;
+        if (predFn->arg_size() < 1) {
+            codegenError("array_count: function '" + fnName + "' must accept at least 1 argument", expr);
+        }
+
+        llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
+        arrArg = toDefaultType(arrArg);
+        llvm::Value* arrPtr = builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "acnt.arrptr");
+        llvm::Value* length = builder->CreateLoad(getDefaultType(), arrPtr, "acnt.len");
+
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* entryBB = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "acnt.loop", function);
+        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "acnt.body", function);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "acnt.done", function);
+
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+
+        builder->CreateBr(loopBB);
+
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* acc = builder->CreatePHI(getDefaultType(), 2, "acnt.acc");
+        llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "acnt.idx");
+        acc->addIncoming(zero, entryBB);
+        idx->addIncoming(zero, entryBB);
+        llvm::Value* doneCheck = builder->CreateICmpSGE(idx, length, "acnt.donecheck");
+        builder->CreateCondBr(doneCheck, doneBB, bodyBB);
+
+        builder->SetInsertPoint(bodyBB);
+        llvm::Value* offset = builder->CreateAdd(idx, one, "acnt.offset");
+        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrPtr, offset, "acnt.elemptr");
+        llvm::Value* elem = builder->CreateLoad(getDefaultType(), elemPtr, "acnt.elem");
+        llvm::Value* predResult = builder->CreateCall(predFn, {elem}, "acnt.pred");
+        predResult = toDefaultType(predResult);
+        llvm::Value* isNonZero = builder->CreateICmpNE(predResult, zero, "acnt.nz");
+        llvm::Value* incr = builder->CreateZExt(isNonZero, getDefaultType(), "acnt.incr");
+        llvm::Value* newAcc = builder->CreateAdd(acc, incr, "acnt.newacc");
+        llvm::Value* newIdx = builder->CreateAdd(idx, one, "acnt.newidx");
+        acc->addIncoming(newAcc, bodyBB);
+        idx->addIncoming(newIdx, bodyBB);
+        builder->CreateBr(loopBB);
+
+        builder->SetInsertPoint(doneBB);
+        return acc;
+    }
+
+    // -----------------------------------------------------------------------
     // println(x) — print value followed by newline (same as print but explicit)
     // -----------------------------------------------------------------------
     if (bid == BuiltinId::PRINTLN) {
-        if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'println' expects 1 argument, but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "println", 1);
         Expression* argExpr = expr->arguments[0].get();
         llvm::Value* arg = generateExpression(argExpr);
         if (arg->getType()->isDoubleTy()) {
@@ -2773,11 +3032,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // write(x) — print without trailing newline
     // -----------------------------------------------------------------------
     if (bid == BuiltinId::WRITE) {
-        if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'write' expects 1 argument, but " + std::to_string(expr->arguments.size()) +
-                             " provided",
-                         expr);
-        }
+        validateArgCount(expr, "write", 1);
         Expression* argExpr = expr->arguments[0].get();
         llvm::Value* arg = generateExpression(argExpr);
         if (arg->getType()->isDoubleTy()) {
@@ -2836,11 +3091,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // random() — returns a pseudo-random integer (seeds once automatically)
     // -----------------------------------------------------------------------
     if (bid == BuiltinId::RANDOM) {
-        if (!expr->arguments.empty()) {
-            codegenError("Built-in function 'random' expects 0 arguments, but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "random", 0);
         // Seed on first call via a global flag
         llvm::GlobalVariable* seeded = module->getGlobalVariable("__om_rand_seeded", true);
         if (!seeded) {
@@ -2875,11 +3126,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // time() — returns current Unix timestamp in seconds
     // -----------------------------------------------------------------------
     if (bid == BuiltinId::TIME) {
-        if (!expr->arguments.empty()) {
-            codegenError("Built-in function 'time' expects 0 arguments, but " + std::to_string(expr->arguments.size()) +
-                             " provided",
-                         expr);
-        }
+        validateArgCount(expr, "time", 0);
         llvm::Value* nullPtr = llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context));
         return builder->CreateCall(getOrDeclareTimeFunc(), {nullPtr}, "time.val");
     }
@@ -2888,11 +3135,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // sleep(ms) — sleep for given milliseconds
     // -----------------------------------------------------------------------
     if (bid == BuiltinId::SLEEP) {
-        if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'sleep' expects 1 argument (milliseconds), but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "sleep", 1);
         llvm::Value* ms = generateExpression(expr->arguments[0].get());
         ms = toDefaultType(ms);
         // usleep takes microseconds, so multiply by 1000
@@ -2906,11 +3149,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // str_to_int(s) — parse string to integer
     // -----------------------------------------------------------------------
     if (bid == BuiltinId::STR_TO_INT) {
-        if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'str_to_int' expects 1 argument, but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "str_to_int", 1);
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* strPtr =
             strArg->getType()->isPointerTy()
@@ -2925,11 +3164,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // str_to_float(s) — parse string to float
     // -----------------------------------------------------------------------
     if (bid == BuiltinId::STR_TO_FLOAT) {
-        if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'str_to_float' expects 1 argument, but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "str_to_float", 1);
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* strPtr =
             strArg->getType()->isPointerTy()
@@ -2943,11 +3178,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // str_split(s, delim) — split string by delimiter, returns array of strings
     // -----------------------------------------------------------------------
     if (bid == BuiltinId::STR_SPLIT) {
-        if (expr->arguments.size() != 2) {
-            codegenError("Built-in function 'str_split' expects 2 arguments (string, delimiter), but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "str_split", 2);
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* delimArg = generateExpression(expr->arguments[1].get());
 
@@ -3078,11 +3309,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // str_chars(s) — convert string into array of character codes
     // -----------------------------------------------------------------------
     if (bid == BuiltinId::STR_CHARS) {
-        if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'str_chars' expects 1 argument, but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "str_chars", 1);
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* strPtr =
             strArg->getType()->isPointerTy()
@@ -3130,13 +3357,196 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     // -----------------------------------------------------------------------
+    // str_join(arr, delim) — join array of strings with delimiter
+    // Inverse of str_split: concatenates array elements with delimiter between.
+    // -----------------------------------------------------------------------
+    if (bid == BuiltinId::STR_JOIN) {
+        validateArgCount(expr, "str_join", 2);
+        llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
+        llvm::Value* delimArg = generateExpression(expr->arguments[1].get());
+
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* arrPtr =
+            arrArg->getType()->isPointerTy()
+                ? arrArg
+                : builder->CreateIntToPtr(arrArg, ptrTy, "join.arrptr");
+        llvm::Value* delimPtr =
+            delimArg->getType()->isPointerTy()
+                ? delimArg
+                : builder->CreateIntToPtr(delimArg, ptrTy, "join.delim");
+
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one  = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* i8zero = llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0);
+
+        llvm::Value* arrLen  = builder->CreateLoad(getDefaultType(), arrPtr, "join.len");
+        llvm::Value* delimLen = builder->CreateCall(getOrDeclareStrlen(), {delimPtr}, "join.delimlen");
+
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+
+        // --- Pass 1: compute total output length ---
+        llvm::BasicBlock* lenPreBB = builder->GetInsertBlock();
+        llvm::BasicBlock* lenLoopBB = llvm::BasicBlock::Create(*context, "join.lenloop", function);
+        llvm::BasicBlock* lenBodyBB = llvm::BasicBlock::Create(*context, "join.lenbody", function);
+        llvm::BasicBlock* lenDoneBB = llvm::BasicBlock::Create(*context, "join.lendone", function);
+
+        builder->CreateBr(lenLoopBB);
+
+        builder->SetInsertPoint(lenLoopBB);
+        llvm::PHINode* li = builder->CreatePHI(getDefaultType(), 2, "join.li");
+        li->addIncoming(zero, lenPreBB);
+        llvm::PHINode* totalLen = builder->CreatePHI(getDefaultType(), 2, "join.totlen");
+        totalLen->addIncoming(zero, lenPreBB);
+        llvm::Value* lcond = builder->CreateICmpSLT(li, arrLen, "join.lcond");
+        builder->CreateCondBr(lcond, lenBodyBB, lenDoneBB);
+
+        builder->SetInsertPoint(lenBodyBB);
+        // Load string pointer from array slot (index li + 1)
+        llvm::Value* lslot = builder->CreateAdd(li, one, "join.lslot");
+        llvm::Value* lslotPtr = builder->CreateGEP(getDefaultType(), arrPtr, lslot, "join.lslotptr");
+        llvm::Value* elemInt = builder->CreateLoad(getDefaultType(), lslotPtr, "join.elemint");
+        llvm::Value* elemPtr = builder->CreateIntToPtr(elemInt, ptrTy, "join.elemptr");
+        llvm::Value* elemLen = builder->CreateCall(getOrDeclareStrlen(), {elemPtr}, "join.elemlen");
+        llvm::Value* newTotal = builder->CreateAdd(totalLen, elemLen, "join.newtot");
+        // Add delimiter length for all elements except the first
+        llvm::Value* isFirst = builder->CreateICmpEQ(li, zero, "join.isfirst");
+        llvm::Value* delimAdd = builder->CreateSelect(isFirst, zero, delimLen, "join.delimadd");
+        llvm::Value* newTotal2 = builder->CreateAdd(newTotal, delimAdd, "join.newtot2");
+        llvm::Value* nextLi = builder->CreateAdd(li, one, "join.nextli");
+        li->addIncoming(nextLi, lenBodyBB);
+        totalLen->addIncoming(newTotal2, lenBodyBB);
+        builder->CreateBr(lenLoopBB);
+
+        // --- Allocate output buffer ---
+        builder->SetInsertPoint(lenDoneBB);
+        llvm::Value* bufSize = builder->CreateAdd(totalLen, one, "join.bufsize");
+        llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bufSize}, "join.buf");
+        // Store null terminator at position 0 initially
+        builder->CreateStore(i8zero, buf);
+
+        // --- Pass 2: concatenate elements ---
+        llvm::BasicBlock* catPreBB = builder->GetInsertBlock();
+        llvm::BasicBlock* catLoopBB = llvm::BasicBlock::Create(*context, "join.catloop", function);
+        llvm::BasicBlock* catBodyBB = llvm::BasicBlock::Create(*context, "join.catbody", function);
+        llvm::BasicBlock* catDoneBB = llvm::BasicBlock::Create(*context, "join.catdone", function);
+
+        builder->CreateBr(catLoopBB);
+
+        builder->SetInsertPoint(catLoopBB);
+        llvm::PHINode* ci = builder->CreatePHI(getDefaultType(), 2, "join.ci");
+        ci->addIncoming(zero, catPreBB);
+        llvm::PHINode* writePos = builder->CreatePHI(getDefaultType(), 2, "join.wpos");
+        writePos->addIncoming(zero, catPreBB);
+        llvm::Value* ccond = builder->CreateICmpSLT(ci, arrLen, "join.ccond");
+        builder->CreateCondBr(ccond, catBodyBB, catDoneBB);
+
+        builder->SetInsertPoint(catBodyBB);
+        llvm::Value* dstPtr = builder->CreateGEP(llvm::Type::getInt8Ty(*context), buf, writePos, "join.dst");
+        // Copy delimiter before element (for all but first)
+        llvm::Value* ciIsFirst = builder->CreateICmpEQ(ci, zero, "join.cifirst");
+        llvm::Value* delimCopyLen = builder->CreateSelect(ciIsFirst, zero, delimLen, "join.dcplen");
+        // Conditionally copy delimiter
+        builder->CreateCall(getOrDeclareMemcpy(), {dstPtr, delimPtr, delimCopyLen});
+        llvm::Value* afterDelim = builder->CreateAdd(writePos, delimCopyLen, "join.afterdelim");
+        // Load and copy element
+        llvm::Value* cslot = builder->CreateAdd(ci, one, "join.cslot");
+        llvm::Value* cslotPtr = builder->CreateGEP(getDefaultType(), arrPtr, cslot, "join.cslotptr");
+        llvm::Value* celemInt = builder->CreateLoad(getDefaultType(), cslotPtr, "join.celemint");
+        llvm::Value* celemPtr = builder->CreateIntToPtr(celemInt, ptrTy, "join.celemptr");
+        llvm::Value* celemLen = builder->CreateCall(getOrDeclareStrlen(), {celemPtr}, "join.celemlen");
+        llvm::Value* elemDst = builder->CreateGEP(llvm::Type::getInt8Ty(*context), buf, afterDelim, "join.elemdst");
+        builder->CreateCall(getOrDeclareMemcpy(), {elemDst, celemPtr, celemLen});
+        llvm::Value* afterElem = builder->CreateAdd(afterDelim, celemLen, "join.afterelem");
+        llvm::Value* nextCi = builder->CreateAdd(ci, one, "join.nextci");
+        ci->addIncoming(nextCi, catBodyBB);
+        writePos->addIncoming(afterElem, catBodyBB);
+        builder->CreateBr(catLoopBB);
+
+        // --- Null-terminate and return ---
+        builder->SetInsertPoint(catDoneBB);
+        llvm::Value* endPtr = builder->CreateGEP(llvm::Type::getInt8Ty(*context), buf, writePos, "join.end");
+        builder->CreateStore(i8zero, endPtr);
+        stringReturningFunctions_.insert("str_join");
+        return buf;
+    }
+
+    // -----------------------------------------------------------------------
+    // str_count(s, sub) — count non-overlapping occurrences of substring
+    // -----------------------------------------------------------------------
+    if (bid == BuiltinId::STR_COUNT) {
+        validateArgCount(expr, "str_count", 2);
+        llvm::Value* strArg = generateExpression(expr->arguments[0].get());
+        llvm::Value* subArg = generateExpression(expr->arguments[1].get());
+
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* strPtr =
+            strArg->getType()->isPointerTy()
+                ? strArg
+                : builder->CreateIntToPtr(strArg, ptrTy, "scount.str");
+        llvm::Value* subPtr =
+            subArg->getType()->isPointerTy()
+                ? subArg
+                : builder->CreateIntToPtr(subArg, ptrTy, "scount.sub");
+
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* nullPtr = llvm::ConstantPointerNull::get(ptrTy);
+
+        llvm::Value* subLen = builder->CreateCall(getOrDeclareStrlen(), {subPtr}, "scount.sublen");
+
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+
+        // If sub is empty, return 0 (avoid infinite loop)
+        llvm::BasicBlock* emptySubBB = llvm::BasicBlock::Create(*context, "scount.emptysub", function);
+        llvm::BasicBlock* mainBB = llvm::BasicBlock::Create(*context, "scount.main", function);
+        llvm::Value* subIsEmpty = builder->CreateICmpEQ(subLen, zero, "scount.isempty");
+        llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "scount.merge", function);
+        builder->CreateCondBr(subIsEmpty, emptySubBB, mainBB);
+
+        builder->SetInsertPoint(emptySubBB);
+        builder->CreateBr(mergeBB);
+
+        // Main counting loop using strstr
+        builder->SetInsertPoint(mainBB);
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "scount.loop", function);
+        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "scount.body", function);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "scount.done", function);
+
+        builder->CreateBr(loopBB);
+
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* cursor = builder->CreatePHI(ptrTy, 2, "scount.cursor");
+        cursor->addIncoming(strPtr, mainBB);
+        llvm::PHINode* count = builder->CreatePHI(getDefaultType(), 2, "scount.count");
+        count->addIncoming(zero, mainBB);
+
+        llvm::Value* found = builder->CreateCall(getOrDeclareStrstr(), {cursor, subPtr}, "scount.found");
+        llvm::Value* isNull = builder->CreateICmpEQ(found, nullPtr, "scount.isnull");
+        builder->CreateCondBr(isNull, doneBB, bodyBB);
+
+        builder->SetInsertPoint(bodyBB);
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* newCount = builder->CreateAdd(count, one, "scount.newcount");
+        llvm::Value* nextCursor = builder->CreateGEP(llvm::Type::getInt8Ty(*context), found, subLen, "scount.next");
+        cursor->addIncoming(nextCursor, bodyBB);
+        count->addIncoming(newCount, bodyBB);
+        builder->CreateBr(loopBB);
+
+        builder->SetInsertPoint(doneBB);
+        builder->CreateBr(mergeBB);
+
+        builder->SetInsertPoint(mergeBB);
+        llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "scount.result");
+        result->addIncoming(zero, emptySubBB);
+        result->addIncoming(count, doneBB);
+        return result;
+    }
+
+    // -----------------------------------------------------------------------
     // File I/O built-ins
     // -----------------------------------------------------------------------
 
     if (bid == BuiltinId::FILE_READ) {
-        if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'file_read' expects 1 argument (path)", expr);
-        }
+        validateArgCount(expr, "file_read", 1);
         llvm::Value* pathArg = generateExpression(expr->arguments[0].get());
         llvm::Value* pathPtr =
             pathArg->getType()->isPointerTy()
@@ -3209,9 +3619,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::FILE_WRITE) {
-        if (expr->arguments.size() != 2) {
-            codegenError("Built-in function 'file_write' expects 2 arguments (path, content)", expr);
-        }
+        validateArgCount(expr, "file_write", 2);
         llvm::Value* pathArg = generateExpression(expr->arguments[0].get());
         llvm::Value* contentArg = generateExpression(expr->arguments[1].get());
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
@@ -3252,9 +3660,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::FILE_APPEND) {
-        if (expr->arguments.size() != 2) {
-            codegenError("Built-in function 'file_append' expects 2 arguments (path, content)", expr);
-        }
+        validateArgCount(expr, "file_append", 2);
         llvm::Value* pathArg = generateExpression(expr->arguments[0].get());
         llvm::Value* contentArg = generateExpression(expr->arguments[1].get());
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
@@ -3295,9 +3701,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::FILE_EXISTS) {
-        if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'file_exists' expects 1 argument (path)", expr);
-        }
+        validateArgCount(expr, "file_exists", 1);
         llvm::Value* pathArg = generateExpression(expr->arguments[0].get());
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
         llvm::Value* pathPtr = pathArg->getType()->isPointerTy()
@@ -3315,9 +3719,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // -----------------------------------------------------------------------
 
     if (bid == BuiltinId::MAP_NEW) {
-        if (expr->arguments.size() != 0) {
-            codegenError("Built-in function 'map_new' expects 0 arguments", expr);
-        }
+        validateArgCount(expr, "map_new", 0);
         // Allocate array with just the length header = 0
         llvm::Value* bufSize = llvm::ConstantInt::get(getDefaultType(), 8);
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bufSize}, "mapnew.buf");
@@ -3327,9 +3729,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::MAP_SET) {
-        if (expr->arguments.size() != 3) {
-            codegenError("Built-in function 'map_set' expects 3 arguments (map, key, value)", expr);
-        }
+        validateArgCount(expr, "map_set", 3);
         llvm::Value* mapArg = generateExpression(expr->arguments[0].get());
         llvm::Value* keyArg = generateExpression(expr->arguments[1].get());
         llvm::Value* valArg = generateExpression(expr->arguments[2].get());
@@ -3413,9 +3813,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::MAP_GET) {
-        if (expr->arguments.size() != 3) {
-            codegenError("Built-in function 'map_get' expects 3 arguments (map, key, default)", expr);
-        }
+        validateArgCount(expr, "map_get", 3);
         llvm::Value* mapArg = generateExpression(expr->arguments[0].get());
         llvm::Value* keyArg = generateExpression(expr->arguments[1].get());
         llvm::Value* defArg = generateExpression(expr->arguments[2].get());
@@ -3467,9 +3865,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::MAP_HAS) {
-        if (expr->arguments.size() != 2) {
-            codegenError("Built-in function 'map_has' expects 2 arguments (map, key)", expr);
-        }
+        validateArgCount(expr, "map_has", 2);
         llvm::Value* mapArg = generateExpression(expr->arguments[0].get());
         llvm::Value* keyArg = generateExpression(expr->arguments[1].get());
         mapArg = toDefaultType(mapArg);
@@ -3517,9 +3913,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::MAP_REMOVE) {
-        if (expr->arguments.size() != 2) {
-            codegenError("Built-in function 'map_remove' expects 2 arguments (map, key)", expr);
-        }
+        validateArgCount(expr, "map_remove", 2);
         llvm::Value* mapArg = generateExpression(expr->arguments[0].get());
         llvm::Value* keyArg = generateExpression(expr->arguments[1].get());
         mapArg = toDefaultType(mapArg);
@@ -3614,9 +4008,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::MAP_KEYS) {
-        if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'map_keys' expects 1 argument (map)", expr);
-        }
+        validateArgCount(expr, "map_keys", 1);
         llvm::Value* mapArg = generateExpression(expr->arguments[0].get());
         mapArg = toDefaultType(mapArg);
 
@@ -3667,9 +4059,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::MAP_VALUES) {
-        if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'map_values' expects 1 argument (map)", expr);
-        }
+        validateArgCount(expr, "map_values", 1);
         llvm::Value* mapArg = generateExpression(expr->arguments[0].get());
         mapArg = toDefaultType(mapArg);
 
@@ -3717,9 +4107,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::MAP_SIZE) {
-        if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'map_size' expects 1 argument (map)", expr);
-        }
+        validateArgCount(expr, "map_size", 1);
         llvm::Value* mapArg = generateExpression(expr->arguments[0].get());
         mapArg = toDefaultType(mapArg);
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
@@ -3735,9 +4123,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // -----------------------------------------------------------------------
 
     if (bid == BuiltinId::RANGE) {
-        if (expr->arguments.size() != 2) {
-            codegenError("Built-in function 'range' expects 2 arguments (start, end)", expr);
-        }
+        validateArgCount(expr, "range", 2);
         llvm::Value* startArg = generateExpression(expr->arguments[0].get());
         llvm::Value* endArg = generateExpression(expr->arguments[1].get());
         startArg = toDefaultType(startArg);
@@ -3785,9 +4171,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::RANGE_STEP) {
-        if (expr->arguments.size() != 3) {
-            codegenError("Built-in function 'range_step' expects 3 arguments (start, end, step)", expr);
-        }
+        validateArgCount(expr, "range_step", 3);
         llvm::Value* startArg = generateExpression(expr->arguments[0].get());
         llvm::Value* endArg = generateExpression(expr->arguments[1].get());
         llvm::Value* stepArg = generateExpression(expr->arguments[2].get());
@@ -3858,9 +4242,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::CHAR_CODE) {
-        if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'char_code' expects 1 argument (string)", expr);
-        }
+        validateArgCount(expr, "char_code", 1);
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
         llvm::Value* strPtr = strArg->getType()->isPointerTy()
@@ -3870,9 +4252,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::NUMBER_TO_STRING) {
-        if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'number_to_string' expects 1 argument", expr);
-        }
+        validateArgCount(expr, "number_to_string", 1);
         llvm::Value* val = generateExpression(expr->arguments[0].get());
         bool isFloat = val->getType()->isDoubleTy();
         if (!isFloat)
@@ -3898,9 +4278,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::STRING_TO_NUMBER) {
-        if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'string_to_number' expects 1 argument (string)", expr);
-        }
+        validateArgCount(expr, "string_to_number", 1);
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
         llvm::Value* strPtr = strArg->getType()->isPointerTy()
@@ -3917,11 +4295,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // -----------------------------------------------------------------------
 
     if (bid == BuiltinId::THREAD_CREATE) {
-        if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'thread_create' expects 1 argument (function name as string), but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "thread_create", 1);
         // thread_create("func_name") — look up the function by name and call pthread_create
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
 
@@ -3972,11 +4346,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::THREAD_JOIN) {
-        if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'thread_join' expects 1 argument (thread id), but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "thread_join", 1);
         llvm::Value* tid = generateExpression(expr->arguments[0].get());
         tid = toDefaultType(tid);
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
@@ -3986,11 +4356,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::MUTEX_NEW) {
-        if (expr->arguments.size() != 0) {
-            codegenError("Built-in function 'mutex_new' expects 0 arguments, but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "mutex_new", 0);
         // Allocate space for pthread_mutex_t.  The struct size varies by
         // platform (40 bytes on Linux x86_64, 64 on macOS).  We allocate a
         // generous fixed size that covers all common platforms.
@@ -4005,11 +4371,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::MUTEX_LOCK) {
-        if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'mutex_lock' expects 1 argument, but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "mutex_lock", 1);
         llvm::Value* mutexVal = generateExpression(expr->arguments[0].get());
         mutexVal = toDefaultType(mutexVal);
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
@@ -4019,11 +4381,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::MUTEX_UNLOCK) {
-        if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'mutex_unlock' expects 1 argument, but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "mutex_unlock", 1);
         llvm::Value* mutexVal = generateExpression(expr->arguments[0].get());
         mutexVal = toDefaultType(mutexVal);
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
@@ -4033,11 +4391,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     if (bid == BuiltinId::MUTEX_DESTROY) {
-        if (expr->arguments.size() != 1) {
-            codegenError("Built-in function 'mutex_destroy' expects 1 argument, but " +
-                             std::to_string(expr->arguments.size()) + " provided",
-                         expr);
-        }
+        validateArgCount(expr, "mutex_destroy", 1);
         llvm::Value* mutexVal = generateExpression(expr->arguments[0].get());
         mutexVal = toDefaultType(mutexVal);
         auto* ptrTy = llvm::PointerType::getUnqual(*context);

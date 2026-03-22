@@ -5,6 +5,108 @@ All notable changes to the OmScript compiler will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.0] - 2026-03-22
+
+### Added
+- **6 new superoptimizer algebraic simplification patterns:**
+  - **De Morgan's laws:** `~(a & b) → (~a) | (~b)` and `~(a | b) → (~a) & (~b)` — exposes further simplification opportunities when one of the operands is a known constant or can be folded
+  - **Boolean select→zext:** `select(cond, 1, 0) → zext(cond)` and `select(cond, 0, 1) → zext(!cond)` — eliminates conditional branches for boolean-to-integer conversions
+  - **Redundant truncation elimination:** `and(zext(x), mask) → zext(x)` when x's source type fits within the mask — removes no-op masking operations
+  - **Absolute value recognition:** `select(a > 0, a, -a)` and `select(a < 0, -a, a)` → branchless abs via `(x ^ (x >> 31)) - (x >> 31)` — eliminates a conditional branch per abs() call
+  - **Low-bit comparison simplification:** `icmp ne (and x, 1), 0 → trunc x to i1` — reduces instruction count for boolean testing patterns
+- **29 new e-graph rewrite rules:**
+  - **Modulo-by-power-of-2 conversion:** `x % 2 → x & 1`, `x % 4 → x & 3`, ..., `x % 1024 → x & 1023` — replaces expensive remainder operations with cheap bitwise AND for power-of-2 divisors (10 rules)
+  - **Comparison-with-subtraction elimination:** `(x - y) < 0 → x < y`, `(x - y) > 0 → x > y`, `(x - y) <= 0 → x <= y`, `(x - y) >= 0 → x >= y` — removes intermediate subtraction in comparison chains (4 rules)
+  - **Zero-comparison to boolean:** `x == 0 → !x`, `x != 0 → !!x` — normalizes zero-testing to logical operations for better downstream simplification (2 rules)
+  - **Multiply-add coalescing:** `x*2+x → x*3`, `x*4+x → x*5`, `x*8-x → x*7`, `x*8+x → x*9`, `x*16-x → x*15`, `x*16+x → x*17` — folds multiply+add/sub sequences into a single multiply, enabling subsequent shift-based strength reduction (9 rules with commutative variants)
+  - **Shift-mask interaction:** `(x >> a) << a → x & ~((1<<a)-1)` and `(x << a) >> a → x & ((1<<(64-a))-1)` — replaces double-shift sequences with a single AND against a constant mask, exposing further AND-merging opportunities (12 rules for shifts 1–6)
+- **Count Leading Zeros (CLZ) idiom detection** in superoptimizer — recognizes the bit-smear + popcount CLZ pattern (`64 - popcount(x | (x>>1) | ...)`) and replaces it with the `llvm.ctlz` intrinsic
+- **Count Trailing Zeros (CTZ) idiom replacement** — the existing `x & (-x)` isolation detection now emits `llvm.cttz` intrinsic for direct hardware CTZ support
+- **Bit-field extract idiom replacement** — shift-and-mask patterns now emit optimized shift+AND sequences
+
+### Changed
+- **Post-recursive-inlining cleanup (O3):** After bounded recursive inlining, a GVN + InstCombine + CFGSimp + DCE pass now runs to eliminate redundant computations and dead code created by manual inlining. This catches duplicate computations that appear in both the original call site and inlined body.
+- **Early InferFunctionAttrs registration (O2+):** `InferFunctionAttrsPass` now runs early in the pipeline to annotate library functions with known attributes (noalias, nocapture, readonly, etc.) before the inliner and alias analysis passes, improving cost estimates and enabling more aggressive optimizations downstream.
+- **Dead argument elimination (O3):** `DeadArgumentEliminationPass` now runs late in the O3 pipeline to remove unused function parameters after inlining and constant propagation, reducing register pressure and enabling further inlining with smaller call signatures.
+- **Enhanced final cleanup pass:** GVN pass added before the final DCE + InstCombine + CFGSimp cleanup to catch redundant computations exposed by the superoptimizer and HGOE passes.
+- **Stronger OPTMAX function optimization:** Added `AggressiveInstCombine` and `BDCE` (Bit-tracking Dead Code Elimination) passes to the OPTMAX pipeline, catching multi-instruction patterns and unused-bit elimination that regular InstCombine misses.
+- **Reassociate + EarlyCSE at O1+:** Expression trees are canonicalized and trivially redundant computations are eliminated early in the pipeline via `ReassociatePass` and `EarlyCSEPass`, reducing IR size for downstream passes.
+- **SCCP at O2+:** Sparse Conditional Constant Propagation now runs late in the scalar optimizer to discover constants flowing through control-flow edges, proving some branches unreachable and some PHI values constant.
+
+## [3.0.0] - 2026-03-22
+
+### Added
+- **String interpolation** `$"..."` — embed expressions directly in string literals using `$"hello {name}, you are {age} years old"`. Expressions inside `{...}` are evaluated and auto-converted to strings. Supports nested expressions, function calls, ternary operators, and escaped braces `\{`/`\}`. Desugars into `+` concatenation at the lexer level for zero runtime overhead.
+- **Multi-value switch case** `case 1, 2, 3:` — match multiple comma-separated values in a single case arm. All values map to the same basic block. Duplicate detection spans across multi-value cases.
+- **Constant switch condition elimination** — when the switch condition is a compile-time constant, the compiler eliminates all dead case branches and directly generates only the matched case body (or default), removing the switch instruction entirely.
+- **`str_join(arr, delim)` built-in** — join an array of strings into a single string with a delimiter between elements. Inverse of `str_split`. Supports empty delimiters and multi-character delimiters.
+- **`str_count(s, sub)` built-in** — count non-overlapping occurrences of a substring in a string. Returns 0 for empty substring or when not found.
+- New integration tests: `string_join_count_test.om`, `string_interp_test.om`, `multicase_interp_test.om`
+- New integration test: `register_test.om` — dedicated test for register keyword covering accumulation loops, countdown, typed register variables, and in-loop register reassignment
+- 9 new lexer unit tests for string interpolation, 1 parser + 3 codegen tests for multi-value case and constant switch elimination
+- Standard library count increased from 119 to 121 built-in functions
+
+### Changed
+- **`register` keyword forces register allocation** — `register var` now runs an immediate mem2reg pass after function codegen, guaranteeing that annotated variables are promoted to SSA registers regardless of the global optimization level. Variables remain mutable — the keyword forces register allocation, not immutability.
+- **`register` emits `llvm.lifetime.start`** — register variables now emit tight lifetime scoping via `llvm.lifetime.start` intrinsic, giving LLVM's register allocator precise live-range information for better register utilization.
+- **Compile-time warning for non-promotable register variables** — If a `register` variable has a type that cannot be promoted to a CPU register (arrays, structs, pointers), the compiler now emits a diagnostic warning instead of silently ignoring the annotation.
+- **Documentation corrections** — Updated built-in function count to 121 across README.md and LANGUAGE_REFERENCE.md; fixed stale compiler version references; documented `**=` and `??=` compound assignment operators; added `register` to the keywords table in LANGUAGE_REFERENCE.md
+- **Version bump** to 3.0.0
+
+### Fixed
+- **`register var` reassignment** — `register var counter = 0; counter = counter + 1;` now compiles correctly. Previously emitted a spurious "Cannot reassign 'register' variable" error that prevented using register variables in loops and accumulators.
+- **`str_replace` documentation** — Fixed documentation that incorrectly stated `str_replace` only replaces the first occurrence. The implementation has always replaced all occurrences.
+
+## [2.9.0] - 2026-03-22
+
+### Added
+- **SIMD vector types** for handwritten SIMD programming:
+  - 8 vector type annotations: `f32x4`, `f32x8`, `f64x2`, `f64x4`, `i32x4`, `i32x8`, `i64x2`, `i64x4`
+  - Map directly to LLVM fixed-vector types (`<4 x float>`, `<2 x double>`, etc.)
+  - Full arithmetic operator support: `+`, `-`, `*`, `/`, `%` on vectors
+  - Bitwise operators on integer vectors: `&`, `|`, `^`, `<<`, `>>`
+  - Scalar-to-vector broadcast (splat) when mixing scalar and vector operands
+  - Element access via indexing: `v[i]` (extract), `v[i] = x` (insert)
+  - Array literal initialization: `var v: f32x4 = [1.0, 2.0, 3.0, 4.0];`
+- **`register` keyword** for register allocation hints:
+  - Syntax: `register var x = 0;` — hints that the variable should be kept in a CPU register
+  - Sets high alignment on allocas to encourage LLVM's SROA/mem2reg promotion to SSA registers
+- **`**=` compound assignment operator** — power-assign (e.g., `x **= 3` is `x = x ** 3`)
+- **`??=` compound assignment operator** — null-coalesce-assign (e.g., `x ??= 42` assigns 42 if x is falsy)
+- New integration tests: `simd_register_test.om`, `compound_assign_test.om`
+- Unit tests for all new features (lexer, parser, codegen)
+
+### Fixed
+- **Struct field compound assignment** — `s.x += 1`, `s.y *= 2`, etc. now work correctly. Previously failed with cryptic "Invalid compound assignment target" error because the parser only handled identifiers and array elements, not struct field access expressions.
+- **Error messages** — improved diagnostic messages for invalid assignment and compound assignment targets, now listing supported forms (variables, array elements, struct fields)
+
+### Changed
+- **Refactored argument validation** in `codegen_builtins.cpp` — extracted `validateArgCount()` helper to replace 107 duplicated argument-count check blocks, reducing boilerplate by ~400 lines
+- **Version bump** to 2.9.0
+
+## [2.8.0] - 2026-03-22
+
+### Added
+- **12 new math built-in functions** returning floating-point values:
+  - Trigonometric: `sin(x)`, `cos(x)`, `tan(x)`, `asin(x)`, `acos(x)`, `atan(x)`, `atan2(y, x)` — radians-based trigonometry with LLVM intrinsics (`sin`, `cos`) and C library calls (`tan`, `asin`, `acos`, `atan`, `atan2`)
+  - Exponential/Logarithmic: `exp(x)`, `log(x)`, `log10(x)` — using LLVM intrinsics for native hardware acceleration
+  - Other: `cbrt(x)` (cube root), `hypot(x, y)` (hypotenuse without overflow) — via C library calls
+- **6 new array utility built-in functions**:
+  - `array_min(arr)` — minimum element (0 for empty arrays)
+  - `array_max(arr)` — maximum element (0 for empty arrays)
+  - `array_find(arr, value)` — index of first match, or -1 if not found
+  - `array_any(arr, "fn")` — returns 1 if predicate matches any element
+  - `array_every(arr, "fn")` — returns 1 if predicate matches all elements (vacuous truth for empty)
+  - `array_count(arr, "fn")` — count of elements matching predicate
+- New integration tests: `trig_math_test.om`, `array_utility_test.om`
+- 20 new unit tests covering all new builtins
+- Standard library count increased from 97 to 115 built-in functions
+
+### Changed
+- **Version bump** to 2.8.0
+- **LANGUAGE_REFERENCE.md** updated with documentation for all 18 new built-in functions
+- **README.md** updated with new function tables and total count
+
 ## [2.7.9] - 2026-03-21
 
 ### Fixed

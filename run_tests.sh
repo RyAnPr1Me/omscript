@@ -275,8 +275,13 @@ test_program "examples/stdlib_test.om" 66
 test_program "examples/stdlib2_test.om" 194
 test_program "examples/new_builtins_test.om" 87
 test_program "examples/math_builtins_test.om" 52
+test_program "examples/trig_math_test.om" 32
 test_program "examples/string_builtins_test.om" 12
 test_program "examples/array_builtins_test.om" 20
+test_program "examples/array_utility_test.om" 18
+test_program "examples/simd_register_test.om" 14
+test_program "examples/register_test.om" 25
+test_program "examples/compound_assign_test.om" 42
 test_program "examples/null_coalesce_test.om" 5
 test_program "examples/production_features_test.om" 14
 test_program "examples/enum_test.om" 9
@@ -284,6 +289,9 @@ test_program "examples/default_params_test.om" 8
 test_program "examples/array_copy_test.om" 21
 test_program "examples/float_test.om" 5
 test_program "examples/string_var_test.om" 0
+test_program "examples/string_join_count_test.om" 41
+test_program "examples/string_interp_test.om" 87
+test_program "examples/multicase_interp_test.om" 110
 test_program "examples/string_param_test.om" 0
 test_program "examples/print_return_test.om" 0
 test_program "examples/optmax_div_zero.om" 1

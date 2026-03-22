@@ -1672,6 +1672,60 @@ TEST(CodegenTest, SwitchDuplicateCaseError) {
                  std::runtime_error);
 }
 
+TEST(CodegenTest, SwitchMultiValueCase) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() {"
+                           "  var x = 2;"
+                           "  switch (x) {"
+                           "    case 1, 2, 3: return 10;"
+                           "    case 4, 5: return 20;"
+                           "    default: return 0;"
+                           "  }"
+                           "}",
+                           codegen);
+    ASSERT_NE(mod, nullptr);
+    llvm::Function* fn = mod->getFunction("main");
+    ASSERT_NE(fn, nullptr);
+    EXPECT_FALSE(fn->empty());
+}
+
+TEST(CodegenTest, SwitchMultiValueDuplicateError) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    EXPECT_THROW(generateIR("fn main() {"
+                            "  var x = 1;"
+                            "  switch (x) {"
+                            "    case 1, 2: return 10;"
+                            "    case 2, 3: return 20;"
+                            "  }"
+                            "}",
+                            codegen),
+                 std::runtime_error);
+}
+
+TEST(CodegenTest, SwitchConstantConditionElimination) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() {"
+                           "  switch (2) {"
+                           "    case 1: return 10;"
+                           "    case 2, 3: return 20;"
+                           "    default: return 0;"
+                           "  }"
+                           "}",
+                           codegen);
+    ASSERT_NE(mod, nullptr);
+    llvm::Function* fn = mod->getFunction("main");
+    ASSERT_NE(fn, nullptr);
+    // Constant condition elimination means no switch instruction is emitted
+    bool hasSwitchInst = false;
+    for (auto& bb : *fn) {
+        for (auto& inst : bb) {
+            if (llvm::isa<llvm::SwitchInst>(&inst))
+                hasSwitchInst = true;
+        }
+    }
+    EXPECT_FALSE(hasSwitchInst) << "Constant switch should be eliminated";
+}
+
 // ===========================================================================
 // Array element assignment: arr[i] = value
 // ===========================================================================
@@ -6561,4 +6615,232 @@ TEST(CodegenTest, LogicalOrBothZeroConstantFold) {
     ASSERT_NE(func, nullptr);
     EXPECT_EQ(func->size(), 1u)
         << "0 || 0 should be constant-folded to 0 (single basic block)";
+}
+
+// ===========================================================================
+// Trigonometric and transcendental math builtins
+// ===========================================================================
+
+TEST(CodegenTest, IsStdlibFunctionTrigMath) {
+    EXPECT_TRUE(isStdlibFunction("sin"));
+    EXPECT_TRUE(isStdlibFunction("cos"));
+    EXPECT_TRUE(isStdlibFunction("tan"));
+    EXPECT_TRUE(isStdlibFunction("asin"));
+    EXPECT_TRUE(isStdlibFunction("acos"));
+    EXPECT_TRUE(isStdlibFunction("atan"));
+    EXPECT_TRUE(isStdlibFunction("atan2"));
+    EXPECT_TRUE(isStdlibFunction("exp"));
+    EXPECT_TRUE(isStdlibFunction("log"));
+    EXPECT_TRUE(isStdlibFunction("log10"));
+    EXPECT_TRUE(isStdlibFunction("cbrt"));
+    EXPECT_TRUE(isStdlibFunction("hypot"));
+}
+
+TEST(CodegenTest, SinGeneration) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return sin(0.0); }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, CosGeneration) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return cos(0.0); }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, TanGeneration) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return tan(0.0); }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, ExpGeneration) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return exp(1.0); }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, LogGeneration) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return log(1.0); }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, Log10Generation) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return log10(100.0); }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, CbrtGeneration) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return cbrt(27.0); }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, HypotGeneration) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return hypot(3.0, 4.0); }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, Atan2Generation) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return atan2(1.0, 1.0); }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, AsinGeneration) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return asin(0.0); }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, AcosGeneration) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return acos(1.0); }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, AtanGeneration) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return atan(0.0); }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+// ===========================================================================
+// Array utility builtins
+// ===========================================================================
+
+TEST(CodegenTest, IsStdlibFunctionArrayUtilities) {
+    EXPECT_TRUE(isStdlibFunction("array_min"));
+    EXPECT_TRUE(isStdlibFunction("array_max"));
+    EXPECT_TRUE(isStdlibFunction("array_any"));
+    EXPECT_TRUE(isStdlibFunction("array_every"));
+    EXPECT_TRUE(isStdlibFunction("array_find"));
+    EXPECT_TRUE(isStdlibFunction("array_count"));
+}
+
+TEST(CodegenTest, ArrayMinGeneration) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var a = [5, 3, 8]; return array_min(a); }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, ArrayMaxGeneration) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var a = [5, 3, 8]; return array_max(a); }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, ArrayFindGeneration) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var a = [5, 3, 8]; return array_find(a, 3); }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, ArrayAnyGeneration) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn is_pos(x) { return x > 0; }\nfn main() { var a = [1, -2, 3]; return array_any(a, \"is_pos\"); }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, ArrayEveryGeneration) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn is_pos(x) { return x > 0; }\nfn main() { var a = [1, 2, 3]; return array_every(a, \"is_pos\"); }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, ArrayCountGeneration) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn is_even(x) { return x % 2 == 0; }\nfn main() { var a = [1, 2, 3, 4]; return array_count(a, \"is_even\"); }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+// ===========================================================================
+// SIMD vector types
+// ===========================================================================
+
+TEST(CodegenTest, SimdF32x4VectorAdd) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var a: f32x4 = [1.0, 2.0, 3.0, 4.0]; var b: f32x4 = [5.0, 6.0, 7.0, 8.0]; var c: f32x4 = a + b; return to_int(c[0]); }", codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* mainFn = mod->getFunction("main");
+    ASSERT_NE(mainFn, nullptr);
+}
+
+TEST(CodegenTest, SimdI32x4VectorSub) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var x: i32x4 = [10, 20, 30, 40]; var y: i32x4 = [1, 2, 3, 4]; var z: i32x4 = x - y; return z[0]; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, SimdElementWrite) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var v: i32x4 = [0, 0, 0, 0]; v[0] = 5; return v[0]; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, SimdF64x2Vector) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var a: f64x2 = [1.5, 2.5]; var b: f64x2 = [3.5, 4.5]; var c: f64x2 = a * b; return to_int(c[0]); }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+// ===========================================================================
+// Register keyword
+// ===========================================================================
+
+TEST(CodegenTest, RegisterVarDecl) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { register var x = 42; return x; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, RegisterVarReassign) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { register var x = 0; x = 42; return x; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, RegisterVarForcesPromotion) {
+    // At O0, register var should still produce zero allocas because
+    // mem2reg is forced after codegen for functions with register vars.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { register var x = 0; x = x + 1; return x; }", codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("main");
+    ASSERT_NE(fn, nullptr);
+    unsigned allocaCount = 0;
+    for (auto& BB : *fn)
+        for (auto& I : BB)
+            if (llvm::isa<llvm::AllocaInst>(I))
+                ++allocaCount;
+    EXPECT_EQ(allocaCount, 0u);
+}
+
+// ===========================================================================
+// **= and ??= compound assignment
+// ===========================================================================
+
+TEST(CodegenTest, PowerAssign) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var x = 2; x **= 3; return x; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, NullCoalesceAssign) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var x = 0; x ?\?= 42; return x; }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+// ===========================================================================
+// Struct field compound assignment
+// ===========================================================================
+
+TEST(CodegenTest, StructFieldCompoundAssign) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("struct P { x, y }\nfn main() { var p = P { x: 10, y: 20 }; p.x += 5; return p.x; }", codegen);
+    ASSERT_NE(mod, nullptr);
 }

@@ -28,8 +28,39 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                                  : resolveAnnotatedType(stmt->typeName);
     llvm::Value* initValue = nullptr;
 
+    // Check if this is a SIMD vector type.
+    const bool isSimdType = allocaType->isVectorTy();
+
     if (stmt->initializer) {
-        initValue = generateExpression(stmt->initializer.get());
+        // SIMD vector initialization from array literal:
+        //   var v: f32x4 = [1.0, 2.0, 3.0, 4.0];
+        // Build an LLVM vector value from the array elements.
+        if (isSimdType && stmt->initializer->type == ASTNodeType::ARRAY_EXPR) {
+            auto* arrExpr = static_cast<ArrayExpr*>(stmt->initializer.get());
+            auto* vecTy = llvm::cast<llvm::FixedVectorType>(allocaType);
+            const unsigned numElems = vecTy->getNumElements();
+            llvm::Type* elemTy = vecTy->getElementType();
+
+            if (arrExpr->elements.size() != numElems) {
+                codegenError("SIMD vector type requires exactly " + std::to_string(numElems) +
+                                 " elements, but " + std::to_string(arrExpr->elements.size()) +
+                                 " provided",
+                             stmt);
+            }
+
+            // Start with an undef vector and insert each element.
+            llvm::Value* vec = llvm::UndefValue::get(vecTy);
+            for (unsigned i = 0; i < numElems; ++i) {
+                llvm::Value* elem = generateExpression(arrExpr->elements[i].get());
+                elem = convertToVectorElement(elem, elemTy);
+                vec = builder->CreateInsertElement(vec, elem,
+                    llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), i), "simd.ins");
+            }
+            initValue = vec;
+        } else {
+            initValue = generateExpression(stmt->initializer.get());
+        }
+
         // When no annotation is present, infer the type from the initializer.
         if (stmt->typeName.empty())
             allocaType = initValue->getType();
@@ -50,11 +81,51 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
 
         // Convert the initializer to match the declared type when an annotation
         // is present (e.g. `var x: float = 42` should store 42.0 as double).
-        if (!stmt->typeName.empty())
+        // Skip for SIMD types — the vector was already built with correct types.
+        if (!stmt->typeName.empty() && !isSimdType)
             initValue = convertTo(initValue, allocaType);
     }
 
     llvm::AllocaInst* alloca = createEntryBlockAlloca(function, stmt->name, allocaType);
+
+    // Register keyword: force the variable into a CPU register.
+    // We set high alignment to facilitate SROA/mem2reg promotion and track the
+    // variable so that a mem2reg pass is run on this function immediately after
+    // codegen, guaranteeing the alloca is promoted to an SSA register
+    // regardless of the global optimization level.  The variable remains
+    // mutable — `register` forces register allocation, not immutability.
+    if (stmt->isRegister) {
+        // Warn at compile time if the type can't be promoted to a register
+        // (arrays, structs, pointers/strings are not promotable by mem2reg).
+        if (allocaType->isArrayTy() || allocaType->isStructTy() ||
+            allocaType->isPointerTy()) {
+            const Diagnostic warn{DiagnosticSeverity::Warning,
+                                  {"", stmt->line, stmt->column},
+                                  "'register' variable '" + stmt->name +
+                                      "' has a type that cannot be promoted to a CPU register; "
+                                      "the keyword will have no effect"};
+            std::cerr << warn.format() << "\n";
+        } else {
+            registerVars_.insert(stmt->name);
+            // Emit llvm.lifetime.start so the register live-range is tightly
+            // scoped, helping the register allocator.
+            const uint64_t sz = module->getDataLayout().getTypeAllocSize(allocaType);
+            auto* szVal = llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), sz);
+            auto* lifetimeStart = OMSC_GET_INTRINSIC_STMT(
+                module.get(), llvm::Intrinsic::lifetime_start,
+                {llvm::PointerType::getUnqual(*context)});
+            builder->CreateCall(lifetimeStart, {szVal, alloca});
+        }
+        if (allocaType->isIntegerTy() || allocaType->isDoubleTy() || allocaType->isFloatTy())
+            alloca->setAlignment(llvm::Align(16));
+        if (allocaType->isVectorTy())
+            alloca->setAlignment(llvm::Align(32));
+    }
+
+    // Track SIMD variables for operator dispatch.
+    if (isSimdType)
+        simdVars_.insert(stmt->name);
+
     bindVariable(stmt->name, alloca, stmt->isConst);
 
     if (initValue) {
@@ -83,7 +154,9 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
         }
     } else {
         // Default-initialize based on type annotation.
-        if (allocaType->isDoubleTy())
+        if (isSimdType) {
+            builder->CreateStore(llvm::Constant::getNullValue(allocaType), alloca);
+        } else if (allocaType->isDoubleTy())
             builder->CreateStore(llvm::ConstantFP::get(allocaType, 0.0), alloca);
         else {
             const unsigned bits = allocaType->isIntegerTy() ? allocaType->getIntegerBitWidth() : 64;
@@ -846,6 +919,85 @@ void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
     condVal = toDefaultType(condVal);
 
     llvm::Function* function = builder->GetInsertBlock()->getParent();
+
+    // Constant switch condition elimination: when the condition is a known
+    // compile-time constant, directly generate only the matched case body
+    // (or default), skipping the switch instruction and all dead branches.
+    if (auto* condConst = llvm::dyn_cast<llvm::ConstantInt>(condVal)) {
+        const int64_t condIntVal = condConst->getSExtValue();
+
+        // Validate all case values first (reject floats).
+        auto validateCaseType = [&](Expression* expr) {
+            llvm::Value* v = generateExpression(expr);
+            if (v->getType()->isDoubleTy()) {
+                codegenError("case value must be an integer constant, not a float", expr);
+            }
+        };
+        for (auto& sc : stmt->cases) {
+            if (sc.isDefault)
+                continue;
+            validateCaseType(sc.value.get());
+            for (auto& ev : sc.values) {
+                validateCaseType(ev.get());
+            }
+        }
+
+        // Find the matching case.
+        SwitchCase* matchedCase = nullptr;
+        SwitchCase* defaultCase = nullptr;
+        for (auto& sc : stmt->cases) {
+            if (sc.isDefault) {
+                defaultCase = &sc;
+                continue;
+            }
+            // Check primary value
+            llvm::Value* cv = generateExpression(sc.value.get());
+            cv = toDefaultType(cv);
+            if (auto* cvConst = llvm::dyn_cast<llvm::ConstantInt>(cv)) {
+                if (cvConst->getSExtValue() == condIntVal) {
+                    matchedCase = &sc;
+                    break;
+                }
+            }
+            // Check additional values (multi-value case)
+            for (auto& extraVal : sc.values) {
+                llvm::Value* ev = generateExpression(extraVal.get());
+                ev = toDefaultType(ev);
+                if (auto* evConst = llvm::dyn_cast<llvm::ConstantInt>(ev)) {
+                    if (evConst->getSExtValue() == condIntVal) {
+                        matchedCase = &sc;
+                        break;
+                    }
+                }
+            }
+            if (matchedCase)
+                break;
+        }
+
+        // Fall back to default if no case matched.
+        SwitchCase* targetCase = matchedCase ? matchedCase : defaultCase;
+        if (targetCase) {
+            // Create a merge block for break statements.
+            llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "switch.end", function);
+            loopStack.push_back({mergeBB, nullptr});
+            {
+                const ScopeGuard scope(*this);
+                for (auto& s : targetCase->body) {
+                    generateStatement(s.get());
+                    if (builder->GetInsertBlock()->getTerminator())
+                        break;
+                }
+            }
+            loopStack.pop_back();
+            if (!builder->GetInsertBlock()->getTerminator()) {
+                builder->CreateBr(mergeBB);
+            }
+            builder->SetInsertPoint(mergeBB);
+        }
+        // If no case and no default, nothing to generate.
+        return;
+    }
+
     llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "switch.end", function);
     llvm::BasicBlock* defaultBB = mergeBB; // fall through to merge if no default
 
@@ -882,23 +1034,37 @@ void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
                 builder->CreateBr(mergeBB);
             }
         } else {
-            llvm::Value* caseVal = generateExpression(sc.value.get());
-            if (caseVal->getType()->isDoubleTy()) {
-                codegenError("case value must be an integer constant, not a float", sc.value.get());
-            }
-            caseVal = toDefaultType(caseVal);
-            auto* caseConst = llvm::dyn_cast<llvm::ConstantInt>(caseVal);
-            if (!caseConst) {
-                codegenError("case value must be a compile-time integer constant", sc.value.get());
-            }
+            // Collect all case values (primary + additional) for multi-value case.
+            std::vector<llvm::ConstantInt*> caseConstants;
 
-            const int64_t cv = caseConst->getSExtValue();
-            if (!seenCaseValues.insert(cv).second) {
-                codegenError("duplicate case value " + std::to_string(cv) + " in switch statement", sc.value.get());
+            auto addCaseValue = [&](Expression* expr) {
+                llvm::Value* caseVal = generateExpression(expr);
+                if (caseVal->getType()->isDoubleTy()) {
+                    codegenError("case value must be an integer constant, not a float", expr);
+                }
+                caseVal = toDefaultType(caseVal);
+                auto* caseConst = llvm::dyn_cast<llvm::ConstantInt>(caseVal);
+                if (!caseConst) {
+                    codegenError("case value must be a compile-time integer constant", expr);
+                }
+                const int64_t cv = caseConst->getSExtValue();
+                if (!seenCaseValues.insert(cv).second) {
+                    codegenError("duplicate case value " + std::to_string(cv) + " in switch statement", expr);
+                }
+                caseConstants.push_back(caseConst);
+            };
+
+            // Primary value
+            addCaseValue(sc.value.get());
+            // Additional values (multi-value case)
+            for (auto& extraVal : sc.values) {
+                addCaseValue(extraVal.get());
             }
 
             llvm::BasicBlock* caseBB = llvm::BasicBlock::Create(*context, "switch.case", function, mergeBB);
-            switchInst->addCase(caseConst, caseBB);
+            for (auto* caseConst : caseConstants) {
+                switchInst->addCase(caseConst, caseBB);
+            }
 
             builder->SetInsertPoint(caseBB);
             {

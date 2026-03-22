@@ -235,6 +235,7 @@ class VarDecl : public Statement {
     std::unique_ptr<Expression> initializer;
     bool isConst;
     std::string typeName;
+    bool isRegister = false; ///< `register var` — force variable into CPU register via mem2reg
 
     VarDecl(const std::string& n, std::unique_ptr<Expression> init, bool cnst = false, const std::string& type = "")
         : Statement(ASTNodeType::VAR_DECL), name(n), initializer(std::move(init)), isConst(cnst), typeName(type) {}
@@ -317,13 +318,26 @@ class ForEachStmt : public Statement {
 };
 
 // A single case arm in a switch statement.
+// Supports multiple values per case: case 1, 2, 3: ...
 struct SwitchCase {
-    std::unique_ptr<Expression> value; // nullptr for default case
+    std::unique_ptr<Expression> value; // nullptr for default case (first value for single-value compat)
+    std::vector<std::unique_ptr<Expression>> values; // all values for multi-value case
     std::vector<std::unique_ptr<Statement>> body;
     bool isDefault;
 
     SwitchCase(std::unique_ptr<Expression> v, std::vector<std::unique_ptr<Statement>> b, bool def = false)
         : value(std::move(v)), body(std::move(b)), isDefault(def) {}
+
+    SwitchCase(std::vector<std::unique_ptr<Expression>> vs, std::vector<std::unique_ptr<Statement>> b, bool def = false)
+        : body(std::move(b)), isDefault(def) {
+        if (!vs.empty()) {
+            // Store first value for backward compatibility
+            value = std::move(vs[0]);
+            for (size_t i = 1; i < vs.size(); ++i) {
+                values.push_back(std::move(vs[i]));
+            }
+        }
+    }
 };
 
 class SwitchStmt : public Statement {

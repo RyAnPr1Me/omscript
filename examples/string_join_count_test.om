@@ -1,0 +1,52 @@
+// Test str_join and str_count builtins
+fn main() {
+    var total = 0;
+
+    // --- str_join tests ---
+
+    // Join array of strings with comma delimiter
+    var parts = str_split("hello,world,foo", ",");
+    var joined = str_join(parts, "-");
+    // joined should be "hello-world-foo"
+    total = total + str_len(joined);      // 15
+    total = total + str_contains(joined, "hello-world");  // 1
+
+    // Join with empty delimiter
+    var abc = str_split("a,b,c", ",");
+    var no_delim = str_join(abc, "");
+    // no_delim should be "abc"
+    total = total + str_len(no_delim);    // 3
+
+    // Join single-element array
+    var single = str_split("only", ",");
+    var single_joined = str_join(single, ",");
+    // single_joined should be "only"
+    total = total + str_len(single_joined);  // 4
+
+    // Join with multi-char delimiter
+    var words = str_split("a,b,c", ",");
+    var spaced = str_join(words, " :: ");
+    // spaced should be "a :: b :: c"
+    total = total + str_len(spaced);      // 11
+
+    // --- str_count tests ---
+
+    // Count occurrences
+    var s = "abcabcabc";
+    total = total + str_count(s, "abc");  // 3
+    total = total + str_count(s, "x");    // 0
+    total = total + str_count(s, "a");    // 3
+
+    // Count with empty substring (should return 0)
+    total = total + str_count(s, "");     // 0
+
+    // Count non-overlapping
+    var s2 = "aaa";
+    total = total + str_count(s2, "aa");  // 1 (non-overlapping)
+
+    // Count in empty string
+    total = total + str_count("", "x");   // 0
+
+    // total = 15 + 1 + 3 + 4 + 11 + 3 + 0 + 3 + 0 + 1 + 0 = 41
+    return total;
+}

@@ -307,6 +307,13 @@ class CodeGenerator {
     /// metadata so LLVM can hoist/CSE them aggressively.
     std::unordered_set<std::string> prefetchedImmutVars_;
 
+    /// Variables declared with `register` keyword — forces register allocation
+    /// by running mem2reg on the function after codegen.
+    std::unordered_set<std::string> registerVars_;
+
+    /// Variables with SIMD vector types for operator dispatch.
+    std::unordered_set<std::string> simdVars_;
+
     /// Per-function loop unrolling hints from @unroll / @nounroll annotations.
     bool currentFuncHintUnroll_ = false;
     bool currentFuncHintNoUnroll_ = false;
@@ -381,6 +388,14 @@ class CodeGenerator {
     /// when no conversion is required.
     llvm::Value* convertTo(llvm::Value* v, llvm::Type* targetTy);
     llvm::Value* ensureFloat(llvm::Value* v);
+    /// Convert a scalar \p v to the element type of \p elemTy, inserting
+    /// appropriate casts (FPTrunc, SIToFP, FPToSI, IntCast) as needed.
+    /// Returns \p v unchanged when no conversion is required.
+    llvm::Value* convertToVectorElement(llvm::Value* v, llvm::Type* elemTy);
+    /// Broadcast a scalar \p scalar to all lanes of vector type \p vecTy.
+    /// Inserts type conversion if the scalar type differs from the vector
+    /// element type, then uses insertelement + shufflevector for the splat.
+    llvm::Value* splatScalarToVector(llvm::Value* scalar, llvm::Type* vecTy);
     void setupPrintfDeclaration();
     llvm::Function* getPrintfFunction();
     void beginScope();
@@ -391,6 +406,7 @@ class CodeGenerator {
     llvm::AllocaInst* createEntryBlockAlloca(llvm::Function* function, const std::string& name,
                                              llvm::Type* type = nullptr);
     [[noreturn]] void codegenError(const std::string& message, const ASTNode* node);
+    void validateArgCount(const CallExpr* expr, const std::string& funcName, size_t expected);
 
     /// RAII guard that calls beginScope() on construction and endScope()
     /// on destruction, ensuring scope stacks are always balanced even
