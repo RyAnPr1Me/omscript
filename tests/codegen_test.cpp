@@ -1692,13 +1692,38 @@ TEST(CodegenTest, SwitchMultiValueCase) {
 TEST(CodegenTest, SwitchMultiValueDuplicateError) {
     CodeGenerator codegen(OptimizationLevel::O0);
     EXPECT_THROW(generateIR("fn main() {"
-                            "  switch (1) {"
+                            "  var x = 1;"
+                            "  switch (x) {"
                             "    case 1, 2: return 10;"
                             "    case 2, 3: return 20;"
                             "  }"
                             "}",
                             codegen),
                  std::runtime_error);
+}
+
+TEST(CodegenTest, SwitchConstantConditionElimination) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() {"
+                           "  switch (2) {"
+                           "    case 1: return 10;"
+                           "    case 2, 3: return 20;"
+                           "    default: return 0;"
+                           "  }"
+                           "}",
+                           codegen);
+    ASSERT_NE(mod, nullptr);
+    llvm::Function* fn = mod->getFunction("main");
+    ASSERT_NE(fn, nullptr);
+    // Constant condition elimination means no switch instruction is emitted
+    bool hasSwitchInst = false;
+    for (auto& bb : *fn) {
+        for (auto& inst : bb) {
+            if (llvm::isa<llvm::SwitchInst>(&inst))
+                hasSwitchInst = true;
+        }
+    }
+    EXPECT_FALSE(hasSwitchInst) << "Constant switch should be eliminated";
 }
 
 // ===========================================================================

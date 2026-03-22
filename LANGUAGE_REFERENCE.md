@@ -430,6 +430,35 @@ And so are you.""";
 
 Multi-line strings preserve all characters between the opening and closing `"""` exactly as written, including newlines and spaces. They do **not** process escape sequences.
 
+#### String Interpolation
+
+Prefixing a string with `$` enables string interpolation. Expressions inside `{...}` are evaluated and automatically converted to strings:
+
+```javascript
+var name = "world";
+var greeting = $"hello {name}!";           // "hello world!"
+var x = 10;
+var msg = $"value is {x + 5}";             // "value is 15"
+var a = 3;
+var b = 4;
+var result = $"{a} + {b} = {a + b}";       // "3 + 4 = 7"
+```
+
+Interpolated strings support all escape sequences from regular strings, plus `\{` and `\}` for literal braces:
+
+```javascript
+$"use \{curly\} braces"   // "use {curly} braces"
+```
+
+Expressions inside `{...}` can include function calls, ternary operators, and nested strings:
+
+```javascript
+$"length is {len(arr)}"
+$"flag is {flag ? "on" : "off"}"
+```
+
+String interpolation desugars into `+` concatenation at compile time, so there is no runtime overhead beyond normal string operations.
+
 ### 4.6 Special Tokens
 
 | Token | Meaning |
@@ -1289,11 +1318,31 @@ fn classify(x) {
 }
 ```
 
+#### Multi-Value Case
+
+A single `case` arm can match multiple values using comma-separated constants:
+
+```javascript
+fn category(x) {
+    switch (x) {
+        case 1, 2, 3:
+            return "small";
+        case 4, 5:
+            return "medium";
+        default:
+            return "large";
+    }
+}
+```
+
+All values in a multi-value case must be unique across the entire switch statement. Duplicate values (even across different case arms) produce a compile error.
+
 **Key points:**
 - Case values must be integer constants (float literals produce a compile error).
 - Use `break` to exit a case (fall-through occurs without it).
 - The `default` case handles any value not matched by an explicit `case`.
 - `continue` inside a `switch` nested within a loop jumps to the enclosing loop's continue target.
+- When the switch condition is a compile-time constant, the compiler eliminates dead branches and generates only the matched case body.
 
 ---
 
@@ -3747,7 +3796,7 @@ do_while_stmt  = "do" statement "while" "(" expression ")" ";" ;
 for_stmt       = "for" "(" IDENTIFIER [ ":" type_annotation ] "in"
                    expression [ "..." expression [ "..." expression ] ] ")" statement ;
 switch_stmt    = "switch" "(" expression ")" "{" { case_clause } [ default_clause ] "}" ;
-case_clause    = "case" INTEGER ":" { statement } ;
+case_clause    = "case" expression { "," expression } ":" { statement } ;
 default_clause = "default" ":" { statement } ;
 try_stmt       = "try" block "catch" "(" IDENTIFIER ")" block ;
 throw_stmt     = "throw" expression ";" ;

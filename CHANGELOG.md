@@ -8,10 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [3.0.0] - 2026-03-22
 
 ### Added
+- **String interpolation** `$"..."` — embed expressions directly in string literals using `$"hello {name}, you are {age} years old"`. Expressions inside `{...}` are evaluated and auto-converted to strings. Supports nested expressions, function calls, ternary operators, and escaped braces `\{`/`\}`. Desugars into `+` concatenation at the lexer level for zero runtime overhead.
+- **Multi-value switch case** `case 1, 2, 3:` — match multiple comma-separated values in a single case arm. All values map to the same basic block. Duplicate detection spans across multi-value cases.
+- **Constant switch condition elimination** — when the switch condition is a compile-time constant, the compiler eliminates all dead case branches and directly generates only the matched case body (or default), removing the switch instruction entirely.
 - **`str_join(arr, delim)` built-in** — join an array of strings into a single string with a delimiter between elements. Inverse of `str_split`. Supports empty delimiters and multi-character delimiters.
 - **`str_count(s, sub)` built-in** — count non-overlapping occurrences of a substring in a string. Returns 0 for empty substring or when not found.
-- New integration test: `string_join_count_test.om` — comprehensive test for `str_join` and `str_count`
+- New integration tests: `string_join_count_test.om`, `string_interp_test.om`, `multicase_interp_test.om`
 - New integration test: `register_test.om` — dedicated test for register keyword covering accumulation loops, countdown, typed register variables, and in-loop register reassignment
+- 9 new lexer unit tests for string interpolation, 1 parser + 3 codegen tests for multi-value case and constant switch elimination
 - Standard library count increased from 119 to 121 built-in functions
 
 ### Changed

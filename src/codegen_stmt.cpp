@@ -919,6 +919,85 @@ void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
     condVal = toDefaultType(condVal);
 
     llvm::Function* function = builder->GetInsertBlock()->getParent();
+
+    // Constant switch condition elimination: when the condition is a known
+    // compile-time constant, directly generate only the matched case body
+    // (or default), skipping the switch instruction and all dead branches.
+    if (auto* condConst = llvm::dyn_cast<llvm::ConstantInt>(condVal)) {
+        const int64_t condIntVal = condConst->getSExtValue();
+
+        // Validate all case values first (reject floats, require constants).
+        auto validateCaseVal = [&](Expression* expr) {
+            llvm::Value* v = generateExpression(expr);
+            if (v->getType()->isDoubleTy()) {
+                codegenError("case value must be an integer constant, not a float", expr);
+            }
+        };
+        for (auto& sc : stmt->cases) {
+            if (sc.isDefault)
+                continue;
+            validateCaseVal(sc.value.get());
+            for (auto& ev : sc.values) {
+                validateCaseVal(ev.get());
+            }
+        }
+
+        // Find the matching case.
+        SwitchCase* matchedCase = nullptr;
+        SwitchCase* defaultCase = nullptr;
+        for (auto& sc : stmt->cases) {
+            if (sc.isDefault) {
+                defaultCase = &sc;
+                continue;
+            }
+            // Check primary value
+            llvm::Value* cv = generateExpression(sc.value.get());
+            cv = toDefaultType(cv);
+            if (auto* cvConst = llvm::dyn_cast<llvm::ConstantInt>(cv)) {
+                if (cvConst->getSExtValue() == condIntVal) {
+                    matchedCase = &sc;
+                    break;
+                }
+            }
+            // Check additional values (multi-value case)
+            for (auto& extraVal : sc.values) {
+                llvm::Value* ev = generateExpression(extraVal.get());
+                ev = toDefaultType(ev);
+                if (auto* evConst = llvm::dyn_cast<llvm::ConstantInt>(ev)) {
+                    if (evConst->getSExtValue() == condIntVal) {
+                        matchedCase = &sc;
+                        break;
+                    }
+                }
+            }
+            if (matchedCase)
+                break;
+        }
+
+        // Fall back to default if no case matched.
+        SwitchCase* targetCase = matchedCase ? matchedCase : defaultCase;
+        if (targetCase) {
+            // Create a merge block for break statements.
+            llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "switch.end", function);
+            loopStack.push_back({mergeBB, nullptr});
+            {
+                const ScopeGuard scope(*this);
+                for (auto& s : targetCase->body) {
+                    generateStatement(s.get());
+                    if (builder->GetInsertBlock()->getTerminator())
+                        break;
+                }
+            }
+            loopStack.pop_back();
+            if (!builder->GetInsertBlock()->getTerminator()) {
+                builder->CreateBr(mergeBB);
+            }
+            builder->SetInsertPoint(mergeBB);
+        }
+        // If no case and no default, nothing to generate.
+        return;
+    }
+
     llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "switch.end", function);
     llvm::BasicBlock* defaultBB = mergeBB; // fall through to merge if no default
 

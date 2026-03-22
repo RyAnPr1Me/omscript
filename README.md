@@ -15,13 +15,14 @@ A low-level, C-like programming language with dynamic typing and **automatic ref
 - **Spread Operator**: Array unpacking in literals with `[1, ...arr, 2]`
 - **For Loops with Ranges**: Modern range-based iteration with `for (i in start...end)` and `for (i in start...end...step)`
 - **For-Each Loops**: Iterate over arrays with `for (x in array)`
-- **Switch/Case**: Multi-way branching with `switch`/`case`/`default`
+- **Switch/Case**: Multi-way branching with `switch`/`case`/`default`, multi-value `case 1, 2, 3:`
 - **Do-While Loops**: Execute body at least once with `do { ... } while (cond);`
 - **Error Handling**: `try`/`catch`/`throw` for structured error handling
 - **Ownership System**: Optional `move`, `invalidate`, and `borrow` keywords for compile-time use-after-move/invalidate detection and LLVM optimization hints
 - **Enum Declarations**: Named integer constants with auto-increment
 - **Default Parameters**: Optional function parameters with default values
 - **Null Coalescing Operator**: `??` for concise null/zero fallback expressions
+- **String Interpolation**: `$"hello {name}, count = {n + 1}"` with auto type conversion
 - **Multi-line Strings**: Triple-quoted `"""..."""` strings with embedded newlines
 - **121 Built-in Functions**: Math, array manipulation, strings, maps, file I/O, threading, character classification, type conversion, and system calls
 - **Adaptive JIT Runtime**: Hot functions are automatically recompiled at higher optimization levels using runtime profiling data
@@ -160,11 +161,11 @@ for (x in arr) {
     println(x);
 }
 
-// Switch/case
+// Switch/case with multi-value matching
 switch (value) {
-    case 1:  println(1);  break;
-    case 2:  println(2);  break;
-    default: println(0);
+    case 1, 2, 3: println("small"); break;
+    case 4, 5:    println("medium"); break;
+    default:      println("large");
 }
 
 // Error handling
@@ -219,6 +220,11 @@ var trimmed = str_trim("  hi  ");         // "hi"
 var ts = to_string(42);                   // "42"
 var n2 = str_to_int("100");              // 100
 var f = str_to_float("3.14");            // 3.14
+
+// String interpolation
+var name = "world";
+var greeting = $"hello {name}!";          // "hello world!"
+var result = $"{n} + {f} = {n + f}";      // "5 + 3.14 = 8.14"
 ```
 
 ### File I/O
