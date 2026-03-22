@@ -1121,11 +1121,13 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     // the overhead of a full function call when the fast path applies.
     fpm.add(llvm::createPartiallyInlineLibCallsPass());
     fpm.add(llvm::createFlattenCFGPass());
-    // Phase 3.5: Aggressive cleanup passes for maximal optimization
+
+    // Phase 3.5: Aggressive cleanup passes for maximal optimization.
     // Extra DCE + CFG simplification to clean up patterns exposed by
     // flattening — catches dead control flow and trivially dead instructions.
     fpm.add(llvm::createDeadCodeEliminationPass());
     fpm.add(llvm::createCFGSimplificationPass());
+
     // Phase 4: Final cleanup — InstSimplify, InstCombine, CFGSimplification,
     // and DCE remove dead code and simplify patterns exposed by loop and
     // control-flow transformations above.
