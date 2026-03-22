@@ -5,6 +5,29 @@ All notable changes to the OmScript compiler will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.8.0] - 2026-03-22
+
+### Added
+- **12 new math built-in functions** returning floating-point values:
+  - Trigonometric: `sin(x)`, `cos(x)`, `tan(x)`, `asin(x)`, `acos(x)`, `atan(x)`, `atan2(y, x)` — radians-based trigonometry with LLVM intrinsics (`sin`, `cos`) and C library calls (`tan`, `asin`, `acos`, `atan`, `atan2`)
+  - Exponential/Logarithmic: `exp(x)`, `log(x)`, `log10(x)` — using LLVM intrinsics for native hardware acceleration
+  - Other: `cbrt(x)` (cube root), `hypot(x, y)` (hypotenuse without overflow) — via C library calls
+- **6 new array utility built-in functions**:
+  - `array_min(arr)` — minimum element (0 for empty arrays)
+  - `array_max(arr)` — maximum element (0 for empty arrays)
+  - `array_find(arr, value)` — index of first match, or -1 if not found
+  - `array_any(arr, "fn")` — returns 1 if predicate matches any element
+  - `array_every(arr, "fn")` — returns 1 if predicate matches all elements (vacuous truth for empty)
+  - `array_count(arr, "fn")` — count of elements matching predicate
+- New integration tests: `trig_math_test.om`, `array_utility_test.om`
+- 20 new unit tests covering all new builtins
+- Standard library count increased from 92 to 110 built-in functions
+
+### Changed
+- **Version bump** to 2.8.0
+- **LANGUAGE_REFERENCE.md** updated with documentation for all 18 new built-in functions
+- **README.md** updated with new function tables and total count
+
 ## [2.7.9] - 2026-03-21
 
 ### Fixed

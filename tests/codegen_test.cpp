@@ -6562,3 +6562,143 @@ TEST(CodegenTest, LogicalOrBothZeroConstantFold) {
     EXPECT_EQ(func->size(), 1u)
         << "0 || 0 should be constant-folded to 0 (single basic block)";
 }
+
+// ===========================================================================
+// Trigonometric and transcendental math builtins
+// ===========================================================================
+
+TEST(CodegenTest, IsStdlibFunctionTrigMath) {
+    EXPECT_TRUE(isStdlibFunction("sin"));
+    EXPECT_TRUE(isStdlibFunction("cos"));
+    EXPECT_TRUE(isStdlibFunction("tan"));
+    EXPECT_TRUE(isStdlibFunction("asin"));
+    EXPECT_TRUE(isStdlibFunction("acos"));
+    EXPECT_TRUE(isStdlibFunction("atan"));
+    EXPECT_TRUE(isStdlibFunction("atan2"));
+    EXPECT_TRUE(isStdlibFunction("exp"));
+    EXPECT_TRUE(isStdlibFunction("log"));
+    EXPECT_TRUE(isStdlibFunction("log10"));
+    EXPECT_TRUE(isStdlibFunction("cbrt"));
+    EXPECT_TRUE(isStdlibFunction("hypot"));
+}
+
+TEST(CodegenTest, SinGeneration) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return sin(0.0); }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, CosGeneration) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return cos(0.0); }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, TanGeneration) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return tan(0.0); }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, ExpGeneration) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return exp(1.0); }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, LogGeneration) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return log(1.0); }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, Log10Generation) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return log10(100.0); }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, CbrtGeneration) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return cbrt(27.0); }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, HypotGeneration) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return hypot(3.0, 4.0); }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, Atan2Generation) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return atan2(1.0, 1.0); }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, AsinGeneration) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return asin(0.0); }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, AcosGeneration) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return acos(1.0); }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, AtanGeneration) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return atan(0.0); }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+// ===========================================================================
+// Array utility builtins
+// ===========================================================================
+
+TEST(CodegenTest, IsStdlibFunctionArrayUtilities) {
+    EXPECT_TRUE(isStdlibFunction("array_min"));
+    EXPECT_TRUE(isStdlibFunction("array_max"));
+    EXPECT_TRUE(isStdlibFunction("array_any"));
+    EXPECT_TRUE(isStdlibFunction("array_every"));
+    EXPECT_TRUE(isStdlibFunction("array_find"));
+    EXPECT_TRUE(isStdlibFunction("array_count"));
+}
+
+TEST(CodegenTest, ArrayMinGeneration) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var a = [5, 3, 8]; return array_min(a); }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, ArrayMaxGeneration) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var a = [5, 3, 8]; return array_max(a); }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, ArrayFindGeneration) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { var a = [5, 3, 8]; return array_find(a, 3); }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, ArrayAnyGeneration) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn is_pos(x) { return x > 0; }\nfn main() { var a = [1, -2, 3]; return array_any(a, \"is_pos\"); }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, ArrayEveryGeneration) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn is_pos(x) { return x > 0; }\nfn main() { var a = [1, 2, 3]; return array_every(a, \"is_pos\"); }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, ArrayCountGeneration) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn is_even(x) { return x % 2 == 0; }\nfn main() { var a = [1, 2, 3, 4]; return array_count(a, \"is_even\"); }", codegen);
+    ASSERT_NE(mod, nullptr);
+}

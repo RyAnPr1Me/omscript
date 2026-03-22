@@ -308,7 +308,7 @@ OPTMAX!:
 var x = 10; /* inline */
 ```
 
-## Built-in Functions (92 total)
+## Built-in Functions (110 total)
 
 ### Math
 | Function | Description |
@@ -320,6 +320,18 @@ var x = 10; /* inline */
 | `sqrt(x)` | Integer square root |
 | `pow(b, e)` | Integer exponentiation |
 | `log2(x)` | Integer log base 2 |
+| `log(x)` | Natural logarithm (float) |
+| `log10(x)` | Base-10 logarithm (float) |
+| `exp(x)` | Exponential e^x (float) |
+| `sin(x)` | Sine (float) |
+| `cos(x)` | Cosine (float) |
+| `tan(x)` | Tangent (float) |
+| `asin(x)` | Arc sine (float) |
+| `acos(x)` | Arc cosine (float) |
+| `atan(x)` | Arc tangent (float) |
+| `atan2(y, x)` | Two-argument arc tangent (float) |
+| `cbrt(x)` | Cube root (float) |
+| `hypot(x, y)` | Hypotenuse sqrt(x²+y²) (float) |
 | `gcd(a, b)` | Greatest common divisor |
 | `min(a, b)` | Minimum of two values |
 | `max(a, b)` | Maximum of two values |
@@ -338,6 +350,12 @@ var x = 10; /* inline */
 | `swap(arr, i, j)` | Swap two elements |
 | `index_of(arr, v)` | First index of value, or -1 |
 | `array_contains(arr, v)` | True if value is in array |
+| `array_min(arr)` | Minimum element of array |
+| `array_max(arr)` | Maximum element of array |
+| `array_find(arr, v)` | Index of first match, or -1 |
+| `array_any(arr, fn)` | True if any element matches predicate |
+| `array_every(arr, fn)` | True if all elements match predicate |
+| `array_count(arr, fn)` | Count elements matching predicate |
 | `array_map(arr, fn)` | Map function over elements |
 | `array_filter(arr, fn)` | Filter by predicate |
 | `array_reduce(arr, fn, init)` | Left-fold with initial value |

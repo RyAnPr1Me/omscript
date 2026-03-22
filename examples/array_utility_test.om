@@ -1,0 +1,81 @@
+// Test array utility built-in functions: array_min, array_max, array_find,
+// array_any, array_every, array_count
+fn is_positive(x) { return x > 0; }
+fn is_even(x) { return x % 2 == 0; }
+fn is_large(x) { return x > 100; }
+
+fn main() {
+    var total = 0;
+
+    // Test array_min
+    var a1 = [5, 3, 8, 1, 9, 2];
+    total = total + array_min(a1);  // 1
+    // total = 1
+
+    // Test array_max
+    total = total + array_max(a1);  // 9
+    // total = 10
+
+    // Test array_find (found)
+    total = total + array_find(a1, 8);  // 2
+    // total = 12
+
+    // Test array_find (not found) returns -1; add 1 to compensate
+    total = total + array_find(a1, 99) + 1;  // -1 + 1 = 0
+    // total = 12
+
+    // Test array_any (true case)
+    var a2 = [1, -2, 3, -4];
+    total = total + array_any(a2, "is_positive");  // 1
+    // total = 13
+
+    // Test array_any (false case)
+    var a3 = [-1, -2, -3];
+    total = total + array_any(a3, "is_positive");  // 0
+    // total = 13
+
+    // Test array_every (true case)
+    var a4 = [2, 4, 6, 8];
+    total = total + array_every(a4, "is_even");  // 1
+    // total = 14
+
+    // Test array_every (false case)
+    var a5 = [2, 3, 6, 8];
+    total = total + array_every(a5, "is_even");  // 0
+    // total = 14
+
+    // Test array_count
+    var a6 = [1, 2, 3, 4, 5, 6];
+    total = total + array_count(a6, "is_even");  // 3
+    // total = 17
+
+    // Test empty array edge cases
+    var empty = [];
+    total = total + array_min(empty);  // 0
+    total = total + array_max(empty);  // 0
+    // total = 17
+
+    // Test single element array
+    var single = [42];
+    total = total + array_min(single);  // 42
+    // total = 59
+
+    // Subtract 42 to keep total manageable for exit code
+    total = total - array_max(single);  // -42
+    // total = 17
+
+    // Test array_every on empty (should return 1 — vacuous truth)
+    // Actually check: our impl returns 1 for empty arrays (loop never runs, falls through with 1)
+    total = total + array_every(empty, "is_even");  // 1
+    // total = 18
+
+    // Test array_any on empty (should return 0)
+    total = total + array_any(empty, "is_even");  // 0
+    // total = 18
+
+    // Test array_count with no matches
+    total = total + array_count(a1, "is_large");  // 0
+    // total = 18
+
+    return total;
+}

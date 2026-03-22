@@ -1,7 +1,7 @@
 # OmScript Language Reference
 
-> **Version:** 2.7.9  
-> **Compiler:** `omsc` — OmScript Compiler v2.7.9  
+> **Version:** 2.8.0  
+> **Compiler:** `omsc` — OmScript Compiler v2.8.0  
 > **Standard:** C++17 · LLVM Backend · Ahead-of-Time Compilation  
 > **License:** See repository root
 
@@ -2076,6 +2076,117 @@ round(3.5)    // 4
 round(3.7)    // 4
 ```
 
+#### `sin(x)`
+
+Returns the sine of `x` (in radians). Returns a floating-point value.
+
+```javascript
+sin(0.0)          // 0.0
+sin(1.5707963)    // 1.0 (π/2)
+```
+
+#### `cos(x)`
+
+Returns the cosine of `x` (in radians). Returns a floating-point value.
+
+```javascript
+cos(0.0)          // 1.0
+cos(3.14159265)   // -1.0 (π)
+```
+
+#### `tan(x)`
+
+Returns the tangent of `x` (in radians). Returns a floating-point value.
+
+```javascript
+tan(0.0)          // 0.0
+tan(0.7853981)    // 1.0 (π/4)
+```
+
+#### `asin(x)`
+
+Returns the arc sine of `x` in radians. Input must be in range [-1, 1]. Returns a floating-point value.
+
+```javascript
+asin(0.0)    // 0.0
+asin(1.0)    // 1.5707963 (π/2)
+```
+
+#### `acos(x)`
+
+Returns the arc cosine of `x` in radians. Input must be in range [-1, 1]. Returns a floating-point value.
+
+```javascript
+acos(1.0)    // 0.0
+acos(0.0)    // 1.5707963 (π/2)
+```
+
+#### `atan(x)`
+
+Returns the arc tangent of `x` in radians. Returns a floating-point value.
+
+```javascript
+atan(0.0)    // 0.0
+atan(1.0)    // 0.7853981 (π/4)
+```
+
+#### `atan2(y, x)`
+
+Returns the arc tangent of `y/x` in radians, using the signs of both arguments to determine the correct quadrant. Returns a floating-point value.
+
+```javascript
+atan2(1.0, 1.0)    // 0.7853981 (π/4)
+atan2(0.0, 1.0)    // 0.0
+atan2(1.0, 0.0)    // 1.5707963 (π/2)
+```
+
+#### `exp(x)`
+
+Returns e raised to the power `x`. Returns a floating-point value.
+
+```javascript
+exp(0.0)    // 1.0
+exp(1.0)    // 2.71828...
+```
+
+#### `log(x)`
+
+Returns the natural logarithm (base e) of `x`. Returns a floating-point value.
+
+```javascript
+log(1.0)        // 0.0
+log(2.71828)    // 1.0
+```
+
+#### `log10(x)`
+
+Returns the base-10 logarithm of `x`. Returns a floating-point value.
+
+```javascript
+log10(1.0)      // 0.0
+log10(100.0)    // 2.0
+log10(1000.0)   // 3.0
+```
+
+#### `cbrt(x)`
+
+Returns the cube root of `x`. Returns a floating-point value.
+
+```javascript
+cbrt(27.0)    // 3.0
+cbrt(8.0)     // 2.0
+cbrt(1000.0)  // 10.0
+```
+
+#### `hypot(x, y)`
+
+Returns the hypotenuse — `sqrt(x² + y²)` — without undue overflow or underflow. Returns a floating-point value.
+
+```javascript
+hypot(3.0, 4.0)     // 5.0
+hypot(5.0, 12.0)    // 13.0
+```
+
 #### `to_int(x)`
 
 Converts a float to an integer by truncation (towards zero).
@@ -2310,6 +2421,90 @@ fn main() {
 
     // With lambda:
     var sum = array_reduce(arr, |a, b| a + b, 0);  // 15
+    return 0;
+}
+```
+
+#### `array_min(array)`
+
+Returns the minimum element in the array. Returns 0 for empty arrays.
+
+```javascript
+var arr = [5, 3, 8, 1, 9];
+array_min(arr)    // 1
+array_min([])     // 0
+```
+
+#### `array_max(array)`
+
+Returns the maximum element in the array. Returns 0 for empty arrays.
+
+```javascript
+var arr = [5, 3, 8, 1, 9];
+array_max(arr)    // 9
+array_max([])     // 0
+```
+
+#### `array_find(array, value)`
+
+Returns the index of the first element equal to `value`, or -1 if not found.
+
+```javascript
+var arr = [10, 20, 30, 40];
+array_find(arr, 30)    // 2
+array_find(arr, 99)    // -1
+```
+
+#### `array_any(array, "function_name")`
+
+Returns 1 if the predicate function returns non-zero for **any** element in the array, 0 otherwise. The function name must be a string literal. Lambda expressions can also be used. Returns 0 for empty arrays.
+
+```javascript
+fn is_negative(x) { return x < 0; }
+fn main() {
+    var arr = [1, -2, 3];
+    array_any(arr, "is_negative")     // 1
+
+    var pos = [1, 2, 3];
+    array_any(pos, "is_negative")     // 0
+
+    // With lambda:
+    array_any(arr, |x| x < 0)        // 1
+    return 0;
+}
+```
+
+#### `array_every(array, "function_name")`
+
+Returns 1 if the predicate function returns non-zero for **all** elements in the array, 0 otherwise. The function name must be a string literal. Lambda expressions can also be used. Returns 1 for empty arrays (vacuous truth).
+
+```javascript
+fn is_even(x) { return x % 2 == 0; }
+fn main() {
+    var evens = [2, 4, 6];
+    array_every(evens, "is_even")     // 1
+
+    var mixed = [2, 3, 6];
+    array_every(mixed, "is_even")     // 0
+
+    // With lambda:
+    array_every(evens, |x| x % 2 == 0)  // 1
+    return 0;
+}
+```
+
+#### `array_count(array, "function_name")`
+
+Returns the count of elements for which the predicate function returns non-zero. The function name must be a string literal. Lambda expressions can also be used.
+
+```javascript
+fn is_even(x) { return x % 2 == 0; }
+fn main() {
+    var arr = [1, 2, 3, 4, 5, 6];
+    array_count(arr, "is_even")       // 3
+
+    // With lambda:
+    array_count(arr, |x| x > 3)      // 3
     return 0;
 }
 ```
