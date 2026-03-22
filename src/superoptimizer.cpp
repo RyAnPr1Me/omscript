@@ -849,6 +849,72 @@ static std::optional<IdiomMatch> detectPopCount(llvm::Instruction* inst) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Idiom detection — count leading zeros via bit-smearing
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Detect the "bit smear then popcount" CLZ pattern:
+///   x |= x >> 1; x |= x >> 2; x |= x >> 4; ... ; return bitwidth - popcount(x)
+///
+/// This function specifically detects the bit-smear-popcount CLZ idiom,
+/// where all bits below the highest set bit are smeared to 1 via a chain
+/// of OR-shift operations, and then popcount is subtracted from the bit
+/// width to yield the number of leading zeros.
+///
+/// We detect the end of the pattern: sub(bitwidth, ctpop(or-chain(x)))
+/// where the or-chain is at least one stage of or(x, lshr(x, k)).
+/// The de Bruijn lookup variant is left for future work.
+static std::optional<IdiomMatch> detectCountLeadingZeros(llvm::Instruction* inst) {
+    // Pattern 1: ~x & (x-1) has popcount = CTZ(x), related pattern
+    // Pattern 2: Detect bit-smear sequence ending with popcount subtraction
+    //   x |= x >> 1; x |= x >> 2; x |= x >> 4; x |= x >> 8; x |= x >> 16; x |= x >> 32;
+    //   return 64 - popcount(x);
+
+    // We'll detect the end of the pattern: sub(bitwidth, ctpop(...))
+    if (inst->getOpcode() != llvm::Instruction::Sub) return std::nullopt;
+
+    unsigned bitWidth = inst->getType()->getIntegerBitWidth();
+    if (!isConstInt(inst->getOperand(0), static_cast<int64_t>(bitWidth)))
+        return std::nullopt;
+
+    // The second operand should be a ctpop call
+    auto* call = llvm::dyn_cast<llvm::CallInst>(inst->getOperand(1));
+    if (!call) return std::nullopt;
+    llvm::Function* callee = call->getCalledFunction();
+    if (!callee || callee->getIntrinsicID() != llvm::Intrinsic::ctpop)
+        return std::nullopt;
+
+    // The argument to ctpop should be the result of a bit-smearing OR chain
+    llvm::Value* smeared = call->getArgOperand(0);
+
+    // Walk back through OR-shift chain: x |= x >> k
+    // We need at least the first stage: or(x, lshr(x, 1))
+    auto* orInst = llvm::dyn_cast<llvm::BinaryOperator>(smeared);
+    if (!orInst || orInst->getOpcode() != llvm::Instruction::Or)
+        return std::nullopt;
+
+    // Check for or(x, lshr(x, k)) pattern
+    auto* lshr = llvm::dyn_cast<llvm::BinaryOperator>(orInst->getOperand(1));
+    if (!lshr || lshr->getOpcode() != llvm::Instruction::LShr)
+        return std::nullopt;
+
+    llvm::Value* x = orInst->getOperand(0);
+    // Walk up the OR chain to find the original x
+    // The chain looks like: or(or(or(x, lshr(x,1)), lshr(or(x,lshr(x,1)),2)), ...)
+    // Just find the deepest x
+    while (auto* innerOr = llvm::dyn_cast<llvm::BinaryOperator>(x)) {
+        if (innerOr->getOpcode() != llvm::Instruction::Or) break;
+        x = innerOr->getOperand(0);
+    }
+
+    IdiomMatch match;
+    match.idiom = Idiom::CountLeadingZeros;
+    match.rootInst = inst;
+    match.operands = {x};
+    match.bitWidth = bitWidth;
+    return match;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main idiom detection
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -890,6 +956,10 @@ std::vector<IdiomMatch> detectIdioms(llvm::BasicBlock& bb) {
             continue;
         }
         if (auto m = detectPopCount(&inst)) {
+            results.push_back(std::move(*m));
+            continue;
+        }
+        if (auto m = detectCountLeadingZeros(&inst)) {
             results.push_back(std::move(*m));
             continue;
         }
@@ -996,6 +1066,46 @@ static bool replaceIdiom(IdiomMatch& match) {
         llvm::Value* result = builder.CreateCall(ctpop, {x}, "popcount");
         match.rootInst->replaceAllUsesWith(result);
         return true;
+    }
+
+    case Idiom::CountLeadingZeros: {
+        // Replace bit-smear + popcount CLZ with llvm.ctlz intrinsic
+        llvm::Value* x = match.operands[0];
+        llvm::Function* ctlz = OMSC_GET_INTRINSIC(
+            mod, llvm::Intrinsic::ctlz, {intTy});
+        llvm::Value* falseConst = llvm::ConstantInt::getFalse(ctx);
+        llvm::Value* result = builder.CreateCall(ctlz, {x, falseConst}, "ctlz");
+        match.rootInst->replaceAllUsesWith(result);
+        return true;
+    }
+
+    case Idiom::CountTrailingZeros: {
+        // Replace isolate-lowest-bit with llvm.cttz intrinsic
+        llvm::Value* x = match.operands[0];
+        llvm::Function* cttz = OMSC_GET_INTRINSIC(
+            mod, llvm::Intrinsic::cttz, {intTy});
+        llvm::Value* falseConst = llvm::ConstantInt::getFalse(ctx);
+        llvm::Value* result = builder.CreateCall(cttz, {x, falseConst}, "cttz");
+        match.rootInst->replaceAllUsesWith(result);
+        return true;
+    }
+
+    case Idiom::BitFieldExtract: {
+        // Replace shift-and-mask with a single AND of a more targeted mask
+        // (this helps subsequent passes recognize the pattern)
+        llvm::Value* x = match.operands[0];
+        llvm::Value* shift = match.operands.size() > 1 ? match.operands[1] : nullptr;
+        if (shift) {
+            llvm::Value* shifted = builder.CreateLShr(x, shift, "bfe.shr");
+            uint64_t maskVal = match.bitWidth >= 64
+                ? ~uint64_t(0)
+                : (1ULL << match.bitWidth) - 1;
+            llvm::Value* mask = llvm::ConstantInt::get(intTy, maskVal);
+            llvm::Value* result = builder.CreateAnd(shifted, mask, "bfe.and");
+            match.rootInst->replaceAllUsesWith(result);
+            return true;
+        }
+        return false;
     }
 
     default:

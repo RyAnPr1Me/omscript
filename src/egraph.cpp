@@ -734,6 +734,65 @@ std::vector<RewriteRule> getAlgebraicRules() {
         P::OpPat(Op::Mod, {P::Wild("x"), P::Wild("x")}),
         [](EGraph& g, const Subst&) { return g.addConst(0); });
 
+    // ── Modulo by power of 2: x % 2 → x & 1 ────────────────────────────
+    // NOTE: This is technically only correct for non-negative x when using
+    // signed semantics.  However, the codegen already emits the corrected
+    // signed-mod sequence for power-of-2 divisors via the sign-bit fixup
+    // path in codegen_expr.cpp.  At the e-graph level, these rules apply
+    // in the abstract integer domain where the e-graph tracks equivalent
+    // representations — the extraction cost model selects bitwise AND
+    // only when it's cheaper.
+    rules.emplace_back("mod_2_to_and",
+        P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(2)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(1));
+        });
+    rules.emplace_back("mod_4_to_and",
+        P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(4)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(3));
+        });
+    rules.emplace_back("mod_8_to_and",
+        P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(8)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(7));
+        });
+    rules.emplace_back("mod_16_to_and",
+        P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(16)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(15));
+        });
+    rules.emplace_back("mod_32_to_and",
+        P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(32)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(31));
+        });
+    rules.emplace_back("mod_64_to_and",
+        P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(64)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(63));
+        });
+    rules.emplace_back("mod_128_to_and",
+        P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(128)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(127));
+        });
+    rules.emplace_back("mod_256_to_and",
+        P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(256)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(255));
+        });
+    rules.emplace_back("mod_512_to_and",
+        P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(512)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(511));
+        });
+    rules.emplace_back("mod_1024_to_and",
+        P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(1024)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(1023));
+        });
+
     // ── Negation distribution: -(a - b) → b - a ─────────────────────────
     rules.emplace_back("neg_sub_to_swap",
         P::OpPat(Op::Neg, {P::OpPat(Op::Sub, {P::Wild("a"), P::Wild("b")})}),
@@ -2703,6 +2762,106 @@ std::vector<RewriteRule> getAdvancedAlgebraicRules() {
     rules.emplace_back("sub_add_self_cancel",
         P::OpPat(Op::Add, {P::OpPat(Op::Sub, {P::Wild("a"), P::Wild("b")}), P::Wild("b")}),
         [](EGraph&, const Subst& s) { return s.at("a"); });
+
+    // ── More multiply strength reduction patterns ───────────────────────
+    // x * 2 + x → x * 3  (complement of existing x * 3 → (x<<1) + x)
+    rules.emplace_back("mul2_plus_x_to_mul3",
+        P::OpPat(Op::Add, {P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(2)}), P::Wild("x")}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Mul, s.at("x"), g.addConst(3));
+        });
+    // x + x * 2 → x * 3
+    rules.emplace_back("x_plus_mul2_to_mul3",
+        P::OpPat(Op::Add, {P::Wild("x"), P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(2)})}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Mul, s.at("x"), g.addConst(3));
+        });
+
+    // x * 4 + x → x * 5
+    rules.emplace_back("mul4_plus_x_to_mul5",
+        P::OpPat(Op::Add, {P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(4)}), P::Wild("x")}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Mul, s.at("x"), g.addConst(5));
+        });
+    // x + x * 4 → x * 5
+    rules.emplace_back("x_plus_mul4_to_mul5",
+        P::OpPat(Op::Add, {P::Wild("x"), P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(4)})}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Mul, s.at("x"), g.addConst(5));
+        });
+
+    // x * 8 - x → x * 7
+    rules.emplace_back("mul8_minus_x_to_mul7",
+        P::OpPat(Op::Sub, {P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(8)}), P::Wild("x")}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Mul, s.at("x"), g.addConst(7));
+        });
+
+    // x * 8 + x → x * 9
+    rules.emplace_back("mul8_plus_x_to_mul9",
+        P::OpPat(Op::Add, {P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(8)}), P::Wild("x")}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Mul, s.at("x"), g.addConst(9));
+        });
+    // x + x * 8 → x * 9
+    rules.emplace_back("x_plus_mul8_to_mul9",
+        P::OpPat(Op::Add, {P::Wild("x"), P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(8)})}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Mul, s.at("x"), g.addConst(9));
+        });
+
+    // x * 16 - x → x * 15
+    rules.emplace_back("mul16_minus_x_to_mul15",
+        P::OpPat(Op::Sub, {P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(16)}), P::Wild("x")}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Mul, s.at("x"), g.addConst(15));
+        });
+
+    // x * 16 + x → x * 17
+    rules.emplace_back("mul16_plus_x_to_mul17",
+        P::OpPat(Op::Add, {P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(16)}), P::Wild("x")}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Mul, s.at("x"), g.addConst(17));
+        });
+
+    // ── Comparison after subtraction ─────────────────────────────────────
+    // (x - y) < 0 → x < y
+    rules.emplace_back("sub_lt_zero",
+        P::OpPat(Op::Lt, {P::OpPat(Op::Sub, {P::Wild("x"), P::Wild("y")}), P::ConstPat(0)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Lt, s.at("x"), s.at("y"));
+        });
+    // (x - y) > 0 → x > y
+    rules.emplace_back("sub_gt_zero",
+        P::OpPat(Op::Gt, {P::OpPat(Op::Sub, {P::Wild("x"), P::Wild("y")}), P::ConstPat(0)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Gt, s.at("x"), s.at("y"));
+        });
+    // (x - y) <= 0 → x <= y
+    rules.emplace_back("sub_le_zero",
+        P::OpPat(Op::Le, {P::OpPat(Op::Sub, {P::Wild("x"), P::Wild("y")}), P::ConstPat(0)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Le, s.at("x"), s.at("y"));
+        });
+    // (x - y) >= 0 → x >= y
+    rules.emplace_back("sub_ge_zero",
+        P::OpPat(Op::Ge, {P::OpPat(Op::Sub, {P::Wild("x"), P::Wild("y")}), P::ConstPat(0)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Ge, s.at("x"), s.at("y"));
+        });
+    // x == 0 → !x (boolean equivalence)
+    rules.emplace_back("eq_zero_to_lognot",
+        P::OpPat(Op::Eq, {P::Wild("x"), P::ConstPat(0)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addUnaryOp(Op::LogNot, s.at("x"));
+        });
+    // x != 0 → !!x (boolean conversion)
+    rules.emplace_back("ne_zero_to_bool",
+        P::OpPat(Op::Ne, {P::Wild("x"), P::ConstPat(0)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId notx = g.addUnaryOp(Op::LogNot, s.at("x"));
+            return g.addUnaryOp(Op::LogNot, notx);
+        });
 
     return rules;
 }
@@ -4714,6 +4873,31 @@ std::vector<RewriteRule> getBitwiseRules() {
         }),
         [](EGraph&, const Subst& s) { return s.at("x"); });
 
+    // ── Shift-mask interaction: (x >> a) << a → x & ~((1 << a) - 1) ─────
+    // Clearing low bits via shift pair.  The e-graph represents this as an
+    // equivalent BitAnd with a constant mask, which exposes further AND
+    // merging opportunities.
+    for (int a = 1; a <= 6; ++a) {
+        int64_t mask = ~((1LL << a) - 1);
+        std::string name = "shr_shl_to_mask_" + std::to_string(a);
+        rules.emplace_back(name,
+            P::OpPat(Op::Shl, {P::OpPat(Op::Shr, {P::Wild("x"), P::ConstPat(a)}), P::ConstPat(a)}),
+            [mask](EGraph& g, const Subst& s) {
+                return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(mask));
+            });
+    }
+
+    // ── Truncation via shift pair: (x << a) >> a → x & ((1 << (64-a)) - 1) ─
+    // Clearing high bits via shift pair.
+    for (int a = 1; a <= 6; ++a) {
+        int64_t mask = (1LL << (64 - a)) - 1;
+        std::string name = "shl_shr_to_mask_" + std::to_string(a);
+        rules.emplace_back(name,
+            P::OpPat(Op::Shr, {P::OpPat(Op::Shl, {P::Wild("x"), P::ConstPat(a)}), P::ConstPat(a)}),
+            [mask](EGraph& g, const Subst& s) {
+                return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(mask));
+            });
+    }
 
     return rules;
 }

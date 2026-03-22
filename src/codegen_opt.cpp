@@ -69,6 +69,9 @@
 #include <llvm/Transforms/Scalar/SimpleLoopUnswitch.h>
 #include <llvm/Transforms/Scalar/SpeculativeExecution.h>
 #include <llvm/Transforms/Scalar/DivRemPairs.h>
+#include <llvm/Transforms/Scalar/Reassociate.h>
+#include <llvm/Transforms/Scalar/EarlyCSE.h>
+#include <llvm/Transforms/Scalar/SCCP.h>
 #include <llvm/Transforms/Utils.h>
 #include <llvm/Transforms/Utils/Cloning.h>
 #include <llvm/Transforms/Vectorize/VectorCombine.h>
@@ -345,6 +348,28 @@ void CodeGenerator::runOptimizationPasses() {
             [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel) {
 #endif
             MPM.addPass(llvm::InferFunctionAttrsPass());
+        });
+    }
+
+    // At O1+, register Reassociate and EarlyCSE early in the function pipeline.
+    // Reassociate canonicalizes expression trees (e.g., (a+b)+c → a+(b+c))
+    // enabling better CSE and constant folding.  EarlyCSE eliminates trivially
+    // redundant computations before the heavier optimization passes run,
+    // reducing IR size and compilation time for the downstream pipeline.
+    if (optimizationLevel >= OptimizationLevel::O1) {
+        PB.registerPeepholeEPCallback([](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) {
+            FPM.addPass(llvm::ReassociatePass());
+            FPM.addPass(llvm::EarlyCSEPass(/*UseMemorySSA=*/false));
+        });
+    }
+
+    // At O2+, register SCCP (Sparse Conditional Constant Propagation) early
+    // in the scalar optimizer to discover constants that flow through control
+    // flow edges.  SCCP can prove that some branches are never taken and that
+    // some PHI values are constant, enabling dead code elimination upstream.
+    if (optimizationLevel >= OptimizationLevel::O2) {
+        PB.registerScalarOptimizerLateEPCallback([](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) {
+            FPM.addPass(llvm::SCCPPass());
         });
     }
 
