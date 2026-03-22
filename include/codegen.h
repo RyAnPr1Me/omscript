@@ -307,7 +307,8 @@ class CodeGenerator {
     /// metadata so LLVM can hoist/CSE them aggressively.
     std::unordered_set<std::string> prefetchedImmutVars_;
 
-    /// Variables declared with `register` keyword — hint for register allocation.
+    /// Variables declared with `register` keyword — forces register allocation
+    /// by running mem2reg on the function after codegen.
     std::unordered_set<std::string> registerVars_;
 
     /// Variables with SIMD vector types for operator dispatch.

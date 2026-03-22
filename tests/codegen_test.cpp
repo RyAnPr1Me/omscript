@@ -6749,6 +6749,22 @@ TEST(CodegenTest, RegisterVarReassign) {
     ASSERT_NE(mod, nullptr);
 }
 
+TEST(CodegenTest, RegisterVarForcesPromotion) {
+    // At O0, register var should still produce zero allocas because
+    // mem2reg is forced after codegen for functions with register vars.
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { register var x = 0; x = x + 1; return x; }", codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("main");
+    ASSERT_NE(fn, nullptr);
+    unsigned allocaCount = 0;
+    for (auto& BB : *fn)
+        for (auto& I : BB)
+            if (llvm::isa<llvm::AllocaInst>(I))
+                ++allocaCount;
+    EXPECT_EQ(allocaCount, 0u);
+}
+
 // ===========================================================================
 // **= and ??= compound assignment
 // ===========================================================================

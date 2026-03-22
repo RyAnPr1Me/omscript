@@ -470,10 +470,10 @@ x = 10;    // ERROR: Cannot modify constant 'x'
 
 ### 5.3 Register Variables
 
-The `register` keyword hints that a variable should be kept in a CPU register for maximum performance. LLVM's SROA/mem2reg passes will promote these allocas to SSA registers when possible. Register variables are **mutable** — the keyword is an optimization hint, not an immutability guarantee.
+The `register` keyword forces the compiler to promote a variable into a CPU register. A mem2reg pass is run immediately after code generation for any function containing register variables, guaranteeing that the annotated allocas are promoted to SSA registers regardless of the global optimization level.  Register variables are **mutable** — the keyword forces register allocation, not immutability.
 
 ```javascript
-register var counter = 0;         // Hint: keep in register
+register var counter = 0;         // Forced into a CPU register
 register var acc: float = 0.0;    // Typed register variable
 counter = counter + 1;            // Reassignment is allowed
 ```

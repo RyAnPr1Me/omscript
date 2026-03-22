@@ -2681,6 +2681,17 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
                                          "Function verification failed for '" + func->name + "': " + errorStr});
     }
 
+    // Force register promotion for functions that use the `register` keyword.
+    // Run mem2reg immediately so register-annotated allocas are promoted to
+    // SSA registers regardless of the global optimization level.
+    if (!registerVars_.empty()) {
+        llvm::legacy::FunctionPassManager fpm(module.get());
+        fpm.add(llvm::createPromoteMemoryToRegisterPass());
+        fpm.doInitialization();
+        fpm.run(*function);
+        fpm.doFinalization();
+    }
+
     inOptMaxFunction = false;
 
     return function;

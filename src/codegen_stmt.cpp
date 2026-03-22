@@ -88,11 +88,12 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
 
     llvm::AllocaInst* alloca = createEntryBlockAlloca(function, stmt->name, allocaType);
 
-    // Register hint: set high alignment to encourage register promotion.
-    // LLVM's SROA/mem2reg will promote well-aligned scalar allocas to SSA
-    // registers when possible.  The variable remains mutable — `register`
-    // is an optimization hint, not an immutability guarantee (matching C
-    // semantics).
+    // Register keyword: force the variable into a CPU register.
+    // We set high alignment to facilitate SROA/mem2reg promotion and track the
+    // variable so that a mem2reg pass is run on this function immediately after
+    // codegen, guaranteeing the alloca is promoted to an SSA register
+    // regardless of the global optimization level.  The variable remains
+    // mutable — `register` forces register allocation, not immutability.
     if (stmt->isRegister) {
         registerVars_.insert(stmt->name);
         if (allocaType->isIntegerTy() || allocaType->isDoubleTy() || allocaType->isFloatTy())

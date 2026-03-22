@@ -8,8 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [3.0.0] - 2026-03-22
 
 ### Changed
-- **`register` keyword semantics** — `register var` is now a mutable optimization hint (matching C semantics) rather than an immutability guarantee. Variables declared with `register` can be reassigned; the keyword only provides alignment hints to encourage LLVM's SROA/mem2reg promotion to CPU registers.
-- **Documentation corrections** — Updated built-in function count from 92 to 119 across README.md and LANGUAGE_REFERENCE.md; fixed stale compiler version references
+- **`register` keyword forces register allocation** — `register var` now runs an immediate mem2reg pass after function codegen, guaranteeing that annotated variables are promoted to SSA registers regardless of the global optimization level. Variables remain mutable — the keyword forces register allocation, not immutability.
+- **Documentation corrections** — Updated built-in function count from 92 to 119 across README.md and LANGUAGE_REFERENCE.md; fixed stale compiler version references; documented `**=` and `??=` compound assignment operators
 - **Version bump** to 3.0.0
 
 ### Fixed
