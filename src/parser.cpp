@@ -1015,7 +1015,8 @@ std::unique_ptr<Expression> Parser::parseAssignment() {
     if (match(TokenType::PLUS_ASSIGN) || match(TokenType::MINUS_ASSIGN) || match(TokenType::STAR_ASSIGN) ||
         match(TokenType::SLASH_ASSIGN) || match(TokenType::PERCENT_ASSIGN) || match(TokenType::AMPERSAND_ASSIGN) ||
         match(TokenType::PIPE_ASSIGN) || match(TokenType::CARET_ASSIGN) || match(TokenType::LSHIFT_ASSIGN) ||
-        match(TokenType::RSHIFT_ASSIGN)) {
+        match(TokenType::RSHIFT_ASSIGN) || match(TokenType::STAR_STAR_ASSIGN) ||
+        match(TokenType::NULL_COALESCE_ASSIGN)) {
         const TokenType opType = tokens[current - 1].type;
         const std::string opLexeme = tokens[current - 1].lexeme;
 
@@ -1051,6 +1052,12 @@ std::unique_ptr<Expression> Parser::parseAssignment() {
             break;
         case TokenType::RSHIFT_ASSIGN:
             binOp = ">>";
+            break;
+        case TokenType::STAR_STAR_ASSIGN:
+            binOp = "**";
+            break;
+        case TokenType::NULL_COALESCE_ASSIGN:
+            binOp = "??";
             break;
         default:
             error("Unknown compound assignment operator: " + opLexeme);

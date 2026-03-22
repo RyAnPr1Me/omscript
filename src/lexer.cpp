@@ -469,7 +469,12 @@ std::vector<Token> Lexer::tokenize() {
         case '*':
             if (peek() == '*') {
                 advance();
-                tokens.push_back(makeToken(TokenType::STAR_STAR, "**"));
+                if (peek() == '=') {
+                    advance();
+                    tokens.push_back(makeToken(TokenType::STAR_STAR_ASSIGN, "**="));
+                } else {
+                    tokens.push_back(makeToken(TokenType::STAR_STAR, "**"));
+                }
             } else if (peek() == '=') {
                 advance();
                 tokens.push_back(makeToken(TokenType::STAR_ASSIGN, "*="));
@@ -523,7 +528,12 @@ std::vector<Token> Lexer::tokenize() {
         case '?':
             if (peek() == '?') {
                 advance();
-                tokens.push_back(makeToken(TokenType::NULL_COALESCE, "??"));
+                if (peek() == '=') {
+                    advance();
+                    tokens.push_back(makeToken(TokenType::NULL_COALESCE_ASSIGN, "??="));
+                } else {
+                    tokens.push_back(makeToken(TokenType::NULL_COALESCE, "??"));
+                }
             } else {
                 tokens.push_back(makeToken(TokenType::QUESTION, "?"));
             }
