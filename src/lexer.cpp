@@ -781,7 +781,7 @@ void Lexer::scanInterpolatedString(std::vector<Token>& tokens) {
                 }
             }
             if (isAtEnd()) {
-                lexError("Unterminated expression in interpolated string", startLine, startColumn);
+                lexError("Unterminated expression in interpolated string: missing closing '}'", startLine, startColumn);
             }
             advance(); // skip closing '}'
             segments.push_back({false, exprText});

@@ -926,8 +926,8 @@ void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
     if (auto* condConst = llvm::dyn_cast<llvm::ConstantInt>(condVal)) {
         const int64_t condIntVal = condConst->getSExtValue();
 
-        // Validate all case values first (reject floats, require constants).
-        auto validateCaseVal = [&](Expression* expr) {
+        // Validate all case values first (reject floats).
+        auto validateCaseType = [&](Expression* expr) {
             llvm::Value* v = generateExpression(expr);
             if (v->getType()->isDoubleTy()) {
                 codegenError("case value must be an integer constant, not a float", expr);
@@ -936,9 +936,9 @@ void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
         for (auto& sc : stmt->cases) {
             if (sc.isDefault)
                 continue;
-            validateCaseVal(sc.value.get());
+            validateCaseType(sc.value.get());
             for (auto& ev : sc.values) {
-                validateCaseVal(ev.get());
+                validateCaseType(ev.get());
             }
         }
 
