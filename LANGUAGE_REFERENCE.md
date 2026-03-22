@@ -1,6 +1,6 @@
 # OmScript Language Reference
 
-> **Version:** 2.8.0  
+> **Version:** 2.9.0  
 > **Compiler:** `omsc` — OmScript Compiler v2.8.0  
 > **Standard:** C++17 · LLVM Backend · Ahead-of-Time Compilation  
 > **License:** See repository root
@@ -212,6 +212,14 @@ Variable, parameter, and function return type declarations may include type anno
 | `string` | `i64` | String pointer (stored as i64) |
 | *struct name* | `i64` | Struct pointer (stored as i64) |
 | *type*`[]` | `i64` | Array pointer (stored as i64) |
+| `f32x4` | `<4 x float>` | 4-element f32 SIMD vector |
+| `f32x8` | `<8 x float>` | 8-element f32 SIMD vector |
+| `f64x2` | `<2 x double>` | 2-element f64 SIMD vector |
+| `f64x4` | `<4 x double>` | 4-element f64 SIMD vector |
+| `i32x4` | `<4 x i32>` | 4-element i32 SIMD vector |
+| `i32x8` | `<8 x i32>` | 8-element i32 SIMD vector |
+| `i64x2` | `<2 x i64>` | 2-element i64 SIMD vector |
+| `i64x4` | `<4 x i64>` | 4-element i64 SIMD vector |
 
 Unsigned type annotations (`u8`, `u16`, `u32`, `u64`) use the same LLVM integer types as their signed counterparts but apply `zeroext` instead of `signext` at function boundaries. This enables the optimizer to prove non-negativity, unlocking more aggressive strength reduction (e.g., `srem` → `urem`, `sdiv` → `udiv`).
 
@@ -223,6 +231,49 @@ var n: u64 = 100;             // unsigned i64 (zeroext at boundaries)
 fn add(a: float, b: float) -> float { return a + b; }    // double params & return
 fn process(pts: Point[]) -> Point { return pts[0]; }     // struct types
 fn count(x: u64) -> u64 { return x + 1; }               // unsigned params & return
+```
+
+#### 3.4.1 SIMD Vector Types
+
+SIMD (Single Instruction, Multiple Data) vector types enable handwritten SIMD programming. Variables declared with a SIMD type annotation map directly to LLVM fixed-vector types, generating native vector instructions (SSE, AVX, NEON, etc.) on supported hardware.
+
+**Vector initialization** uses array literal syntax:
+
+```javascript
+var a: f32x4 = [1.0, 2.0, 3.0, 4.0];   // 4 floats
+var b: i32x4 = [10, 20, 30, 40];        // 4 integers
+var c: f64x2 = [1.5, 2.5];              // 2 doubles
+```
+
+**Vector arithmetic** uses the standard operators. All operations are element-wise:
+
+```javascript
+var sum: f32x4 = a + b;    // element-wise add
+var diff: f32x4 = a - b;   // element-wise subtract
+var prod: f32x4 = a * b;   // element-wise multiply
+var quot: f32x4 = a / b;   // element-wise divide
+```
+
+**Scalar-to-vector broadcast** (splat): when a scalar operand is mixed with a vector operand, the scalar is automatically broadcast to all lanes:
+
+```javascript
+var scaled: f32x4 = a * 2.0;   // multiply all elements by 2.0
+```
+
+**Element access** via indexing:
+
+```javascript
+var first = v[0];    // extract element (returns standard float/int)
+v[2] = 99;           // insert element at index 2
+```
+
+**Bitwise operations** work on integer vectors (`i32x4`, `i32x8`, `i64x2`, `i64x4`):
+
+```javascript
+var x: i32x4 = [0xFF, 0x0F, 0xF0, 0x00];
+var y: i32x4 = [0x0F, 0x0F, 0x0F, 0x0F];
+var masked: i32x4 = x & y;   // bitwise AND
+var shifted: i32x4 = x << 4; // left shift all lanes
 ```
 
 ---
@@ -415,6 +466,15 @@ Attempting to reassign a constant produces a compile error:
 ```javascript
 const x = 5;
 x = 10;    // ERROR: Cannot modify constant 'x'
+```
+
+### 5.3 Register Variables
+
+The `register` keyword hints that a variable should be kept in a CPU register for maximum performance. LLVM's SROA/mem2reg passes will promote these allocas to SSA registers when possible.
+
+```javascript
+register var counter = 0;         // Hint: keep in register
+register var acc: float = 0.0;    // Typed register variable
 ```
 
 ### 5.3 Assignment

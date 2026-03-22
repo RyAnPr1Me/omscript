@@ -5,6 +5,33 @@ All notable changes to the OmScript compiler will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.9.0] - 2026-03-22
+
+### Added
+- **SIMD vector types** for handwritten SIMD programming:
+  - 8 vector type annotations: `f32x4`, `f32x8`, `f64x2`, `f64x4`, `i32x4`, `i32x8`, `i64x2`, `i64x4`
+  - Map directly to LLVM fixed-vector types (`<4 x float>`, `<2 x double>`, etc.)
+  - Full arithmetic operator support: `+`, `-`, `*`, `/`, `%` on vectors
+  - Bitwise operators on integer vectors: `&`, `|`, `^`, `<<`, `>>`
+  - Scalar-to-vector broadcast (splat) when mixing scalar and vector operands
+  - Element access via indexing: `v[i]` (extract), `v[i] = x` (insert)
+  - Array literal initialization: `var v: f32x4 = [1.0, 2.0, 3.0, 4.0];`
+- **`register` keyword** for register allocation hints:
+  - Syntax: `register var x = 0;` — hints that the variable should be kept in a CPU register
+  - Sets high alignment on allocas to encourage LLVM's SROA/mem2reg promotion to SSA registers
+- **`**=` compound assignment operator** — power-assign (e.g., `x **= 3` is `x = x ** 3`)
+- **`??=` compound assignment operator** — null-coalesce-assign (e.g., `x ??= 42` assigns 42 if x is falsy)
+- New integration tests: `simd_register_test.om`, `compound_assign_test.om`
+- Unit tests for all new features (lexer, parser, codegen)
+
+### Fixed
+- **Struct field compound assignment** — `s.x += 1`, `s.y *= 2`, etc. now work correctly. Previously failed with cryptic "Invalid compound assignment target" error because the parser only handled identifiers and array elements, not struct field access expressions.
+- **Error messages** — improved diagnostic messages for invalid assignment and compound assignment targets, now listing supported forms (variables, array elements, struct fields)
+
+### Changed
+- **Refactored argument validation** in `codegen_builtins.cpp` — extracted `validateArgCount()` helper to replace 107 duplicated argument-count check blocks, reducing boilerplate by ~400 lines
+- **Version bump** to 2.9.0
+
 ## [2.8.0] - 2026-03-22
 
 ### Added
