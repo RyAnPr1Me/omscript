@@ -575,10 +575,11 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             } else if (startCI->getSExtValue() >= 0) {
                 // Common patterns: for (i in 0...n), for (i in 1...n), etc.
                 // When start is a non-negative constant and end is variable,
-                // the loop is virtually always ascending.  Step defaults to +1;
-                // if end <= start, the condition (i < end) fails immediately
-                // and the loop body never executes.  Descending ranges from
-                // non-negative starts require explicit step syntax (start...end...-1).
+                // the loop is virtually always ascending with the default
+                // step of +1.  If end <= start, the condition (i < end) fails
+                // immediately and the loop body never executes.  Descending
+                // ranges from non-negative starts require explicit step
+                // syntax (start...end...-1).
                 ascending = true;
             }
         }
@@ -796,7 +797,11 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             // (the unroller refuses to fully unroll unbounded loops).  Use a
             // concrete unroll.count instead, giving LLVM a target that matches
             // GCC's aggressive unrolling for FP-heavy loops.
-            unsigned unrollCount = inOptMaxFunction ? 8 : 4;
+            // OPTMAX uses 8 to hide FP/call latency through ILP; regular
+            // functions use 4 to balance ILP gains vs I-cache pressure.
+            static constexpr unsigned kOptMaxUnrollCount = 8;
+            static constexpr unsigned kDefaultUnrollCount = 4;
+            unsigned unrollCount = inOptMaxFunction ? kOptMaxUnrollCount : kDefaultUnrollCount;
             loopMDs.push_back(llvm::MDNode::get(
                 *context,
                 {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
