@@ -533,10 +533,13 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* x = generateExpression(expr->arguments[0].get());
         // Use the llvm.sqrt intrinsic which maps directly to hardware sqrtsd/sqrtss
         // instructions on x86, producing results in a single cycle on modern CPUs.
-        // Convert to double, compute sqrt, then truncate back to integer.
+        bool inputIsDouble = x->getType()->isDoubleTy();
         llvm::Value* fval = ensureFloat(x);
         llvm::Function* sqrtIntrinsic = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::sqrt, {getFloatType()});
         llvm::Value* result = builder->CreateCall(sqrtIntrinsic, {fval}, "sqrt.result");
+        // Return double when input is double, truncate to integer only for integer input.
+        if (inputIsDouble)
+            return result;
         return builder->CreateFPToSI(result, getDefaultType(), "sqrt.int");
     }
 
