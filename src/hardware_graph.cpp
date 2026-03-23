@@ -2192,6 +2192,16 @@ static void applyTargetAttributes(llvm::Function& func,
             addF("+avx512vl");
             addF("+avx512bw");
             addF("+avx512dq");
+        } else {
+            // Explicitly disable AVX-512 when the profile uses 256-bit vectors.
+            // Some CPUs (e.g. znver4) include AVX-512 in their default feature
+            // set, but run AVX-512 double-pumped from 256-bit units.  The
+            // target-cpu attribute alone would enable AVX-512 code generation;
+            // we must negate it here to match the actual vector width.
+            addF("-avx512f");
+            addF("-avx512vl");
+            addF("-avx512bw");
+            addF("-avx512dq");
         }
         break;
 
