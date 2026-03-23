@@ -18,6 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **4 ternary common-subexpression factoring rules:** `cond ? (a+c) : (b+c) → (cond ? a : b) + c`, and similarly for Sub, Mul, Neg — hoists common operations out of branches
   - **4 complement-based bitwise rules:** `(~a) & (a | b) → (~a) & b`, `(~a) | (a & b) → (~a) | b`, and commuted variants — simplifies complement interactions using Boolean algebra
   - **4 additional commuted variants** for the above rules
+- **13 additional e-graph rules:**
+  - **5 Sqrt identities:** `sqrt(0)→0`, `sqrt(1)→1`, `sqrt(x)*sqrt(x)→x`, `sqrt(x²)→x`, `sqrt(x)*sqrt(y)→sqrt(x*y)`
+  - **5 Power rules:** `x^1→x`, `x^(-1)→1/x`, `x^a * x^b → x^(a+b)`, `(x^a)^b → x^(a*b)`, `x^a / x^b → x^(a-b)`
+  - **1 relational division rule:** `x / C → x >> log2(C)` for any power-of-2 constant
+  - **2 guard-predicated rules** using the new relational infrastructure
 - **4 new HGOE CPU microarchitecture profiles:**
   - **AWS Graviton3** (Arm Neoverse V1, 8-wide, SVE 256-bit, DDR5)
   - **AWS Graviton4** (Arm Neoverse V2, 8-wide, SVE2 256-bit, 2 MB L2, DDR5-5600)
@@ -27,6 +32,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - **E-graph `applyRules()` now checks guard predicates** before applying each rewrite match, enabling fine-grained relational filtering without false merges
 - **AMD Zen 5 HGOE scheduling** now uses its own dedicated profile function (`zen5Profile()`) instead of a minimal derivation from Zen 4, giving more accurate instruction scheduling, port assignment, and throughput modelling
+- **HGOE scheduler uses alias-aware memory dependencies** instead of conservatively serialising all memory operations — independent loads can now execute in parallel on separate load ports, significantly improving IPC on wide-issue CPUs (Graviton3/4, Zen 5, Lunar Lake)
+- **HGOE scheduler prioritises loads** in the scheduling sort to hide memory latency — loads are scheduled as early as possible before dependent ALU operations
 
 ## [3.2.0] - 2026-03-22
 

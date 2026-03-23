@@ -2310,14 +2310,121 @@ static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
         }
     }
 
-    // Memory ordering (conservative): each memory op follows the previous one.
+    // Memory ordering — alias-aware dependency analysis.
+    // Instead of conservatively chaining ALL memory ops sequentially, we
+    // separate loads and stores and only add edges where a true hazard
+    // exists.  Independent loads can execute in parallel on different
+    // load ports, significantly improving IPC on wide-issue CPUs.
+    //
+    // Hazards modelled:
+    //   WAW (Store → Store): output dependence on potentially-aliasing addrs
+    //   RAW (Store → Load):  true dependence (load must see store's value)
+    //   WAR (Load  → Store): anti-dependence (load must complete before
+    //                        store overwrites the same location)
+    //
+    // Load → Load: no dependency needed (reads never conflict).
     {
-        int lastMem = -1;
+        // Helper: extract the memory pointer operand, or nullptr.
+        auto getMemPtr = [](const llvm::Instruction* inst) -> const llvm::Value* {
+            if (const auto* ld = llvm::dyn_cast<llvm::LoadInst>(inst))
+                return ld->getPointerOperand();
+            if (const auto* st = llvm::dyn_cast<llvm::StoreInst>(inst))
+                return st->getPointerOperand();
+            return nullptr;
+        };
+
+        // Alias query: returns false when two pointers are provably
+        // non-aliasing, allowing the dependency to be elided.
+        auto mayAlias = [&](const llvm::Instruction* a,
+                            const llvm::Instruction* b) -> bool {
+            const llvm::Value* ptrA = getMemPtr(a);
+            const llvm::Value* ptrB = getMemPtr(b);
+            if (!ptrA || !ptrB) return true;        // conservative
+            if (ptrA == ptrB)   return true;         // definite alias
+
+            // GEP with constant offsets from the same base → no alias.
+            const auto* gepA = llvm::dyn_cast<llvm::GetElementPtrInst>(ptrA);
+            const auto* gepB = llvm::dyn_cast<llvm::GetElementPtrInst>(ptrB);
+            if (gepA && gepB &&
+                gepA->getPointerOperand() == gepB->getPointerOperand() &&
+                gepA->getNumIndices() == 1 && gepB->getNumIndices() == 1) {
+                const auto* idxA = llvm::dyn_cast<llvm::ConstantInt>(gepA->getOperand(1));
+                const auto* idxB = llvm::dyn_cast<llvm::ConstantInt>(gepB->getOperand(1));
+                if (idxA && idxB && idxA->getSExtValue() != idxB->getSExtValue())
+                    return false;  // different constant offsets → no alias
+            }
+
+            // Distinct local allocations / arguments cannot alias.
+            auto underlyingBase = [](const llvm::Value* v) -> const llvm::Value* {
+                while (const auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(v))
+                    v = gep->getPointerOperand();
+                return v;
+            };
+            const llvm::Value* baseA = underlyingBase(ptrA);
+            const llvm::Value* baseB = underlyingBase(ptrB);
+            if (baseA != baseB) {
+                bool allocA = llvm::isa<llvm::AllocaInst>(baseA) ||
+                              llvm::isa<llvm::Argument>(baseA);
+                bool allocB = llvm::isa<llvm::AllocaInst>(baseB) ||
+                              llvm::isa<llvm::Argument>(baseB);
+                if (allocA && allocB) return false;
+            }
+
+            return true;  // conservative fallback
+        };
+
+        // Collect memory instruction indices by type.
+        std::vector<unsigned> stores, loads, otherMem;
         for (unsigned i = 0; i < n; ++i) {
             if (!hasMemoryEffect(moveable[i])) continue;
-            if (lastMem >= 0)
-                addEdge(static_cast<unsigned>(lastMem), i);
-            lastMem = static_cast<int>(i);
+            if (llvm::isa<llvm::StoreInst>(moveable[i]))
+                stores.push_back(i);
+            else if (llvm::isa<llvm::LoadInst>(moveable[i]))
+                loads.push_back(i);
+            else
+                otherMem.push_back(i); // atomics, fences, calls
+        }
+
+        // WAW: Store → Store (if aliasing).
+        for (size_t si = 0; si < stores.size(); ++si)
+            for (size_t sj = si + 1; sj < stores.size(); ++sj)
+                if (mayAlias(moveable[stores[si]], moveable[stores[sj]]))
+                    addEdge(stores[si], stores[sj]);
+
+        // RAW: Store → Load (if aliasing).
+        for (unsigned stIdx : stores)
+            for (unsigned ldIdx : loads)
+                if (ldIdx > stIdx && mayAlias(moveable[stIdx], moveable[ldIdx]))
+                    addEdge(stIdx, ldIdx);
+
+        // WAR: Load → Store (if aliasing).
+        for (unsigned ldIdx : loads)
+            for (unsigned stIdx : stores)
+                if (stIdx > ldIdx && mayAlias(moveable[ldIdx], moveable[stIdx]))
+                    addEdge(ldIdx, stIdx);
+
+        // Atomics / fences / calls are serialisation barriers — chain them
+        // with all preceding and succeeding memory ops.
+        int lastBarrier = -1;
+        for (unsigned i = 0; i < n; ++i) {
+            if (!hasMemoryEffect(moveable[i])) continue;
+            bool isBarrier = !llvm::isa<llvm::LoadInst>(moveable[i]) &&
+                             !llvm::isa<llvm::StoreInst>(moveable[i]);
+            if (isBarrier) {
+                // All prior memory ops must complete before this barrier.
+                for (unsigned si : stores)
+                    if (si < i) addEdge(si, i);
+                for (unsigned li : loads)
+                    if (li < i) addEdge(li, i);
+                // This barrier must complete before later memory ops.
+                for (unsigned si : stores)
+                    if (si > i) addEdge(i, si);
+                for (unsigned li : loads)
+                    if (li > i) addEdge(i, li);
+                if (lastBarrier >= 0)
+                    addEdge(static_cast<unsigned>(lastBarrier), i);
+                lastBarrier = static_cast<int>(i);
+            }
         }
     }
 
@@ -2429,10 +2536,13 @@ static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
 
         // Sort ready instructions for maximum throughput:
         //   Primary   — critical path remaining (latency hiding)
-        //   Secondary — port pressure (schedule bottleneck resource first)
-        //   Tertiary  — register-freeing score (prefer instructions that kill
+        //   Secondary — loads first (schedule early to hide memory latency;
+        //               loads have the longest pipeline of any common op and
+        //               may miss in cache, so starting them early is critical)
+        //   Tertiary  — port pressure (schedule bottleneck resource first)
+        //   Quaternary — register-freeing score (prefer instructions that kill
         //               live values, reducing register pressure)
-        //   Quaternary — instruction index (deterministic tie-break)
+        //   Quinary   — instruction index (deterministic tie-break)
         //
         // Register-freeing score: count of predecessors whose only remaining
         // not-yet-scheduled user is this instruction (scheduling it frees the
@@ -2452,6 +2562,11 @@ static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
         std::sort(ready.begin(), ready.end(), [&](unsigned a, unsigned b) {
             if (critPath[a] != critPath[b])
                 return critPath[a] > critPath[b];
+            // Loads first: schedule early to hide memory latency.
+            bool isLoadA = llvm::isa<llvm::LoadInst>(moveable[a]);
+            bool isLoadB = llvm::isa<llvm::LoadInst>(moveable[b]);
+            if (isLoadA != isLoadB)
+                return isLoadA;  // loads before non-loads
             OpClass opA = classifyOp(moveable[a]);
             OpClass opB = classifyOp(moveable[b]);
             int rtA = (opA == OpClass::IntMul) ? kIntMulPortKey

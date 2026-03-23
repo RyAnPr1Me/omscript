@@ -2887,6 +2887,112 @@ std::vector<RewriteRule> getAdvancedAlgebraicRules() {
             return g.addUnaryOp(Op::LogNot, notx);
         });
 
+    // ─────────────────────────────────────────────────────────────────────
+    // Sqrt identities
+    // ─────────────────────────────────────────────────────────────────────
+
+    // sqrt(1) → 1
+    rules.emplace_back("sqrt_one",
+        P::OpPat(Op::Sqrt, {P::ConstPat(1)}),
+        [](EGraph& g, const Subst&) { return g.addConst(1); });
+
+    // sqrt(0) → 0
+    rules.emplace_back("sqrt_zero",
+        P::OpPat(Op::Sqrt, {P::ConstPat(0)}),
+        [](EGraph& g, const Subst&) { return g.addConst(0); });
+
+    // sqrt(x) * sqrt(x) → x
+    rules.emplace_back("sqrt_squared",
+        P::OpPat(Op::Mul, {
+            P::OpPat(Op::Sqrt, {P::Wild("x")}),
+            P::OpPat(Op::Sqrt, {P::Wild("x")})
+        }),
+        [](EGraph&, const Subst& s) { return s.at("x"); });
+
+    // sqrt(x^2) → x  (assuming x >= 0; valid for the unsigned domain)
+    rules.emplace_back("sqrt_of_square",
+        P::OpPat(Op::Sqrt, {P::OpPat(Op::Pow, {P::Wild("x"), P::ConstPat(2)})}),
+        [](EGraph&, const Subst& s) { return s.at("x"); });
+
+    // sqrt(x) * sqrt(y) → sqrt(x * y)
+    rules.emplace_back("sqrt_mul_to_sqrt_of_mul",
+        P::OpPat(Op::Mul, {
+            P::OpPat(Op::Sqrt, {P::Wild("x")}),
+            P::OpPat(Op::Sqrt, {P::Wild("y")})
+        }),
+        [](EGraph& g, const Subst& s) {
+            ClassId xy = g.addBinOp(Op::Mul, s.at("x"), s.at("y"));
+            return g.addUnaryOp(Op::Sqrt, xy);
+        });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Additional power rules
+    // ─────────────────────────────────────────────────────────────────────
+
+    // x^1 → x
+    rules.emplace_back("pow_one",
+        P::OpPat(Op::Pow, {P::Wild("x"), P::ConstPat(1)}),
+        [](EGraph&, const Subst& s) { return s.at("x"); });
+
+    // x^(-1) → 1 / x
+    rules.emplace_back("pow_neg1_to_div",
+        P::OpPat(Op::Pow, {P::Wild("x"), P::ConstPat(-1)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Div, g.addConst(1), s.at("x"));
+        });
+
+    // x^a * x^b → x^(a + b)  (power product rule)
+    rules.emplace_back("pow_mul_same_base",
+        P::OpPat(Op::Mul, {
+            P::OpPat(Op::Pow, {P::Wild("x"), P::Wild("a")}),
+            P::OpPat(Op::Pow, {P::Wild("x"), P::Wild("b")})
+        }),
+        [](EGraph& g, const Subst& s) {
+            ClassId ab = g.addBinOp(Op::Add, s.at("a"), s.at("b"));
+            return g.addBinOp(Op::Pow, s.at("x"), ab);
+        });
+
+    // (x^a)^b → x^(a * b)  (power of power rule)
+    rules.emplace_back("pow_of_pow",
+        P::OpPat(Op::Pow, {P::OpPat(Op::Pow, {P::Wild("x"), P::Wild("a")}), P::Wild("b")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId ab = g.addBinOp(Op::Mul, s.at("a"), s.at("b"));
+            return g.addBinOp(Op::Pow, s.at("x"), ab);
+        });
+
+    // x^a / x^b → x^(a - b)  (power quotient rule)
+    rules.emplace_back("pow_div_same_base",
+        P::OpPat(Op::Div, {
+            P::OpPat(Op::Pow, {P::Wild("x"), P::Wild("a")}),
+            P::OpPat(Op::Pow, {P::Wild("x"), P::Wild("b")})
+        }),
+        [](EGraph& g, const Subst& s) {
+            ClassId amb = g.addBinOp(Op::Sub, s.at("a"), s.at("b"));
+            return g.addBinOp(Op::Pow, s.at("x"), amb);
+        });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Relational division: x / C → x >> log2(C) when C is positive pow-of-2
+    // (valid for unsigned / non-negative values — the e-graph is used at the
+    //  algebraic level where values are abstract, and LLVM will legalise the
+    //  shift to the correct signed/unsigned variant.)
+    // ─────────────────────────────────────────────────────────────────────
+    rules.emplace_back("div_any_pow2_to_shr",
+        P::OpPat(Op::Div, {P::Wild("x"), P::Wild("c")}),
+        [](EGraph& g, const Subst& s) {
+            auto cv = g.getConstValue(s.at("c"));
+            long long v = *cv;
+            int shift = 0;
+            while (v > 1) { v >>= 1; ++shift; }
+            return g.addBinOp(Op::Shr, s.at("x"), g.addConst(shift));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto cv = g.getConstValue(s.at("c"));
+            if (!cv) return false;
+            long long v = *cv;
+            return v > 1 && (v & (v - 1)) == 0;
+        });
+
     return rules;
 }
 
