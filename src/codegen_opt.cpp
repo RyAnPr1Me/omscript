@@ -1079,6 +1079,12 @@ void CodeGenerator::optimizeOptMaxFunctions() {
         if (!optMaxFunctions.count(std::string(name)))
             continue;
         func.addFnAttr(llvm::Attribute::NoUnwind);
+        // WillReturn: OPTMAX functions always return (no infinite loops or
+        // exceptions), enabling LLVM to speculate calls and eliminate dead ones.
+        func.addFnAttr(llvm::Attribute::WillReturn);
+        // NoSync: OPTMAX functions don't synchronize (no atomics, locks, or
+        // thread-related operations), enabling aggressive reordering.
+        func.addFnAttr(llvm::Attribute::NoSync);
         // Mark small OPTMAX helpers as always-inline candidates
         if (func.getInstructionCount() < kAlwaysInlineThreshold) {
             func.addFnAttr(llvm::Attribute::AlwaysInline);

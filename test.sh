@@ -60,24 +60,24 @@ BENCH_DESC=(
 # Input sizes – tuned so each test takes ~30-200 ms in C.
 # Previous values were far too large (fib(44) alone could take 30+ sec).
 BENCH_N=(
-    2000000   #  0  integer_math
-    2000000   #  1  array_push
-    1000000   #  2  array_hof
-    50000     #  3  string_concat
-    2000000   #  4  string_ops
-    10000000  #  5  struct_access
-    20000000  #  6  switch_branch
-    38        #  7  recursion_fib   (fib(38) ~ 63 M calls, ~200 ms)
-    300       #  8  nested_loops    (300^3 = 27 M)
-    5000      #  9  array_sort     (bubble = O(n^2) = 25 M)
-    20000000  # 10  while_loop
-    20000000  # 11  if_else_chain
-    10000000  # 12  array_indexing
-    20000000  # 13  function_calls
-    20000000  # 14  bitwise_ops
-    500000    # 15  combined
+    500000    #  0  integer_math
+    500000    #  1  array_push
+    200000    #  2  array_hof
+    10000     #  3  string_concat
+    500000    #  4  string_ops
+    5000000   #  5  struct_access
+    5000000   #  6  switch_branch
+    35        #  7  recursion_fib   (fib(35) ~ 9 M calls, ~50 ms)
+    200       #  8  nested_loops    (200^3 = 8 M)
+    3000      #  9  array_sort     (bubble = O(n^2) = 9 M)
+    5000000   # 10  while_loop
+    5000000   # 11  if_else_chain
+    2000000   # 12  array_indexing
+    5000000   # 13  function_calls
+    5000000   # 14  bitwise_ops
+    100000    # 15  combined
     2000000   # 16  float_math
-    20000000  # 17  bitwise_intrinsics
+    5000000   # 17  bitwise_intrinsics
 )
 
 BOTTLENECK_LABELS=(
