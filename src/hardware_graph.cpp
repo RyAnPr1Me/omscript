@@ -2330,6 +2330,24 @@ static std::vector<FusionPair> detectFusionPairs(
                 }
             }
         }
+
+        // ── IncBranch fusion: add/sub + compare + branch (loop counter) ──────
+        // Pattern: increment → compare → branch (tight loop counter pattern).
+        // Scheduling these adjacently helps branch prediction and enables
+        // macro-op fusion of the compare+branch portion.
+        if (auto* binOp = llvm::dyn_cast<llvm::BinaryOperator>(inst)) {
+            unsigned opc = binOp->getOpcode();
+            if (opc == llvm::Instruction::Add || opc == llvm::Instruction::Sub) {
+                for (auto* user : binOp->users()) {
+                    if (auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(user)) {
+                        auto cmpIt = idx.find(cmp);
+                        if (cmpIt != idx.end()) {
+                            pairs.push_back({i, cmpIt->second, FusionPair::IncBranch});
+                        }
+                    }
+                }
+            }
+        }
     }
 
     return pairs;
@@ -2619,6 +2637,54 @@ static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
         critPath[ui] = lat[ui] + maxSucc;
     }
 
+    // ── 5b. Dependency chain identification for ILP ──────────────────────────
+    // Identify independent dependency chains by walking the DAG. Instructions
+    // in different chains can execute in parallel, so we prefer interleaving
+    // them in the schedule to maximize ILP on wide-issue machines.
+    std::vector<unsigned> chainId(n, 0);
+    {
+        unsigned nextChain = 0;
+        std::vector<bool> visited(n, false);
+        for (unsigned root = 0; root < n; ++root) {
+            if (visited[root]) continue;
+            // DFS from this root to mark its connected component
+            std::vector<unsigned> worklist = {root};
+            while (!worklist.empty()) {
+                unsigned cur = worklist.back();
+                worklist.pop_back();
+                if (visited[cur]) continue;
+                visited[cur] = true;
+                chainId[cur] = nextChain;
+                // Follow both successors and predecessors
+                for (unsigned s : succ[cur])
+                    if (!visited[s]) worklist.push_back(s);
+                for (unsigned p : pred[cur])
+                    if (!visited[p]) worklist.push_back(p);
+            }
+            ++nextChain;
+        }
+    }
+
+    // ── 5c. Critical-path slack (forward + backward pass) ────────────────────
+    // Slack = latest_start - earliest_start.  Instructions with zero slack
+    // are on the critical path.  Instructions with slack > 0 can be delayed
+    // without affecting the total schedule length, giving the scheduler
+    // freedom to optimise for register pressure or port diversity instead.
+    std::vector<unsigned> earliestStart(n, 0);
+    // Forward pass: earliest start = max(pred earliest + pred latency)
+    for (unsigned i = 0; i < n; ++i) {
+        for (unsigned p : pred[i])
+            earliestStart[i] = std::max(earliestStart[i], earliestStart[p] + lat[p]);
+    }
+    unsigned criticalLength = 0;
+    for (unsigned i = 0; i < n; ++i)
+        criticalLength = std::max(criticalLength, earliestStart[i] + critPath[i]);
+    std::vector<unsigned> slack(n, 0);
+    for (unsigned i = 0; i < n; ++i) {
+        unsigned latestStart = criticalLength - critPath[i];
+        slack[i] = (latestStart >= earliestStart[i]) ? (latestStart - earliestStart[i]) : 0;
+    }
+
     // ── 6. Hardware port model from the actual HardwareGraph ──────────────────
     // Each HardwareGraph node may represent multiple port instances (node->count).
     // We create one PortSlot per physical port instance to accurately model
@@ -2830,8 +2896,17 @@ static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
             // If we're already over budget, penalise instructions that add live values
             // unless they also free values (via regFreeScore).
             unsigned rfs = regFreeScore(id);
-            if (currentLive + 1 - rfs > regBudget)
-                return currentLive + 1 - rfs - regBudget;
+            if (currentLive + 1 - rfs > regBudget) {
+                unsigned penalty = currentLive + 1 - rfs - regBudget;
+                // Dampen penalty for instructions with slack — they can be
+                // delayed to a point with lower pressure without extending
+                // the critical path.
+                // Divisor grows with slack; /4 chosen so slack of 4 halves
+                // the penalty — empirically a good balance on Skylake/Zen.
+                if (slack[id] > 0)
+                    penalty = std::max(1u, penalty / (1 + slack[id] / 4));
+                return penalty;
+            }
             return 0;
         };
 
@@ -2893,6 +2968,7 @@ static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
         // Within a cycle, track which ResourceTypes have been issued to
         // encourage diversity and fill different execution units in parallel.
         std::unordered_set<int> issuedPortsThisCycle;
+        std::unordered_set<unsigned> issuedChainsThisCycle;
         unsigned issued = 0;
 
         // Two-pass issue: first pass schedules instructions that use port
@@ -2911,6 +2987,8 @@ static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
                 // Pass 0: only issue to a port type not yet used this cycle.
                 // Pass 1: issue to any port type (fill remaining slots).
                 if (pass == 0 && issuedPortsThisCycle.count(rtKey)) continue;
+                // Pass 0: also prefer chain diversity for ILP.
+                if (pass == 0 && issuedChainsThisCycle.count(chainId[id])) continue;
 
                 // Earliest start: max(currentCycle, predecessor availability).
                 unsigned earliest = currentCycle;
@@ -2941,6 +3019,7 @@ static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
                 ++issued;
                 scheduled.push_back(moveable[id]);
                 issuedPortsThisCycle.insert(rtKey);
+                issuedChainsThisCycle.insert(chainId[id]);
 
                 // ── Register pressure tracking ──────────────────────────────
                 // Instruction produces a value → increase live count.

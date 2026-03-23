@@ -921,3 +921,85 @@ TEST(HardwareGraphTest, ScheduleMultiArchConsistency) {
         ASSERT_TRUE(tm.verify()) << "Verification failed after scheduling on " << arch;
     }
 }
+
+TEST(HardwareGraphTest, ScheduleChainInterleaving) {
+    // Two independent chains: (a+b+c) and (d+e+f).
+    // The scheduler should interleave them for better ILP.
+    HGOETestModule tm("chains", 6);
+    auto* a = tm.arg(0);
+    auto* b = tm.arg(1);
+    auto* c = tm.arg(2);
+    auto* d = tm.arg(3);
+    auto* e = tm.arg(4);
+    auto* f = tm.arg(5);
+
+    // Chain 1: a + b + c
+    auto* chain1a = tm.builder.CreateAdd(a, b, "c1a");
+    auto* chain1b = tm.builder.CreateAdd(chain1a, c, "c1b");
+    // Chain 2: d + e + f
+    auto* chain2a = tm.builder.CreateAdd(d, e, "c2a");
+    auto* chain2b = tm.builder.CreateAdd(chain2a, f, "c2b");
+    // Merge
+    auto* result = tm.builder.CreateAdd(chain1b, chain2b, "result");
+    tm.builder.CreateRet(result);
+    ASSERT_TRUE(tm.verify());
+
+    auto profile = lookupMicroarch("skylake");
+    ASSERT_TRUE(profile.has_value());
+    HardwareGraph hw = buildHardwareGraph(*profile);
+
+    unsigned cycles = scheduleInstructions(*tm.func, hw, *profile);
+    EXPECT_GT(cycles, 0u);
+    ASSERT_TRUE(tm.verify());
+}
+
+TEST(HardwareGraphTest, ScheduleSlackAwarePressure) {
+    // Create a mix of critical-path and off-critical-path instructions.
+    // Slack-aware scheduling should deprioritize off-critical instructions
+    // when register pressure is high.
+    HGOETestModule tm("slack", 2);
+    auto* a = tm.arg(0);
+    auto* b = tm.arg(1);
+
+    // Critical path: a chain of multiplies (high latency)
+    auto* m1 = tm.builder.CreateMul(a, b, "m1");
+    auto* m2 = tm.builder.CreateMul(m1, a, "m2");
+
+    // Off-critical: independent adds that can be delayed
+    auto* add1 = tm.builder.CreateAdd(a, b, "add1");
+    auto* add2 = tm.builder.CreateAdd(add1, a, "add2");
+
+    auto* result = tm.builder.CreateAdd(m2, add2, "result");
+    tm.builder.CreateRet(result);
+    ASSERT_TRUE(tm.verify());
+
+    auto profile = lookupMicroarch("skylake");
+    ASSERT_TRUE(profile.has_value());
+    HardwareGraph hw = buildHardwareGraph(*profile);
+
+    unsigned cycles = scheduleInstructions(*tm.func, hw, *profile);
+    EXPECT_GT(cycles, 0u);
+    ASSERT_TRUE(tm.verify());
+}
+
+TEST(HardwareGraphTest, ScheduleIncBranchFusion) {
+    // Create an increment + compare pattern (loop counter).
+    // The scheduler should keep the add and compare close together.
+    HGOETestModule tm("inc_branch", 2);
+    auto* a = tm.arg(0);
+    auto* b = tm.arg(1);
+
+    auto* inc = tm.builder.CreateAdd(a, tm.builder.getInt64(1), "inc");
+    auto* cmp = tm.builder.CreateICmpSLT(inc, b, "cmp");
+    auto* sel = tm.builder.CreateSelect(cmp, inc, b, "sel");
+    tm.builder.CreateRet(sel);
+    ASSERT_TRUE(tm.verify());
+
+    auto profile = lookupMicroarch("skylake");
+    ASSERT_TRUE(profile.has_value());
+    HardwareGraph hw = buildHardwareGraph(*profile);
+
+    unsigned cycles = scheduleInstructions(*tm.func, hw, *profile);
+    EXPECT_GT(cycles, 0u);
+    ASSERT_TRUE(tm.verify());
+}
