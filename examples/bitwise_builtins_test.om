@@ -1,0 +1,49 @@
+// Test new bitwise built-in functions
+fn main() {
+    // popcount: count set bits
+    var p1 = popcount(0);
+    println(p1);           // 0
+
+    var p2 = popcount(255);
+    println(p2);           // 8 (0xFF = 8 bits set)
+
+    var p3 = popcount(7);
+    println(p3);           // 3 (0b111)
+
+    // clz: count leading zeros (64-bit)
+    var z1 = clz(1);
+    println(z1);           // 63
+
+    var z2 = clz(16);
+    println(z2);           // 59
+
+    // ctz: count trailing zeros
+    var t1 = ctz(8);
+    println(t1);           // 3
+
+    var t2 = ctz(16);
+    println(t2);           // 4
+
+    // bitreverse: reverse all bits
+    var b1 = bitreverse(0);
+    println(b1);           // 0
+
+    // is_power_of_2: check if value is a power of 2
+    var ip1 = is_power_of_2(1);
+    println(ip1);          // 1
+
+    var ip2 = is_power_of_2(16);
+    println(ip2);          // 1
+
+    var ip3 = is_power_of_2(15);
+    println(ip3);          // 0
+
+    var ip4 = is_power_of_2(0);
+    println(ip4);          // 0
+
+    // exp2: 2^x
+    var e1 = exp2(3.0);
+    println(e1);           // 8.0
+
+    return 0;
+}

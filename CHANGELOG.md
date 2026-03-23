@@ -5,6 +5,44 @@ All notable changes to the OmScript compiler will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.0] - 2026-03-23
+
+### Added
+- **`lcm(a, b)` built-in function:** Computes the Least Common Multiple using `|a| / gcd(a, b) * |b|` (divide-first to avoid overflow). Handles negative inputs and `lcm(0, x) = 0` correctly.
+- **2 new benchmark categories in test.sh:**
+  - `float_math` (benchmark 16) — exercises floating-point operations (sqrt, exp2, pow) to test FP optimization rules
+  - `bitwise_intrinsics` (benchmark 17) — exercises new v3.6.0 builtins (popcount, clz, ctz, is_power_of_2) against C `__builtin_*` equivalents
+- **3 new unit tests** for `lcm` builtin (codegen_test.cpp)
+- **New example program** `lcm_test.om` demonstrating LCM with integration test in run_tests.sh
+
+### Changed
+- **test.sh benchmark improvements:**
+  - Added **geometric mean** of per-benchmark ratios for the overall score — more meaningful than arithmetic aggregate because it treats all benchmarks equally regardless of absolute time
+  - Correctness check now doubles as **warmup run** for I-cache and D-cache, improving timing stability
+  - Added **cleanup** of generated temp files (bench.om, bench.c, bench_om, bench_c) at script exit
+  - Added `-lm` to C compilation flags for math library linking (required by float_math benchmark)
+  - Increased benchmark count from 16 to 18
+
+## [3.6.0] - 2026-03-23
+
+### Added
+- **6 new built-in functions** for bitwise operations and math, all using LLVM hardware intrinsics for maximum performance:
+  - `popcount(x)` — count set bits (uses `ctpop` intrinsic, compiles to single `POPCNT` instruction on x86)
+  - `clz(x)` — count leading zeros (uses `ctlz` intrinsic, compiles to `LZCNT`/`BSR`)
+  - `ctz(x)` — count trailing zeros (uses `cttz` intrinsic, compiles to `TZCNT`/`BSF`)
+  - `bitreverse(x)` — reverse all bits (uses `bitreverse` intrinsic)
+  - `exp2(x)` — base-2 exponential, 2^x (uses `exp2` intrinsic for native FP hardware)
+  - `is_power_of_2(x)` — efficient power-of-2 check via `x > 0 && (x & (x-1)) == 0`
+- **12 new e-graph floating-point optimization rules** for faster FP code generation:
+  - Division by power-of-2 constants to multiply by reciprocal: `x / 4.0 → x * 0.25`, `x / 8.0 → x * 0.125`, `x / 16.0 → x * 0.0625` (and reverses for e-graph exploration)
+  - FP double negation elimination: `-(-x) → x` (exact in IEEE-754)
+  - FP subtract/add zero: `x - 0.0 → x`, `0.0 + x → x`, `x + 0.0 → x`
+- **3 new e-graph relational optimization rules:**
+  - Modulo by power-of-2 for non-negative values: `x % C → x & (C-1)` (guarded by `isNonNeg`)
+  - Algebraic factoring: `x*a + x*b → x*(a+b)` and `x*a - x*b → x*(a-b)` where a, b are constants
+- **21 new unit tests** covering all new builtins and optimization rules
+- **New example program** `bitwise_builtins_test.om` demonstrating all new built-in functions
+
 ## [3.5.0] - 2026-03-23
 
 ### Added
