@@ -1112,7 +1112,10 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     fpm.add(llvm::createInstSimplifyLegacyPass()); // simplify instructions in loop bodies
     fpm.add(llvm::createLoopDataPrefetchPass());
     fpm.add(llvm::createLoopStrengthReducePass());
-    fpm.add(llvm::createLoopUnrollPass());
+    // Use aggressive loop unrolling for OPTMAX: OptLevel=3 for maximum
+    // unroll factor, threshold=300 to allow larger loop bodies to unroll.
+    fpm.add(llvm::createLoopUnrollPass(/*OptLevel=*/3, /*OnlyWhenForced=*/false,
+                                       /*ForgetAllSCEV=*/false, /*Threshold=*/300));
     // Phase 2.5: Post-loop cleanup.  Loop strength reduction, unrolling,
     // and LICM can expose redundancies and dead code.  A lightweight
     // CFG simplification + DCE pass is sufficient here; the heavier GVN

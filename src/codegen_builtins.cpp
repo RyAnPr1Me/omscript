@@ -1089,48 +1089,26 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         validateArgCount(expr, "log2", 1);
         llvm::Value* n = generateExpression(expr->arguments[0].get());
         n = toDefaultType(n);
-        // Integer log2 via loop: count how many times we can right-shift before reaching 0.
+        // Integer log2 via CTZ intrinsic: 63 - clz(n).
+        // Uses the llvm.ctlz intrinsic which maps directly to the BSR/LZCNT
+        // hardware instruction on x86, producing the result in a single cycle.
         // Returns -1 for n <= 0.
-        llvm::Function* function = builder->GetInsertBlock()->getParent();
-        llvm::BasicBlock* entryBB = builder->GetInsertBlock();
-        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "log2.loop", function);
-        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "log2.body", function);
-        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "log2.done", function);
-
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
-        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
         llvm::Value* negOne = llvm::ConstantInt::get(getDefaultType(), -1, true);
+        llvm::Value* bits = llvm::ConstantInt::get(getDefaultType(), 63);
 
         // n <= 0 → return -1
-        llvm::Value* isNonPositive = builder->CreateICmpSLE(n, zero, "log2.nonpos");
-        llvm::BasicBlock* startBB = llvm::BasicBlock::Create(*context, "log2.start", function);
-        builder->CreateCondBr(isNonPositive, doneBB, startBB);
+        llvm::Value* isPositive = builder->CreateICmpSGT(n, zero, "log2.pos");
 
-        builder->SetInsertPoint(startBB);
-        builder->CreateBr(loopBB);
+        // clz(n) returns number of leading zeros; log2(n) = 63 - clz(n)
+        llvm::Function* ctlzIntrinsic = OMSC_GET_INTRINSIC(
+            module.get(), llvm::Intrinsic::ctlz, {getDefaultType()});
+        // is_zero_poison=true since we guard with isPositive
+        llvm::Value* clz = builder->CreateCall(
+            ctlzIntrinsic, {n, builder->getTrue()}, "log2.clz");
+        llvm::Value* log2val = builder->CreateSub(bits, clz, "log2.val");
 
-        builder->SetInsertPoint(loopBB);
-        llvm::PHINode* val = builder->CreatePHI(getDefaultType(), 2, "log2.val");
-        val->addIncoming(n, startBB);
-        llvm::PHINode* count = builder->CreatePHI(getDefaultType(), 2, "log2.count");
-        count->addIncoming(negOne, startBB);
-
-        // while val > 0: val >>= 1, count++
-        llvm::Value* stillPositive = builder->CreateICmpSGT(val, zero, "log2.pos");
-        builder->CreateCondBr(stillPositive, bodyBB, doneBB);
-
-        builder->SetInsertPoint(bodyBB);
-        llvm::Value* newVal = builder->CreateLShr(val, one, "log2.shr");
-        llvm::Value* newCount = builder->CreateAdd(count, one, "log2.inc");
-        val->addIncoming(newVal, bodyBB);
-        count->addIncoming(newCount, bodyBB);
-        builder->CreateBr(loopBB);
-
-        builder->SetInsertPoint(doneBB);
-        llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "log2.result");
-        result->addIncoming(negOne, entryBB);
-        result->addIncoming(count, loopBB);
-        return result;
+        return builder->CreateSelect(isPositive, log2val, negOne, "log2.result");
     }
 
     if (bid == BuiltinId::GCD) {
