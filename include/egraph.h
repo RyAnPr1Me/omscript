@@ -146,6 +146,12 @@ struct ENodeHash {
 struct EClass {
     ClassId id;
     std::vector<ENode> nodes;    ///< All equivalent representations
+
+    // ── Analysis data for richer relational reasoning ─────────────────────
+    std::optional<long long> constVal;  ///< Cached constant value if known
+    bool isZero = false;                ///< True if class contains constant 0
+    bool isOne = false;                 ///< True if class contains constant 1
+    bool isNonNeg = false;              ///< True if all values are >= 0 (by analysis)
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -354,6 +360,15 @@ public:
     /// Returns std::nullopt if the class contains no ConstF node.
     std::optional<double> getConstFValue(ClassId cls) const;
 
+    /// Check if two e-classes are equivalent (represent the same value).
+    bool areEquivalent(ClassId a, ClassId b);
+
+    /// Check if an e-class contains a variable with the given name.
+    bool hasVariable(ClassId cls, const std::string& name) const;
+
+    /// Get the operation type of the best (cheapest/first) node in an e-class.
+    std::optional<Op> getClassOp(ClassId cls) const;
+
 private:
     /// Union-find parent array.
     mutable std::vector<ClassId> parent_;
@@ -378,6 +393,11 @@ private:
 
     /// Internal: match a pattern against a specific e-class.
     bool matchClass(const Pattern& pat, ClassId cls, Subst& subst) const;
+
+    /// Internal: match a pattern with commutative awareness for binary ops.
+    /// For commutative operations (Add, Mul, BitAnd, BitOr, BitXor, Eq, Ne,
+    /// LogAnd, LogOr), tries both orderings of children automatically.
+    bool matchClassCommutative(const Pattern& pat, ClassId cls, Subst& subst) const;
 
     /// Internal: constant folding pass on an e-class.
     void foldConstants(ClassId cls);
@@ -417,6 +437,11 @@ std::vector<RewriteRule> getBitwiseRules();
 /// Returns advanced bitwise rules including arithmetic-bitwise identities
 /// and relational guard-predicate rules (power-of-2 strength reduction).
 std::vector<RewriteRule> getAdvancedBitwiseRules();
+
+/// Returns relational rewrite rules with multi-variable guards,
+/// including division strength reduction, conditional move optimization,
+/// and cross-operation algebraic identities.
+std::vector<RewriteRule> getRelationalRules();
 
 /// Returns all optimization rules combined.
 std::vector<RewriteRule> getAllRules();

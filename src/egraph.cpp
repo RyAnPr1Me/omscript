@@ -116,6 +116,15 @@ ClassId EGraph::add(ENode node) {
     EClass cls;
     cls.id = id;
     cls.nodes.push_back(node);
+
+    // Populate analysis data
+    if (node.op == Op::Const) {
+        cls.constVal = node.value;
+        cls.isZero = (node.value == 0);
+        cls.isOne = (node.value == 1);
+        cls.isNonNeg = (node.value >= 0);
+    }
+
     classes_.push_back(std::move(cls));
 
     hashcons_[node] = id;
@@ -183,6 +192,13 @@ ClassId EGraph::merge(ClassId a, ClassId b) {
         classes_[a].nodes.push_back(std::move(node));
     }
     classes_[b].nodes.clear();
+
+    // Merge analysis data
+    if (!classes_[a].constVal && classes_[b].constVal)
+        classes_[a].constVal = classes_[b].constVal;
+    classes_[a].isZero = classes_[a].isZero || classes_[b].isZero;
+    classes_[a].isOne = classes_[a].isOne || classes_[b].isOne;
+    classes_[a].isNonNeg = classes_[a].isNonNeg && classes_[b].isNonNeg;
 
     return a;
 }
@@ -276,6 +292,36 @@ bool EGraph::matchClass(const Pattern& pat, ClassId cls, Subst& subst) const {
     return false;
 }
 
+bool EGraph::matchClassCommutative(const Pattern& pat, ClassId cls, Subst& subst) const {
+    // First try the standard match
+    if (matchClass(pat, cls, subst)) return true;
+
+    // For commutative binary patterns, try swapping children
+    if (pat.kind == Pattern::Kind::OpMatch && pat.children.size() == 2) {
+        bool isCommutative = false;
+        switch (pat.op) {
+        case Op::Add: case Op::Mul:
+        case Op::BitAnd: case Op::BitOr: case Op::BitXor:
+        case Op::Eq: case Op::Ne:
+        case Op::LogAnd: case Op::LogOr:
+            isCommutative = true;
+            break;
+        default:
+            break;
+        }
+        if (isCommutative) {
+            // Create a swapped pattern
+            Pattern swapped = Pattern::OpPat(pat.op, {pat.children[1], pat.children[0]});
+            Subst swappedSubst = subst;
+            if (matchClass(swapped, cls, swappedSubst)) {
+                subst = std::move(swappedSubst);
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 std::vector<std::pair<ClassId, Subst>> EGraph::match(const Pattern& pat) const {
     std::vector<std::pair<ClassId, Subst>> results;
     for (ClassId i = 0; i < classes_.size(); ++i) {
@@ -283,7 +329,7 @@ std::vector<std::pair<ClassId, Subst>> EGraph::match(const Pattern& pat) const {
         if (canonical != i) continue; // Skip non-canonical
 
         Subst subst;
-        if (matchClass(pat, i, subst)) {
+        if (matchClassCommutative(pat, i, subst)) {
             results.emplace_back(i, std::move(subst));
         }
     }
@@ -607,6 +653,28 @@ std::optional<double> EGraph::getConstFValue(ClassId cls) const {
     if (cls >= classes_.size()) return std::nullopt;
     for (const auto& node : classes_[cls].nodes) {
         if (node.op == Op::ConstF) return node.fvalue;
+    }
+    return std::nullopt;
+}
+
+bool EGraph::areEquivalent(ClassId a, ClassId b) {
+    return find(a) == find(b);
+}
+
+bool EGraph::hasVariable(ClassId cls, const std::string& name) const {
+    cls = const_cast<EGraph*>(this)->find(cls);
+    if (cls >= classes_.size()) return false;
+    for (const auto& node : classes_[cls].nodes) {
+        if (node.op == Op::Var && node.name == name) return true;
+    }
+    return false;
+}
+
+std::optional<Op> EGraph::getClassOp(ClassId cls) const {
+    cls = const_cast<EGraph*>(this)->find(cls);
+    if (cls >= classes_.size()) return std::nullopt;
+    for (const auto& node : classes_[cls].nodes) {
+        if (node.op != Op::Nop) return node.op;
     }
     return std::nullopt;
 }
@@ -6286,6 +6354,228 @@ std::vector<RewriteRule> getAdvancedBitwiseRules() {
     return rules;
 }
 
+std::vector<RewriteRule> getRelationalRules() {
+    using P = Pattern;
+    std::vector<RewriteRule> rules;
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Multi-variable relational: cancel multiply-then-divide by same const
+    // ─────────────────────────────────────────────────────────────────────
+
+    // x * C / C → x
+    rules.emplace_back("mul_div_cancel",
+        P::OpPat(Op::Div, {P::OpPat(Op::Mul, {P::Wild("x"), P::Wild("c")}), P::Wild("c")}),
+        [](EGraph&, const Subst& s) { return s.at("x"); },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto cv = g.getConstValue(s.at("c"));
+            return cv && *cv != 0;
+        });
+
+    // (x + C1) - C2 → x + (C1 - C2)
+    rules.emplace_back("add_sub_const_fold",
+        P::OpPat(Op::Sub, {P::OpPat(Op::Add, {P::Wild("x"), P::Wild("c1")}), P::Wild("c2")}),
+        [](EGraph& g, const Subst& s) {
+            auto c1 = g.getConstValue(s.at("c1"));
+            auto c2 = g.getConstValue(s.at("c2"));
+            return g.addBinOp(Op::Add, s.at("x"), g.addConst(*c1 - *c2));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto c1 = g.getConstValue(s.at("c1"));
+            auto c2 = g.getConstValue(s.at("c2"));
+            return c1.has_value() && c2.has_value();
+        });
+
+    // (x - C1) + C2 → x + (C2 - C1)
+    rules.emplace_back("sub_add_const_fold",
+        P::OpPat(Op::Add, {P::OpPat(Op::Sub, {P::Wild("x"), P::Wild("c1")}), P::Wild("c2")}),
+        [](EGraph& g, const Subst& s) {
+            auto c1 = g.getConstValue(s.at("c1"));
+            auto c2 = g.getConstValue(s.at("c2"));
+            return g.addBinOp(Op::Add, s.at("x"), g.addConst(*c2 - *c1));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto c1 = g.getConstValue(s.at("c1"));
+            auto c2 = g.getConstValue(s.at("c2"));
+            return c1.has_value() && c2.has_value();
+        });
+
+    // (x * C1) * C2 → x * (C1 * C2)
+    rules.emplace_back("mul_mul_const_fold",
+        P::OpPat(Op::Mul, {P::OpPat(Op::Mul, {P::Wild("x"), P::Wild("c1")}), P::Wild("c2")}),
+        [](EGraph& g, const Subst& s) {
+            auto c1 = g.getConstValue(s.at("c1"));
+            auto c2 = g.getConstValue(s.at("c2"));
+            return g.addBinOp(Op::Mul, s.at("x"), g.addConst(*c1 * *c2));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto c1 = g.getConstValue(s.at("c1"));
+            auto c2 = g.getConstValue(s.at("c2"));
+            return c1.has_value() && c2.has_value();
+        });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Bitfield extraction / insertion patterns
+    // ─────────────────────────────────────────────────────────────────────
+
+    // (x & mask) >> a → (x >> a) & (mask >> a)  when mask has no low bits
+    rules.emplace_back("mask_shift_normalize",
+        P::OpPat(Op::Shr, {
+            P::OpPat(Op::BitAnd, {P::Wild("x"), P::Wild("mask")}),
+            P::Wild("a")
+        }),
+        [](EGraph& g, const Subst& s) {
+            auto a = g.getConstValue(s.at("a"));
+            auto m = g.getConstValue(s.at("mask"));
+            long long newMask = *m >> *a;
+            return g.addBinOp(Op::BitAnd,
+                g.addBinOp(Op::Shr, s.at("x"), s.at("a")),
+                g.addConst(newMask));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto a = g.getConstValue(s.at("a"));
+            auto m = g.getConstValue(s.at("mask"));
+            if (!a || !m) return false;
+            if (*a <= 0 || *a >= 63) return false;
+            long long lowBits = (1LL << *a) - 1;
+            return (*m & lowBits) == 0 && *m != 0;
+        });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Comparison chain strength reduction
+    // ─────────────────────────────────────────────────────────────────────
+
+    // (x >= C1) && (x <= C2) → (x - C1) <= (C2 - C1)
+    rules.emplace_back("range_check_unsigned",
+        P::OpPat(Op::LogAnd, {
+            P::OpPat(Op::Ge, {P::Wild("x"), P::Wild("lo")}),
+            P::OpPat(Op::Le, {P::Wild("x"), P::Wild("hi")})
+        }),
+        [](EGraph& g, const Subst& s) {
+            auto lo = g.getConstValue(s.at("lo"));
+            auto hi = g.getConstValue(s.at("hi"));
+            ClassId diff = g.addBinOp(Op::Sub, s.at("x"), s.at("lo"));
+            ClassId range = g.addConst(*hi - *lo);
+            return g.addBinOp(Op::Le, diff, range);
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto lo = g.getConstValue(s.at("lo"));
+            auto hi = g.getConstValue(s.at("hi"));
+            if (!lo || !hi) return false;
+            return *hi >= *lo;
+        });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Algebraic identities with multi-variable guards
+    // ─────────────────────────────────────────────────────────────────────
+
+    // (x + y) * (x - y) → x*x - y*y
+    rules.emplace_back("diff_of_squares",
+        P::OpPat(Op::Mul, {
+            P::OpPat(Op::Add, {P::Wild("x"), P::Wild("y")}),
+            P::OpPat(Op::Sub, {P::Wild("x"), P::Wild("y")})
+        }),
+        [](EGraph& g, const Subst& s) {
+            ClassId xx = g.addBinOp(Op::Mul, s.at("x"), s.at("x"));
+            ClassId yy = g.addBinOp(Op::Mul, s.at("y"), s.at("y"));
+            return g.addBinOp(Op::Sub, xx, yy);
+        });
+
+    // x*x - y*y → (x + y) * (x - y)
+    rules.emplace_back("factor_diff_of_squares",
+        P::OpPat(Op::Sub, {
+            P::OpPat(Op::Mul, {P::Wild("x"), P::Wild("x")}),
+            P::OpPat(Op::Mul, {P::Wild("y"), P::Wild("y")})
+        }),
+        [](EGraph& g, const Subst& s) {
+            ClassId sum  = g.addBinOp(Op::Add, s.at("x"), s.at("y"));
+            ClassId diff = g.addBinOp(Op::Sub, s.at("x"), s.at("y"));
+            return g.addBinOp(Op::Mul, sum, diff);
+        });
+
+    // (x << n) + (x << n) → x << (n + 1)
+    rules.emplace_back("double_shift_add",
+        P::OpPat(Op::Add, {
+            P::OpPat(Op::Shl, {P::Wild("x"), P::Wild("n")}),
+            P::OpPat(Op::Shl, {P::Wild("x"), P::Wild("n")})
+        }),
+        [](EGraph& g, const Subst& s) {
+            auto n = g.getConstValue(s.at("n"));
+            return g.addBinOp(Op::Shl, s.at("x"), g.addConst(*n + 1));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto n = g.getConstValue(s.at("n"));
+            return n.has_value() && *n >= 0 && *n < 63;
+        });
+
+    // x * (2^n + 1) → (x << n) + x
+    rules.emplace_back("mul_pow2_plus1",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::Wild("c")}),
+        [](EGraph& g, const Subst& s) {
+            auto cv = g.getConstValue(s.at("c"));
+            long long v = *cv - 1;
+            int shift = 0;
+            while (v > 1) { v >>= 1; ++shift; }
+            ClassId shifted = g.addBinOp(Op::Shl, s.at("x"), g.addConst(shift));
+            return g.addBinOp(Op::Add, shifted, s.at("x"));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto cv = g.getConstValue(s.at("c"));
+            if (!cv) return false;
+            long long v = *cv;
+            if (v <= 2) return false;
+            long long vm1 = v - 1;
+            return vm1 > 0 && (vm1 & (vm1 - 1)) == 0;
+        });
+
+    // x * (2^n - 1) → (x << n) - x
+    rules.emplace_back("mul_pow2_minus1",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::Wild("c")}),
+        [](EGraph& g, const Subst& s) {
+            auto cv = g.getConstValue(s.at("c"));
+            long long v = *cv + 1;
+            int shift = 0;
+            while (v > 1) { v >>= 1; ++shift; }
+            ClassId shifted = g.addBinOp(Op::Shl, s.at("x"), g.addConst(shift));
+            return g.addBinOp(Op::Sub, shifted, s.at("x"));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto cv = g.getConstValue(s.at("c"));
+            if (!cv) return false;
+            long long v = *cv;
+            if (v <= 2) return false;
+            long long vp1 = v + 1;
+            return vp1 > 0 && (vp1 & (vp1 - 1)) == 0;
+        });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Logical-to-bitwise lowering for boolean values
+    // ─────────────────────────────────────────────────────────────────────
+
+    // (a == 0) && (b == 0) → (a | b) == 0
+    rules.emplace_back("combine_zero_checks_and",
+        P::OpPat(Op::LogAnd, {
+            P::OpPat(Op::Eq, {P::Wild("a"), P::ConstPat(0)}),
+            P::OpPat(Op::Eq, {P::Wild("b"), P::ConstPat(0)})
+        }),
+        [](EGraph& g, const Subst& s) {
+            ClassId orNode = g.addBinOp(Op::BitOr, s.at("a"), s.at("b"));
+            return g.addBinOp(Op::Eq, orNode, g.addConst(0));
+        });
+
+    // (a != 0) || (b != 0) → (a | b) != 0
+    rules.emplace_back("combine_nonzero_checks_or",
+        P::OpPat(Op::LogOr, {
+            P::OpPat(Op::Ne, {P::Wild("a"), P::ConstPat(0)}),
+            P::OpPat(Op::Ne, {P::Wild("b"), P::ConstPat(0)})
+        }),
+        [](EGraph& g, const Subst& s) {
+            ClassId orNode = g.addBinOp(Op::BitOr, s.at("a"), s.at("b"));
+            return g.addBinOp(Op::Ne, orNode, g.addConst(0));
+        });
+
+    return rules;
+}
+
 std::vector<RewriteRule> getAllRules() {
     auto rules = getAlgebraicRules();
     auto advAlgRules = getAdvancedAlgebraicRules();
@@ -6303,6 +6593,9 @@ std::vector<RewriteRule> getAllRules() {
                  std::make_move_iterator(bitRules.end()));
     rules.insert(rules.end(), std::make_move_iterator(advBitRules.begin()),
                  std::make_move_iterator(advBitRules.end()));
+    auto relRules = getRelationalRules();
+    rules.insert(rules.end(), std::make_move_iterator(relRules.begin()),
+                 std::make_move_iterator(relRules.end()));
 
     return rules;
 }
