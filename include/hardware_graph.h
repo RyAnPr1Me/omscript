@@ -401,6 +401,9 @@ struct MicroarchProfile {
     // Memory
     unsigned memoryLatency = 200;   ///< Main memory latency in cycles
 
+    // Reorder buffer
+    unsigned robSize = 224;         ///< Reorder buffer entries (224 for Skylake)
+
     // Port constraints for integer multiply.
     // Integer multiply can only use a subset of the total integer ALU ports on
     // most microarchitectures (e.g. only 2 of 4 ports on Skylake, port 1 only

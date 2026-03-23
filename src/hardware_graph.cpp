@@ -640,6 +640,7 @@ static MicroarchProfile skylakeProfile() {
     p.branchMispredictPenalty = 15.0;
     p.btbEntries = 4096;
     p.memoryLatency = 200;
+    p.robSize = 224;
     return p;
 }
 
@@ -653,6 +654,7 @@ static MicroarchProfile haswellProfile() {
     p.branchMispredictPenalty = 15.0;
     // Haswell: integer multiply on port P1 only (1 of the 4 ALU ports).
     p.mulPortCount = 1;
+    p.robSize = 192;
     return p;
 }
 
@@ -691,6 +693,7 @@ static MicroarchProfile alderlakeProfile() {
     p.branchMispredictPenalty = 14.0;
     p.btbEntries = 12288;     // much larger BTB
     p.memoryLatency = 180;
+    p.robSize = 256;
     return p;
 }
 
@@ -727,6 +730,7 @@ static MicroarchProfile zen4Profile() {
     p.branchMispredictPenalty = 13.0;
     p.btbEntries = 6144;
     p.memoryLatency = 180;
+    p.robSize = 320;
     return p;
 }
 
@@ -745,6 +749,7 @@ static MicroarchProfile zen3Profile() {
     p.vectorWidth = 256;
     p.vecRegisters = 16;      // no AVX-512 support
     p.fpRegisters = 16;
+    p.robSize = 256;
     return p;
 }
 
@@ -781,6 +786,7 @@ static MicroarchProfile appleMProfile() {
     p.branchMispredictPenalty = 12.0;
     p.btbEntries = 7168;
     p.memoryLatency = 120;
+    p.robSize = 600;
     return p;
 }
 
@@ -817,6 +823,7 @@ static MicroarchProfile neoverseV2Profile() {
     p.branchMispredictPenalty = 11.0;
     p.btbEntries = 8192;
     p.memoryLatency = 150;
+    p.robSize = 256;
     return p;
 }
 
@@ -914,6 +921,7 @@ static MicroarchProfile graviton3Profile() {
     p.branchMispredictPenalty = 11.0;
     p.btbEntries = 8192;
     p.memoryLatency = 140;     // DDR5 latency
+    p.robSize = 256;
     return p;
 }
 
@@ -925,6 +933,7 @@ static MicroarchProfile graviton4Profile() {
     p.l2Size = 2048;           // 2 MB L2 per core
     p.l3Size = 36864;          // 36 MB shared L3
     p.memoryLatency = 130;     // DDR5-5600
+    p.robSize = 256;
     return p;
 }
 
@@ -964,6 +973,7 @@ static MicroarchProfile lunarLakeProfile() {
     p.branchMispredictPenalty = 13.0;
     p.btbEntries = 16384;      // larger BTB
     p.memoryLatency = 170;     // LPDDR5x
+    p.robSize = 256;
     return p;
 }
 
@@ -1002,6 +1012,7 @@ static MicroarchProfile zen5Profile() {
     p.branchMispredictPenalty = 12.0;
     p.btbEntries = 8192;
     p.memoryLatency = 170;
+    p.robSize = 448;
     return p;
 }
 
@@ -2330,6 +2341,24 @@ static std::vector<FusionPair> detectFusionPairs(
                 }
             }
         }
+
+        // ── IncBranch fusion: add/sub + compare + branch (loop counter) ──────
+        // Pattern: increment → compare → branch (tight loop counter pattern).
+        // Scheduling these adjacently helps branch prediction and enables
+        // macro-op fusion of the compare+branch portion.
+        if (auto* binOp = llvm::dyn_cast<llvm::BinaryOperator>(inst)) {
+            unsigned opc = binOp->getOpcode();
+            if (opc == llvm::Instruction::Add || opc == llvm::Instruction::Sub) {
+                for (auto* user : binOp->users()) {
+                    if (auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(user)) {
+                        auto cmpIt = idx.find(cmp);
+                        if (cmpIt != idx.end()) {
+                            pairs.push_back({i, cmpIt->second, FusionPair::IncBranch});
+                        }
+                    }
+                }
+            }
+        }
     }
 
     return pairs;
@@ -2619,6 +2648,54 @@ static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
         critPath[ui] = lat[ui] + maxSucc;
     }
 
+    // ── 5b. Dependency chain identification for ILP ──────────────────────────
+    // Identify independent dependency chains by walking the DAG. Instructions
+    // in different chains can execute in parallel, so we prefer interleaving
+    // them in the schedule to maximize ILP on wide-issue machines.
+    std::vector<unsigned> chainId(n, 0);
+    {
+        unsigned nextChain = 0;
+        std::vector<bool> visited(n, false);
+        for (unsigned root = 0; root < n; ++root) {
+            if (visited[root]) continue;
+            // DFS from this root to mark its connected component
+            std::vector<unsigned> worklist = {root};
+            while (!worklist.empty()) {
+                unsigned cur = worklist.back();
+                worklist.pop_back();
+                if (visited[cur]) continue;
+                visited[cur] = true;
+                chainId[cur] = nextChain;
+                // Follow both successors and predecessors
+                for (unsigned s : succ[cur])
+                    if (!visited[s]) worklist.push_back(s);
+                for (unsigned p : pred[cur])
+                    if (!visited[p]) worklist.push_back(p);
+            }
+            ++nextChain;
+        }
+    }
+
+    // ── 5c. Critical-path slack (forward + backward pass) ────────────────────
+    // Slack = latest_start - earliest_start.  Instructions with zero slack
+    // are on the critical path.  Instructions with slack > 0 can be delayed
+    // without affecting the total schedule length, giving the scheduler
+    // freedom to optimise for register pressure or port diversity instead.
+    std::vector<unsigned> earliestStart(n, 0);
+    // Forward pass: earliest start = max(pred earliest + pred latency)
+    for (unsigned i = 0; i < n; ++i) {
+        for (unsigned p : pred[i])
+            earliestStart[i] = std::max(earliestStart[i], earliestStart[p] + lat[p]);
+    }
+    unsigned criticalLength = 0;
+    for (unsigned i = 0; i < n; ++i)
+        criticalLength = std::max(criticalLength, earliestStart[i] + critPath[i]);
+    std::vector<unsigned> slack(n, 0);
+    for (unsigned i = 0; i < n; ++i) {
+        unsigned latestStart = criticalLength - critPath[i];
+        slack[i] = (latestStart >= earliestStart[i]) ? (latestStart - earliestStart[i]) : 0;
+    }
+
     // ── 6. Hardware port model from the actual HardwareGraph ──────────────────
     // Each HardwareGraph node may represent multiple port instances (node->count).
     // We create one PortSlot per physical port instance to accurately model
@@ -2735,6 +2812,14 @@ static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
     }
     currentLive = liveInCount;
 
+    // ── 6e. Reorder buffer pressure tracking ─────────────────────────────────
+    // Modern out-of-order CPUs retire instructions in order from a reorder
+    // buffer (ROB).  When the ROB fills, dispatch stalls.  We approximate
+    // ROB pressure by tracking how many instructions are inflight (scheduled
+    // but not yet retired, i.e., avail[] > currentCycle).
+    unsigned robCapacity = profile.robSize > 0 ? profile.robSize : 224u;
+    unsigned inflightCount = 0;
+
     // ── 6d. Debug: dump schedule DAG if requested ─────────────────────────────
     if (shouldDumpSchedule())
         dumpScheduleDAG(moveable, succ, pred, critPath, lat, profile);
@@ -2766,6 +2851,12 @@ static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
                 if (!done[i]) { ready.push_back(i); break; }
             if (ready.empty()) break;
         }
+
+        // Compute ROB occupancy: instructions scheduled but not yet completed.
+        inflightCount = 0;
+        for (unsigned id = 0; id < n; ++id)
+            if (done[id] && avail[id] > currentCycle)
+                ++inflightCount;
 
         // Sort ready instructions for maximum throughput — 9-tier priority:
         //   1. Critical path remaining (latency hiding)
@@ -2830,8 +2921,17 @@ static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
             // If we're already over budget, penalise instructions that add live values
             // unless they also free values (via regFreeScore).
             unsigned rfs = regFreeScore(id);
-            if (currentLive + 1 - rfs > regBudget)
-                return currentLive + 1 - rfs - regBudget;
+            if (currentLive + 1 - rfs > regBudget) {
+                unsigned penalty = currentLive + 1 - rfs - regBudget;
+                // Dampen penalty for instructions with slack — they can be
+                // delayed to a point with lower pressure without extending
+                // the critical path.
+                // Divisor grows with slack; /4 chosen so slack of 4 halves
+                // the penalty — empirically a good balance on Skylake/Zen.
+                if (slack[id] > 0)
+                    penalty = std::max(1u, penalty / (1 + slack[id] / 4));
+                return penalty;
+            }
             return 0;
         };
 
@@ -2849,10 +2949,36 @@ static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
                 return longA;  // long-latency first
 
             // Loads first: schedule early to hide memory latency.
+            // Within loads, prefer those with potentially longer latency
+            // (likely cache misses based on access pattern analysis).
             bool isLoadA = llvm::isa<llvm::LoadInst>(moveable[a]);
             bool isLoadB = llvm::isa<llvm::LoadInst>(moveable[b]);
             if (isLoadA != isLoadB)
                 return isLoadA;  // loads before non-loads
+            if (isLoadA && isLoadB) {
+                // Heuristic: loads from different base pointers are more
+                // likely to miss (different cache lines).  Loads from GEPs
+                // with large constant offsets may cross cache lines.
+                auto estimateMissRisk = [&](unsigned id) -> unsigned {
+                    auto* load = llvm::cast<llvm::LoadInst>(moveable[id]);
+                    auto* ptr = load->getPointerOperand();
+                    if (auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(ptr)) {
+                        // Large constant offset → higher miss risk
+                        for (auto it = gep->idx_begin(); it != gep->idx_end(); ++it) {
+                            if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(*it)) {
+                                long long off = ci->getSExtValue();
+                                if (std::abs(off) > static_cast<long long>(profile.cacheLineSize))
+                                    return 2;  // likely L2+ access
+                            }
+                        }
+                    }
+                    return 1;  // likely L1 hit
+                };
+                unsigned riskA = estimateMissRisk(a);
+                unsigned riskB = estimateMissRisk(b);
+                if (riskA != riskB)
+                    return riskA > riskB;  // higher miss risk = schedule earlier
+            }
 
             // Among same-class ready instructions, prefer those whose
             // consumers have the most remaining work (= more stall hiding).
@@ -2873,12 +2999,40 @@ static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
             if (portPressure[rtA] != portPressure[rtB])
                 return portPressure[rtA] > portPressure[rtB];
 
+            // Tier 6.5: Port utilization balance — prefer instructions that
+            // use the least-loaded port type, evening out utilization across
+            // all execution units for better throughput.
+            {
+                auto& slotsA = hwPorts[rtA];
+                auto& slotsB = hwPorts[rtB];
+                unsigned loadA = 0, loadB = 0;
+                for (const auto& s : slotsA) loadA += s.nextFree;
+                for (const auto& s : slotsB) loadB += s.nextFree;
+                // Cross-multiply to compare averages without integer division
+                // precision loss: loadA/sizeA vs loadB/sizeB ↔ loadA*sizeB vs loadB*sizeA
+                unsigned sizeA = static_cast<unsigned>(slotsA.size());
+                unsigned sizeB = static_cast<unsigned>(slotsB.size());
+                unsigned crossA = sizeB > 0 ? loadA * sizeB : 0;
+                unsigned crossB = sizeA > 0 ? loadB * sizeA : 0;
+                if (crossA != crossB)
+                    return crossA < crossB;  // prefer less-loaded port
+            }
+
             // Register pressure: penalise instructions that would cause spills.
             unsigned rpA = regPressurePenalty(a), rpB = regPressurePenalty(b);
             if (rpA != rpB) return rpA < rpB; // lower penalty = better
 
             unsigned rfsA = regFreeScore(a), rfsB = regFreeScore(b);
             if (rfsA != rfsB) return rfsA > rfsB;
+
+            // Tier 9: ROB pressure — when many instructions are inflight,
+            // prefer instructions that complete sooner (lower latency) to
+            // allow earlier retirement and free ROB entries.
+            if (inflightCount > robCapacity * 3 / 4) {
+                if (lat[a] != lat[b])
+                    return lat[a] < lat[b];  // shorter latency first
+            }
+
             return a < b;
         });
 
@@ -2893,6 +3047,7 @@ static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
         // Within a cycle, track which ResourceTypes have been issued to
         // encourage diversity and fill different execution units in parallel.
         std::unordered_set<int> issuedPortsThisCycle;
+        std::unordered_set<unsigned> issuedChainsThisCycle;
         unsigned issued = 0;
 
         // Two-pass issue: first pass schedules instructions that use port
@@ -2911,6 +3066,8 @@ static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
                 // Pass 0: only issue to a port type not yet used this cycle.
                 // Pass 1: issue to any port type (fill remaining slots).
                 if (pass == 0 && issuedPortsThisCycle.count(rtKey)) continue;
+                // Pass 0: also prefer chain diversity for ILP.
+                if (pass == 0 && issuedChainsThisCycle.count(chainId[id])) continue;
 
                 // Earliest start: max(currentCycle, predecessor availability).
                 unsigned earliest = currentCycle;
@@ -2941,6 +3098,7 @@ static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
                 ++issued;
                 scheduled.push_back(moveable[id]);
                 issuedPortsThisCycle.insert(rtKey);
+                issuedChainsThisCycle.insert(chainId[id]);
 
                 // ── Register pressure tracking ──────────────────────────────
                 // Instruction produces a value → increase live count.
