@@ -32,6 +32,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <cstdlib>
 #include <numeric>
 #include <queue>
 #include <set>
@@ -879,6 +880,131 @@ static MicroarchProfile sifiveU74Profile() {
     return p;
 }
 
+/// Return an AWS Graviton3 profile (Arm Neoverse V1-based).
+/// Graviton3: 64-core, 256-bit SVE, DDR5, 8-wide dispatch.
+static MicroarchProfile graviton3Profile() {
+    MicroarchProfile p;
+    p.name = "graviton3";
+    p.isa = ISAFamily::AArch64;
+    p.decodeWidth = 8;
+    p.issueWidth = 8;
+    p.pipelineDepth = 13;      // Neoverse V1 pipeline
+    p.intALUs = 6;
+    p.vecUnits = 4;            // 4× 128-bit NEON / 2× 256-bit SVE
+    p.fmaUnits = 4;
+    p.loadPorts = 3;
+    p.storePorts = 2;
+    p.branchUnits = 2;
+    p.agus = 3;
+    p.dividers = 2;
+    p.mulPortCount = 4;        // multiply on 4 of 6 integer pipes
+    p.latIntAdd = 1; p.latIntMul = 2; p.latIntDiv = 12;
+    p.latFPAdd = 2; p.latFPMul = 3; p.latFPDiv = 10; p.latFMA = 4;
+    p.latLoad = 4; p.latStore = 4; p.latBranch = 1; p.latShift = 1;
+    p.tputIntAdd = 0.17;       // 6 ALUs → ~6/cycle
+    p.tputIntMul = 0.5;
+    p.tputFPAdd = 0.25; p.tputFPMul = 0.25;
+    p.tputLoad = 0.33; p.tputStore = 0.5;
+    p.l1DSize = 64; p.l1DLatency = 4;
+    p.l2Size = 1024; p.l2Latency = 11;
+    p.l3Size = 32768; p.l3Latency = 40;
+    p.cacheLineSize = 64;
+    p.vectorWidth = 256;       // SVE at 256-bit
+    p.intRegisters = 31; p.vecRegisters = 32; p.fpRegisters = 32;
+    p.branchMispredictPenalty = 11.0;
+    p.btbEntries = 8192;
+    p.memoryLatency = 140;     // DDR5 latency
+    return p;
+}
+
+/// Return an AWS Graviton4 profile (Arm Neoverse V2-based).
+/// Graviton4: 96-core, 256-bit SVE2, DDR5-5600, wider backend.
+static MicroarchProfile graviton4Profile() {
+    MicroarchProfile p = neoverseV2Profile();
+    p.name = "graviton4";
+    p.l2Size = 2048;           // 2 MB L2 per core
+    p.l3Size = 36864;          // 36 MB shared L3
+    p.memoryLatency = 130;     // DDR5-5600
+    return p;
+}
+
+/// Return an Intel Lunar Lake profile (Lion Cove P-cores, 2024).
+/// Lion Cove: 8-wide decode, 8-wide dispatch, AVX2, improved branch pred.
+static MicroarchProfile lunarLakeProfile() {
+    MicroarchProfile p;
+    p.name = "lunar-lake";
+    p.isa = ISAFamily::X86_64;
+    p.decodeWidth = 8;         // 8-wide decode
+    p.issueWidth = 8;          // 8-wide dispatch
+    p.pipelineDepth = 14;
+    p.intALUs = 6;             // 6 integer execution ports
+    p.vecUnits = 3;            // 3 vector ALU ports
+    p.fmaUnits = 2;
+    p.loadPorts = 3;           // 3 load ports
+    p.storePorts = 2;
+    p.branchUnits = 2;
+    p.agus = 3;
+    p.dividers = 1;
+    p.mulPortCount = 2;
+    p.latIntAdd = 1; p.latIntMul = 3; p.latIntDiv = 20;
+    p.latFPAdd = 3; p.latFPMul = 4; p.latFPDiv = 10; p.latFMA = 4;
+    p.latLoad = 5; p.latStore = 5; p.latBranch = 1; p.latShift = 1;
+    p.tputIntAdd = 0.17;      // 6 ALUs → ~6/cycle
+    p.tputIntMul = 0.5;
+    p.tputFPAdd = 0.5; p.tputFPMul = 0.5;
+    p.tputLoad = 0.33; p.tputStore = 0.5;
+    p.l1DSize = 48; p.l1DLatency = 5;
+    p.l2Size = 2560;           // 2.5 MB L2 per P-core
+    p.l2Latency = 12;
+    p.l3Size = 12288;          // 12 MB shared L3
+    p.l3Latency = 38;
+    p.cacheLineSize = 64;
+    p.vectorWidth = 256;       // AVX2
+    p.intRegisters = 16; p.vecRegisters = 16; p.fpRegisters = 16;
+    p.branchMispredictPenalty = 13.0;
+    p.btbEntries = 16384;      // larger BTB
+    p.memoryLatency = 170;     // LPDDR5x
+    return p;
+}
+
+/// Return an improved AMD Zen 5 profile (2024).
+/// Zen 5: 8-wide dispatch, 6 ALU pipes, 2× 256-bit vector, AVX-512
+/// via double-pump, improved branch prediction.
+static MicroarchProfile zen5Profile() {
+    MicroarchProfile p;
+    p.name = "znver5";
+    p.isa = ISAFamily::X86_64;
+    p.decodeWidth = 4;         // x86 decode still 4-wide
+    p.issueWidth = 8;          // 8-wide dispatch to backend
+    p.pipelineDepth = 18;      // slightly shorter than Zen 4
+    p.intALUs = 6;             // 6 integer ALU pipes (up from 4)
+    p.vecUnits = 4;            // 4× 256-bit SIMD pipes (up from 2)
+    p.fmaUnits = 4;            // 4 FMA units (up from 2)
+    p.loadPorts = 4;           // 4 load/store AGU units (up from 3)
+    p.storePorts = 2;
+    p.branchUnits = 2;         // 2 branch units (up from 1)
+    p.agus = 4;
+    p.dividers = 1;
+    p.mulPortCount = 2;
+    p.latIntAdd = 1; p.latIntMul = 3; p.latIntDiv = 15;
+    p.latFPAdd = 3; p.latFPMul = 3; p.latFPDiv = 12; p.latFMA = 4;
+    p.latLoad = 4; p.latStore = 4; p.latBranch = 1; p.latShift = 1;
+    p.tputIntAdd = 0.17;      // 6 ALUs
+    p.tputIntMul = 0.5;
+    p.tputFPAdd = 0.25; p.tputFPMul = 0.25;
+    p.tputLoad = 0.25; p.tputStore = 0.5;
+    p.l1DSize = 48; p.l1DLatency = 4;
+    p.l2Size = 1024; p.l2Latency = 12;
+    p.l3Size = 32768; p.l3Latency = 45;
+    p.cacheLineSize = 64;
+    p.vectorWidth = 512;       // AVX-512 native (not double-pumped)
+    p.intRegisters = 16; p.vecRegisters = 32; p.fpRegisters = 32;
+    p.branchMispredictPenalty = 12.0;
+    p.btbEntries = 8192;
+    p.memoryLatency = 170;
+    return p;
+}
+
 /// Normalize a CPU name for lookup: lowercase, strip hyphens.
 static std::string normalizeCpuName(const std::string& name) {
     std::string result;
@@ -907,6 +1033,9 @@ std::optional<MicroarchProfile> lookupMicroarch(const std::string& cpuName) {
     if (normalized == "alderlake" || normalized == "raptorlake" ||
         normalized == "meteorlake" || normalized == "arrowlake")
         return alderlakeProfile();
+
+    if (normalized == "lunarlake" || normalized == "pantherlake")
+        return lunarLakeProfile();
 
     if (normalized == "icelakeserver" || normalized == "icelakeclient" ||
         normalized == "tigerlake" || normalized == "sapphirerapids" ||
@@ -940,18 +1069,8 @@ std::optional<MicroarchProfile> lookupMicroarch(const std::string& cpuName) {
         p.l3Latency = 40;
         return p;
     }
-    if (normalized == "znver5" || normalized == "zen5") {
-        auto p = zen4Profile();
-        p.name = "znver5";
-        p.issueWidth = 8;
-        p.intALUs = 6;
-        p.vecUnits = 4;
-        p.fmaUnits = 4;
-        p.loadPorts = 4;
-        p.storePorts = 2;
-        p.vectorWidth = 512;
-        return p;
-    }
+    if (normalized == "znver5" || normalized == "zen5")
+        return zen5Profile();
 
     // ARM64 — Apple Silicon
     if (normalized == "applem1" || normalized == "applema14")
@@ -995,6 +1114,12 @@ std::optional<MicroarchProfile> lookupMicroarch(const std::string& cpuName) {
         p.pipelineDepth = 11;
         return p;
     }
+
+    // ARM64 — AWS Graviton (server)
+    if (normalized == "graviton3")
+        return graviton3Profile();
+    if (normalized == "graviton4")
+        return graviton4Profile();
 
     // ARM64 — Cortex
     if (normalized == "cortexa78" || normalized == "cortexa78c" ||
@@ -2114,6 +2239,181 @@ TransformStats applyHardwareTransforms(llvm::Function& func,
 
 /// Returns true if the instruction has memory side-effects relevant to
 /// ordering (loads, stores, atomics, and memory-touching calls).
+// ═════════════════════════════════════════════════════════════════════════════
+// Instruction fusion detection
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Fusion opportunity: two instructions that the CPU can execute as a single
+/// micro-op (or in a reduced number of cycles via macro-op fusion).
+struct FusionPair {
+    unsigned first;   ///< Index of the first instruction in the pair
+    unsigned second;  ///< Index of the second instruction in the pair
+    enum Kind {
+        CmpBranch,     ///< Compare + conditional branch → macro-op fusion
+        LoadOp,        ///< Load + ALU op using the loaded value → micro-op fusion
+        AddrFold,      ///< GEP + load/store → address calculation folding
+        IncBranch,     ///< Increment + compare + branch (loop counter pattern)
+    } kind;
+};
+
+/// Detect instruction fusion opportunities within a basic block.
+/// Returns pairs of instructions that should be scheduled adjacently to
+/// enable fusion on modern CPUs (Skylake: cmp+jcc, Zen: test+jcc,
+/// Apple M: load+op folding).
+static std::vector<FusionPair> detectFusionPairs(
+        const std::vector<llvm::Instruction*>& moveable,
+        const std::unordered_map<llvm::Instruction*, unsigned>& idx,
+        const MicroarchProfile& profile) {
+    std::vector<FusionPair> pairs;
+
+    for (unsigned i = 0; i < moveable.size(); ++i) {
+        auto* inst = moveable[i];
+
+        // ── CmpBranch fusion: ICmp/Test + conditional branch ─────────────
+        // x86: TEST/CMP + JCC fuse into a single macro-op on Skylake+, Zen+
+        // AArch64: CMP + B.cond fuse on Apple M-series, Neoverse
+        if (llvm::isa<llvm::ICmpInst>(inst) || llvm::isa<llvm::FCmpInst>(inst)) {
+            // Check if the comparison result feeds a branch in this BB
+            for (auto* user : inst->users()) {
+                auto* br = llvm::dyn_cast<llvm::BranchInst>(user);
+                if (!br || !br->isConditional()) continue;
+                // The branch is the terminator, so it's not in moveable[],
+                // but the compare should be last before it for fusion.
+                // Mark the compare as having a fusion affinity with the end.
+                // We use UINT_MAX as a sentinel for "schedule near terminator".
+                pairs.push_back({i, static_cast<unsigned>(moveable.size()),
+                                 FusionPair::CmpBranch});
+            }
+        }
+
+        // ── LoadOp fusion: Load + single-use ALU consumer ────────────────
+        // On x86, a load can fold into an ALU op's memory operand
+        // (e.g., ADD r, [mem] instead of MOV r2, [mem]; ADD r, r2).
+        // On AArch64, post-indexed load+op patterns are common.
+        if (auto* load = llvm::dyn_cast<llvm::LoadInst>(inst)) {
+            if (load->hasOneUse()) {
+                auto* user = load->user_back();
+                auto* userInst = llvm::dyn_cast<llvm::Instruction>(user);
+                if (userInst) {
+                    auto it = idx.find(userInst);
+                    if (it != idx.end()) {
+                        unsigned userOpc = userInst->getOpcode();
+                        // ALU ops that can fold a memory operand
+                        if (userOpc == llvm::Instruction::Add ||
+                            userOpc == llvm::Instruction::Sub ||
+                            userOpc == llvm::Instruction::And ||
+                            userOpc == llvm::Instruction::Or ||
+                            userOpc == llvm::Instruction::Xor ||
+                            userOpc == llvm::Instruction::Mul ||
+                            userOpc == llvm::Instruction::FAdd ||
+                            userOpc == llvm::Instruction::FMul) {
+                            pairs.push_back({i, it->second, FusionPair::LoadOp});
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Address folding: GEP + Load/Store ────────────────────────────
+        // GEP + load/store can fold the address calculation into the
+        // load/store's addressing mode, eliminating the separate AGU op.
+        if (auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(inst)) {
+            if (gep->hasOneUse()) {
+                auto* user = gep->user_back();
+                if (auto* userInst = llvm::dyn_cast<llvm::Instruction>(user)) {
+                    auto it = idx.find(userInst);
+                    if (it != idx.end() &&
+                        (llvm::isa<llvm::LoadInst>(userInst) ||
+                         llvm::isa<llvm::StoreInst>(userInst))) {
+                        pairs.push_back({i, it->second, FusionPair::AddrFold});
+                    }
+                }
+            }
+        }
+    }
+
+    return pairs;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Schedule DAG debug / visualization hooks
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Dump the scheduling dependency DAG to stderr for debugging.
+/// Each instruction is printed with its index, opcode, critical-path depth,
+/// latency, assigned resource, and lists of predecessors and successors.
+///
+/// Usage: set OMSC_DUMP_SCHEDULE=1 in the environment, or call directly.
+static void dumpScheduleDAG(
+        const std::vector<llvm::Instruction*>& moveable,
+        const std::vector<std::vector<unsigned>>& succ,
+        const std::vector<std::vector<unsigned>>& pred,
+        const std::vector<unsigned>& critPath,
+        const std::vector<unsigned>& lat,
+        const MicroarchProfile& profile,
+        llvm::raw_ostream& os = llvm::errs()) {
+    os << "=== HGOE Schedule DAG (" << moveable.size() << " instructions, "
+       << profile.name << ") ===\n";
+
+    for (unsigned i = 0; i < moveable.size(); ++i) {
+        os << "  [" << i << "] ";
+        moveable[i]->print(os, /*IsForDebug=*/true);
+        os << "\n";
+        os << "       lat=" << lat[i]
+           << " crit=" << critPath[i]
+           << " class=" << static_cast<int>(classifyOp(moveable[i]))
+           << " res=" << static_cast<int>(mapOpToResource(classifyOp(moveable[i])));
+
+        if (!pred[i].empty()) {
+            os << " pred={";
+            for (unsigned j = 0; j < pred[i].size(); ++j) {
+                if (j > 0) os << ",";
+                os << pred[i][j];
+            }
+            os << "}";
+        }
+        if (!succ[i].empty()) {
+            os << " succ={";
+            for (unsigned j = 0; j < succ[i].size(); ++j) {
+                if (j > 0) os << ",";
+                os << succ[i][j];
+            }
+            os << "}";
+        }
+        os << "\n";
+    }
+    os << "=== End Schedule DAG ===\n";
+}
+
+/// Dump the final schedule order with cycle assignments.
+static void dumpScheduleResult(
+        const std::vector<llvm::Instruction*>& scheduled,
+        const std::vector<unsigned>& avail,
+        const std::unordered_map<llvm::Instruction*, unsigned>& idx,
+        unsigned totalCycles,
+        llvm::raw_ostream& os = llvm::errs()) {
+    os << "=== HGOE Schedule Result (" << scheduled.size()
+       << " instructions, " << totalCycles << " cycles) ===\n";
+    for (unsigned i = 0; i < scheduled.size(); ++i) {
+        auto it = idx.find(scheduled[i]);
+        unsigned origIdx = (it != idx.end()) ? it->second : 0;
+        os << "  cycle≤" << avail[origIdx] << " [" << origIdx << "] ";
+        scheduled[i]->print(os, /*IsForDebug=*/true);
+        os << "\n";
+    }
+    os << "=== End Schedule Result ===\n";
+}
+
+/// Check if the OMSC_DUMP_SCHEDULE environment variable is set.
+static bool shouldDumpSchedule() {
+    static int cached = -1;
+    if (cached < 0) {
+        const char* env = std::getenv("OMSC_DUMP_SCHEDULE");
+        cached = (env && (std::string(env) == "1" || std::string(env) == "true")) ? 1 : 0;
+    }
+    return cached == 1;
+}
+
 static bool hasMemoryEffect(const llvm::Instruction* inst) {
     if (llvm::isa<llvm::LoadInst>(inst) || llvm::isa<llvm::StoreInst>(inst) ||
         llvm::isa<llvm::AtomicRMWInst>(inst) ||
@@ -2186,14 +2486,121 @@ static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
         }
     }
 
-    // Memory ordering (conservative): each memory op follows the previous one.
+    // Memory ordering — alias-aware dependency analysis.
+    // Instead of conservatively chaining ALL memory ops sequentially, we
+    // separate loads and stores and only add edges where a true hazard
+    // exists.  Independent loads can execute in parallel on different
+    // load ports, significantly improving IPC on wide-issue CPUs.
+    //
+    // Hazards modelled:
+    //   WAW (Store → Store): output dependence on potentially-aliasing addrs
+    //   RAW (Store → Load):  true dependence (load must see store's value)
+    //   WAR (Load  → Store): anti-dependence (load must complete before
+    //                        store overwrites the same location)
+    //
+    // Load → Load: no dependency needed (reads never conflict).
     {
-        int lastMem = -1;
+        // Helper: extract the memory pointer operand, or nullptr.
+        auto getMemPtr = [](const llvm::Instruction* inst) -> const llvm::Value* {
+            if (const auto* ld = llvm::dyn_cast<llvm::LoadInst>(inst))
+                return ld->getPointerOperand();
+            if (const auto* st = llvm::dyn_cast<llvm::StoreInst>(inst))
+                return st->getPointerOperand();
+            return nullptr;
+        };
+
+        // Alias query: returns false when two pointers are provably
+        // non-aliasing, allowing the dependency to be elided.
+        auto mayAlias = [&](const llvm::Instruction* a,
+                            const llvm::Instruction* b) -> bool {
+            const llvm::Value* ptrA = getMemPtr(a);
+            const llvm::Value* ptrB = getMemPtr(b);
+            if (!ptrA || !ptrB) return true;        // conservative
+            if (ptrA == ptrB)   return true;         // definite alias
+
+            // GEP with constant offsets from the same base → no alias.
+            const auto* gepA = llvm::dyn_cast<llvm::GetElementPtrInst>(ptrA);
+            const auto* gepB = llvm::dyn_cast<llvm::GetElementPtrInst>(ptrB);
+            if (gepA && gepB &&
+                gepA->getPointerOperand() == gepB->getPointerOperand() &&
+                gepA->getNumIndices() == 1 && gepB->getNumIndices() == 1) {
+                const auto* idxA = llvm::dyn_cast<llvm::ConstantInt>(gepA->getOperand(1));
+                const auto* idxB = llvm::dyn_cast<llvm::ConstantInt>(gepB->getOperand(1));
+                if (idxA && idxB && idxA->getSExtValue() != idxB->getSExtValue())
+                    return false;  // different constant offsets → no alias
+            }
+
+            // Distinct local allocations / arguments cannot alias.
+            auto underlyingBase = [](const llvm::Value* v) -> const llvm::Value* {
+                while (const auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(v))
+                    v = gep->getPointerOperand();
+                return v;
+            };
+            const llvm::Value* baseA = underlyingBase(ptrA);
+            const llvm::Value* baseB = underlyingBase(ptrB);
+            if (baseA != baseB) {
+                bool allocA = llvm::isa<llvm::AllocaInst>(baseA) ||
+                              llvm::isa<llvm::Argument>(baseA);
+                bool allocB = llvm::isa<llvm::AllocaInst>(baseB) ||
+                              llvm::isa<llvm::Argument>(baseB);
+                if (allocA && allocB) return false;
+            }
+
+            return true;  // conservative fallback
+        };
+
+        // Collect memory instruction indices by type.
+        std::vector<unsigned> stores, loads, otherMem;
         for (unsigned i = 0; i < n; ++i) {
             if (!hasMemoryEffect(moveable[i])) continue;
-            if (lastMem >= 0)
-                addEdge(static_cast<unsigned>(lastMem), i);
-            lastMem = static_cast<int>(i);
+            if (llvm::isa<llvm::StoreInst>(moveable[i]))
+                stores.push_back(i);
+            else if (llvm::isa<llvm::LoadInst>(moveable[i]))
+                loads.push_back(i);
+            else
+                otherMem.push_back(i); // atomics, fences, calls
+        }
+
+        // WAW: Store → Store (if aliasing).
+        for (size_t si = 0; si < stores.size(); ++si)
+            for (size_t sj = si + 1; sj < stores.size(); ++sj)
+                if (mayAlias(moveable[stores[si]], moveable[stores[sj]]))
+                    addEdge(stores[si], stores[sj]);
+
+        // RAW: Store → Load (if aliasing).
+        for (unsigned stIdx : stores)
+            for (unsigned ldIdx : loads)
+                if (ldIdx > stIdx && mayAlias(moveable[stIdx], moveable[ldIdx]))
+                    addEdge(stIdx, ldIdx);
+
+        // WAR: Load → Store (if aliasing).
+        for (unsigned ldIdx : loads)
+            for (unsigned stIdx : stores)
+                if (stIdx > ldIdx && mayAlias(moveable[ldIdx], moveable[stIdx]))
+                    addEdge(ldIdx, stIdx);
+
+        // Atomics / fences / calls are serialisation barriers — chain them
+        // with all preceding and succeeding memory ops.
+        int lastBarrier = -1;
+        for (unsigned i = 0; i < n; ++i) {
+            if (!hasMemoryEffect(moveable[i])) continue;
+            bool isBarrier = !llvm::isa<llvm::LoadInst>(moveable[i]) &&
+                             !llvm::isa<llvm::StoreInst>(moveable[i]);
+            if (isBarrier) {
+                // All prior memory ops must complete before this barrier.
+                for (unsigned si : stores)
+                    if (si < i) addEdge(si, i);
+                for (unsigned li : loads)
+                    if (li < i) addEdge(li, i);
+                // This barrier must complete before later memory ops.
+                for (unsigned si : stores)
+                    if (si > i) addEdge(i, si);
+                for (unsigned li : loads)
+                    if (li > i) addEdge(i, li);
+                if (lastBarrier >= 0)
+                    addEdge(static_cast<unsigned>(lastBarrier), i);
+                lastBarrier = static_cast<int>(i);
+            }
         }
     }
 
@@ -2275,6 +2682,63 @@ static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
         portPressure[key]++;
     }
 
+    // ── 6b. Detect instruction fusion opportunities ─────────────────────────
+    // Fusion pairs should be scheduled adjacently when possible to enable
+    // macro-op fusion (cmp+branch) or micro-op folding (load+op, GEP+load).
+    auto fusionPairs = detectFusionPairs(moveable, idx, profile);
+
+    // Build a fusion affinity map: for each instruction, what instruction
+    // should immediately precede it (fusion partner).
+    std::unordered_map<unsigned, unsigned> fusionPartner; // second → first
+    for (const auto& fp : fusionPairs) {
+        if (fp.second < n) // skip sentinel for terminator-adjacent fusions
+            fusionPartner[fp.second] = fp.first;
+    }
+
+    // ── 6c. Register pressure model ──────────────────────────────────────────
+    // Track approximate live-value count during scheduling to penalise
+    // schedules that spike register pressure beyond the physical register
+    // file.  Each instruction that produces a non-void, non-zero-latency
+    // result adds to liveValues; when ALL consumers of a value are scheduled,
+    // the value dies and liveValues decreases.
+    //
+    // The register budget excludes stack pointer and frame pointer.
+    unsigned regBudget = (profile.isa == ISAFamily::AArch64)
+        ? std::max(profile.intRegisters, 16u) - 2
+        : std::max(profile.intRegisters, 16u) - 2;
+    unsigned currentLive = 0;
+
+    // Count how many not-yet-scheduled users each producer has.
+    std::vector<unsigned> remainingUsers(n, 0);
+    for (unsigned i = 0; i < n; ++i) {
+        for (unsigned s : succ[i])
+            ++remainingUsers[i]; // one user per successor edge
+    }
+
+    // Pre-count values live-in from outside the BB (function args, cross-BB defs).
+    unsigned liveInCount = 0;
+    {
+        std::unordered_set<const llvm::Value*> externalDefs;
+        for (unsigned i = 0; i < n; ++i) {
+            for (auto& use : moveable[i]->operands()) {
+                auto* val = use.get();
+                if (llvm::isa<llvm::Constant>(val)) continue;
+                if (auto* arg = llvm::dyn_cast<llvm::Argument>(val))
+                    externalDefs.insert(arg);
+                else if (auto* defInst = llvm::dyn_cast<llvm::Instruction>(val)) {
+                    if (idx.find(defInst) == idx.end()) // defined outside BB
+                        externalDefs.insert(defInst);
+                }
+            }
+        }
+        liveInCount = static_cast<unsigned>(externalDefs.size());
+    }
+    currentLive = liveInCount;
+
+    // ── 6d. Debug: dump schedule DAG if requested ─────────────────────────────
+    if (shouldDumpSchedule())
+        dumpScheduleDAG(moveable, succ, pred, critPath, lat, profile);
+
     // ── 7. List scheduling ────────────────────────────────────────────────────
     std::vector<llvm::Instruction*> scheduled;
     scheduled.reserve(n);
@@ -2303,12 +2767,16 @@ static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
             if (ready.empty()) break;
         }
 
-        // Sort ready instructions for maximum throughput:
-        //   Primary   — critical path remaining (latency hiding)
-        //   Secondary — port pressure (schedule bottleneck resource first)
-        //   Tertiary  — register-freeing score (prefer instructions that kill
-        //               live values, reducing register pressure)
-        //   Quaternary — instruction index (deterministic tie-break)
+        // Sort ready instructions for maximum throughput — 9-tier priority:
+        //   1. Critical path remaining (latency hiding)
+        //   2. Long-latency ops first (div/fdiv — start divider early)
+        //   3. Loads first (hide memory latency, may miss in cache)
+        //   4. Stall distance (consumer work remaining — more = better hiding)
+        //   5. Fusion affinity (schedule fusion partners adjacently)
+        //   6. Port pressure (schedule bottleneck resource first)
+        //   7. Register pressure penalty (penalise if over budget)
+        //   8. Register-freeing score (reduce live values)
+        //   9. Instruction index (deterministic tie-break)
         //
         // Register-freeing score: count of predecessors whose only remaining
         // not-yet-scheduled user is this instruction (scheduling it frees the
@@ -2325,9 +2793,77 @@ static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
             return score;
         };
 
+        // Classify long-latency instructions (divisions, FP divides, sqrt)
+        // that should be scheduled as early as possible so that independent
+        // work can fill the pipeline while the divider is busy.
+        auto isLongLatencyOp = [&](unsigned id) -> bool {
+            OpClass op = classifyOp(moveable[id]);
+            return op == OpClass::IntDiv || op == OpClass::FPDiv;
+        };
+
+        // Compute a "stall distance" for each ready instruction: how many
+        // cycles of independent work exist between this instruction's result
+        // and its first consumer.  A higher value means more opportunity
+        // to hide the latency if we schedule it now.
+        auto stallDistance = [&](unsigned id) -> unsigned {
+            unsigned maxConsumerCrit = 0;
+            for (unsigned s : succ[id])
+                if (!done[s]) maxConsumerCrit = std::max(maxConsumerCrit, critPath[s]);
+            return maxConsumerCrit;
+        };
+
+        // Fusion affinity: returns true if this instruction has a fusion
+        // partner that was just scheduled, so scheduling it next enables
+        // macro-op fusion (cmp+branch) or micro-op folding (load+alu).
+        auto hasFusionAffinity = [&](unsigned id) -> bool {
+            auto it = fusionPartner.find(id);
+            if (it == fusionPartner.end()) return false;
+            return done[it->second]; // partner already scheduled
+        };
+
+        // Register pressure penalty: returns a higher value when scheduling
+        // this instruction would push live values over the register budget.
+        // Instructions that produce a result (non-void) increase pressure.
+        auto regPressurePenalty = [&](unsigned id) -> unsigned {
+            if (moveable[id]->getType()->isVoidTy()) return 0;
+            if (lat[id] == 0) return 0; // free ops (bitcast, phi) don't need regs
+            // If we're already over budget, penalise instructions that add live values
+            // unless they also free values (via regFreeScore).
+            unsigned rfs = regFreeScore(id);
+            if (currentLive + 1 - rfs > regBudget)
+                return currentLive + 1 - rfs - regBudget;
+            return 0;
+        };
+
         std::sort(ready.begin(), ready.end(), [&](unsigned a, unsigned b) {
             if (critPath[a] != critPath[b])
                 return critPath[a] > critPath[b];
+
+            // Long-latency operations (div, fdiv) before other ops at same
+            // critical path — start them early so the divider is busy while
+            // independent ALU/load work proceeds.  LLVM's generic scheduler
+            // does not have per-CPU divider latency data; our profiles do.
+            bool longA = isLongLatencyOp(a);
+            bool longB = isLongLatencyOp(b);
+            if (longA != longB)
+                return longA;  // long-latency first
+
+            // Loads first: schedule early to hide memory latency.
+            bool isLoadA = llvm::isa<llvm::LoadInst>(moveable[a]);
+            bool isLoadB = llvm::isa<llvm::LoadInst>(moveable[b]);
+            if (isLoadA != isLoadB)
+                return isLoadA;  // loads before non-loads
+
+            // Among same-class ready instructions, prefer those whose
+            // consumers have the most remaining work (= more stall hiding).
+            unsigned sdA = stallDistance(a), sdB = stallDistance(b);
+            if (sdA != sdB) return sdA > sdB;
+
+            // Fusion affinity: prefer instructions whose fusion partner
+            // was just scheduled, enabling macro-op / micro-op fusion.
+            bool fusA = hasFusionAffinity(a), fusB = hasFusionAffinity(b);
+            if (fusA != fusB) return fusA;
+
             OpClass opA = classifyOp(moveable[a]);
             OpClass opB = classifyOp(moveable[b]);
             int rtA = (opA == OpClass::IntMul) ? kIntMulPortKey
@@ -2336,10 +2872,23 @@ static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
                 : static_cast<int>(mapOpToResource(opB));
             if (portPressure[rtA] != portPressure[rtB])
                 return portPressure[rtA] > portPressure[rtB];
+
+            // Register pressure: penalise instructions that would cause spills.
+            unsigned rpA = regPressurePenalty(a), rpB = regPressurePenalty(b);
+            if (rpA != rpB) return rpA < rpB; // lower penalty = better
+
             unsigned rfsA = regFreeScore(a), rfsB = regFreeScore(b);
             if (rfsA != rfsB) return rfsA > rfsB;
             return a < b;
         });
+
+        // ── Beam search pruning ──────────────────────────────────────────────
+        // For large ready lists (> beamWidth), only consider the top-N
+        // candidates to prevent combinatorial explosion in very large BBs.
+        // The sorted order ensures the highest-priority instructions are kept.
+        constexpr unsigned kBeamWidth = 32;
+        if (ready.size() > kBeamWidth)
+            ready.resize(kBeamWidth);
 
         // Within a cycle, track which ResourceTypes have been issued to
         // encourage diversity and fill different execution units in parallel.
@@ -2393,6 +2942,20 @@ static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
                 scheduled.push_back(moveable[id]);
                 issuedPortsThisCycle.insert(rtKey);
 
+                // ── Register pressure tracking ──────────────────────────────
+                // Instruction produces a value → increase live count.
+                if (!moveable[id]->getType()->isVoidTy() && lat[id] > 0)
+                    ++currentLive;
+                // Check if scheduling this instruction kills any predecessor's
+                // last use, decreasing the live count.
+                for (unsigned p : pred[id]) {
+                    if (!done[p]) continue;
+                    if (moveable[p]->getType()->isVoidTy()) continue;
+                    if (remainingUsers[p] > 0) --remainingUsers[p];
+                    if (remainingUsers[p] == 0 && currentLive > 0)
+                        --currentLive;
+                }
+
                 // Decrement in-degrees of successors.
                 for (unsigned s : succ[id])
                     if (inDeg[s] > 0) --inDeg[s];
@@ -2420,11 +2983,16 @@ static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
         }
     }
 
-    // ── 8. Apply schedule: reorder LLVM IR within the basic block ────────────
+    // ── 8. Debug: dump schedule result if requested ─────────────────────────
+    if (shouldDumpSchedule())
+        dumpScheduleResult(scheduled, avail, idx,
+                           maxCycle > 0 ? maxCycle : currentCycle);
+
+    // ── 9. Apply schedule: reorder LLVM IR within the basic block ────────────
     if (scheduled.size() == n) {
         llvm::Instruction* term = bb.getTerminator();
         for (auto* inst : scheduled)
-            inst->moveBefore(term);
+            inst->moveBefore(bb, term->getIterator());
     }
 
     return maxCycle > 0 ? maxCycle : currentCycle;

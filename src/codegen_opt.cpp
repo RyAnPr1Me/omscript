@@ -340,13 +340,12 @@ void CodeGenerator::runOptimizationPasses() {
     // etc.) before the inliner and other IPO passes run.  This enables the
     // inliner to make better cost estimates and allows alias analysis to be
     // more precise, unlocking further optimizations downstream.
-    if (optimizationLevel >= OptimizationLevel::O2) {
+    // Lowered from O2 to O1 so that library-function attributes (noalias,
+    // nocapture, readonly, etc.) are available at all optimization levels,
+    // enabling zero-cost abstraction guarantees even at O1.
+    if (optimizationLevel >= OptimizationLevel::O1) {
         PB.registerPipelineStartEPCallback(
-#if LLVM_VERSION_MAJOR >= 21
-            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel, llvm::ThinOrFullLTOPhase) {
-#else
             [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel) {
-#endif
             MPM.addPass(llvm::InferFunctionAttrsPass());
         });
     }
@@ -573,11 +572,7 @@ void CodeGenerator::runOptimizationPasses() {
     //     optionally benefit from profile data when available.
     if (optimizationLevel >= OptimizationLevel::O2) {
         PB.registerOptimizerLastEPCallback(
-#if LLVM_VERSION_MAJOR >= 21
-            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel, llvm::ThinOrFullLTOPhase) {
-#else
             [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel) {
-#endif
             llvm::FunctionPassManager FPM;
             FPM.addPass(llvm::VectorCombinePass());
             FPM.addPass(llvm::LoopSinkPass());
@@ -592,11 +587,7 @@ void CodeGenerator::runOptimizationPasses() {
     // enables further inlining (smaller call signatures).
     if (optimizationLevel >= OptimizationLevel::O3) {
         PB.registerOptimizerLastEPCallback(
-#if LLVM_VERSION_MAJOR >= 21
-            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel, llvm::ThinOrFullLTOPhase) {
-#else
             [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel) {
-#endif
             MPM.addPass(llvm::DeadArgumentEliminationPass());
         });
     }
@@ -608,11 +599,7 @@ void CodeGenerator::runOptimizationPasses() {
     // the remaining hot code.
     if (optimizationLevel >= OptimizationLevel::O3) {
         PB.registerOptimizerLastEPCallback(
-#if LLVM_VERSION_MAJOR >= 21
-            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel, llvm::ThinOrFullLTOPhase) {
-#else
             [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel) {
-#endif
             MPM.addPass(llvm::HotColdSplittingPass());
         });
     }

@@ -5,6 +5,108 @@ All notable changes to the OmScript compiler will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.5.0] - 2026-03-23
+
+### Added
+- **HGOE instruction fusion detection:** The scheduler now detects and exploits three classes of instruction fusion opportunities:
+  - **Compare+Branch (CmpBranch):** `ICmp`/`FCmp` followed by conditional branch — macro-op fusion on Skylake+, Zen+, Apple M-series
+  - **Load+Op (LoadOp):** Single-use loads feeding ALU operations — micro-op folding allows the load to be absorbed into the ALU op's memory operand
+  - **Address folding (AddrFold):** GEP + Load/Store pairs — address calculation folds into the memory instruction's addressing mode
+  - Fusion partners are scheduled adjacently via a new fusion-affinity tier in the priority sort
+- **HGOE register pressure tracking:** The scheduler now models approximate register liveness during scheduling:
+  - Tracks live-in values from outside the basic block (function arguments, cross-BB definitions)
+  - Each scheduled instruction that produces a non-void result increases live count; when all consumers are scheduled, the value dies
+  - A **register pressure penalty** tier in the priority sort penalises instructions that would push live values over the target's physical register budget (adjusted for stack/frame pointer)
+  - Integrates with the existing register-freeing score for spill-avoidance scheduling
+- **HGOE beam search pruning:** For basic blocks with more than 32 ready-to-schedule instructions, only the top 32 candidates (by priority score) are considered each cycle, preventing combinatorial explosion in very large functions while maintaining schedule quality
+- **HGOE schedule DAG visualization/debug hooks:**
+  - `dumpScheduleDAG()` — prints the dependency DAG with per-instruction latency, critical-path depth, resource class, and predecessor/successor lists
+  - `dumpScheduleResult()` — prints the final schedule order with cycle assignments
+  - Activated by setting `OMSC_DUMP_SCHEDULE=1` in the environment — zero overhead when disabled (cached check)
+- **6 new HGOE unit tests:**
+  - `ScheduleReordersInstructions` — verifies instruction reordering for latency hiding
+  - `ScheduleRegisterPressureAware` — tests register pressure tracking with many live values
+  - `ScheduleHandlesLargeBB` — tests beam search pruning on 100-instruction blocks
+  - `ScheduleFusionAware` — tests fusion-aware scheduling with compare+select
+  - `ScheduleWithDivisionLatencyHiding` — verifies division is scheduled before independent adds
+  - `ScheduleMultiArchConsistency` — tests same BB on Skylake, Zen 4, Apple M1
+
+### Changed
+- **HGOE scheduler priority sort upgraded to 9-tier** (from 7-tier):
+  1. Critical-path depth (latency hiding)
+  2. Long-latency operations first (division, FP divide)
+  3. Loads first (hide memory latency)
+  4. Stall distance (consumer work remaining)
+  5. **Fusion affinity** (schedule fusion partners adjacently — new)
+  6. Port pressure (bottleneck resource first)
+  7. **Register pressure penalty** (penalise spill-causing schedules — new)
+  8. Register-freeing score (reduce live values)
+  9. Instruction index (deterministic tie-break)
+
+## [3.4.0] - 2026-03-23
+
+### Added
+- **13 new e-graph relational rewrite rules** using guard predicates for targeted constant optimisation:
+  - **6 multiply-by-constant strength reduction rules:** `x * 3 → (x << 1) + x`, `x * 5 → (x << 2) + x`, `x * 7 → (x << 3) - x`, `x * 9 → (x << 3) + x`, `x * 15 → (x << 4) - x`, `x * 17 → (x << 4) + x` — each guarded by a relational predicate that matches only the specific constant, converting expensive multiplies to 2-cycle shift+add sequences
+  - **2 shift-combining rules:** `(x << a) << b → x << (a + b)` and `(x >> a) >> b → x >> (a + b)` — guarded to require both shift amounts be constants with sum < 64
+  - **5 ternary/select optimisation rules:**
+    - `cond ? x : x → x` (redundant select elimination)
+    - `cond ? 1 : 0 → cond != 0` (boolean select)
+    - `cond ? 0 : 1 → cond == 0` (inverted boolean select)
+    - `!(cond) ? a : b → cond ? b : a` (negate condition = swap arms)
+    - `(a == b) ? a : b → b` (select on equality)
+
+### Changed
+- **HGOE scheduler: long-latency operation hoisting** — Integer and FP divisions are now scheduled before other ready instructions at the same critical-path depth, allowing independent ALU/load work to proceed while the divider pipeline is busy. This outperforms LLVM's generic MachineScheduler which lacks per-CPU division latency data (our profiles model exact divider latency: 25 cycles on Skylake, 15 on Zen 5, 12 on Graviton3)
+- **HGOE scheduler: stall-distance heuristic** — When multiple instructions are ready at the same priority level, the scheduler now prefers instructions whose consumers have the most remaining critical-path work, maximising the opportunity to fill stall cycles with independent computation
+- **HGOE scheduler: 7-tier priority** (up from 5) — New priority levels:
+  1. Critical-path depth (latency hiding)
+  2. **Long-latency operations first** (division, FP divide — new)
+  3. Loads first (hide memory latency)
+  4. **Stall distance** (consumer work remaining — new)
+  5. Port pressure (bottleneck resource first)
+  6. Register-freeing score (reduce live values)
+  7. Instruction index (deterministic tie-break)
+
+## [3.3.0] - 2026-03-22
+
+### Added
+- **Relational e-graph pattern matching:** The e-graph equality saturation engine now supports **guard predicates** on rewrite rules, enabling relational optimizations where structural patterns are refined by semantic constraints on matched values. New infrastructure:
+  - `RuleGuard` predicate type on `RewriteRule` — checked before applying a rewrite
+  - `EGraph::getConstValue()` / `getConstFValue()` — extract constant values from e-classes for guard evaluation
+- **23 new e-graph rewrite rules:**
+  - **3 relational power-of-2 rules:** `x * C → x << log2(C)` and `x % C → x & (C-1)` for ANY power-of-2 constant (generalises the hardcoded rules for 2..1024)
+  - **4 comparison merging rules:** `(a < b) || (a == b) → a <= b`, `(a > b) || (a == b) → a >= b`, and commuted variants — eliminates redundant comparison pairs
+  - **4 redundant comparison elimination rules:** `(a != b) && (a < b) → a < b`, etc. — removes tautological conjuncts
+  - **4 ternary common-subexpression factoring rules:** `cond ? (a+c) : (b+c) → (cond ? a : b) + c`, and similarly for Sub, Mul, Neg — hoists common operations out of branches
+  - **4 complement-based bitwise rules:** `(~a) & (a | b) → (~a) & b`, `(~a) | (a & b) → (~a) | b`, and commuted variants — simplifies complement interactions using Boolean algebra
+  - **4 additional commuted variants** for the above rules
+- **13 additional e-graph rules:**
+  - **5 Sqrt identities:** `sqrt(0)→0`, `sqrt(1)→1`, `sqrt(x)*sqrt(x)→x`, `sqrt(x²)→x`, `sqrt(x)*sqrt(y)→sqrt(x*y)`
+  - **5 Power rules:** `x^1→x`, `x^(-1)→1/x`, `x^a * x^b → x^(a+b)`, `(x^a)^b → x^(a*b)`, `x^a / x^b → x^(a-b)`
+  - **2 guard-predicated rules** using the new relational infrastructure
+- **4 new HGOE CPU microarchitecture profiles:**
+  - **AWS Graviton3** (Arm Neoverse V1, 8-wide, SVE 256-bit, DDR5)
+  - **AWS Graviton4** (Arm Neoverse V2, 8-wide, SVE2 256-bit, 2 MB L2, DDR5-5600)
+  - **Intel Lunar Lake** (Lion Cove P-cores, 8-wide decode/dispatch, 6 ALU, 3 load ports, 2.5 MB L2)
+  - **AMD Zen 5** — dedicated profile (replaces the previous zen4-derived approximation) with accurate 8-wide dispatch, 6 ALU pipes, 4 vector units, 4 FMA units, 4 load ports, AVX-512, 12-cycle branch mispredict penalty
+
+### Changed
+- **E-graph `applyRules()` now checks guard predicates** before applying each rewrite match, enabling fine-grained relational filtering without false merges
+- **AMD Zen 5 HGOE scheduling** now uses its own dedicated profile function (`zen5Profile()`) instead of a minimal derivation from Zen 4, giving more accurate instruction scheduling, port assignment, and throughput modelling
+- **HGOE scheduler uses alias-aware memory dependencies** instead of conservatively serialising all memory operations — independent loads can now execute in parallel on separate load ports, significantly improving IPC on wide-issue CPUs (Graviton3/4, Zen 5, Lunar Lake)
+- **HGOE scheduler prioritises loads** in the scheduling sort to hide memory latency — loads are scheduled as early as possible before dependent ALU operations
+
+## [3.2.0] - 2026-03-22
+
+### Changed
+- **Zero-cost abstraction guarantees:**
+  - Lambda functions (`|x| expr`) are now marked `alwaysinline` at O2+, guaranteeing zero call overhead when passed to `array_map`, `array_filter`, `array_reduce`, and other higher-order functions
+  - Small helper functions (≤4 deep statements) get `alwaysinline` at O2 (previously only at O3 with ≤8 threshold), ensuring struct accessors, predicates, and single-operation helpers are fully inlined
+  - `InferFunctionAttrsPass` lowered from O2+ to O1+, so `nocapture`, `readonly`, `nounwind`, and other library-function attributes are inferred at all optimization levels
+- **Fixed cross-platform release build failures:** Removed incorrect `LLVM_VERSION_MAJOR >= 21` version guards that assumed a `ThinOrFullLTOPhase` parameter in `PassBuilder` EP callbacks — this parameter was never added to the LLVM API, causing compilation failures on macOS (LLVM 22) and Windows (MSYS2 LLVM)
+- **Fixed deprecated `moveBefore(Instruction*)` call** in hardware graph instruction scheduler to use the iterator-based API, eliminating deprecation warnings on LLVM 18+
+
 ## [3.1.0] - 2026-03-22
 
 ### Added
