@@ -5,6 +5,26 @@ All notable changes to the OmScript compiler will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.6.0] - 2026-03-23
+
+### Added
+- **6 new built-in functions** for bitwise operations and math, all using LLVM hardware intrinsics for maximum performance:
+  - `popcount(x)` — count set bits (uses `ctpop` intrinsic, compiles to single `POPCNT` instruction on x86)
+  - `clz(x)` — count leading zeros (uses `ctlz` intrinsic, compiles to `LZCNT`/`BSR`)
+  - `ctz(x)` — count trailing zeros (uses `cttz` intrinsic, compiles to `TZCNT`/`BSF`)
+  - `bitreverse(x)` — reverse all bits (uses `bitreverse` intrinsic)
+  - `exp2(x)` — base-2 exponential, 2^x (uses `exp2` intrinsic for native FP hardware)
+  - `is_power_of_2(x)` — efficient power-of-2 check via `x > 0 && (x & (x-1)) == 0`
+- **12 new e-graph floating-point optimization rules** for faster FP code generation:
+  - Division by power-of-2 constants to multiply by reciprocal: `x / 4.0 → x * 0.25`, `x / 8.0 → x * 0.125`, `x / 16.0 → x * 0.0625` (and reverses for e-graph exploration)
+  - FP double negation elimination: `-(-x) → x` (exact in IEEE-754)
+  - FP subtract/add zero: `x - 0.0 → x`, `0.0 + x → x`, `x + 0.0 → x`
+- **3 new e-graph relational optimization rules:**
+  - Modulo by power-of-2 for non-negative values: `x % C → x & (C-1)` (guarded by `isNonNeg`)
+  - Algebraic factoring: `x*a + x*b → x*(a+b)` and `x*a - x*b → x*(a-b)` where a, b are constants
+- **21 new unit tests** covering all new builtins and optimization rules
+- **New example program** `bitwise_builtins_test.om` demonstrating all new built-in functions
+
 ## [3.5.0] - 2026-03-23
 
 ### Added

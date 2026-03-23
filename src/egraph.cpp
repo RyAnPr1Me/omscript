@@ -6658,6 +6658,62 @@ std::vector<RewriteRule> getRelationalRules() {
             return xClass.isNonNeg;
         });
 
+    // ─────────────────────────────────────────────────────────────────────
+    // Modulo by power-of-2 for non-negative values → bitwise AND
+    // x % C → x & (C - 1)  when x is non-negative and C is power-of-2
+    // ─────────────────────────────────────────────────────────────────────
+    rules.emplace_back("mod_pow2_nonneg",
+        P::OpPat(Op::Mod, {P::Wild("x"), P::Wild("c")}),
+        [](EGraph& g, const Subst& s) {
+            auto cv = g.getConstValue(s.at("c"));
+            return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(*cv - 1));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto cv = g.getConstValue(s.at("c"));
+            if (!cv || *cv <= 1) return false;
+            long long v = *cv;
+            if ((v & (v - 1)) != 0) return false;  // not power of 2
+            const auto& xClass = g.getClass(s.at("x"));
+            return xClass.isNonNeg;
+        });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Algebraic factoring: x*a + x*b → x*(a+b)  where a, b are constants
+    // This reduces two multiplies + one add to one multiply + one add.
+    // ─────────────────────────────────────────────────────────────────────
+    rules.emplace_back("factor_const_mul",
+        P::OpPat(Op::Add, {
+            P::OpPat(Op::Mul, {P::Wild("x"), P::Wild("a")}),
+            P::OpPat(Op::Mul, {P::Wild("x"), P::Wild("b")})
+        }),
+        [](EGraph& g, const Subst& s) {
+            auto a = g.getConstValue(s.at("a"));
+            auto b = g.getConstValue(s.at("b"));
+            return g.addBinOp(Op::Mul, s.at("x"), g.addConst(*a + *b));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto a = g.getConstValue(s.at("a"));
+            auto b = g.getConstValue(s.at("b"));
+            return a.has_value() && b.has_value();
+        });
+
+    // x*a - x*b → x*(a-b)  where a, b are constants
+    rules.emplace_back("factor_const_mul_sub",
+        P::OpPat(Op::Sub, {
+            P::OpPat(Op::Mul, {P::Wild("x"), P::Wild("a")}),
+            P::OpPat(Op::Mul, {P::Wild("x"), P::Wild("b")})
+        }),
+        [](EGraph& g, const Subst& s) {
+            auto a = g.getConstValue(s.at("a"));
+            auto b = g.getConstValue(s.at("b"));
+            return g.addBinOp(Op::Mul, s.at("x"), g.addConst(*a - *b));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto a = g.getConstValue(s.at("a"));
+            auto b = g.getConstValue(s.at("b"));
+            return a.has_value() && b.has_value();
+        });
+
     return rules;
 }
 
@@ -6784,6 +6840,80 @@ std::vector<RewriteRule> getFloatingPointRules() {
             if (iv) return *iv != 0;
             return false;
         });
+
+    // ── Division by power-of-2 → multiply by reciprocal ───────────────
+    // These are exact in IEEE-754 because 0.25 and 0.125 are exactly
+    // representable, and multiplication is faster than division on most
+    // hardware (3-5 cycles vs 20-35 cycles).
+
+    // x / 4.0 → x * 0.25
+    rules.emplace_back("fp_div4_to_mul_quarter",
+        P::OpPat(Op::Div, {P::Wild("x"), P::ConstFPat(4.0)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Mul, s.at("x"), g.addConstF(0.25));
+        });
+
+    // x * 0.25 → x / 4.0  (reverse for e-graph exploration)
+    rules.emplace_back("fp_mul_quarter_to_div4",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstFPat(0.25)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Div, s.at("x"), g.addConstF(4.0));
+        });
+
+    // x / 8.0 → x * 0.125
+    rules.emplace_back("fp_div8_to_mul_eighth",
+        P::OpPat(Op::Div, {P::Wild("x"), P::ConstFPat(8.0)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Mul, s.at("x"), g.addConstF(0.125));
+        });
+
+    // x * 0.125 → x / 8.0  (reverse for e-graph exploration)
+    rules.emplace_back("fp_mul_eighth_to_div8",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstFPat(0.125)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Div, s.at("x"), g.addConstF(8.0));
+        });
+
+    // x / 16.0 → x * 0.0625
+    rules.emplace_back("fp_div16_to_mul",
+        P::OpPat(Op::Div, {P::Wild("x"), P::ConstFPat(16.0)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Mul, s.at("x"), g.addConstF(0.0625));
+        });
+
+    // x * 0.0625 → x / 16.0  (reverse)
+    rules.emplace_back("fp_mul_0625_to_div16",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstFPat(0.0625)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Div, s.at("x"), g.addConstF(16.0));
+        });
+
+    // ── FP double negation ─────────────────────────────────────────────
+    // -(-x) → x  (exact: IEEE-754 negation flips sign bit, doing it twice
+    // restores the original bit pattern, including NaN/Inf/-0.0)
+    rules.emplace_back("fp_double_neg",
+        P::OpPat(Op::Neg, {P::OpPat(Op::Neg, {P::Wild("x")})}),
+        [](EGraph&, const Subst& s) { return s.at("x"); });
+
+    // ── FP subtract zero ──────────────────────────────────────────────
+    // x - 0.0 → x  (exact: subtracting +0.0 preserves the original value
+    // and sign, even for -0.0: (-0.0) - (+0.0) = -0.0)
+    rules.emplace_back("fp_sub_zero",
+        P::OpPat(Op::Sub, {P::Wild("x"), P::ConstFPat(0.0)}),
+        [](EGraph&, const Subst& s) { return s.at("x"); });
+
+    // ── FP add zero ───────────────────────────────────────────────────
+    // 0.0 + x → x  (exact: adding +0.0 to any value is a no-op;
+    // (+0.0) + (-0.0) = +0.0 = -0.0 in IEEE comparison, but we only
+    // apply when the constant is literally 0.0)
+    rules.emplace_back("fp_add_zero_left",
+        P::OpPat(Op::Add, {P::ConstFPat(0.0), P::Wild("x")}),
+        [](EGraph&, const Subst& s) { return s.at("x"); });
+
+    // x + 0.0 → x
+    rules.emplace_back("fp_add_zero_right",
+        P::OpPat(Op::Add, {P::Wild("x"), P::ConstFPat(0.0)}),
+        [](EGraph&, const Subst& s) { return s.at("x"); });
 
     return rules;
 }

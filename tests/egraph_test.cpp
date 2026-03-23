@@ -2798,3 +2798,148 @@ TEST(EGraphTest, DivPow2NonNeg) {
     // After constant folding, both should equal 2
     EXPECT_EQ(g.find(div), g.find(shr));
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// New FP rules: division by power-of-2 → multiply by reciprocal
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST(EGraphTest, FPDiv4ToMulQuarter) {
+    // x / 4.0 ↔ x * 0.25
+    EGraph g;
+    ClassId x = g.addVar("x");
+    ClassId four = g.addConstF(4.0);
+    ClassId quarter = g.addConstF(0.25);
+    ClassId divFour = g.addBinOp(Op::Div, x, four);
+    ClassId mulQuarter = g.addBinOp(Op::Mul, x, quarter);
+
+    auto rules = getFloatingPointRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(divFour), g.find(mulQuarter));
+}
+
+TEST(EGraphTest, FPDiv8ToMulEighth) {
+    // x / 8.0 ↔ x * 0.125
+    EGraph g;
+    ClassId x = g.addVar("x");
+    ClassId eight = g.addConstF(8.0);
+    ClassId eighth = g.addConstF(0.125);
+    ClassId divEight = g.addBinOp(Op::Div, x, eight);
+    ClassId mulEighth = g.addBinOp(Op::Mul, x, eighth);
+
+    auto rules = getFloatingPointRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(divEight), g.find(mulEighth));
+}
+
+TEST(EGraphTest, FPDiv16ToMul0625) {
+    // x / 16.0 ↔ x * 0.0625
+    EGraph g;
+    ClassId x = g.addVar("x");
+    ClassId sixteen = g.addConstF(16.0);
+    ClassId recip = g.addConstF(0.0625);
+    ClassId divSixteen = g.addBinOp(Op::Div, x, sixteen);
+    ClassId mulRecip = g.addBinOp(Op::Mul, x, recip);
+
+    auto rules = getFloatingPointRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(divSixteen), g.find(mulRecip));
+}
+
+TEST(EGraphTest, FPDoubleNeg) {
+    // -(-x) → x
+    EGraph g;
+    ClassId x = g.addVar("x");
+    ClassId negX = g.addUnaryOp(Op::Neg, x);
+    ClassId negNegX = g.addUnaryOp(Op::Neg, negX);
+
+    auto rules = getFloatingPointRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(negNegX), g.find(x));
+}
+
+TEST(EGraphTest, FPSubZero) {
+    // x - 0.0 → x
+    EGraph g;
+    ClassId x = g.addVar("x");
+    ClassId zero = g.addConstF(0.0);
+    ClassId sub = g.addBinOp(Op::Sub, x, zero);
+
+    auto rules = getFloatingPointRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(sub), g.find(x));
+}
+
+TEST(EGraphTest, FPAddZero) {
+    // 0.0 + x → x and x + 0.0 → x
+    EGraph g;
+    ClassId x = g.addVar("x");
+    ClassId zero = g.addConstF(0.0);
+    ClassId addLeft = g.addBinOp(Op::Add, zero, x);
+    ClassId addRight = g.addBinOp(Op::Add, x, zero);
+
+    auto rules = getFloatingPointRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(addLeft), g.find(x));
+    EXPECT_EQ(g.find(addRight), g.find(x));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// New relational rules: modulo by power-of-2, factoring
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST(EGraphTest, ModPow2NonNeg) {
+    // 10 % 4 → 10 & 3  (both are non-negative constants)
+    EGraph g;
+    ClassId c10 = g.addConst(10);
+    ClassId c4 = g.addConst(4);
+    ClassId mod = g.addBinOp(Op::Mod, c10, c4);
+    ClassId andOp = g.addBinOp(Op::BitAnd, c10, g.addConst(3));
+
+    auto rules = getRelationalRules();
+    g.saturate(rules);
+
+    // After constant folding, both should equal 2
+    EXPECT_EQ(g.find(mod), g.find(andOp));
+}
+
+TEST(EGraphTest, FactorConstMul) {
+    // x*3 + x*5 → x*8  (where 3 and 5 are constants)
+    EGraph g;
+    ClassId x = g.addVar("x");
+    ClassId c3 = g.addConst(3);
+    ClassId c5 = g.addConst(5);
+    ClassId c8 = g.addConst(8);
+    ClassId mul3 = g.addBinOp(Op::Mul, x, c3);
+    ClassId mul5 = g.addBinOp(Op::Mul, x, c5);
+    ClassId sum = g.addBinOp(Op::Add, mul3, mul5);
+    ClassId mul8 = g.addBinOp(Op::Mul, x, c8);
+
+    auto rules = getRelationalRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(sum), g.find(mul8));
+}
+
+TEST(EGraphTest, FactorConstMulSub) {
+    // x*7 - x*3 → x*4  (where 7 and 3 are constants)
+    EGraph g;
+    ClassId x = g.addVar("x");
+    ClassId c7 = g.addConst(7);
+    ClassId c3 = g.addConst(3);
+    ClassId c4 = g.addConst(4);
+    ClassId mul7 = g.addBinOp(Op::Mul, x, c7);
+    ClassId mul3 = g.addBinOp(Op::Mul, x, c3);
+    ClassId diff = g.addBinOp(Op::Sub, mul7, mul3);
+    ClassId mul4 = g.addBinOp(Op::Mul, x, c4);
+
+    auto rules = getRelationalRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(diff), g.find(mul4));
+}
