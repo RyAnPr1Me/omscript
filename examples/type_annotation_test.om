@@ -1,0 +1,52 @@
+// type_annotation_test.om — type annotation tests
+//
+// Tests: parameter type annotations, return type annotations,
+// variable type annotations, and unsigned types.
+
+fn add_ints(a: int, b: int) -> int {
+    return a + b;
+}
+
+fn add_floats(a: float, b: float) -> float {
+    return a + b;
+}
+
+fn identity_i32(x: i32) -> i32 {
+    return x;
+}
+
+fn unsigned_add(a: u64, b: u64) -> u64 {
+    return a + b;
+}
+
+fn main() {
+    var result: int = 0;
+
+    // Test 1: Integer parameter and return annotations
+    result = result + (add_ints(3, 4) == 7);
+
+    // Test 2: Float parameter and return annotations
+    var fsum: float = add_floats(1.5, 2.5);
+    result = result + (fsum == 4.0);
+
+    // Test 3: i32 parameter and return annotations
+    result = result + (identity_i32(42) == 42);
+
+    // Test 4: Unsigned type annotations
+    result = result + (unsigned_add(10, 20) == 30);
+
+    // Test 5: Annotated local variables
+    var x: int = 100;
+    var y: int = 200;
+    result = result + (x + y == 300);
+
+    // Test 6: Annotated loop variable
+    var total: int = 0;
+    for (i: int in 0...5) {
+        total = total + i;
+    }
+    result = result + (total == 10);  // 0+1+2+3+4
+
+    // Expected: 6
+    return result;
+}

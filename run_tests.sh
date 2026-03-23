@@ -360,6 +360,9 @@ test_program "examples/hint_flatten.om" 0
 test_program "examples/hint_vectorize.om" 0
 test_program "examples/unsigned_types.om" 0
 test_program "examples/precision_builtins.om" 0
+test_program "examples/lambda_test.om" 10
+test_program "examples/try_catch.om" 25
+test_program "examples/type_annotation_test.om" 6
 test_compile_fail "examples/const_fail.om"
 test_compile_fail "examples/break_outside_loop.om"
 test_compile_fail "examples/continue_outside_loop.om"
