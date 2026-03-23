@@ -319,6 +319,7 @@ class CodeGenerator {
     bool currentFuncHintNoUnroll_ = false;
     bool currentFuncHintVectorize_ = false;
     bool currentFuncHintNoVectorize_ = false;
+    unsigned loopNestDepth_ = 0; ///< Current for-loop nesting depth (0 = not in a loop)
 
     /// Classify a function into its execution tier based on type annotations,
     /// OPTMAX status, and whether it is a special function (main/stdlib).

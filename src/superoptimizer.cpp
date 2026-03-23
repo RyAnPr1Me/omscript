@@ -3066,19 +3066,61 @@ unsigned superopt::inferNonNegativeFlags(llvm::Function& func) {
         for (auto& inst : bb) {
             auto* bo = llvm::dyn_cast<llvm::BinaryOperator>(&inst);
             if (!bo) continue;
-            // Only process add instructions that don't already have nuw
-            if (bo->getOpcode() != llvm::Instruction::Add) continue;
             if (bo->hasNoUnsignedWrap()) continue;
-            // If both operands are provably non-negative, add nuw.
-            // Safety proof: isValueNonNegative guarantees each operand is
-            // in [0, 2^63-1] (non-negative signed i64).  Their sum is
-            // therefore in [0, 2^64-2], which fits in 64 unsigned bits
-            // without wrapping.  (The maximum is 2^63-1 + 2^63-1 = 2^64-2
-            // < 2^64 = UINT64_MAX + 1, so nuw is correct.)
-            if (isValueNonNegative(bo->getOperand(0), DL) &&
-                isValueNonNegative(bo->getOperand(1), DL)) {
-                bo->setHasNoUnsignedWrap(true);
-                ++count;
+
+            unsigned op = bo->getOpcode();
+
+            // Add: if both operands are non-negative, nuw is safe because
+            // max(2^63-1 + 2^63-1) = 2^64-2 < 2^64.
+            if (op == llvm::Instruction::Add) {
+                if (isValueNonNegative(bo->getOperand(0), DL) &&
+                    isValueNonNegative(bo->getOperand(1), DL)) {
+                    bo->setHasNoUnsignedWrap(true);
+                    ++count;
+                }
+                continue;
+            }
+
+            // Mul: if both operands are non-negative and nsw is already set,
+            // then the product is non-negative and fits in signed i64,
+            // which means it also fits in unsigned i64 (nuw is safe).
+            if (op == llvm::Instruction::Mul) {
+                if (bo->hasNoSignedWrap() &&
+                    isValueNonNegative(bo->getOperand(0), DL) &&
+                    isValueNonNegative(bo->getOperand(1), DL)) {
+                    bo->setHasNoUnsignedWrap(true);
+                    ++count;
+                }
+                continue;
+            }
+
+            // Shl: if the base is non-negative and nsw is set, then the
+            // result is non-negative and fits in signed i64, so nuw is safe.
+            if (op == llvm::Instruction::Shl) {
+                if (bo->hasNoSignedWrap() &&
+                    isValueNonNegative(bo->getOperand(0), DL)) {
+                    bo->setHasNoUnsignedWrap(true);
+                    ++count;
+                }
+                continue;
+            }
+
+            // Sub: if both operands are non-negative and nsw is set, then
+            // the result is representable in signed i64.  When additionally
+            // the left operand is >= right operand (i.e. result >= 0), nuw
+            // is safe.  We use nsw as a conservative proxy: nsw guarantees
+            // no signed overflow, and with both operands non-negative the
+            // result must be in [-2^63+1, 2^63-1], which fits unsigned i64.
+            // We additionally require nsw because without it the subtraction
+            // could wrap around in signed arithmetic.
+            if (op == llvm::Instruction::Sub) {
+                if (bo->hasNoSignedWrap() &&
+                    isValueNonNegative(bo->getOperand(0), DL) &&
+                    isValueNonNegative(bo->getOperand(1), DL)) {
+                    bo->setHasNoUnsignedWrap(true);
+                    ++count;
+                }
+                continue;
             }
         }
     }

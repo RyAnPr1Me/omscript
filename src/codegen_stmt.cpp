@@ -404,6 +404,16 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
         llvm::SmallVector<llvm::Metadata*, 4> loopMDs;
         loopMDs.push_back(nullptr);
         loopMDs.push_back(mustProgress);
+        // Unroll hint: match for-loop unrolling strategy.
+        // For OPTMAX functions, let LLVM's cost model choose; for regular
+        // functions, cap at 2 to prevent code bloat.
+        if (!inOptMaxFunction && optimizationLevel >= OptimizationLevel::O3 && enableUnrollLoops_ && !dynamicCompilation_) {
+            loopMDs.push_back(llvm::MDNode::get(
+                *context,
+                {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
+                 llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                     llvm::Type::getInt32Ty(*context), 2))}));
+        }
         // @vectorize / @novectorize: per-function loop vectorization overrides.
         if (currentFuncHintNoVectorize_) {
             loopMDs.push_back(llvm::MDNode::get(
@@ -509,6 +519,8 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     if (!function) {
         codegenError("For loop outside of function", stmt);
     }
+
+    ++loopNestDepth_;
 
     const ScopeGuard scope(*this);
 
@@ -755,13 +767,14 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         // knows the loop structure (ascending, step=+1) and can guide the
         // unroller more precisely than C compilers.
         //
-        // A factor of 2 is used instead of 4 because nested loops with
-        // unroll=4 at each level produce 4^3=64x code bloat for triple-
-        // nested loops, causing severe I-cache pressure.  An unroll factor
-        // of 2 keeps the code within L1 I-cache (2^3=8x worst case) while
-        // still amortizing loop overhead.  This matches GCC's conservative
-        // unrolling heuristic for loops with unknown trip counts.
-        if (!addedUnrollHint && optimizationLevel >= OptimizationLevel::O3 && enableUnrollLoops_ && !dynamicCompilation_) {
+        // For OPTMAX functions, we omit the unroll hint entirely, allowing
+        // LLVM's cost-model-driven unroller to choose the optimal factor
+        // based on loop body complexity and register pressure.  The OPTMAX
+        // per-function pipeline already includes an aggressive unroll pass.
+        //
+        // For regular functions, a factor of 2 keeps the code within L1
+        // I-cache (2^3=8x worst case) while still amortizing loop overhead.
+        if (!addedUnrollHint && !inOptMaxFunction && optimizationLevel >= OptimizationLevel::O3 && enableUnrollLoops_ && !dynamicCompilation_) {
             llvm::MDNode* unrollCount = llvm::MDNode::get(
                 *context,
                 {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
@@ -797,6 +810,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
 
     // End block
     builder->SetInsertPoint(endBB);
+    --loopNestDepth_;
 }
 
 void CodeGenerator::generateForEach(ForEachStmt* stmt) {
