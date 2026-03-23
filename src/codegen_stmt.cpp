@@ -783,13 +783,22 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             loopMDs.push_back(unrollCount);
         }
         // @unroll / @nounroll: per-function loop unrolling overrides.
-        // @nounroll disables unrolling entirely; @unroll requests full unrolling.
+        // @nounroll disables unrolling entirely; @unroll requests aggressive unrolling.
         if (currentFuncHintNoUnroll_) {
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.unroll.disable")}));
         } else if (currentFuncHintUnroll_ && !addedUnrollHint) {
+            // For variable-trip-count loops, unroll.full is ignored by LLVM
+            // (the unroller refuses to fully unroll unbounded loops).  Use
+            // unroll.count=8 instead, which gives LLVM a concrete target and
+            // matches GCC's aggressive unrolling behavior for FP-heavy loops.
+            // For OPTMAX functions, this enables 4-8x loop body replication
+            // that hides exp2/sqrt latency through instruction-level parallelism.
             loopMDs.push_back(llvm::MDNode::get(
-                *context, {llvm::MDString::get(*context, "llvm.loop.unroll.full")}));
+                *context,
+                {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
+                 llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                     llvm::Type::getInt32Ty(*context), 8))}));
         }
         // @vectorize / @novectorize: per-function loop vectorization overrides.
         if (currentFuncHintNoVectorize_) {
