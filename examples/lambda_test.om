@@ -1,0 +1,46 @@
+// lambda_test.om — lambda expression tests
+//
+// Tests: lambda syntax with array_map, array_filter, array_reduce,
+// lambda with multiple parameters, and lambda in pipe chains.
+
+fn main() {
+    var result = 0;
+
+    // Test 1: Lambda with array_map (single parameter)
+    var arr = [1, 2, 3, 4, 5];
+    var doubled = array_map(arr, |x| x * 2);
+    var sum = 0;
+    for (i in 0...len(doubled)) {
+        sum = sum + doubled[i];
+    }
+    result = result + (sum == 30);  // 2+4+6+8+10 = 30
+
+    // Test 2: Lambda with array_filter
+    var evens = array_filter(arr, |x| x % 2 == 0);
+    result = result + (len(evens) == 2);
+    result = result + (evens[0] == 2);
+    result = result + (evens[1] == 4);
+
+    // Test 3: Lambda with array_reduce (two parameters)
+    var total = array_reduce(arr, |acc, x| acc + x, 0);
+    result = result + (total == 15);
+
+    // Test 4: Lambda with complex expression
+    var squares = array_map(arr, |x| x * x);
+    var sum_sq = array_reduce(squares, |a, b| a + b, 0);
+    result = result + (sum_sq == 55);  // 1+4+9+16+25
+
+    // Test 5: Lambda filter for odd numbers
+    var odds = array_filter(arr, |x| x % 2 != 0);
+    result = result + (len(odds) == 3);  // 1, 3, 5
+    result = result + (odds[0] == 1);
+    result = result + (odds[2] == 5);
+
+    // Test 6: Lambda in pipe chain
+    var nums = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    var pipe_result = array_filter(nums, |x| x % 2 == 0) |> len;
+    result = result + (pipe_result == 5);
+
+    // Expected: 10
+    return result;
+}

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.13)
-project(OmScript VERSION 3.0.0)
+project(OmScript VERSION 3.5.0)
 
 # Allow overriding the compiler version string at build time (e.g. -DOMSC_VERSION=1.2.3)
 if(NOT DEFINED OMSC_VERSION)
@@ -138,6 +138,10 @@ find_package(LLVM REQUIRED CONFIG)
 
 if(NOT LLVM_FOUND)
     message(FATAL_ERROR "LLVM not found. Please install LLVM development libraries.")
+endif()
+
+if(LLVM_PACKAGE_VERSION VERSION_LESS "18")
+    message(FATAL_ERROR "LLVM 18.0 or newer is required, but found LLVM ${LLVM_PACKAGE_VERSION}")
 endif()
 
 message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")

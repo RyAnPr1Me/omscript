@@ -164,6 +164,16 @@ jobs:
             examples/foreach_test.om
             examples/switch_test.om
             examples/type_annotation_test.om
+            examples/hint_cold_hot.om
+            examples/hint_flatten.om
+            examples/hint_prefetch.om
+            examples/hint_pure_static.om
+            examples/optmax_div_zero.om
+            examples/prefetch_use_site.om
+            examples/bitwise.om
+            examples/benchmark.om
+            examples/arithmetic.om
+            examples/advanced.om
           )
           for f in "${FEATURE_FILES[@]}"; do
             [ -f "$f" ] || continue
