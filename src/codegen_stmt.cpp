@@ -572,9 +572,13 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             if (auto* endCI = llvm::dyn_cast<llvm::ConstantInt>(endVal)) {
                 // Both bounds known: ascending when start < end.
                 ascending = startCI->getSExtValue() < endCI->getSExtValue();
-            } else if (startCI->getSExtValue() == 0) {
-                // Common pattern: for (i in 0...n).  Step is always +1;
-                // when n <= 0 the loop condition (i < n) fails immediately.
+            } else if (startCI->getSExtValue() >= 0) {
+                // Common patterns: for (i in 0...n), for (i in 1...n), etc.
+                // When start is a non-negative constant and end is variable,
+                // the loop is virtually always ascending.  Step defaults to +1;
+                // if end <= start, the condition (i < end) fails immediately
+                // and the loop body never executes.  Descending ranges from
+                // non-negative starts require explicit step syntax (start...end...-1).
                 ascending = true;
             }
         }
@@ -789,16 +793,15 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
                 *context, {llvm::MDString::get(*context, "llvm.loop.unroll.disable")}));
         } else if (currentFuncHintUnroll_ && !addedUnrollHint) {
             // For variable-trip-count loops, unroll.full is ignored by LLVM
-            // (the unroller refuses to fully unroll unbounded loops).  Use
-            // unroll.count=8 instead, which gives LLVM a concrete target and
-            // matches GCC's aggressive unrolling behavior for FP-heavy loops.
-            // For OPTMAX functions, this enables 4-8x loop body replication
-            // that hides exp2/sqrt latency through instruction-level parallelism.
+            // (the unroller refuses to fully unroll unbounded loops).  Use a
+            // concrete unroll.count instead, giving LLVM a target that matches
+            // GCC's aggressive unrolling for FP-heavy loops.
+            unsigned unrollCount = inOptMaxFunction ? 8 : 4;
             loopMDs.push_back(llvm::MDNode::get(
                 *context,
                 {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
                  llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
-                     llvm::Type::getInt32Ty(*context), 8))}));
+                     llvm::Type::getInt32Ty(*context), unrollCount))}));
         }
         // @vectorize / @novectorize: per-function loop vectorization overrides.
         if (currentFuncHintNoVectorize_) {
