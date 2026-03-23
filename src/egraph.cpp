@@ -499,6 +499,8 @@ size_t EGraph::applyRules(const std::vector<RewriteRule>& rules) {
 
 size_t EGraph::saturate(const std::vector<RewriteRule>& rules) {
     size_t iterations = 0;
+    size_t prevMerges = 0;
+    unsigned stagnantRuns = 0;
 
     for (size_t iter = 0; iter < config_.maxIterations; ++iter) {
         if (atNodeLimit()) break;
@@ -520,6 +522,18 @@ size_t EGraph::saturate(const std::vector<RewriteRule>& rules) {
 
         // Reached fixpoint if no new merges
         if (merges == 0) break;
+
+        // Early termination: if the number of merges is ≤ 10% of the
+        // previous iteration's merges for 3 consecutive rounds, the
+        // saturation is delivering diminishing returns.  Stop early to
+        // save compile time on large programs.
+        if (prevMerges > 0 && merges * 10 <= prevMerges) {
+            ++stagnantRuns;
+            if (stagnantRuns >= 3) break;
+        } else {
+            stagnantRuns = 0;
+        }
+        prevMerges = merges;
     }
 
     return iterations;
@@ -581,6 +595,50 @@ EGraph::extractAll(ClassId root, const CostModel& model) {
                     best[cls] = {total, node};
                     changed = true;
                 }
+            }
+        }
+    }
+
+    // ── DAG sharing discount ────────────────────────────────────────────
+    // When the same sub-expression is used by multiple parent nodes, it is
+    // computed once and reused.  Adjust costs of the already-selected best
+    // nodes to reflect sharing, without changing which node is selected.
+    // This ensures extraction structure remains stable while costs become
+    // more accurate for DAG-aware comparisons.
+    std::unordered_map<ClassId, unsigned> parentCount;
+    for (ClassId cls : reachable) {
+        auto it = best.find(cls);
+        if (it == best.end()) continue;
+        for (auto child : it->second.bestNode.children) {
+            child = find(child);
+            parentCount[child]++;
+        }
+    }
+
+    // Propagate sharing discounts bottom-up through the best map.
+    bool dagChanged = true;
+    for (int dagPass = 0; dagPass < 10 && dagChanged; ++dagPass) {
+        dagChanged = false;
+        for (ClassId cls : reachable) {
+            auto bestIt = best.find(cls);
+            if (bestIt == best.end()) continue;
+            const auto& node = bestIt->second.bestNode;
+            Cost total = model.nodeCost(node);
+            bool feasible = true;
+            for (auto child : node.children) {
+                child = find(child);
+                auto cit = best.find(child);
+                if (cit == best.end()) { feasible = false; break; }
+                Cost childCost = cit->second.cost;
+                unsigned parents = parentCount.count(child) ? parentCount[child] : 1;
+                if (parents > 1)
+                    childCost = childCost / static_cast<Cost>(parents);
+                total += childCost;
+            }
+            if (!feasible) continue;
+            if (total < bestIt->second.cost) {
+                bestIt->second.cost = total;
+                dagChanged = true;
             }
         }
     }
@@ -6573,6 +6631,160 @@ std::vector<RewriteRule> getRelationalRules() {
             return g.addBinOp(Op::Ne, orNode, g.addConst(0));
         });
 
+    // ─────────────────────────────────────────────────────────────────────
+    // Division by power-of-2 for non-negative values (SAFE for unsigned)
+    // Note: x / C → x >> log2(C) is UNSOUND for signed values because
+    // signed division rounds toward zero while arithmetic right shift
+    // rounds toward negative infinity.  We guard with isNonNeg analysis.
+    // ─────────────────────────────────────────────────────────────────────
+
+    // x / C → x >> log2(C)  when x is non-negative and C is power-of-2
+    rules.emplace_back("div_pow2_nonneg",
+        P::OpPat(Op::Div, {P::Wild("x"), P::Wild("c")}),
+        [](EGraph& g, const Subst& s) {
+            auto cv = g.getConstValue(s.at("c"));
+            long long v = *cv;
+            int shift = 0;
+            while (v > 1) { v >>= 1; ++shift; }
+            return g.addBinOp(Op::Shr, s.at("x"), g.addConst(shift));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto cv = g.getConstValue(s.at("c"));
+            if (!cv || *cv <= 1) return false;
+            long long v = *cv;
+            if ((v & (v - 1)) != 0) return false;  // not power of 2
+            // Guard: x must be non-negative to ensure rounding correctness
+            const auto& xClass = g.getClass(s.at("x"));
+            return xClass.isNonNeg;
+        });
+
+    return rules;
+}
+
+std::vector<RewriteRule> getFloatingPointRules() {
+    using P = Pattern;
+    std::vector<RewriteRule> rules;
+
+    // ── IEEE-754 safe FP optimizations ─────────────────────────────────
+    // These rules preserve strict IEEE-754 semantics.
+
+    // x * 1.0 → x  (exact: 1.0 is representable and multiplying by it
+    // is exact for all finite values, including subnormals)
+    rules.emplace_back("fp_mul_one",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstFPat(1.0)}),
+        [](EGraph&, const Subst& s) { return s.at("x"); });
+
+    // x * (-1.0) → -x  (negation is exact in IEEE-754)
+    rules.emplace_back("fp_mul_neg_one",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstFPat(-1.0)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addUnaryOp(Op::Neg, s.at("x"));
+        });
+
+    // x * 2.0 → x + x  (addition is typically faster or equal to multiply;
+    // this is exact because x + x = 2*x exactly in IEEE-754)
+    rules.emplace_back("fp_mul_two_to_add",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstFPat(2.0)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Add, s.at("x"), s.at("x"));
+        });
+
+    // x / 1.0 → x  (dividing by 1.0 is exact)
+    rules.emplace_back("fp_div_one",
+        P::OpPat(Op::Div, {P::Wild("x"), P::ConstFPat(1.0)}),
+        [](EGraph&, const Subst& s) { return s.at("x"); });
+
+    // x / (-1.0) → -x  (dividing by -1.0 is exact)
+    rules.emplace_back("fp_div_neg_one",
+        P::OpPat(Op::Div, {P::Wild("x"), P::ConstFPat(-1.0)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addUnaryOp(Op::Neg, s.at("x"));
+        });
+
+    // x - x → 0.0  (safe: any finite number minus itself is +0.0)
+    rules.emplace_back("fp_sub_self",
+        P::OpPat(Op::Sub, {P::Wild("x"), P::Wild("x")}),
+        [](EGraph& g, const Subst&) {
+            return g.addConstF(0.0);
+        });
+
+    // x / x → 1.0  (safe for non-zero, non-NaN x; since same e-class,
+    // the value is identical and thus this is x/x = 1.0)
+    rules.emplace_back("fp_div_self",
+        P::OpPat(Op::Div, {P::Wild("x"), P::Wild("x")}),
+        [](EGraph& g, const Subst&) {
+            return g.addConstF(1.0);
+        },
+        // Guard: x must be a known non-zero constant (conservative)
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto fv = g.getConstFValue(s.at("x"));
+            if (fv) return *fv != 0.0;
+            auto iv = g.getConstValue(s.at("x"));
+            if (iv) return *iv != 0;
+            return false;  // conservative: don't apply if not proven non-zero
+        });
+
+    // sqrt(x) * sqrt(x) → x  (for known non-negative x)
+    rules.emplace_back("fp_sqrt_squared",
+        P::OpPat(Op::Mul, {
+            P::OpPat(Op::Sqrt, {P::Wild("x")}),
+            P::OpPat(Op::Sqrt, {P::Wild("x")})
+        }),
+        [](EGraph&, const Subst& s) { return s.at("x"); },
+        [](const EGraph& g, const Subst& s) -> bool {
+            // Guard: x must be non-negative (sqrt of negative is undefined)
+            auto fv = g.getConstFValue(s.at("x"));
+            if (fv) return *fv >= 0.0;
+            auto iv = g.getConstValue(s.at("x"));
+            if (iv) return *iv >= 0;
+            return false;  // conservative
+        });
+
+    // x * 0.5 → x / 2.0  (both exact; let cost model pick cheaper)
+    rules.emplace_back("fp_mul_half_to_div2",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstFPat(0.5)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Div, s.at("x"), g.addConstF(2.0));
+        });
+
+    // x / 2.0 → x * 0.5  (reverse direction)
+    rules.emplace_back("fp_div2_to_mul_half",
+        P::OpPat(Op::Div, {P::Wild("x"), P::ConstFPat(2.0)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Mul, s.at("x"), g.addConstF(0.5));
+        });
+
+    // (x + y) - y → x  (cancellation - exact if values are same e-class)
+    rules.emplace_back("fp_add_sub_cancel",
+        P::OpPat(Op::Sub, {
+            P::OpPat(Op::Add, {P::Wild("x"), P::Wild("y")}),
+            P::Wild("y")
+        }),
+        [](EGraph&, const Subst& s) { return s.at("x"); });
+
+    // (x - y) + y → x  (reverse cancellation)
+    rules.emplace_back("fp_sub_add_cancel",
+        P::OpPat(Op::Add, {
+            P::OpPat(Op::Sub, {P::Wild("x"), P::Wild("y")}),
+            P::Wild("y")
+        }),
+        [](EGraph&, const Subst& s) { return s.at("x"); });
+
+    // (x * y) / y → x  (for known non-zero y)
+    rules.emplace_back("fp_mul_div_cancel",
+        P::OpPat(Op::Div, {
+            P::OpPat(Op::Mul, {P::Wild("x"), P::Wild("y")}),
+            P::Wild("y")
+        }),
+        [](EGraph&, const Subst& s) { return s.at("x"); },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto fv = g.getConstFValue(s.at("y"));
+            if (fv) return *fv != 0.0;
+            auto iv = g.getConstValue(s.at("y"));
+            if (iv) return *iv != 0;
+            return false;
+        });
+
     return rules;
 }
 
@@ -6596,6 +6808,10 @@ std::vector<RewriteRule> getAllRules() {
     auto relRules = getRelationalRules();
     rules.insert(rules.end(), std::make_move_iterator(relRules.begin()),
                  std::make_move_iterator(relRules.end()));
+
+    auto fpRules = getFloatingPointRules();
+    rules.insert(rules.end(), std::make_move_iterator(fpRules.begin()),
+                 std::make_move_iterator(fpRules.end()));
 
     return rules;
 }

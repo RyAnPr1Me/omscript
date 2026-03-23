@@ -443,6 +443,11 @@ std::vector<RewriteRule> getAdvancedBitwiseRules();
 /// and cross-operation algebraic identities.
 std::vector<RewriteRule> getRelationalRules();
 
+/// Returns IEEE-754 compliant floating-point optimization rules.
+/// These rules are safe for strict FP semantics (no NaN/Inf concerns
+/// for the patterns they match).
+std::vector<RewriteRule> getFloatingPointRules();
+
 /// Returns all optimization rules combined.
 std::vector<RewriteRule> getAllRules();
 

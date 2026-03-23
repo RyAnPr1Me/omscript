@@ -2590,3 +2590,211 @@ TEST(EGraphTest, MaskShiftNormalize) {
 
     EXPECT_EQ(g.find(shifted), g.find(expected));
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Convergence tracking tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST(EGraphTest, SaturationConvergesEarly) {
+    // A simple expression should converge in few iterations
+    EGraph g;
+    ClassId x = g.addVar("x");
+    ClassId c0 = g.addConst(0);
+    ClassId add = g.addBinOp(Op::Add, x, c0);
+
+    auto rules = getAllRules();
+    size_t iters = g.saturate(rules);
+
+    // Should converge quickly (x + 0 → x is immediate)
+    EXPECT_LE(iters, 10u);
+    EXPECT_EQ(g.find(add), g.find(x));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DAG sharing extraction tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST(EGraphTest, ExtractDAGSharing) {
+    // (x + y) used in two places should benefit from sharing
+    EGraph g;
+    ClassId x = g.addVar("x");
+    ClassId y = g.addVar("y");
+    ClassId sum = g.addBinOp(Op::Add, x, y);
+    // Use sum twice: sum + sum
+    ClassId doubled = g.addBinOp(Op::Add, sum, sum);
+
+    CostModel model;
+    ENode extracted = g.extract(doubled, model);
+    EXPECT_EQ(extracted.op, Op::Add);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Floating-point rule tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST(EGraphTest, FPMulOneIdentity) {
+    // x * 1.0 → x
+    EGraph g;
+    ClassId x = g.addVar("x");
+    ClassId one = g.addConstF(1.0);
+    ClassId mul = g.addBinOp(Op::Mul, x, one);
+
+    auto rules = getFloatingPointRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(mul), g.find(x));
+}
+
+TEST(EGraphTest, FPMulNegOneToNeg) {
+    // x * (-1.0) → -x
+    EGraph g;
+    ClassId x = g.addVar("x");
+    ClassId negone = g.addConstF(-1.0);
+    ClassId mul = g.addBinOp(Op::Mul, x, negone);
+    ClassId neg = g.addUnaryOp(Op::Neg, x);
+
+    auto rules = getFloatingPointRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(mul), g.find(neg));
+}
+
+TEST(EGraphTest, FPMulTwoToAdd) {
+    // x * 2.0 → x + x
+    EGraph g;
+    ClassId x = g.addVar("x");
+    ClassId two = g.addConstF(2.0);
+    ClassId mul = g.addBinOp(Op::Mul, x, two);
+    ClassId add = g.addBinOp(Op::Add, x, x);
+
+    auto rules = getFloatingPointRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(mul), g.find(add));
+}
+
+TEST(EGraphTest, FPDivOneIdentity) {
+    // x / 1.0 → x
+    EGraph g;
+    ClassId x = g.addVar("x");
+    ClassId one = g.addConstF(1.0);
+    ClassId div = g.addBinOp(Op::Div, x, one);
+
+    auto rules = getFloatingPointRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(div), g.find(x));
+}
+
+TEST(EGraphTest, FPSubSelf) {
+    // x - x → 0.0
+    EGraph g;
+    ClassId x = g.addVar("x");
+    ClassId sub = g.addBinOp(Op::Sub, x, x);
+    ClassId zero = g.addConstF(0.0);
+
+    auto rules = getFloatingPointRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(sub), g.find(zero));
+}
+
+TEST(EGraphTest, FPMulHalfToDiv2) {
+    // x * 0.5 ↔ x / 2.0
+    EGraph g;
+    ClassId x = g.addVar("x");
+    ClassId half = g.addConstF(0.5);
+    ClassId two = g.addConstF(2.0);
+    ClassId mulHalf = g.addBinOp(Op::Mul, x, half);
+    ClassId divTwo = g.addBinOp(Op::Div, x, two);
+
+    auto rules = getFloatingPointRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(mulHalf), g.find(divTwo));
+}
+
+TEST(EGraphTest, FPAddSubCancel) {
+    // (x + y) - y → x
+    EGraph g;
+    ClassId x = g.addVar("x");
+    ClassId y = g.addVar("y");
+    ClassId add = g.addBinOp(Op::Add, x, y);
+    ClassId sub = g.addBinOp(Op::Sub, add, y);
+
+    auto rules = getFloatingPointRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(sub), g.find(x));
+}
+
+TEST(EGraphTest, FPSubAddCancel) {
+    // (x - y) + y → x
+    EGraph g;
+    ClassId x = g.addVar("x");
+    ClassId y = g.addVar("y");
+    ClassId sub = g.addBinOp(Op::Sub, x, y);
+    ClassId add = g.addBinOp(Op::Add, sub, y);
+
+    auto rules = getFloatingPointRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(add), g.find(x));
+}
+
+TEST(EGraphTest, FPSqrtSquared) {
+    // sqrt(4.0) * sqrt(4.0) → 4.0
+    EGraph g;
+    ClassId four = g.addConstF(4.0);
+    ClassId sqrtFour = g.addUnaryOp(Op::Sqrt, four);
+    ClassId product = g.addBinOp(Op::Mul, sqrtFour, sqrtFour);
+
+    auto rules = getFloatingPointRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(product), g.find(four));
+}
+
+TEST(EGraphTest, FPDivSelfConst) {
+    // 5.0 / 5.0 → 1.0
+    EGraph g;
+    ClassId five = g.addConstF(5.0);
+    ClassId div = g.addBinOp(Op::Div, five, five);
+    ClassId one = g.addConstF(1.0);
+
+    auto rules = getFloatingPointRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(div), g.find(one));
+}
+
+TEST(EGraphTest, FPRulesNotEmpty) {
+    auto rules = getFloatingPointRules();
+    EXPECT_GT(rules.size(), 0u);
+}
+
+TEST(EGraphTest, AllRulesIncludesFP) {
+    auto allRules = getAllRules();
+    auto fpRules = getFloatingPointRules();
+    auto relRules = getRelationalRules();
+    EXPECT_GT(allRules.size(), fpRules.size() + relRules.size());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Division by power-of-2 for non-negative values
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST(EGraphTest, DivPow2NonNeg) {
+    // 8 / 4 → 8 >> 2  (both operands are non-negative constants)
+    EGraph g;
+    ClassId c8 = g.addConst(8);
+    ClassId c4 = g.addConst(4);
+    ClassId div = g.addBinOp(Op::Div, c8, c4);
+    ClassId shr = g.addBinOp(Op::Shr, c8, g.addConst(2));
+
+    auto rules = getRelationalRules();
+    g.saturate(rules);
+
+    // After constant folding, both should equal 2
+    EXPECT_EQ(g.find(div), g.find(shr));
+}
