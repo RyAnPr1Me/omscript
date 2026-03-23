@@ -6912,3 +6912,21 @@ TEST(CodegenTest, IsPowerOf2WrongArgs) {
     CodeGenerator codegen(OptimizationLevel::O0);
     EXPECT_THROW(generateIR("fn main() { return is_power_of_2(); }", codegen), std::runtime_error);
 }
+
+// ── LCM builtin ──────────────────────────────────────────────────────────
+
+TEST(CodegenTest, LcmCall) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return lcm(4, 6); }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, LcmWrongArgs) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    EXPECT_THROW(generateIR("fn main() { return lcm(4); }", codegen), std::runtime_error);
+}
+
+TEST(CodegenTest, LcmZeroArgs) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    EXPECT_THROW(generateIR("fn main() { return lcm(); }", codegen), std::runtime_error);
+}

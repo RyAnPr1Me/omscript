@@ -57,7 +57,8 @@ enum class BuiltinId : uint8_t {
     SIN, COS, TAN, ASIN, ACOS, ATAN, ATAN2, EXP, LOG, LOG10, CBRT, HYPOT,
     ARRAY_MIN, ARRAY_MAX, ARRAY_ANY, ARRAY_EVERY, ARRAY_FIND, ARRAY_COUNT,
     STR_JOIN, STR_COUNT,
-    POPCOUNT, CLZ, CTZ, BITREVERSE, EXP2, IS_POWER_OF_2
+    POPCOUNT, CLZ, CTZ, BITREVERSE, EXP2, IS_POWER_OF_2,
+    LCM
 };
 
 static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
@@ -188,6 +189,7 @@ static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
     {"bitreverse", BuiltinId::BITREVERSE},
     {"exp2", BuiltinId::EXP2},
     {"is_power_of_2", BuiltinId::IS_POWER_OF_2},
+    {"lcm", BuiltinId::LCM},
 };
 
 static BuiltinId lookupBuiltin(const std::string& name) {
@@ -4464,6 +4466,55 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // x > 0 && (x & (x-1)) == 0
         llvm::Value* result = builder->CreateAnd(isPos, isAnd0, "ispow2.result");
         return builder->CreateZExt(result, getDefaultType(), "ispow2.ext");
+    }
+
+    if (bid == BuiltinId::LCM) {
+        validateArgCount(expr, "lcm", 2);
+        llvm::Value* a = generateExpression(expr->arguments[0].get());
+        llvm::Value* b = generateExpression(expr->arguments[1].get());
+        a = toDefaultType(a);
+        b = toDefaultType(b);
+        // Use absolute values
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
+        llvm::Value* aNeg = builder->CreateICmpSLT(a, zero, "lcm.aneg");
+        llvm::Value* aNegVal = builder->CreateNeg(a, "lcm.anegval");
+        llvm::Value* aAbs = builder->CreateSelect(aNeg, aNegVal, a, "lcm.aabs");
+        llvm::Value* bNeg = builder->CreateICmpSLT(b, zero, "lcm.bneg");
+        llvm::Value* bNegVal = builder->CreateNeg(b, "lcm.bnegval");
+        llvm::Value* bAbs = builder->CreateSelect(bNeg, bNegVal, b, "lcm.babs");
+
+        // GCD via Euclidean algorithm: while (b != 0) { temp = b; b = a % b; a = temp; }
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* preheaderBB = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "lcm.gcd.loop", function);
+        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "lcm.gcd.body", function);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "lcm.gcd.done", function);
+
+        builder->CreateBr(loopBB);
+
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* phiA = builder->CreatePHI(getDefaultType(), 2, "lcm.gcd.a");
+        phiA->addIncoming(aAbs, preheaderBB);
+        llvm::PHINode* phiB = builder->CreatePHI(getDefaultType(), 2, "lcm.gcd.b");
+        phiB->addIncoming(bAbs, preheaderBB);
+
+        llvm::Value* bIsZero = builder->CreateICmpEQ(phiB, zero, "lcm.gcd.bzero");
+        builder->CreateCondBr(bIsZero, doneBB, bodyBB);
+
+        builder->SetInsertPoint(bodyBB);
+        llvm::Value* remainder = builder->CreateURem(phiA, phiB, "lcm.gcd.rem");
+        phiA->addIncoming(phiB, bodyBB);
+        phiB->addIncoming(remainder, bodyBB);
+        builder->CreateBr(loopBB);
+
+        // lcm(a, b) = |a| / gcd(a, b) * |b|  (divide first to avoid overflow)
+        builder->SetInsertPoint(doneBB);
+        llvm::Value* gcdVal = phiA;  // phiA holds gcd result
+        // Handle gcd == 0 (when both inputs are 0): lcm(0, 0) = 0
+        llvm::Value* gcdIsZero = builder->CreateICmpEQ(gcdVal, zero, "lcm.gcd.iszero");
+        llvm::Value* divResult = builder->CreateUDiv(aAbs, gcdVal, "lcm.div");
+        llvm::Value* lcmResult = builder->CreateMul(divResult, bAbs, "lcm.mul");
+        return builder->CreateSelect(gcdIsZero, zero, lcmResult, "lcm.result");
     }
 
     if (inOptMaxFunction) {

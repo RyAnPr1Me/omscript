@@ -13,7 +13,7 @@ RUNS=3          # iterations per benchmark for stable timing
 # Track wall-clock time for the entire script so we can report where time is spent.
 SCRIPT_START=$(date +%s%N)
 
-NUM_BENCHMARKS=16
+NUM_BENCHMARKS=18
 
 BENCH_NAME=(
     "integer_math"
@@ -32,6 +32,8 @@ BENCH_NAME=(
     "function_calls"
     "bitwise_ops"
     "combined"
+    "float_math"
+    "bitwise_intrinsics"
 )
 
 BENCH_DESC=(
@@ -51,6 +53,8 @@ BENCH_DESC=(
     "Deeply nested small-function call chains"
     "Shift, AND, OR, and XOR intensive loop"
     "End-to-end combined workload exercising all subsystems"
+    "Floating-point sqrt, exp2, pow in a tight loop"
+    "popcount, clz, ctz, is_power_of_2 in a tight loop"
 )
 
 # Input sizes – tuned so each test takes ~30-200 ms in C.
@@ -72,6 +76,8 @@ BENCH_N=(
     5000000   # 13  function_calls
     5000000   # 14  bitwise_ops
     100000    # 15  combined
+    2000000   # 16  float_math
+    5000000   # 17  bitwise_intrinsics
 )
 
 BOTTLENECK_LABELS=(
@@ -91,6 +97,8 @@ BOTTLENECK_LABELS=(
     "call/return overhead for small inlined functions"
     "bitwise operation codegen quality"
     "overall compiler optimization quality"
+    "floating-point codegen and FP optimization rules"
+    "LLVM intrinsic codegen for popcount/clz/ctz"
 )
 
 # ─── COLOR CODES ──────────────────────────────────────────────
@@ -372,6 +380,28 @@ fn bench_combined(n:int) -> int {
 
     return total;
 }
+@hot @flatten @unroll
+fn bench_floatmath(@prefetch n:int) -> int {
+    var acc:double = 1.0;
+    for (i:int in 1...n) {
+        var fi:double = to_float(i);
+        acc = acc + sqrt(fi);
+        acc = acc + exp2(fi / 1000000.0);
+        acc = acc * 0.9999999;
+    }
+    return to_int(acc);
+}
+@hot @flatten @unroll
+fn bench_bitintrinsics(@prefetch n:int) -> int {
+    var acc:int = 0;
+    for (i:int in 1...n) {
+        acc += popcount(i);
+        acc += clz(i);
+        acc += ctz(i | 1);
+        acc += is_power_of_2(i);
+    }
+    return acc;
+}
 OPTMAX!:
 
 @flatten @hot
@@ -396,6 +426,8 @@ fn main() -> int {
         case 13: print(bench_calls(n));    break;
         case 14: print(bench_bitwise(n));  break;
         case 15: print(bench_combined(n)); break;
+        case 16: print(bench_floatmath(n));      break;
+        case 17: print(bench_bitintrinsics(n));  break;
         default: print(0);
     }
     invalidate n;
@@ -408,6 +440,7 @@ cat > bench.c << 'CEOF'
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 typedef struct { long x, y; } Point;
 
@@ -680,6 +713,30 @@ static long bench_combined(long n) {
     return total;
 }
 
+/* 16 ── float math ────────────────────────────── */
+static long bench_floatmath(long n) {
+    double acc = 1.0;
+    for (long i = 1; i < n; i++) {
+        double fi = (double)i;
+        acc = acc + sqrt(fi);
+        acc = acc + exp2(fi / 1000000.0);
+        acc = acc * 0.9999999;
+    }
+    return (long)acc;
+}
+
+/* 17 ── bitwise intrinsics ────────────────────── */
+static long bench_bitintrinsics(long n) {
+    long acc = 0;
+    for (long i = 1; i < n; i++) {
+        acc += __builtin_popcountl(i);
+        acc += __builtin_clzl(i);
+        acc += __builtin_ctzl(i | 1);
+        acc += (i > 0 && (i & (i - 1)) == 0) ? 1 : 0;
+    }
+    return acc;
+}
+
 int main(void) {
     int test_id; long n;
     scanf("%d %ld", &test_id, &n);
@@ -699,8 +756,10 @@ int main(void) {
         case 11: r = bench_ifelse(n);   break;
         case 12: r = bench_arrindex(n); break;
         case 13: r = bench_calls(n);    break;
-        case 14: r = bench_bitwise(n);  break;
-        case 15: r = bench_combined(n); break;
+        case 14: r = bench_bitwise(n);       break;
+        case 15: r = bench_combined(n);      break;
+        case 16: r = bench_floatmath(n);     break;
+        case 17: r = bench_bitintrinsics(n); break;
     }
     printf("%ld\n", r);
     return 0;
@@ -725,7 +784,7 @@ echo "────────────────────────�
 
 # All max-optimization flags are enabled.  OPTMAX is set inside bench.om.
 OM_FLAGS="-O3 -flto -march=native -mtune=native -ffast-math -fvectorize -funroll-loops -floop-optimize"
-C_FLAGS="-O3 -march=native -mtune=native -flto -ffast-math -funroll-loops"
+C_FLAGS="-O3 -march=native -mtune=native -flto -ffast-math -funroll-loops -lm"
 
 echo "Compiling OM ($OMSC $OM_FLAGS) …"
 OM_COMP_START=$(date +%s%N)
@@ -763,7 +822,7 @@ MISMATCH=0
 run_one() {
     local id=$1 n=$2 name=$3
 
-    # correctness check (single run)
+    # correctness check (single run) — also serves as warmup for I-cache / D-cache
     local co oo
     co=$(echo "$id $n" | ./bench_c)
     oo=$(echo "$id $n" | ./bench_om)
@@ -944,9 +1003,27 @@ else
     OVERALL=100
 fi
 
+# Geometric mean of per-benchmark ratios (more meaningful than arithmetic
+# average because it treats all benchmarks equally regardless of absolute
+# time, and it correctly handles ratios: geomean of {2x, 0.5x} = 1.0x).
+# Uses awk for floating-point log/exp.
+GEOMEAN=$(awk -v n="$NUM_BENCHMARKS" 'BEGIN {
+    sum = 0; count = 0
+}
+{
+    r = $1 / 100.0
+    if (r > 0) { sum += log(r); count++ }
+}
+END {
+    if (count > 0) printf "%.0f", exp(sum / count) * 100
+    else           printf "100"
+}' <<< "$(for (( id=0; id<NUM_BENCHMARKS; id++ )); do echo "${RATIOS[$id]}"; done)")
+
 echo "==================================================================="
 printf "  Aggregate:  C: %d ms   OM: %d ms   (%d%%)\n" \
        "$SUM_C" "$SUM_OM" "$OVERALL"
+printf "  Geometric mean of per-benchmark ratios: %d%%\n" "$GEOMEAN"
+echo ""
 
 if [ "$OVERALL" -lt 100 ]; then
     DIFF=$(( 100 - OVERALL ))
@@ -959,8 +1036,8 @@ else
 fi
 
 echo ""
-if   [ "$OVERALL" -le 120 ]; then echo -e "  Verdict:    ${GRN}${BLD}Excellent – near-native performance.${RST}"
-elif [ "$OVERALL" -le 200 ]; then echo -e "  Verdict:    ${YEL}${BLD}Acceptable – room for improvement.${RST}"
+if   [ "$GEOMEAN" -le 120 ]; then echo -e "  Verdict:    ${GRN}${BLD}Excellent – near-native performance.${RST}"
+elif [ "$GEOMEAN" -le 200 ]; then echo -e "  Verdict:    ${YEL}${BLD}Acceptable – room for improvement.${RST}"
 else                               echo -e "  Verdict:    ${RED}${BLD}Needs work – significant overhead detected.${RST}"
 fi
 
@@ -988,3 +1065,6 @@ elif [ "$BENCH_MS" -gt $(( TOTAL_MS * 80 / 100 )) ]; then
     echo -e "  ${GRN}  Compilation is fast; benchmark input sizes drive total time.${RST}"
 fi
 echo "────────────────────────────────────────────────────────────────"
+
+# ─── CLEANUP ──────────────────────────────────────────────────
+rm -f bench.om bench.c bench_om bench_c

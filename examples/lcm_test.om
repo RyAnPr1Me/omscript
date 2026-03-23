@@ -1,0 +1,36 @@
+// Test LCM builtin function
+fn main() {
+    // Basic LCM tests
+    var r1 = lcm(4, 6);
+    println(r1);           // 12
+
+    var r2 = lcm(3, 5);
+    println(r2);           // 15
+
+    var r3 = lcm(12, 8);
+    println(r3);           // 24
+
+    // LCM with 1
+    var r4 = lcm(1, 7);
+    println(r4);           // 7
+
+    // LCM with same number
+    var r5 = lcm(5, 5);
+    println(r5);           // 5
+
+    // LCM with 0
+    var r6 = lcm(0, 5);
+    println(r6);           // 0
+
+    // LCM with negative
+    var r7 = lcm(-4, 6);
+    println(r7);           // 12
+
+    // LCM relationship: lcm(a,b) * gcd(a,b) == |a*b|
+    var a = 12;
+    var b = 8;
+    var product = lcm(a, b) * gcd(a, b);
+    println(product);      // 96 (= 12 * 8)
+
+    return 0;
+}
