@@ -1126,32 +1126,84 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* bNegVal = builder->CreateNeg(b, "gcd.bnegval");
         b = builder->CreateSelect(bNeg, bNegVal, b, "gcd.babs");
 
-        // Euclidean algorithm: while (b != 0) { temp = b; b = a % b; a = temp; }
+        // Binary GCD (Stein's algorithm): avoids expensive division by using
+        // only ctz, shifts, comparisons, and subtraction.  On modern x86 CPUs
+        // division takes 20-40 cycles while ctz/shift/sub are all 1-cycle ops,
+        // making binary GCD ~5x faster for typical integer inputs.
+        //
+        // Algorithm:
+        //   if a == 0: return b;  if b == 0: return a
+        //   k = ctz(a | b)        // common factor of 2
+        //   a >>= ctz(a)          // make a odd
+        //   loop:
+        //     b >>= ctz(b)        // make b odd
+        //     if a > b: swap(a,b)
+        //     b -= a
+        //   while b != 0
+        //   return a << k
         llvm::Function* function = builder->GetInsertBlock()->getParent();
-        llvm::BasicBlock* preheaderBB = builder->GetInsertBlock();
+        llvm::BasicBlock* entryBB = builder->GetInsertBlock();
+        llvm::Function* cttzFn = OMSC_GET_INTRINSIC(
+            module.get(), llvm::Intrinsic::cttz, {getDefaultType()});
+
+        // Compute k = ctz(a | b) in the entry block (always dominates doneBB).
+        // For the edge case where a==0 or b==0, k is unused so its value
+        // doesn't matter, but it must dominate all uses.
+        llvm::Value* aOrB = builder->CreateOr(a, b, "gcd.aorb");
+        llvm::Value* k = builder->CreateCall(cttzFn, {aOrB, builder->getFalse()}, "gcd.k");
+
+        llvm::BasicBlock* mainBB = llvm::BasicBlock::Create(*context, "gcd.main", function);
         llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "gcd.loop", function);
-        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "gcd.body", function);
+        llvm::BasicBlock* contBB = llvm::BasicBlock::Create(*context, "gcd.cont", function);
         llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "gcd.done", function);
 
+        // Edge case: if a == 0 return b, if b == 0 return a.
+        // Combined: if (a == 0 || b == 0) return a | b.
+        llvm::Value* edgeCase = builder->CreateOr(
+            builder->CreateICmpEQ(a, zero, "gcd.a0"),
+            builder->CreateICmpEQ(b, zero, "gcd.b0"), "gcd.edge");
+        builder->CreateCondBr(edgeCase, doneBB, mainBB);
+
+        // Main: make a odd
+        builder->SetInsertPoint(mainBB);
+        llvm::Value* ctzA = builder->CreateCall(cttzFn, {a, builder->getTrue()}, "gcd.ctza");
+        llvm::Value* aOdd = builder->CreateLShr(a, ctzA, "gcd.aodd");
         builder->CreateBr(loopBB);
 
+        // Loop header
         builder->SetInsertPoint(loopBB);
-        llvm::PHINode* phiA = builder->CreatePHI(getDefaultType(), 2, "gcd.a");
-        phiA->addIncoming(a, preheaderBB);
-        llvm::PHINode* phiB = builder->CreatePHI(getDefaultType(), 2, "gcd.b");
-        phiB->addIncoming(b, preheaderBB);
+        llvm::PHINode* phiA = builder->CreatePHI(getDefaultType(), 2, "gcd.pa");
+        phiA->addIncoming(aOdd, mainBB);
+        llvm::PHINode* phiB = builder->CreatePHI(getDefaultType(), 2, "gcd.pb");
+        phiB->addIncoming(b, mainBB);
 
-        llvm::Value* bIsZero = builder->CreateICmpEQ(phiB, zero, "gcd.bzero");
-        builder->CreateCondBr(bIsZero, doneBB, bodyBB);
+        // Make b odd: b >>= ctz(b)
+        llvm::Value* ctzB = builder->CreateCall(cttzFn, {phiB, builder->getTrue()}, "gcd.ctzb");
+        llvm::Value* bOdd = builder->CreateLShr(phiB, ctzB, "gcd.bodd");
 
-        builder->SetInsertPoint(bodyBB);
-        llvm::Value* remainder = builder->CreateURem(phiA, phiB, "gcd.rem");
-        phiA->addIncoming(phiB, bodyBB);
-        phiB->addIncoming(remainder, bodyBB);
-        builder->CreateBr(loopBB);
+        // Branchless min/max + subtract: equivalent to if(a>b) swap(a,b); b-=a
+        llvm::Value* aGtB = builder->CreateICmpUGT(phiA, bOdd, "gcd.gt");
+        llvm::Value* lo = builder->CreateSelect(aGtB, bOdd, phiA, "gcd.lo");
+        llvm::Value* hi = builder->CreateSelect(aGtB, phiA, bOdd, "gcd.hi");
+        llvm::Value* diff = builder->CreateSub(hi, lo, "gcd.diff");
 
+        // Continue if diff != 0
+        llvm::Value* done = builder->CreateICmpEQ(diff, zero, "gcd.dz");
+        phiA->addIncoming(lo, loopBB);
+        phiB->addIncoming(diff, loopBB);
+        builder->CreateCondBr(done, contBB, loopBB);
+
+        // Multiply result by 2^k (common factor)
+        builder->SetInsertPoint(contBB);
+        llvm::Value* shifted = builder->CreateShl(lo, k, "gcd.shifted");
+        builder->CreateBr(doneBB);
+
+        // Final merge
         builder->SetInsertPoint(doneBB);
-        return phiA;
+        llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "gcd.result");
+        result->addIncoming(aOrB, entryBB);     // edge case: a|b = max(a,b) when one is 0
+        result->addIncoming(shifted, contBB);   // normal case
+        return result;
     }
 
     if (bid == BuiltinId::TO_STRING) {

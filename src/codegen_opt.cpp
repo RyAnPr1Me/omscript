@@ -649,7 +649,10 @@ void CodeGenerator::runOptimizationPasses() {
     // and internalize global variables, propagate initial values, and eliminate
     // globals that are only stored but never read.  This cleans up patterns the
     // default pipeline leaves behind (e.g. globals used only in main).
-    if (optimizationLevel >= OptimizationLevel::O2 && !lto_) {
+    // Also run in LTO mode: single-TU programs benefit from GlobalOpt even
+    // when the LTO pre-link pipeline is used, since the linker's LTO pass
+    // may not run GlobalOpt on every module.
+    if (optimizationLevel >= OptimizationLevel::O2) {
         if (verbose_) {
             std::cout << "    Adding GlobalOpt + GlobalDCE passes..." << std::endl;
         }
@@ -1119,15 +1122,16 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     fpm.add(llvm::createLoopDataPrefetchPass());
     fpm.add(llvm::createLoopStrengthReducePass());
     // Use aggressive loop unrolling for OPTMAX: OptLevel=3 for maximum
-    // unroll factor, threshold=300 to allow larger loop bodies to unroll.
+    // unroll factor, threshold=500 to allow larger loop bodies to unroll.
+    // Higher threshold enables unrolling of loops containing modulo/division
+    // sequences that expand to multiple µops during ISel.
     fpm.add(llvm::createLoopUnrollPass(/*OptLevel=*/3, /*OnlyWhenForced=*/false,
-                                       /*ForgetAllSCEV=*/false, /*Threshold=*/300));
-    // Phase 2.5: Post-loop cleanup.  Loop strength reduction, unrolling,
-    // and LICM can expose redundancies and dead code.  A lightweight
-    // CFG simplification + DCE pass is sufficient here; the heavier GVN
-    // and InstCombine passes are already in Phase 4 below and the full
-    // pipeline runs 3× per function, so duplicating them here only adds
-    // compile-time without improving generated code quality.
+                                       /*ForgetAllSCEV=*/false, /*Threshold=*/500));
+    // Phase 2.5: Post-loop cleanup.  After unrolling, GVN + InstCombine catch
+    // constant-foldable patterns in unrolled iterations (e.g. known-constant
+    // IV values, redundant loads) that DCE alone would miss.
+    fpm.add(llvm::createGVNPass());
+    fpm.add(llvm::createInstructionCombiningPass());
     fpm.add(llvm::createCFGSimplificationPass());
     fpm.add(llvm::createDeadCodeEliminationPass());
     // Phase 3: Post-loop optimizations
