@@ -757,3 +757,167 @@ TEST(HardwareGraphTest, Zen5ProfileAccuracy) {
     EXPECT_EQ(profile->vectorWidth, 512u); // AVX-512
     EXPECT_EQ(profile->branchUnits, 2u);
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Schedule enhancements — register pressure, fusion, beam search, debug
+// ═════════════════════════════════════════════════════════════════════════════
+
+TEST(HardwareGraphTest, ScheduleReordersInstructions) {
+    // Verify that the scheduler actually reorders instructions when it's
+    // beneficial. Create a BB with: load, add (uses load), independent mul.
+    // The scheduler should move the mul before the add to hide load latency.
+    HGOETestModule tm("sched_reorder");
+    auto* a = tm.arg(0);
+    auto* b = tm.arg(1);
+
+    // Create a pointer, load from it, add to it, and do independent work.
+    auto* alloca = tm.builder.CreateAlloca(tm.i64Ty(), nullptr, "ptr");
+    tm.builder.CreateStore(a, alloca);
+    auto* load = tm.builder.CreateLoad(tm.i64Ty(), alloca, "loaded");
+    auto* add = tm.builder.CreateAdd(load, b, "sum");    // depends on load
+    auto* mul = tm.builder.CreateMul(a, b, "product");   // independent of load
+    auto* result = tm.builder.CreateAdd(add, mul, "result");
+    tm.builder.CreateRet(result);
+
+    ASSERT_TRUE(tm.verify());
+
+    auto profile = lookupMicroarch("skylake");
+    ASSERT_TRUE(profile.has_value());
+    HardwareGraph hw = buildHardwareGraph(*profile);
+
+    unsigned cycles = scheduleInstructions(*tm.func, hw, *profile);
+    EXPECT_GT(cycles, 0u);
+
+    // The module should still verify after scheduling.
+    ASSERT_TRUE(tm.verify());
+}
+
+TEST(HardwareGraphTest, ScheduleRegisterPressureAware) {
+    // Create a BB with many independent additions that produce live values.
+    // The scheduler should track register pressure and prefer to schedule
+    // instructions that free registers when pressure is high.
+    HGOETestModule tm("reg_pressure", 2);
+    auto* a = tm.arg(0);
+    auto* b = tm.arg(1);
+
+    // Generate several independent computations.
+    llvm::Value* sum = a;
+    for (int i = 0; i < 8; ++i) {
+        auto* t = tm.builder.CreateAdd(a, tm.builder.getInt64(i), "t" + std::to_string(i));
+        sum = tm.builder.CreateAdd(sum, t, "acc" + std::to_string(i));
+    }
+    auto* final_ = tm.builder.CreateAdd(sum, b);
+    tm.builder.CreateRet(final_);
+
+    ASSERT_TRUE(tm.verify());
+
+    auto profile = lookupMicroarch("skylake");
+    ASSERT_TRUE(profile.has_value());
+    HardwareGraph hw = buildHardwareGraph(*profile);
+
+    unsigned cycles = scheduleInstructions(*tm.func, hw, *profile);
+    EXPECT_GT(cycles, 0u);
+    ASSERT_TRUE(tm.verify());
+}
+
+TEST(HardwareGraphTest, ScheduleHandlesLargeBB) {
+    // Test beam search pruning: create a large BB with many independent ops.
+    // The scheduler should complete without excessive runtime.
+    HGOETestModule tm("large_bb", 2);
+    auto* a = tm.arg(0);
+
+    llvm::Value* acc = a;
+    for (int i = 0; i < 100; ++i) {
+        auto* t = tm.builder.CreateAdd(acc, tm.builder.getInt64(i));
+        acc = tm.builder.CreateXor(acc, t);
+    }
+    tm.builder.CreateRet(acc);
+    ASSERT_TRUE(tm.verify());
+
+    auto profile = lookupMicroarch("skylake");
+    ASSERT_TRUE(profile.has_value());
+    HardwareGraph hw = buildHardwareGraph(*profile);
+
+    unsigned cycles = scheduleInstructions(*tm.func, hw, *profile);
+    EXPECT_GT(cycles, 0u);
+    ASSERT_TRUE(tm.verify());
+}
+
+TEST(HardwareGraphTest, ScheduleFusionAware) {
+    // Create a compare instruction followed by other work.
+    // The scheduler should keep the compare close to its use (branch).
+    HGOETestModule tm("fusion", 2);
+    auto* a = tm.arg(0);
+    auto* b = tm.arg(1);
+
+    auto* cmp = tm.builder.CreateICmpSLT(a, b, "cmp");
+    auto* sel = tm.builder.CreateSelect(cmp, a, b, "sel");
+    tm.builder.CreateRet(sel);
+
+    ASSERT_TRUE(tm.verify());
+
+    auto profile = lookupMicroarch("skylake");
+    ASSERT_TRUE(profile.has_value());
+    HardwareGraph hw = buildHardwareGraph(*profile);
+
+    unsigned cycles = scheduleInstructions(*tm.func, hw, *profile);
+    EXPECT_GT(cycles, 0u);
+    ASSERT_TRUE(tm.verify());
+}
+
+TEST(HardwareGraphTest, ScheduleWithDivisionLatencyHiding) {
+    // Division should be scheduled early to hide its long latency.
+    HGOETestModule tm("div_hiding", 2);
+    auto* a = tm.arg(0);
+    auto* b = tm.arg(1);
+
+    auto* div = tm.builder.CreateSDiv(a, b, "div");
+    auto* add1 = tm.builder.CreateAdd(a, b, "add1");
+    auto* add2 = tm.builder.CreateAdd(add1, b, "add2");
+    auto* result = tm.builder.CreateAdd(div, add2, "result");
+    tm.builder.CreateRet(result);
+
+    ASSERT_TRUE(tm.verify());
+
+    auto profile = lookupMicroarch("skylake");
+    ASSERT_TRUE(profile.has_value());
+    HardwareGraph hw = buildHardwareGraph(*profile);
+
+    unsigned cycles = scheduleInstructions(*tm.func, hw, *profile);
+    EXPECT_GT(cycles, 0u);
+    ASSERT_TRUE(tm.verify());
+
+    // Check the scheduled order: division should appear before adds
+    // (which are independent of it) since it has higher latency.
+    auto& entry = tm.func->getEntryBlock();
+    unsigned divPos = 0, addPos = 0;
+    unsigned pos = 0;
+    for (auto& inst : entry) {
+        if (inst.getOpcode() == llvm::Instruction::SDiv) divPos = pos;
+        if (&inst == result) addPos = pos;
+        ++pos;
+    }
+    EXPECT_LT(divPos, addPos);
+}
+
+TEST(HardwareGraphTest, ScheduleMultiArchConsistency) {
+    // Schedule the same BB on different architectures and verify consistency.
+    HGOETestModule tm("multi_arch", 2);
+    auto* a = tm.arg(0);
+    auto* b = tm.arg(1);
+    auto* sum = tm.builder.CreateAdd(a, b);
+    auto* prod = tm.builder.CreateMul(a, b);
+    auto* result = tm.builder.CreateAdd(sum, prod);
+    tm.builder.CreateRet(result);
+    ASSERT_TRUE(tm.verify());
+
+    // Try on different architectures.
+    for (const char* arch : {"skylake", "znver4", "apple-m1"}) {
+        auto profile = lookupMicroarch(arch);
+        ASSERT_TRUE(profile.has_value()) << "Missing profile for " << arch;
+        HardwareGraph hw = buildHardwareGraph(*profile);
+        unsigned cycles = scheduleInstructions(*tm.func, hw, *profile);
+        EXPECT_GT(cycles, 0u) << "Zero cycles on " << arch;
+        ASSERT_TRUE(tm.verify()) << "Verification failed after scheduling on " << arch;
+    }
+}

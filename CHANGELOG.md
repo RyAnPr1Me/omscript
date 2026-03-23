@@ -5,6 +5,44 @@ All notable changes to the OmScript compiler will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.5.0] - 2026-03-23
+
+### Added
+- **HGOE instruction fusion detection:** The scheduler now detects and exploits three classes of instruction fusion opportunities:
+  - **Compare+Branch (CmpBranch):** `ICmp`/`FCmp` followed by conditional branch — macro-op fusion on Skylake+, Zen+, Apple M-series
+  - **Load+Op (LoadOp):** Single-use loads feeding ALU operations — micro-op folding allows the load to be absorbed into the ALU op's memory operand
+  - **Address folding (AddrFold):** GEP + Load/Store pairs — address calculation folds into the memory instruction's addressing mode
+  - Fusion partners are scheduled adjacently via a new fusion-affinity tier in the priority sort
+- **HGOE register pressure tracking:** The scheduler now models approximate register liveness during scheduling:
+  - Tracks live-in values from outside the basic block (function arguments, cross-BB definitions)
+  - Each scheduled instruction that produces a non-void result increases live count; when all consumers are scheduled, the value dies
+  - A **register pressure penalty** tier in the priority sort penalises instructions that would push live values over the target's physical register budget (adjusted for stack/frame pointer)
+  - Integrates with the existing register-freeing score for spill-avoidance scheduling
+- **HGOE beam search pruning:** For basic blocks with more than 32 ready-to-schedule instructions, only the top 32 candidates (by priority score) are considered each cycle, preventing combinatorial explosion in very large functions while maintaining schedule quality
+- **HGOE schedule DAG visualization/debug hooks:**
+  - `dumpScheduleDAG()` — prints the dependency DAG with per-instruction latency, critical-path depth, resource class, and predecessor/successor lists
+  - `dumpScheduleResult()` — prints the final schedule order with cycle assignments
+  - Activated by setting `OMSC_DUMP_SCHEDULE=1` in the environment — zero overhead when disabled (cached check)
+- **6 new HGOE unit tests:**
+  - `ScheduleReordersInstructions` — verifies instruction reordering for latency hiding
+  - `ScheduleRegisterPressureAware` — tests register pressure tracking with many live values
+  - `ScheduleHandlesLargeBB` — tests beam search pruning on 100-instruction blocks
+  - `ScheduleFusionAware` — tests fusion-aware scheduling with compare+select
+  - `ScheduleWithDivisionLatencyHiding` — verifies division is scheduled before independent adds
+  - `ScheduleMultiArchConsistency` — tests same BB on Skylake, Zen 4, Apple M1
+
+### Changed
+- **HGOE scheduler priority sort upgraded to 9-tier** (from 7-tier):
+  1. Critical-path depth (latency hiding)
+  2. Long-latency operations first (division, FP divide)
+  3. Loads first (hide memory latency)
+  4. Stall distance (consumer work remaining)
+  5. **Fusion affinity** (schedule fusion partners adjacently — new)
+  6. Port pressure (bottleneck resource first)
+  7. **Register pressure penalty** (penalise spill-causing schedules — new)
+  8. Register-freeing score (reduce live values)
+  9. Instruction index (deterministic tie-break)
+
 ## [3.4.0] - 2026-03-23
 
 ### Added

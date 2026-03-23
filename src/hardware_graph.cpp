@@ -32,6 +32,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <cstdlib>
 #include <numeric>
 #include <queue>
 #include <set>
@@ -2238,6 +2239,181 @@ TransformStats applyHardwareTransforms(llvm::Function& func,
 
 /// Returns true if the instruction has memory side-effects relevant to
 /// ordering (loads, stores, atomics, and memory-touching calls).
+// ═════════════════════════════════════════════════════════════════════════════
+// Instruction fusion detection
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Fusion opportunity: two instructions that the CPU can execute as a single
+/// micro-op (or in a reduced number of cycles via macro-op fusion).
+struct FusionPair {
+    unsigned first;   ///< Index of the first instruction in the pair
+    unsigned second;  ///< Index of the second instruction in the pair
+    enum Kind {
+        CmpBranch,     ///< Compare + conditional branch → macro-op fusion
+        LoadOp,        ///< Load + ALU op using the loaded value → micro-op fusion
+        AddrFold,      ///< GEP + load/store → address calculation folding
+        IncBranch,     ///< Increment + compare + branch (loop counter pattern)
+    } kind;
+};
+
+/// Detect instruction fusion opportunities within a basic block.
+/// Returns pairs of instructions that should be scheduled adjacently to
+/// enable fusion on modern CPUs (Skylake: cmp+jcc, Zen: test+jcc,
+/// Apple M: load+op folding).
+static std::vector<FusionPair> detectFusionPairs(
+        const std::vector<llvm::Instruction*>& moveable,
+        const std::unordered_map<llvm::Instruction*, unsigned>& idx,
+        const MicroarchProfile& profile) {
+    std::vector<FusionPair> pairs;
+
+    for (unsigned i = 0; i < moveable.size(); ++i) {
+        auto* inst = moveable[i];
+
+        // ── CmpBranch fusion: ICmp/Test + conditional branch ─────────────
+        // x86: TEST/CMP + JCC fuse into a single macro-op on Skylake+, Zen+
+        // AArch64: CMP + B.cond fuse on Apple M-series, Neoverse
+        if (llvm::isa<llvm::ICmpInst>(inst) || llvm::isa<llvm::FCmpInst>(inst)) {
+            // Check if the comparison result feeds a branch in this BB
+            for (auto* user : inst->users()) {
+                auto* br = llvm::dyn_cast<llvm::BranchInst>(user);
+                if (!br || !br->isConditional()) continue;
+                // The branch is the terminator, so it's not in moveable[],
+                // but the compare should be last before it for fusion.
+                // Mark the compare as having a fusion affinity with the end.
+                // We use UINT_MAX as a sentinel for "schedule near terminator".
+                pairs.push_back({i, static_cast<unsigned>(moveable.size()),
+                                 FusionPair::CmpBranch});
+            }
+        }
+
+        // ── LoadOp fusion: Load + single-use ALU consumer ────────────────
+        // On x86, a load can fold into an ALU op's memory operand
+        // (e.g., ADD r, [mem] instead of MOV r2, [mem]; ADD r, r2).
+        // On AArch64, post-indexed load+op patterns are common.
+        if (auto* load = llvm::dyn_cast<llvm::LoadInst>(inst)) {
+            if (load->hasOneUse()) {
+                auto* user = load->user_back();
+                auto* userInst = llvm::dyn_cast<llvm::Instruction>(user);
+                if (userInst) {
+                    auto it = idx.find(userInst);
+                    if (it != idx.end()) {
+                        unsigned userOpc = userInst->getOpcode();
+                        // ALU ops that can fold a memory operand
+                        if (userOpc == llvm::Instruction::Add ||
+                            userOpc == llvm::Instruction::Sub ||
+                            userOpc == llvm::Instruction::And ||
+                            userOpc == llvm::Instruction::Or ||
+                            userOpc == llvm::Instruction::Xor ||
+                            userOpc == llvm::Instruction::Mul ||
+                            userOpc == llvm::Instruction::FAdd ||
+                            userOpc == llvm::Instruction::FMul) {
+                            pairs.push_back({i, it->second, FusionPair::LoadOp});
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Address folding: GEP + Load/Store ────────────────────────────
+        // GEP + load/store can fold the address calculation into the
+        // load/store's addressing mode, eliminating the separate AGU op.
+        if (auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(inst)) {
+            if (gep->hasOneUse()) {
+                auto* user = gep->user_back();
+                if (auto* userInst = llvm::dyn_cast<llvm::Instruction>(user)) {
+                    auto it = idx.find(userInst);
+                    if (it != idx.end() &&
+                        (llvm::isa<llvm::LoadInst>(userInst) ||
+                         llvm::isa<llvm::StoreInst>(userInst))) {
+                        pairs.push_back({i, it->second, FusionPair::AddrFold});
+                    }
+                }
+            }
+        }
+    }
+
+    return pairs;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Schedule DAG debug / visualization hooks
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Dump the scheduling dependency DAG to stderr for debugging.
+/// Each instruction is printed with its index, opcode, critical-path depth,
+/// latency, assigned resource, and lists of predecessors and successors.
+///
+/// Usage: set OMSC_DUMP_SCHEDULE=1 in the environment, or call directly.
+static void dumpScheduleDAG(
+        const std::vector<llvm::Instruction*>& moveable,
+        const std::vector<std::vector<unsigned>>& succ,
+        const std::vector<std::vector<unsigned>>& pred,
+        const std::vector<unsigned>& critPath,
+        const std::vector<unsigned>& lat,
+        const MicroarchProfile& profile,
+        llvm::raw_ostream& os = llvm::errs()) {
+    os << "=== HGOE Schedule DAG (" << moveable.size() << " instructions, "
+       << profile.name << ") ===\n";
+
+    for (unsigned i = 0; i < moveable.size(); ++i) {
+        os << "  [" << i << "] ";
+        moveable[i]->print(os, /*IsForDebug=*/true);
+        os << "\n";
+        os << "       lat=" << lat[i]
+           << " crit=" << critPath[i]
+           << " class=" << static_cast<int>(classifyOp(moveable[i]))
+           << " res=" << static_cast<int>(mapOpToResource(classifyOp(moveable[i])));
+
+        if (!pred[i].empty()) {
+            os << " pred={";
+            for (unsigned j = 0; j < pred[i].size(); ++j) {
+                if (j > 0) os << ",";
+                os << pred[i][j];
+            }
+            os << "}";
+        }
+        if (!succ[i].empty()) {
+            os << " succ={";
+            for (unsigned j = 0; j < succ[i].size(); ++j) {
+                if (j > 0) os << ",";
+                os << succ[i][j];
+            }
+            os << "}";
+        }
+        os << "\n";
+    }
+    os << "=== End Schedule DAG ===\n";
+}
+
+/// Dump the final schedule order with cycle assignments.
+static void dumpScheduleResult(
+        const std::vector<llvm::Instruction*>& scheduled,
+        const std::vector<unsigned>& avail,
+        const std::unordered_map<llvm::Instruction*, unsigned>& idx,
+        unsigned totalCycles,
+        llvm::raw_ostream& os = llvm::errs()) {
+    os << "=== HGOE Schedule Result (" << scheduled.size()
+       << " instructions, " << totalCycles << " cycles) ===\n";
+    for (unsigned i = 0; i < scheduled.size(); ++i) {
+        auto it = idx.find(scheduled[i]);
+        unsigned origIdx = (it != idx.end()) ? it->second : 0;
+        os << "  cycle≤" << avail[origIdx] << " [" << origIdx << "] ";
+        scheduled[i]->print(os, /*IsForDebug=*/true);
+        os << "\n";
+    }
+    os << "=== End Schedule Result ===\n";
+}
+
+/// Check if the OMSC_DUMP_SCHEDULE environment variable is set.
+static bool shouldDumpSchedule() {
+    static int cached = -1;
+    if (cached < 0) {
+        const char* env = std::getenv("OMSC_DUMP_SCHEDULE");
+        cached = (env && (std::string(env) == "1" || std::string(env) == "true")) ? 1 : 0;
+    }
+    return cached == 1;
+}
+
 static bool hasMemoryEffect(const llvm::Instruction* inst) {
     if (llvm::isa<llvm::LoadInst>(inst) || llvm::isa<llvm::StoreInst>(inst) ||
         llvm::isa<llvm::AtomicRMWInst>(inst) ||
@@ -2506,6 +2682,63 @@ static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
         portPressure[key]++;
     }
 
+    // ── 6b. Detect instruction fusion opportunities ─────────────────────────
+    // Fusion pairs should be scheduled adjacently when possible to enable
+    // macro-op fusion (cmp+branch) or micro-op folding (load+op, GEP+load).
+    auto fusionPairs = detectFusionPairs(moveable, idx, profile);
+
+    // Build a fusion affinity map: for each instruction, what instruction
+    // should immediately precede it (fusion partner).
+    std::unordered_map<unsigned, unsigned> fusionPartner; // second → first
+    for (const auto& fp : fusionPairs) {
+        if (fp.second < n) // skip sentinel for terminator-adjacent fusions
+            fusionPartner[fp.second] = fp.first;
+    }
+
+    // ── 6c. Register pressure model ──────────────────────────────────────────
+    // Track approximate live-value count during scheduling to penalise
+    // schedules that spike register pressure beyond the physical register
+    // file.  Each instruction that produces a non-void, non-zero-latency
+    // result adds to liveValues; when ALL consumers of a value are scheduled,
+    // the value dies and liveValues decreases.
+    //
+    // The register budget excludes stack pointer and frame pointer.
+    unsigned regBudget = (profile.isa == ISAFamily::AArch64)
+        ? std::max(profile.intRegisters, 16u) - 2
+        : std::max(profile.intRegisters, 16u) - 2;
+    unsigned currentLive = 0;
+
+    // Count how many not-yet-scheduled users each producer has.
+    std::vector<unsigned> remainingUsers(n, 0);
+    for (unsigned i = 0; i < n; ++i) {
+        for (unsigned s : succ[i])
+            ++remainingUsers[i]; // one user per successor edge
+    }
+
+    // Pre-count values live-in from outside the BB (function args, cross-BB defs).
+    unsigned liveInCount = 0;
+    {
+        std::unordered_set<const llvm::Value*> externalDefs;
+        for (unsigned i = 0; i < n; ++i) {
+            for (auto& use : moveable[i]->operands()) {
+                auto* val = use.get();
+                if (llvm::isa<llvm::Constant>(val)) continue;
+                if (auto* arg = llvm::dyn_cast<llvm::Argument>(val))
+                    externalDefs.insert(arg);
+                else if (auto* defInst = llvm::dyn_cast<llvm::Instruction>(val)) {
+                    if (idx.find(defInst) == idx.end()) // defined outside BB
+                        externalDefs.insert(defInst);
+                }
+            }
+        }
+        liveInCount = static_cast<unsigned>(externalDefs.size());
+    }
+    currentLive = liveInCount;
+
+    // ── 6d. Debug: dump schedule DAG if requested ─────────────────────────────
+    if (shouldDumpSchedule())
+        dumpScheduleDAG(moveable, succ, pred, critPath, lat, profile);
+
     // ── 7. List scheduling ────────────────────────────────────────────────────
     std::vector<llvm::Instruction*> scheduled;
     scheduled.reserve(n);
@@ -2534,15 +2767,16 @@ static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
             if (ready.empty()) break;
         }
 
-        // Sort ready instructions for maximum throughput:
-        //   Primary   — critical path remaining (latency hiding)
-        //   Secondary — loads first (schedule early to hide memory latency;
-        //               loads have the longest pipeline of any common op and
-        //               may miss in cache, so starting them early is critical)
-        //   Tertiary  — port pressure (schedule bottleneck resource first)
-        //   Quaternary — register-freeing score (prefer instructions that kill
-        //               live values, reducing register pressure)
-        //   Quinary   — instruction index (deterministic tie-break)
+        // Sort ready instructions for maximum throughput — 9-tier priority:
+        //   1. Critical path remaining (latency hiding)
+        //   2. Long-latency ops first (div/fdiv — start divider early)
+        //   3. Loads first (hide memory latency, may miss in cache)
+        //   4. Stall distance (consumer work remaining — more = better hiding)
+        //   5. Fusion affinity (schedule fusion partners adjacently)
+        //   6. Port pressure (schedule bottleneck resource first)
+        //   7. Register pressure penalty (penalise if over budget)
+        //   8. Register-freeing score (reduce live values)
+        //   9. Instruction index (deterministic tie-break)
         //
         // Register-freeing score: count of predecessors whose only remaining
         // not-yet-scheduled user is this instruction (scheduling it frees the
@@ -2578,6 +2812,29 @@ static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
             return maxConsumerCrit;
         };
 
+        // Fusion affinity: returns true if this instruction has a fusion
+        // partner that was just scheduled, so scheduling it next enables
+        // macro-op fusion (cmp+branch) or micro-op folding (load+alu).
+        auto hasFusionAffinity = [&](unsigned id) -> bool {
+            auto it = fusionPartner.find(id);
+            if (it == fusionPartner.end()) return false;
+            return done[it->second]; // partner already scheduled
+        };
+
+        // Register pressure penalty: returns a higher value when scheduling
+        // this instruction would push live values over the register budget.
+        // Instructions that produce a result (non-void) increase pressure.
+        auto regPressurePenalty = [&](unsigned id) -> unsigned {
+            if (moveable[id]->getType()->isVoidTy()) return 0;
+            if (lat[id] == 0) return 0; // free ops (bitcast, phi) don't need regs
+            // If we're already over budget, penalise instructions that add live values
+            // unless they also free values (via regFreeScore).
+            unsigned rfs = regFreeScore(id);
+            if (currentLive + 1 - rfs > regBudget)
+                return currentLive + 1 - rfs - regBudget;
+            return 0;
+        };
+
         std::sort(ready.begin(), ready.end(), [&](unsigned a, unsigned b) {
             if (critPath[a] != critPath[b])
                 return critPath[a] > critPath[b];
@@ -2602,6 +2859,11 @@ static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
             unsigned sdA = stallDistance(a), sdB = stallDistance(b);
             if (sdA != sdB) return sdA > sdB;
 
+            // Fusion affinity: prefer instructions whose fusion partner
+            // was just scheduled, enabling macro-op / micro-op fusion.
+            bool fusA = hasFusionAffinity(a), fusB = hasFusionAffinity(b);
+            if (fusA != fusB) return fusA;
+
             OpClass opA = classifyOp(moveable[a]);
             OpClass opB = classifyOp(moveable[b]);
             int rtA = (opA == OpClass::IntMul) ? kIntMulPortKey
@@ -2610,10 +2872,23 @@ static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
                 : static_cast<int>(mapOpToResource(opB));
             if (portPressure[rtA] != portPressure[rtB])
                 return portPressure[rtA] > portPressure[rtB];
+
+            // Register pressure: penalise instructions that would cause spills.
+            unsigned rpA = regPressurePenalty(a), rpB = regPressurePenalty(b);
+            if (rpA != rpB) return rpA < rpB; // lower penalty = better
+
             unsigned rfsA = regFreeScore(a), rfsB = regFreeScore(b);
             if (rfsA != rfsB) return rfsA > rfsB;
             return a < b;
         });
+
+        // ── Beam search pruning ──────────────────────────────────────────────
+        // For large ready lists (> beamWidth), only consider the top-N
+        // candidates to prevent combinatorial explosion in very large BBs.
+        // The sorted order ensures the highest-priority instructions are kept.
+        constexpr unsigned kBeamWidth = 32;
+        if (ready.size() > kBeamWidth)
+            ready.resize(kBeamWidth);
 
         // Within a cycle, track which ResourceTypes have been issued to
         // encourage diversity and fill different execution units in parallel.
@@ -2667,6 +2942,20 @@ static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
                 scheduled.push_back(moveable[id]);
                 issuedPortsThisCycle.insert(rtKey);
 
+                // ── Register pressure tracking ──────────────────────────────
+                // Instruction produces a value → increase live count.
+                if (!moveable[id]->getType()->isVoidTy() && lat[id] > 0)
+                    ++currentLive;
+                // Check if scheduling this instruction kills any predecessor's
+                // last use, decreasing the live count.
+                for (unsigned p : pred[id]) {
+                    if (!done[p]) continue;
+                    if (moveable[p]->getType()->isVoidTy()) continue;
+                    if (remainingUsers[p] > 0) --remainingUsers[p];
+                    if (remainingUsers[p] == 0 && currentLive > 0)
+                        --currentLive;
+                }
+
                 // Decrement in-degrees of successors.
                 for (unsigned s : succ[id])
                     if (inDeg[s] > 0) --inDeg[s];
@@ -2694,7 +2983,12 @@ static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
         }
     }
 
-    // ── 8. Apply schedule: reorder LLVM IR within the basic block ────────────
+    // ── 8. Debug: dump schedule result if requested ─────────────────────────
+    if (shouldDumpSchedule())
+        dumpScheduleResult(scheduled, avail, idx,
+                           maxCycle > 0 ? maxCycle : currentCycle);
+
+    // ── 9. Apply schedule: reorder LLVM IR within the basic block ────────────
     if (scheduled.size() == n) {
         llvm::Instruction* term = bb.getTerminator();
         for (auto* inst : scheduled)
