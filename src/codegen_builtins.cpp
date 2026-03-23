@@ -56,7 +56,8 @@ enum class BuiltinId : uint8_t {
     MUTEX_DESTROY,
     SIN, COS, TAN, ASIN, ACOS, ATAN, ATAN2, EXP, LOG, LOG10, CBRT, HYPOT,
     ARRAY_MIN, ARRAY_MAX, ARRAY_ANY, ARRAY_EVERY, ARRAY_FIND, ARRAY_COUNT,
-    STR_JOIN, STR_COUNT
+    STR_JOIN, STR_COUNT,
+    POPCOUNT, CLZ, CTZ, BITREVERSE, EXP2, IS_POWER_OF_2
 };
 
 static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
@@ -181,6 +182,12 @@ static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
     {"array_count", BuiltinId::ARRAY_COUNT},
     {"str_join", BuiltinId::STR_JOIN},
     {"str_count", BuiltinId::STR_COUNT},
+    {"popcount", BuiltinId::POPCOUNT},
+    {"clz", BuiltinId::CLZ},
+    {"ctz", BuiltinId::CTZ},
+    {"bitreverse", BuiltinId::BITREVERSE},
+    {"exp2", BuiltinId::EXP2},
+    {"is_power_of_2", BuiltinId::IS_POWER_OF_2},
 };
 
 static BuiltinId lookupBuiltin(const std::string& name) {
@@ -4399,6 +4406,64 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateCall(getOrDeclarePthreadMutexDestroy(), {mutexPtr});
         builder->CreateCall(getOrDeclareFree(), {mutexPtr});
         return llvm::ConstantInt::get(getDefaultType(), 0);
+    }
+
+    // ── Bitwise intrinsic builtins ─────────────────────────────────────
+    if (bid == BuiltinId::POPCOUNT) {
+        validateArgCount(expr, "popcount", 1);
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        arg = toDefaultType(arg);
+        llvm::Function* ctpopFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::ctpop, {getDefaultType()});
+        return builder->CreateCall(ctpopFn, {arg}, "popcount.result");
+    }
+
+    if (bid == BuiltinId::CLZ) {
+        validateArgCount(expr, "clz", 1);
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        arg = toDefaultType(arg);
+        llvm::Function* ctlzFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::ctlz, {getDefaultType()});
+        return builder->CreateCall(ctlzFn, {arg, builder->getFalse()}, "clz.result");
+    }
+
+    if (bid == BuiltinId::CTZ) {
+        validateArgCount(expr, "ctz", 1);
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        arg = toDefaultType(arg);
+        llvm::Function* cttzFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::cttz, {getDefaultType()});
+        return builder->CreateCall(cttzFn, {arg, builder->getFalse()}, "ctz.result");
+    }
+
+    if (bid == BuiltinId::BITREVERSE) {
+        validateArgCount(expr, "bitreverse", 1);
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        arg = toDefaultType(arg);
+        llvm::Function* brevFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::bitreverse, {getDefaultType()});
+        return builder->CreateCall(brevFn, {arg}, "bitreverse.result");
+    }
+
+    if (bid == BuiltinId::EXP2) {
+        validateArgCount(expr, "exp2", 1);
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        llvm::Value* fval = ensureFloat(arg);
+        llvm::Function* exp2Fn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::exp2, {getFloatType()});
+        return builder->CreateCall(exp2Fn, {fval}, "exp2.result");
+    }
+
+    if (bid == BuiltinId::IS_POWER_OF_2) {
+        validateArgCount(expr, "is_power_of_2", 1);
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        arg = toDefaultType(arg);
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+        // x > 0
+        llvm::Value* isPos = builder->CreateICmpSGT(arg, zero, "ispow2.pos");
+        // x & (x - 1) == 0
+        llvm::Value* xm1 = builder->CreateSub(arg, one, "ispow2.xm1");
+        llvm::Value* andVal = builder->CreateAnd(arg, xm1, "ispow2.and");
+        llvm::Value* isAnd0 = builder->CreateICmpEQ(andVal, zero, "ispow2.and0");
+        // x > 0 && (x & (x-1)) == 0
+        llvm::Value* result = builder->CreateAnd(isPos, isAnd0, "ispow2.result");
+        return builder->CreateZExt(result, getDefaultType(), "ispow2.ext");
     }
 
     if (inOptMaxFunction) {

@@ -6844,3 +6844,71 @@ TEST(CodegenTest, StructFieldCompoundAssign) {
     auto* mod = generateIR("struct P { x, y }\nfn main() { var p = P { x: 10, y: 20 }; p.x += 5; return p.x; }", codegen);
     ASSERT_NE(mod, nullptr);
 }
+
+// ── New bitwise + math builtins ──────────────────────────────────────────
+
+TEST(CodegenTest, PopcountCall) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return popcount(255); }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, PopcountWrongArgs) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    EXPECT_THROW(generateIR("fn main() { return popcount(); }", codegen), std::runtime_error);
+}
+
+TEST(CodegenTest, ClzCall) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return clz(16); }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, ClzWrongArgs) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    EXPECT_THROW(generateIR("fn main() { return clz(); }", codegen), std::runtime_error);
+}
+
+TEST(CodegenTest, CtzCall) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return ctz(16); }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, CtzWrongArgs) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    EXPECT_THROW(generateIR("fn main() { return ctz(); }", codegen), std::runtime_error);
+}
+
+TEST(CodegenTest, BitreverseCall) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return bitreverse(1); }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, BitreverseWrongArgs) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    EXPECT_THROW(generateIR("fn main() { return bitreverse(); }", codegen), std::runtime_error);
+}
+
+TEST(CodegenTest, Exp2Call) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return exp2(3.0); }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, Exp2WrongArgs) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    EXPECT_THROW(generateIR("fn main() { return exp2(); }", codegen), std::runtime_error);
+}
+
+TEST(CodegenTest, IsPowerOf2Call) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    auto* mod = generateIR("fn main() { return is_power_of_2(16); }", codegen);
+    ASSERT_NE(mod, nullptr);
+}
+
+TEST(CodegenTest, IsPowerOf2WrongArgs) {
+    CodeGenerator codegen(OptimizationLevel::O0);
+    EXPECT_THROW(generateIR("fn main() { return is_power_of_2(); }", codegen), std::runtime_error);
+}
