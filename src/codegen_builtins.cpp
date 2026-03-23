@@ -1238,30 +1238,39 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     if (bid == BuiltinId::FLOOR) {
         validateArgCount(expr, "floor", 1);
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        bool inputIsDouble = arg->getType()->isDoubleTy();
         llvm::Value* fval = ensureFloat(arg);
         // Use llvm.floor intrinsic for native hardware rounding
         llvm::Function* floorIntrinsic = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::floor, {getFloatType()});
         llvm::Value* result = builder->CreateCall(floorIntrinsic, {fval}, "floor.result");
+        if (inputIsDouble)
+            return result;
         return builder->CreateFPToSI(result, getDefaultType(), "floor.int");
     }
 
     if (bid == BuiltinId::CEIL) {
         validateArgCount(expr, "ceil", 1);
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        bool inputIsDouble = arg->getType()->isDoubleTy();
         llvm::Value* fval = ensureFloat(arg);
         // Use llvm.ceil intrinsic for native hardware rounding
         llvm::Function* ceilIntrinsic = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::ceil, {getFloatType()});
         llvm::Value* result = builder->CreateCall(ceilIntrinsic, {fval}, "ceil.result");
+        if (inputIsDouble)
+            return result;
         return builder->CreateFPToSI(result, getDefaultType(), "ceil.int");
     }
 
     if (bid == BuiltinId::ROUND) {
         validateArgCount(expr, "round", 1);
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        bool inputIsDouble = arg->getType()->isDoubleTy();
         llvm::Value* fval = ensureFloat(arg);
         // Use llvm.round intrinsic for native hardware rounding
         llvm::Function* roundIntrinsic = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::round, {getFloatType()});
         llvm::Value* result = builder->CreateCall(roundIntrinsic, {fval}, "round.result");
+        if (inputIsDouble)
+            return result;
         return builder->CreateFPToSI(result, getDefaultType(), "round.int");
     }
 

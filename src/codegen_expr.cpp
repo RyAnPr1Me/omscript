@@ -424,10 +424,50 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                         OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::sqrt, {llvm::Type::getDoubleTy(*context)});
                     return builder->CreateCall(sqrtFn, {left}, "fsqrt");
                 }
+                if (rv == 0.25) {
+                    // x**0.25 → sqrt(sqrt(x)): 2 sqrtsd instructions vs pow call
+                    llvm::Function* sqrtFn =
+                        OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::sqrt, {llvm::Type::getDoubleTy(*context)});
+                    auto* inner = builder->CreateCall(sqrtFn, {left}, "fsqrt.inner");
+                    return builder->CreateCall(sqrtFn, {inner}, "fsqrt.outer");
+                }
+                if (rv == -0.5) {
+                    // x**(-0.5) → 1.0/sqrt(x): sqrtsd + fdiv vs pow call
+                    llvm::Function* sqrtFn =
+                        OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::sqrt, {llvm::Type::getDoubleTy(*context)});
+                    auto* sq = builder->CreateCall(sqrtFn, {left}, "fsqrt.inv");
+                    return builder->CreateFDiv(llvm::ConstantFP::get(getFloatType(), 1.0), sq, "frsqrt");
+                }
+                if (rv == -1.0) {
+                    // x**(-1.0) → 1.0/x: single fdiv vs pow call
+                    return builder->CreateFDiv(llvm::ConstantFP::get(getFloatType(), 1.0), left, "frecip");
+                }
                 if (rv == 3.0) {
                     // x**3.0 → x*x*x  (2 fmuls vs pow call)
                     auto* sq = builder->CreateFMul(left, left, "fpow3.sq");
                     return builder->CreateFMul(sq, left, "fpow3");
+                }
+                if (rv == 4.0) {
+                    // x**4.0 → (x*x)*(x*x)  (2 fmuls vs pow call, better than 3)
+                    auto* sq = builder->CreateFMul(left, left, "fpow4.sq");
+                    return builder->CreateFMul(sq, sq, "fpow4");
+                }
+                if (rv == 5.0) {
+                    // x**5.0 → (x*x)*(x*x)*x  (3 fmuls vs pow call)
+                    auto* sq = builder->CreateFMul(left, left, "fpow5.sq");
+                    auto* q4 = builder->CreateFMul(sq, sq, "fpow5.q4");
+                    return builder->CreateFMul(q4, left, "fpow5");
+                }
+                if (rv == 6.0) {
+                    // x**6.0 → ((x*x)*x)²  (3 fmuls vs pow call)
+                    auto* sq = builder->CreateFMul(left, left, "fpow6.sq");
+                    auto* cb = builder->CreateFMul(sq, left, "fpow6.cb");
+                    return builder->CreateFMul(cb, cb, "fpow6");
+                }
+                if (rv == -2.0) {
+                    // x**(-2.0) → 1.0/(x*x)  (fmul + fdiv vs pow call)
+                    auto* sq = builder->CreateFMul(left, left, "fpow_n2.sq");
+                    return builder->CreateFDiv(llvm::ConstantFP::get(getFloatType(), 1.0), sq, "fpow_n2");
                 }
             }
             // General float exponentiation: use llvm.pow intrinsic

@@ -6915,6 +6915,93 @@ std::vector<RewriteRule> getFloatingPointRules() {
         P::OpPat(Op::Add, {P::Wild("x"), P::ConstFPat(0.0)}),
         [](EGraph&, const Subst& s) { return s.at("x"); });
 
+    // ── FP division by power-of-2 → multiply by reciprocal (extended) ──
+    // x / 32.0 → x * 0.03125
+    rules.emplace_back("fp_div32_to_mul",
+        P::OpPat(Op::Div, {P::Wild("x"), P::ConstFPat(32.0)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Mul, s.at("x"), g.addConstF(0.03125));
+        });
+
+    // x * 0.03125 → x / 32.0  (reverse for e-graph exploration)
+    rules.emplace_back("fp_mul_003125_to_div32",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstFPat(0.03125)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Div, s.at("x"), g.addConstF(32.0));
+        });
+
+    // x / 64.0 → x * 0.015625
+    rules.emplace_back("fp_div64_to_mul",
+        P::OpPat(Op::Div, {P::Wild("x"), P::ConstFPat(64.0)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Mul, s.at("x"), g.addConstF(0.015625));
+        });
+
+    // x * 0.015625 → x / 64.0  (reverse)
+    rules.emplace_back("fp_mul_0015625_to_div64",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstFPat(0.015625)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Div, s.at("x"), g.addConstF(64.0));
+        });
+
+    // ── FP negation distribution ────────────────────────────────────────
+    // (-x) * y → -(x * y)  (exact: IEEE-754 negation distributes over mul)
+    rules.emplace_back("fp_neg_mul_left",
+        P::OpPat(Op::Mul, {P::OpPat(Op::Neg, {P::Wild("x")}), P::Wild("y")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId prod = g.addBinOp(Op::Mul, s.at("x"), s.at("y"));
+            return g.addUnaryOp(Op::Neg, prod);
+        });
+
+    // x * (-y) → -(x * y)
+    rules.emplace_back("fp_neg_mul_right",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::OpPat(Op::Neg, {P::Wild("y")})}),
+        [](EGraph& g, const Subst& s) {
+            ClassId prod = g.addBinOp(Op::Mul, s.at("x"), s.at("y"));
+            return g.addUnaryOp(Op::Neg, prod);
+        });
+
+    // (-x) / y → -(x / y)  (exact: negation distributes over division)
+    rules.emplace_back("fp_neg_div_left",
+        P::OpPat(Op::Div, {P::OpPat(Op::Neg, {P::Wild("x")}), P::Wild("y")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId quot = g.addBinOp(Op::Div, s.at("x"), s.at("y"));
+            return g.addUnaryOp(Op::Neg, quot);
+        });
+
+    // x / (-y) → -(x / y)
+    rules.emplace_back("fp_neg_div_right",
+        P::OpPat(Op::Div, {P::Wild("x"), P::OpPat(Op::Neg, {P::Wild("y")})}),
+        [](EGraph& g, const Subst& s) {
+            ClassId quot = g.addBinOp(Op::Div, s.at("x"), s.at("y"));
+            return g.addUnaryOp(Op::Neg, quot);
+        });
+
+    // ── FP multiply by power-of-2 to add chain ─────────────────────────
+    // x * 4.0 → (x + x) + (x + x)  (exact: additions of same value are exact)
+    rules.emplace_back("fp_mul_four_to_add",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstFPat(4.0)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId dbl = g.addBinOp(Op::Add, s.at("x"), s.at("x"));
+            return g.addBinOp(Op::Add, dbl, dbl);
+        });
+
+    // x * 3.0 → (x + x) + x  (exact: addition of same value is exact)
+    rules.emplace_back("fp_mul_three_to_add",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstFPat(3.0)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId dbl = g.addBinOp(Op::Add, s.at("x"), s.at("x"));
+            return g.addBinOp(Op::Add, dbl, s.at("x"));
+        });
+
+    // ── FP add/sub of same → multiply by constant ───────────────────────
+    // x + x → x * 2.0  (reverse direction for cost model exploration)
+    rules.emplace_back("fp_add_self_to_mul2",
+        P::OpPat(Op::Add, {P::Wild("x"), P::Wild("x")}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Mul, s.at("x"), g.addConstF(2.0));
+        });
+
     return rules;
 }
 
