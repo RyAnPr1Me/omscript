@@ -1073,7 +1073,7 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     //
     // We collect OPTMAX function pointers in a single pass so that the later
     // optimization loop can skip the name→string conversion per function.
-    static constexpr unsigned kAlwaysInlineThreshold = 15; // instruction count
+    static constexpr unsigned kAlwaysInlineThreshold = 30; // instruction count
     llvm::SmallVector<llvm::Function*, 16> optMaxFuncs;
     for (auto& func : module->functions()) {
         if (func.isDeclaration())
@@ -1088,7 +1088,13 @@ void CodeGenerator::optimizeOptMaxFunctions() {
         // NoSync: OPTMAX functions don't synchronize (no atomics, locks, or
         // thread-related operations), enabling aggressive reordering.
         func.addFnAttr(llvm::Attribute::NoSync);
-        // Mark small OPTMAX helpers as always-inline candidates
+        // NoFree: OPTMAX functions don't free heap memory, enabling the
+        // optimizer to sink/hoist loads past calls to these functions.
+        func.addFnAttr(llvm::Attribute::NoFree);
+        // Mark small OPTMAX helpers as always-inline candidates.
+        // Higher threshold (30 instrs) ensures utility functions like
+        // classify(), add_one/two/four() are force-inlined, eliminating
+        // call overhead in tight loops.
         if (func.getInstructionCount() < kAlwaysInlineThreshold) {
             func.addFnAttr(llvm::Attribute::AlwaysInline);
         }
