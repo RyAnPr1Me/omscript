@@ -276,7 +276,7 @@ void CodeGenerator::runOptimizationPasses() {
         PTO.CallGraphProfile = true;
     }
     if (optimizationLevel == OptimizationLevel::O3) {
-        PTO.InlinerThreshold = 400; // more aggressive inlining than the default ~225
+        PTO.InlinerThreshold = 500; // aggressive inlining for maximum IPC
     }
 
     // ---------------------------------------------------------------------------
