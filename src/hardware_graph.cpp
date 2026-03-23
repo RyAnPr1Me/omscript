@@ -2559,14 +2559,49 @@ static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
             return score;
         };
 
+        // Classify long-latency instructions (divisions, FP divides, sqrt)
+        // that should be scheduled as early as possible so that independent
+        // work can fill the pipeline while the divider is busy.
+        auto isLongLatencyOp = [&](unsigned id) -> bool {
+            OpClass op = classifyOp(moveable[id]);
+            return op == OpClass::IntDiv || op == OpClass::FPDiv;
+        };
+
+        // Compute a "stall distance" for each ready instruction: how many
+        // cycles of independent work exist between this instruction's result
+        // and its first consumer.  A higher value means more opportunity
+        // to hide the latency if we schedule it now.
+        auto stallDistance = [&](unsigned id) -> unsigned {
+            unsigned maxConsumerCrit = 0;
+            for (unsigned s : succ[id])
+                if (!done[s]) maxConsumerCrit = std::max(maxConsumerCrit, critPath[s]);
+            return maxConsumerCrit;
+        };
+
         std::sort(ready.begin(), ready.end(), [&](unsigned a, unsigned b) {
             if (critPath[a] != critPath[b])
                 return critPath[a] > critPath[b];
+
+            // Long-latency operations (div, fdiv) before other ops at same
+            // critical path — start them early so the divider is busy while
+            // independent ALU/load work proceeds.  LLVM's generic scheduler
+            // does not have per-CPU divider latency data; our profiles do.
+            bool longA = isLongLatencyOp(a);
+            bool longB = isLongLatencyOp(b);
+            if (longA != longB)
+                return longA;  // long-latency first
+
             // Loads first: schedule early to hide memory latency.
             bool isLoadA = llvm::isa<llvm::LoadInst>(moveable[a]);
             bool isLoadB = llvm::isa<llvm::LoadInst>(moveable[b]);
             if (isLoadA != isLoadB)
                 return isLoadA;  // loads before non-loads
+
+            // Among same-class ready instructions, prefer those whose
+            // consumers have the most remaining work (= more stall hiding).
+            unsigned sdA = stallDistance(a), sdB = stallDistance(b);
+            if (sdA != sdB) return sdA > sdB;
+
             OpClass opA = classifyOp(moveable[a]);
             OpClass opB = classifyOp(moveable[b]);
             int rtA = (opA == OpClass::IntMul) ? kIntMulPortKey

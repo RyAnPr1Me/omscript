@@ -2972,27 +2972,6 @@ std::vector<RewriteRule> getAdvancedAlgebraicRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Relational division: x / C → x >> log2(C) when C is positive pow-of-2
-    // (valid for unsigned / non-negative values — the e-graph is used at the
-    //  algebraic level where values are abstract, and LLVM will legalise the
-    //  shift to the correct signed/unsigned variant.)
-    // ─────────────────────────────────────────────────────────────────────
-    rules.emplace_back("div_any_pow2_to_shr",
-        P::OpPat(Op::Div, {P::Wild("x"), P::Wild("c")}),
-        [](EGraph& g, const Subst& s) {
-            auto cv = g.getConstValue(s.at("c"));
-            long long v = *cv;
-            int shift = 0;
-            while (v > 1) { v >>= 1; ++shift; }
-            return g.addBinOp(Op::Shr, s.at("x"), g.addConst(shift));
-        },
-        [](const EGraph& g, const Subst& s) -> bool {
-            auto cv = g.getConstValue(s.at("c"));
-            if (!cv) return false;
-            long long v = *cv;
-            return v > 1 && (v & (v - 1)) == 0;
-        });
-
     return rules;
 }
 
@@ -6150,6 +6129,158 @@ std::vector<RewriteRule> getAdvancedBitwiseRules() {
             long long v = *cv;
             return v > 1 && (v & (v - 1)) == 0;
         });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Relational strength reduction for multiply-by-constant.
+    // Converts x * C to shift-add sequences that are cheaper than hardware
+    // multiply on specific CPUs (3-cycle mul vs 1-cycle shift + 1-cycle add).
+    // The guard ensures C matches the specific constant pattern.
+    // ─────────────────────────────────────────────────────────────────────
+
+    // x * 3 → (x << 1) + x
+    rules.emplace_back("mul_3_shift_add_rel",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::Wild("c")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId shifted = g.addBinOp(Op::Shl, s.at("x"), g.addConst(1));
+            return g.addBinOp(Op::Add, shifted, s.at("x"));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto cv = g.getConstValue(s.at("c"));
+            return cv && *cv == 3;
+        });
+
+    // x * 5 → (x << 2) + x
+    rules.emplace_back("mul_5_shift_add_rel",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::Wild("c")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId shifted = g.addBinOp(Op::Shl, s.at("x"), g.addConst(2));
+            return g.addBinOp(Op::Add, shifted, s.at("x"));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto cv = g.getConstValue(s.at("c"));
+            return cv && *cv == 5;
+        });
+
+    // x * 7 → (x << 3) - x
+    rules.emplace_back("mul_7_shift_sub_rel",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::Wild("c")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId shifted = g.addBinOp(Op::Shl, s.at("x"), g.addConst(3));
+            return g.addBinOp(Op::Sub, shifted, s.at("x"));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto cv = g.getConstValue(s.at("c"));
+            return cv && *cv == 7;
+        });
+
+    // x * 9 → (x << 3) + x
+    rules.emplace_back("mul_9_shift_add_rel",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::Wild("c")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId shifted = g.addBinOp(Op::Shl, s.at("x"), g.addConst(3));
+            return g.addBinOp(Op::Add, shifted, s.at("x"));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto cv = g.getConstValue(s.at("c"));
+            return cv && *cv == 9;
+        });
+
+    // x * 15 → (x << 4) - x
+    rules.emplace_back("mul_15_shift_sub_rel",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::Wild("c")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId shifted = g.addBinOp(Op::Shl, s.at("x"), g.addConst(4));
+            return g.addBinOp(Op::Sub, shifted, s.at("x"));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto cv = g.getConstValue(s.at("c"));
+            return cv && *cv == 15;
+        });
+
+    // x * 17 → (x << 4) + x
+    rules.emplace_back("mul_17_shift_add_rel",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::Wild("c")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId shifted = g.addBinOp(Op::Shl, s.at("x"), g.addConst(4));
+            return g.addBinOp(Op::Add, shifted, s.at("x"));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto cv = g.getConstValue(s.at("c"));
+            return cv && *cv == 17;
+        });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Relational shift combining rules.
+    // ─────────────────────────────────────────────────────────────────────
+
+    // (x << a) << b → x << (a + b)  when a, b are both constants
+    rules.emplace_back("shl_shl_combine",
+        P::OpPat(Op::Shl, {P::OpPat(Op::Shl, {P::Wild("x"), P::Wild("a")}), P::Wild("b")}),
+        [](EGraph& g, const Subst& s) {
+            auto a = g.getConstValue(s.at("a"));
+            auto b = g.getConstValue(s.at("b"));
+            return g.addBinOp(Op::Shl, s.at("x"), g.addConst(*a + *b));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto a = g.getConstValue(s.at("a"));
+            auto b = g.getConstValue(s.at("b"));
+            if (!a || !b) return false;
+            return (*a + *b) < 64;  // must not overflow shift width
+        });
+
+    // (x >> a) >> b → x >> (a + b)  when a, b are both constants
+    rules.emplace_back("shr_shr_combine",
+        P::OpPat(Op::Shr, {P::OpPat(Op::Shr, {P::Wild("x"), P::Wild("a")}), P::Wild("b")}),
+        [](EGraph& g, const Subst& s) {
+            auto a = g.getConstValue(s.at("a"));
+            auto b = g.getConstValue(s.at("b"));
+            return g.addBinOp(Op::Shr, s.at("x"), g.addConst(*a + *b));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto a = g.getConstValue(s.at("a"));
+            auto b = g.getConstValue(s.at("b"));
+            if (!a || !b) return false;
+            return (*a + *b) < 64;
+        });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Ternary/select optimizations
+    // ─────────────────────────────────────────────────────────────────────
+
+    // cond ? x : x → x  (same operands)
+    rules.emplace_back("ternary_same",
+        P::OpPat(Op::Ternary, {P::Wild("c"), P::Wild("x"), P::Wild("x")}),
+        [](EGraph&, const Subst& s) { return s.at("x"); });
+
+    // cond ? 1 : 0 → cond != 0  (boolean select)
+    rules.emplace_back("ternary_1_0_to_bool",
+        P::OpPat(Op::Ternary, {P::Wild("c"), P::ConstPat(1), P::ConstPat(0)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Ne, s.at("c"), g.addConst(0));
+        });
+
+    // cond ? 0 : 1 → cond == 0  (inverted boolean select)
+    rules.emplace_back("ternary_0_1_to_not",
+        P::OpPat(Op::Ternary, {P::Wild("c"), P::ConstPat(0), P::ConstPat(1)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Eq, s.at("c"), g.addConst(0));
+        });
+
+    // !(cond) ? a : b → cond ? b : a  (negate condition = swap arms)
+    rules.emplace_back("ternary_not_swap",
+        P::OpPat(Op::Ternary, {P::OpPat(Op::LogNot, {P::Wild("c")}),
+                                P::Wild("a"), P::Wild("b")}),
+        [](EGraph& g, const Subst& s) {
+            ENode n(Op::Ternary, std::vector<ClassId>{s.at("c"), s.at("b"), s.at("a")});
+            return g.add(std::move(n));
+        });
+
+    // (a == b) ? a : b → b  (select on equality — always b)
+    // When a == b, both arms have the same value, so result is b (= a).
+    rules.emplace_back("ternary_eq_select",
+        P::OpPat(Op::Ternary, {P::OpPat(Op::Eq, {P::Wild("a"), P::Wild("b")}),
+                                P::Wild("a"), P::Wild("b")}),
+        [](EGraph&, const Subst& s) { return s.at("b"); });
 
 
     return rules;

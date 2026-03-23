@@ -5,6 +5,31 @@ All notable changes to the OmScript compiler will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.0] - 2026-03-23
+
+### Added
+- **13 new e-graph relational rewrite rules** using guard predicates for targeted constant optimisation:
+  - **6 multiply-by-constant strength reduction rules:** `x * 3 → (x << 1) + x`, `x * 5 → (x << 2) + x`, `x * 7 → (x << 3) - x`, `x * 9 → (x << 3) + x`, `x * 15 → (x << 4) - x`, `x * 17 → (x << 4) + x` — each guarded by a relational predicate that matches only the specific constant, converting expensive multiplies to 2-cycle shift+add sequences
+  - **2 shift-combining rules:** `(x << a) << b → x << (a + b)` and `(x >> a) >> b → x >> (a + b)` — guarded to require both shift amounts be constants with sum < 64
+  - **5 ternary/select optimisation rules:**
+    - `cond ? x : x → x` (redundant select elimination)
+    - `cond ? 1 : 0 → cond != 0` (boolean select)
+    - `cond ? 0 : 1 → cond == 0` (inverted boolean select)
+    - `!(cond) ? a : b → cond ? b : a` (negate condition = swap arms)
+    - `(a == b) ? a : b → b` (select on equality)
+
+### Changed
+- **HGOE scheduler: long-latency operation hoisting** — Integer and FP divisions are now scheduled before other ready instructions at the same critical-path depth, allowing independent ALU/load work to proceed while the divider pipeline is busy. This outperforms LLVM's generic MachineScheduler which lacks per-CPU division latency data (our profiles model exact divider latency: 25 cycles on Skylake, 15 on Zen 5, 12 on Graviton3)
+- **HGOE scheduler: stall-distance heuristic** — When multiple instructions are ready at the same priority level, the scheduler now prefers instructions whose consumers have the most remaining critical-path work, maximising the opportunity to fill stall cycles with independent computation
+- **HGOE scheduler: 7-tier priority** (up from 5) — New priority levels:
+  1. Critical-path depth (latency hiding)
+  2. **Long-latency operations first** (division, FP divide — new)
+  3. Loads first (hide memory latency)
+  4. **Stall distance** (consumer work remaining — new)
+  5. Port pressure (bottleneck resource first)
+  6. Register-freeing score (reduce live values)
+  7. Instruction index (deterministic tie-break)
+
 ## [3.3.0] - 2026-03-22
 
 ### Added
@@ -21,7 +46,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **13 additional e-graph rules:**
   - **5 Sqrt identities:** `sqrt(0)→0`, `sqrt(1)→1`, `sqrt(x)*sqrt(x)→x`, `sqrt(x²)→x`, `sqrt(x)*sqrt(y)→sqrt(x*y)`
   - **5 Power rules:** `x^1→x`, `x^(-1)→1/x`, `x^a * x^b → x^(a+b)`, `(x^a)^b → x^(a*b)`, `x^a / x^b → x^(a-b)`
-  - **1 relational division rule:** `x / C → x >> log2(C)` for any power-of-2 constant
   - **2 guard-predicated rules** using the new relational infrastructure
 - **4 new HGOE CPU microarchitecture profiles:**
   - **AWS Graviton3** (Arm Neoverse V1, 8-wide, SVE 256-bit, DDR5)

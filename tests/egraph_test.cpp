@@ -2182,3 +2182,98 @@ TEST(EGraphTest, ComplOrAnd) {
 
     EXPECT_EQ(g.find(lhs), g.find(rhs));
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests for relational strength-reduction rules
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST(EGraphTest, RelationalMul3StrengthReduce) {
+    // x * 3 → (x << 1) + x
+    EGraph g;
+    ClassId x   = g.addVar("x");
+    ClassId c3  = g.addConst(3);
+    ClassId mul = g.addBinOp(Op::Mul, x, c3);
+
+    // Expected: (x << 1) + x
+    ClassId shl  = g.addBinOp(Op::Shl, x, g.addConst(1));
+    ClassId sum  = g.addBinOp(Op::Add, shl, x);
+
+    auto rules = getAdvancedBitwiseRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(mul), g.find(sum));
+}
+
+TEST(EGraphTest, RelationalMul7StrengthReduce) {
+    // x * 7 → (x << 3) - x
+    EGraph g;
+    ClassId x   = g.addVar("x");
+    ClassId c7  = g.addConst(7);
+    ClassId mul = g.addBinOp(Op::Mul, x, c7);
+
+    ClassId shl  = g.addBinOp(Op::Shl, x, g.addConst(3));
+    ClassId diff = g.addBinOp(Op::Sub, shl, x);
+
+    auto rules = getAdvancedBitwiseRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(mul), g.find(diff));
+}
+
+TEST(EGraphTest, ShiftCombineShlRelational) {
+    // (x << 2) << 3 → x << 5
+    EGraph g;
+    ClassId x    = g.addVar("x");
+    ClassId shl1 = g.addBinOp(Op::Shl, x, g.addConst(2));
+    ClassId shl2 = g.addBinOp(Op::Shl, shl1, g.addConst(3));
+    ClassId expected = g.addBinOp(Op::Shl, x, g.addConst(5));
+
+    auto rules = getAdvancedBitwiseRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(shl2), g.find(expected));
+}
+
+TEST(EGraphTest, ShiftCombineShrRelational) {
+    // (x >> 4) >> 2 → x >> 6
+    EGraph g;
+    ClassId x    = g.addVar("x");
+    ClassId shr1 = g.addBinOp(Op::Shr, x, g.addConst(4));
+    ClassId shr2 = g.addBinOp(Op::Shr, shr1, g.addConst(2));
+    ClassId expected = g.addBinOp(Op::Shr, x, g.addConst(6));
+
+    auto rules = getAdvancedBitwiseRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(shr2), g.find(expected));
+}
+
+TEST(EGraphTest, TernarySameOperands) {
+    // cond ? x : x → x
+    EGraph g;
+    ClassId c = g.addVar("c");
+    ClassId x = g.addVar("x");
+    ENode ternNode(Op::Ternary, std::vector<ClassId>{c, x, x});
+    ClassId tern = g.add(ternNode);
+
+    auto rules = getAdvancedBitwiseRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(tern), g.find(x));
+}
+
+TEST(EGraphTest, Ternary10ToBool) {
+    // cond ? 1 : 0 → cond != 0
+    EGraph g;
+    ClassId c = g.addVar("c");
+    ClassId c1 = g.addConst(1);
+    ClassId c0 = g.addConst(0);
+    ENode ternNode(Op::Ternary, std::vector<ClassId>{c, c1, c0});
+    ClassId tern = g.add(ternNode);
+    ClassId boolExpr = g.addBinOp(Op::Ne, c, c0);
+
+    auto rules = getAdvancedBitwiseRules();
+    g.saturate(rules);
+
+    EXPECT_EQ(g.find(tern), g.find(boolExpr));
+}
