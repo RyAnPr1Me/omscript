@@ -2536,6 +2536,7 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     if (func->hintHot) {
         function->addFnAttr(llvm::Attribute::Hot);
         userAnnotatedHotFunctions_.insert(func->name);
+        currentFuncHintHot_ = true;
     }
     if (func->hintPure) {
         // @pure: function has no side effects and does not read/write memory

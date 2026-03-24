@@ -1674,7 +1674,33 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
 
         // Bounds check — elided in OPTMAX functions where compile-time
         // ownership analysis guarantees safety (zero-cost abstraction).
-        if (!inOptMaxFunction) {
+        // Also elided when the index is a provably-safe for-loop iterator.
+        bool boundsCheckElidedID = inOptMaxFunction;
+
+        if (!boundsCheckElidedID && optimizationLevel >= OptimizationLevel::O1) {
+            auto* idxIdent = dynamic_cast<IdentifierExpr*>(indexExpr->index.get());
+            if (idxIdent && safeIndexVars_.count(idxIdent->name)) {
+                auto it = loopIterEndBound_.find(idxIdent->name);
+                if (it != loopIterEndBound_.end()) {
+                    llvm::Value* endBound = it->second;
+                    llvm::Value* lenVal = builder->CreateLoad(getDefaultType(), arrPtr, "incdec.len.elim");
+                    if (endBound == lenVal) {
+                        boundsCheckElidedID = true;
+                    }
+                    if (!boundsCheckElidedID) {
+                        if (auto* endCI = llvm::dyn_cast<llvm::ConstantInt>(endBound)) {
+                            if (auto* lenCI = llvm::dyn_cast<llvm::ConstantInt>(lenVal)) {
+                                if (endCI->getSExtValue() <= lenCI->getSExtValue()) {
+                                    boundsCheckElidedID = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (!boundsCheckElidedID) {
             llvm::Value* lenVal = builder->CreateLoad(getDefaultType(), arrPtr, "incdec.len");
             llvm::Value* inBounds = builder->CreateICmpSLT(idxVal, lenVal, "incdec.inbounds");
             llvm::Value* notNeg =
@@ -1967,7 +1993,56 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
 
     // Bounds check — elided in OPTMAX functions where compile-time
     // ownership analysis guarantees safety (zero-cost abstraction).
-    if (!inOptMaxFunction) {
+    //
+    // Also elided when static analysis can prove the index is within bounds:
+    // for ascending for-loops starting from a non-negative constant, the
+    // iterator is always in [start, endVal).  If the index is a known-safe
+    // loop iterator AND we can verify endVal <= array length, the bounds
+    // check is provably unnecessary (zero-cost abstraction).
+    bool boundsCheckElided = inOptMaxFunction;
+
+    if (!boundsCheckElided && !isStr && optimizationLevel >= OptimizationLevel::O1) {
+        // Check if the index value is a safe loop iterator (non-negative,
+        // ascending, bounded by loop end).
+        auto* idxIdent = dynamic_cast<IdentifierExpr*>(expr->index.get());
+        if (idxIdent && safeIndexVars_.count(idxIdent->name)) {
+            auto it = loopIterEndBound_.find(idxIdent->name);
+            if (it != loopIterEndBound_.end()) {
+                llvm::Value* endBound = it->second;
+                // Load the array length from slot 0.
+                llvm::Value* lenVal = builder->CreateLoad(getDefaultType(), basePtr, "idx.len.elim");
+
+                // Case 1: end bound and length are the same SSA value (e.g.,
+                // both come from len(arr) or same variable).
+                if (endBound == lenVal) {
+                    boundsCheckElided = true;
+                }
+
+                // Case 2: both are compile-time constants — compare directly.
+                if (!boundsCheckElided) {
+                    if (auto* endCI = llvm::dyn_cast<llvm::ConstantInt>(endBound)) {
+                        if (auto* lenCI = llvm::dyn_cast<llvm::ConstantInt>(lenVal)) {
+                            if (endCI->getSExtValue() <= lenCI->getSExtValue()) {
+                                boundsCheckElided = true;
+                            }
+                        }
+                    }
+                }
+
+                // Case 3 (fallback): emit llvm.assume(endBound <= len) so LLVM
+                // can fold the bounds check branch via CorrelatedValuePropagation.
+                if (!boundsCheckElided && !dynamicCompilation_
+                    && optimizationLevel >= OptimizationLevel::O2) {
+                    llvm::Value* endLELen = builder->CreateICmpSLE(endBound, lenVal, "idx.endlelen");
+                    llvm::Function* assumeFn = OMSC_GET_INTRINSIC(
+                        module.get(), llvm::Intrinsic::assume, {});
+                    builder->CreateCall(assumeFn, {endLELen});
+                }
+            }
+        }
+    }
+
+    if (!boundsCheckElided) {
         llvm::Function* function = builder->GetInsertBlock()->getParent();
         llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "idx.ok", function);
         llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "idx.fail", function);
@@ -2058,7 +2133,40 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
 
     // Bounds check — elided in OPTMAX functions where compile-time
     // ownership analysis guarantees safety (zero-cost abstraction).
-    if (!inOptMaxFunction) {
+    // Also elided when the index is a provably-safe for-loop iterator.
+    bool boundsCheckElidedA = inOptMaxFunction;
+
+    if (!boundsCheckElidedA && !isStr && optimizationLevel >= OptimizationLevel::O1) {
+        auto* idxIdent = dynamic_cast<IdentifierExpr*>(expr->index.get());
+        if (idxIdent && safeIndexVars_.count(idxIdent->name)) {
+            auto it = loopIterEndBound_.find(idxIdent->name);
+            if (it != loopIterEndBound_.end()) {
+                llvm::Value* endBound = it->second;
+                llvm::Value* lenVal = builder->CreateLoad(getDefaultType(), basePtr, "idxa.len.elim");
+                if (endBound == lenVal) {
+                    boundsCheckElidedA = true;
+                }
+                if (!boundsCheckElidedA) {
+                    if (auto* endCI = llvm::dyn_cast<llvm::ConstantInt>(endBound)) {
+                        if (auto* lenCI = llvm::dyn_cast<llvm::ConstantInt>(lenVal)) {
+                            if (endCI->getSExtValue() <= lenCI->getSExtValue()) {
+                                boundsCheckElidedA = true;
+                            }
+                        }
+                    }
+                }
+                if (!boundsCheckElidedA && !dynamicCompilation_
+                    && optimizationLevel >= OptimizationLevel::O2) {
+                    llvm::Value* endLELen = builder->CreateICmpSLE(endBound, lenVal, "idxa.endlelen");
+                    llvm::Function* assumeFn = OMSC_GET_INTRINSIC(
+                        module.get(), llvm::Intrinsic::assume, {});
+                    builder->CreateCall(assumeFn, {endLELen});
+                }
+            }
+        }
+    }
+
+    if (!boundsCheckElidedA) {
         llvm::Function* function = builder->GetInsertBlock()->getParent();
         llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "idxa.ok", function);
         llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "idxa.fail", function);

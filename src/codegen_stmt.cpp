@@ -683,9 +683,36 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         }
     }
 
+    // Compile-time bounds check elimination: for ascending for-loops starting
+    // at a non-negative constant, the iterator variable is always in
+    // [start, endVal).  If the end bound is known (e.g. len(arr), a constant,
+    // or a named variable), we record the iterator as safe so that array index
+    // operations like arr[i] can skip runtime bounds checks when the array
+    // length >= endVal.
+    //
+    // This is a zero-cost abstraction: the safety guarantee is enforced
+    // statically by the compiler (OmScript's for-loop semantics guarantee
+    // the iterator cannot be modified inside the body), so no runtime check
+    // is needed.
+    if (stepKnownPositive && optimizationLevel >= OptimizationLevel::O1) {
+        bool startNonNegForElim = false;
+        if (auto* startCI = llvm::dyn_cast<llvm::ConstantInt>(startVal)) {
+            startNonNegForElim = startCI->getSExtValue() >= 0;
+        }
+        if (startNonNegForElim) {
+            safeIndexVars_.insert(stmt->iteratorVar);
+            loopIterEndBound_[stmt->iteratorVar] = endVal;
+        }
+    }
+
     loopStack.push_back({endBB, incBB});
     generateStatement(stmt->body.get());
     loopStack.pop_back();
+
+    // Clean up: iterator no longer has guaranteed bounds outside the loop.
+    safeIndexVars_.erase(stmt->iteratorVar);
+    loopIterEndBound_.erase(stmt->iteratorVar);
+
     if (!builder->GetInsertBlock()->getTerminator()) {
         builder->CreateBr(incBB);
     }

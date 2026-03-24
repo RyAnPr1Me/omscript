@@ -217,6 +217,17 @@ class CodeGenerator {
     };
     std::vector<LoopContext> loopStack;
 
+    /// Variables whose index is provably within bounds of a specific array
+    /// at compile time.  Populated during for-loop codegen for patterns like
+    ///   for (i in 0...len(arr)) { arr[i] ... }
+    /// or similar provably-safe patterns.  Cleared when exiting the loop.
+    /// Maps: iterator-variable-name → set of array-variable-names that are safe.
+    std::unordered_set<std::string> safeIndexVars_;
+
+    /// Maps iterator variable name → its LLVM upper bound value.
+    /// Used to emit llvm.assume hints for the optimizer.
+    std::unordered_map<std::string, llvm::Value*> loopIterEndBound_;
+
     // Stack of innermost catch-entry basic blocks, pushed/popped by
     // generateTryCatch(). generateThrow() branches directly to the top of this
     // stack when a throw occurs inside a try block, ensuring that control flow
@@ -329,6 +340,7 @@ class CodeGenerator {
     bool currentFuncHintNoUnroll_ = false;
     bool currentFuncHintVectorize_ = false;
     bool currentFuncHintNoVectorize_ = false;
+    bool currentFuncHintHot_ = false;  ///< Current function has @hot annotation
     unsigned loopNestDepth_ = 0; ///< Current for-loop nesting depth (0 = not in a loop)
 
     /// Classify a function into its execution tier based on type annotations,
