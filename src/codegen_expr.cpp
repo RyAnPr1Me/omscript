@@ -1694,8 +1694,9 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
 
             builder->SetInsertPoint(okBB);
         }
-        llvm::Value* offset = builder->CreateAdd(idxVal, llvm::ConstantInt::get(getDefaultType(), 1), "incdec.offset");
-        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrPtr, offset, "incdec.elem.ptr");
+        llvm::Value* dataPtr = builder->CreateGEP(getDefaultType(), arrPtr,
+            llvm::ConstantInt::get(getDefaultType(), 1), "incdec.data");
+        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), dataPtr, idxVal, "incdec.elem.ptr");
         llvm::Value* current = builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "incdec.elem");
 
         llvm::Value* delta = llvm::ConstantInt::get(getDefaultType(), 1, true);
@@ -2007,8 +2008,11 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
         return builder->CreateZExt(charVal, getDefaultType(), "idx.charext");
     }
     // Array: element is at slot (index + 1) in the i64 buffer.
-    llvm::Value* offset = builder->CreateAdd(idxVal, llvm::ConstantInt::get(getDefaultType(), 1), "idx.offset");
-    llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), basePtr, offset, "idx.elem.ptr");
+    // Compute data pointer (base + 1 slot) then GEP by just the index.
+    // This allows LLVM to hoist the data-pointer computation out of loops.
+    llvm::Value* dataPtr = builder->CreateGEP(getDefaultType(), basePtr,
+        llvm::ConstantInt::get(getDefaultType(), 1), "idx.data");
+    llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), dataPtr, idxVal, "idx.elem.ptr");
     return builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "idx.elem");
 }
 
@@ -2093,8 +2097,10 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
         builder->CreateStore(byteVal, charPtr);
     } else {
         // Array: store i64 element at slot (index + 1)
-        llvm::Value* offset = builder->CreateAdd(idxVal, llvm::ConstantInt::get(getDefaultType(), 1), "idxa.offset");
-        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), basePtr, offset, "idxa.elem.ptr");
+        // Use two-step GEP so LLVM can hoist the data-pointer out of loops.
+        llvm::Value* dataPtr = builder->CreateGEP(getDefaultType(), basePtr,
+            llvm::ConstantInt::get(getDefaultType(), 1), "idxa.data");
+        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), dataPtr, idxVal, "idxa.elem.ptr");
         builder->CreateAlignedStore(newVal, elemPtr, llvm::MaybeAlign(8));
     }
     return newVal;
