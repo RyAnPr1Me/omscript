@@ -13,7 +13,7 @@ RUNS=3          # iterations per benchmark for stable timing
 # Track wall-clock time for the entire script so we can report where time is spent.
 SCRIPT_START=$(date +%s%N)
 
-NUM_BENCHMARKS=21
+NUM_BENCHMARKS=25
 
 BENCH_NAME=(
     "integer_math"
@@ -37,6 +37,10 @@ BENCH_NAME=(
     "reduction"
     "modular_arith"
     "mixed_arithmetic"
+    "polynomial_eval"
+    "branch_table"
+    "cascade_inline"
+    "loop_strength"
 )
 
 BENCH_DESC=(
@@ -61,6 +65,10 @@ BENCH_DESC=(
     "Sum and modular product reduction"
     "Chained modular arithmetic with dependent variables"
     "Mixed arithmetic: multiply, shift, XOR, add"
+    "Horner polynomial evaluation with @pure"
+    "8-way branch dispatch in a tight loop"
+    "8-level deep inline chain"
+    "Loop with multiply strength reduction"
 )
 
 # Input sizes – tuned so each test takes ~30-200 ms in C.
@@ -87,6 +95,10 @@ BENCH_N=(
     5000000   # 18  reduction
     5000000   # 19  modular_arith
     5000000   # 20  mixed_arithmetic
+    5000000   # 21  polynomial_eval
+    5000000   # 22  branch_table
+    5000000   # 23  cascade_inline
+    5000000   # 24  loop_strength
 )
 
 BOTTLENECK_LABELS=(
@@ -108,6 +120,13 @@ BOTTLENECK_LABELS=(
     "overall compiler optimization quality"
     "floating-point codegen and FP optimization rules"
     "LLVM intrinsic codegen for popcount/clz/ctz"
+    ""
+    ""
+    ""
+    "Horner scheme with @pure function semantics"
+    "8-way switch codegen quality"
+    "aggressive inlining of 8-level chain"
+    "loop invariant code motion and strength reduction"
 )
 
 # ─── COLOR CODES ──────────────────────────────────────────────
@@ -411,7 +430,7 @@ fn bench_bitintrinsics(@prefetch n:int) -> int {
     }
     return acc;
 }
-@hot @flatten @unroll @vectorize
+@hot @flatten @vectorize
 fn bench_reduction(@prefetch n:int) -> int {
     var sum:int = 0;
     var prod_acc:int = 1;
@@ -421,7 +440,7 @@ fn bench_reduction(@prefetch n:int) -> int {
     }
     return sum + prod_acc;
 }
-@hot @flatten @unroll
+@hot @flatten
 fn bench_modular(@prefetch n:int) -> int {
     var a:int = 0;
     var b:int = 0;
@@ -442,6 +461,80 @@ fn bench_arithmetic(@prefetch n:int) -> int {
         acc += ((i & 255) << 3) + (i >> 2);
     }
     return acc;
+}
+
+// 21. polynomial_eval - Horner's method evaluation
+@hot @flatten @pure @unroll
+fn poly_eval(x:int) -> int {
+    // Evaluate polynomial: 3x^5 + 2x^4 + x^3 + 5x^2 + 7x + 11
+    var r:int = 3;
+    r = r * x + 2;
+    r = r * x + 1;
+    r = r * x + 5;
+    r = r * x + 7;
+    r = r * x + 11;
+    return r;
+}
+@hot @flatten @unroll
+fn bench_poly(@prefetch n:int) -> int {
+    var sum:int = 0;
+    for (i:int in 0...n) {
+        sum += poly_eval(i % 1000);
+    }
+    return sum;
+}
+
+// 22. branch_table - 8-way switch dispatch
+@hot
+fn bench_branch8(@prefetch n:int) -> int {
+    var sum:int = 0;
+    for (i:int in 0...n) {
+        switch (i % 8) {
+            case 0: sum += i;           break;
+            case 1: sum -= i;           break;
+            case 2: sum ^= i;           break;
+            case 3: sum += (i * 2);     break;
+            case 4: sum += (i >> 1);    break;
+            case 5: sum -= (i & 255);   break;
+            case 6: sum ^= (i << 1);    break;
+            default: sum += (i * 3);
+        }
+    }
+    invalidate n;
+    return sum;
+}
+
+// 23. cascade_inline - 8-level deep inline chain
+@hot @inline
+fn level1(x:int) -> int { return x + 1; }
+@hot @inline
+fn level2(x:int) -> int { return level1(level1(x)); }
+@hot @inline
+fn level3(x:int) -> int { return level2(level2(x)); }
+@hot @inline
+fn level4(x:int) -> int { return level3(x) + level3(x + 1); }
+@hot @flatten
+fn bench_cascade(@prefetch n:int) -> int {
+    var sum:int = 0;
+    for (i:int in 0...n:int) {
+        sum += level4(i % 1000);
+    }
+    invalidate n;
+    return sum;
+}
+
+// 24. loop_strength - Loop with strength reduction
+@hot @flatten
+fn bench_strength(@prefetch n:int) -> int {
+    var sum:int = 0;
+    for (i:int in 0...n) {
+        // These multiplications can be strength-reduced to additions
+        sum += i * 7;
+        sum += i * 13;
+        sum += i * 97;
+        sum ^= (i * 5);
+    }
+    return sum;
 }
 OPTMAX!:
 
@@ -472,6 +565,10 @@ fn main() -> int {
         case 18: print(bench_reduction(n));      break;
         case 19: print(bench_modular(n));         break;
         case 20: print(bench_arithmetic(n));      break;
+        case 21: print(bench_poly(n));            break;
+        case 22: print(bench_branch8(n));         break;
+        case 23: print(bench_cascade(n));         break;
+        case 24: print(bench_strength(n));        break;
         default: print(0);
     }
     invalidate n;
@@ -814,6 +911,67 @@ static long bench_arithmetic(long n) {
     return acc;
 }
 
+/* 21 ── polynomial evaluation ────────────────── */
+static inline long poly_eval(long x) {
+    long r = 3;
+    r = r * x + 2;
+    r = r * x + 1;
+    r = r * x + 5;
+    r = r * x + 7;
+    r = r * x + 11;
+    return r;
+}
+static long bench_poly(long n) {
+    long sum = 0;
+    for (long i = 0; i < n; i++) {
+        sum += poly_eval(i % 1000);
+    }
+    return sum;
+}
+
+/* 22 ── 8-way branch table ────────────────────── */
+static long bench_branch8(long n) {
+    long sum = 0;
+    for (long i = 0; i < n; i++) {
+        switch (i % 8) {
+            case 0: sum += i;           break;
+            case 1: sum -= i;           break;
+            case 2: sum ^= i;           break;
+            case 3: sum += (i * 2);     break;
+            case 4: sum += (i >> 1);    break;
+            case 5: sum -= (i & 255);   break;
+            case 6: sum ^= (i << 1);    break;
+            default: sum += (i * 3);
+        }
+    }
+    return sum;
+}
+
+/* 23 ── cascade inline ────────────────────────── */
+static inline long level1(long x) { return x + 1; }
+static inline long level2(long x) { return level1(level1(x)); }
+static inline long level3(long x) { return level2(level2(x)); }
+static inline long level4(long x) { return level3(x) + level3(x + 1); }
+static long bench_cascade(long n) {
+    long sum = 0;
+    for (long i = 0; i < n; i++) {
+        sum += level4(i % 1000);
+    }
+    return sum;
+}
+
+/* 24 ── loop strength reduction ───────────────── */
+static long bench_strength(long n) {
+    long sum = 0;
+    for (long i = 0; i < n; i++) {
+        sum += i * 7;
+        sum += i * 13;
+        sum += i * 97;
+        sum ^= (i * 5);
+    }
+    return sum;
+}
+
 int main(void) {
     int test_id; long n;
     scanf("%d %ld", &test_id, &n);
@@ -840,6 +998,10 @@ int main(void) {
         case 18: r = bench_reduction(n);    break;
         case 19: r = bench_modular(n);      break;
         case 20: r = bench_arithmetic(n);   break;
+        case 21: r = bench_poly(n);          break;
+        case 22: r = bench_branch8(n);       break;
+        case 23: r = bench_cascade(n);       break;
+        case 24: r = bench_strength(n);      break;
     }
     printf("%ld\n", r);
     return 0;

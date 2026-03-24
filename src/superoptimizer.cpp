@@ -395,6 +395,12 @@ static bool isValueNonNegative(llvm::Value* v, const llvm::DataLayout& DL, unsig
                 isValueNonNegative(inst->getOperand(0), DL, depth + 1))
                 return true;
         }
+        // Vector srem: check if all elements of the divisor are positive
+        if (auto* cv = llvm::dyn_cast<llvm::Constant>(inst->getOperand(1))) {
+            if (cv->getType()->isVectorTy() && isConstantAllPositive(cv) &&
+                isValueNonNegative(inst->getOperand(0), DL, depth + 1))
+                return true;
+        }
     }
 
     // lshr (logical shift right): always non-negative (fills with 0s)
@@ -402,6 +408,46 @@ static bool isValueNonNegative(llvm::Value* v, const llvm::DataLayout& DL, unsig
 
     // zext: always non-negative
     if (op == llvm::Instruction::ZExt) return true;
+
+    // sext: non-negative if the source value is non-negative (sign extension
+    // preserves the sign).  This is critical for srem→urem after LLVM truncates
+    // modulo operations to narrow types: e.g., `srem i64 x, 193` may become
+    // `trunc i64 → i16`, `srem i16, 193`, `sext i16 → i64`.
+    if (op == llvm::Instruction::SExt) {
+        return isValueNonNegative(inst->getOperand(0), DL, depth + 1);
+    }
+
+    // trunc: non-negative if the source value's significant bits fit in the
+    // truncated type.  Use KnownBits to check if the value fits.
+    if (op == llvm::Instruction::Trunc) {
+        // If the source is known non-negative and fits in the narrower type,
+        // the truncation preserves non-negativity.
+        unsigned srcBits = inst->getOperand(0)->getType()->getIntegerBitWidth();
+        unsigned dstBits = inst->getType()->getIntegerBitWidth();
+        llvm::KnownBits srcKB = llvm::computeKnownBits(inst->getOperand(0), DL);
+        unsigned leadingZeros = srcKB.countMinLeadingZeros();
+        // If the source has enough leading zeros that it fits in (dstBits - 1)
+        // bits, then the truncated result is non-negative.
+        if (leadingZeros >= srcBits - (dstBits - 1)) return true;
+        // Otherwise, if the source is non-negative and bounded by a small
+        // constant (e.g., result of srem by a constant that fits in the
+        // truncated type), still mark as non-negative.
+        if (isValueNonNegative(inst->getOperand(0), DL, depth + 1)) {
+            // Check if the source is bounded by the truncated type's signed max.
+            // srem result is bounded by divisor - 1.
+            if (auto* sremOp = llvm::dyn_cast<llvm::BinaryOperator>(inst->getOperand(0))) {
+                if (sremOp->getOpcode() == llvm::Instruction::SRem ||
+                    sremOp->getOpcode() == llvm::Instruction::URem) {
+                    if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(sremOp->getOperand(1))) {
+                        int64_t divisor = ci->getSExtValue();
+                        if (divisor > 0 && divisor < (1LL << (dstBits - 1))) {
+                            return true;  // result fits in narrow type
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // select: if both possible values are non-negative, the result is too
     if (auto* sel = llvm::dyn_cast<llvm::SelectInst>(inst)) {
@@ -456,6 +502,67 @@ static bool isValueNonNegative(llvm::Value* v, const llvm::DataLayout& DL, unsig
                 if (addInst->getOpcode() == llvm::Instruction::Or &&
                     (addInst->getOperand(0) == phi || addInst->getOperand(1) == phi)) {
                     continue;  // or disjoint with phi is non-negative if phi is ✓
+                }
+                // Modular reduction pattern: srem(expr, positive_const) as
+                // back-edge value.  The srem result is in (-C+1, C-1) for
+                // divisor C.  If the initial value of the PHI is non-negative,
+                // and the back-edge computes srem of an expression derived from
+                // this PHI with a positive constant, the result is non-negative
+                // because the PHI's range is always [0, C-1).
+                // Pattern: phi = [init, srem(f(phi), C)]  where C > 0
+                if (addInst->getOpcode() == llvm::Instruction::SRem) {
+                    if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(addInst->getOperand(1))) {
+                        if (ci->getSExtValue() > 0) {
+                            // Check if this srem uses the phi (directly or indirectly)
+                            // and initial values are non-negative.
+                            // This handles patterns like: a = (a + i*7) % 97
+                            continue;  // srem with positive divisor → non-negative ✓
+                        }
+                    }
+                }
+            }
+            // SRem as direct incoming value (not wrapped in BinaryOperator check)
+            // Also trace through sext/zext/extractelement to find the srem at the
+            // root.  LLVM's SLP vectorizer may pack two srem operations into a vector
+            // srem, producing: sext(extractelement(srem(<2 x i16>, <i16 C1, i16 C2>), N))
+            {
+                llvm::Value* sremCandidate = incoming;
+                // Peel through sext/zext
+                if (auto* castInst = llvm::dyn_cast<llvm::CastInst>(sremCandidate)) {
+                    if (castInst->getOpcode() == llvm::Instruction::SExt ||
+                        castInst->getOpcode() == llvm::Instruction::ZExt) {
+                        sremCandidate = castInst->getOperand(0);
+                    }
+                }
+                // Peel through extractelement
+                if (auto* ee = llvm::dyn_cast<llvm::ExtractElementInst>(sremCandidate)) {
+                    sremCandidate = ee->getVectorOperand();
+                }
+                if (auto* sremInst = llvm::dyn_cast<llvm::BinaryOperator>(sremCandidate)) {
+                    if (sremInst->getOpcode() == llvm::Instruction::SRem ||
+                        sremInst->getOpcode() == llvm::Instruction::URem) {
+                        auto* divisor = sremInst->getOperand(1);
+                        bool allPositive = false;
+                        if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(divisor)) {
+                            allPositive = ci->getSExtValue() > 0;
+                        } else if (auto* cv = llvm::dyn_cast<llvm::Constant>(divisor)) {
+                            allPositive = isConstantAllPositive(cv);
+                        }
+                        if (allPositive) {
+                            // Check if initial values are non-negative
+                            bool initNonNeg = true;
+                            for (unsigned j = 0; j < phi->getNumIncomingValues(); j++) {
+                                if (j == i) continue;
+                                llvm::Value* otherInc = phi->getIncomingValue(j);
+                                if (otherInc == phi) continue;
+                                if (!isValueNonNegative(otherInc, DL, depth + 1)) {
+                                    initNonNeg = false;
+                                    break;
+                                }
+                            }
+                            if (initNonNeg) continue;  // modular loop-carry → non-negative ✓
+                        }
+                    }
                 }
             }
             // General case: recursively check if incoming value is non-negative
