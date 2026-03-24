@@ -6815,7 +6815,10 @@ std::vector<RewriteRule> getRelationalRules() {
             auto c1 = g.getConstValue(s.at("c1"));
             auto c2 = g.getConstValue(s.at("c2"));
             if (!c1 || !c2 || *c2 == 0) return false;
-            return (*c1 % *c2) == 0;
+            if ((*c1 % *c2) != 0) return false;
+            // Only safe when x is non-negative (signed modulo rounds toward zero)
+            const auto& xClass = g.getClass(g.find(s.at("x")));
+            return xClass.isNonNeg;
         });
 
     // (x % C) % C → x % C  (idempotent modulo)
