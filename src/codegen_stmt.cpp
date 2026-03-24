@@ -676,6 +676,10 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             llvm::Function* assumeFn = OMSC_GET_INTRINSIC_STMT(
                 module.get(), llvm::Intrinsic::assume, {});
             builder->CreateCall(assumeFn, {isNonNeg});
+            // Track the alloca as producing non-negative values so that
+            // expressions derived from the loop counter can emit urem/udiv
+            // instead of srem/sdiv.
+            nonNegValues_.insert(iterAlloca);
         }
     }
 

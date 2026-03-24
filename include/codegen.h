@@ -303,6 +303,13 @@ class CodeGenerator {
     /// variable is not found in deadVars_ at return time.
     std::unordered_set<std::string> prefetchedVars_;
 
+    /// Values known to be non-negative at codegen time.  Populated when
+    /// ascending for-loop counters are loaded and when binary operations
+    /// on non-negative operands produce non-negative results.  Used to
+    /// emit urem/udiv instead of srem/sdiv for modulo/division by positive
+    /// constants, which the vectorizer then preserves as vector urem/udiv.
+    std::unordered_set<llvm::Value*> nonNegValues_;
+
     /// Variables declared with `prefetch immut` — their loads get invariant
     /// metadata so LLVM can hoist/CSE them aggressively.
     std::unordered_set<std::string> prefetchedImmutVars_;

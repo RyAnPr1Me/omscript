@@ -592,6 +592,52 @@ void CodeGenerator::runOptimizationPasses() {
         });
     }
 
+    // At O3, run srem→urem and sdiv→udiv conversion as an OptimizerLast
+    // callback BEFORE HotColdSplitting.  The vectorizer (which runs earlier
+    // in the pipeline) creates vector srem instructions from the original
+    // scalar urem/srem.  At this point the loop counter PHI nodes still
+    // carry non-negativity information (nsw/nuw flags, assume intrinsics).
+    // After HotColdSplitting, the loop code may be outlined into a separate
+    // function where the loop counters become parameters without non-negativity
+    // metadata, making the srem→urem proof impossible.
+    if (enableSuperopt_ && optimizationLevel >= OptimizationLevel::O2) {
+        const bool v = verbose_;
+        PB.registerOptimizerLastEPCallback(
+            [v](llvm::ModulePassManager& MPM, llvm::OptimizationLevel) {
+            // Wrap the srem→urem conversion in a module pass lambda
+            struct SRemToURemPass : public llvm::PassInfoMixin<SRemToURemPass> {
+                bool verbose;
+                SRemToURemPass(bool v) : verbose(v) {}
+                llvm::PreservedAnalyses run(llvm::Module& M, llvm::ModuleAnalysisManager&) {
+                    unsigned total = 0;
+                    // Debug: count srem operations before conversion
+                    unsigned sremBefore = 0;
+                    for (auto& F : M)
+                        for (auto& BB : F)
+                            for (auto& I : BB)
+                                if (I.getOpcode() == llvm::Instruction::SRem) ++sremBefore;
+                    for (int iter = 0; iter < 4; ++iter) {
+                        unsigned iterCount = 0;
+                        for (auto& F : M) {
+                            iterCount += superopt::inferNonNegativeFlags(F);
+                            iterCount += superopt::convertSRemToURem(F);
+                            iterCount += superopt::convertSDivToUDiv(F);
+                        }
+                        total += iterCount;
+                        if (iterCount == 0) break;
+                    }
+                    if (verbose) {
+                        llvm::errs() << "    In-pipeline srem→urem: " << total
+                                     << " conversions (srem before: " << sremBefore << ")\n";
+                    }
+                    return total > 0 ? llvm::PreservedAnalyses::none()
+                                     : llvm::PreservedAnalyses::all();
+                }
+            };
+            MPM.addPass(SRemToURemPass(v));
+        });
+    }
+
     // At O3, run HotColdSplitting to outline cold code regions (error
     // handlers, assertion failures, rarely-taken branches) into separate
     // functions.  This improves I-cache density on the hot path and
@@ -848,6 +894,15 @@ void CodeGenerator::runOptimizationPasses() {
     // be modified arbitrarily.
     if (enableSuperopt_ && optimizationLevel >= OptimizationLevel::O2) {
         unsigned postConvCount = 0;
+        // Count initial srem operations for debugging
+        if (verbose_) {
+            unsigned sremCount = 0;
+            for (auto& func : *module)
+                for (auto& bb : func)
+                    for (auto& inst : bb)
+                        if (inst.getOpcode() == llvm::Instruction::SRem) ++sremCount;
+            std::cout << "    Pre-iteration srem count: " << sremCount << std::endl;
+        }
         // Iterate: first infer nuw flags on add instructions where both
         // operands are provably non-negative (this catches unrolled copies
         // that lost their flags).  Then convert srem→urem and sdiv→udiv.

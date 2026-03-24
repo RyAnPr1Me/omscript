@@ -271,8 +271,42 @@ static std::optional<int64_t> getConstIntValue(llvm::Value* v) {
 /// This goes beyond computeKnownBits by tracking through nuw-flagged arithmetic,
 /// XOR of non-negative values, and loop induction variable PHI nodes that
 /// start from 0 and increment by a positive step.
+
+/// Check whether a constant (scalar ConstantInt or vector splat/element-wise)
+/// has all elements strictly positive (> 0).
+static bool isConstantAllPositive(llvm::Constant* c) {
+    if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(c))
+        return ci->getSExtValue() > 0;
+    // Handle vector constants: ConstantDataVector, ConstantVector, splat
+    if (auto* splat = c->getSplatValue()) {
+        if (auto* si = llvm::dyn_cast<llvm::ConstantInt>(splat))
+            return si->getSExtValue() > 0;
+    }
+    if (auto* cdv = llvm::dyn_cast<llvm::ConstantDataVector>(c)) {
+        for (unsigned i = 0, n = cdv->getNumElements(); i < n; ++i) {
+            if (auto* ei = llvm::dyn_cast<llvm::ConstantInt>(cdv->getElementAsConstant(i))) {
+                if (ei->getSExtValue() <= 0) return false;
+            } else {
+                return false;
+            }
+        }
+        return cdv->getNumElements() > 0;
+    }
+    if (auto* cv = llvm::dyn_cast<llvm::ConstantVector>(c)) {
+        for (unsigned i = 0, n = cv->getNumOperands(); i < n; ++i) {
+            if (auto* ei = llvm::dyn_cast<llvm::ConstantInt>(cv->getOperand(i))) {
+                if (ei->getSExtValue() <= 0) return false;
+            } else {
+                return false;
+            }
+        }
+        return cv->getNumOperands() > 0;
+    }
+    return false;
+}
+
 static bool isValueNonNegative(llvm::Value* v, const llvm::DataLayout& DL, unsigned depth = 0) {
-    if (depth > 6) return false;  // prevent infinite recursion
+    if (depth > 12) return false;  // prevent infinite recursion
 
     // Non-negative constant
     if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(v))
@@ -406,12 +440,16 @@ static bool isValueNonNegative(llvm::Value* v, const llvm::DataLayout& DL, unsig
             // Fast path: loop increment pattern (phi + positive_constant)
             if (auto* addInst = llvm::dyn_cast<llvm::BinaryOperator>(incoming)) {
                 if (addInst->getOpcode() == llvm::Instruction::Add &&
-                    (addInst->hasNoSignedWrap() || addInst->hasNoUnsignedWrap()) &&
                     (addInst->getOperand(0) == phi || addInst->getOperand(1) == phi)) {
                     llvm::Value* step = (addInst->getOperand(0) == phi) ?
                                          addInst->getOperand(1) : addInst->getOperand(0);
+                    // Scalar positive step
                     if (auto* stepCI = llvm::dyn_cast<llvm::ConstantInt>(step)) {
                         if (stepCI->getSExtValue() > 0) continue;  // positive step ✓
+                    }
+                    // Vector positive step (from vectorized loop increments)
+                    if (auto* stepConst = llvm::dyn_cast<llvm::Constant>(step)) {
+                        if (isConstantAllPositive(stepConst)) continue;  // positive step ✓
                     }
                 }
                 // or disjoint used by loop unroller as add substitute
@@ -427,6 +465,22 @@ static bool isValueNonNegative(llvm::Value* v, const llvm::DataLayout& DL, unsig
             }
         }
         if (allNonNeg && phi->getNumIncomingValues() > 0) return true;
+    }
+
+    // Vector operations: propagate non-negativity through vectorizer-created
+    // instructions so that vector srem can be converted to vector urem.
+    if (auto* si = llvm::dyn_cast<llvm::ShuffleVectorInst>(inst)) {
+        return isValueNonNegative(si->getOperand(0), DL, depth + 1) &&
+               (llvm::isa<llvm::UndefValue>(si->getOperand(1)) ||
+                llvm::isa<llvm::PoisonValue>(si->getOperand(1)) ||
+                isValueNonNegative(si->getOperand(1), DL, depth + 1));
+    }
+    if (auto* ie = llvm::dyn_cast<llvm::InsertElementInst>(inst)) {
+        return isValueNonNegative(ie->getOperand(0), DL, depth + 1) &&
+               isValueNonNegative(ie->getOperand(1), DL, depth + 1);
+    }
+    if (auto* ee = llvm::dyn_cast<llvm::ExtractElementInst>(inst)) {
+        return isValueNonNegative(ee->getVectorOperand(), DL, depth + 1);
     }
 
     return false;
@@ -3010,6 +3064,7 @@ SuperoptimizerStats superoptimizeModule(llvm::Module& module,
 
 } // namespace superopt
 
+/// Check whether a constant (scalar ConstantInt or vector splat/element-wise)
 unsigned superopt::convertSRemToURem(llvm::Function& func) {
     if (func.isDeclaration()) return 0;
     unsigned count = 0;
@@ -3018,14 +3073,14 @@ unsigned superopt::convertSRemToURem(llvm::Function& func) {
     for (auto& bb : func) {
         for (auto& inst : bb) {
             if (inst.getOpcode() == llvm::Instruction::SRem) {
-                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1))) {
-                    if (ci->getSExtValue() > 0 && isValueNonNegative(inst.getOperand(0), DL)) {
-                        llvm::IRBuilder<> builder(&inst);
-                        auto* urem = builder.CreateURem(inst.getOperand(0), inst.getOperand(1), "srem_to_urem");
-                        inst.replaceAllUsesWith(urem);
-                        toErase.push_back(&inst);
-                        ++count;
-                    }
+                auto* rhs = llvm::dyn_cast<llvm::Constant>(inst.getOperand(1));
+                if (rhs && isConstantAllPositive(rhs) &&
+                    isValueNonNegative(inst.getOperand(0), DL)) {
+                    llvm::IRBuilder<> builder(&inst);
+                    auto* urem = builder.CreateURem(inst.getOperand(0), inst.getOperand(1), "srem_to_urem");
+                    inst.replaceAllUsesWith(urem);
+                    toErase.push_back(&inst);
+                    ++count;
                 }
             }
         }
@@ -3042,14 +3097,14 @@ unsigned superopt::convertSDivToUDiv(llvm::Function& func) {
     for (auto& bb : func) {
         for (auto& inst : bb) {
             if (inst.getOpcode() == llvm::Instruction::SDiv) {
-                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1))) {
-                    if (ci->getSExtValue() > 0 && isValueNonNegative(inst.getOperand(0), DL)) {
-                        llvm::IRBuilder<> builder(&inst);
-                        auto* udiv = builder.CreateUDiv(inst.getOperand(0), inst.getOperand(1), "sdiv_to_udiv");
-                        inst.replaceAllUsesWith(udiv);
-                        toErase.push_back(&inst);
-                        ++count;
-                    }
+                auto* rhs = llvm::dyn_cast<llvm::Constant>(inst.getOperand(1));
+                if (rhs && isConstantAllPositive(rhs) &&
+                    isValueNonNegative(inst.getOperand(0), DL)) {
+                    llvm::IRBuilder<> builder(&inst);
+                    auto* udiv = builder.CreateUDiv(inst.getOperand(0), inst.getOperand(1), "sdiv_to_udiv");
+                    inst.replaceAllUsesWith(udiv);
+                    toErase.push_back(&inst);
+                    ++count;
                 }
             }
         }

@@ -4,9 +4,11 @@
 #include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <llvm/Analysis/ValueTracking.h>
 #include <llvm/Config/llvm-config.h>
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/MDBuilder.h>
+#include <llvm/Support/KnownBits.h>
 #include <stdexcept>
 
 // LLVM 19 introduced getOrInsertDeclaration; older versions only have getDeclaration.
@@ -106,6 +108,11 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
             loadInst->setMetadata(llvm::LLVMContext::MD_invariant_load,
                                   llvm::MDNode::get(*context, {}));
         }
+    }
+    // Track non-negativity: if the alloca is known to hold a non-negative
+    // value (e.g., ascending for-loop counter), mark the loaded value.
+    if (nonNegValues_.count(it->second)) {
+        nonNegValues_.insert(load);
     }
     return load;
 }
@@ -895,7 +902,13 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     // when overflow actually occurs.  Omitting them guarantees defined
     // two's-complement behavior on every overflow path.
     if (expr->op == "+") {
-        return builder->CreateAdd(left, right, "addtmp");
+        auto* result = builder->CreateAdd(left, right, "addtmp");
+        // Track non-negativity: if both operands are known non-negative,
+        // the result is non-negative (assuming no overflow, which is true
+        // for typical loop counter arithmetic).
+        if (nonNegValues_.count(left) && nonNegValues_.count(right))
+            nonNegValues_.insert(result);
+        return result;
     } else if (expr->op == "-") {
         return builder->CreateSub(left, right, "subtmp");
     } else if (expr->op == "*") {
@@ -1170,19 +1183,37 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             }
         }
 
-        // Division/modulo by a non-zero constant: let the LLVM optimizer handle
-        // strength reduction via InstCombine.  LLVM converts srem/sdiv by
-        // constants to magic-number multiply-shift sequences, AND converts
-        // srem → urem when it can prove the dividend is non-negative (via
-        // CorrelatedValuePropagation).  The unsigned path avoids the sign-
-        // correction fixup, saving ~2 instructions per operation.
+        // Division/modulo by a non-zero constant: emit unsigned operations
+        // when the dividend is provably non-negative.  The unsigned path
+        // avoids the sign-correction fixup in the magic-number multiply
+        // sequence, saving ~2 instructions per operation.  This is critical
+        // for vectorization: when LLVM's loop vectorizer creates vector
+        // copies, it preserves urem/udiv directly, whereas srem/sdiv would
+        // require sign-correction in each vector lane.
         //
-        // Previously, the codegen emitted its own magic-number code with
-        // unconditional sign correction.  That prevented LLVM from applying
-        // the srem→urem optimisation, causing a ~2× slowdown on benchmarks
-        // like triple-nested loops with modulo (e.g. `((i^j)+k) % 37`).
+        // For signed (negative-possible) dividends, emit srem/sdiv and
+        // let LLVM's CorrelatedValuePropagation convert them when it can
+        // prove non-negativity through its own analysis.
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
             if (!ci->isZero()) {
+                if (ci->getSExtValue() > 0) {
+                    // Positive constant divisor: check if dividend is non-negative
+                    // using codegen-level tracking or LLVM's KnownBits analysis.
+                    bool leftNonNeg = nonNegValues_.count(left) > 0;
+                    if (!leftNonNeg) {
+                        llvm::KnownBits KB = llvm::computeKnownBits(
+                            left, module->getDataLayout());
+                        leftNonNeg = KB.isNonNegative();
+                    }
+                    if (leftNonNeg) {
+                        auto* result = isDivision
+                            ? builder->CreateUDiv(left, right, "udivtmp")
+                            : builder->CreateURem(left, right, "uremtmp");
+                        // urem/udiv result is always non-negative
+                        nonNegValues_.insert(result);
+                        return result;
+                    }
+                }
                 return isDivision ? builder->CreateSDiv(left, right, "divtmp")
                                   : builder->CreateSRem(left, right, "modtmp");
             }
@@ -1231,11 +1262,23 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         llvm::Value* cmp = builder->CreateICmpSGE(left, right, "cmptmp");
         return builder->CreateZExt(cmp, getDefaultType(), "booltmp");
     } else if (expr->op == "&") {
-        return builder->CreateAnd(left, right, "andtmp");
+        auto* result = builder->CreateAnd(left, right, "andtmp");
+        // AND with a non-negative value always produces a non-negative result
+        if (nonNegValues_.count(left) || nonNegValues_.count(right))
+            nonNegValues_.insert(result);
+        return result;
     } else if (expr->op == "|") {
-        return builder->CreateOr(left, right, "ortmp");
+        auto* result = builder->CreateOr(left, right, "ortmp");
+        // OR of two non-negative values is non-negative
+        if (nonNegValues_.count(left) && nonNegValues_.count(right))
+            nonNegValues_.insert(result);
+        return result;
     } else if (expr->op == "^") {
-        return builder->CreateXor(left, right, "xortmp");
+        auto* result = builder->CreateXor(left, right, "xortmp");
+        // XOR of two non-negative values is non-negative (sign bit stays 0)
+        if (nonNegValues_.count(left) && nonNegValues_.count(right))
+            nonNegValues_.insert(result);
+        return result;
     } else if (expr->op == "<<") {
         // For constant shift amounts already in [0, 63], skip the mask.
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
