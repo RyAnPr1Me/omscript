@@ -804,7 +804,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             // OPTMAX uses 8 to hide FP/call latency through ILP; regular
             // functions use 4 to balance ILP gains vs I-cache pressure.
             static constexpr unsigned kOptMaxUnrollCount = 8;
-            static constexpr unsigned kDefaultUnrollCount = 4;
+            static constexpr unsigned kDefaultUnrollCount = 8;
             unsigned unrollCount = inOptMaxFunction ? kOptMaxUnrollCount : kDefaultUnrollCount;
             loopMDs.push_back(llvm::MDNode::get(
                 *context,
