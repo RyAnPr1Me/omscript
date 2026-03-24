@@ -3117,8 +3117,26 @@ unsigned superopt::inferNonNegativeFlags(llvm::Function& func) {
     if (func.isDeclaration()) return 0;
     unsigned count = 0;
     const llvm::DataLayout& DL = func.getParent()->getDataLayout();
+    llvm::SmallVector<llvm::Instruction*, 16> toErase;
     for (auto& bb : func) {
         for (auto& inst : bb) {
+            // Convert AShr to LShr when operand is non-negative.
+            // AShr (arithmetic shift right) fills with sign bit copies,
+            // LShr (logical shift right) fills with zeros.
+            // When the operand is non-negative, the sign bit is 0, so both
+            // produce the same result — but LShr is preferred by LLVM's
+            // backend for unsigned strength reduction of division/modulo.
+            if (inst.getOpcode() == llvm::Instruction::AShr) {
+                if (isValueNonNegative(inst.getOperand(0), DL)) {
+                    llvm::IRBuilder<> builder(&inst);
+                    auto* lshr = builder.CreateLShr(inst.getOperand(0), inst.getOperand(1), "ashr_to_lshr");
+                    inst.replaceAllUsesWith(lshr);
+                    toErase.push_back(&inst);
+                    ++count;
+                    continue;
+                }
+            }
+
             auto* bo = llvm::dyn_cast<llvm::BinaryOperator>(&inst);
             if (!bo) continue;
             if (bo->hasNoUnsignedWrap()) continue;
@@ -3179,6 +3197,7 @@ unsigned superopt::inferNonNegativeFlags(llvm::Function& func) {
             }
         }
     }
+    for (auto* inst : toErase) inst->eraseFromParent();
     return count;
 }
 

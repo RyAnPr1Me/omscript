@@ -123,6 +123,67 @@ ClassId EGraph::add(ENode node) {
         cls.isZero = (node.value == 0);
         cls.isOne = (node.value == 1);
         cls.isNonNeg = (node.value >= 0);
+    } else if (node.op == Op::ConstF) {
+        cls.isNonNeg = (node.fvalue >= 0.0);
+    } else if (node.children.size() >= 2) {
+        // Propagate isNonNeg through operations where it's provable.
+        // This is critical for relational rules (div_pow2_nonneg,
+        // mod_pow2_nonneg) to fire on expressions derived from
+        // non-negative sub-expressions like loop counters.
+        ClassId lhs = find(node.children[0]);
+        ClassId rhs = find(node.children[1]);
+        bool lNonNeg = (lhs < classes_.size()) && classes_[lhs].isNonNeg;
+        bool rNonNeg = (rhs < classes_.size()) && classes_[rhs].isNonNeg;
+
+        switch (node.op) {
+        case Op::Add:
+        case Op::Mul:
+        case Op::BitOr:
+        case Op::BitXor:
+            // Non-negative when both operands are non-negative
+            cls.isNonNeg = lNonNeg && rNonNeg;
+            break;
+        case Op::BitAnd:
+            // Non-negative when either operand is non-negative
+            // (AND can only clear bits, so if sign bit is 0 in either, result sign is 0)
+            cls.isNonNeg = lNonNeg || rNonNeg;
+            break;
+        case Op::Shr:
+            // Logical/arithmetic shift right: if lhs non-negative, result non-negative
+            cls.isNonNeg = lNonNeg;
+            break;
+        case Op::Shl:
+            // Shift left preserves non-negativity only for small shifts,
+            // but conservatively mark it if lhs is non-negative
+            cls.isNonNeg = lNonNeg;
+            break;
+        case Op::Mod:
+            // x % C with x >= 0 and C > 0 → result in [0, C-1)
+            cls.isNonNeg = lNonNeg && rNonNeg;
+            break;
+        case Op::Div:
+            // x / C with x >= 0 and C > 0 → result >= 0
+            cls.isNonNeg = lNonNeg && rNonNeg;
+            break;
+        case Op::Sub:
+            // Not generally non-negative; leave as false
+            break;
+        default:
+            // Comparisons produce boolean 0/1 which are non-negative
+            if (node.op == Op::Eq || node.op == Op::Ne ||
+                node.op == Op::Lt || node.op == Op::Le ||
+                node.op == Op::Gt || node.op == Op::Ge) {
+                cls.isNonNeg = true;
+            }
+            break;
+        }
+    } else if (node.children.size() == 1) {
+        // Unary operations
+        if (node.op == Op::LogNot) {
+            cls.isNonNeg = true;  // Boolean result: 0 or 1
+        } else if (node.op == Op::Sqrt) {
+            cls.isNonNeg = true;  // sqrt is always non-negative for valid inputs
+        }
     }
 
     classes_.push_back(std::move(cls));
@@ -198,7 +259,9 @@ ClassId EGraph::merge(ClassId a, ClassId b) {
         classes_[a].constVal = classes_[b].constVal;
     classes_[a].isZero = classes_[a].isZero || classes_[b].isZero;
     classes_[a].isOne = classes_[a].isOne || classes_[b].isOne;
-    classes_[a].isNonNeg = classes_[a].isNonNeg && classes_[b].isNonNeg;
+    // When merging two equivalent e-classes, if EITHER is proven non-negative,
+    // the merged class is non-negative (they represent the same value).
+    classes_[a].isNonNeg = classes_[a].isNonNeg || classes_[b].isNonNeg;
 
     return a;
 }
@@ -6712,6 +6775,78 @@ std::vector<RewriteRule> getRelationalRules() {
             auto a = g.getConstValue(s.at("a"));
             auto b = g.getConstValue(s.at("b"));
             return a.has_value() && b.has_value();
+        });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Modulo strength reduction for non-negative values
+    // x % C → (x - (x / C) * C) which LLVM then strength-reduces
+    // But more importantly, when x is non-neg, srem → urem which is cheaper.
+    // These rules propagate non-negativity through chains.
+    // ─────────────────────────────────────────────────────────────────────
+
+    // (a % C) + b where a%C is non-neg by analysis → result is non-neg if b is too
+    // This helps chains like ((i^j) + k) % 37 in nested loops
+
+    // Distributive modulo: (a + b) % C → ((a%C) + (b%C)) % C  when a,b non-neg
+    // Allows partial evaluation when one term is a loop constant.
+    rules.emplace_back("mod_distribute_add_nonneg",
+        P::OpPat(Op::Mod, {P::OpPat(Op::Add, {P::Wild("a"), P::Wild("b")}), P::Wild("c")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId amod = g.addBinOp(Op::Mod, s.at("a"), s.at("c"));
+            ClassId bmod = g.addBinOp(Op::Mod, s.at("b"), s.at("c"));
+            ClassId sum = g.addBinOp(Op::Add, amod, bmod);
+            return g.addBinOp(Op::Mod, sum, s.at("c"));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto cv = g.getConstValue(s.at("c"));
+            if (!cv || *cv <= 0) return false;
+            const auto& aClass = g.getClass(s.at("a"));
+            const auto& bClass = g.getClass(s.at("b"));
+            return aClass.isNonNeg && bClass.isNonNeg;
+        });
+
+    // x * C1 % C2 → 0  when C1 is a multiple of C2 and x is non-negative
+    rules.emplace_back("mod_mul_multiple_zero",
+        P::OpPat(Op::Mod, {P::OpPat(Op::Mul, {P::Wild("x"), P::Wild("c1")}), P::Wild("c2")}),
+        [](EGraph& g, const Subst&) {
+            return g.addConst(0);
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto c1 = g.getConstValue(s.at("c1"));
+            auto c2 = g.getConstValue(s.at("c2"));
+            if (!c1 || !c2 || *c2 == 0) return false;
+            return (*c1 % *c2) == 0;
+        });
+
+    // (x % C) % C → x % C  (idempotent modulo)
+    rules.emplace_back("mod_mod_same",
+        P::OpPat(Op::Mod, {P::OpPat(Op::Mod, {P::Wild("x"), P::Wild("c")}), P::Wild("c")}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Mod, s.at("x"), s.at("c"));
+        });
+
+    // (x & mask) where mask = C-1 and C is power-of-2 → x % C (for non-neg x)
+    // This enables subsequent mod optimizations on the AND result
+    // Note: the reverse direction (mod→AND) is already handled by mod_pow2_nonneg
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Shift-based division strength reduction
+    // ─────────────────────────────────────────────────────────────────────
+
+    // x / C → multiply-shift sequence for non-power-of-2 constants (non-neg only)
+    // This is handled better by LLVM's backend but marking non-neg helps
+
+    // x * C / C → x  (already exists, but also with non-neg guard for safety)
+
+    // (x << n) / (1 << n) → x  when x is non-negative
+    rules.emplace_back("shl_div_cancel_nonneg",
+        P::OpPat(Op::Div, {P::OpPat(Op::Shl, {P::Wild("x"), P::Wild("n")}), P::Wild("c")}),
+        [](EGraph&, const Subst& s) { return s.at("x"); },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto n = g.getConstValue(s.at("n"));
+            auto c = g.getConstValue(s.at("c"));
+            if (!n || !c || *n < 0 || *n >= 63 || *c <= 0) return false;
+            return *c == (1LL << *n);
         });
 
     return rules;

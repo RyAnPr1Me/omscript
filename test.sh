@@ -13,7 +13,7 @@ RUNS=3          # iterations per benchmark for stable timing
 # Track wall-clock time for the entire script so we can report where time is spent.
 SCRIPT_START=$(date +%s%N)
 
-NUM_BENCHMARKS=18
+NUM_BENCHMARKS=21
 
 BENCH_NAME=(
     "integer_math"
@@ -34,6 +34,9 @@ BENCH_NAME=(
     "combined"
     "float_math"
     "bitwise_intrinsics"
+    "reduction"
+    "modular_arith"
+    "mixed_arithmetic"
 )
 
 BENCH_DESC=(
@@ -55,6 +58,9 @@ BENCH_DESC=(
     "End-to-end combined workload exercising all subsystems"
     "Floating-point sqrt, exp2, pow in a tight loop"
     "popcount, clz, ctz, is_power_of_2 in a tight loop"
+    "Sum and modular product reduction"
+    "Chained modular arithmetic with dependent variables"
+    "Mixed arithmetic: multiply, shift, XOR, add"
 )
 
 # Input sizes – tuned so each test takes ~30-200 ms in C.
@@ -78,6 +84,9 @@ BENCH_N=(
     100000    # 15  combined
     2000000   # 16  float_math
     5000000   # 17  bitwise_intrinsics
+    5000000   # 18  reduction
+    5000000   # 19  modular_arith
+    5000000   # 20  mixed_arithmetic
 )
 
 BOTTLENECK_LABELS=(
@@ -402,6 +411,38 @@ fn bench_bitintrinsics(@prefetch n:int) -> int {
     }
     return acc;
 }
+@hot @flatten @unroll @vectorize
+fn bench_reduction(@prefetch n:int) -> int {
+    var sum:int = 0;
+    var prod_acc:int = 1;
+    for (i:int in 1...n) {
+        sum += i * i;
+        prod_acc = (prod_acc + i) % 1000003;
+    }
+    return sum + prod_acc;
+}
+@hot @flatten @unroll
+fn bench_modular(@prefetch n:int) -> int {
+    var a:int = 0;
+    var b:int = 0;
+    var c:int = 0;
+    for (i:int in 0...n) {
+        a = (a + i * 7) % 97;
+        b = (b + a * 13) % 193;
+        c = (c + b * 3) % 389;
+    }
+    return a + b + c;
+}
+@hot @flatten @unroll @pure
+fn bench_arithmetic(@prefetch n:int) -> int {
+    var acc:int = 0;
+    for (i:int in 1...n) {
+        acc += (i * i + i) / 2;
+        acc ^= (i * 3 + 7);
+        acc += ((i & 255) << 3) + (i >> 2);
+    }
+    return acc;
+}
 OPTMAX!:
 
 @flatten @hot
@@ -428,6 +469,9 @@ fn main() -> int {
         case 15: print(bench_combined(n)); break;
         case 16: print(bench_floatmath(n));      break;
         case 17: print(bench_bitintrinsics(n));  break;
+        case 18: print(bench_reduction(n));      break;
+        case 19: print(bench_modular(n));         break;
+        case 20: print(bench_arithmetic(n));      break;
         default: print(0);
     }
     invalidate n;
@@ -737,6 +781,39 @@ static long bench_bitintrinsics(long n) {
     return acc;
 }
 
+/* 18 ── reduction ─────────────────────────────── */
+static long bench_reduction(long n) {
+    long sum = 0;
+    long prod_acc = 1;
+    for (long i = 1; i < n; i++) {
+        sum += i * i;
+        prod_acc = (prod_acc + i) % 1000003;
+    }
+    return sum + prod_acc;
+}
+
+/* 19 ── modular arithmetic ────────────────────── */
+static long bench_modular(long n) {
+    long a = 0, b = 0, c = 0;
+    for (long i = 0; i < n; i++) {
+        a = (a + i * 7) % 97;
+        b = (b + a * 13) % 193;
+        c = (c + b * 3) % 389;
+    }
+    return a + b + c;
+}
+
+/* 20 ── mixed arithmetic ──────────────────────── */
+static long bench_arithmetic(long n) {
+    long acc = 0;
+    for (long i = 1; i < n; i++) {
+        acc += (i * i + i) / 2;
+        acc ^= (i * 3 + 7);
+        acc += ((i & 255) << 3) + (i >> 2);
+    }
+    return acc;
+}
+
 int main(void) {
     int test_id; long n;
     scanf("%d %ld", &test_id, &n);
@@ -760,6 +837,9 @@ int main(void) {
         case 15: r = bench_combined(n);      break;
         case 16: r = bench_floatmath(n);     break;
         case 17: r = bench_bitintrinsics(n); break;
+        case 18: r = bench_reduction(n);    break;
+        case 19: r = bench_modular(n);      break;
+        case 20: r = bench_arithmetic(n);   break;
     }
     printf("%ld\n", r);
     return 0;
