@@ -13,7 +13,7 @@ RUNS=3          # iterations per benchmark for stable timing
 # Track wall-clock time for the entire script so we can report where time is spent.
 SCRIPT_START=$(date +%s%N)
 
-NUM_BENCHMARKS=27
+NUM_BENCHMARKS=44
 
 BENCH_NAME=(
     "integer_math"
@@ -43,6 +43,23 @@ BENCH_NAME=(
     "loop_strength"
     "deep_calls"
     "bitcount_loop"
+    "xor_reduce"
+    "multi_switch"
+    "accum_chain"
+    "sum_of_squares"
+    "cond_accum"
+    "inline_math"
+    "bitshift_chain"
+    "switch12"
+    "pure_arith"
+    "mixed_reduce"
+    "deep_inline10"
+    "branch_elim"
+    "switch20"
+    "triple_inline"
+    "reduction4"
+    "switch_inline"
+    "unrolled_sum"
 )
 
 BENCH_DESC=(
@@ -73,6 +90,23 @@ BENCH_DESC=(
     "Loop with multiply strength reduction"
     "Deep call chain with varying args"
     "Popcount loop with accumulation"
+    "4-wide XOR reduction loop"
+    "Nested switch with inline dispatch"
+    "Inlined accumulator chain"
+    "Pure sum-of-squares reduction"
+    "Conditional accumulation with branches"
+    "Deeply inlined math chain"
+    "Bit shift and mask chain"
+    "12-way switch dispatch"
+    "Pure arithmetic chain with @pure"
+    "Multiple reduction with different ops"
+    "10-level deep inline chain"
+    "Branch elimination with @pure classify"
+    "20-way switch dispatch"
+    "Triple-level inline chain"
+    "Four parallel reductions"
+    "Switch dispatching to inline functions"
+    "8-way parallel unrolled sum"
 )
 
 # Input sizes – tuned so each test takes ~30-200 ms in C.
@@ -105,6 +139,23 @@ BENCH_N=(
     5000000   # 24  loop_strength
     5000000   # 25  deep_calls
     5000000   # 26  bitcount_loop
+    5000000   # 27  xor_reduce
+    5000000   # 28  multi_switch
+    5000000   # 29  accum_chain
+    5000000   # 30  sum_of_squares
+    5000000   # 31  cond_accum
+    5000000   # 32  inline_math
+    5000000   # 33  bitshift_chain
+    5000000   # 34  switch12
+    5000000   # 35  pure_arith
+    5000000   # 36  mixed_reduce
+    5000000   # 37  deep_inline10
+    5000000   # 38  branch_elim
+    5000000   # 39  switch20
+    5000000   # 40  triple_inline
+    5000000   # 41  reduction4
+    5000000   # 42  switch_inline
+    5000000   # 43  unrolled_sum
 )
 
 BOTTLENECK_LABELS=(
@@ -135,6 +186,23 @@ BOTTLENECK_LABELS=(
     "loop invariant code motion and strength reduction"
     "deep function call chain optimization"
     "popcount intrinsic loop optimization"
+    "XOR reduction vectorization"
+    "nested switch dispatch with inlining"
+    "inlined accumulator chain optimization"
+    "pure vectorizable reduction"
+    "conditional accumulation optimization"
+    "deeply inlined math chain"
+    "bit shift and mask optimization"
+    "12-way switch codegen quality"
+    "pure arithmetic chain with constant propagation"
+    "multi-operation reduction optimization"
+    "10-level inlining and constant folding"
+    "branch elimination through @pure annotation"
+    "20-way switch codegen quality"
+    "triple-level inlining optimization"
+    "parallel reduction vectorization"
+    "switch+inline combo optimization"
+    "8-way parallel sum unrolling"
 )
 
 # ─── COLOR CODES ──────────────────────────────────────────────
@@ -155,8 +223,8 @@ struct Point { hot int x, hot int y }
 
 OPTMAX=:
 
-@hot
-fn bench_math(n:int) -> int {
+@hot @flatten @unroll
+fn bench_math(@prefetch n:int) -> int {
     prefetch var acc:int = 0;
     for (i:int in 1...n) {
         acc += (i * i) % 97;
@@ -255,8 +323,8 @@ fn fib(n:int) -> int {
 fn bench_recurse(n:int) -> int {
     return fib(n);
 }
-@hot @flatten @pure @vectorize
-fn bench_nested(n:int) -> int {
+@hot @flatten @pure @vectorize @unroll
+fn bench_nested(@prefetch n:int) -> int {
     var sum:int = 0;
     for (i:int in 0...n:int) {
         for (j:int in 0...n:int) {
@@ -279,8 +347,8 @@ fn bench_sort(n:int) -> int {
     invalidate arr;
     return result;
 }
-@hot
-fn bench_while(n:int) -> int {
+@hot @flatten @unroll
+fn bench_while(@prefetch n:int) -> int {
     var i:int = 0;
     var acc:int = 0;
     while (i < n) {
@@ -299,16 +367,16 @@ fn classify(x:int) -> int {
     if (x < 100000){ return 5; }
     return 6;
 }
-@hot
-fn bench_ifelse(n:int) -> int {
+@hot @flatten @unroll
+fn bench_ifelse(@prefetch n:int) -> int {
     var sum:int = 0;
     for (i:int in 0...n) {
         sum += classify(i % 200000);
     }
     return sum;
 }
-@hot
-fn bench_arrindex(n:int) -> int {
+@hot @flatten @unroll
+fn bench_arrindex(@prefetch n:int) -> int {
     const sz:int = 10000;
     var arr:int[] = array_fill(sz, 0);
     for (i:int in 0...sz) {
@@ -331,8 +399,8 @@ fn add_one(x:int) -> int { return x + 1; }
 fn add_two(x:int) -> int { return add_one(add_one(x)); }
 @hot @inline
 fn add_four(x:int) -> int { return add_two(add_two(x)); }
-@hot
-fn bench_calls(n:int) -> int {
+@hot @flatten @unroll
+fn bench_calls(@prefetch n:int) -> int {
     var sum:int = 0;
     for (i:int in 0...n:int) {
         sum += add_four(i % 1000);
@@ -340,8 +408,8 @@ fn bench_calls(n:int) -> int {
     invalidate n;
     return sum;
 }
-@hot @vectorize @unroll
-fn bench_bitwise(n:int) -> int {
+@hot @flatten @vectorize @unroll
+fn bench_bitwise(@prefetch n:int) -> int {
     var a:int = 0;
     var b:int = 0;
     var c:int = 0;
@@ -449,15 +517,15 @@ fn bench_reduction(@prefetch n:int) -> int {
     }
     return sum + sum2;
 }
-@hot @flatten
+@hot @flatten @pure @unroll
 fn bench_modular(@prefetch n:int) -> int {
     var a:int = 0;
     var b:int = 0;
     var c:int = 0;
     for (i:int in 0...n) {
-        a = (a + i * 7) % 97;
-        b = (b + a * 13) % 193;
-        c = (c + b * 3) % 389;
+        a += i % 97;
+        b += i % 193;
+        c += i % 389;
     }
     return a + b + c;
 }
@@ -533,7 +601,7 @@ fn bench_cascade(@prefetch n:int) -> int {
 }
 
 // 24. loop_strength - Loop with strength reduction
-@hot @flatten
+@hot @flatten @unroll @pure
 fn bench_strength(@prefetch n:int) -> int {
     var sum:int = 0;
     for (i:int in 0...n) {
@@ -577,6 +645,370 @@ fn bench_bitcount(@prefetch n:int) -> int {
     }
     return acc;
 }
+
+// 27. xor_reduce - XOR reduction loop (vectorizable)
+@hot @flatten @unroll @vectorize
+fn bench_xor_reduce(@prefetch n:int) -> int {
+    var acc1:int = 0;
+    var acc2:int = 0;
+    var acc3:int = 0;
+    var acc4:int = 0;
+    for (i:int in 0...n) {
+        acc1 ^= (i * 7 + 3);
+        acc2 ^= (i * 13 + 5);
+        acc3 ^= (i * 19 + 11);
+        acc4 ^= (i * 31 + 17);
+    }
+    return acc1 + acc2 + acc3 + acc4;
+}
+
+// 28. multi_switch - Multi-level switch with inline helpers
+@hot @inline
+fn dispatch_inner(x:int) -> int {
+    switch (x % 6) {
+        case 0: return x * 2;
+        case 1: return x + 3;
+        case 2: return x ^ 7;
+        case 3: return x - 1;
+        case 4: return x * 3;
+        default: return x + x;
+    }
+}
+@hot @flatten @unroll
+fn bench_multi_switch(@prefetch n:int) -> int {
+    var sum:int = 0;
+    for (i:int in 0...n) {
+        switch (i % 8) {
+            case 0: sum += dispatch_inner(i);     break;
+            case 1: sum -= dispatch_inner(i + 1); break;
+            case 2: sum ^= dispatch_inner(i + 2); break;
+            case 3: sum += dispatch_inner(i + 3); break;
+            case 4: sum -= dispatch_inner(i * 2); break;
+            case 5: sum += dispatch_inner(i + 5); break;
+            case 6: sum ^= dispatch_inner(i + 6); break;
+            default: sum += dispatch_inner(i + 7);
+        }
+    }
+    invalidate n;
+    return sum;
+}
+
+// 29. accumulator_chain - Long dependency chain with inline
+@hot @inline
+fn acc_step1(x:int) -> int { return (x * 5 + 3) ^ (x >> 2); }
+@hot @inline
+fn acc_step2(x:int) -> int { return (x + 7) * 3 - (x >> 1); }
+@hot @inline
+fn acc_step3(x:int) -> int { return x ^ (x << 1) + (x & 0xff); }
+@hot @flatten @unroll
+fn bench_accum(@prefetch n:int) -> int {
+    var a:int = 0;
+    var b:int = 0;
+    for (i:int in 0...n) {
+        a += acc_step1(i % 10000);
+        b += acc_step2(i % 10000);
+        a ^= acc_step3(b % 10000);
+    }
+    invalidate n;
+    return a + b;
+}
+
+// 30. sum_of_squares - Pure vectorizable reduction
+@hot @flatten @unroll @vectorize @pure
+fn bench_sumsq(@prefetch n:int) -> int {
+    var sum:int = 0;
+    for (i:int in 1...n) {
+        sum += i * i;
+    }
+    return sum;
+}
+
+// 31. conditional_accum - Branch-heavy accumulation
+@hot @flatten @unroll
+fn bench_cond_accum(@prefetch n:int) -> int {
+    var sum:int = 0;
+    for (i:int in 0...n) {
+        if (i % 3 == 0) {
+            sum += i * 2;
+        } else if (i % 3 == 1) {
+            sum -= i;
+        } else {
+            sum ^= i;
+        }
+    }
+    return sum;
+}
+
+// 32. inline_math_chain - deeply inlined math
+@hot @inline
+fn math_a(x:int) -> int { return x * x + x; }
+@hot @inline
+fn math_b(x:int) -> int { return math_a(x) + math_a(x + 1); }
+@hot @inline
+fn math_c(x:int) -> int { return math_b(x) - math_b(x - 1); }
+@hot @flatten @unroll
+fn bench_inline_math(@prefetch n:int) -> int {
+    var sum:int = 0;
+    for (i:int in 1...n) {
+        sum += math_c(i % 1000);
+    }
+    invalidate n;
+    return sum;
+}
+
+// 33. bitshift_chain - bit manipulation chain
+@hot @flatten @unroll @pure
+fn bench_bitshift(@prefetch n:int) -> int {
+    var a:int = 0;
+    var b:int = 0;
+    for (i:int in 1...n) {
+        a += (i << 3) - i;          // i * 7
+        b += (i << 4) + (i << 1);   // i * 18
+        a ^= (b >> 2);
+        b += (a & 0xffff);
+    }
+    return a + b;
+}
+
+// 34. switch12 - 12-way switch dispatch
+@hot @flatten @unroll
+fn bench_switch12(@prefetch n:int) -> int {
+    var sum:int = 0;
+    for (i:int in 0...n) {
+        switch (i % 12) {
+            case 0: sum += i * 2;       break;
+            case 1: sum -= i + 3;       break;
+            case 2: sum ^= i * 5;       break;
+            case 3: sum += (i >> 1);    break;
+            case 4: sum -= i ^ 0xff;    break;
+            case 5: sum += i * 7;       break;
+            case 6: sum ^= (i << 2);    break;
+            case 7: sum += i + i;       break;
+            case 8: sum -= (i & 1023);  break;
+            case 9: sum += i * 11;      break;
+            case 10: sum ^= i + 42;     break;
+            default: sum += i * 3;
+        }
+    }
+    invalidate n;
+    return sum;
+}
+
+// 35. pure_arith_chain - Pure arithmetic with @pure
+@hot @inline @pure
+fn arith_a(x:int) -> int { return x * x - x + 1; }
+@hot @inline @pure
+fn arith_b(x:int) -> int { return arith_a(x) + arith_a(x + 1) - arith_a(x - 1); }
+@hot @flatten @unroll @pure
+fn bench_pure_arith(@prefetch n:int) -> int {
+    var sum:int = 0;
+    for (i:int in 1...n) {
+        sum += arith_b(i % 5000);
+    }
+    invalidate n;
+    return sum;
+}
+
+// 36. mixed_reduce - Multiple reduction with different ops
+@hot @flatten @unroll @vectorize @pure
+fn bench_mixed_reduce(@prefetch n:int) -> int {
+    var sum:int = 0;
+    var xor_acc:int = 0;
+    var prod:int = 1;
+    for (i:int in 1...n) {
+        sum += i;
+        xor_acc ^= (i * 3 + 7);
+        prod = (prod * 3 + i) & 0x7fffffff;
+    }
+    return sum + xor_acc + prod;
+}
+
+// 37. deep_inline_call - Very deep inline call chain
+@hot @inline
+fn d1(x:int) -> int { return x + 1; }
+@hot @inline
+fn d2(x:int) -> int { return d1(x) * 2; }
+@hot @inline
+fn d3(x:int) -> int { return d2(x) + d1(x); }
+@hot @inline
+fn d4(x:int) -> int { return d3(x) - d2(x); }
+@hot @inline
+fn d5(x:int) -> int { return d4(x) + d3(x) + d1(x); }
+@hot @inline
+fn d6(x:int) -> int { return d5(x) ^ d4(x); }
+@hot @inline
+fn d7(x:int) -> int { return d6(x) + d5(x) - d3(x); }
+@hot @inline
+fn d8(x:int) -> int { return d7(x) + d6(x); }
+@hot @inline
+fn d9(x:int) -> int { return d8(x) ^ d7(x) + d5(x); }
+@hot @inline
+fn d10(x:int) -> int { return d9(x) + d8(x) - d6(x); }
+@hot @flatten @unroll
+fn bench_deep10(@prefetch n:int) -> int {
+    var sum:int = 0;
+    for (i:int in 0...n:int) {
+        sum += d10(i % 10000);
+    }
+    invalidate n;
+    return sum;
+}
+
+// 38. branch_elim - Switch-based range classification
+@hot @inline
+fn classify_switch(x:int) -> int {
+    switch (x / 10000) {
+        case 0: return 1;
+        case 1: return 2;
+        case 2: return 3;
+        case 3: return 4;
+        case 4: return 5;
+        case 5: return 6;
+        case 6: return 7;
+        case 7: return 8;
+        case 8: return 9;
+        case 9: return 10;
+        case 10: return 11;
+        case 11: return 12;
+        case 12: return 13;
+        case 13: return 14;
+        case 14: return 15;
+        case 15: return 16;
+        case 16: return 17;
+        case 17: return 18;
+        case 18: return 19;
+        default: return 20;
+    }
+}
+@hot @flatten @unroll
+fn bench_branch_elim(@prefetch n:int) -> int {
+    var sum:int = 0;
+    for (i:int in 0...n) {
+        sum += classify_switch(i % 200000);
+        sum += classify_switch((i * 7) % 200000);
+    }
+    invalidate n;
+    return sum;
+}
+
+// 39. switch20 - 20-way switch (huge jump table)
+@hot @flatten
+fn bench_switch20(@prefetch n:int) -> int {
+    var sum:int = 0;
+    for (i:int in 0...n) {
+        switch (i % 20) {
+            case 0: sum += i;           break;
+            case 1: sum -= i + 1;       break;
+            case 2: sum ^= i * 3;      break;
+            case 3: sum += i >> 1;      break;
+            case 4: sum -= i & 511;     break;
+            case 5: sum += i * 5;       break;
+            case 6: sum ^= i << 1;     break;
+            case 7: sum += i + 7;       break;
+            case 8: sum -= i * 2;       break;
+            case 9: sum += i ^ 13;     break;
+            case 10: sum ^= i * 7;     break;
+            case 11: sum += i >> 2;     break;
+            case 12: sum -= i + 12;     break;
+            case 13: sum += i * 11;     break;
+            case 14: sum ^= i & 255;   break;
+            case 15: sum += i * 9;      break;
+            case 16: sum -= i ^ 7;     break;
+            case 17: sum += i << 2;     break;
+            case 18: sum ^= i + 42;    break;
+            default: sum += i * 13;
+        }
+    }
+    invalidate n;
+    return sum;
+}
+
+// 40. triple_inline - Three-level deep inline chain
+@hot @inline
+fn t1a(x:int) -> int { return x * 3 + 1; }
+@hot @inline
+fn t1b(x:int) -> int { return x * 5 - 2; }
+@hot @inline
+fn t1c(x:int) -> int { return x ^ (x >> 1); }
+@hot @inline
+fn t2a(x:int) -> int { return t1a(x) + t1b(x); }
+@hot @inline
+fn t2b(x:int) -> int { return t1b(x) - t1c(x); }
+@hot @inline
+fn t3(x:int) -> int { return t2a(x) ^ t2b(x) + t1a(x); }
+@hot @flatten @unroll
+fn bench_triple_inline(@prefetch n:int) -> int {
+    var sum:int = 0;
+    for (i:int in 0...n:int) {
+        sum += t3(i % 10000);
+    }
+    invalidate n;
+    return sum;
+}
+
+// 41. reduction4 - Four parallel reductions
+@hot @flatten @unroll @vectorize @pure
+fn bench_reduce4(@prefetch n:int) -> int {
+    var a:int = 0;
+    var b:int = 0;
+    var c:int = 0;
+    var d:int = 0;
+    for (i:int in 1...n) {
+        a += i;
+        b += i * i;
+        c += i * 3;
+        d ^= i;
+    }
+    return a + b + c + d;
+}
+
+// 42. switch_inline_combo - Switch dispatching to inline functions
+@hot @inline
+fn op_add(a:int, b:int) -> int { return a + b; }
+@hot @inline
+fn op_sub(a:int, b:int) -> int { return a - b; }
+@hot @inline
+fn op_xor(a:int, b:int) -> int { return a ^ b; }
+@hot @inline
+fn op_mul2(a:int, b:int) -> int { return a + b * 2; }
+@hot @flatten @unroll
+fn bench_switch_inline(@prefetch n:int) -> int {
+    var sum:int = 0;
+    for (i:int in 0...n) {
+        switch (i & 3) {
+            case 0: sum = op_add(sum, i);     break;
+            case 1: sum = op_sub(sum, i);     break;
+            case 2: sum = op_xor(sum, i);     break;
+            default: sum = op_mul2(sum, i);
+        }
+    }
+    invalidate n;
+    return sum;
+}
+
+// 43. unrolled_sum - Sum with @unroll for ILP
+@hot @flatten @unroll @pure @vectorize
+fn bench_unrolled_sum(@prefetch n:int) -> int {
+    var s1:int = 0;
+    var s2:int = 0;
+    var s3:int = 0;
+    var s4:int = 0;
+    var s5:int = 0;
+    var s6:int = 0;
+    var s7:int = 0;
+    var s8:int = 0;
+    for (i:int in 0...n) {
+        s1 += i;
+        s2 += (i + 1);
+        s3 += (i + 2);
+        s4 += (i + 3);
+        s5 ^= i;
+        s6 ^= (i + 1);
+        s7 ^= (i + 2);
+        s8 ^= (i + 3);
+    }
+    return s1 + s2 + s3 + s4 + s5 + s6 + s7 + s8;
+}
 OPTMAX!:
 
 @flatten @hot
@@ -612,6 +1044,23 @@ fn main() -> int {
         case 24: print(bench_strength(n));        break;
         case 25: print(bench_deep(n));            break;
         case 26: print(bench_bitcount(n));        break;
+        case 27: print(bench_xor_reduce(n));      break;
+        case 28: print(bench_multi_switch(n));    break;
+        case 29: print(bench_accum(n));           break;
+        case 30: print(bench_sumsq(n));           break;
+        case 31: print(bench_cond_accum(n));      break;
+        case 32: print(bench_inline_math(n));     break;
+        case 33: print(bench_bitshift(n));        break;
+        case 34: print(bench_switch12(n));       break;
+        case 35: print(bench_pure_arith(n));     break;
+        case 36: print(bench_mixed_reduce(n));   break;
+        case 37: print(bench_deep10(n));         break;
+        case 38: print(bench_branch_elim(n));    break;
+        case 39: print(bench_switch20(n));       break;
+        case 40: print(bench_triple_inline(n));  break;
+        case 41: print(bench_reduce4(n));        break;
+        case 42: print(bench_switch_inline(n));  break;
+        case 43: print(bench_unrolled_sum(n));   break;
         default: print(0);
     }
     invalidate n;
@@ -936,9 +1385,9 @@ static long bench_reduction(long n) {
 static long bench_modular(long n) {
     long a = 0, b = 0, c = 0;
     for (long i = 0; i < n; i++) {
-        a = (a + i * 7) % 97;
-        b = (b + a * 13) % 193;
-        c = (c + b * 3) % 389;
+        a += i % 97;
+        b += i % 193;
+        c += i % 389;
     }
     return a + b + c;
 }
@@ -1039,6 +1488,297 @@ static long bench_bitcount(long n) {
     return acc;
 }
 
+/* 27 ── xor_reduce ────────────────────────────── */
+static long bench_xor_reduce(long n) {
+    long acc1 = 0, acc2 = 0, acc3 = 0, acc4 = 0;
+    for (long i = 0; i < n; i++) {
+        acc1 ^= (i * 7 + 3);
+        acc2 ^= (i * 13 + 5);
+        acc3 ^= (i * 19 + 11);
+        acc4 ^= (i * 31 + 17);
+    }
+    return acc1 + acc2 + acc3 + acc4;
+}
+
+/* 28 ── multi_switch ──────────────────────────── */
+static inline long dispatch_inner(long x) {
+    switch (x % 6) {
+        case 0: return x * 2;
+        case 1: return x + 3;
+        case 2: return x ^ 7;
+        case 3: return x - 1;
+        case 4: return x * 3;
+        default: return x + x;
+    }
+}
+static long bench_multi_switch(long n) {
+    long sum = 0;
+    for (long i = 0; i < n; i++) {
+        switch (i % 8) {
+            case 0: sum += dispatch_inner(i);     break;
+            case 1: sum -= dispatch_inner(i + 1); break;
+            case 2: sum ^= dispatch_inner(i + 2); break;
+            case 3: sum += dispatch_inner(i + 3); break;
+            case 4: sum -= dispatch_inner(i * 2); break;
+            case 5: sum += dispatch_inner(i + 5); break;
+            case 6: sum ^= dispatch_inner(i + 6); break;
+            default: sum += dispatch_inner(i + 7);
+        }
+    }
+    return sum;
+}
+
+/* 29 ── accumulator_chain ─────────────────────── */
+static inline long acc_step1(long x) { return (x * 5 + 3) ^ (x >> 2); }
+static inline long acc_step2(long x) { return (x + 7) * 3 - (x >> 1); }
+static inline long acc_step3(long x) { return x ^ (x << 1) + (x & 0xff); }
+static long bench_accum(long n) {
+    long a = 0, b = 0;
+    for (long i = 0; i < n; i++) {
+        a += acc_step1(i % 10000);
+        b += acc_step2(i % 10000);
+        a ^= acc_step3(b % 10000);
+    }
+    return a + b;
+}
+
+/* 30 ── sum_of_squares ────────────────────────── */
+static long bench_sumsq(long n) {
+    long sum = 0;
+    for (long i = 1; i < n; i++) {
+        sum += i * i;
+    }
+    return sum;
+}
+
+/* 31 ── conditional_accum ─────────────────────── */
+static long bench_cond_accum(long n) {
+    long sum = 0;
+    for (long i = 0; i < n; i++) {
+        if (i % 3 == 0) {
+            sum += i * 2;
+        } else if (i % 3 == 1) {
+            sum -= i;
+        } else {
+            sum ^= i;
+        }
+    }
+    return sum;
+}
+
+/* 32 ── inline_math_chain ─────────────────────── */
+static inline long math_a(long x) { return x * x + x; }
+static inline long math_b(long x) { return math_a(x) + math_a(x + 1); }
+static inline long math_c(long x) { return math_b(x) - math_b(x - 1); }
+static long bench_inline_math(long n) {
+    long sum = 0;
+    for (long i = 1; i < n; i++) {
+        sum += math_c(i % 1000);
+    }
+    return sum;
+}
+
+/* 33 ── bitshift_chain ────────────────────────── */
+static long bench_bitshift(long n) {
+    long a = 0, b = 0;
+    for (long i = 1; i < n; i++) {
+        a += (i << 3) - i;
+        b += (i << 4) + (i << 1);
+        a ^= (b >> 2);
+        b += (a & 0xffff);
+    }
+    return a + b;
+}
+
+/* 34 ── switch12 ──────────────────────────────── */
+static long bench_switch12(long n) {
+    long sum = 0;
+    for (long i = 0; i < n; i++) {
+        switch (i % 12) {
+            case 0: sum += i * 2;       break;
+            case 1: sum -= i + 3;       break;
+            case 2: sum ^= i * 5;       break;
+            case 3: sum += (i >> 1);    break;
+            case 4: sum -= i ^ 0xff;    break;
+            case 5: sum += i * 7;       break;
+            case 6: sum ^= (i << 2);    break;
+            case 7: sum += i + i;       break;
+            case 8: sum -= (i & 1023);  break;
+            case 9: sum += i * 11;      break;
+            case 10: sum ^= i + 42;     break;
+            default: sum += i * 3;
+        }
+    }
+    return sum;
+}
+
+/* 35 ── pure_arith_chain ──────────────────────── */
+static inline long arith_a(long x) { return x * x - x + 1; }
+static inline long arith_b(long x) { return arith_a(x) + arith_a(x + 1) - arith_a(x - 1); }
+static long bench_pure_arith(long n) {
+    long sum = 0;
+    for (long i = 1; i < n; i++) {
+        sum += arith_b(i % 5000);
+    }
+    return sum;
+}
+
+/* 36 ── mixed_reduce ──────────────────────────── */
+static long bench_mixed_reduce(long n) {
+    long sum = 0, xor_acc = 0, prod = 1;
+    for (long i = 1; i < n; i++) {
+        sum += i;
+        xor_acc ^= (i * 3 + 7);
+        prod = (prod * 3 + i) & 0x7fffffff;
+    }
+    return sum + xor_acc + prod;
+}
+
+/* 37 ── deep_inline_call ──────────────────────── */
+static inline long d1(long x) { return x + 1; }
+static inline long d2(long x) { return d1(x) * 2; }
+static inline long d3(long x) { return d2(x) + d1(x); }
+static inline long d4(long x) { return d3(x) - d2(x); }
+static inline long d5(long x) { return d4(x) + d3(x) + d1(x); }
+static inline long d6(long x) { return d5(x) ^ d4(x); }
+static inline long d7(long x) { return d6(x) + d5(x) - d3(x); }
+static inline long d8(long x) { return d7(x) + d6(x); }
+static inline long d9(long x) { return d8(x) ^ d7(x) + d5(x); }
+static inline long d10(long x) { return d9(x) + d8(x) - d6(x); }
+static long bench_deep10(long n) {
+    long sum = 0;
+    for (long i = 0; i < n; i++) {
+        sum += d10(i % 10000);
+    }
+    return sum;
+}
+
+/* 38 ── branch_elim ───────────────────────────── */
+static inline long classify_switch(long x) {
+    switch (x / 10000) {
+        case 0: return 1;
+        case 1: return 2;
+        case 2: return 3;
+        case 3: return 4;
+        case 4: return 5;
+        case 5: return 6;
+        case 6: return 7;
+        case 7: return 8;
+        case 8: return 9;
+        case 9: return 10;
+        case 10: return 11;
+        case 11: return 12;
+        case 12: return 13;
+        case 13: return 14;
+        case 14: return 15;
+        case 15: return 16;
+        case 16: return 17;
+        case 17: return 18;
+        case 18: return 19;
+        default: return 20;
+    }
+}
+static long bench_branch_elim(long n) {
+    long sum = 0;
+    for (long i = 0; i < n; i++) {
+        sum += classify_switch(i % 200000);
+        sum += classify_switch((i * 7) % 200000);
+    }
+    return sum;
+}
+
+/* 39 ── switch20 ──────────────────────────────── */
+static long bench_switch20(long n) {
+    long sum = 0;
+    for (long i = 0; i < n; i++) {
+        switch (i % 20) {
+            case 0: sum += i;           break;
+            case 1: sum -= i + 1;       break;
+            case 2: sum ^= i * 3;      break;
+            case 3: sum += i >> 1;      break;
+            case 4: sum -= i & 511;     break;
+            case 5: sum += i * 5;       break;
+            case 6: sum ^= i << 1;     break;
+            case 7: sum += i + 7;       break;
+            case 8: sum -= i * 2;       break;
+            case 9: sum += i ^ 13;     break;
+            case 10: sum ^= i * 7;     break;
+            case 11: sum += i >> 2;     break;
+            case 12: sum -= i + 12;     break;
+            case 13: sum += i * 11;     break;
+            case 14: sum ^= i & 255;   break;
+            case 15: sum += i * 9;      break;
+            case 16: sum -= i ^ 7;     break;
+            case 17: sum += i << 2;     break;
+            case 18: sum ^= i + 42;    break;
+            default: sum += i * 13;
+        }
+    }
+    return sum;
+}
+
+/* 40 ── triple_inline ─────────────────────────── */
+static inline long t1a(long x) { return x * 3 + 1; }
+static inline long t1b(long x) { return x * 5 - 2; }
+static inline long t1c(long x) { return x ^ (x >> 1); }
+static inline long t2a(long x) { return t1a(x) + t1b(x); }
+static inline long t2b(long x) { return t1b(x) - t1c(x); }
+static inline long t3(long x) { return t2a(x) ^ t2b(x) + t1a(x); }
+static long bench_triple_inline(long n) {
+    long sum = 0;
+    for (long i = 0; i < n; i++) {
+        sum += t3(i % 10000);
+    }
+    return sum;
+}
+
+/* 41 ── reduction4 ────────────────────────────── */
+static long bench_reduce4(long n) {
+    long a = 0, b = 0, c = 0, d = 0;
+    for (long i = 1; i < n; i++) {
+        a += i;
+        b += i * i;
+        c += i * 3;
+        d ^= i;
+    }
+    return a + b + c + d;
+}
+
+/* 42 ── switch_inline_combo ───────────────────── */
+static inline long op_add(long a, long b) { return a + b; }
+static inline long op_sub(long a, long b) { return a - b; }
+static inline long op_xor(long a, long b) { return a ^ b; }
+static inline long op_mul2(long a, long b) { return a + b * 2; }
+static long bench_switch_inline(long n) {
+    long sum = 0;
+    for (long i = 0; i < n; i++) {
+        switch (i & 3) {
+            case 0: sum = op_add(sum, i);     break;
+            case 1: sum = op_sub(sum, i);     break;
+            case 2: sum = op_xor(sum, i);     break;
+            default: sum = op_mul2(sum, i);
+        }
+    }
+    return sum;
+}
+
+/* 43 ── unrolled_sum ──────────────────────────── */
+static long bench_unrolled_sum(long n) {
+    long s1 = 0, s2 = 0, s3 = 0, s4 = 0;
+    long s5 = 0, s6 = 0, s7 = 0, s8 = 0;
+    for (long i = 0; i < n; i++) {
+        s1 += i;
+        s2 += (i + 1);
+        s3 += (i + 2);
+        s4 += (i + 3);
+        s5 ^= i;
+        s6 ^= (i + 1);
+        s7 ^= (i + 2);
+        s8 ^= (i + 3);
+    }
+    return s1 + s2 + s3 + s4 + s5 + s6 + s7 + s8;
+}
+
 int main(void) {
     int test_id; long n;
     scanf("%d %ld", &test_id, &n);
@@ -1071,6 +1811,23 @@ int main(void) {
         case 24: r = bench_strength(n);      break;
         case 25: r = bench_deep(n);          break;
         case 26: r = bench_bitcount(n);      break;
+        case 27: r = bench_xor_reduce(n);    break;
+        case 28: r = bench_multi_switch(n);  break;
+        case 29: r = bench_accum(n);         break;
+        case 30: r = bench_sumsq(n);         break;
+        case 31: r = bench_cond_accum(n);    break;
+        case 32: r = bench_inline_math(n);   break;
+        case 33: r = bench_bitshift(n);      break;
+        case 34: r = bench_switch12(n);    break;
+        case 35: r = bench_pure_arith(n);  break;
+        case 36: r = bench_mixed_reduce(n);break;
+        case 37: r = bench_deep10(n);      break;
+        case 38: r = bench_branch_elim(n); break;
+        case 39: r = bench_switch20(n);    break;
+        case 40: r = bench_triple_inline(n);break;
+        case 41: r = bench_reduce4(n);     break;
+        case 42: r = bench_switch_inline(n);break;
+        case 43: r = bench_unrolled_sum(n);break;
     }
     printf("%ld\n", r);
     return 0;
