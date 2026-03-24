@@ -146,6 +146,25 @@ std::unique_ptr<Program> Parser::parse() {
             continue;
         }
         try {
+            // Check for file-level @noalias directive (appears before any function
+            // keyword and is not followed by 'fn').
+            if (check(TokenType::AT) && !fileNoAlias) {
+                size_t savedPos = current;
+                // Peek ahead: if it's @noalias followed by a newline/struct/enum
+                // (not 'fn'), treat it as a file-level directive.
+                advance(); // consume '@'
+                if (check(TokenType::IDENTIFIER) && peek().lexeme == "noalias") {
+                    advance(); // consume 'noalias'
+                    // Check if the next thing is NOT a function-related token
+                    if (check(TokenType::AT) || check(TokenType::FN) || check(TokenType::STRUCT) || check(TokenType::ENUM) || check(TokenType::OPTMAX_START) || check(TokenType::IMPORT) || isAtEnd()) {
+                        // This is a file-level @noalias directive
+                        fileNoAlias = true;
+                        continue;
+                    }
+                }
+                // Not a file-level directive, restore position
+                current = savedPos;
+            }
             // Parse optional function annotations: @inline, @noinline, @cold,
             // @hot, @pure, @noreturn, @static, @flatten, @unroll, @nounroll,
             // @restrict, @vectorize, @novectorize

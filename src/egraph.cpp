@@ -6849,6 +6849,80 @@ std::vector<RewriteRule> getRelationalRules() {
             return *c == (1LL << *n);
         });
 
+    // ─────────────────────────────────────────────────────────────────────
+    // Distributive law optimizations
+    // ─────────────────────────────────────────────────────────────────────
+
+    // x * C1 + x * C2 → x * (C1 + C2)  (factor out common multiplicand)
+    rules.emplace_back("add_factor_out",
+        P::OpPat(Op::Add, {P::OpPat(Op::Mul, {P::Wild("x"), P::Wild("c1")}),
+                            P::OpPat(Op::Mul, {P::Wild("x"), P::Wild("c2")})}),
+        [](EGraph& g, const Subst& s) {
+            auto c1 = g.getConstValue(s.at("c1"));
+            auto c2 = g.getConstValue(s.at("c2"));
+            return g.addBinOp(Op::Mul, s.at("x"), g.addConst(*c1 + *c2));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto c1 = g.getConstValue(s.at("c1"));
+            auto c2 = g.getConstValue(s.at("c2"));
+            return c1.has_value() && c2.has_value();
+        });
+
+    // x * C1 - x * C2 → x * (C1 - C2)
+    rules.emplace_back("sub_factor_out",
+        P::OpPat(Op::Sub, {P::OpPat(Op::Mul, {P::Wild("x"), P::Wild("c1")}),
+                            P::OpPat(Op::Mul, {P::Wild("x"), P::Wild("c2")})}),
+        [](EGraph& g, const Subst& s) {
+            auto c1 = g.getConstValue(s.at("c1"));
+            auto c2 = g.getConstValue(s.at("c2"));
+            return g.addBinOp(Op::Mul, s.at("x"), g.addConst(*c1 - *c2));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto c1 = g.getConstValue(s.at("c1"));
+            auto c2 = g.getConstValue(s.at("c2"));
+            return c1.has_value() && c2.has_value();
+        });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Strength reduction: x * (2^n - 1) → (x << n) - x
+    // ─────────────────────────────────────────────────────────────────────
+    rules.emplace_back("mul_to_shl_sub",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::Wild("c")}),
+        [](EGraph& g, const Subst& s) {
+            auto c = g.getConstValue(s.at("c"));
+            int64_t val = *c + 1;  // c = 2^n - 1, val = 2^n
+            int n = 0;
+            while (val > 1) { val >>= 1; n++; }
+            return g.addBinOp(Op::Sub,
+                g.addBinOp(Op::Shl, s.at("x"), g.addConst(n)),
+                s.at("x"));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto c = g.getConstValue(s.at("c"));
+            if (!c || *c < 3) return false;
+            int64_t val = *c + 1;
+            return val > 0 && (val & (val - 1)) == 0;  // check if c+1 is power of 2
+        });
+
+    // x * (2^n + 1) → (x << n) + x
+    rules.emplace_back("mul_to_shl_add",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::Wild("c")}),
+        [](EGraph& g, const Subst& s) {
+            auto c = g.getConstValue(s.at("c"));
+            int64_t val = *c - 1;  // c = 2^n + 1, val = 2^n
+            int n = 0;
+            while (val > 1) { val >>= 1; n++; }
+            return g.addBinOp(Op::Add,
+                g.addBinOp(Op::Shl, s.at("x"), g.addConst(n)),
+                s.at("x"));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto c = g.getConstValue(s.at("c"));
+            if (!c || *c < 3) return false;
+            int64_t val = *c - 1;
+            return val > 0 && (val & (val - 1)) == 0;  // check if c-1 is power of 2
+        });
+
     return rules;
 }
 

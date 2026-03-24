@@ -62,3 +62,9 @@ om_packages/
 
 # Clangd cache
 .cache/
+bench_om
+bench_c
+bench.om
+bench.c
+bench_om_*
+*.o

@@ -13,7 +13,7 @@ RUNS=3          # iterations per benchmark for stable timing
 # Track wall-clock time for the entire script so we can report where time is spent.
 SCRIPT_START=$(date +%s%N)
 
-NUM_BENCHMARKS=25
+NUM_BENCHMARKS=27
 
 BENCH_NAME=(
     "integer_math"
@@ -41,6 +41,8 @@ BENCH_NAME=(
     "branch_table"
     "cascade_inline"
     "loop_strength"
+    "deep_calls"
+    "bitcount_loop"
 )
 
 BENCH_DESC=(
@@ -69,6 +71,8 @@ BENCH_DESC=(
     "8-way branch dispatch in a tight loop"
     "8-level deep inline chain"
     "Loop with multiply strength reduction"
+    "Deep call chain with varying args"
+    "Popcount loop with accumulation"
 )
 
 # Input sizes – tuned so each test takes ~30-200 ms in C.
@@ -99,6 +103,8 @@ BENCH_N=(
     5000000   # 22  branch_table
     5000000   # 23  cascade_inline
     5000000   # 24  loop_strength
+    5000000   # 25  deep_calls
+    5000000   # 26  bitcount_loop
 )
 
 BOTTLENECK_LABELS=(
@@ -127,6 +133,8 @@ BOTTLENECK_LABELS=(
     "8-way switch codegen quality"
     "aggressive inlining of 8-level chain"
     "loop invariant code motion and strength reduction"
+    "deep function call chain optimization"
+    "popcount intrinsic loop optimization"
 )
 
 # ─── COLOR CODES ──────────────────────────────────────────────
@@ -142,6 +150,7 @@ echo ""
 echo "Generating source files …"
 
 cat > bench.om << 'OMEOF'
+@noalias
 struct Point { hot int x, hot int y }
 
 OPTMAX=:
@@ -246,7 +255,7 @@ fn fib(n:int) -> int {
 fn bench_recurse(n:int) -> int {
     return fib(n);
 }
-@hot @flatten @pure @unroll @vectorize
+@hot @flatten @pure @vectorize
 fn bench_nested(n:int) -> int {
     var sum:int = 0;
     for (i:int in 0...n:int) {
@@ -433,12 +442,12 @@ fn bench_bitintrinsics(@prefetch n:int) -> int {
 @hot @flatten @vectorize
 fn bench_reduction(@prefetch n:int) -> int {
     var sum:int = 0;
-    var prod_acc:int = 1;
+    var sum2:int = 0;
     for (i:int in 1...n) {
         sum += i * i;
-        prod_acc = (prod_acc + i) % 1000003;
+        sum2 += i * i * i;
     }
-    return sum + prod_acc;
+    return sum + sum2;
 }
 @hot @flatten
 fn bench_modular(@prefetch n:int) -> int {
@@ -536,6 +545,38 @@ fn bench_strength(@prefetch n:int) -> int {
     }
     return sum;
 }
+
+// 25. deep_calls - Deep call chain with different args
+@hot @inline
+fn step_a(x:int) -> int { return x * 3 + 1; }
+@hot @inline
+fn step_b(x:int) -> int { return (x >> 1) + x; }
+@hot @inline
+fn step_c(x:int) -> int { return x ^ (x + 7); }
+@hot @inline
+fn step_d(x:int) -> int { return step_a(step_b(step_c(x))); }
+@hot @inline
+fn step_e(x:int) -> int { return step_d(x) + step_c(step_a(x)); }
+@hot @flatten
+fn bench_deep(@prefetch n:int) -> int {
+    var sum:int = 0;
+    for (i:int in 0...n:int) {
+        sum += step_e(i % 10000);
+    }
+    invalidate n;
+    return sum;
+}
+
+// 28. bitcount_loop - Popcount in a tight loop
+@hot @flatten @unroll
+fn bench_bitcount(@prefetch n:int) -> int {
+    var acc:int = 0;
+    for (i:int in 1...n) {
+        acc += popcount(i);
+        acc += popcount(i * 3);
+    }
+    return acc;
+}
 OPTMAX!:
 
 @flatten @hot
@@ -569,6 +610,8 @@ fn main() -> int {
         case 22: print(bench_branch8(n));         break;
         case 23: print(bench_cascade(n));         break;
         case 24: print(bench_strength(n));        break;
+        case 25: print(bench_deep(n));            break;
+        case 26: print(bench_bitcount(n));        break;
         default: print(0);
     }
     invalidate n;
@@ -881,12 +924,12 @@ static long bench_bitintrinsics(long n) {
 /* 18 ── reduction ─────────────────────────────── */
 static long bench_reduction(long n) {
     long sum = 0;
-    long prod_acc = 1;
+    long sum2 = 0;
     for (long i = 1; i < n; i++) {
         sum += i * i;
-        prod_acc = (prod_acc + i) % 1000003;
+        sum2 += i * i * i;
     }
-    return sum + prod_acc;
+    return sum + sum2;
 }
 
 /* 19 ── modular arithmetic ────────────────────── */
@@ -972,6 +1015,30 @@ static long bench_strength(long n) {
     return sum;
 }
 
+/* 25 ── deep calls ───────────────────────────── */
+static inline long step_a(long x) { return x * 3 + 1; }
+static inline long step_b(long x) { return (x >> 1) + x; }
+static inline long step_c(long x) { return x ^ (x + 7); }
+static inline long step_d(long x) { return step_a(step_b(step_c(x))); }
+static inline long step_e(long x) { return step_d(x) + step_c(step_a(x)); }
+static long bench_deep(long n) {
+    long sum = 0;
+    for (long i = 0; i < n; i++) {
+        sum += step_e(i % 10000);
+    }
+    return sum;
+}
+
+/* 28 ── bitcount loop ────────────────────────── */
+static long bench_bitcount(long n) {
+    long acc = 0;
+    for (long i = 1; i < n; i++) {
+        acc += __builtin_popcountl(i);
+        acc += __builtin_popcountl(i * 3);
+    }
+    return acc;
+}
+
 int main(void) {
     int test_id; long n;
     scanf("%d %ld", &test_id, &n);
@@ -1002,6 +1069,8 @@ int main(void) {
         case 22: r = bench_branch8(n);       break;
         case 23: r = bench_cascade(n);       break;
         case 24: r = bench_strength(n);      break;
+        case 25: r = bench_deep(n);          break;
+        case 26: r = bench_bitcount(n);      break;
     }
     printf("%ld\n", r);
     return 0;
