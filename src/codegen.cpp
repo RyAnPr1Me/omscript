@@ -2571,6 +2571,26 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         // and vectorization.
         function->setOnlyAccessesArgMemory();
         function->setDoesNotThrow();
+        // Mark all pointer parameters as noalias — OmScript's ownership
+        // semantics guarantee that distinct variables cannot alias the same
+        // memory region unless explicitly declared.
+        for (unsigned i = 0; i < function->arg_size(); ++i) {
+            if (function->getArg(i)->getType()->isPointerTy()) {
+                function->addParamAttr(i, llvm::Attribute::NoAlias);
+            }
+        }
+    }
+
+    // In OPTMAX functions, mark all parameters noalias and add WillReturn.
+    // The OPTMAX annotation is the user's compile-time guarantee that the
+    // function is safe and well-behaved, enabling maximum optimization.
+    if (inOptMaxFunction) {
+        for (unsigned i = 0; i < function->arg_size(); ++i) {
+            if (function->getArg(i)->getType()->isPointerTy()) {
+                function->addParamAttr(i, llvm::Attribute::NoAlias);
+                function->addParamAttr(i, llvm::Attribute::NonNull);
+            }
+        }
     }
 
     // @unroll / @nounroll: per-function loop unrolling control.
