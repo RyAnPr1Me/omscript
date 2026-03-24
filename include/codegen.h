@@ -280,6 +280,10 @@ class CodeGenerator {
     // Variables known to hold struct values, maps var name → struct type name.
     std::unordered_map<std::string, std::string> structVars_;
 
+    // Operator overload registry: maps "StructName::op" → generated LLVM function name.
+    // e.g. "Vec2::+" → "__op_Vec2_add"
+    std::unordered_map<std::string, std::string> operatorOverloads_;
+
     OptimizationLevel optimizationLevel;
 
     // Per-function execution tier decided during code generation.

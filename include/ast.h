@@ -407,11 +407,22 @@ struct StructField {
         : name(n), typeName(t), attrs(a) {}
 };
 
+/// Operator overload definition within a struct.
+/// e.g. `operator+(other: Vec2) -> Vec2 { ... }`
+struct OperatorOverload {
+    std::string op;          ///< Operator string: "+", "-", "*", "/", "==", "!=", "<", ">"
+    std::string paramName;   ///< Right-hand operand parameter name
+    std::string paramType;   ///< Optional type annotation for parameter
+    std::string returnType;  ///< Optional return type annotation
+    std::unique_ptr<FunctionDecl> impl; ///< Implementation function
+};
+
 class StructDecl : public Statement {
   public:
     std::string name;
     std::vector<std::string> fields;       ///< Field names (for backwards compat)
     std::vector<StructField> fieldDecls;   ///< Rich field info with attributes
+    std::vector<OperatorOverload> operators; ///< Operator overload definitions
 
     StructDecl(const std::string& n, std::vector<std::string> f)
         : Statement(ASTNodeType::STRUCT_DECL), name(n), fields(std::move(f)) {}

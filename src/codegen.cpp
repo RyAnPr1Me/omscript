@@ -2223,6 +2223,19 @@ void CodeGenerator::generate(Program* program) {
         }
     }
 
+    // Register operator overloads: generate implementation functions and store
+    // in the operatorOverloads_ registry for dispatch in generateBinary().
+    for (auto& structDecl : program->structs) {
+        for (auto& overload : structDecl->operators) {
+            const std::string key = structDecl->name + "::" + overload.op;
+            const std::string funcName = overload.impl->name;
+            operatorOverloads_[key] = funcName;
+            // Add the operator implementation function to the program's function
+            // list so it gets code-generated alongside other functions.
+            program->functions.push_back(std::move(overload.impl));
+        }
+    }
+
     // Pre-analyze string types: determine which functions return strings and
     // which parameters receive string arguments, so that print/concat/etc.
     // work correctly when strings cross function boundaries.

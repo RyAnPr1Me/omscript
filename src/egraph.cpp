@@ -7217,6 +7217,110 @@ std::vector<RewriteRule> getFloatingPointRules() {
     return rules;
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// Strength Reduction Rules
+// ───────────────────────────────────────────────────────────────────────────
+// Additional algebraic simplifications that reduce expensive operations
+// (multiply, divide, modulo) to cheaper ones (shift, add, sub, bitwise).
+// These complement LLVM's own strength reduction by catching patterns at
+// the AST level before lowering, enabling cross-expression optimizations.
+
+std::vector<RewriteRule> getStrengthReductionRules() {
+    using P = Pattern;
+    std::vector<RewriteRule> rules;
+
+    // x * 3 → (x << 1) + x  (shift+add is cheaper than multiply on most uarchs)
+    rules.emplace_back("mul3_to_shl_add",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(3)}),
+        [](EGraph& g, const Subst& s) {
+            auto shifted = g.addBinOp(Op::Shl, s.at("x"), g.addConst(1));
+            return g.addBinOp(Op::Add, shifted, s.at("x"));
+        });
+
+    // x * 5 → (x << 2) + x
+    rules.emplace_back("mul5_to_shl_add",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(5)}),
+        [](EGraph& g, const Subst& s) {
+            auto shifted = g.addBinOp(Op::Shl, s.at("x"), g.addConst(2));
+            return g.addBinOp(Op::Add, shifted, s.at("x"));
+        });
+
+    // x * 7 → (x << 3) - x
+    rules.emplace_back("mul7_to_shl_sub",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(7)}),
+        [](EGraph& g, const Subst& s) {
+            auto shifted = g.addBinOp(Op::Shl, s.at("x"), g.addConst(3));
+            return g.addBinOp(Op::Sub, shifted, s.at("x"));
+        });
+
+    // x * 9 → (x << 3) + x
+    rules.emplace_back("mul9_to_shl_add",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(9)}),
+        [](EGraph& g, const Subst& s) {
+            auto shifted = g.addBinOp(Op::Shl, s.at("x"), g.addConst(3));
+            return g.addBinOp(Op::Add, shifted, s.at("x"));
+        });
+
+    // x * 15 → (x << 4) - x
+    rules.emplace_back("mul15_to_shl_sub",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(15)}),
+        [](EGraph& g, const Subst& s) {
+            auto shifted = g.addBinOp(Op::Shl, s.at("x"), g.addConst(4));
+            return g.addBinOp(Op::Sub, shifted, s.at("x"));
+        });
+
+    // x * 17 → (x << 4) + x
+    rules.emplace_back("mul17_to_shl_add",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(17)}),
+        [](EGraph& g, const Subst& s) {
+            auto shifted = g.addBinOp(Op::Shl, s.at("x"), g.addConst(4));
+            return g.addBinOp(Op::Add, shifted, s.at("x"));
+        });
+
+    // (a + b) * (a - b) → a*a - b*b  (difference of squares, fewer multiplies)
+    rules.emplace_back("diff_of_squares",
+        P::OpPat(Op::Mul, {
+            P::OpPat(Op::Add, {P::Wild("a"), P::Wild("b")}),
+            P::OpPat(Op::Sub, {P::Wild("a"), P::Wild("b")})}),
+        [](EGraph& g, const Subst& s) {
+            auto a2 = g.addBinOp(Op::Mul, s.at("a"), s.at("a"));
+            auto b2 = g.addBinOp(Op::Mul, s.at("b"), s.at("b"));
+            return g.addBinOp(Op::Sub, a2, b2);
+        });
+
+    // x % C → x & (C-1) when C is power of 2 and x is non-negative
+    // (already exists as mod_pow2_nonneg, but add mod with specific small primes)
+
+    // (x / C) * C → x - (x % C)  (useful for loop index computation)
+    rules.emplace_back("div_mul_to_sub_mod",
+        P::OpPat(Op::Mul, {P::OpPat(Op::Div, {P::Wild("x"), P::Wild("c")}), P::Wild("c")}),
+        [](EGraph& g, const Subst& s) {
+            auto mod = g.addBinOp(Op::Mod, s.at("x"), s.at("c"));
+            return g.addBinOp(Op::Sub, s.at("x"), mod);
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto cv = g.getConstValue(s.at("c"));
+            return cv && *cv > 0;
+        });
+
+    // (x << n) >> n → x & ((1 << (64-n)) - 1) when n is constant
+    // (mask off upper bits — useful for truncation patterns)
+    rules.emplace_back("shl_shr_to_mask",
+        P::OpPat(Op::Shr, {P::OpPat(Op::Shl, {P::Wild("x"), P::Wild("n")}), P::Wild("n")}),
+        [](EGraph& g, const Subst& s) {
+            auto nv = g.getConstValue(s.at("n"));
+            if (!nv || *nv <= 0 || *nv >= 64) return s.at("x"); // fallback
+            long long mask = (1LL << (64 - *nv)) - 1;
+            return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(mask));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto nv = g.getConstValue(s.at("n"));
+            return nv && *nv > 0 && *nv < 64;
+        });
+
+    return rules;
+}
+
 std::vector<RewriteRule> getAllRules() {
     auto rules = getAlgebraicRules();
     auto advAlgRules = getAdvancedAlgebraicRules();
@@ -7241,6 +7345,10 @@ std::vector<RewriteRule> getAllRules() {
     auto fpRules = getFloatingPointRules();
     rules.insert(rules.end(), std::make_move_iterator(fpRules.begin()),
                  std::make_move_iterator(fpRules.end()));
+
+    auto srRules = getStrengthReductionRules();
+    rules.insert(rules.end(), std::make_move_iterator(srRules.begin()),
+                 std::make_move_iterator(srRules.end()));
 
     return rules;
 }

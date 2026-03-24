@@ -935,8 +935,73 @@ std::unique_ptr<StructDecl> Parser::parseStructDecl() {
 
     std::vector<std::string> fields;
     std::vector<StructField> fieldDecls;
+    std::vector<OperatorOverload> operators;
 
     while (!check(TokenType::RBRACE) && !isAtEnd()) {
+        // Check for operator overload: fn operator+(...) -> Type { ... }
+        if (check(TokenType::FN) && current + 1 < tokens.size() &&
+            tokens[current + 1].type == TokenType::IDENTIFIER &&
+            tokens[current + 1].lexeme == "operator") {
+            advance(); // consume 'fn'
+            advance(); // consume 'operator'
+
+            // Parse the operator symbol: +, -, *, /, ==, !=, <, >, <=, >=
+            std::string opStr;
+            if (check(TokenType::PLUS)) { opStr = "+"; advance(); }
+            else if (check(TokenType::MINUS)) { opStr = "-"; advance(); }
+            else if (check(TokenType::STAR)) { opStr = "*"; advance(); }
+            else if (check(TokenType::SLASH)) { opStr = "/"; advance(); }
+            else if (check(TokenType::PERCENT)) { opStr = "%"; advance(); }
+            else if (check(TokenType::EQ)) { opStr = "=="; advance(); }
+            else if (check(TokenType::NEQ)) { opStr = "!="; advance(); }
+            else if (check(TokenType::LT)) { opStr = "<"; advance(); }
+            else if (check(TokenType::GT)) { opStr = ">"; advance(); }
+            else if (check(TokenType::LTE)) { opStr = "<="; advance(); }
+            else if (check(TokenType::GTE)) { opStr = ">="; advance(); }
+            else {
+                error("Expected operator symbol after 'operator' (e.g., +, -, *, /, ==, !=, <, >)");
+            }
+
+            consume(TokenType::LPAREN, "Expected '(' after operator");
+            const Token paramName = consume(TokenType::IDENTIFIER, "Expected parameter name");
+            std::string paramType;
+            if (match(TokenType::COLON)) {
+                paramType = parseTypeAnnotation();
+            }
+            consume(TokenType::RPAREN, "Expected ')' after operator parameter");
+
+            std::string returnType;
+            if (match(TokenType::ARROW)) {
+                returnType = parseTypeAnnotation();
+            }
+
+            // Parse the operator body as a function.
+            // Synthesize a function name: __op_StructName_opname
+            std::string funcName = "__op_" + nameToken.lexeme + "_" + opStr;
+            // Create parameters: self (implicit) + explicit param
+            std::vector<Parameter> params;
+            params.emplace_back("self", nameToken.lexeme);
+            params.emplace_back(paramName.lexeme, paramType);
+
+            auto body = parseBlock();
+
+            auto funcDecl = std::make_unique<FunctionDecl>(
+                funcName, std::vector<std::string>{}, std::move(params),
+                std::move(body), false, returnType);
+            funcDecl->line = nameToken.line;
+            funcDecl->column = nameToken.column;
+            funcDecl->hintInline = true; // Operator overloads should be inlined
+
+            OperatorOverload overload;
+            overload.op = opStr;
+            overload.paramName = paramName.lexeme;
+            overload.paramType = paramType;
+            overload.returnType = returnType;
+            overload.impl = std::move(funcDecl);
+            operators.push_back(std::move(overload));
+            continue;
+        }
+
         // Parse optional field attributes before the field name.
         FieldAttrs attrs;
         while ((check(TokenType::IDENTIFIER) || check(TokenType::MOVE)) && !isAtEnd()) {
@@ -990,7 +1055,9 @@ std::unique_ptr<StructDecl> Parser::parseStructDecl() {
 
     consume(TokenType::RBRACE, "Expected '}' after struct body");
     structNames_.insert(nameToken.lexeme);
-    return std::make_unique<StructDecl>(nameToken.lexeme, std::move(fields), std::move(fieldDecls));
+    auto decl = std::make_unique<StructDecl>(nameToken.lexeme, std::move(fields), std::move(fieldDecls));
+    decl->operators = std::move(operators);
+    return decl;
 }
 
 std::unique_ptr<Expression> Parser::parseStructLiteral(const std::string& name, int line, int col) {

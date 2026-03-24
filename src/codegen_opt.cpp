@@ -437,13 +437,14 @@ void CodeGenerator::runOptimizationPasses() {
         });
     }
 
-    // At O3 with loop optimization enabled (enableLoopOptimize_ / -floop-optimize),
+    // At O2+ with loop optimization enabled (enableLoopOptimize_ / -floop-optimize),
     // register LoopFusePass before vectorization to merge adjacent loops with
     // the same trip count into a single loop, dramatically improving data cache
     // locality and reducing loop overhead.  This is particularly beneficial for
     // array-processing code where successive passes over the same data can be
-    // combined.
-    if (optimizationLevel >= OptimizationLevel::O3 && enableLoopOptimize_) {
+    // combined.  Lowered from O3 to O2 to benefit more workloads, since loop
+    // fusion is a key enabler of iterator-fusion-style optimization.
+    if (optimizationLevel >= OptimizationLevel::O2 && enableLoopOptimize_) {
         PB.registerVectorizerStartEPCallback(
             [](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) { FPM.addPass(llvm::LoopFusePass()); });
     }
@@ -458,10 +459,12 @@ void CodeGenerator::runOptimizationPasses() {
             [](llvm::LoopPassManager& LPM, llvm::OptimizationLevel) { LPM.addPass(llvm::LoopInterchangePass()); });
     }
 
-    // At O3, inject AggressiveInstCombine after the standard peephole passes
+    // At O2+, inject AggressiveInstCombine after the standard peephole passes
     // to catch multi-instruction patterns (e.g. truncation sequences, popcount
-    // idioms) that regular InstCombine does not handle.
-    if (optimizationLevel >= OptimizationLevel::O3) {
+    // idioms) that regular InstCombine does not handle.  Lowered from O3 to O2
+    // to provide zero-cost abstractions: operator overload bodies and iterator
+    // chains benefit from aggressive pattern matching after inlining.
+    if (optimizationLevel >= OptimizationLevel::O2) {
         PB.registerPeepholeEPCallback([](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) {
             FPM.addPass(llvm::AggressiveInstCombinePass());
         });

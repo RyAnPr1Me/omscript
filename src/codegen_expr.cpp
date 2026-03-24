@@ -265,6 +265,32 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         codegenError("Unsupported operator '" + expr->op + "' for SIMD vector types", expr);
     }
 
+    // -----------------------------------------------------------------------
+    // Operator overloading — dispatch to user-defined operator functions
+    // when both operands are known struct types with a matching overload.
+    // -----------------------------------------------------------------------
+    {
+        std::string leftStructType, rightStructType;
+        if (expr->left->type == ASTNodeType::IDENTIFIER_EXPR) {
+            auto* id = static_cast<IdentifierExpr*>(expr->left.get());
+            auto vit = structVars_.find(id->name);
+            if (vit != structVars_.end()) leftStructType = vit->second;
+        } else if (expr->left->type == ASTNodeType::STRUCT_LITERAL_EXPR) {
+            leftStructType = static_cast<StructLiteralExpr*>(expr->left.get())->structName;
+        }
+        if (!leftStructType.empty()) {
+            const std::string key = leftStructType + "::" + expr->op;
+            auto overIt = operatorOverloads_.find(key);
+            if (overIt != operatorOverloads_.end()) {
+                // Call the operator overload function with (self=left, other=right).
+                llvm::Function* opFunc = module->getFunction(overIt->second);
+                if (opFunc) {
+                    return builder->CreateCall(opFunc, {left, right}, "op.result");
+                }
+            }
+        }
+    }
+
     const bool leftIsFloat = left->getType()->isDoubleTy();
     const bool rightIsFloat = right->getType()->isDoubleTy();
 
