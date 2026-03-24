@@ -9,6 +9,15 @@ set -e
 #  No category is over-represented.  Both OM and C implementations
 #  are idiomatic and use the same algorithm.
 #
+#  Methodology:
+#    - Warmup runs before timing to eliminate cold-start bias
+#    - Interleaved C/OM runs to spread system noise evenly
+#    - Median-of-N timing for robustness against outliers
+#    - Standard deviation reported; noisy benchmarks flagged (~)
+#    - Geometric mean as primary aggregate metric (not skewed
+#      by a single slow/fast benchmark the way sum is)
+#    - Env vars: BENCH_RUNS (default 5), BENCH_WARMUP (default 1)
+#
 #  Categories:
 #    - Integer arithmetic & math builtins
 #    - Floating-point computation
@@ -24,7 +33,8 @@ set -e
 #      collatz, binary search)
 # ──────────────────────────────────────────────────────────────
 
-RUNS=3
+RUNS=${BENCH_RUNS:-5}
+WARMUP_RUNS=${BENCH_WARMUP:-1}
 
 SCRIPT_START=$(date +%s%N)
 
@@ -1177,6 +1187,17 @@ run_one() {
         return
     fi
 
+    # Warmup runs: prime the CPU caches and branch predictors so that
+    # the timed runs start from a warm state.  This removes cold-start
+    # variance that would unfairly penalize whichever binary runs first.
+    for (( w=0; w<WARMUP_RUNS; w++ )); do
+        echo "$id $n" | ./bench_c  > /dev/null
+        echo "$id $n" | ./bench_om > /dev/null
+    done
+
+    # Interleaved timed runs: alternate C and OM to spread any
+    # system-level interference (thermal throttling, background tasks)
+    # evenly between the two rather than biasing one side.
     local c_runs=() om_runs=()
     for (( r=0; r<RUNS; r++ )); do
         local cs ce ct os oe ot
@@ -1199,6 +1220,10 @@ run_one() {
     local ct=${c_sorted[$mid]}
     local ot=${om_sorted[$mid]}
 
+    # Also track min (best-case) for secondary analysis.
+    local c_min=${c_sorted[0]}
+    local om_min=${om_sorted[0]}
+
     C_TIMES[$id]=$ct
     OM_TIMES[$id]=$ot
 
@@ -1210,29 +1235,53 @@ run_one() {
     fi
     RATIOS[$id]=$ratio
 
+    # Compute stddev to flag noisy benchmarks.
+    local c_stddev om_stddev
+    c_stddev=$(awk -v med="$ct" 'BEGIN { s=0; n=0 }
+        { d=$1-med; s+=d*d; n++ }
+        END { if(n>1) printf "%.0f", sqrt(s/(n-1)); else print 0 }' \
+        <<< "$(printf '%s\n' "${c_runs[@]}")")
+    om_stddev=$(awk -v med="$ot" 'BEGIN { s=0; n=0 }
+        { d=$1-med; s+=d*d; n++ }
+        END { if(n>1) printf "%.0f", sqrt(s/(n-1)); else print 0 }' \
+        <<< "$(printf '%s\n' "${om_runs[@]}")")
+
     local tag
     if   [ "$ratio" -le 120 ]; then tag="${GRN}✅ competitive${RST}"
     elif [ "$ratio" -le 250 ]; then tag="${YEL}⚠️  slower${RST}"
     else                            tag="${RED}❌ bottleneck${RST}"
     fi
 
-    printf "  %-22s  C: %6d ms   OM: %6d ms   %4d%%   %b\n" \
-           "$name" "$ct" "$ot" "$ratio" "$tag"
+    # Show noisy-benchmark warning when stddev > 15% of median.
+    local noise=""
+    if [ "$ct" -gt 0 ] && [ "$(( c_stddev * 100 / ct ))" -gt 15 ]; then
+        noise=" ${YEL}~${RST}"
+    fi
+    if [ "$ot" -gt 0 ] && [ "$(( om_stddev * 100 / ot ))" -gt 15 ]; then
+        noise=" ${YEL}~${RST}"
+    fi
+
+    printf "  %-22s  C: %6d ms (±%3d)  OM: %6d ms (±%3d)  %4d%%  %b%b\n" \
+           "$name" "$ct" "$c_stddev" "$ot" "$om_stddev" "$ratio" "$tag" "$noise"
 }
 
 # ─── RUN ──────────────────────────────────────────────────────
-echo "╔═══════════════════════════════════════════════════════════════════════════╗"
-echo "║              Per-Function Benchmarks  (median of $RUNS runs)               ║"
-echo "╚═══════════════════════════════════════════════════════════════════════════╝"
+echo "╔═══════════════════════════════════════════════════════════════════════════════════╗"
+echo "║         Per-Function Benchmarks  (median of $RUNS runs, $WARMUP_RUNS warmup)                  ║"
+echo "╚═══════════════════════════════════════════════════════════════════════════════════╝"
 echo ""
-printf "  ${BLD}%-22s  %-15s %-15s %-7s  %-12s${RST}\n" \
+printf "  ${BLD}%-22s  %-20s %-20s %-7s %-12s${RST}\n" \
        "BENCHMARK" "C TIME" "OM TIME" "RATIO" "STATUS"
-printf "  %-22s  %-15s %-15s %-7s  %-12s\n" \
-       "─────────────────────" "──────────────" "──────────────" "──────" "──────────"
+printf "  %-22s  %-20s %-20s %-7s %-12s\n" \
+       "─────────────────────" "───────────────────" "───────────────────" "──────" "──────────"
 
 for (( id=0; id<NUM_BENCHMARKS; id++ )); do
     run_one "$id" "${BENCH_N[$id]}" "${BENCH_NAME[$id]}"
 done
+
+echo ""
+echo -e "  ${YEL}~${RST} = noisy benchmark (stddev > 15% of median); results may be unreliable."
+echo "  ± values show standard deviation across runs."
 
 if [ "$MISMATCH" -eq 1 ]; then
     echo ""
@@ -1355,11 +1404,13 @@ END {
 
 echo "==================================================================="
 echo ""
+echo "  Methodology:  $RUNS timed runs + $WARMUP_RUNS warmup, median timing, interleaved C/OM"
+echo ""
 echo "  Individual results:  $COUNT_FASTER faster, $COUNT_EQUAL tied, $COUNT_SLOWER slower (out of $NUM_BENCHMARKS)"
 echo ""
-printf "  Aggregate:  C: %d ms   OM: %d ms   (%d%%)\n" \
+printf "  Aggregate (sum):    C: %d ms   OM: %d ms   (%d%%)\n" \
        "$SUM_C" "$SUM_OM" "$OVERALL"
-printf "  Geometric mean of per-benchmark ratios: %d%%\n" "$GEOMEAN"
+printf "  Geometric mean:     %d%%  ← primary metric (unbiased by outliers)\n" "$GEOMEAN"
 echo ""
 
 if [ "$OVERALL" -lt 100 ]; then
