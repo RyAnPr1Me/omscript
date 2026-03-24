@@ -13,7 +13,7 @@ RUNS=3          # iterations per benchmark for stable timing
 # Track wall-clock time for the entire script so we can report where time is spent.
 SCRIPT_START=$(date +%s%N)
 
-NUM_BENCHMARKS=48
+NUM_BENCHMARKS=53
 
 BENCH_NAME=(
     "integer_math"
@@ -64,6 +64,11 @@ BENCH_NAME=(
     "parallel_xor"
     "inline_arith6"
     "multi_reduce"
+    "switch6_arith"
+    "deep_inline8"
+    "vectorize_add"
+    "classify_switch"
+    "xor_reduce8"
 )
 
 BENCH_DESC=(
@@ -115,6 +120,11 @@ BENCH_DESC=(
     "8 parallel XOR accumulators"
     "6-deep inline arithmetic chain"
     "Multiple independent reductions"
+    "6-way switch with arithmetic operations"
+    "8-level deep inline chain"
+    "4-wide vectorizable addition"
+    "16-way switch classification"
+    "8-wide XOR reduction"
 )
 
 # Input sizes – tuned so each test takes ~30-200 ms in C.
@@ -168,6 +178,11 @@ BENCH_N=(
     5000000   # 45  parallel_xor
     5000000   # 46  inline_arith6
     5000000   # 47  multi_reduce
+    5000000   # 48  switch6_arith
+    5000000   # 49  deep_inline8
+    5000000   # 50  vectorize_add
+    5000000   # 51  classify_switch
+    5000000   # 52  xor_reduce8
 )
 
 BOTTLENECK_LABELS=(
@@ -219,6 +234,11 @@ BOTTLENECK_LABELS=(
     "8-way parallel XOR reduction"
     "6-level inline chain optimization"
     "multiple independent reduction optimization"
+    "6-way switch dispatch optimization"
+    "8-level deep inline optimization"
+    "4-wide vectorizable addition"
+    "16-way switch classification"
+    "8-wide XOR reduction"
 )
 
 # ─── COLOR CODES ──────────────────────────────────────────────
@@ -1108,6 +1128,113 @@ fn bench_multi_reduce(@prefetch n:int) -> int {
     }
     return sum1 + sum2 + sum3 + sum4;
 }
+
+// 48. switch6_arith - 6-way switch with arithmetic
+@hot @flatten @unroll
+fn bench_switch6(@prefetch n:int) -> int {
+    var sum:int = 0;
+    for (i:int in 0...n) {
+        switch (i % 6) {
+            case 0: sum += i * 7 + 3;       break;
+            case 1: sum -= (i ^ 0xfff) + 5; break;
+            case 2: sum ^= i * 11 - 1;      break;
+            case 3: sum += (i << 3) + i;     break;
+            case 4: sum -= i * 5 + 7;        break;
+            default: sum += (i >> 1) + i;
+        }
+    }
+    invalidate n;
+    return sum;
+}
+
+// 49. deep_inline8 - 8-level inline chain with simple ops
+@hot @inline
+fn di1(x:int) -> int { return x + 1; }
+@hot @inline
+fn di2(x:int) -> int { return di1(x) + di1(x + 1); }
+@hot @inline
+fn di3(x:int) -> int { return di2(x) + 3; }
+@hot @inline
+fn di4(x:int) -> int { return di3(x) * 2 - di2(x); }
+@hot @inline
+fn di5(x:int) -> int { return di4(x) + di3(x + 1); }
+@hot @inline
+fn di6(x:int) -> int { return di5(x) ^ di4(x + 1); }
+@hot @inline
+fn di7(x:int) -> int { return di6(x) + di5(x) - di3(x); }
+@hot @inline
+fn di8(x:int) -> int { return di7(x) + di6(x + 1); }
+@hot @flatten @unroll
+fn bench_deep_inline8(@prefetch n:int) -> int {
+    var sum:int = 0;
+    for (i:int in 0...n:int) {
+        sum += di8(i % 5000);
+    }
+    invalidate n;
+    return sum;
+}
+
+// 50. vectorize_add - Pure addition for SIMD vectorization
+@hot @flatten @unroll @vectorize @pure
+fn bench_vec_add(@prefetch n:int) -> int {
+    var a:int = 0;
+    var b:int = 0;
+    var c:int = 0;
+    var d:int = 0;
+    for (i:int in 0...n) {
+        a += i * 2 + 1;
+        b += i * 3 + 2;
+        c += i * 5 + 3;
+        d += i * 7 + 5;
+    }
+    return a + b + c + d;
+}
+
+// 51. classify_switch - Classification via switch
+@hot @inline
+fn classify_val(x:int) -> int {
+    switch (x >> 13) {
+        case 0: return 1;
+        case 1: return 2;
+        case 2: return 3;
+        case 3: return 4;
+        case 4: return 5;
+        case 5: return 6;
+        case 6: return 7;
+        case 7: return 8;
+        case 8: return 9;
+        case 9: return 10;
+        case 10: return 11;
+        case 11: return 12;
+        case 12: return 13;
+        case 13: return 14;
+        case 14: return 15;
+        default: return 16;
+    }
+}
+@hot @flatten @unroll
+fn bench_classify_switch(@prefetch n:int) -> int {
+    var sum:int = 0;
+    for (i:int in 0...n) {
+        sum += classify_val(i % 500000);
+        sum += classify_val((i * 7) % 500000);
+        sum += classify_val((i * 13) % 500000);
+    }
+    invalidate n;
+    return sum;
+}
+
+// 52. reduction_xor8 - 8-wide XOR with varying multipliers
+@hot @flatten @unroll @vectorize @pure
+fn bench_xor8(@prefetch n:int) -> int {
+    var a:int=0; var b:int=0; var c:int=0; var d:int=0;
+    var e:int=0; var f:int=0; var g:int=0; var h:int=0;
+    for (i:int in 1...n) {
+        a ^= i; b ^= i*2; c ^= i*3; d ^= i*5;
+        e ^= i*7; f ^= i*11; g ^= i*13; h ^= i*17;
+    }
+    return a+b+c+d+e+f+g+h;
+}
 OPTMAX!:
 
 @flatten @hot
@@ -1164,6 +1291,11 @@ fn main() -> int {
         case 45: print(bench_par_xor(n));        break;
         case 46: print(bench_inline6(n));        break;
         case 47: print(bench_multi_reduce(n));   break;
+        case 48: print(bench_switch6(n));        break;
+        case 49: print(bench_deep_inline8(n));   break;
+        case 50: print(bench_vec_add(n));        break;
+        case 51: print(bench_classify_switch(n));break;
+        case 52: print(bench_xor8(n));           break;
         default: print(0);
     }
     invalidate n;
@@ -1944,6 +2076,92 @@ static long bench_multi_reduce(long n) {
     return sum1 + sum2 + sum3 + sum4;
 }
 
+/* 48 ── switch6_arith ─────────────────────────── */
+static long bench_switch6(long n) {
+    long sum = 0;
+    for (long i = 0; i < n; i++) {
+        switch (i % 6) {
+            case 0: sum += i * 7 + 3;       break;
+            case 1: sum -= (i ^ 0xfff) + 5; break;
+            case 2: sum ^= i * 11 - 1;      break;
+            case 3: sum += (i << 3) + i;     break;
+            case 4: sum -= i * 5 + 7;        break;
+            default: sum += (i >> 1) + i;
+        }
+    }
+    return sum;
+}
+
+/* 49 ── deep_inline8 ──────────────────────────── */
+static inline long di1(long x) { return x + 1; }
+static inline long di2(long x) { return di1(x) + di1(x + 1); }
+static inline long di3(long x) { return di2(x) + 3; }
+static inline long di4(long x) { return di3(x) * 2 - di2(x); }
+static inline long di5(long x) { return di4(x) + di3(x + 1); }
+static inline long di6(long x) { return di5(x) ^ di4(x + 1); }
+static inline long di7(long x) { return di6(x) + di5(x) - di3(x); }
+static inline long di8(long x) { return di7(x) + di6(x + 1); }
+static long bench_deep_inline8(long n) {
+    long sum = 0;
+    for (long i = 0; i < n; i++) {
+        sum += di8(i % 5000);
+    }
+    return sum;
+}
+
+/* 50 ── vectorize_add ─────────────────────────── */
+static long bench_vec_add(long n) {
+    long a = 0, b = 0, c = 0, d = 0;
+    for (long i = 0; i < n; i++) {
+        a += i * 2 + 1;
+        b += i * 3 + 2;
+        c += i * 5 + 3;
+        d += i * 7 + 5;
+    }
+    return a + b + c + d;
+}
+
+/* 51 ── classify_switch ───────────────────────── */
+static inline long classify_val(long x) {
+    switch (x >> 13) {
+        case 0: return 1;
+        case 1: return 2;
+        case 2: return 3;
+        case 3: return 4;
+        case 4: return 5;
+        case 5: return 6;
+        case 6: return 7;
+        case 7: return 8;
+        case 8: return 9;
+        case 9: return 10;
+        case 10: return 11;
+        case 11: return 12;
+        case 12: return 13;
+        case 13: return 14;
+        case 14: return 15;
+        default: return 16;
+    }
+}
+static long bench_classify_switch(long n) {
+    long sum = 0;
+    for (long i = 0; i < n; i++) {
+        sum += classify_val(i % 500000);
+        sum += classify_val((i * 7) % 500000);
+        sum += classify_val((i * 13) % 500000);
+    }
+    return sum;
+}
+
+/* 52 ── reduction_xor8 ────────────────────────── */
+static long bench_xor8(long n) {
+    long a=0,b=0,c=0,d=0,e=0,f=0,g=0,h=0;
+    for (long i = 1; i < n; i++) {
+        a ^= i; b ^= i*2; c ^= i*3; d ^= i*5;
+        e ^= i*7; f ^= i*11; g ^= i*13; h ^= i*17;
+    }
+    return a+b+c+d+e+f+g+h;
+}
+
 int main(void) {
     int test_id; long n;
     scanf("%d %ld", &test_id, &n);
@@ -1997,6 +2215,11 @@ int main(void) {
         case 45: r = bench_par_xor(n);     break;
         case 46: r = bench_inline6(n);     break;
         case 47: r = bench_multi_reduce(n);break;
+        case 48: r = bench_switch6(n);     break;
+        case 49: r = bench_deep_inline8(n);break;
+        case 50: r = bench_vec_add(n);     break;
+        case 51: r = bench_classify_switch(n);break;
+        case 52: r = bench_xor8(n);        break;
     }
     printf("%ld\n", r);
     return 0;
