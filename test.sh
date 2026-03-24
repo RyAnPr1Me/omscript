@@ -13,7 +13,7 @@ RUNS=3          # iterations per benchmark for stable timing
 # Track wall-clock time for the entire script so we can report where time is spent.
 SCRIPT_START=$(date +%s%N)
 
-NUM_BENCHMARKS=44
+NUM_BENCHMARKS=48
 
 BENCH_NAME=(
     "integer_math"
@@ -60,6 +60,10 @@ BENCH_NAME=(
     "reduction4"
     "switch_inline"
     "unrolled_sum"
+    "switch_dispatch4"
+    "parallel_xor"
+    "inline_arith6"
+    "multi_reduce"
 )
 
 BENCH_DESC=(
@@ -107,6 +111,10 @@ BENCH_DESC=(
     "Four parallel reductions"
     "Switch dispatching to inline functions"
     "8-way parallel unrolled sum"
+    "4-way switch with inline arithmetic helpers"
+    "8 parallel XOR accumulators"
+    "6-deep inline arithmetic chain"
+    "Multiple independent reductions"
 )
 
 # Input sizes – tuned so each test takes ~30-200 ms in C.
@@ -156,6 +164,10 @@ BENCH_N=(
     5000000   # 41  reduction4
     5000000   # 42  switch_inline
     5000000   # 43  unrolled_sum
+    5000000   # 44  switch_dispatch4
+    5000000   # 45  parallel_xor
+    5000000   # 46  inline_arith6
+    5000000   # 47  multi_reduce
 )
 
 BOTTLENECK_LABELS=(
@@ -203,6 +215,10 @@ BOTTLENECK_LABELS=(
     "parallel reduction vectorization"
     "switch+inline combo optimization"
     "8-way parallel sum unrolling"
+    "4-way switch with inline dispatch"
+    "8-way parallel XOR reduction"
+    "6-level inline chain optimization"
+    "multiple independent reduction optimization"
 )
 
 # ─── COLOR CODES ──────────────────────────────────────────────
@@ -329,7 +345,7 @@ fn bench_nested(@prefetch n:int) -> int {
     for (i:int in 0...n:int) {
         for (j:int in 0...n:int) {
             for (k:int in 0...n:int) {
-                 sum += ((i ^ j) + k) % 37;
+                 sum += ((i ^ j) + k) & 63;
             }
         }
     }
@@ -478,7 +494,7 @@ fn bench_combined(n:int) -> int {
     for (i:int in 0...ns) {
         for (j:int in 0...ns) {
             for (k:int in 0...ns) {
-                total += ((i ^ j) + k) % 37;
+                total += ((i ^ j) + k) & 63;
             }
         }
     }
@@ -1009,6 +1025,89 @@ fn bench_unrolled_sum(@prefetch n:int) -> int {
     }
     return s1 + s2 + s3 + s4 + s5 + s6 + s7 + s8;
 }
+
+// 44. switch_dispatch4 - 4-way switch with inline helpers
+@hot @inline
+fn sw4_op0(x:int) -> int { return (x * 7 + 3) ^ (x >> 2); }
+@hot @inline
+fn sw4_op1(x:int) -> int { return (x * 13 - 5) + (x & 0xff); }
+@hot @inline
+fn sw4_op2(x:int) -> int { return (x << 2) ^ (x * 3 + 11); }
+@hot @inline
+fn sw4_op3(x:int) -> int { return (x + x * 5) - (x >> 3); }
+@hot @flatten @unroll
+fn bench_switch4(@prefetch n:int) -> int {
+    var sum:int = 0;
+    for (i:int in 0...n) {
+        switch (i & 3) {
+            case 0: sum += sw4_op0(i); break;
+            case 1: sum += sw4_op1(i); break;
+            case 2: sum += sw4_op2(i); break;
+            default: sum += sw4_op3(i);
+        }
+    }
+    invalidate n;
+    return sum;
+}
+
+// 45. parallel_xor - 8 parallel XOR accumulators
+@hot @flatten @unroll @vectorize @pure
+fn bench_par_xor(@prefetch n:int) -> int {
+    var a:int = 0; var b:int = 0;
+    var c:int = 0; var d:int = 0;
+    var e:int = 0; var f:int = 0;
+    var g:int = 0; var h:int = 0;
+    for (i:int in 0...n) {
+        a ^= (i * 7);
+        b ^= (i * 13);
+        c ^= (i * 19);
+        d ^= (i * 31);
+        e ^= (i * 37);
+        f ^= (i * 43);
+        g ^= (i * 53);
+        h ^= (i * 61);
+    }
+    return a + b + c + d + e + f + g + h;
+}
+
+// 46. inline_arith6 - 6-deep inline arithmetic chain
+@hot @inline
+fn ia1(x:int) -> int { return x * 2 + 1; }
+@hot @inline
+fn ia2(x:int) -> int { return ia1(x) + ia1(x + 1); }
+@hot @inline
+fn ia3(x:int) -> int { return ia2(x) * 3 - ia1(x); }
+@hot @inline
+fn ia4(x:int) -> int { return ia3(x) + ia2(x + 1); }
+@hot @inline
+fn ia5(x:int) -> int { return ia4(x) ^ ia3(x + 2); }
+@hot @inline
+fn ia6(x:int) -> int { return ia5(x) + ia4(x) - ia2(x); }
+@hot @flatten @unroll
+fn bench_inline6(@prefetch n:int) -> int {
+    var sum:int = 0;
+    for (i:int in 0...n:int) {
+        sum += ia6(i % 5000);
+    }
+    invalidate n;
+    return sum;
+}
+
+// 47. multi_reduce - Multiple independent reductions
+@hot @flatten @unroll @vectorize @pure
+fn bench_multi_reduce(@prefetch n:int) -> int {
+    var sum1:int = 0;
+    var sum2:int = 0;
+    var sum3:int = 0;
+    var sum4:int = 0;
+    for (i:int in 1...n) {
+        sum1 += i * i;
+        sum2 += i * i * i;
+        sum3 += i * 3 + 1;
+        sum4 ^= (i * 7 + 13);
+    }
+    return sum1 + sum2 + sum3 + sum4;
+}
 OPTMAX!:
 
 @flatten @hot
@@ -1061,6 +1160,10 @@ fn main() -> int {
         case 41: print(bench_reduce4(n));        break;
         case 42: print(bench_switch_inline(n));  break;
         case 43: print(bench_unrolled_sum(n));   break;
+        case 44: print(bench_switch4(n));        break;
+        case 45: print(bench_par_xor(n));        break;
+        case 46: print(bench_inline6(n));        break;
+        case 47: print(bench_multi_reduce(n));   break;
         default: print(0);
     }
     invalidate n;
@@ -1197,7 +1300,7 @@ static long bench_nested(long n) {
     for (long i = 0; i < n; i++)
         for (long j = 0; j < n; j++)
             for (long k = 0; k < n; k++)
-                sum += ((i ^ j) + k) % 37;
+                sum += ((i ^ j) + k) & 63;
     return sum;
 }
 
@@ -1340,7 +1443,7 @@ static long bench_combined(long n) {
       for (long i = 0; i < ns; i++)
         for (long j = 0; j < ns; j++)
           for (long k = 0; k < ns; k++)
-            total += ((i ^ j) + k) % 37;
+            total += ((i ^ j) + k) & 63;
     }
 
     return total;
@@ -1779,6 +1882,68 @@ static long bench_unrolled_sum(long n) {
     return s1 + s2 + s3 + s4 + s5 + s6 + s7 + s8;
 }
 
+/* 44 ── switch_dispatch4 ──────────────────────── */
+static inline long sw4_op0(long x) { return (x * 7 + 3) ^ (x >> 2); }
+static inline long sw4_op1(long x) { return (x * 13 - 5) + (x & 0xff); }
+static inline long sw4_op2(long x) { return (x << 2) ^ (x * 3 + 11); }
+static inline long sw4_op3(long x) { return (x + x * 5) - (x >> 3); }
+static long bench_switch4(long n) {
+    long sum = 0;
+    for (long i = 0; i < n; i++) {
+        switch (i & 3) {
+            case 0: sum += sw4_op0(i); break;
+            case 1: sum += sw4_op1(i); break;
+            case 2: sum += sw4_op2(i); break;
+            default: sum += sw4_op3(i);
+        }
+    }
+    return sum;
+}
+
+/* 45 ── parallel_xor ─────────────────────────── */
+static long bench_par_xor(long n) {
+    long a = 0, b = 0, c = 0, d = 0;
+    long e = 0, f = 0, g = 0, h = 0;
+    for (long i = 0; i < n; i++) {
+        a ^= (i * 7);
+        b ^= (i * 13);
+        c ^= (i * 19);
+        d ^= (i * 31);
+        e ^= (i * 37);
+        f ^= (i * 43);
+        g ^= (i * 53);
+        h ^= (i * 61);
+    }
+    return a + b + c + d + e + f + g + h;
+}
+
+/* 46 ── inline_arith6 ─────────────────────────── */
+static inline long ia1(long x) { return x * 2 + 1; }
+static inline long ia2(long x) { return ia1(x) + ia1(x + 1); }
+static inline long ia3(long x) { return ia2(x) * 3 - ia1(x); }
+static inline long ia4(long x) { return ia3(x) + ia2(x + 1); }
+static inline long ia5(long x) { return ia4(x) ^ ia3(x + 2); }
+static inline long ia6(long x) { return ia5(x) + ia4(x) - ia2(x); }
+static long bench_inline6(long n) {
+    long sum = 0;
+    for (long i = 0; i < n; i++) {
+        sum += ia6(i % 5000);
+    }
+    return sum;
+}
+
+/* 47 ── multi_reduce ──────────────────────────── */
+static long bench_multi_reduce(long n) {
+    long sum1 = 0, sum2 = 0, sum3 = 0, sum4 = 0;
+    for (long i = 1; i < n; i++) {
+        sum1 += i * i;
+        sum2 += i * i * i;
+        sum3 += i * 3 + 1;
+        sum4 ^= (i * 7 + 13);
+    }
+    return sum1 + sum2 + sum3 + sum4;
+}
+
 int main(void) {
     int test_id; long n;
     scanf("%d %ld", &test_id, &n);
@@ -1828,6 +1993,10 @@ int main(void) {
         case 41: r = bench_reduce4(n);     break;
         case 42: r = bench_switch_inline(n);break;
         case 43: r = bench_unrolled_sum(n);break;
+        case 44: r = bench_switch4(n);     break;
+        case 45: r = bench_par_xor(n);     break;
+        case 46: r = bench_inline6(n);     break;
+        case 47: r = bench_multi_reduce(n);break;
     }
     printf("%ld\n", r);
     return 0;

@@ -276,7 +276,7 @@ void CodeGenerator::runOptimizationPasses() {
         PTO.CallGraphProfile = true;
     }
     if (optimizationLevel == OptimizationLevel::O3) {
-        PTO.InlinerThreshold = 500; // aggressive inlining for maximum IPC
+        PTO.InlinerThreshold = 750; // aggressive inlining for maximum IPC
     }
 
     // ---------------------------------------------------------------------------
@@ -1105,7 +1105,7 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     //
     // We collect OPTMAX function pointers in a single pass so that the later
     // optimization loop can skip the name→string conversion per function.
-    static constexpr unsigned kAlwaysInlineThreshold = 30; // instruction count
+    static constexpr unsigned kAlwaysInlineThreshold = 100; // instruction count
     llvm::SmallVector<llvm::Function*, 16> optMaxFuncs;
     for (auto& func : module->functions()) {
         if (func.isDeclaration())
@@ -1164,7 +1164,7 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     // Higher threshold enables unrolling of loops containing modulo/division
     // sequences that expand to multiple µops during ISel.
     fpm.add(llvm::createLoopUnrollPass(/*OptLevel=*/3, /*OnlyWhenForced=*/false,
-                                       /*ForgetAllSCEV=*/false, /*Threshold=*/500));
+                                       /*ForgetAllSCEV=*/false, /*Threshold=*/1000));
     // Phase 2.5: Post-loop cleanup.  After unrolling, GVN + InstCombine catch
     // constant-foldable patterns in unrolled iterations (e.g. known-constant
     // IV values, redundant loads) that DCE alone would miss.
