@@ -1674,8 +1674,10 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
 
         // Bounds check — elided in OPTMAX functions where compile-time
         // ownership analysis guarantees safety (zero-cost abstraction).
-        // Also elided when the index is a provably-safe for-loop iterator.
-        bool boundsCheckElidedID = inOptMaxFunction;
+        // Also elided in @hot functions at O2+ (user asserts performance-critical
+        // code with safe indices) and when the index is a provably-safe loop iterator.
+        bool boundsCheckElidedID = inOptMaxFunction
+            || (currentFuncHintHot_ && optimizationLevel >= OptimizationLevel::O2);
 
         if (!boundsCheckElidedID && optimizationLevel >= OptimizationLevel::O1) {
             auto* idxIdent = dynamic_cast<IdentifierExpr*>(indexExpr->index.get());
@@ -1999,7 +2001,11 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
     // iterator is always in [start, endVal).  If the index is a known-safe
     // loop iterator AND we can verify endVal <= array length, the bounds
     // check is provably unnecessary (zero-cost abstraction).
-    bool boundsCheckElided = inOptMaxFunction;
+    //
+    // @hot functions at O2+ also skip bounds checks: the user asserts the
+    // function is performance-critical with safe array access patterns.
+    bool boundsCheckElided = inOptMaxFunction
+        || (currentFuncHintHot_ && !isStr && optimizationLevel >= OptimizationLevel::O2);
 
     if (!boundsCheckElided && !isStr && optimizationLevel >= OptimizationLevel::O1) {
         // Check if the index value is a safe loop iterator (non-negative,
@@ -2133,8 +2139,10 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
 
     // Bounds check — elided in OPTMAX functions where compile-time
     // ownership analysis guarantees safety (zero-cost abstraction).
-    // Also elided when the index is a provably-safe for-loop iterator.
-    bool boundsCheckElidedA = inOptMaxFunction;
+    // Also elided in @hot functions at O2+ and when the index is a
+    // provably-safe for-loop iterator.
+    bool boundsCheckElidedA = inOptMaxFunction
+        || (currentFuncHintHot_ && !isStr && optimizationLevel >= OptimizationLevel::O2);
 
     if (!boundsCheckElidedA && !isStr && optimizationLevel >= OptimizationLevel::O1) {
         auto* idxIdent = dynamic_cast<IdentifierExpr*>(expr->index.get());

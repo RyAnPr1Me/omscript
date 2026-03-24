@@ -2604,6 +2604,10 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     currentFuncHintVectorize_ = func->hintVectorize;
     currentFuncHintNoVectorize_ = func->hintNoVectorize;
 
+    // @hot: per-function hot annotation.  Used for bounds check elimination
+    // and other performance-critical optimizations.
+    currentFuncHintHot_ = func->hintHot;
+
     // Create entry basic block
     llvm::BasicBlock* entry = llvm::BasicBlock::Create(*context, "entry", function);
     builder->SetInsertPoint(entry);
