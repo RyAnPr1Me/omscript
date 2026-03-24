@@ -517,11 +517,12 @@ class Program : public ASTNode {
     std::vector<std::unique_ptr<FunctionDecl>> functions;
     std::vector<std::unique_ptr<EnumDecl>> enums;
     std::vector<std::unique_ptr<StructDecl>> structs;
+    bool fileNoAlias = false;  ///< @noalias file directive: all pointers are noalias
 
     Program(std::vector<std::unique_ptr<FunctionDecl>> funcs, std::vector<std::unique_ptr<EnumDecl>> enms = {},
-            std::vector<std::unique_ptr<StructDecl>> strcts = {})
+            std::vector<std::unique_ptr<StructDecl>> strcts = {}, bool noAlias = false)
         : ASTNode(ASTNodeType::PROGRAM), functions(std::move(funcs)), enums(std::move(enms)),
-          structs(std::move(strcts)) {}
+          structs(std::move(strcts)), fileNoAlias(noAlias) {}
 };
 
 // ---------------------------------------------------------------------------

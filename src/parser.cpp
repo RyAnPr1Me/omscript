@@ -101,6 +101,7 @@ std::unique_ptr<Program> Parser::parse() {
     std::vector<std::unique_ptr<EnumDecl>> enums;
     std::vector<std::unique_ptr<StructDecl>> structs;
     bool optMaxTagActive = false;
+    bool fileNoAlias = false;
 
     while (!isAtEnd()) {
         if (match(TokenType::IMPORT)) {
@@ -183,9 +184,11 @@ std::unique_ptr<Program> Parser::parse() {
                     hintVectorize = true;
                 } else if (ann.lexeme == "novectorize") {
                     hintNoVectorize = true;
+                } else if (ann.lexeme == "noalias") {
+                    hintRestrict = true;  // @noalias on functions = @restrict
                 } else {
                     error("Unknown function annotation '@" + ann.lexeme +
-                          "'; supported: @inline, @noinline, @cold, @hot, @pure, @noreturn, @static, @flatten, @unroll, @nounroll, @restrict, @vectorize, @novectorize (use @prefetch on parameters)");
+                          "'; supported: @inline, @noinline, @cold, @hot, @pure, @noreturn, @static, @flatten, @unroll, @nounroll, @restrict, @noalias, @vectorize, @novectorize (use @prefetch on parameters)");
                 }
             }
             auto func = parseFunction(optMaxTagActive);
@@ -232,7 +235,7 @@ std::unique_ptr<Program> Parser::parse() {
     }
     lambdaFunctions_.clear();
 
-    return std::make_unique<Program>(std::move(functions), std::move(enums), std::move(structs));
+    return std::make_unique<Program>(std::move(functions), std::move(enums), std::move(structs), fileNoAlias);
 }
 
 void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,

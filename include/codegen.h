@@ -310,6 +310,9 @@ class CodeGenerator {
     /// constants, which the vectorizer then preserves as vector urem/udiv.
     std::unordered_set<llvm::Value*> nonNegValues_;
 
+    /// File-level @noalias: all pointer parameters are marked noalias.
+    bool fileNoAlias_ = false;
+
     /// Variables declared with `prefetch immut` — their loads get invariant
     /// metadata so LLVM can hoist/CSE them aggressively.
     std::unordered_set<std::string> prefetchedImmutVars_;

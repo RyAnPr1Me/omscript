@@ -783,7 +783,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         //
         // For regular functions, a factor of 2 keeps the code within L1
         // I-cache (2^3=8x worst case) while still amortizing loop overhead.
-        if (!addedUnrollHint && !inOptMaxFunction && optimizationLevel >= OptimizationLevel::O3 && enableUnrollLoops_ && !dynamicCompilation_) {
+        if (!addedUnrollHint && !inOptMaxFunction && !currentFuncHintUnroll_ && optimizationLevel >= OptimizationLevel::O3 && enableUnrollLoops_ && !dynamicCompilation_) {
             llvm::MDNode* unrollCount = llvm::MDNode::get(
                 *context,
                 {llvm::MDString::get(*context, "llvm.loop.unroll.count"),

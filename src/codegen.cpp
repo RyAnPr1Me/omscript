@@ -1990,6 +1990,7 @@ void CodeGenerator::generate(Program* program) {
     hasOptMaxFunctions = false;
     optMaxFunctions.clear();
     irInstructionCount_ = 0;
+    fileNoAlias_ = program->fileNoAlias;
 
     // --- DWARF debug info initialization ---
     if (debugMode_) {
@@ -2538,11 +2539,13 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     }
     if (func->hintPure) {
         // @pure: function has no side effects and does not read/write memory
-        // beyond its arguments.  Enables aggressive CSE, LICM, and dead call
-        // elimination.  memory(read) is the LLVM equivalent of "pure" — the
-        // function may read memory but does not write or have side effects.
+        // beyond its arguments.  This is a COMPILE-TIME GUARANTEE — the
+        // programmer asserts purity.  Enables aggressive CSE, LICM, dead
+        // call elimination, and speculative execution.
         function->setOnlyReadsMemory();
         function->setDoesNotThrow();
+        function->setWillReturn();
+        function->setDoesNotFreeMemory();
     }
     if (func->hintNoReturn) {
         function->addFnAttr(llvm::Attribute::NoReturn);
@@ -2560,13 +2563,12 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         // inline everything called from this function.
         function->addFnAttr("flatten");
     }
-    if (func->hintRestrict) {
-        // @restrict: tell LLVM this function only accesses memory through
-        // its arguments (argmem).  This enables aggressive alias-based
-        // optimizations: the optimizer can prove that separate call sites
-        // don't alias, enabling load/store reordering and vectorization.
-        // This is equivalent to C's __restrict__ semantics applied to
-        // all pointer parameters — no external side effects.
+    if (func->hintRestrict || fileNoAlias_) {
+        // @restrict / @noalias / file-level @noalias: tell LLVM this function
+        // only accesses memory through its arguments (argmem).  This enables
+        // aggressive alias-based optimizations: the optimizer can prove that
+        // separate call sites don't alias, enabling load/store reordering
+        // and vectorization.
         function->setOnlyAccessesArgMemory();
         function->setDoesNotThrow();
     }
