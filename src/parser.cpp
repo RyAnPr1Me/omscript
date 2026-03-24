@@ -953,11 +953,11 @@ std::unique_ptr<StructDecl> Parser::parseStructDecl() {
             else if (check(TokenType::SLASH)) { opStr = "/"; advance(); }
             else if (check(TokenType::PERCENT)) { opStr = "%"; advance(); }
             else if (check(TokenType::EQ)) { opStr = "=="; advance(); }
-            else if (check(TokenType::NEQ)) { opStr = "!="; advance(); }
+            else if (check(TokenType::NE)) { opStr = "!="; advance(); }
             else if (check(TokenType::LT)) { opStr = "<"; advance(); }
             else if (check(TokenType::GT)) { opStr = ">"; advance(); }
-            else if (check(TokenType::LTE)) { opStr = "<="; advance(); }
-            else if (check(TokenType::GTE)) { opStr = ">="; advance(); }
+            else if (check(TokenType::LE)) { opStr = "<="; advance(); }
+            else if (check(TokenType::GE)) { opStr = ">="; advance(); }
             else {
                 error("Expected operator symbol after 'operator' (e.g., +, -, *, /, ==, !=, <, >)");
             }

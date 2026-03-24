@@ -407,6 +407,9 @@ struct StructField {
         : name(n), typeName(t), attrs(a) {}
 };
 
+// Forward declaration for OperatorOverload.
+class FunctionDecl;
+
 /// Operator overload definition within a struct.
 /// e.g. `operator+(other: Vec2) -> Vec2 { ... }`
 struct OperatorOverload {
