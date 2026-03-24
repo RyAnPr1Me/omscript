@@ -6817,7 +6817,7 @@ std::vector<RewriteRule> getRelationalRules() {
             if (!c1 || !c2 || *c2 == 0) return false;
             if ((*c1 % *c2) != 0) return false;
             // Only safe when x is non-negative (signed modulo rounds toward zero)
-            const auto& xClass = g.getClass(g.find(s.at("x")));
+            const auto& xClass = g.getClass(s.at("x"));
             return xClass.isNonNeg;
         });
 
