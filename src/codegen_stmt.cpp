@@ -1352,6 +1352,7 @@ void CodeGenerator::generateInvalidate(InvalidateStmt* stmt) {
     // Mark the variable as dead for use-after-invalidate detection.
     deadVars_.insert(stmt->varName);
     deadVarReason_[stmt->varName] = "invalidated";
+    varOwnership_[stmt->varName] = OwnershipState::Invalidated;
 }
 
 void CodeGenerator::generateMoveDecl(MoveDecl* stmt) {
@@ -1410,6 +1411,13 @@ llvm::Value* CodeGenerator::generateMoveExpr(MoveExpr* expr) {
 llvm::Value* CodeGenerator::generateBorrowExpr(BorrowExpr* expr) {
     // Generate the source value.
     llvm::Value* val = generateExpression(expr->source.get());
+
+    // Track the source variable as borrowed in the ownership lattice.
+    // Borrowed variables cannot be mutated, moved, or invalidated until
+    // the borrow ends.
+    if (auto* srcIdent = dynamic_cast<IdentifierExpr*>(expr->source.get())) {
+        markVariableBorrowed(srcIdent->name);
+    }
 
     // If the source is an identifier, attach !noalias metadata to the load
     // as a hint that this borrow does not alias other pointers.
@@ -1582,6 +1590,21 @@ void CodeGenerator::markVariableMoved(const std::string& varName) {
     }
     deadVars_.insert(varName);
     deadVarReason_[varName] = "moved";
+    varOwnership_[varName] = OwnershipState::Moved;
+}
+
+void CodeGenerator::markVariableBorrowed(const std::string& varName) {
+    borrowedVars_.insert(varName);
+    varOwnership_[varName] = OwnershipState::Borrowed;
+}
+
+bool CodeGenerator::isVariableBorrowed(const std::string& varName) const {
+    return borrowedVars_.count(varName) > 0;
+}
+
+OwnershipState CodeGenerator::getOwnershipState(const std::string& varName) const {
+    auto it = varOwnership_.find(varName);
+    return (it != varOwnership_.end()) ? it->second : OwnershipState::Owned;
 }
 
 } // namespace omscript

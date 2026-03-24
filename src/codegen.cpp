@@ -2166,10 +2166,60 @@ void CodeGenerator::generate(Program* program) {
     }
 
     // Process struct declarations: store field layouts for struct operations.
+    // When hot/cold field attributes are present, reorder fields so that
+    // hot fields are grouped first (cache-friendly) and cold fields last.
+    // This improves spatial locality for performance-critical access patterns.
     for (auto& structDecl : program->structs) {
-        structDefs_[structDecl->name] = structDecl->fields;
         if (!structDecl->fieldDecls.empty()) {
-            structFieldDecls_[structDecl->name] = structDecl->fieldDecls;
+            // Check if any field has hot or cold annotations.
+            bool hasLayoutHints = false;
+            for (const auto& fd : structDecl->fieldDecls) {
+                if (fd.attrs.hot || fd.attrs.cold) {
+                    hasLayoutHints = true;
+                    break;
+                }
+            }
+
+            if (hasLayoutHints && optimizationLevel >= OptimizationLevel::O2) {
+                // Reorder: hot fields first, normal fields next, cold fields last.
+                // Build a permutation that maps original index → new index.
+                std::vector<size_t> hotIdx, normalIdx, coldIdx;
+                for (size_t i = 0; i < structDecl->fieldDecls.size(); ++i) {
+                    if (structDecl->fieldDecls[i].attrs.hot)
+                        hotIdx.push_back(i);
+                    else if (structDecl->fieldDecls[i].attrs.cold)
+                        coldIdx.push_back(i);
+                    else
+                        normalIdx.push_back(i);
+                }
+
+                // Build reordered field lists.
+                std::vector<std::string> reorderedFields;
+                std::vector<StructField> reorderedDecls;
+                reorderedFields.reserve(structDecl->fields.size());
+                reorderedDecls.reserve(structDecl->fieldDecls.size());
+
+                for (size_t i : hotIdx) {
+                    reorderedFields.push_back(structDecl->fields[i]);
+                    reorderedDecls.push_back(structDecl->fieldDecls[i]);
+                }
+                for (size_t i : normalIdx) {
+                    reorderedFields.push_back(structDecl->fields[i]);
+                    reorderedDecls.push_back(structDecl->fieldDecls[i]);
+                }
+                for (size_t i : coldIdx) {
+                    reorderedFields.push_back(structDecl->fields[i]);
+                    reorderedDecls.push_back(structDecl->fieldDecls[i]);
+                }
+
+                structDefs_[structDecl->name] = reorderedFields;
+                structFieldDecls_[structDecl->name] = reorderedDecls;
+            } else {
+                structDefs_[structDecl->name] = structDecl->fields;
+                structFieldDecls_[structDecl->name] = structDecl->fieldDecls;
+            }
+        } else {
+            structDefs_[structDecl->name] = structDecl->fields;
         }
     }
 

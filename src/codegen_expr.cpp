@@ -2007,6 +2007,16 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
     bool boundsCheckElided = inOptMaxFunction
         || (currentFuncHintHot_ && !isStr && optimizationLevel >= OptimizationLevel::O2);
 
+    // Ownership-aware optimization: borrowed arrays cannot be resized,
+    // so their length is invariant.  Mark the length load with !invariant.load
+    // so LLVM can hoist/CSE it across the loop.
+    bool arrayIsBorrowed = false;
+    if (!isStr) {
+        if (auto* arrIdent = dynamic_cast<IdentifierExpr*>(expr->array.get())) {
+            arrayIsBorrowed = isVariableBorrowed(arrIdent->name);
+        }
+    }
+
     if (!boundsCheckElided && !isStr && optimizationLevel >= OptimizationLevel::O1) {
         // Check if the index value is a safe loop iterator (non-negative,
         // ascending, bounded by loop end).
@@ -2059,7 +2069,14 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
             lenVal = builder->CreateCall(getOrDeclareStrlen(), {basePtr}, "idx.strlen");
         } else {
             // Array: length is stored in slot 0 of the buffer.
-            lenVal = builder->CreateLoad(getDefaultType(), basePtr, "idx.len");
+            auto* lenLoad = builder->CreateLoad(getDefaultType(), basePtr, "idx.len");
+            // Borrowed arrays cannot resize — mark length as invariant so
+            // LLVM can hoist it out of loops and CSE multiple loads.
+            if (arrayIsBorrowed) {
+                lenLoad->setMetadata(llvm::LLVMContext::MD_invariant_load,
+                                     llvm::MDNode::get(*context, {}));
+            }
+            lenVal = lenLoad;
         }
 
         // Bounds check: 0 <= index < length
@@ -2144,6 +2161,14 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
     bool boundsCheckElidedA = inOptMaxFunction
         || (currentFuncHintHot_ && !isStr && optimizationLevel >= OptimizationLevel::O2);
 
+    // Ownership-aware: borrowed arrays cannot resize, so length is stable.
+    bool arrayIsBorrowedA = false;
+    if (!isStr) {
+        if (auto* arrIdent = dynamic_cast<IdentifierExpr*>(expr->array.get())) {
+            arrayIsBorrowedA = isVariableBorrowed(arrIdent->name);
+        }
+    }
+
     if (!boundsCheckElidedA && !isStr && optimizationLevel >= OptimizationLevel::O1) {
         auto* idxIdent = dynamic_cast<IdentifierExpr*>(expr->index.get());
         if (idxIdent && safeIndexVars_.count(idxIdent->name)) {
@@ -2183,7 +2208,13 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
         if (isStr) {
             lenVal = builder->CreateCall(getOrDeclareStrlen(), {basePtr}, "idxa.strlen");
         } else {
-            lenVal = builder->CreateLoad(getDefaultType(), basePtr, "idxa.len");
+            auto* lenLoad = builder->CreateLoad(getDefaultType(), basePtr, "idxa.len");
+            // Borrowed arrays cannot resize — length is invariant.
+            if (arrayIsBorrowedA) {
+                lenLoad->setMetadata(llvm::LLVMContext::MD_invariant_load,
+                                     llvm::MDNode::get(*context, {}));
+            }
+            lenVal = lenLoad;
         }
 
         // Bounds check: 0 <= index < length
