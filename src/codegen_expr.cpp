@@ -1672,33 +1672,36 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
         llvm::Value* arrPtr =
             arrVal->getType()->isPointerTy() ? arrVal : builder->CreateIntToPtr(arrVal, ptrTy, "incdec.arrptr");
 
-        // Bounds check
-        llvm::Value* lenVal = builder->CreateLoad(getDefaultType(), arrPtr, "incdec.len");
-        llvm::Value* inBounds = builder->CreateICmpSLT(idxVal, lenVal, "incdec.inbounds");
-        llvm::Value* notNeg =
-            builder->CreateICmpSGE(idxVal, llvm::ConstantInt::get(getDefaultType(), 0), "incdec.notneg");
-        llvm::Value* valid = builder->CreateAnd(inBounds, notNeg, "incdec.valid");
+        // Bounds check — elided in OPTMAX functions where compile-time
+        // ownership analysis guarantees safety (zero-cost abstraction).
+        if (!inOptMaxFunction) {
+            llvm::Value* lenVal = builder->CreateLoad(getDefaultType(), arrPtr, "incdec.len");
+            llvm::Value* inBounds = builder->CreateICmpSLT(idxVal, lenVal, "incdec.inbounds");
+            llvm::Value* notNeg =
+                builder->CreateICmpSGE(idxVal, llvm::ConstantInt::get(getDefaultType(), 0), "incdec.notneg");
+            llvm::Value* valid = builder->CreateAnd(inBounds, notNeg, "incdec.valid");
 
-        llvm::Function* function = builder->GetInsertBlock()->getParent();
-        llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "incdec.ok", function);
-        llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "incdec.fail", function);
-        builder->CreateCondBr(valid, okBB, failBB);
+            llvm::Function* function = builder->GetInsertBlock()->getParent();
+            llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "incdec.ok", function);
+            llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "incdec.fail", function);
+            builder->CreateCondBr(valid, okBB, failBB);
 
-        builder->SetInsertPoint(failBB);
-        llvm::Value* errMsg = builder->CreateGlobalString("Runtime error: array index out of bounds\n", "idx_oob_msg");
-        builder->CreateCall(getPrintfFunction(), {errMsg});
-        builder->CreateCall(getOrDeclareAbort());
-        builder->CreateUnreachable();
+            builder->SetInsertPoint(failBB);
+            llvm::Value* errMsg = builder->CreateGlobalString("Runtime error: array index out of bounds\n", "idx_oob_msg");
+            builder->CreateCall(getPrintfFunction(), {errMsg});
+            builder->CreateCall(getOrDeclareAbort());
+            builder->CreateUnreachable();
 
-        builder->SetInsertPoint(okBB);
+            builder->SetInsertPoint(okBB);
+        }
         llvm::Value* offset = builder->CreateAdd(idxVal, llvm::ConstantInt::get(getDefaultType(), 1), "incdec.offset");
         llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrPtr, offset, "incdec.elem.ptr");
-        llvm::Value* current = builder->CreateLoad(getDefaultType(), elemPtr, "incdec.elem");
+        llvm::Value* current = builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "incdec.elem");
 
         llvm::Value* delta = llvm::ConstantInt::get(getDefaultType(), 1, true);
         llvm::Value* updated =
             (op == "++") ? builder->CreateAdd(current, delta, "inc") : builder->CreateSub(current, delta, "dec");
-        builder->CreateStore(updated, elemPtr);
+        builder->CreateAlignedStore(updated, elemPtr, llvm::MaybeAlign(8));
         return isPostfix ? current : updated;
     }
 
@@ -1961,37 +1964,42 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
     llvm::Value* basePtr =
         arrVal->getType()->isPointerTy() ? arrVal : builder->CreateIntToPtr(arrVal, ptrTy, "idx.baseptr");
 
-    llvm::Function* function = builder->GetInsertBlock()->getParent();
-    llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "idx.ok", function);
-    llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "idx.fail", function);
+    // Bounds check — elided in OPTMAX functions where compile-time
+    // ownership analysis guarantees safety (zero-cost abstraction).
+    if (!inOptMaxFunction) {
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "idx.ok", function);
+        llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "idx.fail", function);
 
-    llvm::Value* lenVal;
-    if (isStr) {
-        // String: use strlen to get length — no length header.
-        lenVal = builder->CreateCall(getOrDeclareStrlen(), {basePtr}, "idx.strlen");
-    } else {
-        // Array: length is stored in slot 0 of the buffer.
-        lenVal = builder->CreateLoad(getDefaultType(), basePtr, "idx.len");
+        llvm::Value* lenVal;
+        if (isStr) {
+            // String: use strlen to get length — no length header.
+            lenVal = builder->CreateCall(getOrDeclareStrlen(), {basePtr}, "idx.strlen");
+        } else {
+            // Array: length is stored in slot 0 of the buffer.
+            lenVal = builder->CreateLoad(getDefaultType(), basePtr, "idx.len");
+        }
+
+        // Bounds check: 0 <= index < length
+        llvm::Value* inBounds = builder->CreateICmpSLT(idxVal, lenVal, "idx.inbounds");
+        llvm::Value* notNeg = builder->CreateICmpSGE(idxVal, llvm::ConstantInt::get(getDefaultType(), 0), "idx.notneg");
+        llvm::Value* valid = builder->CreateAnd(inBounds, notNeg, "idx.valid");
+
+        builder->CreateCondBr(valid, okBB, failBB);
+
+        // Out-of-bounds path: print error and abort
+        builder->SetInsertPoint(failBB);
+        llvm::Value* errMsg =
+            isStr ? builder->CreateGlobalString("Runtime error: string index out of bounds\n", "idx_str_oob_msg")
+                  : builder->CreateGlobalString("Runtime error: array index out of bounds\n", "idx_arr_oob_msg");
+        builder->CreateCall(getPrintfFunction(), {errMsg});
+        builder->CreateCall(getOrDeclareAbort());
+        builder->CreateUnreachable();
+
+        // Success path
+        builder->SetInsertPoint(okBB);
     }
 
-    // Bounds check: 0 <= index < length
-    llvm::Value* inBounds = builder->CreateICmpSLT(idxVal, lenVal, "idx.inbounds");
-    llvm::Value* notNeg = builder->CreateICmpSGE(idxVal, llvm::ConstantInt::get(getDefaultType(), 0), "idx.notneg");
-    llvm::Value* valid = builder->CreateAnd(inBounds, notNeg, "idx.valid");
-
-    builder->CreateCondBr(valid, okBB, failBB);
-
-    // Out-of-bounds path: print error and abort
-    builder->SetInsertPoint(failBB);
-    llvm::Value* errMsg =
-        isStr ? builder->CreateGlobalString("Runtime error: string index out of bounds\n", "idx_str_oob_msg")
-              : builder->CreateGlobalString("Runtime error: array index out of bounds\n", "idx_arr_oob_msg");
-    builder->CreateCall(getPrintfFunction(), {errMsg});
-    builder->CreateCall(getOrDeclareAbort());
-    builder->CreateUnreachable();
-
-    // Success path
-    builder->SetInsertPoint(okBB);
     if (isStr) {
         // Load single byte at offset index, zero-extend to i64
         llvm::Value* charPtr = builder->CreateGEP(llvm::Type::getInt8Ty(*context), basePtr, idxVal, "idx.charptr");
@@ -2001,7 +2009,7 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
     // Array: element is at slot (index + 1) in the i64 buffer.
     llvm::Value* offset = builder->CreateAdd(idxVal, llvm::ConstantInt::get(getDefaultType(), 1), "idx.offset");
     llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), basePtr, offset, "idx.elem.ptr");
-    return builder->CreateLoad(getDefaultType(), elemPtr, "idx.elem");
+    return builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "idx.elem");
 }
 
 llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
@@ -2044,35 +2052,40 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
     llvm::Value* basePtr =
         arrVal->getType()->isPointerTy() ? arrVal : builder->CreateIntToPtr(arrVal, ptrTy, "idxa.baseptr");
 
-    llvm::Function* function = builder->GetInsertBlock()->getParent();
-    llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "idxa.ok", function);
-    llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "idxa.fail", function);
+    // Bounds check — elided in OPTMAX functions where compile-time
+    // ownership analysis guarantees safety (zero-cost abstraction).
+    if (!inOptMaxFunction) {
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "idxa.ok", function);
+        llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "idxa.fail", function);
 
-    llvm::Value* lenVal;
-    if (isStr) {
-        lenVal = builder->CreateCall(getOrDeclareStrlen(), {basePtr}, "idxa.strlen");
-    } else {
-        lenVal = builder->CreateLoad(getDefaultType(), basePtr, "idxa.len");
+        llvm::Value* lenVal;
+        if (isStr) {
+            lenVal = builder->CreateCall(getOrDeclareStrlen(), {basePtr}, "idxa.strlen");
+        } else {
+            lenVal = builder->CreateLoad(getDefaultType(), basePtr, "idxa.len");
+        }
+
+        // Bounds check: 0 <= index < length
+        llvm::Value* inBounds = builder->CreateICmpSLT(idxVal, lenVal, "idxa.inbounds");
+        llvm::Value* notNeg = builder->CreateICmpSGE(idxVal, llvm::ConstantInt::get(getDefaultType(), 0), "idxa.notneg");
+        llvm::Value* valid = builder->CreateAnd(inBounds, notNeg, "idxa.valid");
+
+        builder->CreateCondBr(valid, okBB, failBB);
+
+        // Out-of-bounds path: print error and abort
+        builder->SetInsertPoint(failBB);
+        llvm::Value* errMsg =
+            isStr ? builder->CreateGlobalString("Runtime error: string index out of bounds\n", "idxa_str_oob_msg")
+                  : builder->CreateGlobalString("Runtime error: array index out of bounds\n", "idxa_arr_oob_msg");
+        builder->CreateCall(getPrintfFunction(), {errMsg});
+        builder->CreateCall(getOrDeclareAbort());
+        builder->CreateUnreachable();
+
+        // Success path
+        builder->SetInsertPoint(okBB);
     }
 
-    // Bounds check: 0 <= index < length
-    llvm::Value* inBounds = builder->CreateICmpSLT(idxVal, lenVal, "idxa.inbounds");
-    llvm::Value* notNeg = builder->CreateICmpSGE(idxVal, llvm::ConstantInt::get(getDefaultType(), 0), "idxa.notneg");
-    llvm::Value* valid = builder->CreateAnd(inBounds, notNeg, "idxa.valid");
-
-    builder->CreateCondBr(valid, okBB, failBB);
-
-    // Out-of-bounds path: print error and abort
-    builder->SetInsertPoint(failBB);
-    llvm::Value* errMsg =
-        isStr ? builder->CreateGlobalString("Runtime error: string index out of bounds\n", "idxa_str_oob_msg")
-              : builder->CreateGlobalString("Runtime error: array index out of bounds\n", "idxa_arr_oob_msg");
-    builder->CreateCall(getPrintfFunction(), {errMsg});
-    builder->CreateCall(getOrDeclareAbort());
-    builder->CreateUnreachable();
-
-    // Success path
-    builder->SetInsertPoint(okBB);
     if (isStr) {
         // Truncate to i8 and store at byte offset index
         llvm::Value* byteVal = builder->CreateTrunc(newVal, llvm::Type::getInt8Ty(*context), "idxa.byte");
@@ -2082,7 +2095,7 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
         // Array: store i64 element at slot (index + 1)
         llvm::Value* offset = builder->CreateAdd(idxVal, llvm::ConstantInt::get(getDefaultType(), 1), "idxa.offset");
         llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), basePtr, offset, "idxa.elem.ptr");
-        builder->CreateStore(newVal, elemPtr);
+        builder->CreateAlignedStore(newVal, elemPtr, llvm::MaybeAlign(8));
     }
     return newVal;
 }

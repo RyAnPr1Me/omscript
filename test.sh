@@ -1070,7 +1070,7 @@ static long bench_bsearch(long n) {
         long lo = 0, hi = sz - 1;
         while (lo <= hi) {
             long mid = (lo + hi) / 2;
-            if (arr[mid] == target) { found++; break; }
+            if (arr[mid] == target) { found++; lo = hi + 1; }
             else if (arr[mid] < target) lo = mid + 1;
             else hi = mid - 1;
         }
