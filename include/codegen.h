@@ -402,6 +402,7 @@ class CodeGenerator {
     bool currentFuncHintNoVectorize_ = false;
     bool currentFuncHintHot_ = false;  ///< Current function has @hot annotation
     unsigned loopNestDepth_ = 0; ///< Current for-loop nesting depth (0 = not in a loop)
+    bool bodyHasInnerLoop_ = false; ///< Set when a while/for loop is found inside a for-loop body
 
     /// Classify a function into its execution tier based on type annotations,
     /// OPTMAX status, and whether it is a special function (main/stdlib).

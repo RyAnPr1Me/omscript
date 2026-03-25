@@ -340,6 +340,10 @@ void CodeGenerator::generateIf(IfStmt* stmt) {
 void CodeGenerator::generateWhile(WhileStmt* stmt) {
     llvm::Function* function = builder->GetInsertBlock()->getParent();
 
+    // Signal to an enclosing for-loop that its body contains an inner loop,
+    // so unrolling the outer loop should be conservative to avoid I-cache bloat.
+    bodyHasInnerLoop_ = true;
+
     const ScopeGuard scope(*this);
 
     // Constant condition elimination — match generateIf's dead-branch pruning.
@@ -527,6 +531,8 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     }
 
     ++loopNestDepth_;
+    const bool savedBodyHasInnerLoop = bodyHasInnerLoop_;
+    bodyHasInnerLoop_ = false;
 
     const ScopeGuard scope(*this);
 
@@ -846,9 +852,15 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             // GCC's aggressive unrolling for FP-heavy loops.
             // OPTMAX uses 8 to hide FP/call latency through ILP; regular
             // functions use 4 to balance ILP gains vs I-cache pressure.
+            // When the body contains an inner loop (while/for), cap the unroll
+            // count to avoid I-cache bloat from duplicating large loop bodies.
             static constexpr unsigned kOptMaxUnrollCount = 8;
             static constexpr unsigned kDefaultUnrollCount = 4;
-            const unsigned unrollCount = inOptMaxFunction ? kOptMaxUnrollCount : kDefaultUnrollCount;
+            static constexpr unsigned kInnerLoopUnrollCap = 2;
+            unsigned unrollCount = inOptMaxFunction ? kOptMaxUnrollCount : kDefaultUnrollCount;
+            if (bodyHasInnerLoop_) {
+                unrollCount = std::min(unrollCount, kInnerLoopUnrollCap);
+            }
             loopMDs.push_back(llvm::MDNode::get(
                 *context,
                 {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
@@ -875,6 +887,8 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     // End block
     builder->SetInsertPoint(endBB);
     --loopNestDepth_;
+    // Restore the flag; propagate upward so enclosing for-loops also see it.
+    bodyHasInnerLoop_ = savedBodyHasInnerLoop || bodyHasInnerLoop_;
 }
 
 void CodeGenerator::generateForEach(ForEachStmt* stmt) {
