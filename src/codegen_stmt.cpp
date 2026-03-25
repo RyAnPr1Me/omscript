@@ -992,7 +992,9 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
         llvm::SmallVector<llvm::Metadata*, 6> loopMDs;
         loopMDs.push_back(nullptr); // self-reference placeholder
         loopMDs.push_back(mustProgress);
-        // At O3, hint the unroller with a moderate count.
+        // At O3 with unrolling enabled, hint the unroller with a moderate
+        // count for static (non-JIT) compilation.  OPTMAX functions use
+        // LLVM's cost model instead.  Matches generateFor/generateWhile logic.
         if (!inOptMaxFunction && optimizationLevel >= OptimizationLevel::O3 && enableUnrollLoops_ && !dynamicCompilation_) {
             loopMDs.push_back(llvm::MDNode::get(
                 *context,

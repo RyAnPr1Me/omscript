@@ -3630,8 +3630,10 @@ static unsigned annotateLoopsForTargetInFunc(llvm::Function& func,
                     }
                 }
             }
-            if (!hasVecMD) {
+            if (!hasVecMD && profile.vectorWidth >= 64) {
                 // vectorWidth is in bits (128/256/512); divide by 64 for i64 lane count.
+                // All known profiles have vectorWidth >= 128 (SSE2 minimum),
+                // but clamp to at least 2 for safety.
                 unsigned vecWidth = std::max(profile.vectorWidth / 64, 2u);
                 mds.push_back(llvm::MDNode::get(ctx, {
                     llvm::MDString::get(ctx, "llvm.loop.vectorize.width"),
