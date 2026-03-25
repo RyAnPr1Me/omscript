@@ -109,6 +109,7 @@ struct CacheOptStats {
     unsigned loopsInterchanged = 0;  ///< Loops reordered for locality
     unsigned prefetchesInserted = 0; ///< Software prefetch hints added
     unsigned layoutHints = 0;        ///< AoS→SoA suggestions emitted
+    unsigned cacheConflicts = 0;     ///< Detected cache set conflicts
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

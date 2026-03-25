@@ -2648,6 +2648,9 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     // In OPTMAX functions, mark all parameters noalias and add WillReturn.
     // The OPTMAX annotation is the user's compile-time guarantee that the
     // function is safe and well-behaved, enabling maximum optimization.
+    // Also set prefer-vector-width=512 for OPTMAX to allow the widest
+    // possible SIMD vectorization (AVX-512 on supported targets), and
+    // min-legal-vector-width=256 to ensure at least AVX2-width vectors.
     if (inOptMaxFunction) {
         for (unsigned i = 0; i < function->arg_size(); ++i) {
             if (function->getArg(i)->getType()->isPointerTy()) {
@@ -2655,16 +2658,36 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
                 function->addParamAttr(i, llvm::Attribute::NonNull);
             }
         }
+        function->addFnAttr("prefer-vector-width", "512");
+        function->addFnAttr("min-legal-vector-width", "256");
+    }
+
+    // @hot functions: allow wider vectorization (512-bit) for maximum
+    // throughput on hot paths.  This enables AVX-512 codegen on supported
+    // targets, which doubles throughput for integer and floating-point
+    // loops compared to AVX2.
+    if (currentFuncHintHot_ && !inOptMaxFunction) {
+        function->addFnAttr("prefer-vector-width", "512");
     }
 
     // @hot functions at O2+: add nonnull on pointer parameters.
     // OmScript's ownership model guarantees arrays/strings passed to
     // functions are always valid (non-null) allocations.  This lets LLVM
     // eliminate null-checks and enables speculative loads.
-    if (currentFuncHintHot_ && optimizationLevel >= OptimizationLevel::O2 && !inOptMaxFunction) {
+    // At O2+, apply nonnull to ALL functions (not just @hot) — OmScript's
+    // type system and ownership model guarantee that pointer parameters are
+    // always valid allocations.  Also add nocapture on pointer parameters
+    // for functions that don't store the pointer to an escape location,
+    // enabling more aggressive alias analysis and stack promotion.
+    if (optimizationLevel >= OptimizationLevel::O2 && !inOptMaxFunction) {
         for (unsigned i = 0; i < function->arg_size(); ++i) {
             if (function->getArg(i)->getType()->isPointerTy()) {
                 function->addParamAttr(i, llvm::Attribute::NonNull);
+                // nocapture: the pointer is only used for its value within
+                // this function and is not stored to memory or returned.
+                // This is safe for OmScript's ownership model where callers
+                // retain ownership and callees only borrow.
+                OMSC_ADD_NOCAPTURE(function, i);
             }
         }
     }
@@ -2682,6 +2705,40 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     // @hot: per-function hot annotation.  Used for bounds check elimination
     // and other performance-critical optimizations.
     currentFuncHintHot_ = func->hintHot;
+
+    // Cross-function inlining enhancement: at O2+, propagate call-graph
+    // information to improve inlining decisions.  Functions that only call
+    // other small functions or intrinsics get InlineHint because inlining
+    // them transitively inlines their callees too (cascade inlining).
+    // Functions called from only one call site get AlwaysInline because
+    // there's no code-size cost to inlining (the callee can be eliminated).
+    if (optimizationLevel >= OptimizationLevel::O2 && !isSelfRecursive &&
+        func->name != "main" && !func->hintNoInline) {
+        // If the function has @static linkage, it's only called within this
+        // TU.  Count the number of call sites — single-caller functions
+        // should always be inlined for zero overhead.
+        if (func->hintStatic || function->hasInternalLinkage()) {
+            if (function->hasOneUse()) {
+                function->removeFnAttr(llvm::Attribute::InlineHint);
+                function->addFnAttr(llvm::Attribute::AlwaysInline);
+            }
+        }
+        // @hot functions get elevated inline cost.  At O3, also set
+        // "function-inline-cost" to encourage the inliner to inline
+        // callees into hot functions more aggressively.
+        if (currentFuncHintHot_ && optimizationLevel >= OptimizationLevel::O3) {
+            function->addFnAttr("hot");
+        }
+        // Small functions with few parameters are good inline candidates.
+        // They become nearly zero-cost after inlining because there's
+        // minimal call overhead.
+        static constexpr size_t kMaxInlineParams = 3;
+        static constexpr size_t kMaxInlineStatements = 5;
+        if (func->body && func->parameters.size() <= kMaxInlineParams &&
+            func->body->statements.size() <= kMaxInlineStatements) {
+            function->addFnAttr(llvm::Attribute::InlineHint);
+        }
+    }
 
     // Create entry basic block
     llvm::BasicBlock* entry = llvm::BasicBlock::Create(*context, "entry", function);

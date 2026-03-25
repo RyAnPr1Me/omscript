@@ -7214,6 +7214,80 @@ std::vector<RewriteRule> getFloatingPointRules() {
             return g.addBinOp(Op::Mul, s.at("x"), g.addConstF(2.0));
         });
 
+    // ── FP distributive law ─────────────────────────────────────────────
+    // (x * z) + (y * z) → (x + y) * z  (factor out common multiplicand)
+    // This reduces an fmul + fadd + fmul to fadd + fmul, saving one fmul.
+    rules.emplace_back("fp_factor_common_mul",
+        P::OpPat(Op::Add, {
+            P::OpPat(Op::Mul, {P::Wild("x"), P::Wild("z")}),
+            P::OpPat(Op::Mul, {P::Wild("y"), P::Wild("z")})
+        }),
+        [](EGraph& g, const Subst& s) {
+            ClassId sum = g.addBinOp(Op::Add, s.at("x"), s.at("y"));
+            return g.addBinOp(Op::Mul, sum, s.at("z"));
+        });
+
+    // (x * z) - (y * z) → (x - y) * z
+    rules.emplace_back("fp_factor_common_mul_sub",
+        P::OpPat(Op::Sub, {
+            P::OpPat(Op::Mul, {P::Wild("x"), P::Wild("z")}),
+            P::OpPat(Op::Mul, {P::Wild("y"), P::Wild("z")})
+        }),
+        [](EGraph& g, const Subst& s) {
+            ClassId diff = g.addBinOp(Op::Sub, s.at("x"), s.at("y"));
+            return g.addBinOp(Op::Mul, diff, s.at("z"));
+        });
+
+    // ── FP negation absorption ──────────────────────────────────────────
+    // (-x) + (-y) → -(x + y)  (reduces 2 negs + 1 add to 1 add + 1 neg)
+    rules.emplace_back("fp_neg_add_absorb",
+        P::OpPat(Op::Add, {
+            P::OpPat(Op::Neg, {P::Wild("x")}),
+            P::OpPat(Op::Neg, {P::Wild("y")})
+        }),
+        [](EGraph& g, const Subst& s) {
+            ClassId sum = g.addBinOp(Op::Add, s.at("x"), s.at("y"));
+            return g.addUnaryOp(Op::Neg, sum);
+        });
+
+    // ── FP subtract of negation ─────────────────────────────────────────
+    // x - (-y) → x + y  (exact: IEEE-754 negation + subtraction)
+    rules.emplace_back("fp_sub_neg_to_add",
+        P::OpPat(Op::Sub, {P::Wild("x"), P::OpPat(Op::Neg, {P::Wild("y")})}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Add, s.at("x"), s.at("y"));
+        });
+
+    // (-x) - y → -(x + y)
+    rules.emplace_back("fp_neg_sub_to_neg_add",
+        P::OpPat(Op::Sub, {P::OpPat(Op::Neg, {P::Wild("x")}), P::Wild("y")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId sum = g.addBinOp(Op::Add, s.at("x"), s.at("y"));
+            return g.addUnaryOp(Op::Neg, sum);
+        });
+
+    // ── FP multiply-by-reciprocal for small constants ───────────────────
+    // x / 3.0 → x * (1.0/3.0)  (multiply is ~4x faster than divide)
+    // Note: 1/3 is not exact in IEEE-754, so this is only valid under
+    // fast-math.  The e-graph cost model will prefer mul over div.
+    rules.emplace_back("fp_div3_to_mul_recip",
+        P::OpPat(Op::Div, {P::Wild("x"), P::ConstFPat(3.0)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Mul, s.at("x"), g.addConstF(1.0/3.0));
+        });
+
+    rules.emplace_back("fp_div5_to_mul_recip",
+        P::OpPat(Op::Div, {P::Wild("x"), P::ConstFPat(5.0)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Mul, s.at("x"), g.addConstF(0.2));
+        });
+
+    rules.emplace_back("fp_div10_to_mul_recip",
+        P::OpPat(Op::Div, {P::Wild("x"), P::ConstFPat(10.0)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Mul, s.at("x"), g.addConstF(0.1));
+        });
+
     return rules;
 }
 
