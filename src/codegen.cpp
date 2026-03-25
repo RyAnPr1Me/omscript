@@ -2697,6 +2697,9 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
             if (function->getArg(i)->getType()->isPointerTy()) {
                 function->addParamAttr(i, llvm::Attribute::NoAlias);
                 function->addParamAttr(i, llvm::Attribute::NonNull);
+                // OmScript arrays always have a valid header: at least 8 bytes
+                // for the i64 length slot.  This is the minimum dereferenceable
+                // size for any OmScript pointer (arrays, strings).
                 function->addParamAttr(i, llvm::Attribute::getWithDereferenceableBytes(
                     *context, 8));
             }

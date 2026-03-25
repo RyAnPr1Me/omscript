@@ -123,13 +123,17 @@ namespace omscript {
 // Aggressive SimplifyCFG options used throughout the optimization pipeline.
 // Converts if-else chains to selects, hoists/sinks common instructions,
 // converts switches to lookup tables, and speculatively simplifies blocks.
+// bonusInstThreshold=4 allows up to 4 extra instructions to be speculated
+// when converting branches to selects — enough for cascading-if classify()
+// patterns without over-speculating complex branches.
+static constexpr int kCFGSpeculationBonus = 4;
 static llvm::SimplifyCFGOptions aggressiveCFGOpts() {
     return llvm::SimplifyCFGOptions()
         .convertSwitchToLookupTable(true)
         .hoistCommonInsts(true)
         .sinkCommonInsts(true)
         .speculateBlocks(true)
-        .bonusInstThreshold(4);
+        .bonusInstThreshold(kCFGSpeculationBonus);
 }
 
 void CodeGenerator::resolveTargetCPU(std::string& cpu, std::string& features) const {
