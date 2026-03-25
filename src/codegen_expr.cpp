@@ -935,14 +935,14 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     // induction variable monotonicity, and perform widening/narrowing
     // optimizations that are critical for loop vectorization.
     if (expr->op == "+") {
-        const bool bothNonNeg = nonNegValues_.count(left) && nonNegValues_.count(right);
-        auto* result = bothNonNeg
+        const bool bothOperandsNonNeg = nonNegValues_.count(left) && nonNegValues_.count(right);
+        auto* result = bothOperandsNonNeg
             ? builder->CreateNSWAdd(left, right, "addtmp")
             : builder->CreateAdd(left, right, "addtmp");
         // Track non-negativity: if both operands are known non-negative,
         // the result is non-negative (assuming no overflow, which is true
         // for typical loop counter arithmetic).
-        if (bothNonNeg)
+        if (bothOperandsNonNeg)
             nonNegValues_.insert(result);
         return result;
     } else if (expr->op == "-") {
