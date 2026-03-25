@@ -734,7 +734,11 @@ void CodeGenerator::runOptimizationPasses() {
     //     optionally benefit from profile data when available.
     if (optimizationLevel >= OptimizationLevel::O2) {
         PB.registerOptimizerLastEPCallback(
+#if LLVM_VERSION_MAJOR >= 22
+            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel, llvm::ThinOrFullLTOPhase) {
+#else
             [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel) {
+#endif
             llvm::FunctionPassManager FPM;
             FPM.addPass(llvm::VectorCombinePass());
             FPM.addPass(llvm::LoopSinkPass());
@@ -759,7 +763,11 @@ void CodeGenerator::runOptimizationPasses() {
     // separate variables, enabling further constant propagation.
     if (optimizationLevel >= OptimizationLevel::O3) {
         PB.registerOptimizerLastEPCallback(
+#if LLVM_VERSION_MAJOR >= 22
+            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel, llvm::ThinOrFullLTOPhase) {
+#else
             [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel) {
+#endif
             MPM.addPass(llvm::DeadArgumentEliminationPass());
             MPM.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(
                 llvm::ArgumentPromotionPass()));
@@ -780,7 +788,11 @@ void CodeGenerator::runOptimizationPasses() {
     // metadata, making the srem→urem proof impossible.
     if (enableSuperopt_ && optimizationLevel >= OptimizationLevel::O2) {
         PB.registerOptimizerLastEPCallback(
+#if LLVM_VERSION_MAJOR >= 22
+            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel, llvm::ThinOrFullLTOPhase) {
+#else
             [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel) {
+#endif
             struct SRemToURemPass : public llvm::PassInfoMixin<SRemToURemPass> {
                 llvm::PreservedAnalyses run(llvm::Module& M, llvm::ModuleAnalysisManager&) {
                     unsigned total = 0;
@@ -809,7 +821,11 @@ void CodeGenerator::runOptimizationPasses() {
     // the remaining hot code.
     if (optimizationLevel >= OptimizationLevel::O3) {
         PB.registerOptimizerLastEPCallback(
+#if LLVM_VERSION_MAJOR >= 22
+            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel, llvm::ThinOrFullLTOPhase) {
+#else
             [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel) {
+#endif
             MPM.addPass(llvm::HotColdSplittingPass());
         });
     }
