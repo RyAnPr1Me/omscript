@@ -492,6 +492,18 @@ void CodeGenerator::runOptimizationPasses() {
             FPM.addPass(llvm::GVNPass());
             FPM.addPass(llvm::InstSimplifyPass());
             FPM.addPass(llvm::AlignmentFromAssumptionsPass());
+            // CorrelatedValuePropagation uses value-range information from
+            // branch conditions to tighten comparisons, convert signed ops
+            // to unsigned, and prove non-negativity.  Running it before the
+            // vectorizer gives the cost model more precise value ranges,
+            // enabling vectorization of loops that would otherwise be rejected
+            // due to conservative overflow assumptions.
+            FPM.addPass(llvm::CorrelatedValuePropagationPass());
+            // SimplifyCFG merges trivially-redundant blocks and eliminates
+            // unreachable code before the vectorizer.  Cleaner CFG structure
+            // helps the vectorizer's control-flow analysis and reduces the
+            // number of scalar epilogue paths it must handle.
+            FPM.addPass(llvm::SimplifyCFGPass());
         });
     }
 
@@ -525,6 +537,15 @@ void CodeGenerator::runOptimizationPasses() {
 
         if (optimizationLevel >= OptimizationLevel::O2) {
             PB.registerLoopOptimizerEndEPCallback([isO3, loopOpt](llvm::LoopPassManager& LPM, llvm::OptimizationLevel /*Level*/) {
+                // LoopIdiomRecognize detects loop patterns that implement
+                // memset, memcpy, or similar operations and replaces them with
+                // optimized library calls.
+                LPM.addPass(llvm::LoopIdiomRecognizePass());
+                // IndVarSimplify canonicalizes induction variables for
+                // vectorization and unrolling.
+                LPM.addPass(llvm::IndVarSimplifyPass());
+                // LoopDeletion removes provably dead loops.
+                LPM.addPass(llvm::LoopDeletionPass());
                 LPM.addPass(llvm::LoopInstSimplifyPass());
                 LPM.addPass(llvm::LoopSimplifyCFGPass());
                 if (isO3 && loopOpt) {
@@ -555,7 +576,20 @@ void CodeGenerator::runOptimizationPasses() {
         const bool isO3 = optimizationLevel >= OptimizationLevel::O3;
         PB.registerScalarOptimizerLateEPCallback([isO3](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel /*Level*/) {
             if (isO3) FPM.addPass(llvm::LoopDataPrefetchPass());
+            // CVP uses value-range info to sharpen comparisons and convert
+            // signed ops to unsigned.
+            FPM.addPass(llvm::CorrelatedValuePropagationPass());
             FPM.addPass(llvm::BDCEPass());
+            // ADCE removes dead code more aggressively than DCE.
+            FPM.addPass(llvm::ADCEPass());
+            // DSE removes stores whose values are never read.
+            FPM.addPass(llvm::DSEPass());
+            // MemCpyOpt optimizes memory transfer operations.
+            FPM.addPass(llvm::MemCpyOptPass());
+            // Float2Int converts float operations to integer when possible.
+            FPM.addPass(llvm::Float2IntPass());
+            // TailCallElim converts tail-recursive calls into loops.
+            FPM.addPass(llvm::TailCallElimPass());
             FPM.addPass(llvm::MergeICmpsPass());
             FPM.addPass(llvm::MergedLoadStoreMotionPass());
             FPM.addPass(llvm::StraightLineStrengthReducePass());
@@ -563,6 +597,11 @@ void CodeGenerator::runOptimizationPasses() {
             FPM.addPass(llvm::InferAlignmentPass());
             if (isO3) {
                 FPM.addPass(llvm::ConstraintEliminationPass());
+                // JumpThreading threads branches through basic blocks with
+                // known conditions, reducing branch mispredictions.
+                FPM.addPass(llvm::JumpThreadingPass());
+                // DivRemPairs reuses quotient from div for rem.
+                FPM.addPass(llvm::DivRemPairsPass());
                 FPM.addPass(llvm::SpeculativeExecutionPass());
                 FPM.addPass(llvm::IRCEPass());
                 FPM.addPass(llvm::DFAJumpThreadingPass());
@@ -630,7 +669,7 @@ void CodeGenerator::runOptimizationPasses() {
             struct SRemToURemPass : public llvm::PassInfoMixin<SRemToURemPass> {
                 llvm::PreservedAnalyses run(llvm::Module& M, llvm::ModuleAnalysisManager&) {
                     unsigned total = 0;
-                    for (int iter = 0; iter < 2; ++iter) {
+                    for (int iter = 0; iter < 4; ++iter) {
                         unsigned iterCount = 0;
                         for (auto& F : M) {
                             iterCount += superopt::inferNonNegativeFlags(F);
@@ -874,7 +913,7 @@ void CodeGenerator::runOptimizationPasses() {
             superConfig.enableSynthesis = false;
             superConfig.enableBranchOpt = false;
         } else if (superoptLevel_ >= 3 || optimizationLevel >= OptimizationLevel::O3) {
-            superConfig.synthesis.maxInstructions = 3;
+            superConfig.synthesis.maxInstructions = 5;
             superConfig.synthesis.costThreshold = 0.9;
         }
         auto superStats = superopt::superoptimizeModule(*module, superConfig);
@@ -917,8 +956,8 @@ void CodeGenerator::runOptimizationPasses() {
         // Each pass may enable the next: inferring nuw on an add makes its
         // result provably non-negative, which enables srem→urem on srem
         // instructions that use that add as their dividend.
-        // Converges in 1-2 iterations for typical unrolled loops.
-        for (int iter = 0; iter < 2; ++iter) {
+        // Converges in 2-3 iterations for typical unrolled loops.
+        for (int iter = 0; iter < 3; ++iter) {
             unsigned iterCount = 0;
             for (auto& func : *module) {
                 iterCount += superopt::inferNonNegativeFlags(func);
@@ -1081,9 +1120,14 @@ void CodeGenerator::runOptimizationPasses() {
                       << std::endl;
         }
 
-        // Final cleanup after prefetch removal: InstCombine + DCE to clean
-        // up dead code exposed by removing prefetch intrinsics.
+        // Final aggressive cleanup after prefetch removal and all post-pipeline
+        // optimizations.  GVN catches redundant computations exposed by
+        // superoptimizer/HGOE transforms.  DCE runs twice: first catches
+        // immediately dead code, InstCombine + CFGSimplification may expose
+        // further dead code, and the second DCE catches that.
         llvm::legacy::FunctionPassManager cleanupFPM(module.get());
+        cleanupFPM.add(llvm::createGVNPass());
+        cleanupFPM.add(llvm::createDeadCodeEliminationPass());
         cleanupFPM.add(llvm::createInstructionCombiningPass());
         cleanupFPM.add(llvm::createCFGSimplificationPass());
         cleanupFPM.add(llvm::createDeadCodeEliminationPass());
@@ -1214,8 +1258,14 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     fpm.add(llvm::createPartiallyInlineLibCallsPass());
     fpm.add(llvm::createFlattenCFGPass());
 
-    // Phase 4: Final cleanup — one pass of InstCombine + CFGSimplification + DCE
-    // cleans up patterns exposed by all previous transformations.
+    // Phase 3.5: Aggressive cleanup passes for maximal optimization.
+    fpm.add(llvm::createDeadCodeEliminationPass());
+    fpm.add(llvm::createCFGSimplificationPass());
+
+    // Phase 4: Final cleanup — InstSimplify, InstCombine, CFGSimplification,
+    // and DCE remove dead code and simplify patterns exposed by loop and
+    // control-flow transformations above.
+    fpm.add(llvm::createInstSimplifyLegacyPass());
     fpm.add(llvm::createInstructionCombiningPass());
     fpm.add(llvm::createCFGSimplificationPass());
     fpm.add(llvm::createDeadCodeEliminationPass());
@@ -1227,7 +1277,7 @@ void CodeGenerator::optimizeOptMaxFunctions() {
         // patterns exposed by loop/strength-reduce transforms.  Beyond two,
         // passes reach a near-fixed-point and additional iterations produce
         // negligible changes while doubling compile time.
-        constexpr int optMaxIterations = 2;
+        constexpr int optMaxIterations = 3;
         for (int i = 0; i < optMaxIterations; ++i) {
             fpm.run(*func);
         }
