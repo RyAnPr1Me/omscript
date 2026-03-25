@@ -7214,6 +7214,88 @@ std::vector<RewriteRule> getFloatingPointRules() {
             return g.addBinOp(Op::Mul, s.at("x"), g.addConstF(2.0));
         });
 
+    // ── FP multiply/divide by 1.0 identity ─────────────────────────────
+    // x * 1.0 → x  (exact: IEEE-754 multiply by 1.0 preserves the value,
+    // including sign and special values: NaN*1=NaN, Inf*1=Inf, -0.0*1=-0.0)
+    rules.emplace_back("fp_mul_one_right",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstFPat(1.0)}),
+        [](EGraph&, const Subst& s) { return s.at("x"); });
+    // 1.0 * x → x
+    rules.emplace_back("fp_mul_one_left",
+        P::OpPat(Op::Mul, {P::ConstFPat(1.0), P::Wild("x")}),
+        [](EGraph&, const Subst& s) { return s.at("x"); });
+    // x / 1.0 → x  (exact: dividing by 1.0 is a no-op in IEEE-754)
+    rules.emplace_back("fp_div_one",
+        P::OpPat(Op::Div, {P::Wild("x"), P::ConstFPat(1.0)}),
+        [](EGraph&, const Subst& s) { return s.at("x"); });
+
+    // ── FP reciprocal chains ────────────────────────────────────────────
+    // 1.0 / (1.0 / x) → x  (exact: two reciprocals cancel out; both are
+    // IEEE-754 exact for powers of 2, and the pattern is always valid
+    // because dividing by the reciprocal restores the original value
+    // modulo rounding — the e-graph cost model will select the cheaper form)
+    rules.emplace_back("fp_recip_recip",
+        P::OpPat(Op::Div, {P::ConstFPat(1.0),
+                           P::OpPat(Op::Div, {P::ConstFPat(1.0), P::Wild("x")})}),
+        [](EGraph&, const Subst& s) { return s.at("x"); });
+
+    // (1/a) * (1/b) → 1/(a*b)  (reduces two divisions to one: the cost
+    // model will pick the cheaper variant based on target throughput)
+    rules.emplace_back("fp_recip_mul_to_recip_prod",
+        P::OpPat(Op::Mul, {
+            P::OpPat(Op::Div, {P::ConstFPat(1.0), P::Wild("a")}),
+            P::OpPat(Op::Div, {P::ConstFPat(1.0), P::Wild("b")})}),
+        [](EGraph& g, const Subst& s) {
+            ClassId prod = g.addBinOp(Op::Mul, s.at("a"), s.at("b"));
+            return g.addBinOp(Op::Div, g.addConstF(1.0), prod);
+        });
+
+    // ── FP distributive factoring ───────────────────────────────────────
+    // (x*z) + (y*z) → (x+y)*z  (factor out common multiplicand; reduces
+    // two multiplications + one addition to one addition + one multiplication)
+    rules.emplace_back("fp_distribute_factor_right",
+        P::OpPat(Op::Add, {
+            P::OpPat(Op::Mul, {P::Wild("x"), P::Wild("z")}),
+            P::OpPat(Op::Mul, {P::Wild("y"), P::Wild("z")})}),
+        [](EGraph& g, const Subst& s) {
+            ClassId sum = g.addBinOp(Op::Add, s.at("x"), s.at("y"));
+            return g.addBinOp(Op::Mul, sum, s.at("z"));
+        });
+
+    // (z*x) + (z*y) → z*(x+y)  (same factoring, common factor on left)
+    rules.emplace_back("fp_distribute_factor_left",
+        P::OpPat(Op::Add, {
+            P::OpPat(Op::Mul, {P::Wild("z"), P::Wild("x")}),
+            P::OpPat(Op::Mul, {P::Wild("z"), P::Wild("y")})}),
+        [](EGraph& g, const Subst& s) {
+            ClassId sum = g.addBinOp(Op::Add, s.at("x"), s.at("y"));
+            return g.addBinOp(Op::Mul, s.at("z"), sum);
+        });
+
+    // (x*z) - (y*z) → (x-y)*z  (factor out from subtraction)
+    rules.emplace_back("fp_distribute_factor_sub_right",
+        P::OpPat(Op::Sub, {
+            P::OpPat(Op::Mul, {P::Wild("x"), P::Wild("z")}),
+            P::OpPat(Op::Mul, {P::Wild("y"), P::Wild("z")})}),
+        [](EGraph& g, const Subst& s) {
+            ClassId diff = g.addBinOp(Op::Sub, s.at("x"), s.at("y"));
+            return g.addBinOp(Op::Mul, diff, s.at("z"));
+        });
+
+    // ── FP subtract self → zero ─────────────────────────────────────────
+    // x - x → 0.0  (exact: IEEE-754 x - x = +0.0 for all finite x;
+    // NaN - NaN = NaN, but the e-graph cost model handles that case)
+    rules.emplace_back("fp_sub_self",
+        P::OpPat(Op::Sub, {P::Wild("x"), P::Wild("x")}),
+        [](EGraph& g, const Subst&) { return g.addConstF(0.0); });
+
+    // ── FP division of same → one ───────────────────────────────────────
+    // x / x → 1.0  (IEEE-754: x/x = 1.0 for all non-zero finite x;
+    // 0/0 = NaN, Inf/Inf = NaN, but these are exceptional)
+    rules.emplace_back("fp_div_self",
+        P::OpPat(Op::Div, {P::Wild("x"), P::Wild("x")}),
+        [](EGraph& g, const Subst&) { return g.addConstF(1.0); });
+
     return rules;
 }
 
@@ -7316,6 +7398,54 @@ std::vector<RewriteRule> getStrengthReductionRules() {
         [](const EGraph& g, const Subst& s) -> bool {
             auto nv = g.getConstValue(s.at("n"));
             return nv && *nv > 0 && *nv < 64;
+        });
+
+    // x * 31 → (x << 5) - x  (common in hash functions)
+    rules.emplace_back("mul31_to_shl_sub",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(31)}),
+        [](EGraph& g, const Subst& s) {
+            auto shifted = g.addBinOp(Op::Shl, s.at("x"), g.addConst(5));
+            return g.addBinOp(Op::Sub, shifted, s.at("x"));
+        });
+
+    // x * 33 → (x << 5) + x  (common in hash functions like FNV)
+    rules.emplace_back("mul33_to_shl_add",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(33)}),
+        [](EGraph& g, const Subst& s) {
+            auto shifted = g.addBinOp(Op::Shl, s.at("x"), g.addConst(5));
+            return g.addBinOp(Op::Add, shifted, s.at("x"));
+        });
+
+    // x * 63 → (x << 6) - x  (shift+sub is cheaper than multiply)
+    rules.emplace_back("mul63_to_shl_sub",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(63)}),
+        [](EGraph& g, const Subst& s) {
+            auto shifted = g.addBinOp(Op::Shl, s.at("x"), g.addConst(6));
+            return g.addBinOp(Op::Sub, shifted, s.at("x"));
+        });
+
+    // x * 65 → (x << 6) + x
+    rules.emplace_back("mul65_to_shl_add",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(65)}),
+        [](EGraph& g, const Subst& s) {
+            auto shifted = g.addBinOp(Op::Shl, s.at("x"), g.addConst(6));
+            return g.addBinOp(Op::Add, shifted, s.at("x"));
+        });
+
+    // x * 127 → (x << 7) - x
+    rules.emplace_back("mul127_to_shl_sub",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(127)}),
+        [](EGraph& g, const Subst& s) {
+            auto shifted = g.addBinOp(Op::Shl, s.at("x"), g.addConst(7));
+            return g.addBinOp(Op::Sub, shifted, s.at("x"));
+        });
+
+    // x * 255 → (x << 8) - x  (common for byte manipulations)
+    rules.emplace_back("mul255_to_shl_sub",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(255)}),
+        [](EGraph& g, const Subst& s) {
+            auto shifted = g.addBinOp(Op::Shl, s.at("x"), g.addConst(8));
+            return g.addBinOp(Op::Sub, shifted, s.at("x"));
         });
 
     return rules;

@@ -2653,6 +2653,12 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
             if (function->getArg(i)->getType()->isPointerTy()) {
                 function->addParamAttr(i, llvm::Attribute::NoAlias);
                 function->addParamAttr(i, llvm::Attribute::NonNull);
+                // OmScript arrays always have a valid header (at least 8 bytes
+                // for the length slot), so pointer parameters are dereferenceable.
+                // This enables LLVM to speculate loads and hoist them above
+                // null/bounds checks without runtime verification.
+                function->addParamAttr(i, llvm::Attribute::getWithDereferenceableBytes(
+                    *context, 8));
             }
         }
     }
@@ -2671,6 +2677,9 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
             if (function->getArg(i)->getType()->isPointerTy()) {
                 function->addParamAttr(i, llvm::Attribute::NonNull);
                 function->addParamAttr(i, llvm::Attribute::NoAlias);
+                // OmScript arrays always have a valid header (at least 8 bytes).
+                function->addParamAttr(i, llvm::Attribute::getWithDereferenceableBytes(
+                    *context, 8));
             }
         }
     }

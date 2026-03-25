@@ -55,6 +55,7 @@
 #include <llvm/Transforms/Scalar/LoopIdiomRecognize.h>
 #include <llvm/Transforms/Scalar/LoopInterchange.h>
 #include <llvm/Transforms/Scalar/LoopLoadElimination.h>
+#include <llvm/Transforms/Scalar/LoopDataPrefetch.h>
 #include <llvm/Transforms/Scalar/LoopRotation.h>
 #include <llvm/Transforms/Scalar/LoopSink.h>
 #include <llvm/Transforms/Scalar/MergeICmps.h>
@@ -564,6 +565,23 @@ void CodeGenerator::runOptimizationPasses() {
             LPM.addPass(llvm::LoopIdiomRecognizePass());
             LPM.addPass(llvm::IndVarSimplifyPass());
             LPM.addPass(llvm::LoopDeletionPass());
+        });
+    }
+
+    // At O3, inject LoopDataPrefetchPass to insert software prefetch
+    // instructions for loops with predictable stride access patterns.
+    // This hides memory latency on hot loops that access large arrays by
+    // issuing prefetch instructions ahead of the actual loads.  The pass
+    // uses TTI (Target Transform Info) to decide prefetch distance and
+    // cache line size based on the target CPU.
+    // Only enabled at O3 because the cost of extra prefetch instructions
+    // can hurt tight loops with good spatial locality (e.g. sequential
+    // access to small arrays that fit in L1).
+    // Registered at ScalarOptimizerLateEP because LoopDataPrefetchPass is a
+    // FunctionPass that internally walks loop nests and analyses SCEVs.
+    if (optimizationLevel >= OptimizationLevel::O3) {
+        PB.registerScalarOptimizerLateEPCallback([](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) {
+            FPM.addPass(llvm::LoopDataPrefetchPass());
         });
     }
 

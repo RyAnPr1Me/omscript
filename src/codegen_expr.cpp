@@ -497,6 +497,19 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                     auto* cb = builder->CreateFMul(sq, left, "fpow6.cb");
                     return builder->CreateFMul(cb, cb, "fpow6");
                 }
+                if (rv == 7.0) {
+                    // x**7.0 → ((x*x)*x)² * x  (4 fmuls vs pow call)
+                    auto* sq = builder->CreateFMul(left, left, "fpow7.sq");
+                    auto* cb = builder->CreateFMul(sq, left, "fpow7.cb");
+                    auto* p6 = builder->CreateFMul(cb, cb, "fpow7.p6");
+                    return builder->CreateFMul(p6, left, "fpow7");
+                }
+                if (rv == 8.0) {
+                    // x**8.0 → ((x*x)*(x*x))²  (3 fmuls vs pow call)
+                    auto* sq = builder->CreateFMul(left, left, "fpow8.sq");
+                    auto* q4 = builder->CreateFMul(sq, sq, "fpow8.q4");
+                    return builder->CreateFMul(q4, q4, "fpow8");
+                }
                 if (rv == -2.0) {
                     // x**(-2.0) → 1.0/(x*x)  (fmul + fdiv vs pow call)
                     auto* sq = builder->CreateFMul(left, left, "fpow_n2.sq");
@@ -946,6 +959,14 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             nonNegValues_.insert(result);
         return result;
     } else if (expr->op == "-") {
+        // When left is a non-negative constant and right is non-negative,
+        // the subtraction cannot underflow below -(2^63) so nsw is safe.
+        // More specifically, when left ≥ 0 and right ≥ 0, the result is
+        // in [-2^63+1, 2^63-1] which doesn't overflow.  The nsw flag
+        // enables SCEV to compute tighter trip counts for countdown loops
+        // and proves induction variable monotonicity.
+        if (nonNegValues_.count(left) && nonNegValues_.count(right))
+            return builder->CreateNSWSub(left, right, "subtmp");
         return builder->CreateSub(left, right, "subtmp");
     } else if (expr->op == "*") {
         // Strength reduction: multiply by power of 2 → left shift
