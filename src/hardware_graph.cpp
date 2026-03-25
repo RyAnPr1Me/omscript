@@ -3955,7 +3955,8 @@ static unsigned estimateWorkingSet(llvm::BasicBlock& bb, unsigned elementSize) {
     // Use 1024 as default trip count for unknown loops.
     static constexpr unsigned kDefaultTripCount = 1024;
     unsigned totalBytes = 0;
-    for (const auto& [_, info] : streams) {
+    for (const auto& [base, info] : streams) {
+        (void)base; // base pointer not needed for byte estimate
         totalBytes += info.stride * elementSize * kDefaultTripCount;
     }
     return totalBytes;

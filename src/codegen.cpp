@@ -2732,8 +2732,10 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         // Small functions with few parameters are good inline candidates.
         // They become nearly zero-cost after inlining because there's
         // minimal call overhead.
-        if (func->body && func->parameters.size() <= 3 &&
-            func->body->statements.size() <= 5) {
+        static constexpr size_t kMaxInlineParams = 3;
+        static constexpr size_t kMaxInlineStatements = 5;
+        if (func->body && func->parameters.size() <= kMaxInlineParams &&
+            func->body->statements.size() <= kMaxInlineStatements) {
             function->addFnAttr(llvm::Attribute::InlineHint);
         }
     }

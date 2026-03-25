@@ -2767,8 +2767,10 @@ static unsigned applyAlgebraicSimplifications(llvm::Function& func) {
             }
 
             // ── Floating-point strength reductions ─────────────────────────
-            // These only fire when the instruction has fast-math flags set,
-            // matching OmScript's -ffast-math semantics.
+            // Patterns using exact FP values (1.0, -1.0, 2.0, etc.) are valid
+            // without fast-math flags because IEEE-754 arithmetic with these
+            // exact constants is identity/exact.  Patterns that change
+            // rounding behavior (fadd(x,0), fsub(x,0)) require fast-math.
 
             // fmul(x, 1.0) → x
             if (!simplified && inst.getOpcode() == llvm::Instruction::FMul) {
