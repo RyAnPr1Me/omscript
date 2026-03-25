@@ -436,6 +436,13 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
                            llvm::ConstantAsMetadata::get(
                                llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
         }
+        if (currentFuncHintHot_ && optimizationLevel >= OptimizationLevel::O3
+            && !currentFuncHintNoVectorize_) {
+            loopMDs.push_back(llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
+                           llvm::ConstantAsMetadata::get(
+                               llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))}));
+        }
         llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
         loopMD->replaceOperandWith(0, loopMD);
         backBrWhile->setMetadata(llvm::LLVMContext::MD_loop, loopMD);
@@ -514,6 +521,13 @@ void CodeGenerator::generateDoWhile(DoWhileStmt* stmt) {
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
                            llvm::ConstantAsMetadata::get(
                                llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
+        }
+        if (currentFuncHintHot_ && optimizationLevel >= OptimizationLevel::O3
+            && !currentFuncHintNoVectorize_) {
+            loopMDs.push_back(llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
+                           llvm::ConstantAsMetadata::get(
+                               llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))}));
         }
         llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
         loopMD->replaceOperandWith(0, loopMD);
@@ -879,6 +893,17 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
                            llvm::ConstantAsMetadata::get(
                                llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
         }
+        // At O3 in @hot functions, hint the vectorizer to interleave 4
+        // iterations per vector cycle.  Interleaving hides memory latency
+        // and FP pipeline stalls by keeping multiple independent vector
+        // operations in flight.
+        if (currentFuncHintHot_ && optimizationLevel >= OptimizationLevel::O3
+            && !currentFuncHintNoVectorize_) {
+            loopMDs.push_back(llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
+                           llvm::ConstantAsMetadata::get(
+                               llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))}));
+        }
         llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
         loopMD->replaceOperandWith(0, loopMD);
         backBr->setMetadata(llvm::LLVMContext::MD_loop, loopMD);
@@ -1047,6 +1072,13 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
                            llvm::ConstantAsMetadata::get(
                                llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
+        }
+        if (currentFuncHintHot_ && optimizationLevel >= OptimizationLevel::O3
+            && !currentFuncHintNoVectorize_) {
+            loopMDs.push_back(llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
+                           llvm::ConstantAsMetadata::get(
+                               llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))}));
         }
         llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
         loopMD->replaceOperandWith(0, loopMD);

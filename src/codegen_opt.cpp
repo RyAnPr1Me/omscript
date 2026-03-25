@@ -1130,6 +1130,12 @@ void CodeGenerator::runOptimizationPasses() {
         cleanupFPM.add(llvm::createDeadCodeEliminationPass());
         cleanupFPM.add(llvm::createInstructionCombiningPass());
         cleanupFPM.add(llvm::createCFGSimplificationPass());
+        // Post-pipeline loop cleanup: LoopSimplify re-canonicalizes loops
+        // after superoptimizer/HGOE transforms, enabling LICM to hoist
+        // invariants and LSR to reduce address computation complexity.
+        cleanupFPM.add(llvm::createLoopSimplifyPass());
+        cleanupFPM.add(llvm::createLICMPass());
+        cleanupFPM.add(llvm::createLoopStrengthReducePass());
         cleanupFPM.add(llvm::createDeadCodeEliminationPass());
         cleanupFPM.doInitialization();
         for (auto& func : *module) {
