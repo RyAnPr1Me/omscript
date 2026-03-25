@@ -3,6 +3,13 @@
 #ifndef DIAGNOSTIC_H
 #define DIAGNOSTIC_H
 
+/// @file diagnostic.h
+/// @brief Diagnostic infrastructure for the OmScript compiler.
+///
+/// Provides machine-readable ErrorCode identifiers, the Diagnostic struct
+/// used to report warnings and errors with source locations, and the
+/// DiagnosticEngine that collects and renders diagnostics.
+
 #include <algorithm>
 #include <cstddef>
 #include <stdexcept>

@@ -3,6 +3,13 @@
 #ifndef AST_H
 #define AST_H
 
+/// @file ast.h
+/// @brief Abstract syntax tree (AST) node definitions for OmScript.
+///
+/// Every syntactic construct in the language — expressions, statements,
+/// declarations, and the top-level program — is represented by a concrete
+/// struct that inherits from either Expression or Statement.
+
 #include <memory>
 #include <string>
 #include <vector>

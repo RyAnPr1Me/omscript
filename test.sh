@@ -1,6 +1,6 @@
 #!/bin/bash
 
-set -e
+set -eu
 
 # ──────────────────────────────────────────────────────────────
 #  OmScript Benchmark Suite  (Fair Edition)

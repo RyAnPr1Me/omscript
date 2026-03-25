@@ -374,7 +374,7 @@ void CodeGenerator::runOptimizationPasses() {
     // enabling zero-cost abstraction guarantees even at O1.
     if (optimizationLevel >= OptimizationLevel::O1) {
         PB.registerPipelineStartEPCallback(
-            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel) {
+            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/) {
             MPM.addPass(llvm::InferFunctionAttrsPass());
         });
     }
@@ -386,7 +386,7 @@ void CodeGenerator::runOptimizationPasses() {
     // reducing IR size and compilation time for the downstream pipeline.
     if (optimizationLevel >= OptimizationLevel::O1) {
         const bool useMemSSA = optimizationLevel >= OptimizationLevel::O2;
-        PB.registerPeepholeEPCallback([useMemSSA](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) {
+        PB.registerPeepholeEPCallback([useMemSSA](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel /*Level*/) {
             FPM.addPass(llvm::ReassociatePass());
             // At O2+, enable MemorySSA for EarlyCSE so it can eliminate
             // redundant loads/stores (at the cost of slightly higher compile
@@ -402,7 +402,7 @@ void CodeGenerator::runOptimizationPasses() {
     // more precise results for every downstream function-level optimisation.
     if (optimizationLevel >= OptimizationLevel::O2) {
         PB.registerOptimizerEarlyEPCallback(
-            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel) {
+            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/) {
             MPM.addPass(llvm::ReversePostOrderFunctionAttrsPass());
         });
     }
@@ -412,7 +412,7 @@ void CodeGenerator::runOptimizationPasses() {
     // flow edges.  SCCP can prove that some branches are never taken and that
     // some PHI values are constant, enabling dead code elimination upstream.
     if (optimizationLevel >= OptimizationLevel::O2) {
-        PB.registerScalarOptimizerLateEPCallback([](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) {
+        PB.registerScalarOptimizerLateEPCallback([](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel /*Level*/) {
             FPM.addPass(llvm::SCCPPass());
             // CallSiteSplitting clones a function call when a predecessor
             // branch constrains one of the call's arguments to a constant
@@ -469,7 +469,7 @@ void CodeGenerator::runOptimizationPasses() {
     // pressure and code size when the promoted values are large.
     if (optimizationLevel >= OptimizationLevel::O3) {
         PB.registerCGSCCOptimizerLateEPCallback(
-            [](llvm::CGSCCPassManager& CGPM, llvm::OptimizationLevel) {
+            [](llvm::CGSCCPassManager& CGPM, llvm::OptimizationLevel /*Level*/) {
             CGPM.addPass(llvm::ArgumentPromotionPass());
         });
     }
@@ -485,7 +485,7 @@ void CodeGenerator::runOptimizationPasses() {
     // had already consumed and transformed the original loop structure.
     if (optimizationLevel >= OptimizationLevel::O2 && enableLoopOptimize_) {
         PB.registerVectorizerStartEPCallback(
-            [](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) { FPM.addPass(llvm::LoopDistributePass()); });
+            [](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel /*Level*/) { FPM.addPass(llvm::LoopDistributePass()); });
     }
 
     // At O2+, inject LoopLoadEliminationPass before vectorization to forward
@@ -493,7 +493,7 @@ void CodeGenerator::runOptimizationPasses() {
     // eliminating redundant memory traffic and enabling vectorization of
     // reduction-like patterns.
     if (optimizationLevel >= OptimizationLevel::O2) {
-        PB.registerVectorizerStartEPCallback([](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) {
+        PB.registerVectorizerStartEPCallback([](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel /*Level*/) {
             FPM.addPass(llvm::LoopLoadEliminationPass());
         });
     }
@@ -507,7 +507,7 @@ void CodeGenerator::runOptimizationPasses() {
     // fusion is a key enabler of iterator-fusion-style optimization.
     if (optimizationLevel >= OptimizationLevel::O2 && enableLoopOptimize_) {
         PB.registerVectorizerStartEPCallback(
-            [](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) { FPM.addPass(llvm::LoopFusePass()); });
+            [](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel /*Level*/) { FPM.addPass(llvm::LoopFusePass()); });
     }
 
     // At O2+, re-canonicalize loops and promote reductions to SSA form
@@ -551,7 +551,7 @@ void CodeGenerator::runOptimizationPasses() {
     // as possible for the vectorizer's cost model and pattern matching.
     if (optimizationLevel >= OptimizationLevel::O2) {
         PB.registerVectorizerStartEPCallback(
-            [](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) {
+            [](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel /*Level*/) {
             FPM.addPass(llvm::SROAPass(llvm::SROAOptions::ModifyCFG));
             FPM.addPass(llvm::PromotePass());
             FPM.addPass(llvm::InstCombinePass());
@@ -590,7 +590,7 @@ void CodeGenerator::runOptimizationPasses() {
     // reducing cache misses for matrix-style code.
     if (optimizationLevel >= OptimizationLevel::O3 && enableLoopOptimize_) {
         PB.registerLoopOptimizerEndEPCallback(
-            [](llvm::LoopPassManager& LPM, llvm::OptimizationLevel) { LPM.addPass(llvm::LoopInterchangePass()); });
+            [](llvm::LoopPassManager& LPM, llvm::OptimizationLevel /*Level*/) { LPM.addPass(llvm::LoopInterchangePass()); });
     }
 
     // At O2+, inject AggressiveInstCombine after the standard peephole passes
@@ -599,7 +599,7 @@ void CodeGenerator::runOptimizationPasses() {
     // to provide zero-cost abstractions: operator overload bodies and iterator
     // chains benefit from aggressive pattern matching after inlining.
     if (optimizationLevel >= OptimizationLevel::O2) {
-        PB.registerPeepholeEPCallback([](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) {
+        PB.registerPeepholeEPCallback([](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel /*Level*/) {
             FPM.addPass(llvm::AggressiveInstCombinePass());
         });
     }
@@ -612,7 +612,7 @@ void CodeGenerator::runOptimizationPasses() {
     // NonTrivial=true allows cloning of the loop for non-trivial unswitching
     // (i.e. the condition has side effects in the loop body).
     if (optimizationLevel >= OptimizationLevel::O2) {
-        PB.registerLateLoopOptimizationsEPCallback([](llvm::LoopPassManager& LPM, llvm::OptimizationLevel) {
+        PB.registerLateLoopOptimizationsEPCallback([](llvm::LoopPassManager& LPM, llvm::OptimizationLevel /*Level*/) {
             LPM.addPass(llvm::SimpleLoopUnswitchPass(/*NonTrivial=*/true));
         });
     }
@@ -632,7 +632,7 @@ void CodeGenerator::runOptimizationPasses() {
     //     side effects, results unused) — eliminates wasted cycles in code
     //     where earlier optimizations eliminated the loop's consumers.
     if (optimizationLevel >= OptimizationLevel::O2) {
-        PB.registerLoopOptimizerEndEPCallback([](llvm::LoopPassManager& LPM, llvm::OptimizationLevel) {
+        PB.registerLoopOptimizerEndEPCallback([](llvm::LoopPassManager& LPM, llvm::OptimizationLevel /*Level*/) {
             LPM.addPass(llvm::LoopIdiomRecognizePass());
             LPM.addPass(llvm::IndVarSimplifyPass());
             LPM.addPass(llvm::LoopDeletionPass());
@@ -654,8 +654,7 @@ void CodeGenerator::runOptimizationPasses() {
     // At O3 with -floop-optimize, register advanced loop nest transformations
     // after the basic loop cleanup passes.
     if (optimizationLevel >= OptimizationLevel::O3 && enableLoopOptimize_) {
-        PB.registerLoopOptimizerEndEPCallback([](llvm::LoopPassManager& LPM, llvm::OptimizationLevel) {
-            // LoopFlatten collapses perfectly-nested loop pairs into a single
+        PB.registerLoopOptimizerEndEPCallback([](llvm::LoopPassManager& LPM, llvm::OptimizationLevel /*Level*/) {
             // loop with a linearised induction variable.  This eliminates inner
             // loop overhead (branch, counter increment, comparison) and enables
             // the vectorizer to process the flattened iteration space as a
@@ -679,7 +678,7 @@ void CodeGenerator::runOptimizationPasses() {
     // that always takes the false branch.  This eliminates a branch per
     // iteration in each clone and exposes more vectorisation opportunities.
     if (optimizationLevel >= OptimizationLevel::O3) {
-        PB.registerLoopOptimizerEndEPCallback([](llvm::LoopPassManager& LPM, llvm::OptimizationLevel) {
+        PB.registerLoopOptimizerEndEPCallback([](llvm::LoopPassManager& LPM, llvm::OptimizationLevel /*Level*/) {
             LPM.addPass(llvm::LoopBoundSplitPass());
             // LoopPredication widens loop-variant guard/range checks into
             // loop-invariant ones by computing the widened condition before
@@ -699,7 +698,7 @@ void CodeGenerator::runOptimizationPasses() {
     // original loop.  This enables LICM on loops that would otherwise be
     // blocked by conservative alias analysis.
     if (optimizationLevel >= OptimizationLevel::O3 && enableLoopOptimize_) {
-        PB.registerLateLoopOptimizationsEPCallback([](llvm::LoopPassManager& LPM, llvm::OptimizationLevel) {
+        PB.registerLateLoopOptimizationsEPCallback([](llvm::LoopPassManager& LPM, llvm::OptimizationLevel /*Level*/) {
             LPM.addPass(llvm::LoopVersioningLICMPass());
         });
     }
@@ -716,7 +715,7 @@ void CodeGenerator::runOptimizationPasses() {
     // Registered at ScalarOptimizerLateEP because LoopDataPrefetchPass is a
     // FunctionPass that internally walks loop nests and analyses SCEVs.
     if (optimizationLevel >= OptimizationLevel::O3) {
-        PB.registerScalarOptimizerLateEPCallback([](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) {
+        PB.registerScalarOptimizerLateEPCallback([](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel /*Level*/) {
             FPM.addPass(llvm::LoopDataPrefetchPass());
         });
     }
@@ -733,7 +732,7 @@ void CodeGenerator::runOptimizationPasses() {
     // TailCallElimPass converts tail-recursive calls into loops, eliminating
     // stack growth for recursive algorithms (e.g. list traversals, tree walks).
     if (optimizationLevel >= OptimizationLevel::O2) {
-        PB.registerScalarOptimizerLateEPCallback([](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) {
+        PB.registerScalarOptimizerLateEPCallback([](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel /*Level*/) {
             FPM.addPass(llvm::CorrelatedValuePropagationPass());
             FPM.addPass(llvm::BDCEPass());
             FPM.addPass(llvm::ADCEPass());
@@ -779,7 +778,7 @@ void CodeGenerator::runOptimizationPasses() {
     // SpeculativeExecutionPass speculatively executes instructions from a
     // branch to reduce branch misprediction cost on wide-issue CPUs.
     if (optimizationLevel >= OptimizationLevel::O3) {
-        PB.registerScalarOptimizerLateEPCallback([](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) {
+        PB.registerScalarOptimizerLateEPCallback([](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel /*Level*/) {
             FPM.addPass(llvm::ConstraintEliminationPass());
             FPM.addPass(llvm::JumpThreadingPass());
             FPM.addPass(llvm::DivRemPairsPass());
@@ -829,7 +828,7 @@ void CodeGenerator::runOptimizationPasses() {
     //     optionally benefit from profile data when available.
     if (optimizationLevel >= OptimizationLevel::O2) {
         PB.registerOptimizerLastEPCallback(
-            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel) {
+            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/) {
             llvm::FunctionPassManager FPM;
             FPM.addPass(llvm::VectorCombinePass());
             FPM.addPass(llvm::LoopSinkPass());
@@ -849,7 +848,7 @@ void CodeGenerator::runOptimizationPasses() {
     // enables further inlining (smaller call signatures).
     if (optimizationLevel >= OptimizationLevel::O3) {
         PB.registerOptimizerLastEPCallback(
-            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel) {
+            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/) {
             MPM.addPass(llvm::DeadArgumentEliminationPass());
             // PartialInlinerPass outlines cold regions (error handling, slow
             // paths) from otherwise-hot functions and inlines only the hot
@@ -870,7 +869,7 @@ void CodeGenerator::runOptimizationPasses() {
     // metadata, making the srem→urem proof impossible.
     if (enableSuperopt_ && optimizationLevel >= OptimizationLevel::O2) {
         PB.registerOptimizerLastEPCallback(
-            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel) {
+            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/) {
             struct SRemToURemPass : public llvm::PassInfoMixin<SRemToURemPass> {
                 llvm::PreservedAnalyses run(llvm::Module& M, llvm::ModuleAnalysisManager&) {
                     unsigned total = 0;
@@ -899,7 +898,7 @@ void CodeGenerator::runOptimizationPasses() {
     // the remaining hot code.
     if (optimizationLevel >= OptimizationLevel::O3) {
         PB.registerOptimizerLastEPCallback(
-            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel) {
+            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/) {
             MPM.addPass(llvm::HotColdSplittingPass());
         });
     }

@@ -3,6 +3,13 @@
 #ifndef PARSER_H
 #define PARSER_H
 
+/// @file parser.h
+/// @brief Recursive-descent parser for OmScript.
+///
+/// The Parser consumes a token stream produced by the Lexer and builds an
+/// AST (see ast.h).  It supports operator precedence, type annotations,
+/// generics, and structured error recovery.
+
 #include "ast.h"
 #include "lexer.h"
 #include <memory>

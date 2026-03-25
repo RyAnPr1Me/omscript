@@ -2284,7 +2284,7 @@ struct FusionPair {
 static std::vector<FusionPair> detectFusionPairs(
         const std::vector<llvm::Instruction*>& moveable,
         const std::unordered_map<llvm::Instruction*, unsigned>& idx,
-        [[maybe_unused]] const MicroarchProfile& profile) {
+        const MicroarchProfile& /*profile*/) {
     std::vector<FusionPair> pairs;
 
     for (unsigned i = 0; i < moveable.size(); ++i) {

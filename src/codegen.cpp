@@ -39,7 +39,6 @@
 #include <llvm/Transforms/Scalar/LoopDistribute.h>
 #include <llvm/Transforms/Utils.h>
 #include <optional>
-#include <set>
 #include <stdexcept>
 
 // LLVM 21 removed Attribute::NoCapture in favour of the captures(...) attribute.
