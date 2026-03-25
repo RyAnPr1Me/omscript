@@ -224,6 +224,33 @@ set(RUNTIME_SOURCES
 
 # Compiler executable
 add_executable(omsc ${COMPILER_SOURCES} ${RUNTIME_SOURCES})
+target_compile_options(omsc PRIVATE
+    # Always-on warnings (good hygiene)
+    -Wall -Wextra -Wpedantic
+
+    # Release-only optimizations
+    $<$<CONFIG:Release>:
+        -O3
+        -DNDEBUG
+
+        # Codegen improvements
+        -fno-plt
+        -fomit-frame-pointer
+
+        # Better inlining + vectorization hints
+        -finline-functions
+        -fstrict-aliasing
+
+        # Reduce binary overhead
+        -fdata-sections
+        -ffunction-sections
+    >
+
+    # Native tuning (only if enabled)
+    $<$<AND:$<CONFIG:Release>,$<BOOL:${NATIVE}>>:
+        -march=native
+    >
+)
 
 # ── Precompiled headers (PCH) ────────────────────────────────────────────────
 # Precompile heavy LLVM headers once and reuse across all translation units.
@@ -318,7 +345,13 @@ target_link_libraries(omsc Threads::Threads)
 # simplicity we use --export-dynamic, which is the approach used by LLVM's
 # own in-process JIT examples and test infrastructure.
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND NOT APPLE)
-    target_link_options(omsc PRIVATE -Wl,--export-dynamic)
+    target_link_options(omsc PRIVATE
+        $<$<CONFIG:Release>:
+            -Wl,-O2
+            -Wl,--gc-sections
+        >
+        -Wl,--export-dynamic
+    )
 endif()
 
 # Installation
