@@ -2653,18 +2653,33 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
             if (function->getArg(i)->getType()->isPointerTy()) {
                 function->addParamAttr(i, llvm::Attribute::NoAlias);
                 function->addParamAttr(i, llvm::Attribute::NonNull);
+                // OmScript arrays always have a valid header (at least 8 bytes
+                // for the length slot), so pointer parameters are dereferenceable.
+                // This enables LLVM to speculate loads and hoist them above
+                // null/bounds checks without runtime verification.
+                function->addParamAttr(i, llvm::Attribute::getWithDereferenceableBytes(
+                    *context, 8));
             }
         }
     }
 
-    // @hot functions at O2+: add nonnull on pointer parameters.
+    // @hot functions at O2+: add nonnull and noalias on pointer parameters.
     // OmScript's ownership model guarantees arrays/strings passed to
     // functions are always valid (non-null) allocations.  This lets LLVM
     // eliminate null-checks and enables speculative loads.
+    // noalias is safe because OmScript's ownership semantics guarantee that
+    // distinct parameters cannot alias the same memory region — the borrow
+    // checker prevents multiple mutable references to the same allocation.
+    // This is equivalent to C's __restrict qualifier and is critical for
+    // enabling vectorization of loops that access multiple array parameters.
     if (currentFuncHintHot_ && optimizationLevel >= OptimizationLevel::O2 && !inOptMaxFunction) {
         for (unsigned i = 0; i < function->arg_size(); ++i) {
             if (function->getArg(i)->getType()->isPointerTy()) {
                 function->addParamAttr(i, llvm::Attribute::NonNull);
+                function->addParamAttr(i, llvm::Attribute::NoAlias);
+                // OmScript arrays always have a valid header (at least 8 bytes).
+                function->addParamAttr(i, llvm::Attribute::getWithDereferenceableBytes(
+                    *context, 8));
             }
         }
     }

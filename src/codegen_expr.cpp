@@ -497,6 +497,19 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                     auto* cb = builder->CreateFMul(sq, left, "fpow6.cb");
                     return builder->CreateFMul(cb, cb, "fpow6");
                 }
+                if (rv == 7.0) {
+                    // x**7.0 → ((x*x)*x)² * x  (4 fmuls vs pow call)
+                    auto* sq = builder->CreateFMul(left, left, "fpow7.sq");
+                    auto* cb = builder->CreateFMul(sq, left, "fpow7.cb");
+                    auto* p6 = builder->CreateFMul(cb, cb, "fpow7.p6");
+                    return builder->CreateFMul(p6, left, "fpow7");
+                }
+                if (rv == 8.0) {
+                    // x**8.0 → ((x*x)*(x*x))²  (3 fmuls vs pow call)
+                    auto* sq = builder->CreateFMul(left, left, "fpow8.sq");
+                    auto* q4 = builder->CreateFMul(sq, sq, "fpow8.q4");
+                    return builder->CreateFMul(q4, q4, "fpow8");
+                }
                 if (rv == -2.0) {
                     // x**(-2.0) → 1.0/(x*x)  (fmul + fdiv vs pow call)
                     auto* sq = builder->CreateFMul(left, left, "fpow_n2.sq");
@@ -923,19 +936,37 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     }
 
     // Regular code generation for non-constant expressions.
-    // Integer arithmetic uses wrapping (no NSW/NUW flags): NSW/NUW flags tell
-    // LLVM that overflow is undefined behavior, which can cause miscompilation
-    // when overflow actually occurs.  Omitting them guarantees defined
-    // two's-complement behavior on every overflow path.
+    // Integer arithmetic generally uses wrapping (no NSW/NUW flags) because
+    // NSW/NUW tell LLVM that overflow is undefined behavior, which can cause
+    // miscompilation when overflow actually occurs.
+    //
+    // Exception: when BOTH operands are provably non-negative (tracked via
+    // nonNegValues_), we set nsw on addition.  For non-negative operands,
+    // signed overflow can only happen if the result exceeds INT64_MAX, which
+    // cannot occur in typical loop counter arithmetic.  The nsw flag enables
+    // LLVM's SCEV (Scalar Evolution) to compute tighter trip counts, prove
+    // induction variable monotonicity, and perform widening/narrowing
+    // optimizations that are critical for loop vectorization.
     if (expr->op == "+") {
-        auto* result = builder->CreateAdd(left, right, "addtmp");
+        const bool bothOperandsNonNeg = nonNegValues_.count(left) && nonNegValues_.count(right);
+        auto* result = bothOperandsNonNeg
+            ? builder->CreateNSWAdd(left, right, "addtmp")
+            : builder->CreateAdd(left, right, "addtmp");
         // Track non-negativity: if both operands are known non-negative,
         // the result is non-negative (assuming no overflow, which is true
         // for typical loop counter arithmetic).
-        if (nonNegValues_.count(left) && nonNegValues_.count(right))
+        if (bothOperandsNonNeg)
             nonNegValues_.insert(result);
         return result;
     } else if (expr->op == "-") {
+        // When both operands are non-negative, the subtraction of two
+        // non-negative values cannot produce signed overflow: the result
+        // is in the range [-(2^63-1), 2^63-1], which is representable
+        // in i64 without wrapping.  The nsw flag enables SCEV to compute
+        // tighter trip counts for countdown loops and proves induction
+        // variable monotonicity.
+        if (nonNegValues_.count(left) && nonNegValues_.count(right))
+            return builder->CreateNSWSub(left, right, "subtmp");
         return builder->CreateSub(left, right, "subtmp");
     } else if (expr->op == "*") {
         // Strength reduction: multiply by power of 2 → left shift
@@ -1167,6 +1198,10 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 }
             }
         }
+        // When both operands are known non-negative, set nsw to enable
+        // SCEV range analysis and strength reduction of derived expressions.
+        if (nonNegValues_.count(left) && nonNegValues_.count(right))
+            return builder->CreateNSWMul(left, right, "multmp");
         return builder->CreateMul(left, right, "multmp");
     } else if (expr->op == "/" || expr->op == "%") {
         const bool isDivision = expr->op == "/";
@@ -2422,15 +2457,21 @@ llvm::Value* CodeGenerator::generateFieldAccess(FieldAccessExpr* expr) {
             load->setMetadata(llvm::LLVMContext::MD_invariant_load,
                               llvm::MDNode::get(*context, {}));
         }
-        // noalias → !noalias scope metadata (similar to borrow)
+        // noalias → !alias.scope + !noalias metadata pair.
+        // The scope includes a reference to the domain so LLVM's
+        // ScopedNoAliasAA can reason about aliasing across struct fields.
+        // The scope name includes the struct type and field name to
+        // distinguish different field accesses for better alias analysis.
         if (attrs->noalias) {
             llvm::MDNode* domain = llvm::MDNode::getDistinct(*context,
                 {llvm::MDString::get(*context, "struct.noalias.domain")});
             domain->replaceOperandWith(0, domain);
+            std::string scopeName = "struct.noalias." + structType + "." + expr->fieldName;
             llvm::MDNode* scope = llvm::MDNode::getDistinct(*context,
-                {llvm::MDString::get(*context, "struct.noalias.scope")});
+                {nullptr, domain, llvm::MDString::get(*context, scopeName)});
             scope->replaceOperandWith(0, scope);
             llvm::MDNode* scopeList = llvm::MDNode::get(*context, {scope});
+            load->setMetadata(llvm::LLVMContext::MD_alias_scope, scopeList);
             load->setMetadata(llvm::LLVMContext::MD_noalias, scopeList);
         }
         // range(min,max) → !range metadata for integer range propagation

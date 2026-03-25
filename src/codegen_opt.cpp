@@ -55,6 +55,7 @@
 #include <llvm/Transforms/Scalar/LoopIdiomRecognize.h>
 #include <llvm/Transforms/Scalar/LoopInterchange.h>
 #include <llvm/Transforms/Scalar/LoopLoadElimination.h>
+#include <llvm/Transforms/Scalar/LoopDataPrefetch.h>
 #include <llvm/Transforms/Scalar/LoopRotation.h>
 #include <llvm/Transforms/Scalar/LoopSink.h>
 #include <llvm/Transforms/Scalar/MergeICmps.h>
@@ -72,8 +73,15 @@
 #include <llvm/Transforms/Scalar/Reassociate.h>
 #include <llvm/Transforms/Scalar/EarlyCSE.h>
 #include <llvm/Transforms/Scalar/SCCP.h>
+#include <llvm/Transforms/Scalar/SROA.h>
+#include <llvm/Transforms/Scalar/LoopPassManager.h>
 #include <llvm/Transforms/Utils.h>
 #include <llvm/Transforms/Utils/Cloning.h>
+#include <llvm/Transforms/Utils/LCSSA.h>
+#include <llvm/Transforms/Utils/LoopSimplify.h>
+#include <llvm/Transforms/Utils/Mem2Reg.h>
+#include <llvm/Transforms/Scalar/InstSimplifyPass.h>
+#include <llvm/Transforms/Scalar/LICM.h>
 #include <llvm/Transforms/Vectorize/VectorCombine.h>
 #include <optional>
 #include <stdexcept>
@@ -449,6 +457,61 @@ void CodeGenerator::runOptimizationPasses() {
             [](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) { FPM.addPass(llvm::LoopFusePass()); });
     }
 
+    // At O2+, re-canonicalize loops and promote reductions to SSA form
+    // immediately before the vectorizer.  This is critical because the
+    // preceding VectorizerStartEP passes (LoopDistribute, LoopLoadElim,
+    // LoopFuse) can transform loop structure in ways that break canonical
+    // form.  Re-running LoopSimplify + LCSSA + LoopRotate guarantees:
+    //   - Single pre-header edge (LoopSimplify)
+    //   - Dedicated exit blocks (LoopSimplify)
+    //   - Exactly one back-edge (LoopSimplify)
+    //   - LCSSA PHI nodes at loop exits (LCSSA)
+    //   - Bottom-tested (rotated) form (LoopRotate)
+    //
+    // SROA + PromotePass (mem2reg) promote stack-allocated reduction
+    // variables to SSA PHI nodes before the vectorizer sees them.
+    // Without this, compound assignments like `sum += a[i]` remain as
+    // load-add-store through an alloca, which the vectorizer cannot
+    // recognize as a reduction.  After promotion, the pattern becomes:
+    //   %sum.phi = phi [init, preheader], [%sum.next, body]
+    //   %sum.next = add %sum.phi, %a_val
+    // which LLVM's vectorizer recognizes as a standard reduction.
+    //
+    // InstCombine cleans up redundant patterns exposed by mem2reg
+    // (dead stores, trivial PHIs) to present the cleanest possible IR
+    // to the vectorizer's pattern matching.
+    //
+    // LICM (Loop Invariant Code Motion) hoists loop-invariant loads,
+    // stores, and computations out of loop bodies, reducing per-iteration
+    // work.  Running it after LoopSimplify + LCSSA + LoopRotate ensures
+    // the loop structure is in canonical form for LICM's analysis.
+    //
+    // GVN (Global Value Numbering) eliminates redundant computations
+    // by recognizing that different expressions compute the same value.
+    // After LICM hoists invariants and InstCombine simplifies patterns,
+    // GVN can merge duplicate loads and computations across basic blocks.
+    //
+    // InstSimplify performs lightweight algebraic simplification
+    // (identity elimination, constant folding, dead comparison removal)
+    // without the overhead of full InstCombine.  Running it as a final
+    // cleanup pass before the vectorizer ensures the IR is as simple
+    // as possible for the vectorizer's cost model and pattern matching.
+    if (optimizationLevel >= OptimizationLevel::O2) {
+        PB.registerVectorizerStartEPCallback(
+            [](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) {
+            FPM.addPass(llvm::SROAPass(llvm::SROAOptions::ModifyCFG));
+            FPM.addPass(llvm::PromotePass());
+            FPM.addPass(llvm::InstCombinePass());
+            FPM.addPass(llvm::LoopSimplifyPass());
+            FPM.addPass(llvm::LCSSAPass());
+            FPM.addPass(llvm::createFunctionToLoopPassAdaptor(llvm::LoopRotatePass()));
+            FPM.addPass(llvm::createFunctionToLoopPassAdaptor(
+                llvm::LICMPass(llvm::LICMOptions()), /*UseMemorySSA=*/true));
+            FPM.addPass(llvm::GVNPass());
+            FPM.addPass(llvm::InstSimplifyPass());
+        });
+    }
+
     // At O3 with -floop-optimize, register LoopInterchangePass at the end of
     // the loop optimizer to interchange nested loops for better cache locality.
     // This transforms loop-nest orders so that the innermost loop accesses
@@ -502,6 +565,23 @@ void CodeGenerator::runOptimizationPasses() {
             LPM.addPass(llvm::LoopIdiomRecognizePass());
             LPM.addPass(llvm::IndVarSimplifyPass());
             LPM.addPass(llvm::LoopDeletionPass());
+        });
+    }
+
+    // At O3, inject LoopDataPrefetchPass to insert software prefetch
+    // instructions for loops with predictable stride access patterns.
+    // This hides memory latency on hot loops that access large arrays by
+    // issuing prefetch instructions ahead of the actual loads.  The pass
+    // uses TTI (Target Transform Info) to decide prefetch distance and
+    // cache line size based on the target CPU.
+    // Only enabled at O3 because the cost of extra prefetch instructions
+    // can hurt tight loops with good spatial locality (e.g. sequential
+    // access to small arrays that fit in L1).
+    // Registered at ScalarOptimizerLateEP because LoopDataPrefetchPass is a
+    // FunctionPass that internally walks loop nests and analyses SCEVs.
+    if (optimizationLevel >= OptimizationLevel::O3) {
+        PB.registerScalarOptimizerLateEPCallback([](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) {
+            FPM.addPass(llvm::LoopDataPrefetchPass());
         });
     }
 
