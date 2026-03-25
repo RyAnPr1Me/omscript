@@ -1139,7 +1139,7 @@ echo "────────────────────────�
 echo "  Compilation Timing"
 echo "────────────────────────────────────────────────────────────────"
 
-OM_FLAGS="-O3 -flto -march=native -mtune=native -ffast-math -fvectorize -funroll-loops -floop-optimize"
+OM_FLAGS="-O3 -march=native -mtune=native -ffast-math -fvectorize -funroll-loops -floop-optimize"
 C_FLAGS="-O3 -march=native -mtune=native -flto -ffast-math -funroll-loops -lm"
 
 echo "Compiling OM ($OMSC $OM_FLAGS) …"

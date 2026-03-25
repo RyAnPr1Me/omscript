@@ -841,11 +841,20 @@ void CodeGenerator::runOptimizationPasses() {
     // Enabled at O2+ unless explicitly disabled with -fno-superopt.
     if (enableSuperopt_ && optimizationLevel >= OptimizationLevel::O2) {
         if (verbose_) {
-            std::cout << "    Running superoptimizer (idiom recognition, algebraic simplification, synthesis)..." << std::endl;
+            std::cout << "    Running superoptimizer (level " << superoptLevel_
+                      << ": idiom recognition, algebraic simplification"
+                      << (superoptLevel_ >= 2 ? ", synthesis, branch-opt" : "")
+                      << ")..." << std::endl;
         }
         superopt::SuperoptimizerConfig superConfig;
-        // At O3, enable more aggressive synthesis
-        if (optimizationLevel >= OptimizationLevel::O3) {
+        // Configure based on superopt level:
+        //   Level 1: idiom + algebraic only (fast compilation)
+        //   Level 2: all features, default synthesis (balanced)
+        //   Level 3: all features, aggressive synthesis (slower compilation)
+        if (superoptLevel_ <= 1) {
+            superConfig.enableSynthesis = false;
+            superConfig.enableBranchOpt = false;
+        } else if (superoptLevel_ >= 3 || optimizationLevel >= OptimizationLevel::O3) {
             superConfig.synthesis.maxInstructions = 5;
             superConfig.synthesis.costThreshold = 0.9;
         }

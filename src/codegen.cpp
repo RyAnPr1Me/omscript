@@ -2657,6 +2657,18 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         }
     }
 
+    // @hot functions at O2+: add nonnull on pointer parameters.
+    // OmScript's ownership model guarantees arrays/strings passed to
+    // functions are always valid (non-null) allocations.  This lets LLVM
+    // eliminate null-checks and enables speculative loads.
+    if (currentFuncHintHot_ && optimizationLevel >= OptimizationLevel::O2 && !inOptMaxFunction) {
+        for (unsigned i = 0; i < function->arg_size(); ++i) {
+            if (function->getArg(i)->getType()->isPointerTy()) {
+                function->addParamAttr(i, llvm::Attribute::NonNull);
+            }
+        }
+    }
+
     // @unroll / @nounroll: per-function loop unrolling control.
     // These are stored and applied to every loop emitted within this function.
     currentFuncHintUnroll_ = func->hintUnroll;
