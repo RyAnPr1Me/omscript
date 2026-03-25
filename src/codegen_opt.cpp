@@ -540,12 +540,14 @@ void CodeGenerator::runOptimizationPasses() {
         });
     }
 
-    // At O3 with -floop-optimize, register LoopInterchangePass at the end of
+    // At O2+ with -floop-optimize, register LoopInterchangePass at the end of
     // the loop optimizer to interchange nested loops for better cache locality.
     // This transforms loop-nest orders so that the innermost loop accesses
     // memory contiguously (e.g. column-major → row-major), dramatically
     // reducing cache misses for matrix-style code.
-    if (optimizationLevel >= OptimizationLevel::O3 && enableLoopOptimize_) {
+    // Lowered from O3 to O2 because matrix-style loops are common even in
+    // moderate-optimization builds.
+    if (optimizationLevel >= OptimizationLevel::O2 && enableLoopOptimize_) {
         PB.registerLoopOptimizerEndEPCallback(
             [](llvm::LoopPassManager& LPM, llvm::OptimizationLevel /*Level*/) { LPM.addPass(llvm::LoopInterchangePass()); });
     }
@@ -648,6 +650,13 @@ void CodeGenerator::runOptimizationPasses() {
                 FPM.addPass(llvm::SeparateConstOffsetFromGEPPass());
                 FPM.addPass(llvm::PartiallyInlineLibCallsPass());
                 FPM.addPass(llvm::SinkingPass());
+                // NewGVN is a graph-based GVN that catches redundancies
+                // classic GVN misses (e.g. through PHI nodes and memory).
+                FPM.addPass(llvm::NewGVNPass());
+                // GuardWidening merges multiple guard checks into a single
+                // wider check, reducing branching overhead in bounds-checked
+                // loops.
+                FPM.addPass(llvm::GuardWideningPass());
             }
             // Aggressive SimplifyCFG at the end to convert if-else chains
             // into select instructions or lookup tables after all inlining,
@@ -981,6 +990,23 @@ void CodeGenerator::runOptimizationPasses() {
         }
     } else if (verbose_ && optimizationLevel >= OptimizationLevel::O2 && !enableSuperopt_) {
         std::cout << "    Superoptimizer disabled (-fno-superopt)" << std::endl;
+    }
+
+    // Post-superoptimizer cleanup: the superoptimizer creates algebraically
+    // simplified patterns that may have new CSE opportunities.  A quick
+    // GVN + InstCombine + SimplifyCFG pass cleans these up before the
+    // signed→unsigned conversion and HGOE runs.
+    if (enableSuperopt_ && optimizationLevel >= OptimizationLevel::O2) {
+        llvm::legacy::FunctionPassManager postSuperFPM(module.get());
+        postSuperFPM.add(llvm::createGVNPass());
+        postSuperFPM.add(llvm::createInstructionCombiningPass());
+        postSuperFPM.add(llvm::createCFGSimplificationPass(aggressiveCFGOpts()));
+        postSuperFPM.add(llvm::createDeadCodeEliminationPass());
+        postSuperFPM.doInitialization();
+        for (auto& func : *module) {
+            if (!func.isDeclaration()) postSuperFPM.run(func);
+        }
+        postSuperFPM.doFinalization();
     }
 
     // Post-pipeline srem→urem and sdiv→udiv conversion.  The pre-pipeline

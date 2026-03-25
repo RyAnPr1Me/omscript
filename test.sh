@@ -13,10 +13,14 @@ set -eu
 #    - Warmup runs before timing to eliminate cold-start bias
 #    - Interleaved C/OM runs to spread system noise evenly
 #    - Median-of-N timing for robustness against outliers
+#    - CPU pinning (taskset) when available for reduced jitter
 #    - Standard deviation reported; noisy benchmarks flagged (~)
+#    - Short-duration benchmarks (<5 ms) flagged (⏱) as unreliable
 #    - Geometric mean as primary aggregate metric (not skewed
 #      by a single slow/fast benchmark the way sum is)
-#    - Env vars: BENCH_RUNS (default 5), BENCH_WARMUP (default 1)
+#    - No LTO for C (OM is single-file; LTO would give C unfair
+#      inter-procedural advantage that OM already gets natively)
+#    - Env vars: BENCH_RUNS (default 7), BENCH_WARMUP (default 2)
 #
 #  Categories:
 #    - Integer arithmetic & math builtins
@@ -33,10 +37,18 @@ set -eu
 #      collatz, binary search)
 # ──────────────────────────────────────────────────────────────
 
-RUNS=${BENCH_RUNS:-5}
-WARMUP_RUNS=${BENCH_WARMUP:-1}
+RUNS=${BENCH_RUNS:-7}
+WARMUP_RUNS=${BENCH_WARMUP:-2}
 
 SCRIPT_START=$(date +%s%N)
+
+# ─── PROCESS ISOLATION ────────────────────────────────────────
+# Pin to a single CPU core to reduce scheduler jitter.
+# Use taskset if available; fall back to no pinning.
+TASKSET=""
+if command -v taskset &>/dev/null; then
+    TASKSET="taskset -c 0"
+fi
 
 NUM_BENCHMARKS=25
 
@@ -1140,7 +1152,10 @@ echo "  Compilation Timing"
 echo "────────────────────────────────────────────────────────────────"
 
 OM_FLAGS="-O3 -march=native -mtune=native -ffast-math -fvectorize -funroll-loops -floop-optimize"
-C_FLAGS="-O3 -march=native -mtune=native -flto -ffast-math -funroll-loops -lm"
+# C flags: no -flto since OM doesn't use LTO (single-file compilation gets
+# no cross-TU benefit).  Adding -fno-plt avoids PLT indirection overhead
+# that OmScript never incurs.  This levels the playing field.
+C_FLAGS="-O3 -march=native -mtune=native -ffast-math -funroll-loops -fno-plt -lm"
 
 echo "Compiling OM ($OMSC $OM_FLAGS) …"
 OM_COMP_START=$(date +%s%N)
@@ -1176,8 +1191,8 @@ run_one() {
     local id=$1 n=$2 name=$3
 
     local co oo
-    co=$(echo "$id $n" | ./bench_c)
-    oo=$(echo "$id $n" | ./bench_om)
+    co=$(echo "$id $n" | $TASKSET ./bench_c)
+    oo=$(echo "$id $n" | $TASKSET ./bench_om)
     if [ "$co" != "$oo" ]; then
         printf "  %-22s  C=%-14s  OM=%-14s  ${RED}❌ MISMATCH${RST}\n" "$name" "$co" "$oo"
         MISMATCH=1
@@ -1191,8 +1206,8 @@ run_one() {
     # the timed runs start from a warm state.  This removes cold-start
     # variance that would unfairly penalize whichever binary runs first.
     for (( w=0; w<WARMUP_RUNS; w++ )); do
-        echo "$id $n" | ./bench_c  > /dev/null
-        echo "$id $n" | ./bench_om > /dev/null
+        echo "$id $n" | $TASKSET ./bench_c  > /dev/null
+        echo "$id $n" | $TASKSET ./bench_om > /dev/null
     done
 
     # Interleaved timed runs: alternate C and OM to spread any
@@ -1202,13 +1217,13 @@ run_one() {
     for (( r=0; r<RUNS; r++ )); do
         local cs ce ct os oe ot
         cs=$(date +%s%N)
-        echo "$id $n" | ./bench_c > /dev/null
+        echo "$id $n" | $TASKSET ./bench_c > /dev/null
         ce=$(date +%s%N)
         ct=$(( (ce - cs) / 1000000 ))
         c_runs+=("$ct")
 
         os=$(date +%s%N)
-        echo "$id $n" | ./bench_om > /dev/null
+        echo "$id $n" | $TASKSET ./bench_om > /dev/null
         oe=$(date +%s%N)
         ot=$(( (oe - os) / 1000000 ))
         om_runs+=("$ot")
@@ -1260,6 +1275,11 @@ run_one() {
     if [ "$ot" -gt 0 ] && [ "$(( om_stddev * 100 / ot ))" -gt 15 ]; then
         noise=" ${YEL}~${RST}"
     fi
+    # Flag benchmarks under 5 ms as potentially unreliable due to
+    # timing resolution — 1 ms jitter on a 3 ms test is 33% noise.
+    if [ "$ct" -lt 5 ] || [ "$ot" -lt 5 ]; then
+        noise="${noise} ${YEL}⏱${RST}"
+    fi
 
     printf "  %-22s  C: %6d ms (±%3d)  OM: %6d ms (±%3d)  %4d%%  %b%b\n" \
            "$name" "$ct" "$c_stddev" "$ot" "$om_stddev" "$ratio" "$tag" "$noise"
@@ -1281,6 +1301,7 @@ done
 
 echo ""
 echo -e "  ${YEL}~${RST} = noisy benchmark (stddev > 15% of median); results may be unreliable."
+echo -e "  ${YEL}⏱${RST} = very short benchmark (<5 ms); timing resolution may dominate."
 echo "  ± values show standard deviation across runs."
 
 if [ "$MISMATCH" -eq 1 ]; then
@@ -1310,15 +1331,27 @@ for si in "${!SCALE_IDS[@]}"; do
     printf "  %-18s  " "$sname"
     for mult in 1 2 4; do
         sn=$(( sbase * mult ))
-        cs=$(date +%s%N)
-        echo "$sid $sn" | ./bench_c > /dev/null
-        ce=$(date +%s%N)
-        ct=$(( (ce - cs) / 1000000 ))
+        # Warmup
+        echo "$sid $sn" | $TASKSET ./bench_c  > /dev/null
+        echo "$sid $sn" | $TASKSET ./bench_om > /dev/null
+        # Median-of-3 for scaling tests
+        sc_runs=()
+        so_runs=()
+        for sr in 0 1 2; do
+            cs=$(date +%s%N)
+            echo "$sid $sn" | $TASKSET ./bench_c > /dev/null
+            ce=$(date +%s%N)
+            sc_runs+=("$(( (ce - cs) / 1000000 ))")
 
-        os=$(date +%s%N)
-        echo "$sid $sn" | ./bench_om > /dev/null
-        oe=$(date +%s%N)
-        ot=$(( (oe - os) / 1000000 ))
+            os=$(date +%s%N)
+            echo "$sid $sn" | $TASKSET ./bench_om > /dev/null
+            oe=$(date +%s%N)
+            so_runs+=("$(( (oe - os) / 1000000 ))")
+        done
+        IFS=$'\n' sc_s=($(printf '%s\n' "${sc_runs[@]}" | sort -n)); unset IFS
+        IFS=$'\n' so_s=($(printf '%s\n' "${so_runs[@]}" | sort -n)); unset IFS
+        ct=${sc_s[1]}
+        ot=${so_s[1]}
 
         if [ "$ct" -gt 0 ]; then ratio=$(( ot * 100 / ct )); else ratio=100; fi
         printf "x%-2d C:%4dms OM:%4dms (%3d%%)  " "$mult" "$ct" "$ot" "$ratio"
