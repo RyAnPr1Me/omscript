@@ -3,6 +3,13 @@
 #ifndef DIAGNOSTIC_H
 #define DIAGNOSTIC_H
 
+/// @file diagnostic.h
+/// @brief Diagnostic infrastructure for the OmScript compiler.
+///
+/// Provides machine-readable ErrorCode identifiers, the Diagnostic struct
+/// used to report warnings and errors with source locations, and the
+/// DiagnosticEngine that collects and renders diagnostics.
+
 #include <algorithm>
 #include <cstddef>
 #include <stdexcept>
@@ -57,7 +64,7 @@ inline const char* errorCodeString(ErrorCode code) {
 /// Compute the edit distance between two strings (Levenshtein distance).
 /// Accounts for insertions, deletions, and substitutions.
 inline size_t editDistance(const std::string& a, const std::string& b) {
-    size_t m = a.size(), n = b.size();
+    const size_t m = a.size(), n = b.size();
     // Fast paths for trivial cases.
     if (m == 0) return n;
     if (n == 0) return m;

@@ -2692,7 +2692,6 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* length = builder->CreateLoad(getDefaultType(), arrPtr, "amin.len");
 
         llvm::Function* function = builder->GetInsertBlock()->getParent();
-        llvm::BasicBlock* entryBB = builder->GetInsertBlock();
         llvm::BasicBlock* emptyBB = llvm::BasicBlock::Create(*context, "amin.empty", function);
         llvm::BasicBlock* initBB = llvm::BasicBlock::Create(*context, "amin.init", function);
         llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "amin.loop", function);
@@ -2756,7 +2755,6 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* length = builder->CreateLoad(getDefaultType(), arrPtr, "amax.len");
 
         llvm::Function* function = builder->GetInsertBlock()->getParent();
-        llvm::BasicBlock* entryBB = builder->GetInsertBlock();
         llvm::BasicBlock* emptyBB = llvm::BasicBlock::Create(*context, "amax.empty", function);
         llvm::BasicBlock* initBB = llvm::BasicBlock::Create(*context, "amax.init", function);
         llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "amax.loop", function);

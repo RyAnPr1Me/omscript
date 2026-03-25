@@ -3,6 +3,13 @@
 #ifndef CODEGEN_H
 #define CODEGEN_H
 
+/// @file codegen.h
+/// @brief LLVM IR code generation for OmScript.
+///
+/// This module defines the CodeGenerator class which walks the OmScript AST
+/// and emits LLVM IR.  It handles type mapping, control flow, built-in
+/// functions, debug information, and optimization attributes.
+
 #include "ast.h"
 #include "diagnostic.h"
 #include <llvm/IR/DIBuilder.h>

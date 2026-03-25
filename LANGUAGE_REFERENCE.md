@@ -1,7 +1,7 @@
 # OmScript Language Reference
 
-> **Version:** 3.0.0  
-> **Compiler:** `omsc` — OmScript Compiler v3.0.0  
+> **Version:** 3.7.0  
+> **Compiler:** `omsc` — OmScript Compiler v3.7.0  
 > **Standard:** C++17 · LLVM Backend · Ahead-of-Time Compilation  
 > **License:** See repository root
 
