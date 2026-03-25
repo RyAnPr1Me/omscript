@@ -425,6 +425,15 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
                            llvm::ConstantAsMetadata::get(
                                llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
+            // Provide target-aware vector width to help the vectorizer commit
+            // to the optimal SIMD width without cost-model exploration overhead.
+            if (preferredVectorWidth_ > 1) {
+                loopMDs.push_back(llvm::MDNode::get(
+                    *context,
+                    {llvm::MDString::get(*context, "llvm.loop.vectorize.width"),
+                     llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                         llvm::Type::getInt32Ty(*context), preferredVectorWidth_))}));
+            }
         }
         llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
         loopMD->replaceOperandWith(0, loopMD);
@@ -504,6 +513,13 @@ void CodeGenerator::generateDoWhile(DoWhileStmt* stmt) {
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
                            llvm::ConstantAsMetadata::get(
                                llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
+            if (preferredVectorWidth_ > 1) {
+                loopMDs.push_back(llvm::MDNode::get(
+                    *context,
+                    {llvm::MDString::get(*context, "llvm.loop.vectorize.width"),
+                     llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                         llvm::Type::getInt32Ty(*context), preferredVectorWidth_))}));
+            }
         }
         llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
         loopMD->replaceOperandWith(0, loopMD);
@@ -850,6 +866,13 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
                            llvm::ConstantAsMetadata::get(
                                llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
+            if (preferredVectorWidth_ > 1) {
+                loopMDs.push_back(llvm::MDNode::get(
+                    *context,
+                    {llvm::MDString::get(*context, "llvm.loop.vectorize.width"),
+                     llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                         llvm::Type::getInt32Ty(*context), preferredVectorWidth_))}));
+            }
         }
         llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
         loopMD->replaceOperandWith(0, loopMD);
@@ -956,7 +979,55 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
     llvm::Value* nextIdx = builder->CreateLoad(getDefaultType(), idxAlloca, "foreach.nidx");
     llvm::Value* incIdx = builder->CreateAdd(nextIdx, llvm::ConstantInt::get(getDefaultType(), 1), "foreach.next");
     builder->CreateStore(incIdx, idxAlloca);
-    builder->CreateBr(condBB);
+    auto* backBr = builder->CreateBr(condBB);
+
+    // Attach loop metadata to the back-edge branch so LLVM's loop optimizer,
+    // vectorizer, and unroller can identify and transform the loop.
+    // This mirrors the metadata generation in generateFor/generateWhile/
+    // generateDoWhile so that for-each loops receive the same optimization
+    // opportunities as regular counted loops.
+    if (optimizationLevel >= OptimizationLevel::O1) {
+        llvm::MDNode* mustProgress =
+            llvm::MDNode::get(*context, {llvm::MDString::get(*context, "llvm.loop.mustprogress")});
+        llvm::SmallVector<llvm::Metadata*, 6> loopMDs;
+        loopMDs.push_back(nullptr); // self-reference placeholder
+        loopMDs.push_back(mustProgress);
+        // At O3 with unrolling enabled, hint the unroller with a moderate
+        // count for static (non-JIT) compilation.  OPTMAX functions use
+        // LLVM's cost model instead.  Matches generateFor/generateWhile logic.
+        if (!inOptMaxFunction && optimizationLevel >= OptimizationLevel::O3 && enableUnrollLoops_ && !dynamicCompilation_) {
+            loopMDs.push_back(llvm::MDNode::get(
+                *context,
+                {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
+                 llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                     llvm::Type::getInt32Ty(*context), 2))}));
+        }
+        // @vectorize / @novectorize: per-function loop vectorization overrides.
+        if (currentFuncHintNoVectorize_) {
+            loopMDs.push_back(llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
+                           llvm::ConstantAsMetadata::get(
+                               llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 0))}));
+        } else if (currentFuncHintVectorize_) {
+            loopMDs.push_back(llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
+                           llvm::ConstantAsMetadata::get(
+                               llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
+            // When the user explicitly requests vectorization, provide the
+            // target-aware vector width so the vectorizer commits to the
+            // optimal SIMD width without cost-model exploration overhead.
+            if (preferredVectorWidth_ > 1) {
+                loopMDs.push_back(llvm::MDNode::get(
+                    *context,
+                    {llvm::MDString::get(*context, "llvm.loop.vectorize.width"),
+                     llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                         llvm::Type::getInt32Ty(*context), preferredVectorWidth_))}));
+            }
+        }
+        llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
+        loopMD->replaceOperandWith(0, loopMD);
+        backBr->setMetadata(llvm::LLVMContext::MD_loop, loopMD);
+    }
 
     // End
     builder->SetInsertPoint(endBB);

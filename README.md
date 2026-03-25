@@ -452,9 +452,9 @@ var x = 10; /* inline */
 ## Building
 
 ### Prerequisites
-- CMake 3.13 or higher
+- CMake 3.13+ (3.16+ recommended for precompiled header support)
 - C++17 compatible compiler (GCC or Clang)
-- LLVM 17+ development libraries
+- LLVM 18+ development libraries
 - GCC (for linking)
 
 ### Build Instructions
@@ -462,6 +462,14 @@ var x = 10; /* inline */
 mkdir -p build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release -DLLVM_DIR=/usr/lib/llvm-18/cmake
 make -j$(nproc)
+```
+
+The build system automatically uses **ccache**/sccache when available and
+enables **precompiled headers** (PCH) on CMake 3.16+ to speed up compilation.
+Install ccache for faster incremental rebuilds:
+```bash
+sudo apt-get install -y ccache   # Debian/Ubuntu
+brew install ccache               # macOS
 ```
 
 ## Usage
@@ -656,7 +664,7 @@ Types are determined at runtime; LLVM compiles each operation to native instruct
 # Unit tests (requires libgtest-dev)
 cd build && ctest --output-on-failure
 
-# Integration tests (125 example programs)
+# Integration tests (~330 example programs)
 bash run_tests.sh
 ```
 
