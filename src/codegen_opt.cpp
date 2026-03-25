@@ -38,8 +38,12 @@
 #include <llvm/Transforms/IPO/GlobalDCE.h>
 #include <llvm/Transforms/IPO/GlobalOpt.h>
 #include <llvm/Transforms/IPO/HotColdSplitting.h>
+#include <llvm/Transforms/IPO/ArgumentPromotion.h>
+#include <llvm/Transforms/IPO/ConstantMerge.h>
 #include <llvm/Transforms/IPO/DeadArgumentElimination.h>
+#include <llvm/Transforms/IPO/FunctionAttrs.h>
 #include <llvm/Transforms/IPO/InferFunctionAttrs.h>
+#include <llvm/Transforms/IPO/PartialInlining.h>
 #include <llvm/Transforms/InstCombine/InstCombine.h>
 #include <llvm/Transforms/Scalar.h>
 #include <llvm/Transforms/Scalar/ADCE.h>
@@ -50,14 +54,23 @@
 #include <llvm/Transforms/Scalar/GVN.h>
 #include <llvm/Transforms/Scalar/IndVarSimplify.h>
 #include <llvm/Transforms/Scalar/LoopDeletion.h>
+#include <llvm/Transforms/Scalar/DFAJumpThreading.h>
+#include <llvm/Transforms/Scalar/InductiveRangeCheckElimination.h>
+#include <llvm/Transforms/Scalar/InferAlignment.h>
+#include <llvm/Transforms/Scalar/AlignmentFromAssumptions.h>
+#include <llvm/Transforms/Scalar/LoopBoundSplit.h>
 #include <llvm/Transforms/Scalar/LoopDistribute.h>
+#include <llvm/Transforms/Scalar/LoopFlatten.h>
 #include <llvm/Transforms/Scalar/LoopFuse.h>
 #include <llvm/Transforms/Scalar/LoopIdiomRecognize.h>
+#include <llvm/Transforms/Scalar/LoopInstSimplify.h>
 #include <llvm/Transforms/Scalar/LoopInterchange.h>
 #include <llvm/Transforms/Scalar/LoopLoadElimination.h>
 #include <llvm/Transforms/Scalar/LoopDataPrefetch.h>
 #include <llvm/Transforms/Scalar/LoopRotation.h>
 #include <llvm/Transforms/Scalar/LoopSink.h>
+#include <llvm/Transforms/Scalar/LoopUnrollAndJamPass.h>
+#include <llvm/Transforms/Scalar/LoopVersioningLICM.h>
 #include <llvm/Transforms/Scalar/MergeICmps.h>
 #include <llvm/Transforms/Scalar/MergedLoadStoreMotion.h>
 #include <llvm/Transforms/Scalar/MemCpyOptimizer.h>
@@ -374,6 +387,18 @@ void CodeGenerator::runOptimizationPasses() {
         });
     }
 
+    // At O2+, infer memory attributes (readnone, readonly, argmemonly, etc.)
+    // on functions using the full call graph in reverse post-order.  Running
+    // this early — before inlining and other IPO passes — gives alias analysis
+    // and LICM accurate function-level memory effects, which propagates to
+    // more precise results for every downstream function-level optimisation.
+    if (optimizationLevel >= OptimizationLevel::O2) {
+        PB.registerOptimizerEarlyEPCallback(
+            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel) {
+            MPM.addPass(llvm::ReversePostOrderFunctionAttrsPass());
+        });
+    }
+
     // At O2+, register SCCP (Sparse Conditional Constant Propagation) early
     // in the scalar optimizer to discover constants that flow through control
     // flow edges.  SCCP can prove that some branches are never taken and that
@@ -420,6 +445,20 @@ void CodeGenerator::runOptimizationPasses() {
     // memcpy): the optimizer can incorrectly eliminate the loop exit condition,
     // producing an infinite loop and segfault.  The attributes we manually set
     // on library function declarations are sufficient.
+
+    // At O3, register ArgumentPromotionPass late in the CGSCC pipeline
+    // to promote by-reference (pointer) arguments to by-value when the
+    // callee only reads through the pointer.  This eliminates pointer
+    // chasing and memory loads at call sites, and the promoted values
+    // become SSA registers that downstream passes can optimise freely.
+    // Only at O3 because argument promotion can increase register
+    // pressure and code size when the promoted values are large.
+    if (optimizationLevel >= OptimizationLevel::O3) {
+        PB.registerCGSCCOptimizerLateEPCallback(
+            [](llvm::CGSCCPassManager& CGPM, llvm::OptimizationLevel) {
+            CGPM.addPass(llvm::ArgumentPromotionPass());
+        });
+    }
 
     // At O2+ with -floop-optimize, register LoopDistributePass to run just
     // before the vectorizer starts.  Loop distribution splits a loop with
@@ -509,6 +548,12 @@ void CodeGenerator::runOptimizationPasses() {
                 llvm::LICMPass(llvm::LICMOptions()), /*UseMemorySSA=*/true));
             FPM.addPass(llvm::GVNPass());
             FPM.addPass(llvm::InstSimplifyPass());
+            // AlignmentFromAssumptions uses @llvm.assume alignment hints to
+            // upgrade load/store alignment.  Better alignment enables the
+            // vectorizer to use wider vector operations (e.g. aligned 256-bit
+            // loads instead of unaligned 128-bit loads), reducing memory
+            // traffic and improving throughput.
+            FPM.addPass(llvm::AlignmentFromAssumptionsPass());
         });
     }
 
@@ -565,6 +610,58 @@ void CodeGenerator::runOptimizationPasses() {
             LPM.addPass(llvm::LoopIdiomRecognizePass());
             LPM.addPass(llvm::IndVarSimplifyPass());
             LPM.addPass(llvm::LoopDeletionPass());
+            // LoopInstSimplify performs lightweight instruction simplification
+            // (constant folding, identity removal, dead comparison elimination)
+            // inside loop bodies after all loop transforms have completed.
+            // This cleans up patterns exposed by IndVarSimplify, LoopRotate,
+            // and LICM that would otherwise persist until later InstCombine.
+            LPM.addPass(llvm::LoopInstSimplifyPass());
+        });
+    }
+
+    // At O3 with -floop-optimize, register advanced loop nest transformations
+    // after the basic loop cleanup passes.
+    if (optimizationLevel >= OptimizationLevel::O3 && enableLoopOptimize_) {
+        PB.registerLoopOptimizerEndEPCallback([](llvm::LoopPassManager& LPM, llvm::OptimizationLevel) {
+            // LoopFlatten collapses perfectly-nested loop pairs into a single
+            // loop with a linearised induction variable.  This eliminates inner
+            // loop overhead (branch, counter increment, comparison) and enables
+            // the vectorizer to process the flattened iteration space as a
+            // single contiguous stream.  Beneficial for matrix-clear,
+            // image-processing, and N-dimensional array traversal patterns.
+            LPM.addPass(llvm::LoopFlattenPass());
+            // LoopUnrollAndJam unrolls the outer loop of a loop nest and fuses
+            // ("jams") the resulting copies of the inner loop.  This improves
+            // data reuse between outer-loop iterations — values loaded by the
+            // inner loop in iteration i of the outer loop are still in
+            // registers when the inner loop runs for iteration i+1, reducing
+            // memory traffic.  The pass uses TTI cost modelling to decide the
+            // unroll factor.
+            LPM.addPass(llvm::LoopUnrollAndJamPass(/*OptLevel=*/3));
+        });
+    }
+
+    // At O3, register LoopBoundSplitPass to split loops whose body contains
+    // an induction-variable-dependent condition (e.g. `if (i < c)`) into
+    // two specialised loops: one that always takes the true branch and one
+    // that always takes the false branch.  This eliminates a branch per
+    // iteration in each clone and exposes more vectorisation opportunities.
+    if (optimizationLevel >= OptimizationLevel::O3) {
+        PB.registerLoopOptimizerEndEPCallback([](llvm::LoopPassManager& LPM, llvm::OptimizationLevel) {
+            LPM.addPass(llvm::LoopBoundSplitPass());
+        });
+    }
+
+    // At O3 with -floop-optimize, register LoopVersioningLICMPass late in
+    // the loop optimizer.  When alias analysis cannot prove that a loop's
+    // memory accesses don't alias, this pass creates a runtime alias check
+    // and generates two loop versions: the fast path with LICM-hoisted
+    // loads/stores (assuming no alias), and a slow fallback with the
+    // original loop.  This enables LICM on loops that would otherwise be
+    // blocked by conservative alias analysis.
+    if (optimizationLevel >= OptimizationLevel::O3 && enableLoopOptimize_) {
+        PB.registerLateLoopOptimizationsEPCallback([](llvm::LoopPassManager& LPM, llvm::OptimizationLevel) {
+            LPM.addPass(llvm::LoopVersioningLICMPass());
         });
     }
 
@@ -622,6 +719,13 @@ void CodeGenerator::runOptimizationPasses() {
             // maximize reuse of existing sub-expressions (e.g. (a+b)+2
             // when (a+b) is already available → reuse + add 2).
             FPM.addPass(llvm::NaryReassociatePass());
+            // InferAlignment uses context clues (GEP offsets, alloca
+            // alignment, assume intrinsics) to tighten the alignment of
+            // loads and stores.  Higher alignment enables the back-end to
+            // use wider, more efficient memory operations and avoids
+            // alignment fixup sequences on architectures that penalise
+            // unaligned access.
+            FPM.addPass(llvm::InferAlignmentPass());
         });
     }
 
@@ -641,6 +745,18 @@ void CodeGenerator::runOptimizationPasses() {
             FPM.addPass(llvm::JumpThreadingPass());
             FPM.addPass(llvm::DivRemPairsPass());
             FPM.addPass(llvm::SpeculativeExecutionPass());
+            // IRCEPass (Inductive Range Check Elimination) creates versioned
+            // loops: a "safe" main loop that runs without bounds checks and a
+            // "pre/post" loop that handles the boundary iterations with checks.
+            // For counted loops with bounds-checked array access this
+            // eliminates a comparison + branch per iteration on the hot path.
+            FPM.addPass(llvm::IRCEPass());
+            // DFAJumpThreading threads through switch-statement state machines
+            // by building a DFA model of the switch dispatch and replacing
+            // indirect jumps with direct branches.  This is more powerful than
+            // regular JumpThreading for parser/automaton code where the next
+            // state is predictable from the current state + input.
+            FPM.addPass(llvm::DFAJumpThreadingPass());
         });
     }
 
@@ -660,6 +776,11 @@ void CodeGenerator::runOptimizationPasses() {
             FPM.addPass(llvm::VectorCombinePass());
             FPM.addPass(llvm::LoopSinkPass());
             MPM.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(FPM)));
+            // ConstantMerge deduplicates identical global constants across the
+            // module (e.g. duplicate string literals, floating-point constants,
+            // constant arrays).  Fewer unique constants means smaller data
+            // sections, better D-cache utilization, and reduced link time.
+            MPM.addPass(llvm::ConstantMergePass());
         });
     }
 
@@ -672,6 +793,12 @@ void CodeGenerator::runOptimizationPasses() {
         PB.registerOptimizerLastEPCallback(
             [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel) {
             MPM.addPass(llvm::DeadArgumentEliminationPass());
+            // PartialInlinerPass outlines cold regions (error handling, slow
+            // paths) from otherwise-hot functions and inlines only the hot
+            // entry region into callers.  This gives the performance benefit
+            // of inlining (no call overhead on the fast path) without the
+            // code-size cost of inlining the entire function body.
+            MPM.addPass(llvm::PartialInlinerPass());
         });
     }
 
