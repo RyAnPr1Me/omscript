@@ -845,6 +845,12 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         if (currentFuncHintNoUnroll_) {
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.unroll.disable")}));
+        } else if (bodyHasInnerLoop_) {
+            // When the body contains an inner loop (while/for), disable
+            // unrolling to avoid I-cache bloat from duplicating large loop
+            // bodies with unpredictable branches.
+            loopMDs.push_back(llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.unroll.disable")}));
         } else if (currentFuncHintUnroll_ && !addedUnrollHint) {
             // For variable-trip-count loops, unroll.full is ignored by LLVM
             // (the unroller refuses to fully unroll unbounded loops).  Use a
@@ -852,15 +858,9 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             // GCC's aggressive unrolling for FP-heavy loops.
             // OPTMAX uses 8 to hide FP/call latency through ILP; regular
             // functions use 4 to balance ILP gains vs I-cache pressure.
-            // When the body contains an inner loop (while/for), cap the unroll
-            // count to avoid I-cache bloat from duplicating large loop bodies.
             static constexpr unsigned kOptMaxUnrollCount = 8;
             static constexpr unsigned kDefaultUnrollCount = 4;
-            static constexpr unsigned kInnerLoopUnrollCap = 2;
             unsigned unrollCount = inOptMaxFunction ? kOptMaxUnrollCount : kDefaultUnrollCount;
-            if (bodyHasInnerLoop_) {
-                unrollCount = std::min(unrollCount, kInnerLoopUnrollCap);
-            }
             loopMDs.push_back(llvm::MDNode::get(
                 *context,
                 {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
