@@ -2723,6 +2723,19 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
                 function->addFnAttr(llvm::Attribute::AlwaysInline);
             }
         }
+        // @hot functions get elevated inline cost.  At O3, also set
+        // "function-inline-cost" to encourage the inliner to inline
+        // callees into hot functions more aggressively.
+        if (currentFuncHintHot_ && optimizationLevel >= OptimizationLevel::O3) {
+            function->addFnAttr("hot");
+        }
+        // Small functions with few parameters are good inline candidates.
+        // They become nearly zero-cost after inlining because there's
+        // minimal call overhead.
+        if (func->body && func->parameters.size() <= 3 &&
+            func->body->statements.size() <= 5) {
+            function->addFnAttr(llvm::Attribute::InlineHint);
+        }
     }
 
     // Create entry basic block

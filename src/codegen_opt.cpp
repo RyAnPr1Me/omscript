@@ -1367,6 +1367,10 @@ void CodeGenerator::optimizeOptMaxFunctions() {
         // NoFree: OPTMAX functions don't free heap memory, enabling the
         // optimizer to sink/hoist loads past calls to these functions.
         func.addFnAttr(llvm::Attribute::NoFree);
+        // MustProgress: OPTMAX functions always make progress (no infinite
+        // loops without side effects), enabling LLVM to eliminate provably
+        // infinite empty loops and simplify trip-count analysis.
+        func.addFnAttr(llvm::Attribute::MustProgress);
         // Mark small OPTMAX helpers as always-inline candidates.
         // Higher threshold (30 instrs) ensures utility functions like
         // classify(), add_one/two/four() are force-inlined, eliminating
