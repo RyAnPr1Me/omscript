@@ -13,7 +13,16 @@ elseif(SCCACHE_PROGRAM)
     set(CMAKE_CXX_COMPILER_LAUNCHER ${SCCACHE_PROGRAM})
 endif()
 
-project(OmScript VERSION 3.5.0)
+project(OmScript VERSION 3.0.0)
+
+# Version define (fixes your compile error)
+if(NOT DEFINED OMSC_VERSION)
+    set(OMSC_VERSION "${PROJECT_VERSION}")
+endif()
+
+target_compile_definitions(omsc PRIVATE
+    OMSC_VERSION=\"${OMSC_VERSION}\"
+)
 
 # ── Global settings ───────────────────────────────────────────────────────────
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
