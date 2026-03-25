@@ -1,436 +1,173 @@
-cmake_minimum_required(VERSION 3.13)
+cmake_minimum_required(VERSION 3.16)
 
-# ── Compiler cache (ccache / sccache) ─────────────────────────────────────────
-# Automatically use ccache or sccache when available to speed up incremental
-# builds.  Must be set before project() so the compiler launcher is active for
-# all targets.
+# ─────────────────────────────────────────────────────────────────────────────
+# OmScript Build System (Optimized for Compiler Performance)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Compiler cache ───────────────────────────────────────────────────────────
 find_program(CCACHE_PROGRAM ccache)
 find_program(SCCACHE_PROGRAM sccache)
 if(CCACHE_PROGRAM)
-    set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
-    message(STATUS "Using ccache: ${CCACHE_PROGRAM}")
+    set(CMAKE_CXX_COMPILER_LAUNCHER ${CCACHE_PROGRAM})
 elseif(SCCACHE_PROGRAM)
-    set(CMAKE_CXX_COMPILER_LAUNCHER "${SCCACHE_PROGRAM}")
-    message(STATUS "Using sccache: ${SCCACHE_PROGRAM}")
+    set(CMAKE_CXX_COMPILER_LAUNCHER ${SCCACHE_PROGRAM})
 endif()
 
 project(OmScript VERSION 3.5.0)
 
-# Allow overriding the compiler version string at build time (e.g. -DOMSC_VERSION=1.2.3)
-if(NOT DEFINED OMSC_VERSION)
-    set(OMSC_VERSION "${PROJECT_VERSION}")
-endif()
-add_compile_definitions(OMSC_VERSION="${OMSC_VERSION}")
-
+# ── Global settings ───────────────────────────────────────────────────────────
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Default to Release build for production use.
+# Default to Release
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
-    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type (Debug, Release, RelWithDebInfo)" FORCE)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
-# Enable compiler warnings for early defect detection
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    add_compile_options(-Wall -Wextra -Wpedantic)
-    # Use pipes instead of temporary files for communication between compiler
-    # stages, avoiding disk I/O overhead during compilation.
-    add_compile_options(-pipe)
-endif()
+# ── Options ───────────────────────────────────────────────────────────────────
+option(LTO "Enable link-time optimization" OFF)
+option(PGO_GENERATE "Enable PGO generation" OFF)
+set(PGO_PROFILE_DIR "" CACHE STRING "PGO output dir")
+set(PGO_USE "" CACHE STRING "PGO input profile")
+option(NATIVE "Enable -march=native" OFF)
+option(UNITY_BUILD "Enable unity builds" OFF)
+set(SANITIZE "" CACHE STRING "Sanitizers")
 
-# Link-time optimization for the compiler binary itself (disabled by default
-# to avoid linking issues on some platforms).  Enable with -DLTO=ON.
-option(LTO "Enable link-time optimization for the compiler build" OFF)
-if(LTO)
-    if(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
-        include(CheckIPOSupported)
-        check_ipo_supported(RESULT lto_supported OUTPUT lto_error)
-        if(lto_supported)
-            set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
-            message(STATUS "Link-time optimization (LTO) enabled")
-        else()
-            message(WARNING "LTO requested but not supported: ${lto_error}")
-        endif()
-    else()
-        message(STATUS "LTO requires Release or RelWithDebInfo build type; ignoring -DLTO=ON")
-    endif()
-endif()
-
-# Profile-Guided Optimization (PGO) for the compiler binary itself.
-#
-# GCC workflow:
-#   1. cmake -DPGO_GENERATE=ON -DPGO_PROFILE_DIR=/path/to/profiles ..
-#   2. make -j$(nproc)
-#   3. ./omsc <representative workloads>   # generates .gcda files in profile dir
-#   4. cmake -DPGO_USE=/path/to/profiles ..   # directory containing .gcda files
-#   5. make -j$(nproc)                        # recompiles using the profile
-#
-# Clang workflow:
-#   1. cmake -DPGO_GENERATE=ON -DPGO_PROFILE_DIR=/path/to/profiles ..
-#   2. make -j$(nproc)
-#   3. ./omsc <representative workloads>   # generates .profraw files in profile dir
-#   4. llvm-profdata merge -output=default.profdata /path/to/profiles/*.profraw
-#   5. cmake -DPGO_USE=/path/to/default.profdata ..  # merged profdata file
-#   6. make -j$(nproc)
-option(PGO_GENERATE "Instrument build for PGO profile generation" OFF)
-set(PGO_PROFILE_DIR "" CACHE STRING "Directory for PGO raw profiles (PGO_GENERATE only)")
-set(PGO_USE "" CACHE STRING "PGO profile path: directory of .gcda files (GCC) or merged .profdata file (Clang)")
-if(PGO_GENERATE AND PGO_USE)
-    message(FATAL_ERROR "PGO_GENERATE and PGO_USE are mutually exclusive")
-endif()
-if(PGO_GENERATE)
-    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-        set(_pgo_gen_flags "-fprofile-generate")
-        if(PGO_PROFILE_DIR)
-            set(_pgo_gen_flags "${_pgo_gen_flags}=${PGO_PROFILE_DIR}")
-        endif()
-        add_compile_options(${_pgo_gen_flags})
-        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${_pgo_gen_flags}")
-        message(STATUS "PGO instrumentation enabled (Clang, profile dir: ${PGO_PROFILE_DIR})")
-    elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
-        set(_pgo_gen_flags "-fprofile-generate")
-        if(PGO_PROFILE_DIR)
-            set(_pgo_gen_flags "${_pgo_gen_flags}=${PGO_PROFILE_DIR}")
-        endif()
-        add_compile_options(${_pgo_gen_flags})
-        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${_pgo_gen_flags}")
-        message(STATUS "PGO instrumentation enabled (GCC, profile dir: ${PGO_PROFILE_DIR})")
-    else()
-        message(WARNING "PGO_GENERATE requested but compiler does not support it")
-    endif()
-endif()
-if(PGO_USE)
-    if(NOT EXISTS "${PGO_USE}")
-        message(FATAL_ERROR "PGO profile not found: ${PGO_USE}")
-    endif()
-    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-        # Store PGO flags for per-target application (avoids -Wmissing-profile
-        # warnings on test targets that were never profiled).
-        set(_PGO_USE_COMPILE_FLAGS -fprofile-use=${PGO_USE})
-        set(_PGO_USE_LINK_FLAGS -fprofile-use=${PGO_USE})
-        message(STATUS "PGO profile-use enabled (Clang): ${PGO_USE}")
-    elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
-        # GCC expects a directory containing .gcda files, not a single file.
-        # -fprofile-correction compensates for profile/code mismatches from
-        # multi-threaded execution or minor code changes since profiling.
-        # -Wno-missing-profile suppresses warnings for functions (especially
-        # lambdas in egraph.cpp) that were not exercised during profiling —
-        # -fprofile-correction already handles these cases gracefully.
-        set(_PGO_USE_COMPILE_FLAGS -fprofile-use=${PGO_USE} -fprofile-correction -Wno-missing-profile)
-        set(_PGO_USE_LINK_FLAGS -fprofile-use=${PGO_USE})
-        message(STATUS "PGO profile-use enabled (GCC, profile dir): ${PGO_USE}")
-    else()
-        message(WARNING "PGO_USE requested but compiler does not support it")
-    endif()
-endif()
-
-# Target the host CPU for maximum performance (release builds only).
-# Enable with -DNATIVE=ON.  Not recommended for distributed binaries.
-option(NATIVE "Build with -march=native for host-specific optimizations" OFF)
-if(NATIVE)
-    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-        add_compile_options(-march=native)
-        message(STATUS "Native CPU targeting enabled (-march=native)")
-    endif()
-endif()
-
-# Code coverage configuration
-option(COVERAGE "Enable code coverage" OFF)
-if(COVERAGE)
-    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-        add_compile_options(--coverage -fno-inline)
-        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} --coverage")
-    endif()
-endif()
-
-# Optional sanitizer support for catching memory and undefined behavior bugs.
-# Usage: cmake -DSANITIZE=address  (or: thread, undefined, address,undefined)
-if(SANITIZE)
-    set(SANITIZE_FLAGS "-fsanitize=${SANITIZE} -fno-omit-frame-pointer")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${SANITIZE_FLAGS}")
-    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${SANITIZE_FLAGS}")
-endif()
-
-# Find LLVM
+# ── LLVM ──────────────────────────────────────────────────────────────────────
 find_package(LLVM REQUIRED CONFIG)
-
-if(NOT LLVM_FOUND)
-    message(FATAL_ERROR "LLVM not found. Please install LLVM development libraries.")
-endif()
-
 if(LLVM_PACKAGE_VERSION VERSION_LESS "18")
-    message(FATAL_ERROR "LLVM 18.0 or newer is required, but found LLVM ${LLVM_PACKAGE_VERSION}")
+    message(FATAL_ERROR "LLVM 18+ required")
 endif()
-
-message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
-message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
 
 include_directories(SYSTEM ${LLVM_INCLUDE_DIRS})
 add_definitions(${LLVM_DEFINITIONS})
 
-# Look for the LLVM Polly plugin (polyhedral loop optimizer).
-# When found, the path is passed as a compile-time define so codegen_opt.cpp
-# can load it at runtime via llvm::PassPlugin::Load().
-# On Debian/Ubuntu the plugin lives under the version-specific directory
-# (e.g. /usr/lib/llvm-18/lib/) and is named LLVMPolly.so (no lib prefix),
-# so we derive the search path from LLVM_DIR and use find_file.
-#
-# NOTE: Polly plugin loading is disabled on macOS because Homebrew LLVM does
-# not export llvm::PassPlugin::Load from its static archives, causing linker
-# failures.  Polyhedral loop optimizations remain available on Linux.
-if(NOT APPLE)
-    get_filename_component(_LLVM_BASE_DIR "${LLVM_DIR}" DIRECTORY)
-    find_file(POLLY_LIB NAMES LLVMPolly.so
-        HINTS "${_LLVM_BASE_DIR}/lib" "${LLVM_LIBRARY_DIR}"
-        NO_DEFAULT_PATH)
-    if(POLLY_LIB)
-        message(STATUS "Found LLVM Polly: ${POLLY_LIB}")
-    else()
-        message(STATUS "LLVM Polly not found; polyhedral loop optimizations disabled")
-    endif()
-else()
-    message(STATUS "Polly plugin disabled on macOS; polyhedral loop optimizations disabled")
-endif()
-
-# Include directories
-include_directories(${CMAKE_SOURCE_DIR}/include)
-include_directories(${CMAKE_SOURCE_DIR}/runtime)
-
-# Compiler sources
-set(COMPILER_SOURCES
-    src/lexer.cpp
-    src/parser.cpp
-    src/ast.cpp
-    src/codegen.cpp
-    src/codegen_builtins.cpp
-    src/codegen_expr.cpp
-    src/codegen_stmt.cpp
-    src/codegen_opt.cpp
-    src/egraph.cpp
-    src/egraph_optimizer.cpp
-    src/superoptimizer.cpp
-    src/hardware_graph.cpp
-    src/compiler.cpp
-    src/main.cpp
+# ── Sources ───────────────────────────────────────────────────────────────────
+set(SRC
+    src/lexer.cpp src/parser.cpp src/ast.cpp src/codegen.cpp
+    src/codegen_builtins.cpp src/codegen_expr.cpp src/codegen_stmt.cpp
+    src/codegen_opt.cpp src/egraph.cpp src/egraph_optimizer.cpp
+    src/superoptimizer.cpp src/hardware_graph.cpp src/compiler.cpp src/main.cpp
+    runtime/value.cpp runtime/aot_profile.cpp runtime/jit_profiler.cpp runtime/deopt.cpp
 )
 
-# Runtime sources
-set(RUNTIME_SOURCES
-    runtime/value.cpp
-    runtime/aot_profile.cpp
-    runtime/jit_profiler.cpp
-    runtime/deopt.cpp
-)
+add_executable(omsc ${SRC})
 
-# Compiler executable
-add_executable(omsc ${COMPILER_SOURCES} ${RUNTIME_SOURCES})
+# ── Compile options (tuned for compiler workloads) ────────────────────────────
 target_compile_options(omsc PRIVATE
-    # Always-on warnings (good hygiene)
+    # Warnings
     -Wall -Wextra -Wpedantic
 
-    # Release-only optimizations
+    # Release optimizations
     $<$<CONFIG:Release>:
         -O3
         -DNDEBUG
 
-        # Codegen improvements
+        # Performance-focused flags
         -fno-plt
         -fomit-frame-pointer
-
-        # Better inlining + vectorization hints
         -finline-functions
         -fstrict-aliasing
 
-        # Reduce binary overhead
-        -fdata-sections
+        # Better code layout / size
         -ffunction-sections
+        -fdata-sections
+
+        # LLVM-heavy workloads benefit
+        -fno-semantic-interposition
     >
 
-    # Native tuning (only if enabled)
+    # Native CPU tuning (optional)
     $<$<AND:$<CONFIG:Release>,$<BOOL:${NATIVE}>>:
         -march=native
     >
 )
 
-# ── Precompiled headers (PCH) ────────────────────────────────────────────────
-# Precompile heavy LLVM headers once and reuse across all translation units.
-# This dramatically reduces build time since headers like IRBuilder.h,
-# Instructions.h, and Module.h are large and included by most source files.
-# Requires CMake 3.16+; gracefully skipped on older versions.
-if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.16")
-    target_precompile_headers(omsc PRIVATE
-        <llvm/IR/IRBuilder.h>
-        <llvm/IR/Module.h>
-        <llvm/IR/Instructions.h>
-        <llvm/IR/LLVMContext.h>
-        <llvm/IR/Value.h>
-        <llvm/IR/DIBuilder.h>
-        <llvm/IR/Function.h>
-        <string>
-        <vector>
-        <memory>
-        <unordered_map>
-        <unordered_set>
-    )
-endif()
-
-# Apply PGO profile-use flags only to the compiler targets (omsc and
-# omscript_lib).  Test targets are not profiled, so applying PGO flags
-# to them causes hundreds of -Wmissing-profile warnings and does not
-# improve test binary performance.
-if(_PGO_USE_COMPILE_FLAGS)
-    target_compile_options(omsc PRIVATE ${_PGO_USE_COMPILE_FLAGS})
-    target_link_options(omsc PRIVATE ${_PGO_USE_LINK_FLAGS})
-endif()
-
-# Pass Polly plugin path as a compile-time define so the optimizer can load it.
-if(POLLY_LIB)
-    target_compile_definitions(omsc PRIVATE "POLLY_LIB_PATH=\"${POLLY_LIB}\"")
-endif()
-
-# Link LLVM libraries
-# Only components actually used by the compiler and AOT runtime are listed.
-# - core, support: fundamental LLVM infrastructure
-# - executionengine, orcjit: adaptive ORC JIT execution (runtime/aot_profile.cpp)
-# - native: host target auto-detection
-# - passes, transformutils, analysis: optimization pipeline
-# - target, codegen, mc, mcparser, asmparser: machine code emission
-set(LLVM_COMPONENTS
-    core
-    executionengine
-    interpreter
-    orcjit
-    orctargetprocess
-    native
-    support
-    passes
-    target
-    transformutils
-    analysis
-    asmparser
-    codegen
-    mc
-    mcparser
-    bitreader
+# ── Linker options ────────────────────────────────────────────────────────────
+target_link_options(omsc PRIVATE
+    $<$<CONFIG:Release>:
+        -Wl,-O2
+        -Wl,--gc-sections
+    >
 )
 
-# Conditionally add target-specific components based on available LLVM targets
-if("X86" IN_LIST LLVM_TARGETS_TO_BUILD)
-    list(APPEND LLVM_COMPONENTS x86codegen x86asmparser x86desc x86info)
+# Required for ORC JIT symbol visibility
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND NOT APPLE)
+    target_link_options(omsc PRIVATE -Wl,--export-dynamic)
 endif()
 
-if("AArch64" IN_LIST LLVM_TARGETS_TO_BUILD)
-    list(APPEND LLVM_COMPONENTS aarch64codegen aarch64asmparser aarch64desc aarch64info)
+# ── LTO ───────────────────────────────────────────────────────────────────────
+if(LTO)
+    include(CheckIPOSupported)
+    check_ipo_supported(RESULT ok)
+    if(ok)
+        set_property(TARGET omsc PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+    endif()
 endif()
 
-if("ARM" IN_LIST LLVM_TARGETS_TO_BUILD)
-    list(APPEND LLVM_COMPONENTS armcodegen armasmparser armdesc arminfo)
+# ── PGO ───────────────────────────────────────────────────────────────────────
+if(PGO_GENERATE AND PGO_USE)
+    message(FATAL_ERROR "PGO_GENERATE and PGO_USE are mutually exclusive")
 endif()
+
+if(PGO_GENERATE)
+    set(flags "-fprofile-generate")
+    if(PGO_PROFILE_DIR)
+        set(flags "${flags}=${PGO_PROFILE_DIR}")
+    endif()
+    target_compile_options(omsc PRIVATE ${flags})
+    target_link_options(omsc PRIVATE ${flags})
+endif()
+
+if(PGO_USE)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        target_compile_options(omsc PRIVATE -fprofile-use=${PGO_USE})
+        target_link_options(omsc PRIVATE -fprofile-use=${PGO_USE})
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+        target_compile_options(omsc PRIVATE
+            -fprofile-use=${PGO_USE}
+            -fprofile-correction
+            -Wno-missing-profile
+        )
+        target_link_options(omsc PRIVATE -fprofile-use=${PGO_USE})
+    endif()
+endif()
+
+# ── Sanitizers ────────────────────────────────────────────────────────────────
+if(SANITIZE)
+    target_compile_options(omsc PRIVATE -fsanitize=${SANITIZE} -fno-omit-frame-pointer)
+    target_link_options(omsc PRIVATE -fsanitize=${SANITIZE})
+endif()
+
+# ── Unity builds (faster compile times) ───────────────────────────────────────
+if(UNITY_BUILD)
+    set_target_properties(omsc PROPERTIES UNITY_BUILD ON)
+endif()
+
+# ── Threads ───────────────────────────────────────────────────────────────────
+find_package(Threads REQUIRED)
+target_link_libraries(omsc PRIVATE Threads::Threads)
+
+# ── LLVM linking ──────────────────────────────────────────────────────────────
+set(LLVM_COMPONENTS
+    core executionengine interpreter orcjit orctargetprocess
+    native support passes target transformutils analysis
+    asmparser codegen mc mcparser bitreader
+)
 
 llvm_map_components_to_libnames(llvm_libs ${LLVM_COMPONENTS})
 
-target_link_libraries(omsc ${llvm_libs})
+target_link_libraries(omsc PRIVATE ${llvm_libs})
 
-# Link pthreads for concurrency primitives (thread_create, mutex_*, etc.)
-find_package(Threads REQUIRED)
-target_link_libraries(omsc Threads::Threads)
-
-# ORC JIT requires the host binary to export its own symbols so the in-process
-# executor can locate ORC runtime helpers (e.g. llvm_orc_registerEHFrameSectionWrapper)
-# via dlsym.  --export-dynamic ensures all statically-linked symbols from
-# libLLVMOrcTargetProcess are visible to the dynamic linker at runtime.
-#
-# Note: a linker version script (--version-script) could be used to export
-# only the specific ORC symbols needed, reducing symbol-table bloat.  For
-# simplicity we use --export-dynamic, which is the approach used by LLVM's
-# own in-process JIT examples and test infrastructure.
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND NOT APPLE)
-    target_link_options(omsc PRIVATE
-        $<$<CONFIG:Release>:
-            -Wl,-O2
-            -Wl,--gc-sections
-        >
-        -Wl,--export-dynamic
-    )
-endif()
-
-# Installation
-install(TARGETS omsc DESTINATION bin)
-
-# --- GTest unit tests ---
-find_package(Threads QUIET)
-find_package(GTest QUIET)
-if(GTest_FOUND)
-    enable_testing()
-
-    # Library of compiler/runtime sources (without main.cpp) for tests to link against.
-    set(LIB_SOURCES
-        src/lexer.cpp
-        src/parser.cpp
-        src/ast.cpp
-        src/codegen.cpp
-        src/codegen_builtins.cpp
-        src/codegen_expr.cpp
-        src/codegen_stmt.cpp
-        src/codegen_opt.cpp
-        src/egraph.cpp
-        src/egraph_optimizer.cpp
-        src/superoptimizer.cpp
-        src/hardware_graph.cpp
-        src/compiler.cpp
-        runtime/value.cpp
-        runtime/aot_profile.cpp
-        runtime/jit_profiler.cpp
-        runtime/deopt.cpp
-    )
-
-    add_library(omscript_lib STATIC ${LIB_SOURCES})
-    target_link_libraries(omscript_lib ${llvm_libs})
-    # Reuse precompiled headers from the main target to avoid recompiling them.
-    if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.16")
-        target_precompile_headers(omscript_lib REUSE_FROM omsc)
-    endif()
-    if(POLLY_LIB)
-        target_compile_definitions(omscript_lib PRIVATE "POLLY_LIB_PATH=\"${POLLY_LIB}\"")
-    endif()
-    if(_PGO_USE_COMPILE_FLAGS)
-        target_compile_options(omscript_lib PRIVATE ${_PGO_USE_COMPILE_FLAGS})
-    endif()
-
-    # Collect all test source files
-    file(GLOB TEST_SOURCES tests/*_test.cpp)
-
-    foreach(test_source ${TEST_SOURCES})
-        get_filename_component(test_name ${test_source} NAME_WE)
-        add_executable(${test_name} ${test_source})
-        target_link_libraries(${test_name} omscript_lib GTest::GTest GTest::Main ${llvm_libs})
-        add_test(NAME ${test_name} COMMAND ${test_name})
-    endforeach()
-endif()
-
-# CPack configuration for distribution packages
-# NOTE: CPACK_* variables must be set BEFORE include(CPack).
-set(CPACK_PACKAGE_NAME "OmScript")
-set(CPACK_PACKAGE_VENDOR "OmScript")
-set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "A low-level C-like programming language with LLVM AOT compilation")
-set(CPACK_PACKAGE_VERSION_MAJOR ${PROJECT_VERSION_MAJOR})
-set(CPACK_PACKAGE_VERSION_MINOR ${PROJECT_VERSION_MINOR})
-set(CPACK_PACKAGE_VERSION_PATCH ${PROJECT_VERSION_PATCH})
-set(CPACK_PACKAGE_INSTALL_DIRECTORY "OmScript")
-set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_SOURCE_DIR}/LICENSE")
-set(CPACK_RESOURCE_FILE_README "${CMAKE_SOURCE_DIR}/README.md")
-set(CPACK_SOURCE_IGNORE_FILES
-    "^/build"
-    "^/.git"
-    "^/examples"
-    "^/tests"
-    "^/.github"
-    "^/CMakeLists.txt$"
-    "^/.clang-format$"
-    "^/.clang-tidy$"
-    "^/.editorconfig$"
-    "^/Makefile$"
-    "^/run_tests.sh$"
+# ── Precompiled headers (huge build speed win) ────────────────────────────────
+target_precompile_headers(omsc PRIVATE
+    <llvm/IR/IRBuilder.h>
+    <llvm/IR/Module.h>
+    <llvm/IR/Instructions.h>
+    <llvm/IR/LLVMContext.h>
+    <llvm/IR/Value.h>
 )
-set(CPACK_BINARY_TGZ "ON")
-include(CPack)
+
+# ── Install ───────────────────────────────────────────────────────────────────
+install(TARGETS omsc RUNTIME DESTINATION bin)
