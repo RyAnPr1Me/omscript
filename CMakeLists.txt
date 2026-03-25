@@ -1,20 +1,19 @@
 cmake_minimum_required(VERSION 3.16)
 
-# ── Compiler cache (ccache / sccache) ─────────────────────────────────────────
-# Automatically use ccache or sccache when available to speed up incremental
-# builds.  Must be set before project() so the compiler launcher is active for
-# all targets.
+# ─────────────────────────────────────────────────────────────────────────────
+# OmScript Compiler Build (Max Perf, LLVM-heavy, No Feature Loss)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Compiler cache ───────────────────────────────────────────────────────────
 find_program(CCACHE_PROGRAM ccache)
 find_program(SCCACHE_PROGRAM sccache)
 if(CCACHE_PROGRAM)
-    set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
-    message(STATUS "Using ccache: ${CCACHE_PROGRAM}")
+    set(CMAKE_CXX_COMPILER_LAUNCHER ${CCACHE_PROGRAM})
 elseif(SCCACHE_PROGRAM)
-    set(CMAKE_CXX_COMPILER_LAUNCHER "${SCCACHE_PROGRAM}")
-    message(STATUS "Using sccache: ${SCCACHE_PROGRAM}")
+    set(CMAKE_CXX_COMPILER_LAUNCHER ${SCCACHE_PROGRAM})
 endif()
 
-project(OmScript VERSION 3.5.0)
+project(OmScript VERSION 3.0.0)
 
 # ── Export compile_commands.json for IDE / clang-tidy integration ─────────────
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -26,102 +25,33 @@ endif()
 # Global define — safe before targets exist; propagates to all TUs.
 add_compile_definitions(OMSC_VERSION="${OMSC_VERSION}")
 
+target_compile_definitions(omsc PRIVATE
+    OMSC_VERSION=\"${OMSC_VERSION}\"
+)
+
+# ── Global settings ───────────────────────────────────────────────────────────
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Default to Release build for production use.
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
-    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type (Debug, Release, RelWithDebInfo)" FORCE)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
 # ── Options ───────────────────────────────────────────────────────────────────
-option(LTO "Enable link-time optimization for the compiler build" OFF)
-option(PGO_GENERATE "Instrument build for PGO profile generation" OFF)
-set(PGO_PROFILE_DIR "" CACHE STRING "Directory for PGO raw profiles (PGO_GENERATE only)")
-set(PGO_USE "" CACHE STRING "PGO profile path: directory of .gcda files (GCC) or merged .profdata file (Clang)")
-option(NATIVE "Build with -march=native for host-specific optimizations" OFF)
-option(COVERAGE "Enable code coverage" OFF)
-set(SANITIZE "" CACHE STRING "Sanitizers (e.g. address, undefined, address,undefined)")
-option(UNITY_BUILD "Unity build for faster full rebuilds" OFF)
-
-# ── Global compile flags ─────────────────────────────────────────────────────
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    add_compile_options(-Wall -Wextra -Wpedantic -pipe)
-endif()
-
-# ── LTO ───────────────────────────────────────────────────────────────────────
-if(LTO)
-    if(CMAKE_BUILD_TYPE STREQUAL "Release" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
-        include(CheckIPOSupported)
-        check_ipo_supported(RESULT lto_supported OUTPUT lto_error)
-        if(lto_supported)
-            set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
-            message(STATUS "Link-time optimization (LTO) enabled")
-        else()
-            message(WARNING "LTO requested but not supported: ${lto_error}")
-        endif()
-    else()
-        message(STATUS "LTO requires Release or RelWithDebInfo build type; ignoring -DLTO=ON")
-    endif()
-endif()
-
-# ── PGO ───────────────────────────────────────────────────────────────────────
-if(PGO_GENERATE AND PGO_USE)
-    message(FATAL_ERROR "PGO_GENERATE and PGO_USE are mutually exclusive")
-endif()
-if(PGO_GENERATE)
-    set(_pgo_gen_flags "-fprofile-generate")
-    if(PGO_PROFILE_DIR)
-        set(_pgo_gen_flags "${_pgo_gen_flags}=${PGO_PROFILE_DIR}")
-    endif()
-    add_compile_options(${_pgo_gen_flags})
-    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${_pgo_gen_flags}")
-    message(STATUS "PGO instrumentation enabled (profile dir: ${PGO_PROFILE_DIR})")
-endif()
-if(PGO_USE)
-    if(NOT EXISTS "${PGO_USE}")
-        message(FATAL_ERROR "PGO profile not found: ${PGO_USE}")
-    endif()
-    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-        set(_PGO_USE_COMPILE_FLAGS -fprofile-use=${PGO_USE})
-        set(_PGO_USE_LINK_FLAGS -fprofile-use=${PGO_USE})
-        message(STATUS "PGO profile-use enabled (Clang): ${PGO_USE}")
-    elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
-        set(_PGO_USE_COMPILE_FLAGS -fprofile-use=${PGO_USE} -fprofile-correction -Wno-missing-profile)
-        set(_PGO_USE_LINK_FLAGS -fprofile-use=${PGO_USE})
-        message(STATUS "PGO profile-use enabled (GCC): ${PGO_USE}")
-    else()
-        message(WARNING "PGO_USE requested but compiler does not support it")
-    endif()
-endif()
-
-# ── Native tuning ─────────────────────────────────────────────────────────────
-if(NATIVE)
-    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-        add_compile_options(-march=native)
-        message(STATUS "Native CPU targeting enabled (-march=native)")
-    endif()
-endif()
-
-# ── Coverage ──────────────────────────────────────────────────────────────────
-if(COVERAGE)
-    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-        add_compile_options(--coverage -fno-inline)
-        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} --coverage")
-    endif()
-endif()
-
-# ── Sanitizers ────────────────────────────────────────────────────────────────
-if(SANITIZE)
-    set(SANITIZE_FLAGS "-fsanitize=${SANITIZE} -fno-omit-frame-pointer")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${SANITIZE_FLAGS}")
-    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${SANITIZE_FLAGS}")
-endif()
+option(LTO "Enable LTO" OFF)
+option(PGO_GENERATE "PGO generate" OFF)
+set(PGO_PROFILE_DIR "" CACHE STRING "PGO dir")
+set(PGO_USE "" CACHE STRING "PGO use")
+option(NATIVE "-march=native" OFF)
+option(COVERAGE "Coverage" OFF)
+set(SANITIZE "" CACHE STRING "Sanitizers")
+option(UNITY_BUILD "Unity build (faster compile)" OFF)
 
 # ── LLVM ──────────────────────────────────────────────────────────────────────
 find_package(LLVM REQUIRED CONFIG)
 if(LLVM_PACKAGE_VERSION VERSION_LESS "18")
-    message(FATAL_ERROR "LLVM 18.0 or newer is required, but found LLVM ${LLVM_PACKAGE_VERSION}")
+    message(FATAL_ERROR "LLVM 18+ required")
 endif()
 message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
 message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
@@ -154,18 +84,23 @@ set(COMPILER_SOURCES
     src/lexer.cpp
     src/parser.cpp
     src/ast.cpp
+
+    # Codegen pipeline
     src/codegen.cpp
     src/codegen_builtins.cpp
     src/codegen_expr.cpp
     src/codegen_stmt.cpp
     src/codegen_opt.cpp
+
+    # Optimizers
     src/egraph.cpp
     src/egraph_optimizer.cpp
     src/superoptimizer.cpp
     src/hardware_graph.cpp
+
+    # Driver
     src/compiler.cpp
     src/main.cpp
-)
 
 set(RUNTIME_SOURCES
     runtime/value.cpp
@@ -189,6 +124,7 @@ add_executable(omsc ${COMPILER_SOURCES} ${RUNTIME_SOURCES})
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(omsc PRIVATE
         $<$<CONFIG:Release>:
+            -O3
             -fno-plt
             -fomit-frame-pointer
             -fstrict-aliasing
@@ -264,12 +200,29 @@ if("ARM" IN_LIST LLVM_TARGETS_TO_BUILD)
     list(APPEND LLVM_COMPONENTS armcodegen armasmparser armdesc arminfo)
 endif()
 
-llvm_map_components_to_libnames(llvm_libs ${LLVM_COMPONENTS})
+        # Visibility (safe with export-dynamic)
+        -fvisibility=hidden
+    >
 
-find_package(Threads REQUIRED)
-target_link_libraries(omsc PRIVATE ${llvm_libs} Threads::Threads)
+    $<$<CONFIG:RelWithDebInfo>:
+        -O2
+        -gline-tables-only
+    >
 
-# ORC JIT requires host symbol export for in-process execution.
+    $<$<AND:$<CONFIG:Release>,$<BOOL:${NATIVE}>>:
+        -march=native
+    >
+)
+
+# ── Link options ──────────────────────────────────────────────────────────────
+target_link_options(omsc PRIVATE
+    $<$<CONFIG:Release>:
+        -Wl,-O2
+        -Wl,--gc-sections
+    >
+)
+
+# Required for ORC JIT
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND NOT APPLE)
     target_link_options(omsc PRIVATE -Wl,--export-dynamic)
 endif()
@@ -291,9 +244,29 @@ if(GTest_FOUND)
     if(POLLY_LIB)
         target_compile_definitions(omscript_lib PRIVATE "POLLY_LIB_PATH=\"${POLLY_LIB}\"")
     endif()
-    if(_PGO_USE_COMPILE_FLAGS)
-        target_compile_options(omscript_lib PRIVATE ${_PGO_USE_COMPILE_FLAGS})
+    target_compile_options(omsc PRIVATE ${flags})
+    target_link_options(omsc PRIVATE ${flags})
+endif()
+
+if(PGO_USE)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        target_compile_options(omsc PRIVATE -fprofile-use=${PGO_USE})
+        target_link_options(omsc PRIVATE -fprofile-use=${PGO_USE})
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+        target_compile_options(omsc PRIVATE
+            -fprofile-use=${PGO_USE}
+            -fprofile-correction
+            -Wno-missing-profile
+        )
+        target_link_options(omsc PRIVATE -fprofile-use=${PGO_USE})
     endif()
+endif()
+
+# ── Sanitizers ────────────────────────────────────────────────────────────────
+if(SANITIZE)
+    target_compile_options(omsc PRIVATE -fsanitize=${SANITIZE} -fno-omit-frame-pointer)
+    target_link_options(omsc PRIVATE -fsanitize=${SANITIZE})
+endif()
 
     file(GLOB TEST_SOURCES tests/*_test.cpp)
     foreach(test_source ${TEST_SOURCES})
