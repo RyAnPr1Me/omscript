@@ -414,15 +414,23 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
                  llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
                      llvm::Type::getInt32Ty(*context), 2))}));
         }
-        // @novectorize: explicitly disable loop vectorization for this function.
-        // @vectorize is purely advisory — the vectorizer's cost model decides
-        // whether vectorization is profitable.  The prefer-vector-width function
-        // attribute already guides the vectorizer toward the optimal SIMD width.
+        // @vectorize / @novectorize: per-function loop vectorization hints.
+        // @vectorize is an advisory preference: it encourages the vectorizer
+        // to attempt vectorization, but the cost model may still choose scalar
+        // code if it determines that is faster.  No specific vector width is
+        // forced — the prefer-vector-width function attribute guides the
+        // vectorizer's width selection.
+        // @novectorize explicitly disables vectorization for this function.
         if (currentFuncHintNoVectorize_) {
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
                            llvm::ConstantAsMetadata::get(
                                llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 0))}));
+        } else if (currentFuncHintVectorize_) {
+            loopMDs.push_back(llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
+                           llvm::ConstantAsMetadata::get(
+                               llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
         }
         llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
         loopMD->replaceOperandWith(0, loopMD);
@@ -491,12 +499,17 @@ void CodeGenerator::generateDoWhile(DoWhileStmt* stmt) {
         llvm::SmallVector<llvm::Metadata*, 4> loopMDs;
         loopMDs.push_back(nullptr);
         loopMDs.push_back(mustProgress);
-        // @novectorize: explicitly disable loop vectorization for this function.
+        // @vectorize / @novectorize: per-function loop vectorization hints.
         if (currentFuncHintNoVectorize_) {
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
                            llvm::ConstantAsMetadata::get(
                                llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 0))}));
+        } else if (currentFuncHintVectorize_) {
+            loopMDs.push_back(llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
+                           llvm::ConstantAsMetadata::get(
+                               llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
         }
         llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
         loopMD->replaceOperandWith(0, loopMD);
@@ -832,12 +845,17 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
                  llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
                      llvm::Type::getInt32Ty(*context), unrollCount))}));
         }
-        // @novectorize: explicitly disable loop vectorization for this function.
+        // @vectorize / @novectorize: per-function loop vectorization hints.
         if (currentFuncHintNoVectorize_) {
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
                            llvm::ConstantAsMetadata::get(
                                llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 0))}));
+        } else if (currentFuncHintVectorize_) {
+            loopMDs.push_back(llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
+                           llvm::ConstantAsMetadata::get(
+                               llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
         }
         llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
         loopMD->replaceOperandWith(0, loopMD);
@@ -967,12 +985,17 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
                  llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
                      llvm::Type::getInt32Ty(*context), 2))}));
         }
-        // @novectorize: explicitly disable loop vectorization for this function.
+        // @vectorize / @novectorize: per-function loop vectorization hints.
         if (currentFuncHintNoVectorize_) {
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
                            llvm::ConstantAsMetadata::get(
                                llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 0))}));
+        } else if (currentFuncHintVectorize_) {
+            loopMDs.push_back(llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
+                           llvm::ConstantAsMetadata::get(
+                               llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
         }
         llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
         loopMD->replaceOperandWith(0, loopMD);

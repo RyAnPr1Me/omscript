@@ -2120,6 +2120,7 @@ int main(int argc, char* argv[]) {
     bool flagLoopOptimize = true;
     bool flagEGraph = true;
     bool flagSuperopt = true;
+    unsigned flagSuperoptLevel = 2;
     bool flagHGOE = true;
     bool flagDebug = false;
     const auto tryParseOptimizationFlag = [](const std::string& arg) -> std::optional<omscript::OptimizationLevel> {
@@ -2232,6 +2233,20 @@ int main(int argc, char* argv[]) {
         }
         if (arg == "-fno-superopt") {
             flagSuperopt = false;
+            flagSuperoptLevel = 0;
+            return true;
+        }
+        if (arg.substr(0, 17) == "-fsuperopt-level=") {
+            const auto levelStr = arg.substr(17);
+            if (levelStr == "0") { flagSuperoptLevel = 0; flagSuperopt = false; }
+            else if (levelStr == "1") { flagSuperoptLevel = 1; flagSuperopt = true; }
+            else if (levelStr == "2") { flagSuperoptLevel = 2; flagSuperopt = true; }
+            else if (levelStr == "3") { flagSuperoptLevel = 3; flagSuperopt = true; }
+            else {
+                std::cerr << "Error: invalid superopt level '" << levelStr
+                          << "' (expected 0-3)\n";
+                return false;
+            }
             return true;
         }
         if (arg == "-fhgoe") {
@@ -2613,6 +2628,7 @@ int main(int argc, char* argv[]) {
             codegen.setLoopOptimize(flagLoopOptimize);
             codegen.setEGraphOptimize(flagEGraph);
             codegen.setSuperoptimize(flagSuperopt);
+            codegen.setSuperoptLevel(flagSuperoptLevel);
             codegen.setHardwareGraphOpt(flagHGOE);
             codegen.setDebugMode(flagDebug);
             codegen.setSourceFilename(sourceFile);
@@ -2672,6 +2688,7 @@ int main(int argc, char* argv[]) {
             codegen.setLoopOptimize(flagLoopOptimize);
             codegen.setEGraphOptimize(flagEGraph);
             codegen.setSuperoptimize(flagSuperopt);
+            codegen.setSuperoptLevel(flagSuperoptLevel);
             codegen.setHardwareGraphOpt(flagHGOE);
             codegen.setDebugMode(flagDebug);
             codegen.setSourceFilename(sourceFile);
@@ -2720,6 +2737,7 @@ int main(int argc, char* argv[]) {
             codegen.setLoopOptimize(flagLoopOptimize);
             codegen.setEGraphOptimize(flagEGraph);
             codegen.setSuperoptimize(flagSuperopt);
+            codegen.setSuperoptLevel(flagSuperoptLevel);
             codegen.setHardwareGraphOpt(flagHGOE);
             codegen.setDebugMode(flagDebug);
             codegen.setSourceFilename(sourceFile);

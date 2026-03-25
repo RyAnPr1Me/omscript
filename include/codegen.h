@@ -161,6 +161,16 @@ class CodeGenerator {
         enableSuperopt_ = enable;
     }
 
+    /// Set the superoptimizer aggressiveness level (0-3).
+    ///   0 = disabled (same as -fno-superopt)
+    ///   1 = light: idiom recognition + algebraic only (fast compilation)
+    ///   2 = normal: all features, default synthesis (default)
+    ///   3 = aggressive: all features, expanded synthesis (slower compilation)
+    void setSuperoptLevel(unsigned level) {
+        superoptLevel_ = level;
+        enableSuperopt_ = (level > 0);
+    }
+
     /// Enable or disable the Hardware Graph Optimization Engine (default: true).
     /// HGOE activates only when -march or -mtune flags are provided; this flag
     /// allows explicitly disabling it even when those flags are present.
@@ -542,6 +552,7 @@ class CodeGenerator {
     bool enableLoopOptimize_ = true;  // -floop-optimize / -fno-loop-optimize
     bool enableEGraph_ = true;        // -fegraph / -fno-egraph (e-graph equality saturation)
     bool enableSuperopt_ = true;      // -fsuperopt / -fno-superopt (superoptimizer)
+    unsigned superoptLevel_ = 2;      // -fsuperopt-level=0/1/2/3 (default: 2)
     bool enableHGOE_ = true;          // -fhgoe / -fno-hgoe (hardware graph optimization)
     unsigned preferredVectorWidth_ = 4; // SIMD vector width for loop hints (target-aware)
     std::string pgoGenPath_;          // --pgo-gen=<path>: emit raw profile to this file
