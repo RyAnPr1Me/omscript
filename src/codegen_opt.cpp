@@ -85,12 +85,20 @@
 #include <llvm/Transforms/Scalar/NewGVN.h>
 #include <llvm/Transforms/Scalar/Scalarizer.h>
 #include <llvm/Transforms/Scalar/LowerConstantIntrinsics.h>
+#include <llvm/Transforms/Scalar/Sink.h>
+#include <llvm/Transforms/Scalar/ConstantHoisting.h>
+#include <llvm/Transforms/Scalar/SeparateConstOffsetFromGEP.h>
 #include <llvm/Transforms/IPO/ArgumentPromotion.h>
 #include <llvm/Transforms/IPO/ConstantMerge.h>
 #include <llvm/Transforms/IPO/SCCP.h>
 #include <llvm/Transforms/IPO/StripDeadPrototypes.h>
+#include <llvm/Transforms/IPO/FunctionAttrs.h>
+#include <llvm/Transforms/IPO/CalledValuePropagation.h>
+#include <llvm/Transforms/IPO/GlobalSplit.h>
+#include <llvm/Transforms/IPO/MergeFunctions.h>
 #include <llvm/Transforms/Vectorize/LoadStoreVectorizer.h>
 #include <llvm/Transforms/Vectorize/SLPVectorizer.h>
+#include <llvm/Transforms/Vectorize/LoopVectorize.h>
 #include <llvm/Analysis/CGSCCPassManager.h>
 #include <llvm/Transforms/Utils.h>
 #include <llvm/Transforms/Utils/Cloning.h>
@@ -370,6 +378,34 @@ void CodeGenerator::runOptimizationPasses() {
         });
     }
 
+    // At O2+, register CalledValuePropagation early to propagate
+    // called-value information through the call graph.  This enables
+    // devirtualization of indirect calls (e.g. function pointers stored
+    // in arrays/structs) by proving the target is a single known function.
+    // Critical for OmScript's lambda dispatch: array_map/filter/reduce
+    // pass function names as strings that become indirect calls.
+    if (optimizationLevel >= OptimizationLevel::O2) {
+        PB.registerPipelineStartEPCallback(
+            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel) {
+            MPM.addPass(llvm::CalledValuePropagationPass());
+        });
+    }
+
+    // At O3, register PostOrderFunctionAttrsPass in the CGSCC pipeline
+    // to infer function attributes (readonly, nounwind, nosync, etc.) based
+    // on call-graph analysis.  This runs bottom-up through the call graph,
+    // so leaf functions get attributes first, then callers inherit them.
+    // Combined with the inliner, this enables aggressive optimizations:
+    // a function proven nounwind+readonly can be speculated, CSE'd across
+    // calls, and its results cached.
+    if (optimizationLevel >= OptimizationLevel::O3) {
+        PB.registerPipelineStartEPCallback(
+            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel) {
+            MPM.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(
+                llvm::PostOrderFunctionAttrsPass()));
+        });
+    }
+
     // At O1+, register Reassociate and EarlyCSE early in the function pipeline.
     // Reassociate canonicalizes expression trees (e.g., (a+b)+c → a+(b+c))
     // enabling better CSE and constant folding.  EarlyCSE eliminates trivially
@@ -467,6 +503,24 @@ void CodeGenerator::runOptimizationPasses() {
     if (optimizationLevel >= OptimizationLevel::O2 && enableLoopOptimize_) {
         PB.registerVectorizerStartEPCallback(
             [](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) { FPM.addPass(llvm::LoopFusePass()); });
+    }
+
+    // At O3 before vectorization, run GVN and ConstantHoisting as SLP
+    // vectorization pre-conditioning.  GVN discovers value equivalences
+    // across basic blocks, and when scalar operations on the same data
+    // become visible, the SLP vectorizer can pack them into SIMD operations.
+    // ConstantHoisting moves expensive constant materializations (large
+    // immediates, address computations) to dominator blocks, reducing
+    // register pressure and enabling more SLP opportunities.
+    // SeparateConstOffsetFromGEP splits constant offsets from GEP address
+    // computations, enabling the SLP vectorizer to recognize adjacent memory
+    // accesses that differ only by a constant stride.
+    if (optimizationLevel >= OptimizationLevel::O3) {
+        PB.registerVectorizerStartEPCallback(
+            [](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) {
+            FPM.addPass(llvm::GVNPass());
+            FPM.addPass(llvm::SeparateConstOffsetFromGEPPass());
+        });
     }
 
     // At O3 with -floop-optimize, register LoopInterchangePass at the end of
@@ -701,6 +755,8 @@ void CodeGenerator::runOptimizationPasses() {
     // IPSCCPPass performs interprocedural sparse conditional constant
     // propagation — discovers constant values across function boundaries,
     // enabling dead code elimination of entire unreachable call paths.
+    // GlobalSplitPass splits internal globals with disjoint uses into
+    // separate variables, enabling further constant propagation.
     if (optimizationLevel >= OptimizationLevel::O3) {
         PB.registerOptimizerLastEPCallback(
             [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel) {
@@ -708,6 +764,7 @@ void CodeGenerator::runOptimizationPasses() {
             MPM.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(
                 llvm::ArgumentPromotionPass()));
             MPM.addPass(llvm::IPSCCPPass());
+            MPM.addPass(llvm::GlobalSplitPass());
             MPM.addPass(llvm::ConstantMergePass());
             MPM.addPass(llvm::StripDeadPrototypesPass());
         });

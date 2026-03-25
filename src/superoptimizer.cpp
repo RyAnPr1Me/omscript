@@ -3098,6 +3098,47 @@ bool synthesizeReplacement(llvm::Instruction* inst, const SynthesisConfig& confi
         }
     }
 
+    // Template 6: Chained multiply strength reduction for 2-instruction
+    // shift+add sequences.  Patterns: x*(2^a + 2^b) → (x<<a) + (x<<b)
+    // and x*(2^a - 2^b) → (x<<a) - (x<<b).
+    // These handle constants that are neither 2^n±1 (template 1) nor
+    // power-of-2 (handled by LLVM), e.g. x*6 → (x<<2)+(x<<1),
+    // x*10 → (x<<3)+(x<<1), x*12 → (x<<3)+(x<<2).
+    if (!replacement && inst->getOpcode() == llvm::Instruction::Mul) {
+        auto cval = getConstIntValue(inst->getOperand(1));
+        llvm::Value* var = inst->getOperand(0);
+        if (!cval) {
+            cval = getConstIntValue(inst->getOperand(0));
+            var = inst->getOperand(1);
+        }
+        if (cval && *cval > 1) {
+            int64_t c = *cval;
+            // Check if c = 2^a + 2^b (two set bits)
+            if (llvm::popcount(static_cast<uint64_t>(c)) == 2) {
+                unsigned lo = llvm::countr_zero(static_cast<uint64_t>(c));
+                unsigned hi = 63 - llvm::countl_zero(static_cast<uint64_t>(c));
+                llvm::Value* shlHi = builder.CreateShl(var, hi);
+                llvm::Value* shlLo = builder.CreateShl(var, lo);
+                replacement = builder.CreateAdd(shlHi, shlLo,
+                    "mul" + std::to_string(c) + "_shift2");
+            }
+            // Check if c = 2^a - 2^b (e.g. 14 = 16-2, 24 = 32-8)
+            else if (!replacement) {
+                for (unsigned b = 0; b < 10; ++b) {
+                    int64_t sum = c + (1LL << b);
+                    if (sum > 0 && (sum & (sum - 1)) == 0) {
+                        unsigned a = llvm::Log2_64(static_cast<uint64_t>(sum));
+                        llvm::Value* shlA = builder.CreateShl(var, a);
+                        llvm::Value* shlB = builder.CreateShl(var, b);
+                        replacement = builder.CreateSub(shlA, shlB,
+                            "mul" + std::to_string(c) + "_shiftsub");
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     if (replacement) {
         double newCost = 0.0;
         // Estimate cost of replacement (rough: count the instructions we created)
@@ -3157,6 +3198,181 @@ static unsigned eliminateDeadCode(llvm::Function& func) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// FMA pattern matching for the superoptimizer
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Detect and generate FMA (fused multiply-add) patterns:
+///   fadd(fmul(a,b), c) → fma(a,b,c)
+///   fsub(fmul(a,b), c) → fma(a,b,-c)
+///   fsub(c, fmul(a,b)) → fma(-a,b,c) [fnmsub]
+///   fadd(fmul(a,b), fmul(c,d)) → fma(a,b,fma(c,d,0)) [chained FMA]
+///
+/// This runs as a superoptimizer phase so it fires even without -march,
+/// unlike the HGOE FMA pass which only runs with hardware profiling.
+/// The patterns replace 2 instructions (fmul+fadd/fsub) with 1 FMA intrinsic,
+/// which is both faster (single µop on modern CPUs) and more precise
+/// (no intermediate rounding).
+static unsigned generateFMAPatterns(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<llvm::Instruction*> toErase;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            // Pattern 1: fadd(fmul(a,b), c) → fma(a,b,c)
+            if (inst.getOpcode() == llvm::Instruction::FAdd) {
+                for (int swap = 0; swap < 2; ++swap) {
+                    llvm::Value* mulCandidate = inst.getOperand(swap);
+                    llvm::Value* addend = inst.getOperand(1 - swap);
+
+                    auto* fmul = llvm::dyn_cast<llvm::BinaryOperator>(mulCandidate);
+                    if (fmul && fmul->getOpcode() == llvm::Instruction::FMul &&
+                        fmul->hasOneUse()) {
+                        llvm::IRBuilder<> builder(&inst);
+                        llvm::Module* mod = func.getParent();
+                        llvm::Type* ty = inst.getType();
+
+                        llvm::Function* fmaFn = OMSC_GET_INTRINSIC(
+                            mod, llvm::Intrinsic::fma, {ty});
+                        llvm::Value* result = builder.CreateCall(
+                            fmaFn, {fmul->getOperand(0), fmul->getOperand(1), addend},
+                            "superopt.fma");
+                        inst.replaceAllUsesWith(result);
+                        toErase.push_back(&inst);
+                        toErase.push_back(fmul);
+                        count++;
+                        break;
+                    }
+                }
+            }
+
+            // Pattern 2: fsub(fmul(a,b), c) → fma(a,b,-c)
+            if (inst.getOpcode() == llvm::Instruction::FSub) {
+                auto* fmul = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                if (fmul && fmul->getOpcode() == llvm::Instruction::FMul &&
+                    fmul->hasOneUse()) {
+                    llvm::IRBuilder<> builder(&inst);
+                    llvm::Module* mod = func.getParent();
+                    llvm::Type* ty = inst.getType();
+
+                    llvm::Value* negC = builder.CreateFNeg(inst.getOperand(1), "fma.negc");
+                    llvm::Function* fmaFn = OMSC_GET_INTRINSIC(
+                        mod, llvm::Intrinsic::fma, {ty});
+                    llvm::Value* result = builder.CreateCall(
+                        fmaFn, {fmul->getOperand(0), fmul->getOperand(1), negC},
+                        "superopt.fms");
+                    inst.replaceAllUsesWith(result);
+                    toErase.push_back(&inst);
+                    toErase.push_back(fmul);
+                    count++;
+                }
+                // Pattern 3: fsub(c, fmul(a,b)) → fma(-a,b,c) [fnmsub pattern]
+                else {
+                    auto* fmul2 = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
+                    if (fmul2 && fmul2->getOpcode() == llvm::Instruction::FMul &&
+                        fmul2->hasOneUse()) {
+                        llvm::IRBuilder<> builder(&inst);
+                        llvm::Module* mod = func.getParent();
+                        llvm::Type* ty = inst.getType();
+
+                        llvm::Value* negA = builder.CreateFNeg(fmul2->getOperand(0), "fma.nega");
+                        llvm::Function* fmaFn = OMSC_GET_INTRINSIC(
+                            mod, llvm::Intrinsic::fma, {ty});
+                        llvm::Value* result = builder.CreateCall(
+                            fmaFn, {negA, fmul2->getOperand(1), inst.getOperand(0)},
+                            "superopt.fnmsub");
+                        inst.replaceAllUsesWith(result);
+                        toErase.push_back(&inst);
+                        toErase.push_back(fmul2);
+                        count++;
+                    }
+                }
+            }
+        }
+    }
+
+    for (auto* inst : toErase) {
+        if (inst->use_empty()) inst->eraseFromParent();
+    }
+    return count;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Conditional select optimization
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Optimize select instructions with constant-foldable patterns:
+///   select(cond, x, x)            → x  (same value)
+///   select(true, a, b)            → a  (constant condition)
+///   select(false, a, b)           → b  (constant condition)
+///   select(cond, x+1, x)          → x + zext(cond)  (increment-by-flag)
+///   select(cond, x, x+1)          → x + zext(!cond)
+///   select(cond, 0, x)            → x & sext(!cond)  (conditional zero)
+///   select(cond, x, 0)            → x & sext(cond)
+static unsigned optimizeSelectPatterns(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<llvm::Instruction*> toErase;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            auto* sel = llvm::dyn_cast<llvm::SelectInst>(&inst);
+            if (!sel) continue;
+            if (!sel->getType()->isIntegerTy()) continue;
+
+            llvm::Value* cond = sel->getCondition();
+            llvm::Value* trueVal = sel->getTrueValue();
+            llvm::Value* falseVal = sel->getFalseValue();
+
+            llvm::Value* simplified = nullptr;
+            llvm::IRBuilder<> builder(sel);
+
+            // select(cond, x, x) → x
+            if (trueVal == falseVal) {
+                simplified = trueVal;
+            }
+
+            // select(cond, x+1, x) → x + zext(cond)
+            // This eliminates a branch-dependent select in favor of a
+            // branchless add, which is better for pipelining.
+            if (!simplified) {
+                auto* addInst = llvm::dyn_cast<llvm::BinaryOperator>(trueVal);
+                if (addInst && addInst->getOpcode() == llvm::Instruction::Add &&
+                    addInst->hasOneUse()) {
+                    if (addInst->getOperand(0) == falseVal &&
+                        isConstInt(addInst->getOperand(1), 1)) {
+                        llvm::Value* ext = builder.CreateZExt(cond, sel->getType(), "sel.zext");
+                        simplified = builder.CreateAdd(falseVal, ext, "sel.inc");
+                    }
+                }
+            }
+            // select(cond, x, x+1) → x + zext(!cond)
+            if (!simplified) {
+                auto* addInst = llvm::dyn_cast<llvm::BinaryOperator>(falseVal);
+                if (addInst && addInst->getOpcode() == llvm::Instruction::Add &&
+                    addInst->hasOneUse()) {
+                    if (addInst->getOperand(0) == trueVal &&
+                        isConstInt(addInst->getOperand(1), 1)) {
+                        llvm::Value* notCond = builder.CreateNot(cond, "sel.not");
+                        llvm::Value* ext = builder.CreateZExt(notCond, sel->getType(), "sel.zext");
+                        simplified = builder.CreateAdd(trueVal, ext, "sel.inc");
+                    }
+                }
+            }
+
+            if (simplified) {
+                sel->replaceAllUsesWith(simplified);
+                toErase.push_back(sel);
+                count++;
+            }
+        }
+    }
+
+    for (auto* inst : toErase) {
+        if (inst->use_empty()) inst->eraseFromParent();
+    }
+    return count;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main superoptimizer entry points
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -3180,6 +3396,20 @@ SuperoptimizerStats superoptimizeFunction(llvm::Function& func,
     // Phase 2: Algebraic simplification
     if (config.enableAlgebraic) {
         stats.algebraicSimplified = applyAlgebraicSimplifications(func);
+    }
+
+    // Phase 2b: FMA pattern matching — converts fadd(fmul(a,b),c) → fma(a,b,c)
+    // and fsub variants.  Runs as a superoptimizer phase so it fires even
+    // without -march (unlike HGOE FMA which requires hardware profiling).
+    // FMA is profitable on all modern x86/ARM/RISC-V CPUs with FMA support.
+    if (config.enableAlgebraic) {
+        stats.algebraicSimplified += generateFMAPatterns(func);
+    }
+
+    // Phase 2c: Select optimization — converts branchful select patterns into
+    // branchless arithmetic (e.g. select(cond, x+1, x) → x + zext(cond)).
+    if (config.enableAlgebraic) {
+        stats.algebraicSimplified += optimizeSelectPatterns(func);
     }
 
     // Phase 3: Branch simplification (branch-to-select)

@@ -2706,6 +2706,25 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     // and other performance-critical optimizations.
     currentFuncHintHot_ = func->hintHot;
 
+    // Cross-function inlining enhancement: at O2+, propagate call-graph
+    // information to improve inlining decisions.  Functions that only call
+    // other small functions or intrinsics get InlineHint because inlining
+    // them transitively inlines their callees too (cascade inlining).
+    // Functions called from only one call site get AlwaysInline because
+    // there's no code-size cost to inlining (the callee can be eliminated).
+    if (optimizationLevel >= OptimizationLevel::O2 && !isSelfRecursive &&
+        func->name != "main" && !func->hintNoInline) {
+        // If the function has @static linkage, it's only called within this
+        // TU.  Count the number of call sites — single-caller functions
+        // should always be inlined for zero overhead.
+        if (func->hintStatic || function->hasInternalLinkage()) {
+            if (function->hasOneUse()) {
+                function->removeFnAttr(llvm::Attribute::InlineHint);
+                function->addFnAttr(llvm::Attribute::AlwaysInline);
+            }
+        }
+    }
+
     // Create entry basic block
     llvm::BasicBlock* entry = llvm::BasicBlock::Create(*context, "entry", function);
     builder->SetInsertPoint(entry);

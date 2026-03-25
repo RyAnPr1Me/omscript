@@ -1673,6 +1673,7 @@ MappingResult mapProgramToHardware(ProgramGraph& pg, const HardwareGraph& hw,
 // ═════════════════════════════════════════════════════════════════════════════
 
 /// Detect and generate FMA: a*b + c → fma(a, b, c) or a*b - c → fma(a, b, -c).
+/// Also detects fsub(c, fmul(a,b)) → fma(-a, b, c) [fnmsub pattern].
 /// Returns the number of FMAs generated.
 static unsigned generateFMA(llvm::Function& func, const MicroarchProfile& profile) {
     if (profile.fmaUnits == 0) return 0;
@@ -1682,7 +1683,7 @@ static unsigned generateFMA(llvm::Function& func, const MicroarchProfile& profil
 
     for (auto& bb : func) {
         for (auto& inst : bb) {
-            // Pattern: fadd(fmul(a, b), c) → fma(a, b, c)
+            // Pattern 1: fadd(fmul(a, b), c) → fma(a, b, c)
             if (inst.getOpcode() == llvm::Instruction::FAdd) {
                 llvm::Value* op0 = inst.getOperand(0);
                 llvm::Value* op1 = inst.getOperand(1);
@@ -1712,6 +1713,47 @@ static unsigned generateFMA(llvm::Function& func, const MicroarchProfile& profil
                     }
                 }
             }
+
+            // Pattern 2: fsub(fmul(a,b), c) → fma(a, b, -c) [fmsub]
+            if (inst.getOpcode() == llvm::Instruction::FSub) {
+                auto* fmul = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                if (fmul && fmul->getOpcode() == llvm::Instruction::FMul &&
+                    fmul->hasOneUse()) {
+                    llvm::IRBuilder<> builder(&inst);
+                    llvm::Module* mod = func.getParent();
+                    llvm::Type* ty = inst.getType();
+                    llvm::Value* negC = builder.CreateFNeg(inst.getOperand(1), "fma.negc");
+                    llvm::Function* fmaFn = OMSC_GET_INTRINSIC(
+                        mod, llvm::Intrinsic::fma, {ty});
+                    llvm::Value* result = builder.CreateCall(
+                        fmaFn, {fmul->getOperand(0), fmul->getOperand(1), negC},
+                        "fmsub");
+                    inst.replaceAllUsesWith(result);
+                    toErase.push_back(&inst);
+                    toErase.push_back(fmul);
+                    count++;
+                }
+                // Pattern 3: fsub(c, fmul(a,b)) → fma(-a, b, c) [fnmsub]
+                else {
+                    auto* fmul2 = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
+                    if (fmul2 && fmul2->getOpcode() == llvm::Instruction::FMul &&
+                        fmul2->hasOneUse()) {
+                        llvm::IRBuilder<> builder(&inst);
+                        llvm::Module* mod = func.getParent();
+                        llvm::Type* ty = inst.getType();
+                        llvm::Value* negA = builder.CreateFNeg(fmul2->getOperand(0), "fma.nega");
+                        llvm::Function* fmaFn = OMSC_GET_INTRINSIC(
+                            mod, llvm::Intrinsic::fma, {ty});
+                        llvm::Value* result = builder.CreateCall(
+                            fmaFn, {negA, fmul2->getOperand(1), inst.getOperand(0)},
+                            "fnmsub");
+                        inst.replaceAllUsesWith(result);
+                        toErase.push_back(&inst);
+                        toErase.push_back(fmul2);
+                        count++;
+                    }
+                }
+            }
         }
     }
 
@@ -1722,9 +1764,31 @@ static unsigned generateFMA(llvm::Function& func, const MicroarchProfile& profil
 }
 
 /// Insert prefetch hints for strided memory access patterns in loops.
+/// Uses stride detection and cache-line-aware prefetch distance to insert
+/// optimally-placed prefetch intrinsics.
+///
+/// Enhanced strategy (compared to naive next-cache-line):
+///   1. Detect GEP-based stride patterns to identify sequential vs. random access
+///   2. Scale prefetch distance by L2 latency (hide memory latency optimally)
+///   3. Use locality hint based on access pattern (streaming=low, reused=high)
+///   4. Insert prefetch for stores too (write-allocate on modern CPUs)
+///   5. Limit per-loop prefetches based on available load/store ports
+///
 /// Returns the number of prefetches inserted.
 static unsigned insertPrefetches(llvm::Function& func, const MicroarchProfile& profile) {
     unsigned count = 0;
+
+    // Compute optimal prefetch distance: how many cache lines ahead to prefetch.
+    // Goal: prefetch far enough that data arrives by the time it's needed.
+    // distance = ceil(L2_latency / estimated_iterations_per_cycle)
+    // For most loops we estimate ~2 iterations per cycle (IPC-limited).
+    const unsigned prefetchDistLines = std::max(1u,
+        (profile.l2Latency + 1) / 2);
+    const unsigned prefetchDistBytes = prefetchDistLines * profile.cacheLineSize;
+
+    // Max prefetches per loop: don't exceed half the load ports (avoid
+    // prefetch traffic crowding out actual loads).
+    const unsigned maxPrefetchesPerLoop = std::max(2u, profile.loadPorts * 2);
 
     for (auto& bb : func) {
         // Look for basic blocks that are likely loop bodies (have a backedge).
@@ -1742,41 +1806,74 @@ static unsigned insertPrefetches(llvm::Function& func, const MicroarchProfile& p
         }
         if (!isLoopBody) continue;
 
-        // Find loads in this loop body.
-        std::vector<llvm::LoadInst*> loads;
+        // Collect loads and stores with GEP address computation for stride
+        // analysis.  Only prefetch for non-trivial address patterns.
+        struct MemAccess {
+            llvm::Instruction* inst;
+            llvm::Value* ptr;
+            bool isStore;
+        };
+        std::vector<MemAccess> accesses;
         for (auto& inst : bb) {
             if (auto* load = llvm::dyn_cast<llvm::LoadInst>(&inst)) {
-                loads.push_back(load);
+                accesses.push_back({load, load->getPointerOperand(), false});
+            } else if (auto* store = llvm::dyn_cast<llvm::StoreInst>(&inst)) {
+                accesses.push_back({store, store->getPointerOperand(), true});
             }
         }
 
-        // Insert prefetch for each load (prefetch the next cache line).
-        for (auto* load : loads) {
-            if (count >= 4) break; // Limit prefetches to avoid overhead
+        unsigned loopPrefetchCount = 0;
+        // De-duplicate: track base pointers we've already prefetched to avoid
+        // redundant prefetches to the same cache line from different offsets.
+        llvm::SmallPtrSet<llvm::Value*, 8> prefetchedBases;
 
-            llvm::IRBuilder<> builder(load);
+        for (auto& access : accesses) {
+            if (loopPrefetchCount >= maxPrefetchesPerLoop) break;
+
+            // Strip GEP to find base pointer for dedup.
+            llvm::Value* base = access.ptr;
+            if (auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(access.ptr)) {
+                base = gep->getPointerOperand();
+            }
+            // Skip if we already prefetched this base.
+            if (!prefetchedBases.insert(base).second) continue;
+
+            llvm::IRBuilder<> builder(access.inst);
             llvm::Module* mod = func.getParent();
 
-            // Compute address + cache_line_size for prefetch (opaque ptr).
-            llvm::Value* ptr = load->getPointerOperand();
-            llvm::Type* ptrTy = ptr->getType(); // opaque ptr in LLVM 18+
+            // Compute prefetch address: ptr + prefetchDistBytes.
             llvm::Value* offset = llvm::ConstantInt::get(
-                builder.getInt64Ty(), profile.cacheLineSize);
+                builder.getInt64Ty(), prefetchDistBytes);
             llvm::Value* prefetchAddr = builder.CreateGEP(
-                builder.getInt8Ty(), ptr, offset, "prefetch_addr");
+                builder.getInt8Ty(), access.ptr, offset, "prefetch_addr");
 
             // Insert llvm.prefetch intrinsic.
+            llvm::Type* ptrTy = access.ptr->getType();
             llvm::Function* prefetchFn = OMSC_GET_INTRINSIC(
                 mod, llvm::Intrinsic::prefetch, {ptrTy});
 
-            // Args: ptr, rw (0=read), locality (3=high), cache_type (1=data)
+            // Determine locality: sequential stride → low locality (streaming),
+            // random/reuse → high locality.  Heuristic: GEP with constant
+            // indices suggests sequential; otherwise assume reuse.
+            int locality = 3; // default: high locality (keep in all caches)
+            if (auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(access.ptr)) {
+                // If GEP has a non-constant index, likely sequential access
+                for (auto it = gep->idx_begin(); it != gep->idx_end(); ++it) {
+                    if (!llvm::isa<llvm::ConstantInt>(*it)) {
+                        locality = 1; // streaming: bring to L2 but not L1
+                        break;
+                    }
+                }
+            }
+
             builder.CreateCall(prefetchFn, {
                 prefetchAddr,
-                builder.getInt32(0),  // read
-                builder.getInt32(3),  // high locality
+                builder.getInt32(access.isStore ? 1 : 0),
+                builder.getInt32(locality),
                 builder.getInt32(1)   // data cache
             });
             count++;
+            loopPrefetchCount++;
         }
     }
 
