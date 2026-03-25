@@ -1990,6 +1990,7 @@ void CodeGenerator::generate(Program* program) {
     hasOptMaxFunctions = false;
     optMaxFunctions.clear();
     irInstructionCount_ = 0;
+    fileNoAlias_ = program->fileNoAlias;
 
     // --- DWARF debug info initialization ---
     if (debugMode_) {
@@ -2165,10 +2166,73 @@ void CodeGenerator::generate(Program* program) {
     }
 
     // Process struct declarations: store field layouts for struct operations.
+    // When hot/cold field attributes are present, reorder fields so that
+    // hot fields are grouped first (cache-friendly) and cold fields last.
+    // This improves spatial locality for performance-critical access patterns.
     for (auto& structDecl : program->structs) {
-        structDefs_[structDecl->name] = structDecl->fields;
         if (!structDecl->fieldDecls.empty()) {
-            structFieldDecls_[structDecl->name] = structDecl->fieldDecls;
+            // Check if any field has hot or cold annotations.
+            bool hasLayoutHints = false;
+            for (const auto& fd : structDecl->fieldDecls) {
+                if (fd.attrs.hot || fd.attrs.cold) {
+                    hasLayoutHints = true;
+                    break;
+                }
+            }
+
+            if (hasLayoutHints && optimizationLevel >= OptimizationLevel::O2) {
+                // Reorder: hot fields first, normal fields next, cold fields last.
+                // Build a permutation that maps original index → new index.
+                std::vector<size_t> hotIdx, normalIdx, coldIdx;
+                for (size_t i = 0; i < structDecl->fieldDecls.size(); ++i) {
+                    if (structDecl->fieldDecls[i].attrs.hot)
+                        hotIdx.push_back(i);
+                    else if (structDecl->fieldDecls[i].attrs.cold)
+                        coldIdx.push_back(i);
+                    else
+                        normalIdx.push_back(i);
+                }
+
+                // Build reordered field lists.
+                std::vector<std::string> reorderedFields;
+                std::vector<StructField> reorderedDecls;
+                reorderedFields.reserve(structDecl->fields.size());
+                reorderedDecls.reserve(structDecl->fieldDecls.size());
+
+                for (size_t i : hotIdx) {
+                    reorderedFields.push_back(structDecl->fields[i]);
+                    reorderedDecls.push_back(structDecl->fieldDecls[i]);
+                }
+                for (size_t i : normalIdx) {
+                    reorderedFields.push_back(structDecl->fields[i]);
+                    reorderedDecls.push_back(structDecl->fieldDecls[i]);
+                }
+                for (size_t i : coldIdx) {
+                    reorderedFields.push_back(structDecl->fields[i]);
+                    reorderedDecls.push_back(structDecl->fieldDecls[i]);
+                }
+
+                structDefs_[structDecl->name] = reorderedFields;
+                structFieldDecls_[structDecl->name] = reorderedDecls;
+            } else {
+                structDefs_[structDecl->name] = structDecl->fields;
+                structFieldDecls_[structDecl->name] = structDecl->fieldDecls;
+            }
+        } else {
+            structDefs_[structDecl->name] = structDecl->fields;
+        }
+    }
+
+    // Register operator overloads: generate implementation functions and store
+    // in the operatorOverloads_ registry for dispatch in generateBinary().
+    for (auto& structDecl : program->structs) {
+        for (auto& overload : structDecl->operators) {
+            const std::string key = structDecl->name + "::" + overload.op;
+            const std::string funcName = overload.impl->name;
+            operatorOverloads_[key] = funcName;
+            // Add the operator implementation function to the program's function
+            // list so it gets code-generated alongside other functions.
+            program->functions.push_back(std::move(overload.impl));
         }
     }
 
@@ -2535,14 +2599,17 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     if (func->hintHot) {
         function->addFnAttr(llvm::Attribute::Hot);
         userAnnotatedHotFunctions_.insert(func->name);
+        currentFuncHintHot_ = true;
     }
     if (func->hintPure) {
         // @pure: function has no side effects and does not read/write memory
-        // beyond its arguments.  Enables aggressive CSE, LICM, and dead call
-        // elimination.  memory(read) is the LLVM equivalent of "pure" — the
-        // function may read memory but does not write or have side effects.
+        // beyond its arguments.  This is a COMPILE-TIME GUARANTEE — the
+        // programmer asserts purity.  Enables aggressive CSE, LICM, dead
+        // call elimination, and speculative execution.
         function->setOnlyReadsMemory();
         function->setDoesNotThrow();
+        function->setWillReturn();
+        function->setDoesNotFreeMemory();
     }
     if (func->hintNoReturn) {
         function->addFnAttr(llvm::Attribute::NoReturn);
@@ -2560,15 +2627,34 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         // inline everything called from this function.
         function->addFnAttr("flatten");
     }
-    if (func->hintRestrict) {
-        // @restrict: tell LLVM this function only accesses memory through
-        // its arguments (argmem).  This enables aggressive alias-based
-        // optimizations: the optimizer can prove that separate call sites
-        // don't alias, enabling load/store reordering and vectorization.
-        // This is equivalent to C's __restrict__ semantics applied to
-        // all pointer parameters — no external side effects.
+    if (func->hintRestrict || fileNoAlias_) {
+        // @restrict / @noalias / file-level @noalias: tell LLVM this function
+        // only accesses memory through its arguments (argmem).  This enables
+        // aggressive alias-based optimizations: the optimizer can prove that
+        // separate call sites don't alias, enabling load/store reordering
+        // and vectorization.
         function->setOnlyAccessesArgMemory();
         function->setDoesNotThrow();
+        // Mark all pointer parameters as noalias — OmScript's ownership
+        // semantics guarantee that distinct variables cannot alias the same
+        // memory region unless explicitly declared.
+        for (unsigned i = 0; i < function->arg_size(); ++i) {
+            if (function->getArg(i)->getType()->isPointerTy()) {
+                function->addParamAttr(i, llvm::Attribute::NoAlias);
+            }
+        }
+    }
+
+    // In OPTMAX functions, mark all parameters noalias and add WillReturn.
+    // The OPTMAX annotation is the user's compile-time guarantee that the
+    // function is safe and well-behaved, enabling maximum optimization.
+    if (inOptMaxFunction) {
+        for (unsigned i = 0; i < function->arg_size(); ++i) {
+            if (function->getArg(i)->getType()->isPointerTy()) {
+                function->addParamAttr(i, llvm::Attribute::NoAlias);
+                function->addParamAttr(i, llvm::Attribute::NonNull);
+            }
+        }
     }
 
     // @unroll / @nounroll: per-function loop unrolling control.
@@ -2580,6 +2666,10 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     // These are stored and applied to every loop emitted within this function.
     currentFuncHintVectorize_ = func->hintVectorize;
     currentFuncHintNoVectorize_ = func->hintNoVectorize;
+
+    // @hot: per-function hot annotation.  Used for bounds check elimination
+    // and other performance-critical optimizations.
+    currentFuncHintHot_ = func->hintHot;
 
     // Create entry basic block
     llvm::BasicBlock* entry = llvm::BasicBlock::Create(*context, "entry", function);
@@ -2602,6 +2692,7 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     prefetchedImmutVars_.clear();
     registerVars_.clear();
     simdVars_.clear();
+    nonNegValues_.clear();
 
     // Pre-populate stringVars_ for parameters known to receive string arguments.
     auto paramStrIt = funcParamStringTypes_.find(func->name);

@@ -212,6 +212,13 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
         }
         if (lto_) {
             linkArgs.push_back("-flto");
+            // Pass -march to the linker so the LTO backend uses the
+            // correct ISA features.  Without this, the LTO pass derives
+            // features solely from the target-cpu attribute (e.g. "znver4")
+            // which may include AVX-512 even when the host only has AVX2.
+            if (!march_.empty()) {
+                linkArgs.push_back("-march=" + march_);
+            }
         }
         if (staticLink_) {
             linkArgs.push_back("-static");

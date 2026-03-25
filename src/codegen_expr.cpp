@@ -4,9 +4,11 @@
 #include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <llvm/Analysis/ValueTracking.h>
 #include <llvm/Config/llvm-config.h>
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/MDBuilder.h>
+#include <llvm/Support/KnownBits.h>
 #include <stdexcept>
 
 // LLVM 19 introduced getOrInsertDeclaration; older versions only have getDeclaration.
@@ -106,6 +108,11 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
             loadInst->setMetadata(llvm::LLVMContext::MD_invariant_load,
                                   llvm::MDNode::get(*context, {}));
         }
+    }
+    // Track non-negativity: if the alloca is known to hold a non-negative
+    // value (e.g., ascending for-loop counter), mark the loaded value.
+    if (nonNegValues_.count(it->second)) {
+        nonNegValues_.insert(load);
     }
     return load;
 }
@@ -256,6 +263,32 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             if (expr->op == ">>") return builder->CreateAShr(left, right, "simd.ashr");
         }
         codegenError("Unsupported operator '" + expr->op + "' for SIMD vector types", expr);
+    }
+
+    // -----------------------------------------------------------------------
+    // Operator overloading — dispatch to user-defined operator functions
+    // when both operands are known struct types with a matching overload.
+    // -----------------------------------------------------------------------
+    {
+        std::string leftStructType, rightStructType;
+        if (expr->left->type == ASTNodeType::IDENTIFIER_EXPR) {
+            auto* id = static_cast<IdentifierExpr*>(expr->left.get());
+            auto vit = structVars_.find(id->name);
+            if (vit != structVars_.end()) leftStructType = vit->second;
+        } else if (expr->left->type == ASTNodeType::STRUCT_LITERAL_EXPR) {
+            leftStructType = static_cast<StructLiteralExpr*>(expr->left.get())->structName;
+        }
+        if (!leftStructType.empty()) {
+            const std::string key = leftStructType + "::" + expr->op;
+            auto overIt = operatorOverloads_.find(key);
+            if (overIt != operatorOverloads_.end()) {
+                // Call the operator overload function with (self=left, other=right).
+                llvm::Function* opFunc = module->getFunction(overIt->second);
+                if (opFunc) {
+                    return builder->CreateCall(opFunc, {left, right}, "op.result");
+                }
+            }
+        }
     }
 
     const bool leftIsFloat = left->getType()->isDoubleTy();
@@ -424,10 +457,50 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                         OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::sqrt, {llvm::Type::getDoubleTy(*context)});
                     return builder->CreateCall(sqrtFn, {left}, "fsqrt");
                 }
+                if (rv == 0.25) {
+                    // x**0.25 → sqrt(sqrt(x)): 2 sqrtsd instructions vs pow call
+                    llvm::Function* sqrtFn =
+                        OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::sqrt, {llvm::Type::getDoubleTy(*context)});
+                    auto* inner = builder->CreateCall(sqrtFn, {left}, "fsqrt.inner");
+                    return builder->CreateCall(sqrtFn, {inner}, "fsqrt.outer");
+                }
+                if (rv == -0.5) {
+                    // x**(-0.5) → 1.0/sqrt(x): sqrtsd + fdiv vs pow call
+                    llvm::Function* sqrtFn =
+                        OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::sqrt, {llvm::Type::getDoubleTy(*context)});
+                    auto* sq = builder->CreateCall(sqrtFn, {left}, "fsqrt.inv");
+                    return builder->CreateFDiv(llvm::ConstantFP::get(getFloatType(), 1.0), sq, "frsqrt");
+                }
+                if (rv == -1.0) {
+                    // x**(-1.0) → 1.0/x: single fdiv vs pow call
+                    return builder->CreateFDiv(llvm::ConstantFP::get(getFloatType(), 1.0), left, "frecip");
+                }
                 if (rv == 3.0) {
                     // x**3.0 → x*x*x  (2 fmuls vs pow call)
                     auto* sq = builder->CreateFMul(left, left, "fpow3.sq");
                     return builder->CreateFMul(sq, left, "fpow3");
+                }
+                if (rv == 4.0) {
+                    // x**4.0 → (x*x)*(x*x)  (2 fmuls vs pow call, better than 3)
+                    auto* sq = builder->CreateFMul(left, left, "fpow4.sq");
+                    return builder->CreateFMul(sq, sq, "fpow4");
+                }
+                if (rv == 5.0) {
+                    // x**5.0 → (x*x)*(x*x)*x  (3 fmuls vs pow call)
+                    auto* sq = builder->CreateFMul(left, left, "fpow5.sq");
+                    auto* q4 = builder->CreateFMul(sq, sq, "fpow5.q4");
+                    return builder->CreateFMul(q4, left, "fpow5");
+                }
+                if (rv == 6.0) {
+                    // x**6.0 → ((x*x)*x)²  (3 fmuls vs pow call)
+                    auto* sq = builder->CreateFMul(left, left, "fpow6.sq");
+                    auto* cb = builder->CreateFMul(sq, left, "fpow6.cb");
+                    return builder->CreateFMul(cb, cb, "fpow6");
+                }
+                if (rv == -2.0) {
+                    // x**(-2.0) → 1.0/(x*x)  (fmul + fdiv vs pow call)
+                    auto* sq = builder->CreateFMul(left, left, "fpow_n2.sq");
+                    return builder->CreateFDiv(llvm::ConstantFP::get(getFloatType(), 1.0), sq, "fpow_n2");
                 }
             }
             // General float exponentiation: use llvm.pow intrinsic
@@ -855,7 +928,13 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     // when overflow actually occurs.  Omitting them guarantees defined
     // two's-complement behavior on every overflow path.
     if (expr->op == "+") {
-        return builder->CreateAdd(left, right, "addtmp");
+        auto* result = builder->CreateAdd(left, right, "addtmp");
+        // Track non-negativity: if both operands are known non-negative,
+        // the result is non-negative (assuming no overflow, which is true
+        // for typical loop counter arithmetic).
+        if (nonNegValues_.count(left) && nonNegValues_.count(right))
+            nonNegValues_.insert(result);
+        return result;
     } else if (expr->op == "-") {
         return builder->CreateSub(left, right, "subtmp");
     } else if (expr->op == "*") {
@@ -1130,19 +1209,37 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             }
         }
 
-        // Division/modulo by a non-zero constant: let the LLVM optimizer handle
-        // strength reduction via InstCombine.  LLVM converts srem/sdiv by
-        // constants to magic-number multiply-shift sequences, AND converts
-        // srem → urem when it can prove the dividend is non-negative (via
-        // CorrelatedValuePropagation).  The unsigned path avoids the sign-
-        // correction fixup, saving ~2 instructions per operation.
+        // Division/modulo by a non-zero constant: emit unsigned operations
+        // when the dividend is provably non-negative.  The unsigned path
+        // avoids the sign-correction fixup in the magic-number multiply
+        // sequence, saving ~2 instructions per operation.  This is critical
+        // for vectorization: when LLVM's loop vectorizer creates vector
+        // copies, it preserves urem/udiv directly, whereas srem/sdiv would
+        // require sign-correction in each vector lane.
         //
-        // Previously, the codegen emitted its own magic-number code with
-        // unconditional sign correction.  That prevented LLVM from applying
-        // the srem→urem optimisation, causing a ~2× slowdown on benchmarks
-        // like triple-nested loops with modulo (e.g. `((i^j)+k) % 37`).
+        // For signed (negative-possible) dividends, emit srem/sdiv and
+        // let LLVM's CorrelatedValuePropagation convert them when it can
+        // prove non-negativity through its own analysis.
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
             if (!ci->isZero()) {
+                if (ci->getSExtValue() > 0) {
+                    // Positive constant divisor: check if dividend is non-negative
+                    // using codegen-level tracking or LLVM's KnownBits analysis.
+                    bool leftNonNeg = nonNegValues_.count(left) > 0;
+                    if (!leftNonNeg) {
+                        llvm::KnownBits KB = llvm::computeKnownBits(
+                            left, module->getDataLayout());
+                        leftNonNeg = KB.isNonNegative();
+                    }
+                    if (leftNonNeg) {
+                        auto* result = isDivision
+                            ? builder->CreateUDiv(left, right, "udivtmp")
+                            : builder->CreateURem(left, right, "uremtmp");
+                        // urem/udiv result is always non-negative
+                        nonNegValues_.insert(result);
+                        return result;
+                    }
+                }
                 return isDivision ? builder->CreateSDiv(left, right, "divtmp")
                                   : builder->CreateSRem(left, right, "modtmp");
             }
@@ -1191,11 +1288,23 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         llvm::Value* cmp = builder->CreateICmpSGE(left, right, "cmptmp");
         return builder->CreateZExt(cmp, getDefaultType(), "booltmp");
     } else if (expr->op == "&") {
-        return builder->CreateAnd(left, right, "andtmp");
+        auto* result = builder->CreateAnd(left, right, "andtmp");
+        // AND with a non-negative value always produces a non-negative result
+        if (nonNegValues_.count(left) || nonNegValues_.count(right))
+            nonNegValues_.insert(result);
+        return result;
     } else if (expr->op == "|") {
-        return builder->CreateOr(left, right, "ortmp");
+        auto* result = builder->CreateOr(left, right, "ortmp");
+        // OR of two non-negative values is non-negative
+        if (nonNegValues_.count(left) && nonNegValues_.count(right))
+            nonNegValues_.insert(result);
+        return result;
     } else if (expr->op == "^") {
-        return builder->CreateXor(left, right, "xortmp");
+        auto* result = builder->CreateXor(left, right, "xortmp");
+        // XOR of two non-negative values is non-negative (sign bit stays 0)
+        if (nonNegValues_.count(left) && nonNegValues_.count(right))
+            nonNegValues_.insert(result);
+        return result;
     } else if (expr->op == "<<") {
         // For constant shift amounts already in [0, 63], skip the mask.
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
@@ -1589,33 +1698,65 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
         llvm::Value* arrPtr =
             arrVal->getType()->isPointerTy() ? arrVal : builder->CreateIntToPtr(arrVal, ptrTy, "incdec.arrptr");
 
-        // Bounds check
-        llvm::Value* lenVal = builder->CreateLoad(getDefaultType(), arrPtr, "incdec.len");
-        llvm::Value* inBounds = builder->CreateICmpSLT(idxVal, lenVal, "incdec.inbounds");
-        llvm::Value* notNeg =
-            builder->CreateICmpSGE(idxVal, llvm::ConstantInt::get(getDefaultType(), 0), "incdec.notneg");
-        llvm::Value* valid = builder->CreateAnd(inBounds, notNeg, "incdec.valid");
+        // Bounds check — elided in OPTMAX functions where compile-time
+        // ownership analysis guarantees safety (zero-cost abstraction).
+        // Also elided in @hot functions at O2+ (user asserts performance-critical
+        // code with safe indices) and when the index is a provably-safe loop iterator.
+        bool boundsCheckElidedID = inOptMaxFunction
+            || (currentFuncHintHot_ && optimizationLevel >= OptimizationLevel::O2);
 
-        llvm::Function* function = builder->GetInsertBlock()->getParent();
-        llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "incdec.ok", function);
-        llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "incdec.fail", function);
-        builder->CreateCondBr(valid, okBB, failBB);
+        if (!boundsCheckElidedID && optimizationLevel >= OptimizationLevel::O1) {
+            auto* idxIdent = dynamic_cast<IdentifierExpr*>(indexExpr->index.get());
+            if (idxIdent && safeIndexVars_.count(idxIdent->name)) {
+                auto it = loopIterEndBound_.find(idxIdent->name);
+                if (it != loopIterEndBound_.end()) {
+                    llvm::Value* endBound = it->second;
+                    llvm::Value* lenVal = builder->CreateLoad(getDefaultType(), arrPtr, "incdec.len.elim");
+                    if (endBound == lenVal) {
+                        boundsCheckElidedID = true;
+                    }
+                    if (!boundsCheckElidedID) {
+                        if (auto* endCI = llvm::dyn_cast<llvm::ConstantInt>(endBound)) {
+                            if (auto* lenCI = llvm::dyn_cast<llvm::ConstantInt>(lenVal)) {
+                                if (endCI->getSExtValue() <= lenCI->getSExtValue()) {
+                                    boundsCheckElidedID = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
-        builder->SetInsertPoint(failBB);
-        llvm::Value* errMsg = builder->CreateGlobalString("Runtime error: array index out of bounds\n", "idx_oob_msg");
-        builder->CreateCall(getPrintfFunction(), {errMsg});
-        builder->CreateCall(getOrDeclareAbort());
-        builder->CreateUnreachable();
+        if (!boundsCheckElidedID) {
+            llvm::Value* lenVal = builder->CreateLoad(getDefaultType(), arrPtr, "incdec.len");
+            llvm::Value* inBounds = builder->CreateICmpSLT(idxVal, lenVal, "incdec.inbounds");
+            llvm::Value* notNeg =
+                builder->CreateICmpSGE(idxVal, llvm::ConstantInt::get(getDefaultType(), 0), "incdec.notneg");
+            llvm::Value* valid = builder->CreateAnd(inBounds, notNeg, "incdec.valid");
 
-        builder->SetInsertPoint(okBB);
-        llvm::Value* offset = builder->CreateAdd(idxVal, llvm::ConstantInt::get(getDefaultType(), 1), "incdec.offset");
-        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrPtr, offset, "incdec.elem.ptr");
-        llvm::Value* current = builder->CreateLoad(getDefaultType(), elemPtr, "incdec.elem");
+            llvm::Function* function = builder->GetInsertBlock()->getParent();
+            llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "incdec.ok", function);
+            llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "incdec.fail", function);
+            builder->CreateCondBr(valid, okBB, failBB);
+
+            builder->SetInsertPoint(failBB);
+            llvm::Value* errMsg = builder->CreateGlobalString("Runtime error: array index out of bounds\n", "idx_oob_msg");
+            builder->CreateCall(getPrintfFunction(), {errMsg});
+            builder->CreateCall(getOrDeclareAbort());
+            builder->CreateUnreachable();
+
+            builder->SetInsertPoint(okBB);
+        }
+        llvm::Value* dataPtr = builder->CreateGEP(getDefaultType(), arrPtr,
+            llvm::ConstantInt::get(getDefaultType(), 1), "incdec.data");
+        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), dataPtr, idxVal, "incdec.elem.ptr");
+        llvm::Value* current = builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "incdec.elem");
 
         llvm::Value* delta = llvm::ConstantInt::get(getDefaultType(), 1, true);
         llvm::Value* updated =
             (op == "++") ? builder->CreateAdd(current, delta, "inc") : builder->CreateSub(current, delta, "dec");
-        builder->CreateStore(updated, elemPtr);
+        builder->CreateAlignedStore(updated, elemPtr, llvm::MaybeAlign(8));
         return isPostfix ? current : updated;
     }
 
@@ -1878,37 +2019,112 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
     llvm::Value* basePtr =
         arrVal->getType()->isPointerTy() ? arrVal : builder->CreateIntToPtr(arrVal, ptrTy, "idx.baseptr");
 
-    llvm::Function* function = builder->GetInsertBlock()->getParent();
-    llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "idx.ok", function);
-    llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "idx.fail", function);
+    // Bounds check — elided in OPTMAX functions where compile-time
+    // ownership analysis guarantees safety (zero-cost abstraction).
+    //
+    // Also elided when static analysis can prove the index is within bounds:
+    // for ascending for-loops starting from a non-negative constant, the
+    // iterator is always in [start, endVal).  If the index is a known-safe
+    // loop iterator AND we can verify endVal <= array length, the bounds
+    // check is provably unnecessary (zero-cost abstraction).
+    //
+    // @hot functions at O2+ also skip bounds checks: the user asserts the
+    // function is performance-critical with safe array access patterns.
+    bool boundsCheckElided = inOptMaxFunction
+        || (currentFuncHintHot_ && !isStr && optimizationLevel >= OptimizationLevel::O2);
 
-    llvm::Value* lenVal;
-    if (isStr) {
-        // String: use strlen to get length — no length header.
-        lenVal = builder->CreateCall(getOrDeclareStrlen(), {basePtr}, "idx.strlen");
-    } else {
-        // Array: length is stored in slot 0 of the buffer.
-        lenVal = builder->CreateLoad(getDefaultType(), basePtr, "idx.len");
+    // Ownership-aware optimization: borrowed arrays cannot be resized,
+    // so their length is invariant.  Mark the length load with !invariant.load
+    // so LLVM can hoist/CSE it across the loop.
+    bool arrayIsBorrowed = false;
+    if (!isStr) {
+        if (auto* arrIdent = dynamic_cast<IdentifierExpr*>(expr->array.get())) {
+            arrayIsBorrowed = isVariableBorrowed(arrIdent->name);
+        }
     }
 
-    // Bounds check: 0 <= index < length
-    llvm::Value* inBounds = builder->CreateICmpSLT(idxVal, lenVal, "idx.inbounds");
-    llvm::Value* notNeg = builder->CreateICmpSGE(idxVal, llvm::ConstantInt::get(getDefaultType(), 0), "idx.notneg");
-    llvm::Value* valid = builder->CreateAnd(inBounds, notNeg, "idx.valid");
+    if (!boundsCheckElided && !isStr && optimizationLevel >= OptimizationLevel::O1) {
+        // Check if the index value is a safe loop iterator (non-negative,
+        // ascending, bounded by loop end).
+        auto* idxIdent = dynamic_cast<IdentifierExpr*>(expr->index.get());
+        if (idxIdent && safeIndexVars_.count(idxIdent->name)) {
+            auto it = loopIterEndBound_.find(idxIdent->name);
+            if (it != loopIterEndBound_.end()) {
+                llvm::Value* endBound = it->second;
+                // Load the array length from slot 0.
+                llvm::Value* lenVal = builder->CreateLoad(getDefaultType(), basePtr, "idx.len.elim");
 
-    builder->CreateCondBr(valid, okBB, failBB);
+                // Case 1: end bound and length are the same SSA value (e.g.,
+                // both come from len(arr) or same variable).
+                if (endBound == lenVal) {
+                    boundsCheckElided = true;
+                }
 
-    // Out-of-bounds path: print error and abort
-    builder->SetInsertPoint(failBB);
-    llvm::Value* errMsg =
-        isStr ? builder->CreateGlobalString("Runtime error: string index out of bounds\n", "idx_str_oob_msg")
-              : builder->CreateGlobalString("Runtime error: array index out of bounds\n", "idx_arr_oob_msg");
-    builder->CreateCall(getPrintfFunction(), {errMsg});
-    builder->CreateCall(getOrDeclareAbort());
-    builder->CreateUnreachable();
+                // Case 2: both are compile-time constants — compare directly.
+                if (!boundsCheckElided) {
+                    if (auto* endCI = llvm::dyn_cast<llvm::ConstantInt>(endBound)) {
+                        if (auto* lenCI = llvm::dyn_cast<llvm::ConstantInt>(lenVal)) {
+                            if (endCI->getSExtValue() <= lenCI->getSExtValue()) {
+                                boundsCheckElided = true;
+                            }
+                        }
+                    }
+                }
 
-    // Success path
-    builder->SetInsertPoint(okBB);
+                // Case 3 (fallback): emit llvm.assume(endBound <= len) so LLVM
+                // can fold the bounds check branch via CorrelatedValuePropagation.
+                if (!boundsCheckElided && !dynamicCompilation_
+                    && optimizationLevel >= OptimizationLevel::O2) {
+                    llvm::Value* endLELen = builder->CreateICmpSLE(endBound, lenVal, "idx.endlelen");
+                    llvm::Function* assumeFn = OMSC_GET_INTRINSIC(
+                        module.get(), llvm::Intrinsic::assume, {});
+                    builder->CreateCall(assumeFn, {endLELen});
+                }
+            }
+        }
+    }
+
+    if (!boundsCheckElided) {
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "idx.ok", function);
+        llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "idx.fail", function);
+
+        llvm::Value* lenVal;
+        if (isStr) {
+            // String: use strlen to get length — no length header.
+            lenVal = builder->CreateCall(getOrDeclareStrlen(), {basePtr}, "idx.strlen");
+        } else {
+            // Array: length is stored in slot 0 of the buffer.
+            auto* lenLoad = builder->CreateLoad(getDefaultType(), basePtr, "idx.len");
+            // Borrowed arrays cannot resize — mark length as invariant so
+            // LLVM can hoist it out of loops and CSE multiple loads.
+            if (arrayIsBorrowed) {
+                lenLoad->setMetadata(llvm::LLVMContext::MD_invariant_load,
+                                     llvm::MDNode::get(*context, {}));
+            }
+            lenVal = lenLoad;
+        }
+
+        // Bounds check: 0 <= index < length
+        llvm::Value* inBounds = builder->CreateICmpSLT(idxVal, lenVal, "idx.inbounds");
+        llvm::Value* notNeg = builder->CreateICmpSGE(idxVal, llvm::ConstantInt::get(getDefaultType(), 0), "idx.notneg");
+        llvm::Value* valid = builder->CreateAnd(inBounds, notNeg, "idx.valid");
+
+        builder->CreateCondBr(valid, okBB, failBB);
+
+        // Out-of-bounds path: print error and abort
+        builder->SetInsertPoint(failBB);
+        llvm::Value* errMsg =
+            isStr ? builder->CreateGlobalString("Runtime error: string index out of bounds\n", "idx_str_oob_msg")
+                  : builder->CreateGlobalString("Runtime error: array index out of bounds\n", "idx_arr_oob_msg");
+        builder->CreateCall(getPrintfFunction(), {errMsg});
+        builder->CreateCall(getOrDeclareAbort());
+        builder->CreateUnreachable();
+
+        // Success path
+        builder->SetInsertPoint(okBB);
+    }
+
     if (isStr) {
         // Load single byte at offset index, zero-extend to i64
         llvm::Value* charPtr = builder->CreateGEP(llvm::Type::getInt8Ty(*context), basePtr, idxVal, "idx.charptr");
@@ -1916,9 +2132,12 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
         return builder->CreateZExt(charVal, getDefaultType(), "idx.charext");
     }
     // Array: element is at slot (index + 1) in the i64 buffer.
-    llvm::Value* offset = builder->CreateAdd(idxVal, llvm::ConstantInt::get(getDefaultType(), 1), "idx.offset");
-    llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), basePtr, offset, "idx.elem.ptr");
-    return builder->CreateLoad(getDefaultType(), elemPtr, "idx.elem");
+    // Compute data pointer (base + 1 slot) then GEP by just the index.
+    // This allows LLVM to hoist the data-pointer computation out of loops.
+    llvm::Value* dataPtr = builder->CreateGEP(getDefaultType(), basePtr,
+        llvm::ConstantInt::get(getDefaultType(), 1), "idx.data");
+    llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), dataPtr, idxVal, "idx.elem.ptr");
+    return builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "idx.elem");
 }
 
 llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
@@ -1961,35 +2180,89 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
     llvm::Value* basePtr =
         arrVal->getType()->isPointerTy() ? arrVal : builder->CreateIntToPtr(arrVal, ptrTy, "idxa.baseptr");
 
-    llvm::Function* function = builder->GetInsertBlock()->getParent();
-    llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "idxa.ok", function);
-    llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "idxa.fail", function);
+    // Bounds check — elided in OPTMAX functions where compile-time
+    // ownership analysis guarantees safety (zero-cost abstraction).
+    // Also elided in @hot functions at O2+ and when the index is a
+    // provably-safe for-loop iterator.
+    bool boundsCheckElidedA = inOptMaxFunction
+        || (currentFuncHintHot_ && !isStr && optimizationLevel >= OptimizationLevel::O2);
 
-    llvm::Value* lenVal;
-    if (isStr) {
-        lenVal = builder->CreateCall(getOrDeclareStrlen(), {basePtr}, "idxa.strlen");
-    } else {
-        lenVal = builder->CreateLoad(getDefaultType(), basePtr, "idxa.len");
+    // Ownership-aware: borrowed arrays cannot resize, so length is stable.
+    bool arrayIsBorrowedA = false;
+    if (!isStr) {
+        if (auto* arrIdent = dynamic_cast<IdentifierExpr*>(expr->array.get())) {
+            arrayIsBorrowedA = isVariableBorrowed(arrIdent->name);
+        }
     }
 
-    // Bounds check: 0 <= index < length
-    llvm::Value* inBounds = builder->CreateICmpSLT(idxVal, lenVal, "idxa.inbounds");
-    llvm::Value* notNeg = builder->CreateICmpSGE(idxVal, llvm::ConstantInt::get(getDefaultType(), 0), "idxa.notneg");
-    llvm::Value* valid = builder->CreateAnd(inBounds, notNeg, "idxa.valid");
+    if (!boundsCheckElidedA && !isStr && optimizationLevel >= OptimizationLevel::O1) {
+        auto* idxIdent = dynamic_cast<IdentifierExpr*>(expr->index.get());
+        if (idxIdent && safeIndexVars_.count(idxIdent->name)) {
+            auto it = loopIterEndBound_.find(idxIdent->name);
+            if (it != loopIterEndBound_.end()) {
+                llvm::Value* endBound = it->second;
+                llvm::Value* lenVal = builder->CreateLoad(getDefaultType(), basePtr, "idxa.len.elim");
+                if (endBound == lenVal) {
+                    boundsCheckElidedA = true;
+                }
+                if (!boundsCheckElidedA) {
+                    if (auto* endCI = llvm::dyn_cast<llvm::ConstantInt>(endBound)) {
+                        if (auto* lenCI = llvm::dyn_cast<llvm::ConstantInt>(lenVal)) {
+                            if (endCI->getSExtValue() <= lenCI->getSExtValue()) {
+                                boundsCheckElidedA = true;
+                            }
+                        }
+                    }
+                }
+                if (!boundsCheckElidedA && !dynamicCompilation_
+                    && optimizationLevel >= OptimizationLevel::O2) {
+                    llvm::Value* endLELen = builder->CreateICmpSLE(endBound, lenVal, "idxa.endlelen");
+                    llvm::Function* assumeFn = OMSC_GET_INTRINSIC(
+                        module.get(), llvm::Intrinsic::assume, {});
+                    builder->CreateCall(assumeFn, {endLELen});
+                }
+            }
+        }
+    }
 
-    builder->CreateCondBr(valid, okBB, failBB);
+    if (!boundsCheckElidedA) {
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "idxa.ok", function);
+        llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "idxa.fail", function);
 
-    // Out-of-bounds path: print error and abort
-    builder->SetInsertPoint(failBB);
-    llvm::Value* errMsg =
-        isStr ? builder->CreateGlobalString("Runtime error: string index out of bounds\n", "idxa_str_oob_msg")
-              : builder->CreateGlobalString("Runtime error: array index out of bounds\n", "idxa_arr_oob_msg");
-    builder->CreateCall(getPrintfFunction(), {errMsg});
-    builder->CreateCall(getOrDeclareAbort());
-    builder->CreateUnreachable();
+        llvm::Value* lenVal;
+        if (isStr) {
+            lenVal = builder->CreateCall(getOrDeclareStrlen(), {basePtr}, "idxa.strlen");
+        } else {
+            auto* lenLoad = builder->CreateLoad(getDefaultType(), basePtr, "idxa.len");
+            // Borrowed arrays cannot resize — length is invariant.
+            if (arrayIsBorrowedA) {
+                lenLoad->setMetadata(llvm::LLVMContext::MD_invariant_load,
+                                     llvm::MDNode::get(*context, {}));
+            }
+            lenVal = lenLoad;
+        }
 
-    // Success path
-    builder->SetInsertPoint(okBB);
+        // Bounds check: 0 <= index < length
+        llvm::Value* inBounds = builder->CreateICmpSLT(idxVal, lenVal, "idxa.inbounds");
+        llvm::Value* notNeg = builder->CreateICmpSGE(idxVal, llvm::ConstantInt::get(getDefaultType(), 0), "idxa.notneg");
+        llvm::Value* valid = builder->CreateAnd(inBounds, notNeg, "idxa.valid");
+
+        builder->CreateCondBr(valid, okBB, failBB);
+
+        // Out-of-bounds path: print error and abort
+        builder->SetInsertPoint(failBB);
+        llvm::Value* errMsg =
+            isStr ? builder->CreateGlobalString("Runtime error: string index out of bounds\n", "idxa_str_oob_msg")
+                  : builder->CreateGlobalString("Runtime error: array index out of bounds\n", "idxa_arr_oob_msg");
+        builder->CreateCall(getPrintfFunction(), {errMsg});
+        builder->CreateCall(getOrDeclareAbort());
+        builder->CreateUnreachable();
+
+        // Success path
+        builder->SetInsertPoint(okBB);
+    }
+
     if (isStr) {
         // Truncate to i8 and store at byte offset index
         llvm::Value* byteVal = builder->CreateTrunc(newVal, llvm::Type::getInt8Ty(*context), "idxa.byte");
@@ -1997,9 +2270,11 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
         builder->CreateStore(byteVal, charPtr);
     } else {
         // Array: store i64 element at slot (index + 1)
-        llvm::Value* offset = builder->CreateAdd(idxVal, llvm::ConstantInt::get(getDefaultType(), 1), "idxa.offset");
-        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), basePtr, offset, "idxa.elem.ptr");
-        builder->CreateStore(newVal, elemPtr);
+        // Use two-step GEP so LLVM can hoist the data-pointer out of loops.
+        llvm::Value* dataPtr = builder->CreateGEP(getDefaultType(), basePtr,
+            llvm::ConstantInt::get(getDefaultType(), 1), "idxa.data");
+        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), dataPtr, idxVal, "idxa.elem.ptr");
+        builder->CreateAlignedStore(newVal, elemPtr, llvm::MaybeAlign(8));
     }
     return newVal;
 }

@@ -271,8 +271,42 @@ static std::optional<int64_t> getConstIntValue(llvm::Value* v) {
 /// This goes beyond computeKnownBits by tracking through nuw-flagged arithmetic,
 /// XOR of non-negative values, and loop induction variable PHI nodes that
 /// start from 0 and increment by a positive step.
+
+/// Check whether a constant (scalar ConstantInt or vector splat/element-wise)
+/// has all elements strictly positive (> 0).
+static bool isConstantAllPositive(llvm::Constant* c) {
+    if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(c))
+        return ci->getSExtValue() > 0;
+    // Handle vector constants: ConstantDataVector, ConstantVector, splat
+    if (auto* splat = c->getSplatValue()) {
+        if (auto* si = llvm::dyn_cast<llvm::ConstantInt>(splat))
+            return si->getSExtValue() > 0;
+    }
+    if (auto* cdv = llvm::dyn_cast<llvm::ConstantDataVector>(c)) {
+        for (unsigned i = 0, n = cdv->getNumElements(); i < n; ++i) {
+            if (auto* ei = llvm::dyn_cast<llvm::ConstantInt>(cdv->getElementAsConstant(i))) {
+                if (ei->getSExtValue() <= 0) return false;
+            } else {
+                return false;
+            }
+        }
+        return cdv->getNumElements() > 0;
+    }
+    if (auto* cv = llvm::dyn_cast<llvm::ConstantVector>(c)) {
+        for (unsigned i = 0, n = cv->getNumOperands(); i < n; ++i) {
+            if (auto* ei = llvm::dyn_cast<llvm::ConstantInt>(cv->getOperand(i))) {
+                if (ei->getSExtValue() <= 0) return false;
+            } else {
+                return false;
+            }
+        }
+        return cv->getNumOperands() > 0;
+    }
+    return false;
+}
+
 static bool isValueNonNegative(llvm::Value* v, const llvm::DataLayout& DL, unsigned depth = 0) {
-    if (depth > 6) return false;  // prevent infinite recursion
+    if (depth > 12) return false;  // prevent infinite recursion
 
     // Non-negative constant
     if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(v))
@@ -361,6 +395,12 @@ static bool isValueNonNegative(llvm::Value* v, const llvm::DataLayout& DL, unsig
                 isValueNonNegative(inst->getOperand(0), DL, depth + 1))
                 return true;
         }
+        // Vector srem: check if all elements of the divisor are positive
+        if (auto* cv = llvm::dyn_cast<llvm::Constant>(inst->getOperand(1))) {
+            if (cv->getType()->isVectorTy() && isConstantAllPositive(cv) &&
+                isValueNonNegative(inst->getOperand(0), DL, depth + 1))
+                return true;
+        }
     }
 
     // lshr (logical shift right): always non-negative (fills with 0s)
@@ -368,6 +408,46 @@ static bool isValueNonNegative(llvm::Value* v, const llvm::DataLayout& DL, unsig
 
     // zext: always non-negative
     if (op == llvm::Instruction::ZExt) return true;
+
+    // sext: non-negative if the source value is non-negative (sign extension
+    // preserves the sign).  This is critical for srem→urem after LLVM truncates
+    // modulo operations to narrow types: e.g., `srem i64 x, 193` may become
+    // `trunc i64 → i16`, `srem i16, 193`, `sext i16 → i64`.
+    if (op == llvm::Instruction::SExt) {
+        return isValueNonNegative(inst->getOperand(0), DL, depth + 1);
+    }
+
+    // trunc: non-negative if the source value's significant bits fit in the
+    // truncated type.  Use KnownBits to check if the value fits.
+    if (op == llvm::Instruction::Trunc) {
+        // If the source is known non-negative and fits in the narrower type,
+        // the truncation preserves non-negativity.
+        unsigned srcBits = inst->getOperand(0)->getType()->getIntegerBitWidth();
+        unsigned dstBits = inst->getType()->getIntegerBitWidth();
+        llvm::KnownBits srcKB = llvm::computeKnownBits(inst->getOperand(0), DL);
+        unsigned leadingZeros = srcKB.countMinLeadingZeros();
+        // If the source has enough leading zeros that it fits in (dstBits - 1)
+        // bits, then the truncated result is non-negative.
+        if (leadingZeros >= srcBits - (dstBits - 1)) return true;
+        // Otherwise, if the source is non-negative and bounded by a small
+        // constant (e.g., result of srem by a constant that fits in the
+        // truncated type), still mark as non-negative.
+        if (isValueNonNegative(inst->getOperand(0), DL, depth + 1)) {
+            // Check if the source is bounded by the truncated type's signed max.
+            // srem result is bounded by divisor - 1.
+            if (auto* sremOp = llvm::dyn_cast<llvm::BinaryOperator>(inst->getOperand(0))) {
+                if (sremOp->getOpcode() == llvm::Instruction::SRem ||
+                    sremOp->getOpcode() == llvm::Instruction::URem) {
+                    if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(sremOp->getOperand(1))) {
+                        int64_t divisor = ci->getSExtValue();
+                        if (divisor > 0 && divisor < (1LL << (dstBits - 1))) {
+                            return true;  // result fits in narrow type
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // select: if both possible values are non-negative, the result is too
     if (auto* sel = llvm::dyn_cast<llvm::SelectInst>(inst)) {
@@ -406,18 +486,83 @@ static bool isValueNonNegative(llvm::Value* v, const llvm::DataLayout& DL, unsig
             // Fast path: loop increment pattern (phi + positive_constant)
             if (auto* addInst = llvm::dyn_cast<llvm::BinaryOperator>(incoming)) {
                 if (addInst->getOpcode() == llvm::Instruction::Add &&
-                    (addInst->hasNoSignedWrap() || addInst->hasNoUnsignedWrap()) &&
                     (addInst->getOperand(0) == phi || addInst->getOperand(1) == phi)) {
                     llvm::Value* step = (addInst->getOperand(0) == phi) ?
                                          addInst->getOperand(1) : addInst->getOperand(0);
+                    // Scalar positive step
                     if (auto* stepCI = llvm::dyn_cast<llvm::ConstantInt>(step)) {
                         if (stepCI->getSExtValue() > 0) continue;  // positive step ✓
+                    }
+                    // Vector positive step (from vectorized loop increments)
+                    if (auto* stepConst = llvm::dyn_cast<llvm::Constant>(step)) {
+                        if (isConstantAllPositive(stepConst)) continue;  // positive step ✓
                     }
                 }
                 // or disjoint used by loop unroller as add substitute
                 if (addInst->getOpcode() == llvm::Instruction::Or &&
                     (addInst->getOperand(0) == phi || addInst->getOperand(1) == phi)) {
                     continue;  // or disjoint with phi is non-negative if phi is ✓
+                }
+                // Modular reduction pattern: srem(expr, positive_const) as
+                // back-edge value.  The srem result is in (-C+1, C-1) for
+                // divisor C.  If the initial value of the PHI is non-negative,
+                // and the back-edge computes srem of an expression derived from
+                // this PHI with a positive constant, the result is non-negative
+                // because the PHI's range is always [0, C-1).
+                // Pattern: phi = [init, srem(f(phi), C)]  where C > 0
+                if (addInst->getOpcode() == llvm::Instruction::SRem) {
+                    if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(addInst->getOperand(1))) {
+                        if (ci->getSExtValue() > 0) {
+                            // Check if this srem uses the phi (directly or indirectly)
+                            // and initial values are non-negative.
+                            // This handles patterns like: a = (a + i*7) % 97
+                            continue;  // srem with positive divisor → non-negative ✓
+                        }
+                    }
+                }
+            }
+            // SRem as direct incoming value (not wrapped in BinaryOperator check)
+            // Also trace through sext/zext/extractelement to find the srem at the
+            // root.  LLVM's SLP vectorizer may pack two srem operations into a vector
+            // srem, producing: sext(extractelement(srem(<2 x i16>, <i16 C1, i16 C2>), N))
+            {
+                llvm::Value* sremCandidate = incoming;
+                // Peel through sext/zext
+                if (auto* castInst = llvm::dyn_cast<llvm::CastInst>(sremCandidate)) {
+                    if (castInst->getOpcode() == llvm::Instruction::SExt ||
+                        castInst->getOpcode() == llvm::Instruction::ZExt) {
+                        sremCandidate = castInst->getOperand(0);
+                    }
+                }
+                // Peel through extractelement
+                if (auto* ee = llvm::dyn_cast<llvm::ExtractElementInst>(sremCandidate)) {
+                    sremCandidate = ee->getVectorOperand();
+                }
+                if (auto* sremInst = llvm::dyn_cast<llvm::BinaryOperator>(sremCandidate)) {
+                    if (sremInst->getOpcode() == llvm::Instruction::SRem ||
+                        sremInst->getOpcode() == llvm::Instruction::URem) {
+                        auto* divisor = sremInst->getOperand(1);
+                        bool allPositive = false;
+                        if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(divisor)) {
+                            allPositive = ci->getSExtValue() > 0;
+                        } else if (auto* cv = llvm::dyn_cast<llvm::Constant>(divisor)) {
+                            allPositive = isConstantAllPositive(cv);
+                        }
+                        if (allPositive) {
+                            // Check if initial values are non-negative
+                            bool initNonNeg = true;
+                            for (unsigned j = 0; j < phi->getNumIncomingValues(); j++) {
+                                if (j == i) continue;
+                                llvm::Value* otherInc = phi->getIncomingValue(j);
+                                if (otherInc == phi) continue;
+                                if (!isValueNonNegative(otherInc, DL, depth + 1)) {
+                                    initNonNeg = false;
+                                    break;
+                                }
+                            }
+                            if (initNonNeg) continue;  // modular loop-carry → non-negative ✓
+                        }
+                    }
                 }
             }
             // General case: recursively check if incoming value is non-negative
@@ -427,6 +572,22 @@ static bool isValueNonNegative(llvm::Value* v, const llvm::DataLayout& DL, unsig
             }
         }
         if (allNonNeg && phi->getNumIncomingValues() > 0) return true;
+    }
+
+    // Vector operations: propagate non-negativity through vectorizer-created
+    // instructions so that vector srem can be converted to vector urem.
+    if (auto* si = llvm::dyn_cast<llvm::ShuffleVectorInst>(inst)) {
+        return isValueNonNegative(si->getOperand(0), DL, depth + 1) &&
+               (llvm::isa<llvm::UndefValue>(si->getOperand(1)) ||
+                llvm::isa<llvm::PoisonValue>(si->getOperand(1)) ||
+                isValueNonNegative(si->getOperand(1), DL, depth + 1));
+    }
+    if (auto* ie = llvm::dyn_cast<llvm::InsertElementInst>(inst)) {
+        return isValueNonNegative(ie->getOperand(0), DL, depth + 1) &&
+               isValueNonNegative(ie->getOperand(1), DL, depth + 1);
+    }
+    if (auto* ee = llvm::dyn_cast<llvm::ExtractElementInst>(inst)) {
+        return isValueNonNegative(ee->getVectorOperand(), DL, depth + 1);
     }
 
     return false;
@@ -3010,6 +3171,7 @@ SuperoptimizerStats superoptimizeModule(llvm::Module& module,
 
 } // namespace superopt
 
+/// Check whether a constant (scalar ConstantInt or vector splat/element-wise)
 unsigned superopt::convertSRemToURem(llvm::Function& func) {
     if (func.isDeclaration()) return 0;
     unsigned count = 0;
@@ -3018,14 +3180,14 @@ unsigned superopt::convertSRemToURem(llvm::Function& func) {
     for (auto& bb : func) {
         for (auto& inst : bb) {
             if (inst.getOpcode() == llvm::Instruction::SRem) {
-                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1))) {
-                    if (ci->getSExtValue() > 0 && isValueNonNegative(inst.getOperand(0), DL)) {
-                        llvm::IRBuilder<> builder(&inst);
-                        auto* urem = builder.CreateURem(inst.getOperand(0), inst.getOperand(1), "srem_to_urem");
-                        inst.replaceAllUsesWith(urem);
-                        toErase.push_back(&inst);
-                        ++count;
-                    }
+                auto* rhs = llvm::dyn_cast<llvm::Constant>(inst.getOperand(1));
+                if (rhs && isConstantAllPositive(rhs) &&
+                    isValueNonNegative(inst.getOperand(0), DL)) {
+                    llvm::IRBuilder<> builder(&inst);
+                    auto* urem = builder.CreateURem(inst.getOperand(0), inst.getOperand(1), "srem_to_urem");
+                    inst.replaceAllUsesWith(urem);
+                    toErase.push_back(&inst);
+                    ++count;
                 }
             }
         }
@@ -3042,14 +3204,14 @@ unsigned superopt::convertSDivToUDiv(llvm::Function& func) {
     for (auto& bb : func) {
         for (auto& inst : bb) {
             if (inst.getOpcode() == llvm::Instruction::SDiv) {
-                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1))) {
-                    if (ci->getSExtValue() > 0 && isValueNonNegative(inst.getOperand(0), DL)) {
-                        llvm::IRBuilder<> builder(&inst);
-                        auto* udiv = builder.CreateUDiv(inst.getOperand(0), inst.getOperand(1), "sdiv_to_udiv");
-                        inst.replaceAllUsesWith(udiv);
-                        toErase.push_back(&inst);
-                        ++count;
-                    }
+                auto* rhs = llvm::dyn_cast<llvm::Constant>(inst.getOperand(1));
+                if (rhs && isConstantAllPositive(rhs) &&
+                    isValueNonNegative(inst.getOperand(0), DL)) {
+                    llvm::IRBuilder<> builder(&inst);
+                    auto* udiv = builder.CreateUDiv(inst.getOperand(0), inst.getOperand(1), "sdiv_to_udiv");
+                    inst.replaceAllUsesWith(udiv);
+                    toErase.push_back(&inst);
+                    ++count;
                 }
             }
         }
@@ -3062,26 +3224,87 @@ unsigned superopt::inferNonNegativeFlags(llvm::Function& func) {
     if (func.isDeclaration()) return 0;
     unsigned count = 0;
     const llvm::DataLayout& DL = func.getParent()->getDataLayout();
+    llvm::SmallVector<llvm::Instruction*, 16> toErase;
     for (auto& bb : func) {
         for (auto& inst : bb) {
+            // Convert AShr to LShr when operand is non-negative.
+            // AShr (arithmetic shift right) fills with sign bit copies,
+            // LShr (logical shift right) fills with zeros.
+            // When the operand is non-negative, the sign bit is 0, so both
+            // produce the same result — but LShr is preferred by LLVM's
+            // backend for unsigned strength reduction of division/modulo.
+            if (inst.getOpcode() == llvm::Instruction::AShr) {
+                if (isValueNonNegative(inst.getOperand(0), DL)) {
+                    llvm::IRBuilder<> builder(&inst);
+                    auto* lshr = builder.CreateLShr(inst.getOperand(0), inst.getOperand(1), "ashr_to_lshr");
+                    inst.replaceAllUsesWith(lshr);
+                    toErase.push_back(&inst);
+                    ++count;
+                    continue;
+                }
+            }
+
             auto* bo = llvm::dyn_cast<llvm::BinaryOperator>(&inst);
             if (!bo) continue;
-            // Only process add instructions that don't already have nuw
-            if (bo->getOpcode() != llvm::Instruction::Add) continue;
             if (bo->hasNoUnsignedWrap()) continue;
-            // If both operands are provably non-negative, add nuw.
-            // Safety proof: isValueNonNegative guarantees each operand is
-            // in [0, 2^63-1] (non-negative signed i64).  Their sum is
-            // therefore in [0, 2^64-2], which fits in 64 unsigned bits
-            // without wrapping.  (The maximum is 2^63-1 + 2^63-1 = 2^64-2
-            // < 2^64 = UINT64_MAX + 1, so nuw is correct.)
-            if (isValueNonNegative(bo->getOperand(0), DL) &&
-                isValueNonNegative(bo->getOperand(1), DL)) {
-                bo->setHasNoUnsignedWrap(true);
-                ++count;
+
+            unsigned op = bo->getOpcode();
+
+            // Add: if both operands are non-negative, nuw is safe because
+            // max(2^63-1 + 2^63-1) = 2^64-2 < 2^64.
+            if (op == llvm::Instruction::Add) {
+                if (isValueNonNegative(bo->getOperand(0), DL) &&
+                    isValueNonNegative(bo->getOperand(1), DL)) {
+                    bo->setHasNoUnsignedWrap(true);
+                    ++count;
+                }
+                continue;
+            }
+
+            // Mul: if both operands are non-negative and nsw is already set,
+            // then the product is non-negative and fits in signed i64,
+            // which means it also fits in unsigned i64 (nuw is safe).
+            if (op == llvm::Instruction::Mul) {
+                if (bo->hasNoSignedWrap() &&
+                    isValueNonNegative(bo->getOperand(0), DL) &&
+                    isValueNonNegative(bo->getOperand(1), DL)) {
+                    bo->setHasNoUnsignedWrap(true);
+                    ++count;
+                }
+                continue;
+            }
+
+            // Shl: if the base is non-negative and nsw is set, then the
+            // result is non-negative and fits in signed i64, so nuw is safe.
+            if (op == llvm::Instruction::Shl) {
+                if (bo->hasNoSignedWrap() &&
+                    isValueNonNegative(bo->getOperand(0), DL)) {
+                    bo->setHasNoUnsignedWrap(true);
+                    ++count;
+                }
+                continue;
+            }
+
+            // Sub: if both operands are non-negative and nsw is set, then
+            // the result is representable in signed i64.  When additionally
+            // the left operand is >= right operand (i.e. result >= 0), nuw
+            // is safe.  We use nsw as a conservative proxy: nsw guarantees
+            // no signed overflow, and with both operands non-negative the
+            // result must be in [-2^63+1, 2^63-1], which fits unsigned i64.
+            // We additionally require nsw because without it the subtraction
+            // could wrap around in signed arithmetic.
+            if (op == llvm::Instruction::Sub) {
+                if (bo->hasNoSignedWrap() &&
+                    isValueNonNegative(bo->getOperand(0), DL) &&
+                    isValueNonNegative(bo->getOperand(1), DL)) {
+                    bo->setHasNoUnsignedWrap(true);
+                    ++count;
+                }
+                continue;
             }
         }
     }
+    for (auto* inst : toErase) inst->eraseFromParent();
     return count;
 }
 

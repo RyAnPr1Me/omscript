@@ -448,6 +448,10 @@ std::vector<RewriteRule> getRelationalRules();
 /// for the patterns they match).
 std::vector<RewriteRule> getFloatingPointRules();
 
+/// Strength reduction rules: replace expensive ops (mul, div) with cheaper
+/// ones (shift, add, sub) for common small-constant multiplications.
+std::vector<RewriteRule> getStrengthReductionRules();
+
 /// Returns all optimization rules combined.
 std::vector<RewriteRule> getAllRules();
 

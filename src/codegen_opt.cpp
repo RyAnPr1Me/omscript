@@ -276,7 +276,7 @@ void CodeGenerator::runOptimizationPasses() {
         PTO.CallGraphProfile = true;
     }
     if (optimizationLevel == OptimizationLevel::O3) {
-        PTO.InlinerThreshold = 400; // more aggressive inlining than the default ~225
+        PTO.InlinerThreshold = 750; // aggressive inlining for maximum IPC
     }
 
     // ---------------------------------------------------------------------------
@@ -437,13 +437,14 @@ void CodeGenerator::runOptimizationPasses() {
         });
     }
 
-    // At O3 with loop optimization enabled (enableLoopOptimize_ / -floop-optimize),
+    // At O2+ with loop optimization enabled (enableLoopOptimize_ / -floop-optimize),
     // register LoopFusePass before vectorization to merge adjacent loops with
     // the same trip count into a single loop, dramatically improving data cache
     // locality and reducing loop overhead.  This is particularly beneficial for
     // array-processing code where successive passes over the same data can be
-    // combined.
-    if (optimizationLevel >= OptimizationLevel::O3 && enableLoopOptimize_) {
+    // combined.  Lowered from O3 to O2 to benefit more workloads, since loop
+    // fusion is a key enabler of iterator-fusion-style optimization.
+    if (optimizationLevel >= OptimizationLevel::O2 && enableLoopOptimize_) {
         PB.registerVectorizerStartEPCallback(
             [](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) { FPM.addPass(llvm::LoopFusePass()); });
     }
@@ -458,10 +459,12 @@ void CodeGenerator::runOptimizationPasses() {
             [](llvm::LoopPassManager& LPM, llvm::OptimizationLevel) { LPM.addPass(llvm::LoopInterchangePass()); });
     }
 
-    // At O3, inject AggressiveInstCombine after the standard peephole passes
+    // At O2+, inject AggressiveInstCombine after the standard peephole passes
     // to catch multi-instruction patterns (e.g. truncation sequences, popcount
-    // idioms) that regular InstCombine does not handle.
-    if (optimizationLevel >= OptimizationLevel::O3) {
+    // idioms) that regular InstCombine does not handle.  Lowered from O3 to O2
+    // to provide zero-cost abstractions: operator overload bodies and iterator
+    // chains benefit from aggressive pattern matching after inlining.
+    if (optimizationLevel >= OptimizationLevel::O2) {
         PB.registerPeepholeEPCallback([](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) {
             FPM.addPass(llvm::AggressiveInstCombinePass());
         });
@@ -592,6 +595,38 @@ void CodeGenerator::runOptimizationPasses() {
         });
     }
 
+    // At O3, run srem→urem and sdiv→udiv conversion as an OptimizerLast
+    // callback BEFORE HotColdSplitting.  The vectorizer (which runs earlier
+    // in the pipeline) creates vector srem instructions from the original
+    // scalar urem/srem.  At this point the loop counter PHI nodes still
+    // carry non-negativity information (nsw/nuw flags, assume intrinsics).
+    // After HotColdSplitting, the loop code may be outlined into a separate
+    // function where the loop counters become parameters without non-negativity
+    // metadata, making the srem→urem proof impossible.
+    if (enableSuperopt_ && optimizationLevel >= OptimizationLevel::O2) {
+        PB.registerOptimizerLastEPCallback(
+            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel) {
+            struct SRemToURemPass : public llvm::PassInfoMixin<SRemToURemPass> {
+                llvm::PreservedAnalyses run(llvm::Module& M, llvm::ModuleAnalysisManager&) {
+                    unsigned total = 0;
+                    for (int iter = 0; iter < 4; ++iter) {
+                        unsigned iterCount = 0;
+                        for (auto& F : M) {
+                            iterCount += superopt::inferNonNegativeFlags(F);
+                            iterCount += superopt::convertSRemToURem(F);
+                            iterCount += superopt::convertSDivToUDiv(F);
+                        }
+                        total += iterCount;
+                        if (iterCount == 0) break;
+                    }
+                    return total > 0 ? llvm::PreservedAnalyses::none()
+                                     : llvm::PreservedAnalyses::all();
+                }
+            };
+            MPM.addPass(SRemToURemPass());
+        });
+    }
+
     // At O3, run HotColdSplitting to outline cold code regions (error
     // handlers, assertion failures, rarely-taken branches) into separate
     // functions.  This improves I-cache density on the hot path and
@@ -649,7 +684,10 @@ void CodeGenerator::runOptimizationPasses() {
     // and internalize global variables, propagate initial values, and eliminate
     // globals that are only stored but never read.  This cleans up patterns the
     // default pipeline leaves behind (e.g. globals used only in main).
-    if (optimizationLevel >= OptimizationLevel::O2 && !lto_) {
+    // Also run in LTO mode: single-TU programs benefit from GlobalOpt even
+    // when the LTO pre-link pipeline is used, since the linker's LTO pass
+    // may not run GlobalOpt on every module.
+    if (optimizationLevel >= OptimizationLevel::O2) {
         if (verbose_) {
             std::cout << "    Adding GlobalOpt + GlobalDCE passes..." << std::endl;
         }
@@ -1070,7 +1108,7 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     //
     // We collect OPTMAX function pointers in a single pass so that the later
     // optimization loop can skip the name→string conversion per function.
-    static constexpr unsigned kAlwaysInlineThreshold = 15; // instruction count
+    static constexpr unsigned kAlwaysInlineThreshold = 100; // instruction count
     llvm::SmallVector<llvm::Function*, 16> optMaxFuncs;
     for (auto& func : module->functions()) {
         if (func.isDeclaration())
@@ -1079,7 +1117,19 @@ void CodeGenerator::optimizeOptMaxFunctions() {
         if (!optMaxFunctions.count(std::string(name)))
             continue;
         func.addFnAttr(llvm::Attribute::NoUnwind);
-        // Mark small OPTMAX helpers as always-inline candidates
+        // WillReturn: OPTMAX functions always return (no infinite loops or
+        // exceptions), enabling LLVM to speculate calls and eliminate dead ones.
+        func.addFnAttr(llvm::Attribute::WillReturn);
+        // NoSync: OPTMAX functions don't synchronize (no atomics, locks, or
+        // thread-related operations), enabling aggressive reordering.
+        func.addFnAttr(llvm::Attribute::NoSync);
+        // NoFree: OPTMAX functions don't free heap memory, enabling the
+        // optimizer to sink/hoist loads past calls to these functions.
+        func.addFnAttr(llvm::Attribute::NoFree);
+        // Mark small OPTMAX helpers as always-inline candidates.
+        // Higher threshold (30 instrs) ensures utility functions like
+        // classify(), add_one/two/four() are force-inlined, eliminating
+        // call overhead in tight loops.
         if (func.getInstructionCount() < kAlwaysInlineThreshold) {
             func.addFnAttr(llvm::Attribute::AlwaysInline);
         }
@@ -1112,13 +1162,17 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     fpm.add(llvm::createInstSimplifyLegacyPass()); // simplify instructions in loop bodies
     fpm.add(llvm::createLoopDataPrefetchPass());
     fpm.add(llvm::createLoopStrengthReducePass());
-    fpm.add(llvm::createLoopUnrollPass());
-    // Phase 2.5: Post-loop cleanup.  Loop strength reduction, unrolling,
-    // and LICM can expose redundancies and dead code.  A lightweight
-    // CFG simplification + DCE pass is sufficient here; the heavier GVN
-    // and InstCombine passes are already in Phase 4 below and the full
-    // pipeline runs 3× per function, so duplicating them here only adds
-    // compile-time without improving generated code quality.
+    // Use aggressive loop unrolling for OPTMAX: OptLevel=3 for maximum
+    // unroll factor, threshold=500 to allow larger loop bodies to unroll.
+    // Higher threshold enables unrolling of loops containing modulo/division
+    // sequences that expand to multiple µops during ISel.
+    fpm.add(llvm::createLoopUnrollPass(/*OptLevel=*/3, /*OnlyWhenForced=*/false,
+                                       /*ForgetAllSCEV=*/false, /*Threshold=*/1000));
+    // Phase 2.5: Post-loop cleanup.  After unrolling, GVN + InstCombine catch
+    // constant-foldable patterns in unrolled iterations (e.g. known-constant
+    // IV values, redundant loads) that DCE alone would miss.
+    fpm.add(llvm::createGVNPass());
+    fpm.add(llvm::createInstructionCombiningPass());
     fpm.add(llvm::createCFGSimplificationPass());
     fpm.add(llvm::createDeadCodeEliminationPass());
     // Phase 3: Post-loop optimizations

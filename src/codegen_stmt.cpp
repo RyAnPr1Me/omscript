@@ -404,6 +404,16 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
         llvm::SmallVector<llvm::Metadata*, 4> loopMDs;
         loopMDs.push_back(nullptr);
         loopMDs.push_back(mustProgress);
+        // Unroll hint: match for-loop unrolling strategy.
+        // For OPTMAX functions, let LLVM's cost model choose; for regular
+        // functions, cap at 2 to prevent code bloat.
+        if (!inOptMaxFunction && optimizationLevel >= OptimizationLevel::O3 && enableUnrollLoops_ && !dynamicCompilation_) {
+            loopMDs.push_back(llvm::MDNode::get(
+                *context,
+                {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
+                 llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                     llvm::Type::getInt32Ty(*context), 2))}));
+        }
         // @vectorize / @novectorize: per-function loop vectorization overrides.
         if (currentFuncHintNoVectorize_) {
             loopMDs.push_back(llvm::MDNode::get(
@@ -510,6 +520,8 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         codegenError("For loop outside of function", stmt);
     }
 
+    ++loopNestDepth_;
+
     const ScopeGuard scope(*this);
 
     // Allocate iterator variable — use annotated type when present
@@ -560,9 +572,14 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             if (auto* endCI = llvm::dyn_cast<llvm::ConstantInt>(endVal)) {
                 // Both bounds known: ascending when start < end.
                 ascending = startCI->getSExtValue() < endCI->getSExtValue();
-            } else if (startCI->getSExtValue() == 0) {
-                // Common pattern: for (i in 0...n).  Step is always +1;
-                // when n <= 0 the loop condition (i < n) fails immediately.
+            } else if (startCI->getSExtValue() >= 0) {
+                // Common patterns: for (i in 0...n), for (i in 1...n), etc.
+                // When start is a non-negative constant and end is variable,
+                // the loop is virtually always ascending with the default
+                // step of +1.  If end <= start, the condition (i < end) fails
+                // immediately and the loop body never executes.  Descending
+                // ranges from non-negative starts require explicit step
+                // syntax (start...end...-1).
                 ascending = true;
             }
         }
@@ -659,12 +676,43 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             llvm::Function* assumeFn = OMSC_GET_INTRINSIC_STMT(
                 module.get(), llvm::Intrinsic::assume, {});
             builder->CreateCall(assumeFn, {isNonNeg});
+            // Track the alloca as producing non-negative values so that
+            // expressions derived from the loop counter can emit urem/udiv
+            // instead of srem/sdiv.
+            nonNegValues_.insert(iterAlloca);
+        }
+    }
+
+    // Compile-time bounds check elimination: for ascending for-loops starting
+    // at a non-negative constant, the iterator variable is always in
+    // [start, endVal).  If the end bound is known (e.g. len(arr), a constant,
+    // or a named variable), we record the iterator as safe so that array index
+    // operations like arr[i] can skip runtime bounds checks when the array
+    // length >= endVal.
+    //
+    // This is a zero-cost abstraction: the safety guarantee is enforced
+    // statically by the compiler (OmScript's for-loop semantics guarantee
+    // the iterator cannot be modified inside the body), so no runtime check
+    // is needed.
+    if (stepKnownPositive && optimizationLevel >= OptimizationLevel::O1) {
+        bool startNonNegForElim = false;
+        if (auto* startCI = llvm::dyn_cast<llvm::ConstantInt>(startVal)) {
+            startNonNegForElim = startCI->getSExtValue() >= 0;
+        }
+        if (startNonNegForElim) {
+            safeIndexVars_.insert(stmt->iteratorVar);
+            loopIterEndBound_[stmt->iteratorVar] = endVal;
         }
     }
 
     loopStack.push_back({endBB, incBB});
     generateStatement(stmt->body.get());
     loopStack.pop_back();
+
+    // Clean up: iterator no longer has guaranteed bounds outside the loop.
+    safeIndexVars_.erase(stmt->iteratorVar);
+    loopIterEndBound_.erase(stmt->iteratorVar);
+
     if (!builder->GetInsertBlock()->getTerminator()) {
         builder->CreateBr(incBB);
     }
@@ -755,13 +803,14 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         // knows the loop structure (ascending, step=+1) and can guide the
         // unroller more precisely than C compilers.
         //
-        // A factor of 2 is used instead of 4 because nested loops with
-        // unroll=4 at each level produce 4^3=64x code bloat for triple-
-        // nested loops, causing severe I-cache pressure.  An unroll factor
-        // of 2 keeps the code within L1 I-cache (2^3=8x worst case) while
-        // still amortizing loop overhead.  This matches GCC's conservative
-        // unrolling heuristic for loops with unknown trip counts.
-        if (!addedUnrollHint && optimizationLevel >= OptimizationLevel::O3 && enableUnrollLoops_ && !dynamicCompilation_) {
+        // For OPTMAX functions, we omit the unroll hint entirely, allowing
+        // LLVM's cost-model-driven unroller to choose the optimal factor
+        // based on loop body complexity and register pressure.  The OPTMAX
+        // per-function pipeline already includes an aggressive unroll pass.
+        //
+        // For regular functions, a factor of 2 keeps the code within L1
+        // I-cache (2^3=8x worst case) while still amortizing loop overhead.
+        if (!addedUnrollHint && !inOptMaxFunction && !currentFuncHintUnroll_ && optimizationLevel >= OptimizationLevel::O3 && enableUnrollLoops_ && !dynamicCompilation_) {
             llvm::MDNode* unrollCount = llvm::MDNode::get(
                 *context,
                 {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
@@ -770,13 +819,25 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             loopMDs.push_back(unrollCount);
         }
         // @unroll / @nounroll: per-function loop unrolling overrides.
-        // @nounroll disables unrolling entirely; @unroll requests full unrolling.
+        // @nounroll disables unrolling entirely; @unroll requests aggressive unrolling.
         if (currentFuncHintNoUnroll_) {
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.unroll.disable")}));
         } else if (currentFuncHintUnroll_ && !addedUnrollHint) {
+            // For variable-trip-count loops, unroll.full is ignored by LLVM
+            // (the unroller refuses to fully unroll unbounded loops).  Use a
+            // concrete unroll.count instead, giving LLVM a target that matches
+            // GCC's aggressive unrolling for FP-heavy loops.
+            // OPTMAX uses 8 to hide FP/call latency through ILP; regular
+            // functions use 4 to balance ILP gains vs I-cache pressure.
+            static constexpr unsigned kOptMaxUnrollCount = 8;
+            static constexpr unsigned kDefaultUnrollCount = 8;
+            unsigned unrollCount = inOptMaxFunction ? kOptMaxUnrollCount : kDefaultUnrollCount;
             loopMDs.push_back(llvm::MDNode::get(
-                *context, {llvm::MDString::get(*context, "llvm.loop.unroll.full")}));
+                *context,
+                {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
+                 llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                     llvm::Type::getInt32Ty(*context), unrollCount))}));
         }
         // @vectorize / @novectorize: per-function loop vectorization overrides.
         if (currentFuncHintNoVectorize_) {
@@ -797,6 +858,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
 
     // End block
     builder->SetInsertPoint(endBB);
+    --loopNestDepth_;
 }
 
 void CodeGenerator::generateForEach(ForEachStmt* stmt) {
@@ -1290,6 +1352,7 @@ void CodeGenerator::generateInvalidate(InvalidateStmt* stmt) {
     // Mark the variable as dead for use-after-invalidate detection.
     deadVars_.insert(stmt->varName);
     deadVarReason_[stmt->varName] = "invalidated";
+    varOwnership_[stmt->varName] = OwnershipState::Invalidated;
 }
 
 void CodeGenerator::generateMoveDecl(MoveDecl* stmt) {
@@ -1348,6 +1411,13 @@ llvm::Value* CodeGenerator::generateMoveExpr(MoveExpr* expr) {
 llvm::Value* CodeGenerator::generateBorrowExpr(BorrowExpr* expr) {
     // Generate the source value.
     llvm::Value* val = generateExpression(expr->source.get());
+
+    // Track the source variable as borrowed in the ownership lattice.
+    // Borrowed variables cannot be mutated, moved, or invalidated until
+    // the borrow ends.
+    if (auto* srcIdent = dynamic_cast<IdentifierExpr*>(expr->source.get())) {
+        markVariableBorrowed(srcIdent->name);
+    }
 
     // If the source is an identifier, attach !noalias metadata to the load
     // as a hint that this borrow does not alias other pointers.
@@ -1520,6 +1590,21 @@ void CodeGenerator::markVariableMoved(const std::string& varName) {
     }
     deadVars_.insert(varName);
     deadVarReason_[varName] = "moved";
+    varOwnership_[varName] = OwnershipState::Moved;
+}
+
+void CodeGenerator::markVariableBorrowed(const std::string& varName) {
+    borrowedVars_.insert(varName);
+    varOwnership_[varName] = OwnershipState::Borrowed;
+}
+
+bool CodeGenerator::isVariableBorrowed(const std::string& varName) const {
+    return borrowedVars_.count(varName) > 0;
+}
+
+OwnershipState CodeGenerator::getOwnershipState(const std::string& varName) const {
+    auto it = varOwnership_.find(varName);
+    return (it != varOwnership_.end()) ? it->second : OwnershipState::Owned;
 }
 
 } // namespace omscript

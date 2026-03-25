@@ -123,6 +123,67 @@ ClassId EGraph::add(ENode node) {
         cls.isZero = (node.value == 0);
         cls.isOne = (node.value == 1);
         cls.isNonNeg = (node.value >= 0);
+    } else if (node.op == Op::ConstF) {
+        cls.isNonNeg = (node.fvalue >= 0.0);
+    } else if (node.children.size() >= 2) {
+        // Propagate isNonNeg through operations where it's provable.
+        // This is critical for relational rules (div_pow2_nonneg,
+        // mod_pow2_nonneg) to fire on expressions derived from
+        // non-negative sub-expressions like loop counters.
+        ClassId lhs = find(node.children[0]);
+        ClassId rhs = find(node.children[1]);
+        bool lNonNeg = (lhs < classes_.size()) && classes_[lhs].isNonNeg;
+        bool rNonNeg = (rhs < classes_.size()) && classes_[rhs].isNonNeg;
+
+        switch (node.op) {
+        case Op::Add:
+        case Op::Mul:
+        case Op::BitOr:
+        case Op::BitXor:
+            // Non-negative when both operands are non-negative
+            cls.isNonNeg = lNonNeg && rNonNeg;
+            break;
+        case Op::BitAnd:
+            // Non-negative when either operand is non-negative
+            // (AND can only clear bits, so if sign bit is 0 in either, result sign is 0)
+            cls.isNonNeg = lNonNeg || rNonNeg;
+            break;
+        case Op::Shr:
+            // Logical/arithmetic shift right: if lhs non-negative, result non-negative
+            cls.isNonNeg = lNonNeg;
+            break;
+        case Op::Shl:
+            // Shift left preserves non-negativity only for small shifts,
+            // but conservatively mark it if lhs is non-negative
+            cls.isNonNeg = lNonNeg;
+            break;
+        case Op::Mod:
+            // x % C with x >= 0 and C > 0 → result in [0, C-1)
+            cls.isNonNeg = lNonNeg && rNonNeg;
+            break;
+        case Op::Div:
+            // x / C with x >= 0 and C > 0 → result >= 0
+            cls.isNonNeg = lNonNeg && rNonNeg;
+            break;
+        case Op::Sub:
+            // Not generally non-negative; leave as false
+            break;
+        default:
+            // Comparisons produce boolean 0/1 which are non-negative
+            if (node.op == Op::Eq || node.op == Op::Ne ||
+                node.op == Op::Lt || node.op == Op::Le ||
+                node.op == Op::Gt || node.op == Op::Ge) {
+                cls.isNonNeg = true;
+            }
+            break;
+        }
+    } else if (node.children.size() == 1) {
+        // Unary operations
+        if (node.op == Op::LogNot) {
+            cls.isNonNeg = true;  // Boolean result: 0 or 1
+        } else if (node.op == Op::Sqrt) {
+            cls.isNonNeg = true;  // sqrt is always non-negative for valid inputs
+        }
     }
 
     classes_.push_back(std::move(cls));
@@ -198,7 +259,9 @@ ClassId EGraph::merge(ClassId a, ClassId b) {
         classes_[a].constVal = classes_[b].constVal;
     classes_[a].isZero = classes_[a].isZero || classes_[b].isZero;
     classes_[a].isOne = classes_[a].isOne || classes_[b].isOne;
-    classes_[a].isNonNeg = classes_[a].isNonNeg && classes_[b].isNonNeg;
+    // When merging two equivalent e-classes, if EITHER is proven non-negative,
+    // the merged class is non-negative (they represent the same value).
+    classes_[a].isNonNeg = classes_[a].isNonNeg || classes_[b].isNonNeg;
 
     return a;
 }
@@ -6714,6 +6777,155 @@ std::vector<RewriteRule> getRelationalRules() {
             return a.has_value() && b.has_value();
         });
 
+    // ─────────────────────────────────────────────────────────────────────
+    // Modulo strength reduction for non-negative values
+    // x % C → (x - (x / C) * C) which LLVM then strength-reduces
+    // But more importantly, when x is non-neg, srem → urem which is cheaper.
+    // These rules propagate non-negativity through chains.
+    // ─────────────────────────────────────────────────────────────────────
+
+    // (a % C) + b where a%C is non-neg by analysis → result is non-neg if b is too
+    // This helps chains like ((i^j) + k) % 37 in nested loops
+
+    // Distributive modulo: (a + b) % C → ((a%C) + (b%C)) % C  when a,b non-neg
+    // Allows partial evaluation when one term is a loop constant.
+    rules.emplace_back("mod_distribute_add_nonneg",
+        P::OpPat(Op::Mod, {P::OpPat(Op::Add, {P::Wild("a"), P::Wild("b")}), P::Wild("c")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId amod = g.addBinOp(Op::Mod, s.at("a"), s.at("c"));
+            ClassId bmod = g.addBinOp(Op::Mod, s.at("b"), s.at("c"));
+            ClassId sum = g.addBinOp(Op::Add, amod, bmod);
+            return g.addBinOp(Op::Mod, sum, s.at("c"));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto cv = g.getConstValue(s.at("c"));
+            if (!cv || *cv <= 0) return false;
+            const auto& aClass = g.getClass(s.at("a"));
+            const auto& bClass = g.getClass(s.at("b"));
+            return aClass.isNonNeg && bClass.isNonNeg;
+        });
+
+    // x * C1 % C2 → 0  when C1 is a multiple of C2 and x is non-negative
+    rules.emplace_back("mod_mul_multiple_zero",
+        P::OpPat(Op::Mod, {P::OpPat(Op::Mul, {P::Wild("x"), P::Wild("c1")}), P::Wild("c2")}),
+        [](EGraph& g, const Subst&) {
+            return g.addConst(0);
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto c1 = g.getConstValue(s.at("c1"));
+            auto c2 = g.getConstValue(s.at("c2"));
+            if (!c1 || !c2 || *c2 == 0) return false;
+            if ((*c1 % *c2) != 0) return false;
+            // Only safe when x is non-negative (signed modulo rounds toward zero)
+            const auto& xClass = g.getClass(s.at("x"));
+            return xClass.isNonNeg;
+        });
+
+    // (x % C) % C → x % C  (idempotent modulo)
+    rules.emplace_back("mod_mod_same",
+        P::OpPat(Op::Mod, {P::OpPat(Op::Mod, {P::Wild("x"), P::Wild("c")}), P::Wild("c")}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Mod, s.at("x"), s.at("c"));
+        });
+
+    // (x & mask) where mask = C-1 and C is power-of-2 → x % C (for non-neg x)
+    // This enables subsequent mod optimizations on the AND result
+    // Note: the reverse direction (mod→AND) is already handled by mod_pow2_nonneg
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Shift-based division strength reduction
+    // ─────────────────────────────────────────────────────────────────────
+
+    // x / C → multiply-shift sequence for non-power-of-2 constants (non-neg only)
+    // This is handled better by LLVM's backend but marking non-neg helps
+
+    // x * C / C → x  (already exists, but also with non-neg guard for safety)
+
+    // (x << n) / (1 << n) → x  when x is non-negative
+    rules.emplace_back("shl_div_cancel_nonneg",
+        P::OpPat(Op::Div, {P::OpPat(Op::Shl, {P::Wild("x"), P::Wild("n")}), P::Wild("c")}),
+        [](EGraph&, const Subst& s) { return s.at("x"); },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto n = g.getConstValue(s.at("n"));
+            auto c = g.getConstValue(s.at("c"));
+            if (!n || !c || *n < 0 || *n >= 63 || *c <= 0) return false;
+            return *c == (1LL << *n);
+        });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Distributive law optimizations
+    // ─────────────────────────────────────────────────────────────────────
+
+    // x * C1 + x * C2 → x * (C1 + C2)  (factor out common multiplicand)
+    rules.emplace_back("add_factor_out",
+        P::OpPat(Op::Add, {P::OpPat(Op::Mul, {P::Wild("x"), P::Wild("c1")}),
+                            P::OpPat(Op::Mul, {P::Wild("x"), P::Wild("c2")})}),
+        [](EGraph& g, const Subst& s) {
+            auto c1 = g.getConstValue(s.at("c1"));
+            auto c2 = g.getConstValue(s.at("c2"));
+            return g.addBinOp(Op::Mul, s.at("x"), g.addConst(*c1 + *c2));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto c1 = g.getConstValue(s.at("c1"));
+            auto c2 = g.getConstValue(s.at("c2"));
+            return c1.has_value() && c2.has_value();
+        });
+
+    // x * C1 - x * C2 → x * (C1 - C2)
+    rules.emplace_back("sub_factor_out",
+        P::OpPat(Op::Sub, {P::OpPat(Op::Mul, {P::Wild("x"), P::Wild("c1")}),
+                            P::OpPat(Op::Mul, {P::Wild("x"), P::Wild("c2")})}),
+        [](EGraph& g, const Subst& s) {
+            auto c1 = g.getConstValue(s.at("c1"));
+            auto c2 = g.getConstValue(s.at("c2"));
+            return g.addBinOp(Op::Mul, s.at("x"), g.addConst(*c1 - *c2));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto c1 = g.getConstValue(s.at("c1"));
+            auto c2 = g.getConstValue(s.at("c2"));
+            return c1.has_value() && c2.has_value();
+        });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Strength reduction: x * (2^n - 1) → (x << n) - x
+    // ─────────────────────────────────────────────────────────────────────
+    rules.emplace_back("mul_to_shl_sub",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::Wild("c")}),
+        [](EGraph& g, const Subst& s) {
+            auto c = g.getConstValue(s.at("c"));
+            int64_t val = *c + 1;  // c = 2^n - 1, val = 2^n
+            int n = 0;
+            while (val > 1) { val >>= 1; n++; }
+            return g.addBinOp(Op::Sub,
+                g.addBinOp(Op::Shl, s.at("x"), g.addConst(n)),
+                s.at("x"));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto c = g.getConstValue(s.at("c"));
+            if (!c || *c < 3) return false;
+            int64_t val = *c + 1;
+            return val > 0 && (val & (val - 1)) == 0;  // check if c+1 is power of 2
+        });
+
+    // x * (2^n + 1) → (x << n) + x
+    rules.emplace_back("mul_to_shl_add",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::Wild("c")}),
+        [](EGraph& g, const Subst& s) {
+            auto c = g.getConstValue(s.at("c"));
+            int64_t val = *c - 1;  // c = 2^n + 1, val = 2^n
+            int n = 0;
+            while (val > 1) { val >>= 1; n++; }
+            return g.addBinOp(Op::Add,
+                g.addBinOp(Op::Shl, s.at("x"), g.addConst(n)),
+                s.at("x"));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto c = g.getConstValue(s.at("c"));
+            if (!c || *c < 3) return false;
+            int64_t val = *c - 1;
+            return val > 0 && (val & (val - 1)) == 0;  // check if c-1 is power of 2
+        });
+
     return rules;
 }
 
@@ -6915,6 +7127,197 @@ std::vector<RewriteRule> getFloatingPointRules() {
         P::OpPat(Op::Add, {P::Wild("x"), P::ConstFPat(0.0)}),
         [](EGraph&, const Subst& s) { return s.at("x"); });
 
+    // ── FP division by power-of-2 → multiply by reciprocal (extended) ──
+    // x / 32.0 → x * 0.03125
+    rules.emplace_back("fp_div32_to_mul",
+        P::OpPat(Op::Div, {P::Wild("x"), P::ConstFPat(32.0)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Mul, s.at("x"), g.addConstF(0.03125));
+        });
+
+    // x * 0.03125 → x / 32.0  (reverse for e-graph exploration)
+    rules.emplace_back("fp_mul_003125_to_div32",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstFPat(0.03125)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Div, s.at("x"), g.addConstF(32.0));
+        });
+
+    // x / 64.0 → x * 0.015625
+    rules.emplace_back("fp_div64_to_mul",
+        P::OpPat(Op::Div, {P::Wild("x"), P::ConstFPat(64.0)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Mul, s.at("x"), g.addConstF(0.015625));
+        });
+
+    // x * 0.015625 → x / 64.0  (reverse)
+    rules.emplace_back("fp_mul_0015625_to_div64",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstFPat(0.015625)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Div, s.at("x"), g.addConstF(64.0));
+        });
+
+    // ── FP negation distribution ────────────────────────────────────────
+    // (-x) * y → -(x * y)  (exact: IEEE-754 negation distributes over mul)
+    rules.emplace_back("fp_neg_mul_left",
+        P::OpPat(Op::Mul, {P::OpPat(Op::Neg, {P::Wild("x")}), P::Wild("y")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId prod = g.addBinOp(Op::Mul, s.at("x"), s.at("y"));
+            return g.addUnaryOp(Op::Neg, prod);
+        });
+
+    // x * (-y) → -(x * y)
+    rules.emplace_back("fp_neg_mul_right",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::OpPat(Op::Neg, {P::Wild("y")})}),
+        [](EGraph& g, const Subst& s) {
+            ClassId prod = g.addBinOp(Op::Mul, s.at("x"), s.at("y"));
+            return g.addUnaryOp(Op::Neg, prod);
+        });
+
+    // (-x) / y → -(x / y)  (exact: negation distributes over division)
+    rules.emplace_back("fp_neg_div_left",
+        P::OpPat(Op::Div, {P::OpPat(Op::Neg, {P::Wild("x")}), P::Wild("y")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId quot = g.addBinOp(Op::Div, s.at("x"), s.at("y"));
+            return g.addUnaryOp(Op::Neg, quot);
+        });
+
+    // x / (-y) → -(x / y)
+    rules.emplace_back("fp_neg_div_right",
+        P::OpPat(Op::Div, {P::Wild("x"), P::OpPat(Op::Neg, {P::Wild("y")})}),
+        [](EGraph& g, const Subst& s) {
+            ClassId quot = g.addBinOp(Op::Div, s.at("x"), s.at("y"));
+            return g.addUnaryOp(Op::Neg, quot);
+        });
+
+    // ── FP multiply by power-of-2 to add chain ─────────────────────────
+    // x * 4.0 → (x + x) + (x + x)  (exact: additions of same value are exact)
+    rules.emplace_back("fp_mul_four_to_add",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstFPat(4.0)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId dbl = g.addBinOp(Op::Add, s.at("x"), s.at("x"));
+            return g.addBinOp(Op::Add, dbl, dbl);
+        });
+
+    // x * 3.0 → (x + x) + x  (exact: addition of same value is exact)
+    rules.emplace_back("fp_mul_three_to_add",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstFPat(3.0)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId dbl = g.addBinOp(Op::Add, s.at("x"), s.at("x"));
+            return g.addBinOp(Op::Add, dbl, s.at("x"));
+        });
+
+    // ── FP add/sub of same → multiply by constant ───────────────────────
+    // x + x → x * 2.0  (reverse direction for cost model exploration)
+    rules.emplace_back("fp_add_self_to_mul2",
+        P::OpPat(Op::Add, {P::Wild("x"), P::Wild("x")}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Mul, s.at("x"), g.addConstF(2.0));
+        });
+
+    return rules;
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Strength Reduction Rules
+// ───────────────────────────────────────────────────────────────────────────
+// Additional algebraic simplifications that reduce expensive operations
+// (multiply, divide, modulo) to cheaper ones (shift, add, sub, bitwise).
+// These complement LLVM's own strength reduction by catching patterns at
+// the AST level before lowering, enabling cross-expression optimizations.
+
+std::vector<RewriteRule> getStrengthReductionRules() {
+    using P = Pattern;
+    std::vector<RewriteRule> rules;
+
+    // x * 3 → (x << 1) + x  (shift+add is cheaper than multiply on most uarchs)
+    rules.emplace_back("mul3_to_shl_add",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(3)}),
+        [](EGraph& g, const Subst& s) {
+            auto shifted = g.addBinOp(Op::Shl, s.at("x"), g.addConst(1));
+            return g.addBinOp(Op::Add, shifted, s.at("x"));
+        });
+
+    // x * 5 → (x << 2) + x
+    rules.emplace_back("mul5_to_shl_add",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(5)}),
+        [](EGraph& g, const Subst& s) {
+            auto shifted = g.addBinOp(Op::Shl, s.at("x"), g.addConst(2));
+            return g.addBinOp(Op::Add, shifted, s.at("x"));
+        });
+
+    // x * 7 → (x << 3) - x
+    rules.emplace_back("mul7_to_shl_sub",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(7)}),
+        [](EGraph& g, const Subst& s) {
+            auto shifted = g.addBinOp(Op::Shl, s.at("x"), g.addConst(3));
+            return g.addBinOp(Op::Sub, shifted, s.at("x"));
+        });
+
+    // x * 9 → (x << 3) + x
+    rules.emplace_back("mul9_to_shl_add",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(9)}),
+        [](EGraph& g, const Subst& s) {
+            auto shifted = g.addBinOp(Op::Shl, s.at("x"), g.addConst(3));
+            return g.addBinOp(Op::Add, shifted, s.at("x"));
+        });
+
+    // x * 15 → (x << 4) - x
+    rules.emplace_back("mul15_to_shl_sub",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(15)}),
+        [](EGraph& g, const Subst& s) {
+            auto shifted = g.addBinOp(Op::Shl, s.at("x"), g.addConst(4));
+            return g.addBinOp(Op::Sub, shifted, s.at("x"));
+        });
+
+    // x * 17 → (x << 4) + x
+    rules.emplace_back("mul17_to_shl_add",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(17)}),
+        [](EGraph& g, const Subst& s) {
+            auto shifted = g.addBinOp(Op::Shl, s.at("x"), g.addConst(4));
+            return g.addBinOp(Op::Add, shifted, s.at("x"));
+        });
+
+    // (a + b) * (a - b) → a*a - b*b  (difference of squares, fewer multiplies)
+    rules.emplace_back("diff_of_squares",
+        P::OpPat(Op::Mul, {
+            P::OpPat(Op::Add, {P::Wild("a"), P::Wild("b")}),
+            P::OpPat(Op::Sub, {P::Wild("a"), P::Wild("b")})}),
+        [](EGraph& g, const Subst& s) {
+            auto a2 = g.addBinOp(Op::Mul, s.at("a"), s.at("a"));
+            auto b2 = g.addBinOp(Op::Mul, s.at("b"), s.at("b"));
+            return g.addBinOp(Op::Sub, a2, b2);
+        });
+
+    // x % C → x & (C-1) when C is power of 2 and x is non-negative
+    // (already exists as mod_pow2_nonneg, but add mod with specific small primes)
+
+    // (x / C) * C → x - (x % C)  (useful for loop index computation)
+    rules.emplace_back("div_mul_to_sub_mod",
+        P::OpPat(Op::Mul, {P::OpPat(Op::Div, {P::Wild("x"), P::Wild("c")}), P::Wild("c")}),
+        [](EGraph& g, const Subst& s) {
+            auto mod = g.addBinOp(Op::Mod, s.at("x"), s.at("c"));
+            return g.addBinOp(Op::Sub, s.at("x"), mod);
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto cv = g.getConstValue(s.at("c"));
+            return cv && *cv > 0;
+        });
+
+    // (x << n) >> n → x & ((1 << (64-n)) - 1) when n is constant
+    // (mask off upper bits — useful for truncation patterns)
+    rules.emplace_back("shl_shr_to_mask",
+        P::OpPat(Op::Shr, {P::OpPat(Op::Shl, {P::Wild("x"), P::Wild("n")}), P::Wild("n")}),
+        [](EGraph& g, const Subst& s) {
+            auto nv = g.getConstValue(s.at("n"));
+            if (!nv || *nv <= 0 || *nv >= 64) return s.at("x"); // fallback
+            long long mask = (1LL << (64 - *nv)) - 1;
+            return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(mask));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto nv = g.getConstValue(s.at("n"));
+            return nv && *nv > 0 && *nv < 64;
+        });
+
     return rules;
 }
 
@@ -6942,6 +7345,10 @@ std::vector<RewriteRule> getAllRules() {
     auto fpRules = getFloatingPointRules();
     rules.insert(rules.end(), std::make_move_iterator(fpRules.begin()),
                  std::make_move_iterator(fpRules.end()));
+
+    auto srRules = getStrengthReductionRules();
+    rules.insert(rules.end(), std::make_move_iterator(srRules.begin()),
+                 std::make_move_iterator(srRules.end()));
 
     return rules;
 }

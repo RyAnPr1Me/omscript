@@ -533,10 +533,13 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* x = generateExpression(expr->arguments[0].get());
         // Use the llvm.sqrt intrinsic which maps directly to hardware sqrtsd/sqrtss
         // instructions on x86, producing results in a single cycle on modern CPUs.
-        // Convert to double, compute sqrt, then truncate back to integer.
+        bool inputIsDouble = x->getType()->isDoubleTy();
         llvm::Value* fval = ensureFloat(x);
         llvm::Function* sqrtIntrinsic = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::sqrt, {getFloatType()});
         llvm::Value* result = builder->CreateCall(sqrtIntrinsic, {fval}, "sqrt.result");
+        // Return double when input is double, truncate to integer only for integer input.
+        if (inputIsDouble)
+            return result;
         return builder->CreateFPToSI(result, getDefaultType(), "sqrt.int");
     }
 
@@ -1086,48 +1089,26 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         validateArgCount(expr, "log2", 1);
         llvm::Value* n = generateExpression(expr->arguments[0].get());
         n = toDefaultType(n);
-        // Integer log2 via loop: count how many times we can right-shift before reaching 0.
+        // Integer log2 via CTZ intrinsic: 63 - clz(n).
+        // Uses the llvm.ctlz intrinsic which maps directly to the BSR/LZCNT
+        // hardware instruction on x86, producing the result in a single cycle.
         // Returns -1 for n <= 0.
-        llvm::Function* function = builder->GetInsertBlock()->getParent();
-        llvm::BasicBlock* entryBB = builder->GetInsertBlock();
-        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "log2.loop", function);
-        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "log2.body", function);
-        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "log2.done", function);
-
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
-        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
         llvm::Value* negOne = llvm::ConstantInt::get(getDefaultType(), -1, true);
+        llvm::Value* bits = llvm::ConstantInt::get(getDefaultType(), 63);
 
         // n <= 0 → return -1
-        llvm::Value* isNonPositive = builder->CreateICmpSLE(n, zero, "log2.nonpos");
-        llvm::BasicBlock* startBB = llvm::BasicBlock::Create(*context, "log2.start", function);
-        builder->CreateCondBr(isNonPositive, doneBB, startBB);
+        llvm::Value* isPositive = builder->CreateICmpSGT(n, zero, "log2.pos");
 
-        builder->SetInsertPoint(startBB);
-        builder->CreateBr(loopBB);
+        // clz(n) returns number of leading zeros; log2(n) = 63 - clz(n)
+        llvm::Function* ctlzIntrinsic = OMSC_GET_INTRINSIC(
+            module.get(), llvm::Intrinsic::ctlz, {getDefaultType()});
+        // is_zero_poison=true since we guard with isPositive
+        llvm::Value* clz = builder->CreateCall(
+            ctlzIntrinsic, {n, builder->getTrue()}, "log2.clz");
+        llvm::Value* log2val = builder->CreateSub(bits, clz, "log2.val");
 
-        builder->SetInsertPoint(loopBB);
-        llvm::PHINode* val = builder->CreatePHI(getDefaultType(), 2, "log2.val");
-        val->addIncoming(n, startBB);
-        llvm::PHINode* count = builder->CreatePHI(getDefaultType(), 2, "log2.count");
-        count->addIncoming(negOne, startBB);
-
-        // while val > 0: val >>= 1, count++
-        llvm::Value* stillPositive = builder->CreateICmpSGT(val, zero, "log2.pos");
-        builder->CreateCondBr(stillPositive, bodyBB, doneBB);
-
-        builder->SetInsertPoint(bodyBB);
-        llvm::Value* newVal = builder->CreateLShr(val, one, "log2.shr");
-        llvm::Value* newCount = builder->CreateAdd(count, one, "log2.inc");
-        val->addIncoming(newVal, bodyBB);
-        count->addIncoming(newCount, bodyBB);
-        builder->CreateBr(loopBB);
-
-        builder->SetInsertPoint(doneBB);
-        llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "log2.result");
-        result->addIncoming(negOne, entryBB);
-        result->addIncoming(count, loopBB);
-        return result;
+        return builder->CreateSelect(isPositive, log2val, negOne, "log2.result");
     }
 
     if (bid == BuiltinId::GCD) {
@@ -1145,32 +1126,84 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* bNegVal = builder->CreateNeg(b, "gcd.bnegval");
         b = builder->CreateSelect(bNeg, bNegVal, b, "gcd.babs");
 
-        // Euclidean algorithm: while (b != 0) { temp = b; b = a % b; a = temp; }
+        // Binary GCD (Stein's algorithm): avoids expensive division by using
+        // only ctz, shifts, comparisons, and subtraction.  On modern x86 CPUs
+        // division takes 20-40 cycles while ctz/shift/sub are all 1-cycle ops,
+        // making binary GCD ~5x faster for typical integer inputs.
+        //
+        // Algorithm:
+        //   if a == 0: return b;  if b == 0: return a
+        //   k = ctz(a | b)        // common factor of 2
+        //   a >>= ctz(a)          // make a odd
+        //   loop:
+        //     b >>= ctz(b)        // make b odd
+        //     if a > b: swap(a,b)
+        //     b -= a
+        //   while b != 0
+        //   return a << k
         llvm::Function* function = builder->GetInsertBlock()->getParent();
-        llvm::BasicBlock* preheaderBB = builder->GetInsertBlock();
+        llvm::BasicBlock* entryBB = builder->GetInsertBlock();
+        llvm::Function* cttzFn = OMSC_GET_INTRINSIC(
+            module.get(), llvm::Intrinsic::cttz, {getDefaultType()});
+
+        // Compute k = ctz(a | b) in the entry block (always dominates doneBB).
+        // For the edge case where a==0 or b==0, k is unused so its value
+        // doesn't matter, but it must dominate all uses.
+        llvm::Value* aOrB = builder->CreateOr(a, b, "gcd.aorb");
+        llvm::Value* k = builder->CreateCall(cttzFn, {aOrB, builder->getFalse()}, "gcd.k");
+
+        llvm::BasicBlock* mainBB = llvm::BasicBlock::Create(*context, "gcd.main", function);
         llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "gcd.loop", function);
-        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "gcd.body", function);
+        llvm::BasicBlock* contBB = llvm::BasicBlock::Create(*context, "gcd.cont", function);
         llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "gcd.done", function);
 
+        // Edge case: if a == 0 return b, if b == 0 return a.
+        // Combined: if (a == 0 || b == 0) return a | b.
+        llvm::Value* edgeCase = builder->CreateOr(
+            builder->CreateICmpEQ(a, zero, "gcd.a0"),
+            builder->CreateICmpEQ(b, zero, "gcd.b0"), "gcd.edge");
+        builder->CreateCondBr(edgeCase, doneBB, mainBB);
+
+        // Main: make a odd
+        builder->SetInsertPoint(mainBB);
+        llvm::Value* ctzA = builder->CreateCall(cttzFn, {a, builder->getTrue()}, "gcd.ctza");
+        llvm::Value* aOdd = builder->CreateLShr(a, ctzA, "gcd.aodd");
         builder->CreateBr(loopBB);
 
+        // Loop header
         builder->SetInsertPoint(loopBB);
-        llvm::PHINode* phiA = builder->CreatePHI(getDefaultType(), 2, "gcd.a");
-        phiA->addIncoming(a, preheaderBB);
-        llvm::PHINode* phiB = builder->CreatePHI(getDefaultType(), 2, "gcd.b");
-        phiB->addIncoming(b, preheaderBB);
+        llvm::PHINode* phiA = builder->CreatePHI(getDefaultType(), 2, "gcd.pa");
+        phiA->addIncoming(aOdd, mainBB);
+        llvm::PHINode* phiB = builder->CreatePHI(getDefaultType(), 2, "gcd.pb");
+        phiB->addIncoming(b, mainBB);
 
-        llvm::Value* bIsZero = builder->CreateICmpEQ(phiB, zero, "gcd.bzero");
-        builder->CreateCondBr(bIsZero, doneBB, bodyBB);
+        // Make b odd: b >>= ctz(b)
+        llvm::Value* ctzB = builder->CreateCall(cttzFn, {phiB, builder->getTrue()}, "gcd.ctzb");
+        llvm::Value* bOdd = builder->CreateLShr(phiB, ctzB, "gcd.bodd");
 
-        builder->SetInsertPoint(bodyBB);
-        llvm::Value* remainder = builder->CreateURem(phiA, phiB, "gcd.rem");
-        phiA->addIncoming(phiB, bodyBB);
-        phiB->addIncoming(remainder, bodyBB);
-        builder->CreateBr(loopBB);
+        // Branchless min/max + subtract: equivalent to if(a>b) swap(a,b); b-=a
+        llvm::Value* aGtB = builder->CreateICmpUGT(phiA, bOdd, "gcd.gt");
+        llvm::Value* lo = builder->CreateSelect(aGtB, bOdd, phiA, "gcd.lo");
+        llvm::Value* hi = builder->CreateSelect(aGtB, phiA, bOdd, "gcd.hi");
+        llvm::Value* diff = builder->CreateSub(hi, lo, "gcd.diff");
 
+        // Continue if diff != 0
+        llvm::Value* done = builder->CreateICmpEQ(diff, zero, "gcd.dz");
+        phiA->addIncoming(lo, loopBB);
+        phiB->addIncoming(diff, loopBB);
+        builder->CreateCondBr(done, contBB, loopBB);
+
+        // Multiply result by 2^k (common factor)
+        builder->SetInsertPoint(contBB);
+        llvm::Value* shifted = builder->CreateShl(lo, k, "gcd.shifted");
+        builder->CreateBr(doneBB);
+
+        // Final merge
         builder->SetInsertPoint(doneBB);
-        return phiA;
+        llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "gcd.result");
+        result->addIncoming(aOrB, entryBB);     // edge case: a|b = max(a,b) when one is 0
+        result->addIncoming(shifted, contBB);   // normal case
+        return result;
     }
 
     if (bid == BuiltinId::TO_STRING) {
@@ -1235,30 +1268,39 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     if (bid == BuiltinId::FLOOR) {
         validateArgCount(expr, "floor", 1);
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        bool inputIsDouble = arg->getType()->isDoubleTy();
         llvm::Value* fval = ensureFloat(arg);
         // Use llvm.floor intrinsic for native hardware rounding
         llvm::Function* floorIntrinsic = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::floor, {getFloatType()});
         llvm::Value* result = builder->CreateCall(floorIntrinsic, {fval}, "floor.result");
+        if (inputIsDouble)
+            return result;
         return builder->CreateFPToSI(result, getDefaultType(), "floor.int");
     }
 
     if (bid == BuiltinId::CEIL) {
         validateArgCount(expr, "ceil", 1);
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        bool inputIsDouble = arg->getType()->isDoubleTy();
         llvm::Value* fval = ensureFloat(arg);
         // Use llvm.ceil intrinsic for native hardware rounding
         llvm::Function* ceilIntrinsic = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::ceil, {getFloatType()});
         llvm::Value* result = builder->CreateCall(ceilIntrinsic, {fval}, "ceil.result");
+        if (inputIsDouble)
+            return result;
         return builder->CreateFPToSI(result, getDefaultType(), "ceil.int");
     }
 
     if (bid == BuiltinId::ROUND) {
         validateArgCount(expr, "round", 1);
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        bool inputIsDouble = arg->getType()->isDoubleTy();
         llvm::Value* fval = ensureFloat(arg);
         // Use llvm.round intrinsic for native hardware rounding
         llvm::Function* roundIntrinsic = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::round, {getFloatType()});
         llvm::Value* result = builder->CreateCall(roundIntrinsic, {fval}, "round.result");
+        if (inputIsDouble)
+            return result;
         return builder->CreateFPToSI(result, getDefaultType(), "round.int");
     }
 

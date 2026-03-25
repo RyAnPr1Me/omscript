@@ -35,6 +35,27 @@ enum class OptimizationLevel {
     O3  // Aggressive optimization
 };
 
+/// Ownership lattice states for compile-time memory safety.
+///
+/// Every variable tracked by the ownership system transitions through
+/// these states:
+///
+///  Owned → Borrowed → (back to Owned when borrow ends)
+///  Owned → Moved → (variable is dead, use-after-move error)
+///  Owned/Borrowed/Moved → Invalidated → (explicitly killed)
+///
+/// Rules:
+///  - Owned: full control — may read, write, move, borrow, or invalidate.
+///  - Borrowed: read-only alias — may NOT mutate, move, or invalidate.
+///  - Moved: ownership transferred — any use is a compile-time error.
+///  - Invalidated: explicitly killed — any use is a compile-time error.
+enum class OwnershipState {
+    Owned,       ///< Variable owns its value — full read/write access
+    Borrowed,    ///< Variable is borrowed — read-only, cannot resize/move
+    Moved,       ///< Ownership transferred out — use is a compile error
+    Invalidated  ///< Explicitly killed — use is a compile error
+};
+
 /// Execution tier assigned to each function during compilation.
 ///
 /// All user-defined functions compile to native LLVM IR and are executed via
@@ -217,6 +238,17 @@ class CodeGenerator {
     };
     std::vector<LoopContext> loopStack;
 
+    /// Variables whose index is provably within bounds of a specific array
+    /// at compile time.  Populated during for-loop codegen for patterns like
+    ///   for (i in 0...len(arr)) { arr[i] ... }
+    /// or similar provably-safe patterns.  Cleared when exiting the loop.
+    /// Maps: iterator-variable-name → set of array-variable-names that are safe.
+    std::unordered_set<std::string> safeIndexVars_;
+
+    /// Maps iterator variable name → its LLVM upper bound value.
+    /// Used to emit llvm.assume hints for the optimizer.
+    std::unordered_map<std::string, llvm::Value*> loopIterEndBound_;
+
     // Stack of innermost catch-entry basic blocks, pushed/popped by
     // generateTryCatch(). generateThrow() branches directly to the top of this
     // stack when a throw occurs inside a try block, ensuring that control flow
@@ -248,6 +280,10 @@ class CodeGenerator {
     // Variables known to hold struct values, maps var name → struct type name.
     std::unordered_map<std::string, std::string> structVars_;
 
+    // Operator overload registry: maps "StructName::op" → generated LLVM function name.
+    // e.g. "Vec2::+" → "__op_Vec2_add"
+    std::unordered_map<std::string, std::string> operatorOverloads_;
+
     OptimizationLevel optimizationLevel;
 
     // Per-function execution tier decided during code generation.
@@ -276,6 +312,19 @@ class CodeGenerator {
     // when the existing buffer has enough space (amortized O(1) appends).
     std::unordered_map<std::string, llvm::AllocaInst*> stringCapCache_;
 
+    /// Ownership lattice: tracks the ownership state of each variable.
+    ///
+    /// Only populated for variables that participate in ownership annotations
+    /// (move, invalidate, borrow).  Variables not in this map are implicitly
+    /// Owned with full read/write access.
+    ///
+    /// Transitions:
+    ///   Owned → Borrowed (via borrow expression)
+    ///   Owned → Moved (via move expression)
+    ///   Any → Invalidated (via invalidate statement)
+    ///   Borrowed → Owned (when borrow scope ends)
+    std::unordered_map<std::string, OwnershipState> varOwnership_;
+
     /// Variables that have been explicitly moved or invalidated.
     /// Used to detect use-after-move and use-after-invalidate at compile time.
     /// Only populated when the user writes `move` or `invalidate` — normal
@@ -283,6 +332,11 @@ class CodeGenerator {
     std::unordered_set<std::string> deadVars_;
     /// Tracks the reason a variable became dead: "moved" or "invalidated".
     std::unordered_map<std::string, std::string> deadVarReason_;
+
+    /// Variables currently borrowed — these cannot be mutated or moved.
+    /// Populated when a borrow expression creates an alias; cleared when
+    /// the borrowing variable goes out of scope.
+    std::unordered_set<std::string> borrowedVars_;
 
     /// Functions explicitly annotated with @cold by the user.
     /// These are preserved when the post-pipeline cold-stripping pass runs.
@@ -303,6 +357,16 @@ class CodeGenerator {
     /// variable is not found in deadVars_ at return time.
     std::unordered_set<std::string> prefetchedVars_;
 
+    /// Values known to be non-negative at codegen time.  Populated when
+    /// ascending for-loop counters are loaded and when binary operations
+    /// on non-negative operands produce non-negative results.  Used to
+    /// emit urem/udiv instead of srem/sdiv for modulo/division by positive
+    /// constants, which the vectorizer then preserves as vector urem/udiv.
+    std::unordered_set<llvm::Value*> nonNegValues_;
+
+    /// File-level @noalias: all pointer parameters are marked noalias.
+    bool fileNoAlias_ = false;
+
     /// Variables declared with `prefetch immut` — their loads get invariant
     /// metadata so LLVM can hoist/CSE them aggressively.
     std::unordered_set<std::string> prefetchedImmutVars_;
@@ -319,6 +383,8 @@ class CodeGenerator {
     bool currentFuncHintNoUnroll_ = false;
     bool currentFuncHintVectorize_ = false;
     bool currentFuncHintNoVectorize_ = false;
+    bool currentFuncHintHot_ = false;  ///< Current function has @hot annotation
+    unsigned loopNestDepth_ = 0; ///< Current for-loop nesting depth (0 = not in a loop)
 
     /// Classify a function into its execution tier based on type annotations,
     /// OPTMAX status, and whether it is a special function (main/stdlib).
@@ -373,6 +439,16 @@ class CodeGenerator {
     /// Mark a variable as moved: emit lifetime.end + store undef on its alloca,
     /// and record it in deadVars_ for use-after-move detection.
     void markVariableMoved(const std::string& varName);
+
+    /// Mark a variable as borrowed: records it in the ownership lattice so
+    /// that mutations and moves are rejected at compile time.
+    void markVariableBorrowed(const std::string& varName);
+
+    /// Check if a variable is currently borrowed (read-only).
+    bool isVariableBorrowed(const std::string& varName) const;
+
+    /// Get the ownership state of a variable.  Returns Owned if not tracked.
+    OwnershipState getOwnershipState(const std::string& varName) const;
 
     // Helper methods
     llvm::Type* getDefaultType();
