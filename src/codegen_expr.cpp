@@ -959,12 +959,12 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             nonNegValues_.insert(result);
         return result;
     } else if (expr->op == "-") {
-        // When left is a non-negative constant and right is non-negative,
-        // the subtraction cannot underflow below -(2^63) so nsw is safe.
-        // More specifically, when left ≥ 0 and right ≥ 0, the result is
-        // in [-2^63+1, 2^63-1] which doesn't overflow.  The nsw flag
-        // enables SCEV to compute tighter trip counts for countdown loops
-        // and proves induction variable monotonicity.
+        // When both operands are non-negative, the subtraction of two
+        // non-negative values cannot produce signed overflow: the result
+        // is in the range [-(2^63-1), 2^63-1], which is representable
+        // in i64 without wrapping.  The nsw flag enables SCEV to compute
+        // tighter trip counts for countdown loops and proves induction
+        // variable monotonicity.
         if (nonNegValues_.count(left) && nonNegValues_.count(right))
             return builder->CreateNSWSub(left, right, "subtmp");
         return builder->CreateSub(left, right, "subtmp");
