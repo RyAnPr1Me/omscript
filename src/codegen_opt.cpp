@@ -79,6 +79,19 @@
 #include <llvm/Transforms/Scalar/AlignmentFromAssumptions.h>
 #include <llvm/Transforms/Scalar/PartiallyInlineLibCalls.h>
 #include <llvm/Transforms/Scalar/LoopPassManager.h>
+#include <llvm/Transforms/Scalar/LoopPredication.h>
+#include <llvm/Transforms/Scalar/LoopBoundSplit.h>
+#include <llvm/Transforms/Scalar/LoopSimplifyCFG.h>
+#include <llvm/Transforms/Scalar/NewGVN.h>
+#include <llvm/Transforms/Scalar/Scalarizer.h>
+#include <llvm/Transforms/Scalar/LowerConstantIntrinsics.h>
+#include <llvm/Transforms/IPO/ArgumentPromotion.h>
+#include <llvm/Transforms/IPO/ConstantMerge.h>
+#include <llvm/Transforms/IPO/SCCP.h>
+#include <llvm/Transforms/IPO/StripDeadPrototypes.h>
+#include <llvm/Transforms/Vectorize/LoadStoreVectorizer.h>
+#include <llvm/Transforms/Vectorize/SLPVectorizer.h>
+#include <llvm/Analysis/CGSCCPassManager.h>
 #include <llvm/Transforms/Utils.h>
 #include <llvm/Transforms/Utils/Cloning.h>
 #include <llvm/Transforms/Vectorize/VectorCombine.h>
@@ -621,6 +634,41 @@ void CodeGenerator::runOptimizationPasses() {
         });
     }
 
+    // At O3, add LoopPredication to convert loop bounds checks into loop
+    // guard predicates, enabling vectorization of loops that would otherwise
+    // be inhibited by early-exit bounds checks.  LoopBoundSplit splits loops
+    // at points where the iteration space changes behavior (e.g., when an
+    // index crosses a boundary), creating simpler loops that optimize better.
+    if (optimizationLevel >= OptimizationLevel::O3) {
+        PB.registerLoopOptimizerEndEPCallback([](llvm::LoopPassManager& LPM, llvm::OptimizationLevel) {
+            LPM.addPass(llvm::LoopPredicationPass());
+            LPM.addPass(llvm::LoopBoundSplitPass());
+            LPM.addPass(llvm::LoopSimplifyCFGPass());
+        });
+    }
+
+    // At O2+, add LoadStoreVectorizerPass to combine adjacent scalar
+    // loads/stores into wider vector operations.  This is critical for
+    // struct-of-arrays and array-of-structs access patterns where the
+    // standard loop vectorizer doesn't apply but adjacent memory accesses
+    // can still be combined into 128/256-bit operations.
+    if (optimizationLevel >= OptimizationLevel::O2) {
+        PB.registerScalarOptimizerLateEPCallback([](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) {
+            FPM.addPass(llvm::LoadStoreVectorizerPass());
+        });
+    }
+
+    // At O3, add Scalarizer to break vector operations back to scalars
+    // when the target doesn't benefit from them (e.g., when vector ops
+    // would require expensive shuffles).  This runs AFTER vectorization
+    // to clean up vector operations that the cost model deemed unprofitable
+    // but the vectorizer emitted anyway.
+    if (optimizationLevel >= OptimizationLevel::O3) {
+        PB.registerScalarOptimizerLateEPCallback([](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) {
+            FPM.addPass(llvm::ScalarizerPass());
+        });
+    }
+
     // At O2+, register VectorCombinePass and LoopSinkPass as one of the last
     // function-level optimizations.
     //   VectorCombinePass: optimizes scalar/vector interactions using target
@@ -645,10 +693,23 @@ void CodeGenerator::runOptimizationPasses() {
     // have parameters that are never used in the function body.  Removing
     // these eliminates register pressure from passing dead values and
     // enables further inlining (smaller call signatures).
+    // Also run ArgumentPromotionPass to promote pointer/aggregate parameters
+    // to scalar values when possible, eliminating memory indirection.
+    // ConstantMergePass deduplicates identical constants across functions,
+    // reducing I-cache pressure and enabling CSE across module boundaries.
+    // StripDeadPrototypesPass removes unused function declarations.
+    // IPSCCPPass performs interprocedural sparse conditional constant
+    // propagation — discovers constant values across function boundaries,
+    // enabling dead code elimination of entire unreachable call paths.
     if (optimizationLevel >= OptimizationLevel::O3) {
         PB.registerOptimizerLastEPCallback(
             [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel) {
             MPM.addPass(llvm::DeadArgumentEliminationPass());
+            MPM.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(
+                llvm::ArgumentPromotionPass()));
+            MPM.addPass(llvm::IPSCCPPass());
+            MPM.addPass(llvm::ConstantMergePass());
+            MPM.addPass(llvm::StripDeadPrototypesPass());
         });
     }
 
