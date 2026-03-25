@@ -72,8 +72,13 @@
 #include <llvm/Transforms/Scalar/Reassociate.h>
 #include <llvm/Transforms/Scalar/EarlyCSE.h>
 #include <llvm/Transforms/Scalar/SCCP.h>
+#include <llvm/Transforms/Scalar/SROA.h>
+#include <llvm/Transforms/Scalar/LoopPassManager.h>
 #include <llvm/Transforms/Utils.h>
 #include <llvm/Transforms/Utils/Cloning.h>
+#include <llvm/Transforms/Utils/LCSSA.h>
+#include <llvm/Transforms/Utils/LoopSimplify.h>
+#include <llvm/Transforms/Utils/Mem2Reg.h>
 #include <llvm/Transforms/Vectorize/VectorCombine.h>
 #include <optional>
 #include <stdexcept>
@@ -447,6 +452,41 @@ void CodeGenerator::runOptimizationPasses() {
     if (optimizationLevel >= OptimizationLevel::O2 && enableLoopOptimize_) {
         PB.registerVectorizerStartEPCallback(
             [](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) { FPM.addPass(llvm::LoopFusePass()); });
+    }
+
+    // At O2+, re-canonicalize loops and promote reductions to SSA form
+    // immediately before the vectorizer.  This is critical because the
+    // preceding VectorizerStartEP passes (LoopDistribute, LoopLoadElim,
+    // LoopFuse) can transform loop structure in ways that break canonical
+    // form.  Re-running LoopSimplify + LCSSA + LoopRotate guarantees:
+    //   - Single pre-header edge (LoopSimplify)
+    //   - Dedicated exit blocks (LoopSimplify)
+    //   - Exactly one back-edge (LoopSimplify)
+    //   - LCSSA PHI nodes at loop exits (LCSSA)
+    //   - Bottom-tested (rotated) form (LoopRotate)
+    //
+    // SROA + PromotePass (mem2reg) promote stack-allocated reduction
+    // variables to SSA PHI nodes before the vectorizer sees them.
+    // Without this, compound assignments like `sum += a[i]` remain as
+    // load-add-store through an alloca, which the vectorizer cannot
+    // recognize as a reduction.  After promotion, the pattern becomes:
+    //   %sum.phi = phi [init, preheader], [%sum.next, body]
+    //   %sum.next = add %sum.phi, %a_val
+    // which LLVM's vectorizer recognizes as a standard reduction.
+    //
+    // InstCombine cleans up redundant patterns exposed by mem2reg
+    // (dead stores, trivial PHIs) to present the cleanest possible IR
+    // to the vectorizer's pattern matching.
+    if (optimizationLevel >= OptimizationLevel::O2) {
+        PB.registerVectorizerStartEPCallback(
+            [](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) {
+            FPM.addPass(llvm::SROAPass(llvm::SROAOptions::ModifyCFG));
+            FPM.addPass(llvm::PromotePass());
+            FPM.addPass(llvm::InstCombinePass());
+            FPM.addPass(llvm::LoopSimplifyPass());
+            FPM.addPass(llvm::LCSSAPass());
+            FPM.addPass(llvm::createFunctionToLoopPassAdaptor(llvm::LoopRotatePass()));
+        });
     }
 
     // At O3 with -floop-optimize, register LoopInterchangePass at the end of

@@ -2422,15 +2422,18 @@ llvm::Value* CodeGenerator::generateFieldAccess(FieldAccessExpr* expr) {
             load->setMetadata(llvm::LLVMContext::MD_invariant_load,
                               llvm::MDNode::get(*context, {}));
         }
-        // noalias → !noalias scope metadata (similar to borrow)
+        // noalias → !alias.scope + !noalias metadata pair.
+        // The scope includes a reference to the domain so LLVM's
+        // ScopedNoAliasAA can reason about aliasing across struct fields.
         if (attrs->noalias) {
             llvm::MDNode* domain = llvm::MDNode::getDistinct(*context,
                 {llvm::MDString::get(*context, "struct.noalias.domain")});
             domain->replaceOperandWith(0, domain);
             llvm::MDNode* scope = llvm::MDNode::getDistinct(*context,
-                {llvm::MDString::get(*context, "struct.noalias.scope")});
+                {nullptr, domain, llvm::MDString::get(*context, "struct.noalias.scope")});
             scope->replaceOperandWith(0, scope);
             llvm::MDNode* scopeList = llvm::MDNode::get(*context, {scope});
+            load->setMetadata(llvm::LLVMContext::MD_alias_scope, scopeList);
             load->setMetadata(llvm::LLVMContext::MD_noalias, scopeList);
         }
         // range(min,max) → !range metadata for integer range propagation

@@ -1473,20 +1473,43 @@ llvm::Value* CodeGenerator::generateBorrowExpr(BorrowExpr* expr) {
         markVariableBorrowed(srcIdent->name);
     }
 
-    // If the source is an identifier, attach !noalias metadata to the load
-    // as a hint that this borrow does not alias other pointers.
-    // The noalias.scope metadata requires a valid scope domain structure:
-    //   !scope = !{!scope, !domain, !"name"}
-    //   !domain = !{!domain, !"domain_name"}
+    // Attach !alias.scope and !noalias metadata to the load instruction.
+    // The alias.scope declares which alias domain this access belongs to,
+    // and noalias declares which domains it is guaranteed not to alias with.
+    // Together, they tell LLVM that a borrowed pointer does not alias other
+    // pointers in the function — this is safe because OmScript's ownership
+    // model guarantees that borrows are unique read-only references and
+    // no mutable alias can exist concurrently.
+    //
+    // LLVM's scoped noalias metadata structure:
+    //   !domain = distinct !{!domain, !"omscript.borrow.domain"}
+    //   !scope  = distinct !{!scope, !domain, !"omscript.borrow.<name>"}
+    //   !alias.scope = !{!scope}    — "this access is in this scope"
+    //   !noalias     = !{!scope}    — "this access does NOT alias this scope"
+    //
+    // Setting BOTH alias.scope and noalias on the borrow load enables LLVM's
+    // ScopedNoAliasAA to prove that loads through the borrow don't alias
+    // stores through other pointers, enabling vectorization, LICM, and
+    // load/store reordering across borrow boundaries.
     if (auto* loadInst = llvm::dyn_cast<llvm::LoadInst>(val)) {
+        std::string scopeName = "omscript.borrow";
+        if (auto* srcIdent = dynamic_cast<IdentifierExpr*>(expr->source.get())) {
+            scopeName += "." + srcIdent->name;
+        }
+
         llvm::MDNode* domain = llvm::MDNode::getDistinct(
             *context, {llvm::MDString::get(*context, "omscript.borrow.domain")});
-        // Patch self-ref: domain = !{domain, !"..."}
         domain->replaceOperandWith(0, domain);
+
         llvm::MDNode* scope = llvm::MDNode::getDistinct(
-            *context, {nullptr, domain, llvm::MDString::get(*context, "omscript.borrow.scope")});
+            *context, {nullptr, domain, llvm::MDString::get(*context, scopeName)});
         scope->replaceOperandWith(0, scope);
+
         llvm::MDNode* scopeList = llvm::MDNode::get(*context, {scope});
+        // alias.scope: declares this access belongs to the borrow scope
+        loadInst->setMetadata(llvm::LLVMContext::MD_alias_scope, scopeList);
+        // noalias: declares this access does not alias accesses in this scope
+        // (other borrows get their own distinct scopes)
         loadInst->setMetadata(llvm::LLVMContext::MD_noalias, scopeList);
     }
 
