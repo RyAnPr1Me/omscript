@@ -1778,12 +1778,16 @@ static unsigned generateFMA(llvm::Function& func, const MicroarchProfile& profil
 static unsigned insertPrefetches(llvm::Function& func, const MicroarchProfile& profile) {
     unsigned count = 0;
 
+    // Estimated iterations executed per cycle.  Most loops are limited by
+    // either data dependencies or memory latency rather than raw µop throughput,
+    // so 2 iterations/cycle is a conservative average across workloads.
+    static constexpr unsigned kEstimatedIterPerCycle = 2;
+
     // Compute optimal prefetch distance: how many cache lines ahead to prefetch.
     // Goal: prefetch far enough that data arrives by the time it's needed.
     // distance = ceil(L2_latency / estimated_iterations_per_cycle)
-    // For most loops we estimate ~2 iterations per cycle (IPC-limited).
     const unsigned prefetchDistLines = std::max(1u,
-        (profile.l2Latency + 1) / 2);
+        (profile.l2Latency + kEstimatedIterPerCycle - 1) / kEstimatedIterPerCycle);
     const unsigned prefetchDistBytes = prefetchDistLines * profile.cacheLineSize;
 
     // Max prefetches per loop: don't exceed half the load ports (avoid
@@ -2381,7 +2385,7 @@ struct FusionPair {
 static std::vector<FusionPair> detectFusionPairs(
         const std::vector<llvm::Instruction*>& moveable,
         const std::unordered_map<llvm::Instruction*, unsigned>& idx,
-        const MicroarchProfile& profile) {
+        const MicroarchProfile& /*profile*/) {
     std::vector<FusionPair> pairs;
 
     for (unsigned i = 0; i < moveable.size(); ++i) {
@@ -2895,8 +2899,7 @@ static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
     // Count how many not-yet-scheduled users each producer has.
     std::vector<unsigned> remainingUsers(n, 0);
     for (unsigned i = 0; i < n; ++i) {
-        for (unsigned s : succ[i])
-            ++remainingUsers[i]; // one user per successor edge
+        remainingUsers[i] = static_cast<unsigned>(succ[i].size());
     }
 
     // Pre-count values live-in from outside the BB (function args, cross-BB defs).

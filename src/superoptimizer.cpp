@@ -1079,50 +1079,33 @@ static std::optional<IdiomMatch> detectCountLeadingZeros(llvm::Instruction* inst
 // Main idiom detection
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Idiom detector dispatch table — each entry is a function that tries to
+// detect a specific idiom at the given instruction.  Using a table instead
+// of a chain of if-else blocks makes it trivial to add new detectors:
+// just append to the array.
+using IdiomDetectorFn = std::optional<IdiomMatch>(*)(llvm::Instruction*);
+static constexpr IdiomDetectorFn kIdiomDetectors[] = {
+    detectRotate,
+    detectAbsoluteValue,
+    detectMinMax,
+    detectPowerOf2Test,
+    detectBitFieldExtract,
+    detectConditionalNeg,
+    detectIsolateLowestBit,
+    detectByteSwap,
+    detectPopCount,
+    detectCountLeadingZeros,
+};
+
 std::vector<IdiomMatch> detectIdioms(llvm::BasicBlock& bb) {
     std::vector<IdiomMatch> results;
 
     for (auto& inst : bb) {
-        // Try each idiom detector
-        if (auto m = detectRotate(&inst)) {
-            results.push_back(std::move(*m));
-            continue;
-        }
-        if (auto m = detectAbsoluteValue(&inst)) {
-            results.push_back(std::move(*m));
-            continue;
-        }
-        if (auto m = detectMinMax(&inst)) {
-            results.push_back(std::move(*m));
-            continue;
-        }
-        if (auto m = detectPowerOf2Test(&inst)) {
-            results.push_back(std::move(*m));
-            continue;
-        }
-        if (auto m = detectBitFieldExtract(&inst)) {
-            results.push_back(std::move(*m));
-            continue;
-        }
-        if (auto m = detectConditionalNeg(&inst)) {
-            results.push_back(std::move(*m));
-            continue;
-        }
-        if (auto m = detectIsolateLowestBit(&inst)) {
-            results.push_back(std::move(*m));
-            continue;
-        }
-        if (auto m = detectByteSwap(&inst)) {
-            results.push_back(std::move(*m));
-            continue;
-        }
-        if (auto m = detectPopCount(&inst)) {
-            results.push_back(std::move(*m));
-            continue;
-        }
-        if (auto m = detectCountLeadingZeros(&inst)) {
-            results.push_back(std::move(*m));
-            continue;
+        for (auto detector : kIdiomDetectors) {
+            if (auto m = detector(&inst)) {
+                results.push_back(std::move(*m));
+                break; // one idiom per instruction
+            }
         }
     }
 
