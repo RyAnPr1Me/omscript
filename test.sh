@@ -212,7 +212,7 @@ fn bench_push(@prefetch n:int) -> int {
 }
 
 // ── 3. array_hof ─────────────────────────────────────────────
-@hot @flatten @pure @unroll
+@hot @flatten @pure @unroll @vectorize
 fn bench_hof(@prefetch n:int) -> int {
     var arr:int[] = array_fill(n, 0);
     prefetch arr;
@@ -258,7 +258,7 @@ fn bench_strops(@prefetch n:int) -> int {
 }
 
 // ── 6. struct_access ─────────────────────────────────────────
-@hot @flatten @pure @unroll
+@hot @flatten @pure @unroll @vectorize
 fn bench_struct(@prefetch n:int) -> int {
     prefetch var p:struct = Point { x: 1, y: 2 };
     var sum:int = 0;
@@ -332,7 +332,7 @@ fn bench_recurse(n:int) -> int {
 }
 
 // ── 11. nested_loops ─────────────────────────────────────────
-@hot @flatten @pure @unroll
+@hot @flatten @pure @unroll @vectorize
 fn bench_nested(@prefetch n:int) -> int {
     var sum:int = 0;
     for (i:int in 0...n:int) {
@@ -371,7 +371,7 @@ fn add_one(x:int) -> int { return x + 1; }
 fn add_two(x:int) -> int { return add_one(add_one(x)); }
 @hot @inline
 fn add_four(x:int) -> int { return add_two(add_two(x)); }
-@hot @flatten @unroll
+@hot @flatten @vectorize
 fn bench_calls(@prefetch n:int) -> int {
     var sum:int = 0;
     for (i:int in 0...n:int) {

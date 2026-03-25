@@ -1182,10 +1182,6 @@ void CodeGenerator::runOptimizationPasses() {
         cleanupFPM.add(llvm::createLoopSimplifyPass());
         cleanupFPM.add(llvm::createLICMPass());
         cleanupFPM.add(llvm::createLoopStrengthReducePass());
-        // Second GVN pass to catch redundancies created by LSR address
-        // canonicalization and loop cleanup.
-        cleanupFPM.add(llvm::createGVNPass());
-        cleanupFPM.add(llvm::createInstructionCombiningPass());
         cleanupFPM.add(llvm::createDeadCodeEliminationPass());
         cleanupFPM.add(llvm::createCFGSimplificationPass(aggressiveCFGOpts()));
         cleanupFPM.doInitialization();
