@@ -3,6 +3,13 @@
 #ifndef LEXER_H
 #define LEXER_H
 
+/// @file lexer.h
+/// @brief Lexical analyser (tokeniser) for OmScript source code.
+///
+/// The Lexer scans a source string and produces a vector of Tokens that the
+/// Parser consumes.  It recognises keywords, identifiers, numeric and string
+/// literals, operators, and punctuation.
+
 #include <string>
 #include <vector>
 
