@@ -71,6 +71,14 @@
 #include <llvm/Transforms/Scalar/LoopSink.h>
 #include <llvm/Transforms/Scalar/LoopUnrollAndJamPass.h>
 #include <llvm/Transforms/Scalar/LoopVersioningLICM.h>
+#include <llvm/Transforms/Scalar/LoopPredication.h>
+#include <llvm/Transforms/Scalar/LoopSimplifyCFG.h>
+#include <llvm/Transforms/Scalar/CallSiteSplitting.h>
+#include <llvm/Transforms/Scalar/Sink.h>
+#include <llvm/Transforms/Scalar/ConstantHoisting.h>
+#include <llvm/Transforms/Scalar/SeparateConstOffsetFromGEP.h>
+#include <llvm/Transforms/Scalar/PartiallyInlineLibCalls.h>
+#include <llvm/Transforms/Scalar/SimplifyCFG.h>
 #include <llvm/Transforms/Scalar/MergeICmps.h>
 #include <llvm/Transforms/Scalar/MergedLoadStoreMotion.h>
 #include <llvm/Transforms/Scalar/MemCpyOptimizer.h>
@@ -406,6 +414,12 @@ void CodeGenerator::runOptimizationPasses() {
     if (optimizationLevel >= OptimizationLevel::O2) {
         PB.registerScalarOptimizerLateEPCallback([](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) {
             FPM.addPass(llvm::SCCPPass());
+            // CallSiteSplitting clones a function call when a predecessor
+            // branch constrains one of the call's arguments to a constant
+            // (e.g. `if (x == 0) foo(x)` → `foo(0)`).  The specialised
+            // clone is amenable to constant propagation and dead branch
+            // elimination, often collapsing an entire function body.
+            FPM.addPass(llvm::CallSiteSplittingPass());
         });
     }
 
@@ -554,6 +568,18 @@ void CodeGenerator::runOptimizationPasses() {
             // loads instead of unaligned 128-bit loads), reducing memory
             // traffic and improving throughput.
             FPM.addPass(llvm::AlignmentFromAssumptionsPass());
+            // CorrelatedValuePropagation uses value-range information from
+            // branch conditions to tighten comparisons, convert signed ops
+            // to unsigned, and prove non-negativity.  Running it before the
+            // vectorizer gives the cost model more precise value ranges,
+            // enabling vectorization of loops that would otherwise be rejected
+            // due to conservative overflow assumptions.
+            FPM.addPass(llvm::CorrelatedValuePropagationPass());
+            // SimplifyCFG merges trivially-redundant blocks and eliminates
+            // unreachable code before the vectorizer.  Cleaner CFG structure
+            // helps the vectorizer's control-flow analysis and reduces the
+            // number of scalar epilogue paths it must handle.
+            FPM.addPass(llvm::SimplifyCFGPass());
         });
     }
 
@@ -616,6 +642,12 @@ void CodeGenerator::runOptimizationPasses() {
             // This cleans up patterns exposed by IndVarSimplify, LoopRotate,
             // and LICM that would otherwise persist until later InstCombine.
             LPM.addPass(llvm::LoopInstSimplifyPass());
+            // LoopSimplifyCFG removes trivially dead blocks, merges blocks
+            // with single predecessors, and eliminates unreachable code inside
+            // loops.  Running it after IndVarSimplify and LoopDeletion cleans
+            // up CFG artifacts those passes may leave behind, presenting the
+            // vectorizer and unroller with cleaner loop bodies.
+            LPM.addPass(llvm::LoopSimplifyCFGPass());
         });
     }
 
@@ -649,6 +681,13 @@ void CodeGenerator::runOptimizationPasses() {
     if (optimizationLevel >= OptimizationLevel::O3) {
         PB.registerLoopOptimizerEndEPCallback([](llvm::LoopPassManager& LPM, llvm::OptimizationLevel) {
             LPM.addPass(llvm::LoopBoundSplitPass());
+            // LoopPredication widens loop-variant guard/range checks into
+            // loop-invariant ones by computing the widened condition before
+            // loop entry.  This converts per-iteration bounds checks (e.g.
+            // `if (i < n)`) into a single pre-loop check, eliminating a
+            // branch per iteration and enabling the vectorizer to process
+            // the loop without scalar epilogues for the check.
+            LPM.addPass(llvm::LoopPredicationPass());
         });
     }
 
@@ -757,6 +796,25 @@ void CodeGenerator::runOptimizationPasses() {
             // regular JumpThreading for parser/automaton code where the next
             // state is predictable from the current state + input.
             FPM.addPass(llvm::DFAJumpThreadingPass());
+            // ConstantHoisting identifies expensive-to-materialise constants
+            // (e.g. large immediates that don't fit in the instruction encoding)
+            // and hoists them to a common dominator, materialising once and
+            // reusing via register.  This reduces code size and avoids repeated
+            // constant-materialisation sequences in hot loops.
+            FPM.addPass(llvm::ConstantHoistingPass());
+            // SeparateConstOffsetFromGEP extracts constant parts from GEP
+            // (GetElementPtr) address computations, allowing the back-end to
+            // share common base addresses across multiple array accesses via
+            // base+offset addressing modes — critical for tight array loops.
+            FPM.addPass(llvm::SeparateConstOffsetFromGEPPass());
+            // PartiallyInlineLibCalls replaces calls to math functions (sqrt,
+            // etc.) with an inline fast-path + fallback-call branch, avoiding
+            // the function-call overhead when the fast path is taken.
+            FPM.addPass(llvm::PartiallyInlineLibCallsPass());
+            // SinkingPass moves instructions into successor blocks when the
+            // result is only used in that successor, reducing register pressure
+            // and execution cost on paths where the result isn't needed.
+            FPM.addPass(llvm::SinkingPass());
         });
     }
 

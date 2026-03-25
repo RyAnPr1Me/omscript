@@ -57,7 +57,7 @@ inline const char* errorCodeString(ErrorCode code) {
 /// Compute the edit distance between two strings (Levenshtein distance).
 /// Accounts for insertions, deletions, and substitutions.
 inline size_t editDistance(const std::string& a, const std::string& b) {
-    size_t m = a.size(), n = b.size();
+    const size_t m = a.size(), n = b.size();
     // Fast paths for trivial cases.
     if (m == 0) return n;
     if (n == 0) return m;

@@ -2284,7 +2284,7 @@ struct FusionPair {
 static std::vector<FusionPair> detectFusionPairs(
         const std::vector<llvm::Instruction*>& moveable,
         const std::unordered_map<llvm::Instruction*, unsigned>& idx,
-        const MicroarchProfile& profile) {
+        [[maybe_unused]] const MicroarchProfile& profile) {
     std::vector<FusionPair> pairs;
 
     for (unsigned i = 0; i < moveable.size(); ++i) {
@@ -2798,8 +2798,7 @@ static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
     // Count how many not-yet-scheduled users each producer has.
     std::vector<unsigned> remainingUsers(n, 0);
     for (unsigned i = 0; i < n; ++i) {
-        for (unsigned s : succ[i])
-            ++remainingUsers[i]; // one user per successor edge
+        remainingUsers[i] = static_cast<unsigned>(succ[i].size());
     }
 
     // Pre-count values live-in from outside the BB (function args, cross-BB defs).

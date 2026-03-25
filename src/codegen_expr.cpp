@@ -270,7 +270,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     // when both operands are known struct types with a matching overload.
     // -----------------------------------------------------------------------
     {
-        std::string leftStructType, rightStructType;
+        std::string leftStructType;
         if (expr->left->type == ASTNodeType::IDENTIFIER_EXPR) {
             auto* id = static_cast<IdentifierExpr*>(expr->left.get());
             auto vit = structVars_.find(id->name);
