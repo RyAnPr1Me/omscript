@@ -3879,30 +3879,128 @@ static AccessPattern classifyAccess(llvm::GetElementPtrInst* gep) {
                 return AccessPattern::Strided;
             return AccessPattern::Sequential;
         }
+        // Shift-left by constant = stride of 2^n
+        if (binOp->getOpcode() == llvm::Instruction::Shl &&
+            llvm::isa<llvm::ConstantInt>(binOp->getOperand(1)))
+            return AccessPattern::Strided;
+    }
+    // Index is a trunc/zext/sext of a PHI → sequential with type coercion
+    if (llvm::isa<llvm::TruncInst>(lastIdx) || llvm::isa<llvm::ZExtInst>(lastIdx) ||
+        llvm::isa<llvm::SExtInst>(lastIdx)) {
+        if (auto* cast = llvm::dyn_cast<llvm::Instruction>(lastIdx)) {
+            if (llvm::isa<llvm::PHINode>(cast->getOperand(0)))
+                return AccessPattern::Sequential;
+        }
     }
     return AccessPattern::Unknown;
 }
 
+/// Detect the stride (in elements) of a GEP-based memory access.
+/// Returns 0 if the stride cannot be determined.
+static unsigned detectStride(llvm::GetElementPtrInst* gep) {
+    if (!gep || gep->getNumOperands() < 2) return 0;
+    llvm::Value* lastIdx = gep->getOperand(gep->getNumOperands() - 1);
+
+    // PHI → stride 1 (sequential)
+    if (llvm::isa<llvm::PHINode>(lastIdx)) return 1;
+
+    auto* binOp = llvm::dyn_cast<llvm::BinaryOperator>(lastIdx);
+    if (!binOp) return 0;
+
+    // i * const → stride = const
+    if (binOp->getOpcode() == llvm::Instruction::Mul) {
+        if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(binOp->getOperand(1)))
+            return static_cast<unsigned>(ci->getZExtValue());
+    }
+    // i << const → stride = 2^const
+    if (binOp->getOpcode() == llvm::Instruction::Shl) {
+        if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(binOp->getOperand(1)))
+            return 1u << static_cast<unsigned>(ci->getZExtValue());
+    }
+    // i + const → stride 1 (offset sequential)
+    if (binOp->getOpcode() == llvm::Instruction::Add)
+        return 1;
+
+    return 0;
+}
+
 /// Estimate the working set size (in bytes) for a loop body.
-/// Counts distinct base pointers accessed via GEP and multiplies by
-/// an estimated iteration count.
+/// Counts distinct base pointers accessed via GEP, detects strides,
+/// and estimates cache footprint based on access patterns.
 static unsigned estimateWorkingSet(llvm::BasicBlock& bb, unsigned elementSize) {
-    std::set<llvm::Value*> bases;
+    struct StreamInfo {
+        unsigned stride = 1;
+        unsigned count = 0;
+    };
+    std::unordered_map<llvm::Value*, StreamInfo> streams;
+
     for (auto& inst : bb) {
         if (auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(&inst)) {
-            bases.insert(gep->getPointerOperand());
+            auto* base = gep->getPointerOperand();
+            unsigned stride = detectStride(gep);
+            if (stride == 0) stride = 1;
+
+            auto it = streams.find(base);
+            if (it == streams.end()) {
+                streams[base] = {stride, 1};
+            } else {
+                it->second.count++;
+                // Use maximum stride seen for this base
+                it->second.stride = std::max(it->second.stride, stride);
+            }
         }
     }
-    // Each distinct array base contributes elementSize * estimatedTripCount.
-    // Use a conservative estimate of 1024 iterations for unknown trip counts.
-    return static_cast<unsigned>(bases.size()) * elementSize * 1024;
+
+    // Estimate: each stream touches (estimatedTrips * stride * elementSize) bytes.
+    // Use 1024 as default trip count for unknown loops.
+    static constexpr unsigned kDefaultTripCount = 1024;
+    unsigned totalBytes = 0;
+    for (const auto& [_, info] : streams) {
+        totalBytes += info.stride * elementSize * kDefaultTripCount;
+    }
+    return totalBytes;
+}
+
+/// Detect potential cache set conflicts between multiple array streams.
+/// Returns the number of conflicting stream pairs (same cache set modulo
+/// L1 associativity).  A high count suggests array padding or tiling.
+static unsigned detectCacheConflicts(llvm::BasicBlock& bb,
+                                     const CacheModel& cache) {
+    // Collect base pointers of all memory accesses in the loop
+    llvm::SmallVector<llvm::Value*, 8> bases;
+    for (auto& inst : bb) {
+        llvm::Value* ptr = nullptr;
+        if (auto* load = llvm::dyn_cast<llvm::LoadInst>(&inst))
+            ptr = load->getPointerOperand();
+        else if (auto* store = llvm::dyn_cast<llvm::StoreInst>(&inst))
+            ptr = store->getPointerOperand();
+        if (!ptr) continue;
+
+        if (auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(ptr))
+            ptr = gep->getPointerOperand();
+
+        // De-duplicate base pointers
+        bool found = false;
+        for (auto* existing : bases) {
+            if (existing == ptr) { found = true; break; }
+        }
+        if (!found) bases.push_back(ptr);
+    }
+
+    // With N distinct base pointers and a direct-mapped or low-associativity
+    // cache, there's a risk of conflict misses when N > associativity.
+    // L1 is typically 4-8 way set-associative.
+    static constexpr unsigned kL1Associativity = 8;
+    if (bases.size() <= kL1Associativity) return 0;
+    return static_cast<unsigned>(bases.size()) - kL1Associativity;
 }
 
 /// Insert cache-aware prefetch hints for strided loads in loop bodies.
 /// Unlike the simpler insertPrefetches in hardware transforms, this version
-/// uses the CacheModel to compute prefetch distances based on cache latencies.
+/// uses the CacheModel to compute prefetch distances based on cache latencies
+/// and detects actual strides from GEP index patterns.
 static unsigned insertCacheAwarePrefetches(llvm::Function& func,
-                                            const MicroarchProfile& /*profile*/,
+                                            const MicroarchProfile& profile,
                                             const CacheModel& cache) {
     unsigned count = 0;
 
@@ -3912,6 +4010,9 @@ static unsigned insertCacheAwarePrefetches(llvm::Function& func,
         unsigned ord = 0;
         for (auto& bb : func) bbOrder[&bb] = ord++;
     }
+
+    // Maximum prefetches per loop = 2 × load ports (avoid crowding actual loads)
+    const unsigned maxPrefetchesPerLoop = 2 * profile.loadPorts;
 
     for (auto& bb : func) {
         // Find loop headers (BBs with a back-edge predecessor).
@@ -3924,7 +4025,13 @@ static unsigned insertCacheAwarePrefetches(llvm::Function& func,
         }
         if (!isLoopHeader) continue;
 
+        // Track prefetched base pointers to avoid redundant prefetches
+        std::unordered_set<llvm::Value*> prefetchedBases;
+        unsigned loopPrefetches = 0;
+
         for (auto& inst : bb) {
+            if (loopPrefetches >= maxPrefetchesPerLoop) break;
+
             auto* load = llvm::dyn_cast<llvm::LoadInst>(&inst);
             if (!load) continue;
 
@@ -3935,27 +4042,49 @@ static unsigned insertCacheAwarePrefetches(llvm::Function& func,
             if (pattern == AccessPattern::Unknown || pattern == AccessPattern::Random)
                 continue;
 
-            // Check precision of surrounding instructions — only insert
-            // aggressive prefetches (longer distance) in fast regions.
+            // Deduplicate: skip if we already prefetched this base pointer
+            llvm::Value* base = gep->getPointerOperand();
+            if (prefetchedBases.count(base)) continue;
+            prefetchedBases.insert(base);
+
+            // Detect actual element stride from GEP
+            unsigned elemStride = detectStride(gep);
+            if (elemStride == 0) elemStride = 1;
+
+            // Compute prefetch distance based on cache model and access pattern.
+            // For sequential: prefetch L2_latency/throughput cache lines ahead
+            // For strided: scale by stride to ensure we reach the right data
+            unsigned cacheLineStride = cache.l1LineSize;
+            unsigned distance;
+
+            // Use precision metadata to guide aggressiveness
             FPPrecision prec = getInstructionPrecision(load);
 
-            // Compute prefetch distance based on cache model.
-            // distance = (L2_latency / memory_throughput) * stride
-            // For sequential access, use cache line size as stride.
-            unsigned stride = cache.l1LineSize;
-            unsigned distance;
             if (prec == FPPrecision::Strict) {
                 // Conservative: prefetch 2 cache lines ahead.
-                distance = 2 * stride;
+                distance = 2 * cacheLineStride;
             } else if (prec == FPPrecision::Fast) {
                 // Aggressive: prefetch based on L2 latency.
-                distance = std::max(4u, cache.l2Latency / 2) * stride;
+                distance = std::max(4u, cache.l2Latency / 2) * cacheLineStride;
             } else {
                 // Medium: moderate prefetch distance.
-                distance = std::max(3u, cache.l2Latency / 4) * stride;
+                distance = std::max(3u, cache.l2Latency / 4) * cacheLineStride;
             }
 
-            // Build prefetch: __builtin_prefetch(ptr + distance, 0/*read*/, 3/*L1*/)
+            // Scale distance by stride for non-unit-stride accesses
+            if (elemStride > 1) {
+                distance *= elemStride;
+            }
+
+            // Determine locality hint based on stride:
+            // - Unit stride (sequential): high locality (data reused soon) → 3
+            // - Small stride (2-4): moderate locality → 2
+            // - Large stride (>4): streaming (unlikely reuse) → 1
+            unsigned locality = 3; // default: high temporal locality
+            if (elemStride > 4) locality = 1;
+            else if (elemStride > 1) locality = 2;
+
+            // Build prefetch: __builtin_prefetch(ptr + distance, rw, locality)
             llvm::IRBuilder<> builder(load);
             llvm::Value* ptr = load->getPointerOperand();
             llvm::Value* prefAddr = builder.CreateGEP(
@@ -3968,10 +4097,11 @@ static unsigned insertCacheAwarePrefetches(llvm::Function& func,
             builder.CreateCall(prefetchFn, {
                 prefAddr,
                 builder.getInt32(0),  // read
-                builder.getInt32(3),  // high temporal locality
+                builder.getInt32(locality),
                 builder.getInt32(1)   // data cache
             });
             count++;
+            loopPrefetches++;
         }
     }
 
@@ -4060,6 +4190,26 @@ CacheOptStats optimizeCacheLocality(llvm::Function& func,
 
     // Phase 3: Add tiling hints for loops with large working sets.
     stats.loopsTiled = addTilingHints(func, cache);
+
+    // Phase 4: Detect cache set conflicts in loop bodies.
+    // This information is useful for diagnostics and can guide data layout
+    // decisions (e.g., padding arrays to avoid power-of-2 stride conflicts).
+    {
+        std::unordered_map<llvm::BasicBlock*, unsigned> bbOrder;
+        unsigned ord = 0;
+        for (auto& bb : func) bbOrder[&bb] = ord++;
+        for (auto& bb : func) {
+            bool isLoopHeader = false;
+            for (auto* pred : llvm::predecessors(&bb)) {
+                if (bbOrder.count(pred) && bbOrder[pred] >= bbOrder[&bb]) {
+                    isLoopHeader = true;
+                    break;
+                }
+            }
+            if (!isLoopHeader) continue;
+            stats.cacheConflicts += detectCacheConflicts(bb, cache);
+        }
+    }
 
     return stats;
 }

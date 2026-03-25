@@ -572,6 +572,20 @@ void CodeGenerator::runOptimizationPasses() {
         });
     }
 
+    // At O3 with -floop-optimize, register LoopRotation before vectorization
+    // to ensure loops have a canonical do-while form that the vectorizer
+    // and other loop passes can analyze.  Loop rotation moves the header
+    // check to the end, creating a single latch with the backedge condition.
+    // This enables SCEV analysis to compute precise trip counts and is
+    // required by many loop optimizations (LICM, strength reduction, etc.).
+    if (optimizationLevel >= OptimizationLevel::O3 && enableLoopOptimize_) {
+        PB.registerVectorizerStartEPCallback(
+            [](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) {
+            FPM.addPass(llvm::createFunctionToLoopPassAdaptor(
+                llvm::LoopRotatePass()));
+        });
+    }
+
     // At O2+, inject AggressiveInstCombine after the standard peephole passes
     // to catch multi-instruction patterns (e.g. truncation sequences, popcount
     // idioms) that regular InstCombine does not handle.  Lowered from O3 to O2
@@ -1270,6 +1284,7 @@ void CodeGenerator::runOptimizationPasses() {
             // first round of cleanup exposed.
             cleanupFPM.add(llvm::createLICMPass());
             cleanupFPM.add(llvm::createSinkingPass());
+            cleanupFPM.add(llvm::createLoopStrengthReducePass());
             cleanupFPM.add(llvm::createGVNPass());
             cleanupFPM.add(llvm::createInstructionCombiningPass());
             cleanupFPM.add(llvm::createCFGSimplificationPass());

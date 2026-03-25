@@ -3189,6 +3189,7 @@ static unsigned eliminateDeadCode(llvm::Function& func) {
 ///   fsub(fmul(a,b), c) → fma(a,b,-c)
 ///   fsub(c, fmul(a,b)) → fma(-a,b,c) [fnmsub]
 ///   fadd(fmul(a,b), fmul(c,d)) → fma(a,b,fma(c,d,0)) [chained FMA]
+///   fneg(fadd(fmul(a,b),c)) → fma(-a,b,-c) [negated FMA]
 ///
 /// This runs as a superoptimizer phase so it fires even without -march,
 /// unlike the HGOE FMA pass which only runs with hardware profiling.
@@ -3202,6 +3203,7 @@ static unsigned generateFMAPatterns(llvm::Function& func) {
     for (auto& bb : func) {
         for (auto& inst : bb) {
             // Pattern 1: fadd(fmul(a,b), c) → fma(a,b,c)
+            // Also handles: fadd(fmul(a,b), fmul(c,d)) → fma(a,b,fma(c,d,0))
             if (inst.getOpcode() == llvm::Instruction::FAdd) {
                 for (int swap = 0; swap < 2; ++swap) {
                     llvm::Value* mulCandidate = inst.getOperand(swap);
@@ -3213,6 +3215,31 @@ static unsigned generateFMAPatterns(llvm::Function& func) {
                         llvm::IRBuilder<> builder(&inst);
                         llvm::Module* mod = func.getParent();
                         llvm::Type* ty = inst.getType();
+
+                        // Check if addend is also an fmul → chained FMA:
+                        // fma(a,b, fma(c,d, 0))
+                        auto* addendMul = llvm::dyn_cast<llvm::BinaryOperator>(addend);
+                        if (addendMul && addendMul->getOpcode() == llvm::Instruction::FMul &&
+                            addendMul->hasOneUse()) {
+                            llvm::Function* fmaFn = OMSC_GET_INTRINSIC(
+                                mod, llvm::Intrinsic::fma, {ty});
+                            // Inner FMA: fma(c,d,0)
+                            llvm::Value* innerFma = builder.CreateCall(
+                                fmaFn,
+                                {addendMul->getOperand(0), addendMul->getOperand(1),
+                                 llvm::ConstantFP::get(ty, 0.0)},
+                                "superopt.fma.inner");
+                            // Outer FMA: fma(a,b, innerFma)
+                            llvm::Value* result = builder.CreateCall(
+                                fmaFn, {fmul->getOperand(0), fmul->getOperand(1), innerFma},
+                                "superopt.fma.chain");
+                            inst.replaceAllUsesWith(result);
+                            toErase.push_back(&inst);
+                            toErase.push_back(fmul);
+                            toErase.push_back(addendMul);
+                            count += 2; // two FMAs generated
+                            break;
+                        }
 
                         llvm::Function* fmaFn = OMSC_GET_INTRINSIC(
                             mod, llvm::Intrinsic::fma, {ty});
@@ -3270,11 +3297,134 @@ static unsigned generateFMAPatterns(llvm::Function& func) {
                     }
                 }
             }
+
+            // Pattern 4: fneg(fma(a,b,c)) → fma(-a,b,-c) [negated FMA]
+            // Saves an fneg instruction and uses a single FMA with negated inputs.
+            if (inst.getOpcode() == llvm::Instruction::FNeg) {
+                if (auto* call = llvm::dyn_cast<llvm::CallInst>(inst.getOperand(0))) {
+                    if (auto* callee = call->getCalledFunction()) {
+                        if (callee->getIntrinsicID() == llvm::Intrinsic::fma &&
+                            call->hasOneUse()) {
+                            llvm::IRBuilder<> builder(&inst);
+                            llvm::Module* mod = func.getParent();
+                            llvm::Type* ty = inst.getType();
+
+                            llvm::Value* negA = builder.CreateFNeg(call->getArgOperand(0), "nfma.nega");
+                            llvm::Value* negC = builder.CreateFNeg(call->getArgOperand(2), "nfma.negc");
+                            llvm::Function* fmaFn = OMSC_GET_INTRINSIC(
+                                mod, llvm::Intrinsic::fma, {ty});
+                            llvm::Value* result = builder.CreateCall(
+                                fmaFn, {negA, call->getArgOperand(1), negC},
+                                "superopt.nfma");
+                            inst.replaceAllUsesWith(result);
+                            toErase.push_back(&inst);
+                            toErase.push_back(call);
+                            count++;
+                        }
+                    }
+                }
+            }
         }
     }
 
     for (auto* inst : toErase) {
         if (inst->use_empty()) inst->eraseFromParent();
+    }
+    return count;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Horizontal FMA reduction detection
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Detect horizontal sum reduction patterns:
+///   sum = a0*b0 + a1*b1 + a2*b2 + ...
+/// and chain them as sequential FMAs:
+///   sum = fma(a0,b0, fma(a1,b1, fma(a2,b2, 0)))
+/// This reduces latency vs a tree of independent fmul+fadd pairs because
+/// modern CPUs can overlap the FMA execution with the accumulation.
+static unsigned generateHorizontalFMAReductions(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<llvm::Instruction*> toErase;
+
+    for (auto& bb : func) {
+        // Find chains of fadd(fmul, fadd(fmul, fadd(fmul, ...)))
+        for (auto& inst : bb) {
+            if (inst.getOpcode() != llvm::Instruction::FAdd) continue;
+            // Check if this is the root of a reduction chain (not used by another fadd)
+            bool isRoot = true;
+            for (auto* user : inst.users()) {
+                if (auto* userInst = llvm::dyn_cast<llvm::Instruction>(user)) {
+                    if (userInst->getOpcode() == llvm::Instruction::FAdd)
+                        isRoot = false;
+                }
+            }
+            if (!isRoot) continue;
+
+            // Collect the chain of fmul operands
+            struct MulPair { llvm::Value* a; llvm::Value* b; };
+            llvm::SmallVector<MulPair, 8> pairs;
+            llvm::SmallVector<llvm::Instruction*, 8> chainInsts;
+            llvm::Value* accumBase = nullptr;
+
+            std::function<bool(llvm::Instruction*)> collectChain =
+                [&](llvm::Instruction* node) -> bool {
+                if (!node || node->getOpcode() != llvm::Instruction::FAdd)
+                    return false;
+                chainInsts.push_back(node);
+
+                for (int swap = 0; swap < 2; ++swap) {
+                    auto* fmul = llvm::dyn_cast<llvm::BinaryOperator>(node->getOperand(swap));
+                    llvm::Value* other = node->getOperand(1 - swap);
+
+                    if (fmul && fmul->getOpcode() == llvm::Instruction::FMul &&
+                        fmul->hasOneUse()) {
+                        pairs.push_back({fmul->getOperand(0), fmul->getOperand(1)});
+                        chainInsts.push_back(fmul);
+
+                        if (auto* otherInst = llvm::dyn_cast<llvm::Instruction>(other)) {
+                            if (otherInst->getOpcode() == llvm::Instruction::FAdd &&
+                                otherInst->hasOneUse()) {
+                                return collectChain(otherInst);
+                            }
+                            // Check if the other side is also fmul
+                            if (otherInst->getOpcode() == llvm::Instruction::FMul &&
+                                otherInst->hasOneUse()) {
+                                pairs.push_back({otherInst->getOperand(0), otherInst->getOperand(1)});
+                                chainInsts.push_back(otherInst);
+                                accumBase = llvm::ConstantFP::get(inst.getType(), 0.0);
+                                return true;
+                            }
+                        }
+                        accumBase = other;
+                        return true;
+                    }
+                }
+                return false;
+            };
+
+            if (!collectChain(&inst) || pairs.size() < 3) continue;
+
+            // Build chained FMA: fma(an,bn, fma(a(n-1),b(n-1), ... fma(a0,b0,base)))
+            llvm::IRBuilder<> builder(&inst);
+            llvm::Module* mod = func.getParent();
+            llvm::Type* ty = inst.getType();
+            llvm::Function* fmaFn = OMSC_GET_INTRINSIC(mod, llvm::Intrinsic::fma, {ty});
+
+            llvm::Value* accum = accumBase ? accumBase
+                                           : llvm::ConstantFP::get(ty, 0.0);
+            for (auto& p : pairs) {
+                accum = builder.CreateCall(fmaFn, {p.a, p.b, accum}, "hfma.chain");
+            }
+
+            inst.replaceAllUsesWith(accum);
+            for (auto* ci : chainInsts) toErase.push_back(ci);
+            count++;
+        }
+    }
+
+    for (auto* i : toErase) {
+        if (i->use_empty()) i->eraseFromParent();
     }
     return count;
 }
@@ -3387,6 +3537,13 @@ SuperoptimizerStats superoptimizeFunction(llvm::Function& func,
     // FMA is profitable on all modern x86/ARM/RISC-V CPUs with FMA support.
     if (config.enableAlgebraic) {
         stats.algebraicSimplified += generateFMAPatterns(func);
+    }
+
+    // Phase 2c: Horizontal FMA reduction — converts dot-product-like chains
+    // (a0*b0 + a1*b1 + a2*b2 + ...) into chained FMAs for better precision
+    // and throughput on FMA-capable CPUs.
+    if (config.enableAlgebraic) {
+        stats.algebraicSimplified += generateHorizontalFMAReductions(func);
     }
 
     // Phase 2c: Select optimization — converts branchful select patterns into
