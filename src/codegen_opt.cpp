@@ -79,6 +79,8 @@
 #include <llvm/Transforms/Utils/LCSSA.h>
 #include <llvm/Transforms/Utils/LoopSimplify.h>
 #include <llvm/Transforms/Utils/Mem2Reg.h>
+#include <llvm/Transforms/Scalar/InstSimplifyPass.h>
+#include <llvm/Transforms/Scalar/LICM.h>
 #include <llvm/Transforms/Vectorize/VectorCombine.h>
 #include <optional>
 #include <stdexcept>
@@ -477,6 +479,22 @@ void CodeGenerator::runOptimizationPasses() {
     // InstCombine cleans up redundant patterns exposed by mem2reg
     // (dead stores, trivial PHIs) to present the cleanest possible IR
     // to the vectorizer's pattern matching.
+    //
+    // LICM (Loop Invariant Code Motion) hoists loop-invariant loads,
+    // stores, and computations out of loop bodies, reducing per-iteration
+    // work.  Running it after LoopSimplify + LCSSA + LoopRotate ensures
+    // the loop structure is in canonical form for LICM's analysis.
+    //
+    // GVN (Global Value Numbering) eliminates redundant computations
+    // by recognizing that different expressions compute the same value.
+    // After LICM hoists invariants and InstCombine simplifies patterns,
+    // GVN can merge duplicate loads and computations across basic blocks.
+    //
+    // InstSimplify performs lightweight algebraic simplification
+    // (identity elimination, constant folding, dead comparison removal)
+    // without the overhead of full InstCombine.  Running it as a final
+    // cleanup pass before the vectorizer ensures the IR is as simple
+    // as possible for the vectorizer's cost model and pattern matching.
     if (optimizationLevel >= OptimizationLevel::O2) {
         PB.registerVectorizerStartEPCallback(
             [](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) {
@@ -486,6 +504,10 @@ void CodeGenerator::runOptimizationPasses() {
             FPM.addPass(llvm::LoopSimplifyPass());
             FPM.addPass(llvm::LCSSAPass());
             FPM.addPass(llvm::createFunctionToLoopPassAdaptor(llvm::LoopRotatePass()));
+            FPM.addPass(llvm::createFunctionToLoopPassAdaptor(
+                llvm::LICMPass(llvm::LICMOptions()), /*UseMemorySSA=*/true));
+            FPM.addPass(llvm::GVNPass());
+            FPM.addPass(llvm::InstSimplifyPass());
         });
     }
 

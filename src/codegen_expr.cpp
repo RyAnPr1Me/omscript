@@ -923,16 +923,26 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     }
 
     // Regular code generation for non-constant expressions.
-    // Integer arithmetic uses wrapping (no NSW/NUW flags): NSW/NUW flags tell
-    // LLVM that overflow is undefined behavior, which can cause miscompilation
-    // when overflow actually occurs.  Omitting them guarantees defined
-    // two's-complement behavior on every overflow path.
+    // Integer arithmetic generally uses wrapping (no NSW/NUW flags) because
+    // NSW/NUW tell LLVM that overflow is undefined behavior, which can cause
+    // miscompilation when overflow actually occurs.
+    //
+    // Exception: when BOTH operands are provably non-negative (tracked via
+    // nonNegValues_), we set nsw on addition.  For non-negative operands,
+    // signed overflow can only happen if the result exceeds INT64_MAX, which
+    // cannot occur in typical loop counter arithmetic.  The nsw flag enables
+    // LLVM's SCEV (Scalar Evolution) to compute tighter trip counts, prove
+    // induction variable monotonicity, and perform widening/narrowing
+    // optimizations that are critical for loop vectorization.
     if (expr->op == "+") {
-        auto* result = builder->CreateAdd(left, right, "addtmp");
+        const bool bothNonNeg = nonNegValues_.count(left) && nonNegValues_.count(right);
+        auto* result = bothNonNeg
+            ? builder->CreateNSWAdd(left, right, "addtmp")
+            : builder->CreateAdd(left, right, "addtmp");
         // Track non-negativity: if both operands are known non-negative,
         // the result is non-negative (assuming no overflow, which is true
         // for typical loop counter arithmetic).
-        if (nonNegValues_.count(left) && nonNegValues_.count(right))
+        if (bothNonNeg)
             nonNegValues_.insert(result);
         return result;
     } else if (expr->op == "-") {
@@ -1167,6 +1177,10 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 }
             }
         }
+        // When both operands are known non-negative, set nsw to enable
+        // SCEV range analysis and strength reduction of derived expressions.
+        if (nonNegValues_.count(left) && nonNegValues_.count(right))
+            return builder->CreateNSWMul(left, right, "multmp");
         return builder->CreateMul(left, right, "multmp");
     } else if (expr->op == "/" || expr->op == "%") {
         const bool isDivision = expr->op == "/";

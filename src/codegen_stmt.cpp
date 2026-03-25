@@ -914,6 +914,10 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
     // Allocate hidden index variable and the user's iterator variable
     llvm::AllocaInst* idxAlloca = createEntryBlockAlloca(function, "_foreach_idx");
     builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 0), idxAlloca);
+    // The foreach hidden index starts at 0 and only increments, so it is
+    // always non-negative.  Track this so expressions derived from the
+    // index (e.g. arr[i+1]) can use urem/udiv instead of srem/sdiv.
+    nonNegValues_.insert(idxAlloca);
 
     llvm::AllocaInst* iterAlloca = createEntryBlockAlloca(function, stmt->iteratorVar);
     bindVariable(stmt->iteratorVar, iterAlloca);
@@ -945,6 +949,21 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
     // Body: load current element into iterator variable, then execute body
     builder->SetInsertPoint(bodyBB);
     llvm::Value* bodyIdx = builder->CreateLoad(getDefaultType(), idxAlloca, "foreach.bidx");
+
+    // Emit @llvm.assume(idx >= 0) so LLVM's CorrelatedValuePropagation and
+    // SCEV passes can prove non-negativity of the foreach index.  This
+    // enables srem→urem and sdiv→udiv conversions for expressions derived
+    // from the index variable.  The foreach index always starts at 0 and
+    // increments by 1, so the assume is unconditionally correct.
+    // Skip in JIT/dynamic mode to avoid adding instruction overhead.
+    if (optimizationLevel >= OptimizationLevel::O2 && !dynamicCompilation_) {
+        llvm::Value* isNonNeg = builder->CreateICmpSGE(
+            bodyIdx, llvm::ConstantInt::get(getDefaultType(), 0), "foreach.nonneg");
+        llvm::Function* assumeFn = OMSC_GET_INTRINSIC_STMT(
+            module.get(), llvm::Intrinsic::assume, {});
+        builder->CreateCall(assumeFn, {isNonNeg});
+    }
+
     llvm::Value* elemVal;
     if (isStr) {
         // String: load single byte at offset bodyIdx, zero-extend to i64
@@ -952,9 +971,12 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
         llvm::Value* charByte = builder->CreateLoad(llvm::Type::getInt8Ty(*context), charPtr, "foreach.char");
         elemVal = builder->CreateZExt(charByte, getDefaultType(), "foreach.charext");
     } else {
-        // Array: element is at slot (bodyIdx + 1)
+        // Array: element is at slot (bodyIdx + 1).
+        // The offset is always non-negative (bodyIdx starts at 0) so nsw+nuw
+        // are safe and enable SCEV to compute tight trip counts.
         llvm::Value* offset =
-            builder->CreateAdd(bodyIdx, llvm::ConstantInt::get(getDefaultType(), 1), "foreach.offset");
+            builder->CreateAdd(bodyIdx, llvm::ConstantInt::get(getDefaultType(), 1), "foreach.offset",
+                               /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), basePtr, offset, "foreach.elem.ptr");
         elemVal = builder->CreateLoad(getDefaultType(), elemPtr, "foreach.elem");
     }
@@ -967,10 +989,15 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
         builder->CreateBr(incBB);
     }
 
-    // Increment hidden index
+    // Increment hidden index.
+    // The hidden index starts at 0 and increments by 1 up to the collection
+    // length, so it is always non-negative.  Setting nuw+nsw enables LLVM's
+    // SCEV to compute exact trip counts and prove induction variable
+    // monotonicity, which is critical for loop vectorization and unrolling.
     builder->SetInsertPoint(incBB);
     llvm::Value* nextIdx = builder->CreateLoad(getDefaultType(), idxAlloca, "foreach.nidx");
-    llvm::Value* incIdx = builder->CreateAdd(nextIdx, llvm::ConstantInt::get(getDefaultType(), 1), "foreach.next");
+    llvm::Value* incIdx = builder->CreateAdd(nextIdx, llvm::ConstantInt::get(getDefaultType(), 1), "foreach.next",
+                                             /*HasNUW=*/true, /*HasNSW=*/true);
     builder->CreateStore(incIdx, idxAlloca);
     auto* backBr = builder->CreateBr(condBB);
 
