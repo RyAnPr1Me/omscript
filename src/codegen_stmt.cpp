@@ -860,7 +860,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             // functions use 4 to balance ILP gains vs I-cache pressure.
             static constexpr unsigned kOptMaxUnrollCount = 8;
             static constexpr unsigned kDefaultUnrollCount = 4;
-            unsigned unrollCount = inOptMaxFunction ? kOptMaxUnrollCount : kDefaultUnrollCount;
+            const unsigned unrollCount = inOptMaxFunction ? kOptMaxUnrollCount : kDefaultUnrollCount;
             loopMDs.push_back(llvm::MDNode::get(
                 *context,
                 {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
