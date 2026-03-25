@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# OmScript Build System (Optimized for Compiler Performance)
+# OmScript Compiler Build (Max Perf, LLVM-heavy, No Feature Loss)
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── Compiler cache ───────────────────────────────────────────────────────────
@@ -20,19 +20,19 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Default to Release
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
 # ── Options ───────────────────────────────────────────────────────────────────
-option(LTO "Enable link-time optimization" OFF)
-option(PGO_GENERATE "Enable PGO generation" OFF)
-set(PGO_PROFILE_DIR "" CACHE STRING "PGO output dir")
-set(PGO_USE "" CACHE STRING "PGO input profile")
-option(NATIVE "Enable -march=native" OFF)
-option(UNITY_BUILD "Enable unity builds" OFF)
+option(LTO "Enable LTO" OFF)
+option(PGO_GENERATE "PGO generate" OFF)
+set(PGO_PROFILE_DIR "" CACHE STRING "PGO dir")
+set(PGO_USE "" CACHE STRING "PGO use")
+option(NATIVE "-march=native" OFF)
+option(COVERAGE "Coverage" OFF)
 set(SANITIZE "" CACHE STRING "Sanitizers")
+option(UNITY_BUILD "Unity build (faster compile)" OFF)
 
 # ── LLVM ──────────────────────────────────────────────────────────────────────
 find_package(LLVM REQUIRED CONFIG)
@@ -43,48 +43,89 @@ endif()
 include_directories(SYSTEM ${LLVM_INCLUDE_DIRS})
 add_definitions(${LLVM_DEFINITIONS})
 
+# ── Polly detection ───────────────────────────────────────────────────────────
+if(NOT APPLE)
+    get_filename_component(_LLVM_BASE_DIR "${LLVM_DIR}" DIRECTORY)
+    find_file(POLLY_LIB NAMES LLVMPolly.so
+        HINTS "${_LLVM_BASE_DIR}/lib" "${LLVM_LIBRARY_DIR}"
+        NO_DEFAULT_PATH)
+endif()
+
 # ── Sources ───────────────────────────────────────────────────────────────────
 set(SRC
-    src/lexer.cpp src/parser.cpp src/ast.cpp src/codegen.cpp
-    src/codegen_builtins.cpp src/codegen_expr.cpp src/codegen_stmt.cpp
-    src/codegen_opt.cpp src/egraph.cpp src/egraph_optimizer.cpp
-    src/superoptimizer.cpp src/hardware_graph.cpp src/compiler.cpp src/main.cpp
-    runtime/value.cpp runtime/aot_profile.cpp runtime/jit_profiler.cpp runtime/deopt.cpp
+    # Frontend / core
+    src/lexer.cpp
+    src/parser.cpp
+    src/ast.cpp
+
+    # Codegen pipeline
+    src/codegen.cpp
+    src/codegen_builtins.cpp
+    src/codegen_expr.cpp
+    src/codegen_stmt.cpp
+    src/codegen_opt.cpp
+
+    # Optimizers
+    src/egraph.cpp
+    src/egraph_optimizer.cpp
+    src/superoptimizer.cpp
+    src/hardware_graph.cpp
+
+    # Driver
+    src/compiler.cpp
+    src/main.cpp
+
+    # Runtime (AOT + profiling + deopt)
+    runtime/value.cpp
+    runtime/aot_profile.cpp
+    runtime/jit_profiler.cpp
+    runtime/deopt.cpp
 )
 
 add_executable(omsc ${SRC})
 
-# ── Compile options (tuned for compiler workloads) ────────────────────────────
+# ── Include directories (explicit for headers) ────────────────────────────────
+target_include_directories(omsc PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/runtime
+)
+
+# ── Compile options (aggressively tuned but safe) ─────────────────────────────
 target_compile_options(omsc PRIVATE
-    # Warnings
     -Wall -Wextra -Wpedantic
 
-    # Release optimizations
     $<$<CONFIG:Release>:
         -O3
         -DNDEBUG
 
-        # Performance-focused flags
+        # Core perf
         -fno-plt
         -fomit-frame-pointer
-        -finline-functions
         -fstrict-aliasing
+        -finline-functions
 
-        # Better code layout / size
+        # Code layout / size
         -ffunction-sections
         -fdata-sections
 
-        # LLVM-heavy workloads benefit
+        # Big win for LLVM-style code
         -fno-semantic-interposition
+
+        # Visibility (safe with export-dynamic)
+        -fvisibility=hidden
     >
 
-    # Native CPU tuning (optional)
+    $<$<CONFIG:RelWithDebInfo>:
+        -O2
+        -gline-tables-only
+    >
+
     $<$<AND:$<CONFIG:Release>,$<BOOL:${NATIVE}>>:
         -march=native
     >
 )
 
-# ── Linker options ────────────────────────────────────────────────────────────
+# ── Link options ──────────────────────────────────────────────────────────────
 target_link_options(omsc PRIVATE
     $<$<CONFIG:Release>:
         -Wl,-O2
@@ -92,12 +133,12 @@ target_link_options(omsc PRIVATE
     >
 )
 
-# Required for ORC JIT symbol visibility
+# Required for ORC JIT
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND NOT APPLE)
     target_link_options(omsc PRIVATE -Wl,--export-dynamic)
 endif()
 
-# ── LTO ───────────────────────────────────────────────────────────────────────
+# ── LTO (IPO) ─────────────────────────────────────────────────────────────────
 if(LTO)
     include(CheckIPOSupported)
     check_ipo_supported(RESULT ok)
@@ -140,7 +181,13 @@ if(SANITIZE)
     target_link_options(omsc PRIVATE -fsanitize=${SANITIZE})
 endif()
 
-# ── Unity builds (faster compile times) ───────────────────────────────────────
+# ── Coverage ──────────────────────────────────────────────────────────────────
+if(COVERAGE)
+    target_compile_options(omsc PRIVATE --coverage -fno-inline)
+    target_link_options(omsc PRIVATE --coverage)
+endif()
+
+# ── Unity build (huge compile speed boost for large compilers) ────────────────
 if(UNITY_BUILD)
     set_target_properties(omsc PROPERTIES UNITY_BUILD ON)
 endif()
@@ -160,13 +207,24 @@ llvm_map_components_to_libnames(llvm_libs ${LLVM_COMPONENTS})
 
 target_link_libraries(omsc PRIVATE ${llvm_libs})
 
-# ── Precompiled headers (huge build speed win) ────────────────────────────────
+# ── Polly define ──────────────────────────────────────────────────────────────
+if(POLLY_LIB)
+    target_compile_definitions(omsc PRIVATE "POLLY_LIB_PATH=\"${POLLY_LIB}\"")
+endif()
+
+# ── Precompiled headers ───────────────────────────────────────────────────────
 target_precompile_headers(omsc PRIVATE
     <llvm/IR/IRBuilder.h>
     <llvm/IR/Module.h>
     <llvm/IR/Instructions.h>
     <llvm/IR/LLVMContext.h>
     <llvm/IR/Value.h>
+    <llvm/IR/Function.h>
+    <string>
+    <vector>
+    <memory>
+    <unordered_map>
+    <unordered_set>
 )
 
 # ── Install ───────────────────────────────────────────────────────────────────
