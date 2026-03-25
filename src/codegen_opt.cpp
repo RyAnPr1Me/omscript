@@ -104,10 +104,33 @@
 #include <llvm/Transforms/Scalar/InstSimplifyPass.h>
 #include <llvm/Transforms/Scalar/LICM.h>
 #include <llvm/Transforms/Vectorize/VectorCombine.h>
+#include <llvm/Transforms/Vectorize/LoadStoreVectorizer.h>
+#include <llvm/Transforms/Vectorize/SLPVectorizer.h>
+#include <llvm/Transforms/Scalar/NewGVN.h>
+#include <llvm/Transforms/Scalar/Scalarizer.h>
+#include <llvm/Transforms/IPO/CalledValuePropagation.h>
+#include <llvm/Transforms/IPO/Attributor.h>
+#include <llvm/Transforms/Scalar/SCCP.h>
+#include <llvm/Transforms/Scalar/LoopReroll.h>
+#include <llvm/Transforms/Scalar/GuardWidening.h>
+#include <llvm/Transforms/Scalar/TLSVariableHoist.h>
+#include <llvm/Transforms/IPO/MergeFunctions.h>
 #include <optional>
 #include <stdexcept>
 
 namespace omscript {
+
+// Aggressive SimplifyCFG options used throughout the optimization pipeline.
+// Converts if-else chains to selects, hoists/sinks common instructions,
+// converts switches to lookup tables, and speculatively simplifies blocks.
+static llvm::SimplifyCFGOptions aggressiveCFGOpts() {
+    return llvm::SimplifyCFGOptions()
+        .convertSwitchToLookupTable(true)
+        .hoistCommonInsts(true)
+        .sinkCommonInsts(true)
+        .speculateBlocks(true)
+        .bonusInstThreshold(4);
+}
 
 void CodeGenerator::resolveTargetCPU(std::string& cpu, std::string& features) const {
     const bool isNative = marchCpu_.empty() || marchCpu_ == "native";
@@ -489,6 +512,9 @@ void CodeGenerator::runOptimizationPasses() {
             FPM.addPass(llvm::createFunctionToLoopPassAdaptor(llvm::LoopRotatePass()));
             FPM.addPass(llvm::createFunctionToLoopPassAdaptor(
                 llvm::LICMPass(llvm::LICMOptions()), /*UseMemorySSA=*/true));
+            // Reassociate reorders commutative/associative expressions to
+            // expose more CSE opportunities for GVN.
+            FPM.addPass(llvm::ReassociatePass());
             FPM.addPass(llvm::GVNPass());
             FPM.addPass(llvm::InstSimplifyPass());
             FPM.addPass(llvm::AlignmentFromAssumptionsPass());
@@ -503,7 +529,10 @@ void CodeGenerator::runOptimizationPasses() {
             // unreachable code before the vectorizer.  Cleaner CFG structure
             // helps the vectorizer's control-flow analysis and reduces the
             // number of scalar epilogue paths it must handle.
-            FPM.addPass(llvm::SimplifyCFGPass());
+            // Use aggressive options: convert if-else chains to selects,
+            // hoist/sink common instructions, and convert switches to lookup
+            // tables — critical for classify()-style cascading-if patterns.
+            FPM.addPass(llvm::SimplifyCFGPass(aggressiveCFGOpts()));
         });
     }
 
@@ -594,7 +623,13 @@ void CodeGenerator::runOptimizationPasses() {
             FPM.addPass(llvm::MergedLoadStoreMotionPass());
             FPM.addPass(llvm::StraightLineStrengthReducePass());
             FPM.addPass(llvm::NaryReassociatePass());
+            FPM.addPass(llvm::ReassociatePass());
             FPM.addPass(llvm::InferAlignmentPass());
+            // SCCP: sparse conditional constant propagation — more powerful
+            // than simple constant folding because it tracks value ranges
+            // through phi nodes and conditional branches.
+            FPM.addPass(llvm::SCCPPass());
+            FPM.addPass(llvm::InstCombinePass());
             if (isO3) {
                 FPM.addPass(llvm::ConstraintEliminationPass());
                 // JumpThreading threads branches through basic blocks with
@@ -610,6 +645,10 @@ void CodeGenerator::runOptimizationPasses() {
                 FPM.addPass(llvm::PartiallyInlineLibCallsPass());
                 FPM.addPass(llvm::SinkingPass());
             }
+            // Aggressive SimplifyCFG at the end to convert if-else chains
+            // into select instructions or lookup tables after all inlining,
+            // jump threading, and CVP have simplified conditions.
+            FPM.addPass(llvm::SimplifyCFGPass(aggressiveCFGOpts()));
         });
     }
 
@@ -628,7 +667,14 @@ void CodeGenerator::runOptimizationPasses() {
             llvm::FunctionPassManager FPM;
             FPM.addPass(llvm::VectorCombinePass());
             FPM.addPass(llvm::LoopSinkPass());
+            // LoadStoreVectorizer combines adjacent scalar loads/stores into
+            // vector operations.  This is especially beneficial for struct
+            // field access patterns and array initialization loops.
+            FPM.addPass(llvm::LoadStoreVectorizerPass());
             MPM.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(FPM)));
+            // CalledValuePropagation propagates known function pointer values
+            // through indirect calls, enabling devirtualization and inlining.
+            MPM.addPass(llvm::CalledValuePropagationPass());
             // ConstantMerge deduplicates identical global constants across the
             // module (e.g. duplicate string literals, floating-point constants,
             // constant arrays).  Fewer unique constants means smaller data
@@ -880,7 +926,7 @@ void CodeGenerator::runOptimizationPasses() {
             llvm::legacy::FunctionPassManager postInlineFPM(module.get());
             postInlineFPM.add(llvm::createGVNPass());
             postInlineFPM.add(llvm::createInstructionCombiningPass());
-            postInlineFPM.add(llvm::createCFGSimplificationPass());
+            postInlineFPM.add(llvm::createCFGSimplificationPass(aggressiveCFGOpts()));
             postInlineFPM.add(llvm::createDeadCodeEliminationPass());
             postInlineFPM.doInitialization();
             for (auto* F : inlinedFuncs) {
@@ -1129,14 +1175,19 @@ void CodeGenerator::runOptimizationPasses() {
         cleanupFPM.add(llvm::createGVNPass());
         cleanupFPM.add(llvm::createDeadCodeEliminationPass());
         cleanupFPM.add(llvm::createInstructionCombiningPass());
-        cleanupFPM.add(llvm::createCFGSimplificationPass());
+        cleanupFPM.add(llvm::createCFGSimplificationPass(aggressiveCFGOpts()));
         // Post-pipeline loop cleanup: LoopSimplify re-canonicalizes loops
         // after superoptimizer/HGOE transforms, enabling LICM to hoist
         // invariants and LSR to reduce address computation complexity.
         cleanupFPM.add(llvm::createLoopSimplifyPass());
         cleanupFPM.add(llvm::createLICMPass());
         cleanupFPM.add(llvm::createLoopStrengthReducePass());
+        // Second GVN pass to catch redundancies created by LSR address
+        // canonicalization and loop cleanup.
+        cleanupFPM.add(llvm::createGVNPass());
+        cleanupFPM.add(llvm::createInstructionCombiningPass());
         cleanupFPM.add(llvm::createDeadCodeEliminationPass());
+        cleanupFPM.add(llvm::createCFGSimplificationPass(aggressiveCFGOpts()));
         cleanupFPM.doInitialization();
         for (auto& func : *module) {
             if (!func.isDeclaration()) {
@@ -1160,7 +1211,7 @@ void CodeGenerator::optimizeFunction(llvm::Function* func) {
     fpm.add(llvm::createInstructionCombiningPass());
     fpm.add(llvm::createReassociatePass());
     fpm.add(llvm::createGVNPass());
-    fpm.add(llvm::createCFGSimplificationPass());
+    fpm.add(llvm::createCFGSimplificationPass(aggressiveCFGOpts()));
     fpm.add(llvm::createDeadCodeEliminationPass());
 
     fpm.doInitialization();
@@ -1217,7 +1268,7 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     fpm.add(llvm::createInstructionCombiningPass());
     fpm.add(llvm::createReassociatePass());
     fpm.add(llvm::createGVNPass());
-    fpm.add(llvm::createCFGSimplificationPass());
+    fpm.add(llvm::createCFGSimplificationPass(aggressiveCFGOpts()));
     fpm.add(llvm::createDeadCodeEliminationPass());
     // Phase 2: Loop optimizations (polyhedral-style)
     // Standard LLVM ordering: LoopSimplify normalises loop structure first
@@ -1245,7 +1296,7 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     // IV values, redundant loads) that DCE alone would miss.
     fpm.add(llvm::createGVNPass());
     fpm.add(llvm::createInstructionCombiningPass());
-    fpm.add(llvm::createCFGSimplificationPass());
+    fpm.add(llvm::createCFGSimplificationPass(aggressiveCFGOpts()));
     fpm.add(llvm::createDeadCodeEliminationPass());
     // Phase 3: Post-loop optimizations
 #if LLVM_VERSION_MAJOR < 18
@@ -1254,6 +1305,7 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     fpm.add(llvm::createSinkingPass());
     fpm.add(llvm::createStraightLineStrengthReducePass());
     fpm.add(llvm::createNaryReassociatePass());
+    fpm.add(llvm::createReassociatePass());
     fpm.add(llvm::createTailCallEliminationPass());
     fpm.add(llvm::createConstantHoistingPass());
     fpm.add(llvm::createSeparateConstOffsetFromGEPPass());
@@ -1266,14 +1318,14 @@ void CodeGenerator::optimizeOptMaxFunctions() {
 
     // Phase 3.5: Aggressive cleanup passes for maximal optimization.
     fpm.add(llvm::createDeadCodeEliminationPass());
-    fpm.add(llvm::createCFGSimplificationPass());
+    fpm.add(llvm::createCFGSimplificationPass(aggressiveCFGOpts()));
 
     // Phase 4: Final cleanup — InstSimplify, InstCombine, CFGSimplification,
     // and DCE remove dead code and simplify patterns exposed by loop and
     // control-flow transformations above.
     fpm.add(llvm::createInstSimplifyLegacyPass());
     fpm.add(llvm::createInstructionCombiningPass());
-    fpm.add(llvm::createCFGSimplificationPass());
+    fpm.add(llvm::createCFGSimplificationPass(aggressiveCFGOpts()));
     fpm.add(llvm::createDeadCodeEliminationPass());
 
     fpm.doInitialization();
@@ -1417,7 +1469,7 @@ void CodeGenerator::runJITBaselinePasses() {
     fpm.add(llvm::createInstructionCombiningPass());
     fpm.add(llvm::createInstSimplifyLegacyPass());
     fpm.add(llvm::createReassociatePass());
-    fpm.add(llvm::createCFGSimplificationPass());
+    fpm.add(llvm::createCFGSimplificationPass(aggressiveCFGOpts()));
 
     // Phase 2: Value numbering and redundancy elimination.
     fpm.add(llvm::createGVNPass());
@@ -1469,7 +1521,7 @@ void CodeGenerator::runJITBaselinePasses() {
 
     // Phase 5: Final cleanup to remove instructions exposed by earlier passes.
     fpm.add(llvm::createInstructionCombiningPass());
-    fpm.add(llvm::createCFGSimplificationPass());
+    fpm.add(llvm::createCFGSimplificationPass(aggressiveCFGOpts()));
     fpm.add(llvm::createDeadCodeEliminationPass());
 
     fpm.doInitialization();

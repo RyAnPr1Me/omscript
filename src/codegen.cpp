@@ -2683,6 +2683,26 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         }
     }
 
+    // Default noalias at O2+: OmScript's ownership model guarantees that
+    // distinct pointer parameters never alias the same memory region —
+    // the borrow checker prevents multiple mutable references.  This is
+    // equivalent to compiling all C code with __restrict on every pointer
+    // parameter.  The attribute enables LLVM to freely reorder, vectorize,
+    // and hoist loads/stores without alias-related conservatism.
+    // Applied to all functions at O2+ unless already covered above.
+    if (optimizationLevel >= OptimizationLevel::O2
+        && !inOptMaxFunction && !currentFuncHintHot_
+        && !func->hintRestrict && !fileNoAlias_) {
+        for (unsigned i = 0; i < function->arg_size(); ++i) {
+            if (function->getArg(i)->getType()->isPointerTy()) {
+                function->addParamAttr(i, llvm::Attribute::NoAlias);
+                function->addParamAttr(i, llvm::Attribute::NonNull);
+                function->addParamAttr(i, llvm::Attribute::getWithDereferenceableBytes(
+                    *context, 8));
+            }
+        }
+    }
+
     // @unroll / @nounroll: per-function loop unrolling control.
     // These are stored and applied to every loop emitted within this function.
     currentFuncHintUnroll_ = func->hintUnroll;

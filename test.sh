@@ -298,7 +298,7 @@ fn classify(x:int) -> int {
     if (x < 100000){ return 5; }
     return 6;
 }
-@hot @flatten @unroll
+@hot @flatten @vectorize
 fn bench_ifelse(@prefetch n:int) -> int {
     var sum:int = 0;
     for (i:int in 0...n) {
@@ -420,7 +420,7 @@ fn poly_eval(x:int) -> int {
     r = r * x + 11;
     return r;
 }
-@hot @flatten @unroll
+@hot @flatten @vectorize
 fn bench_poly(@prefetch n:int) -> int {
     var sum:int = 0;
     for (i:int in 0...n) {
@@ -500,7 +500,7 @@ fn bench_combined(n:int) -> int {
 }
 
 // ── 19. matrix_multiply ──────────────────────────────────────
-@hot @flatten @unroll @vectorize
+@hot @flatten @unroll
 fn bench_matmul(n:int) -> int {
     var a:int[] = array_fill(n * n, 0);
     var b:int[] = array_fill(n * n, 0);
