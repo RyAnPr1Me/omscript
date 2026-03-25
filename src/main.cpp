@@ -1495,6 +1495,7 @@ void printUsage(const char* progName) {
                  "  -fstack-protector Stack protection\n"
                  "  -fegraph         E-graph equality saturation (default: on at O2+)\n"
                  "  -fsuperopt       Superoptimizer pass (default: on at O2+)\n"
+                 "  -fsuperopt-level=N  Superoptimizer aggressiveness 0-3 (default: 2)\n"
                  "  -fhgoe           Hardware graph optimization (default: on)\n"
                  "\n"
                  "Linker:\n"

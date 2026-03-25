@@ -790,12 +790,22 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
                         ? static_cast<uint64_t>(endV) - static_cast<uint64_t>(startV)
                         : static_cast<uint64_t>(startV) - static_cast<uint64_t>(endV);
                     if (tripCount > 0 && tripCount <= 64) {
-                        llvm::MDNode* unrollCount = llvm::MDNode::get(
-                            *context,
-                            {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
-                             llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
-                                 llvm::Type::getInt32Ty(*context), static_cast<uint32_t>(tripCount)))});
-                        loopMDs.push_back(unrollCount);
+                        if (tripCount <= 8) {
+                            // Very small constant-trip-count loops: fully unroll.
+                            // llvm.loop.unroll.full is a stronger hint than .count
+                            // and eliminates the loop entirely, removing branch
+                            // overhead and enabling cross-iteration optimization.
+                            loopMDs.push_back(llvm::MDNode::get(
+                                *context,
+                                {llvm::MDString::get(*context, "llvm.loop.unroll.full")}));
+                        } else {
+                            llvm::MDNode* unrollCount = llvm::MDNode::get(
+                                *context,
+                                {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
+                                 llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                                     llvm::Type::getInt32Ty(*context), static_cast<uint32_t>(tripCount)))});
+                            loopMDs.push_back(unrollCount);
+                        }
                         addedUnrollHint = true;
                     }
                 }

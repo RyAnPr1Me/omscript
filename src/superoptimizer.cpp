@@ -2013,6 +2013,7 @@ static unsigned applyAlgebraicSimplifications(llvm::Function& func) {
                     case 72: simplified = builder.CreateAdd(shl(xv,6), shl(xv,3), "mul72"); break;
                     case 80: simplified = builder.CreateAdd(shl(xv,6), shl(xv,4), "mul80"); break;
                     case 96: simplified = builder.CreateAdd(shl(xv,6), shl(xv,5), "mul96"); break;
+                    case 100: simplified = builder.CreateAdd(shl(xv,6), builder.CreateAdd(shl(xv,5), shl(xv,2)), "mul100"); break;
                     case 112: simplified = builder.CreateSub(shl(xv,7), shl(xv,4), "mul112"); break;
                     case 120: simplified = builder.CreateSub(shl(xv,7), shl(xv,3), "mul120"); break;
                     case 127: simplified = builder.CreateSub(shl(xv,7), xv, "mul127"); break;
@@ -3037,6 +3038,63 @@ bool synthesizeReplacement(llvm::Instruction* inst, const SynthesisConfig& confi
         if (cval && *cval > 0 && (*cval & (*cval - 1)) == 0) {
             replacement = builder.CreateAnd(inst->getOperand(0),
                 llvm::ConstantInt::get(inst->getType(), *cval - 1), "urem_and");
+        }
+    }
+
+    // Template 4: Signed division by power-of-2 → arithmetic shift with
+    // sign-bit correction.  For non-negative x, sdiv x, 2^n == x >> n.
+    // For negative x, we need to add (2^n - 1) before shifting to round
+    // toward zero (C/LLVM semantics) instead of toward negative infinity.
+    //   sdiv x, 2^n → (x + (x >> 63) & (2^n - 1)) >> n
+    // This replaces a 25-cycle division with ~4 cycles of shifts+add+and.
+    if (!replacement && inst->getOpcode() == llvm::Instruction::SDiv) {
+        auto cval = getConstIntValue(inst->getOperand(1));
+        if (cval && *cval > 1 && (*cval & (*cval - 1)) == 0) {
+            unsigned n = llvm::Log2_64(static_cast<uint64_t>(*cval));
+            llvm::Value* x = inst->getOperand(0);
+            llvm::Type* ty = x->getType();
+            unsigned bitWidth = ty->getIntegerBitWidth();
+            // signBit = x >> (bitWidth - 1)  (all 1s if negative, 0 if non-neg)
+            llvm::Value* signBit = builder.CreateAShr(x,
+                llvm::ConstantInt::get(ty, bitWidth - 1), "sdiv_sign");
+            // bias = signBit & (2^n - 1)  (adds bias only for negative values)
+            llvm::Value* bias = builder.CreateAnd(signBit,
+                llvm::ConstantInt::get(ty, (*cval) - 1), "sdiv_bias");
+            // biased = x + bias
+            llvm::Value* biased = builder.CreateAdd(x, bias, "sdiv_biased");
+            // result = biased >> n  (arithmetic shift to preserve sign)
+            replacement = builder.CreateAShr(biased,
+                llvm::ConstantInt::get(ty, n), "sdiv_shr");
+        }
+    }
+
+    // Template 5: Signed remainder by power-of-2 → mask with sign correction.
+    //   srem x, 2^n → x - ((x + (x >> 63) & (2^n - 1)) >> n) * 2^n
+    // Simplified: for non-negative x, same as urem.  For negative x, needs
+    // sign correction.  We use the identity:
+    //   srem x, 2^n = x - (sdiv x, 2^n) * 2^n
+    // where sdiv is already lowered to shifts above.  But we can do better:
+    //   srem x, C = x - (x / C) * C  [generic identity]
+    // For power-of-2 C with corrected division:
+    //   t = (x + ((x >> 63) & (C-1))) >> n
+    //   srem = x - (t << n)
+    if (!replacement && inst->getOpcode() == llvm::Instruction::SRem) {
+        auto cval = getConstIntValue(inst->getOperand(1));
+        if (cval && *cval > 1 && (*cval & (*cval - 1)) == 0) {
+            unsigned n = llvm::Log2_64(static_cast<uint64_t>(*cval));
+            llvm::Value* x = inst->getOperand(0);
+            llvm::Type* ty = x->getType();
+            unsigned bitWidth = ty->getIntegerBitWidth();
+            llvm::Value* signBit = builder.CreateAShr(x,
+                llvm::ConstantInt::get(ty, bitWidth - 1), "srem_sign");
+            llvm::Value* bias = builder.CreateAnd(signBit,
+                llvm::ConstantInt::get(ty, (*cval) - 1), "srem_bias");
+            llvm::Value* biased = builder.CreateAdd(x, bias, "srem_biased");
+            llvm::Value* quot = builder.CreateAShr(biased,
+                llvm::ConstantInt::get(ty, n), "srem_quot");
+            llvm::Value* quotTimesC = builder.CreateShl(quot,
+                llvm::ConstantInt::get(ty, n), "srem_qtc");
+            replacement = builder.CreateSub(x, quotTimesC, "srem_result");
         }
     }
 
