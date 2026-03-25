@@ -5,7 +5,7 @@ set -e
 # ──────────────────────────────────────────────────────────────
 #  OmScript Benchmark Suite  (Fair Edition)
 #
-#  25 diverse micro-benchmarks covering distinct workloads.
+#  30 diverse micro-benchmarks covering distinct workloads.
 #  No category is over-represented.  Both OM and C implementations
 #  are idiomatic and use the same algorithm.
 #
@@ -22,15 +22,17 @@ set -e
 #    - Integer arithmetic & math builtins
 #    - Floating-point computation
 #    - Arrays (push, random access, sorting, higher-order)
-#    - Strings (concat, search)
+#    - Strings (concat, search, replace, transform)
 #    - Structs / data layout
-#    - Control flow (switch, if/else, while)
+#    - Control flow (switch, if/else, while, countdown)
 #    - Recursion
 #    - Loops (nested, reduction, vectorizable)
 #    - Function calls / inlining
 #    - Bitwise / intrinsics
 #    - Real-world kernels (matrix mul, sieve, prefix sum, hash,
 #      collatz, binary search)
+#    - I/O (file write, file read, line counting)
+#    - Type conversions (int, float, string)
 # ──────────────────────────────────────────────────────────────
 
 RUNS=${BENCH_RUNS:-5}
@@ -38,7 +40,7 @@ WARMUP_RUNS=${BENCH_WARMUP:-1}
 
 SCRIPT_START=$(date +%s%N)
 
-NUM_BENCHMARKS=25
+NUM_BENCHMARKS=30
 
 BENCH_NAME=(
     "integer_math"       #  0 — GCD, log2, modular arithmetic
@@ -66,6 +68,11 @@ BENCH_NAME=(
     "hash_compute"       # 22 — FNV-1a hash loop
     "collatz"            # 23 — Collatz-sequence lengths
     "binary_search"      # 24 — binary search in sorted array
+    "file_io"            # 25 — file write / read / line count
+    "string_manip"       # 26 — replace, upper, reverse
+    "array_sort"         # 27 — sort array of integers
+    "countdown_loop"     # 28 — backward decrement loop
+    "type_conversion"    # 29 — int↔float↔string conversion
 )
 
 BENCH_DESC=(
@@ -94,6 +101,11 @@ BENCH_DESC=(
     "FNV-1a style hash computation"
     "Collatz conjecture sequence lengths"
     "Binary search in a sorted array"
+    "File write then read back with line counting"
+    "String replace, uppercase, and reverse operations"
+    "Sort an array of N integers"
+    "Backward decrement loop with accumulation"
+    "Integer, float, and string type conversions"
 )
 
 # Input sizes – tuned so each test runs ~20-200 ms in C.
@@ -123,6 +135,11 @@ BENCH_N=(
     5000000   # 22  hash_compute
     1000000   # 23  collatz
     5000000   # 24  binary_search
+    50000     # 25  file_io        (write+read 50K lines)
+    50000     # 26  string_manip   (50K string ops)
+    500000    # 27  array_sort     (sort 500K elements)
+    5000000   # 28  countdown_loop (decrement 5M times)
+    2000000   # 29  type_conversion (2M conversions)
 )
 
 BOTTLENECK_LABELS=(
@@ -151,6 +168,11 @@ BOTTLENECK_LABELS=(
     "integer hash computation codegen"
     "branch-heavy integer loop"
     "loop + comparison codegen (binary search)"
+    "file I/O syscall and buffering overhead"
+    "string manipulation builtin overhead"
+    "array sort algorithm overhead (qsort vs builtin)"
+    "backward loop codegen quality"
+    "type conversion overhead (int/float/string)"
 )
 
 # ─── COLOR CODES ──────────────────────────────────────────────
@@ -630,6 +652,94 @@ fn bench_bsearch(@prefetch n:int) -> int {
     return found;
 }
 
+// ── 25. file_io ──────────────────────────────────────────────
+@hot
+fn bench_fileio(@prefetch n:int) -> int {
+    var path:str = "/tmp/omscript_bench_io.txt";
+    // Write N lines to a file
+    var content:str = "";
+    for (i:int in 0...n) {
+        content = str_concat(content, str_concat(to_string(i * 7 + 3), "\n"));
+        if (i % 1000 == 999) {
+            file_append(path, content);
+            content = "";
+        }
+    }
+    if (str_len(content) > 0) {
+        file_append(path, content);
+    }
+    // Read it back and count lines
+    var data:str = file_read(path);
+    var lines:int = str_count(data, "\n");
+    invalidate data;
+    invalidate content;
+    invalidate path;
+    return lines;
+}
+
+// ── 26. string_manip ────────────────────────────────────────
+@hot @flatten
+fn bench_strmanip(@prefetch n:int) -> int {
+    var acc:int = 0;
+    var base:str = str_repeat("hello world ", 10);
+    for (i:int in 0...n) {
+        var s:str = str_replace(base, "world", "earth");
+        acc += str_len(s);
+        var u:str = str_upper(s);
+        acc += str_len(u);
+        var r:str = str_reverse(u);
+        acc += str_len(r);
+        invalidate s;
+        invalidate u;
+        invalidate r;
+    }
+    invalidate base;
+    return acc;
+}
+
+// ── 27. array_sort ───────────────────────────────────────────
+@hot @flatten
+fn bench_arrsort(@prefetch n:int) -> int {
+    var arr:int[] = array_fill(n, 0);
+    for (i:int in 0...n) {
+        arr[i] = (i * 2654435761) % n;
+    }
+    arr = sort(arr);
+    var checksum:int = 0;
+    for (i:int in 0...n) {
+        checksum += arr[i] ^ i;
+    }
+    invalidate arr;
+    return checksum;
+}
+
+// ── 28. countdown_loop ──────────────────────────────────────
+@hot @flatten @unroll
+fn bench_countdown(@prefetch n:int) -> int {
+    var acc:int = 0;
+    var i:int = n;
+    while (i > 0) {
+        acc += (i * i) % 127;
+        acc ^= (i >> 1);
+        acc += (i & 255);
+        i -= 1;
+    }
+    return acc;
+}
+
+// ── 29. type_conversion ─────────────────────────────────────
+@hot @flatten @unroll
+fn bench_typeconv(@prefetch n:int) -> int {
+    var acc:int = 0;
+    for (i:int in 1...n) {
+        var f:double = to_float(i);
+        var back:int = to_int(f * 1.5);
+        acc += back % 1000;
+        acc ^= (i * 3);
+    }
+    return acc;
+}
+
 OPTMAX!:
 
 // ── main dispatch ────────────────────────────────────────────
@@ -663,6 +773,11 @@ fn main() -> int {
         case 22: print(bench_hash(n));           break;
         case 23: print(bench_collatz(n));        break;
         case 24: print(bench_bsearch(n));        break;
+        case 25: print(bench_fileio(n));         break;
+        case 26: print(bench_strmanip(n));       break;
+        case 27: print(bench_arrsort(n));        break;
+        case 28: print(bench_countdown(n));      break;
+        case 29: print(bench_typeconv(n));       break;
         default: print(0);
     }
     invalidate n;
@@ -1089,6 +1204,99 @@ static long bench_bsearch(long n) {
     return found;
 }
 
+/* 25 ── file_io ───────────────────────────────── */
+static long bench_fileio(long n) {
+    const char *path = "/tmp/c_bench_io.txt";
+    FILE *f = fopen(path, "w");
+    for (long i = 0; i < n; i++) {
+        fprintf(f, "%ld\n", i * 7 + 3);
+    }
+    fclose(f);
+    /* read back and count lines */
+    f = fopen(path, "r");
+    long lines = 0;
+    int ch;
+    while ((ch = fgetc(f)) != EOF) {
+        if (ch == '\n') lines++;
+    }
+    fclose(f);
+    return lines;
+}
+
+/* 26 ── string_manip ──────────────────────────── */
+static long bench_strmanip(long n) {
+    long acc = 0;
+    /* build base: "hello world " repeated 10 times = 120 chars */
+    char base[121];
+    for (int r = 0; r < 10; r++) memcpy(base + r * 12, "hello world ", 12);
+    base[120] = '\0';
+    for (long i = 0; i < n; i++) {
+        /* replace "world" with "earth" */
+        char buf[121];
+        memcpy(buf, base, 121);
+        char *p;
+        while ((p = strstr(buf, "world")) != NULL) {
+            memcpy(p, "earth", 5);
+        }
+        acc += (long)strlen(buf);
+        /* uppercase */
+        for (int j = 0; buf[j]; j++)
+            if (buf[j] >= 'a' && buf[j] <= 'z') buf[j] -= 32;
+        acc += (long)strlen(buf);
+        /* reverse */
+        long len = (long)strlen(buf);
+        for (long j = 0; j < len / 2; j++) {
+            char tmp = buf[j]; buf[j] = buf[len - 1 - j]; buf[len - 1 - j] = tmp;
+        }
+        acc += (long)strlen(buf);
+    }
+    return acc;
+}
+
+/* 27 ── array_sort ────────────────────────────── */
+static int cmp_long(const void *a, const void *b) {
+    long la = *(const long *)a, lb = *(const long *)b;
+    return (la > lb) - (la < lb);
+}
+static long bench_arrsort(long n) {
+    long *arr = malloc(n * sizeof(long));
+    for (long i = 0; i < n; i++) {
+        arr[i] = (i * 2654435761UL) % n;
+    }
+    qsort(arr, n, sizeof(long), cmp_long);
+    long checksum = 0;
+    for (long i = 0; i < n; i++) {
+        checksum += arr[i] ^ i;
+    }
+    free(arr);
+    return checksum;
+}
+
+/* 28 ── countdown_loop ────────────────────────── */
+static long bench_countdown(long n) {
+    long acc = 0;
+    long i = n;
+    while (i > 0) {
+        acc += (i * i) % 127;
+        acc ^= (i >> 1);
+        acc += (i & 255);
+        i--;
+    }
+    return acc;
+}
+
+/* 29 ── type_conversion ───────────────────────── */
+static long bench_typeconv(long n) {
+    long acc = 0;
+    for (long i = 1; i < n; i++) {
+        double f = (double)i;
+        long back = (long)(f * 1.5);
+        acc += back % 1000;
+        acc ^= (i * 3);
+    }
+    return acc;
+}
+
 int main(void) {
     int test_id; long n;
     scanf("%d %ld", &test_id, &n);
@@ -1119,6 +1327,11 @@ int main(void) {
         case 22: r = bench_hash(n);           break;
         case 23: r = bench_collatz(n);        break;
         case 24: r = bench_bsearch(n);        break;
+        case 25: r = bench_fileio(n);         break;
+        case 26: r = bench_strmanip(n);       break;
+        case 27: r = bench_arrsort(n);        break;
+        case 28: r = bench_countdown(n);      break;
+        case 29: r = bench_typeconv(n);       break;
     }
     printf("%ld\n", r);
     return 0;
@@ -1175,8 +1388,15 @@ MISMATCH=0
 run_one() {
     local id=$1 n=$2 name=$3
 
+    # For file_io benchmark, clean temp files before correctness check.
+    if [ "$id" -eq 25 ]; then
+        rm -f /tmp/omscript_bench_io.txt /tmp/c_bench_io.txt
+    fi
+
     local co oo
     co=$(echo "$id $n" | ./bench_c)
+    # Clean between C and OM correctness runs for file_io.
+    if [ "$id" -eq 25 ]; then rm -f /tmp/omscript_bench_io.txt /tmp/c_bench_io.txt; fi
     oo=$(echo "$id $n" | ./bench_om)
     if [ "$co" != "$oo" ]; then
         printf "  %-22s  C=%-14s  OM=%-14s  ${RED}❌ MISMATCH${RST}\n" "$name" "$co" "$oo"
@@ -1191,7 +1411,9 @@ run_one() {
     # the timed runs start from a warm state.  This removes cold-start
     # variance that would unfairly penalize whichever binary runs first.
     for (( w=0; w<WARMUP_RUNS; w++ )); do
+        if [ "$id" -eq 25 ]; then rm -f /tmp/omscript_bench_io.txt /tmp/c_bench_io.txt; fi
         echo "$id $n" | ./bench_c  > /dev/null
+        if [ "$id" -eq 25 ]; then rm -f /tmp/omscript_bench_io.txt /tmp/c_bench_io.txt; fi
         echo "$id $n" | ./bench_om > /dev/null
     done
 
@@ -1201,12 +1423,14 @@ run_one() {
     local c_runs=() om_runs=()
     for (( r=0; r<RUNS; r++ )); do
         local cs ce ct os oe ot
+        if [ "$id" -eq 25 ]; then rm -f /tmp/omscript_bench_io.txt /tmp/c_bench_io.txt; fi
         cs=$(date +%s%N)
         echo "$id $n" | ./bench_c > /dev/null
         ce=$(date +%s%N)
         ct=$(( (ce - cs) / 1000000 ))
         c_runs+=("$ct")
 
+        if [ "$id" -eq 25 ]; then rm -f /tmp/omscript_bench_io.txt /tmp/c_bench_io.txt; fi
         os=$(date +%s%N)
         echo "$id $n" | ./bench_om > /dev/null
         oe=$(date +%s%N)
@@ -1266,6 +1490,10 @@ run_one() {
 }
 
 # ─── RUN ──────────────────────────────────────────────────────
+# Pre-clean temp files used by I/O benchmarks so stale data doesn't
+# corrupt correctness checks or inflate timing.
+rm -f /tmp/omscript_bench_io.txt /tmp/c_bench_io.txt
+
 echo "╔═══════════════════════════════════════════════════════════════════════════════════╗"
 echo "║         Per-Function Benchmarks  (median of $RUNS runs, $WARMUP_RUNS warmup)                  ║"
 echo "╚═══════════════════════════════════════════════════════════════════════════════════╝"
@@ -1461,3 +1689,4 @@ echo "────────────────────────�
 
 # ─── CLEANUP ──────────────────────────────────────────────────
 rm -f bench.om bench.c bench_om bench_c
+rm -f /tmp/omscript_bench_io.txt /tmp/c_bench_io.txt

@@ -72,6 +72,13 @@
 #include <llvm/Transforms/Scalar/Reassociate.h>
 #include <llvm/Transforms/Scalar/EarlyCSE.h>
 #include <llvm/Transforms/Scalar/SCCP.h>
+#include <llvm/Transforms/Scalar/LoopFlatten.h>
+#include <llvm/Transforms/Scalar/LoopUnrollAndJamPass.h>
+#include <llvm/Transforms/Scalar/DFAJumpThreading.h>
+#include <llvm/Transforms/Scalar/InductiveRangeCheckElimination.h>
+#include <llvm/Transforms/Scalar/AlignmentFromAssumptions.h>
+#include <llvm/Transforms/Scalar/PartiallyInlineLibCalls.h>
+#include <llvm/Transforms/Scalar/LoopPassManager.h>
 #include <llvm/Transforms/Utils.h>
 #include <llvm/Transforms/Utils/Cloning.h>
 #include <llvm/Transforms/Vectorize/VectorCombine.h>
@@ -459,6 +466,32 @@ void CodeGenerator::runOptimizationPasses() {
             [](llvm::LoopPassManager& LPM, llvm::OptimizationLevel) { LPM.addPass(llvm::LoopInterchangePass()); });
     }
 
+    // At O3 with -floop-optimize, register LoopFlattenPass to collapse
+    // perfectly-nested loops into a single loop, eliminating inner loop
+    // overhead (branch, IV update).  This is particularly beneficial for
+    // matrix-style iteration patterns where the inner loop simply increments
+    // a linear index.  Uses createFunctionToLoopPassAdaptor because
+    // LoopFlattenPass operates on LoopNest (not a single Loop).
+    if (optimizationLevel >= OptimizationLevel::O3 && enableLoopOptimize_) {
+        PB.registerScalarOptimizerLateEPCallback(
+            [](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) {
+            FPM.addPass(llvm::createFunctionToLoopPassAdaptor(llvm::LoopFlattenPass()));
+        });
+    }
+
+    // At O3 with -floop-optimize, register LoopUnrollAndJamPass to unroll
+    // the outer loop and fuse ("jam") the unrolled copies of the inner loop.
+    // This improves data reuse across outer iterations and enables better
+    // vectorization of the combined inner loop body.  Critical for dense
+    // matrix multiply and stencil computations.
+    if (optimizationLevel >= OptimizationLevel::O3 && enableLoopOptimize_) {
+        PB.registerScalarOptimizerLateEPCallback(
+            [](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) {
+            FPM.addPass(llvm::createFunctionToLoopPassAdaptor(
+                llvm::LoopUnrollAndJamPass(/*OptLevel=*/3)));
+        });
+    }
+
     // At O2+, inject AggressiveInstCombine after the standard peephole passes
     // to catch multi-instruction patterns (e.g. truncation sequences, popcount
     // idioms) that regular InstCombine does not handle.  Lowered from O3 to O2
@@ -555,12 +588,36 @@ void CodeGenerator::runOptimizationPasses() {
     // the quotient from a single hardware division for both results.
     // SpeculativeExecutionPass speculatively executes instructions from a
     // branch to reduce branch misprediction cost on wide-issue CPUs.
+    // DFAJumpThreadingPass performs DFA-based jump threading on switch/case
+    // statements, threading through entire state machines where the switch
+    // variable can be proven constant along specific paths.
+    // GVNHoistPass hoists identical computations from different basic blocks
+    // to their common dominator, reducing redundant computation in
+    // branch-heavy code (e.g. collatz, switch dispatch).
+    // AlignmentFromAssumptionsPass derives alignment from __builtin_assume
+    // and related hints, enabling better vectorization of aligned loads/stores.
     if (optimizationLevel >= OptimizationLevel::O3) {
         PB.registerScalarOptimizerLateEPCallback([](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) {
             FPM.addPass(llvm::ConstraintEliminationPass());
             FPM.addPass(llvm::JumpThreadingPass());
+            FPM.addPass(llvm::DFAJumpThreadingPass());
             FPM.addPass(llvm::DivRemPairsPass());
             FPM.addPass(llvm::SpeculativeExecutionPass());
+            FPM.addPass(llvm::GVNHoistPass());
+            FPM.addPass(llvm::AlignmentFromAssumptionsPass());
+        });
+    }
+
+    // At O2+, inject IRCEPass (Inductive Range Check Elimination) to
+    // eliminate range checks inside loops where the loop induction variable
+    // is provably within bounds.  This creates a "main loop" that runs
+    // without checks and a small "pre/post loop" for the edge iterations.
+    // Particularly beneficial for OmScript array loops where bounds checks
+    // are already statically elided for safe iterators but residual LLVM
+    // range checks may remain from vectorization or unrolling.
+    if (optimizationLevel >= OptimizationLevel::O2) {
+        PB.registerScalarOptimizerLateEPCallback([](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel) {
+            FPM.addPass(llvm::IRCEPass());
         });
     }
 
@@ -1072,8 +1129,21 @@ void CodeGenerator::runOptimizationPasses() {
         cleanupFPM.add(llvm::createGVNPass());
         cleanupFPM.add(llvm::createDeadCodeEliminationPass());
         cleanupFPM.add(llvm::createInstructionCombiningPass());
+        cleanupFPM.add(llvm::createReassociatePass());
         cleanupFPM.add(llvm::createCFGSimplificationPass());
         cleanupFPM.add(llvm::createDeadCodeEliminationPass());
+        if (optimizationLevel >= OptimizationLevel::O3) {
+            // At O3, add LICM to hoist any remaining loop-invariant code
+            // exposed by the superoptimizer and HGOE passes, and add a
+            // second round of GVN + InstCombine to catch patterns that the
+            // first round of cleanup exposed.
+            cleanupFPM.add(llvm::createLICMPass());
+            cleanupFPM.add(llvm::createSinkingPass());
+            cleanupFPM.add(llvm::createGVNPass());
+            cleanupFPM.add(llvm::createInstructionCombiningPass());
+            cleanupFPM.add(llvm::createCFGSimplificationPass());
+            cleanupFPM.add(llvm::createDeadCodeEliminationPass());
+        }
         cleanupFPM.doInitialization();
         for (auto& func : *module) {
             if (!func.isDeclaration()) {
