@@ -1,4 +1,19 @@
 cmake_minimum_required(VERSION 3.13)
+
+# ── Compiler cache (ccache / sccache) ─────────────────────────────────────────
+# Automatically use ccache or sccache when available to speed up incremental
+# builds.  Must be set before project() so the compiler launcher is active for
+# all targets.
+find_program(CCACHE_PROGRAM ccache)
+find_program(SCCACHE_PROGRAM sccache)
+if(CCACHE_PROGRAM)
+    set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
+    message(STATUS "Using ccache: ${CCACHE_PROGRAM}")
+elseif(SCCACHE_PROGRAM)
+    set(CMAKE_CXX_COMPILER_LAUNCHER "${SCCACHE_PROGRAM}")
+    message(STATUS "Using sccache: ${SCCACHE_PROGRAM}")
+endif()
+
 project(OmScript VERSION 3.5.0)
 
 # Allow overriding the compiler version string at build time (e.g. -DOMSC_VERSION=1.2.3)
@@ -18,6 +33,9 @@ endif()
 # Enable compiler warnings for early defect detection
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     add_compile_options(-Wall -Wextra -Wpedantic)
+    # Use pipes instead of temporary files for communication between compiler
+    # stages, avoiding disk I/O overhead during compilation.
+    add_compile_options(-pipe)
 endif()
 
 # Link-time optimization for the compiler binary itself (disabled by default
@@ -207,6 +225,28 @@ set(RUNTIME_SOURCES
 # Compiler executable
 add_executable(omsc ${COMPILER_SOURCES} ${RUNTIME_SOURCES})
 
+# ── Precompiled headers (PCH) ────────────────────────────────────────────────
+# Precompile heavy LLVM headers once and reuse across all translation units.
+# This dramatically reduces build time since headers like IRBuilder.h,
+# Instructions.h, and Module.h are large and included by most source files.
+# Requires CMake 3.16+; gracefully skipped on older versions.
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.16")
+    target_precompile_headers(omsc PRIVATE
+        <llvm/IR/IRBuilder.h>
+        <llvm/IR/Module.h>
+        <llvm/IR/Instructions.h>
+        <llvm/IR/LLVMContext.h>
+        <llvm/IR/Value.h>
+        <llvm/IR/DIBuilder.h>
+        <llvm/IR/Function.h>
+        <string>
+        <vector>
+        <memory>
+        <unordered_map>
+        <unordered_set>
+    )
+endif()
+
 # Apply PGO profile-use flags only to the compiler targets (omsc and
 # omscript_lib).  Test targets are not profiled, so applying PGO flags
 # to them causes hundreds of -Wmissing-profile warnings and does not
@@ -313,6 +353,10 @@ if(GTest_FOUND)
 
     add_library(omscript_lib STATIC ${LIB_SOURCES})
     target_link_libraries(omscript_lib ${llvm_libs})
+    # Reuse precompiled headers from the main target to avoid recompiling them.
+    if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.16")
+        target_precompile_headers(omscript_lib REUSE_FROM omsc)
+    endif()
     if(POLLY_LIB)
         target_compile_definitions(omscript_lib PRIVATE "POLLY_LIB_PATH=\"${POLLY_LIB}\"")
     endif()

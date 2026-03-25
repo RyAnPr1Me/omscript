@@ -25,10 +25,17 @@
 ///   optimization pipeline, catching patterns that individual passes miss.
 ///   It is enabled at O2+ and can be controlled with -fsuperopt / -fno-superopt.
 
-#include <llvm/IR/Function.h>
-#include <llvm/IR/Module.h>
-#include <llvm/IR/Instructions.h>
-#include <llvm/IR/IRBuilder.h>
+// Forward declarations — avoids pulling in heavy LLVM headers for translation
+// units that only need the superoptimizer interface (e.g. codegen_opt.cpp already
+// includes the full headers via codegen.h).
+namespace llvm {
+class BasicBlock;
+class Function;
+class Instruction;
+class Module;
+class Value;
+} // namespace llvm
+
 #include <cstdint>
 #include <string>
 #include <vector>

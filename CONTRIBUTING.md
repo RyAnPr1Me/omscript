@@ -5,7 +5,7 @@ Thank you for considering contributing to OmScript!
 ## Development Setup
 
 ### Prerequisites
-- CMake 3.13+
+- CMake 3.13+ (3.16+ recommended for precompiled header support)
 - C++17 compiler (GCC or Clang)
 - LLVM 18 development libraries
 - Google Test (libgtest-dev)
@@ -17,12 +17,41 @@ cmake .. -DCMAKE_BUILD_TYPE=Debug
 make -j$(nproc)
 ```
 
+### Faster Builds
+
+The build system automatically uses **ccache** or **sccache** when available,
+and enables **precompiled headers** (PCH) on CMake 3.16+ to avoid reparsing
+heavy LLVM headers in every translation unit.
+
+```bash
+# Install ccache for faster incremental rebuilds
+sudo apt-get install -y ccache        # Debian/Ubuntu
+brew install ccache                    # macOS
+
+# First build compiles the PCH (~15s), subsequent builds reuse it
+mkdir -p build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release -DLLVM_DIR=/usr/lib/llvm-18/cmake
+make -j$(nproc)
+
+# Optional: build with LTO for a faster compiler binary
+cmake .. -DCMAKE_BUILD_TYPE=Release -DLTO=ON
+make -j$(nproc)
+
+# Optional: build with PGO for maximum compiler performance
+# Phase 1: instrument
+cmake .. -DPGO_GENERATE=ON -DPGO_PROFILE_DIR=/tmp/pgo
+make -j$(nproc) && ./omsc run ../../examples/fibonacci.om
+# Phase 2: optimize
+cmake .. -DPGO_USE=/tmp/pgo
+make -j$(nproc)
+```
+
 ### Running Tests
 ```bash
 # Unit tests
 cd build && ctest --output-on-failure
 
-# Integration tests
+# Integration tests (~330 tests)
 bash run_tests.sh
 ```
 

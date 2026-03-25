@@ -3610,6 +3610,37 @@ static unsigned annotateLoopsForTargetInFunc(llvm::Function& func,
                 llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), interleave))
         }));
 
+        // Add a target-aware vectorization width hint based on the CPU's SIMD
+        // register width.  This helps the vectorizer commit to the optimal VF
+        // without cost-model exploration overhead.  Only added when no explicit
+        // vectorize metadata is present (to preserve user @novectorize hints).
+        {
+            bool hasVecMD = false;
+            if (auto* existingMD = latchTerm->getMetadata(llvm::LLVMContext::MD_loop)) {
+                for (unsigned i = 1, e = existingMD->getNumOperands(); i < e; ++i) {
+                    if (auto* inner = llvm::dyn_cast<llvm::MDNode>(existingMD->getOperand(i))) {
+                        if (inner->getNumOperands() > 0) {
+                            if (auto* str = llvm::dyn_cast<llvm::MDString>(inner->getOperand(0))) {
+                                if (str->getString().starts_with("llvm.loop.vectorize")) {
+                                    hasVecMD = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if (!hasVecMD) {
+                // vectorWidth is in bits (128/256/512); divide by 64 for i64 lane count.
+                unsigned vecWidth = std::max(profile.vectorWidth / 64, 2u);
+                mds.push_back(llvm::MDNode::get(ctx, {
+                    llvm::MDString::get(ctx, "llvm.loop.vectorize.width"),
+                    llvm::ConstantAsMetadata::get(
+                        llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), vecWidth))
+                }));
+            }
+        }
+
         llvm::MDNode* loopID = llvm::MDNode::get(ctx, mds);
         loopID->replaceOperandWith(0, loopID);
         latchTerm->setMetadata(llvm::LLVMContext::MD_loop, loopID);

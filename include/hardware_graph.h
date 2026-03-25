@@ -18,10 +18,16 @@
 ///   When -march / -mtune are not specified, the engine is bypassed entirely
 ///   and the normal compiler pipeline is used unchanged.
 
-#include <llvm/IR/Function.h>
-#include <llvm/IR/Module.h>
-#include <llvm/IR/Instructions.h>
-#include <llvm/IR/IRBuilder.h>
+// Forward declarations — avoids pulling in heavy LLVM headers for translation
+// units that only need the HGOE interface.  The full headers are included in
+// the .cpp file where the implementations live.
+namespace llvm {
+class BasicBlock;
+class Function;
+class Instruction;
+class Module;
+} // namespace llvm
+
 #include <cstdint>
 #include <string>
 #include <vector>
