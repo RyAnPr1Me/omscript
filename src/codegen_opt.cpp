@@ -739,6 +739,22 @@ void CodeGenerator::runOptimizationPasses() {
         });
     }
 
+    // At O3, run an additional SLP vectorizer pass after the scalar optimizer
+    // late callbacks.  This catches SLP opportunities that were only exposed
+    // after scalar optimizations (constant propagation, GVN, strength
+    // reduction) simplified the IR.  For example, after SCCP proves a
+    // branch is dead and DCE removes it, previously-separated scalar
+    // operations may now be adjacent and packable into SIMD.
+    if (optimizationLevel >= OptimizationLevel::O3) {
+        PB.registerOptimizerLastEPCallback(
+            OMSC_OPTIMIZER_LAST_EP_LAMBDA {
+            llvm::FunctionPassManager FPM;
+            FPM.addPass(llvm::SLPVectorizerPass());
+            FPM.addPass(llvm::VectorCombinePass());
+            MPM.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(FPM)));
+        });
+    }
+
     // At O3, add Scalarizer to break vector operations back to scalars
     // when the target doesn't benefit from them (e.g., when vector ops
     // would require expensive shuffles).  This runs AFTER vectorization

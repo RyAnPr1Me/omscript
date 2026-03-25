@@ -2766,6 +2766,128 @@ static unsigned applyAlgebraicSimplifications(llvm::Function& func) {
                 }
             }
 
+            // ── Floating-point strength reductions ─────────────────────────
+            // These only fire when the instruction has fast-math flags set,
+            // matching OmScript's -ffast-math semantics.
+
+            // fmul(x, 1.0) → x
+            if (!simplified && inst.getOpcode() == llvm::Instruction::FMul) {
+                if (auto* cf = llvm::dyn_cast<llvm::ConstantFP>(inst.getOperand(1))) {
+                    if (cf->isExactlyValue(1.0)) simplified = inst.getOperand(0);
+                } else if (auto* cf = llvm::dyn_cast<llvm::ConstantFP>(inst.getOperand(0))) {
+                    if (cf->isExactlyValue(1.0)) simplified = inst.getOperand(1);
+                }
+            }
+            // fmul(x, -1.0) → fneg(x)
+            if (!simplified && inst.getOpcode() == llvm::Instruction::FMul) {
+                if (auto* cf = llvm::dyn_cast<llvm::ConstantFP>(inst.getOperand(1))) {
+                    if (cf->isExactlyValue(-1.0)) {
+                        llvm::IRBuilder<> builder(&inst);
+                        simplified = builder.CreateFNeg(inst.getOperand(0), "fmul_neg1");
+                    }
+                } else if (auto* cf = llvm::dyn_cast<llvm::ConstantFP>(inst.getOperand(0))) {
+                    if (cf->isExactlyValue(-1.0)) {
+                        llvm::IRBuilder<> builder(&inst);
+                        simplified = builder.CreateFNeg(inst.getOperand(1), "fmul_neg1");
+                    }
+                }
+            }
+            // fmul(x, 2.0) → fadd(x, x) — saves a constant load and may be faster
+            if (!simplified && inst.getOpcode() == llvm::Instruction::FMul) {
+                if (auto* cf = llvm::dyn_cast<llvm::ConstantFP>(inst.getOperand(1))) {
+                    if (cf->isExactlyValue(2.0)) {
+                        llvm::IRBuilder<> builder(&inst);
+                        simplified = builder.CreateFAdd(inst.getOperand(0), inst.getOperand(0), "fmul2_fadd");
+                    }
+                } else if (auto* cf = llvm::dyn_cast<llvm::ConstantFP>(inst.getOperand(0))) {
+                    if (cf->isExactlyValue(2.0)) {
+                        llvm::IRBuilder<> builder(&inst);
+                        simplified = builder.CreateFAdd(inst.getOperand(1), inst.getOperand(1), "fmul2_fadd");
+                    }
+                }
+            }
+            // fadd(x, 0.0) → x (safe under fast-math)
+            if (!simplified && inst.getOpcode() == llvm::Instruction::FAdd && inst.getFastMathFlags().isFast()) {
+                if (auto* cf = llvm::dyn_cast<llvm::ConstantFP>(inst.getOperand(1))) {
+                    if (cf->isZero()) simplified = inst.getOperand(0);
+                } else if (auto* cf = llvm::dyn_cast<llvm::ConstantFP>(inst.getOperand(0))) {
+                    if (cf->isZero()) simplified = inst.getOperand(1);
+                }
+            }
+            // fsub(x, 0.0) → x (safe under fast-math)
+            if (!simplified && inst.getOpcode() == llvm::Instruction::FSub && inst.getFastMathFlags().isFast()) {
+                if (auto* cf = llvm::dyn_cast<llvm::ConstantFP>(inst.getOperand(1))) {
+                    if (cf->isZero()) simplified = inst.getOperand(0);
+                }
+            }
+            // fdiv(x, 1.0) → x
+            if (!simplified && inst.getOpcode() == llvm::Instruction::FDiv) {
+                if (auto* cf = llvm::dyn_cast<llvm::ConstantFP>(inst.getOperand(1))) {
+                    if (cf->isExactlyValue(1.0)) simplified = inst.getOperand(0);
+                }
+            }
+            // fdiv(x, -1.0) → fneg(x)
+            if (!simplified && inst.getOpcode() == llvm::Instruction::FDiv) {
+                if (auto* cf = llvm::dyn_cast<llvm::ConstantFP>(inst.getOperand(1))) {
+                    if (cf->isExactlyValue(-1.0)) {
+                        llvm::IRBuilder<> builder(&inst);
+                        simplified = builder.CreateFNeg(inst.getOperand(0), "fdiv_neg1");
+                    }
+                }
+            }
+            // fdiv(x, 2.0) → fmul(x, 0.5) — multiply is much cheaper than divide
+            if (!simplified && inst.getOpcode() == llvm::Instruction::FDiv && inst.getFastMathFlags().isFast()) {
+                if (auto* cf = llvm::dyn_cast<llvm::ConstantFP>(inst.getOperand(1))) {
+                    if (cf->isExactlyValue(2.0)) {
+                        llvm::IRBuilder<> builder(&inst);
+                        simplified = builder.CreateFMul(inst.getOperand(0),
+                            llvm::ConstantFP::get(inst.getType(), 0.5), "fdiv2_fmul");
+                    }
+                }
+            }
+            // fdiv(x, power-of-2) → fmul(x, 1/power-of-2) for exact powers of 2
+            // (reciprocal is exact in FP, so no precision loss)
+            if (!simplified && inst.getOpcode() == llvm::Instruction::FDiv) {
+                if (auto* cf = llvm::dyn_cast<llvm::ConstantFP>(inst.getOperand(1))) {
+                    const llvm::APFloat& apf = cf->getValueAPF();
+                    if (apf.isNormal() && !apf.isNegative()) {
+                        // Check if it's a power of 2 by checking if only 1 bit in significand
+                        llvm::APFloat recip(apf.getSemantics(), 1);
+                        llvm::APFloat::opStatus status = recip.divide(apf,
+                            llvm::APFloat::rmNearestTiesToEven);
+                        if (status == llvm::APFloat::opOK && recip.isNormal()) {
+                            // Only do this if the reciprocal is exact
+                            llvm::APFloat check(apf.getSemantics(), 1);
+                            check.multiply(recip, llvm::APFloat::rmNearestTiesToEven);
+                            llvm::APFloat one(apf.getSemantics(), 1);
+                            if (check.bitwiseIsEqual(one)) {
+                                llvm::IRBuilder<> builder(&inst);
+                                simplified = builder.CreateFMul(inst.getOperand(0),
+                                    llvm::ConstantFP::get(inst.getType(), recip),
+                                    "fdiv_pow2_recip");
+                            }
+                        }
+                    }
+                }
+            }
+            // fneg(fneg(x)) → x
+            if (!simplified && inst.getOpcode() == llvm::Instruction::FNeg) {
+                if (auto* inner = llvm::dyn_cast<llvm::UnaryOperator>(inst.getOperand(0))) {
+                    if (inner->getOpcode() == llvm::Instruction::FNeg && inner->hasOneUse()) {
+                        simplified = inner->getOperand(0);
+                    }
+                }
+            }
+            // fsub(0.0, x) → fneg(x) (canonical form)
+            if (!simplified && inst.getOpcode() == llvm::Instruction::FSub) {
+                if (auto* cf = llvm::dyn_cast<llvm::ConstantFP>(inst.getOperand(0))) {
+                    if (cf->isZero()) {
+                        llvm::IRBuilder<> builder(&inst);
+                        simplified = builder.CreateFNeg(inst.getOperand(1), "fsub0_fneg");
+                    }
+                }
+            }
+
             if (simplified) {
                 inst.replaceAllUsesWith(simplified);
                 toErase.push_back(&inst);
