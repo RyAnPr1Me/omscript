@@ -655,6 +655,7 @@ void CodeGenerator::runOptimizationPasses() {
     // after the basic loop cleanup passes.
     if (optimizationLevel >= OptimizationLevel::O3 && enableLoopOptimize_) {
         PB.registerLoopOptimizerEndEPCallback([](llvm::LoopPassManager& LPM, llvm::OptimizationLevel /*Level*/) {
+            // LoopFlatten collapses perfectly-nested loop pairs into a single
             // loop with a linearised induction variable.  This eliminates inner
             // loop overhead (branch, counter increment, comparison) and enables
             // the vectorizer to process the flattened iteration space as a
