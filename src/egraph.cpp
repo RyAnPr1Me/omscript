@@ -151,8 +151,8 @@ ClassId EGraph::add(ENode node) {
             // Non-negative when either operand is non-negative
             // (AND can only clear bits, so if sign bit is 0 in either, result sign is 0)
             cls.isNonNeg = lNonNeg || rNonNeg;
-            // AND of a boolean with anything is boolean
-            cls.isBoolean = lBool || rBool;
+            // AND of two booleans is boolean; AND with non-boolean can produce non-boolean values
+            cls.isBoolean = lBool && rBool;
             break;
         case Op::Shr:
             // Logical/arithmetic shift right: if lhs non-negative, result non-negative
@@ -7638,8 +7638,7 @@ std::vector<RewriteRule> getStrengthReductionRules() {
             return g.addBinOp(Op::Add, s4, s3);
         });
 
-    // x * 25 → (x << 5) - (x << 2) - x + (x << 1)
-    // Actually simpler: x * 25 = (x << 4) + (x << 3) + x
+    // x * 25 → (x << 4) + (x << 3) + x  (16 + 8 + 1 = 25)
     rules.emplace_back("mul25_to_shl_add",
         P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(25)}),
         [](EGraph& g, const Subst& s) {
