@@ -258,7 +258,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Use llvm.abs.i64 intrinsic for native hardware abs on integers
         llvm::Function* absIntrinsic = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::abs, {getDefaultType()});
         // The second argument (is_int_min_poison) is false for safe behavior
-        return builder->CreateCall(absIntrinsic, {arg, builder->getFalse()}, "absval");
+        auto* result = builder->CreateCall(absIntrinsic, {arg, builder->getFalse()}, "absval");
+        nonNegValues_.insert(result);
+        return result;
     }
 
     if (bid == BuiltinId::LEN) {
@@ -282,9 +284,11 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                                       : builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "len.sptr");
             llvm::Value* rawLen = builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "len.strlen");
             // strlen returns size_t (i64 on 64-bit); ensure we return the default type.
-            return rawLen->getType() == getDefaultType()
+            auto* result = rawLen->getType() == getDefaultType()
                        ? rawLen
                        : builder->CreateZExtOrTrunc(rawLen, getDefaultType(), "len.strsz");
+            nonNegValues_.insert(result);
+            return result;
         }
         // Array is stored as an i64 holding a pointer to [length, elem0, elem1, ...]
         // Convert to integer first if needed (e.g. if stored in a float variable)
@@ -293,6 +297,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         auto* arrlenLoad = builder->CreateLoad(getDefaultType(), arrPtr, "arrlen");
         arrlenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
         arrlenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+        nonNegValues_.insert(arrlenLoad);
         return arrlenLoad;
     }
 
@@ -636,7 +641,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* bit = builder->CreateAnd(x, one, "evenbit");
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
         llvm::Value* isEven = builder->CreateICmpEQ(bit, zero, "iseven");
-        return builder->CreateZExt(isEven, getDefaultType(), "evenval");
+        auto* result = builder->CreateZExt(isEven, getDefaultType(), "evenval");
+        nonNegValues_.insert(result);
+        return result;
     }
 
     if (bid == BuiltinId::IS_ODD) {
@@ -645,7 +652,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Convert float to integer since is_odd() is an integer operation
         x = toDefaultType(x);
         llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
-        return builder->CreateAnd(x, one, "oddval");
+        auto* result = builder->CreateAnd(x, one, "oddval");
+        nonNegValues_.insert(result);
+        return result;
     }
 
     if (bid == BuiltinId::SUM) {
@@ -924,7 +933,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* strPtr = arg->getType()->isPointerTy()
                                   ? arg
                                   : builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "strlen.ptr");
-        return builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "strlen.result");
+        auto* result = builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "strlen.result");
+        nonNegValues_.insert(result);
+        return result;
     }
 
     if (bid == BuiltinId::CHAR_AT) {

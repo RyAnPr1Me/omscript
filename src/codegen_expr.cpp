@@ -1316,22 +1316,34 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         return isDivision ? builder->CreateSDiv(left, right, "divtmp") : builder->CreateSRem(left, right, "modtmp");
     } else if (expr->op == "==") {
         llvm::Value* cmp = builder->CreateICmpEQ(left, right, "cmptmp");
-        return builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+        auto* result = builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+        nonNegValues_.insert(result);
+        return result;
     } else if (expr->op == "!=") {
         llvm::Value* cmp = builder->CreateICmpNE(left, right, "cmptmp");
-        return builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+        auto* result = builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+        nonNegValues_.insert(result);
+        return result;
     } else if (expr->op == "<") {
         llvm::Value* cmp = builder->CreateICmpSLT(left, right, "cmptmp");
-        return builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+        auto* result = builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+        nonNegValues_.insert(result);
+        return result;
     } else if (expr->op == "<=") {
         llvm::Value* cmp = builder->CreateICmpSLE(left, right, "cmptmp");
-        return builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+        auto* result = builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+        nonNegValues_.insert(result);
+        return result;
     } else if (expr->op == ">") {
         llvm::Value* cmp = builder->CreateICmpSGT(left, right, "cmptmp");
-        return builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+        auto* result = builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+        nonNegValues_.insert(result);
+        return result;
     } else if (expr->op == ">=") {
         llvm::Value* cmp = builder->CreateICmpSGE(left, right, "cmptmp");
-        return builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+        auto* result = builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+        nonNegValues_.insert(result);
+        return result;
     } else if (expr->op == "&") {
         auto* result = builder->CreateAnd(left, right, "andtmp");
         // AND with a non-negative value always produces a non-negative result
