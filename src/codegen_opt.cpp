@@ -99,8 +99,10 @@
 #include <llvm/Transforms/Scalar/SROA.h>
 #include <llvm/Transforms/Scalar/LoopPassManager.h>
 #include <llvm/Transforms/Utils.h>
+#include <llvm/Transforms/Utils/CanonicalizeFreezeInLoops.h>
 #include <llvm/Transforms/Utils/Cloning.h>
 #include <llvm/Transforms/Utils/LCSSA.h>
+#include <llvm/Transforms/Utils/LibCallsShrinkWrap.h>
 #include <llvm/Transforms/Utils/LoopSimplify.h>
 #include <llvm/Transforms/Utils/Mem2Reg.h>
 #include <llvm/Transforms/Scalar/InstSimplifyPass.h>
@@ -112,6 +114,7 @@
 #include <llvm/Transforms/Scalar/Scalarizer.h>
 #include <llvm/Transforms/IPO/CalledValuePropagation.h>
 #include <llvm/Transforms/IPO/Attributor.h>
+#include <llvm/Transforms/IPO/SCCP.h>
 #include <llvm/Transforms/Scalar/SCCP.h>
 #include <llvm/Transforms/Scalar/LoopReroll.h>
 #include <llvm/Transforms/Scalar/GuardWidening.h>
@@ -128,10 +131,10 @@ namespace omscript {
 // Aggressive SimplifyCFG options used throughout the optimization pipeline.
 // Converts if-else chains to selects, hoists/sinks common instructions,
 // converts switches to lookup tables, and speculatively simplifies blocks.
-// bonusInstThreshold=4 allows up to 4 extra instructions to be speculated
+// bonusInstThreshold=6 allows up to 6 extra instructions to be speculated
 // when converting branches to selects — enough for cascading-if classify()
-// patterns without over-speculating complex branches.
-static constexpr int kCFGSpeculationBonus = 4;
+// patterns and multi-condition guards without over-speculating complex branches.
+static constexpr int kCFGSpeculationBonus = 6;
 static llvm::SimplifyCFGOptions aggressiveCFGOpts() {
     return llvm::SimplifyCFGOptions()
         .convertSwitchToLookupTable(true)
@@ -338,7 +341,13 @@ void CodeGenerator::runOptimizationPasses() {
         PTO.CallGraphProfile = true;
     }
     if (optimizationLevel == OptimizationLevel::O3) {
-        PTO.InlinerThreshold = 750; // aggressive inlining for maximum IPC
+        PTO.InlinerThreshold = 1000; // aggressive inlining for maximum IPC
+        // ForgetAllSCEVInLoopUnroll forces SCEV to recompute trip counts after
+        // each unrolling step.  Without this, stale trip-count information from
+        // before unrolling can cause the unroller to make suboptimal decisions
+        // on subsequent iterations (e.g. under-unrolling a loop whose trip
+        // count became statically known after partial unrolling).
+        PTO.ForgetAllSCEVInLoopUnroll = true;
     }
 
     // ---------------------------------------------------------------------------
@@ -504,6 +513,14 @@ void CodeGenerator::runOptimizationPasses() {
         PB.registerCGSCCOptimizerLateEPCallback(
             [](llvm::CGSCCPassManager& CGPM, llvm::OptimizationLevel /*Level*/) {
             CGPM.addPass(llvm::ArgumentPromotionPass());
+            // AttributorCGSCCPass performs context-sensitive, call-graph-aware
+            // attribute inference.  Unlike InferFunctionAttrsPass (which only
+            // infers library function attributes), Attributor propagates:
+            // noalias, nofree, nosync, nounwind, readnone, readonly, willreturn,
+            // nocapture, and more across the entire call graph.  This enables
+            // downstream passes (LICM, DSE, vectorizer) to make stronger
+            // assumptions about function behavior.
+            CGPM.addPass(llvm::AttributorCGSCCPass());
         });
     }
 
@@ -601,6 +618,11 @@ void CodeGenerator::runOptimizationPasses() {
                 LPM.addPass(llvm::LoopDeletionPass());
                 LPM.addPass(llvm::LoopInstSimplifyPass());
                 LPM.addPass(llvm::LoopSimplifyCFGPass());
+                // CanonicalizeFreezeInLoops moves freeze instructions out of
+                // loop bodies, allowing SCEV to compute precise trip counts
+                // for loops that contain freeze-guarded induction variables.
+                // This enables better vectorization and unrolling decisions.
+                LPM.addPass(llvm::CanonicalizeFreezeInLoopsPass());
                 if (isO3 && loopOpt) {
                     LPM.addPass(llvm::LoopFlattenPass());
                     LPM.addPass(llvm::LoopUnrollAndJamPass(/*OptLevel=*/3));
@@ -608,6 +630,12 @@ void CodeGenerator::runOptimizationPasses() {
                 if (isO3) {
                     LPM.addPass(llvm::LoopBoundSplitPass());
                     LPM.addPass(llvm::LoopPredicationPass());
+                    // LoopReroll recognizes manually-unrolled loop patterns and
+                    // "rerolls" them into a single iteration with a larger trip
+                    // count.  This enables the vectorizer to handle patterns
+                    // that were over-unrolled by earlier passes or written as
+                    // unrolled loops in the source code.
+                    LPM.addPass(llvm::LoopRerollPass());
                 }
             });
         }
@@ -655,6 +683,13 @@ void CodeGenerator::runOptimizationPasses() {
             FPM.addPass(llvm::SCCPPass());
             FPM.addPass(llvm::InstCombinePass());
             if (isO3) {
+                // LibCallsShrinkWrap wraps math library calls (sqrt, exp2, pow,
+                // log, etc.) with fast-path domain checks.  When the argument
+                // is known to be in the valid domain (e.g. non-negative for
+                // sqrt), the expensive errno-setting/NaN-checking slow path is
+                // bypassed entirely.  This is especially beneficial for
+                // floating-point benchmarks that call math functions in loops.
+                FPM.addPass(llvm::LibCallsShrinkWrapPass());
                 FPM.addPass(llvm::ConstraintEliminationPass());
                 // JumpThreading threads branches through basic blocks with
                 // known conditions, reducing branch mispredictions.
@@ -722,6 +757,13 @@ void CodeGenerator::runOptimizationPasses() {
     if (optimizationLevel >= OptimizationLevel::O3) {
         PB.registerOptimizerLastEPCallback(
             [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/) {
+            // IPSCCPPass performs inter-procedural sparse conditional constant
+            // propagation — a more powerful version of SCCP that propagates
+            // constants, value ranges, and struct field values across function
+            // boundaries through the call graph.  This catches constant-folding
+            // opportunities that function-local SCCP misses, such as functions
+            // always called with a specific constant argument.
+            MPM.addPass(llvm::IPSCCPPass());
             MPM.addPass(llvm::DeadArgumentEliminationPass());
             // PartialInlinerPass outlines cold regions (error handling, slow
             // paths) from otherwise-hot functions and inlines only the hot

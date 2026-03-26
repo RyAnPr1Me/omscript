@@ -5,7 +5,7 @@ set -eu
 # ──────────────────────────────────────────────────────────────
 #  OmScript Benchmark Suite  (Fair Edition)
 #
-#  25 diverse micro-benchmarks covering distinct workloads.
+#  30 diverse micro-benchmarks covering distinct workloads.
 #  No category is over-represented.  Both OM and C implementations
 #  are idiomatic and use the same algorithm.
 #
@@ -37,8 +37,8 @@ set -eu
 #      collatz, binary search)
 # ──────────────────────────────────────────────────────────────
 
-RUNS=${BENCH_RUNS:-7}
-WARMUP_RUNS=${BENCH_WARMUP:-2}
+RUNS=${BENCH_RUNS:-11}
+WARMUP_RUNS=${BENCH_WARMUP:-3}
 
 SCRIPT_START=$(date +%s%N)
 
@@ -50,7 +50,7 @@ if command -v taskset &>/dev/null; then
     TASKSET="taskset -c 0"
 fi
 
-NUM_BENCHMARKS=25
+NUM_BENCHMARKS=30
 
 BENCH_NAME=(
     "integer_math"       #  0 — GCD, log2, modular arithmetic

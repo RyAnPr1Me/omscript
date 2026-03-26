@@ -905,9 +905,9 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             // (the unroller refuses to fully unroll unbounded loops).  Use a
             // concrete unroll.count instead, giving LLVM a target that matches
             // GCC's aggressive unrolling for FP-heavy loops.
-            // OPTMAX uses 8 to hide FP/call latency through ILP; regular
-            // functions use 4 to balance ILP gains vs I-cache pressure.
-            static constexpr unsigned kOptMaxUnrollCount = 8;
+            // OPTMAX uses 16 to maximally hide FP/call latency through ILP;
+            // regular functions use 4 to balance ILP gains vs I-cache pressure.
+            static constexpr unsigned kOptMaxUnrollCount = 16;
             static constexpr unsigned kDefaultUnrollCount = 4;
             const unsigned unrollCount = inOptMaxFunction ? kOptMaxUnrollCount : kDefaultUnrollCount;
             loopMDs.push_back(llvm::MDNode::get(
