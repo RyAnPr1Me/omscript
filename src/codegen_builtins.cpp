@@ -2590,7 +2590,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         mapped = toDefaultType(mapped);
         // Store into result: buf[idx + 1]
         llvm::Value* dstPtr = builder->CreateInBoundsGEP(getDefaultType(), buf, elemIdx, "amap.dstptr");
-        builder->CreateStore(mapped, dstPtr)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        auto* mappedStore = builder->CreateStore(mapped, dstPtr);
+        mappedStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
         llvm::Value* nextIdx = builder->CreateAdd(idx, one, "amap.next", /*HasNUW=*/true, /*HasNSW=*/true);
         idx->addIncoming(nextIdx, bodyBB);
         builder->CreateBr(loopBB);
@@ -2670,7 +2671,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(addBB);
         llvm::Value* dstIdx = builder->CreateAdd(outIdx, one, "afilt.dstidx");
         llvm::Value* dstPtr = builder->CreateInBoundsGEP(getDefaultType(), buf, dstIdx, "afilt.dstptr");
-        builder->CreateStore(elem, dstPtr)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        auto* elemStore = builder->CreateStore(elem, dstPtr);
+        elemStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
         llvm::Value* newOutIdx = builder->CreateAdd(outIdx, one, "afilt.newoutidx");
         builder->CreateBr(incBB);
 
