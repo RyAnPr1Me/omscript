@@ -982,7 +982,12 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
         lenVal = builder->CreateCall(getOrDeclareStrlen(), {basePtr}, "foreach.strlen");
     } else {
         // Array: length stored in slot 0
-        lenVal = builder->CreateLoad(getDefaultType(), basePtr, "foreach.len");
+        auto* lenLoad = builder->CreateLoad(getDefaultType(), basePtr, "foreach.len");
+        // TBAA: array length (slot 0) never aliases element stores (slots 1+).
+        lenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+        // !range: array lengths are always in [0, INT64_MAX).
+        lenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+        lenVal = lenLoad;
     }
 
     // Allocate hidden index variable and the user's iterator variable
