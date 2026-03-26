@@ -89,7 +89,8 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
     auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(it->second);
 
     llvm::Type* loadType = alloca ? alloca->getAllocatedType() : getDefaultType();
-    auto* load = builder->CreateLoad(loadType, it->second, expr->name.c_str());
+    auto* load = builder->CreateAlignedLoad(loadType, it->second,
+        llvm::MaybeAlign(8), expr->name.c_str());
 
     // If this is a const variable or a prefetch-immut variable, mark the
     // load as invariant so LLVM knows the value never changes and can
@@ -1690,7 +1691,7 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
         }
     }
 
-    builder->CreateStore(value, it->second);
+    builder->CreateAlignedStore(value, it->second, llvm::MaybeAlign(8));
     // Update string variable tracking after assignment.
     if (value->getType()->isPointerTy() || isStringExpr(expr->value.get()))
         stringVars_.insert(expr->name);

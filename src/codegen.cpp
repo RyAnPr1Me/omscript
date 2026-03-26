@@ -2175,11 +2175,12 @@ void CodeGenerator::generate(Program* program) {
         //              unlocks loop-idiom recognition (auto-memset/memcpy detection).
         function->addFnAttr(llvm::Attribute::NoUnwind);
         function->addFnAttr(llvm::Attribute::MustProgress);
-        // prefer-vector-width=256 — allow AVX2-width vectorization (4×i64)
-        // while preventing VF=8 that causes i128 promotion for division/modulo.
-        // This balances vectorization throughput with avoiding expensive i128
-        // multiply sequences on x86-64.
-        function->addFnAttr("prefer-vector-width", "256");
+        // prefer-vector-width: use the target-aware preferred SIMD width
+        // detected from CPU features.  AVX-512 → 512, AVX2 → 256, SSE → 128.
+        // This balances vectorization throughput with avoiding expensive type
+        // promotion on targets without wide vector support.
+        function->addFnAttr("prefer-vector-width",
+            std::to_string(preferredVectorWidth_ * 64));
         // nosync, nofree, willreturn — these promise the optimizer that the
         // function never synchronizes, never frees memory, and always returns.
         // These promises are WRONG for functions that use concurrency

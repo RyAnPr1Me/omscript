@@ -44,6 +44,8 @@
 #include <llvm/Transforms/IPO/FunctionAttrs.h>
 #include <llvm/Transforms/IPO/InferFunctionAttrs.h>
 #include <llvm/Transforms/IPO/PartialInlining.h>
+#include <llvm/Transforms/IPO/GlobalSplit.h>
+#include <llvm/Transforms/IPO/StripDeadPrototypes.h>
 #include <llvm/Transforms/InstCombine/InstCombine.h>
 #include <llvm/Transforms/Scalar.h>
 #include <llvm/Transforms/Scalar/ADCE.h>
@@ -115,6 +117,9 @@
 #include <llvm/Transforms/Scalar/GuardWidening.h>
 #include <llvm/Transforms/Scalar/TLSVariableHoist.h>
 #include <llvm/Transforms/IPO/MergeFunctions.h>
+#include <llvm/Transforms/Scalar/LowerExpectIntrinsic.h>
+#include <llvm/Transforms/Scalar/WarnMissedTransforms.h>
+#include <llvm/Transforms/Scalar/LowerConstantIntrinsics.h>
 #include <optional>
 #include <stdexcept>
 
@@ -133,6 +138,7 @@ static llvm::SimplifyCFGOptions aggressiveCFGOpts() {
         .hoistCommonInsts(true)
         .sinkCommonInsts(true)
         .speculateBlocks(true)
+        .forwardSwitchCondToPhi(true)
         .bonusInstThreshold(kCFGSpeculationBonus);
 }
 
@@ -403,6 +409,13 @@ void CodeGenerator::runOptimizationPasses() {
         PB.registerPipelineStartEPCallback(
             [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/) {
             MPM.addPass(llvm::InferFunctionAttrsPass());
+            // LowerExpectIntrinsic converts llvm.expect intrinsics to branch
+            // weight metadata early in the pipeline so that all downstream
+            // passes (SimplifyCFG, JumpThreading, LoopRotate) can use the
+            // likely/unlikely hints for better code layout.
+            llvm::FunctionPassManager EarlyFPM;
+            EarlyFPM.addPass(llvm::LowerExpectIntrinsicPass());
+            MPM.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(EarlyFPM)));
         });
     }
 
@@ -760,6 +773,27 @@ void CodeGenerator::runOptimizationPasses() {
         PB.registerOptimizerLastEPCallback(
             [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/) {
             MPM.addPass(llvm::HotColdSplittingPass());
+            // StripDeadPrototypes removes unused external function declarations.
+            // After inlining, dead argument elimination, and DCE, many declared-
+            // but-never-called prototypes remain.  Removing them reduces symbol
+            // table pressure and link time.
+            MPM.addPass(llvm::StripDeadPrototypesPass());
+            // GlobalSplit splits internal globals with multiple fields into
+            // separate globals, enabling more precise alias analysis and
+            // allowing SROA/mem2reg to promote individual fields to registers.
+            MPM.addPass(llvm::GlobalSplitPass());
+            // MergeFunctions deduplicates identical function bodies, reducing
+            // code size and I-cache pressure.  OmScript's monomorphization of
+            // generic functions often produces identical machine code for
+            // different type instantiations.
+            MPM.addPass(llvm::MergeFunctionsPass());
+        });
+    }
+    // At O2, still strip dead prototypes for cleaner output.
+    if (optimizationLevel == OptimizationLevel::O2) {
+        PB.registerOptimizerLastEPCallback(
+            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/) {
+            MPM.addPass(llvm::StripDeadPrototypesPass());
         });
     }
 
@@ -817,6 +851,9 @@ void CodeGenerator::runOptimizationPasses() {
         }
         MPM.addPass(llvm::GlobalOptPass());
         MPM.addPass(llvm::GlobalDCEPass());
+        // Final StripDeadPrototypes cleanup: after GlobalDCE removes dead
+        // functions, their forward declarations may linger.
+        MPM.addPass(llvm::StripDeadPrototypesPass());
     }
     if (verbose_) {
         std::cout << "    Running LLVM module pass pipeline..." << std::endl;
