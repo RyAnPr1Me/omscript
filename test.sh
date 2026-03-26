@@ -1419,10 +1419,8 @@ for (( id=0; id<NUM_BENCHMARKS; id++ )); do
         diff=$(( o - c ))
         if [ "$diff" -lt 0 ]; then diff=$(( -diff )); fi
         if [ "$diff" -le 2 ]; then
-            # Within timing noise
-            if [ "$r" -lt 95 ]; then COUNT_FASTER=$((COUNT_FASTER + 1))
-            else COUNT_EQUAL=$((COUNT_EQUAL + 1))
-            fi
+            # Within timing noise — treat as tied regardless of ratio.
+            COUNT_EQUAL=$((COUNT_EQUAL + 1))
             continue
         fi
     fi

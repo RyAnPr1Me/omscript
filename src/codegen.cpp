@@ -1060,7 +1060,9 @@ llvm::Function* CodeGenerator::getOrDeclareCalloc() {
     fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addFnAttr(llvm::Attribute::NoBuiltin);
     fn->addRetAttr(llvm::Attribute::NoAlias);
-    fn->addRetAttr(llvm::Attribute::NonNull);
+    // Note: calloc CAN return NULL on OOM, so we do NOT add NonNull here.
+    // The call site in array_fill does not check for NULL because OmScript's
+    // runtime assumes allocation always succeeds (same as C benchmarks).
     return fn;
 }
 
