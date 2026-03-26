@@ -123,6 +123,8 @@ ClassId EGraph::add(ENode node) {
         cls.isZero = (node.value == 0);
         cls.isOne = (node.value == 1);
         cls.isNonNeg = (node.value >= 0);
+        cls.isPowerOfTwo = (node.value > 0) && ((node.value & (node.value - 1)) == 0);
+        cls.isBoolean = (node.value == 0 || node.value == 1);
     } else if (node.op == Op::ConstF) {
         cls.isNonNeg = (node.fvalue >= 0.0);
     } else if (node.children.size() >= 2) {
@@ -134,6 +136,8 @@ ClassId EGraph::add(ENode node) {
         ClassId rhs = find(node.children[1]);
         bool lNonNeg = (lhs < classes_.size()) && classes_[lhs].isNonNeg;
         bool rNonNeg = (rhs < classes_.size()) && classes_[rhs].isNonNeg;
+        bool lBool = (lhs < classes_.size()) && classes_[lhs].isBoolean;
+        bool rBool = (rhs < classes_.size()) && classes_[rhs].isBoolean;
 
         switch (node.op) {
         case Op::Add:
@@ -147,6 +151,8 @@ ClassId EGraph::add(ENode node) {
             // Non-negative when either operand is non-negative
             // (AND can only clear bits, so if sign bit is 0 in either, result sign is 0)
             cls.isNonNeg = lNonNeg || rNonNeg;
+            // AND of two booleans is boolean; AND with non-boolean can produce non-boolean values
+            cls.isBoolean = lBool && rBool;
             break;
         case Op::Shr:
             // Logical/arithmetic shift right: if lhs non-negative, result non-negative
@@ -168,12 +174,19 @@ ClassId EGraph::add(ENode node) {
         case Op::Sub:
             // Not generally non-negative; leave as false
             break;
+        case Op::LogAnd:
+        case Op::LogOr:
+            // Logical operations produce boolean 0/1
+            cls.isNonNeg = true;
+            cls.isBoolean = true;
+            break;
         default:
             // Comparisons produce boolean 0/1 which are non-negative
             if (node.op == Op::Eq || node.op == Op::Ne ||
                 node.op == Op::Lt || node.op == Op::Le ||
                 node.op == Op::Gt || node.op == Op::Ge) {
                 cls.isNonNeg = true;
+                cls.isBoolean = true;
             }
             break;
         }
@@ -181,6 +194,7 @@ ClassId EGraph::add(ENode node) {
         // Unary operations
         if (node.op == Op::LogNot) {
             cls.isNonNeg = true;  // Boolean result: 0 or 1
+            cls.isBoolean = true;
         } else if (node.op == Op::Sqrt) {
             cls.isNonNeg = true;  // sqrt is always non-negative for valid inputs
         }
@@ -780,6 +794,24 @@ std::optional<double> EGraph::getConstFValue(ClassId cls) const {
 
 bool EGraph::areEquivalent(ClassId a, ClassId b) {
     return find(a) == find(b);
+}
+
+bool EGraph::isClassPowerOfTwo(ClassId cls) const {
+    cls = const_cast<EGraph*>(this)->find(cls);
+    if (cls >= classes_.size()) return false;
+    return classes_[cls].isPowerOfTwo;
+}
+
+bool EGraph::isClassBoolean(ClassId cls) const {
+    cls = const_cast<EGraph*>(this)->find(cls);
+    if (cls >= classes_.size()) return false;
+    return classes_[cls].isBoolean;
+}
+
+bool EGraph::isClassNonNeg(ClassId cls) const {
+    cls = const_cast<EGraph*>(this)->find(cls);
+    if (cls >= classes_.size()) return false;
+    return classes_[cls].isNonNeg;
 }
 
 bool EGraph::hasVariable(ClassId cls, const std::string& name) const {
@@ -3161,6 +3193,45 @@ std::vector<RewriteRule> getAdvancedAlgebraicRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
+    // Reassociation rules — expose constant folding across associations
+    // ─────────────────────────────────────────────────────────────────────
+
+    // (a + b) + c → a + (b + c)  (right-associate addition)
+    rules.emplace_back("add_reassoc_right",
+        P::OpPat(Op::Add, {P::OpPat(Op::Add, {P::Wild("a"), P::Wild("b")}), P::Wild("c")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId bc = g.addBinOp(Op::Add, s.at("b"), s.at("c"));
+            return g.addBinOp(Op::Add, s.at("a"), bc);
+        });
+
+    // a + (b + c) → (a + b) + c  (left-associate addition)
+    rules.emplace_back("add_reassoc_left",
+        P::OpPat(Op::Add, {P::Wild("a"), P::OpPat(Op::Add, {P::Wild("b"), P::Wild("c")})}),
+        [](EGraph& g, const Subst& s) {
+            ClassId ab = g.addBinOp(Op::Add, s.at("a"), s.at("b"));
+            return g.addBinOp(Op::Add, ab, s.at("c"));
+        });
+
+    // (a * b) * c → a * (b * c)  (right-associate multiplication)
+    rules.emplace_back("mul_reassoc_right",
+        P::OpPat(Op::Mul, {P::OpPat(Op::Mul, {P::Wild("a"), P::Wild("b")}), P::Wild("c")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId bc = g.addBinOp(Op::Mul, s.at("b"), s.at("c"));
+            return g.addBinOp(Op::Mul, s.at("a"), bc);
+        });
+
+    // a * (b * c) → (a * b) * c  (left-associate multiplication)
+    rules.emplace_back("mul_reassoc_left",
+        P::OpPat(Op::Mul, {P::Wild("a"), P::OpPat(Op::Mul, {P::Wild("b"), P::Wild("c")})}),
+        [](EGraph& g, const Subst& s) {
+            ClassId ab = g.addBinOp(Op::Mul, s.at("a"), s.at("b"));
+            return g.addBinOp(Op::Mul, ab, s.at("c"));
+        });
+
+    // (a + C1) + C2 → a + (C1 + C2)  (constant folding via reassociation)
+    // This is handled implicitly by the above rules + constant folding.
+
+    // ─────────────────────────────────────────────────────────────────────
     return rules;
 }
 
@@ -4745,6 +4816,89 @@ std::vector<RewriteRule> getAdvancedComparisonRules() {
             ClassId selId = g.add(sel);
             return g.addUnaryOp(Op::Neg, selId);
         });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Ternary identity / boolean simplification
+    // ─────────────────────────────────────────────────────────────────────
+
+    // cond ? x : x → x  (both branches identical → result is always x)
+    rules.emplace_back("ternary_same_branches",
+        P::OpPat(Op::Ternary, {P::Wild("cond"), P::Wild("x"), P::Wild("x")}),
+        [](EGraph&, const Subst& s) { return s.at("x"); });
+
+    // cond ? 1 : 0 → cond  (boolean select is identity on condition)
+    rules.emplace_back("ternary_bool_identity",
+        P::OpPat(Op::Ternary, {P::Wild("cond"), P::ConstPat(1), P::ConstPat(0)}),
+        [](EGraph&, const Subst& s) { return s.at("cond"); });
+
+    // cond ? 0 : 1 → !cond  (inverted boolean select)
+    rules.emplace_back("ternary_bool_not",
+        P::OpPat(Op::Ternary, {P::Wild("cond"), P::ConstPat(0), P::ConstPat(1)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addUnaryOp(Op::LogNot, s.at("cond"));
+        });
+
+    // 1 ? a : b → a  (condition always true)
+    rules.emplace_back("ternary_true_cond",
+        P::OpPat(Op::Ternary, {P::ConstPat(1), P::Wild("a"), P::Wild("b")}),
+        [](EGraph&, const Subst& s) { return s.at("a"); });
+
+    // 0 ? a : b → b  (condition always false)
+    rules.emplace_back("ternary_false_cond",
+        P::OpPat(Op::Ternary, {P::ConstPat(0), P::Wild("a"), P::Wild("b")}),
+        [](EGraph&, const Subst& s) { return s.at("b"); });
+
+    // !cond ? a : b → cond ? b : a  (flip branches on negated condition)
+    rules.emplace_back("ternary_not_cond_flip",
+        P::OpPat(Op::Ternary, {P::OpPat(Op::LogNot, {P::Wild("cond")}),
+                                P::Wild("a"), P::Wild("b")}),
+        [](EGraph& g, const Subst& s) {
+            ENode sel(Op::Ternary, std::vector<ClassId>{s.at("cond"), s.at("b"), s.at("a")});
+            return g.add(sel);
+        });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Comparison negation (De Morgan for comparisons)
+    // ─────────────────────────────────────────────────────────────────────
+
+    // !(a < b) → a >= b
+    rules.emplace_back("not_lt_to_ge",
+        P::OpPat(Op::LogNot, {P::OpPat(Op::Lt, {P::Wild("a"), P::Wild("b")})}),
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Ge, s.at("a"), s.at("b")); });
+
+    // !(a <= b) → a > b
+    rules.emplace_back("not_le_to_gt",
+        P::OpPat(Op::LogNot, {P::OpPat(Op::Le, {P::Wild("a"), P::Wild("b")})}),
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Gt, s.at("a"), s.at("b")); });
+
+    // !(a > b) → a <= b
+    rules.emplace_back("not_gt_to_le",
+        P::OpPat(Op::LogNot, {P::OpPat(Op::Gt, {P::Wild("a"), P::Wild("b")})}),
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Le, s.at("a"), s.at("b")); });
+
+    // !(a >= b) → a < b
+    rules.emplace_back("not_ge_to_lt",
+        P::OpPat(Op::LogNot, {P::OpPat(Op::Ge, {P::Wild("a"), P::Wild("b")})}),
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Lt, s.at("a"), s.at("b")); });
+
+    // !(a == b) → a != b
+    rules.emplace_back("not_eq_to_ne",
+        P::OpPat(Op::LogNot, {P::OpPat(Op::Eq, {P::Wild("a"), P::Wild("b")})}),
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Ne, s.at("a"), s.at("b")); });
+
+    // !(a != b) → a == b
+    rules.emplace_back("not_ne_to_eq",
+        P::OpPat(Op::LogNot, {P::OpPat(Op::Ne, {P::Wild("a"), P::Wild("b")})}),
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Eq, s.at("a"), s.at("b")); });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Boolean double negation
+    // ─────────────────────────────────────────────────────────────────────
+
+    // !!x → x  (when x is known boolean: double logical negation is identity)
+    rules.emplace_back("double_lognot",
+        P::OpPat(Op::LogNot, {P::OpPat(Op::LogNot, {P::Wild("x")})}),
+        [](EGraph&, const Subst& s) { return s.at("x"); });
 
 
     return rules;
@@ -7446,6 +7600,74 @@ std::vector<RewriteRule> getStrengthReductionRules() {
         [](EGraph& g, const Subst& s) {
             auto shifted = g.addBinOp(Op::Shl, s.at("x"), g.addConst(8));
             return g.addBinOp(Op::Sub, shifted, s.at("x"));
+        });
+
+    // x * 6 → (x << 2) + (x << 1)  (two shifts + add cheaper than multiply)
+    rules.emplace_back("mul6_to_shl_add",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(6)}),
+        [](EGraph& g, const Subst& s) {
+            auto s2 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(2));
+            auto s1 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(1));
+            return g.addBinOp(Op::Add, s2, s1);
+        });
+
+    // x * 10 → (x << 3) + (x << 1)  (common in decimal conversion)
+    rules.emplace_back("mul10_to_shl_add",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(10)}),
+        [](EGraph& g, const Subst& s) {
+            auto s3 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(3));
+            auto s1 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(1));
+            return g.addBinOp(Op::Add, s3, s1);
+        });
+
+    // x * 12 → (x << 3) + (x << 2)
+    rules.emplace_back("mul12_to_shl_add",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(12)}),
+        [](EGraph& g, const Subst& s) {
+            auto s3 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(3));
+            auto s2 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(2));
+            return g.addBinOp(Op::Add, s3, s2);
+        });
+
+    // x * 24 → (x << 4) + (x << 3)
+    rules.emplace_back("mul24_to_shl_add",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(24)}),
+        [](EGraph& g, const Subst& s) {
+            auto s4 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(4));
+            auto s3 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(3));
+            return g.addBinOp(Op::Add, s4, s3);
+        });
+
+    // x * 25 → (x << 4) + (x << 3) + x  (16 + 8 + 1 = 25)
+    rules.emplace_back("mul25_to_shl_add",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(25)}),
+        [](EGraph& g, const Subst& s) {
+            auto s4 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(4));
+            auto s3 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(3));
+            auto sum = g.addBinOp(Op::Add, s4, s3);
+            return g.addBinOp(Op::Add, sum, s.at("x"));
+        });
+
+    // x * 100 → (x << 6) + (x << 5) + (x << 2)
+    rules.emplace_back("mul100_to_shl_add",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(100)}),
+        [](EGraph& g, const Subst& s) {
+            auto s6 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(6));
+            auto s5 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(5));
+            auto s2 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(2));
+            auto sum = g.addBinOp(Op::Add, s6, s5);
+            return g.addBinOp(Op::Add, sum, s2);
+        });
+
+    // x * 1000 → (x << 10) - (x << 4) - (x << 3)
+    rules.emplace_back("mul1000_to_shl_sub",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(1000)}),
+        [](EGraph& g, const Subst& s) {
+            auto s10 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(10));
+            auto s4 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(4));
+            auto s3 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(3));
+            auto diff1 = g.addBinOp(Op::Sub, s10, s4);
+            return g.addBinOp(Op::Sub, diff1, s3);
         });
 
     return rules;

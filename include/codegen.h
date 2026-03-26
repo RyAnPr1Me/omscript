@@ -384,6 +384,18 @@ class CodeGenerator {
     /// File-level @noalias: all pointer parameters are marked noalias.
     bool fileNoAlias_ = false;
 
+    /// TBAA (Type-Based Alias Analysis) metadata hierarchy.
+    /// OmScript arrays store length in slot 0 and elements in slots 1+.
+    /// TBAA tells LLVM that length loads can never alias element loads/stores,
+    /// enabling hoisting of length loads out of element-mutating loops.
+    llvm::MDNode* tbaaRoot_ = nullptr;       ///< Root of TBAA type hierarchy
+    llvm::MDNode* tbaaArrayLen_ = nullptr;   ///< TBAA access tag for array length (slot 0)
+    llvm::MDNode* tbaaArrayElem_ = nullptr;  ///< TBAA access tag for array elements (slots 1+)
+
+    /// !range metadata for array length loads: [0, INT64_MAX).
+    /// Array lengths are always non-negative (they're sizes).
+    llvm::MDNode* arrayLenRangeMD_ = nullptr;
+
     /// Variables declared with `prefetch immut` — their loads get invariant
     /// metadata so LLVM can hoist/CSE them aggressively.
     std::unordered_set<std::string> prefetchedImmutVars_;
@@ -402,6 +414,7 @@ class CodeGenerator {
     bool currentFuncHintNoVectorize_ = false;
     bool currentFuncHintHot_ = false;  ///< Current function has @hot annotation
     unsigned loopNestDepth_ = 0; ///< Current for-loop nesting depth (0 = not in a loop)
+    bool bodyHasInnerLoop_ = false; ///< Set when a while/for loop is found inside a for-loop body
 
     /// Classify a function into its execution tier based on type annotations,
     /// OPTMAX status, and whether it is a special function (main/stdlib).
@@ -490,6 +503,7 @@ class CodeGenerator {
     /// element type, then uses insertelement + shufflevector for the splat.
     llvm::Value* splatScalarToVector(llvm::Value* scalar, llvm::Type* vecTy);
     void setupPrintfDeclaration();
+    void initTBAAMetadata();
     llvm::Function* getPrintfFunction();
     void beginScope();
     void endScope();
@@ -611,6 +625,7 @@ class CodeGenerator {
     // multiple built-in handlers.
     llvm::Function* getOrDeclareStrlen();
     llvm::Function* getOrDeclareMalloc();
+    llvm::Function* getOrDeclareCalloc();
     llvm::Function* getOrDeclareStrcpy();
     llvm::Function* getOrDeclareStrcat();
     llvm::Function* getOrDeclareStrcmp();

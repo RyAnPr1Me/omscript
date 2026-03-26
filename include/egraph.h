@@ -152,6 +152,8 @@ struct EClass {
     bool isZero = false;                ///< True if class contains constant 0
     bool isOne = false;                 ///< True if class contains constant 1
     bool isNonNeg = false;              ///< True if all values are >= 0 (by analysis)
+    bool isPowerOfTwo = false;          ///< True if value is a power of 2 (1,2,4,8,...)
+    bool isBoolean = false;             ///< True if value is 0 or 1 (comparison result)
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -359,6 +361,15 @@ public:
     /// Extract the float constant value from an e-class, if one exists.
     /// Returns std::nullopt if the class contains no ConstF node.
     std::optional<double> getConstFValue(ClassId cls) const;
+
+    /// Check if a class is known to be a power of two (1, 2, 4, 8, ...).
+    bool isClassPowerOfTwo(ClassId cls) const;
+
+    /// Check if a class is known to be boolean (0 or 1 only).
+    bool isClassBoolean(ClassId cls) const;
+
+    /// Check if a class is known to be non-negative (>= 0).
+    bool isClassNonNeg(ClassId cls) const;
 
     /// Check if two e-classes are equivalent (represent the same value).
     bool areEquivalent(ClassId a, ClassId b);

@@ -44,6 +44,8 @@
 #include <llvm/Transforms/IPO/FunctionAttrs.h>
 #include <llvm/Transforms/IPO/InferFunctionAttrs.h>
 #include <llvm/Transforms/IPO/PartialInlining.h>
+#include <llvm/Transforms/IPO/GlobalSplit.h>
+#include <llvm/Transforms/IPO/StripDeadPrototypes.h>
 #include <llvm/Transforms/InstCombine/InstCombine.h>
 #include <llvm/Transforms/Scalar.h>
 #include <llvm/Transforms/Scalar/ADCE.h>
@@ -104,10 +106,41 @@
 #include <llvm/Transforms/Scalar/InstSimplifyPass.h>
 #include <llvm/Transforms/Scalar/LICM.h>
 #include <llvm/Transforms/Vectorize/VectorCombine.h>
+#include <llvm/Transforms/Vectorize/LoadStoreVectorizer.h>
+#include <llvm/Transforms/Vectorize/SLPVectorizer.h>
+#include <llvm/Transforms/Scalar/NewGVN.h>
+#include <llvm/Transforms/Scalar/Scalarizer.h>
+#include <llvm/Transforms/IPO/CalledValuePropagation.h>
+#include <llvm/Transforms/IPO/Attributor.h>
+#include <llvm/Transforms/Scalar/SCCP.h>
+#include <llvm/Transforms/Scalar/LoopReroll.h>
+#include <llvm/Transforms/Scalar/GuardWidening.h>
+#include <llvm/Transforms/Scalar/TLSVariableHoist.h>
+#include <llvm/Transforms/IPO/MergeFunctions.h>
+#include <llvm/Transforms/Scalar/LowerExpectIntrinsic.h>
+#include <llvm/Transforms/Scalar/WarnMissedTransforms.h>
+#include <llvm/Transforms/Scalar/LowerConstantIntrinsics.h>
 #include <optional>
 #include <stdexcept>
 
 namespace omscript {
+
+// Aggressive SimplifyCFG options used throughout the optimization pipeline.
+// Converts if-else chains to selects, hoists/sinks common instructions,
+// converts switches to lookup tables, and speculatively simplifies blocks.
+// bonusInstThreshold=4 allows up to 4 extra instructions to be speculated
+// when converting branches to selects — enough for cascading-if classify()
+// patterns without over-speculating complex branches.
+static constexpr int kCFGSpeculationBonus = 4;
+static llvm::SimplifyCFGOptions aggressiveCFGOpts() {
+    return llvm::SimplifyCFGOptions()
+        .convertSwitchToLookupTable(true)
+        .hoistCommonInsts(true)
+        .sinkCommonInsts(true)
+        .speculateBlocks(true)
+        .forwardSwitchCondToPhi(true)
+        .bonusInstThreshold(kCFGSpeculationBonus);
+}
 
 void CodeGenerator::resolveTargetCPU(std::string& cpu, std::string& features) const {
     const bool isNative = marchCpu_.empty() || marchCpu_ == "native";
@@ -376,6 +409,13 @@ void CodeGenerator::runOptimizationPasses() {
         PB.registerPipelineStartEPCallback(
             [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/) {
             MPM.addPass(llvm::InferFunctionAttrsPass());
+            // LowerExpectIntrinsic converts llvm.expect intrinsics to branch
+            // weight metadata early in the pipeline so that all downstream
+            // passes (SimplifyCFG, JumpThreading, LoopRotate) can use the
+            // likely/unlikely hints for better code layout.
+            llvm::FunctionPassManager EarlyFPM;
+            EarlyFPM.addPass(llvm::LowerExpectIntrinsicPass());
+            MPM.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(EarlyFPM)));
         });
     }
 
@@ -384,13 +424,13 @@ void CodeGenerator::runOptimizationPasses() {
     // enabling better CSE and constant folding.  EarlyCSE eliminates trivially
     // redundant computations before the heavier optimization passes run,
     // reducing IR size and compilation time for the downstream pipeline.
+    // The PeepholeEP callback runs after EVERY InstCombine invocation in
+    // the pipeline.  Keep this extremely lightweight — only EarlyCSE which
+    // is cheap and catches redundancies InstCombine creates.  Reassociate
+    // is already in the main pipeline and is too expensive to run repeatedly.
     if (optimizationLevel >= OptimizationLevel::O1) {
         const bool useMemSSA = optimizationLevel >= OptimizationLevel::O2;
         PB.registerPeepholeEPCallback([useMemSSA](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel /*Level*/) {
-            FPM.addPass(llvm::ReassociatePass());
-            // At O2+, enable MemorySSA for EarlyCSE so it can eliminate
-            // redundant loads/stores (at the cost of slightly higher compile
-            // time).  At O1 the lightweight version without MemorySSA is enough.
             FPM.addPass(llvm::EarlyCSEPass(useMemSSA));
         });
     }
@@ -407,18 +447,11 @@ void CodeGenerator::runOptimizationPasses() {
         });
     }
 
-    // At O2+, register SCCP (Sparse Conditional Constant Propagation) early
-    // in the scalar optimizer to discover constants that flow through control
-    // flow edges.  SCCP can prove that some branches are never taken and that
-    // some PHI values are constant, enabling dead code elimination upstream.
+    // At O2+, register CallSiteSplitting in the scalar optimizer.
+    // NOTE: SCCP is already part of the default O2/O3 pipeline — only
+    // CallSiteSplitting, which is not in the default pipeline, is added.
     if (optimizationLevel >= OptimizationLevel::O2) {
         PB.registerScalarOptimizerLateEPCallback([](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel /*Level*/) {
-            FPM.addPass(llvm::SCCPPass());
-            // CallSiteSplitting clones a function call when a predecessor
-            // branch constrains one of the call's arguments to a constant
-            // (e.g. `if (x == 0) foo(x)` → `foo(0)`).  The specialised
-            // clone is amenable to constant propagation and dead branch
-            // elimination, often collapsing an entire function body.
             FPM.addPass(llvm::CallSiteSplittingPass());
         });
     }
@@ -478,80 +511,16 @@ void CodeGenerator::runOptimizationPasses() {
     // before the vectorizer starts.  Loop distribution splits a loop with
     // multiple independent memory access patterns into separate loops, each
     // touching a smaller working set — this improves cache locality and
-    // enables downstream vectorization of the resulting simpler loops.
-    // Running it BEFORE vectorization (via registerVectorizerStartEPCallback)
-    // is critical; appending it after the full pipeline produced
-    // "unsupported transformation ordering" warnings because vectorization
-    // had already consumed and transformed the original loop structure.
-    if (optimizationLevel >= OptimizationLevel::O2 && enableLoopOptimize_) {
-        PB.registerVectorizerStartEPCallback(
-            [](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel /*Level*/) { FPM.addPass(llvm::LoopDistributePass()); });
-    }
-
-    // At O2+, inject LoopLoadEliminationPass before vectorization to forward
-    // values from stores to subsequent loads within the same loop iteration,
-    // eliminating redundant memory traffic and enabling vectorization of
-    // reduction-like patterns.
+    // At O2+, register all pre-vectorization passes in a single callback.
+    // This runs LoopDistribute, LoopLoadElim, LoopFuse (if enabled), and
+    // then re-canonicalizes loops + promotes reductions to SSA form.
     if (optimizationLevel >= OptimizationLevel::O2) {
-        PB.registerVectorizerStartEPCallback([](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel /*Level*/) {
+        const bool loopOpt = enableLoopOptimize_;
+        PB.registerVectorizerStartEPCallback(
+            [loopOpt](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel /*Level*/) {
+            if (loopOpt) FPM.addPass(llvm::LoopDistributePass());
             FPM.addPass(llvm::LoopLoadEliminationPass());
-        });
-    }
-
-    // At O2+ with loop optimization enabled (enableLoopOptimize_ / -floop-optimize),
-    // register LoopFusePass before vectorization to merge adjacent loops with
-    // the same trip count into a single loop, dramatically improving data cache
-    // locality and reducing loop overhead.  This is particularly beneficial for
-    // array-processing code where successive passes over the same data can be
-    // combined.  Lowered from O3 to O2 to benefit more workloads, since loop
-    // fusion is a key enabler of iterator-fusion-style optimization.
-    if (optimizationLevel >= OptimizationLevel::O2 && enableLoopOptimize_) {
-        PB.registerVectorizerStartEPCallback(
-            [](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel /*Level*/) { FPM.addPass(llvm::LoopFusePass()); });
-    }
-
-    // At O2+, re-canonicalize loops and promote reductions to SSA form
-    // immediately before the vectorizer.  This is critical because the
-    // preceding VectorizerStartEP passes (LoopDistribute, LoopLoadElim,
-    // LoopFuse) can transform loop structure in ways that break canonical
-    // form.  Re-running LoopSimplify + LCSSA + LoopRotate guarantees:
-    //   - Single pre-header edge (LoopSimplify)
-    //   - Dedicated exit blocks (LoopSimplify)
-    //   - Exactly one back-edge (LoopSimplify)
-    //   - LCSSA PHI nodes at loop exits (LCSSA)
-    //   - Bottom-tested (rotated) form (LoopRotate)
-    //
-    // SROA + PromotePass (mem2reg) promote stack-allocated reduction
-    // variables to SSA PHI nodes before the vectorizer sees them.
-    // Without this, compound assignments like `sum += a[i]` remain as
-    // load-add-store through an alloca, which the vectorizer cannot
-    // recognize as a reduction.  After promotion, the pattern becomes:
-    //   %sum.phi = phi [init, preheader], [%sum.next, body]
-    //   %sum.next = add %sum.phi, %a_val
-    // which LLVM's vectorizer recognizes as a standard reduction.
-    //
-    // InstCombine cleans up redundant patterns exposed by mem2reg
-    // (dead stores, trivial PHIs) to present the cleanest possible IR
-    // to the vectorizer's pattern matching.
-    //
-    // LICM (Loop Invariant Code Motion) hoists loop-invariant loads,
-    // stores, and computations out of loop bodies, reducing per-iteration
-    // work.  Running it after LoopSimplify + LCSSA + LoopRotate ensures
-    // the loop structure is in canonical form for LICM's analysis.
-    //
-    // GVN (Global Value Numbering) eliminates redundant computations
-    // by recognizing that different expressions compute the same value.
-    // After LICM hoists invariants and InstCombine simplifies patterns,
-    // GVN can merge duplicate loads and computations across basic blocks.
-    //
-    // InstSimplify performs lightweight algebraic simplification
-    // (identity elimination, constant folding, dead comparison removal)
-    // without the overhead of full InstCombine.  Running it as a final
-    // cleanup pass before the vectorizer ensures the IR is as simple
-    // as possible for the vectorizer's cost model and pattern matching.
-    if (optimizationLevel >= OptimizationLevel::O2) {
-        PB.registerVectorizerStartEPCallback(
-            [](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel /*Level*/) {
+            if (loopOpt) FPM.addPass(llvm::LoopFusePass());
             FPM.addPass(llvm::SROAPass(llvm::SROAOptions::ModifyCFG));
             FPM.addPass(llvm::PromotePass());
             FPM.addPass(llvm::InstCombinePass());
@@ -560,13 +529,11 @@ void CodeGenerator::runOptimizationPasses() {
             FPM.addPass(llvm::createFunctionToLoopPassAdaptor(llvm::LoopRotatePass()));
             FPM.addPass(llvm::createFunctionToLoopPassAdaptor(
                 llvm::LICMPass(llvm::LICMOptions()), /*UseMemorySSA=*/true));
+            // Reassociate reorders commutative/associative expressions to
+            // expose more CSE opportunities for GVN.
+            FPM.addPass(llvm::ReassociatePass());
             FPM.addPass(llvm::GVNPass());
             FPM.addPass(llvm::InstSimplifyPass());
-            // AlignmentFromAssumptions uses @llvm.assume alignment hints to
-            // upgrade load/store alignment.  Better alignment enables the
-            // vectorizer to use wider vector operations (e.g. aligned 256-bit
-            // loads instead of unaligned 128-bit loads), reducing memory
-            // traffic and improving throughput.
             FPM.addPass(llvm::AlignmentFromAssumptionsPass());
             // CorrelatedValuePropagation uses value-range information from
             // branch conditions to tighten comparisons, convert signed ops
@@ -579,129 +546,71 @@ void CodeGenerator::runOptimizationPasses() {
             // unreachable code before the vectorizer.  Cleaner CFG structure
             // helps the vectorizer's control-flow analysis and reduces the
             // number of scalar epilogue paths it must handle.
-            FPM.addPass(llvm::SimplifyCFGPass());
+            // Use aggressive options: convert if-else chains to selects,
+            // hoist/sink common instructions, and convert switches to lookup
+            // tables — critical for classify()-style cascading-if patterns.
+            FPM.addPass(llvm::SimplifyCFGPass(aggressiveCFGOpts()));
         });
     }
 
-    // At O3 with -floop-optimize, register LoopInterchangePass at the end of
+    // At O2+ with -floop-optimize, register LoopInterchangePass at the end of
     // the loop optimizer to interchange nested loops for better cache locality.
     // This transforms loop-nest orders so that the innermost loop accesses
     // memory contiguously (e.g. column-major → row-major), dramatically
     // reducing cache misses for matrix-style code.
-    if (optimizationLevel >= OptimizationLevel::O3 && enableLoopOptimize_) {
+    // Lowered from O3 to O2 because matrix-style loops are common even in
+    // moderate-optimization builds.
+    if (optimizationLevel >= OptimizationLevel::O2 && enableLoopOptimize_) {
         PB.registerLoopOptimizerEndEPCallback(
             [](llvm::LoopPassManager& LPM, llvm::OptimizationLevel /*Level*/) { LPM.addPass(llvm::LoopInterchangePass()); });
     }
 
-    // At O2+, inject AggressiveInstCombine after the standard peephole passes
-    // to catch multi-instruction patterns (e.g. truncation sequences, popcount
-    // idioms) that regular InstCombine does not handle.  Lowered from O3 to O2
-    // to provide zero-cost abstractions: operator overload bodies and iterator
-    // chains benefit from aggressive pattern matching after inlining.
-    if (optimizationLevel >= OptimizationLevel::O2) {
-        PB.registerPeepholeEPCallback([](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel /*Level*/) {
-            FPM.addPass(llvm::AggressiveInstCombinePass());
-        });
-    }
+    // NOTE: AggressiveInstCombine is already part of the default O2/O3
+    // pipeline.  Registering it at PeepholeEP caused it to run after EVERY
+    // InstCombine invocation, which is extremely expensive with diminishing
+    // returns.  Removed to improve compile time.
 
-    // At O2+, inject SimpleLoopUnswitchPass late in the loop optimizer to hoist
-    // loop-invariant conditional branches out of loops.  This transforms a loop
-    // with an invariant if/else into two specialized loops — one for the true
-    // path and one for the false path — eliminating a branch per iteration
-    // and enabling further loop-specific optimizations on each clone.
-    // NonTrivial=true allows cloning of the loop for non-trivial unswitching
-    // (i.e. the condition has side effects in the loop body).
-    if (optimizationLevel >= OptimizationLevel::O2) {
-        PB.registerLateLoopOptimizationsEPCallback([](llvm::LoopPassManager& LPM, llvm::OptimizationLevel /*Level*/) {
-            LPM.addPass(llvm::SimpleLoopUnswitchPass(/*NonTrivial=*/true));
-        });
-    }
+    // At O2+, register all extra loop optimizer passes in consolidated callbacks.
+    {
+        const bool isO3 = optimizationLevel >= OptimizationLevel::O3;
+        const bool loopOpt = enableLoopOptimize_;
 
-    // At O2+, register additional loop cleanup passes at the end of the loop
-    // optimizer.  These run after all loop transformations (rotation, LICM,
-    // unrolling, vectorization) have completed:
-    //   LoopIdiomRecognizePass: detects loop patterns that implement memset,
-    //     memcpy, or similar operations and replaces them with optimized
-    //     library calls — a major performance win for array initialization
-    //     and copy loops.
-    //   IndVarSimplifyPass: canonicalizes induction variables (e.g. narrows
-    //     types, removes sign-extensions, replaces derived IVs with a single
-    //     canonical counter) to simplify trip-count computation and enable
-    //     more aggressive vectorization and unrolling.
-    //   LoopDeletionPass: removes loops that are provably dead (no observable
-    //     side effects, results unused) — eliminates wasted cycles in code
-    //     where earlier optimizations eliminated the loop's consumers.
-    if (optimizationLevel >= OptimizationLevel::O2) {
-        PB.registerLoopOptimizerEndEPCallback([](llvm::LoopPassManager& LPM, llvm::OptimizationLevel /*Level*/) {
-            LPM.addPass(llvm::LoopIdiomRecognizePass());
-            LPM.addPass(llvm::IndVarSimplifyPass());
-            LPM.addPass(llvm::LoopDeletionPass());
-            // LoopInstSimplify performs lightweight instruction simplification
-            // (constant folding, identity removal, dead comparison elimination)
-            // inside loop bodies after all loop transforms have completed.
-            // This cleans up patterns exposed by IndVarSimplify, LoopRotate,
-            // and LICM that would otherwise persist until later InstCombine.
-            LPM.addPass(llvm::LoopInstSimplifyPass());
-            // LoopSimplifyCFG removes trivially dead blocks, merges blocks
-            // with single predecessors, and eliminates unreachable code inside
-            // loops.  Running it after IndVarSimplify and LoopDeletion cleans
-            // up CFG artifacts those passes may leave behind, presenting the
-            // vectorizer and unroller with cleaner loop bodies.
-            LPM.addPass(llvm::LoopSimplifyCFGPass());
-        });
-    }
+        if (optimizationLevel >= OptimizationLevel::O2) {
+            PB.registerLateLoopOptimizationsEPCallback([isO3, loopOpt](llvm::LoopPassManager& LPM, llvm::OptimizationLevel /*Level*/) {
+                LPM.addPass(llvm::SimpleLoopUnswitchPass(/*NonTrivial=*/true));
+                // LoopVersioningLICM creates a versioned copy of the loop
+                // with runtime alias checks, allowing LICM to hoist loads
+                // and stores that may alias.  Lowered from O3-only to O2+
+                // because OmScript's noalias semantics make the runtime
+                // checks trivially optimizable, benefiting general code.
+                if (loopOpt)
+                    LPM.addPass(llvm::LoopVersioningLICMPass());
+            });
+        }
 
-    // At O3 with -floop-optimize, register advanced loop nest transformations
-    // after the basic loop cleanup passes.
-    if (optimizationLevel >= OptimizationLevel::O3 && enableLoopOptimize_) {
-        PB.registerLoopOptimizerEndEPCallback([](llvm::LoopPassManager& LPM, llvm::OptimizationLevel /*Level*/) {
-            // LoopFlatten collapses perfectly-nested loop pairs into a single
-            // loop with a linearised induction variable.  This eliminates inner
-            // loop overhead (branch, counter increment, comparison) and enables
-            // the vectorizer to process the flattened iteration space as a
-            // single contiguous stream.  Beneficial for matrix-clear,
-            // image-processing, and N-dimensional array traversal patterns.
-            LPM.addPass(llvm::LoopFlattenPass());
-            // LoopUnrollAndJam unrolls the outer loop of a loop nest and fuses
-            // ("jams") the resulting copies of the inner loop.  This improves
-            // data reuse between outer-loop iterations — values loaded by the
-            // inner loop in iteration i of the outer loop are still in
-            // registers when the inner loop runs for iteration i+1, reducing
-            // memory traffic.  The pass uses TTI cost modelling to decide the
-            // unroll factor.
-            LPM.addPass(llvm::LoopUnrollAndJamPass(/*OptLevel=*/3));
-        });
-    }
-
-    // At O3, register LoopBoundSplitPass to split loops whose body contains
-    // an induction-variable-dependent condition (e.g. `if (i < c)`) into
-    // two specialised loops: one that always takes the true branch and one
-    // that always takes the false branch.  This eliminates a branch per
-    // iteration in each clone and exposes more vectorisation opportunities.
-    if (optimizationLevel >= OptimizationLevel::O3) {
-        PB.registerLoopOptimizerEndEPCallback([](llvm::LoopPassManager& LPM, llvm::OptimizationLevel /*Level*/) {
-            LPM.addPass(llvm::LoopBoundSplitPass());
-            // LoopPredication widens loop-variant guard/range checks into
-            // loop-invariant ones by computing the widened condition before
-            // loop entry.  This converts per-iteration bounds checks (e.g.
-            // `if (i < n)`) into a single pre-loop check, eliminating a
-            // branch per iteration and enabling the vectorizer to process
-            // the loop without scalar epilogues for the check.
-            LPM.addPass(llvm::LoopPredicationPass());
-        });
-    }
-
-    // At O3 with -floop-optimize, register LoopVersioningLICMPass late in
-    // the loop optimizer.  When alias analysis cannot prove that a loop's
-    // memory accesses don't alias, this pass creates a runtime alias check
-    // and generates two loop versions: the fast path with LICM-hoisted
-    // loads/stores (assuming no alias), and a slow fallback with the
-    // original loop.  This enables LICM on loops that would otherwise be
-    // blocked by conservative alias analysis.
-    if (optimizationLevel >= OptimizationLevel::O3 && enableLoopOptimize_) {
-        PB.registerLateLoopOptimizationsEPCallback([](llvm::LoopPassManager& LPM, llvm::OptimizationLevel /*Level*/) {
-            LPM.addPass(llvm::LoopVersioningLICMPass());
-        });
+        if (optimizationLevel >= OptimizationLevel::O2) {
+            PB.registerLoopOptimizerEndEPCallback([isO3, loopOpt](llvm::LoopPassManager& LPM, llvm::OptimizationLevel /*Level*/) {
+                // LoopIdiomRecognize detects loop patterns that implement
+                // memset, memcpy, or similar operations and replaces them with
+                // optimized library calls.
+                LPM.addPass(llvm::LoopIdiomRecognizePass());
+                // IndVarSimplify canonicalizes induction variables for
+                // vectorization and unrolling.
+                LPM.addPass(llvm::IndVarSimplifyPass());
+                // LoopDeletion removes provably dead loops.
+                LPM.addPass(llvm::LoopDeletionPass());
+                LPM.addPass(llvm::LoopInstSimplifyPass());
+                LPM.addPass(llvm::LoopSimplifyCFGPass());
+                if (isO3 && loopOpt) {
+                    LPM.addPass(llvm::LoopFlattenPass());
+                    LPM.addPass(llvm::LoopUnrollAndJamPass(/*OptLevel=*/3));
+                }
+                if (isO3) {
+                    LPM.addPass(llvm::LoopBoundSplitPass());
+                    LPM.addPass(llvm::LoopPredicationPass());
+                }
+            });
+        }
     }
 
     // At O3, inject LoopDataPrefetchPass to insert software prefetch
@@ -715,106 +624,62 @@ void CodeGenerator::runOptimizationPasses() {
     // access to small arrays that fit in L1).
     // Registered at ScalarOptimizerLateEP because LoopDataPrefetchPass is a
     // FunctionPass that internally walks loop nests and analyses SCEVs.
-    if (optimizationLevel >= OptimizationLevel::O3) {
-        PB.registerScalarOptimizerLateEPCallback([](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel /*Level*/) {
-            FPM.addPass(llvm::LoopDataPrefetchPass());
-        });
-    }
-
-    // At O2+, inject CorrelatedValuePropagation and DeadStoreElimination
-    // late in the scalar optimizer.  CVP uses value-range information from
-    // branch conditions to sharpen comparisons, convert signed operations
-    // to unsigned (enabling more shifts/masks), and eliminate provably-dead
-    // branches.  DSE removes stores whose values are never read (e.g.
-    // overwritten before use, or stored to dead allocations).
-    // BDCE (Bit-tracking Dead Code Elimination) identifies and eliminates
-    // instructions whose results have unused bits, shrinking live ranges
-    // and enabling further simplification.
-    // TailCallElimPass converts tail-recursive calls into loops, eliminating
-    // stack growth for recursive algorithms (e.g. list traversals, tree walks).
+    // At O2+, consolidate all ScalarOptimizerLateEP passes into one callback.
     if (optimizationLevel >= OptimizationLevel::O2) {
-        PB.registerScalarOptimizerLateEPCallback([](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel /*Level*/) {
+        const bool isO3 = optimizationLevel >= OptimizationLevel::O3;
+        PB.registerScalarOptimizerLateEPCallback([isO3](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel /*Level*/) {
+            if (isO3) FPM.addPass(llvm::LoopDataPrefetchPass());
+            // CVP uses value-range info to sharpen comparisons and convert
+            // signed ops to unsigned.
             FPM.addPass(llvm::CorrelatedValuePropagationPass());
             FPM.addPass(llvm::BDCEPass());
+            // ADCE removes dead code more aggressively than DCE.
             FPM.addPass(llvm::ADCEPass());
+            // DSE removes stores whose values are never read.
             FPM.addPass(llvm::DSEPass());
+            // MemCpyOpt optimizes memory transfer operations.
             FPM.addPass(llvm::MemCpyOptPass());
+            // Float2Int converts float operations to integer when possible.
             FPM.addPass(llvm::Float2IntPass());
+            // TailCallElim converts tail-recursive calls into loops.
             FPM.addPass(llvm::TailCallElimPass());
-            // MergeICmps merges chains of integer comparisons (e.g. struct
-            // field-by-field equality) into efficient memcmp/bcmp calls,
-            // which the back-end can lower to vectorized SIMD comparisons.
             FPM.addPass(llvm::MergeICmpsPass());
-            // MergedLoadStoreMotion hoists loads and sinks stores across
-            // diamond-shaped (if/else) control flow, hiding memory latency
-            // and reducing static code size.
             FPM.addPass(llvm::MergedLoadStoreMotionPass());
-            // StraightLineStrengthReduce detects and reuses redundant
-            // address/offset computations in straight-line code (e.g.
-            // base+i*stride patterns), replacing expensive multiplies with
-            // incremental additions.
             FPM.addPass(llvm::StraightLineStrengthReducePass());
-            // NaryReassociate reassociates n-ary add/mul expressions to
-            // maximize reuse of existing sub-expressions (e.g. (a+b)+2
-            // when (a+b) is already available → reuse + add 2).
             FPM.addPass(llvm::NaryReassociatePass());
-            // InferAlignment uses context clues (GEP offsets, alloca
-            // alignment, assume intrinsics) to tighten the alignment of
-            // loads and stores.  Higher alignment enables the back-end to
-            // use wider, more efficient memory operations and avoids
-            // alignment fixup sequences on architectures that penalise
-            // unaligned access.
+            FPM.addPass(llvm::ReassociatePass());
             FPM.addPass(llvm::InferAlignmentPass());
-        });
-    }
-
-    // At O3, inject ConstraintElimination and JumpThreading late in the
-    // scalar optimizer.  ConstraintElimination removes redundant comparisons
-    // using range constraints (e.g. after a bounds check, subsequent in-range
-    // accesses skip the check).  JumpThreading threads branches through
-    // basic blocks with known conditions, reducing branch mispredictions.
-    // DivRemPairsPass hoists and decomposes division/remainder pairs — when
-    // both x/y and x%y appear in the same function, the backend can reuse
-    // the quotient from a single hardware division for both results.
-    // SpeculativeExecutionPass speculatively executes instructions from a
-    // branch to reduce branch misprediction cost on wide-issue CPUs.
-    if (optimizationLevel >= OptimizationLevel::O3) {
-        PB.registerScalarOptimizerLateEPCallback([](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel /*Level*/) {
-            FPM.addPass(llvm::ConstraintEliminationPass());
-            FPM.addPass(llvm::JumpThreadingPass());
-            FPM.addPass(llvm::DivRemPairsPass());
-            FPM.addPass(llvm::SpeculativeExecutionPass());
-            // IRCEPass (Inductive Range Check Elimination) creates versioned
-            // loops: a "safe" main loop that runs without bounds checks and a
-            // "pre/post" loop that handles the boundary iterations with checks.
-            // For counted loops with bounds-checked array access this
-            // eliminates a comparison + branch per iteration on the hot path.
-            FPM.addPass(llvm::IRCEPass());
-            // DFAJumpThreading threads through switch-statement state machines
-            // by building a DFA model of the switch dispatch and replacing
-            // indirect jumps with direct branches.  This is more powerful than
-            // regular JumpThreading for parser/automaton code where the next
-            // state is predictable from the current state + input.
-            FPM.addPass(llvm::DFAJumpThreadingPass());
-            // ConstantHoisting identifies expensive-to-materialise constants
-            // (e.g. large immediates that don't fit in the instruction encoding)
-            // and hoists them to a common dominator, materialising once and
-            // reusing via register.  This reduces code size and avoids repeated
-            // constant-materialisation sequences in hot loops.
-            FPM.addPass(llvm::ConstantHoistingPass());
-            // SeparateConstOffsetFromGEP extracts constant parts from GEP
-            // (GetElementPtr) address computations, allowing the back-end to
-            // share common base addresses across multiple array accesses via
-            // base+offset addressing modes — critical for tight array loops.
-            FPM.addPass(llvm::SeparateConstOffsetFromGEPPass());
-            // PartiallyInlineLibCalls replaces calls to math functions (sqrt,
-            // etc.) with an inline fast-path + fallback-call branch, avoiding
-            // the function-call overhead when the fast path is taken.
-            FPM.addPass(llvm::PartiallyInlineLibCallsPass());
-            // SinkingPass moves instructions into successor blocks when the
-            // result is only used in that successor, reducing register pressure
-            // and execution cost on paths where the result isn't needed.
-            FPM.addPass(llvm::SinkingPass());
+            // SCCP: sparse conditional constant propagation — more powerful
+            // than simple constant folding because it tracks value ranges
+            // through phi nodes and conditional branches.
+            FPM.addPass(llvm::SCCPPass());
+            FPM.addPass(llvm::InstCombinePass());
+            if (isO3) {
+                FPM.addPass(llvm::ConstraintEliminationPass());
+                // JumpThreading threads branches through basic blocks with
+                // known conditions, reducing branch mispredictions.
+                FPM.addPass(llvm::JumpThreadingPass());
+                // DivRemPairs reuses quotient from div for rem.
+                FPM.addPass(llvm::DivRemPairsPass());
+                FPM.addPass(llvm::SpeculativeExecutionPass());
+                FPM.addPass(llvm::IRCEPass());
+                FPM.addPass(llvm::DFAJumpThreadingPass());
+                FPM.addPass(llvm::ConstantHoistingPass());
+                FPM.addPass(llvm::SeparateConstOffsetFromGEPPass());
+                FPM.addPass(llvm::PartiallyInlineLibCallsPass());
+                FPM.addPass(llvm::SinkingPass());
+                // NewGVN is a graph-based GVN that catches redundancies
+                // classic GVN misses (e.g. through PHI nodes and memory).
+                FPM.addPass(llvm::NewGVNPass());
+                // GuardWidening merges multiple guard checks into a single
+                // wider check, reducing branching overhead in bounds-checked
+                // loops.
+                FPM.addPass(llvm::GuardWideningPass());
+            }
+            // Aggressive SimplifyCFG at the end to convert if-else chains
+            // into select instructions or lookup tables after all inlining,
+            // jump threading, and CVP have simplified conditions.
+            FPM.addPass(llvm::SimplifyCFGPass(aggressiveCFGOpts()));
         });
     }
 
@@ -833,7 +698,14 @@ void CodeGenerator::runOptimizationPasses() {
             llvm::FunctionPassManager FPM;
             FPM.addPass(llvm::VectorCombinePass());
             FPM.addPass(llvm::LoopSinkPass());
+            // LoadStoreVectorizer combines adjacent scalar loads/stores into
+            // vector operations.  This is especially beneficial for struct
+            // field access patterns and array initialization loops.
+            FPM.addPass(llvm::LoadStoreVectorizerPass());
             MPM.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(FPM)));
+            // CalledValuePropagation propagates known function pointer values
+            // through indirect calls, enabling devirtualization and inlining.
+            MPM.addPass(llvm::CalledValuePropagationPass());
             // ConstantMerge deduplicates identical global constants across the
             // module (e.g. duplicate string literals, floating-point constants,
             // constant arrays).  Fewer unique constants means smaller data
@@ -901,6 +773,27 @@ void CodeGenerator::runOptimizationPasses() {
         PB.registerOptimizerLastEPCallback(
             [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/) {
             MPM.addPass(llvm::HotColdSplittingPass());
+            // StripDeadPrototypes removes unused external function declarations.
+            // After inlining, dead argument elimination, and DCE, many declared-
+            // but-never-called prototypes remain.  Removing them reduces symbol
+            // table pressure and link time.
+            MPM.addPass(llvm::StripDeadPrototypesPass());
+            // GlobalSplit splits internal globals with multiple fields into
+            // separate globals, enabling more precise alias analysis and
+            // allowing SROA/mem2reg to promote individual fields to registers.
+            MPM.addPass(llvm::GlobalSplitPass());
+            // MergeFunctions deduplicates identical function bodies, reducing
+            // code size and I-cache pressure.  OmScript's monomorphization of
+            // generic functions often produces identical machine code for
+            // different type instantiations.
+            MPM.addPass(llvm::MergeFunctionsPass());
+        });
+    }
+    // At O2, still strip dead prototypes for cleaner output.
+    if (optimizationLevel == OptimizationLevel::O2) {
+        PB.registerOptimizerLastEPCallback(
+            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/) {
+            MPM.addPass(llvm::StripDeadPrototypesPass());
         });
     }
 
@@ -958,6 +851,9 @@ void CodeGenerator::runOptimizationPasses() {
         }
         MPM.addPass(llvm::GlobalOptPass());
         MPM.addPass(llvm::GlobalDCEPass());
+        // Final StripDeadPrototypes cleanup: after GlobalDCE removes dead
+        // functions, their forward declarations may linger.
+        MPM.addPass(llvm::StripDeadPrototypesPass());
     }
     if (verbose_) {
         std::cout << "    Running LLVM module pass pipeline..." << std::endl;
@@ -1021,12 +917,13 @@ void CodeGenerator::runOptimizationPasses() {
     // reducing call overhead by ~2^depth.  3 levels gives ~8x fewer calls,
     // matching GCC -O3's behavior for naive recursive algorithms like fib.
     if (optimizationLevel >= OptimizationLevel::O3) {
-        static constexpr unsigned kRecursiveInlineDepth = 3;
+        static constexpr unsigned kRecursiveInlineDepth = 4;
         // Conservative size limit: the function BEFORE inlining must be
         // small enough that inlining won't create a huge function.
         // After inlining, each copy roughly doubles the size. So we limit
         // the pre-inline size to 200 instructions (~200 * 2^3 = 1600 max).
         static constexpr unsigned kMaxPreInlineSize = 200;
+        llvm::SmallVector<llvm::Function*, 4> inlinedFuncs;
         for (auto& F : *module) {
             if (F.isDeclaration() || F.getName() == "main") continue;
             const unsigned preSize = F.getInstructionCount();
@@ -1072,26 +969,23 @@ void CodeGenerator::runOptimizationPasses() {
                 }
                 if (inlined == 0) break;
             }
+            // Only functions with successful inlining need cleanup
+            inlinedFuncs.push_back(&F);
         }
         if (verbose_) {
             std::cout << "    Bounded recursive inlining complete" << std::endl;
         }
-        // Post-recursive-inlining cleanup: GVN + InstCombine + ADCE to eliminate
-        // redundant computations and dead code created by manual inlining.
-        // The inlined copies create duplicate computations of the same values
-        // (e.g., fib(n-1) appears both at the original call site and in the
-        // inlined body), and GVN can often merge these.
-        {
+        // Post-recursive-inlining cleanup: only run on functions that were
+        // actually inlined, not all functions in the module.
+        if (!inlinedFuncs.empty()) {
             llvm::legacy::FunctionPassManager postInlineFPM(module.get());
             postInlineFPM.add(llvm::createGVNPass());
             postInlineFPM.add(llvm::createInstructionCombiningPass());
-            postInlineFPM.add(llvm::createCFGSimplificationPass());
+            postInlineFPM.add(llvm::createCFGSimplificationPass(aggressiveCFGOpts()));
             postInlineFPM.add(llvm::createDeadCodeEliminationPass());
             postInlineFPM.doInitialization();
-            for (auto& F : *module) {
-                if (!F.isDeclaration() && F.getName() != "main") {
-                    postInlineFPM.run(F);
-                }
+            for (auto* F : inlinedFuncs) {
+                postInlineFPM.run(*F);
             }
             postInlineFPM.doFinalization();
         }
@@ -1124,17 +1018,37 @@ void CodeGenerator::runOptimizationPasses() {
             superConfig.synthesis.costThreshold = 0.9;
         }
         auto superStats = superopt::superoptimizeModule(*module, superConfig);
-        if (verbose_) {
-            const unsigned totalOpts = superStats.idiomsReplaced + superStats.synthReplacements +
+        const unsigned totalSuperOpts = superStats.idiomsReplaced + superStats.synthReplacements +
                                  superStats.algebraicSimplified + superStats.branchesSimplified +
                                  superStats.deadCodeEliminated;
+        if (verbose_) {
             std::cout << "    Superoptimizer complete: "
                       << superStats.idiomsReplaced << " idioms replaced, "
                       << superStats.algebraicSimplified << " algebraic simplifications, "
                       << superStats.synthReplacements << " synthesis replacements, "
                       << superStats.branchesSimplified << " branches simplified, "
                       << superStats.deadCodeEliminated << " dead instructions eliminated"
-                      << " (" << totalOpts << " total optimizations)" << std::endl;
+                      << " (" << totalSuperOpts << " total optimizations)" << std::endl;
+        }
+
+        // Post-superoptimizer cleanup: the superoptimizer creates algebraically
+        // simplified patterns that may have new CSE opportunities.  A quick
+        // GVN + InstCombine + SimplifyCFG pass cleans these up before the
+        // signed→unsigned conversion and HGOE runs.
+        // Only run on functions ≤2000 instructions to avoid excessive compile time.
+        if (totalSuperOpts > 0) {
+            llvm::legacy::FunctionPassManager postSuperFPM(module.get());
+            postSuperFPM.add(llvm::createGVNPass());
+            postSuperFPM.add(llvm::createInstructionCombiningPass());
+            postSuperFPM.add(llvm::createCFGSimplificationPass(aggressiveCFGOpts()));
+            postSuperFPM.add(llvm::createDeadCodeEliminationPass());
+            postSuperFPM.doInitialization();
+            for (auto& func : *module) {
+                if (func.isDeclaration()) continue;
+                if (func.getInstructionCount() > 2000) continue;
+                postSuperFPM.run(func);
+            }
+            postSuperFPM.doFinalization();
         }
     } else if (verbose_ && optimizationLevel >= OptimizationLevel::O2 && !enableSuperopt_) {
         std::cout << "    Superoptimizer disabled (-fno-superopt)" << std::endl;
@@ -1327,18 +1241,24 @@ void CodeGenerator::runOptimizationPasses() {
                       << std::endl;
         }
 
-        // Final aggressive DCE + redundant intrinsic removal after prefetch
-        // cleanup.  This catches any dead instructions exposed by prefetch
-        // removal and strips lifetime intrinsics for values that no longer
-        // exist in memory.  DCE runs twice intentionally: the first pass
-        // catches immediately dead code, InstCombine + CFGSimplification
-        // may expose further dead code, and the second DCE catches that.
+        // Final aggressive cleanup after prefetch removal and all post-pipeline
+        // optimizations.  GVN catches redundant computations exposed by
+        // superoptimizer/HGOE transforms.  DCE runs twice: first catches
+        // immediately dead code, InstCombine + CFGSimplification may expose
+        // further dead code, and the second DCE catches that.
         llvm::legacy::FunctionPassManager cleanupFPM(module.get());
         cleanupFPM.add(llvm::createGVNPass());
         cleanupFPM.add(llvm::createDeadCodeEliminationPass());
         cleanupFPM.add(llvm::createInstructionCombiningPass());
-        cleanupFPM.add(llvm::createCFGSimplificationPass());
+        cleanupFPM.add(llvm::createCFGSimplificationPass(aggressiveCFGOpts()));
+        // Post-pipeline loop cleanup: LoopSimplify re-canonicalizes loops
+        // after superoptimizer/HGOE transforms, enabling LICM to hoist
+        // invariants and LSR to reduce address computation complexity.
+        cleanupFPM.add(llvm::createLoopSimplifyPass());
+        cleanupFPM.add(llvm::createLICMPass());
+        cleanupFPM.add(llvm::createLoopStrengthReducePass());
         cleanupFPM.add(llvm::createDeadCodeEliminationPass());
+        cleanupFPM.add(llvm::createCFGSimplificationPass(aggressiveCFGOpts()));
         cleanupFPM.doInitialization();
         for (auto& func : *module) {
             if (!func.isDeclaration()) {
@@ -1362,7 +1282,7 @@ void CodeGenerator::optimizeFunction(llvm::Function* func) {
     fpm.add(llvm::createInstructionCombiningPass());
     fpm.add(llvm::createReassociatePass());
     fpm.add(llvm::createGVNPass());
-    fpm.add(llvm::createCFGSimplificationPass());
+    fpm.add(llvm::createCFGSimplificationPass(aggressiveCFGOpts()));
     fpm.add(llvm::createDeadCodeEliminationPass());
 
     fpm.doInitialization();
@@ -1419,7 +1339,7 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     fpm.add(llvm::createInstructionCombiningPass());
     fpm.add(llvm::createReassociatePass());
     fpm.add(llvm::createGVNPass());
-    fpm.add(llvm::createCFGSimplificationPass());
+    fpm.add(llvm::createCFGSimplificationPass(aggressiveCFGOpts()));
     fpm.add(llvm::createDeadCodeEliminationPass());
     // Phase 2: Loop optimizations (polyhedral-style)
     // Standard LLVM ordering: LoopSimplify normalises loop structure first
@@ -1447,7 +1367,7 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     // IV values, redundant loads) that DCE alone would miss.
     fpm.add(llvm::createGVNPass());
     fpm.add(llvm::createInstructionCombiningPass());
-    fpm.add(llvm::createCFGSimplificationPass());
+    fpm.add(llvm::createCFGSimplificationPass(aggressiveCFGOpts()));
     fpm.add(llvm::createDeadCodeEliminationPass());
     // Phase 3: Post-loop optimizations
 #if LLVM_VERSION_MAJOR < 18
@@ -1456,6 +1376,7 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     fpm.add(llvm::createSinkingPass());
     fpm.add(llvm::createStraightLineStrengthReducePass());
     fpm.add(llvm::createNaryReassociatePass());
+    fpm.add(llvm::createReassociatePass());
     fpm.add(llvm::createTailCallEliminationPass());
     fpm.add(llvm::createConstantHoistingPass());
     fpm.add(llvm::createSeparateConstOffsetFromGEPPass());
@@ -1467,27 +1388,24 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     fpm.add(llvm::createFlattenCFGPass());
 
     // Phase 3.5: Aggressive cleanup passes for maximal optimization.
-    // Extra DCE + CFG simplification to clean up patterns exposed by
-    // flattening — catches dead control flow and trivially dead instructions.
     fpm.add(llvm::createDeadCodeEliminationPass());
-    fpm.add(llvm::createCFGSimplificationPass());
+    fpm.add(llvm::createCFGSimplificationPass(aggressiveCFGOpts()));
 
     // Phase 4: Final cleanup — InstSimplify, InstCombine, CFGSimplification,
     // and DCE remove dead code and simplify patterns exposed by loop and
     // control-flow transformations above.
-    fpm.add(llvm::createInstSimplifyLegacyPass()); // lightweight complement to instcombine
+    fpm.add(llvm::createInstSimplifyLegacyPass());
     fpm.add(llvm::createInstructionCombiningPass());
-    fpm.add(llvm::createCFGSimplificationPass());
+    fpm.add(llvm::createCFGSimplificationPass(aggressiveCFGOpts()));
     fpm.add(llvm::createDeadCodeEliminationPass());
 
     fpm.doInitialization();
     for (llvm::Function* func : optMaxFuncs) {
-        // OPTMAX runs the aggressive pass stack three times to maximize optimization.
-        // Each iteration can expose new patterns for subsequent passes to simplify.
-        // Three iterations is the sweet spot: the first pass does heavy lifting,
-        // the second catches patterns exposed by loop/strength-reduce transforms,
-        // and the third cleans up residuals.  Beyond three, passes reach a fixed
-        // point and additional iterations produce no further changes.
+        // OPTMAX runs the aggressive pass stack twice to maximize optimization.
+        // The first iteration does the heavy lifting; the second catches
+        // patterns exposed by loop/strength-reduce transforms.  Beyond two,
+        // passes reach a near-fixed-point and additional iterations produce
+        // negligible changes while doubling compile time.
         constexpr int optMaxIterations = 3;
         for (int i = 0; i < optMaxIterations; ++i) {
             fpm.run(*func);
@@ -1622,7 +1540,7 @@ void CodeGenerator::runJITBaselinePasses() {
     fpm.add(llvm::createInstructionCombiningPass());
     fpm.add(llvm::createInstSimplifyLegacyPass());
     fpm.add(llvm::createReassociatePass());
-    fpm.add(llvm::createCFGSimplificationPass());
+    fpm.add(llvm::createCFGSimplificationPass(aggressiveCFGOpts()));
 
     // Phase 2: Value numbering and redundancy elimination.
     fpm.add(llvm::createGVNPass());
@@ -1674,7 +1592,7 @@ void CodeGenerator::runJITBaselinePasses() {
 
     // Phase 5: Final cleanup to remove instructions exposed by earlier passes.
     fpm.add(llvm::createInstructionCombiningPass());
-    fpm.add(llvm::createCFGSimplificationPass());
+    fpm.add(llvm::createCFGSimplificationPass(aggressiveCFGOpts()));
     fpm.add(llvm::createDeadCodeEliminationPass());
 
     fpm.doInitialization();

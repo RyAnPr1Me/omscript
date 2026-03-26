@@ -89,7 +89,8 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
     auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(it->second);
 
     llvm::Type* loadType = alloca ? alloca->getAllocatedType() : getDefaultType();
-    auto* load = builder->CreateLoad(loadType, it->second, expr->name.c_str());
+    auto* load = builder->CreateAlignedLoad(loadType, it->second,
+        llvm::MaybeAlign(8), expr->name.c_str());
 
     // If this is a const variable or a prefetch-immut variable, mark the
     // load as invariant so LLVM knows the value never changes and can
@@ -630,7 +631,16 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         builder->CreateCall(getOrDeclareStrcat(), {buf, strPtr});
         llvm::Value* nextIdx = builder->CreateAdd(idx, one, "strmul.next");
         idx->addIncoming(nextIdx, bodyBB);
-        builder->CreateBr(loopBB);
+        auto* strmulBackBr = builder->CreateBr(loopBB);
+        if (optimizationLevel >= OptimizationLevel::O1) {
+            llvm::SmallVector<llvm::Metadata*, 2> mds;
+            mds.push_back(nullptr);
+            mds.push_back(llvm::MDNode::get(*context,
+                {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
+            llvm::MDNode* md = llvm::MDNode::get(*context, mds);
+            md->replaceOperandWith(0, md);
+            strmulBackBr->setMetadata(llvm::LLVMContext::MD_loop, md);
+        }
         builder->SetInsertPoint(doneBB);
         return buf;
     }
@@ -1306,22 +1316,34 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         return isDivision ? builder->CreateSDiv(left, right, "divtmp") : builder->CreateSRem(left, right, "modtmp");
     } else if (expr->op == "==") {
         llvm::Value* cmp = builder->CreateICmpEQ(left, right, "cmptmp");
-        return builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+        auto* result = builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+        nonNegValues_.insert(result);
+        return result;
     } else if (expr->op == "!=") {
         llvm::Value* cmp = builder->CreateICmpNE(left, right, "cmptmp");
-        return builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+        auto* result = builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+        nonNegValues_.insert(result);
+        return result;
     } else if (expr->op == "<") {
         llvm::Value* cmp = builder->CreateICmpSLT(left, right, "cmptmp");
-        return builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+        auto* result = builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+        nonNegValues_.insert(result);
+        return result;
     } else if (expr->op == "<=") {
         llvm::Value* cmp = builder->CreateICmpSLE(left, right, "cmptmp");
-        return builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+        auto* result = builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+        nonNegValues_.insert(result);
+        return result;
     } else if (expr->op == ">") {
         llvm::Value* cmp = builder->CreateICmpSGT(left, right, "cmptmp");
-        return builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+        auto* result = builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+        nonNegValues_.insert(result);
+        return result;
     } else if (expr->op == ">=") {
         llvm::Value* cmp = builder->CreateICmpSGE(left, right, "cmptmp");
-        return builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+        auto* result = builder->CreateZExt(cmp, getDefaultType(), "booltmp");
+        nonNegValues_.insert(result);
+        return result;
     } else if (expr->op == "&") {
         auto* result = builder->CreateAnd(left, right, "andtmp");
         // AND with a non-negative value always produces a non-negative result
@@ -1594,7 +1616,16 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         result->addIncoming(resultSel, squareBB);
         base->addIncoming(newBase, squareBB);
         exp->addIncoming(newExp, squareBB);
-        builder->CreateBr(loopBB);
+        auto* powBackBr = builder->CreateBr(loopBB);
+        if (optimizationLevel >= OptimizationLevel::O1) {
+            llvm::SmallVector<llvm::Metadata*, 2> mds;
+            mds.push_back(nullptr);
+            mds.push_back(llvm::MDNode::get(*context,
+                {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
+            llvm::MDNode* md = llvm::MDNode::get(*context, mds);
+            md->replaceOperandWith(0, md);
+            powBackBr->setMetadata(llvm::LLVMContext::MD_loop, md);
+        }
 
         builder->SetInsertPoint(doneBB);
         llvm::PHINode* finalResult = builder->CreatePHI(getDefaultType(), 2, "pow.final");
@@ -1690,7 +1721,7 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
         }
     }
 
-    builder->CreateStore(value, it->second);
+    builder->CreateAlignedStore(value, it->second, llvm::MaybeAlign(8));
     // Update string variable tracking after assignment.
     if (value->getType()->isPointerTy() || isStringExpr(expr->value.get()))
         stringVars_.insert(expr->name);
@@ -1746,7 +1777,10 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
                 auto it = loopIterEndBound_.find(idxIdent->name);
                 if (it != loopIterEndBound_.end()) {
                     llvm::Value* endBound = it->second;
-                    llvm::Value* lenVal = builder->CreateLoad(getDefaultType(), arrPtr, "incdec.len.elim");
+                    auto* lenLoadE = builder->CreateLoad(getDefaultType(), arrPtr, "incdec.len.elim");
+                    lenLoadE->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+                    lenLoadE->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                    llvm::Value* lenVal = lenLoadE;
                     if (endBound == lenVal) {
                         boundsCheckElidedID = true;
                     }
@@ -1764,7 +1798,10 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
         }
 
         if (!boundsCheckElidedID) {
-            llvm::Value* lenVal = builder->CreateLoad(getDefaultType(), arrPtr, "incdec.len");
+            auto* lenLoadID = builder->CreateLoad(getDefaultType(), arrPtr, "incdec.len");
+            lenLoadID->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+            lenLoadID->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+            llvm::Value* lenVal = lenLoadID;
             llvm::Value* inBounds = builder->CreateICmpSLT(idxVal, lenVal, "incdec.inbounds");
             llvm::Value* notNeg =
                 builder->CreateICmpSGE(idxVal, llvm::ConstantInt::get(getDefaultType(), 0), "incdec.notneg");
@@ -1783,9 +1820,9 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
 
             builder->SetInsertPoint(okBB);
         }
-        llvm::Value* dataPtr = builder->CreateGEP(getDefaultType(), arrPtr,
+        llvm::Value* dataPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr,
             llvm::ConstantInt::get(getDefaultType(), 1), "incdec.data");
-        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), dataPtr, idxVal, "incdec.elem.ptr");
+        llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), dataPtr, idxVal, "incdec.elem.ptr");
         llvm::Value* current = builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "incdec.elem");
 
         llvm::Value* delta = llvm::ConstantInt::get(getDefaultType(), 1, true);
@@ -1947,7 +1984,10 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
             arrVal = toDefaultType(arrVal);
             llvm::Value* arrPtr =
                 builder->CreateIntToPtr(arrVal, llvm::PointerType::getUnqual(*context), "spread.arrptr");
-            llvm::Value* arrLen = builder->CreateLoad(getDefaultType(), arrPtr, "spread.len");
+            auto* spreadLenLoad = builder->CreateLoad(getDefaultType(), arrPtr, "spread.len");
+            spreadLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+            spreadLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+            llvm::Value* arrLen = spreadLenLoad;
             totalLen = builder->CreateAdd(totalLen, arrLen, "spread.addlen");
             evalElems.push_back({arrVal, true, arrLen});
         } else {
@@ -1993,12 +2033,12 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
             builder->SetInsertPoint(bodyBB);
             // Load element from source: srcPtr[i + 1]
             llvm::Value* srcIdx = builder->CreateAdd(i, one, "spread.srcidx");
-            llvm::Value* srcElemPtr = builder->CreateGEP(getDefaultType(), srcPtr, srcIdx, "spread.srcelem");
+            llvm::Value* srcElemPtr = builder->CreateInBoundsGEP(getDefaultType(), srcPtr, srcIdx, "spread.srcelem");
             llvm::Value* elem = builder->CreateLoad(getDefaultType(), srcElemPtr, "spread.elem");
             // Store in dest: buf[writeIdx + 1]
             llvm::Value* curIdx = builder->CreateLoad(getDefaultType(), writeIdx, "spread.curidx");
             llvm::Value* dstIdx = builder->CreateAdd(curIdx, one, "spread.dstidx");
-            llvm::Value* dstPtr = builder->CreateGEP(getDefaultType(), buf, dstIdx, "spread.dstptr");
+            llvm::Value* dstPtr = builder->CreateInBoundsGEP(getDefaultType(), buf, dstIdx, "spread.dstptr");
             builder->CreateStore(elem, dstPtr);
             // Increment write index
             llvm::Value* newIdx = builder->CreateAdd(curIdx, one, "spread.newidx");
@@ -2006,14 +2046,23 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
             // Increment loop counter
             llvm::Value* nextI = builder->CreateAdd(i, one, "spread.nexti");
             i->addIncoming(nextI, bodyBB);
-            builder->CreateBr(loopBB);
+            auto* spreadBackBr = builder->CreateBr(loopBB);
+            if (optimizationLevel >= OptimizationLevel::O1) {
+                llvm::SmallVector<llvm::Metadata*, 2> mds;
+                mds.push_back(nullptr);
+                mds.push_back(llvm::MDNode::get(*context,
+                    {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
+                llvm::MDNode* md = llvm::MDNode::get(*context, mds);
+                md->replaceOperandWith(0, md);
+                spreadBackBr->setMetadata(llvm::LLVMContext::MD_loop, md);
+            }
 
             builder->SetInsertPoint(doneBB);
         } else {
             // Single element: store at buf[writeIdx + 1]
             llvm::Value* curIdx = builder->CreateLoad(getDefaultType(), writeIdx, "spread.curidx");
             llvm::Value* dstIdx = builder->CreateAdd(curIdx, one, "spread.dstidx");
-            llvm::Value* dstPtr = builder->CreateGEP(getDefaultType(), buf, dstIdx, "spread.dstptr");
+            llvm::Value* dstPtr = builder->CreateInBoundsGEP(getDefaultType(), buf, dstIdx, "spread.dstptr");
             builder->CreateStore(ei.val, dstPtr);
             llvm::Value* newIdx = builder->CreateAdd(curIdx, one, "spread.newidx");
             builder->CreateStore(newIdx, writeIdx);
@@ -2087,7 +2136,10 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
             if (it != loopIterEndBound_.end()) {
                 llvm::Value* endBound = it->second;
                 // Load the array length from slot 0.
-                llvm::Value* lenVal = builder->CreateLoad(getDefaultType(), basePtr, "idx.len.elim");
+                auto* lenLoadElim = builder->CreateLoad(getDefaultType(), basePtr, "idx.len.elim");
+                lenLoadElim->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+                lenLoadElim->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                llvm::Value* lenVal = lenLoadElim;
 
                 // Case 1: end bound and length are the same SSA value (e.g.,
                 // both come from len(arr) or same variable).
@@ -2131,6 +2183,8 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
         } else {
             // Array: length is stored in slot 0 of the buffer.
             auto* lenLoad = builder->CreateLoad(getDefaultType(), basePtr, "idx.len");
+            lenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+            lenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
             // Borrowed arrays cannot resize — mark length as invariant so
             // LLVM can hoist it out of loops and CSE multiple loads.
             if (arrayIsBorrowed) {
@@ -2169,10 +2223,21 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
     // Array: element is at slot (index + 1) in the i64 buffer.
     // Compute data pointer (base + 1 slot) then GEP by just the index.
     // This allows LLVM to hoist the data-pointer computation out of loops.
-    llvm::Value* dataPtr = builder->CreateGEP(getDefaultType(), basePtr,
+    //
+    // OmScript arrays are guaranteed contiguous in memory: the layout is
+    // [length, e0, e1, ..., e(n-1)] as a single malloc/calloc allocation.
+    // We communicate this to LLVM via:
+    //   - 8-byte aligned loads (elements are i64)
+    //   - !nontemporal on large sequential scans (when @prefetch is active)
+    //   - inbounds GEP (the index is within the allocated region)
+    // This enables LLVM to apply vectorization, prefetching, and stride
+    // analysis optimizations that require contiguous memory guarantees.
+    llvm::Value* dataPtr = builder->CreateInBoundsGEP(getDefaultType(), basePtr,
         llvm::ConstantInt::get(getDefaultType(), 1), "idx.data");
-    llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), dataPtr, idxVal, "idx.elem.ptr");
-    return builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "idx.elem");
+    llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), dataPtr, idxVal, "idx.elem.ptr");
+    auto* elemLoad = builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "idx.elem");
+    elemLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+    return elemLoad;
 }
 
 llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
@@ -2236,7 +2301,10 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
             auto it = loopIterEndBound_.find(idxIdent->name);
             if (it != loopIterEndBound_.end()) {
                 llvm::Value* endBound = it->second;
-                llvm::Value* lenVal = builder->CreateLoad(getDefaultType(), basePtr, "idxa.len.elim");
+                auto* lenLoadAElim = builder->CreateLoad(getDefaultType(), basePtr, "idxa.len.elim");
+                lenLoadAElim->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+                lenLoadAElim->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                llvm::Value* lenVal = lenLoadAElim;
                 if (endBound == lenVal) {
                     boundsCheckElidedA = true;
                 }
@@ -2270,6 +2338,8 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
             lenVal = builder->CreateCall(getOrDeclareStrlen(), {basePtr}, "idxa.strlen");
         } else {
             auto* lenLoad = builder->CreateLoad(getDefaultType(), basePtr, "idxa.len");
+            lenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+            lenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
             // Borrowed arrays cannot resize — length is invariant.
             if (arrayIsBorrowedA) {
                 lenLoad->setMetadata(llvm::LLVMContext::MD_invariant_load,
@@ -2306,10 +2376,13 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
     } else {
         // Array: store i64 element at slot (index + 1)
         // Use two-step GEP so LLVM can hoist the data-pointer out of loops.
-        llvm::Value* dataPtr = builder->CreateGEP(getDefaultType(), basePtr,
+        // inbounds GEP: OmScript arrays are contiguous heap allocations,
+        // so the element pointer is always within the allocated region.
+        llvm::Value* dataPtr = builder->CreateInBoundsGEP(getDefaultType(), basePtr,
             llvm::ConstantInt::get(getDefaultType(), 1), "idxa.data");
-        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), dataPtr, idxVal, "idxa.elem.ptr");
-        builder->CreateAlignedStore(newVal, elemPtr, llvm::MaybeAlign(8));
+        llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), dataPtr, idxVal, "idxa.elem.ptr");
+        auto* elemStore = builder->CreateAlignedStore(newVal, elemPtr, llvm::MaybeAlign(8));
+        elemStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
     }
     return newVal;
 }

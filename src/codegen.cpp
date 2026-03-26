@@ -737,9 +737,59 @@ CodeGenerator::CodeGenerator(OptimizationLevel optLevel)
     builder = std::make_unique<llvm::IRBuilder<>>(*context);
 
     setupPrintfDeclaration();
+    initTBAAMetadata();
 }
 
 CodeGenerator::~CodeGenerator() = default;
+
+// ---------------------------------------------------------------------------
+// TBAA metadata initialization
+// ---------------------------------------------------------------------------
+
+void CodeGenerator::initTBAAMetadata() {
+    // Build a TBAA type hierarchy so LLVM knows that array lengths (slot 0)
+    // and array elements (slots 1+) are distinct memory types.  This allows
+    // LLVM to freely reorder length loads past element stores and hoist
+    // length loads out of element-mutation loops.
+    //
+    // LLVM scalar TBAA format (path-based):
+    //   Root:    !{ !"label" }
+    //   Type:    !{ !"label", !root, i64 0 }        (0 = may-alias-others)
+    //   Access:  !{ !type, !type, i64 0 }            (offset 0, not constant)
+    //
+    // We use two sibling types under one root so they're guaranteed disjoint.
+    auto& C = *context;
+    tbaaRoot_ = llvm::MDNode::get(C, {llvm::MDString::get(C, "OmScript TBAA")});
+
+    // Scalar type nodes: children of root, constant=0 means NOT constant memory.
+    llvm::MDNode* tbaaLenType = llvm::MDNode::get(C, {
+        llvm::MDString::get(C, "array length"),
+        tbaaRoot_,
+        llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+            llvm::Type::getInt64Ty(C), 0))
+    });
+    llvm::MDNode* tbaaElemType = llvm::MDNode::get(C, {
+        llvm::MDString::get(C, "array element"),
+        tbaaRoot_,
+        llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+            llvm::Type::getInt64Ty(C), 0))
+    });
+
+    // Access tag nodes: !{ !base-type, !access-type, offset }
+    // For scalar types, base == access.
+    auto* zero = llvm::ConstantAsMetadata::get(
+        llvm::ConstantInt::get(llvm::Type::getInt64Ty(C), 0));
+    tbaaArrayLen_  = llvm::MDNode::get(C, {tbaaLenType, tbaaLenType, zero});
+    tbaaArrayElem_ = llvm::MDNode::get(C, {tbaaElemType, tbaaElemType, zero});
+
+    // !range metadata: array lengths are always in [0, INT64_MAX).
+    auto* i64Ty = llvm::Type::getInt64Ty(C);
+    arrayLenRangeMD_ = llvm::MDNode::get(C, {
+        llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64Ty, 0)),
+        llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+            i64Ty, static_cast<uint64_t>(INT64_MAX)))
+    });
+}
 
 // ---------------------------------------------------------------------------
 // Execution-tier classification
@@ -1046,6 +1096,23 @@ llvm::Function* CodeGenerator::getOrDeclareMalloc() {
     fn->addFnAttr(llvm::Attribute::NoBuiltin);
     fn->addRetAttr(llvm::Attribute::NoAlias);
     fn->addRetAttr(llvm::Attribute::NonNull);
+    return fn;
+}
+
+llvm::Function* CodeGenerator::getOrDeclareCalloc() {
+    if (auto* fn = module->getFunction("calloc"))
+        return fn;
+    // calloc(size_t count, size_t size) -> void*
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(ptrTy, {getDefaultType(), getDefaultType()}, false);
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "calloc", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoBuiltin);
+    fn->addRetAttr(llvm::Attribute::NoAlias);
+    // Note: calloc CAN return NULL on OOM, so we do NOT add NonNull here.
+    // The call site in array_fill does not check for NULL because OmScript's
+    // runtime assumes allocation always succeeds (same as C benchmarks).
     return fn;
 }
 
@@ -2108,11 +2175,12 @@ void CodeGenerator::generate(Program* program) {
         //              unlocks loop-idiom recognition (auto-memset/memcpy detection).
         function->addFnAttr(llvm::Attribute::NoUnwind);
         function->addFnAttr(llvm::Attribute::MustProgress);
-        // prefer-vector-width=256 — allow AVX2-width vectorization (4×i64)
-        // while preventing VF=8 that causes i128 promotion for division/modulo.
-        // This balances vectorization throughput with avoiding expensive i128
-        // multiply sequences on x86-64.
-        function->addFnAttr("prefer-vector-width", "256");
+        // prefer-vector-width: use the target-aware preferred SIMD width
+        // detected from CPU features.  AVX-512 → 512, AVX2 → 256, SSE → 128.
+        // This balances vectorization throughput with avoiding expensive type
+        // promotion on targets without wide vector support.
+        function->addFnAttr("prefer-vector-width",
+            std::to_string(preferredVectorWidth_ * 64));
         // nosync, nofree, willreturn — these promise the optimizer that the
         // function never synchronizes, never frees memory, and always returns.
         // These promises are WRONG for functions that use concurrency
@@ -2677,6 +2745,30 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
                 function->addParamAttr(i, llvm::Attribute::NonNull);
                 function->addParamAttr(i, llvm::Attribute::NoAlias);
                 // OmScript arrays always have a valid header (at least 8 bytes).
+                function->addParamAttr(i, llvm::Attribute::getWithDereferenceableBytes(
+                    *context, 8));
+            }
+        }
+    }
+
+    // Default noalias at O1+: OmScript's ownership model guarantees that
+    // distinct pointer parameters never alias the same memory region —
+    // the borrow checker prevents multiple mutable references.  This is
+    // equivalent to compiling all C code with __restrict on every pointer
+    // parameter.  The attribute enables LLVM to freely reorder, vectorize,
+    // and hoist loads/stores without alias-related conservatism.
+    // Lowered from O2 to O1: aliasing information is a language-level
+    // invariant, not a heuristic — it should be propagated at all opt levels.
+    if (optimizationLevel >= OptimizationLevel::O1
+        && !inOptMaxFunction && !currentFuncHintHot_
+        && !func->hintRestrict && !fileNoAlias_) {
+        for (unsigned i = 0; i < function->arg_size(); ++i) {
+            if (function->getArg(i)->getType()->isPointerTy()) {
+                function->addParamAttr(i, llvm::Attribute::NoAlias);
+                function->addParamAttr(i, llvm::Attribute::NonNull);
+                // OmScript arrays always have a valid header: at least 8 bytes
+                // for the i64 length slot.  This is the minimum dereferenceable
+                // size for any OmScript pointer (arrays, strings).
                 function->addParamAttr(i, llvm::Attribute::getWithDereferenceableBytes(
                     *context, 8));
             }
