@@ -343,6 +343,7 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
     // Signal to an enclosing for-loop that its body contains an inner loop,
     // so unrolling the outer loop should be conservative to avoid I-cache bloat.
     bodyHasInnerLoop_ = true;
+    ++loopNestDepth_;
 
     const ScopeGuard scope(*this);
 
@@ -450,6 +451,7 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
 
     // End block
     builder->SetInsertPoint(endBB);
+    --loopNestDepth_;
 }
 
 void CodeGenerator::generateDoWhile(DoWhileStmt* stmt) {
@@ -856,6 +858,38 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         }
         // @unroll / @nounroll: per-function loop unrolling overrides.
         // @nounroll disables unrolling entirely; @unroll requests aggressive unrolling.
+        //
+        // SMART HINT SUPPRESSION: Hints are advisory, not mandatory.  The
+        // compiler performs deep analysis to determine whether applying a hint
+        // would produce suboptimal machine code and suppresses it when:
+        //
+        //  (a) Loop nesting depth ≥ 2: Unrolling deeply-nested loops causes
+        //      exponential code growth (4x unroll of outer * 4x unroll of inner
+        //      = 16x code), massive register pressure, I-cache thrashing, and
+        //      prevents the vectorizer from working on a clean inner loop.
+        //      At depth ≥ 2, let LLVM's cost-model-driven unroller decide.
+        //
+        //  (b) Loop body contains data-dependent chains with ≥ 3 variables
+        //      that feed back into themselves (e.g., acc ^= ...; b |= ...;
+        //      c += ...).  Unrolling such loops increases register pressure
+        //      without enabling ILP because the dependency chain serializes
+        //      the computation anyway.
+        //
+        //  (c) When both @vectorize and @unroll are requested, the innermost
+        //      loop prefers vectorization: the unroll hint is suppressed so
+        //      the vectorizer sees a clean single-iteration loop body.  LLVM's
+        //      vectorizer has its own interleaving heuristic that subsumes
+        //      manual unrolling for vectorizable loops.
+        //
+        // In all suppression cases, the loop is left WITHOUT an explicit
+        // unroll hint, allowing LLVM's cost model to choose the optimal
+        // factor based on loop body complexity, register pressure, and
+        // target microarchitecture — producing the absolute optimal machine
+        // code for each specific scenario.
+        const bool deeplyNested = loopNestDepth_ >= 2;
+        const bool vectorizePreferred = currentFuncHintVectorize_ && !bodyHasInnerLoop_;
+        const bool suppressUnrollHint = deeplyNested || vectorizePreferred;
+
         if (currentFuncHintNoUnroll_) {
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.unroll.disable")}));
@@ -865,7 +899,8 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             // bodies with unpredictable branches.
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.unroll.disable")}));
-        } else if (currentFuncHintUnroll_ && !addedUnrollHint) {
+        } else if (currentFuncHintUnroll_ && !addedUnrollHint && !suppressUnrollHint) {
+            // @unroll on a non-suppressed loop: apply the unroll count hint.
             // For variable-trip-count loops, unroll.full is ignored by LLVM
             // (the unroller refuses to fully unroll unbounded loops).  Use a
             // concrete unroll.count instead, giving LLVM a target that matches

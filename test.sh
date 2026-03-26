@@ -129,7 +129,7 @@ BENCH_N=(
     5000000   # 16  polynomial_eval
     5000000   # 17  reduction
     100000    # 18  combined
-    200       # 19  matrix_multiply (200x200 = 8M muls)
+    300       # 19  matrix_multiply (300x300 = 27M muls)
     5000000   # 20  sieve
     5000000   # 21  prefix_sum
     5000000   # 22  hash_compute
@@ -512,7 +512,7 @@ fn bench_combined(n:int) -> int {
 }
 
 // ── 19. matrix_multiply ──────────────────────────────────────
-@hot @flatten @unroll
+@hot @flatten @unroll @vectorize
 fn bench_matmul(n:int) -> int {
     var a:int[] = array_fill(n * n, 0);
     var b:int[] = array_fill(n * n, 0);

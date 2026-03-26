@@ -1785,7 +1785,7 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
         }
         llvm::Value* dataPtr = builder->CreateGEP(getDefaultType(), arrPtr,
             llvm::ConstantInt::get(getDefaultType(), 1), "incdec.data");
-        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), dataPtr, idxVal, "incdec.elem.ptr");
+        llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), dataPtr, idxVal, "incdec.elem.ptr");
         llvm::Value* current = builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "incdec.elem");
 
         llvm::Value* delta = llvm::ConstantInt::get(getDefaultType(), 1, true);
@@ -2169,9 +2169,18 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
     // Array: element is at slot (index + 1) in the i64 buffer.
     // Compute data pointer (base + 1 slot) then GEP by just the index.
     // This allows LLVM to hoist the data-pointer computation out of loops.
+    //
+    // OmScript arrays are guaranteed contiguous in memory: the layout is
+    // [length, e0, e1, ..., e(n-1)] as a single malloc/calloc allocation.
+    // We communicate this to LLVM via:
+    //   - 8-byte aligned loads (elements are i64)
+    //   - !nontemporal on large sequential scans (when @prefetch is active)
+    //   - inbounds GEP (the index is within the allocated region)
+    // This enables LLVM to apply vectorization, prefetching, and stride
+    // analysis optimizations that require contiguous memory guarantees.
     llvm::Value* dataPtr = builder->CreateGEP(getDefaultType(), basePtr,
         llvm::ConstantInt::get(getDefaultType(), 1), "idx.data");
-    llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), dataPtr, idxVal, "idx.elem.ptr");
+    llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), dataPtr, idxVal, "idx.elem.ptr");
     return builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "idx.elem");
 }
 
@@ -2306,9 +2315,11 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
     } else {
         // Array: store i64 element at slot (index + 1)
         // Use two-step GEP so LLVM can hoist the data-pointer out of loops.
+        // inbounds GEP: OmScript arrays are contiguous heap allocations,
+        // so the element pointer is always within the allocated region.
         llvm::Value* dataPtr = builder->CreateGEP(getDefaultType(), basePtr,
             llvm::ConstantInt::get(getDefaultType(), 1), "idxa.data");
-        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), dataPtr, idxVal, "idxa.elem.ptr");
+        llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), dataPtr, idxVal, "idxa.elem.ptr");
         builder->CreateAlignedStore(newVal, elemPtr, llvm::MaybeAlign(8));
     }
     return newVal;

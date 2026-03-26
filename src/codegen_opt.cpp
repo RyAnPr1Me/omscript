@@ -875,7 +875,7 @@ void CodeGenerator::runOptimizationPasses() {
     // reducing call overhead by ~2^depth.  3 levels gives ~8x fewer calls,
     // matching GCC -O3's behavior for naive recursive algorithms like fib.
     if (optimizationLevel >= OptimizationLevel::O3) {
-        static constexpr unsigned kRecursiveInlineDepth = 3;
+        static constexpr unsigned kRecursiveInlineDepth = 4;
         // Conservative size limit: the function BEFORE inlining must be
         // small enough that inlining won't create a huge function.
         // After inlining, each copy roughly doubles the size. So we limit
