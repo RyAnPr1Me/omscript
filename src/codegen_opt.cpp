@@ -976,37 +976,40 @@ void CodeGenerator::runOptimizationPasses() {
             superConfig.synthesis.costThreshold = 0.9;
         }
         auto superStats = superopt::superoptimizeModule(*module, superConfig);
-        if (verbose_) {
-            const unsigned totalOpts = superStats.idiomsReplaced + superStats.synthReplacements +
+        const unsigned totalSuperOpts = superStats.idiomsReplaced + superStats.synthReplacements +
                                  superStats.algebraicSimplified + superStats.branchesSimplified +
                                  superStats.deadCodeEliminated;
+        if (verbose_) {
             std::cout << "    Superoptimizer complete: "
                       << superStats.idiomsReplaced << " idioms replaced, "
                       << superStats.algebraicSimplified << " algebraic simplifications, "
                       << superStats.synthReplacements << " synthesis replacements, "
                       << superStats.branchesSimplified << " branches simplified, "
                       << superStats.deadCodeEliminated << " dead instructions eliminated"
-                      << " (" << totalOpts << " total optimizations)" << std::endl;
+                      << " (" << totalSuperOpts << " total optimizations)" << std::endl;
+        }
+
+        // Post-superoptimizer cleanup: the superoptimizer creates algebraically
+        // simplified patterns that may have new CSE opportunities.  A quick
+        // GVN + InstCombine + SimplifyCFG pass cleans these up before the
+        // signed→unsigned conversion and HGOE runs.
+        // Only run on functions ≤2000 instructions to avoid excessive compile time.
+        if (totalSuperOpts > 0) {
+            llvm::legacy::FunctionPassManager postSuperFPM(module.get());
+            postSuperFPM.add(llvm::createGVNPass());
+            postSuperFPM.add(llvm::createInstructionCombiningPass());
+            postSuperFPM.add(llvm::createCFGSimplificationPass(aggressiveCFGOpts()));
+            postSuperFPM.add(llvm::createDeadCodeEliminationPass());
+            postSuperFPM.doInitialization();
+            for (auto& func : *module) {
+                if (func.isDeclaration()) continue;
+                if (func.getInstructionCount() > 2000) continue;
+                postSuperFPM.run(func);
+            }
+            postSuperFPM.doFinalization();
         }
     } else if (verbose_ && optimizationLevel >= OptimizationLevel::O2 && !enableSuperopt_) {
         std::cout << "    Superoptimizer disabled (-fno-superopt)" << std::endl;
-    }
-
-    // Post-superoptimizer cleanup: the superoptimizer creates algebraically
-    // simplified patterns that may have new CSE opportunities.  A quick
-    // GVN + InstCombine + SimplifyCFG pass cleans these up before the
-    // signed→unsigned conversion and HGOE runs.
-    if (enableSuperopt_ && optimizationLevel >= OptimizationLevel::O2) {
-        llvm::legacy::FunctionPassManager postSuperFPM(module.get());
-        postSuperFPM.add(llvm::createGVNPass());
-        postSuperFPM.add(llvm::createInstructionCombiningPass());
-        postSuperFPM.add(llvm::createCFGSimplificationPass(aggressiveCFGOpts()));
-        postSuperFPM.add(llvm::createDeadCodeEliminationPass());
-        postSuperFPM.doInitialization();
-        for (auto& func : *module) {
-            if (!func.isDeclaration()) postSuperFPM.run(func);
-        }
-        postSuperFPM.doFinalization();
     }
 
     // Post-pipeline srem→urem and sdiv→udiv conversion.  The pre-pipeline
