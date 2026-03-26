@@ -612,6 +612,7 @@ class CodeGenerator {
     // multiple built-in handlers.
     llvm::Function* getOrDeclareStrlen();
     llvm::Function* getOrDeclareMalloc();
+    llvm::Function* getOrDeclareCalloc();
     llvm::Function* getOrDeclareStrcpy();
     llvm::Function* getOrDeclareStrcat();
     llvm::Function* getOrDeclareStrcmp();

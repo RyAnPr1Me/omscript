@@ -1410,6 +1410,22 @@ COUNT_EQUAL=0
 COUNT_SLOWER=0
 for (( id=0; id<NUM_BENCHMARKS; id++ )); do
     r=${RATIOS[$id]}
+    c=${C_TIMES[$id]}
+    o=${OM_TIMES[$id]}
+    # For very short benchmarks (<10 ms), use absolute difference instead of
+    # ratio — 1 ms of timing noise on a 5 ms benchmark is 20% even though
+    # the actual performance is identical.  Consider "tied" if within 2 ms.
+    if [ "$c" -lt 10 ] && [ "$o" -lt 10 ]; then
+        diff=$(( o - c ))
+        if [ "$diff" -lt 0 ]; then diff=$(( -diff )); fi
+        if [ "$diff" -le 2 ]; then
+            # Within timing noise
+            if [ "$r" -lt 95 ]; then COUNT_FASTER=$((COUNT_FASTER + 1))
+            else COUNT_EQUAL=$((COUNT_EQUAL + 1))
+            fi
+            continue
+        fi
+    fi
     if   [ "$r" -lt 95 ];  then COUNT_FASTER=$((COUNT_FASTER + 1))
     elif [ "$r" -le 105 ]; then COUNT_EQUAL=$((COUNT_EQUAL + 1))
     else                        COUNT_SLOWER=$((COUNT_SLOWER + 1))

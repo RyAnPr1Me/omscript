@@ -1049,6 +1049,21 @@ llvm::Function* CodeGenerator::getOrDeclareMalloc() {
     return fn;
 }
 
+llvm::Function* CodeGenerator::getOrDeclareCalloc() {
+    if (auto* fn = module->getFunction("calloc"))
+        return fn;
+    // calloc(size_t count, size_t size) -> void*
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(ptrTy, {getDefaultType(), getDefaultType()}, false);
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "calloc", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoBuiltin);
+    fn->addRetAttr(llvm::Attribute::NoAlias);
+    fn->addRetAttr(llvm::Attribute::NonNull);
+    return fn;
+}
+
 llvm::Function* CodeGenerator::getOrDeclareStrcpy() {
     if (auto* fn = module->getFunction("strcpy"))
         return fn;

@@ -2297,34 +2297,55 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             llvm::Value* isNeg = builder->CreateICmpSLT(sizeArg, zeroClamp, "fill.isneg");
             sizeArg = builder->CreateSelect(isNeg, zeroClamp, sizeArg, "fill.clamp");
         }
-        // Allocate: (size + 1) * 8 bytes
+        // Allocate: (size + 1) * 8 bytes.  Header slot stores the length.
         llvm::Value* slots = builder->CreateAdd(sizeArg, llvm::ConstantInt::get(getDefaultType(), 1), "fill.slots");
-        llvm::Value* bytes = builder->CreateMul(slots, llvm::ConstantInt::get(getDefaultType(), 8), "fill.bytes");
-        llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "fill.buf");
-        // Store length
-        builder->CreateStore(sizeArg, buf);
-        // Fill loop
-        llvm::Function* function = builder->GetInsertBlock()->getParent();
-        llvm::BasicBlock* preheader = builder->GetInsertBlock();
-        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "fill.loop", function);
-        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "fill.body", function);
-        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "fill.done", function);
-        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
-        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
-        builder->CreateBr(loopBB);
-        builder->SetInsertPoint(loopBB);
-        llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "fill.idx");
-        idx->addIncoming(zero, preheader);
-        llvm::Value* cond = builder->CreateICmpSLT(idx, sizeArg, "fill.cond");
-        builder->CreateCondBr(cond, bodyBB, doneBB);
-        builder->SetInsertPoint(bodyBB);
-        llvm::Value* elemIdx = builder->CreateAdd(idx, one, "fill.elemidx");
-        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), buf, elemIdx, "fill.elemptr");
-        builder->CreateStore(valArg, elemPtr);
-        llvm::Value* nextIdx = builder->CreateAdd(idx, one, "fill.next");
-        idx->addIncoming(nextIdx, bodyBB);
-        builder->CreateBr(loopBB);
-        builder->SetInsertPoint(doneBB);
+        llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
+
+        // Optimization: when filling with zero, use calloc() instead of
+        // malloc() + loop.  calloc() lets the OS provide pre-zeroed pages
+        // via virtual memory (mmap MAP_ANONYMOUS), avoiding the loop entirely
+        // for large allocations — identical to what C's calloc() gives.
+        bool isZeroFill = false;
+        if (auto* constVal = llvm::dyn_cast<llvm::ConstantInt>(valArg)) {
+            isZeroFill = constVal->isZero();
+        }
+
+        llvm::Value* buf;
+        if (isZeroFill) {
+            // calloc(slots, 8) returns pre-zeroed memory — both the header
+            // (length = 0) and all element slots are zero.  We only need to
+            // fix up the header with the correct length.
+            buf = builder->CreateCall(getOrDeclareCalloc(), {slots, eight}, "fill.buf");
+            // Store length in header (calloc zeroed it; overwrite with actual size)
+            builder->CreateStore(sizeArg, buf);
+        } else {
+            llvm::Value* bytes = builder->CreateMul(slots, eight, "fill.bytes");
+            buf = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "fill.buf");
+            // Store length
+            builder->CreateStore(sizeArg, buf);
+            // Fill loop
+            llvm::Function* function = builder->GetInsertBlock()->getParent();
+            llvm::BasicBlock* preheader = builder->GetInsertBlock();
+            llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "fill.loop", function);
+            llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "fill.body", function);
+            llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "fill.done", function);
+            llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+            llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+            builder->CreateBr(loopBB);
+            builder->SetInsertPoint(loopBB);
+            llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "fill.idx");
+            idx->addIncoming(zero, preheader);
+            llvm::Value* cond = builder->CreateICmpSLT(idx, sizeArg, "fill.cond");
+            builder->CreateCondBr(cond, bodyBB, doneBB);
+            builder->SetInsertPoint(bodyBB);
+            llvm::Value* elemIdx = builder->CreateAdd(idx, one, "fill.elemidx");
+            llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), buf, elemIdx, "fill.elemptr");
+            builder->CreateStore(valArg, elemPtr);
+            llvm::Value* nextIdx = builder->CreateAdd(idx, one, "fill.next");
+            idx->addIncoming(nextIdx, bodyBB);
+            builder->CreateBr(loopBB);
+            builder->SetInsertPoint(doneBB);
+        }
         return builder->CreatePtrToInt(buf, getDefaultType(), "fill.result");
     }
 
