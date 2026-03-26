@@ -737,9 +737,59 @@ CodeGenerator::CodeGenerator(OptimizationLevel optLevel)
     builder = std::make_unique<llvm::IRBuilder<>>(*context);
 
     setupPrintfDeclaration();
+    initTBAAMetadata();
 }
 
 CodeGenerator::~CodeGenerator() = default;
+
+// ---------------------------------------------------------------------------
+// TBAA metadata initialization
+// ---------------------------------------------------------------------------
+
+void CodeGenerator::initTBAAMetadata() {
+    // Build a TBAA type hierarchy so LLVM knows that array lengths (slot 0)
+    // and array elements (slots 1+) are distinct memory types.  This allows
+    // LLVM to freely reorder length loads past element stores and hoist
+    // length loads out of element-mutation loops.
+    //
+    // LLVM scalar TBAA format (path-based):
+    //   Root:    !{ !"label" }
+    //   Type:    !{ !"label", !root, i64 0 }        (0 = may-alias-others)
+    //   Access:  !{ !type, !type, i64 0 }            (offset 0, not constant)
+    //
+    // We use two sibling types under one root so they're guaranteed disjoint.
+    auto& C = *context;
+    tbaaRoot_ = llvm::MDNode::get(C, {llvm::MDString::get(C, "OmScript TBAA")});
+
+    // Scalar type nodes: children of root, constant=0 means NOT constant memory.
+    llvm::MDNode* tbaaLenType = llvm::MDNode::get(C, {
+        llvm::MDString::get(C, "array length"),
+        tbaaRoot_,
+        llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+            llvm::Type::getInt64Ty(C), 0))
+    });
+    llvm::MDNode* tbaaElemType = llvm::MDNode::get(C, {
+        llvm::MDString::get(C, "array element"),
+        tbaaRoot_,
+        llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+            llvm::Type::getInt64Ty(C), 0))
+    });
+
+    // Access tag nodes: !{ !base-type, !access-type, offset }
+    // For scalar types, base == access.
+    auto* zero = llvm::ConstantAsMetadata::get(
+        llvm::ConstantInt::get(llvm::Type::getInt64Ty(C), 0));
+    tbaaArrayLen_  = llvm::MDNode::get(C, {tbaaLenType, tbaaLenType, zero});
+    tbaaArrayElem_ = llvm::MDNode::get(C, {tbaaElemType, tbaaElemType, zero});
+
+    // !range metadata: array lengths are always in [0, INT64_MAX).
+    auto* i64Ty = llvm::Type::getInt64Ty(C);
+    arrayLenRangeMD_ = llvm::MDNode::get(C, {
+        llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64Ty, 0)),
+        llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+            i64Ty, static_cast<uint64_t>(INT64_MAX)))
+    });
+}
 
 // ---------------------------------------------------------------------------
 // Execution-tier classification
@@ -2700,14 +2750,15 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         }
     }
 
-    // Default noalias at O2+: OmScript's ownership model guarantees that
+    // Default noalias at O1+: OmScript's ownership model guarantees that
     // distinct pointer parameters never alias the same memory region —
     // the borrow checker prevents multiple mutable references.  This is
     // equivalent to compiling all C code with __restrict on every pointer
     // parameter.  The attribute enables LLVM to freely reorder, vectorize,
     // and hoist loads/stores without alias-related conservatism.
-    // Applied to all functions at O2+ unless already covered above.
-    if (optimizationLevel >= OptimizationLevel::O2
+    // Lowered from O2 to O1: aliasing information is a language-level
+    // invariant, not a heuristic — it should be propagated at all opt levels.
+    if (optimizationLevel >= OptimizationLevel::O1
         && !inOptMaxFunction && !currentFuncHintHot_
         && !func->hintRestrict && !fileNoAlias_) {
         for (unsigned i = 0; i < function->arg_size(); ++i) {

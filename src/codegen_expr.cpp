@@ -1746,7 +1746,10 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
                 auto it = loopIterEndBound_.find(idxIdent->name);
                 if (it != loopIterEndBound_.end()) {
                     llvm::Value* endBound = it->second;
-                    llvm::Value* lenVal = builder->CreateLoad(getDefaultType(), arrPtr, "incdec.len.elim");
+                    auto* lenLoadE = builder->CreateLoad(getDefaultType(), arrPtr, "incdec.len.elim");
+                    lenLoadE->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+                    lenLoadE->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                    llvm::Value* lenVal = lenLoadE;
                     if (endBound == lenVal) {
                         boundsCheckElidedID = true;
                     }
@@ -1764,7 +1767,10 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
         }
 
         if (!boundsCheckElidedID) {
-            llvm::Value* lenVal = builder->CreateLoad(getDefaultType(), arrPtr, "incdec.len");
+            auto* lenLoadID = builder->CreateLoad(getDefaultType(), arrPtr, "incdec.len");
+            lenLoadID->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+            lenLoadID->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+            llvm::Value* lenVal = lenLoadID;
             llvm::Value* inBounds = builder->CreateICmpSLT(idxVal, lenVal, "incdec.inbounds");
             llvm::Value* notNeg =
                 builder->CreateICmpSGE(idxVal, llvm::ConstantInt::get(getDefaultType(), 0), "incdec.notneg");
@@ -1947,7 +1953,10 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
             arrVal = toDefaultType(arrVal);
             llvm::Value* arrPtr =
                 builder->CreateIntToPtr(arrVal, llvm::PointerType::getUnqual(*context), "spread.arrptr");
-            llvm::Value* arrLen = builder->CreateLoad(getDefaultType(), arrPtr, "spread.len");
+            auto* spreadLenLoad = builder->CreateLoad(getDefaultType(), arrPtr, "spread.len");
+            spreadLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+            spreadLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+            llvm::Value* arrLen = spreadLenLoad;
             totalLen = builder->CreateAdd(totalLen, arrLen, "spread.addlen");
             evalElems.push_back({arrVal, true, arrLen});
         } else {
@@ -2087,7 +2096,10 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
             if (it != loopIterEndBound_.end()) {
                 llvm::Value* endBound = it->second;
                 // Load the array length from slot 0.
-                llvm::Value* lenVal = builder->CreateLoad(getDefaultType(), basePtr, "idx.len.elim");
+                auto* lenLoadElim = builder->CreateLoad(getDefaultType(), basePtr, "idx.len.elim");
+                lenLoadElim->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+                lenLoadElim->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                llvm::Value* lenVal = lenLoadElim;
 
                 // Case 1: end bound and length are the same SSA value (e.g.,
                 // both come from len(arr) or same variable).
@@ -2131,6 +2143,8 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
         } else {
             // Array: length is stored in slot 0 of the buffer.
             auto* lenLoad = builder->CreateLoad(getDefaultType(), basePtr, "idx.len");
+            lenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+            lenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
             // Borrowed arrays cannot resize — mark length as invariant so
             // LLVM can hoist it out of loops and CSE multiple loads.
             if (arrayIsBorrowed) {
@@ -2181,7 +2195,9 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
     llvm::Value* dataPtr = builder->CreateInBoundsGEP(getDefaultType(), basePtr,
         llvm::ConstantInt::get(getDefaultType(), 1), "idx.data");
     llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), dataPtr, idxVal, "idx.elem.ptr");
-    return builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "idx.elem");
+    auto* elemLoad = builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "idx.elem");
+    elemLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+    return elemLoad;
 }
 
 llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
@@ -2245,7 +2261,10 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
             auto it = loopIterEndBound_.find(idxIdent->name);
             if (it != loopIterEndBound_.end()) {
                 llvm::Value* endBound = it->second;
-                llvm::Value* lenVal = builder->CreateLoad(getDefaultType(), basePtr, "idxa.len.elim");
+                auto* lenLoadAElim = builder->CreateLoad(getDefaultType(), basePtr, "idxa.len.elim");
+                lenLoadAElim->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+                lenLoadAElim->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                llvm::Value* lenVal = lenLoadAElim;
                 if (endBound == lenVal) {
                     boundsCheckElidedA = true;
                 }
@@ -2279,6 +2298,8 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
             lenVal = builder->CreateCall(getOrDeclareStrlen(), {basePtr}, "idxa.strlen");
         } else {
             auto* lenLoad = builder->CreateLoad(getDefaultType(), basePtr, "idxa.len");
+            lenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+            lenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
             // Borrowed arrays cannot resize — length is invariant.
             if (arrayIsBorrowedA) {
                 lenLoad->setMetadata(llvm::LLVMContext::MD_invariant_load,
@@ -2320,7 +2341,8 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
         llvm::Value* dataPtr = builder->CreateInBoundsGEP(getDefaultType(), basePtr,
             llvm::ConstantInt::get(getDefaultType(), 1), "idxa.data");
         llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), dataPtr, idxVal, "idxa.elem.ptr");
-        builder->CreateAlignedStore(newVal, elemPtr, llvm::MaybeAlign(8));
+        auto* elemStore = builder->CreateAlignedStore(newVal, elemPtr, llvm::MaybeAlign(8));
+        elemStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
     }
     return newVal;
 }
