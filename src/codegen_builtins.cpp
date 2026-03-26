@@ -4566,7 +4566,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* srcAfter = builder->CreateInBoundsGEP(getDefaultType(), mapPtr, srcAfterSlot, "maprem.srcafter");
         llvm::Value* dstAfterSlot = builder->CreateAdd(idx, one, "maprem.dstafterslot");
         llvm::Value* dstAfter = builder->CreateInBoundsGEP(getDefaultType(), newBuf, dstAfterSlot, "maprem.dstafter");
-        llvm::Value* afterBytes = builder->CreateMul(afterCount, eight, "maprem.afterbytes");
+        llvm::Value* afterBytes = builder->CreateMul(afterCount, eight, "maprem.afterbytes", /*HasNUW=*/true, /*HasNSW=*/true);
         builder->CreateCall(getOrDeclareMemcpy(), {dstAfter, srcAfter, afterBytes});
         builder->CreateBr(afterCopyAfterBB);
 
@@ -4597,8 +4597,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Number of pairs = mapLen / 2
         llvm::Value* numPairs = builder->CreateSDiv(mapLen, two, "mapkeys.numpairs");
         // Allocate: (numPairs + 1) * 8
-        llvm::Value* arrSlots = builder->CreateAdd(numPairs, one, "mapkeys.arrslots");
-        llvm::Value* arrSize = builder->CreateMul(arrSlots, eight, "mapkeys.arrsize");
+        llvm::Value* arrSlots = builder->CreateAdd(numPairs, one, "mapkeys.arrslots", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* arrSize = builder->CreateMul(arrSlots, eight, "mapkeys.arrsize", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {arrSize}, "mapkeys.buf");
         builder->CreateStore(numPairs, buf);
 
@@ -4664,8 +4664,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
 
         llvm::Value* numPairs = builder->CreateSDiv(mapLen, two, "mapvals.numpairs");
-        llvm::Value* arrSlots = builder->CreateAdd(numPairs, one, "mapvals.arrslots");
-        llvm::Value* arrSize = builder->CreateMul(arrSlots, eight, "mapvals.arrsize");
+        llvm::Value* arrSlots = builder->CreateAdd(numPairs, one, "mapvals.arrslots", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* arrSize = builder->CreateMul(arrSlots, eight, "mapvals.arrsize", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {arrSize}, "mapvals.buf");
         builder->CreateStore(numPairs, buf);
 
@@ -4749,8 +4749,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* count = builder->CreateSelect(isPos, diff, zero, "range.count");
 
         // Allocate: (count + 1) * 8
-        llvm::Value* arrSlots = builder->CreateAdd(count, one, "range.arrslots");
-        llvm::Value* arrSize = builder->CreateMul(arrSlots, eight, "range.arrsize");
+        llvm::Value* arrSlots = builder->CreateAdd(count, one, "range.arrslots", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* arrSize = builder->CreateMul(arrSlots, eight, "range.arrsize", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {arrSize}, "range.buf");
         builder->CreateStore(count, buf);
 
@@ -4838,8 +4838,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* isPos = builder->CreateICmpSGT(count, zero, "rstep.ispos");
         count = builder->CreateSelect(isPos, count, zero, "rstep.clampcount");
 
-        llvm::Value* arrSlots = builder->CreateAdd(count, one, "rstep.arrslots");
-        llvm::Value* arrSize = builder->CreateMul(arrSlots, eight, "rstep.arrsize");
+        llvm::Value* arrSlots = builder->CreateAdd(count, one, "rstep.arrslots", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* arrSize = builder->CreateMul(arrSlots, eight, "rstep.arrsize", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {arrSize}, "rstep.buf");
         builder->CreateStore(count, buf);
 
