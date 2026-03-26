@@ -565,7 +565,12 @@ void CodeGenerator::runOptimizationPasses() {
         if (optimizationLevel >= OptimizationLevel::O2) {
             PB.registerLateLoopOptimizationsEPCallback([isO3, loopOpt](llvm::LoopPassManager& LPM, llvm::OptimizationLevel /*Level*/) {
                 LPM.addPass(llvm::SimpleLoopUnswitchPass(/*NonTrivial=*/true));
-                if (isO3 && loopOpt)
+                // LoopVersioningLICM creates a versioned copy of the loop
+                // with runtime alias checks, allowing LICM to hoist loads
+                // and stores that may alias.  Lowered from O3-only to O2+
+                // because OmScript's noalias semantics make the runtime
+                // checks trivially optimizable, benefiting general code.
+                if (loopOpt)
                     LPM.addPass(llvm::LoopVersioningLICMPass());
             });
         }

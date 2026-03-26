@@ -1783,7 +1783,7 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
 
             builder->SetInsertPoint(okBB);
         }
-        llvm::Value* dataPtr = builder->CreateGEP(getDefaultType(), arrPtr,
+        llvm::Value* dataPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr,
             llvm::ConstantInt::get(getDefaultType(), 1), "incdec.data");
         llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), dataPtr, idxVal, "incdec.elem.ptr");
         llvm::Value* current = builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "incdec.elem");
@@ -1993,12 +1993,12 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
             builder->SetInsertPoint(bodyBB);
             // Load element from source: srcPtr[i + 1]
             llvm::Value* srcIdx = builder->CreateAdd(i, one, "spread.srcidx");
-            llvm::Value* srcElemPtr = builder->CreateGEP(getDefaultType(), srcPtr, srcIdx, "spread.srcelem");
+            llvm::Value* srcElemPtr = builder->CreateInBoundsGEP(getDefaultType(), srcPtr, srcIdx, "spread.srcelem");
             llvm::Value* elem = builder->CreateLoad(getDefaultType(), srcElemPtr, "spread.elem");
             // Store in dest: buf[writeIdx + 1]
             llvm::Value* curIdx = builder->CreateLoad(getDefaultType(), writeIdx, "spread.curidx");
             llvm::Value* dstIdx = builder->CreateAdd(curIdx, one, "spread.dstidx");
-            llvm::Value* dstPtr = builder->CreateGEP(getDefaultType(), buf, dstIdx, "spread.dstptr");
+            llvm::Value* dstPtr = builder->CreateInBoundsGEP(getDefaultType(), buf, dstIdx, "spread.dstptr");
             builder->CreateStore(elem, dstPtr);
             // Increment write index
             llvm::Value* newIdx = builder->CreateAdd(curIdx, one, "spread.newidx");
@@ -2013,7 +2013,7 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
             // Single element: store at buf[writeIdx + 1]
             llvm::Value* curIdx = builder->CreateLoad(getDefaultType(), writeIdx, "spread.curidx");
             llvm::Value* dstIdx = builder->CreateAdd(curIdx, one, "spread.dstidx");
-            llvm::Value* dstPtr = builder->CreateGEP(getDefaultType(), buf, dstIdx, "spread.dstptr");
+            llvm::Value* dstPtr = builder->CreateInBoundsGEP(getDefaultType(), buf, dstIdx, "spread.dstptr");
             builder->CreateStore(ei.val, dstPtr);
             llvm::Value* newIdx = builder->CreateAdd(curIdx, one, "spread.newidx");
             builder->CreateStore(newIdx, writeIdx);
@@ -2178,7 +2178,7 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
     //   - inbounds GEP (the index is within the allocated region)
     // This enables LLVM to apply vectorization, prefetching, and stride
     // analysis optimizations that require contiguous memory guarantees.
-    llvm::Value* dataPtr = builder->CreateGEP(getDefaultType(), basePtr,
+    llvm::Value* dataPtr = builder->CreateInBoundsGEP(getDefaultType(), basePtr,
         llvm::ConstantInt::get(getDefaultType(), 1), "idx.data");
     llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), dataPtr, idxVal, "idx.elem.ptr");
     return builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "idx.elem");
@@ -2317,7 +2317,7 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
         // Use two-step GEP so LLVM can hoist the data-pointer out of loops.
         // inbounds GEP: OmScript arrays are contiguous heap allocations,
         // so the element pointer is always within the allocated region.
-        llvm::Value* dataPtr = builder->CreateGEP(getDefaultType(), basePtr,
+        llvm::Value* dataPtr = builder->CreateInBoundsGEP(getDefaultType(), basePtr,
             llvm::ConstantInt::get(getDefaultType(), 1), "idxa.data");
         llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), dataPtr, idxVal, "idxa.elem.ptr");
         builder->CreateAlignedStore(newVal, elemPtr, llvm::MaybeAlign(8));

@@ -655,7 +655,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(bodyBB);
         // Element is at offset (idx + 1) from array base
         llvm::Value* offset = builder->CreateAdd(idx, llvm::ConstantInt::get(getDefaultType(), 1), "sum.offset");
-        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrPtr, offset, "sum.elemptr");
+        llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, offset, "sum.elemptr");
         llvm::Value* elem = builder->CreateLoad(getDefaultType(), elemPtr, "sum.elem");
         llvm::Value* newAcc = builder->CreateAdd(acc, elem, "sum.newacc");
         llvm::Value* newIdx = builder->CreateAdd(idx, llvm::ConstantInt::get(getDefaultType(), 1), "sum.newidx");
@@ -702,8 +702,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
         llvm::Value* offI = builder->CreateAdd(i, one, "swap.offi");
         llvm::Value* offJ = builder->CreateAdd(j, one, "swap.offj");
-        llvm::Value* ptrI = builder->CreateGEP(getDefaultType(), arrPtr, offI, "swap.ptri");
-        llvm::Value* ptrJ = builder->CreateGEP(getDefaultType(), arrPtr, offJ, "swap.ptrj");
+        llvm::Value* ptrI = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, offI, "swap.ptri");
+        llvm::Value* ptrJ = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, offJ, "swap.ptrj");
         llvm::Value* valI = builder->CreateLoad(getDefaultType(), ptrI, "swap.vali");
         llvm::Value* valJ = builder->CreateLoad(getDefaultType(), ptrJ, "swap.valj");
         builder->CreateStore(valJ, ptrI);
@@ -740,8 +740,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(bodyBB);
         llvm::Value* offLo = builder->CreateAdd(lo, one, "rev.offlo");
         llvm::Value* offHi = builder->CreateAdd(hi, one, "rev.offhi");
-        llvm::Value* ptrLo = builder->CreateGEP(getDefaultType(), arrPtr, offLo, "rev.ptrlo");
-        llvm::Value* ptrHi = builder->CreateGEP(getDefaultType(), arrPtr, offHi, "rev.ptrhi");
+        llvm::Value* ptrLo = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, offLo, "rev.ptrlo");
+        llvm::Value* ptrHi = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, offHi, "rev.ptrhi");
         llvm::Value* valLo = builder->CreateLoad(getDefaultType(), ptrLo, "rev.vallo");
         llvm::Value* valHi = builder->CreateLoad(getDefaultType(), ptrHi, "rev.valhi");
         builder->CreateStore(valHi, ptrLo);
@@ -2084,7 +2084,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Store new value at index oldLen + 1 (after header)
         llvm::Value* newElemIdx =
             builder->CreateAdd(oldLen, llvm::ConstantInt::get(getDefaultType(), 1), "push.elemidx");
-        llvm::Value* newElemPtr = builder->CreateGEP(getDefaultType(), newBuf, newElemIdx, "push.elemptr");
+        llvm::Value* newElemPtr = builder->CreateInBoundsGEP(getDefaultType(), newBuf, newElemIdx, "push.elemptr");
         builder->CreateStore(valArg, newElemPtr);
         // Return new array pointer as i64
         return builder->CreatePtrToInt(newBuf, getDefaultType(), "push.result");
@@ -2151,7 +2151,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateCondBr(cond, bodyBB, doneBB);
         builder->SetInsertPoint(bodyBB);
         llvm::Value* elemIdx = builder->CreateAdd(idx, one, "indexof.elemidx");
-        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrPtr, elemIdx, "indexof.elemptr");
+        llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, elemIdx, "indexof.elemptr");
         llvm::Value* elem = builder->CreateLoad(getDefaultType(), elemPtr, "indexof.elem");
         llvm::Value* match = builder->CreateICmpEQ(elem, valArg, "indexof.match");
         builder->CreateCondBr(match, foundBB, nextBB);
@@ -2194,7 +2194,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateCondBr(cond, bodyBB, doneBB);
         builder->SetInsertPoint(bodyBB);
         llvm::Value* elemIdx = builder->CreateAdd(idx, one, "contains.elemidx");
-        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrPtr, elemIdx, "contains.elemptr");
+        llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, elemIdx, "contains.elemptr");
         llvm::Value* elem = builder->CreateLoad(getDefaultType(), elemPtr, "contains.elem");
         llvm::Value* match = builder->CreateICmpEQ(elem, valArg, "contains.match");
         llvm::Value* nextIdx = builder->CreateAdd(idx, one, "contains.next");
@@ -2339,7 +2339,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             builder->CreateCondBr(cond, bodyBB, doneBB);
             builder->SetInsertPoint(bodyBB);
             llvm::Value* elemIdx = builder->CreateAdd(idx, one, "fill.elemidx");
-            llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), buf, elemIdx, "fill.elemptr");
+            llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), buf, elemIdx, "fill.elemptr");
             builder->CreateStore(valArg, elemPtr);
             llvm::Value* nextIdx = builder->CreateAdd(idx, one, "fill.next");
             idx->addIncoming(nextIdx, bodyBB);
@@ -2467,12 +2467,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // In-bounds: save removed value, shift elements left, decrement length
         builder->SetInsertPoint(okBB);
         llvm::Value* elemOffset = builder->CreateAdd(idxArg, one, "aremove.elemoff");
-        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrPtr, elemOffset, "aremove.elemptr");
+        llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, elemOffset, "aremove.elemptr");
         llvm::Value* removedVal = builder->CreateLoad(getDefaultType(), elemPtr, "aremove.removed");
         // memmove(&arr[idx+1], &arr[idx+2], (length - idx - 1) * 8)
         llvm::Value* srcOffset =
             builder->CreateAdd(idxArg, llvm::ConstantInt::get(getDefaultType(), 2), "aremove.srcoff");
-        llvm::Value* srcPtr = builder->CreateGEP(getDefaultType(), arrPtr, srcOffset, "aremove.srcptr");
+        llvm::Value* srcPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, srcOffset, "aremove.srcptr");
         llvm::Value* shiftCount =
             builder->CreateSub(arrLen, builder->CreateAdd(idxArg, one, "aremove.idxp1"), "aremove.shiftcnt");
         llvm::Value* shiftBytes = builder->CreateMul(shiftCount, eight, "aremove.shiftbytes");
@@ -2534,13 +2534,13 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(bodyBB);
         // Load element from source: arrPtr[idx + 1]
         llvm::Value* elemIdx = builder->CreateAdd(idx, one, "amap.elemidx");
-        llvm::Value* srcPtr = builder->CreateGEP(getDefaultType(), arrPtr, elemIdx, "amap.srcptr");
+        llvm::Value* srcPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, elemIdx, "amap.srcptr");
         llvm::Value* elem = builder->CreateLoad(getDefaultType(), srcPtr, "amap.elem");
         // Call the map function with the element
         llvm::Value* mapped = builder->CreateCall(mapFn, {elem}, "amap.mapped");
         mapped = toDefaultType(mapped);
         // Store into result: buf[idx + 1]
-        llvm::Value* dstPtr = builder->CreateGEP(getDefaultType(), buf, elemIdx, "amap.dstptr");
+        llvm::Value* dstPtr = builder->CreateInBoundsGEP(getDefaultType(), buf, elemIdx, "amap.dstptr");
         builder->CreateStore(mapped, dstPtr);
         llvm::Value* nextIdx = builder->CreateAdd(idx, one, "amap.next");
         idx->addIncoming(nextIdx, bodyBB);
@@ -2605,7 +2605,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(testBB);
         // Load element from source
         llvm::Value* elemIdx = builder->CreateAdd(idx, one, "afilt.elemidx");
-        llvm::Value* srcPtr = builder->CreateGEP(getDefaultType(), arrPtr, elemIdx, "afilt.srcptr");
+        llvm::Value* srcPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, elemIdx, "afilt.srcptr");
         llvm::Value* elem = builder->CreateLoad(getDefaultType(), srcPtr, "afilt.elem");
         // Call the filter function
         llvm::Value* result = builder->CreateCall(filterFn, {elem}, "afilt.result");
@@ -2616,7 +2616,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Add element to result
         builder->SetInsertPoint(addBB);
         llvm::Value* dstIdx = builder->CreateAdd(outIdx, one, "afilt.dstidx");
-        llvm::Value* dstPtr = builder->CreateGEP(getDefaultType(), buf, dstIdx, "afilt.dstptr");
+        llvm::Value* dstPtr = builder->CreateInBoundsGEP(getDefaultType(), buf, dstIdx, "afilt.dstptr");
         builder->CreateStore(elem, dstPtr);
         llvm::Value* newOutIdx = builder->CreateAdd(outIdx, one, "afilt.newoutidx");
         builder->CreateBr(incBB);
@@ -2688,7 +2688,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(bodyBB);
         // Load element from source: arrPtr[idx + 1]
         llvm::Value* elemIdx = builder->CreateAdd(idx, one, "areduce.elemidx");
-        llvm::Value* srcPtr = builder->CreateGEP(getDefaultType(), arrPtr, elemIdx, "areduce.srcptr");
+        llvm::Value* srcPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, elemIdx, "areduce.srcptr");
         llvm::Value* elem = builder->CreateLoad(getDefaultType(), srcPtr, "areduce.elem");
         // Call reduce function: fn(accumulator, element)
         llvm::Value* newAcc = builder->CreateCall(reduceFn, {acc, elem}, "areduce.newacc");
@@ -2749,7 +2749,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Body: compare and update min
         builder->SetInsertPoint(bodyBB);
         llvm::Value* offset = builder->CreateAdd(idx, one, "amin.offset");
-        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrPtr, offset, "amin.elemptr");
+        llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, offset, "amin.elemptr");
         llvm::Value* elem = builder->CreateLoad(getDefaultType(), elemPtr, "amin.elem");
         llvm::Value* isLess = builder->CreateICmpSLT(elem, curMin, "amin.isless");
         llvm::Value* newMin = builder->CreateSelect(isLess, elem, curMin, "amin.newmin");
@@ -2812,7 +2812,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Body: compare and update max
         builder->SetInsertPoint(bodyBB);
         llvm::Value* offset = builder->CreateAdd(idx, one, "amax.offset");
-        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrPtr, offset, "amax.elemptr");
+        llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, offset, "amax.elemptr");
         llvm::Value* elem = builder->CreateLoad(getDefaultType(), elemPtr, "amax.elem");
         llvm::Value* isGreater = builder->CreateICmpSGT(elem, curMax, "amax.isgreater");
         llvm::Value* newMax = builder->CreateSelect(isGreater, elem, curMax, "amax.newmax");
@@ -2873,7 +2873,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         builder->SetInsertPoint(bodyBB);
         llvm::Value* offset = builder->CreateAdd(idx, one, "aany.offset");
-        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrPtr, offset, "aany.elemptr");
+        llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, offset, "aany.elemptr");
         llvm::Value* elem = builder->CreateLoad(getDefaultType(), elemPtr, "aany.elem");
         llvm::Value* predResult = builder->CreateCall(predFn, {elem}, "aany.pred");
         predResult = toDefaultType(predResult);
@@ -2936,7 +2936,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         builder->SetInsertPoint(bodyBB);
         llvm::Value* offset = builder->CreateAdd(idx, one, "aevery.offset");
-        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrPtr, offset, "aevery.elemptr");
+        llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, offset, "aevery.elemptr");
         llvm::Value* elem = builder->CreateLoad(getDefaultType(), elemPtr, "aevery.elem");
         llvm::Value* predResult = builder->CreateCall(predFn, {elem}, "aevery.pred");
         predResult = toDefaultType(predResult);
@@ -2988,7 +2988,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         builder->SetInsertPoint(bodyBB);
         llvm::Value* offset = builder->CreateAdd(idx, one, "afind.offset");
-        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrPtr, offset, "afind.elemptr");
+        llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, offset, "afind.elemptr");
         llvm::Value* elem = builder->CreateLoad(getDefaultType(), elemPtr, "afind.elem");
         llvm::Value* isEqual = builder->CreateICmpEQ(elem, target, "afind.iseq");
         llvm::Value* newIdx = builder->CreateAdd(idx, one, "afind.newidx");
@@ -3050,7 +3050,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         builder->SetInsertPoint(bodyBB);
         llvm::Value* offset = builder->CreateAdd(idx, one, "acnt.offset");
-        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrPtr, offset, "acnt.elemptr");
+        llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, offset, "acnt.elemptr");
         llvm::Value* elem = builder->CreateLoad(getDefaultType(), elemPtr, "acnt.elem");
         llvm::Value* predResult = builder->CreateCall(predFn, {elem}, "acnt.pred");
         predResult = toDefaultType(predResult);
@@ -4230,7 +4230,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(bodyBB);
         llvm::Value* val = builder->CreateAdd(startArg, i, "range.val");
         llvm::Value* slot = builder->CreateAdd(i, one, "range.slot");
-        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), buf, slot, "range.elemptr");
+        llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), buf, slot, "range.elemptr");
         builder->CreateStore(val, elemPtr);
         llvm::Value* nextI = builder->CreateAdd(i, one, "range.next");
         i->addIncoming(nextI, bodyBB);
@@ -4301,7 +4301,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* val = builder->CreateAdd(startArg,
             builder->CreateMul(i, stepArg, "rstep.offset"), "rstep.val");
         llvm::Value* slot = builder->CreateAdd(i, one, "rstep.slot");
-        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), buf, slot, "rstep.elemptr");
+        llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), buf, slot, "rstep.elemptr");
         builder->CreateStore(val, elemPtr);
         llvm::Value* nextI = builder->CreateAdd(i, one, "rstep.next");
         i->addIncoming(nextI, bodyBB);
