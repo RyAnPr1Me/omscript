@@ -2716,6 +2716,12 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     // The OPTMAX annotation is the user's compile-time guarantee that the
     // function is safe and well-behaved, enabling maximum optimization.
     if (inOptMaxFunction) {
+        // OPTMAX is the user's guarantee that this function always terminates,
+        // has no side effects on synchronization, and doesn't free memory that
+        // callers depend on.  These attributes enable LLVM to speculate calls,
+        // hoist them out of loops, and eliminate dead calls.
+        function->addFnAttr(llvm::Attribute::WillReturn);
+        function->addFnAttr(llvm::Attribute::NoSync);
         for (unsigned i = 0; i < function->arg_size(); ++i) {
             if (function->getArg(i)->getType()->isPointerTy()) {
                 function->addParamAttr(i, llvm::Attribute::NoAlias);
@@ -2726,6 +2732,7 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
                 // null/bounds checks without runtime verification.
                 function->addParamAttr(i, llvm::Attribute::getWithDereferenceableBytes(
                     *context, 8));
+                function->addParamAttr(i, llvm::Attribute::NoCapture);
             }
         }
     }
@@ -2747,6 +2754,7 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
                 // OmScript arrays always have a valid header (at least 8 bytes).
                 function->addParamAttr(i, llvm::Attribute::getWithDereferenceableBytes(
                     *context, 8));
+                function->addParamAttr(i, llvm::Attribute::NoCapture);
             }
         }
     }
@@ -2771,8 +2779,22 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
                 // size for any OmScript pointer (arrays, strings).
                 function->addParamAttr(i, llvm::Attribute::getWithDereferenceableBytes(
                     *context, 8));
+                // OmScript's ownership model ensures pointer parameters are
+                // never captured (stored into global state or returned as
+                // pointers).  The borrow checker prevents escaping references.
+                // nocapture enables LLVM to prove the pointer doesn't escape,
+                // allowing stack promotion and more aggressive alias analysis.
+                function->addParamAttr(i, llvm::Attribute::NoCapture);
             }
         }
+    }
+
+    // OmScript is a single-threaded language — no concurrent memory access
+    // is possible.  nosync tells LLVM that this function does not communicate
+    // with other threads via memory or synchronization primitives, enabling
+    // store-to-load forwarding and dead store elimination across calls.
+    if (optimizationLevel >= OptimizationLevel::O2 && !inOptMaxFunction) {
+        function->addFnAttr(llvm::Attribute::NoSync);
     }
 
     // @unroll / @nounroll: per-function loop unrolling control.
@@ -2784,6 +2806,11 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     // These are stored and applied to every loop emitted within this function.
     currentFuncHintVectorize_ = func->hintVectorize;
     currentFuncHintNoVectorize_ = func->hintNoVectorize;
+
+    // @parallel / @noparallel: per-function auto-parallelization control.
+    // These are stored and applied to every loop emitted within this function.
+    currentFuncHintParallelize_ = func->hintParallelize;
+    currentFuncHintNoParallelize_ = func->hintNoParallelize;
 
     // @hot: per-function hot annotation.  Used for bounds check elimination
     // and other performance-critical optimizations.

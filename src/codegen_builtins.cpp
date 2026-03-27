@@ -765,8 +765,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* ptrJ = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, offJ, "swap.ptrj");
         llvm::Value* valI = builder->CreateLoad(getDefaultType(), ptrI, "swap.vali");
         llvm::Value* valJ = builder->CreateLoad(getDefaultType(), ptrJ, "swap.valj");
-        builder->CreateStore(valJ, ptrI);
-        builder->CreateStore(valI, ptrJ);
+        llvm::cast<llvm::Instruction>(valI)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        llvm::cast<llvm::Instruction>(valJ)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        auto* stI = builder->CreateStore(valJ, ptrI);
+        auto* stJ = builder->CreateStore(valI, ptrJ);
+        stI->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        stJ->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
         return llvm::ConstantInt::get(getDefaultType(), 0);
     }
 
@@ -815,8 +819,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* ptrHi = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, offHi, "rev.ptrhi");
         llvm::Value* valLo = builder->CreateLoad(getDefaultType(), ptrLo, "rev.vallo");
         llvm::Value* valHi = builder->CreateLoad(getDefaultType(), ptrHi, "rev.valhi");
-        builder->CreateStore(valHi, ptrLo);
-        builder->CreateStore(valLo, ptrHi);
+        llvm::cast<llvm::Instruction>(valLo)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        llvm::cast<llvm::Instruction>(valHi)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        auto* stLo = builder->CreateStore(valHi, ptrLo);
+        auto* stHi = builder->CreateStore(valLo, ptrHi);
+        stLo->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        stHi->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
         llvm::Value* newLo = builder->CreateAdd(lo, one, "rev.newlo");
         llvm::Value* newHi = builder->CreateSub(hi, one, "rev.newhi");
         lo->addIncoming(newLo, bodyBB);
@@ -2251,7 +2259,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* newElemIdx =
             builder->CreateAdd(oldLen, llvm::ConstantInt::get(getDefaultType(), 1), "push.elemidx");
         llvm::Value* newElemPtr = builder->CreateInBoundsGEP(getDefaultType(), newBuf, newElemIdx, "push.elemptr");
-        builder->CreateStore(valArg, newElemPtr);
+        auto* pushElemSt = builder->CreateStore(valArg, newElemPtr);
+        pushElemSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
         // Return new array pointer as i64
         return builder->CreatePtrToInt(newBuf, getDefaultType(), "push.result");
     }
@@ -2467,6 +2476,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* ptr2 = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, idx2, "sort.ptr2");
         llvm::Value* val1 = builder->CreateLoad(getDefaultType(), ptr1, "sort.val1");
         llvm::Value* val2 = builder->CreateLoad(getDefaultType(), ptr2, "sort.val2");
+        llvm::cast<llvm::Instruction>(val1)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        llvm::cast<llvm::Instruction>(val2)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
         llvm::Value* needSwap;
         if (sortStrings) {
             // String sort: use strcmp(val1_as_ptr, val2_as_ptr) > 0
@@ -2481,8 +2492,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateCondBr(needSwap, swapBB, noswapBB);
 
         builder->SetInsertPoint(swapBB);
-        builder->CreateStore(val2, ptr1);
-        builder->CreateStore(val1, ptr2);
+        auto* sortSt1 = builder->CreateStore(val2, ptr1);
+        auto* sortSt2 = builder->CreateStore(val1, ptr2);
+        sortSt1->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        sortSt2->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
         builder->CreateBr(noswapBB);
 
         builder->SetInsertPoint(noswapBB);

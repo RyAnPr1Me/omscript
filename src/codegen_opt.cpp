@@ -20,6 +20,7 @@
 #endif
 #endif
 #include <llvm/Support/CodeGen.h>
+#include <llvm/Support/CommandLine.h>
 #include <llvm/Support/FileSystem.h>
 #include <llvm/Support/PGOOptions.h>
 #include <llvm/Support/TargetSelect.h>
@@ -52,6 +53,7 @@
 #include <llvm/Transforms/Scalar/CorrelatedValuePropagation.h>
 #include <llvm/Transforms/Scalar/ConstraintElimination.h>
 #include <llvm/Transforms/Scalar/DeadStoreElimination.h>
+#include <llvm/Transforms/Scalar/FlattenCFG.h>
 #include <llvm/Transforms/Scalar/Float2Int.h>
 #include <llvm/Transforms/Scalar/GVN.h>
 #include <llvm/Transforms/Scalar/IndVarSimplify.h>
@@ -134,15 +136,47 @@ namespace omscript {
 // bonusInstThreshold=6 allows up to 6 extra instructions to be speculated
 // when converting branches to selects — enough for cascading-if classify()
 // patterns and multi-condition guards without over-speculating complex branches.
+// convertSwitchRangeToICmp: converts switch statements with contiguous case
+// ranges to icmp+branch sequences, which are more efficient on modern OoO CPUs
+// with branch prediction than the switch dispatch table.
 static constexpr int kCFGSpeculationBonus = 6;
 static llvm::SimplifyCFGOptions aggressiveCFGOpts() {
     return llvm::SimplifyCFGOptions()
         .convertSwitchToLookupTable(true)
+        .convertSwitchRangeToICmp(true)
         .hoistCommonInsts(true)
         .sinkCommonInsts(true)
         .speculateBlocks(true)
         .forwardSwitchCondToPhi(true)
         .bonusInstThreshold(kCFGSpeculationBonus);
+}
+
+// Hyperblock-aggressive SimplifyCFG options for superblock/hyperblock formation.
+// Uses a higher bonusInstThreshold (12) to convert more branches to predicated
+// (select) instructions, creating larger basic blocks that give the scheduler
+// and register allocator more freedom.  This is the IR-level equivalent of
+// hyperblock formation in traditional compilers.
+//
+// Threshold=12 is chosen to match GCC's aggressive if-conversion heuristic:
+// it allows speculating up to 12 instructions to convert a branch to a select,
+// which covers 2-3 chained comparisons with arithmetic (common in classify()
+// and range-check patterns).  Values above 12 risk register-pressure increases
+// that offset the scheduling benefit on x86-64 (16 GPRs).
+//
+// needCanonicalLoops(false) allows SimplifyCFG to break canonical loop form
+// when it enables more aggressive if-conversion — the loop canonicalization
+// passes that run later will restore the form if needed.
+static constexpr int kHyperblockSpeculationBonus = 12;
+static llvm::SimplifyCFGOptions hyperblockCFGOpts() {
+    return llvm::SimplifyCFGOptions()
+        .convertSwitchToLookupTable(true)
+        .convertSwitchRangeToICmp(true)
+        .hoistCommonInsts(true)
+        .sinkCommonInsts(true)
+        .speculateBlocks(true)
+        .forwardSwitchCondToPhi(true)
+        .needCanonicalLoops(false)
+        .bonusInstThreshold(kHyperblockSpeculationBonus);
 }
 
 void CodeGenerator::resolveTargetCPU(std::string& cpu, std::string& features) const {
@@ -465,6 +499,23 @@ void CodeGenerator::runOptimizationPasses() {
         });
     }
 
+    // ── Auto-parallelization pipeline configuration ─────────────────────
+    // OmScript supports automatic loop parallelization via two complementary
+    // mechanisms:
+    //
+    //   1. LLVM Loop Vectorizer: uses !llvm.access.group + parallel_accesses
+    //      metadata (attached by codegen_stmt.cpp) to vectorize loops that
+    //      are provably parallel.
+    //
+    //   2. Polly Polyhedral Optimizer: for affine loop nests, Polly performs
+    //      high-level transformations (tiling, interchange, fusion) and can
+    //      generate OpenMP parallel loops.  We configure Polly's parallelism
+    //      options via LLVM's cl::opt mechanism after loading the plugin.
+    //
+    // The -fparallelize / -fno-parallelize flag controls both mechanisms,
+    // and the @parallel / @noparallel function annotations provide per-
+    // function control.
+
     // At O2+ with -floop-optimize, load the LLVM Polly polyhedral optimizer
     // plugin.  Polly provides high-level loop transformations (tiling, fusion,
     // interchange) based on the polyhedral model, improving data locality and
@@ -480,8 +531,39 @@ void CodeGenerator::runOptimizationPasses() {
         auto pollyPlugin = llvm::PassPlugin::Load(POLLY_LIB_PATH);
         if (pollyPlugin) {
             pollyPlugin->registerPassBuilderCallbacks(PB);
+            // Now that Polly has registered its cl::opt entries, configure
+            // automatic parallelization if -fparallelize is active.
+            //
+            // -polly-parallel: generate OpenMP parallel loops for profitable
+            //   outer loops in affine loop nests
+            // -polly-vectorizer=stripmine: use Polly's strip-mining vectorizer
+            //   for inner loops (complementing LLVM's LoopVectorizer)
+            // -polly-run-dce: dead code elimination after Polly transforms
+            // -polly-run-inliner: inline small helper functions Polly creates
+            // -polly-invariant-load-hoisting: hoist loop-invariant loads for
+            //   better data locality
+            // -polly-scheduling=dynamic: dynamic OpenMP scheduling for uneven
+            //   workloads (more robust than static for user code)
+            // -polly-scheduling-chunksize=1: fine-grained chunks for balance
+            if (enableParallelize_) {
+                const char* pollyArgs[] = {
+                    "omsc",
+                    "-polly-parallel",
+                    "-polly-vectorizer=stripmine",
+                    "-polly-run-dce",
+                    "-polly-run-inliner",
+                    "-polly-invariant-load-hoisting",
+                    "-polly-scheduling=dynamic",
+                    "-polly-scheduling-chunksize=1",
+                };
+                llvm::cl::ParseCommandLineOptions(
+                    sizeof(pollyArgs) / sizeof(pollyArgs[0]), pollyArgs,
+                    "OmScript Polly auto-parallelization\n");
+            }
             if (verbose_) {
-                std::cout << "    Polly plugin loaded successfully" << std::endl;
+                std::cout << "    Polly plugin loaded successfully"
+                          << (enableParallelize_ ? " (parallel mode)" : "")
+                          << std::endl;
             }
         } else {
             llvm::errs() << "omsc: warning: failed to load Polly plugin; "
@@ -490,6 +572,56 @@ void CodeGenerator::runOptimizationPasses() {
         }
     }
 #endif
+
+    // ── Superblock / Hyperblock Formation ───────────────────────────────
+    // At O3, add a dedicated superblock/hyperblock formation phase that
+    // creates larger basic blocks for better scheduling and register alloc.
+    //
+    // Superblock formation (trace scheduling): JumpThreading duplicates
+    // blocks along hot paths to create single-entry multiple-exit regions,
+    // eliminating branches that break instruction-level parallelism.
+    //
+    // Hyperblock formation (if-conversion): aggressive SimplifyCFG with a
+    // high speculation threshold converts diamond-shaped branch patterns
+    // into predicated (select) instructions, creating wider basic blocks
+    // that give the instruction scheduler and register allocator more
+    // freedom.  This is particularly effective for OmScript's pattern-
+    // matching style (cascading if-else classify() functions).
+    //
+    // The pipeline runs:
+    //   1. JumpThreading — duplicates blocks to form superblocks
+    //   2. DFAJumpThreading — handles state-machine/switch patterns
+    //   3. CorrelatedValuePropagation — sharpens value ranges from
+    //      conditions duplicated by JumpThreading
+    //   4. SpeculativeExecution — hoists cheap ops above remaining branches
+    //   5. SimplifyCFG(hyperblock) — converts remaining branches to selects
+    //   6. FlattenCFG — collapses nested if-else chains
+    //   7. InstCombine + DCE — clean up
+    //
+    // Registered at OptimizerEarlyEP so it runs after inlining has created
+    // the full intra-procedural CFG but before the loop optimizer and
+    // vectorizer — giving them larger, straighter basic blocks to work with.
+    if (optimizationLevel >= OptimizationLevel::O3) {
+        PB.registerOptimizerEarlyEPCallback(
+            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/) {
+            llvm::FunctionPassManager SuperblockFPM;
+            // Phase 1: Superblock formation — duplicate blocks along
+            // frequently-taken paths to form single-entry traces.
+            SuperblockFPM.addPass(llvm::JumpThreadingPass());
+            SuperblockFPM.addPass(llvm::DFAJumpThreadingPass());
+            // Phase 2: Sharpen value ranges exposed by block duplication.
+            SuperblockFPM.addPass(llvm::CorrelatedValuePropagationPass());
+            // Phase 3: Hoist cheap instructions above remaining branches.
+            SuperblockFPM.addPass(llvm::SpeculativeExecutionPass());
+            // Phase 4: Hyperblock formation — convert branches to selects.
+            SuperblockFPM.addPass(llvm::SimplifyCFGPass(hyperblockCFGOpts()));
+            SuperblockFPM.addPass(llvm::FlattenCFGPass());
+            // Phase 5: Cleanup — combine and eliminate dead code.
+            SuperblockFPM.addPass(llvm::InstCombinePass());
+            SuperblockFPM.addPass(llvm::ADCEPass());
+            MPM.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(SuperblockFPM)));
+        });
+    }
 
     // NOTE: InferFunctionAttrsPass is intentionally NOT registered here.
     // LLVM's default pipeline already includes it, and we previously added it
@@ -746,6 +878,24 @@ void CodeGenerator::runOptimizationPasses() {
             // constant arrays).  Fewer unique constants means smaller data
             // sections, better D-cache utilization, and reduced link time.
             MPM.addPass(llvm::ConstantMergePass());
+        });
+    }
+
+    // At O3, add a post-vectorizer superblock formation phase.  After the
+    // loop vectorizer has transformed loops, the CFG often contains new
+    // scalar-epilogue paths, predicated blocks, and vector-select patterns
+    // that can be merged into larger basic blocks.  This improves the
+    // backend's instruction scheduling and reduces branch overhead in
+    // vectorized code.
+    if (optimizationLevel >= OptimizationLevel::O3) {
+        PB.registerOptimizerLastEPCallback(
+            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/) {
+            llvm::FunctionPassManager PostVecFPM;
+            PostVecFPM.addPass(llvm::JumpThreadingPass());
+            PostVecFPM.addPass(llvm::SpeculativeExecutionPass());
+            PostVecFPM.addPass(llvm::SimplifyCFGPass(hyperblockCFGOpts()));
+            PostVecFPM.addPass(llvm::InstCombinePass());
+            MPM.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(PostVecFPM)));
         });
     }
 
@@ -1282,6 +1432,33 @@ void CodeGenerator::runOptimizationPasses() {
     }
 
     // -----------------------------------------------------------------------
+    // Post-HGOE srem→urem and sdiv→udiv conversion
+    // -----------------------------------------------------------------------
+    // The HGOE may introduce new arithmetic patterns (e.g. from FMA fusion
+    // or loop restructuring) that contain srem/sdiv instructions.  Run one
+    // more round of signed→unsigned conversion to catch these residuals.
+    // This is particularly important because urem/udiv on x86-64 avoid the
+    // sign-correction fixup (3 extra instructions per operation).
+    if (enableSuperopt_ && optimizationLevel >= OptimizationLevel::O2
+        && enableHGOE_ && !marchCpu_.empty()) {
+        unsigned postHGOECount = 0;
+        for (int iter = 0; iter < 2; ++iter) {
+            unsigned iterCount = 0;
+            for (auto& func : *module) {
+                iterCount += superopt::inferNonNegativeFlags(func);
+                iterCount += superopt::convertSRemToURem(func);
+                iterCount += superopt::convertSDivToUDiv(func);
+            }
+            if (iterCount == 0) break;
+            postHGOECount += iterCount;
+        }
+        if (verbose_ && postHGOECount > 0) {
+            std::cout << "    Post-HGOE signed→unsigned: "
+                      << postHGOECount << " conversions" << std::endl;
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Post-Optimization Prefetch Cleanup
     // -----------------------------------------------------------------------
     // After all major optimizations (constant folding, loop elimination,
@@ -1524,6 +1701,21 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     fpm.add(llvm::createInstructionCombiningPass());
     fpm.add(llvm::createCFGSimplificationPass(aggressiveCFGOpts()));
     fpm.add(llvm::createDeadCodeEliminationPass());
+
+    // Phase 2.6: Superblock / Hyperblock formation for OPTMAX functions.
+    // After loop unrolling and cleanup, the CFG contains many small blocks
+    // from unrolled iterations and branch-heavy patterns.  We form
+    // superblocks (via GVN which implicitly threads branches through known
+    // values) and hyperblocks (via aggressive if-conversion with a high
+    // speculation threshold) to create larger basic blocks that improve
+    // instruction scheduling and reduce branch overhead.
+    fpm.add(llvm::createGVNPass());
+    fpm.add(llvm::createSpeculativeExecutionPass());
+    fpm.add(llvm::createCFGSimplificationPass(hyperblockCFGOpts()));
+    fpm.add(llvm::createFlattenCFGPass());
+    fpm.add(llvm::createInstructionCombiningPass());
+    fpm.add(llvm::createDeadCodeEliminationPass());
+
     // Phase 3: Post-loop optimizations
 #if LLVM_VERSION_MAJOR < 18
     fpm.add(llvm::createMergedLoadStoreMotionPass());
@@ -1545,6 +1737,18 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     // Phase 3.5: Aggressive cleanup passes for maximal optimization.
     fpm.add(llvm::createDeadCodeEliminationPass());
     fpm.add(llvm::createCFGSimplificationPass(aggressiveCFGOpts()));
+
+    // Phase 3.6: Post-cleanup loop re-canonicalization.  After aggressive DCE
+    // and CFG simplification, loops may have simplified structure that enables
+    // further LICM and strength reduction.  Re-canonicalize loops and run
+    // another round of LICM + LSR to catch these opportunities.
+    fpm.add(llvm::createLoopSimplifyPass());
+    fpm.add(llvm::createLICMPass());
+    fpm.add(llvm::createLoopStrengthReducePass());
+    // MergeICmps transforms chains of integer comparisons (e.g. struct
+    // equality) into a single memcmp call.  Running it in OPTMAX catches
+    // comparison chains in classify()-style functions.
+    fpm.add(llvm::createMergeICmpsLegacyPass());
 
     // Phase 4: Final cleanup — InstSimplify, InstCombine, CFGSimplification,
     // and DCE remove dead code and simplify patterns exposed by loop and

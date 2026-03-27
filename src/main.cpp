@@ -1489,6 +1489,7 @@ void printUsage(const char* progName) {
                  "  -fvectorize      SIMD vectorization hints (default: on)\n"
                  "  -funroll-loops   Loop unrolling (default: on)\n"
                  "  -floop-optimize  Polyhedral loop opts (default: on)\n"
+                 "  -fparallelize    Auto-parallelize loops (default: on)\n"
                  "  -fpic            Position-independent code (default: on)\n"
                  "  -foptmax         OPTMAX block optimization (default: on)\n"
                  "  -fjit            Hybrid JIT mode (default: on)\n"
@@ -2119,6 +2120,7 @@ int main(int argc, char* argv[]) {
     bool flagVectorize = true;
     bool flagUnrollLoops = true;
     bool flagLoopOptimize = true;
+    bool flagParallelize = true;
     bool flagEGraph = true;
     bool flagSuperopt = true;
     unsigned flagSuperoptLevel = 2;
@@ -2218,6 +2220,14 @@ int main(int argc, char* argv[]) {
         }
         if (arg == "-fno-loop-optimize") {
             flagLoopOptimize = false;
+            return true;
+        }
+        if (arg == "-fparallelize") {
+            flagParallelize = true;
+            return true;
+        }
+        if (arg == "-fno-parallelize") {
+            flagParallelize = false;
             return true;
         }
         if (arg == "-fegraph") {
@@ -2627,6 +2637,7 @@ int main(int argc, char* argv[]) {
             codegen.setVectorize(flagVectorize);
             codegen.setUnrollLoops(flagUnrollLoops);
             codegen.setLoopOptimize(flagLoopOptimize);
+            codegen.setParallelize(flagParallelize);
             codegen.setEGraphOptimize(flagEGraph);
             codegen.setSuperoptimize(flagSuperopt);
             codegen.setSuperoptLevel(flagSuperoptLevel);
@@ -2687,6 +2698,7 @@ int main(int argc, char* argv[]) {
             codegen.setVectorize(flagVectorize);
             codegen.setUnrollLoops(flagUnrollLoops);
             codegen.setLoopOptimize(flagLoopOptimize);
+            codegen.setParallelize(flagParallelize);
             codegen.setEGraphOptimize(flagEGraph);
             codegen.setSuperoptimize(flagSuperopt);
             codegen.setSuperoptLevel(flagSuperoptLevel);
@@ -2736,6 +2748,7 @@ int main(int argc, char* argv[]) {
             codegen.setVectorize(flagVectorize);
             codegen.setUnrollLoops(flagUnrollLoops);
             codegen.setLoopOptimize(flagLoopOptimize);
+            codegen.setParallelize(flagParallelize);
             codegen.setEGraphOptimize(flagEGraph);
             codegen.setSuperoptimize(flagSuperopt);
             codegen.setSuperoptLevel(flagSuperoptLevel);
@@ -2811,6 +2824,7 @@ int main(int argc, char* argv[]) {
             cg.setVectorize(flagVectorize);
             cg.setUnrollLoops(flagUnrollLoops);
             cg.setLoopOptimize(flagLoopOptimize);
+            cg.setParallelize(flagParallelize);
             cg.generateHybrid(program2.get());
             auto codegenEnd2 = std::chrono::steady_clock::now();
 
@@ -2877,6 +2891,7 @@ int main(int argc, char* argv[]) {
             runner.setVectorize(flagVectorize);
             runner.setUnrollLoops(flagUnrollLoops);
             runner.setLoopOptimize(flagLoopOptimize);
+            runner.setParallelize(flagParallelize);
             int exitCode = 1;
             try {
                 exitCode = runner.run(cg.getModule());
@@ -2927,6 +2942,7 @@ int main(int argc, char* argv[]) {
         compiler.setVectorize(flagVectorize);
         compiler.setUnrollLoops(flagUnrollLoops);
         compiler.setLoopOptimize(flagLoopOptimize);
+        compiler.setParallelize(flagParallelize);
         compiler.setDebugMode(flagDebug);
         if (quiet) {
             compiler.setVerbose(false);

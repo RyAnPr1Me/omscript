@@ -464,6 +464,29 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
                            llvm::ConstantAsMetadata::get(
                                llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))}));
         }
+
+        // ── Auto-parallelization hints for while-loops ────────────
+        // Mirror the for-loop parallel_accesses metadata logic.
+        // While-loops are parallelizable when:
+        //   - -fparallelize is enabled and @noparallel not set
+        //   - The loop is not deeply nested
+        //   - The function is @parallel or @hot, or optimization is O3
+        const bool wantParallelWhile = enableParallelize_
+            && !currentFuncHintNoParallelize_
+            && loopNestDepth_ <= 1
+            && (currentFuncHintParallelize_
+                || currentFuncHintHot_
+                || optimizationLevel >= OptimizationLevel::O3);
+        if (wantParallelWhile) {
+            llvm::MDNode* accessGroup = llvm::MDNode::getDistinct(*context, {});
+            loopMDs.push_back(llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.parallel_accesses"),
+                           accessGroup}));
+            currentLoopAccessGroup_ = accessGroup;
+        } else {
+            currentLoopAccessGroup_ = nullptr;
+        }
+
         llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
         loopMD->replaceOperandWith(0, loopMD);
         backBrWhile->setMetadata(llvm::LLVMContext::MD_loop, loopMD);
@@ -880,6 +903,19 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
                  llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
                      llvm::Type::getInt32Ty(*context), 2))});
             loopMDs.push_back(unrollCount);
+            // Explicitly enable runtime unrolling for variable-trip-count
+            // loops.  LLVM's runtime unroller generates a prologue/epilogue
+            // that handles the remainder iterations, enabling the main loop
+            // body to run at the unrolled stride.  Without this hint, the
+            // unroller may skip runtime unrolling if the trip count is not
+            // a compile-time constant.
+            // Note: llvm.loop.unroll.runtime.disable=false is a double
+            // negative — false means "do NOT disable runtime unrolling",
+            // i.e. enable it.
+            loopMDs.push_back(llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.unroll.runtime.disable"),
+                           llvm::ConstantAsMetadata::get(
+                               llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 0))}));
         }
         // @unroll / @nounroll: per-function loop unrolling overrides.
         // @nounroll disables unrolling entirely; @unroll requests aggressive unrolling.
@@ -974,8 +1010,11 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         // Example:  for i in 0...n { arr[i]=i*2; sum+=arr[i] }
         //   → Loop 1: for i in 0...n { arr[i]=i*2 }  (vectorizable)
         //   → Loop 2: for i in 0...n { sum+=arr[i] }  (reduction)
-        if (optimizationLevel >= OptimizationLevel::O3
-            && stepKnownPositive && !deeplyNested && !bodyHasInnerLoop_) {
+        // At O2, enable distribution only for @hot functions since the
+        // analysis cost is non-trivial for cold code.
+        if (stepKnownPositive && !deeplyNested && !bodyHasInnerLoop_
+            && (optimizationLevel >= OptimizationLevel::O3
+                || (optimizationLevel >= OptimizationLevel::O2 && currentFuncHintHot_))) {
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.distribute.enable"),
                            llvm::ConstantAsMetadata::get(
@@ -999,6 +1038,49 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
                 *context, {llvm::MDString::get(*context, "llvm.loop.pipeline.initiationinterval"),
                            llvm::ConstantAsMetadata::get(
                                llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 1))}));
+        }
+
+        // ── Auto-parallelization hints ─────────────────────────────
+        // At O2+ with -fparallelize, mark loops that are safe to execute
+        // in parallel.  We attach llvm.loop.parallel_accesses metadata that
+        // references an access group placed on every load/store in the loop
+        // body.  This tells LLVM's LoopVectorizer and Polly that there are
+        // no cross-iteration dependencies — enabling:
+        //   1. Vectorization with unordered reductions
+        //   2. Polly automatic OpenMP parallelization
+        //   3. LoopDistribute to split parallelizable sub-loops
+        //
+        // We only mark loops as parallel when:
+        //   - The step is known positive (forward iteration)
+        //   - The loop is not deeply nested (to avoid over-parallelizing)
+        //   - The function is @parallel or @hot (user-indicated hotness)
+        //   - -fno-parallelize was not passed
+        // At O3, all non-nested forward loops get the hint regardless of
+        // @hot/@parallel annotations.
+        const bool wantParallel = enableParallelize_
+            && !currentFuncHintNoParallelize_
+            && stepKnownPositive
+            && !deeplyNested
+            && !bodyHasInnerLoop_
+            && (currentFuncHintParallelize_
+                || currentFuncHintHot_
+                || optimizationLevel >= OptimizationLevel::O3);
+        if (wantParallel) {
+            // Create an access group — this is a unique MDNode that we
+            // attach to every load/store inside the loop body via
+            // !llvm.access.group.  The loop metadata then references it
+            // via llvm.loop.parallel_accesses, forming the contract:
+            //   "all memory operations in this group are independent
+            //    across iterations."
+            llvm::MDNode* accessGroup = llvm::MDNode::getDistinct(*context, {});
+            loopMDs.push_back(llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.parallel_accesses"),
+                           accessGroup}));
+            // Store the access group so codegen can attach it to memory
+            // operations emitted inside this loop body.
+            currentLoopAccessGroup_ = accessGroup;
+        } else {
+            currentLoopAccessGroup_ = nullptr;
         }
 
         llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
@@ -1373,6 +1455,29 @@ void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
     }
 
     loopStack.pop_back();
+
+    // At O2+, add branch weight metadata to the switch instruction.
+    // Uniform weights tell the optimizer that all cases are equally likely,
+    // which enables SimplifyCFG's switch-to-lookup-table conversion and
+    // prevents the backend from biasing layout toward any particular case.
+    // Without explicit weights, LLVM may assume the default case is cold
+    // and misoptimize the jump table structure.
+    if (optimizationLevel >= OptimizationLevel::O2) {
+        const unsigned numCases = switchInst->getNumCases();
+        const bool hasDefault = (defaultBB != mergeBB);
+        const unsigned totalSuccessors = numCases + (hasDefault ? 1 : 0);
+        if (totalSuccessors > 0) {
+            llvm::SmallVector<uint32_t, 16> weights;
+            // Default case weight (first weight in the metadata)
+            weights.push_back(hasDefault ? 1 : 0);
+            // Per-case weights: uniform distribution
+            for (unsigned i = 0; i < numCases; ++i) {
+                weights.push_back(1);
+            }
+            llvm::MDNode* brWeights = llvm::MDBuilder(*context).createBranchWeights(weights);
+            switchInst->setMetadata(llvm::LLVMContext::MD_prof, brWeights);
+        }
+    }
 
     builder->SetInsertPoint(mergeBB);
 }

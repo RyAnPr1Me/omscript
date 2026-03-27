@@ -1622,11 +1622,13 @@ echo "────────────────────────�
 echo "  Compilation Timing"
 echo "────────────────────────────────────────────────────────────────"
 
-OM_FLAGS="-O3 -march=native -mtune=native -ffast-math -fvectorize -funroll-loops -floop-optimize"
+OM_FLAGS="-O3 -march=native -mtune=native -fvectorize -funroll-loops -floop-optimize"
 # C flags: no -flto since OM doesn't use LTO (single-file compilation gets
 # no cross-TU benefit).  Adding -fno-plt avoids PLT indirection overhead
 # that OmScript never incurs.  This levels the playing field.
-C_FLAGS="-O3 -march=native -mtune=native -ffast-math -funroll-loops -fno-plt -lm"
+# NOTE: -ffast-math removed from both OM and C flags — it is unsafe and can
+# produce incorrect results for edge cases (NaN, Inf, signed zeros).
+C_FLAGS="-O3 -march=native -mtune=native -funroll-loops -fno-plt -lm"
 
 echo "Compiling OM ($OMSC $OM_FLAGS) …"
 OM_COMP_START=$(date +%s%N)
@@ -1797,7 +1799,7 @@ run_one() {
 
 # ─── RUN ──────────────────────────────────────────────────────
 echo "╔═══════════════════════════════════════════════════════════════════════════════════╗"
-echo "║         Per-Function Benchmarks  (median of $RUNS runs, $WARMUP_RUNS warmup)                  ║"
+echo "║         Per-Function Benchmarks  (trimmed mean of $RUNS runs, $WARMUP_RUNS warmup)               ║"
 echo "╚═══════════════════════════════════════════════════════════════════════════════════╝"
 echo ""
 printf "  ${BLD}%-22s  %-20s %-20s %-7s %-12s${RST}\n" \

@@ -5,8 +5,6 @@ cmake_minimum_required(VERSION 3.16)
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── Compiler cache ───────────────────────────────────────────────────────────
-set(CMAKE_UNITY_BUILD ON)
-add_link_options(-fuse-ld=mold)
 find_program(CCACHE_PROGRAM ccache)
 find_program(SCCACHE_PROGRAM sccache)
 if(CCACHE_PROGRAM)
@@ -95,28 +93,20 @@ add_executable(omsc ${SRC})
 target_compile_definitions(omsc PRIVATE
     OMSC_VERSION=\"${OMSC_VERSION}\"
 )
-include(CheckIPOSupported)
-check_ipo_supported(RESULT result OUTPUT output)
 
-if(result)
-    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
-else()
-    message(WARNING "IPO/LTO not supported: ${output}")
-endif()
 # ── Include directories (explicit for headers) ────────────────────────────────
 target_include_directories(omsc PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/runtime
 )
 
-# ── Compile options (aggressively tuned but safe) ─────────────────────────────
+# ── Compile options (maximum performance) ─────────────────────────────────────
 target_compile_options(omsc PRIVATE
     -Wall -Wextra -Wpedantic
 
     $<$<CONFIG:Release>:
         -O3
         -DNDEBUG
-        
 
         # Core perf
         -fno-plt
@@ -124,13 +114,27 @@ target_compile_options(omsc PRIVATE
         -fstrict-aliasing
         -finline-functions
 
+        # Aggressive loop optimizations
+        -funroll-loops
+        -ftree-vectorize
+        -ftree-loop-distribution
+        -ftree-loop-im
+        -ftree-loop-ivcanon
+        -fprefetch-loop-arrays
+
+        # Interprocedural analysis
+        -fipa-pta
+
+        # Graphite polyhedral loop optimizer
+        -floop-nest-optimize
+        -fgraphite-identity
+
         # Code layout / size
         -ffunction-sections
         -fdata-sections
 
         # Big win for LLVM-style code
         -fno-semantic-interposition
-        -fsanitize=address
 
         # Visibility (safe with export-dynamic)
         -fvisibility=hidden
@@ -151,8 +155,12 @@ target_link_options(omsc PRIVATE
     $<$<CONFIG:Release>:
         -Wl,-O3
         -Wl,--gc-sections
-        -static
-       -fsanitize=address
+        # Static linkage for C/C++ runtimes: embed libgcc and libstdc++
+        # into the binary so it doesn't depend on system-specific
+        # versions.  Full -static is not used because LLVM depends on
+        # dynamic-only system libraries (libffi, libz, etc.).
+        -static-libgcc
+        -static-libstdc++
     >
 )
 
