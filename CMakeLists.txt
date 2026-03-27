@@ -5,6 +5,8 @@ cmake_minimum_required(VERSION 3.16)
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── Compiler cache ───────────────────────────────────────────────────────────
+set(CMAKE_UNITY_BUILD ON)
+add_link_options(-fuse-ld=mold)
 find_program(CCACHE_PROGRAM ccache)
 find_program(SCCACHE_PROGRAM sccache)
 if(CCACHE_PROGRAM)
@@ -93,7 +95,14 @@ add_executable(omsc ${SRC})
 target_compile_definitions(omsc PRIVATE
     OMSC_VERSION=\"${OMSC_VERSION}\"
 )
+include(CheckIPOSupported)
+check_ipo_supported(RESULT result OUTPUT output)
 
+if(result)
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
+else()
+    message(WARNING "IPO/LTO not supported: ${output}")
+endif()
 # ── Include directories (explicit for headers) ────────────────────────────────
 target_include_directories(omsc PRIVATE
     ${CMAKE_SOURCE_DIR}/include
@@ -107,6 +116,7 @@ target_compile_options(omsc PRIVATE
     $<$<CONFIG:Release>:
         -O3
         -DNDEBUG
+        
 
         # Core perf
         -fno-plt
@@ -120,6 +130,7 @@ target_compile_options(omsc PRIVATE
 
         # Big win for LLVM-style code
         -fno-semantic-interposition
+        -fsanitize=address
 
         # Visibility (safe with export-dynamic)
         -fvisibility=hidden
@@ -140,6 +151,7 @@ target_link_options(omsc PRIVATE
     $<$<CONFIG:Release>:
         -Wl,-O2
         -Wl,--gc-sections
+        -static
     >
 )
 
