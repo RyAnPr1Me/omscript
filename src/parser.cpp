@@ -174,6 +174,7 @@ std::unique_ptr<Program> Parser::parse() {
             bool hintUnroll = false, hintNoUnroll = false;
             bool hintRestrict = false;
             bool hintVectorize = false, hintNoVectorize = false;
+            bool hintParallelize = false, hintNoParallelize = false;
             while (check(TokenType::AT)) {
                 advance(); // consume '@'
                 const Token ann = consume(TokenType::IDENTIFIER, "Expected annotation name after '@'");
@@ -203,11 +204,15 @@ std::unique_ptr<Program> Parser::parse() {
                     hintVectorize = true;
                 } else if (ann.lexeme == "novectorize") {
                     hintNoVectorize = true;
+                } else if (ann.lexeme == "parallel") {
+                    hintParallelize = true;
+                } else if (ann.lexeme == "noparallel") {
+                    hintNoParallelize = true;
                 } else if (ann.lexeme == "noalias") {
                     hintRestrict = true;  // @noalias on functions = @restrict
                 } else {
                     error("Unknown function annotation '@" + ann.lexeme +
-                          "'; supported: @inline, @noinline, @cold, @hot, @pure, @noreturn, @static, @flatten, @unroll, @nounroll, @restrict, @noalias, @vectorize, @novectorize (use @prefetch on parameters)");
+                          "'; supported: @inline, @noinline, @cold, @hot, @pure, @noreturn, @static, @flatten, @unroll, @nounroll, @restrict, @noalias, @vectorize, @novectorize, @parallel, @noparallel (use @prefetch on parameters)");
                 }
             }
             auto func = parseFunction(optMaxTagActive);
@@ -224,6 +229,8 @@ std::unique_ptr<Program> Parser::parse() {
             func->hintRestrict = hintRestrict;
             func->hintVectorize = hintVectorize;
             func->hintNoVectorize = hintNoVectorize;
+            func->hintParallelize = hintParallelize;
+            func->hintNoParallelize = hintNoParallelize;
             functions.push_back(std::move(func));
         } catch (const std::runtime_error& e) {
             errors_.push_back(e.what());

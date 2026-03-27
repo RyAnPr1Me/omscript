@@ -205,6 +205,9 @@ class AdaptiveJITRunner {
     void setLoopOptimize(bool v) {
         loopOptimize_ = v;
     }
+    void setParallelize(bool v) {
+        parallelize_ = v;
+    }
 
     /// Execute the program defined by @p module in-process.
     /// The module is NOT modified — a working copy is created internally.
@@ -257,6 +260,7 @@ class AdaptiveJITRunner {
     bool vectorize_ = true;
     bool unrollLoops_ = true;
     bool loopOptimize_ = true;
+    bool parallelize_ = true;
 
     // -------------------------------------------------------------------
     // Cached TargetMachine factory for recompilation

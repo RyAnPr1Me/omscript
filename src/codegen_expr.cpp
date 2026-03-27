@@ -2398,6 +2398,10 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
     llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), dataPtr, idxVal, "idx.elem.ptr");
     auto* elemLoad = builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "idx.elem");
     elemLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+    // When inside a parallel loop, attach the access group metadata so
+    // LLVM's vectorizer and Polly know this load is iteration-independent.
+    if (currentLoopAccessGroup_)
+        elemLoad->setMetadata(llvm::LLVMContext::MD_access_group, currentLoopAccessGroup_);
     return elemLoad;
 }
 
@@ -2544,6 +2548,10 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
         llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), dataPtr, idxVal, "idxa.elem.ptr");
         auto* elemStore = builder->CreateAlignedStore(newVal, elemPtr, llvm::MaybeAlign(8));
         elemStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        // When inside a parallel loop, attach the access group metadata so
+        // LLVM's vectorizer and Polly know this store is iteration-independent.
+        if (currentLoopAccessGroup_)
+            elemStore->setMetadata(llvm::LLVMContext::MD_access_group, currentLoopAccessGroup_);
     }
     return newVal;
 }

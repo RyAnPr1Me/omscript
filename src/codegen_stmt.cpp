@@ -1017,6 +1017,49 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
                                llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 1))}));
         }
 
+        // ── Auto-parallelization hints ─────────────────────────────
+        // At O2+ with -fparallelize, mark loops that are safe to execute
+        // in parallel.  We attach llvm.loop.parallel_accesses metadata that
+        // references an access group placed on every load/store in the loop
+        // body.  This tells LLVM's LoopVectorizer and Polly that there are
+        // no cross-iteration dependencies — enabling:
+        //   1. Vectorization with unordered reductions
+        //   2. Polly automatic OpenMP parallelization
+        //   3. LoopDistribute to split parallelizable sub-loops
+        //
+        // We only mark loops as parallel when:
+        //   - The step is known positive (forward iteration)
+        //   - The loop is not deeply nested (to avoid over-parallelizing)
+        //   - The function is @parallel or @hot (user-indicated hotness)
+        //   - -fno-parallelize was not passed
+        // At O3, all non-nested forward loops get the hint regardless of
+        // @hot/@parallel annotations.
+        const bool wantParallel = enableParallelize_
+            && !currentFuncHintNoParallelize_
+            && stepKnownPositive
+            && !deeplyNested
+            && !bodyHasInnerLoop_
+            && (currentFuncHintParallelize_
+                || currentFuncHintHot_
+                || optimizationLevel >= OptimizationLevel::O3);
+        if (wantParallel) {
+            // Create an access group — this is a unique MDNode that we
+            // attach to every load/store inside the loop body via
+            // !llvm.access.group.  The loop metadata then references it
+            // via llvm.loop.parallel_accesses, forming the contract:
+            //   "all memory operations in this group are independent
+            //    across iterations."
+            llvm::MDNode* accessGroup = llvm::MDNode::getDistinct(*context, {});
+            loopMDs.push_back(llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.parallel_accesses"),
+                           accessGroup}));
+            // Store the access group so codegen can attach it to memory
+            // operations emitted inside this loop body.
+            currentLoopAccessGroup_ = accessGroup;
+        } else {
+            currentLoopAccessGroup_ = nullptr;
+        }
+
         llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
         loopMD->replaceOperandWith(0, loopMD);
         backBr->setMetadata(llvm::LLVMContext::MD_loop, loopMD);

@@ -158,6 +158,11 @@ class CodeGenerator {
         enableLoopOptimize_ = enable;
     }
 
+    /// Enable or disable automatic loop parallelization (default: true at O2+).
+    void setParallelize(bool enable) {
+        enableParallelize_ = enable;
+    }
+
     /// Enable or disable e-graph equality saturation optimization (default: true at O2+).
     void setEGraphOptimize(bool enable) {
         enableEGraph_ = enable;
@@ -424,9 +429,12 @@ class CodeGenerator {
     bool currentFuncHintNoUnroll_ = false;
     bool currentFuncHintVectorize_ = false;
     bool currentFuncHintNoVectorize_ = false;
+    bool currentFuncHintParallelize_ = false;
+    bool currentFuncHintNoParallelize_ = false;
     bool currentFuncHintHot_ = false;  ///< Current function has @hot annotation
     unsigned loopNestDepth_ = 0; ///< Current for-loop nesting depth (0 = not in a loop)
     bool bodyHasInnerLoop_ = false; ///< Set when a while/for loop is found inside a for-loop body
+    llvm::MDNode* currentLoopAccessGroup_ = nullptr; ///< Access group for parallel loop metadata
 
     /// Classify a function into its execution tier based on type annotations,
     /// OPTMAX status, and whether it is a special function (main/stdlib).
@@ -583,6 +591,7 @@ class CodeGenerator {
     bool enableVectorize_ = true;     // -fvectorize / -fno-vectorize
     bool enableUnrollLoops_ = true;   // -funroll-loops / -fno-unroll-loops
     bool enableLoopOptimize_ = true;  // -floop-optimize / -fno-loop-optimize
+    bool enableParallelize_ = true;   // -fparallelize / -fno-parallelize
     bool enableEGraph_ = true;        // -fegraph / -fno-egraph (e-graph equality saturation)
     bool enableSuperopt_ = true;      // -fsuperopt / -fno-superopt (superoptimizer)
     unsigned superoptLevel_ = 2;      // -fsuperopt-level=0/1/2/3 (default: 2)

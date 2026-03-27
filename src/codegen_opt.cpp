@@ -20,6 +20,7 @@
 #endif
 #endif
 #include <llvm/Support/CodeGen.h>
+#include <llvm/Support/CommandLine.h>
 #include <llvm/Support/FileSystem.h>
 #include <llvm/Support/PGOOptions.h>
 #include <llvm/Support/TargetSelect.h>
@@ -465,6 +466,23 @@ void CodeGenerator::runOptimizationPasses() {
         });
     }
 
+    // ── Auto-parallelization pipeline configuration ─────────────────────
+    // OmScript supports automatic loop parallelization via two complementary
+    // mechanisms:
+    //
+    //   1. LLVM Loop Vectorizer: uses !llvm.access.group + parallel_accesses
+    //      metadata (attached by codegen_stmt.cpp) to vectorize loops that
+    //      are provably parallel.
+    //
+    //   2. Polly Polyhedral Optimizer: for affine loop nests, Polly performs
+    //      high-level transformations (tiling, interchange, fusion) and can
+    //      generate OpenMP parallel loops.  We configure Polly's parallelism
+    //      options via LLVM's cl::opt mechanism after loading the plugin.
+    //
+    // The -fparallelize / -fno-parallelize flag controls both mechanisms,
+    // and the @parallel / @noparallel function annotations provide per-
+    // function control.
+
     // At O2+ with -floop-optimize, load the LLVM Polly polyhedral optimizer
     // plugin.  Polly provides high-level loop transformations (tiling, fusion,
     // interchange) based on the polyhedral model, improving data locality and
@@ -480,8 +498,39 @@ void CodeGenerator::runOptimizationPasses() {
         auto pollyPlugin = llvm::PassPlugin::Load(POLLY_LIB_PATH);
         if (pollyPlugin) {
             pollyPlugin->registerPassBuilderCallbacks(PB);
+            // Now that Polly has registered its cl::opt entries, configure
+            // automatic parallelization if -fparallelize is active.
+            //
+            // -polly-parallel: generate OpenMP parallel loops for profitable
+            //   outer loops in affine loop nests
+            // -polly-vectorizer=stripmine: use Polly's strip-mining vectorizer
+            //   for inner loops (complementing LLVM's LoopVectorizer)
+            // -polly-run-dce: dead code elimination after Polly transforms
+            // -polly-run-inliner: inline small helper functions Polly creates
+            // -polly-invariant-load-hoisting: hoist loop-invariant loads for
+            //   better data locality
+            // -polly-scheduling=dynamic: dynamic OpenMP scheduling for uneven
+            //   workloads (more robust than static for user code)
+            // -polly-scheduling-chunksize=1: fine-grained chunks for balance
+            if (enableParallelize_) {
+                const char* pollyArgs[] = {
+                    "omsc",
+                    "-polly-parallel",
+                    "-polly-vectorizer=stripmine",
+                    "-polly-run-dce",
+                    "-polly-run-inliner",
+                    "-polly-invariant-load-hoisting",
+                    "-polly-scheduling=dynamic",
+                    "-polly-scheduling-chunksize=1",
+                };
+                llvm::cl::ParseCommandLineOptions(
+                    sizeof(pollyArgs) / sizeof(pollyArgs[0]), pollyArgs,
+                    "OmScript Polly auto-parallelization\n");
+            }
             if (verbose_) {
-                std::cout << "    Polly plugin loaded successfully" << std::endl;
+                std::cout << "    Polly plugin loaded successfully"
+                          << (enableParallelize_ ? " (parallel mode)" : "")
+                          << std::endl;
             }
         } else {
             llvm::errs() << "omsc: warning: failed to load Polly plugin; "

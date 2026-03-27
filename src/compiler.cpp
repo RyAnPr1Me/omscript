@@ -116,6 +116,7 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
     codegen.setVectorize(vectorize_);
     codegen.setUnrollLoops(unrollLoops_);
     codegen.setLoopOptimize(loopOptimize_);
+    codegen.setParallelize(parallelize_);
     codegen.setLTO(lto_);
     codegen.setDebugMode(debug_);
     codegen.setSourceFilename(sourceFile);

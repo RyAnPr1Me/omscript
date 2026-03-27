@@ -2807,6 +2807,11 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     currentFuncHintVectorize_ = func->hintVectorize;
     currentFuncHintNoVectorize_ = func->hintNoVectorize;
 
+    // @parallel / @noparallel: per-function auto-parallelization control.
+    // These are stored and applied to every loop emitted within this function.
+    currentFuncHintParallelize_ = func->hintParallelize;
+    currentFuncHintNoParallelize_ = func->hintNoParallelize;
+
     // @hot: per-function hot annotation.  Used for bounds check elimination
     // and other performance-critical optimizations.
     currentFuncHintHot_ = func->hintHot;

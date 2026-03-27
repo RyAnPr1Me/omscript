@@ -98,6 +98,10 @@ class Compiler {
     void setLoopOptimize(bool enable) {
         loopOptimize_ = enable;
     }
+    /// Enable or disable automatic loop parallelization (default: true).
+    void setParallelize(bool enable) {
+        parallelize_ = enable;
+    }
     /// Enable PGO instrumentation generation.
     /// The compiled binary will write a raw profile to @p path on exit.
     void setPGOGen(const std::string& path) {
@@ -130,6 +134,7 @@ class Compiler {
     bool vectorize_ = true;
     bool unrollLoops_ = true;
     bool loopOptimize_ = true;
+    bool parallelize_ = true;
     bool debug_ = false;
     std::string pgoGenPath_;
     std::string pgoUsePath_;
