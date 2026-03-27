@@ -1622,7 +1622,7 @@ echo "────────────────────────�
 echo "  Compilation Timing"
 echo "────────────────────────────────────────────────────────────────"
 
-OM_FLAGS="-O3 -march=native -mtune=native -fvectorize -funroll-loops -floop-optimize"
+OM_FLAGS="-O3 -march=native -mtune=native -fvectorize -funroll-loops -floop-optimize -fparallelize"
 # C flags: no -flto since OM doesn't use LTO (single-file compilation gets
 # no cross-TU benefit).  Adding -fno-plt avoids PLT indirection overhead
 # that OmScript never incurs.  This levels the playing field.
