@@ -429,9 +429,17 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
         llvm::SmallVector<llvm::Metadata*, 4> loopMDs;
         loopMDs.push_back(nullptr);
         loopMDs.push_back(mustProgress);
-        // While-loop unrolling: trust LLVM's cost model to choose the
-        // optimal factor.  Explicit unroll caps were removed to avoid
-        // interfering with the vectorizer's interleaving decisions.
+        // While-loop unrolling: when nested inside another loop, cap the
+        // unroll factor to prevent LLVM from over-unrolling branch-heavy
+        // inner loops (e.g. Collatz) that create massive I-cache pressure.
+        // For top-level while-loops, trust LLVM's cost model.
+        if (!inOptMaxFunction && loopNestDepth_ > 0 && optimizationLevel >= OptimizationLevel::O2) {
+            loopMDs.push_back(llvm::MDNode::get(
+                *context,
+                {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
+                 llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                     llvm::Type::getInt32Ty(*context), 2))}));
+        }
         // @vectorize / @novectorize: per-function loop vectorization hints.
         if (currentFuncHintNoVectorize_) {
             loopMDs.push_back(llvm::MDNode::get(
