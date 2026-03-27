@@ -1575,7 +1575,7 @@ void CodeGenerator::optimizeOptMaxFunctions() {
 
     // Phase 3.6: Post-cleanup loop re-canonicalization.  After aggressive DCE
     // and CFG simplification, loops may have simplified structure that enables
-    // further LICM and strength reduction.  Re-canonicalise loops and run
+    // further LICM and strength reduction.  Re-canonicalize loops and run
     // another round of LICM + LSR to catch these opportunities.
     fpm.add(llvm::createLoopSimplifyPass());
     fpm.add(llvm::createLICMPass());

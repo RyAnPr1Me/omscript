@@ -7479,9 +7479,9 @@ std::vector<RewriteRule> getRelationalRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    // Modulo chain folding: (x % C1) % C2 → x % C2  when C1 % C2 == 0
-    // If C1 is a multiple of C2, then x % C1 is in [0, C1-1], and
-    // taking mod C2 where C2 divides C1 gives the same result as x % C2.
+    // Modulo chain folding: (x % C1) % C2 → x % C2  when C2 divides C1
+    // If C1 is a multiple of C2, then x % C1 is in [0, C1-1], and since
+    // C2 divides C1, (x % C1) % C2 produces the same result as x % C2.
     // ─────────────────────────────────────────────────────────────────────
     rules.emplace_back("mod_chain_fold",
         P::OpPat(Op::Mod, {P::OpPat(Op::Mod, {P::Wild("x"), P::Wild("c1")}), P::Wild("c2")}),
