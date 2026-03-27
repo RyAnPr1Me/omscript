@@ -1449,22 +1449,63 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         nonNegValues_.insert(result);
         return result;
     } else if (expr->op == "<") {
-        llvm::Value* cmp = builder->CreateICmpSLT(left, right, "cmptmp");
+        // When both operands are provably non-negative, use unsigned comparison.
+        // Unsigned comparisons have simpler codegen (no sign-extension) and
+        // enable better vectorization — LLVM's loop vectorizer can widen
+        // unsigned comparisons without sign-correction in each lane.
+        bool bothNonNeg = nonNegValues_.count(left) && nonNegValues_.count(right);
+        if (!bothNonNeg) {
+            // Also check for non-negative constant operands.
+            if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right))
+                bothNonNeg = nonNegValues_.count(left) && !ci->isNegative();
+            else if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left))
+                bothNonNeg = nonNegValues_.count(right) && !ci->isNegative();
+        }
+        llvm::Value* cmp = bothNonNeg
+            ? builder->CreateICmpULT(left, right, "cmptmp")
+            : builder->CreateICmpSLT(left, right, "cmptmp");
         auto* result = builder->CreateZExt(cmp, getDefaultType(), "booltmp");
         nonNegValues_.insert(result);
         return result;
     } else if (expr->op == "<=") {
-        llvm::Value* cmp = builder->CreateICmpSLE(left, right, "cmptmp");
+        bool bothNonNeg = nonNegValues_.count(left) && nonNegValues_.count(right);
+        if (!bothNonNeg) {
+            if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right))
+                bothNonNeg = nonNegValues_.count(left) && !ci->isNegative();
+            else if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left))
+                bothNonNeg = nonNegValues_.count(right) && !ci->isNegative();
+        }
+        llvm::Value* cmp = bothNonNeg
+            ? builder->CreateICmpULE(left, right, "cmptmp")
+            : builder->CreateICmpSLE(left, right, "cmptmp");
         auto* result = builder->CreateZExt(cmp, getDefaultType(), "booltmp");
         nonNegValues_.insert(result);
         return result;
     } else if (expr->op == ">") {
-        llvm::Value* cmp = builder->CreateICmpSGT(left, right, "cmptmp");
+        bool bothNonNeg = nonNegValues_.count(left) && nonNegValues_.count(right);
+        if (!bothNonNeg) {
+            if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right))
+                bothNonNeg = nonNegValues_.count(left) && !ci->isNegative();
+            else if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left))
+                bothNonNeg = nonNegValues_.count(right) && !ci->isNegative();
+        }
+        llvm::Value* cmp = bothNonNeg
+            ? builder->CreateICmpUGT(left, right, "cmptmp")
+            : builder->CreateICmpSGT(left, right, "cmptmp");
         auto* result = builder->CreateZExt(cmp, getDefaultType(), "booltmp");
         nonNegValues_.insert(result);
         return result;
     } else if (expr->op == ">=") {
-        llvm::Value* cmp = builder->CreateICmpSGE(left, right, "cmptmp");
+        bool bothNonNeg = nonNegValues_.count(left) && nonNegValues_.count(right);
+        if (!bothNonNeg) {
+            if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right))
+                bothNonNeg = nonNegValues_.count(left) && !ci->isNegative();
+            else if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left))
+                bothNonNeg = nonNegValues_.count(right) && !ci->isNegative();
+        }
+        llvm::Value* cmp = bothNonNeg
+            ? builder->CreateICmpUGE(left, right, "cmptmp")
+            : builder->CreateICmpSGE(left, right, "cmptmp");
         auto* result = builder->CreateZExt(cmp, getDefaultType(), "booltmp");
         nonNegValues_.insert(result);
         return result;
@@ -1516,75 +1557,173 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         // instead of the general binary-exponentiation loop.  This eliminates
         // loop overhead and branches for the most common exponents,
         // producing straight-line code that the backend can schedule optimally.
+        //
+        // When the base is provably non-negative and the exponent is positive,
+        // we set nsw on all intermediate multiplications.  This enables SCEV
+        // to compute tighter value ranges for the result, improving downstream
+        // loop optimization and vectorization.
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
             const int64_t exp = ci->getSExtValue();
+            const bool baseNonNeg = nonNegValues_.count(left);
             if (exp == 2) {
-                // x**2 → x*x  (1 mul)
-                return builder->CreateMul(left, left, "pow2");
+                // x**2 → x*x  (1 mul) — result is always non-negative
+                auto* result = baseNonNeg
+                    ? builder->CreateNSWMul(left, left, "pow2")
+                    : builder->CreateMul(left, left, "pow2");
+                nonNegValues_.insert(result);  // x*x >= 0 always
+                return result;
             }
             if (exp == 3) {
                 // x**3 → x*x*x  (2 muls)
-                auto* sq = builder->CreateMul(left, left, "pow3.sq");
-                return builder->CreateMul(sq, left, "pow3");
+                auto* sq = baseNonNeg
+                    ? builder->CreateNSWMul(left, left, "pow3.sq")
+                    : builder->CreateMul(left, left, "pow3.sq");
+                auto* result = baseNonNeg
+                    ? builder->CreateNSWMul(sq, left, "pow3")
+                    : builder->CreateMul(sq, left, "pow3");
+                if (baseNonNeg) nonNegValues_.insert(result);
+                return result;
             }
             if (exp == 4) {
-                // x**4 → t=x*x; t*t  (2 muls)
-                auto* sq = builder->CreateMul(left, left, "pow4.sq");
-                return builder->CreateMul(sq, sq, "pow4");
+                // x**4 → t=x*x; t*t  (2 muls) — result is always non-negative
+                auto* sq = baseNonNeg
+                    ? builder->CreateNSWMul(left, left, "pow4.sq")
+                    : builder->CreateMul(left, left, "pow4.sq");
+                auto* result = baseNonNeg
+                    ? builder->CreateNSWMul(sq, sq, "pow4")
+                    : builder->CreateMul(sq, sq, "pow4");
+                nonNegValues_.insert(result);  // (x*x)*(x*x) >= 0 always
+                return result;
             }
             if (exp == 5) {
                 // x**5 → t=x*x; t*t*x  (3 muls)
-                auto* sq = builder->CreateMul(left, left, "pow5.sq");
-                auto* q4 = builder->CreateMul(sq, sq, "pow5.q4");
-                return builder->CreateMul(q4, left, "pow5");
+                auto* sq = baseNonNeg
+                    ? builder->CreateNSWMul(left, left, "pow5.sq")
+                    : builder->CreateMul(left, left, "pow5.sq");
+                auto* q4 = baseNonNeg
+                    ? builder->CreateNSWMul(sq, sq, "pow5.q4")
+                    : builder->CreateMul(sq, sq, "pow5.q4");
+                auto* result = baseNonNeg
+                    ? builder->CreateNSWMul(q4, left, "pow5")
+                    : builder->CreateMul(q4, left, "pow5");
+                if (baseNonNeg) nonNegValues_.insert(result);
+                return result;
             }
             if (exp == 6) {
-                // x**6 → t=x*x; u=t*t; u*t  (3 muls)
-                auto* sq = builder->CreateMul(left, left, "pow6.sq");
-                auto* q4 = builder->CreateMul(sq, sq, "pow6.q4");
-                return builder->CreateMul(q4, sq, "pow6");
+                // x**6 → t=x*x; u=t*t; u*t  (3 muls) — result is always non-negative
+                auto* sq = baseNonNeg
+                    ? builder->CreateNSWMul(left, left, "pow6.sq")
+                    : builder->CreateMul(left, left, "pow6.sq");
+                auto* q4 = baseNonNeg
+                    ? builder->CreateNSWMul(sq, sq, "pow6.q4")
+                    : builder->CreateMul(sq, sq, "pow6.q4");
+                auto* result = baseNonNeg
+                    ? builder->CreateNSWMul(q4, sq, "pow6")
+                    : builder->CreateMul(q4, sq, "pow6");
+                nonNegValues_.insert(result);  // even exponent → always non-neg
+                return result;
             }
             if (exp == 7) {
                 // x**7 → t=x*x; u=t*t; u*t*x  (4 muls)
-                auto* sq = builder->CreateMul(left, left, "pow7.sq");
-                auto* q4 = builder->CreateMul(sq, sq, "pow7.q4");
-                auto* q6 = builder->CreateMul(q4, sq, "pow7.q6");
-                return builder->CreateMul(q6, left, "pow7");
+                auto* sq = baseNonNeg
+                    ? builder->CreateNSWMul(left, left, "pow7.sq")
+                    : builder->CreateMul(left, left, "pow7.sq");
+                auto* q4 = baseNonNeg
+                    ? builder->CreateNSWMul(sq, sq, "pow7.q4")
+                    : builder->CreateMul(sq, sq, "pow7.q4");
+                auto* q6 = baseNonNeg
+                    ? builder->CreateNSWMul(q4, sq, "pow7.q6")
+                    : builder->CreateMul(q4, sq, "pow7.q6");
+                auto* result = baseNonNeg
+                    ? builder->CreateNSWMul(q6, left, "pow7")
+                    : builder->CreateMul(q6, left, "pow7");
+                if (baseNonNeg) nonNegValues_.insert(result);
+                return result;
             }
             if (exp == 8) {
-                // x**8 → t=x*x; u=t*t; u*u  (3 muls)
-                auto* sq = builder->CreateMul(left, left, "pow8.sq");
-                auto* q4 = builder->CreateMul(sq, sq, "pow8.q4");
-                return builder->CreateMul(q4, q4, "pow8");
+                // x**8 → t=x*x; u=t*t; u*u  (3 muls) — result is always non-negative
+                auto* sq = baseNonNeg
+                    ? builder->CreateNSWMul(left, left, "pow8.sq")
+                    : builder->CreateMul(left, left, "pow8.sq");
+                auto* q4 = baseNonNeg
+                    ? builder->CreateNSWMul(sq, sq, "pow8.q4")
+                    : builder->CreateMul(sq, sq, "pow8.q4");
+                auto* result = baseNonNeg
+                    ? builder->CreateNSWMul(q4, q4, "pow8")
+                    : builder->CreateMul(q4, q4, "pow8");
+                nonNegValues_.insert(result);  // even exponent → always non-neg
+                return result;
             }
             if (exp == 9) {
                 // x**9 → t=x*x; u=t*t; v=u*u; v*x  (4 muls)
-                auto* sq = builder->CreateMul(left, left, "pow9.sq");
-                auto* q4 = builder->CreateMul(sq, sq, "pow9.q4");
-                auto* q8 = builder->CreateMul(q4, q4, "pow9.q8");
-                return builder->CreateMul(q8, left, "pow9");
+                auto* sq = baseNonNeg
+                    ? builder->CreateNSWMul(left, left, "pow9.sq")
+                    : builder->CreateMul(left, left, "pow9.sq");
+                auto* q4 = baseNonNeg
+                    ? builder->CreateNSWMul(sq, sq, "pow9.q4")
+                    : builder->CreateMul(sq, sq, "pow9.q4");
+                auto* q8 = baseNonNeg
+                    ? builder->CreateNSWMul(q4, q4, "pow9.q8")
+                    : builder->CreateMul(q4, q4, "pow9.q8");
+                auto* result = baseNonNeg
+                    ? builder->CreateNSWMul(q8, left, "pow9")
+                    : builder->CreateMul(q8, left, "pow9");
+                if (baseNonNeg) nonNegValues_.insert(result);
+                return result;
             }
             if (exp == 10) {
-                // x**10 → t=x*x; u=t*t; v=u*u; v*t  (4 muls)
-                auto* sq = builder->CreateMul(left, left, "pow10.sq");
-                auto* q4 = builder->CreateMul(sq, sq, "pow10.q4");
-                auto* q8 = builder->CreateMul(q4, q4, "pow10.q8");
-                return builder->CreateMul(q8, sq, "pow10");
+                // x**10 → t=x*x; u=t*t; v=u*u; v*t  (4 muls) — result is always non-negative
+                auto* sq = baseNonNeg
+                    ? builder->CreateNSWMul(left, left, "pow10.sq")
+                    : builder->CreateMul(left, left, "pow10.sq");
+                auto* q4 = baseNonNeg
+                    ? builder->CreateNSWMul(sq, sq, "pow10.q4")
+                    : builder->CreateMul(sq, sq, "pow10.q4");
+                auto* q8 = baseNonNeg
+                    ? builder->CreateNSWMul(q4, q4, "pow10.q8")
+                    : builder->CreateMul(q4, q4, "pow10.q8");
+                auto* result = baseNonNeg
+                    ? builder->CreateNSWMul(q8, sq, "pow10")
+                    : builder->CreateMul(q8, sq, "pow10");
+                nonNegValues_.insert(result);  // even exponent → always non-neg
+                return result;
             }
             if (exp == 11) {
                 // x**11 → t=x*x; u=t*t; v=u*u; v*t*x  (5 muls)
-                auto* sq = builder->CreateMul(left, left, "pow11.sq");
-                auto* q4 = builder->CreateMul(sq, sq, "pow11.q4");
-                auto* q8 = builder->CreateMul(q4, q4, "pow11.q8");
-                auto* q10 = builder->CreateMul(q8, sq, "pow11.q10");
-                return builder->CreateMul(q10, left, "pow11");
+                auto* sq = baseNonNeg
+                    ? builder->CreateNSWMul(left, left, "pow11.sq")
+                    : builder->CreateMul(left, left, "pow11.sq");
+                auto* q4 = baseNonNeg
+                    ? builder->CreateNSWMul(sq, sq, "pow11.q4")
+                    : builder->CreateMul(sq, sq, "pow11.q4");
+                auto* q8 = baseNonNeg
+                    ? builder->CreateNSWMul(q4, q4, "pow11.q8")
+                    : builder->CreateMul(q4, q4, "pow11.q8");
+                auto* q10 = baseNonNeg
+                    ? builder->CreateNSWMul(q8, sq, "pow11.q10")
+                    : builder->CreateMul(q8, sq, "pow11.q10");
+                auto* result = baseNonNeg
+                    ? builder->CreateNSWMul(q10, left, "pow11")
+                    : builder->CreateMul(q10, left, "pow11");
+                if (baseNonNeg) nonNegValues_.insert(result);
+                return result;
             }
             if (exp == 12) {
-                // x**12 → t=x*x; u=t*t; v=u*u; v*u  (4 muls)
-                auto* sq = builder->CreateMul(left, left, "pow12.sq");
-                auto* q4 = builder->CreateMul(sq, sq, "pow12.q4");
-                auto* q8 = builder->CreateMul(q4, q4, "pow12.q8");
-                return builder->CreateMul(q8, q4, "pow12");
+                // x**12 → t=x*x; u=t*t; v=u*u; v*u  (4 muls) — even exponent
+                auto* sq = baseNonNeg
+                    ? builder->CreateNSWMul(left, left, "pow12.sq")
+                    : builder->CreateMul(left, left, "pow12.sq");
+                auto* q4 = baseNonNeg
+                    ? builder->CreateNSWMul(sq, sq, "pow12.q4")
+                    : builder->CreateMul(sq, sq, "pow12.q4");
+                auto* q8 = baseNonNeg
+                    ? builder->CreateNSWMul(q4, q4, "pow12.q8")
+                    : builder->CreateMul(q4, q4, "pow12.q8");
+                auto* result = baseNonNeg
+                    ? builder->CreateNSWMul(q8, q4, "pow12")
+                    : builder->CreateMul(q8, q4, "pow12");
+                nonNegValues_.insert(result);  // even exponent → always non-neg
+                return result;
             }
             if (exp == 16) {
                 // x**16 → t=x*x; u=t*t; v=u*u; v*v  (4 muls)
@@ -2007,6 +2146,30 @@ llvm::Value* CodeGenerator::generateTernary(TernaryExpr* expr) {
     }
 
     llvm::Value* condBool = toBool(condition);
+
+    // Branchless select optimization: when both arms are simple expressions
+    // (literals or identifiers with no side effects), emit a single `select`
+    // instruction instead of a branch+PHI diamond.  This eliminates branch
+    // misprediction entirely and enables the backend to use conditional-move
+    // (cmov) instructions.
+    auto isSimpleExpr = [](Expression* e) -> bool {
+        return dynamic_cast<LiteralExpr*>(e) != nullptr ||
+               dynamic_cast<IdentifierExpr*>(e) != nullptr;
+    };
+    if (isSimpleExpr(expr->thenExpr.get()) && isSimpleExpr(expr->elseExpr.get())) {
+        llvm::Value* thenVal = generateExpression(expr->thenExpr.get());
+        llvm::Value* elseVal = generateExpression(expr->elseExpr.get());
+        // Ensure matching types for select.
+        if (thenVal->getType() != elseVal->getType()) {
+            if (thenVal->getType()->isDoubleTy() || elseVal->getType()->isDoubleTy()) {
+                if (!thenVal->getType()->isDoubleTy())
+                    thenVal = ensureFloat(thenVal);
+                if (!elseVal->getType()->isDoubleTy())
+                    elseVal = ensureFloat(elseVal);
+            }
+        }
+        return builder->CreateSelect(condBool, thenVal, elseVal, "ternsel");
+    }
 
     llvm::Function* function = builder->GetInsertBlock()->getParent();
     llvm::BasicBlock* thenBB = llvm::BasicBlock::Create(*context, "tern.then", function);

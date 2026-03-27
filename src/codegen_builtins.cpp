@@ -725,10 +725,23 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         idx->addIncoming(newIdx, bodyBB);
         auto* backBr_674 = builder->CreateBr(loopBB);
         if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 2> mds;
+            llvm::SmallVector<llvm::Metadata*, 4> mds;
             mds.push_back(nullptr);
             mds.push_back(llvm::MDNode::get(*context,
                 {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
+            // Vectorization hints: sum() is a classic reduction loop — enable
+            // vectorization with interleave count 4 to exploit SIMD lanes and
+            // hide memory latency through overlapping independent accumulation.
+            if (optimizationLevel >= OptimizationLevel::O2) {
+                mds.push_back(llvm::MDNode::get(*context,
+                    {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
+                     llvm::ConstantAsMetadata::get(
+                         llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
+                mds.push_back(llvm::MDNode::get(*context,
+                    {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
+                     llvm::ConstantAsMetadata::get(
+                         llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))}));
+            }
             llvm::MDNode* md = llvm::MDNode::get(*context, mds);
             md->replaceOperandWith(0, md);
             backBr_674->setMetadata(llvm::LLVMContext::MD_loop, md);
@@ -846,10 +859,19 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         hi->addIncoming(newHi, bodyBB);
         auto* backBr_769 = builder->CreateBr(loopBB);
         if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 2> mds;
+            llvm::SmallVector<llvm::Metadata*, 4> mds;
             mds.push_back(nullptr);
             mds.push_back(llvm::MDNode::get(*context,
                 {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
+            // Vectorization hints: reverse() swaps elements from opposite
+            // ends of the array — enable vectorization to process multiple
+            // swaps per iteration using SIMD gather/scatter operations.
+            if (optimizationLevel >= OptimizationLevel::O2) {
+                mds.push_back(llvm::MDNode::get(*context,
+                    {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
+                     llvm::ConstantAsMetadata::get(
+                         llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
+            }
             llvm::MDNode* md = llvm::MDNode::get(*context, mds);
             md->replaceOperandWith(0, md);
             backBr_769->setMetadata(llvm::LLVMContext::MD_loop, md);
