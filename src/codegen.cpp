@@ -2361,7 +2361,6 @@ void CodeGenerator::generate(Program* program) {
             // Scan all instructions: track whether the function reads/writes memory.
             bool hasMemoryWrite = false;
             bool hasMemoryRead = false;
-            bool hasCall = false;
             bool hasUnknownSideEffect = false;
             // Track whether all non-local memory accesses go through
             // function arguments.  If so, the function is argmem-only.
@@ -2415,7 +2414,6 @@ void CodeGenerator::generate(Program* program) {
                                 allAccessesThroughArgs = false;
                         }
                     } else if (auto* CI = llvm::dyn_cast<llvm::CallInst>(&I)) {
-                        hasCall = true;
                         auto* calledFn = CI->getCalledFunction();
                         if (!calledFn) {
                             hasUnknownSideEffect = true;
@@ -2440,15 +2438,11 @@ void CodeGenerator::generate(Program* program) {
                     }
                 }
             }
-            if (!hasUnknownSideEffect && !hasMemoryWrite && !hasMemoryRead && !hasCall) {
-                // Function doesn't access memory at all → readnone.
+            if (!hasUnknownSideEffect && !hasMemoryWrite && !hasMemoryRead) {
+                // Function doesn't access memory at all (directly or
+                // transitively through calls) → readnone.
                 func.addFnAttr(llvm::Attribute::getWithMemoryEffects(
                     *context, llvm::MemoryEffects::none()));
-            } else if (!hasUnknownSideEffect && !hasMemoryWrite && !hasMemoryRead) {
-                // Function only calls other functions but doesn't directly
-                // access memory → readonly (callee reads are transitive).
-                func.addFnAttr(llvm::Attribute::getWithMemoryEffects(
-                    *context, llvm::MemoryEffects::readOnly()));
             } else if (!hasUnknownSideEffect && allAccessesThroughArgs) {
                 // All non-local memory accesses go through function arguments.
                 // This enables LLVM to prove non-interference with globals and

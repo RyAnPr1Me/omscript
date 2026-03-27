@@ -340,8 +340,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Use llvm.smax intrinsic for native hardware signed integer max
         llvm::Function* smaxIntrinsic = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::smax, {getDefaultType()});
         auto* result = builder->CreateCall(smaxIntrinsic, {a, b}, "maxval");
-        // max(a, b) is non-negative when either input is non-negative.
-        // smax(x, y) >= max(x, y) >= x when x >= 0.
+        // max(a, b) is non-negative when either input is non-negative:
+        // if a >= 0 then max(a, b) >= a >= 0.
         if (nonNegValues_.count(a) || nonNegValues_.count(b))
             nonNegValues_.insert(result);
         return result;
