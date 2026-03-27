@@ -2345,6 +2345,12 @@ void CodeGenerator::generate(Program* program) {
     // all (readnone).  This enables interprocedural optimizations: LICM can
     // hoist readonly calls out of loops, and the inliner uses memory effects
     // to avoid unnecessary spills around call sites.
+    //
+    // Also infer argmem-only (memory(argmem: ...)) for functions whose
+    // non-local memory accesses all trace back to function arguments.
+    // argmemonly enables LLVM to prove that calls don't alias globals or
+    // heap state, unlocking store-to-load forwarding and dead store
+    // elimination across call sites.
     if (optimizationLevel >= OptimizationLevel::O1) {
         for (auto& func : module->functions()) {
             if (func.isDeclaration() || func.getName() == "main")
@@ -2357,12 +2363,38 @@ void CodeGenerator::generate(Program* program) {
             bool hasMemoryRead = false;
             bool hasCall = false;
             bool hasUnknownSideEffect = false;
+            // Track whether all non-local memory accesses go through
+            // function arguments.  If so, the function is argmem-only.
+            bool allAccessesThroughArgs = true;
+            // Helper: collect the set of function arguments for fast lookup.
+            llvm::SmallPtrSet<llvm::Value*, 8> funcArgs;
+            for (auto& arg : func.args())
+                funcArgs.insert(&arg);
             // Helper: strip GEP chains to find the underlying allocation.
             // A store to `getelementptr(alloca, ...)` is still a local write.
             auto isLocalAlloca = [](llvm::Value* ptr) -> bool {
                 while (auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(ptr))
                     ptr = gep->getPointerOperand();
                 return llvm::isa<llvm::AllocaInst>(ptr);
+            };
+            // Helper: strip GEP/bitcast chains and check if the base is a
+            // function argument or a load from a function argument (one level
+            // of indirection covers OmScript's array-of-pointers pattern).
+            auto isArgDerived = [&](llvm::Value* ptr) -> bool {
+                while (auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(ptr))
+                    ptr = gep->getPointerOperand();
+                if (auto* bc = llvm::dyn_cast<llvm::BitCastInst>(ptr))
+                    ptr = bc->getOperand(0);
+                if (funcArgs.count(ptr))
+                    return true;
+                // One level of load indirection: load from arg-derived ptr.
+                if (auto* li = llvm::dyn_cast<llvm::LoadInst>(ptr)) {
+                    llvm::Value* loadPtr = li->getPointerOperand();
+                    while (auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(loadPtr))
+                        loadPtr = gep->getPointerOperand();
+                    return funcArgs.count(loadPtr) > 0;
+                }
+                return false;
             };
             for (auto& BB : func) {
                 for (auto& I : BB) {
@@ -2371,16 +2403,23 @@ void CodeGenerator::generate(Program* program) {
                         // external writes — they're promoted to SSA by mem2reg.
                         // Also check through GEP chains (struct field / array
                         // element stores) whose base is an alloca.
-                        if (!isLocalAlloca(SI->getPointerOperand()))
+                        if (!isLocalAlloca(SI->getPointerOperand())) {
                             hasMemoryWrite = true;
+                            if (!isArgDerived(SI->getPointerOperand()))
+                                allAccessesThroughArgs = false;
+                        }
                     } else if (auto* LI = llvm::dyn_cast<llvm::LoadInst>(&I)) {
-                        if (!isLocalAlloca(LI->getPointerOperand()))
+                        if (!isLocalAlloca(LI->getPointerOperand())) {
                             hasMemoryRead = true;
+                            if (!isArgDerived(LI->getPointerOperand()))
+                                allAccessesThroughArgs = false;
+                        }
                     } else if (auto* CI = llvm::dyn_cast<llvm::CallInst>(&I)) {
                         hasCall = true;
                         auto* calledFn = CI->getCalledFunction();
                         if (!calledFn) {
                             hasUnknownSideEffect = true;
+                            allAccessesThroughArgs = false;
                         } else {
                             // Check callee's memory effects.
                             auto ME = calledFn->getMemoryEffects();
@@ -2388,8 +2427,15 @@ void CodeGenerator::generate(Program* program) {
                                 hasMemoryWrite = true;
                             if (!ME.doesNotAccessMemory())
                                 hasMemoryRead = true;
-                            if (ME == llvm::MemoryEffects::unknown())
+                            if (ME == llvm::MemoryEffects::unknown()) {
                                 hasUnknownSideEffect = true;
+                                allAccessesThroughArgs = false;
+                            }
+                            // If callee accesses non-arg memory, this function
+                            // transitively accesses non-arg memory too.
+                            if (!ME.doesNotAccessMemory() &&
+                                !calledFn->onlyAccessesArgMemory())
+                                allAccessesThroughArgs = false;
                         }
                     }
                 }
@@ -2398,8 +2444,24 @@ void CodeGenerator::generate(Program* program) {
                 // Function doesn't access memory at all → readnone.
                 func.addFnAttr(llvm::Attribute::getWithMemoryEffects(
                     *context, llvm::MemoryEffects::none()));
+            } else if (!hasUnknownSideEffect && !hasMemoryWrite && !hasMemoryRead) {
+                // Function only calls other functions but doesn't directly
+                // access memory → readonly (callee reads are transitive).
+                func.addFnAttr(llvm::Attribute::getWithMemoryEffects(
+                    *context, llvm::MemoryEffects::readOnly()));
+            } else if (!hasUnknownSideEffect && allAccessesThroughArgs) {
+                // All non-local memory accesses go through function arguments.
+                // This enables LLVM to prove non-interference with globals and
+                // heap allocations not passed to this function.
+                if (!hasMemoryWrite) {
+                    func.addFnAttr(llvm::Attribute::getWithMemoryEffects(
+                        *context, llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::Ref)));
+                } else {
+                    func.addFnAttr(llvm::Attribute::getWithMemoryEffects(
+                        *context, llvm::MemoryEffects::argMemOnly()));
+                }
             } else if (!hasUnknownSideEffect && !hasMemoryWrite) {
-                // Function only reads memory → readonly.
+                // Function reads memory (possibly non-arg) → readonly.
                 func.addFnAttr(llvm::Attribute::getWithMemoryEffects(
                     *context, llvm::MemoryEffects::readOnly()));
             }
