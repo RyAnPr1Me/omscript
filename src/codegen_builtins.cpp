@@ -316,7 +316,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         }
         // Use llvm.smin intrinsic for native hardware signed integer min
         llvm::Function* sminIntrinsic = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::smin, {getDefaultType()});
-        return builder->CreateCall(sminIntrinsic, {a, b}, "minval");
+        auto* result = builder->CreateCall(sminIntrinsic, {a, b}, "minval");
+        // min(a, b) is non-negative when both inputs are non-negative.
+        // This enables nsw on downstream add/mul operations.
+        if (nonNegValues_.count(a) && nonNegValues_.count(b))
+            nonNegValues_.insert(result);
+        return result;
     }
 
     if (bid == BuiltinId::MAX) {
@@ -334,7 +339,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         }
         // Use llvm.smax intrinsic for native hardware signed integer max
         llvm::Function* smaxIntrinsic = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::smax, {getDefaultType()});
-        return builder->CreateCall(smaxIntrinsic, {a, b}, "maxval");
+        auto* result = builder->CreateCall(smaxIntrinsic, {a, b}, "maxval");
+        // max(a, b) is non-negative when either input is non-negative:
+        // if a >= 0 then max(a, b) >= a >= 0.
+        if (nonNegValues_.count(a) || nonNegValues_.count(b))
+            nonNegValues_.insert(result);
+        return result;
     }
 
     if (bid == BuiltinId::SIGN) {
@@ -380,7 +390,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Function* sminIntrinsic = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::smin, {getDefaultType()});
         llvm::Function* smaxIntrinsic = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::smax, {getDefaultType()});
         llvm::Value* minVH = builder->CreateCall(sminIntrinsic, {val, hi}, "clampmin");
-        return builder->CreateCall(smaxIntrinsic, {minVH, lo}, "clampval");
+        auto* result = builder->CreateCall(smaxIntrinsic, {minVH, lo}, "clampval");
+        // clamp(val, lo, hi) = max(lo, min(val, hi)) is non-negative when
+        // the lower bound is non-negative (result >= lo >= 0).
+        if (nonNegValues_.count(lo))
+            nonNegValues_.insert(result);
+        return result;
     }
 
     if (bid == BuiltinId::POW) {
@@ -710,10 +725,23 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         idx->addIncoming(newIdx, bodyBB);
         auto* backBr_674 = builder->CreateBr(loopBB);
         if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 2> mds;
+            llvm::SmallVector<llvm::Metadata*, 4> mds;
             mds.push_back(nullptr);
             mds.push_back(llvm::MDNode::get(*context,
                 {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
+            // Vectorization hints: sum() is a classic reduction loop — enable
+            // vectorization with interleave count 4 to exploit SIMD lanes and
+            // hide memory latency through overlapping independent accumulation.
+            if (optimizationLevel >= OptimizationLevel::O2) {
+                mds.push_back(llvm::MDNode::get(*context,
+                    {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
+                     llvm::ConstantAsMetadata::get(
+                         llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
+                mds.push_back(llvm::MDNode::get(*context,
+                    {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
+                     llvm::ConstantAsMetadata::get(
+                         llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))}));
+            }
             llvm::MDNode* md = llvm::MDNode::get(*context, mds);
             md->replaceOperandWith(0, md);
             backBr_674->setMetadata(llvm::LLVMContext::MD_loop, md);
@@ -831,10 +859,19 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         hi->addIncoming(newHi, bodyBB);
         auto* backBr_769 = builder->CreateBr(loopBB);
         if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 2> mds;
+            llvm::SmallVector<llvm::Metadata*, 4> mds;
             mds.push_back(nullptr);
             mds.push_back(llvm::MDNode::get(*context,
                 {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
+            // Vectorization hints: reverse() swaps elements from opposite
+            // ends of the array — enable vectorization to process multiple
+            // swaps per iteration using SIMD gather/scatter operations.
+            if (optimizationLevel >= OptimizationLevel::O2) {
+                mds.push_back(llvm::MDNode::get(*context,
+                    {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
+                     llvm::ConstantAsMetadata::get(
+                         llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
+            }
             llvm::MDNode* md = llvm::MDNode::get(*context, mds);
             md->replaceOperandWith(0, md);
             backBr_769->setMetadata(llvm::LLVMContext::MD_loop, md);
@@ -1302,6 +1339,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "gcd.result");
         result->addIncoming(aOrB, entryBB);     // edge case: a|b = max(a,b) when one is 0
         result->addIncoming(shifted, contBB);   // normal case
+        // GCD is always non-negative: the algorithm takes abs() of both inputs.
+        // This enables nsw on downstream add/mul operations with the result.
+        nonNegValues_.insert(result);
         return result;
     }
 

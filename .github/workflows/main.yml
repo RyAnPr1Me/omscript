@@ -20,6 +20,7 @@ jobs:
             cmake \
             build-essential \
             llvm-18-dev \
+            clang-18 \
             gcc \
             mold \
 
@@ -30,3 +31,6 @@ jobs:
 
       - name: Run integration tests
         run: bash run_tests.sh
+
+      - name: Run benchmarks (omsc vs C)
+        run: BENCH_RUNS=5 BENCH_WARMUP=1 bash test.sh
