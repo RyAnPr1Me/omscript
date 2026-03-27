@@ -965,9 +965,9 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         bool constNonNeg = false;
         if (!bothOperandsNonNeg) {
             if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right))
-                constNonNeg = leftNonNeg && ci->getSExtValue() >= 0;
+                constNonNeg = leftNonNeg && !ci->isNegative();
             else if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left))
-                constNonNeg = rightNonNeg && ci->getSExtValue() >= 0;
+                constNonNeg = rightNonNeg && !ci->isNegative();
         }
         const bool canNSW = bothOperandsNonNeg || constNonNeg;
         auto* result = canNSW
@@ -1213,14 +1213,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 auto* t = builder->CreateSub(shl8, shl6, "mul200.t", nf, ns);
                 return builder->CreateAdd(t, shl3, "mul200", nf, ns);
             }
-            case 2048: {
-                // n*2048 → (n<<11)
-                return builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 11), "mul2048");
-            }
-            case 4096: {
-                // n*4096 → (n<<12)
-                return builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 12), "mul4096");
-            }
             case 256: {
                 // n*256 → (n<<8)
                 return builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 8), "mul256");
@@ -1272,13 +1264,13 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             return builder->CreateNSWMul(left, right, "multmp");
         if (nonNegValues_.count(left)) {
             if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
-                if (ci->getSExtValue() > 0)
+                if (!ci->isNegative() && !ci->isZero())
                     return builder->CreateNSWMul(left, right, "multmp");
             }
         }
         if (nonNegValues_.count(right)) {
             if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left)) {
-                if (ci->getSExtValue() > 0)
+                if (!ci->isNegative() && !ci->isZero())
                     return builder->CreateNSWMul(left, right, "multmp");
             }
         }
