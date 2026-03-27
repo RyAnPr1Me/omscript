@@ -152,10 +152,17 @@ static llvm::SimplifyCFGOptions aggressiveCFGOpts() {
 }
 
 // Hyperblock-aggressive SimplifyCFG options for superblock/hyperblock formation.
-// Uses a much higher bonusInstThreshold (12) to convert more branches to
-// predicated (select) instructions, creating larger basic blocks that give
-// the scheduler and register allocator more freedom.  This is the IR-level
-// equivalent of hyperblock formation in traditional compilers.
+// Uses a higher bonusInstThreshold (12) to convert more branches to predicated
+// (select) instructions, creating larger basic blocks that give the scheduler
+// and register allocator more freedom.  This is the IR-level equivalent of
+// hyperblock formation in traditional compilers.
+//
+// Threshold=12 is chosen to match GCC's aggressive if-conversion heuristic:
+// it allows speculating up to 12 instructions to convert a branch to a select,
+// which covers 2-3 chained comparisons with arithmetic (common in classify()
+// and range-check patterns).  Values above 12 risk register-pressure increases
+// that offset the scheduling benefit on x86-64 (16 GPRs).
+//
 // needCanonicalLoops(false) allows SimplifyCFG to break canonical loop form
 // when it enables more aggressive if-conversion — the loop canonicalization
 // passes that run later will restore the form if needed.
