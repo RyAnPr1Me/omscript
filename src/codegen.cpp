@@ -2726,6 +2726,7 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
                 // null/bounds checks without runtime verification.
                 function->addParamAttr(i, llvm::Attribute::getWithDereferenceableBytes(
                     *context, 8));
+                function->addParamAttr(i, llvm::Attribute::NoCapture);
             }
         }
     }
@@ -2747,6 +2748,7 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
                 // OmScript arrays always have a valid header (at least 8 bytes).
                 function->addParamAttr(i, llvm::Attribute::getWithDereferenceableBytes(
                     *context, 8));
+                function->addParamAttr(i, llvm::Attribute::NoCapture);
             }
         }
     }
@@ -2771,6 +2773,12 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
                 // size for any OmScript pointer (arrays, strings).
                 function->addParamAttr(i, llvm::Attribute::getWithDereferenceableBytes(
                     *context, 8));
+                // OmScript's ownership model ensures pointer parameters are
+                // never captured (stored into global state or returned as
+                // pointers).  The borrow checker prevents escaping references.
+                // nocapture enables LLVM to prove the pointer doesn't escape,
+                // allowing stack promotion and more aggressive alias analysis.
+                function->addParamAttr(i, llvm::Attribute::NoCapture);
             }
         }
     }

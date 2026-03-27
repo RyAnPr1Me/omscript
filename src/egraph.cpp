@@ -6625,6 +6625,126 @@ std::vector<RewriteRule> getAdvancedBitwiseRules() {
                                 P::Wild("a"), P::Wild("b")}),
         [](EGraph&, const Subst& s) { return s.at("b"); });
 
+    // ─────────────────────────────────────────────────────────────────────
+    // Shift-multiply distribution: (a << n) * b → (a * b) << n
+    // ─────────────────────────────────────────────────────────────────────
+    // Left-shift is equivalent to multiplication by a power of two.
+    // Distributing the shift outside the multiply can reduce the critical
+    // path length when the shift amount is known at compile time.
+    // Guard: shift amount must be a positive constant < 64 to avoid UB.
+    for (int n = 1; n <= 6; ++n) {
+        std::string name = "shl_mul_distribute_" + std::to_string(n);
+        rules.emplace_back(name,
+            P::OpPat(Op::Mul, {P::OpPat(Op::Shl, {P::Wild("a"), P::ConstPat(n)}), P::Wild("b")}),
+            [n](EGraph& g, const Subst& s) {
+                ClassId ab = g.addBinOp(Op::Mul, s.at("a"), s.at("b"));
+                return g.addBinOp(Op::Shl, ab, g.addConst(n));
+            });
+        // Commutative: b * (a << n) → (a * b) << n
+        std::string name2 = "mul_shl_distribute_" + std::to_string(n);
+        rules.emplace_back(name2,
+            P::OpPat(Op::Mul, {P::Wild("b"), P::OpPat(Op::Shl, {P::Wild("a"), P::ConstPat(n)})}),
+            [n](EGraph& g, const Subst& s) {
+                ClassId ab = g.addBinOp(Op::Mul, s.at("a"), s.at("b"));
+                return g.addBinOp(Op::Shl, ab, g.addConst(n));
+            });
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Nested modulo: (x % (c*d)) % d → x % d  when d > 0
+    // ─────────────────────────────────────────────────────────────────────
+    // If we take x mod (c*d), the result is in [0, c*d-1], and taking that
+    // mod d is equivalent to x mod d.  We handle common cases where the
+    // outer modulus is a known multiple of the inner modulus.
+    // (x % a) % b → x % b  when a is a constant multiple of b
+    rules.emplace_back("mod_mod_divisible",
+        P::OpPat(Op::Mod, {P::OpPat(Op::Mod, {P::Wild("x"), P::Wild("a")}), P::Wild("b")}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Mod, s.at("x"), s.at("b"));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto aVal = g.getConstValue(s.at("a"));
+            auto bVal = g.getConstValue(s.at("b"));
+            if (!aVal || !bVal || *bVal <= 0 || *aVal <= 0) return false;
+            return (*aVal % *bVal) == 0;
+        });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // XOR with OR/AND distribution patterns
+    // ─────────────────────────────────────────────────────────────────────
+    // a ^ (a | b) → ~a & b
+    // Proof: a ^ (a | b) = (~a & (a | b)) | (a & ~(a | b))
+    //      = (~a & a) | (~a & b) | (a & ~a & ~b) = ~a & b  ✓
+    rules.emplace_back("xor_or_simplify",
+        P::OpPat(Op::BitXor, {P::Wild("a"), P::OpPat(Op::BitOr, {P::Wild("a"), P::Wild("b")})}),
+        [](EGraph& g, const Subst& s) {
+            ClassId na = g.addUnaryOp(Op::BitNot, s.at("a"));
+            return g.addBinOp(Op::BitAnd, na, s.at("b"));
+        });
+
+    // (a | b) ^ a → ~a & b  (reversed operand order)
+    rules.emplace_back("or_xor_simplify",
+        P::OpPat(Op::BitXor, {P::OpPat(Op::BitOr, {P::Wild("a"), P::Wild("b")}), P::Wild("a")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId na = g.addUnaryOp(Op::BitNot, s.at("a"));
+            return g.addBinOp(Op::BitAnd, na, s.at("b"));
+        });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Ternary with negated comparison → simpler ternary
+    // ─────────────────────────────────────────────────────────────────────
+    // (a < b) ? c : d  when c == 0 and d == 1 → a >= b
+    rules.emplace_back("ternary_lt_0_1_to_ge",
+        P::OpPat(Op::Ternary, {P::OpPat(Op::Lt, {P::Wild("a"), P::Wild("b")}),
+                                P::ConstPat(0), P::ConstPat(1)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Ge, s.at("a"), s.at("b"));
+        });
+
+    // (a > b) ? c : d  when c == 0 and d == 1 → a <= b
+    rules.emplace_back("ternary_gt_0_1_to_le",
+        P::OpPat(Op::Ternary, {P::OpPat(Op::Gt, {P::Wild("a"), P::Wild("b")}),
+                                P::ConstPat(0), P::ConstPat(1)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Le, s.at("a"), s.at("b"));
+        });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Bitwise-logical equivalence for boolean values
+    // ─────────────────────────────────────────────────────────────────────
+    // When both operands are boolean (0 or 1), bitwise ops are equivalent
+    // to logical ops, which have cheaper codegen (no masking).
+    // a & b → a && b  when both are boolean
+    rules.emplace_back("bitand_to_logand_bool",
+        P::OpPat(Op::BitAnd, {P::Wild("a"), P::Wild("b")}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::LogAnd, s.at("a"), s.at("b"));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            return g.isClassBoolean(s.at("a")) && g.isClassBoolean(s.at("b"));
+        });
+
+    // a | b → a || b  when both are boolean
+    rules.emplace_back("bitor_to_logor_bool",
+        P::OpPat(Op::BitOr, {P::Wild("a"), P::Wild("b")}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::LogOr, s.at("a"), s.at("b"));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            return g.isClassBoolean(s.at("a")) && g.isClassBoolean(s.at("b"));
+        });
+
+    // a ^ b → a != b  when both are boolean
+    // XOR of two boolean values is equivalent to inequality comparison.
+    rules.emplace_back("bitxor_to_ne_bool",
+        P::OpPat(Op::BitXor, {P::Wild("a"), P::Wild("b")}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Ne, s.at("a"), s.at("b"));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            return g.isClassBoolean(s.at("a")) && g.isClassBoolean(s.at("b"));
+        });
+
 
     return rules;
 }
@@ -7924,6 +8044,103 @@ std::vector<RewriteRule> getStrengthReductionRules() {
             const auto& aClass = g.getClass(s.at("a"));
             const auto& bClass = g.getClass(s.at("b"));
             return aClass.isNonNeg && bClass.isNonNeg;
+        });
+
+    // ── Multiply-by-power-of-two-minus-one strength reduction ───────────
+    // x * (2^n - 1) → (x << n) - x
+    // These patterns cover common constants not already in the algebraic
+    // rules.  The shift+sub sequence avoids the multiplier and reduces
+    // latency on most x86-64 micro-architectures.
+    rules.emplace_back("mul_129_shift",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(129)}),
+        [](EGraph& g, const Subst& s) {
+            // x*129 = (x<<7) + x
+            ClassId shl = g.addBinOp(Op::Shl, s.at("x"), g.addConst(7));
+            return g.addBinOp(Op::Add, shl, s.at("x"));
+        });
+    rules.emplace_back("mul_129_shift_comm",
+        P::OpPat(Op::Mul, {P::ConstPat(129), P::Wild("x")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId shl = g.addBinOp(Op::Shl, s.at("x"), g.addConst(7));
+            return g.addBinOp(Op::Add, shl, s.at("x"));
+        });
+
+    rules.emplace_back("mul_257_shift",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(257)}),
+        [](EGraph& g, const Subst& s) {
+            // x*257 = (x<<8) + x
+            ClassId shl = g.addBinOp(Op::Shl, s.at("x"), g.addConst(8));
+            return g.addBinOp(Op::Add, shl, s.at("x"));
+        });
+    rules.emplace_back("mul_257_shift_comm",
+        P::OpPat(Op::Mul, {P::ConstPat(257), P::Wild("x")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId shl = g.addBinOp(Op::Shl, s.at("x"), g.addConst(8));
+            return g.addBinOp(Op::Add, shl, s.at("x"));
+        });
+
+    // x * 2048 → x << 11
+    rules.emplace_back("mul_2048_to_shl11",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(2048)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Shl, s.at("x"), g.addConst(11));
+        });
+    rules.emplace_back("mul_2048_to_shl11_comm",
+        P::OpPat(Op::Mul, {P::ConstPat(2048), P::Wild("x")}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Shl, s.at("x"), g.addConst(11));
+        });
+
+    // x * 4096 → x << 12
+    rules.emplace_back("mul_4096_to_shl12",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(4096)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Shl, s.at("x"), g.addConst(12));
+        });
+    rules.emplace_back("mul_4096_to_shl12_comm",
+        P::OpPat(Op::Mul, {P::ConstPat(4096), P::Wild("x")}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Shl, s.at("x"), g.addConst(12));
+        });
+
+    // ── Division strength reduction for non-negative values ─────────────
+    // x / 2048 → x >> 11  (when x is non-negative)
+    rules.emplace_back("div_2048_to_shr11",
+        P::OpPat(Op::Div, {P::Wild("x"), P::ConstPat(2048)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Shr, s.at("x"), g.addConst(11));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            return g.isClassNonNeg(s.at("x"));
+        });
+
+    // x / 4096 → x >> 12  (when x is non-negative)
+    rules.emplace_back("div_4096_to_shr12",
+        P::OpPat(Op::Div, {P::Wild("x"), P::ConstPat(4096)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Shr, s.at("x"), g.addConst(12));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            return g.isClassNonNeg(s.at("x"));
+        });
+
+    // ── Add then negate patterns ────────────────────────────────────────
+    // -(a + b) → (-a) + (-b)  (distribute negation over addition)
+    // This can expose further simplification when one of a or b is known.
+    rules.emplace_back("neg_add_distribute",
+        P::OpPat(Op::Neg, {P::OpPat(Op::Add, {P::Wild("a"), P::Wild("b")})}),
+        [](EGraph& g, const Subst& s) {
+            ClassId na = g.addUnaryOp(Op::Neg, s.at("a"));
+            ClassId nb = g.addUnaryOp(Op::Neg, s.at("b"));
+            return g.addBinOp(Op::Add, na, nb);
+        });
+
+    // -(a * b) → (-a) * b  (factor negation into one operand)
+    rules.emplace_back("neg_mul_factor",
+        P::OpPat(Op::Neg, {P::OpPat(Op::Mul, {P::Wild("a"), P::Wild("b")})}),
+        [](EGraph& g, const Subst& s) {
+            ClassId na = g.addUnaryOp(Op::Neg, s.at("a"));
+            return g.addBinOp(Op::Mul, na, s.at("b"));
         });
 
     return rules;

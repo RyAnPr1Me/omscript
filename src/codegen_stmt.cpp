@@ -880,6 +880,16 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
                  llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
                      llvm::Type::getInt32Ty(*context), 2))});
             loopMDs.push_back(unrollCount);
+            // Explicitly enable runtime unrolling for variable-trip-count
+            // loops.  LLVM's runtime unroller generates a prologue/epilogue
+            // that handles the remainder iterations, enabling the main loop
+            // body to run at the unrolled stride.  Without this hint, the
+            // unroller may skip runtime unrolling if the trip count is not
+            // a compile-time constant.
+            loopMDs.push_back(llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.unroll.runtime.disable"),
+                           llvm::ConstantAsMetadata::get(
+                               llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 0))}));
         }
         // @unroll / @nounroll: per-function loop unrolling overrides.
         // @nounroll disables unrolling entirely; @unroll requests aggressive unrolling.
@@ -974,8 +984,11 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         // Example:  for i in 0...n { arr[i]=i*2; sum+=arr[i] }
         //   → Loop 1: for i in 0...n { arr[i]=i*2 }  (vectorizable)
         //   → Loop 2: for i in 0...n { sum+=arr[i] }  (reduction)
-        if (optimizationLevel >= OptimizationLevel::O3
-            && stepKnownPositive && !deeplyNested && !bodyHasInnerLoop_) {
+        // At O2, enable distribution only for @hot functions since the
+        // analysis cost is non-trivial for cold code.
+        if (stepKnownPositive && !deeplyNested && !bodyHasInnerLoop_
+            && (optimizationLevel >= OptimizationLevel::O3
+                || (optimizationLevel >= OptimizationLevel::O2 && currentFuncHintHot_))) {
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.distribute.enable"),
                            llvm::ConstantAsMetadata::get(

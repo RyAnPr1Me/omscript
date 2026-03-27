@@ -1282,6 +1282,33 @@ void CodeGenerator::runOptimizationPasses() {
     }
 
     // -----------------------------------------------------------------------
+    // Post-HGOE srem→urem and sdiv→udiv conversion
+    // -----------------------------------------------------------------------
+    // The HGOE may introduce new arithmetic patterns (e.g. from FMA fusion
+    // or loop restructuring) that contain srem/sdiv instructions.  Run one
+    // more round of signed→unsigned conversion to catch these residuals.
+    // This is particularly important because urem/udiv on x86-64 avoid the
+    // sign-correction fixup (3 extra instructions per operation).
+    if (enableSuperopt_ && optimizationLevel >= OptimizationLevel::O2
+        && enableHGOE_ && !marchCpu_.empty()) {
+        unsigned postHGOECount = 0;
+        for (int iter = 0; iter < 2; ++iter) {
+            unsigned iterCount = 0;
+            for (auto& func : *module) {
+                iterCount += superopt::inferNonNegativeFlags(func);
+                iterCount += superopt::convertSRemToURem(func);
+                iterCount += superopt::convertSDivToUDiv(func);
+            }
+            if (iterCount == 0) break;
+            postHGOECount += iterCount;
+        }
+        if (verbose_ && postHGOECount > 0) {
+            std::cout << "    Post-HGOE signed→unsigned: "
+                      << postHGOECount << " conversions" << std::endl;
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Post-Optimization Prefetch Cleanup
     // -----------------------------------------------------------------------
     // After all major optimizations (constant folding, loop elimination,
