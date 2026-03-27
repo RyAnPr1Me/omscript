@@ -2142,6 +2142,17 @@ void CodeGenerator::generate(Program* program) {
         llvm::FastMathFlags FMF;
         FMF.setFast(); // enables all unsafe FP optimizations
         builder->setFastMathFlags(FMF);
+    } else if (optimizationLevel >= OptimizationLevel::O2) {
+        // At O2+, enable FP contraction (a*b+c → fma) without full
+        // fast-math.  This matches clang's default -ffp-contract=on
+        // behaviour: FMA contraction is safe — it produces a more precise
+        // result (one rounding instead of two) and utilises hardware FMA
+        // units, improving throughput on modern CPUs.  No other unsafe FP
+        // transformations (reassociation, reciprocal approximation, etc.)
+        // are enabled, preserving IEEE-754 semantics for everything else.
+        llvm::FastMathFlags FMF;
+        FMF.setAllowContract(true);
+        builder->setFastMathFlags(FMF);
     }
 
     // Forward-declare all functions so that any function can reference any

@@ -989,11 +989,15 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
                            llvm::ConstantAsMetadata::get(
                                llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
         }
-        // At O3 in @hot functions, hint the vectorizer to interleave 4
-        // iterations per vector cycle.  Interleaving hides memory latency
-        // and FP pipeline stalls by keeping multiple independent vector
-        // operations in flight.
-        if (currentFuncHintHot_ && optimizationLevel >= OptimizationLevel::O3
+        // At O3 in @hot functions that explicitly request vectorization,
+        // hint the vectorizer to interleave 4 iterations per vector cycle.
+        // For other @hot loops, leave the interleave count unset so LLVM's
+        // cost model can pick the optimal factor.  Forcing interleave=4 on
+        // loops with complex bodies (conditional branches, reductions, many
+        // live values) causes excessive register pressure and can prevent
+        // the vectorizer from choosing a wider vector factor.
+        if (currentFuncHintHot_ && currentFuncHintVectorize_
+            && optimizationLevel >= OptimizationLevel::O3
             && !currentFuncHintNoVectorize_) {
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.interleave.count"),

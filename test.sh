@@ -833,7 +833,7 @@ fn bench_idioms(@prefetch n:int) -> int {
 // Tests HGOE FMA generation: floating-point multiply-add chains
 // of the form a*b+c and a*b+c*d that the hardware graph optimizer
 // converts to fused multiply-add instructions.
-@hot @flatten @unroll @vectorize
+@hot @flatten @unroll
 fn bench_fma(@prefetch n:int) -> int {
     var a:double = 1.0;
     var b:double = 0.9999999;

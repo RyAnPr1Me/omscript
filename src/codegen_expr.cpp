@@ -1350,30 +1350,19 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                             return result;
                         }
                     }
-                    if (isDivision) {
-                        // Signed division by power-of-2: (x + (x >> 63 & (2^s - 1))) >> s
-                        // This handles negative values correctly (rounds toward zero).
-                        auto* signBit = builder->CreateAShr(left,
-                            llvm::ConstantInt::get(getDefaultType(), 63), "div.sign");
-                        auto* correction = builder->CreateAnd(signBit,
-                            llvm::ConstantInt::get(getDefaultType(), (1LL << s) - 1), "div.corr");
-                        auto* corrected = builder->CreateAdd(left, correction, "div.adj");
-                        return builder->CreateAShr(corrected,
-                            llvm::ConstantInt::get(getDefaultType(), s), "div.shr");
-                    } else {
-                        // Signed modulo by power-of-2: x - ((x + (x >> 63 & (2^s - 1))) >> s) * 2^s
-                        // Equivalent to: x - (x / 2^s) * 2^s, but fully in shifts.
-                        auto* signBit = builder->CreateAShr(left,
-                            llvm::ConstantInt::get(getDefaultType(), 63), "mod.sign");
-                        auto* correction = builder->CreateAnd(signBit,
-                            llvm::ConstantInt::get(getDefaultType(), (1LL << s) - 1), "mod.corr");
-                        auto* corrected = builder->CreateAdd(left, correction, "mod.adj");
-                        auto* quotient = builder->CreateAShr(corrected,
-                            llvm::ConstantInt::get(getDefaultType(), s), "mod.quot");
-                        auto* product = builder->CreateShl(quotient,
-                            llvm::ConstantInt::get(getDefaultType(), s), "mod.prod");
-                        return builder->CreateSub(left, product, "mod.rem");
-                    }
+                    // Dividend sign unknown: emit sdiv/srem instead of the
+                    // multi-instruction signed shift expansion.  LLVM's
+                    // CorrelatedValuePropagation (CVP) pass can often prove
+                    // non-negativity through value-range analysis on PHI nodes
+                    // (e.g. Collatz-sequence variables that are always > 0) and
+                    // convert sdiv/srem → udiv/urem, which InstCombine then
+                    // lowers to lshr/and — a single instruction instead of four.
+                    // The inline shift expansion we used previously baked in the
+                    // sign-correction at IR-generation time, before LLVM's
+                    // analyses could run, preventing this optimisation.
+                    return isDivision
+                        ? builder->CreateSDiv(left, right, "divtmp")
+                        : builder->CreateSRem(left, right, "modtmp");
                 }
             }
         }
