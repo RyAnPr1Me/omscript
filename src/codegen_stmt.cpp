@@ -429,11 +429,13 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
         llvm::SmallVector<llvm::Metadata*, 4> loopMDs;
         loopMDs.push_back(nullptr);
         loopMDs.push_back(mustProgress);
-        // While-loop unrolling: when nested inside another loop, cap the
-        // unroll factor to prevent LLVM from over-unrolling branch-heavy
-        // inner loops (e.g. Collatz) that create massive I-cache pressure.
-        // For top-level while-loops, trust LLVM's cost model.
-        if (!inOptMaxFunction && loopNestDepth_ > 0 && optimizationLevel >= OptimizationLevel::O2) {
+        // While-loop unrolling: when truly nested inside another loop
+        // (depth > 1, since we already incremented loopNestDepth_ for
+        // this while-loop), cap the unroll factor to prevent LLVM from
+        // over-unrolling branch-heavy inner loops that create massive
+        // I-cache pressure.  Top-level while-loops (depth == 1) are
+        // left to LLVM's cost model for optimal unrolling decisions.
+        if (!inOptMaxFunction && loopNestDepth_ > 1 && optimizationLevel >= OptimizationLevel::O2) {
             loopMDs.push_back(llvm::MDNode::get(
                 *context,
                 {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
@@ -923,11 +925,14 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.unroll.disable")}));
         } else if (bodyHasInnerLoop_) {
-            // When the body contains an inner loop (while/for), disable
-            // unrolling to avoid I-cache bloat from duplicating large loop
-            // bodies with unpredictable branches.
-            loopMDs.push_back(llvm::MDNode::get(
-                *context, {llvm::MDString::get(*context, "llvm.loop.unroll.disable")}));
+            // When the body contains an inner loop (while/for), omit any
+            // unroll hint entirely and let LLVM's cost model decide.
+            // Previously we force-disabled unrolling here, but that prevents
+            // LLVM from applying profitable unrolling (e.g. Collatz outer
+            // loop where clang unrolls aggressively).  Even with @unroll,
+            // forcing a specific count can be suboptimal — LLVM's heuristics
+            // account for inner-loop size and register pressure better than
+            // a fixed constant.
         } else if (currentFuncHintUnroll_ && !addedUnrollHint && !suppressUnrollHint) {
             // @unroll on a non-suppressed loop: apply the unroll count hint.
             // For variable-trip-count loops, unroll.full is ignored by LLVM

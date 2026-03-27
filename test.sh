@@ -154,33 +154,33 @@ BENCH_N=(
     5000000   #  6  struct_access
     5000000   #  7  switch_branch
     5000000   #  8  if_else_chain
-    5000000   #  9  while_loop
+    10000000  #  9  while_loop
     35        # 10  recursion_fib  (fib(35) ~ 9 M calls)
     200       # 11  nested_loops   (200^3 = 8 M)
-    2000000   # 12  array_indexing
-    5000000   # 13  function_calls
-    5000000   # 14  bitwise_ops
-    5000000   # 15  bitwise_intrinsics
+    5000000   # 12  array_indexing
+    50000000  # 13  function_calls
+    10000000  # 14  bitwise_ops
+    10000000  # 15  bitwise_intrinsics
     5000000   # 16  polynomial_eval
-    5000000   # 17  reduction
+    10000000  # 17  reduction
     100000    # 18  combined
     300       # 19  matrix_multiply (300x300 = 27M muls)
     5000000   # 20  sieve
     5000000   # 21  prefix_sum
-    5000000   # 22  hash_compute
+    10000000  # 22  hash_compute
     1000000   # 23  collatz
     5000000   # 24  binary_search
     5000000   # 25  dot_product
     50000000  # 26  fibonacci_iter
     5000000   # 27  histogram
-    5000000   # 28  accumulator_chain
-    5000000   # 29  modular_exp
-    5000000   # 30  strength_reduce
+    10000000  # 28  accumulator_chain
+    10000000  # 29  modular_exp
+    10000000  # 30  strength_reduce
     5000000   # 31  idiom_patterns
     2000000   # 32  fma_compute
     5000000   # 33  negative_offset
-    5000000   # 34  const_array_size
-    5000000   # 35  cond_arithmetic
+    10000000  # 34  const_array_size
+    10000000  # 35  cond_arithmetic
 )
 
 BOTTLENECK_LABELS=(
@@ -440,7 +440,7 @@ fn add_one(x:int) -> int { return x + 1; }
 fn add_two(x:int) -> int { return add_one(add_one(x)); }
 @hot @inline
 fn add_four(x:int) -> int { return add_two(add_two(x)); }
-@hot @flatten @vectorize
+@hot @flatten
 fn bench_calls(@prefetch n:int) -> int {
     var sum:int = 0;
     for (i:int in 0...n:int) {
