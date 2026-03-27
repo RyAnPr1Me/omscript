@@ -20,11 +20,12 @@ jobs:
             cmake \
             build-essential \
             llvm-18-dev \
-            gcc
+            gcc \
+            mold \
 
       - name: Build omsc from source
         run: |
-          cmake -B build -DCMAKE_BUILD_TYPE=Release -DLLVM_DIR=/usr/lib/llvm-18/cmake
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DLLVM_DIR=/usr/lib/llvm-18/cmake -DLTO=ON
           cmake --build build --parallel $(nproc)
 
       - name: Run tests
