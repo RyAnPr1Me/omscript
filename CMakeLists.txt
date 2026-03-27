@@ -116,7 +116,7 @@ target_compile_options(omsc PRIVATE
     $<$<CONFIG:Release>:
         -O3
         -DNDEBUG
-        -s
+        
 
         # Core perf
         -fno-plt
@@ -151,6 +151,7 @@ target_link_options(omsc PRIVATE
     $<$<CONFIG:Release>:
         -Wl,-O2
         -Wl,--gc-sections
+        -s
     >
 )
 
