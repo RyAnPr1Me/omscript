@@ -152,6 +152,7 @@ target_link_options(omsc PRIVATE
         -Wl,-O3
         -Wl,--gc-sections
         -static
+       -fsanitize=address
     >
 )
 
