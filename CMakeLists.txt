@@ -5,6 +5,7 @@ cmake_minimum_required(VERSION 3.16)
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── Compiler cache ───────────────────────────────────────────────────────────
+set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
 find_program(CCACHE_PROGRAM ccache)
 find_program(SCCACHE_PROGRAM sccache)
 if(CCACHE_PROGRAM)
