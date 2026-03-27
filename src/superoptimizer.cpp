@@ -1076,6 +1076,140 @@ static std::optional<IdiomMatch> detectCountLeadingZeros(llvm::Instruction* inst
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Saturating addition: select(add_overflow(a,b), MAX, a+b) → uadd.sat(a,b)
+// Patterns detected:
+//   1. select(icmp ugt (a+b), a, MAX_UINT, a+b)  (unsigned overflow via wrap)
+//   2. select(extractvalue(@llvm.uadd.with.overflow(a,b), 1), MAX, sum)
+// ─────────────────────────────────────────────────────────────────────────────
+static std::optional<IdiomMatch> detectSaturatingAdd(llvm::Instruction* inst) {
+    auto* sel = llvm::dyn_cast<llvm::SelectInst>(inst);
+    if (!sel) return std::nullopt;
+    if (!sel->getType()->isIntegerTy()) return std::nullopt;
+
+    llvm::Value* cond = sel->getCondition();
+    llvm::Value* trueVal = sel->getTrueValue();
+    llvm::Value* falseVal = sel->getFalseValue();
+
+    // Pattern: select(icmp ult (a+b) a, MAX, a+b)
+    //   meaning: if (a+b) wrapped around (unsigned), return MAX; else return a+b
+    auto* icmp = llvm::dyn_cast<llvm::ICmpInst>(cond);
+    if (!icmp) return std::nullopt;
+
+    unsigned bitWidth = sel->getType()->getIntegerBitWidth();
+    uint64_t maxVal = bitWidth >= 64 ? ~uint64_t(0) : (1ULL << bitWidth) - 1;
+
+    // Check: trueVal == MAX_UINT and falseVal is the sum
+    if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(trueVal)) {
+        if (ci->getZExtValue() == maxVal) {
+            auto* sum = llvm::dyn_cast<llvm::BinaryOperator>(falseVal);
+            if (sum && sum->getOpcode() == llvm::Instruction::Add) {
+                // Check: icmp ult sum, a  (unsigned overflow detection)
+                if (icmp->getPredicate() == llvm::CmpInst::ICMP_ULT &&
+                    icmp->getOperand(0) == sum) {
+                    llvm::Value* a = sum->getOperand(0);
+                    llvm::Value* b = sum->getOperand(1);
+                    if (icmp->getOperand(1) == a || icmp->getOperand(1) == b) {
+                        IdiomMatch match;
+                        match.idiom = Idiom::SaturatingAdd;
+                        match.rootInst = inst;
+                        match.operands = {a, b};
+                        match.bitWidth = bitWidth;
+                        return match;
+                    }
+                }
+            }
+        }
+    }
+
+    // Also check reversed pattern: select(icmp ugt a (a+b), MAX, a+b)
+    if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(trueVal)) {
+        if (ci->getZExtValue() == maxVal) {
+            auto* sum = llvm::dyn_cast<llvm::BinaryOperator>(falseVal);
+            if (sum && sum->getOpcode() == llvm::Instruction::Add) {
+                if (icmp->getPredicate() == llvm::CmpInst::ICMP_UGT &&
+                    icmp->getOperand(1) == sum) {
+                    llvm::Value* a = sum->getOperand(0);
+                    llvm::Value* b = sum->getOperand(1);
+                    if (icmp->getOperand(0) == a || icmp->getOperand(0) == b) {
+                        IdiomMatch match;
+                        match.idiom = Idiom::SaturatingAdd;
+                        match.rootInst = inst;
+                        match.operands = {a, b};
+                        match.bitWidth = bitWidth;
+                        return match;
+                    }
+                }
+            }
+        }
+    }
+
+    return std::nullopt;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Saturating subtraction: select(icmp ult a b, 0, a-b) → usub.sat(a,b)
+// Pattern: clamp subtraction to zero instead of wrapping unsigned
+// ─────────────────────────────────────────────────────────────────────────────
+static std::optional<IdiomMatch> detectSaturatingSub(llvm::Instruction* inst) {
+    auto* sel = llvm::dyn_cast<llvm::SelectInst>(inst);
+    if (!sel) return std::nullopt;
+    if (!sel->getType()->isIntegerTy()) return std::nullopt;
+
+    llvm::Value* cond = sel->getCondition();
+    llvm::Value* trueVal = sel->getTrueValue();
+    llvm::Value* falseVal = sel->getFalseValue();
+
+    auto* icmp = llvm::dyn_cast<llvm::ICmpInst>(cond);
+    if (!icmp) return std::nullopt;
+
+    unsigned bitWidth = sel->getType()->getIntegerBitWidth();
+
+    // Pattern: select(icmp ult a b, 0, a-b)
+    // If a < b (unsigned), return 0; else return a - b
+    if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(trueVal)) {
+        if (ci->isZero()) {
+            auto* sub = llvm::dyn_cast<llvm::BinaryOperator>(falseVal);
+            if (sub && sub->getOpcode() == llvm::Instruction::Sub) {
+                llvm::Value* a = sub->getOperand(0);
+                llvm::Value* b = sub->getOperand(1);
+                // Check: icmp ult a, b
+                if (icmp->getPredicate() == llvm::CmpInst::ICMP_ULT &&
+                    icmp->getOperand(0) == a && icmp->getOperand(1) == b) {
+                    IdiomMatch match;
+                    match.idiom = Idiom::SaturatingSub;
+                    match.rootInst = inst;
+                    match.operands = {a, b};
+                    match.bitWidth = bitWidth;
+                    return match;
+                }
+            }
+        }
+    }
+
+    // Reversed: select(icmp uge a b, a-b, 0)
+    if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(falseVal)) {
+        if (ci->isZero()) {
+            auto* sub = llvm::dyn_cast<llvm::BinaryOperator>(trueVal);
+            if (sub && sub->getOpcode() == llvm::Instruction::Sub) {
+                llvm::Value* a = sub->getOperand(0);
+                llvm::Value* b = sub->getOperand(1);
+                if (icmp->getPredicate() == llvm::CmpInst::ICMP_UGE &&
+                    icmp->getOperand(0) == a && icmp->getOperand(1) == b) {
+                    IdiomMatch match;
+                    match.idiom = Idiom::SaturatingSub;
+                    match.rootInst = inst;
+                    match.operands = {a, b};
+                    match.bitWidth = bitWidth;
+                    return match;
+                }
+            }
+        }
+    }
+
+    return std::nullopt;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main idiom detection
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1121,6 +1255,14 @@ std::vector<IdiomMatch> detectIdioms(llvm::BasicBlock& bb) {
             continue;
         }
         if (auto m = detectCountLeadingZeros(&inst)) {
+            results.push_back(std::move(*m));
+            continue;
+        }
+        if (auto m = detectSaturatingAdd(&inst)) {
+            results.push_back(std::move(*m));
+            continue;
+        }
+        if (auto m = detectSaturatingSub(&inst)) {
             results.push_back(std::move(*m));
             continue;
         }
@@ -1269,6 +1411,28 @@ static bool replaceIdiom(IdiomMatch& match) {
             return true;
         }
         return false;
+    }
+
+    case Idiom::SaturatingAdd: {
+        // Replace select(overflow_test, MAX, a+b) → llvm.uadd.sat(a, b)
+        llvm::Value* a = match.operands[0];
+        llvm::Value* b = match.operands[1];
+        llvm::Function* satAdd = OMSC_GET_INTRINSIC(
+            mod, llvm::Intrinsic::uadd_sat, {intTy});
+        llvm::Value* result = builder.CreateCall(satAdd, {a, b}, "uadd_sat");
+        match.rootInst->replaceAllUsesWith(result);
+        return true;
+    }
+
+    case Idiom::SaturatingSub: {
+        // Replace select(a < b, 0, a-b) → llvm.usub.sat(a, b)
+        llvm::Value* a = match.operands[0];
+        llvm::Value* b = match.operands[1];
+        llvm::Function* satSub = OMSC_GET_INTRINSIC(
+            mod, llvm::Intrinsic::usub_sat, {intTy});
+        llvm::Value* result = builder.CreateCall(satSub, {a, b}, "usub_sat");
+        match.rootInst->replaceAllUsesWith(result);
+        return true;
     }
 
     default:

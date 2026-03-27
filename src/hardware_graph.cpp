@@ -1721,6 +1721,58 @@ static unsigned generateFMA(llvm::Function& func, const MicroarchProfile& profil
     return count;
 }
 
+/// Generate chained FMA for a*b + c*d → fma(c, d, fma(a, b, 0.0))
+/// This leverages 2+ FMA units by expressing the computation as two
+/// dependent FMAs, which modern out-of-order processors can pipeline.
+/// Returns the number of FMA chains generated.
+static unsigned generateFMAChain(llvm::Function& func, const MicroarchProfile& profile) {
+    if (profile.fmaUnits < 2) return 0;  // Need 2+ FMA units to benefit
+
+    unsigned count = 0;
+    std::vector<llvm::Instruction*> toErase;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            // Pattern: fadd(fmul(a,b), fmul(c,d)) → fma(c, d, fma(a, b, 0))
+            if (inst.getOpcode() != llvm::Instruction::FAdd) continue;
+
+            auto* lhsMul = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+            auto* rhsMul = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
+
+            if (!lhsMul || !rhsMul) continue;
+            if (lhsMul->getOpcode() != llvm::Instruction::FMul) continue;
+            if (rhsMul->getOpcode() != llvm::Instruction::FMul) continue;
+            if (!lhsMul->hasOneUse() || !rhsMul->hasOneUse()) continue;
+
+            llvm::IRBuilder<> builder(&inst);
+            llvm::Module* mod = func.getParent();
+            llvm::Type* ty = inst.getType();
+
+            llvm::Function* fmaFn = OMSC_GET_INTRINSIC(mod, llvm::Intrinsic::fma, {ty});
+
+            // First FMA: fma(a, b, 0.0)
+            llvm::Value* zero = llvm::ConstantFP::get(ty, 0.0);
+            llvm::Value* fma1 = builder.CreateCall(fmaFn,
+                {lhsMul->getOperand(0), lhsMul->getOperand(1), zero}, "fma_chain1");
+
+            // Second FMA: fma(c, d, fma1)
+            llvm::Value* fma2 = builder.CreateCall(fmaFn,
+                {rhsMul->getOperand(0), rhsMul->getOperand(1), fma1}, "fma_chain2");
+
+            inst.replaceAllUsesWith(fma2);
+            toErase.push_back(&inst);
+            toErase.push_back(lhsMul);
+            toErase.push_back(rhsMul);
+            count++;
+        }
+    }
+
+    for (auto* inst : toErase) {
+        if (inst->use_empty()) inst->eraseFromParent();
+    }
+    return count;
+}
+
 /// Insert prefetch hints for strided memory access patterns in loops.
 /// Returns the number of prefetches inserted.
 static unsigned insertPrefetches(llvm::Function& func, const MicroarchProfile& profile) {
@@ -2239,6 +2291,7 @@ TransformStats applyHardwareTransforms(llvm::Function& func,
 
     stats.fmaGenerated     = generateFMA(func, profile);
     stats.fmaGenerated    += generateFMASub(func, profile);
+    stats.fmaGenerated    += generateFMAChain(func, profile);
     stats.prefetchesInserted = insertPrefetches(func, profile);
     stats.branchesOptimized  = optimizeBranchLayout(func, profile);
     stats.loadsStorePaired   = markLoadStorePairs(func, profile);
