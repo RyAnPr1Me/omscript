@@ -6693,7 +6693,7 @@ std::vector<RewriteRule> getAdvancedBitwiseRules() {
     // ─────────────────────────────────────────────────────────────────────
     // Ternary with negated comparison → simpler ternary
     // ─────────────────────────────────────────────────────────────────────
-    // (a < b) ? c : d  when c == 0 and d == 1 → a >= b
+    // (a < b) ? 0 : 1 → a >= b
     rules.emplace_back("ternary_lt_0_1_to_ge",
         P::OpPat(Op::Ternary, {P::OpPat(Op::Lt, {P::Wild("a"), P::Wild("b")}),
                                 P::ConstPat(0), P::ConstPat(1)}),
@@ -6701,7 +6701,7 @@ std::vector<RewriteRule> getAdvancedBitwiseRules() {
             return g.addBinOp(Op::Ge, s.at("a"), s.at("b"));
         });
 
-    // (a > b) ? c : d  when c == 0 and d == 1 → a <= b
+    // (a > b) ? 0 : 1 → a <= b
     rules.emplace_back("ternary_gt_0_1_to_le",
         P::OpPat(Op::Ternary, {P::OpPat(Op::Gt, {P::Wild("a"), P::Wild("b")}),
                                 P::ConstPat(0), P::ConstPat(1)}),
@@ -8046,15 +8046,17 @@ std::vector<RewriteRule> getStrengthReductionRules() {
             return aClass.isNonNeg && bClass.isNonNeg;
         });
 
-    // ── Multiply-by-power-of-two-minus-one strength reduction ───────────
-    // x * (2^n - 1) → (x << n) - x
+    // ── Multiply-by-power-of-two-plus/minus-one strength reduction ─────
+    // x * (2^n + 1) → (x << n) + x
+    // x * (2^n - 1) → (x << n) - x  (already covered by existing rules)
     // These patterns cover common constants not already in the algebraic
-    // rules.  The shift+sub sequence avoids the multiplier and reduces
+    // rules.  The shift+add/sub sequence avoids the multiplier and reduces
     // latency on most x86-64 micro-architectures.
+    // 129 = 2^7 + 1
     rules.emplace_back("mul_129_shift",
         P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(129)}),
         [](EGraph& g, const Subst& s) {
-            // x*129 = (x<<7) + x
+            // x*129 = (x<<7) + x  since 129 = 2^7 + 1
             ClassId shl = g.addBinOp(Op::Shl, s.at("x"), g.addConst(7));
             return g.addBinOp(Op::Add, shl, s.at("x"));
         });
@@ -8065,10 +8067,11 @@ std::vector<RewriteRule> getStrengthReductionRules() {
             return g.addBinOp(Op::Add, shl, s.at("x"));
         });
 
+    // 257 = 2^8 + 1
     rules.emplace_back("mul_257_shift",
         P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(257)}),
         [](EGraph& g, const Subst& s) {
-            // x*257 = (x<<8) + x
+            // x*257 = (x<<8) + x  since 257 = 2^8 + 1
             ClassId shl = g.addBinOp(Op::Shl, s.at("x"), g.addConst(8));
             return g.addBinOp(Op::Add, shl, s.at("x"));
         });

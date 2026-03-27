@@ -886,6 +886,9 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             // body to run at the unrolled stride.  Without this hint, the
             // unroller may skip runtime unrolling if the trip count is not
             // a compile-time constant.
+            // Note: llvm.loop.unroll.runtime.disable=false is a double
+            // negative — false means "do NOT disable runtime unrolling",
+            // i.e. enable it.
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.unroll.runtime.disable"),
                            llvm::ConstantAsMetadata::get(
