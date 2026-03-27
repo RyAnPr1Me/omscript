@@ -958,14 +958,26 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     // induction variable monotonicity, and perform widening/narrowing
     // optimizations that are critical for loop vectorization.
     if (expr->op == "+") {
-        const bool bothOperandsNonNeg = nonNegValues_.count(left) && nonNegValues_.count(right);
-        auto* result = bothOperandsNonNeg
+        const bool leftNonNeg = nonNegValues_.count(left);
+        const bool rightNonNeg = nonNegValues_.count(right);
+        const bool bothOperandsNonNeg = leftNonNeg && rightNonNeg;
+        // Also detect non-negative constant operands for NSW/tracking.
+        bool constNonNeg = false;
+        if (!bothOperandsNonNeg) {
+            if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right))
+                constNonNeg = leftNonNeg && ci->getSExtValue() >= 0;
+            else if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left))
+                constNonNeg = rightNonNeg && ci->getSExtValue() >= 0;
+        }
+        const bool canNSW = bothOperandsNonNeg || constNonNeg;
+        auto* result = canNSW
             ? builder->CreateNSWAdd(left, right, "addtmp")
             : builder->CreateAdd(left, right, "addtmp");
-        // Track non-negativity: if both operands are known non-negative,
-        // the result is non-negative (assuming no overflow, which is true
-        // for typical loop counter arithmetic).
-        if (bothOperandsNonNeg)
+        // Track non-negativity: if both operands are known non-negative
+        // (including constant operands), the result is non-negative
+        // (assuming no overflow, which is true for typical loop counter
+        // arithmetic).
+        if (canNSW)
             nonNegValues_.insert(result);
         return result;
     } else if (expr->op == "-") {
@@ -1173,6 +1185,42 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 auto* shl3 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 3), "mul120.shl3");
                 return builder->CreateSub(shl7, shl3, "mul120", nf, ns);
             }
+            case 18: {
+                // n*18 → (n<<4) + (n<<1)  (= 16n + 2n)
+                auto* shl4 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 4), "mul18.shl4");
+                auto* shl1 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 1), "mul18.shl1");
+                return builder->CreateAdd(shl4, shl1, "mul18", nf, ns);
+            }
+            case 36: {
+                // n*36 → (n<<5) + (n<<2)  (= 32n + 4n)
+                auto* shl5 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 5), "mul36.shl5");
+                auto* shl2 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 2), "mul36.shl2");
+                return builder->CreateAdd(shl5, shl2, "mul36", nf, ns);
+            }
+            case 50: {
+                // n*50 → (n<<6) - (n<<4) + (n<<1)  (= 64n - 16n + 2n)
+                auto* shl6 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 6), "mul50.shl6");
+                auto* shl4 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 4), "mul50.shl4");
+                auto* shl1 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 1), "mul50.shl1");
+                auto* t = builder->CreateSub(shl6, shl4, "mul50.t", nf, ns);
+                return builder->CreateAdd(t, shl1, "mul50", nf, ns);
+            }
+            case 200: {
+                // n*200 → (n<<8) - (n<<6) + (n<<3)  (= 256n - 64n + 8n)
+                auto* shl8 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 8), "mul200.shl8");
+                auto* shl6 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 6), "mul200.shl6");
+                auto* shl3 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 3), "mul200.shl3");
+                auto* t = builder->CreateSub(shl8, shl6, "mul200.t", nf, ns);
+                return builder->CreateAdd(t, shl3, "mul200", nf, ns);
+            }
+            case 2048: {
+                // n*2048 → (n<<11)
+                return builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 11), "mul2048");
+            }
+            case 4096: {
+                // n*4096 → (n<<12)
+                return builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 12), "mul4096");
+            }
             case 256: {
                 // n*256 → (n<<8)
                 return builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 8), "mul256");
@@ -1217,8 +1265,23 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         }
         // When both operands are known non-negative, set nsw to enable
         // SCEV range analysis and strength reduction of derived expressions.
+        // Also set nsw when one operand is a positive constant and the other
+        // is non-negative — the product of two non-negative values cannot
+        // overflow into the negative range for typical program values.
         if (nonNegValues_.count(left) && nonNegValues_.count(right))
             return builder->CreateNSWMul(left, right, "multmp");
+        if (nonNegValues_.count(left)) {
+            if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
+                if (ci->getSExtValue() > 0)
+                    return builder->CreateNSWMul(left, right, "multmp");
+            }
+        }
+        if (nonNegValues_.count(right)) {
+            if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left)) {
+                if (ci->getSExtValue() > 0)
+                    return builder->CreateNSWMul(left, right, "multmp");
+            }
+        }
         return builder->CreateMul(left, right, "multmp");
     } else if (expr->op == "/" || expr->op == "%") {
         const bool isDivision = expr->op == "/";
@@ -1228,11 +1291,37 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         // arithmetic right shift with sign-correction for correct rounding
         // toward zero (C/OmScript semantics).  For modulo, we use
         // AND with (divisor - 1) after similar sign correction.
+        //
+        // When the dividend is provably non-negative, skip the sign correction
+        // entirely: a simple logical right shift (div) or AND mask (mod) suffices,
+        // saving 3 instructions per operation.
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
             const int64_t rv = ci->getSExtValue();
             if (rv > 0) {
                 const int s = log2IfPowerOf2(rv);
                 if (s > 0) {
+                    bool leftNonNeg = nonNegValues_.count(left) > 0;
+                    if (!leftNonNeg) {
+                        llvm::KnownBits KB = llvm::computeKnownBits(
+                            left, module->getDataLayout());
+                        leftNonNeg = KB.isNonNegative();
+                    }
+                    if (leftNonNeg) {
+                        // Non-negative dividend: no sign correction needed.
+                        // div: x >> s (logical shift — high bits are 0)
+                        // mod: x & (2^s - 1)
+                        if (isDivision) {
+                            auto* result = builder->CreateLShr(left,
+                                llvm::ConstantInt::get(getDefaultType(), s), "div.lshr");
+                            nonNegValues_.insert(result);
+                            return result;
+                        } else {
+                            auto* result = builder->CreateAnd(left,
+                                llvm::ConstantInt::get(getDefaultType(), (1LL << s) - 1), "mod.and");
+                            nonNegValues_.insert(result);
+                            return result;
+                        }
+                    }
                     if (isDivision) {
                         // Signed division by power-of-2: (x + (x >> 63 & (2^s - 1))) >> s
                         // This handles negative values correctly (rounds toward zero).
