@@ -464,6 +464,29 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
                            llvm::ConstantAsMetadata::get(
                                llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))}));
         }
+
+        // ── Auto-parallelization hints for while-loops ────────────
+        // Mirror the for-loop parallel_accesses metadata logic.
+        // While-loops are parallelizable when:
+        //   - -fparallelize is enabled and @noparallel not set
+        //   - The loop is not deeply nested
+        //   - The function is @parallel or @hot, or optimization is O3
+        const bool wantParallelWhile = enableParallelize_
+            && !currentFuncHintNoParallelize_
+            && loopNestDepth_ <= 1
+            && (currentFuncHintParallelize_
+                || currentFuncHintHot_
+                || optimizationLevel >= OptimizationLevel::O3);
+        if (wantParallelWhile) {
+            llvm::MDNode* accessGroup = llvm::MDNode::getDistinct(*context, {});
+            loopMDs.push_back(llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.parallel_accesses"),
+                           accessGroup}));
+            currentLoopAccessGroup_ = accessGroup;
+        } else {
+            currentLoopAccessGroup_ = nullptr;
+        }
+
         llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
         loopMD->replaceOperandWith(0, loopMD);
         backBrWhile->setMetadata(llvm::LLVMContext::MD_loop, loopMD);

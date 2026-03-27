@@ -53,6 +53,7 @@
 #include <llvm/Transforms/Scalar/CorrelatedValuePropagation.h>
 #include <llvm/Transforms/Scalar/ConstraintElimination.h>
 #include <llvm/Transforms/Scalar/DeadStoreElimination.h>
+#include <llvm/Transforms/Scalar/FlattenCFG.h>
 #include <llvm/Transforms/Scalar/Float2Int.h>
 #include <llvm/Transforms/Scalar/GVN.h>
 #include <llvm/Transforms/Scalar/IndVarSimplify.h>
@@ -135,15 +136,40 @@ namespace omscript {
 // bonusInstThreshold=6 allows up to 6 extra instructions to be speculated
 // when converting branches to selects — enough for cascading-if classify()
 // patterns and multi-condition guards without over-speculating complex branches.
+// convertSwitchRangeToICmp: converts switch statements with contiguous case
+// ranges to icmp+branch sequences, which are more efficient on modern OoO CPUs
+// with branch prediction than the switch dispatch table.
 static constexpr int kCFGSpeculationBonus = 6;
 static llvm::SimplifyCFGOptions aggressiveCFGOpts() {
     return llvm::SimplifyCFGOptions()
         .convertSwitchToLookupTable(true)
+        .convertSwitchRangeToICmp(true)
         .hoistCommonInsts(true)
         .sinkCommonInsts(true)
         .speculateBlocks(true)
         .forwardSwitchCondToPhi(true)
         .bonusInstThreshold(kCFGSpeculationBonus);
+}
+
+// Hyperblock-aggressive SimplifyCFG options for superblock/hyperblock formation.
+// Uses a much higher bonusInstThreshold (12) to convert more branches to
+// predicated (select) instructions, creating larger basic blocks that give
+// the scheduler and register allocator more freedom.  This is the IR-level
+// equivalent of hyperblock formation in traditional compilers.
+// needCanonicalLoops(false) allows SimplifyCFG to break canonical loop form
+// when it enables more aggressive if-conversion — the loop canonicalization
+// passes that run later will restore the form if needed.
+static constexpr int kHyperblockSpeculationBonus = 12;
+static llvm::SimplifyCFGOptions hyperblockCFGOpts() {
+    return llvm::SimplifyCFGOptions()
+        .convertSwitchToLookupTable(true)
+        .convertSwitchRangeToICmp(true)
+        .hoistCommonInsts(true)
+        .sinkCommonInsts(true)
+        .speculateBlocks(true)
+        .forwardSwitchCondToPhi(true)
+        .needCanonicalLoops(false)
+        .bonusInstThreshold(kHyperblockSpeculationBonus);
 }
 
 void CodeGenerator::resolveTargetCPU(std::string& cpu, std::string& features) const {
@@ -540,6 +566,56 @@ void CodeGenerator::runOptimizationPasses() {
     }
 #endif
 
+    // ── Superblock / Hyperblock Formation ───────────────────────────────
+    // At O3, add a dedicated superblock/hyperblock formation phase that
+    // creates larger basic blocks for better scheduling and register alloc.
+    //
+    // Superblock formation (trace scheduling): JumpThreading duplicates
+    // blocks along hot paths to create single-entry multiple-exit regions,
+    // eliminating branches that break instruction-level parallelism.
+    //
+    // Hyperblock formation (if-conversion): aggressive SimplifyCFG with a
+    // high speculation threshold converts diamond-shaped branch patterns
+    // into predicated (select) instructions, creating wider basic blocks
+    // that give the instruction scheduler and register allocator more
+    // freedom.  This is particularly effective for OmScript's pattern-
+    // matching style (cascading if-else classify() functions).
+    //
+    // The pipeline runs:
+    //   1. JumpThreading — duplicates blocks to form superblocks
+    //   2. DFAJumpThreading — handles state-machine/switch patterns
+    //   3. CorrelatedValuePropagation — sharpens value ranges from
+    //      conditions duplicated by JumpThreading
+    //   4. SpeculativeExecution — hoists cheap ops above remaining branches
+    //   5. SimplifyCFG(hyperblock) — converts remaining branches to selects
+    //   6. FlattenCFG — collapses nested if-else chains
+    //   7. InstCombine + DCE — clean up
+    //
+    // Registered at OptimizerEarlyEP so it runs after inlining has created
+    // the full intra-procedural CFG but before the loop optimizer and
+    // vectorizer — giving them larger, straighter basic blocks to work with.
+    if (optimizationLevel >= OptimizationLevel::O3) {
+        PB.registerOptimizerEarlyEPCallback(
+            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/) {
+            llvm::FunctionPassManager SuperblockFPM;
+            // Phase 1: Superblock formation — duplicate blocks along
+            // frequently-taken paths to form single-entry traces.
+            SuperblockFPM.addPass(llvm::JumpThreadingPass());
+            SuperblockFPM.addPass(llvm::DFAJumpThreadingPass());
+            // Phase 2: Sharpen value ranges exposed by block duplication.
+            SuperblockFPM.addPass(llvm::CorrelatedValuePropagationPass());
+            // Phase 3: Hoist cheap instructions above remaining branches.
+            SuperblockFPM.addPass(llvm::SpeculativeExecutionPass());
+            // Phase 4: Hyperblock formation — convert branches to selects.
+            SuperblockFPM.addPass(llvm::SimplifyCFGPass(hyperblockCFGOpts()));
+            SuperblockFPM.addPass(llvm::FlattenCFGPass());
+            // Phase 5: Cleanup — combine and eliminate dead code.
+            SuperblockFPM.addPass(llvm::InstCombinePass());
+            SuperblockFPM.addPass(llvm::ADCEPass());
+            MPM.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(SuperblockFPM)));
+        });
+    }
+
     // NOTE: InferFunctionAttrsPass is intentionally NOT registered here.
     // LLVM's default pipeline already includes it, and we previously added it
     // again as an explicit pipeline-start callback.  However, this pass auto-
@@ -795,6 +871,24 @@ void CodeGenerator::runOptimizationPasses() {
             // constant arrays).  Fewer unique constants means smaller data
             // sections, better D-cache utilization, and reduced link time.
             MPM.addPass(llvm::ConstantMergePass());
+        });
+    }
+
+    // At O3, add a post-vectorizer superblock formation phase.  After the
+    // loop vectorizer has transformed loops, the CFG often contains new
+    // scalar-epilogue paths, predicated blocks, and vector-select patterns
+    // that can be merged into larger basic blocks.  This improves the
+    // backend's instruction scheduling and reduces branch overhead in
+    // vectorized code.
+    if (optimizationLevel >= OptimizationLevel::O3) {
+        PB.registerOptimizerLastEPCallback(
+            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/) {
+            llvm::FunctionPassManager PostVecFPM;
+            PostVecFPM.addPass(llvm::JumpThreadingPass());
+            PostVecFPM.addPass(llvm::SpeculativeExecutionPass());
+            PostVecFPM.addPass(llvm::SimplifyCFGPass(hyperblockCFGOpts()));
+            PostVecFPM.addPass(llvm::InstCombinePass());
+            MPM.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(PostVecFPM)));
         });
     }
 
@@ -1600,6 +1694,21 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     fpm.add(llvm::createInstructionCombiningPass());
     fpm.add(llvm::createCFGSimplificationPass(aggressiveCFGOpts()));
     fpm.add(llvm::createDeadCodeEliminationPass());
+
+    // Phase 2.6: Superblock / Hyperblock formation for OPTMAX functions.
+    // After loop unrolling and cleanup, the CFG contains many small blocks
+    // from unrolled iterations and branch-heavy patterns.  We form
+    // superblocks (via GVN which implicitly threads branches through known
+    // values) and hyperblocks (via aggressive if-conversion with a high
+    // speculation threshold) to create larger basic blocks that improve
+    // instruction scheduling and reduce branch overhead.
+    fpm.add(llvm::createGVNPass());
+    fpm.add(llvm::createSpeculativeExecutionPass());
+    fpm.add(llvm::createCFGSimplificationPass(hyperblockCFGOpts()));
+    fpm.add(llvm::createFlattenCFGPass());
+    fpm.add(llvm::createInstructionCombiningPass());
+    fpm.add(llvm::createDeadCodeEliminationPass());
+
     // Phase 3: Post-loop optimizations
 #if LLVM_VERSION_MAJOR < 18
     fpm.add(llvm::createMergedLoadStoreMotionPass());
