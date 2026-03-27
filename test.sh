@@ -12,15 +12,17 @@ set -eu
 #  Methodology:
 #    - Warmup runs before timing to eliminate cold-start bias
 #    - Interleaved C/OM runs to spread system noise evenly
-#    - Median-of-N timing for robustness against outliers
+#    - Trimmed mean of N runs (drop 2 highest + 2 lowest) for
+#      robustness against outliers — more data than median, more
+#      resistant to noise than full average
 #    - CPU pinning (taskset) when available for reduced jitter
 #    - Standard deviation reported; noisy benchmarks flagged (~)
-#    - Short-duration benchmarks (<5 ms) flagged (⏱) as unreliable
+#    - Short-duration benchmarks (<10 ms) flagged (⏱) as unreliable
 #    - Geometric mean as primary aggregate metric (not skewed
 #      by a single slow/fast benchmark the way sum is)
 #    - No LTO for C (OM is single-file; LTO would give C unfair
 #      inter-procedural advantage that OM already gets natively)
-#    - Env vars: BENCH_RUNS (default 7), BENCH_WARMUP (default 2)
+#    - Env vars: BENCH_RUNS (default 11), BENCH_WARMUP (default 3)
 #
 #  Categories:
 #    - Integer arithmetic & math builtins
@@ -33,6 +35,9 @@ set -eu
 #    - Loops (nested, reduction, vectorizable)
 #    - Function calls / inlining
 #    - Bitwise / intrinsics
+#    - Vectorization (dot product, histogram)
+#    - Instruction-level parallelism (accumulator chain)
+#    - Modular arithmetic (Fibonacci iter, modular exponent)
 #    - Real-world kernels (matrix mul, sieve, prefix sum, hash,
 #      collatz, binary search)
 # ──────────────────────────────────────────────────────────────
@@ -78,6 +83,11 @@ BENCH_NAME=(
     "hash_compute"       # 22 — FNV-1a hash loop
     "collatz"            # 23 — Collatz-sequence lengths
     "binary_search"      # 24 — binary search in sorted array
+    "dot_product"        # 25 — vectorizable multiply-accumulate
+    "fibonacci_iter"     # 26 — iterative modular Fibonacci
+    "histogram"          # 27 — computed-index histogram binning
+    "accumulator_chain"  # 28 — dependent accumulator chain (ILP)
+    "modular_exp"        # 29 — modular exponentiation loop
 )
 
 BENCH_DESC=(
@@ -106,6 +116,11 @@ BENCH_DESC=(
     "FNV-1a style hash computation"
     "Collatz conjecture sequence lengths"
     "Binary search in a sorted array"
+    "Dot product of two integer arrays (vectorizable)"
+    "Iterative modular Fibonacci in a tight loop"
+    "Histogram binning with computed array indices"
+    "Four cross-dependent accumulators (ILP test)"
+    "Repeated modular exponentiation"
 )
 
 # Input sizes – tuned so each test runs ~20-200 ms in C.
@@ -135,6 +150,11 @@ BENCH_N=(
     5000000   # 22  hash_compute
     1000000   # 23  collatz
     5000000   # 24  binary_search
+    5000000   # 25  dot_product
+    50000000  # 26  fibonacci_iter
+    5000000   # 27  histogram
+    5000000   # 28  accumulator_chain
+    5000000   # 29  modular_exp
 )
 
 BOTTLENECK_LABELS=(
@@ -163,6 +183,11 @@ BOTTLENECK_LABELS=(
     "integer hash computation codegen"
     "branch-heavy integer loop"
     "loop + comparison codegen (binary search)"
+    "array + vectorization codegen (dot product)"
+    "integer-only loop codegen quality"
+    "computed-index array write pattern"
+    "instruction-level parallelism extraction"
+    "integer multiply + modular arithmetic codegen"
 )
 
 # ─── COLOR CODES ──────────────────────────────────────────────
@@ -642,6 +667,83 @@ fn bench_bsearch(@prefetch n:int) -> int {
     return found;
 }
 
+// ── 25. dot_product ──────────────────────────────────────────
+@hot @flatten @vectorize @unroll
+fn bench_dot(@prefetch n:int) -> int {
+    var a:int[] = array_fill(n, 0);
+    var b:int[] = array_fill(n, 0);
+    for (i:int in 0...n) {
+        a[i] = (i * 3 + 1) % 1000;
+        b[i] = (i * 7 + 2) % 1000;
+    }
+    var sum:int = 0;
+    for (i:int in 0...n) {
+        sum += a[i] * b[i];
+    }
+    invalidate a;
+    invalidate b;
+    return sum;
+}
+
+// ── 26. fibonacci_iter ───────────────────────────────────────
+@hot @flatten @unroll
+fn bench_fib_iter(@prefetch n:int) -> int {
+    var a:int = 0;
+    var b:int = 1;
+    for (i:int in 0...n) {
+        var t:int = b;
+        b = (a + b) % 1000000007;
+        a = t;
+    }
+    return b;
+}
+
+// ── 27. histogram ────────────────────────────────────────────
+@hot @flatten @unroll
+fn bench_histogram(@prefetch n:int) -> int {
+    var bins:int[] = array_fill(256, 0);
+    for (i:int in 0...n) {
+        var idx:int = ((i * 7) ^ (i >> 3)) & 255;
+        bins[idx] = bins[idx] + 1;
+    }
+    var sum:int = 0;
+    for (i:int in 0...256) {
+        sum += bins[i] * (i + 1);
+    }
+    invalidate bins;
+    return sum;
+}
+
+// ── 28. accumulator_chain ────────────────────────────────────
+@hot @flatten @unroll
+fn bench_accum(@prefetch n:int) -> int {
+    var a:int = 1;
+    var b:int = 2;
+    var c:int = 3;
+    var d:int = 4;
+    for (i:int in 1...n) {
+        a = a + (b ^ i);
+        b = b + (c & i);
+        c = c ^ (d + i);
+        d = d + (a | i);
+    }
+    return a + b + c + d;
+}
+
+// ── 29. modular_exp ──────────────────────────────────────────
+@hot @flatten @unroll
+fn bench_modexp(@prefetch n:int) -> int {
+    var result:int = 1;
+    var base:int = 3;
+    var modulus:int = 1000000007;
+    var acc:int = 0;
+    for (i:int in 1...n) {
+        result = (result * base) % modulus;
+        acc += result;
+    }
+    return acc;
+}
+
 OPTMAX!:
 
 // ── main dispatch ────────────────────────────────────────────
@@ -675,6 +777,11 @@ fn main() -> int {
         case 22: print(bench_hash(n));           break;
         case 23: print(bench_collatz(n));        break;
         case 24: print(bench_bsearch(n));        break;
+        case 25: print(bench_dot(n));            break;
+        case 26: print(bench_fib_iter(n));       break;
+        case 27: print(bench_histogram(n));      break;
+        case 28: print(bench_accum(n));          break;
+        case 29: print(bench_modexp(n));         break;
         default: print(0);
     }
     invalidate n;
@@ -1101,6 +1208,71 @@ static long bench_bsearch(long n) {
     return found;
 }
 
+/* 25 ── dot_product ────────────────────────────── */
+static long bench_dot(long n) {
+    long *a = malloc(n * sizeof(long));
+    long *b = malloc(n * sizeof(long));
+    for (long i = 0; i < n; i++) {
+        a[i] = (i * 3 + 1) % 1000;
+        b[i] = (i * 7 + 2) % 1000;
+    }
+    long sum = 0;
+    for (long i = 0; i < n; i++) {
+        sum += a[i] * b[i];
+    }
+    free(a); free(b);
+    return sum;
+}
+
+/* 26 ── fibonacci_iter ─────────────────────────── */
+static long bench_fib_iter(long n) {
+    long a = 0, b = 1;
+    for (long i = 0; i < n; i++) {
+        long t = b;
+        b = (a + b) % 1000000007L;
+        a = t;
+    }
+    return b;
+}
+
+/* 27 ── histogram ──────────────────────────────── */
+static long bench_histogram(long n) {
+    long *bins = calloc(256, sizeof(long));
+    for (long i = 0; i < n; i++) {
+        long idx = ((i * 7) ^ (i >> 3)) & 255;
+        bins[idx]++;
+    }
+    long sum = 0;
+    for (long i = 0; i < 256; i++) {
+        sum += bins[i] * (i + 1);
+    }
+    free(bins);
+    return sum;
+}
+
+/* 28 ── accumulator_chain ──────────────────────── */
+static long bench_accum(long n) {
+    long a = 1, b = 2, c = 3, d = 4;
+    for (long i = 1; i < n; i++) {
+        a = a + (b ^ i);
+        b = b + (c & i);
+        c = c ^ (d + i);
+        d = d + (a | i);
+    }
+    return a + b + c + d;
+}
+
+/* 29 ── modular_exp ────────────────────────────── */
+static long bench_modexp(long n) {
+    long result = 1, base = 3, modulus = 1000000007L;
+    long acc = 0;
+    for (long i = 1; i < n; i++) {
+        result = (result * base) % modulus;
+        acc += result;
+    }
+    return acc;
+}
+
 int main(void) {
     int test_id; long n;
     scanf("%d %ld", &test_id, &n);
@@ -1131,6 +1303,11 @@ int main(void) {
         case 22: r = bench_hash(n);           break;
         case 23: r = bench_collatz(n);        break;
         case 24: r = bench_bsearch(n);        break;
+        case 25: r = bench_dot(n);            break;
+        case 26: r = bench_fib_iter(n);       break;
+        case 27: r = bench_histogram(n);      break;
+        case 28: r = bench_accum(n);          break;
+        case 29: r = bench_modexp(n);         break;
     }
     printf("%ld\n", r);
     return 0;
@@ -1239,24 +1416,53 @@ run_one() {
     local c_min=${c_sorted[0]}
     local om_min=${om_sorted[0]}
 
-    C_TIMES[$id]=$ct
-    OM_TIMES[$id]=$ot
+    # Trimmed mean: drop the highest and lowest 2 runs to remove outliers,
+    # then average the remaining runs.  More robust than median for small
+    # sample sizes because it uses more data points while still rejecting
+    # extreme values from system noise.
+    local trim=2
+    local trim_count=$(( RUNS - trim * 2 ))
+    local c_trim_sum=0 om_trim_sum=0
+    if [ "$trim_count" -gt 0 ]; then
+        for (( t=trim; t<RUNS-trim; t++ )); do
+            c_trim_sum=$(( c_trim_sum + c_sorted[t] ))
+            om_trim_sum=$(( om_trim_sum + om_sorted[t] ))
+        done
+        local c_trimmed=$(( c_trim_sum / trim_count ))
+        local om_trimmed=$(( om_trim_sum / trim_count ))
+    else
+        local c_trimmed=$ct
+        local om_trimmed=$ot
+    fi
+
+    # Use trimmed mean as the primary timing metric for ratio calculation.
+    # Falls back to median for very short benchmarks where integer division
+    # artifacts in the trimmed mean could distort results.
+    local c_primary=$c_trimmed
+    local om_primary=$om_trimmed
+    if [ "$c_trimmed" -lt 3 ] || [ "$om_trimmed" -lt 3 ]; then
+        c_primary=$ct
+        om_primary=$ot
+    fi
+
+    C_TIMES[$id]=$c_primary
+    OM_TIMES[$id]=$om_primary
 
     local ratio
-    if [ "$ct" -eq 0 ]; then
-        if [ "$ot" -le 1 ]; then ratio=100; else ratio=$(( ot * 1000 )); fi
+    if [ "$c_primary" -eq 0 ]; then
+        if [ "$om_primary" -le 1 ]; then ratio=100; else ratio=$(( om_primary * 1000 )); fi
     else
-        ratio=$(( ot * 100 / ct ))
+        ratio=$(( om_primary * 100 / c_primary ))
     fi
     RATIOS[$id]=$ratio
 
     # Compute stddev to flag noisy benchmarks.
     local c_stddev om_stddev
-    c_stddev=$(awk -v med="$ct" 'BEGIN { s=0; n=0 }
+    c_stddev=$(awk -v med="$c_primary" 'BEGIN { s=0; n=0 }
         { d=$1-med; s+=d*d; n++ }
         END { if(n>1) printf "%.0f", sqrt(s/(n-1)); else print 0 }' \
         <<< "$(printf '%s\n' "${c_runs[@]}")")
-    om_stddev=$(awk -v med="$ot" 'BEGIN { s=0; n=0 }
+    om_stddev=$(awk -v med="$om_primary" 'BEGIN { s=0; n=0 }
         { d=$1-med; s+=d*d; n++ }
         END { if(n>1) printf "%.0f", sqrt(s/(n-1)); else print 0 }' \
         <<< "$(printf '%s\n' "${om_runs[@]}")")
@@ -1267,22 +1473,22 @@ run_one() {
     else                            tag="${RED}❌ bottleneck${RST}"
     fi
 
-    # Show noisy-benchmark warning when stddev > 15% of median.
+    # Show noisy-benchmark warning when stddev > 15% of trimmed mean.
     local noise=""
-    if [ "$ct" -gt 0 ] && [ "$(( c_stddev * 100 / ct ))" -gt 15 ]; then
+    if [ "$c_primary" -gt 0 ] && [ "$(( c_stddev * 100 / c_primary ))" -gt 15 ]; then
         noise=" ${YEL}~${RST}"
     fi
-    if [ "$ot" -gt 0 ] && [ "$(( om_stddev * 100 / ot ))" -gt 15 ]; then
+    if [ "$om_primary" -gt 0 ] && [ "$(( om_stddev * 100 / om_primary ))" -gt 15 ]; then
         noise=" ${YEL}~${RST}"
     fi
-    # Flag benchmarks under 5 ms as potentially unreliable due to
-    # timing resolution — 1 ms jitter on a 3 ms test is 33% noise.
-    if [ "$ct" -lt 5 ] || [ "$ot" -lt 5 ]; then
+    # Flag benchmarks under 10 ms as potentially unreliable due to
+    # timing resolution — 1 ms jitter on a 5 ms test is 20% noise.
+    if [ "$c_primary" -lt 10 ] || [ "$om_primary" -lt 10 ]; then
         noise="${noise} ${YEL}⏱${RST}"
     fi
 
     printf "  %-22s  C: %6d ms (±%3d)  OM: %6d ms (±%3d)  %4d%%  %b%b\n" \
-           "$name" "$ct" "$c_stddev" "$ot" "$om_stddev" "$ratio" "$tag" "$noise"
+           "$name" "$c_primary" "$c_stddev" "$om_primary" "$om_stddev" "$ratio" "$tag" "$noise"
 }
 
 # ─── RUN ──────────────────────────────────────────────────────
@@ -1300,9 +1506,10 @@ for (( id=0; id<NUM_BENCHMARKS; id++ )); do
 done
 
 echo ""
-echo -e "  ${YEL}~${RST} = noisy benchmark (stddev > 15% of median); results may be unreliable."
-echo -e "  ${YEL}⏱${RST} = very short benchmark (<5 ms); timing resolution may dominate."
+echo -e "  ${YEL}~${RST} = noisy benchmark (stddev > 15% of trimmed mean); results may be unreliable."
+echo -e "  ${YEL}⏱${RST} = very short benchmark (<10 ms); timing resolution may dominate."
 echo "  ± values show standard deviation across runs."
+echo "  Times use trimmed mean (drop 2 highest + 2 lowest of $RUNS runs)."
 
 if [ "$MISMATCH" -eq 1 ]; then
     echo ""
@@ -1312,16 +1519,16 @@ fi
 
 # ─── SCALING ──────────────────────────────────────────────────
 echo ""
-echo "╔═══════════════════════════════════════════════════════════════════════════╗"
-echo "║                    Loop Scaling  (x1  x2  x4)                           ║"
-echo "╚═══════════════════════════════════════════════════════════════════════════╝"
+echo "╔═══════════════════════════════════════════════════════════════════════════════════╗"
+echo "║                    Loop Scaling  (x1  x2  x4  x8)                               ║"
+echo "╚═══════════════════════════════════════════════════════════════════════════════════╝"
 echo ""
 echo "  Tests whether OM runtime scales linearly with input size, like C."
 echo ""
 
-SCALE_IDS=(0 6 7 9 14)
-SCALE_NAMES=("integer_math" "struct_access" "switch_branch" "while_loop" "bitwise_ops")
-SCALE_BASE=(250000 2000000 2000000 2000000 2000000)
+SCALE_IDS=(0 6 7 9 14 26 28)
+SCALE_NAMES=("integer_math" "struct_access" "switch_branch" "while_loop" "bitwise_ops" "fibonacci_iter" "accumulator_chain")
+SCALE_BASE=(125000 1000000 1000000 1000000 1000000 5000000 1000000)
 
 for si in "${!SCALE_IDS[@]}"; do
     sid=${SCALE_IDS[$si]}
@@ -1329,15 +1536,15 @@ for si in "${!SCALE_IDS[@]}"; do
     sbase=${SCALE_BASE[$si]}
 
     printf "  %-18s  " "$sname"
-    for mult in 1 2 4; do
+    for mult in 1 2 4 8; do
         sn=$(( sbase * mult ))
         # Warmup
         echo "$sid $sn" | $TASKSET ./bench_c  > /dev/null
         echo "$sid $sn" | $TASKSET ./bench_om > /dev/null
-        # Median-of-3 for scaling tests
+        # Median-of-5 for scaling tests (up from 3 for better reliability)
         sc_runs=()
         so_runs=()
-        for sr in 0 1 2; do
+        for sr in 0 1 2 3 4; do
             cs=$(date +%s%N)
             echo "$sid $sn" | $TASKSET ./bench_c > /dev/null
             ce=$(date +%s%N)
@@ -1350,8 +1557,8 @@ for si in "${!SCALE_IDS[@]}"; do
         done
         IFS=$'\n' sc_s=($(printf '%s\n' "${sc_runs[@]}" | sort -n)); unset IFS
         IFS=$'\n' so_s=($(printf '%s\n' "${so_runs[@]}" | sort -n)); unset IFS
-        ct=${sc_s[1]}
-        ot=${so_s[1]}
+        ct=${sc_s[2]}
+        ot=${so_s[2]}
 
         if [ "$ct" -gt 0 ]; then ratio=$(( ot * 100 / ct )); else ratio=100; fi
         printf "x%-2d C:%4dms OM:%4dms (%3d%%)  " "$mult" "$ct" "$ot" "$ratio"
@@ -1451,7 +1658,7 @@ END {
 
 echo "==================================================================="
 echo ""
-echo "  Methodology:  $RUNS timed runs + $WARMUP_RUNS warmup, median timing, interleaved C/OM"
+echo "  Methodology:  $RUNS timed runs + $WARMUP_RUNS warmup, trimmed mean (drop 2 high + 2 low), interleaved C/OM"
 echo ""
 echo "  Individual results:  $COUNT_FASTER faster, $COUNT_EQUAL tied, $COUNT_SLOWER slower (out of $NUM_BENCHMARKS)"
 echo ""
