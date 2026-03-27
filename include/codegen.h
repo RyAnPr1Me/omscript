@@ -266,6 +266,11 @@ class CodeGenerator {
     /// Used to emit llvm.assume hints for the optimizer.
     std::unordered_map<std::string, llvm::Value*> loopIterEndBound_;
 
+    /// Maps iterator variable name → its LLVM start bound value.
+    /// Used for negative-offset bounds check elision: in patterns like
+    /// for (i in C...n) { arr[i - K] }, knowing start >= K proves i-K >= 0.
+    std::unordered_map<std::string, llvm::Value*> loopIterStartBound_;
+
     // Stack of innermost catch-entry basic blocks, pushed/popped by
     // generateTryCatch(). generateThrow() branches directly to the top of this
     // stack when a throw occurs inside a try block, ensuring that control flow
