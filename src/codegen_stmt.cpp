@@ -939,6 +939,24 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
                            llvm::ConstantAsMetadata::get(
                                llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))}));
         }
+
+        // ── Enhanced vectorization: distribution hint ────────────────
+        // At O3 for non-nested ascending loops, hint that the loop may be
+        // distributed (split into multiple loops with simpler bodies).
+        // This enables LLVM to vectorize subsets of a loop body even when
+        // some parts have cross-iteration dependencies.
+        //
+        // Example:  for i in 0...n { arr[i]=i*2; sum+=arr[i] }
+        //   → Loop 1: for i in 0...n { arr[i]=i*2 }  (vectorizable)
+        //   → Loop 2: for i in 0...n { sum+=arr[i] }  (reduction)
+        if (optimizationLevel >= OptimizationLevel::O3
+            && stepKnownPositive && !deeplyNested && !bodyHasInnerLoop_) {
+            loopMDs.push_back(llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.distribute.enable"),
+                           llvm::ConstantAsMetadata::get(
+                               llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
+        }
+
         llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
         loopMD->replaceOperandWith(0, loopMD);
         backBr->setMetadata(llvm::LLVMContext::MD_loop, loopMD);
