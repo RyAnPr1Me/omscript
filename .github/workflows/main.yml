@@ -27,5 +27,5 @@ jobs:
           cmake -B build -DCMAKE_BUILD_TYPE=Release -DLLVM_DIR=/usr/lib/llvm-18/cmake
           cmake --build build --parallel $(nproc)
 
-      - name: Run tests
-        run: ./test.sh
+      - name: Run integration tests
+        run: bash run_tests.sh

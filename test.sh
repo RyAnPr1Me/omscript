@@ -1797,7 +1797,7 @@ run_one() {
 
 # ─── RUN ──────────────────────────────────────────────────────
 echo "╔═══════════════════════════════════════════════════════════════════════════════════╗"
-echo "║         Per-Function Benchmarks  (median of $RUNS runs, $WARMUP_RUNS warmup)                  ║"
+echo "║         Per-Function Benchmarks  (trimmed mean of $RUNS runs, $WARMUP_RUNS warmup)               ║"
 echo "╚═══════════════════════════════════════════════════════════════════════════════════╝"
 echo ""
 printf "  ${BLD}%-22s  %-20s %-20s %-7s %-12s${RST}\n" \
