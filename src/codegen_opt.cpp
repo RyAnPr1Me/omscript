@@ -1573,6 +1573,18 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     fpm.add(llvm::createDeadCodeEliminationPass());
     fpm.add(llvm::createCFGSimplificationPass(aggressiveCFGOpts()));
 
+    // Phase 3.6: Post-cleanup loop re-canonicalization.  After aggressive DCE
+    // and CFG simplification, loops may have simplified structure that enables
+    // further LICM and strength reduction.  Re-canonicalise loops and run
+    // another round of LICM + LSR to catch these opportunities.
+    fpm.add(llvm::createLoopSimplifyPass());
+    fpm.add(llvm::createLICMPass());
+    fpm.add(llvm::createLoopStrengthReducePass());
+    // MergeICmps transforms chains of integer comparisons (e.g. struct
+    // equality) into a single memcmp call.  Running it in OPTMAX catches
+    // comparison chains in classify()-style functions.
+    fpm.add(llvm::createMergeICmpsLegacyPass());
+
     // Phase 4: Final cleanup — InstSimplify, InstCombine, CFGSimplification,
     // and DCE remove dead code and simplify patterns exposed by loop and
     // control-flow transformations above.

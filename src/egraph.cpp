@@ -7397,6 +7397,203 @@ std::vector<RewriteRule> getRelationalRules() {
             return xClass.isNonNeg;
         });
 
+    // ─────────────────────────────────────────────────────────────────────
+    // Comparison with arithmetic: simplify comparisons involving ±1
+    // ─────────────────────────────────────────────────────────────────────
+
+    // (a - 1) >= 0 → a > 0  (when a is non-negative integer)
+    rules.emplace_back("sub1_ge0_to_gt0",
+        P::OpPat(Op::Ge, {P::OpPat(Op::Sub, {P::Wild("a"), P::ConstPat(1)}), P::ConstPat(0)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Gt, s.at("a"), g.addConst(0));
+        });
+
+    // (a + 1) <= 0 → a < 0
+    rules.emplace_back("add1_le0_to_lt0",
+        P::OpPat(Op::Le, {P::OpPat(Op::Add, {P::Wild("a"), P::ConstPat(1)}), P::ConstPat(0)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Lt, s.at("a"), g.addConst(0));
+        });
+
+    // (a - 1) < 0 → a <= 0
+    rules.emplace_back("sub1_lt0_to_le0",
+        P::OpPat(Op::Lt, {P::OpPat(Op::Sub, {P::Wild("a"), P::ConstPat(1)}), P::ConstPat(0)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Le, s.at("a"), g.addConst(0));
+        });
+
+    // (a + 1) > 0 → a >= 0
+    rules.emplace_back("add1_gt0_to_ge0",
+        P::OpPat(Op::Gt, {P::OpPat(Op::Add, {P::Wild("a"), P::ConstPat(1)}), P::ConstPat(0)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Ge, s.at("a"), g.addConst(0));
+        });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Multiply-then-shift strength reduction for common scale factors
+    // ─────────────────────────────────────────────────────────────────────
+    // These patterns arise in fixed-point arithmetic and hash computations
+    // where a multiplication by a small constant is followed by a shift.
+
+    // (x * 3) >> 1 → x + (x >> 1)  (approximate divide by 2/3)
+    rules.emplace_back("mul3_shr1",
+        P::OpPat(Op::Shr, {P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(3)}), P::ConstPat(1)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId shr = g.addBinOp(Op::Shr, s.at("x"), g.addConst(1));
+            return g.addBinOp(Op::Add, s.at("x"), shr);
+        });
+
+    // (x * 5) >> 2 → x + (x >> 2)  (approximate multiply by 5/4)
+    rules.emplace_back("mul5_shr2",
+        P::OpPat(Op::Shr, {P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(5)}), P::ConstPat(2)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId shr = g.addBinOp(Op::Shr, s.at("x"), g.addConst(2));
+            return g.addBinOp(Op::Add, s.at("x"), shr);
+        });
+
+    // (x * 7) >> 3 → x - (x >> 3)  (x - x/8 = 7x/8)
+    rules.emplace_back("mul7_shr3",
+        P::OpPat(Op::Shr, {P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(7)}), P::ConstPat(3)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId shr = g.addBinOp(Op::Shr, s.at("x"), g.addConst(3));
+            return g.addBinOp(Op::Sub, s.at("x"), shr);
+        });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Division chain folding: (x / C1) / C2 → x / (C1 * C2)
+    // Guard: C1*C2 must not overflow and both must be positive.
+    // ─────────────────────────────────────────────────────────────────────
+    rules.emplace_back("div_chain_fold",
+        P::OpPat(Op::Div, {P::OpPat(Op::Div, {P::Wild("x"), P::Wild("c1")}), P::Wild("c2")}),
+        [](EGraph& g, const Subst& s) {
+            auto c1 = g.getConstValue(s.at("c1"));
+            auto c2 = g.getConstValue(s.at("c2"));
+            return g.addBinOp(Op::Div, s.at("x"), g.addConst(*c1 * *c2));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto c1 = g.getConstValue(s.at("c1"));
+            auto c2 = g.getConstValue(s.at("c2"));
+            if (!c1 || !c2 || *c1 <= 0 || *c2 <= 0) return false;
+            // Guard against overflow: C1*C2 must fit in int64
+            return *c1 <= INT64_MAX / *c2;
+        });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Modulo chain folding: (x % C1) % C2 → x % C2  when C1 % C2 == 0
+    // If C1 is a multiple of C2, then x % C1 is in [0, C1-1], and
+    // taking mod C2 where C2 divides C1 gives the same result as x % C2.
+    // ─────────────────────────────────────────────────────────────────────
+    rules.emplace_back("mod_chain_fold",
+        P::OpPat(Op::Mod, {P::OpPat(Op::Mod, {P::Wild("x"), P::Wild("c1")}), P::Wild("c2")}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Mod, s.at("x"), s.at("c2"));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto c1 = g.getConstValue(s.at("c1"));
+            auto c2 = g.getConstValue(s.at("c2"));
+            if (!c1 || !c2 || *c1 <= 0 || *c2 <= 0) return false;
+            return (*c1 % *c2) == 0;
+        });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Power-of-two modulo for non-negative: x % (2^n) → x & (2^n - 1)
+    // This generalises the hardcoded mod_2/4/8/.../1024 patterns to ANY
+    // power-of-two modulus, catching x%2048, x%4096, x%8192, etc.
+    // ─────────────────────────────────────────────────────────────────────
+    rules.emplace_back("mod_any_pow2_to_and",
+        P::OpPat(Op::Mod, {P::Wild("x"), P::Wild("c")}),
+        [](EGraph& g, const Subst& s) {
+            auto c = g.getConstValue(s.at("c"));
+            return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(*c - 1));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto c = g.getConstValue(s.at("c"));
+            if (!c || *c <= 0) return false;
+            if ((*c & (*c - 1)) != 0) return false;  // not power of 2
+            // Must be > 1024 to avoid overlap with existing mod_2..mod_1024 rules
+            if (*c <= 1024) return false;
+            return g.isClassNonNeg(s.at("x"));
+        });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Division by power-of-two for non-negative: x / (2^n) → x >> n
+    // Generalises to ANY power-of-two divisor beyond the existing 2048/4096.
+    // ─────────────────────────────────────────────────────────────────────
+    rules.emplace_back("div_any_pow2_to_shr",
+        P::OpPat(Op::Div, {P::Wild("x"), P::Wild("c")}),
+        [](EGraph& g, const Subst& s) {
+            auto c = g.getConstValue(s.at("c"));
+            int64_t val = *c;
+            int n = 0;
+            while (val > 1) { val >>= 1; n++; }
+            return g.addBinOp(Op::Shr, s.at("x"), g.addConst(n));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto c = g.getConstValue(s.at("c"));
+            if (!c || *c <= 0) return false;
+            if ((*c & (*c - 1)) != 0) return false;  // not power of 2
+            // Only fire for values > 4096 to avoid overlap with existing rules
+            if (*c <= 4096) return false;
+            return g.isClassNonNeg(s.at("x"));
+        });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Ternary min/max with same operand: min(a, a) → a, max(a, a) → a
+    // ─────────────────────────────────────────────────────────────────────
+    rules.emplace_back("ternary_lt_same_is_identity",
+        P::OpPat(Op::Ternary, {
+            P::OpPat(Op::Lt, {P::Wild("a"), P::Wild("a")}),
+            P::Wild("a"), P::Wild("a")
+        }),
+        [](EGraph&, const Subst& s) { return s.at("a"); });
+
+    rules.emplace_back("ternary_gt_same_is_identity",
+        P::OpPat(Op::Ternary, {
+            P::OpPat(Op::Gt, {P::Wild("a"), P::Wild("a")}),
+            P::Wild("a"), P::Wild("a")
+        }),
+        [](EGraph&, const Subst& s) { return s.at("a"); });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Double comparison elimination: (a > b) == 1 → a > b
+    // Since comparisons already produce 0 or 1, comparing the result
+    // against 1 is redundant.
+    // ─────────────────────────────────────────────────────────────────────
+    rules.emplace_back("cmp_eq1_identity",
+        P::OpPat(Op::Eq, {P::Wild("x"), P::ConstPat(1)}),
+        [](EGraph&, const Subst& s) { return s.at("x"); },
+        [](const EGraph& g, const Subst& s) -> bool {
+            return g.isClassBoolean(s.at("x"));
+        });
+
+    // bool_expr == 0 → !bool_expr
+    rules.emplace_back("cmp_eq0_to_not",
+        P::OpPat(Op::Eq, {P::Wild("x"), P::ConstPat(0)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addUnaryOp(Op::LogNot, s.at("x"));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            return g.isClassBoolean(s.at("x"));
+        });
+
+    // bool_expr != 0 → bool_expr
+    rules.emplace_back("cmp_ne0_identity",
+        P::OpPat(Op::Ne, {P::Wild("x"), P::ConstPat(0)}),
+        [](EGraph&, const Subst& s) { return s.at("x"); },
+        [](const EGraph& g, const Subst& s) -> bool {
+            return g.isClassBoolean(s.at("x"));
+        });
+
+    // bool_expr != 1 → !bool_expr
+    rules.emplace_back("cmp_ne1_to_not",
+        P::OpPat(Op::Ne, {P::Wild("x"), P::ConstPat(1)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addUnaryOp(Op::LogNot, s.at("x"));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            return g.isClassBoolean(s.at("x"));
+        });
+
     return rules;
 }
 

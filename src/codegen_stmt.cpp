@@ -1390,6 +1390,29 @@ void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
 
     loopStack.pop_back();
 
+    // At O2+, add branch weight metadata to the switch instruction.
+    // Uniform weights tell the optimizer that all cases are equally likely,
+    // which enables SimplifyCFG's switch-to-lookup-table conversion and
+    // prevents the backend from biasing layout toward any particular case.
+    // Without explicit weights, LLVM may assume the default case is cold
+    // and misoptimize the jump table structure.
+    if (optimizationLevel >= OptimizationLevel::O2) {
+        const unsigned numCases = switchInst->getNumCases();
+        const bool hasDefault = (defaultBB != mergeBB);
+        const unsigned totalSuccessors = numCases + (hasDefault ? 1 : 0);
+        if (totalSuccessors > 0) {
+            llvm::SmallVector<uint32_t, 16> weights;
+            // Default case weight (first weight in the metadata)
+            weights.push_back(hasDefault ? 1 : 0);
+            // Per-case weights: uniform distribution
+            for (unsigned i = 0; i < numCases; ++i) {
+                weights.push_back(1);
+            }
+            llvm::MDNode* brWeights = llvm::MDBuilder(*context).createBranchWeights(weights);
+            switchInst->setMetadata(llvm::LLVMContext::MD_prof, brWeights);
+        }
+    }
+
     builder->SetInsertPoint(mergeBB);
 }
 
