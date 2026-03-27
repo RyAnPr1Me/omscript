@@ -5,9 +5,18 @@ set -eu
 # ──────────────────────────────────────────────────────────────
 #  OmScript Benchmark Suite  (Fair Edition)
 #
-#  30 diverse micro-benchmarks covering distinct workloads.
+#  36 diverse micro-benchmarks covering distinct workloads.
 #  No category is over-represented.  Both OM and C implementations
 #  are idiomatic and use the same algorithm.
+#
+#  Fair-comparison design:
+#    - C compiled with clang (same LLVM backend as OM) so any
+#      performance difference reflects frontend IR quality, not
+#      backend differences between GCC and LLVM
+#    - Override with BENCH_CC=gcc if desired
+#    - No LTO for C (OM is single-file; LTO would give C unfair
+#      inter-procedural advantage that OM already gets natively)
+#    - No -ffast-math for either side (unsafe / non-IEEE)
 #
 #  Methodology:
 #    - Warmup runs before timing to eliminate cold-start bias
@@ -20,9 +29,8 @@ set -eu
 #    - Short-duration benchmarks (<10 ms) flagged (⏱) as unreliable
 #    - Geometric mean as primary aggregate metric (not skewed
 #      by a single slow/fast benchmark the way sum is)
-#    - No LTO for C (OM is single-file; LTO would give C unfair
-#      inter-procedural advantage that OM already gets natively)
-#    - Env vars: BENCH_RUNS (default 11), BENCH_WARMUP (default 3)
+#    - Env vars: BENCH_RUNS (default 11), BENCH_WARMUP (default 3),
+#               BENCH_CC (default: clang-18 > clang > gcc)
 #
 #  Categories:
 #    - Integer arithmetic & math builtins
@@ -1623,11 +1631,20 @@ echo "  Compilation Timing"
 echo "────────────────────────────────────────────────────────────────"
 
 OM_FLAGS="-O3 -march=native -mtune=native -fvectorize -funroll-loops -floop-optimize -fparallelize"
-# C flags: no -flto since OM doesn't use LTO (single-file compilation gets
-# no cross-TU benefit).  Adding -fno-plt avoids PLT indirection overhead
-# that OmScript never incurs.  This levels the playing field.
+# Use clang (same LLVM backend as OM) for a fair comparison — any perf
+# difference reflects frontend IR quality, not GCC-vs-LLVM backend diffs.
+# Override: BENCH_CC=gcc bash test.sh
+# No -flto: single-file compilation gets no cross-TU benefit anyway.
+# -fno-plt: avoids PLT indirection overhead that OmScript never incurs.
 # NOTE: -ffast-math removed from both OM and C flags — it is unsafe and can
 # produce incorrect results for edge cases (NaN, Inf, signed zeros).
+CC="${BENCH_CC:-}"
+if [ -z "$CC" ]; then
+    if command -v clang-18 &>/dev/null; then CC="clang-18"
+    elif command -v clang   &>/dev/null; then CC="clang"
+    else                                      CC="gcc"
+    fi
+fi
 C_FLAGS="-O3 -march=native -mtune=native -funroll-loops -fno-plt -lm"
 
 echo "Compiling OM ($OMSC $OM_FLAGS) …"
@@ -1637,9 +1654,9 @@ OM_COMP_END=$(date +%s%N)
 OM_COMP_MS=$(( (OM_COMP_END - OM_COMP_START) / 1000000 ))
 echo "  OM compile time: ${OM_COMP_MS} ms"
 
-echo "Compiling C  (gcc $C_FLAGS) …"
+echo "Compiling C  ($CC $C_FLAGS) …"
 C_COMP_START=$(date +%s%N)
-gcc bench.c $C_FLAGS -o bench_c
+$CC bench.c $C_FLAGS -o bench_c
 C_COMP_END=$(date +%s%N)
 C_COMP_MS=$(( (C_COMP_END - C_COMP_START) / 1000000 ))
 echo "  C  compile time: ${C_COMP_MS} ms"
