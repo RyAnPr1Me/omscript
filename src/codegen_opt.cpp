@@ -763,8 +763,9 @@ void CodeGenerator::runOptimizationPasses() {
     // constants folded in.  This is especially beneficial for OmScript programs
     // that use helper functions dispatched from a central switch/case.
     if (optimizationLevel >= OptimizationLevel::O2) {
+        const bool isO3 = optimizationLevel >= OptimizationLevel::O3;
         PB.registerOptimizerLastEPCallback(
-            [this](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/) {
+            [isO3](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/) {
             // IPSCCPPass performs inter-procedural sparse conditional constant
             // propagation — a more powerful version of SCCP that propagates
             // constants, value ranges, and struct field values across function
@@ -773,7 +774,7 @@ void CodeGenerator::runOptimizationPasses() {
             // always called with a specific constant argument.
             MPM.addPass(llvm::IPSCCPPass());
             MPM.addPass(llvm::DeadArgumentEliminationPass());
-            if (optimizationLevel >= OptimizationLevel::O3) {
+            if (isO3) {
                 // PartialInlinerPass outlines cold regions (error handling, slow
                 // paths) from otherwise-hot functions and inlines only the hot
                 // entry region into callers.  This gives the performance benefit

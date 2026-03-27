@@ -7867,29 +7867,6 @@ std::vector<RewriteRule> getStrengthReductionRules() {
             return g.addBinOp(Op::Sub, diff1, s3);
         });
 
-    // ── Collatz odd-branch compound pattern ─────────────────────────────
-    // 3*x + 1 → (x << 1) + x + 1
-    // This optimizes the Collatz odd-branch computation by replacing the
-    // multiply with shift+add.  The e-graph already has x*3 → (x<<1)+x,
-    // but the compound 3*x+1 pattern enables the optimizer to consider
-    // the full expression as a single unit for cost comparison.
-    rules.emplace_back("mul3_add1_to_shl_add",
-        P::OpPat(Op::Add, {P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(3)}), P::ConstPat(1)}),
-        [](EGraph& g, const Subst& s) {
-            auto shifted = g.addBinOp(Op::Shl, s.at("x"), g.addConst(1));
-            auto sum = g.addBinOp(Op::Add, shifted, s.at("x"));
-            return g.addBinOp(Op::Add, sum, g.addConst(1));
-        });
-
-    // Commuted form: 1 + 3*x → (x << 1) + x + 1
-    rules.emplace_back("add1_mul3_to_shl_add",
-        P::OpPat(Op::Add, {P::ConstPat(1), P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(3)})}),
-        [](EGraph& g, const Subst& s) {
-            auto shifted = g.addBinOp(Op::Shl, s.at("x"), g.addConst(1));
-            auto sum = g.addBinOp(Op::Add, shifted, s.at("x"));
-            return g.addBinOp(Op::Add, sum, g.addConst(1));
-        });
-
     // ── Non-negative squaring ───────────────────────────────────────────
     // x * x → result is always non-negative (informational: the analysis
     // propagation marks x*x as non-neg, enabling downstream nsw/nuw flags)
