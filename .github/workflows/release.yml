@@ -112,8 +112,8 @@ jobs:
             -DLLVM_DIR="$LLVM_DIR" \
             -DPGO_GENERATE=ON \
             -DPGO_PROFILE_DIR="$PWD/pgo-profiles" \
-            "-DOMSC_VERSION=${{ steps.version.outputs.VERSION }}"\
             -DLTO=ON \
+            "-DOMSC_VERSION=${{ steps.version.outputs.VERSION }}"
           cmake --build build --config Release --parallel "$(nproc)"
 
       # Step 2: Run the instrumented compiler on comprehensive, real-world

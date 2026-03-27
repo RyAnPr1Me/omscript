@@ -2716,6 +2716,12 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     // The OPTMAX annotation is the user's compile-time guarantee that the
     // function is safe and well-behaved, enabling maximum optimization.
     if (inOptMaxFunction) {
+        // OPTMAX is the user's guarantee that this function always terminates,
+        // has no side effects on synchronization, and doesn't free memory that
+        // callers depend on.  These attributes enable LLVM to speculate calls,
+        // hoist them out of loops, and eliminate dead calls.
+        function->addFnAttr(llvm::Attribute::WillReturn);
+        function->addFnAttr(llvm::Attribute::NoSync);
         for (unsigned i = 0; i < function->arg_size(); ++i) {
             if (function->getArg(i)->getType()->isPointerTy()) {
                 function->addParamAttr(i, llvm::Attribute::NoAlias);
@@ -2781,6 +2787,14 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
                 function->addParamAttr(i, llvm::Attribute::NoCapture);
             }
         }
+    }
+
+    // OmScript is a single-threaded language — no concurrent memory access
+    // is possible.  nosync tells LLVM that this function does not communicate
+    // with other threads via memory or synchronization primitives, enabling
+    // store-to-load forwarding and dead store elimination across calls.
+    if (optimizationLevel >= OptimizationLevel::O2 && !inOptMaxFunction) {
+        function->addFnAttr(llvm::Attribute::NoSync);
     }
 
     // @unroll / @nounroll: per-function loop unrolling control.

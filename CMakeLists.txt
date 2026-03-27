@@ -129,24 +129,12 @@ target_compile_options(omsc PRIVATE
         -floop-nest-optimize
         -fgraphite-identity
 
-        # Fast math — allows reassociation, reciprocal approximations,
-        # and other FP transformations that improve throughput at the
-        # cost of strict IEEE-754 compliance.
-        -ffast-math
-
         # Code layout / size
         -ffunction-sections
         -fdata-sections
 
         # Big win for LLVM-style code
         -fno-semantic-interposition
-
-        # Intel AMX (Advanced Matrix Extensions) — enables tile-based
-        # matrix multiplication intrinsics for Sapphire Rapids+ CPUs.
-        -mamx-tile
-        -mamx-int8
-        -mamx-bf16
-        -mamx-fp16
 
         # Visibility (safe with export-dynamic)
         -fvisibility=hidden
