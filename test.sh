@@ -1420,11 +1420,21 @@ run_one() {
     # then average the remaining runs.  More robust than median for small
     # sample sizes because it uses more data points while still rejecting
     # extreme values from system noise.
-    local trim=2
+    # When RUNS < 5, trimming 2 from each end leaves nothing — fall back
+    # to trimming 1 from each end, or use plain median for very few runs.
+    local trim
+    if [ "$RUNS" -ge 5 ]; then
+        trim=2
+    elif [ "$RUNS" -ge 3 ]; then
+        trim=1
+    else
+        trim=0
+    fi
     local trim_count=$(( RUNS - trim * 2 ))
     local c_trim_sum=0 om_trim_sum=0
     if [ "$trim_count" -gt 0 ]; then
-        for (( t=trim; t<RUNS-trim; t++ )); do
+        local trim_end=$(( RUNS - trim ))
+        for (( t=trim; t<trim_end; t++ )); do
             c_trim_sum=$(( c_trim_sum + c_sorted[t] ))
             om_trim_sum=$(( om_trim_sum + om_sorted[t] ))
         done
