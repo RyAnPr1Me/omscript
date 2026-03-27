@@ -151,7 +151,7 @@ target_link_options(omsc PRIVATE
     $<$<CONFIG:Release>:
         -Wl,-O2
         -Wl,--gc-sections
-        -s
+        -static
     >
 )
 
