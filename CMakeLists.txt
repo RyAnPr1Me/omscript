@@ -5,7 +5,7 @@ cmake_minimum_required(VERSION 3.16)
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── Compiler cache ───────────────────────────────────────────────────────────
-set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
+
 find_program(CCACHE_PROGRAM ccache)
 find_program(SCCACHE_PROGRAM sccache)
 if(CCACHE_PROGRAM)
@@ -13,7 +13,14 @@ if(CCACHE_PROGRAM)
 elseif(SCCACHE_PROGRAM)
     set(CMAKE_CXX_COMPILER_LAUNCHER ${SCCACHE_PROGRAM})
 endif()
+include(CheckIPOSupported)
+check_ipo_supported(RESULT result OUTPUT output)
 
+if(result)
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
+else()
+    message(WARNING "IPO/LTO not supported: ${output}")
+endif()
 project(OmScript VERSION 3.7.0)
 
 # Version define
