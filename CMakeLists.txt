@@ -149,7 +149,7 @@ target_compile_options(omsc PRIVATE
 # ── Link options ──────────────────────────────────────────────────────────────
 target_link_options(omsc PRIVATE
     $<$<CONFIG:Release>:
-        -Wl,-O2
+        -Wl,-O3
         -Wl,--gc-sections
         -static
     >
