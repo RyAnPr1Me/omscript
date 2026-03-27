@@ -5,7 +5,8 @@ cmake_minimum_required(VERSION 3.16)
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── Compiler cache ───────────────────────────────────────────────────────────
-
+set(CMAKE_UNITY_BUILD ON)
+add_link_options(-fuse-ld=mold)
 find_program(CCACHE_PROGRAM ccache)
 find_program(SCCACHE_PROGRAM sccache)
 if(CCACHE_PROGRAM)
@@ -115,6 +116,7 @@ target_compile_options(omsc PRIVATE
     $<$<CONFIG:Release>:
         -O3
         -DNDEBUG
+        -s
 
         # Core perf
         -fno-plt
@@ -128,6 +130,7 @@ target_compile_options(omsc PRIVATE
 
         # Big win for LLVM-style code
         -fno-semantic-interposition
+        -fsanitize=address
 
         # Visibility (safe with export-dynamic)
         -fvisibility=hidden
