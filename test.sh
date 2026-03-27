@@ -55,7 +55,7 @@ if command -v taskset &>/dev/null; then
     TASKSET="taskset -c 0"
 fi
 
-NUM_BENCHMARKS=30
+NUM_BENCHMARKS=36
 
 BENCH_NAME=(
     "integer_math"       #  0 — GCD, log2, modular arithmetic
@@ -88,6 +88,12 @@ BENCH_NAME=(
     "histogram"          # 27 — computed-index histogram binning
     "accumulator_chain"  # 28 — dependent accumulator chain (ILP)
     "modular_exp"        # 29 — modular exponentiation loop
+    "strength_reduce"    # 30 — multiply/divide by small constants
+    "idiom_patterns"     # 31 — min/max/abs/rotate patterns
+    "fma_compute"        # 32 — floating-point multiply-add chains
+    "negative_offset"    # 33 — arr[i-1] lookback pattern (bounds elision)
+    "const_array_size"   # 34 — array_fill known-size bounds elision
+    "cond_arithmetic"    # 35 — conditional increment/decrement + Collatz
 )
 
 BENCH_DESC=(
@@ -121,6 +127,12 @@ BENCH_DESC=(
     "Histogram binning with computed array indices"
     "Four cross-dependent accumulators (ILP test)"
     "Repeated modular exponentiation"
+    "Multiply/divide by small constants (e-graph strength reduction)"
+    "Min/max/abs/rotate idiom patterns (superoptimizer)"
+    "Floating-point multiply-add chains (HGOE FMA generation)"
+    "Array lookback arr[i-1] pattern (negative-offset bounds elision)"
+    "Known-size array bounds elision (array_fill constant propagation)"
+    "Conditional increment/decrement + Collatz 3x+1 (superoptimizer + e-graph)"
 )
 
 # Input sizes – tuned so each test runs ~20-200 ms in C.
@@ -155,6 +167,12 @@ BENCH_N=(
     5000000   # 27  histogram
     5000000   # 28  accumulator_chain
     5000000   # 29  modular_exp
+    5000000   # 30  strength_reduce
+    5000000   # 31  idiom_patterns
+    2000000   # 32  fma_compute
+    5000000   # 33  negative_offset
+    5000000   # 34  const_array_size
+    5000000   # 35  cond_arithmetic
 )
 
 BOTTLENECK_LABELS=(
@@ -188,6 +206,12 @@ BOTTLENECK_LABELS=(
     "computed-index array write pattern"
     "instruction-level parallelism extraction"
     "integer multiply + modular arithmetic codegen"
+    "e-graph strength reduction for multiply/divide by constants"
+    "superoptimizer idiom recognition (min/max/abs/rotate)"
+    "hardware FMA generation for multiply-add chains"
+    "negative-offset bounds check elision (arr[i-1] lookback)"
+    "known-array-size bounds check elision (constant propagation)"
+    "conditional arithmetic + Collatz strength reduction"
 )
 
 # ─── COLOR CODES ──────────────────────────────────────────────
@@ -744,6 +768,145 @@ fn bench_modexp(@prefetch n:int) -> int {
     return acc;
 }
 
+// ── 30. strength_reduce ──────────────────────────────────────
+// Tests e-graph strength reduction: multiply and divide by small
+// constants (3,5,7,10,12,100), modulo by powers of 2, and
+// mixed shift-add patterns that the e-graph rewrites to cheaper
+// shift+add/sub sequences.
+@hot @flatten @unroll
+fn bench_strength(@prefetch n:int) -> int {
+    var acc:int = 0;
+    for (i:int in 1...n) {
+        acc += i * 3;
+        acc += i * 5;
+        acc += i * 7;
+        acc += i * 10;
+        acc += i * 12;
+        acc += i * 100;
+        acc += i / 4;
+        acc += i / 8;
+        acc += i % 16;
+        acc += i % 64;
+        acc ^= (i * 15);
+        acc ^= (i * 31);
+    }
+    return acc;
+}
+
+// ── 31. idiom_patterns ───────────────────────────────────────
+// Tests superoptimizer idiom recognition: min, max, absolute value,
+// conditional negation, and power-of-2 test patterns.
+// Patterns are written inline to match the C version exactly.
+@hot @flatten @unroll
+fn bench_idioms(@prefetch n:int) -> int {
+    var acc:int = 0;
+    for (i:int in 1...n) {
+        var x:int = i - (n / 2);
+        // abs(x) pattern — superoptimizer detects select(x<0, -x, x) → llvm.abs
+        if (x < 0) { acc += (0 - x); } else { acc += x; }
+        // min(i, n-i) pattern — superoptimizer detects select(a<b, a, b) → llvm.smin
+        var ni:int = n - i;
+        if (i < ni) { acc += i; } else { acc += ni; }
+        // max(a, b) pattern — superoptimizer detects select(a>b, a, b) → llvm.smax
+        var a:int = i % 100;
+        var b:int = ni % 100;
+        if (a > b) { acc += a; } else { acc += b; }
+        // Conditional negation pattern
+        if (i % 3 == 0) {
+            acc -= x;
+        } else {
+            acc += x;
+        }
+    }
+    return acc;
+}
+
+// ── 32. fma_compute ──────────────────────────────────────────
+// Tests HGOE FMA generation: floating-point multiply-add chains
+// of the form a*b+c and a*b+c*d that the hardware graph optimizer
+// converts to fused multiply-add instructions.
+@hot @flatten @unroll @vectorize
+fn bench_fma(@prefetch n:int) -> int {
+    var a:double = 1.0;
+    var b:double = 0.9999999;
+    var c:double = 0.0000001;
+    var acc:double = 0.0;
+    for (i:int in 1...n) {
+        var fi:double = to_float(i);
+        // a*b + c  pattern (single FMA)
+        acc = acc + (fi * b + c);
+        // a*b + c*d  pattern (chained FMA)
+        acc = acc + (fi * 0.3 + (fi + 1.0) * 0.7);
+        a = a * b + c;
+    }
+    return to_int(acc + a);
+}
+
+// ── 33. negative_offset ──────────────────────────────────────
+// Tests negative-offset bounds check elision: arr[i-1] lookback
+// pattern inside a loop starting from 1.  The compiler should
+// prove that i-1 >= 0 because the loop starts at 1, and that
+// i-1 < len(arr) because i < len(arr).
+@hot @flatten @unroll
+fn bench_negoffset(@prefetch n:int) -> int {
+    var arr:int[] = array_fill(n, 0);
+    for (i:int in 0...n) {
+        arr[i] = i * 3 + 1;
+    }
+    var acc:int = 0;
+    for (i:int in 1...n) {
+        // lookback pattern: arr[i - 1]
+        acc += arr[i] - arr[i - 1];
+        // double lookback
+        acc ^= arr[i - 1] * 2;
+    }
+    return acc;
+}
+
+// ── 34. const_array_size ─────────────────────────────────────
+// Tests known-array-size bounds elision: array_fill with constant
+// size + bounded loop access.  The compiler should track that
+// the array has exactly 1024 elements and elide bounds checks
+// when the loop bound <= 1024.
+@hot @flatten @unroll
+fn bench_constarray(@prefetch n:int) -> int {
+    var data:int[] = array_fill(1024, 0);
+    for (i:int in 0...1024) {
+        data[i] = i * i + i;
+    }
+    var acc:int = 0;
+    for (j:int in 0...n) {
+        var idx:int = j % 1024;
+        acc += data[idx];
+        acc ^= data[(j * 7) % 1024];
+    }
+    return acc;
+}
+
+// ── 35. cond_arithmetic ──────────────────────────────────────
+// Tests superoptimizer conditional increment/decrement detection.
+// Patterns: if(cond) x++; else x; → x + zext(cond)
+// These arise from conditional counter updates in tight loops.
+@hot @flatten @unroll
+fn bench_condarith(@prefetch n:int) -> int {
+    var acc:int = 0;
+    for (i:int in 1...n) {
+        // Conditional increment: acc += (i % 3 == 0) ? 1 : 0
+        if (i % 3 == 0) { acc += 1; }
+        // Conditional decrement: acc -= (i % 5 == 0) ? 1 : 0
+        if (i % 5 == 0) { acc -= 1; }
+        // Collatz 3x+1 pattern
+        var x:int = i;
+        if (x % 2 == 0) {
+            x = x / 2;
+        } else {
+            x = 3 * x + 1;
+        }
+        acc += x;
+    }
+    return acc;
+}
+
 OPTMAX!:
 
 // ── main dispatch ────────────────────────────────────────────
@@ -782,6 +945,12 @@ fn main() -> int {
         case 27: print(bench_histogram(n));      break;
         case 28: print(bench_accum(n));          break;
         case 29: print(bench_modexp(n));         break;
+        case 30: print(bench_strength(n));       break;
+        case 31: print(bench_idioms(n));         break;
+        case 32: print(bench_fma(n));            break;
+        case 33: print(bench_negoffset(n));      break;
+        case 34: print(bench_constarray(n));     break;
+        case 35: print(bench_condarith(n));      break;
         default: print(0);
     }
     invalidate n;
@@ -1273,6 +1442,125 @@ static long bench_modexp(long n) {
     return acc;
 }
 
+/* 30 ── strength_reduce ────────────────────────── */
+static long bench_strength(long n) {
+    long acc = 0;
+    for (long i = 1; i < n; i++) {
+        acc += i * 3;
+        acc += i * 5;
+        acc += i * 7;
+        acc += i * 10;
+        acc += i * 12;
+        acc += i * 100;
+        acc += i / 4;
+        acc += i / 8;
+        acc += i % 16;
+        acc += i % 64;
+        acc ^= (i * 15);
+        acc ^= (i * 31);
+    }
+    return acc;
+}
+
+/* 31 ── idiom_patterns ─────────────────────────── */
+static inline long my_abs(long x) {
+    if (x < 0) return -x;
+    return x;
+}
+static inline long my_min(long a, long b) {
+    if (a < b) return a;
+    return b;
+}
+static inline long my_max(long a, long b) {
+    if (a > b) return a;
+    return b;
+}
+static long bench_idioms(long n) {
+    long acc = 0;
+    for (long i = 1; i < n; i++) {
+        long x = i - (n / 2);
+        acc += my_abs(x);
+        acc += my_min(i, n - i);
+        acc += my_max(i % 100, (n - i) % 100);
+        /* Conditional negation pattern */
+        if (i % 3 == 0) {
+            acc -= x;
+        } else {
+            acc += x;
+        }
+    }
+    return acc;
+}
+
+/* 32 ── fma_compute ────────────────────────────── */
+static long bench_fma(long n) {
+    double a = 1.0;
+    double b = 0.9999999;
+    double c = 0.0000001;
+    double acc = 0.0;
+    for (long i = 1; i < n; i++) {
+        double fi = (double)i;
+        /* a*b + c  pattern (single FMA) */
+        acc = acc + (fi * b + c);
+        /* a*b + c*d  pattern (chained FMA) */
+        acc = acc + (fi * 0.3 + (fi + 1.0) * 0.7);
+        a = a * b + c;
+    }
+    return (long)(acc + a);
+}
+
+/* 33 ── negative_offset ────────────────────────── */
+static long bench_negoffset(long n) {
+    long* arr = (long*)calloc(n, sizeof(long));
+    for (long i = 0; i < n; i++) {
+        arr[i] = i * 3 + 1;
+    }
+    long acc = 0;
+    for (long i = 1; i < n; i++) {
+        /* lookback pattern: arr[i - 1] */
+        acc += arr[i] - arr[i - 1];
+        /* double lookback */
+        acc ^= arr[i - 1] * 2;
+    }
+    free(arr);
+    return acc;
+}
+
+/* 34 ── const_array_size ───────────────────────── */
+static long bench_constarray(long n) {
+    long data[1024];
+    for (long i = 0; i < 1024; i++) {
+        data[i] = i * i + i;
+    }
+    long acc = 0;
+    for (long j = 0; j < n; j++) {
+        long idx = j % 1024;
+        acc += data[idx];
+        acc ^= data[(j * 7) % 1024];
+    }
+    return acc;
+}
+
+/* 35 ── cond_arithmetic ────────────────────────── */
+static long bench_condarith(long n) {
+    long acc = 0;
+    for (long i = 1; i < n; i++) {
+        /* Conditional increment */
+        if (i % 3 == 0) { acc += 1; }
+        /* Conditional decrement */
+        if (i % 5 == 0) { acc -= 1; }
+        /* Collatz 3x+1 pattern */
+        long x = i;
+        if (x % 2 == 0) {
+            x = x / 2;
+        } else {
+            x = 3 * x + 1;
+        }
+        acc += x;
+    }
+    return acc;
+}
+
 int main(void) {
     int test_id; long n;
     scanf("%d %ld", &test_id, &n);
@@ -1308,6 +1596,12 @@ int main(void) {
         case 27: r = bench_histogram(n);      break;
         case 28: r = bench_accum(n);          break;
         case 29: r = bench_modexp(n);         break;
+        case 30: r = bench_strength(n);       break;
+        case 31: r = bench_idioms(n);         break;
+        case 32: r = bench_fma(n);            break;
+        case 33: r = bench_negoffset(n);      break;
+        case 34: r = bench_constarray(n);     break;
+        case 35: r = bench_condarith(n);      break;
     }
     printf("%ld\n", r);
     return 0;

@@ -95,6 +95,8 @@ enum class Idiom {
     ConditionalNeg, ///< Conditional negation pattern
     SaturatingAdd,  ///< Addition with overflow clamp
     SaturatingSub,  ///< Subtraction with underflow clamp
+    ConditionalIncrement,  ///< select(cond, x+1, x) → x + zext(cond)
+    ConditionalDecrement,  ///< select(cond, x-1, x) → x - zext(cond)
 };
 
 /// Result of idiom detection on an instruction or sequence.

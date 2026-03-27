@@ -7080,6 +7080,203 @@ std::vector<RewriteRule> getRelationalRules() {
             return val > 0 && (val & (val - 1)) == 0;  // check if c-1 is power of 2
         });
 
+    // ─────────────────────────────────────────────────────────────────────
+    // Collatz-style: 3*x+1 → (x << 1) + x + 1  (saves mul cost 3→2+1)
+    // Pattern: (x * 3) + 1 → (x + x + x) + 1 → ((x<<1) + x) + 1
+    // ─────────────────────────────────────────────────────────────────────
+    rules.emplace_back("mul3_add1_to_shl_add",
+        P::OpPat(Op::Add, {P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(3)}), P::ConstPat(1)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId shl1 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(1));
+            ClassId add = g.addBinOp(Op::Add, shl1, s.at("x"));
+            return g.addBinOp(Op::Add, add, g.addConst(1));
+        });
+
+    // Commuted: 1 + (x * 3)
+    rules.emplace_back("add1_mul3_to_shl_add",
+        P::OpPat(Op::Add, {P::ConstPat(1), P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(3)})}),
+        [](EGraph& g, const Subst& s) {
+            ClassId shl1 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(1));
+            ClassId add = g.addBinOp(Op::Add, shl1, s.at("x"));
+            return g.addBinOp(Op::Add, add, g.addConst(1));
+        });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Division of even values: x/2 → x>>1  when x is known even
+    // Detected via x = (y * 2), (y << 1), or x%2==0 analysis
+    // ─────────────────────────────────────────────────────────────────────
+    // (x * 2) / 2 → x  (no guard needed; exact divide)
+    rules.emplace_back("mul2_div2_cancel",
+        P::OpPat(Op::Div, {P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(2)}), P::ConstPat(2)}),
+        [](EGraph&, const Subst& s) { return s.at("x"); });
+
+    // (x << 1) / 2 → x  (shift-left by 1 is multiply by 2)
+    rules.emplace_back("shl1_div2_cancel",
+        P::OpPat(Op::Div, {P::OpPat(Op::Shl, {P::Wild("x"), P::ConstPat(1)}), P::ConstPat(2)}),
+        [](EGraph&, const Subst& s) { return s.at("x"); });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Ternary + comparison fusion (min/max at AST level)
+    // These enable the cost model to pick the cheapest representation.
+    // ─────────────────────────────────────────────────────────────────────
+
+    // (a < b) ? a : b  and  (a <= b) ? a : b  →  min(a, b) idiom
+    // We represent min/max via ternary with a canonical comparison,
+    // but we also give the optimizer the dual form for cost comparison.
+
+    // (a > b) ? a : b → (a < b) ? b : a  (normalize comparisons)
+    rules.emplace_back("ternary_gt_to_lt_swap",
+        P::OpPat(Op::Ternary, {
+            P::OpPat(Op::Gt, {P::Wild("a"), P::Wild("b")}),
+            P::Wild("a"), P::Wild("b")
+        }),
+        [](EGraph& g, const Subst& s) {
+            ClassId cmp = g.addBinOp(Op::Lt, s.at("a"), s.at("b"));
+            ENode sel(Op::Ternary, std::vector<ClassId>{cmp, s.at("b"), s.at("a")});
+            return g.add(sel);
+        });
+
+    // (a >= b) ? a : b → (a < b) ? b : a
+    rules.emplace_back("ternary_ge_to_lt_swap",
+        P::OpPat(Op::Ternary, {
+            P::OpPat(Op::Ge, {P::Wild("a"), P::Wild("b")}),
+            P::Wild("a"), P::Wild("b")
+        }),
+        [](EGraph& g, const Subst& s) {
+            ClassId cmp = g.addBinOp(Op::Lt, s.at("a"), s.at("b"));
+            ENode sel(Op::Ternary, std::vector<ClassId>{cmp, s.at("b"), s.at("a")});
+            return g.add(sel);
+        });
+
+    // (a > b) ? b : a → (a < b) ? a : b  (normalize min pattern)
+    rules.emplace_back("ternary_gt_swap_to_lt",
+        P::OpPat(Op::Ternary, {
+            P::OpPat(Op::Gt, {P::Wild("a"), P::Wild("b")}),
+            P::Wild("b"), P::Wild("a")
+        }),
+        [](EGraph& g, const Subst& s) {
+            ClassId cmp = g.addBinOp(Op::Lt, s.at("a"), s.at("b"));
+            ENode sel(Op::Ternary, std::vector<ClassId>{cmp, s.at("a"), s.at("b")});
+            return g.add(sel);
+        });
+
+    // (a >= b) ? b : a → (a <= b) ? a : b
+    rules.emplace_back("ternary_ge_swap_to_le",
+        P::OpPat(Op::Ternary, {
+            P::OpPat(Op::Ge, {P::Wild("a"), P::Wild("b")}),
+            P::Wild("b"), P::Wild("a")
+        }),
+        [](EGraph& g, const Subst& s) {
+            ClassId cmp = g.addBinOp(Op::Le, s.at("a"), s.at("b"));
+            ENode sel(Op::Ternary, std::vector<ClassId>{cmp, s.at("a"), s.at("b")});
+            return g.add(sel);
+        });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Modulo-comparison strength reduction (common in Collatz/sieve)
+    // x % 2 == 0  →  (x & 1) == 0  (bitwise cheaper than modulo)
+    // ─────────────────────────────────────────────────────────────────────
+    rules.emplace_back("mod2_eq0_to_and1_eq0",
+        P::OpPat(Op::Eq, {P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(2)}), P::ConstPat(0)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId andOp = g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(1));
+            return g.addBinOp(Op::Eq, andOp, g.addConst(0));
+        });
+
+    // x % 2 != 0  →  (x & 1) != 0
+    rules.emplace_back("mod2_ne0_to_and1_ne0",
+        P::OpPat(Op::Ne, {P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(2)}), P::ConstPat(0)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId andOp = g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(1));
+            return g.addBinOp(Op::Ne, andOp, g.addConst(0));
+        });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Conditional half: (x % 2 == 0) ? (x / 2) : y  →  ((x & 1) == 0) ? (x >> 1) : y
+    // This chains the mod2→and1 + div2→shr1 optimizations in a single ternary
+    // ─────────────────────────────────────────────────────────────────────
+    rules.emplace_back("collatz_even_branch",
+        P::OpPat(Op::Ternary, {
+            P::OpPat(Op::Eq, {P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(2)}), P::ConstPat(0)}),
+            P::OpPat(Op::Div, {P::Wild("x"), P::ConstPat(2)}),
+            P::Wild("y")
+        }),
+        [](EGraph& g, const Subst& s) {
+            ClassId andOp = g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(1));
+            ClassId cond = g.addBinOp(Op::Eq, andOp, g.addConst(0));
+            ClassId shr = g.addBinOp(Op::Shr, s.at("x"), g.addConst(1));
+            ENode sel(Op::Ternary, std::vector<ClassId>{cond, shr, s.at("y")});
+            return g.add(sel);
+        });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Non-negative division by small constants via multiply-high + shift
+    // x / 3 → (x * 0x5556) >> 16  for x in [0, 65535] — but at AST level
+    // we don't know bit-widths. Instead, these rules help the e-graph
+    // represent the division as a cheaper form that the LLVM backend can
+    // lower optimally. The key insight: marking x as non-negative lets
+    // LLVM use udiv instead of sdiv, which is ~2x cheaper on x86.
+    // ─────────────────────────────────────────────────────────────────────
+
+    // x / C → 0  when x is non-negative and C > max_possible_x
+    // (useful when x is known to be a small value like a boolean or %result)
+    rules.emplace_back("div_large_const_nonneg_boolean",
+        P::OpPat(Op::Div, {P::Wild("x"), P::Wild("c")}),
+        [](EGraph& g, const Subst&) { return g.addConst(0); },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto cv = g.getConstValue(s.at("c"));
+            if (!cv || *cv <= 1) return false;
+            const auto& xClass = g.getClass(s.at("x"));
+            return xClass.isBoolean && *cv > 1;
+        });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Mod of boolean: (bool_expr) % C → bool_expr  when C > 1
+    // If x is 0 or 1, then x%C = x for any C > 1
+    // ─────────────────────────────────────────────────────────────────────
+    rules.emplace_back("mod_of_boolean",
+        P::OpPat(Op::Mod, {P::Wild("x"), P::Wild("c")}),
+        [](EGraph&, const Subst& s) { return s.at("x"); },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto cv = g.getConstValue(s.at("c"));
+            if (!cv || *cv <= 1) return false;
+            const auto& xClass = g.getClass(s.at("x"));
+            return xClass.isBoolean;
+        });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Nested ternary simplification
+    // (c ? a : b) where c = (x == 0): (x == 0) ? a : b
+    // This enables short-circuit evaluation and branch-free select
+    // ─────────────────────────────────────────────────────────────────────
+
+    // (x == 0) ? 0 : f(x)  → trivially 0 when x==0 (identity)
+    // Already handled by ternary_true_cond/ternary_false_cond
+
+    // min(x, 0) when x is non-neg → 0 (a < b ? a : b where b=0, a non-neg)
+    rules.emplace_back("ternary_min_nonneg_zero",
+        P::OpPat(Op::Ternary, {
+            P::OpPat(Op::Lt, {P::Wild("x"), P::ConstPat(0)}),
+            P::Wild("x"), P::ConstPat(0)
+        }),
+        [](EGraph& g, const Subst&) { return g.addConst(0); },
+        [](const EGraph& g, const Subst& s) -> bool {
+            const auto& xClass = g.getClass(s.at("x"));
+            return xClass.isNonNeg;
+        });
+
+    // max(x, 0) when x is non-neg → x
+    rules.emplace_back("ternary_max_nonneg_zero",
+        P::OpPat(Op::Ternary, {
+            P::OpPat(Op::Gt, {P::Wild("x"), P::ConstPat(0)}),
+            P::Wild("x"), P::ConstPat(0)
+        }),
+        [](EGraph&, const Subst& s) { return s.at("x"); },
+        [](const EGraph& g, const Subst& s) -> bool {
+            const auto& xClass = g.getClass(s.at("x"));
+            return xClass.isNonNeg;
+        });
+
     return rules;
 }
 
@@ -7668,6 +7865,65 @@ std::vector<RewriteRule> getStrengthReductionRules() {
             auto s3 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(3));
             auto diff1 = g.addBinOp(Op::Sub, s10, s4);
             return g.addBinOp(Op::Sub, diff1, s3);
+        });
+
+    // ── Non-negative squaring ───────────────────────────────────────────
+    // x * x → result is always non-negative (informational: the analysis
+    // propagation marks x*x as non-neg, enabling downstream nsw/nuw flags)
+    // This rule doesn't transform — it's handled by analysis propagation.
+
+    // ── Multiply-by-constant then divide cancellation ───────────────────
+    // (x * C) / C → x  (already exists as mul_div_cancel)
+    // (x << N) >> N → x & ((1 << (64-N)) - 1)  (shift cancel with mask)
+    // Only for non-negative x where the high bits are zero.
+    rules.emplace_back("shl_shr_cancel_nonneg",
+        P::OpPat(Op::Shr, {P::OpPat(Op::Shl, {P::Wild("x"), P::Wild("n")}), P::Wild("n")}),
+        [](EGraph&, const Subst& s) { return s.at("x"); },
+        [](const EGraph& g, const Subst& s) -> bool {
+            // Only safe when x is non-negative and shift count is small
+            // enough that the sign bit isn't affected.
+            auto n = g.getConstValue(s.at("n"));
+            if (!n || *n <= 0 || *n >= 63) return false;
+            const auto& xClass = g.getClass(s.at("x"));
+            return xClass.isNonNeg;
+        });
+
+    // ── Boolean arithmetic simplifications ──────────────────────────────
+    // bool_expr * C → 0 or bool_expr or C based on value
+    // bool * bool → bool & bool  (cheaper: AND vs MUL)
+    rules.emplace_back("mul_booleans_to_and",
+        P::OpPat(Op::Mul, {P::Wild("a"), P::Wild("b")}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::BitAnd, s.at("a"), s.at("b"));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            const auto& aClass = g.getClass(s.at("a"));
+            const auto& bClass = g.getClass(s.at("b"));
+            return aClass.isBoolean && bClass.isBoolean;
+        });
+
+    // bool + bool → bool | bool when both are disjoint (max value 1)
+    // Actually bool + bool can be 0, 1, or 2, so this is NOT safe.
+    // But: bool | bool is safe (max 1) — skip this rule.
+
+    // ── Mod distribute over multiplication ──────────────────────────────
+    // (a * b) % C → ((a % C) * (b % C)) % C  when a, b non-negative
+    // This is useful for modular arithmetic chains where intermediate
+    // values can be reduced early, preventing overflow.
+    rules.emplace_back("mod_distribute_mul_nonneg",
+        P::OpPat(Op::Mod, {P::OpPat(Op::Mul, {P::Wild("a"), P::Wild("b")}), P::Wild("c")}),
+        [](EGraph& g, const Subst& s) {
+            auto aMod = g.addBinOp(Op::Mod, s.at("a"), s.at("c"));
+            auto bMod = g.addBinOp(Op::Mod, s.at("b"), s.at("c"));
+            auto prod = g.addBinOp(Op::Mul, aMod, bMod);
+            return g.addBinOp(Op::Mod, prod, s.at("c"));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto cv = g.getConstValue(s.at("c"));
+            if (!cv || *cv <= 0) return false;
+            const auto& aClass = g.getClass(s.at("a"));
+            const auto& bClass = g.getClass(s.at("b"));
+            return aClass.isNonNeg && bClass.isNonNeg;
         });
 
     return rules;

@@ -1076,6 +1076,202 @@ static std::optional<IdiomMatch> detectCountLeadingZeros(llvm::Instruction* inst
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Saturating addition: select(add_overflow(a,b), MAX, a+b) → uadd.sat(a,b)
+// Patterns detected:
+//   1. select(icmp ugt (a+b), a, MAX_UINT, a+b)  (unsigned overflow via wrap)
+//   2. select(extractvalue(@llvm.uadd.with.overflow(a,b), 1), MAX, sum)
+// ─────────────────────────────────────────────────────────────────────────────
+static std::optional<IdiomMatch> detectSaturatingAdd(llvm::Instruction* inst) {
+    auto* sel = llvm::dyn_cast<llvm::SelectInst>(inst);
+    if (!sel) return std::nullopt;
+    if (!sel->getType()->isIntegerTy()) return std::nullopt;
+
+    llvm::Value* cond = sel->getCondition();
+    llvm::Value* trueVal = sel->getTrueValue();
+    llvm::Value* falseVal = sel->getFalseValue();
+
+    // Pattern: select(icmp ult (a+b) a, MAX, a+b)
+    //   meaning: if (a+b) wrapped around (unsigned), return MAX; else return a+b
+    auto* icmp = llvm::dyn_cast<llvm::ICmpInst>(cond);
+    if (!icmp) return std::nullopt;
+
+    unsigned bitWidth = sel->getType()->getIntegerBitWidth();
+    uint64_t maxVal = bitWidth >= 64 ? ~uint64_t(0) : (1ULL << bitWidth) - 1;
+
+    // Check: trueVal == MAX_UINT and falseVal is the sum
+    if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(trueVal)) {
+        if (ci->getZExtValue() == maxVal) {
+            auto* sum = llvm::dyn_cast<llvm::BinaryOperator>(falseVal);
+            if (sum && sum->getOpcode() == llvm::Instruction::Add) {
+                // Check: icmp ult sum, a  (unsigned overflow detection)
+                if (icmp->getPredicate() == llvm::CmpInst::ICMP_ULT &&
+                    icmp->getOperand(0) == sum) {
+                    llvm::Value* a = sum->getOperand(0);
+                    llvm::Value* b = sum->getOperand(1);
+                    if (icmp->getOperand(1) == a || icmp->getOperand(1) == b) {
+                        IdiomMatch match;
+                        match.idiom = Idiom::SaturatingAdd;
+                        match.rootInst = inst;
+                        match.operands = {a, b};
+                        match.bitWidth = bitWidth;
+                        return match;
+                    }
+                }
+            }
+        }
+    }
+
+    // Also check reversed pattern: select(icmp ugt a (a+b), MAX, a+b)
+    if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(trueVal)) {
+        if (ci->getZExtValue() == maxVal) {
+            auto* sum = llvm::dyn_cast<llvm::BinaryOperator>(falseVal);
+            if (sum && sum->getOpcode() == llvm::Instruction::Add) {
+                if (icmp->getPredicate() == llvm::CmpInst::ICMP_UGT &&
+                    icmp->getOperand(1) == sum) {
+                    llvm::Value* a = sum->getOperand(0);
+                    llvm::Value* b = sum->getOperand(1);
+                    if (icmp->getOperand(0) == a || icmp->getOperand(0) == b) {
+                        IdiomMatch match;
+                        match.idiom = Idiom::SaturatingAdd;
+                        match.rootInst = inst;
+                        match.operands = {a, b};
+                        match.bitWidth = bitWidth;
+                        return match;
+                    }
+                }
+            }
+        }
+    }
+
+    return std::nullopt;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Saturating subtraction: select(icmp ult a b, 0, a-b) → usub.sat(a,b)
+// Pattern: clamp subtraction to zero instead of wrapping unsigned
+// ─────────────────────────────────────────────────────────────────────────────
+static std::optional<IdiomMatch> detectSaturatingSub(llvm::Instruction* inst) {
+    auto* sel = llvm::dyn_cast<llvm::SelectInst>(inst);
+    if (!sel) return std::nullopt;
+    if (!sel->getType()->isIntegerTy()) return std::nullopt;
+
+    llvm::Value* cond = sel->getCondition();
+    llvm::Value* trueVal = sel->getTrueValue();
+    llvm::Value* falseVal = sel->getFalseValue();
+
+    auto* icmp = llvm::dyn_cast<llvm::ICmpInst>(cond);
+    if (!icmp) return std::nullopt;
+
+    unsigned bitWidth = sel->getType()->getIntegerBitWidth();
+
+    // Pattern: select(icmp ult a b, 0, a-b)
+    // If a < b (unsigned), return 0; else return a - b
+    if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(trueVal)) {
+        if (ci->isZero()) {
+            auto* sub = llvm::dyn_cast<llvm::BinaryOperator>(falseVal);
+            if (sub && sub->getOpcode() == llvm::Instruction::Sub) {
+                llvm::Value* a = sub->getOperand(0);
+                llvm::Value* b = sub->getOperand(1);
+                // Check: icmp ult a, b
+                if (icmp->getPredicate() == llvm::CmpInst::ICMP_ULT &&
+                    icmp->getOperand(0) == a && icmp->getOperand(1) == b) {
+                    IdiomMatch match;
+                    match.idiom = Idiom::SaturatingSub;
+                    match.rootInst = inst;
+                    match.operands = {a, b};
+                    match.bitWidth = bitWidth;
+                    return match;
+                }
+            }
+        }
+    }
+
+    // Reversed: select(icmp uge a b, a-b, 0)
+    if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(falseVal)) {
+        if (ci->isZero()) {
+            auto* sub = llvm::dyn_cast<llvm::BinaryOperator>(trueVal);
+            if (sub && sub->getOpcode() == llvm::Instruction::Sub) {
+                llvm::Value* a = sub->getOperand(0);
+                llvm::Value* b = sub->getOperand(1);
+                if (icmp->getPredicate() == llvm::CmpInst::ICMP_UGE &&
+                    icmp->getOperand(0) == a && icmp->getOperand(1) == b) {
+                    IdiomMatch match;
+                    match.idiom = Idiom::SaturatingSub;
+                    match.rootInst = inst;
+                    match.operands = {a, b};
+                    match.bitWidth = bitWidth;
+                    return match;
+                }
+            }
+        }
+    }
+
+    return std::nullopt;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Conditional increment/decrement idiom detection
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Detect: select(cond, x+1, x) or select(cond, x-1, x)
+/// These patterns arise from if/else branches that conditionally adjust a
+/// counter.  Replacing with x + zext(cond) or x - zext(cond) eliminates
+/// the select instruction and produces a single add/sub with a zero-extended
+/// boolean, which is cheaper on all microarchitectures.
+static std::optional<IdiomMatch> detectConditionalIncrement(llvm::Instruction* inst) {
+    auto* sel = llvm::dyn_cast<llvm::SelectInst>(inst);
+    if (!sel) return std::nullopt;
+
+    llvm::Value* cond = sel->getCondition();
+    llvm::Value* trueVal = sel->getTrueValue();
+    llvm::Value* falseVal = sel->getFalseValue();
+
+    // Pattern 1: select(cond, x + 1, x)  →  x + zext(cond)
+    if (auto* addInst = llvm::dyn_cast<llvm::BinaryOperator>(trueVal)) {
+        if (addInst->getOpcode() == llvm::Instruction::Add) {
+            llvm::Value* lhs = addInst->getOperand(0);
+            llvm::Value* rhs = addInst->getOperand(1);
+            if (lhs == falseVal && isConstInt(rhs, 1)) {
+                IdiomMatch match;
+                match.idiom = Idiom::ConditionalIncrement;
+                match.rootInst = inst;
+                match.operands = {falseVal, cond};
+                match.bitWidth = inst->getType()->getIntegerBitWidth();
+                return match;
+            }
+            if (rhs == falseVal && isConstInt(lhs, 1)) {
+                IdiomMatch match;
+                match.idiom = Idiom::ConditionalIncrement;
+                match.rootInst = inst;
+                match.operands = {falseVal, cond};
+                match.bitWidth = inst->getType()->getIntegerBitWidth();
+                return match;
+            }
+        }
+
+        // Pattern 2: select(cond, x - 1, x)  →  x - zext(cond)
+        if (addInst->getOpcode() == llvm::Instruction::Sub) {
+            llvm::Value* lhs = addInst->getOperand(0);
+            llvm::Value* rhs = addInst->getOperand(1);
+            if (lhs == falseVal && isConstInt(rhs, 1)) {
+                IdiomMatch match;
+                match.idiom = Idiom::ConditionalDecrement;
+                match.rootInst = inst;
+                match.operands = {falseVal, cond};
+                match.bitWidth = inst->getType()->getIntegerBitWidth();
+                return match;
+            }
+        }
+    }
+
+    // Reverse patterns: select(cond, x, x+1) → x + zext(!cond)
+    // These are handled by LLVM's instcombine (select canonicalization),
+    // so we don't need to detect them here.
+
+    return std::nullopt;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main idiom detection
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1121,6 +1317,18 @@ std::vector<IdiomMatch> detectIdioms(llvm::BasicBlock& bb) {
             continue;
         }
         if (auto m = detectCountLeadingZeros(&inst)) {
+            results.push_back(std::move(*m));
+            continue;
+        }
+        if (auto m = detectSaturatingAdd(&inst)) {
+            results.push_back(std::move(*m));
+            continue;
+        }
+        if (auto m = detectSaturatingSub(&inst)) {
+            results.push_back(std::move(*m));
+            continue;
+        }
+        if (auto m = detectConditionalIncrement(&inst)) {
             results.push_back(std::move(*m));
             continue;
         }
@@ -1269,6 +1477,50 @@ static bool replaceIdiom(IdiomMatch& match) {
             return true;
         }
         return false;
+    }
+
+    case Idiom::SaturatingAdd: {
+        // Replace select(overflow_test, MAX, a+b) → llvm.uadd.sat(a, b)
+        llvm::Value* a = match.operands[0];
+        llvm::Value* b = match.operands[1];
+        llvm::Function* satAdd = OMSC_GET_INTRINSIC(
+            mod, llvm::Intrinsic::uadd_sat, {intTy});
+        llvm::Value* result = builder.CreateCall(satAdd, {a, b}, "uadd_sat");
+        match.rootInst->replaceAllUsesWith(result);
+        return true;
+    }
+
+    case Idiom::SaturatingSub: {
+        // Replace select(a < b, 0, a-b) → llvm.usub.sat(a, b)
+        llvm::Value* a = match.operands[0];
+        llvm::Value* b = match.operands[1];
+        llvm::Function* satSub = OMSC_GET_INTRINSIC(
+            mod, llvm::Intrinsic::usub_sat, {intTy});
+        llvm::Value* result = builder.CreateCall(satSub, {a, b}, "usub_sat");
+        match.rootInst->replaceAllUsesWith(result);
+        return true;
+    }
+
+    case Idiom::ConditionalIncrement: {
+        // Replace select(cond, x+1, x) → x + zext(cond, type)
+        // This eliminates the select and the intermediate add, producing
+        // a single zext + add sequence that is cheaper on all targets.
+        llvm::Value* x = match.operands[0];
+        llvm::Value* cond = match.operands[1];
+        llvm::Value* ext = builder.CreateZExt(cond, intTy, "cond.zext");
+        llvm::Value* result = builder.CreateAdd(x, ext, "cond.inc");
+        match.rootInst->replaceAllUsesWith(result);
+        return true;
+    }
+
+    case Idiom::ConditionalDecrement: {
+        // Replace select(cond, x-1, x) → x - zext(cond, type)
+        llvm::Value* x = match.operands[0];
+        llvm::Value* cond = match.operands[1];
+        llvm::Value* ext = builder.CreateZExt(cond, intTy, "cond.zext");
+        llvm::Value* result = builder.CreateSub(x, ext, "cond.dec");
+        match.rootInst->replaceAllUsesWith(result);
+        return true;
     }
 
     default:
@@ -3124,6 +3376,135 @@ bool synthesizeReplacement(llvm::Instruction* inst, const SynthesisConfig& confi
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Loop strength reduction — convert i*C to incremental addition
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Detect simple loop-induction-variable multiplications and convert them
+/// to additive induction variables.  For example:
+///
+///   for (i = 0; i < n; i++) { use(i * 7); }
+///   →
+///   iv = 0;
+///   for (i = 0; i < n; i++) { use(iv); iv += 7; }
+///
+/// This replaces a 3-cycle multiply with a 1-cycle add per iteration.
+/// LLVM's own strength reduction catches many of these, but our version
+/// runs earlier and handles patterns across basic blocks that LLVM misses
+/// in the presence of OmScript's ownership-aware IR.
+static unsigned loopStrengthReduce(llvm::Function& func) {
+    unsigned count = 0;
+
+    for (auto& bb : func) {
+        // Look for phi nodes — indicators of loop headers
+        for (auto& phi : bb.phis()) {
+            // Check if this phi is a simple integer induction variable:
+            //   %iv = phi [init, preheader], [%iv.next, latch]
+            //   %iv.next = add %iv, step
+            if (!phi.getType()->isIntegerTy()) continue;
+            if (phi.getNumIncomingValues() != 2) continue;
+
+            // Find the increment pattern
+            llvm::Value* init = nullptr;
+            llvm::Value* next = nullptr;
+            llvm::BasicBlock* latchBB = nullptr;
+
+            for (unsigned i = 0; i < 2; ++i) {
+                auto* incoming = phi.getIncomingValue(i);
+                auto* incomingBB = phi.getIncomingBlock(i);
+
+                if (auto* addInst = llvm::dyn_cast<llvm::BinaryOperator>(incoming)) {
+                    if (addInst->getOpcode() == llvm::Instruction::Add) {
+                        if (addInst->getOperand(0) == &phi || addInst->getOperand(1) == &phi) {
+                            llvm::Value* step = (addInst->getOperand(0) == &phi)
+                                ? addInst->getOperand(1) : addInst->getOperand(0);
+                            if (llvm::isa<llvm::ConstantInt>(step)) {
+                                next = incoming;
+                                latchBB = incomingBB;
+                                init = phi.getIncomingValue(1 - i);
+                            }
+                        }
+                    }
+                }
+            }
+            if (!init || !next || !latchBB) continue;
+
+            auto* addNext = llvm::cast<llvm::BinaryOperator>(next);
+            llvm::Value* step = (addNext->getOperand(0) == &phi)
+                ? addNext->getOperand(1) : addNext->getOperand(0);
+            auto* stepCI = llvm::cast<llvm::ConstantInt>(step);
+            int64_t stepVal = stepCI->getSExtValue();
+
+            // Now scan for users of the form: %iv * constant
+            // These are candidates for strength reduction
+            std::vector<llvm::BinaryOperator*> mulUsers;
+            for (auto* user : phi.users()) {
+                auto* binOp = llvm::dyn_cast<llvm::BinaryOperator>(user);
+                if (!binOp) continue;
+                if (binOp->getOpcode() != llvm::Instruction::Mul) continue;
+                if (binOp == addNext) continue; // Don't transform the increment itself
+
+                llvm::Value* mulConst = nullptr;
+                if (binOp->getOperand(0) == &phi && llvm::isa<llvm::ConstantInt>(binOp->getOperand(1)))
+                    mulConst = binOp->getOperand(1);
+                else if (binOp->getOperand(1) == &phi && llvm::isa<llvm::ConstantInt>(binOp->getOperand(0)))
+                    mulConst = binOp->getOperand(0);
+
+                if (mulConst && binOp->hasOneUse()) {
+                    mulUsers.push_back(binOp);
+                }
+            }
+
+            // For each mul user, create a new additive induction variable
+            for (auto* mulInst : mulUsers) {
+                llvm::Value* mulConst = llvm::isa<llvm::ConstantInt>(mulInst->getOperand(0))
+                    ? mulInst->getOperand(0) : mulInst->getOperand(1);
+                auto* constVal = llvm::cast<llvm::ConstantInt>(mulConst);
+                int64_t C = constVal->getSExtValue();
+
+                // Create new phi: iv_sr = phi [init*C, preheader], [iv_sr + step*C, latch]
+                llvm::IRBuilder<> headerBuilder(&bb, bb.getFirstInsertionPt());
+
+                auto* newPhi = headerBuilder.CreatePHI(phi.getType(), 2, "sr.iv");
+
+                // Init value: init * C
+                llvm::Value* initMul;
+                if (auto* initCI = llvm::dyn_cast<llvm::ConstantInt>(init)) {
+                    initMul = llvm::ConstantInt::get(phi.getType(), initCI->getSExtValue() * C);
+                } else {
+                    // Non-constant init: need to compute at runtime
+                    llvm::IRBuilder<> preBuilder(phi.getIncomingBlock(
+                        phi.getIncomingValue(0) == init ? 0 : 1)->getTerminator());
+                    initMul = preBuilder.CreateMul(init, constVal, "sr.init");
+                }
+
+                // Step increment: step * C
+                int64_t newStep = stepVal * C;
+                llvm::Value* newStepVal = llvm::ConstantInt::get(phi.getType(), newStep);
+
+                // Create increment in latch
+                llvm::IRBuilder<> latchBuilder(latchBB->getTerminator());
+                auto* newNext = latchBuilder.CreateAdd(newPhi, newStepVal, "sr.next",
+                    /*HasNUW=*/false, /*HasNSW=*/true);
+
+                // Wire up phi
+                for (unsigned i = 0; i < phi.getNumIncomingValues(); ++i) {
+                    if (phi.getIncomingValue(i) == init)
+                        newPhi->addIncoming(initMul, phi.getIncomingBlock(i));
+                    else
+                        newPhi->addIncoming(newNext, phi.getIncomingBlock(i));
+                }
+
+                // Replace the multiply with the new induction variable
+                mulInst->replaceAllUsesWith(newPhi);
+                count++;
+            }
+        }
+    }
+
+    return count;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Dead code elimination
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -3180,6 +3561,13 @@ SuperoptimizerStats superoptimizeFunction(llvm::Function& func,
     // Phase 2: Algebraic simplification
     if (config.enableAlgebraic) {
         stats.algebraicSimplified = applyAlgebraicSimplifications(func);
+    }
+
+    // Phase 2.5: Loop strength reduction — convert i*C to additive IVs
+    // Runs after algebraic simplification but before branch opts so that
+    // simplified multiply patterns are visible.
+    if (config.enableAlgebraic) {
+        stats.algebraicSimplified += loopStrengthReduce(func);
     }
 
     // Phase 3: Branch simplification (branch-to-select)

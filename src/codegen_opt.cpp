@@ -754,9 +754,18 @@ void CodeGenerator::runOptimizationPasses() {
     // have parameters that are never used in the function body.  Removing
     // these eliminates register pressure from passing dead values and
     // enables further inlining (smaller call signatures).
-    if (optimizationLevel >= OptimizationLevel::O3) {
+    //
+    // IPSCCPPass is lowered to O2+ (from O3) because OmScript compiles as a
+    // single translation unit — the full call graph is always available, making
+    // interprocedural constant propagation cheap and highly effective.  At O2,
+    // we enable function specialization (AllowFuncSpec=true by default) so that
+    // functions called with constant arguments get specialized clones with the
+    // constants folded in.  This is especially beneficial for OmScript programs
+    // that use helper functions dispatched from a central switch/case.
+    if (optimizationLevel >= OptimizationLevel::O2) {
+        const bool isO3 = optimizationLevel >= OptimizationLevel::O3;
         PB.registerOptimizerLastEPCallback(
-            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/) {
+            [isO3](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/) {
             // IPSCCPPass performs inter-procedural sparse conditional constant
             // propagation — a more powerful version of SCCP that propagates
             // constants, value ranges, and struct field values across function
@@ -765,12 +774,14 @@ void CodeGenerator::runOptimizationPasses() {
             // always called with a specific constant argument.
             MPM.addPass(llvm::IPSCCPPass());
             MPM.addPass(llvm::DeadArgumentEliminationPass());
-            // PartialInlinerPass outlines cold regions (error handling, slow
-            // paths) from otherwise-hot functions and inlines only the hot
-            // entry region into callers.  This gives the performance benefit
-            // of inlining (no call overhead on the fast path) without the
-            // code-size cost of inlining the entire function body.
-            MPM.addPass(llvm::PartialInlinerPass());
+            if (isO3) {
+                // PartialInlinerPass outlines cold regions (error handling, slow
+                // paths) from otherwise-hot functions and inlines only the hot
+                // entry region into callers.  This gives the performance benefit
+                // of inlining (no call overhead on the fast path) without the
+                // code-size cost of inlining the entire function body.
+                MPM.addPass(llvm::PartialInlinerPass());
+            }
         });
     }
 
@@ -1030,6 +1041,108 @@ void CodeGenerator::runOptimizationPasses() {
                 postInlineFPM.run(*F);
             }
             postInlineFPM.doFinalization();
+        }
+    }
+
+    // ── Function specialization for constant arguments ──────────────────
+    // When a non-recursive internal function is called with one or more
+    // constant arguments, clone it with those constants inlined.  The
+    // specialized version enables further constant folding, dead code
+    // elimination, and loop optimizations within the clone.
+    //
+    // This is a compile-time-only transformation: no runtime dispatch.
+    // We limit to small functions (≤200 instructions) and at most 4
+    // specializations per function to control code-size growth.
+    if (optimizationLevel >= OptimizationLevel::O3) {
+        unsigned totalSpecialized = 0;
+        constexpr unsigned kMaxSpecsPerFunc = 4;
+        constexpr unsigned kMaxFuncSizeForSpec = 200;
+
+        // Collect call sites with constant arguments
+        struct SpecCandidate {
+            llvm::CallBase* callSite;
+            llvm::Function* callee;
+            llvm::SmallVector<unsigned, 4> constArgIndices;
+        };
+        std::vector<SpecCandidate> candidates;
+
+        for (auto& F : *module) {
+            if (F.isDeclaration()) continue;
+            for (auto& BB : F) {
+                for (auto& I : BB) {
+                    auto* CB = llvm::dyn_cast<llvm::CallBase>(&I);
+                    if (!CB) continue;
+                    auto* callee = CB->getCalledFunction();
+                    if (!callee || callee->isDeclaration()) continue;
+                    if (callee->hasExactDefinition() == false) continue;
+                    if (callee->getInstructionCount() > kMaxFuncSizeForSpec) continue;
+                    if (callee == &F) continue;  // skip self-recursion
+
+                    llvm::SmallVector<unsigned, 4> constArgs;
+                    for (unsigned i = 0; i < CB->arg_size(); ++i) {
+                        if (llvm::isa<llvm::ConstantInt>(CB->getArgOperand(i)) ||
+                            llvm::isa<llvm::ConstantFP>(CB->getArgOperand(i))) {
+                            constArgs.push_back(i);
+                        }
+                    }
+                    if (!constArgs.empty()) {
+                        candidates.push_back({CB, callee, constArgs});
+                    }
+                }
+            }
+        }
+
+        // Group candidates by callee and specialize
+        std::unordered_map<llvm::Function*, unsigned> specCount;
+        for (auto& cand : candidates) {
+            if (specCount[cand.callee] >= kMaxSpecsPerFunc) continue;
+
+            // Create the specialized clone
+            llvm::ValueToValueMapTy VMap;
+            auto* clone = llvm::CloneFunction(cand.callee, VMap);
+            if (!clone) continue;
+
+            // Set constant arguments in the clone
+            for (unsigned argIdx : cand.constArgIndices) {
+                auto argIt = clone->arg_begin();
+                std::advance(argIt, argIdx);
+                llvm::Argument& cloneArg = *argIt;
+                llvm::Value* constVal = cand.callSite->getArgOperand(argIdx);
+                cloneArg.replaceAllUsesWith(constVal);
+            }
+
+            // Give the clone a unique name and internal linkage
+            clone->setName(cand.callee->getName() + ".spec." +
+                          std::to_string(specCount[cand.callee]));
+            clone->setLinkage(llvm::GlobalValue::InternalLinkage);
+
+            // Redirect the call site to use the specialized version
+            cand.callSite->setCalledFunction(clone);
+
+            specCount[cand.callee]++;
+            totalSpecialized++;
+        }
+
+        if (verbose_ && totalSpecialized > 0) {
+            std::cout << "    Function specialization: " << totalSpecialized
+                      << " call sites specialized" << std::endl;
+        }
+
+        // Run a cleanup pass on specialized functions
+        if (totalSpecialized > 0) {
+            llvm::legacy::FunctionPassManager specFPM(module.get());
+            specFPM.add(llvm::createGVNPass());
+            specFPM.add(llvm::createInstructionCombiningPass());
+            specFPM.add(llvm::createCFGSimplificationPass(aggressiveCFGOpts()));
+            specFPM.add(llvm::createDeadCodeEliminationPass());
+            specFPM.doInitialization();
+            for (auto& func : *module) {
+                if (func.isDeclaration()) continue;
+                if (func.getName().contains(".spec.")) {
+                    specFPM.run(func);
+                }
+            }
+            specFPM.doFinalization();
         }
     }
 

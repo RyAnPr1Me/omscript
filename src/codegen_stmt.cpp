@@ -152,6 +152,26 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
         } else {
             structVars_.erase(stmt->name);
         }
+        // Track known array sizes from array_fill(N, val) calls.
+        // When N is a compile-time constant (or a tracked value), record
+        // the size so that subsequent bounds checks on arr[i] can be
+        // proven statically without loading the length header at runtime.
+        if (stmt->initializer->type == ASTNodeType::CALL_EXPR) {
+            auto* callExpr = static_cast<CallExpr*>(stmt->initializer.get());
+            if (callExpr->callee == "array_fill" && callExpr->arguments.size() == 2) {
+                // The initValue is the result of array_fill, but sizeArg
+                // was the first argument.  Re-derive from the AST: if the
+                // first argument is a literal integer, store the constant.
+                auto* sizeExpr = callExpr->arguments[0].get();
+                if (sizeExpr->type == ASTNodeType::LITERAL_EXPR) {
+                    auto* lit = static_cast<LiteralExpr*>(sizeExpr);
+                    if (lit->literalType == LiteralExpr::LiteralType::INTEGER && lit->intValue > 0) {
+                        knownArraySizes_[stmt->name] =
+                            llvm::ConstantInt::get(getDefaultType(), lit->intValue);
+                    }
+                }
+            }
+        }
     } else {
         // Default-initialize based on type annotation.
         if (isSimdType) {
@@ -730,6 +750,10 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         if (startNonNegForElim) {
             safeIndexVars_.insert(stmt->iteratorVar);
             loopIterEndBound_[stmt->iteratorVar] = endVal;
+            // Track loop start bound for negative-offset bounds check
+            // elision: for patterns like for(i in C...n) { arr[i - K] },
+            // knowing start == C proves i - K >= C - K >= 0 when C >= K.
+            loopIterStartBound_[stmt->iteratorVar] = startVal;
         }
     }
 
@@ -740,6 +764,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     // Clean up: iterator no longer has guaranteed bounds outside the loop.
     safeIndexVars_.erase(stmt->iteratorVar);
     loopIterEndBound_.erase(stmt->iteratorVar);
+    loopIterStartBound_.erase(stmt->iteratorVar);
 
     if (!builder->GetInsertBlock()->getTerminator()) {
         builder->CreateBr(incBB);
@@ -939,6 +964,43 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
                            llvm::ConstantAsMetadata::get(
                                llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))}));
         }
+
+        // ── Enhanced vectorization: distribution hint ────────────────
+        // At O3 for non-nested ascending loops, hint that the loop may be
+        // distributed (split into multiple loops with simpler bodies).
+        // This enables LLVM to vectorize subsets of a loop body even when
+        // some parts have cross-iteration dependencies.
+        //
+        // Example:  for i in 0...n { arr[i]=i*2; sum+=arr[i] }
+        //   → Loop 1: for i in 0...n { arr[i]=i*2 }  (vectorizable)
+        //   → Loop 2: for i in 0...n { sum+=arr[i] }  (reduction)
+        if (optimizationLevel >= OptimizationLevel::O3
+            && stepKnownPositive && !deeplyNested && !bodyHasInnerLoop_) {
+            loopMDs.push_back(llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.distribute.enable"),
+                           llvm::ConstantAsMetadata::get(
+                               llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
+        }
+
+        // ── Software pipelining hint for @hot O3 innermost loops ─────
+        // At O3, for @hot non-nested loops with known positive step and
+        // no inner loops, enable software pipelining.  This tells the
+        // backend to overlap iterations by starting the next iteration
+        // before the current one finishes, hiding memory latency and FP
+        // pipeline stalls.  initiation interval = 1 is the most aggressive
+        // hint (one new iteration per cycle).
+        if (currentFuncHintHot_ && optimizationLevel >= OptimizationLevel::O3
+            && !deeplyNested && !bodyHasInnerLoop_ && stepKnownPositive) {
+            loopMDs.push_back(llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.pipeline.disable"),
+                           llvm::ConstantAsMetadata::get(
+                               llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 0))}));
+            loopMDs.push_back(llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.pipeline.initiationinterval"),
+                           llvm::ConstantAsMetadata::get(
+                               llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 1))}));
+        }
+
         llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
         loopMD->replaceOperandWith(0, loopMD);
         backBr->setMetadata(llvm::LLVMContext::MD_loop, loopMD);
