@@ -1210,6 +1210,68 @@ static std::optional<IdiomMatch> detectSaturatingSub(llvm::Instruction* inst) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Conditional increment/decrement idiom detection
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Detect: select(cond, x+1, x) or select(cond, x-1, x)
+/// These patterns arise from if/else branches that conditionally adjust a
+/// counter.  Replacing with x + zext(cond) or x - zext(cond) eliminates
+/// the select instruction and produces a single add/sub with a zero-extended
+/// boolean, which is cheaper on all microarchitectures.
+static std::optional<IdiomMatch> detectConditionalIncrement(llvm::Instruction* inst) {
+    auto* sel = llvm::dyn_cast<llvm::SelectInst>(inst);
+    if (!sel) return std::nullopt;
+
+    llvm::Value* cond = sel->getCondition();
+    llvm::Value* trueVal = sel->getTrueValue();
+    llvm::Value* falseVal = sel->getFalseValue();
+
+    // Pattern 1: select(cond, x + 1, x)  →  x + zext(cond)
+    if (auto* addInst = llvm::dyn_cast<llvm::BinaryOperator>(trueVal)) {
+        if (addInst->getOpcode() == llvm::Instruction::Add) {
+            llvm::Value* lhs = addInst->getOperand(0);
+            llvm::Value* rhs = addInst->getOperand(1);
+            if (lhs == falseVal && isConstInt(rhs, 1)) {
+                IdiomMatch match;
+                match.idiom = Idiom::ConditionalIncrement;
+                match.rootInst = inst;
+                match.operands = {falseVal, cond};
+                match.bitWidth = inst->getType()->getIntegerBitWidth();
+                return match;
+            }
+            if (rhs == falseVal && isConstInt(lhs, 1)) {
+                IdiomMatch match;
+                match.idiom = Idiom::ConditionalIncrement;
+                match.rootInst = inst;
+                match.operands = {falseVal, cond};
+                match.bitWidth = inst->getType()->getIntegerBitWidth();
+                return match;
+            }
+        }
+
+        // Pattern 2: select(cond, x - 1, x)  →  x - zext(cond)
+        if (addInst->getOpcode() == llvm::Instruction::Sub) {
+            llvm::Value* lhs = addInst->getOperand(0);
+            llvm::Value* rhs = addInst->getOperand(1);
+            if (lhs == falseVal && isConstInt(rhs, 1)) {
+                IdiomMatch match;
+                match.idiom = Idiom::ConditionalDecrement;
+                match.rootInst = inst;
+                match.operands = {falseVal, cond};
+                match.bitWidth = inst->getType()->getIntegerBitWidth();
+                return match;
+            }
+        }
+    }
+
+    // Reverse patterns: select(cond, x, x+1) → x + zext(!cond)
+    // These are handled by LLVM's instcombine (select canonicalization),
+    // so we don't need to detect them here.
+
+    return std::nullopt;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main idiom detection
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1263,6 +1325,10 @@ std::vector<IdiomMatch> detectIdioms(llvm::BasicBlock& bb) {
             continue;
         }
         if (auto m = detectSaturatingSub(&inst)) {
+            results.push_back(std::move(*m));
+            continue;
+        }
+        if (auto m = detectConditionalIncrement(&inst)) {
             results.push_back(std::move(*m));
             continue;
         }
@@ -1431,6 +1497,28 @@ static bool replaceIdiom(IdiomMatch& match) {
         llvm::Function* satSub = OMSC_GET_INTRINSIC(
             mod, llvm::Intrinsic::usub_sat, {intTy});
         llvm::Value* result = builder.CreateCall(satSub, {a, b}, "usub_sat");
+        match.rootInst->replaceAllUsesWith(result);
+        return true;
+    }
+
+    case Idiom::ConditionalIncrement: {
+        // Replace select(cond, x+1, x) → x + zext(cond, type)
+        // This eliminates the select and the intermediate add, producing
+        // a single zext + add sequence that is cheaper on all targets.
+        llvm::Value* x = match.operands[0];
+        llvm::Value* cond = match.operands[1];
+        llvm::Value* ext = builder.CreateZExt(cond, intTy, "cond.zext");
+        llvm::Value* result = builder.CreateAdd(x, ext, "cond.inc");
+        match.rootInst->replaceAllUsesWith(result);
+        return true;
+    }
+
+    case Idiom::ConditionalDecrement: {
+        // Replace select(cond, x-1, x) → x - zext(cond, type)
+        llvm::Value* x = match.operands[0];
+        llvm::Value* cond = match.operands[1];
+        llvm::Value* ext = builder.CreateZExt(cond, intTy, "cond.zext");
+        llvm::Value* result = builder.CreateSub(x, ext, "cond.dec");
         match.rootInst->replaceAllUsesWith(result);
         return true;
     }

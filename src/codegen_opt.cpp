@@ -754,9 +754,17 @@ void CodeGenerator::runOptimizationPasses() {
     // have parameters that are never used in the function body.  Removing
     // these eliminates register pressure from passing dead values and
     // enables further inlining (smaller call signatures).
-    if (optimizationLevel >= OptimizationLevel::O3) {
+    //
+    // IPSCCPPass is lowered to O2+ (from O3) because OmScript compiles as a
+    // single translation unit — the full call graph is always available, making
+    // interprocedural constant propagation cheap and highly effective.  At O2,
+    // we enable function specialization (AllowFuncSpec=true by default) so that
+    // functions called with constant arguments get specialized clones with the
+    // constants folded in.  This is especially beneficial for OmScript programs
+    // that use helper functions dispatched from a central switch/case.
+    if (optimizationLevel >= OptimizationLevel::O2) {
         PB.registerOptimizerLastEPCallback(
-            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/) {
+            [this](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/) {
             // IPSCCPPass performs inter-procedural sparse conditional constant
             // propagation — a more powerful version of SCCP that propagates
             // constants, value ranges, and struct field values across function
@@ -765,12 +773,14 @@ void CodeGenerator::runOptimizationPasses() {
             // always called with a specific constant argument.
             MPM.addPass(llvm::IPSCCPPass());
             MPM.addPass(llvm::DeadArgumentEliminationPass());
-            // PartialInlinerPass outlines cold regions (error handling, slow
-            // paths) from otherwise-hot functions and inlines only the hot
-            // entry region into callers.  This gives the performance benefit
-            // of inlining (no call overhead on the fast path) without the
-            // code-size cost of inlining the entire function body.
-            MPM.addPass(llvm::PartialInlinerPass());
+            if (optimizationLevel >= OptimizationLevel::O3) {
+                // PartialInlinerPass outlines cold regions (error handling, slow
+                // paths) from otherwise-hot functions and inlines only the hot
+                // entry region into callers.  This gives the performance benefit
+                // of inlining (no call overhead on the fast path) without the
+                // code-size cost of inlining the entire function body.
+                MPM.addPass(llvm::PartialInlinerPass());
+            }
         });
     }
 

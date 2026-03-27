@@ -2128,6 +2128,28 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
     }
 
     if (!boundsCheckElided && !isStr && optimizationLevel >= OptimizationLevel::O1) {
+        // ── Known-array-size optimization ────────────────────────────
+        // When the array was created via array_fill(N, val) with constant
+        // N, and the loop iterator is bounded by a constant <= N, we can
+        // prove bounds safety without loading the length header.
+        if (auto* arrIdent = dynamic_cast<IdentifierExpr*>(expr->array.get())) {
+            auto sizeIt = knownArraySizes_.find(arrIdent->name);
+            if (sizeIt != knownArraySizes_.end()) {
+                auto* idxIdent2 = dynamic_cast<IdentifierExpr*>(expr->index.get());
+                if (idxIdent2 && safeIndexVars_.count(idxIdent2->name)) {
+                    auto endIt = loopIterEndBound_.find(idxIdent2->name);
+                    if (endIt != loopIterEndBound_.end()) {
+                        auto* endCI = llvm::dyn_cast<llvm::ConstantInt>(endIt->second);
+                        auto* sizeCI = llvm::dyn_cast<llvm::ConstantInt>(sizeIt->second);
+                        if (endCI && sizeCI &&
+                            endCI->getSExtValue() <= sizeCI->getSExtValue()) {
+                            boundsCheckElided = true;
+                        }
+                    }
+                }
+            }
+        }
+
         // Check if the index value is a safe loop iterator (non-negative,
         // ascending, bounded by loop end).
         auto* idxIdent = dynamic_cast<IdentifierExpr*>(expr->index.get());
@@ -2199,8 +2221,8 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
                             }
                             if (offsetKnown) {
                                 int64_t effectiveOffset = (idxBinary->op == "-") ? -offset : offset;
-                                // Only handle non-negative effective offset where
-                                // endBound + effectiveOffset <= length is provable
+                                // ── Positive effective offset: arr[i + C] ─────
+                                // Range is [start+C, end+C). Safe if end+C <= len.
                                 if (effectiveOffset >= 0) {
                                     auto* endCI = llvm::dyn_cast<llvm::ConstantInt>(endIt->second);
                                     auto* arithLenLoad = builder->CreateLoad(
@@ -2235,6 +2257,85 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
                                         llvm::Function* assumeFn = OMSC_GET_INTRINSIC(
                                             module.get(), llvm::Intrinsic::assume, {});
                                         builder->CreateCall(assumeFn, {cmp});
+                                    }
+                                }
+
+                                // ── Negative effective offset: arr[i - K] ────
+                                // Range is [start-K, end-K). Safe if:
+                                //   (a) start - K >= 0  (lower bound non-negative)
+                                //   (b) end - K <= len  (upper bound within array)
+                                // Use loopIterStartBound_ to prove (a) at compile
+                                // time.  This handles the common lookback pattern:
+                                //   for (i in K...n) { arr[i - K] }
+                                if (effectiveOffset < 0 && !boundsCheckElided) {
+                                    int64_t absOffset = -effectiveOffset;
+                                    auto startIt = loopIterStartBound_.find(iterIdent->name);
+                                    if (startIt != loopIterStartBound_.end()) {
+                                        bool lowerBoundSafe = false;
+                                        bool upperBoundSafe = false;
+
+                                        // Check (a): start >= absOffset
+                                        auto* startCI = llvm::dyn_cast<llvm::ConstantInt>(startIt->second);
+                                        if (startCI && startCI->getSExtValue() >= absOffset) {
+                                            lowerBoundSafe = true;
+                                        }
+
+                                        // Check (b): end - absOffset <= len
+                                        auto* endCI = llvm::dyn_cast<llvm::ConstantInt>(endIt->second);
+                                        if (lowerBoundSafe) {
+                                            auto* arithLenLoad = builder->CreateLoad(
+                                                getDefaultType(), basePtr, "idx.len.arith.neg");
+                                            arithLenLoad->setMetadata(
+                                                llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+                                            arithLenLoad->setMetadata(
+                                                llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+
+                                            if (endCI) {
+                                                if (auto* lenCI = llvm::dyn_cast<llvm::ConstantInt>(
+                                                        arithLenLoad)) {
+                                                    if (endCI->getSExtValue() - absOffset
+                                                        <= lenCI->getSExtValue()) {
+                                                        upperBoundSafe = true;
+                                                    }
+                                                }
+                                            }
+                                            // If end bound equals or is derived from
+                                            // len(arr), end - K <= len is guaranteed
+                                            // (since K > 0, end - K < end <= len).
+                                            if (!upperBoundSafe && endIt->second == arithLenLoad) {
+                                                upperBoundSafe = true;
+                                            }
+
+                                            if (lowerBoundSafe && upperBoundSafe) {
+                                                boundsCheckElided = true;
+                                            }
+
+                                            // Fallback: emit assume hints for LLVM CVP
+                                            if (!boundsCheckElided && !dynamicCompilation_
+                                                && optimizationLevel >= OptimizationLevel::O2) {
+                                                // Assume: start - absOffset >= 0
+                                                llvm::Value* adjustedStart = builder->CreateSub(
+                                                    startIt->second,
+                                                    llvm::ConstantInt::get(getDefaultType(), absOffset),
+                                                    "idx.adjstart");
+                                                llvm::Value* geZero = builder->CreateICmpSGE(
+                                                    adjustedStart,
+                                                    llvm::ConstantInt::get(getDefaultType(), 0),
+                                                    "idx.negoff.ge0");
+                                                // Assume: end - absOffset <= len
+                                                llvm::Value* adjustedEnd = builder->CreateSub(
+                                                    endIt->second,
+                                                    llvm::ConstantInt::get(getDefaultType(), absOffset),
+                                                    "idx.adjend.neg");
+                                                llvm::Value* leLen = builder->CreateICmpSLE(
+                                                    adjustedEnd, arithLenLoad, "idx.negoff.safe");
+                                                llvm::Value* bothSafe = builder->CreateAnd(
+                                                    geZero, leLen, "idx.negoff.both");
+                                                llvm::Function* assumeFn = OMSC_GET_INTRINSIC(
+                                                    module.get(), llvm::Intrinsic::assume, {});
+                                                builder->CreateCall(assumeFn, {bothSafe});
+                                            }
+                                        }
                                     }
                                 }
                             }

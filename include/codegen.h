@@ -401,6 +401,13 @@ class CodeGenerator {
     /// Array lengths are always non-negative (they're sizes).
     llvm::MDNode* arrayLenRangeMD_ = nullptr;
 
+    /// Compile-time known array sizes: maps variable name → LLVM Value*
+    /// representing the known element count.  Populated when an array is
+    /// created via array_fill(N, val) where N is a compile-time constant
+    /// or a tracked variable.  Used to elide bounds checks without reading
+    /// the length header at runtime.
+    std::unordered_map<std::string, llvm::Value*> knownArraySizes_;
+
     /// Variables declared with `prefetch immut` — their loads get invariant
     /// metadata so LLVM can hoist/CSE them aggressively.
     std::unordered_set<std::string> prefetchedImmutVars_;

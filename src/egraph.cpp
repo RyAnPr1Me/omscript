@@ -7867,6 +7867,88 @@ std::vector<RewriteRule> getStrengthReductionRules() {
             return g.addBinOp(Op::Sub, diff1, s3);
         });
 
+    // ── Collatz odd-branch compound pattern ─────────────────────────────
+    // 3*x + 1 → (x << 1) + x + 1
+    // This optimizes the Collatz odd-branch computation by replacing the
+    // multiply with shift+add.  The e-graph already has x*3 → (x<<1)+x,
+    // but the compound 3*x+1 pattern enables the optimizer to consider
+    // the full expression as a single unit for cost comparison.
+    rules.emplace_back("mul3_add1_to_shl_add",
+        P::OpPat(Op::Add, {P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(3)}), P::ConstPat(1)}),
+        [](EGraph& g, const Subst& s) {
+            auto shifted = g.addBinOp(Op::Shl, s.at("x"), g.addConst(1));
+            auto sum = g.addBinOp(Op::Add, shifted, s.at("x"));
+            return g.addBinOp(Op::Add, sum, g.addConst(1));
+        });
+
+    // Commuted form: 1 + 3*x → (x << 1) + x + 1
+    rules.emplace_back("add1_mul3_to_shl_add",
+        P::OpPat(Op::Add, {P::ConstPat(1), P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(3)})}),
+        [](EGraph& g, const Subst& s) {
+            auto shifted = g.addBinOp(Op::Shl, s.at("x"), g.addConst(1));
+            auto sum = g.addBinOp(Op::Add, shifted, s.at("x"));
+            return g.addBinOp(Op::Add, sum, g.addConst(1));
+        });
+
+    // ── Non-negative squaring ───────────────────────────────────────────
+    // x * x → result is always non-negative (informational: the analysis
+    // propagation marks x*x as non-neg, enabling downstream nsw/nuw flags)
+    // This rule doesn't transform — it's handled by analysis propagation.
+
+    // ── Multiply-by-constant then divide cancellation ───────────────────
+    // (x * C) / C → x  (already exists as mul_div_cancel)
+    // (x << N) >> N → x & ((1 << (64-N)) - 1)  (shift cancel with mask)
+    // Only for non-negative x where the high bits are zero.
+    rules.emplace_back("shl_shr_cancel_nonneg",
+        P::OpPat(Op::Shr, {P::OpPat(Op::Shl, {P::Wild("x"), P::Wild("n")}), P::Wild("n")}),
+        [](EGraph&, const Subst& s) { return s.at("x"); },
+        [](const EGraph& g, const Subst& s) -> bool {
+            // Only safe when x is non-negative and shift count is small
+            // enough that the sign bit isn't affected.
+            auto n = g.getConstValue(s.at("n"));
+            if (!n || *n <= 0 || *n >= 63) return false;
+            const auto& xClass = g.getClass(s.at("x"));
+            return xClass.isNonNeg;
+        });
+
+    // ── Boolean arithmetic simplifications ──────────────────────────────
+    // bool_expr * C → 0 or bool_expr or C based on value
+    // bool * bool → bool & bool  (cheaper: AND vs MUL)
+    rules.emplace_back("mul_booleans_to_and",
+        P::OpPat(Op::Mul, {P::Wild("a"), P::Wild("b")}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::BitAnd, s.at("a"), s.at("b"));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            const auto& aClass = g.getClass(s.at("a"));
+            const auto& bClass = g.getClass(s.at("b"));
+            return aClass.isBoolean && bClass.isBoolean;
+        });
+
+    // bool + bool → bool | bool when both are disjoint (max value 1)
+    // Actually bool + bool can be 0, 1, or 2, so this is NOT safe.
+    // But: bool | bool is safe (max 1) — skip this rule.
+
+    // ── Mod distribute over multiplication ──────────────────────────────
+    // (a * b) % C → ((a % C) * (b % C)) % C  when a, b non-negative
+    // This is useful for modular arithmetic chains where intermediate
+    // values can be reduced early, preventing overflow.
+    rules.emplace_back("mod_distribute_mul_nonneg",
+        P::OpPat(Op::Mod, {P::OpPat(Op::Mul, {P::Wild("a"), P::Wild("b")}), P::Wild("c")}),
+        [](EGraph& g, const Subst& s) {
+            auto aMod = g.addBinOp(Op::Mod, s.at("a"), s.at("c"));
+            auto bMod = g.addBinOp(Op::Mod, s.at("b"), s.at("c"));
+            auto prod = g.addBinOp(Op::Mul, aMod, bMod);
+            return g.addBinOp(Op::Mod, prod, s.at("c"));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            auto cv = g.getConstValue(s.at("c"));
+            if (!cv || *cv <= 0) return false;
+            const auto& aClass = g.getClass(s.at("a"));
+            const auto& bClass = g.getClass(s.at("b"));
+            return aClass.isNonNeg && bClass.isNonNeg;
+        });
+
     return rules;
 }
 
