@@ -82,6 +82,21 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
         codegenError(msg, expr);
     }
 
+    // Constant folding for `const` integer variables: return the constant
+    // directly instead of emitting a load.  This allows downstream div/mod,
+    // multiply, and comparison operations to see a ConstantInt and use the
+    // fast urem/udiv path, NSWMul, and other constant-specific optimizations
+    // that would otherwise only fire after LLVM's mem2reg pass.
+    {
+        auto foldIt = constIntFolds_.find(expr->name);
+        if (foldIt != constIntFolds_.end()) {
+            auto* ci = llvm::ConstantInt::get(getDefaultType(), foldIt->second);
+            if (foldIt->second >= 0)
+                nonNegValues_.insert(ci);
+            return ci;
+        }
+    }
+
     // Register-promotion strategy: prefetched variables go straight to
     // registers (promoted by SROA/mem2reg) and stay there until invalidated.
     // No use-site llvm.prefetch is emitted on the alloca — that would anchor
@@ -987,9 +1002,22 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         // in i64 without wrapping.  The nsw flag enables SCEV to compute
         // tighter trip counts for countdown loops and proves induction
         // variable monotonicity.
-        if (nonNegValues_.count(left) && nonNegValues_.count(right))
-            return builder->CreateNSWSub(left, right, "subtmp");
-        return builder->CreateSub(left, right, "subtmp");
+        const bool leftNonNeg = nonNegValues_.count(left);
+        const bool rightNonNeg = nonNegValues_.count(right);
+        const bool bothNonNeg = leftNonNeg && rightNonNeg;
+        // Also detect constant non-negative operands — mirrors the
+        // addition logic.  Subtracting a non-negative constant from a
+        // non-negative value (or vice versa) cannot overflow i64.
+        bool constNSW = false;
+        if (!bothNonNeg) {
+            if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right))
+                constNSW = leftNonNeg && !ci->isNegative();
+            else if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left))
+                constNSW = rightNonNeg && !ci->isNegative();
+        }
+        const bool canNSW = bothNonNeg || constNSW;
+        return canNSW ? builder->CreateNSWSub(left, right, "subtmp")
+                      : builder->CreateSub(left, right, "subtmp");
     } else if (expr->op == "*") {
         // Strength reduction: multiply by power of 2 → left shift
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
@@ -1267,8 +1295,12 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         };
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
             const bool leftNonNeg = nonNegValues_.count(left);
-            if (auto* result = emitShiftAdd(left, ci->getSExtValue(), leftNonNeg))
+            if (auto* result = emitShiftAdd(left, ci->getSExtValue(), leftNonNeg)) {
+                // Product of non-negative base and positive constant is non-neg.
+                if (leftNonNeg && ci->getSExtValue() > 0)
+                    nonNegValues_.insert(result);
                 return result;
+            }
             // Negative constant strength reduction: n * (-K) → neg(n * K).
             // This leverages the existing shift+add patterns for the absolute
             // value, then negates the result.  A single neg (sub 0, x) is far
@@ -1282,8 +1314,11 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         }
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left)) {
             const bool rightNonNeg = nonNegValues_.count(right);
-            if (auto* result = emitShiftAdd(right, ci->getSExtValue(), rightNonNeg))
+            if (auto* result = emitShiftAdd(right, ci->getSExtValue(), rightNonNeg)) {
+                if (rightNonNeg && ci->getSExtValue() > 0)
+                    nonNegValues_.insert(result);
                 return result;
+            }
             const int64_t lv = ci->getSExtValue();
             if (lv < -1) {
                 if (auto* posResult = emitShiftAdd(right, -lv, rightNonNeg)) {
@@ -1296,19 +1331,48 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         // Also set nsw when one operand is a positive constant and the other
         // is non-negative — the product of two non-negative values cannot
         // overflow into the negative range for typical program values.
-        if (nonNegValues_.count(left) && nonNegValues_.count(right))
-            return builder->CreateNSWMul(left, right, "multmp");
+        if (nonNegValues_.count(left) && nonNegValues_.count(right)) {
+            auto* result = builder->CreateNSWMul(left, right, "multmp");
+            nonNegValues_.insert(result);
+            return result;
+        }
         if (nonNegValues_.count(left)) {
             if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
-                if (!ci->isNegative() && !ci->isZero())
-                    return builder->CreateNSWMul(left, right, "multmp");
+                if (!ci->isNegative() && !ci->isZero()) {
+                    auto* result = builder->CreateNSWMul(left, right, "multmp");
+                    nonNegValues_.insert(result);
+                    return result;
+                }
             }
         }
         if (nonNegValues_.count(right)) {
             if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left)) {
-                if (!ci->isNegative() && !ci->isZero())
-                    return builder->CreateNSWMul(left, right, "multmp");
+                if (!ci->isNegative() && !ci->isZero()) {
+                    auto* result = builder->CreateNSWMul(left, right, "multmp");
+                    nonNegValues_.insert(result);
+                    return result;
+                }
             }
+        }
+        // Squaring detection: x*x is always non-negative regardless of
+        // the sign of x.  This is crucial for loops like `(i*i) % 101`
+        // where the non-negativity of the product enables urem instead
+        // of the more expensive srem.
+        // Detect squaring at the AST level: both children are the same
+        // identifier expression.
+        {
+            auto* leftIdent = dynamic_cast<IdentifierExpr*>(expr->left.get());
+            auto* rightIdent = dynamic_cast<IdentifierExpr*>(expr->right.get());
+            if (leftIdent && rightIdent && leftIdent->name == rightIdent->name) {
+                auto* result = builder->CreateMul(left, right, "sqtmp");
+                nonNegValues_.insert(result);
+                return result;
+            }
+        }
+        if (left == right) {
+            auto* result = builder->CreateMul(left, right, "sqtmp");
+            nonNegValues_.insert(result);
+            return result;
         }
         return builder->CreateMul(left, right, "multmp");
     } else if (expr->op == "/" || expr->op == "%") {
@@ -1350,30 +1414,19 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                             return result;
                         }
                     }
-                    if (isDivision) {
-                        // Signed division by power-of-2: (x + (x >> 63 & (2^s - 1))) >> s
-                        // This handles negative values correctly (rounds toward zero).
-                        auto* signBit = builder->CreateAShr(left,
-                            llvm::ConstantInt::get(getDefaultType(), 63), "div.sign");
-                        auto* correction = builder->CreateAnd(signBit,
-                            llvm::ConstantInt::get(getDefaultType(), (1LL << s) - 1), "div.corr");
-                        auto* corrected = builder->CreateAdd(left, correction, "div.adj");
-                        return builder->CreateAShr(corrected,
-                            llvm::ConstantInt::get(getDefaultType(), s), "div.shr");
-                    } else {
-                        // Signed modulo by power-of-2: x - ((x + (x >> 63 & (2^s - 1))) >> s) * 2^s
-                        // Equivalent to: x - (x / 2^s) * 2^s, but fully in shifts.
-                        auto* signBit = builder->CreateAShr(left,
-                            llvm::ConstantInt::get(getDefaultType(), 63), "mod.sign");
-                        auto* correction = builder->CreateAnd(signBit,
-                            llvm::ConstantInt::get(getDefaultType(), (1LL << s) - 1), "mod.corr");
-                        auto* corrected = builder->CreateAdd(left, correction, "mod.adj");
-                        auto* quotient = builder->CreateAShr(corrected,
-                            llvm::ConstantInt::get(getDefaultType(), s), "mod.quot");
-                        auto* product = builder->CreateShl(quotient,
-                            llvm::ConstantInt::get(getDefaultType(), s), "mod.prod");
-                        return builder->CreateSub(left, product, "mod.rem");
-                    }
+                    // Dividend sign unknown: emit sdiv/srem instead of the
+                    // multi-instruction signed shift expansion.  LLVM's
+                    // CorrelatedValuePropagation (CVP) pass can often prove
+                    // non-negativity through value-range analysis on PHI nodes
+                    // (e.g. Collatz-sequence variables that are always > 0) and
+                    // convert sdiv/srem → udiv/urem, which InstCombine then
+                    // lowers to lshr/and — a single instruction instead of four.
+                    // The inline shift expansion we used previously baked in the
+                    // sign-correction at IR-generation time, before LLVM's
+                    // analyses could run, preventing this optimisation.
+                    return isDivision
+                        ? builder->CreateSDiv(left, right, "divtmp")
+                        : builder->CreateSRem(left, right, "modtmp");
                 }
             }
         }
@@ -1985,6 +2038,22 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
     }
 
     builder->CreateAlignedStore(value, it->second, llvm::MaybeAlign(8));
+    // Update non-negativity tracking on assignment.
+    // When the assigned value is provably non-negative, mark the alloca so
+    // subsequent loads can benefit from unsigned operations and NSW flags.
+    // When the value might be negative, remove the alloca from nonNegValues_
+    // to prevent unsound optimizations.
+    if (alloca && alloca->getAllocatedType()->isIntegerTy()) {
+        bool valNonNeg = nonNegValues_.count(value) > 0;
+        if (!valNonNeg) {
+            if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(value))
+                valNonNeg = !ci->isNegative();
+        }
+        if (valNonNeg)
+            nonNegValues_.insert(it->second);
+        else
+            nonNegValues_.erase(it->second);
+    }
     // Update string variable tracking after assignment.
     if (value->getType()->isPointerTy() || isStringExpr(expr->value.get()))
         stringVars_.insert(expr->name);
@@ -2168,7 +2237,19 @@ llvm::Value* CodeGenerator::generateTernary(TernaryExpr* expr) {
                     elseVal = ensureFloat(elseVal);
             }
         }
-        return builder->CreateSelect(condBool, thenVal, elseVal, "ternsel");
+        llvm::Value* sel = builder->CreateSelect(condBool, thenVal, elseVal, "ternsel");
+        // Propagate non-negativity: if both arms are non-negative, the result is.
+        bool tNonNeg = nonNegValues_.count(thenVal) > 0;
+        if (!tNonNeg)
+            if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(thenVal))
+                tNonNeg = !ci->isNegative();
+        bool eNonNeg = nonNegValues_.count(elseVal) > 0;
+        if (!eNonNeg)
+            if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(elseVal))
+                eNonNeg = !ci->isNegative();
+        if (tNonNeg && eNonNeg)
+            nonNegValues_.insert(sel);
+        return sel;
     }
 
     llvm::Function* function = builder->GetInsertBlock()->getParent();
@@ -2212,6 +2293,21 @@ llvm::Value* CodeGenerator::generateTernary(TernaryExpr* expr) {
     llvm::PHINode* phi = builder->CreatePHI(thenVal->getType(), 2, "ternval");
     phi->addIncoming(thenVal, thenBB);
     phi->addIncoming(elseVal, elseBB);
+
+    // Propagate non-negativity through the PHI: if both arms are provably
+    // non-negative the merged result is also non-negative.  Without this,
+    // patterns like x = (x%2==0) ? (x/2) : (3*x+1) lose non-neg tracking
+    // after the first iteration, causing srem/sdiv instead of urem/lshr.
+    bool thenNonNeg = nonNegValues_.count(thenVal) > 0;
+    if (!thenNonNeg)
+        if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(thenVal))
+            thenNonNeg = !ci->isNegative();
+    bool elseNonNeg = nonNegValues_.count(elseVal) > 0;
+    if (!elseNonNeg)
+        if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(elseVal))
+            elseNonNeg = !ci->isNegative();
+    if (thenNonNeg && elseNonNeg)
+        nonNegValues_.insert(phi);
 
     return phi;
 }

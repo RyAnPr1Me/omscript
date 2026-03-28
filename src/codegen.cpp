@@ -1000,6 +1000,12 @@ void CodeGenerator::endScope() {
         } else {
             constValues.erase(entry.first);
         }
+        // Restore constIntFolds_ to the value that was in scope before this scope was entered.
+        if (entry.second.hadPreviousIntFold) {
+            constIntFolds_[entry.first] = entry.second.previousIntFold;
+        } else {
+            constIntFolds_.erase(entry.first);
+        }
     }
     scopeStack.pop_back();
     constScopeStack.pop_back();
@@ -1017,15 +1023,27 @@ void CodeGenerator::bindVariable(const std::string& name, llvm::Value* value, bo
         auto& constScope = constScopeStack.back();
         if (constScope.find(name) == constScope.end()) {
             auto existingConst = constValues.find(name);
+            ConstBinding binding;
             if (existingConst == constValues.end()) {
-                constScope[name] = {false, false};
+                binding = {false, false};
             } else {
-                constScope[name] = {true, existingConst->second};
+                binding = {true, existingConst->second};
             }
+            // Save previous constIntFolds_ entry for this variable (for scope restoration).
+            auto foldIt = constIntFolds_.find(name);
+            if (foldIt != constIntFolds_.end()) {
+                binding.hadPreviousIntFold = true;
+                binding.previousIntFold = foldIt->second;
+            }
+            constScope[name] = binding;
         }
     }
     namedValues[name] = value;
     constValues[name] = isConst;
+    // If the variable is being rebound (not a const), remove its int fold entry
+    // since the new binding may have a different value.
+    if (!isConst)
+        constIntFolds_.erase(name);
 }
 
 void CodeGenerator::checkConstModification(const std::string& name, const std::string& action) {
@@ -2142,6 +2160,17 @@ void CodeGenerator::generate(Program* program) {
         llvm::FastMathFlags FMF;
         FMF.setFast(); // enables all unsafe FP optimizations
         builder->setFastMathFlags(FMF);
+    } else if (optimizationLevel >= OptimizationLevel::O2) {
+        // At O2+, enable FP contraction (a*b+c → fma) without full
+        // fast-math.  This matches clang's default -ffp-contract=on
+        // behaviour: FMA contraction is safe — it produces a more precise
+        // result (one rounding instead of two) and utilises hardware FMA
+        // units, improving throughput on modern CPUs.  No other unsafe FP
+        // transformations (reassociation, reciprocal approximation, etc.)
+        // are enabled, preserving IEEE-754 semantics for everything else.
+        llvm::FastMathFlags FMF;
+        FMF.setAllowContract(true);
+        builder->setFastMathFlags(FMF);
     }
 
     // Forward-declare all functions so that any function can reference any
@@ -2894,6 +2923,7 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     registerVars_.clear();
     simdVars_.clear();
     nonNegValues_.clear();
+    constIntFolds_.clear();
 
     // Pre-populate stringVars_ for parameters known to receive string arguments.
     auto paramStrIt = funcParamStringTypes_.find(func->name);

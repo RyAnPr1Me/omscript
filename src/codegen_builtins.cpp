@@ -58,7 +58,10 @@ enum class BuiltinId : uint8_t {
     ARRAY_MIN, ARRAY_MAX, ARRAY_ANY, ARRAY_EVERY, ARRAY_FIND, ARRAY_COUNT,
     STR_JOIN, STR_COUNT,
     POPCOUNT, CLZ, CTZ, BITREVERSE, EXP2, IS_POWER_OF_2,
-    LCM
+    LCM,
+    // New intrinsic builtins
+    ROTATE_LEFT, ROTATE_RIGHT, BSWAP, SATURATING_ADD, SATURATING_SUB,
+    FMA_BUILTIN, COPYSIGN, MIN_FLOAT, MAX_FLOAT
 };
 
 static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
@@ -190,6 +193,15 @@ static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
     {"exp2", BuiltinId::EXP2},
     {"is_power_of_2", BuiltinId::IS_POWER_OF_2},
     {"lcm", BuiltinId::LCM},
+    {"rotate_left", BuiltinId::ROTATE_LEFT},
+    {"rotate_right", BuiltinId::ROTATE_RIGHT},
+    {"bswap", BuiltinId::BSWAP},
+    {"saturating_add", BuiltinId::SATURATING_ADD},
+    {"saturating_sub", BuiltinId::SATURATING_SUB},
+    {"fma", BuiltinId::FMA_BUILTIN},
+    {"copysign", BuiltinId::COPYSIGN},
+    {"min_float", BuiltinId::MIN_FLOAT},
+    {"max_float", BuiltinId::MAX_FLOAT},
 };
 
 static BuiltinId lookupBuiltin(const std::string& name) {
@@ -5234,6 +5246,99 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* divResult = builder->CreateUDiv(aAbs, gcdVal, "lcm.div");
         llvm::Value* lcmResult = builder->CreateMul(divResult, bAbs, "lcm.mul");
         return builder->CreateSelect(gcdIsZero, zero, lcmResult, "lcm.result");
+    }
+
+    // ── New intrinsic builtins ─────────────────────────────────────────
+    if (bid == BuiltinId::ROTATE_LEFT) {
+        validateArgCount(expr, "rotate_left", 2);
+        llvm::Value* val = generateExpression(expr->arguments[0].get());
+        llvm::Value* amt = generateExpression(expr->arguments[1].get());
+        val = toDefaultType(val);
+        amt = toDefaultType(amt);
+        // fshl(a, a, amt) implements rotate-left: (a << amt) | (a >> (64-amt))
+        llvm::Function* fshlFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::fshl, {getDefaultType()});
+        return builder->CreateCall(fshlFn, {val, val, amt}, "rotl.result");
+    }
+
+    if (bid == BuiltinId::ROTATE_RIGHT) {
+        validateArgCount(expr, "rotate_right", 2);
+        llvm::Value* val = generateExpression(expr->arguments[0].get());
+        llvm::Value* amt = generateExpression(expr->arguments[1].get());
+        val = toDefaultType(val);
+        amt = toDefaultType(amt);
+        // fshr(a, a, amt) implements rotate-right: (a >> amt) | (a << (64-amt))
+        llvm::Function* fshrFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::fshr, {getDefaultType()});
+        return builder->CreateCall(fshrFn, {val, val, amt}, "rotr.result");
+    }
+
+    if (bid == BuiltinId::BSWAP) {
+        validateArgCount(expr, "bswap", 1);
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        arg = toDefaultType(arg);
+        llvm::Function* bswapFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::bswap, {getDefaultType()});
+        return builder->CreateCall(bswapFn, {arg}, "bswap.result");
+    }
+
+    if (bid == BuiltinId::SATURATING_ADD) {
+        validateArgCount(expr, "saturating_add", 2);
+        llvm::Value* a = generateExpression(expr->arguments[0].get());
+        llvm::Value* b = generateExpression(expr->arguments[1].get());
+        a = toDefaultType(a);
+        b = toDefaultType(b);
+        llvm::Function* saddSatFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::sadd_sat, {getDefaultType()});
+        return builder->CreateCall(saddSatFn, {a, b}, "sadd.sat.result");
+    }
+
+    if (bid == BuiltinId::SATURATING_SUB) {
+        validateArgCount(expr, "saturating_sub", 2);
+        llvm::Value* a = generateExpression(expr->arguments[0].get());
+        llvm::Value* b = generateExpression(expr->arguments[1].get());
+        a = toDefaultType(a);
+        b = toDefaultType(b);
+        llvm::Function* ssubSatFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::ssub_sat, {getDefaultType()});
+        return builder->CreateCall(ssubSatFn, {a, b}, "ssub.sat.result");
+    }
+
+    if (bid == BuiltinId::FMA_BUILTIN) {
+        validateArgCount(expr, "fma", 3);
+        llvm::Value* a = generateExpression(expr->arguments[0].get());
+        llvm::Value* b = generateExpression(expr->arguments[1].get());
+        llvm::Value* c = generateExpression(expr->arguments[2].get());
+        a = ensureFloat(a);
+        b = ensureFloat(b);
+        c = ensureFloat(c);
+        llvm::Function* fmaFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::fma, {getFloatType()});
+        return builder->CreateCall(fmaFn, {a, b, c}, "fma.result");
+    }
+
+    if (bid == BuiltinId::COPYSIGN) {
+        validateArgCount(expr, "copysign", 2);
+        llvm::Value* mag = generateExpression(expr->arguments[0].get());
+        llvm::Value* sgn = generateExpression(expr->arguments[1].get());
+        mag = ensureFloat(mag);
+        sgn = ensureFloat(sgn);
+        llvm::Function* copysignFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::copysign, {getFloatType()});
+        return builder->CreateCall(copysignFn, {mag, sgn}, "copysign.result");
+    }
+
+    if (bid == BuiltinId::MIN_FLOAT) {
+        validateArgCount(expr, "min_float", 2);
+        llvm::Value* a = generateExpression(expr->arguments[0].get());
+        llvm::Value* b = generateExpression(expr->arguments[1].get());
+        a = ensureFloat(a);
+        b = ensureFloat(b);
+        llvm::Function* minnumFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::minnum, {getFloatType()});
+        return builder->CreateCall(minnumFn, {a, b}, "minnum.result");
+    }
+
+    if (bid == BuiltinId::MAX_FLOAT) {
+        validateArgCount(expr, "max_float", 2);
+        llvm::Value* a = generateExpression(expr->arguments[0].get());
+        llvm::Value* b = generateExpression(expr->arguments[1].get());
+        a = ensureFloat(a);
+        b = ensureFloat(b);
+        llvm::Function* maxnumFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::maxnum, {getFloatType()});
+        return builder->CreateCall(maxnumFn, {a, b}, "maxnum.result");
     }
 
     if (inOptMaxFunction) {

@@ -130,6 +130,28 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
 
     if (initValue) {
         builder->CreateStore(initValue, alloca);
+        // Track non-negativity: if a variable is initialized with a
+        // non-negative value (constant or expression), mark the alloca so
+        // that subsequent loads inherit the non-negative property.  This
+        // enables unsigned comparisons, urem/udiv, and NSW flags on
+        // downstream arithmetic.  For non-const vars, the tracking is
+        // updated on each assignment (generateAssign) to maintain soundness.
+        if (allocaType->isIntegerTy()) {
+            bool initNonNeg = nonNegValues_.count(initValue) > 0;
+            if (!initNonNeg) {
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(initValue))
+                    initNonNeg = !ci->isNegative();
+            }
+            if (initNonNeg)
+                nonNegValues_.insert(alloca);
+            // Track constant integer values for `const` variables so that
+            // downstream div/mod can substitute the constant directly and
+            // use the fast urem/udiv path instead of the dynamic-divisor path.
+            if (stmt->isConst) {
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(initValue))
+                    constIntFolds_[stmt->name] = ci->getSExtValue();
+            }
+        }
         // Track whether this variable holds a string value so that print(),
         // concatenation, and comparison operators handle it correctly when
         // the variable's alloca type is i64 (e.g. assigned from a function
@@ -337,19 +359,43 @@ void CodeGenerator::generateIf(IfStmt* stmt) {
         br->setMetadata(llvm::LLVMContext::MD_prof, brWeights);
     }
 
+    // Save pre-if non-neg state so each branch starts from the same baseline.
+    // Without this the else-branch inherits the then-branch's mutations, which
+    // is unsound and can misclassify values as non-negative.
+    const std::unordered_set<llvm::Value*> preIfNonNeg = nonNegValues_;
+
     // Then block
     builder->SetInsertPoint(thenBB);
     generateStatement(stmt->thenBranch.get());
     if (!builder->GetInsertBlock()->getTerminator()) {
         builder->CreateBr(mergeBB);
     }
+    // Capture which allocas are non-negative after the then branch.
+    const std::unordered_set<llvm::Value*> thenNonNeg = nonNegValues_;
 
-    // Else block
+    // Else block — restore to pre-if state before generating.
     if (elseBB) {
+        nonNegValues_ = preIfNonNeg;
         builder->SetInsertPoint(elseBB);
         generateStatement(stmt->elseBranch.get());
         if (!builder->GetInsertBlock()->getTerminator()) {
             builder->CreateBr(mergeBB);
+        }
+        // After both branches: a value is non-negative at the merge point only
+        // if it was non-negative in BOTH branches (conservative intersection).
+        const std::unordered_set<llvm::Value*> elseNonNeg = nonNegValues_;
+        nonNegValues_ = preIfNonNeg; // start from pre-if
+        for (llvm::Value* v : thenNonNeg) {
+            if (elseNonNeg.count(v))
+                nonNegValues_.insert(v);
+        }
+    } else {
+        // No else: at the merge point a value is non-negative only if it was
+        // non-negative before the if AND remains so after the then-branch.
+        // Conservative: intersect pre-if with post-then.
+        for (llvm::Value* v : preIfNonNeg) {
+            if (!thenNonNeg.count(v))
+                nonNegValues_.erase(v);
         }
     }
 
@@ -429,23 +475,19 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
         llvm::SmallVector<llvm::Metadata*, 4> loopMDs;
         loopMDs.push_back(nullptr);
         loopMDs.push_back(mustProgress);
-        // Unroll hint: match for-loop unrolling strategy.
-        // For OPTMAX functions, let LLVM's cost model choose; for regular
-        // functions, cap at 2 to prevent code bloat.
-        if (!inOptMaxFunction && optimizationLevel >= OptimizationLevel::O3 && enableUnrollLoops_ && !dynamicCompilation_) {
+        // While-loop unrolling: when truly nested inside another loop
+        // (depth > 1, since we already incremented loopNestDepth_ for
+        // this while-loop), cap the unroll factor to prevent LLVM from
+        // over-unrolling branch-heavy inner loops that create massive
+        // I-cache pressure.  Top-level while-loops (depth == 1) are
+        // left to LLVM's cost model for optimal unrolling decisions.
+        // When the function has @unroll, trust the user's intent and
+        // let LLVM's cost model decide the factor for all nested loops.
+        if (!inOptMaxFunction && !currentFuncHintUnroll_ && loopNestDepth_ > 1 && optimizationLevel >= OptimizationLevel::O2) {
             loopMDs.push_back(llvm::MDNode::get(
-                *context,
-                {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
-                 llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
-                     llvm::Type::getInt32Ty(*context), 2))}));
+                *context, {llvm::MDString::get(*context, "llvm.loop.unroll.disable")}));
         }
         // @vectorize / @novectorize: per-function loop vectorization hints.
-        // @vectorize is an advisory preference: it encourages the vectorizer
-        // to attempt vectorization, but the cost model may still choose scalar
-        // code if it determines that is faster.  No specific vector width is
-        // forced — the prefer-vector-width function attribute guides the
-        // vectorizer's width selection.
-        // @novectorize explicitly disables vectorization for this function.
         if (currentFuncHintNoVectorize_) {
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
@@ -457,7 +499,8 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
                            llvm::ConstantAsMetadata::get(
                                llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
         }
-        if (currentFuncHintHot_ && optimizationLevel >= OptimizationLevel::O3
+        if (currentFuncHintHot_ && currentFuncHintVectorize_
+            && optimizationLevel >= OptimizationLevel::O3
             && !currentFuncHintNoVectorize_) {
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
@@ -567,7 +610,8 @@ void CodeGenerator::generateDoWhile(DoWhileStmt* stmt) {
                            llvm::ConstantAsMetadata::get(
                                llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
         }
-        if (currentFuncHintHot_ && optimizationLevel >= OptimizationLevel::O3
+        if (currentFuncHintHot_ && currentFuncHintVectorize_
+            && optimizationLevel >= OptimizationLevel::O3
             && !currentFuncHintNoVectorize_) {
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
@@ -881,42 +925,13 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
                 }
             }
         }
-        // For variable-trip-count for-loops at O3, cap the unroll factor
-        // to prevent LLVM's runtime unroller from over-unrolling.
-        // LLVM's O3 unroller can create 50-100 copies of the loop body for
-        // loops with expensive operations (urem, division), causing massive
-        // register pressure, stack spills, and I-cache misses.  OmScript
-        // knows the loop structure (ascending, step=+1) and can guide the
-        // unroller more precisely than C compilers.
-        //
-        // For OPTMAX functions, we omit the unroll hint entirely, allowing
-        // LLVM's cost-model-driven unroller to choose the optimal factor
-        // based on loop body complexity and register pressure.  The OPTMAX
-        // per-function pipeline already includes an aggressive unroll pass.
-        //
-        // For regular functions, a factor of 2 keeps the code within L1
-        // I-cache (2^3=8x worst case) while still amortizing loop overhead.
-        if (!addedUnrollHint && !inOptMaxFunction && !currentFuncHintUnroll_ && optimizationLevel >= OptimizationLevel::O3 && enableUnrollLoops_ && !dynamicCompilation_) {
-            llvm::MDNode* unrollCount = llvm::MDNode::get(
-                *context,
-                {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
-                 llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
-                     llvm::Type::getInt32Ty(*context), 2))});
-            loopMDs.push_back(unrollCount);
-            // Explicitly enable runtime unrolling for variable-trip-count
-            // loops.  LLVM's runtime unroller generates a prologue/epilogue
-            // that handles the remainder iterations, enabling the main loop
-            // body to run at the unrolled stride.  Without this hint, the
-            // unroller may skip runtime unrolling if the trip count is not
-            // a compile-time constant.
-            // Note: llvm.loop.unroll.runtime.disable=false is a double
-            // negative — false means "do NOT disable runtime unrolling",
-            // i.e. enable it.
-            loopMDs.push_back(llvm::MDNode::get(
-                *context, {llvm::MDString::get(*context, "llvm.loop.unroll.runtime.disable"),
-                           llvm::ConstantAsMetadata::get(
-                               llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 0))}));
-        }
+        // For variable-trip-count for-loops at O3, trust LLVM's cost-model-
+        // driven unroller to choose the optimal factor based on loop body
+        // complexity, register pressure, and target microarchitecture.
+        // Previously we capped unroll at 2, but that cap prevented the
+        // vectorizer from choosing its own interleaving factor and sometimes
+        // produced suboptimal code.  OPTMAX functions and @unroll-annotated
+        // functions still get their explicit hints below.
         // @unroll / @nounroll: per-function loop unrolling overrides.
         // @nounroll disables unrolling entirely; @unroll requests aggressive unrolling.
         //
@@ -955,11 +970,16 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.unroll.disable")}));
         } else if (bodyHasInnerLoop_) {
-            // When the body contains an inner loop (while/for), disable
-            // unrolling to avoid I-cache bloat from duplicating large loop
-            // bodies with unpredictable branches.
+            // When the body contains an inner loop (while/for), cap unrolling
+            // to prevent LLVM from over-unrolling the outer loop.  Each outer
+            // iteration includes the full inner loop body, so aggressive
+            // unrolling creates massive code bloat and I-cache pressure.
+            // Cap at 4 iterations which balances ILP gains vs code size.
             loopMDs.push_back(llvm::MDNode::get(
-                *context, {llvm::MDString::get(*context, "llvm.loop.unroll.disable")}));
+                *context,
+                {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
+                 llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                     llvm::Type::getInt32Ty(*context), 4))}));
         } else if (currentFuncHintUnroll_ && !addedUnrollHint && !suppressUnrollHint) {
             // @unroll on a non-suppressed loop: apply the unroll count hint.
             // For variable-trip-count loops, unroll.full is ignored by LLVM
@@ -978,22 +998,37 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
                      llvm::Type::getInt32Ty(*context), unrollCount))}));
         }
         // @vectorize / @novectorize: per-function loop vectorization hints.
+        // At O3, also enable vectorization for @hot functions even without
+        // an explicit @vectorize annotation.  LLVM's vectorizer cost model
+        // can be overly conservative for i64 loops (e.g. those containing
+        // urem/udiv by constant) where the magic-number-multiply cost is
+        // overestimated.  Explicitly enabling vectorization lets the
+        // vectorizer proceed and produce profitable SIMD code that matches
+        // clang's aggressive auto-vectorization of hot loops.
         if (currentFuncHintNoVectorize_) {
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
                            llvm::ConstantAsMetadata::get(
                                llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 0))}));
-        } else if (currentFuncHintVectorize_) {
+        } else if (currentFuncHintVectorize_
+                   || (currentFuncHintHot_ && optimizationLevel >= OptimizationLevel::O3
+                       && !bodyHasInnerLoop_ && stepKnownPositive)) {
+            // @hot at O3: auto-vectorize simple ascending loops without inner
+            // loops.  Use @novectorize to opt out (e.g. loops with urem).
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
                            llvm::ConstantAsMetadata::get(
                                llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
         }
-        // At O3 in @hot functions, hint the vectorizer to interleave 4
-        // iterations per vector cycle.  Interleaving hides memory latency
-        // and FP pipeline stalls by keeping multiple independent vector
-        // operations in flight.
-        if (currentFuncHintHot_ && optimizationLevel >= OptimizationLevel::O3
+        // At O3 in @hot functions that explicitly request vectorization,
+        // hint the vectorizer to interleave 4 iterations per vector cycle.
+        // For other @hot loops, leave the interleave count unset so LLVM's
+        // cost model can pick the optimal factor.  Forcing interleave=4 on
+        // loops with complex bodies (conditional branches, reductions, many
+        // live values) causes excessive register pressure and can prevent
+        // the vectorizer from choosing a wider vector factor.
+        if (currentFuncHintHot_ && currentFuncHintVectorize_
+            && optimizationLevel >= OptimizationLevel::O3
             && !currentFuncHintNoVectorize_) {
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
@@ -1022,13 +1057,12 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         }
 
         // ── Software pipelining hint for @hot O3 innermost loops ─────
-        // At O3, for @hot non-nested loops with known positive step and
-        // no inner loops, enable software pipelining.  This tells the
-        // backend to overlap iterations by starting the next iteration
-        // before the current one finishes, hiding memory latency and FP
-        // pipeline stalls.  initiation interval = 1 is the most aggressive
-        // hint (one new iteration per cycle).
-        if (currentFuncHintHot_ && optimizationLevel >= OptimizationLevel::O3
+        // Software pipelining hints are only added when @vectorize is
+        // explicitly requested.  For other loops, LLVM's backend makes
+        // its own scheduling decisions which are generally optimal.
+        // Adding pipeline hints unconditionally was found to interfere
+        // with the vectorizer's cost model on some loop shapes.
+        if (currentFuncHintVectorize_ && optimizationLevel >= OptimizationLevel::O3
             && !deeplyNested && !bodyHasInnerLoop_ && stepKnownPositive) {
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.pipeline.disable"),
@@ -1257,7 +1291,8 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
                            llvm::ConstantAsMetadata::get(
                                llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
         }
-        if (currentFuncHintHot_ && optimizationLevel >= OptimizationLevel::O3
+        if (currentFuncHintHot_ && currentFuncHintVectorize_
+            && optimizationLevel >= OptimizationLevel::O3
             && !currentFuncHintNoVectorize_) {
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
