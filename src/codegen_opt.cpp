@@ -128,6 +128,14 @@
 #include <optional>
 #include <stdexcept>
 
+// LLVM 19 changed the signatures of registerOptimizerEarlyEPCallback and
+// registerOptimizerLastEPCallback to include a ThinOrFullLTOPhase argument.
+#if LLVM_VERSION_MAJOR >= 19
+#define OM_MODULE_EP_EXTRA_PARAM , llvm::ThinOrFullLTOPhase
+#else
+#define OM_MODULE_EP_EXTRA_PARAM
+#endif
+
 namespace omscript {
 
 // Aggressive SimplifyCFG options used throughout the optimization pipeline.
@@ -485,7 +493,7 @@ void CodeGenerator::runOptimizationPasses() {
     // more precise results for every downstream function-level optimisation.
     if (optimizationLevel >= OptimizationLevel::O2) {
         PB.registerOptimizerEarlyEPCallback(
-            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/) {
+            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/ OM_MODULE_EP_EXTRA_PARAM) {
             MPM.addPass(llvm::ReversePostOrderFunctionAttrsPass());
         });
     }
@@ -603,7 +611,7 @@ void CodeGenerator::runOptimizationPasses() {
     // vectorizer — giving them larger, straighter basic blocks to work with.
     if (optimizationLevel >= OptimizationLevel::O3) {
         PB.registerOptimizerEarlyEPCallback(
-            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/) {
+            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/ OM_MODULE_EP_EXTRA_PARAM) {
             llvm::FunctionPassManager SuperblockFPM;
             // Phase 1: Superblock formation — duplicate blocks along
             // frequently-taken paths to form single-entry traces.
@@ -861,7 +869,7 @@ void CodeGenerator::runOptimizationPasses() {
     //     optionally benefit from profile data when available.
     if (optimizationLevel >= OptimizationLevel::O2) {
         PB.registerOptimizerLastEPCallback(
-            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/) {
+            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/ OM_MODULE_EP_EXTRA_PARAM) {
             llvm::FunctionPassManager FPM;
             FPM.addPass(llvm::VectorCombinePass());
             FPM.addPass(llvm::LoopSinkPass());
@@ -889,7 +897,7 @@ void CodeGenerator::runOptimizationPasses() {
     // vectorized code.
     if (optimizationLevel >= OptimizationLevel::O3) {
         PB.registerOptimizerLastEPCallback(
-            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/) {
+            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/ OM_MODULE_EP_EXTRA_PARAM) {
             llvm::FunctionPassManager PostVecFPM;
             PostVecFPM.addPass(llvm::JumpThreadingPass());
             PostVecFPM.addPass(llvm::SpeculativeExecutionPass());
@@ -915,7 +923,7 @@ void CodeGenerator::runOptimizationPasses() {
     if (optimizationLevel >= OptimizationLevel::O2) {
         const bool isO3 = optimizationLevel >= OptimizationLevel::O3;
         PB.registerOptimizerLastEPCallback(
-            [isO3](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/) {
+            [isO3](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/ OM_MODULE_EP_EXTRA_PARAM) {
             // IPSCCPPass performs inter-procedural sparse conditional constant
             // propagation — a more powerful version of SCCP that propagates
             // constants, value ranges, and struct field values across function
@@ -945,7 +953,7 @@ void CodeGenerator::runOptimizationPasses() {
     // metadata, making the srem→urem proof impossible.
     if (enableSuperopt_ && optimizationLevel >= OptimizationLevel::O2) {
         PB.registerOptimizerLastEPCallback(
-            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/) {
+            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/ OM_MODULE_EP_EXTRA_PARAM) {
             struct SRemToURemPass : public llvm::PassInfoMixin<SRemToURemPass> {
                 llvm::PreservedAnalyses run(llvm::Module& M, llvm::ModuleAnalysisManager&) {
                     unsigned total = 0;
@@ -974,7 +982,7 @@ void CodeGenerator::runOptimizationPasses() {
     // the remaining hot code.
     if (optimizationLevel >= OptimizationLevel::O3) {
         PB.registerOptimizerLastEPCallback(
-            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/) {
+            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/ OM_MODULE_EP_EXTRA_PARAM) {
             MPM.addPass(llvm::HotColdSplittingPass());
             // StripDeadPrototypes removes unused external function declarations.
             // After inlining, dead argument elimination, and DCE, many declared-
@@ -995,7 +1003,7 @@ void CodeGenerator::runOptimizationPasses() {
     // At O2, still strip dead prototypes for cleaner output.
     if (optimizationLevel == OptimizationLevel::O2) {
         PB.registerOptimizerLastEPCallback(
-            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/) {
+            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/ OM_MODULE_EP_EXTRA_PARAM) {
             MPM.addPass(llvm::StripDeadPrototypesPass());
         });
     }
