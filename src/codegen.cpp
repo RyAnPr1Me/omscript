@@ -94,59 +94,86 @@ static const std::unordered_set<std::string> kConcurrencyBuiltins = {"thread_cre
 static bool exprCallsAny(const Expression* e, const std::unordered_set<std::string>& names) {
     if (!e)
         return false;
-    if (auto* call = dynamic_cast<const CallExpr*>(e)) {
+    switch (e->type) {
+    case ASTNodeType::CALL_EXPR: {
+        auto* call = static_cast<const CallExpr*>(e);
         if (names.count(call->callee))
             return true;
         for (auto& arg : call->arguments)
             if (exprCallsAny(arg.get(), names))
                 return true;
+        return false;
     }
-    if (auto* bin = dynamic_cast<const BinaryExpr*>(e))
+    case ASTNodeType::BINARY_EXPR: {
+        auto* bin = static_cast<const BinaryExpr*>(e);
         return exprCallsAny(bin->left.get(), names) || exprCallsAny(bin->right.get(), names);
-    if (auto* un = dynamic_cast<const UnaryExpr*>(e))
-        return exprCallsAny(un->operand.get(), names);
-    if (auto* tern = dynamic_cast<const TernaryExpr*>(e))
+    }
+    case ASTNodeType::UNARY_EXPR:
+        return exprCallsAny(static_cast<const UnaryExpr*>(e)->operand.get(), names);
+    case ASTNodeType::TERNARY_EXPR: {
+        auto* tern = static_cast<const TernaryExpr*>(e);
         return exprCallsAny(tern->condition.get(), names) || exprCallsAny(tern->thenExpr.get(), names) ||
                exprCallsAny(tern->elseExpr.get(), names);
-    if (auto* idx = dynamic_cast<const IndexExpr*>(e))
+    }
+    case ASTNodeType::INDEX_EXPR: {
+        auto* idx = static_cast<const IndexExpr*>(e);
         return exprCallsAny(idx->array.get(), names) || exprCallsAny(idx->index.get(), names);
-    if (auto* ia = dynamic_cast<const IndexAssignExpr*>(e))
+    }
+    case ASTNodeType::INDEX_ASSIGN_EXPR: {
+        auto* ia = static_cast<const IndexAssignExpr*>(e);
         return exprCallsAny(ia->array.get(), names) || exprCallsAny(ia->index.get(), names) ||
                exprCallsAny(ia->value.get(), names);
-    if (auto* assign = dynamic_cast<const AssignExpr*>(e))
-        return exprCallsAny(assign->value.get(), names);
-    return false;
+    }
+    case ASTNodeType::ASSIGN_EXPR:
+        return exprCallsAny(static_cast<const AssignExpr*>(e)->value.get(), names);
+    default:
+        return false;
+    }
 }
 
 /// Recursively check if a statement tree contains a call to any name in @p names.
 static bool stmtCallsAny(const Statement* s, const std::unordered_set<std::string>& names) {
     if (!s)
         return false;
-    if (auto* blk = dynamic_cast<const BlockStmt*>(s)) {
+    switch (s->type) {
+    case ASTNodeType::BLOCK: {
+        auto* blk = static_cast<const BlockStmt*>(s);
         for (auto& st : blk->statements)
             if (stmtCallsAny(st.get(), names))
                 return true;
         return false;
     }
-    if (auto* ret = dynamic_cast<const omscript::ReturnStmt*>(s))
-        return exprCallsAny(ret->value.get(), names);
-    if (auto* exprS = dynamic_cast<const ExprStmt*>(s))
-        return exprCallsAny(exprS->expression.get(), names);
-    if (auto* var = dynamic_cast<const VarDecl*>(s))
-        return exprCallsAny(var->initializer.get(), names);
-    if (auto* ifS = dynamic_cast<const IfStmt*>(s))
+    case ASTNodeType::RETURN_STMT:
+        return exprCallsAny(static_cast<const omscript::ReturnStmt*>(s)->value.get(), names);
+    case ASTNodeType::EXPR_STMT:
+        return exprCallsAny(static_cast<const ExprStmt*>(s)->expression.get(), names);
+    case ASTNodeType::VAR_DECL:
+        return exprCallsAny(static_cast<const VarDecl*>(s)->initializer.get(), names);
+    case ASTNodeType::IF_STMT: {
+        auto* ifS = static_cast<const IfStmt*>(s);
         return exprCallsAny(ifS->condition.get(), names) || stmtCallsAny(ifS->thenBranch.get(), names) ||
                stmtCallsAny(ifS->elseBranch.get(), names);
-    if (auto* wh = dynamic_cast<const WhileStmt*>(s))
+    }
+    case ASTNodeType::WHILE_STMT: {
+        auto* wh = static_cast<const WhileStmt*>(s);
         return exprCallsAny(wh->condition.get(), names) || stmtCallsAny(wh->body.get(), names);
-    if (auto* dw = dynamic_cast<const DoWhileStmt*>(s))
+    }
+    case ASTNodeType::DO_WHILE_STMT: {
+        auto* dw = static_cast<const DoWhileStmt*>(s);
         return stmtCallsAny(dw->body.get(), names) || exprCallsAny(dw->condition.get(), names);
-    if (auto* fr = dynamic_cast<const ForStmt*>(s))
+    }
+    case ASTNodeType::FOR_STMT: {
+        auto* fr = static_cast<const ForStmt*>(s);
         return exprCallsAny(fr->start.get(), names) || exprCallsAny(fr->end.get(), names) ||
                exprCallsAny(fr->step.get(), names) || stmtCallsAny(fr->body.get(), names);
-    if (auto* fe = dynamic_cast<const ForEachStmt*>(s))
+    }
+    case ASTNodeType::FOR_EACH_STMT: {
+        auto* fe = static_cast<const ForEachStmt*>(s);
         return exprCallsAny(fe->collection.get(), names) || stmtCallsAny(fe->body.get(), names);
-    return false;
+    }
+    default:
+        return false;
+    }
 }
 
 /// Returns true if the function body contains calls to any concurrency builtin.
@@ -2003,9 +2030,10 @@ void CodeGenerator::preAnalyzeStringTypes(Program* program) {
 bool CodeGenerator::isStringExpr(Expression* expr) const {
     if (!expr)
         return false;
-    if (auto* lit = dynamic_cast<LiteralExpr*>(expr))
-        return lit->literalType == LiteralExpr::LiteralType::STRING;
-    if (auto* id = dynamic_cast<IdentifierExpr*>(expr)) {
+    if (expr->type == ASTNodeType::LITERAL_EXPR)
+        return static_cast<LiteralExpr*>(expr)->literalType == LiteralExpr::LiteralType::STRING;
+    if (expr->type == ASTNodeType::IDENTIFIER_EXPR) {
+        auto* id = static_cast<IdentifierExpr*>(expr);
         // Check the LLVM alloca type (handles local vars initialized with string literals).
         auto it = namedValues.find(id->name);
         if (it != namedValues.end() && it->second) {
@@ -2018,10 +2046,10 @@ bool CodeGenerator::isStringExpr(Expression* expr) const {
         return stringVars_.count(id->name) > 0;
     }
     // arr[i] where arr is a string array → the element is a string.
-    if (auto* idx = dynamic_cast<IndexExpr*>(expr)) {
-        return isStringArrayExpr(idx->array.get());
-    }
-    if (auto* bin = dynamic_cast<BinaryExpr*>(expr)) {
+    if (expr->type == ASTNodeType::INDEX_EXPR)
+        return isStringArrayExpr(static_cast<IndexExpr*>(expr)->array.get());
+    if (expr->type == ASTNodeType::BINARY_EXPR) {
+        auto* bin = static_cast<BinaryExpr*>(expr);
         if (bin->op == "+")
             return isStringExpr(bin->left.get()) || isStringExpr(bin->right.get());
         // str * n  and  n * str  both produce a string
@@ -2029,11 +2057,12 @@ bool CodeGenerator::isStringExpr(Expression* expr) const {
             return isStringExpr(bin->left.get()) || isStringExpr(bin->right.get());
         return false;
     }
-    if (auto* tern = dynamic_cast<TernaryExpr*>(expr)) {
+    if (expr->type == ASTNodeType::TERNARY_EXPR) {
+        auto* tern = static_cast<TernaryExpr*>(expr);
         return isStringExpr(tern->thenExpr.get()) || isStringExpr(tern->elseExpr.get());
     }
-    if (auto* call = dynamic_cast<CallExpr*>(expr))
-        return stringReturningFunctions_.count(call->callee) > 0;
+    if (expr->type == ASTNodeType::CALL_EXPR)
+        return stringReturningFunctions_.count(static_cast<CallExpr*>(expr)->callee) > 0;
     return false;
 }
 
@@ -2042,10 +2071,11 @@ bool CodeGenerator::isStringArrayExpr(Expression* expr) const {
     if (!expr)
         return false;
     // Variable whose name is tracked as a string array.
-    if (auto* id = dynamic_cast<IdentifierExpr*>(expr))
-        return stringArrayVars_.count(id->name) > 0;
+    if (expr->type == ASTNodeType::IDENTIFIER_EXPR)
+        return stringArrayVars_.count(static_cast<IdentifierExpr*>(expr)->name) > 0;
     // Array literal whose elements are all strings.
-    if (auto* arr = dynamic_cast<ArrayExpr*>(expr)) {
+    if (expr->type == ASTNodeType::ARRAY_EXPR) {
+        auto* arr = static_cast<ArrayExpr*>(expr);
         if (arr->elements.empty())
             return false;
         for (const auto& e : arr->elements) {
@@ -2057,7 +2087,8 @@ bool CodeGenerator::isStringArrayExpr(Expression* expr) const {
     // str_split() always returns an array of strings.
     // push(strArr, elem) returns a string array if the input is one.
     // array_concat/array_copy preserve the string-array type of the input.
-    if (auto* call = dynamic_cast<CallExpr*>(expr)) {
+    if (expr->type == ASTNodeType::CALL_EXPR) {
+        auto* call = static_cast<CallExpr*>(expr);
         if (call->callee == "str_split")
             return true;
         if ((call->callee == "push" || call->callee == "array_copy") && !call->arguments.empty())

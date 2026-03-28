@@ -5361,7 +5361,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         candidates.reserve(functions.size());
         for (const auto& kv : functions) {
             if (kv.second)
-                candidates.push_back(kv.first);
+                candidates.push_back(kv.getKey().str());
         }
         std::string suggestion = suggestSimilar(expr->callee, candidates);
         if (!suggestion.empty()) {

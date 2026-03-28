@@ -254,7 +254,7 @@ class CodeGenerator {
     std::unique_ptr<llvm::IRBuilder<>> builder;
     std::unique_ptr<llvm::Module> module;
 
-    std::unordered_map<std::string, llvm::Value*> namedValues;
+    llvm::StringMap<llvm::Value*> namedValues;
     std::vector<std::unordered_map<std::string, llvm::Value*>> scopeStack;
 
     struct LoopContext {
@@ -296,15 +296,15 @@ class CodeGenerator {
         bool hadPreviousIntFold = false;
         int64_t previousIntFold = 0;
     };
-    std::unordered_map<std::string, bool> constValues;
+    llvm::StringMap<bool> constValues;
     std::vector<std::unordered_map<std::string, ConstBinding>> constScopeStack;
-    std::unordered_map<std::string, llvm::Function*> functions;
+    llvm::StringMap<llvm::Function*> functions;
 
     // Store AST function declarations for default parameter lookup at call sites.
-    std::unordered_map<std::string, const FunctionDecl*> functionDecls_;
+    llvm::StringMap<const FunctionDecl*> functionDecls_;
 
     // Enum constant values (name → integer value), populated from enum declarations.
-    std::unordered_map<std::string, long long> enumConstants_;
+    llvm::StringMap<long long> enumConstants_;
 
     // Struct type definitions: struct name → ordered list of field names.
     std::unordered_map<std::string, std::vector<std::string>> structDefs_;
