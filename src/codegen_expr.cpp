@@ -1280,8 +1280,12 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         };
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
             const bool leftNonNeg = nonNegValues_.count(left);
-            if (auto* result = emitShiftAdd(left, ci->getSExtValue(), leftNonNeg))
+            if (auto* result = emitShiftAdd(left, ci->getSExtValue(), leftNonNeg)) {
+                // Product of non-negative base and positive constant is non-neg.
+                if (leftNonNeg && ci->getSExtValue() > 0)
+                    nonNegValues_.insert(result);
                 return result;
+            }
             // Negative constant strength reduction: n * (-K) → neg(n * K).
             // This leverages the existing shift+add patterns for the absolute
             // value, then negates the result.  A single neg (sub 0, x) is far
@@ -1295,8 +1299,11 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         }
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left)) {
             const bool rightNonNeg = nonNegValues_.count(right);
-            if (auto* result = emitShiftAdd(right, ci->getSExtValue(), rightNonNeg))
+            if (auto* result = emitShiftAdd(right, ci->getSExtValue(), rightNonNeg)) {
+                if (rightNonNeg && ci->getSExtValue() > 0)
+                    nonNegValues_.insert(result);
                 return result;
+            }
             const int64_t lv = ci->getSExtValue();
             if (lv < -1) {
                 if (auto* posResult = emitShiftAdd(right, -lv, rightNonNeg)) {
