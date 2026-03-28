@@ -2086,7 +2086,11 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
     }
 
     // Handle array element increment/decrement: arr[i]++ / ++arr[i]
-    auto* indexExpr = dynamic_cast<IndexExpr*>(operandExpr);
+    if (operandExpr->type != ASTNodeType::INDEX_EXPR && operandExpr->type != ASTNodeType::IDENTIFIER_EXPR) {
+        codegenError("Increment/decrement operators require an lvalue operand", errorNode);
+    }
+    IndexExpr* indexExpr = (operandExpr->type == ASTNodeType::INDEX_EXPR)
+        ? static_cast<IndexExpr*>(operandExpr) : nullptr;
     if (indexExpr) {
         llvm::Value* arrVal = generateExpression(indexExpr->array.get());
         llvm::Value* idxVal = generateExpression(indexExpr->index.get());
@@ -2720,6 +2724,7 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
                 }
             }
         }
+    }
 
     if (!boundsCheckElided) {
         llvm::Function* function = builder->GetInsertBlock()->getParent();
@@ -2799,7 +2804,8 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
     // We must handle this before generating the array expression because
     // SIMD vectors are values (not pointers) — we load the vector from its
     // alloca, insert the new element, and store the updated vector back.
-    if (auto* idExpr = dynamic_cast<IdentifierExpr*>(expr->array.get())) {
+    if (expr->array->type == ASTNodeType::IDENTIFIER_EXPR) {
+        auto* idExpr = static_cast<IdentifierExpr*>(expr->array.get());
         auto it = namedValues.find(idExpr->name);
         if (it != namedValues.end()) {
             auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(it->second);
@@ -2844,13 +2850,13 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
     // Ownership-aware: borrowed arrays cannot resize, so length is stable.
     bool arrayIsBorrowedA = false;
     if (!isStr) {
-        if (auto* arrIdent = dynamic_cast<IdentifierExpr*>(expr->array.get())) {
-            arrayIsBorrowedA = isVariableBorrowed(arrIdent->name);
-        }
+        if (expr->array->type == ASTNodeType::IDENTIFIER_EXPR)
+            arrayIsBorrowedA = isVariableBorrowed(static_cast<IdentifierExpr*>(expr->array.get())->name);
     }
 
     if (!boundsCheckElidedA && !isStr && optimizationLevel >= OptimizationLevel::O1) {
-        auto* idxIdent = dynamic_cast<IdentifierExpr*>(expr->index.get());
+        IdentifierExpr* idxIdent = (expr->index->type == ASTNodeType::IDENTIFIER_EXPR)
+            ? static_cast<IdentifierExpr*>(expr->index.get()) : nullptr;
         if (idxIdent && safeIndexVars_.count(idxIdent->name)) {
             auto it = loopIterEndBound_.find(idxIdent->name);
             if (it != loopIterEndBound_.end()) {
