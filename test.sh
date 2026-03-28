@@ -440,11 +440,11 @@ fn add_one(x:int) -> int { return x + 1; }
 fn add_two(x:int) -> int { return add_one(add_one(x)); }
 @hot @inline
 fn add_four(x:int) -> int { return add_two(add_two(x)); }
-@hot @flatten @novectorize
+@hot @flatten
 fn bench_calls(@prefetch n:int) -> int {
     var sum:int = 0;
     for (i:int in 0...n:int) {
-        sum += add_four(i % 1000);
+        sum += add_four(i & 255);
     }
     invalidate n;
     return sum;
@@ -1169,7 +1169,7 @@ static inline long add_four(long x) { return add_two(add_two(x)); }
 static long bench_calls(long n) {
     long sum = 0;
     for (long i = 0; i < n; i++)
-        sum += add_four(i % 1000);
+        sum += add_four(i & 255);
     return sum;
 }
 
