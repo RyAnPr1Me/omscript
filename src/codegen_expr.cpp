@@ -2222,7 +2222,19 @@ llvm::Value* CodeGenerator::generateTernary(TernaryExpr* expr) {
                     elseVal = ensureFloat(elseVal);
             }
         }
-        return builder->CreateSelect(condBool, thenVal, elseVal, "ternsel");
+        llvm::Value* sel = builder->CreateSelect(condBool, thenVal, elseVal, "ternsel");
+        // Propagate non-negativity: if both arms are non-negative, the result is.
+        bool tNonNeg = nonNegValues_.count(thenVal) > 0;
+        if (!tNonNeg)
+            if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(thenVal))
+                tNonNeg = !ci->isNegative();
+        bool eNonNeg = nonNegValues_.count(elseVal) > 0;
+        if (!eNonNeg)
+            if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(elseVal))
+                eNonNeg = !ci->isNegative();
+        if (tNonNeg && eNonNeg)
+            nonNegValues_.insert(sel);
+        return sel;
     }
 
     llvm::Function* function = builder->GetInsertBlock()->getParent();
@@ -2266,6 +2278,21 @@ llvm::Value* CodeGenerator::generateTernary(TernaryExpr* expr) {
     llvm::PHINode* phi = builder->CreatePHI(thenVal->getType(), 2, "ternval");
     phi->addIncoming(thenVal, thenBB);
     phi->addIncoming(elseVal, elseBB);
+
+    // Propagate non-negativity through the PHI: if both arms are provably
+    // non-negative the merged result is also non-negative.  Without this,
+    // patterns like x = (x%2==0) ? (x/2) : (3*x+1) lose non-neg tracking
+    // after the first iteration, causing srem/sdiv instead of urem/lshr.
+    bool thenNonNeg = nonNegValues_.count(thenVal) > 0;
+    if (!thenNonNeg)
+        if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(thenVal))
+            thenNonNeg = !ci->isNegative();
+    bool elseNonNeg = nonNegValues_.count(elseVal) > 0;
+    if (!elseNonNeg)
+        if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(elseVal))
+            elseNonNeg = !ci->isNegative();
+    if (thenNonNeg && elseNonNeg)
+        nonNegValues_.insert(phi);
 
     return phi;
 }

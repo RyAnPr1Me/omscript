@@ -352,19 +352,43 @@ void CodeGenerator::generateIf(IfStmt* stmt) {
         br->setMetadata(llvm::LLVMContext::MD_prof, brWeights);
     }
 
+    // Save pre-if non-neg state so each branch starts from the same baseline.
+    // Without this the else-branch inherits the then-branch's mutations, which
+    // is unsound and can misclassify values as non-negative.
+    const std::unordered_set<llvm::Value*> preIfNonNeg = nonNegValues_;
+
     // Then block
     builder->SetInsertPoint(thenBB);
     generateStatement(stmt->thenBranch.get());
     if (!builder->GetInsertBlock()->getTerminator()) {
         builder->CreateBr(mergeBB);
     }
+    // Capture which allocas are non-negative after the then branch.
+    const std::unordered_set<llvm::Value*> thenNonNeg = nonNegValues_;
 
-    // Else block
+    // Else block — restore to pre-if state before generating.
     if (elseBB) {
+        nonNegValues_ = preIfNonNeg;
         builder->SetInsertPoint(elseBB);
         generateStatement(stmt->elseBranch.get());
         if (!builder->GetInsertBlock()->getTerminator()) {
             builder->CreateBr(mergeBB);
+        }
+        // After both branches: a value is non-negative at the merge point only
+        // if it was non-negative in BOTH branches (conservative intersection).
+        const std::unordered_set<llvm::Value*> elseNonNeg = nonNegValues_;
+        nonNegValues_ = preIfNonNeg; // start from pre-if
+        for (llvm::Value* v : thenNonNeg) {
+            if (elseNonNeg.count(v))
+                nonNegValues_.insert(v);
+        }
+    } else {
+        // No else: at the merge point a value is non-negative only if it was
+        // non-negative before the if AND remains so after the then-branch.
+        // Conservative: intersect pre-if with post-then.
+        for (llvm::Value* v : preIfNonNeg) {
+            if (!thenNonNeg.count(v))
+                nonNegValues_.erase(v);
         }
     }
 
@@ -454,10 +478,7 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
         // let LLVM's cost model decide the factor for all nested loops.
         if (!inOptMaxFunction && !currentFuncHintUnroll_ && loopNestDepth_ > 1 && optimizationLevel >= OptimizationLevel::O2) {
             loopMDs.push_back(llvm::MDNode::get(
-                *context,
-                {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
-                 llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
-                     llvm::Type::getInt32Ty(*context), 2))}));
+                *context, {llvm::MDString::get(*context, "llvm.loop.unroll.disable")}));
         }
         // @vectorize / @novectorize: per-function loop vectorization hints.
         if (currentFuncHintNoVectorize_) {
