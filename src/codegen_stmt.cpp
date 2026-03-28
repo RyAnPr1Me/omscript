@@ -966,6 +966,8 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         } else if (currentFuncHintVectorize_
                    || (currentFuncHintHot_ && optimizationLevel >= OptimizationLevel::O3
                        && !bodyHasInnerLoop_ && stepKnownPositive)) {
+            // @hot at O3: auto-vectorize simple ascending loops without inner
+            // loops.  Use @novectorize to opt out (e.g. loops with urem).
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
                            llvm::ConstantAsMetadata::get(
