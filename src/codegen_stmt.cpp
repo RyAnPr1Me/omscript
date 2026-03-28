@@ -130,6 +130,20 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
 
     if (initValue) {
         builder->CreateStore(initValue, alloca);
+        // Track non-negativity: if a const variable is initialized with a
+        // non-negative value (constant or expression), mark the alloca so
+        // that subsequent loads inherit the non-negative property.  This
+        // enables unsigned comparisons, urem/udiv, and NSW flags on
+        // downstream arithmetic.
+        if (stmt->isConst && allocaType->isIntegerTy()) {
+            bool initNonNeg = nonNegValues_.count(initValue) > 0;
+            if (!initNonNeg) {
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(initValue))
+                    initNonNeg = !ci->isNegative();
+            }
+            if (initNonNeg)
+                nonNegValues_.insert(alloca);
+        }
         // Track whether this variable holds a string value so that print(),
         // concatenation, and comparison operators handle it correctly when
         // the variable's alloca type is i64 (e.g. assigned from a function

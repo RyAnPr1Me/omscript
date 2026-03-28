@@ -987,9 +987,22 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         // in i64 without wrapping.  The nsw flag enables SCEV to compute
         // tighter trip counts for countdown loops and proves induction
         // variable monotonicity.
-        if (nonNegValues_.count(left) && nonNegValues_.count(right))
-            return builder->CreateNSWSub(left, right, "subtmp");
-        return builder->CreateSub(left, right, "subtmp");
+        const bool leftNonNeg = nonNegValues_.count(left);
+        const bool rightNonNeg = nonNegValues_.count(right);
+        const bool bothNonNeg = leftNonNeg && rightNonNeg;
+        // Also detect constant non-negative operands — mirrors the
+        // addition logic.  Subtracting a non-negative constant from a
+        // non-negative value (or vice versa) cannot overflow i64.
+        bool constNSW = false;
+        if (!bothNonNeg) {
+            if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right))
+                constNSW = leftNonNeg && !ci->isNegative();
+            else if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left))
+                constNSW = rightNonNeg && !ci->isNegative();
+        }
+        const bool canNSW = bothNonNeg || constNSW;
+        return canNSW ? builder->CreateNSWSub(left, right, "subtmp")
+                      : builder->CreateSub(left, right, "subtmp");
     } else if (expr->op == "*") {
         // Strength reduction: multiply by power of 2 → left shift
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
@@ -1296,19 +1309,48 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         // Also set nsw when one operand is a positive constant and the other
         // is non-negative — the product of two non-negative values cannot
         // overflow into the negative range for typical program values.
-        if (nonNegValues_.count(left) && nonNegValues_.count(right))
-            return builder->CreateNSWMul(left, right, "multmp");
+        if (nonNegValues_.count(left) && nonNegValues_.count(right)) {
+            auto* result = builder->CreateNSWMul(left, right, "multmp");
+            nonNegValues_.insert(result);
+            return result;
+        }
         if (nonNegValues_.count(left)) {
             if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
-                if (!ci->isNegative() && !ci->isZero())
-                    return builder->CreateNSWMul(left, right, "multmp");
+                if (!ci->isNegative() && !ci->isZero()) {
+                    auto* result = builder->CreateNSWMul(left, right, "multmp");
+                    nonNegValues_.insert(result);
+                    return result;
+                }
             }
         }
         if (nonNegValues_.count(right)) {
             if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left)) {
-                if (!ci->isNegative() && !ci->isZero())
-                    return builder->CreateNSWMul(left, right, "multmp");
+                if (!ci->isNegative() && !ci->isZero()) {
+                    auto* result = builder->CreateNSWMul(left, right, "multmp");
+                    nonNegValues_.insert(result);
+                    return result;
+                }
             }
+        }
+        // Squaring detection: x*x is always non-negative regardless of
+        // the sign of x.  This is crucial for loops like `(i*i) % 101`
+        // where the non-negativity of the product enables urem instead
+        // of the more expensive srem.
+        // Detect squaring at the AST level: both children are the same
+        // identifier expression.
+        {
+            auto* leftIdent = dynamic_cast<IdentifierExpr*>(expr->left.get());
+            auto* rightIdent = dynamic_cast<IdentifierExpr*>(expr->right.get());
+            if (leftIdent && rightIdent && leftIdent->name == rightIdent->name) {
+                auto* result = builder->CreateMul(left, right, "sqtmp");
+                nonNegValues_.insert(result);
+                return result;
+            }
+        }
+        if (left == right) {
+            auto* result = builder->CreateMul(left, right, "sqtmp");
+            nonNegValues_.insert(result);
+            return result;
         }
         return builder->CreateMul(left, right, "multmp");
     } else if (expr->op == "/" || expr->op == "%") {
