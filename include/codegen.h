@@ -289,6 +289,9 @@ class CodeGenerator {
     struct ConstBinding {
         bool wasPreviouslyDefined;
         bool previousIsConst;
+        // Previous constIntFolds_ value for this variable (if any).
+        bool hadPreviousIntFold = false;
+        int64_t previousIntFold = 0;
     };
     std::unordered_map<std::string, bool> constValues;
     std::vector<std::unordered_map<std::string, ConstBinding>> constScopeStack;
@@ -420,6 +423,13 @@ class CodeGenerator {
     /// Variables declared with `register` keyword — forces register allocation
     /// by running mem2reg on the function after codegen.
     std::unordered_set<std::string> registerVars_;
+
+    /// Constant integer values for `const` integer variables initialized with
+    /// a compile-time constant.  Used to substitute constants directly in
+    /// division/modulo expressions (e.g. `x % sz` where `sz` is a `const`
+    /// variable with value 10000), enabling the urem/udiv fast path and
+    /// avoiding the slow dynamic-divisor branch with zero-check overhead.
+    std::unordered_map<std::string, int64_t> constIntFolds_;
 
     /// Variables with SIMD vector types for operator dispatch.
     std::unordered_set<std::string> simdVars_;

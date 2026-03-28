@@ -144,6 +144,13 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             }
             if (initNonNeg)
                 nonNegValues_.insert(alloca);
+            // Track constant integer values for `const` variables so that
+            // downstream div/mod can substitute the constant directly and
+            // use the fast urem/udiv path instead of the dynamic-divisor path.
+            if (stmt->isConst) {
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(initValue))
+                    constIntFolds_[stmt->name] = ci->getSExtValue();
+            }
         }
         // Track whether this variable holds a string value so that print(),
         // concatenation, and comparison operators handle it correctly when

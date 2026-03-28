@@ -82,6 +82,21 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
         codegenError(msg, expr);
     }
 
+    // Constant folding for `const` integer variables: return the constant
+    // directly instead of emitting a load.  This allows downstream div/mod,
+    // multiply, and comparison operations to see a ConstantInt and use the
+    // fast urem/udiv path, NSWMul, and other constant-specific optimizations
+    // that would otherwise only fire after LLVM's mem2reg pass.
+    {
+        auto foldIt = constIntFolds_.find(expr->name);
+        if (foldIt != constIntFolds_.end()) {
+            auto* ci = llvm::ConstantInt::get(getDefaultType(), foldIt->second);
+            if (foldIt->second >= 0)
+                nonNegValues_.insert(ci);
+            return ci;
+        }
+    }
+
     // Register-promotion strategy: prefetched variables go straight to
     // registers (promoted by SROA/mem2reg) and stay there until invalidated.
     // No use-site llvm.prefetch is emitted on the alloca — that would anchor
