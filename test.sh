@@ -651,18 +651,14 @@ fn bench_hash(@prefetch n:int) -> int {
 }
 
 // ── 23. collatz ──────────────────────────────────────────────
-@hot @flatten @unroll
+@hot @noinline
 fn bench_collatz(@prefetch n:int) -> int {
     var total_steps:int = 0;
     for (i:int in 1...n) {
         var x:int = i;
         var steps:int = 0;
         while (x != 1) {
-            if (x % 2 == 0) {
-                x = x / 2;
-            } else {
-                x = 3 * x + 1;
-            }
+            x = (x % 2 == 0) ? (x / 2) : (3 * x + 1);
             steps += 1;
         }
         total_steps += steps;
@@ -1356,8 +1352,7 @@ static long bench_collatz(long n) {
         long x = i;
         long steps = 0;
         while (x != 1) {
-            if (x % 2 == 0) x = x / 2;
-            else x = 3 * x + 1;
+            x = (x % 2 == 0) ? (x / 2) : (3 * x + 1);
             steps++;
         }
         total_steps += steps;
