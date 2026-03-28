@@ -1105,7 +1105,7 @@ void CodeGenerator::runOptimizationPasses() {
     if (optimizationLevel >= OptimizationLevel::O3) {
         for (auto& F : *module) {
             if (F.isDeclaration()) continue;
-            if (userAnnotatedColdFunctions_.count(std::string(F.getName()))) continue; // preserve @cold
+            if (userAnnotatedColdFunctions_.count(F.getName())) continue; // preserve @cold
             F.removeFnAttr(llvm::Attribute::Cold);
             F.removeFnAttr(llvm::Attribute::MinSize);
         }
@@ -1640,7 +1640,7 @@ void CodeGenerator::optimizeOptMaxFunctions() {
         if (func.isDeclaration())
             continue;
         const llvm::StringRef name = func.getName();
-        if (!optMaxFunctions.count(std::string(name)))
+        if (!optMaxFunctions.count(name))
             continue;
         func.addFnAttr(llvm::Attribute::NoUnwind);
         // WillReturn: OPTMAX functions always return (no infinite loops or
@@ -1760,14 +1760,16 @@ void CodeGenerator::optimizeOptMaxFunctions() {
 
     fpm.doInitialization();
     for (llvm::Function* func : optMaxFuncs) {
-        // OPTMAX runs the aggressive pass stack twice to maximize optimization.
+        // OPTMAX runs the aggressive pass stack up to 3 times to maximize optimization.
         // The first iteration does the heavy lifting; the second catches
         // patterns exposed by loop/strength-reduce transforms.  Beyond two,
         // passes reach a near-fixed-point and additional iterations produce
         // negligible changes while doubling compile time.
+        // Early exit: if a pass iteration makes no changes, the fixed point is
+        // reached and further iterations cannot improve the IR.
         constexpr int optMaxIterations = 3;
         for (int i = 0; i < optMaxIterations; ++i) {
-            fpm.run(*func);
+            if (!fpm.run(*func)) break;
         }
     }
     fpm.doFinalization();
@@ -1960,11 +1962,13 @@ void CodeGenerator::runJITBaselinePasses() {
     // new optimization opportunities (e.g., strength reduction creates patterns
     // that instcombine can simplify further).  Two iterations is the sweet spot
     // for per-function JIT optimization without excessive compile time.
+    // Early exit: if an iteration makes no changes, the fixed point is reached
+    // and further iterations cannot improve the IR.
     const int iterations = (optimizationLevel >= OptimizationLevel::O3) ? 2 : 1;
     for (auto& func : module->functions()) {
         if (!func.isDeclaration()) {
             for (int i = 0; i < iterations; ++i) {
-                fpm.run(func);
+                if (!fpm.run(func)) break;
             }
         }
     }

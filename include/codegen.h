@@ -12,6 +12,9 @@
 
 #include "ast.h"
 #include "diagnostic.h"
+#include <llvm/ADT/DenseSet.h>
+#include <llvm/ADT/StringMap.h>
+#include <llvm/ADT/StringSet.h>
 #include <llvm/IR/DIBuilder.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/LLVMContext.h>
@@ -251,7 +254,7 @@ class CodeGenerator {
     std::unique_ptr<llvm::IRBuilder<>> builder;
     std::unique_ptr<llvm::Module> module;
 
-    std::unordered_map<std::string, llvm::Value*> namedValues;
+    llvm::StringMap<llvm::Value*> namedValues;
     std::vector<std::unordered_map<std::string, llvm::Value*>> scopeStack;
 
     struct LoopContext {
@@ -265,16 +268,16 @@ class CodeGenerator {
     ///   for (i in 0...len(arr)) { arr[i] ... }
     /// or similar provably-safe patterns.  Cleared when exiting the loop.
     /// Maps: iterator-variable-name → set of array-variable-names that are safe.
-    std::unordered_set<std::string> safeIndexVars_;
+    llvm::StringSet<> safeIndexVars_;
 
     /// Maps iterator variable name → its LLVM upper bound value.
     /// Used to emit llvm.assume hints for the optimizer.
-    std::unordered_map<std::string, llvm::Value*> loopIterEndBound_;
+    llvm::StringMap<llvm::Value*> loopIterEndBound_;
 
     /// Maps iterator variable name → its LLVM start bound value.
     /// Used for negative-offset bounds check elision: in patterns like
     /// for (i in C...n) { arr[i - K] }, knowing start >= K proves i-K >= 0.
-    std::unordered_map<std::string, llvm::Value*> loopIterStartBound_;
+    llvm::StringMap<llvm::Value*> loopIterStartBound_;
 
     // Stack of innermost catch-entry basic blocks, pushed/popped by
     // generateTryCatch(). generateThrow() branches directly to the top of this
@@ -284,7 +287,7 @@ class CodeGenerator {
     std::vector<llvm::BasicBlock*> tryCatchStack_;
     bool inOptMaxFunction;
     bool hasOptMaxFunctions;
-    std::unordered_set<std::string> optMaxFunctions;
+    llvm::StringSet<> optMaxFunctions;
 
     struct ConstBinding {
         bool wasPreviouslyDefined;
@@ -293,15 +296,15 @@ class CodeGenerator {
         bool hadPreviousIntFold = false;
         int64_t previousIntFold = 0;
     };
-    std::unordered_map<std::string, bool> constValues;
+    llvm::StringMap<bool> constValues;
     std::vector<std::unordered_map<std::string, ConstBinding>> constScopeStack;
-    std::unordered_map<std::string, llvm::Function*> functions;
+    llvm::StringMap<llvm::Function*> functions;
 
     // Store AST function declarations for default parameter lookup at call sites.
-    std::unordered_map<std::string, const FunctionDecl*> functionDecls_;
+    llvm::StringMap<const FunctionDecl*> functionDecls_;
 
     // Enum constant values (name → integer value), populated from enum declarations.
-    std::unordered_map<std::string, long long> enumConstants_;
+    llvm::StringMap<long long> enumConstants_;
 
     // Struct type definitions: struct name → ordered list of field names.
     std::unordered_map<std::string, std::vector<std::string>> structDefs_;
@@ -329,18 +332,18 @@ class CodeGenerator {
     //   string pointers (e.g. declared with ["a","b"] or assigned from str_split).
     //   Used by isStringExpr(IndexExpr) and generateForEach to propagate string
     //   type information through array element accesses.
-    std::unordered_set<std::string> stringVars_;
-    std::unordered_set<std::string> stringReturningFunctions_;
+    llvm::StringSet<> stringVars_;
+    llvm::StringSet<> stringReturningFunctions_;
     std::unordered_map<std::string, std::unordered_set<size_t>> funcParamStringTypes_;
-    std::unordered_set<std::string> stringArrayVars_;
+    llvm::StringSet<> stringArrayVars_;
     // stringLenCache_: maps string variable names to an alloca that caches the
     // current strlen of the variable's value.  Used by str_concat to avoid
     // O(n) strlen calls on growing strings in append loops.
-    std::unordered_map<std::string, llvm::AllocaInst*> stringLenCache_;
+    llvm::StringMap<llvm::AllocaInst*> stringLenCache_;
     // stringCapCache_: maps string variable names to an alloca that caches the
     // allocated buffer capacity.  Used by str_concat to skip realloc calls
     // when the existing buffer has enough space (amortized O(1) appends).
-    std::unordered_map<std::string, llvm::AllocaInst*> stringCapCache_;
+    llvm::StringMap<llvm::AllocaInst*> stringCapCache_;
 
     /// Ownership lattice: tracks the ownership state of each variable.
     ///
@@ -359,21 +362,21 @@ class CodeGenerator {
     /// Used to detect use-after-move and use-after-invalidate at compile time.
     /// Only populated when the user writes `move` or `invalidate` — normal
     /// code without ownership annotations is never affected.
-    std::unordered_set<std::string> deadVars_;
+    llvm::StringSet<> deadVars_;
     /// Tracks the reason a variable became dead: "moved" or "invalidated".
     std::unordered_map<std::string, std::string> deadVarReason_;
 
     /// Variables currently borrowed — these cannot be mutated or moved.
     /// Populated when a borrow expression creates an alias; cleared when
     /// the borrowing variable goes out of scope.
-    std::unordered_set<std::string> borrowedVars_;
+    llvm::StringSet<> borrowedVars_;
 
     /// Functions explicitly annotated with @cold by the user.
     /// These are preserved when the post-pipeline cold-stripping pass runs.
-    std::unordered_set<std::string> userAnnotatedColdFunctions_;
+    llvm::StringSet<> userAnnotatedColdFunctions_;
 
     /// Functions explicitly annotated with @hot by the user.
-    std::unordered_set<std::string> userAnnotatedHotFunctions_;
+    llvm::StringSet<> userAnnotatedHotFunctions_;
 
     /// Parameters annotated with @prefetch in the current function.
     /// Tracks parameter names that were prefetched at function entry so that
@@ -392,7 +395,7 @@ class CodeGenerator {
     /// on non-negative operands produce non-negative results.  Used to
     /// emit urem/udiv instead of srem/sdiv for modulo/division by positive
     /// constants, which the vectorizer then preserves as vector urem/udiv.
-    std::unordered_set<llvm::Value*> nonNegValues_;
+    llvm::DenseSet<llvm::Value*> nonNegValues_;
 
     /// File-level @noalias: all pointer parameters are marked noalias.
     bool fileNoAlias_ = false;
@@ -414,25 +417,25 @@ class CodeGenerator {
     /// created via array_fill(N, val) where N is a compile-time constant
     /// or a tracked variable.  Used to elide bounds checks without reading
     /// the length header at runtime.
-    std::unordered_map<std::string, llvm::Value*> knownArraySizes_;
+    llvm::StringMap<llvm::Value*> knownArraySizes_;
 
     /// Variables declared with `prefetch immut` — their loads get invariant
     /// metadata so LLVM can hoist/CSE them aggressively.
-    std::unordered_set<std::string> prefetchedImmutVars_;
+    llvm::StringSet<> prefetchedImmutVars_;
 
     /// Variables declared with `register` keyword — forces register allocation
     /// by running mem2reg on the function after codegen.
-    std::unordered_set<std::string> registerVars_;
+    llvm::StringSet<> registerVars_;
 
     /// Constant integer values for `const` integer variables initialized with
     /// a compile-time constant.  Used to substitute constants directly in
     /// division/modulo expressions (e.g. `x % sz` where `sz` is a `const`
     /// variable with value 10000), enabling the urem/udiv fast path and
     /// avoiding the slow dynamic-divisor branch with zero-check overhead.
-    std::unordered_map<std::string, int64_t> constIntFolds_;
+    llvm::StringMap<int64_t> constIntFolds_;
 
     /// Variables with SIMD vector types for operator dispatch.
-    std::unordered_set<std::string> simdVars_;
+    llvm::StringSet<> simdVars_;
 
     /// Per-function loop unrolling hints from @unroll / @nounroll annotations.
     bool currentFuncHintUnroll_ = false;
