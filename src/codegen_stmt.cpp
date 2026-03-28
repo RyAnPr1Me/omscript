@@ -941,14 +941,16 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.unroll.disable")}));
         } else if (bodyHasInnerLoop_) {
-            // When the body contains an inner loop (while/for), omit any
-            // unroll hint entirely and let LLVM's cost model decide.
-            // Previously we force-disabled unrolling here, but that prevents
-            // LLVM from applying profitable unrolling (e.g. Collatz outer
-            // loop where clang unrolls aggressively).  Even with @unroll,
-            // forcing a specific count can be suboptimal — LLVM's heuristics
-            // account for inner-loop size and register pressure better than
-            // a fixed constant.
+            // When the body contains an inner loop (while/for), cap unrolling
+            // to prevent LLVM from over-unrolling the outer loop.  Each outer
+            // iteration includes the full inner loop body, so aggressive
+            // unrolling creates massive code bloat and I-cache pressure.
+            // Cap at 4 iterations which balances ILP gains vs code size.
+            loopMDs.push_back(llvm::MDNode::get(
+                *context,
+                {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
+                 llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                     llvm::Type::getInt32Ty(*context), 4))}));
         } else if (currentFuncHintUnroll_ && !addedUnrollHint && !suppressUnrollHint) {
             // @unroll on a non-suppressed loop: apply the unroll count hint.
             // For variable-trip-count loops, unroll.full is ignored by LLVM
