@@ -238,7 +238,7 @@ void CodeGenerator::generateReturn(ReturnStmt* stmt) {
         // callers can use isStringExpr() on the CallExpr and track the result.
         if (retValue->getType()->isPointerTy() || isStringExpr(stmt->value.get())) {
             if (builder->GetInsertBlock() && builder->GetInsertBlock()->getParent())
-                stringReturningFunctions_.insert(std::string(builder->GetInsertBlock()->getParent()->getName()));
+                stringReturningFunctions_.insert(builder->GetInsertBlock()->getParent()->getName());
         }
         // Convert return value to match the function's declared return type.
         llvm::Function* currentFn = builder->GetInsertBlock()->getParent();
@@ -362,7 +362,7 @@ void CodeGenerator::generateIf(IfStmt* stmt) {
     // Save pre-if non-neg state so each branch starts from the same baseline.
     // Without this the else-branch inherits the then-branch's mutations, which
     // is unsound and can misclassify values as non-negative.
-    const std::unordered_set<llvm::Value*> preIfNonNeg = nonNegValues_;
+    const llvm::DenseSet<llvm::Value*> preIfNonNeg = nonNegValues_;
 
     // Then block
     builder->SetInsertPoint(thenBB);
@@ -371,7 +371,7 @@ void CodeGenerator::generateIf(IfStmt* stmt) {
         builder->CreateBr(mergeBB);
     }
     // Capture which allocas are non-negative after the then branch.
-    const std::unordered_set<llvm::Value*> thenNonNeg = nonNegValues_;
+    const llvm::DenseSet<llvm::Value*> thenNonNeg = nonNegValues_;
 
     // Else block — restore to pre-if state before generating.
     if (elseBB) {
@@ -383,7 +383,7 @@ void CodeGenerator::generateIf(IfStmt* stmt) {
         }
         // After both branches: a value is non-negative at the merge point only
         // if it was non-negative in BOTH branches (conservative intersection).
-        const std::unordered_set<llvm::Value*> elseNonNeg = nonNegValues_;
+        const llvm::DenseSet<llvm::Value*> elseNonNeg = nonNegValues_;
         nonNegValues_ = preIfNonNeg; // start from pre-if
         for (llvm::Value* v : thenNonNeg) {
             if (elseNonNeg.count(v))
