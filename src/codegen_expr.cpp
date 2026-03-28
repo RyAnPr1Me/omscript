@@ -2023,6 +2023,22 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
     }
 
     builder->CreateAlignedStore(value, it->second, llvm::MaybeAlign(8));
+    // Update non-negativity tracking on assignment.
+    // When the assigned value is provably non-negative, mark the alloca so
+    // subsequent loads can benefit from unsigned operations and NSW flags.
+    // When the value might be negative, remove the alloca from nonNegValues_
+    // to prevent unsound optimizations.
+    if (alloca && alloca->getAllocatedType()->isIntegerTy()) {
+        bool valNonNeg = nonNegValues_.count(value) > 0;
+        if (!valNonNeg) {
+            if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(value))
+                valNonNeg = !ci->isNegative();
+        }
+        if (valNonNeg)
+            nonNegValues_.insert(it->second);
+        else
+            nonNegValues_.erase(it->second);
+    }
     // Update string variable tracking after assignment.
     if (value->getType()->isPointerTy() || isStringExpr(expr->value.get()))
         stringVars_.insert(expr->name);

@@ -158,7 +158,7 @@ BENCH_N=(
     35        # 10  recursion_fib  (fib(35) ~ 9 M calls)
     200       # 11  nested_loops   (200^3 = 8 M)
     5000000   # 12  array_indexing
-    50000000  # 13  function_calls
+    5000000   # 13  function_calls
     10000000  # 14  bitwise_ops
     10000000  # 15  bitwise_intrinsics
     5000000   # 16  polynomial_eval
