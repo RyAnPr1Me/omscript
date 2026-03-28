@@ -449,7 +449,9 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
         // over-unrolling branch-heavy inner loops that create massive
         // I-cache pressure.  Top-level while-loops (depth == 1) are
         // left to LLVM's cost model for optimal unrolling decisions.
-        if (!inOptMaxFunction && loopNestDepth_ > 1 && optimizationLevel >= OptimizationLevel::O2) {
+        // When the function has @unroll, trust the user's intent and
+        // let LLVM's cost model decide the factor for all nested loops.
+        if (!inOptMaxFunction && !currentFuncHintUnroll_ && loopNestDepth_ > 1 && optimizationLevel >= OptimizationLevel::O2) {
             loopMDs.push_back(llvm::MDNode::get(
                 *context,
                 {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
