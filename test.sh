@@ -440,7 +440,7 @@ fn add_one(x:int) -> int { return x + 1; }
 fn add_two(x:int) -> int { return add_one(add_one(x)); }
 @hot @inline
 fn add_four(x:int) -> int { return add_two(add_two(x)); }
-@hot @flatten
+@hot @flatten @novectorize
 fn bench_calls(@prefetch n:int) -> int {
     var sum:int = 0;
     for (i:int in 0...n:int) {
