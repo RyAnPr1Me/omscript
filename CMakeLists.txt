@@ -135,8 +135,11 @@ target_compile_options(omsc PRIVATE
         -march=native
     >
 
-    # GCC-only loop and IPA optimizations (not supported by Clang/MSVC)
-    $<$<AND:$<CONFIG:Release>,$<CXX_COMPILER_ID:GNU>>:
+    # GCC-only loop and IPA optimizations (not supported by Clang/MSVC).
+    # Excluded on Windows/MinGW: -fipa-pta and the graphite-adjacent loop
+    # flags cause GCC to hang for hours on LLVM-header-heavy translation
+    # units when targeting MinGW (LLVM 21 + GCC 15).
+    $<$<AND:$<CONFIG:Release>,$<CXX_COMPILER_ID:GNU>,$<NOT:$<PLATFORM_ID:Windows>>>:
         -fprefetch-loop-arrays
         -fno-semantic-interposition
         -ftree-loop-distribution
