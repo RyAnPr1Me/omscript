@@ -1024,13 +1024,29 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         // Strength reduction: multiply by power of 2 → left shift
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
             const int s = log2IfPowerOf2(ci->getSExtValue());
-            if (s >= 0)
+            if (s >= 0) {
+                const bool leftNonNeg = nonNegValues_.count(left);
+                // For non-negative base × positive power-of-2: emit NSWMul so
+                // LLVM's SCEV can track the result range (shift loses flags).
+                if (leftNonNeg) {
+                    auto* result = builder->CreateNSWMul(left, right, "multmp");
+                    nonNegValues_.insert(result);
+                    return result;
+                }
                 return builder->CreateShl(left, llvm::ConstantInt::get(getDefaultType(), s), "shltmp");
+            }
         }
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left)) {
             const int s = log2IfPowerOf2(ci->getSExtValue());
-            if (s >= 0)
+            if (s >= 0) {
+                const bool rightNonNeg = nonNegValues_.count(right);
+                if (rightNonNeg) {
+                    auto* result = builder->CreateNSWMul(right, left, "multmp");
+                    nonNegValues_.insert(result);
+                    return result;
+                }
                 return builder->CreateShl(right, llvm::ConstantInt::get(getDefaultType(), s), "shltmp");
+            }
         }
         // Strength reduction: multiply by small non-power-of-2 constants
         // to shift+add/sub sequences (faster on many microarchitectures).
@@ -1297,33 +1313,51 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         };
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
             const bool leftNonNeg = nonNegValues_.count(left);
-            if (auto* result = emitShiftAdd(left, ci->getSExtValue(), leftNonNeg)) {
-                // Product of non-negative base and positive constant is non-neg.
-                if (leftNonNeg && ci->getSExtValue() > 0)
-                    nonNegValues_.insert(result);
+            const int64_t rv = ci->getSExtValue();
+            // For non-negative base × positive constant: emit mul nsw directly.
+            // emitShiftAdd produces (x<<a)+x patterns, but LLVM's InstCombine
+            // converts these back to mul and DROPS the nsw flag, preventing
+            // SCEV from proving non-negativity in subsequent analysis passes
+            // (e.g. loop phi variables in Collatz-like while-loops lose the
+            // mul nsw that enables accumulation interleaving and other opts).
+            // Emitting mul nsw directly preserves the flag through all passes
+            // since it is placed on the multiply itself, not on an intermediate
+            // add.  The backend produces the same lea/shift instructions anyway.
+            if (leftNonNeg && rv > 0) {
+                auto* result = builder->CreateNSWMul(left, right, "multmp");
+                nonNegValues_.insert(result);
+                return result;
+            }
+            if (auto* result = emitShiftAdd(left, rv, false)) {
                 return result;
             }
             // Negative constant strength reduction: n * (-K) → neg(n * K).
             // This leverages the existing shift+add patterns for the absolute
             // value, then negates the result.  A single neg (sub 0, x) is far
             // cheaper than a hardware multiply.
-            const int64_t rv = ci->getSExtValue();
             if (rv < -1) {
-                if (auto* posResult = emitShiftAdd(left, -rv, leftNonNeg)) {
+                if (auto* posResult = emitShiftAdd(left, -rv, false)) {
                     return builder->CreateNeg(posResult, "mulneg");
                 }
             }
         }
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left)) {
             const bool rightNonNeg = nonNegValues_.count(right);
-            if (auto* result = emitShiftAdd(right, ci->getSExtValue(), rightNonNeg)) {
-                if (rightNonNeg && ci->getSExtValue() > 0)
-                    nonNegValues_.insert(result);
+            const int64_t lv = ci->getSExtValue();
+            // Same as above: emit mul nsw when base is non-negative so the
+            // nsw flag survives InstCombine's shift+add → mul canonicalization.
+            if (rightNonNeg && lv > 0) {
+    
+                auto* result = builder->CreateNSWMul(right, left, "multmp");
+                nonNegValues_.insert(result);
                 return result;
             }
-            const int64_t lv = ci->getSExtValue();
+
+            if (auto* result = emitShiftAdd(right, lv, false)) {
+                return result;
+            }
             if (lv < -1) {
-                if (auto* posResult = emitShiftAdd(right, -lv, rightNonNeg)) {
+                if (auto* posResult = emitShiftAdd(right, -lv, false)) {
                     return builder->CreateNeg(posResult, "mulneg");
                 }
             }

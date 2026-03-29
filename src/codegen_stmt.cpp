@@ -459,11 +459,47 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
     // Body block
     builder->SetInsertPoint(bodyBB);
     loopStack.push_back({endBB, condBB});
+
+    // Emit llvm.assume(var >= 0) for all alloca variables known to be
+    // non-negative at O2+.  When a while loop carries a non-negative loop
+    // variable (e.g. the Collatz x in `while (x != 1)`), LLVM's value-range
+    // analysis does NOT automatically propagate the non-negativity across the
+    // loop phi boundary.  Without an explicit assumption, LLVM conservatively
+    // drops `nsw` flags from multiplications like `3 * x`, preventing
+    // accumulation-interleaving and other dependency-chain optimisations.
+    // Adding the assume INSIDE the body (on the phi successor value) gives
+    // CVP and SCEV the evidence they need to keep nsw on derived operations.
+    if (optimizationLevel >= OptimizationLevel::O2 && !dynamicCompilation_) {
+        llvm::Function* assumeFn = OMSC_GET_INTRINSIC_STMT(
+            module.get(), llvm::Intrinsic::assume, {});
+        llvm::Type* i64Ty = getDefaultType();
+        for (auto& kv : namedValues) {
+            auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(kv.second);
+            if (!alloca) continue;
+            if (!nonNegValues_.count(alloca)) continue;
+            // Only assume for integer allocas — float/pointer non-negativity
+            // is not expressed the same way and would confuse LLVM.
+            if (!alloca->getAllocatedType()->isIntegerTy()) continue;
+            const std::string varName = kv.first().str();
+            llvm::Value* loaded = builder->CreateAlignedLoad(
+                alloca->getAllocatedType(), alloca,
+                llvm::MaybeAlign(8), (varName + ".assume.nn").c_str());
+            // Widen to i64 if narrower (e.g. i1, i32) before comparison.
+            llvm::Value* asI64 = loaded->getType() == i64Ty
+                ? loaded
+                : builder->CreateSExt(loaded, i64Ty, "nn.sext");
+            llvm::Value* isNN = builder->CreateICmpSGE(
+                asI64,
+                llvm::ConstantInt::get(i64Ty, 0),
+                (varName + ".nn").c_str());
+            builder->CreateCall(assumeFn, {isNN});
+        }
+    }
+
     generateStatement(stmt->body.get());
     loopStack.pop_back();
     if (!builder->GetInsertBlock()->getTerminator()) {
         auto* backBrWhile = builder->CreateBr(condBB);
-        // Attach loop metadata to the while-loop back-edge, matching for-loop
         // hints: mustprogress for loop-idiom recognition.
         // NOTE: Interleave count and vectorize width are intentionally NOT
         // forced here.  Forcing these values overrides the vectorizer's cost
@@ -974,12 +1010,28 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             // to prevent LLVM from over-unrolling the outer loop.  Each outer
             // iteration includes the full inner loop body, so aggressive
             // unrolling creates massive code bloat and I-cache pressure.
-            // Cap at 4 iterations which balances ILP gains vs code size.
-            loopMDs.push_back(llvm::MDNode::get(
-                *context,
-                {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
-                 llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
-                     llvm::Type::getInt32Ty(*context), 4))}));
+            //
+            // OPTMAX functions: trust LLVM's cost-model-driven unroller to
+            // choose the optimal factor, exactly as clang does for C code.
+            // For loops like Collatz (outer-for / inner-while with independent
+            // iterations), LLVM chooses large unroll factors (e.g. 34x) that
+            // expose cross-iteration ILP; a hard cap at 4 prevents this and
+            // leaves significant performance on the table.
+            //
+            // @hot O3 functions: use a cap of 8 (vs 4) to allow more ILP
+            // than the conservative default while still bounding code size.
+            //
+            // Regular functions: cap at 4 as before.
+            if (!inOptMaxFunction) {
+                const unsigned outerLoopCap =
+                    (currentFuncHintHot_ && optimizationLevel >= OptimizationLevel::O3) ? 8u : 4u;
+                loopMDs.push_back(llvm::MDNode::get(
+                    *context,
+                    {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
+                     llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                         llvm::Type::getInt32Ty(*context), outerLoopCap))}));
+            }
+            // For OPTMAX functions: no explicit count hint — let LLVM decide.
         } else if (currentFuncHintUnroll_ && !addedUnrollHint && !suppressUnrollHint) {
             // @unroll on a non-suppressed loop: apply the unroll count hint.
             // For variable-trip-count loops, unroll.full is ignored by LLVM
