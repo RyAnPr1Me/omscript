@@ -117,17 +117,7 @@ target_compile_options(omsc PRIVATE
         # Aggressive loop optimizations
         -funroll-loops
         -ftree-vectorize
-        -ftree-loop-distribution
-        -ftree-loop-im
-        -ftree-loop-ivcanon
         -fprefetch-loop-arrays
-
-        # Interprocedural analysis
-        -fipa-pta
-
-        # Graphite polyhedral loop optimizer
-        -floop-nest-optimize
-        -fgraphite-identity
 
         # Code layout / size
         -ffunction-sections
@@ -148,11 +138,23 @@ target_compile_options(omsc PRIVATE
     $<$<AND:$<CONFIG:Release>,$<BOOL:${NATIVE}>>:
         -march=native
     >
+
+    # GCC-only loop and IPA optimizations (not supported by Clang/MSVC)
+    $<$<AND:$<CONFIG:Release>,$<CXX_COMPILER_ID:GNU>>:
+        -ftree-loop-distribution
+        -ftree-loop-im
+        -ftree-loop-ivcanon
+        -fipa-pta
+        -floop-nest-optimize
+        -fgraphite-identity
+    >
 )
 
 # ── Link options ──────────────────────────────────────────────────────────────
 target_link_options(omsc PRIVATE
-    $<$<CONFIG:Release>:
+    # GNU ld-specific link optimizations and static C/C++ runtime linkage.
+    # Not supported on macOS (ld64) or MSVC; applied for GCC (Linux + MinGW).
+    $<$<AND:$<CONFIG:Release>,$<CXX_COMPILER_ID:GNU>>:
         -Wl,-O3
         -Wl,--gc-sections
         # Static linkage for C/C++ runtimes: embed libgcc and libstdc++
