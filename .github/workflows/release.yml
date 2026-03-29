@@ -34,6 +34,7 @@ jobs:
             archive_ext: zip
 
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
 
     steps:
       - name: Checkout repository
@@ -135,7 +136,7 @@ jobs:
           for f in examples/*.om; do
             [ -f "$f" ] || continue
             for opt in -O0 -O1 -O2 -O3; do
-              "$OMSC" "$f" $opt -o /tmp/pgo_out 2>/dev/null && PGO_COUNT=$((PGO_COUNT + 1)) || true
+              timeout 120 "$OMSC" "$f" $opt -o /tmp/pgo_out 2>/dev/null && PGO_COUNT=$((PGO_COUNT + 1)) || true
             done
           done
           echo "  Compiled $PGO_COUNT file+opt-level combinations"
@@ -145,9 +146,9 @@ jobs:
           echo "=== PGO Phase B: Front-end profiling ==="
           for f in examples/*.om; do
             [ -f "$f" ] || continue
-            "$OMSC" lex "$f" > /dev/null 2>&1 || true
-            "$OMSC" parse "$f" > /dev/null 2>&1 || true
-            "$OMSC" emit-ir "$f" > /dev/null 2>&1 || true
+            timeout 30 "$OMSC" lex "$f" > /dev/null 2>&1 || true
+            timeout 30 "$OMSC" parse "$f" > /dev/null 2>&1 || true
+            timeout 60 "$OMSC" emit-ir "$f" > /dev/null 2>&1 || true
           done
 
           # ── Phase C: Compile feature-rich programs that stress specific
@@ -181,7 +182,7 @@ jobs:
           )
           for f in "${FEATURE_FILES[@]}"; do
             [ -f "$f" ] || continue
-            "$OMSC" "$f" -O3 -o /tmp/pgo_out 2>/dev/null || true
+            timeout 120 "$OMSC" "$f" -O3 -o /tmp/pgo_out 2>/dev/null || true
           done
 
           # ── Phase D: Exercise e-graph / superoptimizer paths by compiling
@@ -192,7 +193,7 @@ jobs:
           EGRAPH_COUNT=0
           for f in examples/*.om; do
             [ -f "$f" ] || continue
-            "$OMSC" "$f" -O2 -o /tmp/pgo_out 2>/dev/null && EGRAPH_COUNT=$((EGRAPH_COUNT + 1)) || true
+            timeout 120 "$OMSC" "$f" -O2 -o /tmp/pgo_out 2>/dev/null && EGRAPH_COUNT=$((EGRAPH_COUNT + 1)) || true
           done
           echo "  E-graph profiled $EGRAPH_COUNT files at -O2"
 
@@ -309,6 +310,7 @@ jobs:
 
       - name: Run integration tests (Linux)
         if: runner.os == 'Linux'
+        timeout-minutes: 15
         run: bash run_tests.sh
 
       - name: Package binary (Unix)

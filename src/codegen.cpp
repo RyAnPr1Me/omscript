@@ -2751,16 +2751,34 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     // This ensures that abstractions like lambdas passed to array_map /
     // array_filter / array_reduce are fully inlined, eliminating all call
     // overhead.  At O3, a higher deep-statement threshold is used.
+    //
+    // At O1, we also add InlineHint for small functions (but never AlwaysInline).
+    // This is critical to prevent a compiler hang: LLVM's O1 interprocedural
+    // constant-propagation passes (IPSCCP, FunctionSpecializationPass) can hang
+    // when multiple functions call inner functions containing while-loops with
+    // constant integer arguments (e.g. collatz_steps(837799), fib_iter(150)).
+    // Adding InlineHint causes the inliner to eliminate those cross-function
+    // constant-argument call sites before the IPO passes see them, avoiding
+    // the expensive analysis.
     static constexpr size_t kAlwaysInlineStatementsO2 = 4;
     const bool isLambda = func->name.rfind("__lambda_", 0) == 0;
-    if (func->name != "main" && optimizationLevel >= OptimizationLevel::O2 && func->body &&
+    if (func->name != "main" && optimizationLevel >= OptimizationLevel::O1 && func->body &&
         shallowCount <= inlineThreshold) {
-        const size_t alwaysInlineThreshold =
-            (optimizationLevel >= OptimizationLevel::O3) ? kAlwaysInlineStatements : kAlwaysInlineStatementsO2;
-        if ((isLambda || deepCount <= alwaysInlineThreshold) && !isSelfRecursive) {
-            function->addFnAttr(llvm::Attribute::AlwaysInline);
+        if (optimizationLevel >= OptimizationLevel::O2) {
+            const size_t alwaysInlineThreshold =
+                (optimizationLevel >= OptimizationLevel::O3) ? kAlwaysInlineStatements : kAlwaysInlineStatementsO2;
+            if ((isLambda || deepCount <= alwaysInlineThreshold) && !isSelfRecursive) {
+                function->addFnAttr(llvm::Attribute::AlwaysInline);
+            } else {
+                function->addFnAttr(llvm::Attribute::InlineHint);
+            }
         } else {
-            function->addFnAttr(llvm::Attribute::InlineHint);
+            // O1: hint small non-recursive functions for inlining only.
+            // No AlwaysInline — that would force inlining even of larger
+            // functions, bloating code size at a level meant for fast compilation.
+            if (!isSelfRecursive) {
+                function->addFnAttr(llvm::Attribute::InlineHint);
+            }
         }
     }
 
