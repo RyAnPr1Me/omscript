@@ -48,9 +48,15 @@ test_program() {
         return 1
     fi
     
-    # Run
-    ./$name
+    # Run (with timeout to prevent benchmark programs from stalling)
+    timeout 60 ./$name
     local result=$?
+    if [ $result -eq 124 ]; then
+        echo -e "${RED}✗ Timed out after 60s${NC}"
+        FAILURES=$((FAILURES + 1))
+        rm -f $name ${name}.o
+        return 1
+    fi
     
     # Clean up
     rm -f $name ${name}.o
