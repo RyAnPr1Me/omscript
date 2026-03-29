@@ -352,24 +352,35 @@ void CodeGenerator::runOptimizationPasses() {
     // "unable to perform the requested transformation" warnings when the
     // optimizer could not satisfy the forced hints.
     llvm::PipelineTuningOptions PTO;
-    PTO.LoopVectorization = enableVectorize_;
-    PTO.SLPVectorization = enableVectorize_;
+    // At O1, keep vectorization and unrolling disabled to match LLVM's
+    // standard O1 behavior.  Enabling them at O1 (via the global flags below)
+    // causes a compiler hang: LLVM's loop vectorizer inlines inner functions
+    // (e.g. collatz, fib) marked inlinehint into outer benchmark loops, then
+    // tries to vectorize the resulting complex nested while-loops.  With
+    // large loop-trip-count constants (640000 x collatz(837799)) the SLP /
+    // loop vectorizer analysis doesn't terminate within a reasonable time.
+    // At O2+, the inliner runs before the vectorizer in a dedicated phase, so
+    // the patterns that trigger the slow analysis are already eliminated.
+    const bool atLeastO2 = optimizationLevel >= OptimizationLevel::O2;
+    PTO.LoopVectorization = atLeastO2 && enableVectorize_;
+    PTO.SLPVectorization  = atLeastO2 && enableVectorize_;
     // Re-enable LLVM's cost-model-driven loop unrolling.  The standard O3
     // pipeline has excellent register-pressure-aware unrolling heuristics.
     // We previously disabled this because the HGOE pre-pipeline was injecting
     // bad unroll metadata that caused over-unrolling; now that pre-pipeline
     // annotation is disabled, LLVM's own unroller makes good decisions.
-    PTO.LoopUnrolling = enableUnrollLoops_;
-    PTO.LoopInterleaving = enableVectorize_; // enable loop interleaving at O2+
+    // Restrict to O2+ for the same reason as vectorization above.
+    PTO.LoopUnrolling    = atLeastO2 && enableUnrollLoops_;
+    PTO.LoopInterleaving = atLeastO2 && enableVectorize_;
 
     if (verbose_) {
-        const char* levelStr = "O2";
-        if (optimizationLevel == OptimizationLevel::O1) levelStr = "O1";
-        else if (optimizationLevel == OptimizationLevel::O3) levelStr = "O3";
+        const char* levelStr =
+            (optimizationLevel == OptimizationLevel::O1) ? "O1" :
+            (optimizationLevel == OptimizationLevel::O3) ? "O3" : "O2";
         std::cout << "    Optimization level: " << levelStr << std::endl;
         std::cout << "    Pipeline options:"
-                  << " vectorize=" << (enableVectorize_ ? "on" : "off")
-                  << ", unroll=" << (enableUnrollLoops_ ? "on" : "off")
+                  << " vectorize=" << (atLeastO2 && enableVectorize_ ? "on" : "off")
+                  << ", unroll=" << (atLeastO2 && enableUnrollLoops_ ? "on" : "off")
                   << ", loop-optimize=" << (enableLoopOptimize_ ? "on" : "off")
                   << std::endl;
         if (!pgoGenPath_.empty()) std::cout << "    PGO instrumentation: " << pgoGenPath_ << std::endl;
@@ -1045,9 +1056,9 @@ void CodeGenerator::runOptimizationPasses() {
         MPM = PB.buildLTOPreLinkDefaultPipeline(newPMLevel);
     } else {
         if (verbose_) {
-            const char* levelStr = "O2";
-            if (optimizationLevel == OptimizationLevel::O1) levelStr = "O1";
-            else if (optimizationLevel == OptimizationLevel::O3) levelStr = "O3";
+            const char* levelStr =
+                (optimizationLevel == OptimizationLevel::O1) ? "O1" :
+                (optimizationLevel == OptimizationLevel::O3) ? "O3" : "O2";
             std::cout << "    Building per-module default pipeline at " << levelStr << "..." << std::endl;
         }
         MPM = PB.buildPerModuleDefaultPipeline(newPMLevel);
