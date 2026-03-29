@@ -118,7 +118,9 @@
 #include <llvm/Transforms/IPO/Attributor.h>
 #include <llvm/Transforms/IPO/SCCP.h>
 #include <llvm/Transforms/Scalar/SCCP.h>
+#if LLVM_VERSION_MAJOR < 20
 #include <llvm/Transforms/Scalar/LoopReroll.h>
+#endif
 #include <llvm/Transforms/Scalar/GuardWidening.h>
 #include <llvm/Transforms/Scalar/TLSVariableHoist.h>
 #include <llvm/Transforms/IPO/MergeFunctions.h>
@@ -770,12 +772,14 @@ void CodeGenerator::runOptimizationPasses() {
                 if (isO3) {
                     LPM.addPass(llvm::LoopBoundSplitPass());
                     LPM.addPass(llvm::LoopPredicationPass());
+#if LLVM_VERSION_MAJOR < 20
                     // LoopReroll recognizes manually-unrolled loop patterns and
                     // "rerolls" them into a single iteration with a larger trip
                     // count.  This enables the vectorizer to handle patterns
                     // that were over-unrolled by earlier passes or written as
                     // unrolled loops in the source code.
                     LPM.addPass(llvm::LoopRerollPass());
+#endif
                 }
             });
         }
