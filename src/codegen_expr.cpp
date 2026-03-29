@@ -1347,12 +1347,10 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             // Same as above: emit mul nsw when base is non-negative so the
             // nsw flag survives InstCombine's shift+add → mul canonicalization.
             if (rightNonNeg && lv > 0) {
-    
                 auto* result = builder->CreateNSWMul(right, left, "multmp");
                 nonNegValues_.insert(result);
                 return result;
             }
-
             if (auto* result = emitShiftAdd(right, lv, false)) {
                 return result;
             }
