@@ -117,14 +117,10 @@ target_compile_options(omsc PRIVATE
         # Aggressive loop optimizations
         -funroll-loops
         -ftree-vectorize
-        -fprefetch-loop-arrays
 
         # Code layout / size
         -ffunction-sections
         -fdata-sections
-
-        # Big win for LLVM-style code
-        -fno-semantic-interposition
 
         # Visibility (safe with export-dynamic)
         -fvisibility=hidden
@@ -141,6 +137,8 @@ target_compile_options(omsc PRIVATE
 
     # GCC-only loop and IPA optimizations (not supported by Clang/MSVC)
     $<$<AND:$<CONFIG:Release>,$<CXX_COMPILER_ID:GNU>>:
+        -fprefetch-loop-arrays
+        -fno-semantic-interposition
         -ftree-loop-distribution
         -ftree-loop-im
         -ftree-loop-ivcanon
