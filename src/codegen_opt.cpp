@@ -122,7 +122,6 @@
 #include <llvm/Transforms/Scalar/LoopReroll.h>
 #endif
 #include <llvm/Transforms/Scalar/GuardWidening.h>
-#include <llvm/Transforms/Scalar/TLSVariableHoist.h>
 #include <llvm/Transforms/IPO/MergeFunctions.h>
 #include <llvm/Transforms/Scalar/LowerExpectIntrinsic.h>
 #include <llvm/Transforms/Scalar/WarnMissedTransforms.h>

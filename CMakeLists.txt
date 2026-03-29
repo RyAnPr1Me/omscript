@@ -143,8 +143,6 @@ target_compile_options(omsc PRIVATE
         -ftree-loop-im
         -ftree-loop-ivcanon
         -fipa-pta
-        -floop-nest-optimize
-        -fgraphite-identity
     >
 )
 
