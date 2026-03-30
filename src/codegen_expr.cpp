@@ -129,6 +129,20 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
     // value (e.g., ascending for-loop counter), mark the loaded value.
     if (nonNegValues_.count(it->second)) {
         nonNegValues_.insert(load);
+        // Add !range [0, INT64_MAX) metadata so LLVM IR-level passes (LVI,
+        // CVP, InstCombine, loop unroller) see the non-negativity directly
+        // in the IR without relying solely on llvm.assume intrinsics.  The
+        // two approaches are complementary: the assume fires at the point in
+        // the function body where it is emitted; the !range metadata travels
+        // with every individual load and is visible to every pass that
+        // processes the load instruction — including interprocedural passes
+        // that inline the function and lose the assume context.
+        if (auto* loadInst = llvm::dyn_cast<llvm::LoadInst>(load)) {
+            if (loadInst->getType()->isIntegerTy(64)
+                    && optimizationLevel >= OptimizationLevel::O1) {
+                loadInst->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+            }
+        }
     }
     return load;
 }
@@ -968,17 +982,18 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     // miscompilation when overflow actually occurs.
     //
     // Exception: when BOTH operands are provably non-negative (tracked via
-    // nonNegValues_), we set nsw on addition.  For non-negative operands,
-    // signed overflow can only happen if the result exceeds INT64_MAX, which
-    // cannot occur in typical loop counter arithmetic.  The nsw flag enables
-    // LLVM's SCEV (Scalar Evolution) to compute tighter trip counts, prove
-    // induction variable monotonicity, and perform widening/narrowing
-    // optimizations that are critical for loop vectorization.
+    // nonNegValues_), we set both nsw and nuw on addition.  For two non-negative
+    // i64 values, signed overflow cannot occur unless the result exceeds
+    // INT64_MAX (nsw), and unsigned overflow cannot occur either: the sum of
+    // two values in [0, INT64_MAX] is at most 2·INT64_MAX = 2^64−2, which is
+    // strictly less than UINT64_MAX = 2^64−1 (nuw).  The nuw flag additionally
+    // enables LLVM's loop unroller to propagate non-negativity to unrolled
+    // copies and allows SCEV to use unsigned induction variable ranges.
     if (expr->op == "+") {
         const bool leftNonNeg = nonNegValues_.count(left);
         const bool rightNonNeg = nonNegValues_.count(right);
         const bool bothOperandsNonNeg = leftNonNeg && rightNonNeg;
-        // Also detect non-negative constant operands for NSW/tracking.
+        // Also detect non-negative constant operands for NSW/NUW/tracking.
         bool constNonNeg = false;
         if (!bothOperandsNonNeg) {
             if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right))
@@ -986,15 +1001,19 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             else if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left))
                 constNonNeg = rightNonNeg && !ci->isNegative();
         }
-        const bool canNSW = bothOperandsNonNeg || constNonNeg;
-        auto* result = canNSW
-            ? builder->CreateNSWAdd(left, right, "addtmp")
+        // Both nsw and nuw are safe: for non-negative operands, signed
+        // overflow cannot occur (each value fits in [0, INT64_MAX]), and
+        // their sum is at most 2·INT64_MAX = 2^64−2 < UINT64_MAX so unsigned
+        // overflow cannot occur either.
+        const bool canNSWNUW = bothOperandsNonNeg || constNonNeg;
+        auto* result = canNSWNUW
+            ? builder->CreateAdd(left, right, "addtmp", /*HasNUW=*/true, /*HasNSW=*/true)
             : builder->CreateAdd(left, right, "addtmp");
         // Track non-negativity: if both operands are known non-negative
         // (including constant operands), the result is non-negative
         // (assuming no overflow, which is true for typical loop counter
         // arithmetic).
-        if (canNSW)
+        if (canNSWNUW)
             nonNegValues_.insert(result);
         return result;
     } else if (expr->op == "-") {
