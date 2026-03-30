@@ -6930,3 +6930,65 @@ TEST(CodegenTest, LcmZeroArgs) {
     CodeGenerator codegen(OptimizationLevel::O0);
     EXPECT_THROW(generateIR("fn main() { return lcm(); }", codegen), std::runtime_error);
 }
+
+// ── NUW on non-negative additions ─────────────────────────────────────────
+
+// At O1+, adding two provably non-negative values should produce an add
+// instruction with both the nsw and nuw flags set.  The nuw flag enables
+// LLVM's SCEV and loop unroller to reason about the unsigned range of the
+// sum, which in turn enables additional vectorization and CSE opportunities.
+TEST(CodegenTest, NUWAddOnNonNegOperands) {
+    // The for-loop iterator `i` is non-negative (ascending from 0); `len(a)`
+    // is also non-negative.  Their sum should get both nuw and nsw.
+    CodeGenerator codegen(OptimizationLevel::O1);
+    auto* mod = generateIR(
+        "fn f(a) { var s = 0; for (i in 0...len(a)) { s = s + i; } return s; } "
+        "fn main() { return f([1, 2, 3]); }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("f");
+    ASSERT_NE(fn, nullptr);
+    bool foundNUWAdd = false;
+    for (auto& BB : *fn) {
+        for (auto& I : BB) {
+            if (auto* bo = llvm::dyn_cast<llvm::BinaryOperator>(&I)) {
+                if (bo->getOpcode() == llvm::Instruction::Add
+                        && bo->hasNoUnsignedWrap()
+                        && bo->hasNoSignedWrap()) {
+                    foundNUWAdd = true;
+                }
+            }
+        }
+    }
+    EXPECT_TRUE(foundNUWAdd) << "Expected at least one add nuw nsw instruction";
+}
+
+// ── !range metadata on non-negative variable loads ────────────────────────
+
+// At O1+, loading a variable that is tracked as non-negative (e.g. a
+// for-loop iterator starting at 0) should attach !range [0, INT64_MAX)
+// metadata to the load instruction.  This makes the non-negativity visible
+// directly in the IR to every LLVM pass, not just through assume intrinsics.
+TEST(CodegenTest, RangeMetadataOnNonNegLoad) {
+    CodeGenerator codegen(OptimizationLevel::O1);
+    auto* mod = generateIR(
+        "fn f(n) { for (i in 0...n) { var x = i * 2; } } "
+        "fn main() { f(10); return 0; }",
+        codegen);
+    ASSERT_NE(mod, nullptr);
+    auto* fn = mod->getFunction("f");
+    ASSERT_NE(fn, nullptr);
+    bool foundRangeLoad = false;
+    for (auto& BB : *fn) {
+        for (auto& I : BB) {
+            if (auto* load = llvm::dyn_cast<llvm::LoadInst>(&I)) {
+                if (load->getType()->isIntegerTy(64)
+                        && load->getMetadata(llvm::LLVMContext::MD_range)) {
+                    foundRangeLoad = true;
+                }
+            }
+        }
+    }
+    EXPECT_TRUE(foundRangeLoad)
+        << "Expected at least one i64 load with !range metadata";
+}
