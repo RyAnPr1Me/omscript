@@ -3633,28 +3633,17 @@ unsigned superopt::convertSRemToURem(llvm::Function& func) {
                 llvm::Value* rhs = inst.getOperand(1);
                 // Convert srem(a, b) → urem(a, b) when:
                 //   (a) dividend is non-negative, AND
-                //   (b) divisor is a positive constant OR proven non-negative variable.
-                // Correctness: if a >= 0 and b > 0, srem and urem produce the same
-                // result because both are equivalent to unsigned remainder.
-                // For non-constant b: we also require b > 0 (i.e., non-negative AND nonzero).
-                // isValueNonNegative returns true for URem results, which are in [0, b),
-                // so for the divisor we need strictly positive. We use the constant check
-                // (isConstantAllPositive) for constants, and a conservative check for
-                // variables: strictly positive is implied by non-zero + non-negative.
-                bool rhsPositive = false;
-                if (auto* rhsConst = llvm::dyn_cast<llvm::Constant>(rhs)) {
-                    rhsPositive = isConstantAllPositive(rhsConst);
-                } else if (isValueNonNegative(rhs, DL)) {
-                    // For variables, require that the value is strictly positive.
-                    // isValueNonNegative returns true for urem results (always >= 0),
-                    // but modulus=0 is UB in both srem and urem. We treat non-negative
-                    // non-constant divisors conservatively: only convert when the divisor
-                    // is itself derived from a positive constant (e.g. a function argument
-                    // annotated with llvm.assume) to avoid changing observable UB behavior.
-                    // For safety, skip non-constant divisors without further proof.
-                    rhsPositive = false; // conservative: constants only for now
-                }
-                if (rhsPositive && isValueNonNegative(lhs, DL)) {
+                //   (b) divisor is a positive constant.
+                // Correctness: if a >= 0 and b > 0, srem(a,b) == urem(a,b)
+                // because the C/LLVM standard srem has the sign of the dividend,
+                // and a non-negative dividend with a positive divisor gives a
+                // non-negative remainder identical to unsigned remainder.
+                // Non-constant divisors are not handled here: proving b > 0 for
+                // runtime values requires range tracking beyond isValueNonNegative,
+                // and LLVM's own passes handle that after SCCP folds variables.
+                auto* rhsConst = llvm::dyn_cast<llvm::Constant>(rhs);
+                if (rhsConst && isConstantAllPositive(rhsConst) &&
+                    isValueNonNegative(lhs, DL)) {
                     llvm::IRBuilder<> builder(&inst);
                     auto* urem = builder.CreateURem(lhs, rhs, "srem_to_urem");
                     inst.replaceAllUsesWith(urem);
