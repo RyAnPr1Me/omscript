@@ -2042,93 +2042,159 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 return result;
             }
             if (exp == 16) {
-                // x**16 → t=x*x; u=t*t; v=u*u; v*v  (4 muls)
-                auto* sq = builder->CreateMul(left, left, "pow16.sq");
-                auto* q4 = builder->CreateMul(sq, sq, "pow16.q4");
-                auto* q8 = builder->CreateMul(q4, q4, "pow16.q8");
-                return builder->CreateMul(q8, q8, "pow16");
+                // x**16 → t=x*x; u=t*t; v=u*u; v*v  (4 muls) — even exponent → always non-neg
+                auto mkMul = [&](llvm::Value* a, llvm::Value* b, const char* nm) -> llvm::Value* {
+                    return baseNonNeg ? builder->CreateNSWMul(a, b, nm)
+                                     : builder->CreateMul(a, b, nm);
+                };
+                auto* sq = mkMul(left, left, "pow16.sq");
+                auto* q4 = mkMul(sq, sq, "pow16.q4");
+                auto* q8 = mkMul(q4, q4, "pow16.q8");
+                auto* result = mkMul(q8, q8, "pow16");
+                nonNegValues_.insert(result);  // even exponent → always non-neg
+                return result;
             }
             if (exp == 13) {
                 // x**13 → t=x*x; u=t*t; v=u*t; w=v*v; w*x  (5 muls)
-                auto* sq = builder->CreateMul(left, left, "pow13.sq");
-                auto* q4 = builder->CreateMul(sq, sq, "pow13.q4");
-                auto* q6 = builder->CreateMul(q4, sq, "pow13.q6");
-                auto* q12 = builder->CreateMul(q6, q6, "pow13.q12");
-                return builder->CreateMul(q12, left, "pow13");
+                auto mkMul = [&](llvm::Value* a, llvm::Value* b, const char* nm) -> llvm::Value* {
+                    return baseNonNeg ? builder->CreateNSWMul(a, b, nm)
+                                     : builder->CreateMul(a, b, nm);
+                };
+                auto* sq = mkMul(left, left, "pow13.sq");
+                auto* q4 = mkMul(sq, sq, "pow13.q4");
+                auto* q6 = mkMul(q4, sq, "pow13.q6");
+                auto* q12 = mkMul(q6, q6, "pow13.q12");
+                auto* result = mkMul(q12, left, "pow13");
+                if (baseNonNeg) nonNegValues_.insert(result);
+                return result;
             }
             if (exp == 14) {
-                // x**14 = x^12 * x^2 → sq=x*x; q4=sq*sq; q8=q4*q4; q12=q8*q4; q12*sq  (5 muls)
-                auto* sq = builder->CreateMul(left, left, "pow14.sq");
-                auto* q4 = builder->CreateMul(sq, sq, "pow14.q4");
-                auto* q8 = builder->CreateMul(q4, q4, "pow14.q8");
-                auto* q12 = builder->CreateMul(q8, q4, "pow14.q12");
-                return builder->CreateMul(q12, sq, "pow14");
+                // x**14 = x^12 * x^2 → sq; q4=sq*sq; q8=q4*q4; q12=q8*q4; q12*sq  (5 muls)
+                auto mkMul = [&](llvm::Value* a, llvm::Value* b, const char* nm) -> llvm::Value* {
+                    return baseNonNeg ? builder->CreateNSWMul(a, b, nm)
+                                     : builder->CreateMul(a, b, nm);
+                };
+                auto* sq = mkMul(left, left, "pow14.sq");
+                auto* q4 = mkMul(sq, sq, "pow14.q4");
+                auto* q8 = mkMul(q4, q4, "pow14.q8");
+                auto* q12 = mkMul(q8, q4, "pow14.q12");
+                auto* result = mkMul(q12, sq, "pow14");
+                nonNegValues_.insert(result);  // even exponent → always non-neg
+                return result;
             }
             if (exp == 15) {
                 // x**15 = x^12 * x^3 → sq; q3=sq*x; q6=q3*q3; q12=q6*q6; q12*q3  (5 muls)
-                auto* sq = builder->CreateMul(left, left, "pow15.sq");
-                auto* q3 = builder->CreateMul(sq, left, "pow15.q3");
-                auto* q6 = builder->CreateMul(q3, q3, "pow15.q6");
-                auto* q12 = builder->CreateMul(q6, q6, "pow15.q12");
-                return builder->CreateMul(q12, q3, "pow15");
+                auto mkMul = [&](llvm::Value* a, llvm::Value* b, const char* nm) -> llvm::Value* {
+                    return baseNonNeg ? builder->CreateNSWMul(a, b, nm)
+                                     : builder->CreateMul(a, b, nm);
+                };
+                auto* sq = mkMul(left, left, "pow15.sq");
+                auto* q3 = mkMul(sq, left, "pow15.q3");
+                auto* q6 = mkMul(q3, q3, "pow15.q6");
+                auto* q12 = mkMul(q6, q6, "pow15.q12");
+                auto* result = mkMul(q12, q3, "pow15");
+                if (baseNonNeg) nonNegValues_.insert(result);
+                return result;
             }
             if (exp == 17) {
                 // x**17 = x^16 * x  (5 muls)
-                auto* sq = builder->CreateMul(left, left, "pow17.sq");
-                auto* q4 = builder->CreateMul(sq, sq, "pow17.q4");
-                auto* q8 = builder->CreateMul(q4, q4, "pow17.q8");
-                auto* q16 = builder->CreateMul(q8, q8, "pow17.q16");
-                return builder->CreateMul(q16, left, "pow17");
+                auto mkMul = [&](llvm::Value* a, llvm::Value* b, const char* nm) -> llvm::Value* {
+                    return baseNonNeg ? builder->CreateNSWMul(a, b, nm)
+                                     : builder->CreateMul(a, b, nm);
+                };
+                auto* sq = mkMul(left, left, "pow17.sq");
+                auto* q4 = mkMul(sq, sq, "pow17.q4");
+                auto* q8 = mkMul(q4, q4, "pow17.q8");
+                auto* q16 = mkMul(q8, q8, "pow17.q16");
+                auto* result = mkMul(q16, left, "pow17");
+                if (baseNonNeg) nonNegValues_.insert(result);
+                return result;
             }
             if (exp == 18) {
                 // x**18 = x^16 * x^2  (5 muls)
-                auto* sq = builder->CreateMul(left, left, "pow18.sq");
-                auto* q4 = builder->CreateMul(sq, sq, "pow18.q4");
-                auto* q8 = builder->CreateMul(q4, q4, "pow18.q8");
-                auto* q16 = builder->CreateMul(q8, q8, "pow18.q16");
-                return builder->CreateMul(q16, sq, "pow18");
+                auto mkMul = [&](llvm::Value* a, llvm::Value* b, const char* nm) -> llvm::Value* {
+                    return baseNonNeg ? builder->CreateNSWMul(a, b, nm)
+                                     : builder->CreateMul(a, b, nm);
+                };
+                auto* sq = mkMul(left, left, "pow18.sq");
+                auto* q4 = mkMul(sq, sq, "pow18.q4");
+                auto* q8 = mkMul(q4, q4, "pow18.q8");
+                auto* q16 = mkMul(q8, q8, "pow18.q16");
+                auto* result = mkMul(q16, sq, "pow18");
+                nonNegValues_.insert(result);  // even exponent → always non-neg
+                return result;
             }
             if (exp == 20) {
                 // x**20 = x^16 * x^4  (5 muls)
-                auto* sq = builder->CreateMul(left, left, "pow20.sq");
-                auto* q4 = builder->CreateMul(sq, sq, "pow20.q4");
-                auto* q8 = builder->CreateMul(q4, q4, "pow20.q8");
-                auto* q16 = builder->CreateMul(q8, q8, "pow20.q16");
-                return builder->CreateMul(q16, q4, "pow20");
+                auto mkMul = [&](llvm::Value* a, llvm::Value* b, const char* nm) -> llvm::Value* {
+                    return baseNonNeg ? builder->CreateNSWMul(a, b, nm)
+                                     : builder->CreateMul(a, b, nm);
+                };
+                auto* sq = mkMul(left, left, "pow20.sq");
+                auto* q4 = mkMul(sq, sq, "pow20.q4");
+                auto* q8 = mkMul(q4, q4, "pow20.q8");
+                auto* q16 = mkMul(q8, q8, "pow20.q16");
+                auto* result = mkMul(q16, q4, "pow20");
+                nonNegValues_.insert(result);  // even exponent → always non-neg
+                return result;
             }
             if (exp == 24) {
                 // x**24 = x^16 * x^8  (5 muls)
-                auto* sq = builder->CreateMul(left, left, "pow24.sq");
-                auto* q4 = builder->CreateMul(sq, sq, "pow24.q4");
-                auto* q8 = builder->CreateMul(q4, q4, "pow24.q8");
-                auto* q16 = builder->CreateMul(q8, q8, "pow24.q16");
-                return builder->CreateMul(q16, q8, "pow24");
+                auto mkMul = [&](llvm::Value* a, llvm::Value* b, const char* nm) -> llvm::Value* {
+                    return baseNonNeg ? builder->CreateNSWMul(a, b, nm)
+                                     : builder->CreateMul(a, b, nm);
+                };
+                auto* sq = mkMul(left, left, "pow24.sq");
+                auto* q4 = mkMul(sq, sq, "pow24.q4");
+                auto* q8 = mkMul(q4, q4, "pow24.q8");
+                auto* q16 = mkMul(q8, q8, "pow24.q16");
+                auto* result = mkMul(q16, q8, "pow24");
+                nonNegValues_.insert(result);  // even exponent → always non-neg
+                return result;
             }
             if (exp == 25) {
                 // x**25 = x^24 * x = x^16 * x^8 * x  (6 muls)
-                auto* sq = builder->CreateMul(left, left, "pow25.sq");
-                auto* q4 = builder->CreateMul(sq, sq, "pow25.q4");
-                auto* q8 = builder->CreateMul(q4, q4, "pow25.q8");
-                auto* q16 = builder->CreateMul(q8, q8, "pow25.q16");
-                auto* q24 = builder->CreateMul(q16, q8, "pow25.q24");
-                return builder->CreateMul(q24, left, "pow25");
+                auto mkMul = [&](llvm::Value* a, llvm::Value* b, const char* nm) -> llvm::Value* {
+                    return baseNonNeg ? builder->CreateNSWMul(a, b, nm)
+                                     : builder->CreateMul(a, b, nm);
+                };
+                auto* sq = mkMul(left, left, "pow25.sq");
+                auto* q4 = mkMul(sq, sq, "pow25.q4");
+                auto* q8 = mkMul(q4, q4, "pow25.q8");
+                auto* q16 = mkMul(q8, q8, "pow25.q16");
+                auto* q24 = mkMul(q16, q8, "pow25.q24");
+                auto* result = mkMul(q24, left, "pow25");
+                if (baseNonNeg) nonNegValues_.insert(result);
+                return result;
             }
             if (exp == 32) {
                 // x**32 → ((((x*x)^2)^2)^2)^2  (5 muls)
-                auto* sq = builder->CreateMul(left, left, "pow32.sq");
-                auto* q4 = builder->CreateMul(sq, sq, "pow32.q4");
-                auto* q8 = builder->CreateMul(q4, q4, "pow32.q8");
-                auto* q16 = builder->CreateMul(q8, q8, "pow32.q16");
-                return builder->CreateMul(q16, q16, "pow32");
+                auto mkMul = [&](llvm::Value* a, llvm::Value* b, const char* nm) -> llvm::Value* {
+                    return baseNonNeg ? builder->CreateNSWMul(a, b, nm)
+                                     : builder->CreateMul(a, b, nm);
+                };
+                auto* sq = mkMul(left, left, "pow32.sq");
+                auto* q4 = mkMul(sq, sq, "pow32.q4");
+                auto* q8 = mkMul(q4, q4, "pow32.q8");
+                auto* q16 = mkMul(q8, q8, "pow32.q16");
+                auto* result = mkMul(q16, q16, "pow32");
+                nonNegValues_.insert(result);  // even exponent → always non-neg
+                return result;
             }
             if (exp == 64) {
                 // x**64 → (((((x*x)^2)^2)^2)^2)^2  (6 muls)
-                auto* sq = builder->CreateMul(left, left, "pow64.sq");
-                auto* q4 = builder->CreateMul(sq, sq, "pow64.q4");
-                auto* q8 = builder->CreateMul(q4, q4, "pow64.q8");
-                auto* q16 = builder->CreateMul(q8, q8, "pow64.q16");
-                auto* q32 = builder->CreateMul(q16, q16, "pow64.q32");
-                return builder->CreateMul(q32, q32, "pow64");
+                auto mkMul = [&](llvm::Value* a, llvm::Value* b, const char* nm) -> llvm::Value* {
+                    return baseNonNeg ? builder->CreateNSWMul(a, b, nm)
+                                     : builder->CreateMul(a, b, nm);
+                };
+                auto* sq = mkMul(left, left, "pow64.sq");
+                auto* q4 = mkMul(sq, sq, "pow64.q4");
+                auto* q8 = mkMul(q4, q4, "pow64.q8");
+                auto* q16 = mkMul(q8, q8, "pow64.q16");
+                auto* q32 = mkMul(q16, q16, "pow64.q32");
+                auto* result = mkMul(q32, q32, "pow64");
+                nonNegValues_.insert(result);  // even exponent → always non-neg
+                return result;
             }
         }
 
