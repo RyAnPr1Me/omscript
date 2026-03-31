@@ -2303,7 +2303,47 @@ static unsigned applyAlgebraicSimplifications(llvm::Function& func) {
                     case 1000: simplified = builder.CreateSub(builder.CreateSub(shl(xv,10), shl(xv,4)), shl(xv,3), "mul1000"); break;
                     case 1023: simplified = builder.CreateSub(shl(xv,10), xv, "mul1023"); break;
                     case 1025: simplified = builder.CreateAdd(shl(xv,10), xv, "mul1025"); break;
-                    default: break;
+                    default:
+                        // Negative constants: compute |cv|, strength-reduce, then negate.
+                        if (*cv < -1) {
+                            int64_t absCV = -*cv;
+                            llvm::Value* posRep = nullptr;
+                            switch (absCV) {
+                            case  3: posRep = builder.CreateAdd(shl(xv,1), xv, "mulp3"); break;
+                            case  5: posRep = builder.CreateAdd(shl(xv,2), xv, "mulp5"); break;
+                            case  6: posRep = builder.CreateAdd(shl(xv,2), shl(xv,1), "mulp6"); break;
+                            case  7: posRep = builder.CreateSub(shl(xv,3), xv, "mulp7"); break;
+                            case  9: posRep = builder.CreateAdd(shl(xv,3), xv, "mulp9"); break;
+                            case 10: posRep = builder.CreateAdd(shl(xv,3), shl(xv,1), "mulp10"); break;
+                            case 11: posRep = builder.CreateAdd(builder.CreateAdd(shl(xv,3), shl(xv,1)), xv, "mulp11"); break;
+                            case 12: posRep = builder.CreateAdd(shl(xv,3), shl(xv,2), "mulp12"); break;
+                            case 13: posRep = builder.CreateAdd(builder.CreateAdd(shl(xv,3), shl(xv,2)), xv, "mulp13"); break;
+                            case 14: posRep = builder.CreateSub(shl(xv,4), shl(xv,1), "mulp14"); break;
+                            case 15: posRep = builder.CreateSub(shl(xv,4), xv, "mulp15"); break;
+                            case 17: posRep = builder.CreateAdd(shl(xv,4), xv, "mulp17"); break;
+                            case 18: posRep = builder.CreateAdd(shl(xv,4), shl(xv,1), "mulp18"); break;
+                            case 19: posRep = builder.CreateAdd(builder.CreateAdd(shl(xv,4), shl(xv,1)), xv, "mulp19"); break;
+                            case 20: posRep = builder.CreateAdd(shl(xv,4), shl(xv,2), "mulp20"); break;
+                            case 21: posRep = builder.CreateAdd(builder.CreateAdd(shl(xv,4), shl(xv,2)), xv, "mulp21"); break;
+                            case 22: posRep = builder.CreateAdd(builder.CreateAdd(shl(xv,4), shl(xv,2)), shl(xv,1), "mulp22"); break;
+                            case 24: posRep = builder.CreateAdd(shl(xv,4), shl(xv,3), "mulp24"); break;
+                            case 25: posRep = builder.CreateAdd(builder.CreateAdd(shl(xv,4), shl(xv,3)), xv, "mulp25"); break;
+                            case 26: posRep = builder.CreateSub(builder.CreateSub(shl(xv,5), shl(xv,2)), shl(xv,1), "mulp26"); break;
+                            case 27: posRep = builder.CreateSub(builder.CreateSub(shl(xv,5), shl(xv,2)), xv, "mulp27"); break;
+                            case 28: posRep = builder.CreateSub(shl(xv,5), shl(xv,2), "mulp28"); break;
+                            case 30: posRep = builder.CreateSub(shl(xv,5), shl(xv,1), "mulp30"); break;
+                            case 31: posRep = builder.CreateSub(shl(xv,5), xv, "mulp31"); break;
+                            case 33: posRep = builder.CreateAdd(shl(xv,5), xv, "mulp33"); break;
+                            case 63: posRep = builder.CreateSub(shl(xv,6), xv, "mulp63"); break;
+                            case 65: posRep = builder.CreateAdd(shl(xv,6), xv, "mulp65"); break;
+                            case 127: posRep = builder.CreateSub(shl(xv,7), xv, "mulp127"); break;
+                            case 255: posRep = builder.CreateSub(shl(xv,8), xv, "mulp255"); break;
+                            default: break;
+                            }
+                            if (posRep)
+                                simplified = builder.CreateNeg(posRep, "mulneg");
+                        }
+                        break;
                     }
                 }
             }

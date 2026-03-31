@@ -2894,15 +2894,6 @@ std::vector<RewriteRule> getAdvancedAlgebraicRules() {
             ClassId s10 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(10));
             return g.addBinOp(Op::Add, s10, s.at("x"));
         });
-    // 21 * x → (x << 4) + (x << 2) + x  [16x + 4x + x = 21x]
-    rules.emplace_back("mul_21_left_shift",
-        P::OpPat(Op::Mul, {P::ConstPat(21), P::Wild("x")}),
-        [](EGraph& g, const Subst& s) {
-            ClassId s4 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(4));
-            ClassId s2 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(2));
-            ClassId sum = g.addBinOp(Op::Add, s4, s2);
-            return g.addBinOp(Op::Add, sum, s.at("x"));
-        });
     // 30 * x → (x << 5) - (x << 1)  [32x - 2x = 30x]
     rules.emplace_back("mul_30_left_shift",
         P::OpPat(Op::Mul, {P::ConstPat(30), P::Wild("x")}),
