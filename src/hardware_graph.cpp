@@ -2077,13 +2077,33 @@ static unsigned integerStrengthReduce(llvm::Function& func,
             case 14: rep = builder.CreateSub(shl(xv,4), shl(xv,1), "sr_mul14"); break;
             case 19: rep = builder.CreateAdd(builder.CreateAdd(shl(xv,4), shl(xv,1), "t"), xv, "sr_mul19"); break;
             case 21: rep = builder.CreateAdd(builder.CreateAdd(shl(xv,4), shl(xv,2), "t"), xv, "sr_mul21"); break;
+            case 22: rep = builder.CreateAdd(builder.CreateAdd(shl(xv,4), shl(xv,2), "t"), shl(xv,1), "sr_mul22"); break;
             case 25: rep = builder.CreateAdd(builder.CreateAdd(shl(xv,4), shl(xv,3), "t"), xv, "sr_mul25"); break;
+            case 26: rep = builder.CreateSub(builder.CreateSub(shl(xv,5), shl(xv,2), "t"), shl(xv,1), "sr_mul26"); break;
+            case 27: rep = builder.CreateSub(builder.CreateSub(shl(xv,5), shl(xv,2), "t"), xv, "sr_mul27"); break;
             case 28: rep = builder.CreateSub(shl(xv,5), shl(xv,2), "sr_mul28"); break;
+            case 30: rep = builder.CreateSub(shl(xv,5), shl(xv,1), "sr_mul30"); break;
+            case 34: rep = builder.CreateAdd(shl(xv,5), shl(xv,1), "sr_mul34"); break;
             case 36: rep = builder.CreateAdd(shl(xv,5), shl(xv,2), "sr_mul36"); break;
             case 37: rep = builder.CreateAdd(builder.CreateAdd(shl(xv,5), shl(xv,2), "t"), xv, "sr_mul37"); break;
             case 40: rep = builder.CreateAdd(shl(xv,5), shl(xv,3), "sr_mul40"); break;
             case 41: rep = builder.CreateAdd(builder.CreateAdd(shl(xv,5), shl(xv,3), "t"), xv, "sr_mul41"); break;
             case 49: rep = builder.CreateAdd(builder.CreateAdd(shl(xv,5), shl(xv,4), "t"), xv, "sr_mul49"); break;
+            case 50: rep = builder.CreateAdd(builder.CreateSub(shl(xv,6), shl(xv,4), "t"), shl(xv,1), "sr_mul50"); break;
+            case 60: rep = builder.CreateSub(shl(xv,6), shl(xv,2), "sr_mul60"); break;
+            case 100: {
+                // n*100 → (n<<7) - (n<<5) + (n<<2)  [128n - 32n + 4n]
+                auto* t1 = builder.CreateSub(shl(xv,7), shl(xv,5), "sr_mul100.t");
+                rep = builder.CreateAdd(t1, shl(xv,2), "sr_mul100");
+                break;
+            }
+            case 120: rep = builder.CreateSub(shl(xv,7), shl(xv,3), "sr_mul120"); break;
+            case 200: {
+                // n*200 → (n<<8) - (n<<6) + (n<<3)  [256n - 64n + 8n]
+                auto* t1 = builder.CreateSub(shl(xv,8), shl(xv,6), "sr_mul200.t");
+                rep = builder.CreateAdd(t1, shl(xv,3), "sr_mul200");
+                break;
+            }
             default: break;
             }
 
