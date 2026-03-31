@@ -1672,7 +1672,9 @@ MappingResult mapProgramToHardware(ProgramGraph& pg, const HardwareGraph& hw,
 // Step 4 — Hardware-aware transformations
 // ═════════════════════════════════════════════════════════════════════════════
 
-/// Detect and generate FMA: a*b + c → fma(a, b, c) or a*b - c → fma(a, b, -c).
+/// Detect and generate FMA: a*b + c → fma(a, b, c).
+/// Also handles: c - a*b → fma(-a, b, c)  (FNMADD pattern).
+/// Note: a*b - c → fma(a, b, -c) is handled separately by generateFMASub.
 /// Returns the number of FMAs generated.
 static unsigned generateFMA(llvm::Function& func, const MicroarchProfile& profile) {
     if (profile.fmaUnits == 0) return 0;
@@ -1712,6 +1714,38 @@ static unsigned generateFMA(llvm::Function& func, const MicroarchProfile& profil
                     }
                 }
             }
+
+            // Pattern: fsub(c, fmul(a, b)) → fma(-a, b, c)
+            // This is the "negated fused multiply-subtract" (FNMADD) pattern.
+            // On x86, VFNMADD132/213/231 maps to this.
+            // Note: fsub(fmul(a,b), c) → fma(a,b,-c) is handled by generateFMASub.
+            if (inst.getOpcode() == llvm::Instruction::FSub) {
+                llvm::Value* op0 = inst.getOperand(0);
+                llvm::Value* op1 = inst.getOperand(1);
+
+                // Only match when op0 is NOT an fmul (that's generateFMASub's job).
+                auto* fmul = llvm::dyn_cast<llvm::BinaryOperator>(op1);
+                auto* lhsMul = llvm::dyn_cast<llvm::BinaryOperator>(op0);
+                bool lhsIsFmul = lhsMul && lhsMul->getOpcode() == llvm::Instruction::FMul;
+                if (!lhsIsFmul && fmul && fmul->getOpcode() == llvm::Instruction::FMul &&
+                    fmul->hasOneUse()) {
+                    // fsub(c, fmul(a,b)) = fma(-a, b, c)
+                    llvm::IRBuilder<> builder(&inst);
+                    llvm::Module* mod = func.getParent();
+                    llvm::Type* ty = inst.getType();
+                    llvm::Function* fmaFn = OMSC_GET_INTRINSIC(
+                        mod, llvm::Intrinsic::fma, {ty});
+                    llvm::Value* negA = builder.CreateFNeg(fmul->getOperand(0), "fnmadd.neg");
+                    llvm::Value* result = builder.CreateCall(
+                        fmaFn, {negA, fmul->getOperand(1), op0},
+                        "fnmadd");
+                    inst.replaceAllUsesWith(result);
+                    toErase.push_back(&inst);
+                    toErase.push_back(fmul);
+                    count++;
+                    continue;
+                }
+            }
         }
     }
 
@@ -1721,7 +1755,9 @@ static unsigned generateFMA(llvm::Function& func, const MicroarchProfile& profil
     return count;
 }
 
-/// Generate chained FMA for a*b + c*d → fma(c, d, fma(a, b, 0.0))
+/// Generate chained FMA for:
+///   a*b + c*d → fma(c, d, fma(a, b, 0.0))
+///   a*b - c*d → fma(a, b, fma(-c, d, 0.0))   (FMSUB chain)
 /// This leverages 2+ FMA units by expressing the computation as two
 /// dependent FMAs, which modern out-of-order processors can pipeline.
 /// Returns the number of FMA chains generated.
@@ -1733,37 +1769,73 @@ static unsigned generateFMAChain(llvm::Function& func, const MicroarchProfile& p
 
     for (auto& bb : func) {
         for (auto& inst : bb) {
-            // Pattern: fadd(fmul(a,b), fmul(c,d)) → fma(c, d, fma(a, b, 0))
-            if (inst.getOpcode() != llvm::Instruction::FAdd) continue;
-
-            auto* lhsMul = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
-            auto* rhsMul = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
-
-            if (!lhsMul || !rhsMul) continue;
-            if (lhsMul->getOpcode() != llvm::Instruction::FMul) continue;
-            if (rhsMul->getOpcode() != llvm::Instruction::FMul) continue;
-            if (!lhsMul->hasOneUse() || !rhsMul->hasOneUse()) continue;
-
-            llvm::IRBuilder<> builder(&inst);
             llvm::Module* mod = func.getParent();
             llvm::Type* ty = inst.getType();
 
-            llvm::Function* fmaFn = OMSC_GET_INTRINSIC(mod, llvm::Intrinsic::fma, {ty});
+            // Pattern: fadd(fmul(a,b), fmul(c,d)) → fma(c, d, fma(a, b, 0))
+            if (inst.getOpcode() == llvm::Instruction::FAdd) {
+                auto* lhsMul = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                auto* rhsMul = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
 
-            // First FMA: fma(a, b, 0.0)
-            llvm::Value* zero = llvm::ConstantFP::get(ty, 0.0);
-            llvm::Value* fma1 = builder.CreateCall(fmaFn,
-                {lhsMul->getOperand(0), lhsMul->getOperand(1), zero}, "fma_chain1");
+                if (lhsMul && rhsMul &&
+                    lhsMul->getOpcode() == llvm::Instruction::FMul &&
+                    rhsMul->getOpcode() == llvm::Instruction::FMul &&
+                    lhsMul->hasOneUse() && rhsMul->hasOneUse()) {
 
-            // Second FMA: fma(c, d, fma1)
-            llvm::Value* fma2 = builder.CreateCall(fmaFn,
-                {rhsMul->getOperand(0), rhsMul->getOperand(1), fma1}, "fma_chain2");
+                    llvm::IRBuilder<> builder(&inst);
+                    llvm::Function* fmaFn = OMSC_GET_INTRINSIC(mod, llvm::Intrinsic::fma, {ty});
 
-            inst.replaceAllUsesWith(fma2);
-            toErase.push_back(&inst);
-            toErase.push_back(lhsMul);
-            toErase.push_back(rhsMul);
-            count++;
+                    // First FMA: fma(a, b, 0.0)
+                    llvm::Value* zero = llvm::ConstantFP::get(ty, 0.0);
+                    llvm::Value* fma1 = builder.CreateCall(fmaFn,
+                        {lhsMul->getOperand(0), lhsMul->getOperand(1), zero}, "fma_chain1");
+
+                    // Second FMA: fma(c, d, fma1)
+                    llvm::Value* fma2 = builder.CreateCall(fmaFn,
+                        {rhsMul->getOperand(0), rhsMul->getOperand(1), fma1}, "fma_chain2");
+
+                    inst.replaceAllUsesWith(fma2);
+                    toErase.push_back(&inst);
+                    toErase.push_back(lhsMul);
+                    toErase.push_back(rhsMul);
+                    count++;
+                    continue;
+                }
+            }
+
+            // Pattern: fsub(fmul(a,b), fmul(c,d)) → fma(a, b, fma(-c, d, 0.0))
+            // This is the chained FMSUB (fused multiply-subtract) pattern.
+            // On x86: VFMSUB + VFNMADD executed on 2 FMA units in parallel.
+            if (inst.getOpcode() == llvm::Instruction::FSub) {
+                auto* lhsMul = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                auto* rhsMul = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
+
+                if (lhsMul && rhsMul &&
+                    lhsMul->getOpcode() == llvm::Instruction::FMul &&
+                    rhsMul->getOpcode() == llvm::Instruction::FMul &&
+                    lhsMul->hasOneUse() && rhsMul->hasOneUse()) {
+
+                    llvm::IRBuilder<> builder(&inst);
+                    llvm::Function* fmaFn = OMSC_GET_INTRINSIC(mod, llvm::Intrinsic::fma, {ty});
+
+                    // Inner FMA: fma(-c, d, 0.0)  [= -c*d]
+                    llvm::Value* zero = llvm::ConstantFP::get(ty, 0.0);
+                    llvm::Value* negC = builder.CreateFNeg(rhsMul->getOperand(0), "fmsub_chain.neg");
+                    llvm::Value* fma1 = builder.CreateCall(fmaFn,
+                        {negC, rhsMul->getOperand(1), zero}, "fmsub_chain1");
+
+                    // Outer FMA: fma(a, b, -c*d) = a*b - c*d
+                    llvm::Value* fma2 = builder.CreateCall(fmaFn,
+                        {lhsMul->getOperand(0), lhsMul->getOperand(1), fma1}, "fmsub_chain2");
+
+                    inst.replaceAllUsesWith(fma2);
+                    toErase.push_back(&inst);
+                    toErase.push_back(lhsMul);
+                    toErase.push_back(rhsMul);
+                    count++;
+                    continue;
+                }
+            }
         }
     }
 
@@ -2005,10 +2077,87 @@ static unsigned integerStrengthReduce(llvm::Function& func,
             case 14: rep = builder.CreateSub(shl(xv,4), shl(xv,1), "sr_mul14"); break;
             case 19: rep = builder.CreateAdd(builder.CreateAdd(shl(xv,4), shl(xv,1), "t"), xv, "sr_mul19"); break;
             case 21: rep = builder.CreateAdd(builder.CreateAdd(shl(xv,4), shl(xv,2), "t"), xv, "sr_mul21"); break;
+            case 22: rep = builder.CreateAdd(builder.CreateAdd(shl(xv,4), shl(xv,2), "t"), shl(xv,1), "sr_mul22"); break;
             case 25: rep = builder.CreateAdd(builder.CreateAdd(shl(xv,4), shl(xv,3), "t"), xv, "sr_mul25"); break;
+            case 26: rep = builder.CreateSub(builder.CreateSub(shl(xv,5), shl(xv,2), "t"), shl(xv,1), "sr_mul26"); break;
+            case 27: rep = builder.CreateSub(builder.CreateSub(shl(xv,5), shl(xv,2), "t"), xv, "sr_mul27"); break;
             case 28: rep = builder.CreateSub(shl(xv,5), shl(xv,2), "sr_mul28"); break;
+            case 30: rep = builder.CreateSub(shl(xv,5), shl(xv,1), "sr_mul30"); break;
+            case 34: rep = builder.CreateAdd(shl(xv,5), shl(xv,1), "sr_mul34"); break;
+            case 36: rep = builder.CreateAdd(shl(xv,5), shl(xv,2), "sr_mul36"); break;
+            case 37: rep = builder.CreateAdd(builder.CreateAdd(shl(xv,5), shl(xv,2), "t"), xv, "sr_mul37"); break;
             case 40: rep = builder.CreateAdd(shl(xv,5), shl(xv,3), "sr_mul40"); break;
+            case 41: rep = builder.CreateAdd(builder.CreateAdd(shl(xv,5), shl(xv,3), "t"), xv, "sr_mul41"); break;
+            case 49: rep = builder.CreateAdd(builder.CreateAdd(shl(xv,5), shl(xv,4), "t"), xv, "sr_mul49"); break;
+            case 50: rep = builder.CreateAdd(builder.CreateSub(shl(xv,6), shl(xv,4), "t"), shl(xv,1), "sr_mul50"); break;
+            case 60: rep = builder.CreateSub(shl(xv,6), shl(xv,2), "sr_mul60"); break;
+            case 100: {
+                // n*100 → (n<<7) - (n<<5) + (n<<2)  [128n - 32n + 4n]
+                auto* t1 = builder.CreateSub(shl(xv,7), shl(xv,5), "sr_mul100.t");
+                rep = builder.CreateAdd(t1, shl(xv,2), "sr_mul100");
+                break;
+            }
+            case 120: rep = builder.CreateSub(shl(xv,7), shl(xv,3), "sr_mul120"); break;
+            case 200: {
+                // n*200 → (n<<8) - (n<<6) + (n<<3)  [256n - 64n + 8n]
+                auto* t1 = builder.CreateSub(shl(xv,8), shl(xv,6), "sr_mul200.t");
+                rep = builder.CreateAdd(t1, shl(xv,3), "sr_mul200");
+                break;
+            }
             default: break;
+            }
+
+            // Negative constant: compute |cv|'s strength-reduced form, then negate.
+            // e.g. x * -7 → -(x * 7) → -((x<<3) - x)
+            if (!rep && cv < -1) {
+                int64_t absCV = -cv;
+                llvm::Value* posRep = nullptr;
+                switch (absCV) {
+                // 2-instruction positive sequences (shift + add/sub)
+                case  3: posRep = builder.CreateAdd(shl(xv,1), xv, "sr_mul3"); break;
+                case  5: posRep = builder.CreateAdd(shl(xv,2), xv, "sr_mul5"); break;
+                case  6: posRep = builder.CreateAdd(shl(xv,2), shl(xv,1), "sr_mul6"); break;
+                case  7: posRep = builder.CreateSub(shl(xv,3), xv, "sr_mul7"); break;
+                case  9: posRep = builder.CreateAdd(shl(xv,3), xv, "sr_mul9"); break;
+                case 10: posRep = builder.CreateAdd(shl(xv,3), shl(xv,1), "sr_mul10"); break;
+                case 12: posRep = builder.CreateAdd(shl(xv,3), shl(xv,2), "sr_mul12"); break;
+                case 15: posRep = builder.CreateSub(shl(xv,4), xv, "sr_mul15"); break;
+                case 17: posRep = builder.CreateAdd(shl(xv,4), xv, "sr_mul17"); break;
+                case 18: posRep = builder.CreateAdd(shl(xv,4), shl(xv,1), "sr_mul18"); break;
+                case 20: posRep = builder.CreateAdd(shl(xv,4), shl(xv,2), "sr_mul20"); break;
+                case 24: posRep = builder.CreateAdd(shl(xv,4), shl(xv,3), "sr_mul24"); break;
+                case 28: posRep = builder.CreateSub(shl(xv,5), shl(xv,2), "sr_mul28"); break;
+                case 30: posRep = builder.CreateSub(shl(xv,5), shl(xv,1), "sr_mul30"); break;
+                case 31: posRep = builder.CreateSub(shl(xv,5), xv, "sr_mul31"); break;
+                case 33: posRep = builder.CreateAdd(shl(xv,5), xv, "sr_mul33"); break;
+                case 34: posRep = builder.CreateAdd(shl(xv,5), shl(xv,1), "sr_mul34"); break;
+                case 36: posRep = builder.CreateAdd(shl(xv,5), shl(xv,2), "sr_mul36"); break;
+                case 40: posRep = builder.CreateAdd(shl(xv,5), shl(xv,3), "sr_mul40"); break;
+                case 48: posRep = builder.CreateAdd(shl(xv,5), shl(xv,4), "sr_mul48"); break;
+                case 60: posRep = builder.CreateSub(shl(xv,6), shl(xv,2), "sr_mul60"); break;
+                case 63: posRep = builder.CreateSub(shl(xv,6), xv, "sr_mul63"); break;
+                case 65: posRep = builder.CreateAdd(shl(xv,6), xv, "sr_mul65"); break;
+                case 96: posRep = builder.CreateAdd(shl(xv,6), shl(xv,5), "sr_mul96"); break;
+                case 120: posRep = builder.CreateSub(shl(xv,7), shl(xv,3), "sr_mul120"); break;
+                case 127: posRep = builder.CreateSub(shl(xv,7), xv, "sr_mul127"); break;
+                case 255: posRep = builder.CreateSub(shl(xv,8), xv, "sr_mul255"); break;
+                // 3-instruction positive sequences
+                case 11: posRep = builder.CreateAdd(builder.CreateAdd(shl(xv,3), shl(xv,1), "t"), xv, "sr_mul11"); break;
+                case 13: { auto* t = builder.CreateSub(shl(xv,4), shl(xv,1), "t"); posRep = builder.CreateSub(t, xv, "sr_mul13"); break; }
+                case 14: posRep = builder.CreateSub(shl(xv,4), shl(xv,1), "sr_mul14"); break;
+                case 19: posRep = builder.CreateAdd(builder.CreateAdd(shl(xv,4), shl(xv,1), "t"), xv, "sr_mul19"); break;
+                case 21: posRep = builder.CreateAdd(builder.CreateAdd(shl(xv,4), shl(xv,2), "t"), xv, "sr_mul21"); break;
+                case 22: posRep = builder.CreateAdd(builder.CreateAdd(shl(xv,4), shl(xv,2), "t"), shl(xv,1), "sr_mul22"); break;
+                case 25: posRep = builder.CreateAdd(builder.CreateAdd(shl(xv,4), shl(xv,3), "t"), xv, "sr_mul25"); break;
+                case 26: posRep = builder.CreateSub(builder.CreateSub(shl(xv,5), shl(xv,2), "t"), shl(xv,1), "sr_mul26"); break;
+                case 27: posRep = builder.CreateSub(builder.CreateSub(shl(xv,5), shl(xv,2), "t"), xv, "sr_mul27"); break;
+                case 37: posRep = builder.CreateAdd(builder.CreateAdd(shl(xv,5), shl(xv,2), "t"), xv, "sr_mul37"); break;
+                case 41: posRep = builder.CreateAdd(builder.CreateAdd(shl(xv,5), shl(xv,3), "t"), xv, "sr_mul41"); break;
+                case 49: posRep = builder.CreateAdd(builder.CreateAdd(shl(xv,5), shl(xv,4), "t"), xv, "sr_mul49"); break;
+                default: break;
+                }
+                if (posRep)
+                    rep = builder.CreateNeg(posRep, "sr_mulneg");
             }
 
             if (rep) {
@@ -2166,10 +2315,39 @@ static unsigned softwarePipelineLoops(llvm::Function& func,
         // in-order cores (issueWidth == 1 → no benefit from high interleave).
         unsigned interleave = (profile.issueWidth > 2) ? unroll : 2u;
 
-        // ── Vectorize width (32-bit baseline, clamped to hardware width) ─────
-        unsigned vecWidth = (profile.vecUnits > 0 && profile.vectorWidth >= 128)
-            ? profile.vectorWidth / 32 : 0;
-        if (vecWidth < 2) vecWidth = 0; // don't set a width of 1
+        // ── Vectorize width (element-size-aware, based on dominant loop type) ──
+        // OmScript supports all standard types (i8, i16, i32, i64, f32, f64).
+        // Use the dominant element bit-width of the loop body to compute the
+        // correct lane count: lanes = vectorWidth / elementBits.
+        // Wider elements → fewer lanes; narrower elements → more lanes.
+        unsigned vecWidth = 0;
+        if (profile.vecUnits > 0 && profile.vectorWidth >= 128) {
+            // Survey the loop header's arithmetic instructions to find the
+            // dominant element width. We count the number of instructions
+            // that operate on each width and pick the most common.
+            std::unordered_map<unsigned, unsigned> widthFreq;
+            for (auto& loopInst : bb) {
+                if (llvm::isa<llvm::PHINode>(loopInst) || loopInst.isTerminator())
+                    continue;
+                llvm::Type* ty = loopInst.getType();
+                unsigned bits = 0;
+                if (ty->isIntegerTy())       bits = ty->getIntegerBitWidth();
+                else if (ty->isFloatTy())    bits = 32;
+                else if (ty->isDoubleTy())   bits = 64;
+                else if (ty->isHalfTy())     bits = 16;
+                if (bits >= 8 && bits <= 64) widthFreq[bits]++;
+            }
+            unsigned domBits = 64; // default: OmScript's native int is i64
+            unsigned domCount = 0;
+            for (auto& [bits, cnt] : widthFreq) {
+                if (cnt > domCount) { domBits = bits; domCount = cnt; }
+            }
+            // Compute lane count and clamp: at least 2, at most 16.
+            unsigned lanes = profile.vectorWidth / domBits;
+            if (lanes >= 2) {
+                vecWidth = std::min(lanes, 16u);
+            }
+        }
 
         // ── Build loop metadata ───────────────────────────────────────────────
         llvm::SmallVector<llvm::Metadata*, 6> mds;

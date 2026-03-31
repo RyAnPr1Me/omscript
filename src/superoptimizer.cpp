@@ -2248,16 +2248,23 @@ static unsigned applyAlgebraicSimplifications(llvm::Function& func) {
                     case 19: simplified = builder.CreateAdd(builder.CreateAdd(shl(xv,4), shl(xv,1)), xv, "mul19"); break;
                     case 20: simplified = builder.CreateAdd(shl(xv,4), shl(xv,2), "mul20"); break;
                     case 21: simplified = builder.CreateAdd(builder.CreateAdd(shl(xv,4), shl(xv,2)), xv, "mul21"); break;
+                    case 22: simplified = builder.CreateAdd(builder.CreateAdd(shl(xv,4), shl(xv,2)), shl(xv,1), "mul22"); break;
                     case 24: simplified = builder.CreateAdd(shl(xv,4), shl(xv,3), "mul24"); break;
                     case 25: simplified = builder.CreateAdd(builder.CreateAdd(shl(xv,4), shl(xv,3)), xv, "mul25"); break;
+                    case 26: simplified = builder.CreateSub(builder.CreateSub(shl(xv,5), shl(xv,2)), shl(xv,1), "mul26"); break;
+                    case 27: simplified = builder.CreateSub(builder.CreateSub(shl(xv,5), shl(xv,2)), xv, "mul27"); break;
                     case 28: simplified = builder.CreateSub(shl(xv,5), shl(xv,2), "mul28"); break;
                     case 30: simplified = builder.CreateSub(shl(xv,5), shl(xv,1), "mul30"); break;
                     case 31: simplified = builder.CreateSub(shl(xv,5), xv, "mul31"); break;
                     case 33: simplified = builder.CreateAdd(shl(xv,5), xv, "mul33"); break;
                     case 34: simplified = builder.CreateAdd(shl(xv,5), shl(xv,1), "mul34"); break;
                     case 36: simplified = builder.CreateAdd(shl(xv,5), shl(xv,2), "mul36"); break;
+                    case 37: simplified = builder.CreateAdd(builder.CreateAdd(shl(xv,5), shl(xv,2)), xv, "mul37"); break;
                     case 40: simplified = builder.CreateAdd(shl(xv,5), shl(xv,3), "mul40"); break;
+                    case 41: simplified = builder.CreateAdd(builder.CreateAdd(shl(xv,5), shl(xv,3)), xv, "mul41"); break;
                     case 48: simplified = builder.CreateAdd(shl(xv,5), shl(xv,4), "mul48"); break;
+                    case 49: simplified = builder.CreateAdd(builder.CreateAdd(shl(xv,5), shl(xv,4)), xv, "mul49"); break;
+                    case 50: simplified = builder.CreateAdd(builder.CreateSub(shl(xv,6), shl(xv,4)), shl(xv,1), "mul50"); break;
                     case 56: simplified = builder.CreateSub(shl(xv,6), shl(xv,3), "mul56"); break;
                     case 60: simplified = builder.CreateSub(shl(xv,6), shl(xv,2), "mul60"); break;
                     case 63: simplified = builder.CreateSub(shl(xv,6), xv, "mul63"); break;
@@ -2274,6 +2281,7 @@ static unsigned applyAlgebraicSimplifications(llvm::Function& func) {
                     case 144: simplified = builder.CreateAdd(shl(xv,7), shl(xv,4), "mul144"); break;
                     case 160: simplified = builder.CreateAdd(shl(xv,7), shl(xv,5), "mul160"); break;
                     case 192: simplified = builder.CreateAdd(shl(xv,7), shl(xv,6), "mul192"); break;
+                    case 200: simplified = builder.CreateAdd(builder.CreateSub(shl(xv,8), shl(xv,6)), shl(xv,3), "mul200"); break;
                     case 224: simplified = builder.CreateSub(shl(xv,8), shl(xv,5), "mul224"); break;
                     case 240: simplified = builder.CreateSub(shl(xv,8), shl(xv,4), "mul240"); break;
                     case 248: simplified = builder.CreateSub(shl(xv,8), shl(xv,3), "mul248"); break;
@@ -2295,7 +2303,47 @@ static unsigned applyAlgebraicSimplifications(llvm::Function& func) {
                     case 1000: simplified = builder.CreateSub(builder.CreateSub(shl(xv,10), shl(xv,4)), shl(xv,3), "mul1000"); break;
                     case 1023: simplified = builder.CreateSub(shl(xv,10), xv, "mul1023"); break;
                     case 1025: simplified = builder.CreateAdd(shl(xv,10), xv, "mul1025"); break;
-                    default: break;
+                    default:
+                        // Negative constants: compute |cv|, strength-reduce, then negate.
+                        if (*cv < -1) {
+                            int64_t absCV = -*cv;
+                            llvm::Value* posRep = nullptr;
+                            switch (absCV) {
+                            case  3: posRep = builder.CreateAdd(shl(xv,1), xv, "mulp3"); break;
+                            case  5: posRep = builder.CreateAdd(shl(xv,2), xv, "mulp5"); break;
+                            case  6: posRep = builder.CreateAdd(shl(xv,2), shl(xv,1), "mulp6"); break;
+                            case  7: posRep = builder.CreateSub(shl(xv,3), xv, "mulp7"); break;
+                            case  9: posRep = builder.CreateAdd(shl(xv,3), xv, "mulp9"); break;
+                            case 10: posRep = builder.CreateAdd(shl(xv,3), shl(xv,1), "mulp10"); break;
+                            case 11: posRep = builder.CreateAdd(builder.CreateAdd(shl(xv,3), shl(xv,1)), xv, "mulp11"); break;
+                            case 12: posRep = builder.CreateAdd(shl(xv,3), shl(xv,2), "mulp12"); break;
+                            case 13: posRep = builder.CreateAdd(builder.CreateAdd(shl(xv,3), shl(xv,2)), xv, "mulp13"); break;
+                            case 14: posRep = builder.CreateSub(shl(xv,4), shl(xv,1), "mulp14"); break;
+                            case 15: posRep = builder.CreateSub(shl(xv,4), xv, "mulp15"); break;
+                            case 17: posRep = builder.CreateAdd(shl(xv,4), xv, "mulp17"); break;
+                            case 18: posRep = builder.CreateAdd(shl(xv,4), shl(xv,1), "mulp18"); break;
+                            case 19: posRep = builder.CreateAdd(builder.CreateAdd(shl(xv,4), shl(xv,1)), xv, "mulp19"); break;
+                            case 20: posRep = builder.CreateAdd(shl(xv,4), shl(xv,2), "mulp20"); break;
+                            case 21: posRep = builder.CreateAdd(builder.CreateAdd(shl(xv,4), shl(xv,2)), xv, "mulp21"); break;
+                            case 22: posRep = builder.CreateAdd(builder.CreateAdd(shl(xv,4), shl(xv,2)), shl(xv,1), "mulp22"); break;
+                            case 24: posRep = builder.CreateAdd(shl(xv,4), shl(xv,3), "mulp24"); break;
+                            case 25: posRep = builder.CreateAdd(builder.CreateAdd(shl(xv,4), shl(xv,3)), xv, "mulp25"); break;
+                            case 26: posRep = builder.CreateSub(builder.CreateSub(shl(xv,5), shl(xv,2)), shl(xv,1), "mulp26"); break;
+                            case 27: posRep = builder.CreateSub(builder.CreateSub(shl(xv,5), shl(xv,2)), xv, "mulp27"); break;
+                            case 28: posRep = builder.CreateSub(shl(xv,5), shl(xv,2), "mulp28"); break;
+                            case 30: posRep = builder.CreateSub(shl(xv,5), shl(xv,1), "mulp30"); break;
+                            case 31: posRep = builder.CreateSub(shl(xv,5), xv, "mulp31"); break;
+                            case 33: posRep = builder.CreateAdd(shl(xv,5), xv, "mulp33"); break;
+                            case 63: posRep = builder.CreateSub(shl(xv,6), xv, "mulp63"); break;
+                            case 65: posRep = builder.CreateAdd(shl(xv,6), xv, "mulp65"); break;
+                            case 127: posRep = builder.CreateSub(shl(xv,7), xv, "mulp127"); break;
+                            case 255: posRep = builder.CreateSub(shl(xv,8), xv, "mulp255"); break;
+                            default: break;
+                            }
+                            if (posRep)
+                                simplified = builder.CreateNeg(posRep, "mulneg");
+                        }
+                        break;
                     }
                 }
             }
@@ -2409,6 +2457,32 @@ static unsigned applyAlgebraicSimplifications(llvm::Function& func) {
             }
 
             // ── Nested AND/OR/XOR with constants ─────────────────────────────
+            // (x | c) & c → c  [OR sets c-bits; AND keeps only c-bits → always c]
+            // Proof: (x | c) has all bits of c set. ANDing with c yields exactly c.
+            if (!simplified && inst.getOpcode() == llvm::Instruction::And) {
+                auto* inner = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                auto c2 = getConstIntValue(inst.getOperand(1));
+                if (inner && c2 && inner->getOpcode() == llvm::Instruction::Or &&
+                    hasOneUse(inner)) {
+                    auto c1 = getConstIntValue(inner->getOperand(1));
+                    if (c1 && *c1 == *c2) {
+                        simplified = llvm::ConstantInt::get(inst.getType(), *c2);
+                    }
+                }
+            }
+            // (x & c) | c → c  [AND keeps only c-bits; OR adds them back → always c]
+            // Proof: (x & c) ⊆ c, so (x & c) | c = c.
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Or) {
+                auto* inner = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                auto c2 = getConstIntValue(inst.getOperand(1));
+                if (inner && c2 && inner->getOpcode() == llvm::Instruction::And &&
+                    hasOneUse(inner)) {
+                    auto c1 = getConstIntValue(inner->getOperand(1));
+                    if (c1 && *c1 == *c2) {
+                        simplified = llvm::ConstantInt::get(inst.getType(), *c2);
+                    }
+                }
+            }
             // (x & c1) & c2 → x & (c1&c2)
             if (!simplified && inst.getOpcode() == llvm::Instruction::And) {
                 auto* inner = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
@@ -3626,11 +3700,23 @@ unsigned superopt::convertSRemToURem(llvm::Function& func) {
     for (auto& bb : func) {
         for (auto& inst : bb) {
             if (inst.getOpcode() == llvm::Instruction::SRem) {
-                auto* rhs = llvm::dyn_cast<llvm::Constant>(inst.getOperand(1));
-                if (rhs && isConstantAllPositive(rhs) &&
-                    isValueNonNegative(inst.getOperand(0), DL)) {
+                llvm::Value* lhs = inst.getOperand(0);
+                llvm::Value* rhs = inst.getOperand(1);
+                // Convert srem(a, b) → urem(a, b) when:
+                //   (a) dividend is non-negative, AND
+                //   (b) divisor is a positive constant.
+                // Correctness: if a >= 0 and b > 0, srem(a,b) == urem(a,b)
+                // because the C/LLVM standard srem has the sign of the dividend,
+                // and a non-negative dividend with a positive divisor gives a
+                // non-negative remainder identical to unsigned remainder.
+                // Non-constant divisors are not handled here: proving b > 0 for
+                // runtime values requires range tracking beyond isValueNonNegative,
+                // and LLVM's own passes handle that after SCCP folds variables.
+                auto* rhsConst = llvm::dyn_cast<llvm::Constant>(rhs);
+                if (rhsConst && isConstantAllPositive(rhsConst) &&
+                    isValueNonNegative(lhs, DL)) {
                     llvm::IRBuilder<> builder(&inst);
-                    auto* urem = builder.CreateURem(inst.getOperand(0), inst.getOperand(1), "srem_to_urem");
+                    auto* urem = builder.CreateURem(lhs, rhs, "srem_to_urem");
                     inst.replaceAllUsesWith(urem);
                     toErase.push_back(&inst);
                     ++count;
@@ -3650,11 +3736,15 @@ unsigned superopt::convertSDivToUDiv(llvm::Function& func) {
     for (auto& bb : func) {
         for (auto& inst : bb) {
             if (inst.getOpcode() == llvm::Instruction::SDiv) {
-                auto* rhs = llvm::dyn_cast<llvm::Constant>(inst.getOperand(1));
-                if (rhs && isConstantAllPositive(rhs) &&
-                    isValueNonNegative(inst.getOperand(0), DL)) {
+                llvm::Value* lhs = inst.getOperand(0);
+                llvm::Value* rhs = inst.getOperand(1);
+                bool rhsPositive = false;
+                if (auto* rhsConst = llvm::dyn_cast<llvm::Constant>(rhs)) {
+                    rhsPositive = isConstantAllPositive(rhsConst);
+                }
+                if (rhsPositive && isValueNonNegative(lhs, DL)) {
                     llvm::IRBuilder<> builder(&inst);
-                    auto* udiv = builder.CreateUDiv(inst.getOperand(0), inst.getOperand(1), "sdiv_to_udiv");
+                    auto* udiv = builder.CreateUDiv(lhs, rhs, "sdiv_to_udiv");
                     inst.replaceAllUsesWith(udiv);
                     toErase.push_back(&inst);
                     ++count;
