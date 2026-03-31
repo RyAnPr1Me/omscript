@@ -2142,6 +2142,12 @@ static unsigned integerStrengthReduce(llvm::Function& func,
             case 768: rep = builder.CreateAdd(shl(xv,9), shl(xv,8), "sr_mul768"); break;
             case 1023: rep = builder.CreateSub(shl(xv,10), xv,        "sr_mul1023"); break;
             case 1025: rep = builder.CreateAdd(shl(xv,10), xv,        "sr_mul1025"); break;
+            case 1152: rep = builder.CreateAdd(shl(xv,10), shl(xv,7), "sr_mul1152"); break;
+            case 1280: rep = builder.CreateAdd(shl(xv,10), shl(xv,8), "sr_mul1280"); break;
+            case 1536: rep = builder.CreateAdd(shl(xv,10), shl(xv,9), "sr_mul1536"); break;
+            case 1792: rep = builder.CreateSub(shl(xv,11), shl(xv,8), "sr_mul1792"); break;
+            case 2047: rep = builder.CreateSub(shl(xv,11), xv,        "sr_mul2047"); break;
+            case 2049: rep = builder.CreateAdd(shl(xv,11), xv,        "sr_mul2049"); break;
             // ── Extended multiply-by-constant patterns (3-instruction) ─────────
             case 1000: {
                 // n*1000 → (n<<10) - (n<<5) + (n<<3)  [1024n - 32n + 8n]
@@ -2224,6 +2230,12 @@ static unsigned integerStrengthReduce(llvm::Function& func,
                 case 768: posRep = builder.CreateAdd(shl(xv,9), shl(xv,8), "sr_mulp768"); break;
                 case 1023: posRep = builder.CreateSub(shl(xv,10), xv,       "sr_mulp1023"); break;
                 case 1025: posRep = builder.CreateAdd(shl(xv,10), xv,       "sr_mulp1025"); break;
+                case 1152: posRep = builder.CreateAdd(shl(xv,10), shl(xv,7), "sr_mulp1152"); break;
+                case 1280: posRep = builder.CreateAdd(shl(xv,10), shl(xv,8), "sr_mulp1280"); break;
+                case 1536: posRep = builder.CreateAdd(shl(xv,10), shl(xv,9), "sr_mulp1536"); break;
+                case 1792: posRep = builder.CreateSub(shl(xv,11), shl(xv,8), "sr_mulp1792"); break;
+                case 2047: posRep = builder.CreateSub(shl(xv,11), xv,        "sr_mulp2047"); break;
+                case 2049: posRep = builder.CreateAdd(shl(xv,11), xv,        "sr_mulp2049"); break;
                 // 3-instruction positive sequences
                 case 11: posRep = builder.CreateAdd(builder.CreateAdd(shl(xv,3), shl(xv,1), "t"), xv, "sr_mul11"); break;
                 case 13: { auto* t = builder.CreateSub(shl(xv,4), shl(xv,1), "t"); posRep = builder.CreateSub(t, xv, "sr_mul13"); break; }

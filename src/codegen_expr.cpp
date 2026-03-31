@@ -1546,6 +1546,40 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 auto* shl10 = builder->CreateShl(base, mkShift(10), "mul1025.shl10");
                 return builder->CreateAdd(shl10, base, "mul1025", nf, ns);
             }
+            case 1152: {
+                // n*1152 → (n<<10) + (n<<7)  (= 1024n + 128n)
+                auto* shl10 = builder->CreateShl(base, mkShift(10), "mul1152.shl10");
+                auto* shl7 = builder->CreateShl(base, mkShift(7), "mul1152.shl7");
+                return builder->CreateAdd(shl10, shl7, "mul1152", nf, ns);
+            }
+            case 1280: {
+                // n*1280 → (n<<10) + (n<<8)  (= 1024n + 256n)
+                auto* shl10 = builder->CreateShl(base, mkShift(10), "mul1280.shl10");
+                auto* shl8 = builder->CreateShl(base, mkShift(8), "mul1280.shl8");
+                return builder->CreateAdd(shl10, shl8, "mul1280", nf, ns);
+            }
+            case 1536: {
+                // n*1536 → (n<<10) + (n<<9)  (= 1024n + 512n)
+                auto* shl10 = builder->CreateShl(base, mkShift(10), "mul1536.shl10");
+                auto* shl9 = builder->CreateShl(base, mkShift(9), "mul1536.shl9");
+                return builder->CreateAdd(shl10, shl9, "mul1536", nf, ns);
+            }
+            case 1792: {
+                // n*1792 → (n<<11) - (n<<8)  (= 2048n - 256n)
+                auto* shl11 = builder->CreateShl(base, mkShift(11), "mul1792.shl11");
+                auto* shl8 = builder->CreateShl(base, mkShift(8), "mul1792.shl8");
+                return builder->CreateSub(shl11, shl8, "mul1792", nf, ns);
+            }
+            case 2047: {
+                // n*2047 → (n<<11) - n  (= 2048n - n)
+                auto* shl11 = builder->CreateShl(base, mkShift(11), "mul2047.shl11");
+                return builder->CreateSub(shl11, base, "mul2047", nf, ns);
+            }
+            case 2049: {
+                // n*2049 → (n<<11) + n  (= 2048n + n)
+                auto* shl11 = builder->CreateShl(base, mkShift(11), "mul2049.shl11");
+                return builder->CreateAdd(shl11, base, "mul2049", nf, ns);
+            }
             default:
                 return nullptr;
             }

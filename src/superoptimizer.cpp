@@ -465,10 +465,15 @@ static bool isValueNonNegative(llvm::Value* v, const llvm::DataLayout& DL, unsig
         }
     }
 
-    // shl nuw: if operand is non-negative, result is non-negative
+    // shl nsw: if operand is non-negative, result is non-negative.
+    // nsw (no signed wrap) on shl guarantees the sign bit was not
+    // changed by the shift, so x >= 0 → (x shl k nsw) >= 0.
+    // Note: nuw alone is NOT sufficient — shl nuw only guarantees that
+    // no bits are shifted out of the top, but the result's sign bit can
+    // still be set by a 1-bit in the source shifted into position 63.
     if (op == llvm::Instruction::Shl) {
         if (auto* bo = llvm::dyn_cast<llvm::BinaryOperator>(inst)) {
-            if (bo->hasNoUnsignedWrap()) {
+            if (bo->hasNoSignedWrap()) {
                 return isValueNonNegative(bo->getOperand(0), DL, depth + 1);
             }
         }
@@ -588,6 +593,41 @@ static bool isValueNonNegative(llvm::Value* v, const llvm::DataLayout& DL, unsig
     }
     if (auto* ee = llvm::dyn_cast<llvm::ExtractElementInst>(inst)) {
         return isValueNonNegative(ee->getVectorOperand(), DL, depth + 1);
+    }
+
+    // Intrinsic calls with known non-negative results.
+    // Note: computeKnownBits at depth=0 does not analyse call instructions,
+    // so we must handle these explicitly.
+    if (auto* ci = llvm::dyn_cast<llvm::CallInst>(inst)) {
+        if (auto* ii = llvm::dyn_cast<llvm::IntrinsicInst>(ci)) {
+            switch (ii->getIntrinsicID()) {
+            // Bit-counting intrinsics: result is always in [0, bitwidth]
+            // (max 64 for i64), so the sign bit is always 0.
+            case llvm::Intrinsic::ctpop:
+            case llvm::Intrinsic::ctlz:
+            case llvm::Intrinsic::cttz:
+                return true;
+            // llvm.abs: result is always in [0, INT64_MAX] since abs never
+            // produces INT64_MIN when is_int_min_poison is false.
+            case llvm::Intrinsic::abs:
+                return true;
+            // Unsigned min/max: results are always non-negative (unsigned).
+            case llvm::Intrinsic::umin:
+            case llvm::Intrinsic::umax:
+                return true;
+            // Saturating unsigned add/sub: results are always non-negative.
+            case llvm::Intrinsic::uadd_sat:
+            case llvm::Intrinsic::usub_sat:
+                return true;
+            // Signed min/max: non-negative when both inputs are non-negative.
+            case llvm::Intrinsic::smin:
+            case llvm::Intrinsic::smax:
+                return isValueNonNegative(ii->getArgOperand(0), DL, depth + 1) &&
+                       isValueNonNegative(ii->getArgOperand(1), DL, depth + 1);
+            default:
+                break;
+            }
+        }
     }
 
     return false;
@@ -2266,7 +2306,7 @@ static unsigned applyAlgebraicSimplifications(llvm::Function& func) {
                     case 49: simplified = builder.CreateAdd(builder.CreateAdd(shl(xv,5), shl(xv,4)), xv, "mul49"); break;
                     case 50: simplified = builder.CreateAdd(builder.CreateSub(shl(xv,6), shl(xv,4)), shl(xv,1), "mul50"); break;
                     case 56: simplified = builder.CreateSub(shl(xv,6), shl(xv,3), "mul56"); break;
-                    case 57: simplified = builder.CreateAdd(builder.CreateSub(shl(xv,6), shl(xv,3), "t"), xv, "mul57"); break;
+                    case 57: simplified = builder.CreateAdd(builder.CreateSub(shl(xv,6), shl(xv,3), "mul57.t"), xv, "mul57"); break;
                     case 60: simplified = builder.CreateSub(shl(xv,6), shl(xv,2), "mul60"); break;
                     case 62: simplified = builder.CreateSub(shl(xv,6), shl(xv,1), "mul62"); break;
                     case 63: simplified = builder.CreateSub(shl(xv,6), xv, "mul63"); break;
@@ -2307,6 +2347,12 @@ static unsigned applyAlgebraicSimplifications(llvm::Function& func) {
                     case 1000: simplified = builder.CreateSub(builder.CreateSub(shl(xv,10), shl(xv,4)), shl(xv,3), "mul1000"); break;
                     case 1023: simplified = builder.CreateSub(shl(xv,10), xv, "mul1023"); break;
                     case 1025: simplified = builder.CreateAdd(shl(xv,10), xv, "mul1025"); break;
+                    case 1152: simplified = builder.CreateAdd(shl(xv,10), shl(xv,7), "mul1152"); break;
+                    case 1280: simplified = builder.CreateAdd(shl(xv,10), shl(xv,8), "mul1280"); break;
+                    case 1536: simplified = builder.CreateAdd(shl(xv,10), shl(xv,9), "mul1536"); break;
+                    case 1792: simplified = builder.CreateSub(shl(xv,11), shl(xv,8), "mul1792"); break;
+                    case 2047: simplified = builder.CreateSub(shl(xv,11), xv, "mul2047"); break;
+                    case 2049: simplified = builder.CreateAdd(shl(xv,11), xv, "mul2049"); break;
                     default:
                         // Negative constants: compute |cv|, strength-reduce, then negate.
                         if (*cv < -1) {
@@ -2381,6 +2427,12 @@ static unsigned applyAlgebraicSimplifications(llvm::Function& func) {
                             case 768: posRep = builder.CreateAdd(shl(xv,9), shl(xv,8), "mulp768"); break;
                             case 1023: posRep = builder.CreateSub(shl(xv,10), xv, "mulp1023"); break;
                             case 1025: posRep = builder.CreateAdd(shl(xv,10), xv, "mulp1025"); break;
+                            case 1152: posRep = builder.CreateAdd(shl(xv,10), shl(xv,7), "mulp1152"); break;
+                            case 1280: posRep = builder.CreateAdd(shl(xv,10), shl(xv,8), "mulp1280"); break;
+                            case 1536: posRep = builder.CreateAdd(shl(xv,10), shl(xv,9), "mulp1536"); break;
+                            case 1792: posRep = builder.CreateSub(shl(xv,11), shl(xv,8), "mulp1792"); break;
+                            case 2047: posRep = builder.CreateSub(shl(xv,11), xv, "mulp2047"); break;
+                            case 2049: posRep = builder.CreateAdd(shl(xv,11), xv, "mulp2049"); break;
                             // 3-instruction negative sequences (new cases not covered above)
                             case 37: posRep = builder.CreateAdd(builder.CreateAdd(shl(xv,5), shl(xv,2)), xv, "mulp37"); break;
                             case 41: posRep = builder.CreateAdd(builder.CreateAdd(shl(xv,5), shl(xv,3)), xv, "mulp41"); break;
