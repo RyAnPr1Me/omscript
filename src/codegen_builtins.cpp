@@ -5129,7 +5129,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         arg = toDefaultType(arg);
         llvm::Function* ctpopFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::ctpop, {getDefaultType()});
-        return builder->CreateCall(ctpopFn, {arg}, "popcount.result");
+        auto* result = builder->CreateCall(ctpopFn, {arg}, "popcount.result");
+        nonNegValues_.insert(result);  // popcount is always in [0, 64]
+        return result;
     }
 
     if (bid == BuiltinId::CLZ) {
@@ -5137,7 +5139,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         arg = toDefaultType(arg);
         llvm::Function* ctlzFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::ctlz, {getDefaultType()});
-        return builder->CreateCall(ctlzFn, {arg, builder->getFalse()}, "clz.result");
+        auto* result = builder->CreateCall(ctlzFn, {arg, builder->getFalse()}, "clz.result");
+        nonNegValues_.insert(result);  // clz is always in [0, 64]
+        return result;
     }
 
     if (bid == BuiltinId::CTZ) {
@@ -5145,7 +5149,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         arg = toDefaultType(arg);
         llvm::Function* cttzFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::cttz, {getDefaultType()});
-        return builder->CreateCall(cttzFn, {arg, builder->getFalse()}, "ctz.result");
+        auto* result = builder->CreateCall(cttzFn, {arg, builder->getFalse()}, "ctz.result");
+        nonNegValues_.insert(result);  // ctz is always in [0, 64]
+        return result;
     }
 
     if (bid == BuiltinId::BITREVERSE) {
@@ -5178,7 +5184,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* isAnd0 = builder->CreateICmpEQ(andVal, zero, "ispow2.and0");
         // x > 0 && (x & (x-1)) == 0
         llvm::Value* result = builder->CreateAnd(isPos, isAnd0, "ispow2.result");
-        return builder->CreateZExt(result, getDefaultType(), "ispow2.ext");
+        auto* ext = builder->CreateZExt(result, getDefaultType(), "ispow2.ext");
+        nonNegValues_.insert(ext);  // is_power_of_2 returns 0 or 1 — always non-negative
+        return ext;
     }
 
     if (bid == BuiltinId::LCM) {
@@ -5245,7 +5253,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* gcdIsZero = builder->CreateICmpEQ(gcdVal, zero, "lcm.gcd.iszero");
         llvm::Value* divResult = builder->CreateUDiv(aAbs, gcdVal, "lcm.div");
         llvm::Value* lcmResult = builder->CreateMul(divResult, bAbs, "lcm.mul");
-        return builder->CreateSelect(gcdIsZero, zero, lcmResult, "lcm.result");
+        auto* lcmFinal = builder->CreateSelect(gcdIsZero, zero, lcmResult, "lcm.result");
+        nonNegValues_.insert(lcmFinal);  // lcm is always non-negative (uses abs of inputs)
+        return lcmFinal;
     }
 
     // ── New intrinsic builtins ─────────────────────────────────────────

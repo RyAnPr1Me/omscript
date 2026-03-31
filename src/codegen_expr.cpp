@@ -1452,6 +1452,18 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 auto* shl8 = builder->CreateShl(base, mkShift(8), "mul257.shl8");
                 return builder->CreateAdd(shl8, base, "mul257", nf, ns);
             }
+            case 264: {
+                // n*264 → (n<<8) + (n<<3)  (= 256n + 8n)
+                auto* shl8 = builder->CreateShl(base, mkShift(8), "mul264.shl8");
+                auto* shl3 = builder->CreateShl(base, mkShift(3), "mul264.shl3");
+                return builder->CreateAdd(shl8, shl3, "mul264", nf, ns);
+            }
+            case 272: {
+                // n*272 → (n<<8) + (n<<4)  (= 256n + 16n)
+                auto* shl8 = builder->CreateShl(base, mkShift(8), "mul272.shl8");
+                auto* shl4 = builder->CreateShl(base, mkShift(4), "mul272.shl4");
+                return builder->CreateAdd(shl8, shl4, "mul272", nf, ns);
+            }
             case 288: {
                 // n*288 → (n<<8) + (n<<5)  (= 256n + 32n)
                 auto* shl8 = builder->CreateShl(base, mkShift(8), "mul288.shl8");

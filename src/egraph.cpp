@@ -1716,6 +1716,22 @@ std::vector<RewriteRule> getAlgebraicRules() {
             ClassId s8 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(8));
             return g.addBinOp(Op::Add, s8, s.at("x"));
         });
+    // x * 264 → (x<<8) + (x<<3)  [256x + 8x = 264x]
+    rules.emplace_back("mul_264_shift",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(264)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId s8 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(8));
+            ClassId s3 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(3));
+            return g.addBinOp(Op::Add, s8, s3);
+        });
+    // x * 272 → (x<<8) + (x<<4)  [256x + 16x = 272x]
+    rules.emplace_back("mul_272_shift",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(272)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId s8 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(8));
+            ClassId s4 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(4));
+            return g.addBinOp(Op::Add, s8, s4);
+        });
 
     // x * 1000 → (x << 10) - (x << 4) - (x << 3)  [1024x - 16x - 8x = 1000x]
     rules.emplace_back("mul_1000_shift",
@@ -3101,6 +3117,22 @@ std::vector<RewriteRule> getAdvancedAlgebraicRules() {
         [](EGraph& g, const Subst& s) {
             ClassId s8 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(8));
             return g.addBinOp(Op::Add, s8, s.at("x"));
+        });
+    // 264 * x → (x<<8) + (x<<3)  [256x + 8x = 264x]
+    rules.emplace_back("mul_264_left_shift",
+        P::OpPat(Op::Mul, {P::ConstPat(264), P::Wild("x")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId s8 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(8));
+            ClassId s3 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(3));
+            return g.addBinOp(Op::Add, s8, s3);
+        });
+    // 272 * x → (x<<8) + (x<<4)  [256x + 16x = 272x]
+    rules.emplace_back("mul_272_left_shift",
+        P::OpPat(Op::Mul, {P::ConstPat(272), P::Wild("x")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId s8 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(8));
+            ClassId s4 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(4));
+            return g.addBinOp(Op::Add, s8, s4);
         });
     // 1000 * x → (x << 10) - (x << 4) - (x << 3)  [1024x - 16x - 8x = 1000x]
     rules.emplace_back("mul_1000_left_shift",
