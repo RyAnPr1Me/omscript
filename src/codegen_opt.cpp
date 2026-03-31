@@ -685,11 +685,12 @@ void CodeGenerator::runOptimizationPasses() {
     // then re-canonicalizes loops + promotes reductions to SSA form.
     if (optimizationLevel >= OptimizationLevel::O2) {
         const bool loopOpt = enableLoopOptimize_;
+        const bool loopOptOrO3 = loopOpt || (optimizationLevel >= OptimizationLevel::O3);
         PB.registerVectorizerStartEPCallback(
-            [loopOpt](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel /*Level*/) {
-            if (loopOpt) FPM.addPass(llvm::LoopDistributePass());
+            [loopOptOrO3](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel /*Level*/) {
+            if (loopOptOrO3) FPM.addPass(llvm::LoopDistributePass());
             FPM.addPass(llvm::LoopLoadEliminationPass());
-            if (loopOpt) FPM.addPass(llvm::LoopFusePass());
+            if (loopOptOrO3) FPM.addPass(llvm::LoopFusePass());
             FPM.addPass(llvm::SROAPass(llvm::SROAOptions::ModifyCFG));
             FPM.addPass(llvm::PromotePass());
             FPM.addPass(llvm::InstCombinePass());
@@ -752,7 +753,8 @@ void CodeGenerator::runOptimizationPasses() {
                 // and stores that may alias.  Lowered from O3-only to O2+
                 // because OmScript's noalias semantics make the runtime
                 // checks trivially optimizable, benefiting general code.
-                if (loopOpt)
+                // Enabled unconditionally at O3 for maximum performance.
+                if (loopOpt || isO3)
                     LPM.addPass(llvm::LoopVersioningLICMPass());
             });
         }
@@ -775,7 +777,7 @@ void CodeGenerator::runOptimizationPasses() {
                 // for loops that contain freeze-guarded induction variables.
                 // This enables better vectorization and unrolling decisions.
                 LPM.addPass(llvm::CanonicalizeFreezeInLoopsPass());
-                if (isO3 && loopOpt) {
+                if (isO3) {
                     LPM.addPass(llvm::LoopFlattenPass());
                     LPM.addPass(llvm::LoopUnrollAndJamPass(/*OptLevel=*/3));
                 }
@@ -1303,6 +1305,12 @@ void CodeGenerator::runOptimizationPasses() {
         // Run a cleanup pass on specialized functions
         if (totalSpecialized > 0) {
             llvm::legacy::FunctionPassManager specFPM(module.get());
+            // InstSimplify folds constant expressions that were exposed when
+            // constant arguments were inlined into the specialized clone.
+            specFPM.add(llvm::createInstSimplifyLegacyPass());
+            specFPM.add(llvm::createSROAPass());
+            specFPM.add(llvm::createPromoteMemoryToRegisterPass());
+            specFPM.add(llvm::createEarlyCSEPass(/*UseMemorySSA=*/true));
             specFPM.add(llvm::createGVNPass());
             specFPM.add(llvm::createInstructionCombiningPass());
             specFPM.add(llvm::createCFGSimplificationPass(aggressiveCFGOpts()));
