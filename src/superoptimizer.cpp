@@ -2417,6 +2417,32 @@ static unsigned applyAlgebraicSimplifications(llvm::Function& func) {
             }
 
             // ── Nested AND/OR/XOR with constants ─────────────────────────────
+            // (x | c) & c → c  [OR sets c-bits; AND keeps only c-bits → always c]
+            // Proof: (x | c) has all bits of c set. ANDing with c yields exactly c.
+            if (!simplified && inst.getOpcode() == llvm::Instruction::And) {
+                auto* inner = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                auto c2 = getConstIntValue(inst.getOperand(1));
+                if (inner && c2 && inner->getOpcode() == llvm::Instruction::Or &&
+                    hasOneUse(inner)) {
+                    auto c1 = getConstIntValue(inner->getOperand(1));
+                    if (c1 && *c1 == *c2) {
+                        simplified = llvm::ConstantInt::get(inst.getType(), *c2);
+                    }
+                }
+            }
+            // (x & c) | c → c  [AND keeps only c-bits; OR adds them back → always c]
+            // Proof: (x & c) ⊆ c, so (x & c) | c = c.
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Or) {
+                auto* inner = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                auto c2 = getConstIntValue(inst.getOperand(1));
+                if (inner && c2 && inner->getOpcode() == llvm::Instruction::And &&
+                    hasOneUse(inner)) {
+                    auto c1 = getConstIntValue(inner->getOperand(1));
+                    if (c1 && *c1 == *c2) {
+                        simplified = llvm::ConstantInt::get(inst.getType(), *c2);
+                    }
+                }
+            }
             // (x & c1) & c2 → x & (c1&c2)
             if (!simplified && inst.getOpcode() == llvm::Instruction::And) {
                 auto* inner = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));

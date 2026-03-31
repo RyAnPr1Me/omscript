@@ -2107,6 +2107,37 @@ static unsigned integerStrengthReduce(llvm::Function& func,
             default: break;
             }
 
+            // Negative constant: compute |cv|'s strength-reduced form, then negate.
+            // e.g. x * -7 → -(x * 7) → -((x<<3) - x)
+            if (!rep && cv < -1) {
+                int64_t absCV = -cv;
+                llvm::Value* posRep = nullptr;
+                switch (absCV) {
+                case  3: posRep = builder.CreateAdd(shl(xv,1), xv, "sr_mul3"); break;
+                case  5: posRep = builder.CreateAdd(shl(xv,2), xv, "sr_mul5"); break;
+                case  6: posRep = builder.CreateAdd(shl(xv,2), shl(xv,1), "sr_mul6"); break;
+                case  7: posRep = builder.CreateSub(shl(xv,3), xv, "sr_mul7"); break;
+                case  9: posRep = builder.CreateAdd(shl(xv,3), xv, "sr_mul9"); break;
+                case 10: posRep = builder.CreateAdd(shl(xv,3), shl(xv,1), "sr_mul10"); break;
+                case 12: posRep = builder.CreateAdd(shl(xv,3), shl(xv,2), "sr_mul12"); break;
+                case 15: posRep = builder.CreateSub(shl(xv,4), xv, "sr_mul15"); break;
+                case 17: posRep = builder.CreateAdd(shl(xv,4), xv, "sr_mul17"); break;
+                case 18: posRep = builder.CreateAdd(shl(xv,4), shl(xv,1), "sr_mul18"); break;
+                case 20: posRep = builder.CreateAdd(shl(xv,4), shl(xv,2), "sr_mul20"); break;
+                case 24: posRep = builder.CreateAdd(shl(xv,4), shl(xv,3), "sr_mul24"); break;
+                case 25: posRep = builder.CreateAdd(builder.CreateAdd(shl(xv,4), shl(xv,3), "t"), xv, "sr_mul25"); break;
+                case 31: posRep = builder.CreateSub(shl(xv,5), xv, "sr_mul31"); break;
+                case 33: posRep = builder.CreateAdd(shl(xv,5), xv, "sr_mul33"); break;
+                case 63: posRep = builder.CreateSub(shl(xv,6), xv, "sr_mul63"); break;
+                case 65: posRep = builder.CreateAdd(shl(xv,6), xv, "sr_mul65"); break;
+                case 127: posRep = builder.CreateSub(shl(xv,7), xv, "sr_mul127"); break;
+                case 255: posRep = builder.CreateSub(shl(xv,8), xv, "sr_mul255"); break;
+                default: break;
+                }
+                if (posRep)
+                    rep = builder.CreateNeg(posRep, "sr_mulneg");
+            }
+
             if (rep) {
                 replacements.emplace_back(&inst, rep);
                 count++;
