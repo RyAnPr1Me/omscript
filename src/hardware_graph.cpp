@@ -2242,10 +2242,39 @@ static unsigned softwarePipelineLoops(llvm::Function& func,
         // in-order cores (issueWidth == 1 → no benefit from high interleave).
         unsigned interleave = (profile.issueWidth > 2) ? unroll : 2u;
 
-        // ── Vectorize width (32-bit baseline, clamped to hardware width) ─────
-        unsigned vecWidth = (profile.vecUnits > 0 && profile.vectorWidth >= 128)
-            ? profile.vectorWidth / 32 : 0;
-        if (vecWidth < 2) vecWidth = 0; // don't set a width of 1
+        // ── Vectorize width (element-size-aware, based on dominant loop type) ──
+        // OmScript supports all standard types (i8, i16, i32, i64, f32, f64).
+        // Use the dominant element bit-width of the loop body to compute the
+        // correct lane count: lanes = vectorWidth / elementBits.
+        // Wider elements → fewer lanes; narrower elements → more lanes.
+        unsigned vecWidth = 0;
+        if (profile.vecUnits > 0 && profile.vectorWidth >= 128) {
+            // Survey the loop header's arithmetic instructions to find the
+            // dominant element width. We count the number of instructions
+            // that operate on each width and pick the most common.
+            std::unordered_map<unsigned, unsigned> widthFreq;
+            for (auto& loopInst : bb) {
+                if (llvm::isa<llvm::PHINode>(loopInst) || loopInst.isTerminator())
+                    continue;
+                llvm::Type* ty = loopInst.getType();
+                unsigned bits = 0;
+                if (ty->isIntegerTy())       bits = ty->getIntegerBitWidth();
+                else if (ty->isFloatTy())    bits = 32;
+                else if (ty->isDoubleTy())   bits = 64;
+                else if (ty->isHalfTy())     bits = 16;
+                if (bits >= 8 && bits <= 64) widthFreq[bits]++;
+            }
+            unsigned domBits = 64; // default: OmScript's native int is i64
+            unsigned domCount = 0;
+            for (auto& [bits, cnt] : widthFreq) {
+                if (cnt > domCount) { domBits = bits; domCount = cnt; }
+            }
+            // Compute lane count and clamp: at least 2, at most 16.
+            unsigned lanes = profile.vectorWidth / domBits;
+            if (lanes >= 2) {
+                vecWidth = std::min(lanes, 16u);
+            }
+        }
 
         // ── Build loop metadata ───────────────────────────────────────────────
         llvm::SmallVector<llvm::Metadata*, 6> mds;

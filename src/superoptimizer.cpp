@@ -3629,11 +3629,34 @@ unsigned superopt::convertSRemToURem(llvm::Function& func) {
     for (auto& bb : func) {
         for (auto& inst : bb) {
             if (inst.getOpcode() == llvm::Instruction::SRem) {
-                auto* rhs = llvm::dyn_cast<llvm::Constant>(inst.getOperand(1));
-                if (rhs && isConstantAllPositive(rhs) &&
-                    isValueNonNegative(inst.getOperand(0), DL)) {
+                llvm::Value* lhs = inst.getOperand(0);
+                llvm::Value* rhs = inst.getOperand(1);
+                // Convert srem(a, b) → urem(a, b) when:
+                //   (a) dividend is non-negative, AND
+                //   (b) divisor is a positive constant OR proven non-negative variable.
+                // Correctness: if a >= 0 and b > 0, srem and urem produce the same
+                // result because both are equivalent to unsigned remainder.
+                // For non-constant b: we also require b > 0 (i.e., non-negative AND nonzero).
+                // isValueNonNegative returns true for URem results, which are in [0, b),
+                // so for the divisor we need strictly positive. We use the constant check
+                // (isConstantAllPositive) for constants, and a conservative check for
+                // variables: strictly positive is implied by non-zero + non-negative.
+                bool rhsPositive = false;
+                if (auto* rhsConst = llvm::dyn_cast<llvm::Constant>(rhs)) {
+                    rhsPositive = isConstantAllPositive(rhsConst);
+                } else if (isValueNonNegative(rhs, DL)) {
+                    // For variables, require that the value is strictly positive.
+                    // isValueNonNegative returns true for urem results (always >= 0),
+                    // but modulus=0 is UB in both srem and urem. We treat non-negative
+                    // non-constant divisors conservatively: only convert when the divisor
+                    // is itself derived from a positive constant (e.g. a function argument
+                    // annotated with llvm.assume) to avoid changing observable UB behavior.
+                    // For safety, skip non-constant divisors without further proof.
+                    rhsPositive = false; // conservative: constants only for now
+                }
+                if (rhsPositive && isValueNonNegative(lhs, DL)) {
                     llvm::IRBuilder<> builder(&inst);
-                    auto* urem = builder.CreateURem(inst.getOperand(0), inst.getOperand(1), "srem_to_urem");
+                    auto* urem = builder.CreateURem(lhs, rhs, "srem_to_urem");
                     inst.replaceAllUsesWith(urem);
                     toErase.push_back(&inst);
                     ++count;
@@ -3653,11 +3676,15 @@ unsigned superopt::convertSDivToUDiv(llvm::Function& func) {
     for (auto& bb : func) {
         for (auto& inst : bb) {
             if (inst.getOpcode() == llvm::Instruction::SDiv) {
-                auto* rhs = llvm::dyn_cast<llvm::Constant>(inst.getOperand(1));
-                if (rhs && isConstantAllPositive(rhs) &&
-                    isValueNonNegative(inst.getOperand(0), DL)) {
+                llvm::Value* lhs = inst.getOperand(0);
+                llvm::Value* rhs = inst.getOperand(1);
+                bool rhsPositive = false;
+                if (auto* rhsConst = llvm::dyn_cast<llvm::Constant>(rhs)) {
+                    rhsPositive = isConstantAllPositive(rhsConst);
+                }
+                if (rhsPositive && isValueNonNegative(lhs, DL)) {
                     llvm::IRBuilder<> builder(&inst);
-                    auto* udiv = builder.CreateUDiv(inst.getOperand(0), inst.getOperand(1), "sdiv_to_udiv");
+                    auto* udiv = builder.CreateUDiv(lhs, rhs, "sdiv_to_udiv");
                     inst.replaceAllUsesWith(udiv);
                     toErase.push_back(&inst);
                     ++count;
