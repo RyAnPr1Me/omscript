@@ -1672,8 +1672,9 @@ MappingResult mapProgramToHardware(ProgramGraph& pg, const HardwareGraph& hw,
 // Step 4 — Hardware-aware transformations
 // ═════════════════════════════════════════════════════════════════════════════
 
-/// Detect and generate FMA: a*b + c → fma(a, b, c) or a*b - c → fma(a, b, -c).
-/// Also handles: c - a*b → fma(-a, b, c)  (negated multiply-subtract / FNMADD).
+/// Detect and generate FMA: a*b + c → fma(a, b, c).
+/// Also handles: c - a*b → fma(-a, b, c)  (FNMADD pattern).
+/// Note: a*b - c → fma(a, b, -c) is handled separately by generateFMASub.
 /// Returns the number of FMAs generated.
 static unsigned generateFMA(llvm::Function& func, const MicroarchProfile& profile) {
     if (profile.fmaUnits == 0) return 0;
@@ -1714,52 +1715,33 @@ static unsigned generateFMA(llvm::Function& func, const MicroarchProfile& profil
                 }
             }
 
-            // Pattern: fsub(fmul(a, b), c) → fma(a, b, -c)
-            // This is the "fused multiply-subtract" (FMS) pattern.
-            // On x86, VFMSUB132/213/231 maps directly to this.
+            // Pattern: fsub(c, fmul(a, b)) → fma(-a, b, c)
+            // This is the "negated fused multiply-subtract" (FNMADD) pattern.
+            // On x86, VFNMADD132/213/231 maps to this.
+            // Note: fsub(fmul(a,b), c) → fma(a,b,-c) is handled by generateFMASub.
             if (inst.getOpcode() == llvm::Instruction::FSub) {
                 llvm::Value* op0 = inst.getOperand(0);
                 llvm::Value* op1 = inst.getOperand(1);
 
-                auto* fmul = llvm::dyn_cast<llvm::BinaryOperator>(op0);
-                if (fmul && fmul->getOpcode() == llvm::Instruction::FMul &&
+                // Only match when op0 is NOT an fmul (that's generateFMASub's job).
+                auto* fmul = llvm::dyn_cast<llvm::BinaryOperator>(op1);
+                auto* lhsMul = llvm::dyn_cast<llvm::BinaryOperator>(op0);
+                bool lhsIsFmul = lhsMul && lhsMul->getOpcode() == llvm::Instruction::FMul;
+                if (!lhsIsFmul && fmul && fmul->getOpcode() == llvm::Instruction::FMul &&
                     fmul->hasOneUse()) {
-                    // fsub(fmul(a,b), c) = fma(a, b, -c)
-                    llvm::IRBuilder<> builder(&inst);
-                    llvm::Module* mod = func.getParent();
-                    llvm::Type* ty = inst.getType();
-                    llvm::Function* fmaFn = OMSC_GET_INTRINSIC(
-                        mod, llvm::Intrinsic::fma, {ty});
-                    llvm::Value* negC = builder.CreateFNeg(op1, "fms.neg");
-                    llvm::Value* result = builder.CreateCall(
-                        fmaFn, {fmul->getOperand(0), fmul->getOperand(1), negC},
-                        "fms");
-                    inst.replaceAllUsesWith(result);
-                    toErase.push_back(&inst);
-                    toErase.push_back(fmul);
-                    count++;
-                    continue;
-                }
-
-                // Pattern: fsub(c, fmul(a, b)) → fma(-a, b, c)
-                // This is the "negated fused multiply-subtract" (FNMADD) pattern.
-                // On x86, VFNMADD132/213/231 maps to this.
-                auto* fmul2 = llvm::dyn_cast<llvm::BinaryOperator>(op1);
-                if (fmul2 && fmul2->getOpcode() == llvm::Instruction::FMul &&
-                    fmul2->hasOneUse()) {
                     // fsub(c, fmul(a,b)) = fma(-a, b, c)
                     llvm::IRBuilder<> builder(&inst);
                     llvm::Module* mod = func.getParent();
                     llvm::Type* ty = inst.getType();
                     llvm::Function* fmaFn = OMSC_GET_INTRINSIC(
                         mod, llvm::Intrinsic::fma, {ty});
-                    llvm::Value* negA = builder.CreateFNeg(fmul2->getOperand(0), "fnmadd.neg");
+                    llvm::Value* negA = builder.CreateFNeg(fmul->getOperand(0), "fnmadd.neg");
                     llvm::Value* result = builder.CreateCall(
-                        fmaFn, {negA, fmul2->getOperand(1), op0},
+                        fmaFn, {negA, fmul->getOperand(1), op0},
                         "fnmadd");
                     inst.replaceAllUsesWith(result);
                     toErase.push_back(&inst);
-                    toErase.push_back(fmul2);
+                    toErase.push_back(fmul);
                     count++;
                     continue;
                 }
@@ -2097,7 +2079,11 @@ static unsigned integerStrengthReduce(llvm::Function& func,
             case 21: rep = builder.CreateAdd(builder.CreateAdd(shl(xv,4), shl(xv,2), "t"), xv, "sr_mul21"); break;
             case 25: rep = builder.CreateAdd(builder.CreateAdd(shl(xv,4), shl(xv,3), "t"), xv, "sr_mul25"); break;
             case 28: rep = builder.CreateSub(shl(xv,5), shl(xv,2), "sr_mul28"); break;
+            case 36: rep = builder.CreateAdd(shl(xv,5), shl(xv,2), "sr_mul36"); break;
+            case 37: rep = builder.CreateAdd(builder.CreateAdd(shl(xv,5), shl(xv,2), "t"), xv, "sr_mul37"); break;
             case 40: rep = builder.CreateAdd(shl(xv,5), shl(xv,3), "sr_mul40"); break;
+            case 41: rep = builder.CreateAdd(builder.CreateAdd(shl(xv,5), shl(xv,3), "t"), xv, "sr_mul41"); break;
+            case 49: rep = builder.CreateAdd(builder.CreateAdd(shl(xv,5), shl(xv,4), "t"), xv, "sr_mul49"); break;
             default: break;
             }
 

@@ -2673,6 +2673,15 @@ std::vector<RewriteRule> getAdvancedAlgebraicRules() {
             ClassId s2 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(2));
             return g.addBinOp(Op::Add, s5, s2);
         });
+    // 37 * x → (x << 5) + (x << 2) + x  [32x + 4x + x = 37x]
+    rules.emplace_back("mul_37_left_shift",
+        P::OpPat(Op::Mul, {P::ConstPat(37), P::Wild("x")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId s5 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(5));
+            ClassId s2 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(2));
+            ClassId sum = g.addBinOp(Op::Add, s5, s2);
+            return g.addBinOp(Op::Add, sum, s.at("x"));
+        });
     rules.emplace_back("mul_40_left_shift",
         P::OpPat(Op::Mul, {P::ConstPat(40), P::Wild("x")}),
         [](EGraph& g, const Subst& s) {
@@ -2680,12 +2689,30 @@ std::vector<RewriteRule> getAdvancedAlgebraicRules() {
             ClassId s3 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(3));
             return g.addBinOp(Op::Add, s5, s3);
         });
+    // 41 * x → (x << 5) + (x << 3) + x  [32x + 8x + x = 41x]
+    rules.emplace_back("mul_41_left_shift",
+        P::OpPat(Op::Mul, {P::ConstPat(41), P::Wild("x")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId s5 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(5));
+            ClassId s3 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(3));
+            ClassId sum = g.addBinOp(Op::Add, s5, s3);
+            return g.addBinOp(Op::Add, sum, s.at("x"));
+        });
     rules.emplace_back("mul_48_left_shift",
         P::OpPat(Op::Mul, {P::ConstPat(48), P::Wild("x")}),
         [](EGraph& g, const Subst& s) {
             ClassId s5 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(5));
             ClassId s4 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(4));
             return g.addBinOp(Op::Add, s5, s4);
+        });
+    // 49 * x → (x << 5) + (x << 4) + x  [32x + 16x + x = 49x]
+    rules.emplace_back("mul_49_left_shift",
+        P::OpPat(Op::Mul, {P::ConstPat(49), P::Wild("x")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId s5 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(5));
+            ClassId s4 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(4));
+            ClassId sum = g.addBinOp(Op::Add, s5, s4);
+            return g.addBinOp(Op::Add, sum, s.at("x"));
         });
     rules.emplace_back("mul_56_left_shift",
         P::OpPat(Op::Mul, {P::ConstPat(56), P::Wild("x")}),
