@@ -1220,18 +1220,6 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 auto* shl2 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 2), "mul28.shl2");
                 return builder->CreateSub(shl5, shl2, "mul28", nf, ns);
             }
-            case 40: {
-                // n*40 → (n<<5) + (n<<3)  (= 32n + 8n)
-                auto* shl5 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 5), "mul40.shl5");
-                auto* shl3 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 3), "mul40.shl3");
-                return builder->CreateAdd(shl5, shl3, "mul40", nf, ns);
-            }
-            case 48: {
-                // n*48 → (n<<5) + (n<<4)  (= 32n + 16n)
-                auto* shl5 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 5), "mul48.shl5");
-                auto* shl4 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 4), "mul48.shl4");
-                return builder->CreateAdd(shl5, shl4, "mul48", nf, ns);
-            }
             case 60: {
                 // n*60 → (n<<6) - (n<<2)  (= 64n - 4n)
                 auto* shl6 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 6), "mul60.shl6");
@@ -1261,6 +1249,39 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 auto* shl5 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 5), "mul36.shl5");
                 auto* shl2 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 2), "mul36.shl2");
                 return builder->CreateAdd(shl5, shl2, "mul36", nf, ns);
+            }
+            case 37: {
+                // n*37 → (n<<5) + (n<<2) + n  (= 32n + 4n + n)
+                auto* shl5 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 5), "mul37.shl5");
+                auto* shl2 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 2), "mul37.shl2");
+                auto* t = builder->CreateAdd(shl5, shl2, "mul37.t", nf, ns);
+                return builder->CreateAdd(t, base, "mul37", nf, ns);
+            }
+            case 40: {
+                // n*40 → (n<<5) + (n<<3)  (= 32n + 8n)
+                auto* shl5 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 5), "mul40.shl5");
+                auto* shl3 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 3), "mul40.shl3");
+                return builder->CreateAdd(shl5, shl3, "mul40", nf, ns);
+            }
+            case 41: {
+                // n*41 → (n<<5) + (n<<3) + n  (= 32n + 8n + n)
+                auto* shl5 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 5), "mul41.shl5");
+                auto* shl3 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 3), "mul41.shl3");
+                auto* t = builder->CreateAdd(shl5, shl3, "mul41.t", nf, ns);
+                return builder->CreateAdd(t, base, "mul41", nf, ns);
+            }
+            case 48: {
+                // n*48 → (n<<5) + (n<<4)  (= 32n + 16n)
+                auto* shl5 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 5), "mul48.shl5");
+                auto* shl4 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 4), "mul48.shl4");
+                return builder->CreateAdd(shl5, shl4, "mul48", nf, ns);
+            }
+            case 49: {
+                // n*49 → (n<<5) + (n<<4) + n  (= 32n + 16n + n)
+                auto* shl5 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 5), "mul49.shl5");
+                auto* shl4 = builder->CreateShl(base, llvm::ConstantInt::get(getDefaultType(), 4), "mul49.shl4");
+                auto* t = builder->CreateAdd(shl5, shl4, "mul49.t", nf, ns);
+                return builder->CreateAdd(t, base, "mul49", nf, ns);
             }
             case 50: {
                 // n*50 → (n<<6) - (n<<4) + (n<<1)  (= 64n - 16n + 2n)

@@ -1673,6 +1673,7 @@ MappingResult mapProgramToHardware(ProgramGraph& pg, const HardwareGraph& hw,
 // ═════════════════════════════════════════════════════════════════════════════
 
 /// Detect and generate FMA: a*b + c → fma(a, b, c) or a*b - c → fma(a, b, -c).
+/// Also handles: c - a*b → fma(-a, b, c)  (negated multiply-subtract / FNMADD).
 /// Returns the number of FMAs generated.
 static unsigned generateFMA(llvm::Function& func, const MicroarchProfile& profile) {
     if (profile.fmaUnits == 0) return 0;
@@ -1712,6 +1713,57 @@ static unsigned generateFMA(llvm::Function& func, const MicroarchProfile& profil
                     }
                 }
             }
+
+            // Pattern: fsub(fmul(a, b), c) → fma(a, b, -c)
+            // This is the "fused multiply-subtract" (FMS) pattern.
+            // On x86, VFMSUB132/213/231 maps directly to this.
+            if (inst.getOpcode() == llvm::Instruction::FSub) {
+                llvm::Value* op0 = inst.getOperand(0);
+                llvm::Value* op1 = inst.getOperand(1);
+
+                auto* fmul = llvm::dyn_cast<llvm::BinaryOperator>(op0);
+                if (fmul && fmul->getOpcode() == llvm::Instruction::FMul &&
+                    fmul->hasOneUse()) {
+                    // fsub(fmul(a,b), c) = fma(a, b, -c)
+                    llvm::IRBuilder<> builder(&inst);
+                    llvm::Module* mod = func.getParent();
+                    llvm::Type* ty = inst.getType();
+                    llvm::Function* fmaFn = OMSC_GET_INTRINSIC(
+                        mod, llvm::Intrinsic::fma, {ty});
+                    llvm::Value* negC = builder.CreateFNeg(op1, "fms.neg");
+                    llvm::Value* result = builder.CreateCall(
+                        fmaFn, {fmul->getOperand(0), fmul->getOperand(1), negC},
+                        "fms");
+                    inst.replaceAllUsesWith(result);
+                    toErase.push_back(&inst);
+                    toErase.push_back(fmul);
+                    count++;
+                    continue;
+                }
+
+                // Pattern: fsub(c, fmul(a, b)) → fma(-a, b, c)
+                // This is the "negated fused multiply-subtract" (FNMADD) pattern.
+                // On x86, VFNMADD132/213/231 maps to this.
+                auto* fmul2 = llvm::dyn_cast<llvm::BinaryOperator>(op1);
+                if (fmul2 && fmul2->getOpcode() == llvm::Instruction::FMul &&
+                    fmul2->hasOneUse()) {
+                    // fsub(c, fmul(a,b)) = fma(-a, b, c)
+                    llvm::IRBuilder<> builder(&inst);
+                    llvm::Module* mod = func.getParent();
+                    llvm::Type* ty = inst.getType();
+                    llvm::Function* fmaFn = OMSC_GET_INTRINSIC(
+                        mod, llvm::Intrinsic::fma, {ty});
+                    llvm::Value* negA = builder.CreateFNeg(fmul2->getOperand(0), "fnmadd.neg");
+                    llvm::Value* result = builder.CreateCall(
+                        fmaFn, {negA, fmul2->getOperand(1), op0},
+                        "fnmadd");
+                    inst.replaceAllUsesWith(result);
+                    toErase.push_back(&inst);
+                    toErase.push_back(fmul2);
+                    count++;
+                    continue;
+                }
+            }
         }
     }
 
@@ -1721,7 +1773,9 @@ static unsigned generateFMA(llvm::Function& func, const MicroarchProfile& profil
     return count;
 }
 
-/// Generate chained FMA for a*b + c*d → fma(c, d, fma(a, b, 0.0))
+/// Generate chained FMA for:
+///   a*b + c*d → fma(c, d, fma(a, b, 0.0))
+///   a*b - c*d → fma(a, b, fma(-c, d, 0.0))   (FMSUB chain)
 /// This leverages 2+ FMA units by expressing the computation as two
 /// dependent FMAs, which modern out-of-order processors can pipeline.
 /// Returns the number of FMA chains generated.
@@ -1733,37 +1787,73 @@ static unsigned generateFMAChain(llvm::Function& func, const MicroarchProfile& p
 
     for (auto& bb : func) {
         for (auto& inst : bb) {
-            // Pattern: fadd(fmul(a,b), fmul(c,d)) → fma(c, d, fma(a, b, 0))
-            if (inst.getOpcode() != llvm::Instruction::FAdd) continue;
-
-            auto* lhsMul = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
-            auto* rhsMul = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
-
-            if (!lhsMul || !rhsMul) continue;
-            if (lhsMul->getOpcode() != llvm::Instruction::FMul) continue;
-            if (rhsMul->getOpcode() != llvm::Instruction::FMul) continue;
-            if (!lhsMul->hasOneUse() || !rhsMul->hasOneUse()) continue;
-
-            llvm::IRBuilder<> builder(&inst);
             llvm::Module* mod = func.getParent();
             llvm::Type* ty = inst.getType();
 
-            llvm::Function* fmaFn = OMSC_GET_INTRINSIC(mod, llvm::Intrinsic::fma, {ty});
+            // Pattern: fadd(fmul(a,b), fmul(c,d)) → fma(c, d, fma(a, b, 0))
+            if (inst.getOpcode() == llvm::Instruction::FAdd) {
+                auto* lhsMul = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                auto* rhsMul = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
 
-            // First FMA: fma(a, b, 0.0)
-            llvm::Value* zero = llvm::ConstantFP::get(ty, 0.0);
-            llvm::Value* fma1 = builder.CreateCall(fmaFn,
-                {lhsMul->getOperand(0), lhsMul->getOperand(1), zero}, "fma_chain1");
+                if (lhsMul && rhsMul &&
+                    lhsMul->getOpcode() == llvm::Instruction::FMul &&
+                    rhsMul->getOpcode() == llvm::Instruction::FMul &&
+                    lhsMul->hasOneUse() && rhsMul->hasOneUse()) {
 
-            // Second FMA: fma(c, d, fma1)
-            llvm::Value* fma2 = builder.CreateCall(fmaFn,
-                {rhsMul->getOperand(0), rhsMul->getOperand(1), fma1}, "fma_chain2");
+                    llvm::IRBuilder<> builder(&inst);
+                    llvm::Function* fmaFn = OMSC_GET_INTRINSIC(mod, llvm::Intrinsic::fma, {ty});
 
-            inst.replaceAllUsesWith(fma2);
-            toErase.push_back(&inst);
-            toErase.push_back(lhsMul);
-            toErase.push_back(rhsMul);
-            count++;
+                    // First FMA: fma(a, b, 0.0)
+                    llvm::Value* zero = llvm::ConstantFP::get(ty, 0.0);
+                    llvm::Value* fma1 = builder.CreateCall(fmaFn,
+                        {lhsMul->getOperand(0), lhsMul->getOperand(1), zero}, "fma_chain1");
+
+                    // Second FMA: fma(c, d, fma1)
+                    llvm::Value* fma2 = builder.CreateCall(fmaFn,
+                        {rhsMul->getOperand(0), rhsMul->getOperand(1), fma1}, "fma_chain2");
+
+                    inst.replaceAllUsesWith(fma2);
+                    toErase.push_back(&inst);
+                    toErase.push_back(lhsMul);
+                    toErase.push_back(rhsMul);
+                    count++;
+                    continue;
+                }
+            }
+
+            // Pattern: fsub(fmul(a,b), fmul(c,d)) → fma(a, b, fma(-c, d, 0.0))
+            // This is the chained FMSUB (fused multiply-subtract) pattern.
+            // On x86: VFMSUB + VFNMADD executed on 2 FMA units in parallel.
+            if (inst.getOpcode() == llvm::Instruction::FSub) {
+                auto* lhsMul = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
+                auto* rhsMul = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
+
+                if (lhsMul && rhsMul &&
+                    lhsMul->getOpcode() == llvm::Instruction::FMul &&
+                    rhsMul->getOpcode() == llvm::Instruction::FMul &&
+                    lhsMul->hasOneUse() && rhsMul->hasOneUse()) {
+
+                    llvm::IRBuilder<> builder(&inst);
+                    llvm::Function* fmaFn = OMSC_GET_INTRINSIC(mod, llvm::Intrinsic::fma, {ty});
+
+                    // Inner FMA: fma(-c, d, 0.0)  [= -c*d]
+                    llvm::Value* zero = llvm::ConstantFP::get(ty, 0.0);
+                    llvm::Value* negC = builder.CreateFNeg(rhsMul->getOperand(0), "fmsub_chain.neg");
+                    llvm::Value* fma1 = builder.CreateCall(fmaFn,
+                        {negC, rhsMul->getOperand(1), zero}, "fmsub_chain1");
+
+                    // Outer FMA: fma(a, b, -c*d) = a*b - c*d
+                    llvm::Value* fma2 = builder.CreateCall(fmaFn,
+                        {lhsMul->getOperand(0), lhsMul->getOperand(1), fma1}, "fmsub_chain2");
+
+                    inst.replaceAllUsesWith(fma2);
+                    toErase.push_back(&inst);
+                    toErase.push_back(lhsMul);
+                    toErase.push_back(rhsMul);
+                    count++;
+                    continue;
+                }
+            }
         }
     }
 

@@ -2256,8 +2256,11 @@ static unsigned applyAlgebraicSimplifications(llvm::Function& func) {
                     case 33: simplified = builder.CreateAdd(shl(xv,5), xv, "mul33"); break;
                     case 34: simplified = builder.CreateAdd(shl(xv,5), shl(xv,1), "mul34"); break;
                     case 36: simplified = builder.CreateAdd(shl(xv,5), shl(xv,2), "mul36"); break;
+                    case 37: simplified = builder.CreateAdd(builder.CreateAdd(shl(xv,5), shl(xv,2)), xv, "mul37"); break;
                     case 40: simplified = builder.CreateAdd(shl(xv,5), shl(xv,3), "mul40"); break;
+                    case 41: simplified = builder.CreateAdd(builder.CreateAdd(shl(xv,5), shl(xv,3)), xv, "mul41"); break;
                     case 48: simplified = builder.CreateAdd(shl(xv,5), shl(xv,4), "mul48"); break;
+                    case 49: simplified = builder.CreateAdd(builder.CreateAdd(shl(xv,5), shl(xv,4)), xv, "mul49"); break;
                     case 56: simplified = builder.CreateSub(shl(xv,6), shl(xv,3), "mul56"); break;
                     case 60: simplified = builder.CreateSub(shl(xv,6), shl(xv,2), "mul60"); break;
                     case 63: simplified = builder.CreateSub(shl(xv,6), xv, "mul63"); break;
