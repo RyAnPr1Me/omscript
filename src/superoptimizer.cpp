@@ -3923,21 +3923,11 @@ unsigned superopt::inferNonNegativeFlags(llvm::Function& func) {
                 continue;
             }
 
-            // Sub: if both operands are non-negative and nsw is set, then
-            // the result is representable in signed i64.  When additionally
-            // the left operand is >= right operand (i.e. result >= 0), nuw
-            // is safe.  We use nsw as a conservative proxy: nsw guarantees
-            // no signed overflow, and with both operands non-negative the
-            // result must be in [-2^63+1, 2^63-1], which fits unsigned i64.
-            // We additionally require nsw because without it the subtraction
-            // could wrap around in signed arithmetic.
+            // Sub: NUW (no unsigned wrap) requires a >= b (unsigned), i.e. the
+            // result is non-negative.  Knowing both a and b are non-negative is
+            // NOT sufficient — if a < b the result is negative and wraps unsigned.
+            // Without proven a >= b we cannot add NUW, so we skip this case.
             if (op == llvm::Instruction::Sub) {
-                if (bo->hasNoSignedWrap() &&
-                    isValueNonNegative(bo->getOperand(0), DL) &&
-                    isValueNonNegative(bo->getOperand(1), DL)) {
-                    bo->setHasNoUnsignedWrap(true);
-                    ++count;
-                }
                 continue;
             }
         }
