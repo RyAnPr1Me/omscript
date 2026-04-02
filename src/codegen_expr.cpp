@@ -247,7 +247,10 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             phi->addIncoming(llvm::ConstantInt::getTrue(*context), leftBB);
             phi->addIncoming(rightBool, rightBB);
         }
-        return builder->CreateZExt(phi, getDefaultType(), "booltmp");
+        // Boolean phi: i1, so result is always 0 or 1 after ZExt; track non-neg.
+        auto* logicResult = builder->CreateZExt(phi, getDefaultType(), "booltmp");
+        nonNegValues_.insert(logicResult);
+        return logicResult;
     }
 
     // Null coalescing operator: x ?? y → x != 0 ? x : y (short-circuit)
@@ -2973,7 +2976,10 @@ llvm::Value* CodeGenerator::generateUnary(UnaryExpr* expr) {
     } else if (expr->op == "!") {
         llvm::Value* boolVal = toBool(operand);
         llvm::Value* notVal = builder->CreateNot(boolVal, "nottmp");
-        return builder->CreateZExt(notVal, getDefaultType(), "booltmp");
+        // Logical NOT of a boolean produces 0 or 1 — always non-negative.
+        auto* result = builder->CreateZExt(notVal, getDefaultType(), "booltmp");
+        nonNegValues_.insert(result);
+        return result;
     } else if (expr->op == "~") {
         if (operand->getType()->isDoubleTy()) {
             operand = builder->CreateFPToSI(operand, getDefaultType(), "ftoi");
@@ -3352,7 +3358,8 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
         for (size_t i = 0; i < numElements; i++) {
             llvm::Value* elemVal = generateExpression(expr->elements[i].get());
             elemVal = toDefaultType(elemVal);
-            llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), arrPtr,
+            // inbounds: malloc'd (1+numElements)*8 bytes, slots [0,numElements] all within.
+            llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr,
                                                       llvm::ConstantInt::get(getDefaultType(), i + 1), "arr.elem.ptr");
             builder->CreateStore(elemVal, elemPtr);
         }
@@ -4042,8 +4049,9 @@ llvm::Value* CodeGenerator::generateStructLiteral(StructLiteralExpr* expr) {
 
     // Initialize all fields to 0
     for (size_t i = 0; i < numFields; i++) {
+        // inbounds: alloca is [numFields x i64], index i ∈ [0, numFields-1].
         llvm::Value* elemPtr =
-            builder->CreateGEP(getDefaultType(), ptr, llvm::ConstantInt::get(getDefaultType(), i), "struct.field.ptr");
+            builder->CreateInBoundsGEP(getDefaultType(), ptr, llvm::ConstantInt::get(getDefaultType(), i), "struct.field.ptr");
         builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 0), elemPtr);
     }
 
@@ -4055,7 +4063,8 @@ llvm::Value* CodeGenerator::generateStructLiteral(StructLiteralExpr* expr) {
         }
         llvm::Value* val = generateExpression(valueExpr.get());
         val = toDefaultType(val);
-        llvm::Value* elemPtr = builder->CreateGEP(
+        // inbounds: fit->second is a validated index ∈ [0, numFields-1].
+        llvm::Value* elemPtr = builder->CreateInBoundsGEP(
             getDefaultType(), ptr, llvm::ConstantInt::get(getDefaultType(), fit->second), "struct.field.ptr");
         builder->CreateStore(val, elemPtr);
     }
@@ -4072,7 +4081,9 @@ llvm::Value* CodeGenerator::generateFieldAccess(FieldAccessExpr* expr) {
 
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     llvm::Value* basePtr = builder->CreateIntToPtr(objVal, ptrTy, "struct.baseptr");
-    llvm::Value* elemPtr = builder->CreateGEP(
+    // inbounds: fieldIdx is validated against the declared struct size by
+    // resolveFieldIndex, so it is always within [0, numFields-1].
+    llvm::Value* elemPtr = builder->CreateInBoundsGEP(
         getDefaultType(), basePtr, llvm::ConstantInt::get(getDefaultType(), fieldIdx), "struct.field.load.ptr");
 
     // Determine alignment from struct field attributes.
@@ -4154,7 +4165,9 @@ llvm::Value* CodeGenerator::generateFieldAssign(FieldAssignExpr* expr) {
 
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     llvm::Value* basePtr = builder->CreateIntToPtr(objVal, ptrTy, "struct.baseptr");
-    llvm::Value* elemPtr = builder->CreateGEP(
+    // inbounds: fieldIdx is validated against the declared struct size by
+    // resolveFieldIndex, so it is always within [0, numFields-1].
+    llvm::Value* elemPtr = builder->CreateInBoundsGEP(
         getDefaultType(), basePtr, llvm::ConstantInt::get(getDefaultType(), fieldIdx), "struct.field.store.ptr");
 
     // Apply alignment from struct field attributes.

@@ -4614,17 +4614,15 @@ unsigned superopt::convertSRemToURem(llvm::Function& func) {
                 llvm::Value* rhs = inst.getOperand(1);
                 // Convert srem(a, b) → urem(a, b) when:
                 //   (a) dividend is non-negative, AND
-                //   (b) divisor is a positive constant.
+                //   (b) divisor is positive (constant or proven non-negative runtime value).
                 // Correctness: if a >= 0 and b > 0, srem(a,b) == urem(a,b)
                 // because the C/LLVM standard srem has the sign of the dividend,
                 // and a non-negative dividend with a positive divisor gives a
                 // non-negative remainder identical to unsigned remainder.
-                // Non-constant divisors are not handled here: proving b > 0 for
-                // runtime values requires range tracking beyond isValueNonNegative,
-                // and LLVM's own passes handle that after SCCP folds variables.
                 auto* rhsConst = llvm::dyn_cast<llvm::Constant>(rhs);
-                if (rhsConst && isConstantAllPositive(rhsConst) &&
-                    isValueNonNegative(lhs, DL)) {
+                const bool rhsPositive = (rhsConst && isConstantAllPositive(rhsConst))
+                    || (!rhsConst && isValueNonNegative(rhs, DL));
+                if (rhsPositive && isValueNonNegative(lhs, DL)) {
                     llvm::IRBuilder<> builder(&inst);
                     auto* urem = builder.CreateURem(lhs, rhs, "srem_to_urem");
                     inst.replaceAllUsesWith(urem);
@@ -4648,9 +4646,13 @@ unsigned superopt::convertSDivToUDiv(llvm::Function& func) {
             if (inst.getOpcode() == llvm::Instruction::SDiv) {
                 llvm::Value* lhs = inst.getOperand(0);
                 llvm::Value* rhs = inst.getOperand(1);
+                // Convert sdiv(a, b) → udiv(a, b) when both operands are
+                // proven non-negative.  Handles constant and runtime divisors.
                 bool rhsPositive = false;
                 if (auto* rhsConst = llvm::dyn_cast<llvm::Constant>(rhs)) {
                     rhsPositive = isConstantAllPositive(rhsConst);
+                } else {
+                    rhsPositive = isValueNonNegative(rhs, DL);
                 }
                 if (rhsPositive && isValueNonNegative(lhs, DL)) {
                     llvm::IRBuilder<> builder(&inst);
