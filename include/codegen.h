@@ -447,6 +447,17 @@ class CodeGenerator {
     bool currentFuncHintHot_ = false;  ///< Current function has @hot annotation
     unsigned loopNestDepth_ = 0; ///< Current for-loop nesting depth (0 = not in a loop)
     bool bodyHasInnerLoop_ = false; ///< Set when a while/for loop is found inside a for-loop body
+    bool bodyHasNonPow2Modulo_ = false; ///< Set when a for-loop body has non-power-of-2 modulo
+    bool bodyHasNonPow2ModuloValue_ = false; ///< Set when non-pow2 modulo result is used as a VALUE (not just in a comparison). Combined with bodyHasNonPow2Modulo_, suppresses vectorize.enable=false when true — the profitable abs/min/max vectorization outweighs the cost of vector urem.
+    bool inComparisonContext_ = false; ///< True while generating operands of == != < > <= >= (used to classify urem as "for branch" vs "for value")
+    /// Per-alloca exclusive upper bounds from modular arithmetic.
+    /// When a variable is assigned `x % C` (a urem with constant C), we record
+    /// C here so that subsequent loads emit `llvm.assume(value ult C)`.  This
+    /// propagates the tight range [0, C) through loop PHI nodes via LLVM's
+    /// LazyValueInfo, enabling the conditional-subtract optimisation
+    /// (select(s<C, s, s-C)) to fire for ALL unrolled iterations — not just
+    /// the ones where the divisor is immediately visible.
+    llvm::DenseMap<llvm::Value*, int64_t> allocaUpperBound_;
     llvm::MDNode* currentLoopAccessGroup_ = nullptr; ///< Access group for parallel loop metadata
 
     /// Classify a function into its execution tier based on type annotations,

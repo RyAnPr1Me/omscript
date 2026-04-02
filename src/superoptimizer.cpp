@@ -20,6 +20,7 @@
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/IRBuilder.h>
+#include <llvm/IR/MDBuilder.h>
 #include <llvm/IR/PatternMatch.h>
 #include <llvm/Support/KnownBits.h>
 #include <llvm/Support/MathExtras.h>
@@ -3453,6 +3454,248 @@ static unsigned simplifyBranches(llvm::Function& func) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// MACS: Modular-Addition-to-Conditional-Subtract
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Returns true if value v is provably in [0, hi) through !range metadata,
+/// constant folding, or one level of PHI-node incoming-value analysis.
+static bool valueInRange(llvm::Value* v, uint64_t hi) {
+    // Check !range metadata on an instruction.
+    if (auto* instr = llvm::dyn_cast<llvm::Instruction>(v)) {
+        if (auto* md = instr->getMetadata(llvm::LLVMContext::MD_range)) {
+            if (md->getNumOperands() >= 2) {
+                if (auto* hiMD = llvm::dyn_cast<llvm::ConstantAsMetadata>(
+                        md->getOperand(1))) {
+                    if (auto* hiCI = llvm::dyn_cast<llvm::ConstantInt>(
+                            hiMD->getValue())) {
+                        if (hiCI->getZExtValue() <= hi) return true;
+                    }
+                }
+            }
+        }
+    }
+    // Constant: check directly.
+    if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(v)) {
+        return ci->getZExtValue() < hi;
+    }
+    // PHI: check all incoming values one level deep (no deeper recursion).
+    if (auto* phi = llvm::dyn_cast<llvm::PHINode>(v)) {
+        if (phi->getNumIncomingValues() == 0) return false;
+        for (unsigned i = 0; i < phi->getNumIncomingValues(); ++i) {
+            llvm::Value* incoming = phi->getIncomingValue(i);
+            // Check incoming directly (no recursion to avoid cycle issues).
+            bool ok = false;
+            if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(incoming)) {
+                ok = ci->getZExtValue() < hi;
+            } else if (auto* instr = llvm::dyn_cast<llvm::Instruction>(incoming)) {
+                if (auto* md = instr->getMetadata(llvm::LLVMContext::MD_range)) {
+                    if (md->getNumOperands() >= 2) {
+                        if (auto* hiMD = llvm::dyn_cast<llvm::ConstantAsMetadata>(
+                                md->getOperand(1))) {
+                            if (auto* hiCI = llvm::dyn_cast<llvm::ConstantInt>(
+                                    hiMD->getValue())) {
+                                ok = hiCI->getZExtValue() <= hi;
+                            }
+                        }
+                    }
+                }
+                // Also accept if incoming is a urem (result is always in [0, divisor)).
+                if (!ok && instr->getOpcode() == llvm::Instruction::URem) {
+                    if (auto* divisorCI = llvm::dyn_cast<llvm::ConstantInt>(
+                            instr->getOperand(1))) {
+                        ok = divisorCI->getZExtValue() <= hi;
+                    }
+                }
+                // Accept a select result that itself comes from a prior MACS.
+                if (!ok && instr->getOpcode() == llvm::Instruction::Select) {
+                    if (auto* md2 = instr->getMetadata(llvm::LLVMContext::MD_range)) {
+                        if (md2->getNumOperands() >= 2) {
+                            if (auto* hMD = llvm::dyn_cast<llvm::ConstantAsMetadata>(
+                                    md2->getOperand(1))) {
+                                if (auto* hCI = llvm::dyn_cast<llvm::ConstantInt>(
+                                        hMD->getValue())) {
+                                    ok = hCI->getZExtValue() <= hi;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if (!ok) return false;
+        }
+        return true;
+    }
+    // Also check a urem instruction directly.
+    if (auto* instr = llvm::dyn_cast<llvm::Instruction>(v)) {
+        if (instr->getOpcode() == llvm::Instruction::URem) {
+            if (auto* divisorCI = llvm::dyn_cast<llvm::ConstantInt>(
+                    instr->getOperand(1))) {
+                return divisorCI->getZExtValue() <= hi;
+            }
+        }
+    }
+    return false;
+}
+
+/// Replace `urem(add(a, b), C)` with `select(s < C, s, s - C)` when both
+/// operands of the add are provably in [0, C).
+///
+/// Motivation: for modular-arithmetic loops (Fibonacci, iterative modular
+/// exponentiation, etc.) the induction variables stay in [0, C).  After
+/// the first iteration LLVM knows each carry value is in [0, C) via the
+/// !range metadata we attach to urem results.  CVP propagates this through
+/// the loop PHI so the add has operands in [0, C) ⊂ [0, 2C); but LLVM's
+/// own InstCombine sometimes misses this when the PHI comes from a select
+/// (the prior MACS result) rather than a urem directly.  This pass fills
+/// the gap so ALL unrolled iterations use the fast 2-cycle conditional
+/// subtract instead of the 25-cycle division.
+///
+/// Cost:  urem (div) ≈ 25 cycles  →  add + icmp + sub + select ≈ 4 cycles.
+/// The transformation is always safe: for a, b ∈ [0, C), a+b ∈ [0, 2C),
+/// so `(a+b) % C == (a+b < C) ? (a+b) : (a+b - C)`.
+static unsigned applyMacs(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() != llvm::Instruction::URem) continue;
+
+            auto* divisorCI = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1));
+            if (!divisorCI) continue;
+            int64_t C = divisorCI->getSExtValue();
+            if (C <= 1) continue;
+            uint64_t UC = static_cast<uint64_t>(C);
+
+            llvm::Value* dividend = inst.getOperand(0);
+
+            // Check if dividend is the result of an add where both operands
+            // are provably in [0, C) via !range metadata or value analysis.
+            auto* addInst = llvm::dyn_cast<llvm::BinaryOperator>(dividend);
+            if (!addInst || addInst->getOpcode() != llvm::Instruction::Add) continue;
+
+            llvm::Value* lhs = addInst->getOperand(0);
+            llvm::Value* rhs = addInst->getOperand(1);
+            if (!valueInRange(lhs, UC) || !valueInRange(rhs, UC)) continue;
+
+            // Both operands in [0, C): apply MACS.
+            // s = a + b; result = (s < C) ? s : s - C
+            llvm::IRBuilder<> builder(&inst);
+            llvm::Value* s = dividend;   // the existing add result (or reuse)
+            llvm::Value* cmpC = llvm::ConstantInt::get(inst.getType(), UC);
+            llvm::Value* cmp = builder.CreateICmpULT(s, cmpC, "macs.cmp");
+            llvm::Value* sub = builder.CreateSub(s, cmpC, "macs.sub",
+                /*HasNUW=*/false, /*HasNSW=*/true);
+            llvm::Value* sel = builder.CreateSelect(cmp, s, sub, "macs.sel");
+
+            replacements.emplace_back(&inst, sel);
+            ++count;
+        }
+    }
+
+    for (auto& [old, newVal] : replacements)
+        old->replaceAllUsesWith(newVal);
+    return count;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Select operand sinking (a.k.a. "select factoring")
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Factor a common operand out of both arms of a select:
+///
+///   select(cond, binop(x, a), binop(x, b))  →  binop(x, select(cond, a, b))
+///   select(cond, binop(a, x), binop(b, x))  →  binop(select(cond, a, b), x)
+///
+/// where `binop` is a pure, no-side-effect integer operation (add/sub/mul/
+/// and/or/xor/shl/lshr/ashr) and `x` is the identical value in both arms.
+///
+/// Motivation: simplifyBranches (branch→select) converts `if/else` diamonds
+/// to select instructions, but when both branches compute `acc op val` and
+/// only `val` differs, the result is `select(cond, acc+a, acc+b)`.  The idiom
+/// recogniser cannot see the abs/min/max pattern hidden inside; this pass
+/// factors it out to `acc + select(cond, a, b)`, exposing the inner select for
+/// idiom detection.
+///
+/// Example:
+///   if (x < 0) acc += -x; else acc += x;
+///   → (after simplifyBranches)  acc_new = select(x<0, acc+neg_x, acc+x)
+///   → (after this pass)          acc_new = acc + select(x<0, neg_x, x)
+///   → (after detectAbsoluteValue) acc_new = acc + llvm.abs(x)
+static unsigned applySelectSinking(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            auto* sel = llvm::dyn_cast<llvm::SelectInst>(&inst);
+            if (!sel) continue;
+            if (!sel->getType()->isIntegerTy()) continue;
+
+            auto* trueOp  = llvm::dyn_cast<llvm::BinaryOperator>(sel->getTrueValue());
+            auto* falseOp = llvm::dyn_cast<llvm::BinaryOperator>(sel->getFalseValue());
+            if (!trueOp || !falseOp) continue;
+            if (trueOp->getOpcode() != falseOp->getOpcode()) continue;
+
+            auto opcode = trueOp->getOpcode();
+            // Only pure arithmetic operations — no memory, no division-by-zero risk.
+            if (opcode != llvm::Instruction::Add  &&
+                opcode != llvm::Instruction::Sub  &&
+                opcode != llvm::Instruction::Mul  &&
+                opcode != llvm::Instruction::And  &&
+                opcode != llvm::Instruction::Or   &&
+                opcode != llvm::Instruction::Xor  &&
+                opcode != llvm::Instruction::Shl  &&
+                opcode != llvm::Instruction::LShr &&
+                opcode != llvm::Instruction::AShr) continue;
+
+            // Require at least one arm to have a single use to avoid code size blow-up.
+            if (!hasOneUse(trueOp) && !hasOneUse(falseOp)) continue;
+
+            llvm::Value* tL = trueOp->getOperand(0);
+            llvm::Value* tR = trueOp->getOperand(1);
+            llvm::Value* fL = falseOp->getOperand(0);
+            llvm::Value* fR = falseOp->getOperand(1);
+
+            llvm::IRBuilder<> builder(&inst);
+            llvm::Value* replacement = nullptr;
+
+            // Case 1: left operand is the common factor  →  binop(x, select(a, b))
+            if (tL == fL && opcode != llvm::Instruction::Sub) {
+                // sub(x, a) vs sub(x, b): common left, but sub(x, select(a,b))
+                // is only valid if we keep x on the left.
+                llvm::Value* inner = builder.CreateSelect(
+                    sel->getCondition(), tR, fR, "sel.sink");
+                replacement = builder.CreateBinOp(opcode, tL, inner, "binop.sink");
+            }
+            // Case 2: right operand is the common factor  →  binop(select(a, b), x)
+            else if (tR == fR) {
+                llvm::Value* inner = builder.CreateSelect(
+                    sel->getCondition(), tL, fL, "sel.sink");
+                replacement = builder.CreateBinOp(opcode, inner, tR, "binop.sink");
+            }
+
+            if (!replacement) continue;
+
+            // Propagate NSW/NUW flags when both source ops had them.
+            if (auto* binRep = llvm::dyn_cast<llvm::BinaryOperator>(replacement)) {
+                if (trueOp->hasNoSignedWrap() && falseOp->hasNoSignedWrap())
+                    binRep->setHasNoSignedWrap(true);
+                if (trueOp->hasNoUnsignedWrap() && falseOp->hasNoUnsignedWrap())
+                    binRep->setHasNoUnsignedWrap(true);
+            }
+
+            replacements.emplace_back(&inst, replacement);
+            ++count;
+        }
+    }
+
+    for (auto& [old, newVal] : replacements)
+        old->replaceAllUsesWith(newVal);
+    return count;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Synthesis engine
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -3895,6 +4138,35 @@ SuperoptimizerStats superoptimizeFunction(llvm::Function& func,
     // Phase 3: Branch simplification (branch-to-select)
     if (config.enableBranchOpt) {
         stats.branchesSimplified = simplifyBranches(func);
+    }
+
+    // Phase 3.5: Select operand sinking — factor common operands out of both
+    // arms of a select, exposing idiom patterns to the recogniser.
+    //   select(cond, acc+a, acc+b) → acc + select(cond, a, b)
+    // This runs AFTER simplifyBranches (which creates the selects) and
+    // BEFORE idiom recognition so that abs/min/max patterns become visible.
+    if (config.enableBranchOpt && config.enableIdiomRecognition) {
+        unsigned sinkCount = applySelectSinking(func);
+        if (sinkCount > 0) {
+            // Re-run idiom recognition on the newly factored selects.
+            for (auto& bb : func) {
+                auto idioms = detectIdioms(bb);
+                for (auto& match : idioms) {
+                    if (replaceIdiom(match)) {
+                        stats.idiomsReplaced++;
+                    }
+                }
+            }
+            stats.algebraicSimplified += sinkCount;
+        }
+    }
+
+    // Phase 3.8: MACS — Modular-Addition-to-Conditional-Subtract.
+    // Replace urem(add(a,b), C) with select(s<C, s, s-C) when a,b ∈ [0,C).
+    // This produces a 2-4 cycle operation vs the 25-cycle integer division,
+    // critical for tight loops like iterative Fibonacci modulo a large prime.
+    if (config.enableAlgebraic) {
+        stats.algebraicSimplified += applyMacs(func);
     }
 
     // Phase 4: Enumerative synthesis on remaining expensive instructions

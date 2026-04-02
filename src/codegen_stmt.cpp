@@ -144,6 +144,22 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             }
             if (initNonNeg)
                 nonNegValues_.insert(alloca);
+            // Propagate tight upper bound for modular arithmetic.
+            // If a variable is declared with `var t = b` where b has a bound,
+            // t inherits that bound, allowing llvm.assume to convey the range.
+            if (auto* ri = llvm::dyn_cast<llvm::Instruction>(initValue)) {
+                if (ri->getOpcode() == llvm::Instruction::URem) {
+                    if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(ri->getOperand(1))) {
+                        if (ci->getSExtValue() > 1)
+                            allocaUpperBound_[alloca] = ci->getSExtValue();
+                    }
+                } else if (ri->getOpcode() == llvm::Instruction::Load) {
+                    auto* srcAlloca = llvm::dyn_cast<llvm::AllocaInst>(ri->getOperand(0));
+                    auto bit = allocaUpperBound_.find(srcAlloca);
+                    if (srcAlloca && bit != allocaUpperBound_.end())
+                        allocaUpperBound_[alloca] = bit->second;
+                }
+            }
             // Track constant integer values for `const` variables so that
             // downstream div/mod can substitute the constant directly and
             // use the fast urem/udiv path instead of the dynamic-divisor path.
@@ -674,6 +690,8 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     ++loopNestDepth_;
     const bool savedBodyHasInnerLoop = bodyHasInnerLoop_;
     bodyHasInnerLoop_ = false;
+    const bool savedBodyHasNonPow2Modulo = bodyHasNonPow2Modulo_;
+    bodyHasNonPow2Modulo_ = false;
 
     const ScopeGuard scope(*this);
 
@@ -1059,7 +1077,17 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         // overestimated.  Explicitly enabling vectorization lets the
         // vectorizer proceed and produce profitable SIMD code that matches
         // clang's aggressive auto-vectorization of hot loops.
-        if (currentFuncHintNoVectorize_) {
+        if (currentFuncHintNoVectorize_
+                || (bodyHasNonPow2Modulo_ && !currentFuncHintVectorize_)) {
+            // Disable vectorization when:
+            //  (a) @novectorize is set explicitly, OR
+            //  (b) the loop body has non-power-of-2 modular arithmetic and the
+            //      user has NOT requested vectorization with @vectorize.
+            // Reason for (b): LLVM's vectorizer converts urem to vector division
+            // sequences (urem <N x i64>) that serialise N software divisions —
+            // each ~25 cycles — making the "vectorised" loop far slower than
+            // the scalar magic-multiply path (~5 cycles).  Explicitly disabling
+            // lets the scalar loop use efficient magic-number reduction.
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
                            llvm::ConstantAsMetadata::get(
@@ -1067,9 +1095,6 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         } else if (currentFuncHintVectorize_
                    || (optimizationLevel >= OptimizationLevel::O3
                        && !bodyHasInnerLoop_ && stepKnownPositive)) {
-            // O3: auto-vectorize all simple ascending non-nested for-loops.
-            // @hot with O3 already satisfied this; now every O3 loop qualifies.
-            // Use @novectorize to opt out when needed.
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
                            llvm::ConstantAsMetadata::get(
@@ -1179,6 +1204,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     --loopNestDepth_;
     // Restore the flag; propagate upward so enclosing for-loops also see it.
     bodyHasInnerLoop_ = savedBodyHasInnerLoop || bodyHasInnerLoop_;
+    bodyHasNonPow2Modulo_ = savedBodyHasNonPow2Modulo || bodyHasNonPow2Modulo_;
 }
 
 void CodeGenerator::generateForEach(ForEachStmt* stmt) {

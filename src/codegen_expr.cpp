@@ -140,7 +140,19 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
         if (auto* loadInst = llvm::dyn_cast<llvm::LoadInst>(load)) {
             if (loadInst->getType()->isIntegerTy(64)
                     && optimizationLevel >= OptimizationLevel::O1) {
-                loadInst->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                // If we have a tighter upper bound from modular arithmetic,
+                // emit !range [0, bound) directly on the load — this IS valid
+                // on load instructions and propagates more precisely through
+                // LLVM's value range analysis (CVP/LVI) than the assume alone.
+                auto bit = allocaUpperBound_.find(it->second);
+                if (bit != allocaUpperBound_.end()) {
+                    llvm::MDBuilder mdB(*context);
+                    loadInst->setMetadata(llvm::LLVMContext::MD_range,
+                        mdB.createRange(llvm::APInt(64, 0),
+                                        llvm::APInt(64, bit->second)));
+                } else {
+                    loadInst->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                }
             }
         }
     }
@@ -163,6 +175,17 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         }
     }
     // --- End string constant folding ---
+
+    // For comparison operators, set inComparisonContext_ so that any non-pow2
+    // modulo operations in the operands are classified as "for branch" (not
+    // "for value"). This prevents the vectorization suppression from firing
+    // when urem results feed into scalar comparisons whose vectorized form
+    // is a branch — the dominant pattern in cond_arithmetic-style loops.
+    const bool isComparisonOp = (expr->op == "==" || expr->op == "!=" ||
+                                 expr->op == "<"  || expr->op == ">"  ||
+                                 expr->op == "<=" || expr->op == ">=");
+    const bool savedInComparison = inComparisonContext_;
+    if (isComparisonOp) inComparisonContext_ = true;
 
     llvm::Value* left = generateExpression(expr->left.get());
     if (expr->op == "&&" || expr->op == "||") {
@@ -2172,8 +2195,23 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                         auto* result = isDivision
                             ? builder->CreateUDiv(left, right, "udivtmp")
                             : builder->CreateURem(left, right, "uremtmp");
-                        // urem/udiv result is always non-negative
+                        // urem/udiv result is always non-negative.
+                        // For non-power-of-2 urem in a loop: emit llvm.assume(result ult divisor)
+                        // so LLVM's LazyValueInfo can propagate the tight range [0, divisor)
+                        // through loop PHI nodes.  This is the critical enabler for the
+                        // conditional-subtract optimization (select(s<C, s, s-C), ~2 cycles)
+                        // instead of a full division (~25 cycles) in modular loops.
                         nonNegValues_.insert(result);
+                        if (!isDivision && loopNestDepth_ > 0
+                                && optimizationLevel >= OptimizationLevel::O2) {
+                            auto* assumeFn = OMSC_GET_INTRINSIC(module.get(),
+                                llvm::Intrinsic::assume, {});
+                            llvm::Value* cmp = builder->CreateICmpULT(
+                                result, right, "urem.ult");
+                            builder->CreateCall(assumeFn, {cmp});
+                            // Flag non-pow2 for vectorization suppression
+                            bodyHasNonPow2Modulo_ = true;
+                        }
                         return result;
                     }
                 }
@@ -2181,6 +2219,10 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                                   : builder->CreateSRem(left, right, "modtmp");
             }
         }
+
+        // For non-constant or runtime divisors, any srem/urem in a loop is flagged.
+        if (!isDivision && loopNestDepth_ > 0)
+            bodyHasNonPow2Modulo_ = true;
 
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
         llvm::Value* isZero = builder->CreateICmpEQ(right, zero, "divzero");
@@ -2835,6 +2877,35 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
             nonNegValues_.insert(it->second);
         else
             nonNegValues_.erase(it->second);
+        // Track tight upper bound for modular arithmetic.
+        // If the assigned value is a urem(x, C), record C so subsequent loads
+        // emit llvm.assume(value ult C), letting LLVM's LVI propagate the range
+        // [0, C) through loop PHI nodes and enabling the conditional-subtract
+        // optimization for all unrolled iterations.
+        // Also propagate through variable copies (a = b where b has a bound).
+        auto updateBound = [&](llvm::Value* v) {
+            if (auto* ri = llvm::dyn_cast<llvm::Instruction>(v)) {
+                if (ri->getOpcode() == llvm::Instruction::URem) {
+                    if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(ri->getOperand(1))) {
+                        if (ci->getSExtValue() > 1) {
+                            allocaUpperBound_[alloca] = ci->getSExtValue();
+                            return;
+                        }
+                    }
+                }
+                if (ri->getOpcode() == llvm::Instruction::Load) {
+                    auto* srcAlloca = llvm::dyn_cast<llvm::AllocaInst>(
+                        ri->getOperand(0));
+                    auto it2 = allocaUpperBound_.find(srcAlloca);
+                    if (srcAlloca && it2 != allocaUpperBound_.end()) {
+                        allocaUpperBound_[alloca] = it2->second;
+                        return;
+                    }
+                }
+            }
+            allocaUpperBound_.erase(alloca);
+        };
+        updateBound(value);
     }
     // Update string variable tracking after assignment.
     if (value->getType()->isPointerTy() || isStringExpr(expr->value.get()))
