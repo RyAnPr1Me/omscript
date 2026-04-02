@@ -63,7 +63,7 @@ if command -v taskset &>/dev/null; then
     TASKSET="taskset -c 0"
 fi
 
-NUM_BENCHMARKS=36
+NUM_BENCHMARKS=38
 
 BENCH_NAME=(
     "integer_math"       #  0 — GCD, log2, modular arithmetic
@@ -102,6 +102,8 @@ BENCH_NAME=(
     "negative_offset"    # 33 — arr[i-1] lookback pattern (bounds elision)
     "const_array_size"   # 34 — array_fill known-size bounds elision
     "cond_arithmetic"    # 35 — conditional increment/decrement + Collatz
+    "ring_buffer"        # 36 — circular ring buffer with prime capacity
+    "sliding_window"     # 37 — sliding window sum over a large array
 )
 
 BENCH_DESC=(
@@ -141,6 +143,8 @@ BENCH_DESC=(
     "Array lookback arr[i-1] pattern (negative-offset bounds elision)"
     "Known-size array bounds elision (array_fill constant propagation)"
     "Conditional increment/decrement + Collatz 3x+1 (superoptimizer + e-graph)"
+    "Circular ring buffer with prime (non-power-of-2) capacity; modulo-wrap head/tail"
+    "Sliding window sum; loop from positive constant, non-negative subtraction"
 )
 
 # Input sizes – tuned so each test runs ~20-200 ms in C.
@@ -181,6 +185,8 @@ BENCH_N=(
     5000000   # 33  negative_offset
     10000000  # 34  const_array_size
     10000000  # 35  cond_arithmetic
+    5000000   # 36  ring_buffer
+    5000000   # 37  sliding_window
 )
 
 BOTTLENECK_LABELS=(
@@ -220,6 +226,8 @@ BOTTLENECK_LABELS=(
     "negative-offset bounds check elision (arr[i-1] lookback)"
     "known-array-size bounds check elision (constant propagation)"
     "conditional arithmetic + Collatz strength reduction"
+    "Ring buffer with prime capacity; non-power-of-2 modulo on bounded indices"
+    "Sliding window sum; loop starting at positive constant, NSW-annotated sub"
 )
 
 # ─── COLOR CODES ──────────────────────────────────────────────
@@ -911,6 +919,56 @@ fn bench_condarith(@prefetch n:int) -> int {
     return acc;
 }
 
+// ── 36. ring_buffer ──────────────────────────────────────────
+// Circular ring buffer with prime capacity (non-power-of-2 = 509).
+// head and tail are provably non-negative, bounded to [0, CAP-1].
+// (tail + 1) % CAP exercises srem→urem for a non-constant-divisor
+// path when CAP is a runtime-tracked positive value.
+@hot @flatten @unroll
+fn bench_ringbuf(@prefetch n:int) -> int {
+    const CAP:int = 509;
+    var buf:int[] = array_fill(CAP, 0);
+    for (i:int in 0...CAP) {
+        buf[i] = (i * 3 + 1) % 10007;
+    }
+    var tail:int = 0;
+    var acc:int = 0;
+    for (i:int in CAP...n) {
+        acc += buf[tail];
+        buf[tail] = (i * 3 + 1) % 10007;
+        tail = (tail + 1) % CAP;
+    }
+    invalidate buf;
+    invalidate n;
+    return acc;
+}
+
+// ── 37. sliding_window ───────────────────────────────────────
+// Sliding window sum.  Inner loop starts from positive constant WIN,
+// so the iterator is non-negative and the loop condition can use
+// ICmpULT.  wsum + data[i] - data[i-WIN] exercises the NSW-Sub pass
+// since wsum and data[i] are both provably non-negative.
+@hot @flatten @unroll @vectorize
+fn bench_slidingwin(@prefetch n:int) -> int {
+    const WIN:int = 64;
+    var data:int[] = array_fill(n, 0);
+    for (i:int in 0...n) {
+        data[i] = (i * 13 + 7) % 10000;
+    }
+    var wsum:int = 0;
+    for (i:int in 0...WIN) {
+        wsum += data[i];
+    }
+    var acc:int = wsum;
+    for (i:int in WIN...n) {
+        wsum = wsum + data[i] - data[i - WIN];
+        acc += wsum;
+    }
+    invalidate data;
+    invalidate n;
+    return acc;
+}
+
 OPTMAX!:
 
 // ── main dispatch ────────────────────────────────────────────
@@ -955,6 +1013,8 @@ fn main() -> int {
         case 33: print(bench_negoffset(n));      break;
         case 34: print(bench_constarray(n));     break;
         case 35: print(bench_condarith(n));      break;
+        case 36: print(bench_ringbuf(n));        break;
+        case 37: print(bench_slidingwin(n));     break;
         default: print(0);
     }
     invalidate n;
@@ -1564,6 +1624,37 @@ static long bench_condarith(long n) {
     return acc;
 }
 
+/* 36 ── ring_buffer ────────────────────────────── */
+static long bench_ringbuf(long n) {
+    long CAP = 509;
+    long *buf = calloc(CAP, sizeof(long));
+    for (long i = 0; i < CAP; i++) buf[i] = (i * 3 + 1) % 10007;
+    long tail = 0, acc = 0;
+    for (long i = CAP; i < n; i++) {
+        acc += buf[tail];
+        buf[tail] = (i * 3 + 1) % 10007;
+        tail = (tail + 1) % CAP;
+    }
+    free(buf);
+    return acc;
+}
+
+/* 37 ── sliding_window ─────────────────────────── */
+static long bench_slidingwin(long n) {
+    long WIN = 64;
+    long *data = malloc(n * sizeof(long));
+    for (long i = 0; i < n; i++) data[i] = (i * 13 + 7) % 10000;
+    long wsum = 0;
+    for (long i = 0; i < WIN; i++) wsum += data[i];
+    long acc = wsum;
+    for (long i = WIN; i < n; i++) {
+        wsum = wsum + data[i] - data[i - WIN];
+        acc += wsum;
+    }
+    free(data);
+    return acc;
+}
+
 int main(void) {
     int test_id; long n;
     scanf("%d %ld", &test_id, &n);
@@ -1605,6 +1696,8 @@ int main(void) {
         case 33: r = bench_negoffset(n);      break;
         case 34: r = bench_constarray(n);     break;
         case 35: r = bench_condarith(n);      break;
+        case 36: r = bench_ringbuf(n);           break;
+        case 37: r = bench_slidingwin(n);        break;
     }
     printf("%ld\n", r);
     return 0;
