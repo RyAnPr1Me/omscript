@@ -1028,31 +1028,32 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.unroll.disable")}));
         } else if (bodyHasInnerLoop_) {
-            // When the body contains an inner loop (while/for), cap unrolling
-            // to prevent LLVM from over-unrolling the outer loop.  Each outer
-            // iteration includes the full inner loop body, so aggressive
-            // unrolling creates massive code bloat and I-cache pressure.
+            // When the body contains an inner loop (while/for), disable
+            // unrolling of the outer loop.  Each outer iteration already
+            // contains the full inner loop, so unrolling the outer loop
+            // creates N copies of the entire inner loop body — massive
+            // I-cache pressure with zero throughput benefit.
             //
-            // OPTMAX functions: trust LLVM's cost-model-driven unroller to
-            // choose the optimal factor, exactly as clang does for C code.
-            // For loops like Collatz (outer-for / inner-while with independent
-            // iterations), LLVM chooses large unroll factors (e.g. 34x) that
-            // expose cross-iteration ILP; a hard cap at 4 prevents this and
-            // leaves significant performance on the table.
+            // This matches clang's behaviour for equivalent C code: clang's
+            // cost model sees the inner loop and emits no unroll hint,
+            // leaving the outer loop as a single copy.
             //
-            // @hot O3 functions: use a cap of 8 (vs 4) to allow more ILP
-            // than the conservative default while still bounding code size.
-            //
-            // Regular functions: cap at 4 as before.
-            if (!inOptMaxFunction) {
-                const unsigned outerLoopCap = 4u;
+            // OPTMAX functions: let LLVM's unroller decide (same as clang -O3
+            // for performance-critical code where cross-iteration ILP matters).
+            if (!inOptMaxFunction && !currentFuncHintUnroll_) {
+                loopMDs.push_back(llvm::MDNode::get(
+                    *context, {llvm::MDString::get(*context, "llvm.loop.unroll.disable")}));
+            } else if (!inOptMaxFunction && currentFuncHintUnroll_) {
+                // @unroll explicitly requested on an outer loop with inner loop:
+                // honour it with a conservative count (2) to allow minor ILP
+                // without the code-size explosion of large factors.
                 loopMDs.push_back(llvm::MDNode::get(
                     *context,
                     {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
                      llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
-                         llvm::Type::getInt32Ty(*context), outerLoopCap))}));
+                         llvm::Type::getInt32Ty(*context), 2u))}));
             }
-            // For OPTMAX functions: no explicit count hint — let LLVM decide.
+            // For OPTMAX functions: no explicit hint — let LLVM decide.
         } else if (currentFuncHintUnroll_ && !addedUnrollHint && !suppressUnrollHint) {
             // @unroll on a non-suppressed loop: apply the unroll count hint.
             // For variable-trip-count loops, unroll.full is ignored by LLVM
