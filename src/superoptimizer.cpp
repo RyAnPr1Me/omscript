@@ -459,6 +459,36 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
         }
     }
 
+    // and: bitmask with a positive constant always produces a non-negative
+    // result.  e.g. x & 1  →  result ∈ {0,1}, always ≥ 0.
+    // More generally, x & C where C ∈ [0, INT64_MAX] has the sign bit cleared
+    // so the result is non-negative regardless of x.
+    if (op == llvm::Instruction::And) {
+        auto checkNonNegConst = [](llvm::Value* v) -> bool {
+            if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(v))
+                return !ci->isNegative();
+            if (auto* cv = llvm::dyn_cast<llvm::Constant>(v))
+                return isConstantAllPositive(cv);
+            return false;
+        };
+        if (checkNonNegConst(inst->getOperand(1)) ||
+            checkNonNegConst(inst->getOperand(0)))
+            return true;
+        // If either operand is non-negative, the and result is too
+        // (anding with a non-negative value clears the sign bit).
+        if (isValueNonNegative(inst->getOperand(0), DL, depth + 1) ||
+            isValueNonNegative(inst->getOperand(1), DL, depth + 1))
+            return true;
+    }
+
+    // or disjoint (llvm.or.disjoint / or with known non-overlapping bits):
+    // if both operands are non-negative, the result is non-negative.
+    if (op == llvm::Instruction::Or) {
+        if (isValueNonNegative(inst->getOperand(0), DL, depth + 1) &&
+            isValueNonNegative(inst->getOperand(1), DL, depth + 1))
+            return true;
+    }
+
     // select: if both possible values are non-negative, the result is too
     if (auto* sel = llvm::dyn_cast<llvm::SelectInst>(inst)) {
         return isValueNonNegative(sel->getTrueValue(), DL, depth + 1) &&
@@ -493,7 +523,22 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
     // non-negative.  This handles loop induction variables that start from 0
     // and increment by a positive step, as well as PHIs from loop unrolling
     // where incoming values are other PHI nodes or or-disjoint increments.
+    //
+    // Cycle detection: a thread-local set of PHIs currently under analysis
+    // prevents infinite recursion when back-edges form cycles through select
+    // or other expressions that contain the PHI (e.g. Collatz x variable:
+    //   phi = [init, select(x&1, 3*phi+1, phi>>1)]).
+    // When we re-encounter a phi already being analyzed, we return true
+    // (assume non-negative inductively) — the base case is checked below
+    // on the non-back-edge incoming values, and the back-edge check tests
+    // whether the update expression preserves non-negativity given non-neg input.
     if (auto* phi = llvm::dyn_cast<llvm::PHINode>(inst)) {
+        // Cycle guard: if we're already analyzing this phi in the current
+        // call chain, assume it's non-negative (inductive hypothesis).
+        thread_local llvm::SmallPtrSet<const llvm::PHINode*, 8> activePHIs;
+        if (activePHIs.count(phi)) return true;
+        activePHIs.insert(phi);
+
         bool allNonNeg = true;
         for (unsigned i = 0; i < phi->getNumIncomingValues(); i++) {
             llvm::Value* incoming = phi->getIncomingValue(i);
@@ -586,6 +631,7 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
                 break;
             }
         }
+        activePHIs.erase(phi);
         if (allNonNeg && phi->getNumIncomingValues() > 0) return true;
     }
 
@@ -4702,10 +4748,36 @@ unsigned superopt::convertSDivToUDiv(llvm::Function& func) {
 
             // Add: if both operands are non-negative, nuw is safe because
             // max(2^63-1 + 2^63-1) = 2^64-2 < 2^64.
+            // nsw is also safe when one operand is a 1-bit zext (value ∈ {0,1})
+            // and the other is non-negative, because adding at most 1 to a
+            // value in [0, 2^63-1] stays in [0, 2^63], and the signed max is
+            // 2^63-1 — so this is only safe when the non-zext operand is
+            // bounded below 2^63-1.  Use KnownBits to check the leading zeros.
             if (op == llvm::Instruction::Add) {
-                if (isValueNonNegative(bo->getOperand(0), DL) &&
-                    isValueNonNegative(bo->getOperand(1), DL)) {
+                const bool lhsNonNeg = isValueNonNegative(bo->getOperand(0), DL);
+                const bool rhsNonNeg = isValueNonNegative(bo->getOperand(1), DL);
+                if (lhsNonNeg && rhsNonNeg) {
                     bo->setHasNoUnsignedWrap(true);
+                    // Also set nsw when one operand comes from a zext-of-i1
+                    // (value ∈ {0,1}) and the other has at least 2 leading zeros
+                    // (≤ 2^62-1), guaranteeing sum ≤ 2^62 < 2^63-1.
+                    if (!bo->hasNoSignedWrap()) {
+                        auto isZextFromBool = [](llvm::Value* v) -> bool {
+                            auto* z = llvm::dyn_cast<llvm::ZExtInst>(v);
+                            return z && z->getOperand(0)->getType()->isIntegerTy(1);
+                        };
+                        auto isBoundedAbove = [&](llvm::Value* v, unsigned slack) -> bool {
+                            llvm::KnownBits kb = llvm::computeKnownBits(v, DL);
+                            return kb.countMinLeadingZeros() >= slack;
+                        };
+                        if ((isZextFromBool(bo->getOperand(1)) &&
+                             isBoundedAbove(bo->getOperand(0), 2)) ||
+                            (isZextFromBool(bo->getOperand(0)) &&
+                             isBoundedAbove(bo->getOperand(1), 2))) {
+                            bo->setHasNoSignedWrap(true);
+                            ++count;
+                        }
+                    }
                     ++count;
                 }
                 continue;
@@ -4714,12 +4786,33 @@ unsigned superopt::convertSDivToUDiv(llvm::Function& func) {
             // Mul: if both operands are non-negative and nsw is already set,
             // then the product is non-negative and fits in signed i64,
             // which means it also fits in unsigned i64 (nuw is safe).
+            // Additionally, if both operands are non-negative and at least one
+            // is bounded to a small value (many leading zeros), we can infer
+            // nsw: if product_max ≤ INT64_MAX, signed overflow cannot occur.
+            // This handles common patterns like i*3 or i*7 where i < n and
+            // n fits in 32 bits (KnownBits shows 32+ leading zeros on i).
             if (op == llvm::Instruction::Mul) {
-                if (bo->hasNoSignedWrap() &&
-                    isValueNonNegative(bo->getOperand(0), DL) &&
-                    isValueNonNegative(bo->getOperand(1), DL)) {
-                    bo->setHasNoUnsignedWrap(true);
-                    ++count;
+                const bool lhsNN = isValueNonNegative(bo->getOperand(0), DL);
+                const bool rhsNN = isValueNonNegative(bo->getOperand(1), DL);
+                if (lhsNN && rhsNN) {
+                    if (bo->hasNoSignedWrap()) {
+                        // nsw already set → add nuw too
+                        bo->setHasNoUnsignedWrap(true);
+                        ++count;
+                    } else if (!bo->hasNoSignedWrap()) {
+                        // Try to prove nsw via KnownBits: product fits in signed i64
+                        // when log2(lhs_max) + log2(rhs_max) < 63.
+                        llvm::KnownBits lhsKB = llvm::computeKnownBits(bo->getOperand(0), DL);
+                        llvm::KnownBits rhsKB = llvm::computeKnownBits(bo->getOperand(1), DL);
+                        const unsigned lhsBits = lhsKB.getBitWidth() - lhsKB.countMinLeadingZeros();
+                        const unsigned rhsBits = rhsKB.getBitWidth() - rhsKB.countMinLeadingZeros();
+                        if (lhsBits + rhsBits < 63) {
+                            // max_product < 2^(lhsBits+rhsBits) ≤ 2^62 < INT64_MAX
+                            bo->setHasNoSignedWrap(true);
+                            bo->setHasNoUnsignedWrap(true);
+                            ++count;
+                        }
+                    }
                 }
                 continue;
             }

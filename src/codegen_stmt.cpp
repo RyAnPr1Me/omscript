@@ -373,6 +373,65 @@ void CodeGenerator::generateIf(IfStmt* stmt) {
         const uint32_t elseWeight = stmt->hintLikely ? 1 : 2000;
         llvm::MDNode* brWeights = llvm::MDBuilder(*context).createBranchWeights(thenWeight, elseWeight);
         br->setMetadata(llvm::LLVMContext::MD_prof, brWeights);
+    } else if (optimizationLevel >= OptimizationLevel::O2) {
+        // Infer branch probability from modulo-equality patterns.
+        // Pattern: if (x % k == 0) { … } where k is a positive constant.
+        // The true branch fires ~1/k of the time; emitting accurate weights
+        // (1 : k-1) lets the CPU's branch predictor and LLVM's block layout
+        // optimise for the common (false) case — critical for inner-loop
+        // branches like collatz and cond_arithmetic.
+        //
+        // The emitted condition chain is:
+        //   %srem  = srem/urem %x, k
+        //   %icmp  = icmp eq/ne %srem, 0
+        //   %zext  = zext i1 %icmp to i64   (OM bool-to-int)
+        //   %tobool = icmp ne i64 %zext, 0  (toBool)
+        //   condBr %tobool, then, merge
+        // Trace back through the %tobool → %zext → %icmp → %srem chain.
+        [&]() {
+            // condBool = icmp ne (%zext, 0)
+            auto* outerNE = llvm::dyn_cast<llvm::ICmpInst>(condBool);
+            if (!outerNE || outerNE->getPredicate() != llvm::ICmpInst::ICMP_NE) return;
+            auto* outerRHS = llvm::dyn_cast<llvm::ConstantInt>(outerNE->getOperand(1));
+            if (!outerRHS || !outerRHS->isZero()) return;
+            // Peel zext
+            auto* zext = llvm::dyn_cast<llvm::ZExtInst>(outerNE->getOperand(0));
+            if (!zext) return;
+            // Inner icmp eq/ne
+            auto* innerCmp = llvm::dyn_cast<llvm::ICmpInst>(zext->getOperand(0));
+            if (!innerCmp) return;
+            const bool innerIsEq = (innerCmp->getPredicate() == llvm::ICmpInst::ICMP_EQ);
+            const bool innerIsNe = (innerCmp->getPredicate() == llvm::ICmpInst::ICMP_NE);
+            if (!innerIsEq && !innerIsNe) return;
+            // One operand of the inner cmp must be 0
+            llvm::Value* remVal = nullptr;
+            if (auto* c = llvm::dyn_cast<llvm::ConstantInt>(innerCmp->getOperand(1))) {
+                if (c->isZero()) remVal = innerCmp->getOperand(0);
+            }
+            if (!remVal) {
+                if (auto* c = llvm::dyn_cast<llvm::ConstantInt>(innerCmp->getOperand(0))) {
+                    if (c->isZero()) remVal = innerCmp->getOperand(1);
+                }
+            }
+            if (!remVal) return;
+            // remVal must be srem/urem with a positive constant divisor
+            auto* remOp = llvm::dyn_cast<llvm::BinaryOperator>(remVal);
+            if (!remOp) return;
+            if (remOp->getOpcode() != llvm::Instruction::SRem &&
+                remOp->getOpcode() != llvm::Instruction::URem) return;
+            auto* divisorCI = llvm::dyn_cast<llvm::ConstantInt>(remOp->getOperand(1));
+            if (!divisorCI) return;
+            const int64_t k = divisorCI->getSExtValue();
+            if (k <= 1 || k > 1024) return;  // sanity: reasonable divisors only
+            // innerIsEq && outerNE(zext): branch fires 1/k of the time
+            // innerIsNe && outerNE(zext): branch fires (k-1)/k of the time
+            const auto kU = static_cast<uint32_t>(k);
+            const uint32_t thenW = innerIsEq ? 1u : (kU - 1u);
+            const uint32_t elseW = innerIsEq ? (kU - 1u) : 1u;
+            llvm::MDNode* brWeights =
+                llvm::MDBuilder(*context).createBranchWeights(thenW, elseW);
+            br->setMetadata(llvm::LLVMContext::MD_prof, brWeights);
+        }();
     }
 
     // Save pre-if non-neg state so each branch starts from the same baseline.
@@ -857,11 +916,26 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         }
         if (startNonNeg) {
             llvm::Value* iterVal = builder->CreateLoad(iterType, iterAlloca, "iter.assume");
-            llvm::Value* isNonNeg = builder->CreateICmpSGE(
-                iterVal, llvm::ConstantInt::get(iterType, 0), "iter.nonneg");
             llvm::Function* assumeFn = OMSC_GET_INTRINSIC_STMT(
                 module.get(), llvm::Intrinsic::assume, {});
+            // Lower bound: assume iter >= 0.
+            llvm::Value* isNonNeg = builder->CreateICmpSGE(
+                iterVal, llvm::ConstantInt::get(iterType, 0), "iter.nonneg");
             builder->CreateCall(assumeFn, {isNonNeg});
+            // Upper bound: assume iter < end.  OmScript's for-loop semantics
+            // guarantee the iterator never equals or exceeds end inside the body
+            // (the loop exits before that).  This assumption lets LLVM's
+            // CorrelatedValuePropagation, SCEV, and InstCombine prove tighter
+            // ranges on derived expressions (e.g. iter*k, iter%m, arr[iter]),
+            // enabling strength reduction, signed→unsigned conversions, and
+            // bounds-check elimination for expressions involving the iterator.
+            // C compilers emit this implicitly when the variable is loop-local
+            // and the loop condition is visible; for function arguments (like n)
+            // C cannot propagate this across call boundaries without LTO.
+            llvm::Value* iterVal2 = builder->CreateLoad(iterType, iterAlloca, "iter.ub");
+            llvm::Value* isLtEnd = builder->CreateICmpSLT(
+                iterVal2, endVal, "iter.lt.end");
+            builder->CreateCall(assumeFn, {isLtEnd});
             // Track the alloca as producing non-negative values so that
             // expressions derived from the loop counter can emit urem/udiv
             // instead of srem/sdiv.
@@ -1057,26 +1131,51 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             // both unroll.disable and unroll.count=1 ensures the constraint is
             // respected even by aggressive unrollers.
             if (!currentFuncHintUnroll_) {
-                loopMDs.push_back(llvm::MDNode::get(
-                    *context, {llvm::MDString::get(*context, "llvm.loop.unroll.disable")}));
-                // llvm.loop.unroll.count = 1 is a belt-and-suspenders constraint:
-                // it explicitly tells LLVM's LoopUnroll pass to produce exactly 1
-                // copy even when the pass ignores unroll.disable (e.g. at OptLevel=3
-                // with OnlyWhenForced=false as used in the OPTMAX pass).
-                loopMDs.push_back(llvm::MDNode::get(
-                    *context,
-                    {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
-                     llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
-                         llvm::Type::getInt32Ty(*context), 1u))}));
+                // @hot outer loop at O3 with inner loop: emit unroll.count to enable
+                // out-of-order ILP across independent outer iterations.  Clang's cost
+                // model unrolls the outer for-loop 8× for equivalent C code (e.g.
+                // Collatz), allowing the CPU's out-of-order backend to overlap
+                // independent inner-loop chains.  Without this hint LLVM disables
+                // unrolling when it sees an inner loop — correct for throughput-bound
+                // loops, but wrong for latency-bound irregular inner loops.
+                //
+                // Use 8 for OPTMAX (maximal ILP), 4 for plain @hot (balance between
+                // ILP and I-cache pressure).  Only when not deeply nested so we do
+                // not unroll already-unrolled inner bodies.
+                if (currentFuncHintHot_ && !deeplyNested
+                        && optimizationLevel >= OptimizationLevel::O3) {
+                    const unsigned outerUnrollCount = inOptMaxFunction ? 8u : 4u;
+                    loopMDs.push_back(llvm::MDNode::get(
+                        *context,
+                        {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
+                         llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                             llvm::Type::getInt32Ty(*context), outerUnrollCount))}));
+                } else {
+                    loopMDs.push_back(llvm::MDNode::get(
+                        *context, {llvm::MDString::get(*context, "llvm.loop.unroll.disable")}));
+                    // llvm.loop.unroll.count = 1 is a belt-and-suspenders constraint:
+                    // it explicitly tells LLVM's LoopUnroll pass to produce exactly 1
+                    // copy even when the pass ignores unroll.disable (e.g. at OptLevel=3
+                    // with OnlyWhenForced=false as used in the OPTMAX pass).
+                    loopMDs.push_back(llvm::MDNode::get(
+                        *context,
+                        {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
+                         llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                             llvm::Type::getInt32Ty(*context), 1u))}));
+                }
             } else {
                 // @unroll explicitly requested on an outer loop with inner loop:
-                // honour it with a conservative count (2) to allow minor ILP
-                // without the code-size explosion of large factors.
+                // for @hot at O3 use 4 (or 8 for OPTMAX); otherwise conservative 2.
+                const unsigned explicitCount =
+                    (currentFuncHintHot_ && !deeplyNested
+                     && optimizationLevel >= OptimizationLevel::O3)
+                    ? (inOptMaxFunction ? 8u : 4u)
+                    : 2u;
                 loopMDs.push_back(llvm::MDNode::get(
                     *context,
                     {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
                      llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
-                         llvm::Type::getInt32Ty(*context), 2u))}));
+                         llvm::Type::getInt32Ty(*context), explicitCount))}));
             }
         } else if (currentFuncHintUnroll_ && !addedUnrollHint && !suppressUnrollHint) {
             // @unroll on a non-suppressed loop: apply the unroll count hint.
