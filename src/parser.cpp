@@ -241,6 +241,15 @@ std::unique_ptr<Program> Parser::parse() {
             func->hintMinSize = hintMinSize;
             func->hintOptNone = hintOptNone;
             func->hintNoUnwind = hintNoUnwind;
+            // Warn about conflicting annotations at parse time.
+            if (hintOptNone && hintInline) {
+                std::cerr << "warning: '@optnone' and '@inline' are mutually exclusive on function '"
+                          << func->name << "' — '@inline' will be ignored (optnone requires noinline)\n";
+            }
+            if (hintOptNone && hintHot) {
+                std::cerr << "warning: '@optnone' disables all optimizations on function '"
+                          << func->name << "' — '@hot' annotation will have no effect\n";
+            }
             functions.push_back(std::move(func));
         } catch (const std::runtime_error& e) {
             errors_.push_back(e.what());

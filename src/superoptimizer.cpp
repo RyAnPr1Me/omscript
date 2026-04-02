@@ -4557,7 +4557,7 @@ SuperoptimizerStats superoptimizeModule(llvm::Module& module,
     }
 
     // Parallel threshold: launch async tasks only when there are enough
-    // functions to amortise the thread-creation overhead (≥4 functions and
+    // functions to amortize the thread-creation overhead (≥4 functions and
     // more than one hardware thread available).  Below this threshold the
     // sequential path is faster.
     const unsigned hwThreads = std::max(1u, std::thread::hardware_concurrency());
@@ -4570,11 +4570,13 @@ SuperoptimizerStats superoptimizeModule(llvm::Module& module,
         // so concurrent modification is safe.  IRBuilder objects are created
         // locally inside superoptimizeFunction which also makes them
         // thread-local by construction.
+        // config is captured by value to avoid a dangling-reference if any
+        // future outlives the current stack frame.
         std::vector<std::future<SuperoptimizerStats>> futures;
         futures.reserve(funcs.size());
         for (llvm::Function* fn : funcs) {
             futures.push_back(std::async(std::launch::async,
-                [fn, &config]() { return superoptimizeFunction(*fn, config); }));
+                [fn, config]() { return superoptimizeFunction(*fn, config); }));
         }
         for (auto& fut : futures) {
             auto stats = fut.get();
