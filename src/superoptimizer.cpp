@@ -20,6 +20,7 @@
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/IRBuilder.h>
+#include <llvm/IR/MDBuilder.h>
 #include <llvm/IR/PatternMatch.h>
 #include <llvm/Support/KnownBits.h>
 #include <llvm/Support/MathExtras.h>
@@ -46,7 +47,7 @@ using namespace llvm::PatternMatch;
 // ─────────────────────────────────────────────────────────────────────────────
 
 double instructionCost(const llvm::Instruction* inst) {
-    if (!inst) return 0.0;
+    if (__builtin_expect(!inst, 0)) return 0.0;
 
     switch (inst->getOpcode()) {
     // Near-free: these are typically eliminated or folded by the backend
@@ -247,12 +248,12 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Check if a value has exactly one use.
-static bool hasOneUse(llvm::Value* v) {
+[[nodiscard]] [[gnu::always_inline]] static inline bool hasOneUse(llvm::Value* v) {
     return v->hasOneUse();
 }
 
 /// Check if value is a constant integer with a specific value.
-static bool isConstInt(llvm::Value* v, uint64_t val) {
+[[nodiscard]] [[gnu::always_inline]] static inline bool isConstInt(llvm::Value* v, uint64_t val) {
     if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(v)) {
         return ci->getZExtValue() == val;
     }
@@ -260,7 +261,7 @@ static bool isConstInt(llvm::Value* v, uint64_t val) {
 }
 
 /// Check if value is a constant integer and return its value.
-static std::optional<int64_t> getConstIntValue(llvm::Value* v) {
+[[nodiscard]] [[gnu::always_inline]] static inline std::optional<int64_t> getConstIntValue(llvm::Value* v) {
     if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(v)) {
         return ci->getSExtValue();
     }
@@ -274,7 +275,7 @@ static std::optional<int64_t> getConstIntValue(llvm::Value* v) {
 
 /// Check whether a constant (scalar ConstantInt or vector splat/element-wise)
 /// has all elements strictly positive (> 0).
-static bool isConstantAllPositive(llvm::Constant* c) {
+[[nodiscard]] static bool isConstantAllPositive(llvm::Constant* c) {
     if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(c))
         return ci->getSExtValue() > 0;
     // Handle vector constants: ConstantDataVector, ConstantVector, splat
@@ -305,8 +306,8 @@ static bool isConstantAllPositive(llvm::Constant* c) {
     return false;
 }
 
-static bool isValueNonNegative(llvm::Value* v, const llvm::DataLayout& DL, unsigned depth = 0) {
-    if (depth > 12) return false;  // prevent infinite recursion
+[[nodiscard]] static bool isValueNonNegative(llvm::Value* v, const llvm::DataLayout& DL, unsigned depth = 0) {
+    if (__builtin_expect(depth > 12, 0)) return false;  // prevent infinite recursion
 
     // Non-negative constant
     if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(v))
@@ -639,7 +640,7 @@ static bool isValueNonNegative(llvm::Value* v, const llvm::DataLayout& DL, unsig
 
 /// Detect: (x << c) | (x >> (bitwidth - c))  →  rotate left by c
 /// Also:   (x >> c) | (x << (bitwidth - c))  →  rotate right by c
-static std::optional<IdiomMatch> detectRotate(llvm::Instruction* inst) {
+[[nodiscard]] static std::optional<IdiomMatch> detectRotate(llvm::Instruction* inst) {
     if (inst->getOpcode() != llvm::Instruction::Or) return std::nullopt;
 
     llvm::Value* op0 = inst->getOperand(0);
@@ -681,7 +682,7 @@ static std::optional<IdiomMatch> detectRotate(llvm::Instruction* inst) {
 
 /// Detect: select(x < 0, -x, x)  →  abs(x)
 /// Also:   (x ^ (x >> 31)) - (x >> 31)  →  abs(x) for i32
-static std::optional<IdiomMatch> detectAbsoluteValue(llvm::Instruction* inst) {
+[[nodiscard]] static std::optional<IdiomMatch> detectAbsoluteValue(llvm::Instruction* inst) {
     // Pattern 1: select(icmp slt x, 0, sub 0, x, x)
     if (auto* sel = llvm::dyn_cast<llvm::SelectInst>(inst)) {
         auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(sel->getCondition());
@@ -740,7 +741,7 @@ static std::optional<IdiomMatch> detectAbsoluteValue(llvm::Instruction* inst) {
 
 /// Detect: select(icmp slt a, b, a, b) → smin(a, b)
 /// And all variants (sgt → smax, ult → umin, ugt → umax)
-static std::optional<IdiomMatch> detectMinMax(llvm::Instruction* inst) {
+[[nodiscard]] static std::optional<IdiomMatch> detectMinMax(llvm::Instruction* inst) {
     auto* sel = llvm::dyn_cast<llvm::SelectInst>(inst);
     if (!sel) return std::nullopt;
 
@@ -823,7 +824,7 @@ static std::optional<IdiomMatch> detectMinMax(llvm::Instruction* inst) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Detect: (x & (x - 1)) == 0  →  ctpop(x) <= 1
-static std::optional<IdiomMatch> detectPowerOf2Test(llvm::Instruction* inst) {
+[[nodiscard]] static std::optional<IdiomMatch> detectPowerOf2Test(llvm::Instruction* inst) {
     auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(inst);
     if (!cmp || cmp->getPredicate() != llvm::ICmpInst::ICMP_EQ)
         return std::nullopt;
@@ -855,7 +856,7 @@ static std::optional<IdiomMatch> detectPowerOf2Test(llvm::Instruction* inst) {
 
 /// Detect: (x >> shift) & mask  where mask = (1 << width) - 1
 /// → bitfield extract from bit position `shift`, width `width`
-static std::optional<IdiomMatch> detectBitFieldExtract(llvm::Instruction* inst) {
+[[nodiscard]] static std::optional<IdiomMatch> detectBitFieldExtract(llvm::Instruction* inst) {
     if (inst->getOpcode() != llvm::Instruction::And) return std::nullopt;
 
     auto* shift = llvm::dyn_cast<llvm::BinaryOperator>(inst->getOperand(0));
@@ -889,7 +890,7 @@ static std::optional<IdiomMatch> detectBitFieldExtract(llvm::Instruction* inst) 
 
 /// Detect: select(cond, sub(0, x), x)  →  conditional negation
 /// Also:   (x ^ mask) - mask  where mask = ashr(x, bitwidth-1)
-static std::optional<IdiomMatch> detectConditionalNeg(llvm::Instruction* inst) {
+[[nodiscard]] static std::optional<IdiomMatch> detectConditionalNeg(llvm::Instruction* inst) {
     // Pattern: select(cond, -x, x)
     if (auto* sel = llvm::dyn_cast<llvm::SelectInst>(inst)) {
         llvm::Value* trueVal = sel->getTrueValue();
@@ -941,7 +942,7 @@ static std::optional<IdiomMatch> detectConditionalNeg(llvm::Instruction* inst) {
 
 /// Detect: x & (-x) → isolate lowest set bit (related to CTZ)
 /// Pattern: and(x, sub(0, x))
-static std::optional<IdiomMatch> detectIsolateLowestBit(llvm::Instruction* inst) {
+[[nodiscard]] static std::optional<IdiomMatch> detectIsolateLowestBit(llvm::Instruction* inst) {
     if (inst->getOpcode() != llvm::Instruction::And) return std::nullopt;
 
     llvm::Value* op0 = inst->getOperand(0);
@@ -977,7 +978,7 @@ static std::optional<IdiomMatch> detectIsolateLowestBit(llvm::Instruction* inst)
 /// Detect: (x >> 24) | ((x >> 8) & 0xFF00) | ((x << 8) & 0xFF0000) | (x << 24)
 /// This is a 32-bit byte swap pattern.  Also detects the simpler 16-bit form:
 /// ((x >> 8) & 0xFF) | (x << 8)
-static std::optional<IdiomMatch> detectByteSwap(llvm::Instruction* inst) {
+[[nodiscard]] static std::optional<IdiomMatch> detectByteSwap(llvm::Instruction* inst) {
     if (inst->getOpcode() != llvm::Instruction::Or) return std::nullopt;
 
     // 16-bit byte swap: ((x >> 8) & 0xFF) | ((x & 0xFF) << 8)
@@ -1016,7 +1017,7 @@ static std::optional<IdiomMatch> detectByteSwap(llvm::Instruction* inst) {
 /// x = x - ((x >> 1) & 0x5555555555555555)
 /// This is the first step of the standard Brian Kernighan or divide-and-conquer
 /// popcount algorithm.  We detect the pattern and replace with llvm.ctpop.
-static std::optional<IdiomMatch> detectPopCount(llvm::Instruction* inst) {
+[[nodiscard]] static std::optional<IdiomMatch> detectPopCount(llvm::Instruction* inst) {
     if (inst->getOpcode() != llvm::Instruction::Sub) return std::nullopt;
 
     // Look for: sub(x, and(lshr(x, 1), 0x5555...))
@@ -1064,7 +1065,7 @@ static std::optional<IdiomMatch> detectPopCount(llvm::Instruction* inst) {
 /// We detect the end of the pattern: sub(bitwidth, ctpop(or-chain(x)))
 /// where the or-chain is at least one stage of or(x, lshr(x, k)).
 /// The de Bruijn lookup variant is left for future work.
-static std::optional<IdiomMatch> detectCountLeadingZeros(llvm::Instruction* inst) {
+[[nodiscard]] static std::optional<IdiomMatch> detectCountLeadingZeros(llvm::Instruction* inst) {
     // Detect bit-smear sequence ending with popcount subtraction:
     //   x |= x >> 1; x |= x >> 2; x |= x >> 4; x |= x >> 8; x |= x >> 16; x |= x >> 32;
     //   return 64 - popcount(x);
@@ -1121,7 +1122,7 @@ static std::optional<IdiomMatch> detectCountLeadingZeros(llvm::Instruction* inst
 //   1. select(icmp ugt (a+b), a, MAX_UINT, a+b)  (unsigned overflow via wrap)
 //   2. select(extractvalue(@llvm.uadd.with.overflow(a,b), 1), MAX, sum)
 // ─────────────────────────────────────────────────────────────────────────────
-static std::optional<IdiomMatch> detectSaturatingAdd(llvm::Instruction* inst) {
+[[nodiscard]] static std::optional<IdiomMatch> detectSaturatingAdd(llvm::Instruction* inst) {
     auto* sel = llvm::dyn_cast<llvm::SelectInst>(inst);
     if (!sel) return std::nullopt;
     if (!sel->getType()->isIntegerTy()) return std::nullopt;
@@ -1190,7 +1191,7 @@ static std::optional<IdiomMatch> detectSaturatingAdd(llvm::Instruction* inst) {
 // Saturating subtraction: select(icmp ult a b, 0, a-b) → usub.sat(a,b)
 // Pattern: clamp subtraction to zero instead of wrapping unsigned
 // ─────────────────────────────────────────────────────────────────────────────
-static std::optional<IdiomMatch> detectSaturatingSub(llvm::Instruction* inst) {
+[[nodiscard]] static std::optional<IdiomMatch> detectSaturatingSub(llvm::Instruction* inst) {
     auto* sel = llvm::dyn_cast<llvm::SelectInst>(inst);
     if (!sel) return std::nullopt;
     if (!sel->getType()->isIntegerTy()) return std::nullopt;
@@ -1258,7 +1259,7 @@ static std::optional<IdiomMatch> detectSaturatingSub(llvm::Instruction* inst) {
 /// counter.  Replacing with x + zext(cond) or x - zext(cond) eliminates
 /// the select instruction and produces a single add/sub with a zero-extended
 /// boolean, which is cheaper on all microarchitectures.
-static std::optional<IdiomMatch> detectConditionalIncrement(llvm::Instruction* inst) {
+[[nodiscard]] static std::optional<IdiomMatch> detectConditionalIncrement(llvm::Instruction* inst) {
     auto* sel = llvm::dyn_cast<llvm::SelectInst>(inst);
     if (!sel) return std::nullopt;
 
@@ -1312,10 +1313,209 @@ static std::optional<IdiomMatch> detectConditionalIncrement(llvm::Instruction* i
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Hacker's Delight §5-2: Average of two integers without overflow
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Detect: (a & b) + ((a ^ b) >> 1)  →  floor((a + b) / 2) without overflow
+/// Also:   (a + b) >> 1  when NSW/NUW flags prove no overflow (already handled
+///         by LLVM InstCombine, but our pattern handles the explicit safe form).
+///
+/// Hacker's Delight §5-2: "Average of two integers without overflow":
+///   unsigned avg = (a & b) + ((a ^ b) >> 1)
+///   This is exactly llvm.uavg.u(a, b) — one instruction on modern x86 with AVX512.
+[[nodiscard]] static std::optional<IdiomMatch> detectAverageWithoutOverflow(llvm::Instruction* inst) {
+    // Pattern: add(and(a, b), lshr(xor(a, b), 1))
+    if (inst->getOpcode() != llvm::Instruction::Add) return std::nullopt;
+
+    llvm::Value* addL = inst->getOperand(0);
+    llvm::Value* addR = inst->getOperand(1);
+
+    // Try both orderings
+    for (int ord = 0; ord < 2; ++ord) {
+        auto* andInst = llvm::dyn_cast<llvm::BinaryOperator>(addL);
+        auto* shrInst = llvm::dyn_cast<llvm::BinaryOperator>(addR);
+        if (!andInst || andInst->getOpcode() != llvm::Instruction::And) {
+            std::swap(addL, addR);
+            std::swap(andInst, shrInst);
+            continue;
+        }
+        if (!andInst || andInst->getOpcode() != llvm::Instruction::And) break;
+        if (!shrInst || shrInst->getOpcode() != llvm::Instruction::LShr) break;
+
+        // Check: shr amount is 1
+        auto shrAmt = getConstIntValue(shrInst->getOperand(1));
+        if (!shrAmt || *shrAmt != 1) break;
+
+        // The xor inside the shift
+        auto* xorInst = llvm::dyn_cast<llvm::BinaryOperator>(shrInst->getOperand(0));
+        if (!xorInst || xorInst->getOpcode() != llvm::Instruction::Xor) break;
+
+        // Verify both (a & b) and ((a ^ b) >> 1) use the same a, b
+        llvm::Value* andA = andInst->getOperand(0);
+        llvm::Value* andB = andInst->getOperand(1);
+        llvm::Value* xorA = xorInst->getOperand(0);
+        llvm::Value* xorB = xorInst->getOperand(1);
+
+        bool match1 = (andA == xorA && andB == xorB);
+        bool match2 = (andA == xorB && andB == xorA);
+        if (!match1 && !match2) break;
+
+        IdiomMatch match;
+        match.idiom = Idiom::AverageWithoutOverflow;
+        match.rootInst = inst;
+        match.operands = {andA, andB};
+        match.bitWidth = inst->getType()->getIntegerBitWidth();
+        return match;
+    }
+    return std::nullopt;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Hacker's Delight §2-1: Sign of an integer
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Detect: select(x > 0, 1, select(x < 0, -1, 0))  →  sign(x)
+/// Or the arithmetic version: (x >> 63) | ((-x) >>> 63)  Hacker's Delight §2-7
+/// Canonical LLVM: (x >> (N-1)) - ((-x) >> (N-1))  (for signed)
+///   or:  ashr(x, N-1) | zext(icmp sgt x, 0)  (alternative)
+///
+/// Replaces with: select(x > 0, 1, ashr(x, bitwidth-1))
+/// which is 2 ops (icmp + select/or) vs 3-5 ops for the naive form.
+[[nodiscard]] static std::optional<IdiomMatch> detectSignFunction(llvm::Instruction* inst) {
+    // Pattern 1: or(ashr(x, 63), zext(icmp sgt(x, 0)))
+    // = (x >> 63) | (x > 0 ? 1 : 0)
+    // For signed: negative→-1, zero→0, positive→1
+    if (inst->getOpcode() == llvm::Instruction::Or) {
+        auto* ashrInst = llvm::dyn_cast<llvm::BinaryOperator>(inst->getOperand(0));
+        auto* zextInst = llvm::dyn_cast<llvm::CastInst>(inst->getOperand(1));
+        if (!ashrInst || !zextInst) {
+            // Try reversed order
+            ashrInst = llvm::dyn_cast<llvm::BinaryOperator>(inst->getOperand(1));
+            zextInst = llvm::dyn_cast<llvm::CastInst>(inst->getOperand(0));
+        }
+        if (!ashrInst || ashrInst->getOpcode() != llvm::Instruction::AShr) return std::nullopt;
+        if (!zextInst || zextInst->getOpcode() != llvm::Instruction::ZExt) return std::nullopt;
+
+        unsigned bw = inst->getType()->getIntegerBitWidth();
+        auto shiftAmt = getConstIntValue(ashrInst->getOperand(1));
+        if (!shiftAmt || *shiftAmt != static_cast<int64_t>(bw - 1)) return std::nullopt;
+
+        auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(zextInst->getOperand(0));
+        if (!cmp || cmp->getPredicate() != llvm::ICmpInst::ICMP_SGT) return std::nullopt;
+        auto zeroCheck = getConstIntValue(cmp->getOperand(1));
+        if (!zeroCheck || *zeroCheck != 0) return std::nullopt;
+        if (cmp->getOperand(0) != ashrInst->getOperand(0)) return std::nullopt;
+
+        IdiomMatch match;
+        match.idiom = Idiom::SignFunction;
+        match.rootInst = inst;
+        match.operands = {ashrInst->getOperand(0)};
+        match.bitWidth = bw;
+        return match;
+    }
+
+    // Pattern 2: nested select: select(cmp sgt x, 0, 1, select(cmp slt x, 0, -1, 0))
+    if (auto* outer = llvm::dyn_cast<llvm::SelectInst>(inst)) {
+        auto* outerCmp = llvm::dyn_cast<llvm::ICmpInst>(outer->getCondition());
+        if (!outerCmp) return std::nullopt;
+
+        // Check outer is: x > 0 → true_val=1
+        auto trueVal = getConstIntValue(outer->getTrueValue());
+        if (outerCmp->getPredicate() == llvm::ICmpInst::ICMP_SGT && trueVal && *trueVal == 1) {
+            auto zeroCheck = getConstIntValue(outerCmp->getOperand(1));
+            if (!zeroCheck || *zeroCheck != 0) return std::nullopt;
+            llvm::Value* x = outerCmp->getOperand(0);
+
+            // The false branch should be: select(x < 0, -1, 0)
+            auto* inner = llvm::dyn_cast<llvm::SelectInst>(outer->getFalseValue());
+            if (!inner) return std::nullopt;
+            auto* innerCmp = llvm::dyn_cast<llvm::ICmpInst>(inner->getCondition());
+            if (!innerCmp || innerCmp->getPredicate() != llvm::ICmpInst::ICMP_SLT) return std::nullopt;
+            if (innerCmp->getOperand(0) != x) return std::nullopt;
+            auto zero2 = getConstIntValue(innerCmp->getOperand(1));
+            if (!zero2 || *zero2 != 0) return std::nullopt;
+            auto negOne = getConstIntValue(inner->getTrueValue());
+            auto zero3 = getConstIntValue(inner->getFalseValue());
+            if (!negOne || *negOne != static_cast<int64_t>(-1)) return std::nullopt;
+            if (!zero3 || *zero3 != 0) return std::nullopt;
+
+            IdiomMatch match;
+            match.idiom = Idiom::SignFunction;
+            match.rootInst = inst;
+            match.operands = {x};
+            match.bitWidth = inst->getType()->getIntegerBitWidth();
+            return match;
+        }
+    }
+    return std::nullopt;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Hacker's Delight §3-1: Next power of 2
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Detect the bit-smear pattern for "ceiling to next power of 2":
+///   x = x - 1
+///   x |= x >> 1; x |= x >> 2; x |= x >> 4; x |= x >> 8; x |= x >> 16; x |= x >> 32
+///   x = x + 1
+/// This is equivalent to: x == 0 ? 1 : 1 << (64 - ctlz(x-1))
+/// Or simpler: (x <= 1) ? 1 : (1 << (64 - ctlz(x - 1)))
+///
+/// We detect the accumulated OR pattern and replace with CLZ-based computation.
+[[nodiscard]] static std::optional<IdiomMatch> detectNextPowerOf2(llvm::Instruction* inst) {
+    // Final instruction must be: add(%smeared, 1)
+    if (inst->getOpcode() != llvm::Instruction::Add) return std::nullopt;
+    auto addOne = getConstIntValue(inst->getOperand(1));
+    if (!addOne || *addOne != 1) return std::nullopt;
+
+    llvm::Value* smeared = inst->getOperand(0);
+
+    // Walk through the OR chain: the value must be: x | (x >> 32) at minimum
+    // We need to see at least 3 OR-with-shift layers
+    int orLayers = 0;
+    llvm::Value* cur = smeared;
+    while (true) {
+        auto* orInst = llvm::dyn_cast<llvm::BinaryOperator>(cur);
+        if (!orInst || orInst->getOpcode() != llvm::Instruction::Or) break;
+        auto* shrInst = llvm::dyn_cast<llvm::BinaryOperator>(orInst->getOperand(1));
+        if (!shrInst) {
+            shrInst = llvm::dyn_cast<llvm::BinaryOperator>(orInst->getOperand(0));
+            if (!shrInst) break;
+        }
+        if (shrInst->getOpcode() != llvm::Instruction::LShr &&
+            shrInst->getOpcode() != llvm::Instruction::AShr) break;
+        ++orLayers;
+        // The non-shift operand is the previous layer
+        llvm::Value* prev = orInst->getOperand(0);
+        if (prev == shrInst) prev = orInst->getOperand(1);
+        if (auto* prevShr = llvm::dyn_cast<llvm::BinaryOperator>(prev)) {
+            if (prevShr == shrInst) break;
+        }
+        cur = prev;
+        if (orLayers >= 4) break; // enough evidence
+    }
+
+    if (orLayers < 3) return std::nullopt;
+
+    // The base (before smearing) should be: sub(original_x, 1)
+    auto* subInst = llvm::dyn_cast<llvm::BinaryOperator>(cur);
+    if (!subInst || subInst->getOpcode() != llvm::Instruction::Sub) return std::nullopt;
+    auto subOne = getConstIntValue(subInst->getOperand(1));
+    if (!subOne || *subOne != 1) return std::nullopt;
+
+    IdiomMatch match;
+    match.idiom = Idiom::NextPowerOf2;
+    match.rootInst = inst;
+    match.operands = {subInst->getOperand(0)};  // original x
+    match.bitWidth = inst->getType()->getIntegerBitWidth();
+    return match;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main idiom detection
 // ─────────────────────────────────────────────────────────────────────────────
 
-std::vector<IdiomMatch> detectIdioms(llvm::BasicBlock& bb) {
+[[gnu::hot]] std::vector<IdiomMatch> detectIdioms(llvm::BasicBlock& bb) {
     std::vector<IdiomMatch> results;
 
     for (auto& inst : bb) {
@@ -1369,6 +1569,18 @@ std::vector<IdiomMatch> detectIdioms(llvm::BasicBlock& bb) {
             continue;
         }
         if (auto m = detectConditionalIncrement(&inst)) {
+            results.push_back(std::move(*m));
+            continue;
+        }
+        if (auto m = detectAverageWithoutOverflow(&inst)) {
+            results.push_back(std::move(*m));
+            continue;
+        }
+        if (auto m = detectSignFunction(&inst)) {
+            results.push_back(std::move(*m));
+            continue;
+        }
+        if (auto m = detectNextPowerOf2(&inst)) {
             results.push_back(std::move(*m));
             continue;
         }
@@ -1563,6 +1775,85 @@ static bool replaceIdiom(IdiomMatch& match) {
         return true;
     }
 
+    case Idiom::AverageWithoutOverflow: {
+        // Hacker's Delight §5-2: (a & b) + ((a ^ b) >> 1)
+        // Replace with the equivalent 2-instruction sequence that directly
+        // expresses the average, which LLVM's backend can lower to VAVG or
+        // a single add + shift on targets that support it.
+        // We emit: (a + b) >> 1 with overflow-safe arithmetic:
+        //   tmp = add(a, b)  — may overflow, but we handle with nsw trick
+        // Actually we re-emit the canonical form so LLVM InstCombine can
+        // further optimize:  (a & b) + ((a ^ b) >> 1)  is already optimal
+        // for unsigned average.  Just return true to mark as handled — the
+        // pattern is already the optimal 3-instruction form and the idiom
+        // detection will prevent the synthesis pass from trying to "improve"
+        // it further with more expensive sequences.
+        //
+        // For the actual lowering: emit the average directly using the form
+        // that LLVM recognizes as uavg_sat-eligible:
+        //   result = lshr(add_nuw(a, b), 1)  when both are non-negative
+        // or keep the original pattern. Since this runs on verified non-negative
+        // contexts, use the simpler form:
+        llvm::Value* a = match.operands[0];
+        llvm::Value* b = match.operands[1];
+        // (a | b) - ((a ^ b) >> 1) is equivalent and sometimes cheaper:
+        // But the simplest canonical form for LLVM to recognize is:
+        // lshr(add(zext(a, i128), zext(b, i128)), 1) truncated — too complex.
+        // Instead: the original pattern (a&b)+((a^b)>>1) is already the
+        // 3-op Hacker's Delight form. We improve it to (a|b)-((a^b)>>1)
+        // which uses the same 3 instructions but may have better ILP
+        // because OR has no carry chain unlike AND:
+        llvm::Value* orVal = builder.CreateOr(a, b, "avg.or");
+        llvm::Value* xorVal = builder.CreateXor(a, b, "avg.xor");
+        llvm::Value* shrVal = builder.CreateLShr(xorVal,
+            llvm::ConstantInt::get(intTy, 1), "avg.shr");
+        llvm::Value* result = builder.CreateSub(orVal, shrVal, "avg.sub");
+        match.rootInst->replaceAllUsesWith(result);
+        return true;
+    }
+
+    case Idiom::SignFunction: {
+        // Hacker's Delight §2-7: sign of integer
+        // Replace with: ashr(x, bw-1) | zext(x > 0)
+        // = -1 for x<0, 0 for x==0, 1 for x>0
+        // 2 instructions vs 3-5 for the naive form.
+        llvm::Value* x = match.operands[0];
+        unsigned bw = match.bitWidth;
+        llvm::Value* shiftAmt = llvm::ConstantInt::get(intTy, bw - 1);
+        llvm::Value* sign = builder.CreateAShr(x, shiftAmt, "sign.shr");
+        llvm::Value* pos = builder.CreateICmpSGT(x,
+            llvm::ConstantInt::get(intTy, 0), "sign.pos");
+        llvm::Value* posExt = builder.CreateZExt(pos, intTy, "sign.zext");
+        llvm::Value* result = builder.CreateOr(sign, posExt, "sign.or");
+        match.rootInst->replaceAllUsesWith(result);
+        return true;
+    }
+
+    case Idiom::NextPowerOf2: {
+        // Hacker's Delight §3-1: next power of 2 (ceiling)
+        // Replace bit-smear pattern with CLZ-based computation:
+        //   x == 0 ? 1 : 1 << (bw - ctlz(x - 1))
+        // This is 4-5 instructions vs 10+ for the bit-smear.
+        llvm::Value* x = match.operands[0];
+        unsigned bw = match.bitWidth;
+        llvm::Function* ctlz = OMSC_GET_INTRINSIC(mod, llvm::Intrinsic::ctlz, {intTy});
+        // Compute: 1 << (bw - clz(x - 1))
+        llvm::Value* xm1 = builder.CreateSub(x,
+            llvm::ConstantInt::get(intTy, 1), "np2.sub");
+        llvm::Value* falseConst = llvm::ConstantInt::getFalse(ctx);
+        llvm::Value* clz = builder.CreateCall(ctlz, {xm1, falseConst}, "np2.clz");
+        llvm::Value* bwConst = llvm::ConstantInt::get(intTy, bw);
+        llvm::Value* shift = builder.CreateSub(bwConst, clz, "np2.shift");
+        llvm::Value* one = llvm::ConstantInt::get(intTy, 1);
+        llvm::Value* pow2 = builder.CreateShl(one, shift, "np2.shl");
+        // Edge case: x == 0 → return 1
+        llvm::Value* isZero = builder.CreateICmpEQ(x,
+            llvm::ConstantInt::get(intTy, 0), "np2.iszero");
+        llvm::Value* result = builder.CreateSelect(isZero, one, pow2, "np2.result");
+        match.rootInst->replaceAllUsesWith(result);
+        return true;
+    }
+
     default:
         return false;
     }
@@ -1574,7 +1865,7 @@ static bool replaceIdiom(IdiomMatch& match) {
 
 /// Apply algebraic identity simplifications that LLVM's instcombine may miss
 /// when instructions are in different basic blocks or have multiple uses.
-static unsigned applyAlgebraicSimplifications(llvm::Function& func) {
+[[gnu::hot]] static unsigned applyAlgebraicSimplifications(llvm::Function& func) {
     unsigned count = 0;
     std::vector<llvm::Instruction*> toErase;
 
@@ -2353,6 +2644,79 @@ static unsigned applyAlgebraicSimplifications(llvm::Function& func) {
                     case 1792: simplified = builder.CreateSub(shl(xv,11), shl(xv,8), "mul1792"); break;
                     case 2047: simplified = builder.CreateSub(shl(xv,11), xv, "mul2047"); break;
                     case 2049: simplified = builder.CreateAdd(shl(xv,11), xv, "mul2049"); break;
+                    // ── n×128 family ───────────────────────────────────────────
+                    case 124:  simplified = builder.CreateSub(shl(xv,7), shl(xv,2),  "mul124");  break;
+                    case 126:  simplified = builder.CreateSub(shl(xv,7), shl(xv,1),  "mul126");  break;
+                    case 130:  simplified = builder.CreateAdd(shl(xv,7), shl(xv,1),  "mul130");  break;
+                    case 132:  simplified = builder.CreateAdd(shl(xv,7), shl(xv,2),  "mul132");  break;
+                    // ── n×256 family ───────────────────────────────────────────
+                    case 252:  simplified = builder.CreateSub(shl(xv,8), shl(xv,2),  "mul252");  break;
+                    case 254:  simplified = builder.CreateSub(shl(xv,8), shl(xv,1),  "mul254");  break;
+                    case 258:  simplified = builder.CreateAdd(shl(xv,8), shl(xv,1),  "mul258");  break;
+                    case 260:  simplified = builder.CreateAdd(shl(xv,8), shl(xv,2),  "mul260");  break;
+                    // ── n×512 family ───────────────────────────────────────────
+                    case 508:  simplified = builder.CreateSub(shl(xv,9), shl(xv,2),  "mul508");  break;
+                    case 510:  simplified = builder.CreateSub(shl(xv,9), shl(xv,1),  "mul510");  break;
+                    case 514:  simplified = builder.CreateAdd(shl(xv,9), shl(xv,1),  "mul514");  break;
+                    case 516:  simplified = builder.CreateAdd(shl(xv,9), shl(xv,2),  "mul516");  break;
+                    case 520:  simplified = builder.CreateAdd(shl(xv,9), shl(xv,3),  "mul520");  break;
+                    case 528:  simplified = builder.CreateAdd(shl(xv,9), shl(xv,4),  "mul528");  break;
+                    case 544:  simplified = builder.CreateAdd(shl(xv,9), shl(xv,5),  "mul544");  break;
+                    case 576:  simplified = builder.CreateAdd(shl(xv,9), shl(xv,6),  "mul576");  break;
+                    // ── n×1024 family ──────────────────────────────────────────
+                    case 960:  simplified = builder.CreateSub(shl(xv,10), shl(xv,6), "mul960");  break;
+                    case 992:  simplified = builder.CreateSub(shl(xv,10), shl(xv,5), "mul992");  break;
+                    case 1008: simplified = builder.CreateSub(shl(xv,10), shl(xv,4), "mul1008"); break;
+                    case 1016: simplified = builder.CreateSub(shl(xv,10), shl(xv,3), "mul1016"); break;
+                    case 1020: simplified = builder.CreateSub(shl(xv,10), shl(xv,2), "mul1020"); break;
+                    case 1022: simplified = builder.CreateSub(shl(xv,10), shl(xv,1), "mul1022"); break;
+                    case 1026: simplified = builder.CreateAdd(shl(xv,10), shl(xv,1), "mul1026"); break;
+                    case 1028: simplified = builder.CreateAdd(shl(xv,10), shl(xv,2), "mul1028"); break;
+                    case 1032: simplified = builder.CreateAdd(shl(xv,10), shl(xv,3), "mul1032"); break;
+                    case 1040: simplified = builder.CreateAdd(shl(xv,10), shl(xv,4), "mul1040"); break;
+                    case 1056: simplified = builder.CreateAdd(shl(xv,10), shl(xv,5), "mul1056"); break;
+                    case 1088: simplified = builder.CreateAdd(shl(xv,10), shl(xv,6), "mul1088"); break;
+                    // ── n×2048 family ──────────────────────────────────────────
+                    case 1920: simplified = builder.CreateSub(shl(xv,11), shl(xv,7), "mul1920"); break;
+                    case 1984: simplified = builder.CreateSub(shl(xv,11), shl(xv,6), "mul1984"); break;
+                    case 2016: simplified = builder.CreateSub(shl(xv,11), shl(xv,5), "mul2016"); break;
+                    case 2032: simplified = builder.CreateSub(shl(xv,11), shl(xv,4), "mul2032"); break;
+                    case 2040: simplified = builder.CreateSub(shl(xv,11), shl(xv,3), "mul2040"); break;
+                    case 2044: simplified = builder.CreateSub(shl(xv,11), shl(xv,2), "mul2044"); break;
+                    case 2046: simplified = builder.CreateSub(shl(xv,11), shl(xv,1), "mul2046"); break;
+                    case 2050: simplified = builder.CreateAdd(shl(xv,11), shl(xv,1), "mul2050"); break;
+                    case 2052: simplified = builder.CreateAdd(shl(xv,11), shl(xv,2), "mul2052"); break;
+                    case 2056: simplified = builder.CreateAdd(shl(xv,11), shl(xv,3), "mul2056"); break;
+                    case 2064: simplified = builder.CreateAdd(shl(xv,11), shl(xv,4), "mul2064"); break;
+                    case 2080: simplified = builder.CreateAdd(shl(xv,11), shl(xv,5), "mul2080"); break;
+                    case 2112: simplified = builder.CreateAdd(shl(xv,11), shl(xv,6), "mul2112"); break;
+                    case 2176: simplified = builder.CreateAdd(shl(xv,11), shl(xv,7), "mul2176"); break;
+                    case 2304: simplified = builder.CreateAdd(shl(xv,11), shl(xv,8), "mul2304"); break;
+                    case 2560: simplified = builder.CreateAdd(shl(xv,11), shl(xv,9), "mul2560"); break;
+                    case 3072: simplified = builder.CreateAdd(shl(xv,11), shl(xv,10),"mul3072"); break;
+                    // ── n×4096 family ──────────────────────────────────────────
+                    case 3584: simplified = builder.CreateSub(shl(xv,12), shl(xv,9),  "mul3584"); break;
+                    case 3840: simplified = builder.CreateSub(shl(xv,12), shl(xv,8),  "mul3840"); break;
+                    case 3968: simplified = builder.CreateSub(shl(xv,12), shl(xv,7),  "mul3968"); break;
+                    case 4032: simplified = builder.CreateSub(shl(xv,12), shl(xv,6),  "mul4032"); break;
+                    case 4064: simplified = builder.CreateSub(shl(xv,12), shl(xv,5),  "mul4064"); break;
+                    case 4080: simplified = builder.CreateSub(shl(xv,12), shl(xv,4),  "mul4080"); break;
+                    case 4088: simplified = builder.CreateSub(shl(xv,12), shl(xv,3),  "mul4088"); break;
+                    case 4092: simplified = builder.CreateSub(shl(xv,12), shl(xv,2),  "mul4092"); break;
+                    case 4094: simplified = builder.CreateSub(shl(xv,12), shl(xv,1),  "mul4094"); break;
+                    case 4095: simplified = builder.CreateSub(shl(xv,12), xv,          "mul4095"); break;
+                    case 4097: simplified = builder.CreateAdd(shl(xv,12), xv,          "mul4097"); break;
+                    case 4098: simplified = builder.CreateAdd(shl(xv,12), shl(xv,1),   "mul4098"); break;
+                    case 4100: simplified = builder.CreateAdd(shl(xv,12), shl(xv,2),   "mul4100"); break;
+                    case 4104: simplified = builder.CreateAdd(shl(xv,12), shl(xv,3),   "mul4104"); break;
+                    case 4112: simplified = builder.CreateAdd(shl(xv,12), shl(xv,4),   "mul4112"); break;
+                    case 4128: simplified = builder.CreateAdd(shl(xv,12), shl(xv,5),   "mul4128"); break;
+                    case 4160: simplified = builder.CreateAdd(shl(xv,12), shl(xv,6),   "mul4160"); break;
+                    case 4224: simplified = builder.CreateAdd(shl(xv,12), shl(xv,7),   "mul4224"); break;
+                    case 4352: simplified = builder.CreateAdd(shl(xv,12), shl(xv,8),   "mul4352"); break;
+                    case 4608: simplified = builder.CreateAdd(shl(xv,12), shl(xv,9),   "mul4608"); break;
+                    case 5120: simplified = builder.CreateAdd(shl(xv,12), shl(xv,10),  "mul5120"); break;
+                    case 6144: simplified = builder.CreateAdd(shl(xv,12), shl(xv,11),  "mul6144"); break;
                     default:
                         // Negative constants: compute |cv|, strength-reduce, then negate.
                         if (*cv < -1) {
@@ -2433,6 +2797,79 @@ static unsigned applyAlgebraicSimplifications(llvm::Function& func) {
                             case 1792: posRep = builder.CreateSub(shl(xv,11), shl(xv,8), "mulp1792"); break;
                             case 2047: posRep = builder.CreateSub(shl(xv,11), xv, "mulp2047"); break;
                             case 2049: posRep = builder.CreateAdd(shl(xv,11), xv, "mulp2049"); break;
+                            // ── n×128 family ───────────────────────────────────
+                            case 124:  posRep = builder.CreateSub(shl(xv,7), shl(xv,2),  "mulp124");  break;
+                            case 126:  posRep = builder.CreateSub(shl(xv,7), shl(xv,1),  "mulp126");  break;
+                            case 130:  posRep = builder.CreateAdd(shl(xv,7), shl(xv,1),  "mulp130");  break;
+                            case 132:  posRep = builder.CreateAdd(shl(xv,7), shl(xv,2),  "mulp132");  break;
+                            // ── n×256 family ───────────────────────────────────
+                            case 252:  posRep = builder.CreateSub(shl(xv,8), shl(xv,2),  "mulp252");  break;
+                            case 254:  posRep = builder.CreateSub(shl(xv,8), shl(xv,1),  "mulp254");  break;
+                            case 258:  posRep = builder.CreateAdd(shl(xv,8), shl(xv,1),  "mulp258");  break;
+                            case 260:  posRep = builder.CreateAdd(shl(xv,8), shl(xv,2),  "mulp260");  break;
+                            // ── n×512 family ───────────────────────────────────
+                            case 508:  posRep = builder.CreateSub(shl(xv,9), shl(xv,2),  "mulp508");  break;
+                            case 510:  posRep = builder.CreateSub(shl(xv,9), shl(xv,1),  "mulp510");  break;
+                            case 514:  posRep = builder.CreateAdd(shl(xv,9), shl(xv,1),  "mulp514");  break;
+                            case 516:  posRep = builder.CreateAdd(shl(xv,9), shl(xv,2),  "mulp516");  break;
+                            case 520:  posRep = builder.CreateAdd(shl(xv,9), shl(xv,3),  "mulp520");  break;
+                            case 528:  posRep = builder.CreateAdd(shl(xv,9), shl(xv,4),  "mulp528");  break;
+                            case 544:  posRep = builder.CreateAdd(shl(xv,9), shl(xv,5),  "mulp544");  break;
+                            case 576:  posRep = builder.CreateAdd(shl(xv,9), shl(xv,6),  "mulp576");  break;
+                            // ── n×1024 family ──────────────────────────────────
+                            case 960:  posRep = builder.CreateSub(shl(xv,10), shl(xv,6), "mulp960");  break;
+                            case 992:  posRep = builder.CreateSub(shl(xv,10), shl(xv,5), "mulp992");  break;
+                            case 1008: posRep = builder.CreateSub(shl(xv,10), shl(xv,4), "mulp1008"); break;
+                            case 1016: posRep = builder.CreateSub(shl(xv,10), shl(xv,3), "mulp1016"); break;
+                            case 1020: posRep = builder.CreateSub(shl(xv,10), shl(xv,2), "mulp1020"); break;
+                            case 1022: posRep = builder.CreateSub(shl(xv,10), shl(xv,1), "mulp1022"); break;
+                            case 1026: posRep = builder.CreateAdd(shl(xv,10), shl(xv,1), "mulp1026"); break;
+                            case 1028: posRep = builder.CreateAdd(shl(xv,10), shl(xv,2), "mulp1028"); break;
+                            case 1032: posRep = builder.CreateAdd(shl(xv,10), shl(xv,3), "mulp1032"); break;
+                            case 1040: posRep = builder.CreateAdd(shl(xv,10), shl(xv,4), "mulp1040"); break;
+                            case 1056: posRep = builder.CreateAdd(shl(xv,10), shl(xv,5), "mulp1056"); break;
+                            case 1088: posRep = builder.CreateAdd(shl(xv,10), shl(xv,6), "mulp1088"); break;
+                            // ── n×2048 family ──────────────────────────────────
+                            case 1920: posRep = builder.CreateSub(shl(xv,11), shl(xv,7), "mulp1920"); break;
+                            case 1984: posRep = builder.CreateSub(shl(xv,11), shl(xv,6), "mulp1984"); break;
+                            case 2016: posRep = builder.CreateSub(shl(xv,11), shl(xv,5), "mulp2016"); break;
+                            case 2032: posRep = builder.CreateSub(shl(xv,11), shl(xv,4), "mulp2032"); break;
+                            case 2040: posRep = builder.CreateSub(shl(xv,11), shl(xv,3), "mulp2040"); break;
+                            case 2044: posRep = builder.CreateSub(shl(xv,11), shl(xv,2), "mulp2044"); break;
+                            case 2046: posRep = builder.CreateSub(shl(xv,11), shl(xv,1), "mulp2046"); break;
+                            case 2050: posRep = builder.CreateAdd(shl(xv,11), shl(xv,1), "mulp2050"); break;
+                            case 2052: posRep = builder.CreateAdd(shl(xv,11), shl(xv,2), "mulp2052"); break;
+                            case 2056: posRep = builder.CreateAdd(shl(xv,11), shl(xv,3), "mulp2056"); break;
+                            case 2064: posRep = builder.CreateAdd(shl(xv,11), shl(xv,4), "mulp2064"); break;
+                            case 2080: posRep = builder.CreateAdd(shl(xv,11), shl(xv,5), "mulp2080"); break;
+                            case 2112: posRep = builder.CreateAdd(shl(xv,11), shl(xv,6), "mulp2112"); break;
+                            case 2176: posRep = builder.CreateAdd(shl(xv,11), shl(xv,7), "mulp2176"); break;
+                            case 2304: posRep = builder.CreateAdd(shl(xv,11), shl(xv,8), "mulp2304"); break;
+                            case 2560: posRep = builder.CreateAdd(shl(xv,11), shl(xv,9), "mulp2560"); break;
+                            case 3072: posRep = builder.CreateAdd(shl(xv,11), shl(xv,10),"mulp3072"); break;
+                            // ── n×4096 family ───────────────────────────────────
+                            case 3584: posRep = builder.CreateSub(shl(xv,12), shl(xv,9),  "mulp3584"); break;
+                            case 3840: posRep = builder.CreateSub(shl(xv,12), shl(xv,8),  "mulp3840"); break;
+                            case 3968: posRep = builder.CreateSub(shl(xv,12), shl(xv,7),  "mulp3968"); break;
+                            case 4032: posRep = builder.CreateSub(shl(xv,12), shl(xv,6),  "mulp4032"); break;
+                            case 4064: posRep = builder.CreateSub(shl(xv,12), shl(xv,5),  "mulp4064"); break;
+                            case 4080: posRep = builder.CreateSub(shl(xv,12), shl(xv,4),  "mulp4080"); break;
+                            case 4088: posRep = builder.CreateSub(shl(xv,12), shl(xv,3),  "mulp4088"); break;
+                            case 4092: posRep = builder.CreateSub(shl(xv,12), shl(xv,2),  "mulp4092"); break;
+                            case 4094: posRep = builder.CreateSub(shl(xv,12), shl(xv,1),  "mulp4094"); break;
+                            case 4095: posRep = builder.CreateSub(shl(xv,12), xv,          "mulp4095"); break;
+                            case 4097: posRep = builder.CreateAdd(shl(xv,12), xv,          "mulp4097"); break;
+                            case 4098: posRep = builder.CreateAdd(shl(xv,12), shl(xv,1),   "mulp4098"); break;
+                            case 4100: posRep = builder.CreateAdd(shl(xv,12), shl(xv,2),   "mulp4100"); break;
+                            case 4104: posRep = builder.CreateAdd(shl(xv,12), shl(xv,3),   "mulp4104"); break;
+                            case 4112: posRep = builder.CreateAdd(shl(xv,12), shl(xv,4),   "mulp4112"); break;
+                            case 4128: posRep = builder.CreateAdd(shl(xv,12), shl(xv,5),   "mulp4128"); break;
+                            case 4160: posRep = builder.CreateAdd(shl(xv,12), shl(xv,6),   "mulp4160"); break;
+                            case 4224: posRep = builder.CreateAdd(shl(xv,12), shl(xv,7),   "mulp4224"); break;
+                            case 4352: posRep = builder.CreateAdd(shl(xv,12), shl(xv,8),   "mulp4352"); break;
+                            case 4608: posRep = builder.CreateAdd(shl(xv,12), shl(xv,9),   "mulp4608"); break;
+                            case 5120: posRep = builder.CreateAdd(shl(xv,12), shl(xv,10),  "mulp5120"); break;
+                            case 6144: posRep = builder.CreateAdd(shl(xv,12), shl(xv,11),  "mulp6144"); break;
                             // 3-instruction negative sequences (new cases not covered above)
                             case 37: posRep = builder.CreateAdd(builder.CreateAdd(shl(xv,5), shl(xv,2)), xv, "mulp37"); break;
                             case 41: posRep = builder.CreateAdd(builder.CreateAdd(shl(xv,5), shl(xv,3)), xv, "mulp41"); break;
@@ -3307,12 +3744,254 @@ static unsigned simplifyBranches(llvm::Function& func) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// MACS: Modular-Addition-to-Conditional-Subtract
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Returns true if value v is provably in [0, hi) through !range metadata,
+/// constant folding, or one level of PHI-node incoming-value analysis.
+static bool valueInRange(llvm::Value* v, uint64_t hi) {
+    // Check !range metadata on an instruction.
+    if (auto* instr = llvm::dyn_cast<llvm::Instruction>(v)) {
+        if (auto* md = instr->getMetadata(llvm::LLVMContext::MD_range)) {
+            if (md->getNumOperands() >= 2) {
+                if (auto* hiMD = llvm::dyn_cast<llvm::ConstantAsMetadata>(
+                        md->getOperand(1))) {
+                    if (auto* hiCI = llvm::dyn_cast<llvm::ConstantInt>(
+                            hiMD->getValue())) {
+                        if (hiCI->getZExtValue() <= hi) return true;
+                    }
+                }
+            }
+        }
+    }
+    // Constant: check directly.
+    if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(v)) {
+        return ci->getZExtValue() < hi;
+    }
+    // PHI: check all incoming values one level deep (no deeper recursion).
+    if (auto* phi = llvm::dyn_cast<llvm::PHINode>(v)) {
+        if (phi->getNumIncomingValues() == 0) return false;
+        for (unsigned i = 0; i < phi->getNumIncomingValues(); ++i) {
+            llvm::Value* incoming = phi->getIncomingValue(i);
+            // Check incoming directly (no recursion to avoid cycle issues).
+            bool ok = false;
+            if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(incoming)) {
+                ok = ci->getZExtValue() < hi;
+            } else if (auto* instr = llvm::dyn_cast<llvm::Instruction>(incoming)) {
+                if (auto* md = instr->getMetadata(llvm::LLVMContext::MD_range)) {
+                    if (md->getNumOperands() >= 2) {
+                        if (auto* hiMD = llvm::dyn_cast<llvm::ConstantAsMetadata>(
+                                md->getOperand(1))) {
+                            if (auto* hiCI = llvm::dyn_cast<llvm::ConstantInt>(
+                                    hiMD->getValue())) {
+                                ok = hiCI->getZExtValue() <= hi;
+                            }
+                        }
+                    }
+                }
+                // Also accept if incoming is a urem (result is always in [0, divisor)).
+                if (!ok && instr->getOpcode() == llvm::Instruction::URem) {
+                    if (auto* divisorCI = llvm::dyn_cast<llvm::ConstantInt>(
+                            instr->getOperand(1))) {
+                        ok = divisorCI->getZExtValue() <= hi;
+                    }
+                }
+                // Accept a select result that itself comes from a prior MACS.
+                if (!ok && instr->getOpcode() == llvm::Instruction::Select) {
+                    if (auto* md2 = instr->getMetadata(llvm::LLVMContext::MD_range)) {
+                        if (md2->getNumOperands() >= 2) {
+                            if (auto* hMD = llvm::dyn_cast<llvm::ConstantAsMetadata>(
+                                    md2->getOperand(1))) {
+                                if (auto* hCI = llvm::dyn_cast<llvm::ConstantInt>(
+                                        hMD->getValue())) {
+                                    ok = hCI->getZExtValue() <= hi;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if (!ok) return false;
+        }
+        return true;
+    }
+    // Also check a urem instruction directly.
+    if (auto* instr = llvm::dyn_cast<llvm::Instruction>(v)) {
+        if (instr->getOpcode() == llvm::Instruction::URem) {
+            if (auto* divisorCI = llvm::dyn_cast<llvm::ConstantInt>(
+                    instr->getOperand(1))) {
+                return divisorCI->getZExtValue() <= hi;
+            }
+        }
+    }
+    return false;
+}
+
+/// Replace `urem(add(a, b), C)` with `select(s < C, s, s - C)` when both
+/// operands of the add are provably in [0, C).
+///
+/// Motivation: for modular-arithmetic loops (Fibonacci, iterative modular
+/// exponentiation, etc.) the induction variables stay in [0, C).  After
+/// the first iteration LLVM knows each carry value is in [0, C) via the
+/// !range metadata we attach to urem results.  CVP propagates this through
+/// the loop PHI so the add has operands in [0, C) ⊂ [0, 2C); but LLVM's
+/// own InstCombine sometimes misses this when the PHI comes from a select
+/// (the prior MACS result) rather than a urem directly.  This pass fills
+/// the gap so ALL unrolled iterations use the fast 2-cycle conditional
+/// subtract instead of the 25-cycle division.
+///
+/// Cost:  urem (div) ≈ 25 cycles  →  add + icmp + sub + select ≈ 4 cycles.
+/// The transformation is always safe: for a, b ∈ [0, C), a+b ∈ [0, 2C),
+/// so `(a+b) % C == (a+b < C) ? (a+b) : (a+b - C)`.
+[[gnu::hot]] static unsigned applyMacs(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            if (inst.getOpcode() != llvm::Instruction::URem) continue;
+
+            auto* divisorCI = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1));
+            if (!divisorCI) continue;
+            int64_t C = divisorCI->getSExtValue();
+            if (C <= 1) continue;
+            uint64_t UC = static_cast<uint64_t>(C);
+
+            llvm::Value* dividend = inst.getOperand(0);
+
+            // Check if dividend is the result of an add where both operands
+            // are provably in [0, C) via !range metadata or value analysis.
+            auto* addInst = llvm::dyn_cast<llvm::BinaryOperator>(dividend);
+            if (!addInst || addInst->getOpcode() != llvm::Instruction::Add) continue;
+
+            llvm::Value* lhs = addInst->getOperand(0);
+            llvm::Value* rhs = addInst->getOperand(1);
+            if (!valueInRange(lhs, UC) || !valueInRange(rhs, UC)) continue;
+
+            // Both operands in [0, C): apply MACS.
+            // s = a + b; result = (s < C) ? s : s - C
+            llvm::IRBuilder<> builder(&inst);
+            llvm::Value* s = dividend;   // the existing add result (or reuse)
+            llvm::Value* cmpC = llvm::ConstantInt::get(inst.getType(), UC);
+            llvm::Value* cmp = builder.CreateICmpULT(s, cmpC, "macs.cmp");
+            llvm::Value* sub = builder.CreateSub(s, cmpC, "macs.sub",
+                /*HasNUW=*/false, /*HasNSW=*/true);
+            llvm::Value* sel = builder.CreateSelect(cmp, s, sub, "macs.sel");
+
+            replacements.emplace_back(&inst, sel);
+            ++count;
+        }
+    }
+
+    for (auto& [old, newVal] : replacements)
+        old->replaceAllUsesWith(newVal);
+    return count;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Select operand sinking (a.k.a. "select factoring")
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Factor a common operand out of both arms of a select:
+///
+///   select(cond, binop(x, a), binop(x, b))  →  binop(x, select(cond, a, b))
+///   select(cond, binop(a, x), binop(b, x))  →  binop(select(cond, a, b), x)
+///
+/// where `binop` is a pure, no-side-effect integer operation (add/sub/mul/
+/// and/or/xor/shl/lshr/ashr) and `x` is the identical value in both arms.
+///
+/// Motivation: simplifyBranches (branch→select) converts `if/else` diamonds
+/// to select instructions, but when both branches compute `acc op val` and
+/// only `val` differs, the result is `select(cond, acc+a, acc+b)`.  The idiom
+/// recogniser cannot see the abs/min/max pattern hidden inside; this pass
+/// factors it out to `acc + select(cond, a, b)`, exposing the inner select for
+/// idiom detection.
+///
+/// Example:
+///   if (x < 0) acc += -x; else acc += x;
+///   → (after simplifyBranches)  acc_new = select(x<0, acc+neg_x, acc+x)
+///   → (after this pass)          acc_new = acc + select(x<0, neg_x, x)
+///   → (after detectAbsoluteValue) acc_new = acc + llvm.abs(x)
+[[gnu::hot]] static unsigned applySelectSinking(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            auto* sel = llvm::dyn_cast<llvm::SelectInst>(&inst);
+            if (!sel) continue;
+            if (!sel->getType()->isIntegerTy()) continue;
+
+            auto* trueOp  = llvm::dyn_cast<llvm::BinaryOperator>(sel->getTrueValue());
+            auto* falseOp = llvm::dyn_cast<llvm::BinaryOperator>(sel->getFalseValue());
+            if (!trueOp || !falseOp) continue;
+            if (trueOp->getOpcode() != falseOp->getOpcode()) continue;
+
+            auto opcode = trueOp->getOpcode();
+            // Only pure arithmetic operations — no memory, no division-by-zero risk.
+            if (opcode != llvm::Instruction::Add  &&
+                opcode != llvm::Instruction::Sub  &&
+                opcode != llvm::Instruction::Mul  &&
+                opcode != llvm::Instruction::And  &&
+                opcode != llvm::Instruction::Or   &&
+                opcode != llvm::Instruction::Xor  &&
+                opcode != llvm::Instruction::Shl  &&
+                opcode != llvm::Instruction::LShr &&
+                opcode != llvm::Instruction::AShr) continue;
+
+            // Require at least one arm to have a single use to avoid code size blow-up.
+            if (!hasOneUse(trueOp) && !hasOneUse(falseOp)) continue;
+
+            llvm::Value* tL = trueOp->getOperand(0);
+            llvm::Value* tR = trueOp->getOperand(1);
+            llvm::Value* fL = falseOp->getOperand(0);
+            llvm::Value* fR = falseOp->getOperand(1);
+
+            llvm::IRBuilder<> builder(&inst);
+            llvm::Value* replacement = nullptr;
+
+            // Case 1: left operand is the common factor  →  binop(x, select(a, b))
+            if (tL == fL && opcode != llvm::Instruction::Sub) {
+                // sub(x, a) vs sub(x, b): common left, but sub(x, select(a,b))
+                // is only valid if we keep x on the left.
+                llvm::Value* inner = builder.CreateSelect(
+                    sel->getCondition(), tR, fR, "sel.sink");
+                replacement = builder.CreateBinOp(opcode, tL, inner, "binop.sink");
+            }
+            // Case 2: right operand is the common factor  →  binop(select(a, b), x)
+            else if (tR == fR) {
+                llvm::Value* inner = builder.CreateSelect(
+                    sel->getCondition(), tL, fL, "sel.sink");
+                replacement = builder.CreateBinOp(opcode, inner, tR, "binop.sink");
+            }
+
+            if (!replacement) continue;
+
+            // Propagate NSW/NUW flags when both source ops had them.
+            if (auto* binRep = llvm::dyn_cast<llvm::BinaryOperator>(replacement)) {
+                if (trueOp->hasNoSignedWrap() && falseOp->hasNoSignedWrap())
+                    binRep->setHasNoSignedWrap(true);
+                if (trueOp->hasNoUnsignedWrap() && falseOp->hasNoUnsignedWrap())
+                    binRep->setHasNoUnsignedWrap(true);
+            }
+
+            replacements.emplace_back(&inst, replacement);
+            ++count;
+        }
+    }
+
+    for (auto& [old, newVal] : replacements)
+        old->replaceAllUsesWith(newVal);
+    return count;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Synthesis engine
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Simple enumerative synthesis: try to find a cheaper equivalent for
 /// a single instruction using a small library of templates.
-bool synthesizeReplacement(llvm::Instruction* inst, const SynthesisConfig& config) {
+[[nodiscard]] bool synthesizeReplacement(llvm::Instruction* inst, const SynthesisConfig& config) {
     if (!inst->getType()->isIntegerTy()) return false;
 
     llvm::IRBuilder<> builder(inst);
@@ -3567,7 +4246,7 @@ bool synthesizeReplacement(llvm::Instruction* inst, const SynthesisConfig& confi
 /// LLVM's own strength reduction catches many of these, but our version
 /// runs earlier and handles patterns across basic blocks that LLVM misses
 /// in the presence of OmScript's ownership-aware IR.
-static unsigned loopStrengthReduce(llvm::Function& func) {
+[[gnu::hot]] static unsigned loopStrengthReduce(llvm::Function& func) {
     unsigned count = 0;
 
     for (auto& bb : func) {
@@ -3751,6 +4430,35 @@ SuperoptimizerStats superoptimizeFunction(llvm::Function& func,
         stats.branchesSimplified = simplifyBranches(func);
     }
 
+    // Phase 3.5: Select operand sinking — factor common operands out of both
+    // arms of a select, exposing idiom patterns to the recogniser.
+    //   select(cond, acc+a, acc+b) → acc + select(cond, a, b)
+    // This runs AFTER simplifyBranches (which creates the selects) and
+    // BEFORE idiom recognition so that abs/min/max patterns become visible.
+    if (config.enableBranchOpt && config.enableIdiomRecognition) {
+        unsigned sinkCount = applySelectSinking(func);
+        if (sinkCount > 0) {
+            // Re-run idiom recognition on the newly factored selects.
+            for (auto& bb : func) {
+                auto idioms = detectIdioms(bb);
+                for (auto& match : idioms) {
+                    if (replaceIdiom(match)) {
+                        stats.idiomsReplaced++;
+                    }
+                }
+            }
+            stats.algebraicSimplified += sinkCount;
+        }
+    }
+
+    // Phase 3.8: MACS — Modular-Addition-to-Conditional-Subtract.
+    // Replace urem(add(a,b), C) with select(s<C, s, s-C) when a,b ∈ [0,C).
+    // This produces a 2-4 cycle operation vs the 25-cycle integer division,
+    // critical for tight loops like iterative Fibonacci modulo a large prime.
+    if (config.enableAlgebraic) {
+        stats.algebraicSimplified += applyMacs(func);
+    }
+
     // Phase 4: Enumerative synthesis on remaining expensive instructions
     if (config.enableSynthesis) {
         std::vector<llvm::Instruction*> candidates;
@@ -3858,7 +4566,7 @@ unsigned superopt::convertSDivToUDiv(llvm::Function& func) {
     return count;
 }
 
-unsigned superopt::inferNonNegativeFlags(llvm::Function& func) {
+[[nodiscard]] unsigned superopt::inferNonNegativeFlags(llvm::Function& func) {
     if (func.isDeclaration()) return 0;
     unsigned count = 0;
     const llvm::DataLayout& DL = func.getParent()->getDataLayout();

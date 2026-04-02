@@ -144,6 +144,22 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             }
             if (initNonNeg)
                 nonNegValues_.insert(alloca);
+            // Propagate tight upper bound for modular arithmetic.
+            // If a variable is declared with `var t = b` where b has a bound,
+            // t inherits that bound, allowing llvm.assume to convey the range.
+            if (auto* ri = llvm::dyn_cast<llvm::Instruction>(initValue)) {
+                if (ri->getOpcode() == llvm::Instruction::URem) {
+                    if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(ri->getOperand(1))) {
+                        if (ci->getSExtValue() > 1)
+                            allocaUpperBound_[alloca] = ci->getSExtValue();
+                    }
+                } else if (ri->getOpcode() == llvm::Instruction::Load) {
+                    auto* srcAlloca = llvm::dyn_cast<llvm::AllocaInst>(ri->getOperand(0));
+                    auto bit = allocaUpperBound_.find(srcAlloca);
+                    if (srcAlloca && bit != allocaUpperBound_.end())
+                        allocaUpperBound_[alloca] = bit->second;
+                }
+            }
             // Track constant integer values for `const` variables so that
             // downstream div/mod can substitute the constant directly and
             // use the fast urem/udiv path instead of the dynamic-divisor path.
@@ -529,7 +545,13 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
                            llvm::ConstantAsMetadata::get(
                                llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 0))}));
-        } else if (currentFuncHintVectorize_) {
+        } else if (currentFuncHintVectorize_
+                   || (currentFuncHintHot_ && optimizationLevel >= OptimizationLevel::O3
+                       && loopNestDepth_ <= 1)) {
+            // @hot at O3: auto-enable vectorization for top-level while-loops.
+            // While-loops are less amenable to vectorization than for-loops
+            // (no known trip count), so we require @hot as a signal that the
+            // loop is performance-critical before applying this hint.
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
                            llvm::ConstantAsMetadata::get(
@@ -543,13 +565,6 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
                            llvm::ConstantAsMetadata::get(
                                llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))}));
         }
-
-        // ── Auto-parallelization hints for while-loops ────────────
-        // Mirror the for-loop parallel_accesses metadata logic.
-        // While-loops are parallelizable when:
-        //   - -fparallelize is enabled and @noparallel not set
-        //   - The loop is not deeply nested
-        //   - The function is @parallel or @hot, or optimization is O3
         const bool wantParallelWhile = enableParallelize_
             && !currentFuncHintNoParallelize_
             && loopNestDepth_ <= 1
@@ -640,7 +655,10 @@ void CodeGenerator::generateDoWhile(DoWhileStmt* stmt) {
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
                            llvm::ConstantAsMetadata::get(
                                llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 0))}));
-        } else if (currentFuncHintVectorize_) {
+        } else if (currentFuncHintVectorize_
+                   || (currentFuncHintHot_ && optimizationLevel >= OptimizationLevel::O3
+                       && loopNestDepth_ <= 1)) {
+            // Mirror while-loop: @hot+O3 for top-level do-while loops.
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
                            llvm::ConstantAsMetadata::get(
@@ -672,6 +690,10 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     ++loopNestDepth_;
     const bool savedBodyHasInnerLoop = bodyHasInnerLoop_;
     bodyHasInnerLoop_ = false;
+    const bool savedBodyHasNonPow2Modulo = bodyHasNonPow2Modulo_;
+    bodyHasNonPow2Modulo_ = false;
+    const bool savedBodyHasNonPow2ModuloValue = bodyHasNonPow2ModuloValue_;
+    bodyHasNonPow2ModuloValue_ = false;
 
     const ScopeGuard scope(*this);
 
@@ -1006,32 +1028,43 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.unroll.disable")}));
         } else if (bodyHasInnerLoop_) {
-            // When the body contains an inner loop (while/for), cap unrolling
-            // to prevent LLVM from over-unrolling the outer loop.  Each outer
-            // iteration includes the full inner loop body, so aggressive
-            // unrolling creates massive code bloat and I-cache pressure.
+            // When the body contains an inner loop (while/for), disable
+            // unrolling of the outer loop.  Each outer iteration already
+            // contains the full inner loop, so unrolling the outer loop
+            // creates N copies of the entire inner loop body — massive
+            // I-cache pressure with zero throughput benefit.
             //
-            // OPTMAX functions: trust LLVM's cost-model-driven unroller to
-            // choose the optimal factor, exactly as clang does for C code.
-            // For loops like Collatz (outer-for / inner-while with independent
-            // iterations), LLVM chooses large unroll factors (e.g. 34x) that
-            // expose cross-iteration ILP; a hard cap at 4 prevents this and
-            // leaves significant performance on the table.
+            // This matches clang's behaviour for equivalent C code: clang's
+            // cost model sees the inner loop and emits no unroll hint,
+            // leaving the outer loop as a single copy.
             //
-            // @hot O3 functions: use a cap of 8 (vs 4) to allow more ILP
-            // than the conservative default while still bounding code size.
-            //
-            // Regular functions: cap at 4 as before.
-            if (!inOptMaxFunction) {
-                const unsigned outerLoopCap =
-                    (currentFuncHintHot_ && optimizationLevel >= OptimizationLevel::O3) ? 8u : 4u;
+            // For OPTMAX functions without an explicit @unroll: also disable
+            // unrolling.  The OPTMAX LoopUnrollPass uses OnlyWhenForced=false
+            // at OptLevel=3 and may ignore llvm.loop.unroll.disable.  Emitting
+            // both unroll.disable and unroll.count=1 ensures the constraint is
+            // respected even by aggressive unrollers.
+            if (!currentFuncHintUnroll_) {
+                loopMDs.push_back(llvm::MDNode::get(
+                    *context, {llvm::MDString::get(*context, "llvm.loop.unroll.disable")}));
+                // llvm.loop.unroll.count = 1 is a belt-and-suspenders constraint:
+                // it explicitly tells LLVM's LoopUnroll pass to produce exactly 1
+                // copy even when the pass ignores unroll.disable (e.g. at OptLevel=3
+                // with OnlyWhenForced=false as used in the OPTMAX pass).
                 loopMDs.push_back(llvm::MDNode::get(
                     *context,
                     {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
                      llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
-                         llvm::Type::getInt32Ty(*context), outerLoopCap))}));
+                         llvm::Type::getInt32Ty(*context), 1u))}));
+            } else {
+                // @unroll explicitly requested on an outer loop with inner loop:
+                // honour it with a conservative count (2) to allow minor ILP
+                // without the code-size explosion of large factors.
+                loopMDs.push_back(llvm::MDNode::get(
+                    *context,
+                    {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
+                     llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                         llvm::Type::getInt32Ty(*context), 2u))}));
             }
-            // For OPTMAX functions: no explicit count hint — let LLVM decide.
         } else if (currentFuncHintUnroll_ && !addedUnrollHint && !suppressUnrollHint) {
             // @unroll on a non-suppressed loop: apply the unroll count hint.
             // For variable-trip-count loops, unroll.full is ignored by LLVM
@@ -1057,35 +1090,42 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         // overestimated.  Explicitly enabling vectorization lets the
         // vectorizer proceed and produce profitable SIMD code that matches
         // clang's aggressive auto-vectorization of hot loops.
-        if (currentFuncHintNoVectorize_) {
+        if (currentFuncHintNoVectorize_
+                || (bodyHasNonPow2Modulo_ && !bodyHasNonPow2ModuloValue_
+                    && !currentFuncHintVectorize_)) {
+            // Disable vectorization when:
+            //  (a) @novectorize is set explicitly, OR
+            //  (b) loop has non-power-of-2 modular arithmetic used ONLY as a
+            //      branch condition (e.g. i%3==0), not as a value (i%100 for max).
+            // Vectorizing case (b) generates urem <N x i64> — N serialized
+            // ~25-cycle divisions vs scalar ~5-cycle magic-multiply reduction.
+            // Case (b) is detected via inComparisonContext_ during codegen:
+            //   bodyHasNonPow2Modulo_=true && bodyHasNonPow2ModuloValue_=false
+            // When modulo feeds into max(a%100, b%100), bodyHasNonPow2ModuloValue_
+            // is set, so we keep vectorize.enable=true for SIMD abs/min/max.
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
                            llvm::ConstantAsMetadata::get(
                                llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 0))}));
         } else if (currentFuncHintVectorize_
-                   || (currentFuncHintHot_ && optimizationLevel >= OptimizationLevel::O3
+                   || (optimizationLevel >= OptimizationLevel::O3
                        && !bodyHasInnerLoop_ && stepKnownPositive)) {
-            // @hot at O3: auto-vectorize simple ascending loops without inner
-            // loops.  Use @novectorize to opt out (e.g. loops with urem).
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
                            llvm::ConstantAsMetadata::get(
                                llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
         }
-        // At O3 in @hot functions that explicitly request vectorization,
-        // hint the vectorizer to interleave 4 iterations per vector cycle.
-        // For other @hot loops, leave the interleave count unset so LLVM's
-        // cost model can pick the optimal factor.  Forcing interleave=4 on
-        // loops with complex bodies (conditional branches, reductions, many
-        // live values) causes excessive register pressure and can prevent
-        // the vectorizer from choosing a wider vector factor.
-        if (currentFuncHintHot_ && currentFuncHintVectorize_
-            && optimizationLevel >= OptimizationLevel::O3
-            && !currentFuncHintNoVectorize_) {
+        // Interleaving: @hot+@vectorize at O3 → 4 iterations; plain O3
+        // auto-vectorized loops → 2 iterations (balances register pressure
+        // with latency hiding without the aggressive 4× that @hot requests).
+        if (optimizationLevel >= OptimizationLevel::O3
+            && !currentFuncHintNoVectorize_
+            && !bodyHasInnerLoop_ && stepKnownPositive) {
+            const int32_t interleave = (currentFuncHintHot_ && currentFuncHintVectorize_) ? 4 : 2;
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
                            llvm::ConstantAsMetadata::get(
-                               llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))}));
+                               llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), interleave))}));
         }
 
         // ── Enhanced vectorization: distribution hint ────────────────
@@ -1179,6 +1219,8 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     --loopNestDepth_;
     // Restore the flag; propagate upward so enclosing for-loops also see it.
     bodyHasInnerLoop_ = savedBodyHasInnerLoop || bodyHasInnerLoop_;
+    bodyHasNonPow2Modulo_ = savedBodyHasNonPow2Modulo || bodyHasNonPow2Modulo_;
+    bodyHasNonPow2ModuloValue_ = savedBodyHasNonPow2ModuloValue || bodyHasNonPow2ModuloValue_;
 }
 
 void CodeGenerator::generateForEach(ForEachStmt* stmt) {
@@ -1283,10 +1325,13 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
         // Array: element is at slot (bodyIdx + 1).
         // The offset is always non-negative (bodyIdx starts at 0) so nsw+nuw
         // are safe and enable SCEV to compute tight trip counts.
+        // The condition (bodyIdx < lenVal) proven by the loop guard ensures
+        // offset = bodyIdx+1 ≤ len, which is always within the allocated
+        // region ([len+1] elements at indices 0..len), so the GEP is inbounds.
         llvm::Value* offset =
             builder->CreateAdd(bodyIdx, llvm::ConstantInt::get(getDefaultType(), 1), "foreach.offset",
                                /*HasNUW=*/true, /*HasNSW=*/true);
-        llvm::Value* elemPtr = builder->CreateGEP(getDefaultType(), basePtr, offset, "foreach.elem.ptr");
+        llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), basePtr, offset, "foreach.elem.ptr");
         elemVal = builder->CreateLoad(getDefaultType(), elemPtr, "foreach.elem");
     }
     builder->CreateStore(elemVal, iterAlloca);
@@ -1332,24 +1377,54 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
                      llvm::Type::getInt32Ty(*context), 2))}));
         }
         // @vectorize / @novectorize: per-function loop vectorization hints.
+        // For-each loops over arrays always iterate forward from 0 to len,
+        // so at O3 the vectorizer is safe to try even without @vectorize.
+        // Use @novectorize to opt out.
         if (currentFuncHintNoVectorize_) {
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
                            llvm::ConstantAsMetadata::get(
                                llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 0))}));
-        } else if (currentFuncHintVectorize_) {
+        } else if (currentFuncHintVectorize_
+                   || (optimizationLevel >= OptimizationLevel::O3 && loopNestDepth_ == 0)) {
+            // O3 outermost for-each: auto-enable vectorization.
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
                            llvm::ConstantAsMetadata::get(
                                llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
         }
-        if (currentFuncHintHot_ && currentFuncHintVectorize_
-            && optimizationLevel >= OptimizationLevel::O3
-            && !currentFuncHintNoVectorize_) {
+        // Interleave: @hot+@vectorize at O3 → 4; plain O3 auto-vectorized → 2.
+        if (optimizationLevel >= OptimizationLevel::O3
+            && !currentFuncHintNoVectorize_ && loopNestDepth_ == 0) {
+            const int32_t interleave = (currentFuncHintHot_ && currentFuncHintVectorize_) ? 4 : 2;
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
                            llvm::ConstantAsMetadata::get(
-                               llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))}));
+                               llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), interleave))}));
+        }
+        // Loop distribution at O3: split complex for-each bodies into
+        // sub-loops with simpler dependence graphs (mirrors for-loop logic).
+        if (optimizationLevel >= OptimizationLevel::O3 && loopNestDepth_ == 0) {
+            loopMDs.push_back(llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.distribute.enable"),
+                           llvm::ConstantAsMetadata::get(
+                               llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
+        }
+        // parallel_accesses: mark for-each as having iteration-independent
+        // memory accesses at O3, enabling the vectorizer and loop distribution
+        // to treat array loads/stores as independent across iterations.
+        if (optimizationLevel >= OptimizationLevel::O3
+            && enableParallelize_ && !currentFuncHintNoParallelize_
+            && loopNestDepth_ == 0
+            && (currentFuncHintParallelize_ || currentFuncHintHot_
+                || optimizationLevel >= OptimizationLevel::O3)) {
+            llvm::MDNode* accessGroup = llvm::MDNode::getDistinct(*context, {});
+            loopMDs.push_back(llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.parallel_accesses"),
+                           accessGroup}));
+            currentLoopAccessGroup_ = accessGroup;
+        } else {
+            currentLoopAccessGroup_ = nullptr;
         }
         llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
         loopMD->replaceOperandWith(0, loopMD);

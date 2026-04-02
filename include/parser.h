@@ -23,13 +23,13 @@ class Parser {
   public:
     Parser(const std::vector<Token>& tokens);
     Parser(std::vector<Token>&& tokens);
-    std::unique_ptr<Program> parse();
+    [[nodiscard]] std::unique_ptr<Program> parse();
 
     /// Set the base directory for resolving import paths.
     void setBaseDir(const std::string& dir) { baseDir_ = dir; }
 
     /// Returns collected parse errors (populated when multi-error mode is active).
-    const std::vector<std::string>& errors() const {
+    [[nodiscard]] const std::vector<std::string>& errors() const noexcept {
         return errors_;
     }
 
@@ -78,11 +78,11 @@ class Parser {
                      std::vector<std::unique_ptr<EnumDecl>>& enums,
                      std::vector<std::unique_ptr<StructDecl>>& structs);
 
-    const Token& peek(int offset = 0) const;
-    Token advance();
-    bool check(TokenType type) const;
-    bool match(TokenType type);
-    bool isAtEnd() const;
+    const Token& peek(int offset = 0) const noexcept;
+    Token advance() noexcept;
+    [[nodiscard]] bool check(TokenType type) const noexcept;
+    bool match(TokenType type) noexcept;
+    [[nodiscard]] bool isAtEnd() const noexcept;
     Token consume(TokenType type, const std::string& message);
 
     /// Synchronize: skip tokens until we reach a statement boundary.

@@ -97,6 +97,9 @@ enum class Idiom {
     SaturatingSub,  ///< Subtraction with underflow clamp
     ConditionalIncrement,  ///< select(cond, x+1, x) → x + zext(cond)
     ConditionalDecrement,  ///< select(cond, x-1, x) → x - zext(cond)
+    AverageWithoutOverflow, ///< (a & b) + ((a ^ b) >> 1) → floor((a+b)/2) — Hacker's Delight §5-2
+    SignFunction,          ///< select(x>0,1,select(x<0,-1,0)) → sign(x) — Hacker's Delight §2-7
+    NextPowerOf2,          ///< bit-smear + 1 → 1 << (bw - ctlz(x-1)) — Hacker's Delight §3-1
 };
 
 /// Result of idiom detection on an instruction or sequence.
@@ -151,11 +154,11 @@ struct SuperoptimizerStats {
 
 /// Run the superoptimizer on a single LLVM function.
 /// Returns statistics about optimizations applied.
-SuperoptimizerStats superoptimizeFunction(llvm::Function& func,
+[[nodiscard]] SuperoptimizerStats superoptimizeFunction(llvm::Function& func,
                                            const SuperoptimizerConfig& config = {});
 
 /// Run the superoptimizer on all functions in a module.
-SuperoptimizerStats superoptimizeModule(llvm::Module& module,
+[[nodiscard]] SuperoptimizerStats superoptimizeModule(llvm::Module& module,
                                          const SuperoptimizerConfig& config = {});
 
 /// Convert srem-by-positive-constant → urem when the dividend is provably
@@ -177,7 +180,7 @@ unsigned convertSDivToUDiv(llvm::Function& func);
 /// unrolled copies.  Setting nuw enables downstream convertSRemToURem to
 /// prove non-negativity through the add chain.
 /// Returns the number of instructions updated.
-unsigned inferNonNegativeFlags(llvm::Function& func);
+[[nodiscard]] unsigned inferNonNegativeFlags(llvm::Function& func);
 
 } // namespace superopt
 } // namespace omscript

@@ -1686,7 +1686,8 @@ void CodeGenerator::optimizeOptMaxFunctions() {
         // Higher threshold (30 instrs) ensures utility functions like
         // classify(), add_one/two/four() are force-inlined, eliminating
         // call overhead in tight loops.
-        if (func.getInstructionCount() < kAlwaysInlineThreshold) {
+        if (func.getInstructionCount() < kAlwaysInlineThreshold
+                && !func.hasFnAttribute(llvm::Attribute::NoInline)) {
             func.addFnAttr(llvm::Attribute::AlwaysInline);
         }
         optMaxFuncs.push_back(&func);

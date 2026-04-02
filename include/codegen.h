@@ -36,7 +36,7 @@ namespace omscript {
 
 // Returns true if the given name is a stdlib built-in function.
 // Stdlib functions are always compiled to native machine code.
-bool isStdlibFunction(const std::string& name);
+[[nodiscard]] bool isStdlibFunction(const std::string& name);
 
 enum class OptimizationLevel {
     O0, // No optimization
@@ -447,6 +447,17 @@ class CodeGenerator {
     bool currentFuncHintHot_ = false;  ///< Current function has @hot annotation
     unsigned loopNestDepth_ = 0; ///< Current for-loop nesting depth (0 = not in a loop)
     bool bodyHasInnerLoop_ = false; ///< Set when a while/for loop is found inside a for-loop body
+    bool bodyHasNonPow2Modulo_ = false; ///< Set when a for-loop body has non-power-of-2 modulo
+    bool bodyHasNonPow2ModuloValue_ = false; ///< Set when non-pow2 modulo result is used as a VALUE (not just in a comparison). Combined with bodyHasNonPow2Modulo_, suppresses vectorize.enable=false when true — the profitable abs/min/max vectorization outweighs the cost of vector urem.
+    bool inComparisonContext_ = false; ///< True while generating operands of == != < > <= >= (used to classify urem as "for branch" vs "for value")
+    /// Per-alloca exclusive upper bounds from modular arithmetic.
+    /// When a variable is assigned `x % C` (a urem with constant C), we record
+    /// C here so that subsequent loads emit `llvm.assume(value ult C)`.  This
+    /// propagates the tight range [0, C) through loop PHI nodes via LLVM's
+    /// LazyValueInfo, enabling the conditional-subtract optimisation
+    /// (select(s<C, s, s-C)) to fire for ALL unrolled iterations — not just
+    /// the ones where the divisor is immediately visible.
+    llvm::DenseMap<llvm::Value*, int64_t> allocaUpperBound_;
     llvm::MDNode* currentLoopAccessGroup_ = nullptr; ///< Access group for parallel loop metadata
 
     /// Classify a function into its execution tier based on type annotations,
@@ -454,16 +465,16 @@ class CodeGenerator {
     ExecutionTier classifyFunction(const FunctionDecl* func) const;
 
     // Code generation methods
-    llvm::Function* generateFunction(FunctionDecl* func);
-    void generateStatement(Statement* stmt);
-    llvm::Value* generateExpression(Expression* expr);
+    [[gnu::hot]] llvm::Function* generateFunction(FunctionDecl* func);
+    [[gnu::hot]] void generateStatement(Statement* stmt);
+    [[gnu::hot]] llvm::Value* generateExpression(Expression* expr);
 
     // Expression generators
-    llvm::Value* generateLiteral(LiteralExpr* expr);
-    llvm::Value* generateIdentifier(IdentifierExpr* expr);
-    llvm::Value* generateBinary(BinaryExpr* expr);
+    [[gnu::hot]] llvm::Value* generateLiteral(LiteralExpr* expr);
+    [[gnu::hot]] llvm::Value* generateIdentifier(IdentifierExpr* expr);
+    [[gnu::hot]] llvm::Value* generateBinary(BinaryExpr* expr);
     llvm::Value* generateUnary(UnaryExpr* expr);
-    llvm::Value* generateCall(CallExpr* expr);
+    [[gnu::hot]] llvm::Value* generateCall(CallExpr* expr);
     llvm::Value* generateAssign(AssignExpr* expr);
     llvm::Value* generatePostfix(PostfixExpr* expr);
     llvm::Value* generatePrefix(PrefixExpr* expr);
@@ -514,12 +525,12 @@ class CodeGenerator {
     OwnershipState getOwnershipState(const std::string& varName) const;
 
     // Helper methods
-    llvm::Type* getDefaultType();
-    llvm::Type* getFloatType();
+    [[nodiscard]] llvm::Type* getDefaultType();
+    [[nodiscard]] llvm::Type* getFloatType();
     /// Map a type annotation string ("int", "float", "string", etc.) to the
     /// corresponding LLVM type.  Unknown or empty annotations fall back to
     /// getDefaultType() (i64).
-    llvm::Type* resolveAnnotatedType(const std::string& annotation);
+    [[nodiscard]] llvm::Type* resolveAnnotatedType(const std::string& annotation);
     llvm::Value* toBool(llvm::Value* v);
     llvm::Value* toDefaultType(llvm::Value* v);
     /// Convert \p v to \p targetTy, inserting appropriate casts (FPToSI,
@@ -545,7 +556,7 @@ class CodeGenerator {
     void validateScopeStacksMatch(const char* location);
     llvm::AllocaInst* createEntryBlockAlloca(llvm::Function* function, const std::string& name,
                                              llvm::Type* type = nullptr);
-    [[noreturn]] void codegenError(const std::string& message, const ASTNode* node);
+    [[noreturn]] [[gnu::cold]] void codegenError(const std::string& message, const ASTNode* node);
     void validateArgCount(const CallExpr* expr, const std::string& funcName, size_t expected);
 
     /// RAII guard that calls beginScope() on construction and endScope()

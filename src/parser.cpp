@@ -25,32 +25,32 @@ Parser::Parser(std::vector<Token>&& tokens)
     : tokens(std::move(tokens)), current(0), inOptMaxFunction(false),
       importedFiles_(std::make_shared<std::unordered_set<std::string>>()) {}
 
-const Token& Parser::peek(int offset) const {
+const Token& Parser::peek(int offset) const noexcept {
     static const Token eofToken(TokenType::END_OF_FILE, "", 0, 0);
-    if (tokens.empty()) {
+    if (__builtin_expect(tokens.empty(), 0)) {
         return eofToken;
     }
-    const size_t index = current + offset;
-    if (index >= tokens.size()) {
+    const size_t index = current + static_cast<size_t>(offset);
+    if (__builtin_expect(index >= tokens.size(), 0)) {
         return tokens.back();
     }
     return tokens[index];
 }
 
-Token Parser::advance() {
+Token Parser::advance() noexcept {
     if (!isAtEnd()) {
         current++;
     }
     return tokens[current - 1];
 }
 
-bool Parser::check(TokenType type) const {
-    if (isAtEnd())
+bool Parser::check(TokenType type) const noexcept {
+    if (__builtin_expect(isAtEnd(), 0))
         return false;
     return peek().type == type;
 }
 
-bool Parser::match(TokenType type) {
+bool Parser::match(TokenType type) noexcept {
     if (check(type)) {
         advance();
         return true;
@@ -58,7 +58,7 @@ bool Parser::match(TokenType type) {
     return false;
 }
 
-bool Parser::isAtEnd() const {
+bool Parser::isAtEnd() const noexcept {
     return peek().type == TokenType::END_OF_FILE;
 }
 
@@ -70,7 +70,7 @@ Token Parser::consume(TokenType type, const std::string& message) {
     throw std::logic_error("unreachable parser consume() path");
 }
 
-void Parser::error(const std::string& message) {
+[[gnu::cold]] void Parser::error(const std::string& message) {
     Token token = peek();
     throw DiagnosticError(
         Diagnostic{DiagnosticSeverity::Error, {"", token.line, token.column}, "Parse error: " + message});
