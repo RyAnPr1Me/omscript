@@ -133,9 +133,9 @@ struct Token {
         double floatValue;
     };
 
-    Token(TokenType t, const std::string& lex, int ln, int col)
+    Token(TokenType t, const std::string& lex, int ln, int col) noexcept(false)
         : type(t), lexeme(lex), line(ln), column(col), intValue(0) {}
-    Token(TokenType t, std::string&& lex, int ln, int col)
+    Token(TokenType t, std::string&& lex, int ln, int col) noexcept(false)
         : type(t), lexeme(std::move(lex)), line(ln), column(col), intValue(0) {}
 };
 
@@ -143,7 +143,7 @@ class Lexer {
   public:
     Lexer(const std::string& source);
     Lexer(std::string&& source);
-    std::vector<Token> tokenize();
+    [[nodiscard]] std::vector<Token> tokenize();
 
   private:
     std::string source;

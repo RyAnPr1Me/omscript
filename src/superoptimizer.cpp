@@ -47,7 +47,7 @@ using namespace llvm::PatternMatch;
 // ─────────────────────────────────────────────────────────────────────────────
 
 double instructionCost(const llvm::Instruction* inst) {
-    if (!inst) return 0.0;
+    if (__builtin_expect(!inst, 0)) return 0.0;
 
     switch (inst->getOpcode()) {
     // Near-free: these are typically eliminated or folded by the backend
@@ -248,12 +248,12 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Check if a value has exactly one use.
-static bool hasOneUse(llvm::Value* v) {
+[[nodiscard]] [[gnu::always_inline]] static inline bool hasOneUse(llvm::Value* v) {
     return v->hasOneUse();
 }
 
 /// Check if value is a constant integer with a specific value.
-static bool isConstInt(llvm::Value* v, uint64_t val) {
+[[nodiscard]] [[gnu::always_inline]] static inline bool isConstInt(llvm::Value* v, uint64_t val) {
     if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(v)) {
         return ci->getZExtValue() == val;
     }
@@ -261,7 +261,7 @@ static bool isConstInt(llvm::Value* v, uint64_t val) {
 }
 
 /// Check if value is a constant integer and return its value.
-static std::optional<int64_t> getConstIntValue(llvm::Value* v) {
+[[nodiscard]] [[gnu::always_inline]] static inline std::optional<int64_t> getConstIntValue(llvm::Value* v) {
     if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(v)) {
         return ci->getSExtValue();
     }
@@ -275,7 +275,7 @@ static std::optional<int64_t> getConstIntValue(llvm::Value* v) {
 
 /// Check whether a constant (scalar ConstantInt or vector splat/element-wise)
 /// has all elements strictly positive (> 0).
-static bool isConstantAllPositive(llvm::Constant* c) {
+[[nodiscard]] static bool isConstantAllPositive(llvm::Constant* c) {
     if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(c))
         return ci->getSExtValue() > 0;
     // Handle vector constants: ConstantDataVector, ConstantVector, splat
@@ -306,8 +306,8 @@ static bool isConstantAllPositive(llvm::Constant* c) {
     return false;
 }
 
-static bool isValueNonNegative(llvm::Value* v, const llvm::DataLayout& DL, unsigned depth = 0) {
-    if (depth > 12) return false;  // prevent infinite recursion
+[[nodiscard]] static bool isValueNonNegative(llvm::Value* v, const llvm::DataLayout& DL, unsigned depth = 0) {
+    if (__builtin_expect(depth > 12, 0)) return false;  // prevent infinite recursion
 
     // Non-negative constant
     if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(v))
@@ -640,7 +640,7 @@ static bool isValueNonNegative(llvm::Value* v, const llvm::DataLayout& DL, unsig
 
 /// Detect: (x << c) | (x >> (bitwidth - c))  →  rotate left by c
 /// Also:   (x >> c) | (x << (bitwidth - c))  →  rotate right by c
-static std::optional<IdiomMatch> detectRotate(llvm::Instruction* inst) {
+[[nodiscard]] static std::optional<IdiomMatch> detectRotate(llvm::Instruction* inst) {
     if (inst->getOpcode() != llvm::Instruction::Or) return std::nullopt;
 
     llvm::Value* op0 = inst->getOperand(0);
@@ -682,7 +682,7 @@ static std::optional<IdiomMatch> detectRotate(llvm::Instruction* inst) {
 
 /// Detect: select(x < 0, -x, x)  →  abs(x)
 /// Also:   (x ^ (x >> 31)) - (x >> 31)  →  abs(x) for i32
-static std::optional<IdiomMatch> detectAbsoluteValue(llvm::Instruction* inst) {
+[[nodiscard]] static std::optional<IdiomMatch> detectAbsoluteValue(llvm::Instruction* inst) {
     // Pattern 1: select(icmp slt x, 0, sub 0, x, x)
     if (auto* sel = llvm::dyn_cast<llvm::SelectInst>(inst)) {
         auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(sel->getCondition());
@@ -741,7 +741,7 @@ static std::optional<IdiomMatch> detectAbsoluteValue(llvm::Instruction* inst) {
 
 /// Detect: select(icmp slt a, b, a, b) → smin(a, b)
 /// And all variants (sgt → smax, ult → umin, ugt → umax)
-static std::optional<IdiomMatch> detectMinMax(llvm::Instruction* inst) {
+[[nodiscard]] static std::optional<IdiomMatch> detectMinMax(llvm::Instruction* inst) {
     auto* sel = llvm::dyn_cast<llvm::SelectInst>(inst);
     if (!sel) return std::nullopt;
 
@@ -824,7 +824,7 @@ static std::optional<IdiomMatch> detectMinMax(llvm::Instruction* inst) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Detect: (x & (x - 1)) == 0  →  ctpop(x) <= 1
-static std::optional<IdiomMatch> detectPowerOf2Test(llvm::Instruction* inst) {
+[[nodiscard]] static std::optional<IdiomMatch> detectPowerOf2Test(llvm::Instruction* inst) {
     auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(inst);
     if (!cmp || cmp->getPredicate() != llvm::ICmpInst::ICMP_EQ)
         return std::nullopt;
@@ -856,7 +856,7 @@ static std::optional<IdiomMatch> detectPowerOf2Test(llvm::Instruction* inst) {
 
 /// Detect: (x >> shift) & mask  where mask = (1 << width) - 1
 /// → bitfield extract from bit position `shift`, width `width`
-static std::optional<IdiomMatch> detectBitFieldExtract(llvm::Instruction* inst) {
+[[nodiscard]] static std::optional<IdiomMatch> detectBitFieldExtract(llvm::Instruction* inst) {
     if (inst->getOpcode() != llvm::Instruction::And) return std::nullopt;
 
     auto* shift = llvm::dyn_cast<llvm::BinaryOperator>(inst->getOperand(0));
@@ -890,7 +890,7 @@ static std::optional<IdiomMatch> detectBitFieldExtract(llvm::Instruction* inst) 
 
 /// Detect: select(cond, sub(0, x), x)  →  conditional negation
 /// Also:   (x ^ mask) - mask  where mask = ashr(x, bitwidth-1)
-static std::optional<IdiomMatch> detectConditionalNeg(llvm::Instruction* inst) {
+[[nodiscard]] static std::optional<IdiomMatch> detectConditionalNeg(llvm::Instruction* inst) {
     // Pattern: select(cond, -x, x)
     if (auto* sel = llvm::dyn_cast<llvm::SelectInst>(inst)) {
         llvm::Value* trueVal = sel->getTrueValue();
@@ -942,7 +942,7 @@ static std::optional<IdiomMatch> detectConditionalNeg(llvm::Instruction* inst) {
 
 /// Detect: x & (-x) → isolate lowest set bit (related to CTZ)
 /// Pattern: and(x, sub(0, x))
-static std::optional<IdiomMatch> detectIsolateLowestBit(llvm::Instruction* inst) {
+[[nodiscard]] static std::optional<IdiomMatch> detectIsolateLowestBit(llvm::Instruction* inst) {
     if (inst->getOpcode() != llvm::Instruction::And) return std::nullopt;
 
     llvm::Value* op0 = inst->getOperand(0);
@@ -978,7 +978,7 @@ static std::optional<IdiomMatch> detectIsolateLowestBit(llvm::Instruction* inst)
 /// Detect: (x >> 24) | ((x >> 8) & 0xFF00) | ((x << 8) & 0xFF0000) | (x << 24)
 /// This is a 32-bit byte swap pattern.  Also detects the simpler 16-bit form:
 /// ((x >> 8) & 0xFF) | (x << 8)
-static std::optional<IdiomMatch> detectByteSwap(llvm::Instruction* inst) {
+[[nodiscard]] static std::optional<IdiomMatch> detectByteSwap(llvm::Instruction* inst) {
     if (inst->getOpcode() != llvm::Instruction::Or) return std::nullopt;
 
     // 16-bit byte swap: ((x >> 8) & 0xFF) | ((x & 0xFF) << 8)
@@ -1017,7 +1017,7 @@ static std::optional<IdiomMatch> detectByteSwap(llvm::Instruction* inst) {
 /// x = x - ((x >> 1) & 0x5555555555555555)
 /// This is the first step of the standard Brian Kernighan or divide-and-conquer
 /// popcount algorithm.  We detect the pattern and replace with llvm.ctpop.
-static std::optional<IdiomMatch> detectPopCount(llvm::Instruction* inst) {
+[[nodiscard]] static std::optional<IdiomMatch> detectPopCount(llvm::Instruction* inst) {
     if (inst->getOpcode() != llvm::Instruction::Sub) return std::nullopt;
 
     // Look for: sub(x, and(lshr(x, 1), 0x5555...))
@@ -1065,7 +1065,7 @@ static std::optional<IdiomMatch> detectPopCount(llvm::Instruction* inst) {
 /// We detect the end of the pattern: sub(bitwidth, ctpop(or-chain(x)))
 /// where the or-chain is at least one stage of or(x, lshr(x, k)).
 /// The de Bruijn lookup variant is left for future work.
-static std::optional<IdiomMatch> detectCountLeadingZeros(llvm::Instruction* inst) {
+[[nodiscard]] static std::optional<IdiomMatch> detectCountLeadingZeros(llvm::Instruction* inst) {
     // Detect bit-smear sequence ending with popcount subtraction:
     //   x |= x >> 1; x |= x >> 2; x |= x >> 4; x |= x >> 8; x |= x >> 16; x |= x >> 32;
     //   return 64 - popcount(x);
@@ -1122,7 +1122,7 @@ static std::optional<IdiomMatch> detectCountLeadingZeros(llvm::Instruction* inst
 //   1. select(icmp ugt (a+b), a, MAX_UINT, a+b)  (unsigned overflow via wrap)
 //   2. select(extractvalue(@llvm.uadd.with.overflow(a,b), 1), MAX, sum)
 // ─────────────────────────────────────────────────────────────────────────────
-static std::optional<IdiomMatch> detectSaturatingAdd(llvm::Instruction* inst) {
+[[nodiscard]] static std::optional<IdiomMatch> detectSaturatingAdd(llvm::Instruction* inst) {
     auto* sel = llvm::dyn_cast<llvm::SelectInst>(inst);
     if (!sel) return std::nullopt;
     if (!sel->getType()->isIntegerTy()) return std::nullopt;
@@ -1191,7 +1191,7 @@ static std::optional<IdiomMatch> detectSaturatingAdd(llvm::Instruction* inst) {
 // Saturating subtraction: select(icmp ult a b, 0, a-b) → usub.sat(a,b)
 // Pattern: clamp subtraction to zero instead of wrapping unsigned
 // ─────────────────────────────────────────────────────────────────────────────
-static std::optional<IdiomMatch> detectSaturatingSub(llvm::Instruction* inst) {
+[[nodiscard]] static std::optional<IdiomMatch> detectSaturatingSub(llvm::Instruction* inst) {
     auto* sel = llvm::dyn_cast<llvm::SelectInst>(inst);
     if (!sel) return std::nullopt;
     if (!sel->getType()->isIntegerTy()) return std::nullopt;
@@ -1259,7 +1259,7 @@ static std::optional<IdiomMatch> detectSaturatingSub(llvm::Instruction* inst) {
 /// counter.  Replacing with x + zext(cond) or x - zext(cond) eliminates
 /// the select instruction and produces a single add/sub with a zero-extended
 /// boolean, which is cheaper on all microarchitectures.
-static std::optional<IdiomMatch> detectConditionalIncrement(llvm::Instruction* inst) {
+[[nodiscard]] static std::optional<IdiomMatch> detectConditionalIncrement(llvm::Instruction* inst) {
     auto* sel = llvm::dyn_cast<llvm::SelectInst>(inst);
     if (!sel) return std::nullopt;
 
@@ -1323,7 +1323,7 @@ static std::optional<IdiomMatch> detectConditionalIncrement(llvm::Instruction* i
 /// Hacker's Delight §5-2: "Average of two integers without overflow":
 ///   unsigned avg = (a & b) + ((a ^ b) >> 1)
 ///   This is exactly llvm.uavg.u(a, b) — one instruction on modern x86 with AVX512.
-static std::optional<IdiomMatch> detectAverageWithoutOverflow(llvm::Instruction* inst) {
+[[nodiscard]] static std::optional<IdiomMatch> detectAverageWithoutOverflow(llvm::Instruction* inst) {
     // Pattern: add(and(a, b), lshr(xor(a, b), 1))
     if (inst->getOpcode() != llvm::Instruction::Add) return std::nullopt;
 
@@ -1381,7 +1381,7 @@ static std::optional<IdiomMatch> detectAverageWithoutOverflow(llvm::Instruction*
 ///
 /// Replaces with: select(x > 0, 1, ashr(x, bitwidth-1))
 /// which is 2 ops (icmp + select/or) vs 3-5 ops for the naive form.
-static std::optional<IdiomMatch> detectSignFunction(llvm::Instruction* inst) {
+[[nodiscard]] static std::optional<IdiomMatch> detectSignFunction(llvm::Instruction* inst) {
     // Pattern 1: or(ashr(x, 63), zext(icmp sgt(x, 0)))
     // = (x >> 63) | (x > 0 ? 1 : 0)
     // For signed: negative→-1, zero→0, positive→1
@@ -1462,7 +1462,7 @@ static std::optional<IdiomMatch> detectSignFunction(llvm::Instruction* inst) {
 /// Or simpler: (x <= 1) ? 1 : (1 << (64 - ctlz(x - 1)))
 ///
 /// We detect the accumulated OR pattern and replace with CLZ-based computation.
-static std::optional<IdiomMatch> detectNextPowerOf2(llvm::Instruction* inst) {
+[[nodiscard]] static std::optional<IdiomMatch> detectNextPowerOf2(llvm::Instruction* inst) {
     // Final instruction must be: add(%smeared, 1)
     if (inst->getOpcode() != llvm::Instruction::Add) return std::nullopt;
     auto addOne = getConstIntValue(inst->getOperand(1));
@@ -1515,7 +1515,7 @@ static std::optional<IdiomMatch> detectNextPowerOf2(llvm::Instruction* inst) {
 // Main idiom detection
 // ─────────────────────────────────────────────────────────────────────────────
 
-std::vector<IdiomMatch> detectIdioms(llvm::BasicBlock& bb) {
+[[gnu::hot]] std::vector<IdiomMatch> detectIdioms(llvm::BasicBlock& bb) {
     std::vector<IdiomMatch> results;
 
     for (auto& inst : bb) {
@@ -1865,7 +1865,7 @@ static bool replaceIdiom(IdiomMatch& match) {
 
 /// Apply algebraic identity simplifications that LLVM's instcombine may miss
 /// when instructions are in different basic blocks or have multiple uses.
-static unsigned applyAlgebraicSimplifications(llvm::Function& func) {
+[[gnu::hot]] static unsigned applyAlgebraicSimplifications(llvm::Function& func) {
     unsigned count = 0;
     std::vector<llvm::Instruction*> toErase;
 
@@ -3843,7 +3843,7 @@ static bool valueInRange(llvm::Value* v, uint64_t hi) {
 /// Cost:  urem (div) ≈ 25 cycles  →  add + icmp + sub + select ≈ 4 cycles.
 /// The transformation is always safe: for a, b ∈ [0, C), a+b ∈ [0, 2C),
 /// so `(a+b) % C == (a+b < C) ? (a+b) : (a+b - C)`.
-static unsigned applyMacs(llvm::Function& func) {
+[[gnu::hot]] static unsigned applyMacs(llvm::Function& func) {
     unsigned count = 0;
     std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
 
@@ -3912,7 +3912,7 @@ static unsigned applyMacs(llvm::Function& func) {
 ///   → (after simplifyBranches)  acc_new = select(x<0, acc+neg_x, acc+x)
 ///   → (after this pass)          acc_new = acc + select(x<0, neg_x, x)
 ///   → (after detectAbsoluteValue) acc_new = acc + llvm.abs(x)
-static unsigned applySelectSinking(llvm::Function& func) {
+[[gnu::hot]] static unsigned applySelectSinking(llvm::Function& func) {
     unsigned count = 0;
     std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
 
@@ -3991,7 +3991,7 @@ static unsigned applySelectSinking(llvm::Function& func) {
 
 /// Simple enumerative synthesis: try to find a cheaper equivalent for
 /// a single instruction using a small library of templates.
-bool synthesizeReplacement(llvm::Instruction* inst, const SynthesisConfig& config) {
+[[nodiscard]] bool synthesizeReplacement(llvm::Instruction* inst, const SynthesisConfig& config) {
     if (!inst->getType()->isIntegerTy()) return false;
 
     llvm::IRBuilder<> builder(inst);
@@ -4246,7 +4246,7 @@ bool synthesizeReplacement(llvm::Instruction* inst, const SynthesisConfig& confi
 /// LLVM's own strength reduction catches many of these, but our version
 /// runs earlier and handles patterns across basic blocks that LLVM misses
 /// in the presence of OmScript's ownership-aware IR.
-static unsigned loopStrengthReduce(llvm::Function& func) {
+[[gnu::hot]] static unsigned loopStrengthReduce(llvm::Function& func) {
     unsigned count = 0;
 
     for (auto& bb : func) {
@@ -4566,7 +4566,7 @@ unsigned superopt::convertSDivToUDiv(llvm::Function& func) {
     return count;
 }
 
-unsigned superopt::inferNonNegativeFlags(llvm::Function& func) {
+[[nodiscard]] unsigned superopt::inferNonNegativeFlags(llvm::Function& func) {
     if (func.isDeclaration()) return 0;
     unsigned count = 0;
     const llvm::DataLayout& DL = func.getParent()->getDataLayout();

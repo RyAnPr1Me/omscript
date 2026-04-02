@@ -766,11 +766,11 @@ size_t EGraph::numClasses() const {
     return count;
 }
 
-size_t EGraph::numNodes() const {
+size_t EGraph::numNodes() const noexcept {
     return totalNodes_;
 }
 
-bool EGraph::atNodeLimit() const {
+bool EGraph::atNodeLimit() const noexcept {
     return totalNodes_ >= config_.maxNodes;
 }
 

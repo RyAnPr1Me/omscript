@@ -68,7 +68,7 @@ void HardwareGraph::addEdge(unsigned srcId, unsigned dstId, double latency,
     edges_.push_back({srcId, dstId, latency, bandwidth, label});
 }
 
-const HardwareNode* HardwareGraph::getNode(unsigned id) const {
+const HardwareNode* HardwareGraph::getNode(unsigned id) const noexcept {
     if (id < nodes_.size()) return &nodes_[id];
     return nullptr;
 }
@@ -94,7 +94,7 @@ std::vector<const HardwareEdge*> HardwareGraph::getOutEdges(unsigned nodeId) con
 // ═════════════════════════════════════════════════════════════════════════════
 
 /// Classify an LLVM instruction into an OpClass.
-static OpClass classifyOp(const llvm::Instruction* inst) {
+[[gnu::hot]] static OpClass classifyOp(const llvm::Instruction* inst) {
     if (!inst) return OpClass::Other;
 
     switch (inst->getOpcode()) {
@@ -608,7 +608,7 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
 // ═════════════════════════════════════════════════════════════════════════════
 
 /// Return a Skylake (Intel 6th–10th gen) microarchitecture profile.
-static MicroarchProfile skylakeProfile() {
+[[gnu::cold]] static MicroarchProfile skylakeProfile() {
     MicroarchProfile p;
     p.name = "skylake";
     p.isa = ISAFamily::X86_64;
@@ -645,7 +645,7 @@ static MicroarchProfile skylakeProfile() {
 }
 
 /// Return a Haswell (Intel 4th gen) microarchitecture profile.
-static MicroarchProfile haswellProfile() {
+[[gnu::cold]] static MicroarchProfile haswellProfile() {
     MicroarchProfile p = skylakeProfile();
     p.name = "haswell";
     p.decodeWidth = 4;
@@ -659,7 +659,7 @@ static MicroarchProfile haswellProfile() {
 }
 
 /// Return an Intel Alder Lake / Raptor Lake (Golden Cove P-core) profile.
-static MicroarchProfile alderlakeProfile() {
+[[gnu::cold]] static MicroarchProfile alderlakeProfile() {
     MicroarchProfile p;
     p.name = "alderlake";
     p.isa = ISAFamily::X86_64;
@@ -698,7 +698,7 @@ static MicroarchProfile alderlakeProfile() {
 }
 
 /// Return an AMD Zen 4 (Ryzen 7000 / EPYC Genoa) profile.
-static MicroarchProfile zen4Profile() {
+[[gnu::cold]] static MicroarchProfile zen4Profile() {
     MicroarchProfile p;
     p.name = "znver4";
     p.isa = ISAFamily::X86_64;
@@ -735,7 +735,7 @@ static MicroarchProfile zen4Profile() {
 }
 
 /// Return an AMD Zen 3 (Ryzen 5000) profile.
-static MicroarchProfile zen3Profile() {
+[[gnu::cold]] static MicroarchProfile zen3Profile() {
     MicroarchProfile p = zen4Profile();
     p.name = "znver3";
     p.pipelineDepth = 19;     // similar pipeline depth to Zen 4
@@ -754,7 +754,7 @@ static MicroarchProfile zen3Profile() {
 }
 
 /// Return an Apple M1/M2 Firestorm (performance core) profile.
-static MicroarchProfile appleMProfile() {
+[[gnu::cold]] static MicroarchProfile appleMProfile() {
     MicroarchProfile p;
     p.name = "apple-m1";
     p.isa = ISAFamily::AArch64;
@@ -791,7 +791,7 @@ static MicroarchProfile appleMProfile() {
 }
 
 /// Return an ARM Neoverse V2 (server) profile.
-static MicroarchProfile neoverseV2Profile() {
+[[gnu::cold]] static MicroarchProfile neoverseV2Profile() {
     MicroarchProfile p;
     p.name = "neoverse-v2";
     p.isa = ISAFamily::AArch64;
@@ -828,7 +828,7 @@ static MicroarchProfile neoverseV2Profile() {
 }
 
 /// Return an ARM Neoverse N2 profile.
-static MicroarchProfile neoverseN2Profile() {
+[[gnu::cold]] static MicroarchProfile neoverseN2Profile() {
     MicroarchProfile p = neoverseV2Profile();
     p.name = "neoverse-n2";
     p.issueWidth = 5;
@@ -843,7 +843,7 @@ static MicroarchProfile neoverseN2Profile() {
 }
 
 /// Return a generic RISC-V 64-bit in-order core profile.
-static MicroarchProfile riscvGenericProfile() {
+[[gnu::cold]] static MicroarchProfile riscvGenericProfile() {
     MicroarchProfile p;
     p.name = "generic-rv64";
     p.isa = ISAFamily::RISCV64;
@@ -877,7 +877,7 @@ static MicroarchProfile riscvGenericProfile() {
 }
 
 /// Return a SiFive U74 (RISC-V) profile.
-static MicroarchProfile sifiveU74Profile() {
+[[gnu::cold]] static MicroarchProfile sifiveU74Profile() {
     MicroarchProfile p = riscvGenericProfile();
     p.name = "sifive-u74";
     p.pipelineDepth = 8;
@@ -889,7 +889,7 @@ static MicroarchProfile sifiveU74Profile() {
 
 /// Return an AWS Graviton3 profile (Arm Neoverse V1-based).
 /// Graviton3: 64-core, 256-bit SVE, DDR5, 8-wide dispatch.
-static MicroarchProfile graviton3Profile() {
+[[gnu::cold]] static MicroarchProfile graviton3Profile() {
     MicroarchProfile p;
     p.name = "graviton3";
     p.isa = ISAFamily::AArch64;
@@ -927,7 +927,7 @@ static MicroarchProfile graviton3Profile() {
 
 /// Return an AWS Graviton4 profile (Arm Neoverse V2-based).
 /// Graviton4: 96-core, 256-bit SVE2, DDR5-5600, wider backend.
-static MicroarchProfile graviton4Profile() {
+[[gnu::cold]] static MicroarchProfile graviton4Profile() {
     MicroarchProfile p = neoverseV2Profile();
     p.name = "graviton4";
     p.l2Size = 2048;           // 2 MB L2 per core
@@ -939,7 +939,7 @@ static MicroarchProfile graviton4Profile() {
 
 /// Return an Intel Lunar Lake profile (Lion Cove P-cores, 2024).
 /// Lion Cove: 8-wide decode, 8-wide dispatch, AVX2, improved branch pred.
-static MicroarchProfile lunarLakeProfile() {
+[[gnu::cold]] static MicroarchProfile lunarLakeProfile() {
     MicroarchProfile p;
     p.name = "lunar-lake";
     p.isa = ISAFamily::X86_64;
@@ -980,7 +980,7 @@ static MicroarchProfile lunarLakeProfile() {
 /// Return an improved AMD Zen 5 profile (2024).
 /// Zen 5: 8-wide dispatch, 6 ALU pipes, 2× 256-bit vector, AVX-512
 /// via double-pump, improved branch prediction.
-static MicroarchProfile zen5Profile() {
+[[gnu::cold]] static MicroarchProfile zen5Profile() {
     MicroarchProfile p;
     p.name = "znver5";
     p.isa = ISAFamily::X86_64;
@@ -1298,7 +1298,7 @@ HardwareGraph buildHardwareGraph(const MicroarchProfile& profile) {
 // ═════════════════════════════════════════════════════════════════════════════
 
 /// Map OpClass to the ResourceType that should execute it.
-static ResourceType mapOpToResource(OpClass op) {
+[[nodiscard]] static ResourceType mapOpToResource(OpClass op) {
     switch (op) {
     case OpClass::IntArith:
     case OpClass::IntMul:
@@ -1328,7 +1328,7 @@ static ResourceType mapOpToResource(OpClass op) {
 }
 
 /// Return the instruction latency for an OpClass from the profile.
-static unsigned getLatency(OpClass op, const MicroarchProfile& profile) {
+[[nodiscard]] static unsigned getLatency(OpClass op, const MicroarchProfile& profile) {
     switch (op) {
     case OpClass::IntArith:
     case OpClass::Shift:
@@ -1350,7 +1350,7 @@ static unsigned getLatency(OpClass op, const MicroarchProfile& profile) {
 }
 
 /// Return the available ports for a ResourceType from the profile.
-static unsigned getPortCount(ResourceType rt, const MicroarchProfile& profile) {
+[[nodiscard]] static unsigned getPortCount(ResourceType rt, const MicroarchProfile& profile) {
     switch (rt) {
     case ResourceType::IntegerALU:  return profile.intALUs;
     case ResourceType::VectorALU:   return profile.vecUnits;
@@ -1372,7 +1372,7 @@ static unsigned getPortCount(ResourceType rt, const MicroarchProfile& profile) {
 ///   FMA intrinsic  — latFMA
 ///   sqrt intrinsic — ≈ fdiv latency
 ///   Unknown calls  — conservative 10-cycle estimate
-static unsigned getOpcodeLatency(const llvm::Instruction* inst,
+[[nodiscard]] static unsigned getOpcodeLatency(const llvm::Instruction* inst,
                                   const MicroarchProfile& profile) {
     // Conservative latency constants used when we cannot determine exact timing.
     constexpr unsigned kUnknownCallLatency = 10;      ///< Non-intrinsic call (ABI overhead)

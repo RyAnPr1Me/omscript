@@ -8,16 +8,16 @@
 namespace omscript {
 
 namespace {
-inline bool isDigit(char c) {
+[[nodiscard]] [[gnu::always_inline]] inline bool isDigit(char c) noexcept {
     return std::isdigit(static_cast<unsigned char>(c)) != 0;
 }
-inline bool isHexDigit(char c) {
+[[nodiscard]] [[gnu::always_inline]] inline bool isHexDigit(char c) noexcept {
     return std::isxdigit(static_cast<unsigned char>(c)) != 0;
 }
-inline bool isAlpha(char c) {
+[[nodiscard]] [[gnu::always_inline]] inline bool isAlpha(char c) noexcept {
     return std::isalpha(static_cast<unsigned char>(c)) != 0;
 }
-inline bool isAlnum(char c) {
+[[nodiscard]] [[gnu::always_inline]] inline bool isAlnum(char c) noexcept {
     return std::isalnum(static_cast<unsigned char>(c)) != 0;
 }
 } // namespace
@@ -45,7 +45,7 @@ static const std::unordered_map<std::string_view, TokenType> keywords = {
     {"register", TokenType::REGISTER}};
 
 /// Throw a DiagnosticError with the given message and source location.
-[[noreturn]] static void lexError(const std::string& msg, int ln, int col) {
+[[noreturn]] [[gnu::cold]] static void lexError(const std::string& msg, int ln, int col) {
     throw DiagnosticError(Diagnostic{DiagnosticSeverity::Error, {"", ln, col}, msg});
 }
 
@@ -366,7 +366,7 @@ Token Lexer::scanMultiLineString() {
     lexError("Unterminated multi-line string literal", startLine, startColumn);
 }
 
-std::vector<Token> Lexer::tokenize() {
+[[gnu::hot]] std::vector<Token> Lexer::tokenize() {
     std::vector<Token> tokens;
     // Heuristic pre-allocation: most source characters produce roughly
     // one token per ~4 characters.  This avoids repeated reallocations
@@ -380,7 +380,7 @@ std::vector<Token> Lexer::tokenize() {
 
         const char c = peek();
 
-        if (c == 'O' && pos + 8 <= source.length()) {
+        if (__builtin_expect(c == 'O' && pos + 8 <= source.length(), 0)) {
             if (source.compare(pos, 8, "OPTMAX=:") == 0) {
                 for (int i = 0; i < 8; i++) {
                     advance();
@@ -398,13 +398,13 @@ std::vector<Token> Lexer::tokenize() {
         }
 
         // Numbers
-        if (isDigit(c)) {
+        if (__builtin_expect(isDigit(c), 0)) {
             tokens.push_back(scanNumber());
             continue;
         }
 
         // Identifiers and keywords
-        if (isAlpha(c) || c == '_') {
+        if (__builtin_expect(isAlpha(c) || c == '_', 1)) {
             tokens.push_back(scanIdentifier());
             continue;
         }

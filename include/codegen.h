@@ -36,7 +36,7 @@ namespace omscript {
 
 // Returns true if the given name is a stdlib built-in function.
 // Stdlib functions are always compiled to native machine code.
-bool isStdlibFunction(const std::string& name);
+[[nodiscard]] bool isStdlibFunction(const std::string& name);
 
 enum class OptimizationLevel {
     O0, // No optimization
@@ -465,16 +465,16 @@ class CodeGenerator {
     ExecutionTier classifyFunction(const FunctionDecl* func) const;
 
     // Code generation methods
-    llvm::Function* generateFunction(FunctionDecl* func);
-    void generateStatement(Statement* stmt);
-    llvm::Value* generateExpression(Expression* expr);
+    [[gnu::hot]] llvm::Function* generateFunction(FunctionDecl* func);
+    [[gnu::hot]] void generateStatement(Statement* stmt);
+    [[gnu::hot]] llvm::Value* generateExpression(Expression* expr);
 
     // Expression generators
-    llvm::Value* generateLiteral(LiteralExpr* expr);
-    llvm::Value* generateIdentifier(IdentifierExpr* expr);
-    llvm::Value* generateBinary(BinaryExpr* expr);
+    [[gnu::hot]] llvm::Value* generateLiteral(LiteralExpr* expr);
+    [[gnu::hot]] llvm::Value* generateIdentifier(IdentifierExpr* expr);
+    [[gnu::hot]] llvm::Value* generateBinary(BinaryExpr* expr);
     llvm::Value* generateUnary(UnaryExpr* expr);
-    llvm::Value* generateCall(CallExpr* expr);
+    [[gnu::hot]] llvm::Value* generateCall(CallExpr* expr);
     llvm::Value* generateAssign(AssignExpr* expr);
     llvm::Value* generatePostfix(PostfixExpr* expr);
     llvm::Value* generatePrefix(PrefixExpr* expr);
@@ -525,12 +525,12 @@ class CodeGenerator {
     OwnershipState getOwnershipState(const std::string& varName) const;
 
     // Helper methods
-    llvm::Type* getDefaultType();
-    llvm::Type* getFloatType();
+    [[nodiscard]] llvm::Type* getDefaultType();
+    [[nodiscard]] llvm::Type* getFloatType();
     /// Map a type annotation string ("int", "float", "string", etc.) to the
     /// corresponding LLVM type.  Unknown or empty annotations fall back to
     /// getDefaultType() (i64).
-    llvm::Type* resolveAnnotatedType(const std::string& annotation);
+    [[nodiscard]] llvm::Type* resolveAnnotatedType(const std::string& annotation);
     llvm::Value* toBool(llvm::Value* v);
     llvm::Value* toDefaultType(llvm::Value* v);
     /// Convert \p v to \p targetTy, inserting appropriate casts (FPToSI,
@@ -556,7 +556,7 @@ class CodeGenerator {
     void validateScopeStacksMatch(const char* location);
     llvm::AllocaInst* createEntryBlockAlloca(llvm::Function* function, const std::string& name,
                                              llvm::Type* type = nullptr);
-    [[noreturn]] void codegenError(const std::string& message, const ASTNode* node);
+    [[noreturn]] [[gnu::cold]] void codegenError(const std::string& message, const ASTNode* node);
     void validateArgCount(const CallExpr* expr, const std::string& funcName, size_t expected);
 
     /// RAII guard that calls beginScope() on construction and endScope()

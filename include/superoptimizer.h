@@ -154,11 +154,11 @@ struct SuperoptimizerStats {
 
 /// Run the superoptimizer on a single LLVM function.
 /// Returns statistics about optimizations applied.
-SuperoptimizerStats superoptimizeFunction(llvm::Function& func,
+[[nodiscard]] SuperoptimizerStats superoptimizeFunction(llvm::Function& func,
                                            const SuperoptimizerConfig& config = {});
 
 /// Run the superoptimizer on all functions in a module.
-SuperoptimizerStats superoptimizeModule(llvm::Module& module,
+[[nodiscard]] SuperoptimizerStats superoptimizeModule(llvm::Module& module,
                                          const SuperoptimizerConfig& config = {});
 
 /// Convert srem-by-positive-constant → urem when the dividend is provably
@@ -180,7 +180,7 @@ unsigned convertSDivToUDiv(llvm::Function& func);
 /// unrolled copies.  Setting nuw enables downstream convertSRemToURem to
 /// prove non-negativity through the add chain.
 /// Returns the number of instructions updated.
-unsigned inferNonNegativeFlags(llvm::Function& func);
+[[nodiscard]] unsigned inferNonNegativeFlags(llvm::Function& func);
 
 } // namespace superopt
 } // namespace omscript

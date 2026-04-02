@@ -172,25 +172,25 @@ public:
                  double bandwidth = 1.0, const std::string& label = "");
 
     /// Look up a node by ID.
-    const HardwareNode* getNode(unsigned id) const;
+    [[nodiscard]] const HardwareNode* getNode(unsigned id) const noexcept;
 
     /// Find nodes of a given resource type.
-    std::vector<const HardwareNode*> findNodes(ResourceType type) const;
+    [[nodiscard]] std::vector<const HardwareNode*> findNodes(ResourceType type) const;
 
     /// Get all edges originating from a node.
-    std::vector<const HardwareEdge*> getOutEdges(unsigned nodeId) const;
+    [[nodiscard]] std::vector<const HardwareEdge*> getOutEdges(unsigned nodeId) const;
 
     /// Total number of nodes.
-    size_t nodeCount() const { return nodes_.size(); }
+    [[nodiscard]] size_t nodeCount() const noexcept { return nodes_.size(); }
 
     /// Total number of edges.
-    size_t edgeCount() const { return edges_.size(); }
+    [[nodiscard]] size_t edgeCount() const noexcept { return edges_.size(); }
 
     /// Get all nodes (read-only).
-    const std::vector<HardwareNode>& nodes() const { return nodes_; }
+    [[nodiscard]] const std::vector<HardwareNode>& nodes() const noexcept { return nodes_; }
 
     /// Get all edges (read-only).
-    const std::vector<HardwareEdge>& edges() const { return edges_; }
+    [[nodiscard]] const std::vector<HardwareEdge>& edges() const noexcept { return edges_; }
 
 private:
     std::vector<HardwareNode> nodes_;

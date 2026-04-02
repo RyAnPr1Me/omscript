@@ -293,27 +293,27 @@ public:
 
     /// Add a new node to the e-graph, returning its canonical class ID.
     /// If an equivalent node already exists, returns the existing class.
-    ClassId add(ENode node);
+    [[nodiscard]] ClassId add(ENode node);
 
     /// Create a constant integer node.
-    ClassId addConst(long long val);
+    [[nodiscard]] ClassId addConst(long long val);
 
     /// Create a constant float node.
-    ClassId addConstF(double val);
+    [[nodiscard]] ClassId addConstF(double val);
 
     /// Create a variable reference node.
-    ClassId addVar(const std::string& name);
+    [[nodiscard]] ClassId addVar(const std::string& name);
 
     /// Create a binary operation node.
-    ClassId addBinOp(Op op, ClassId lhs, ClassId rhs);
+    [[nodiscard]] ClassId addBinOp(Op op, ClassId lhs, ClassId rhs);
 
     /// Create a unary operation node.
-    ClassId addUnaryOp(Op op, ClassId operand);
+    [[nodiscard]] ClassId addUnaryOp(Op op, ClassId operand);
 
     // ── Union-find ───────────────────────────────────────────────────────
 
     /// Find the canonical representative of an e-class.
-    ClassId find(ClassId id);
+    [[nodiscard]] ClassId find(ClassId id);
 
     /// Merge two e-classes, returning the new canonical ID.
     ClassId merge(ClassId a, ClassId b);
@@ -325,38 +325,38 @@ public:
     size_t saturate(const std::vector<RewriteRule>& rules);
 
     /// Apply all rules once and return the number of new merges.
-    size_t applyRules(const std::vector<RewriteRule>& rules);
+    [[nodiscard]] size_t applyRules(const std::vector<RewriteRule>& rules);
 
     // ── Pattern matching ─────────────────────────────────────────────────
 
     /// Match a pattern against all e-classes, returning substitutions.
-    std::vector<std::pair<ClassId, Subst>> match(const Pattern& pat) const;
+    [[nodiscard]] std::vector<std::pair<ClassId, Subst>> match(const Pattern& pat) const;
 
     // ── Extraction ───────────────────────────────────────────────────────
 
     /// Extract the lowest-cost expression tree from the given root class.
     /// Returns the reconstructed ENode tree (with children as nested nodes).
-    ENode extract(ClassId root, const CostModel& model);
+    [[nodiscard]] ENode extract(ClassId root, const CostModel& model);
 
     // ── Accessors ────────────────────────────────────────────────────────
 
     /// Get the e-class for a given canonical ID.
-    const EClass& getClass(ClassId id) const;
+    [[nodiscard]] const EClass& getClass(ClassId id) const;
 
     /// Number of e-classes (after canonicalization).
-    size_t numClasses() const;
+    [[nodiscard]] size_t numClasses() const;
 
     /// Total number of e-nodes across all classes.
-    size_t numNodes() const;
+    [[nodiscard]] size_t numNodes() const noexcept;
 
     /// Check if the node limit has been reached.
-    bool atNodeLimit() const;
+    [[nodiscard]] bool atNodeLimit() const noexcept;
 
     // ── Relational helpers ───────────────────────────────────────────
 
     /// Extract the integer constant value from an e-class, if one exists.
     /// Returns std::nullopt if the class contains no Const node.
-    std::optional<long long> getConstValue(ClassId cls) const;
+    [[nodiscard]] std::optional<long long> getConstValue(ClassId cls) const;
 
     /// Extract the float constant value from an e-class, if one exists.
     /// Returns std::nullopt if the class contains no ConstF node.
