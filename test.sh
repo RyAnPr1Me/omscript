@@ -63,7 +63,7 @@ if command -v taskset &>/dev/null; then
     TASKSET="taskset -c 0"
 fi
 
-NUM_BENCHMARKS=38
+NUM_BENCHMARKS=42
 
 BENCH_NAME=(
     "integer_math"       #  0 — GCD, log2, modular arithmetic
@@ -104,6 +104,10 @@ BENCH_NAME=(
     "cond_arithmetic"    # 35 — conditional increment/decrement + Collatz
     "ring_buffer"        # 36 — circular ring buffer with prime capacity
     "sliding_window"     # 37 — sliding window sum over a large array
+    "exponent_chain"     # 38 — integer exponentiation x**N (NSW-mul codegen)
+    "for_each"           # 39 — for-each loop over array (inbounds GEP path)
+    "lcm_gcd"            # 40 — repeated lcm() + gcd() (nonNeg builtin tracking)
+    "zext_pattern"       # 41 — bool-to-int zero-extension (select→zext patterns)
 )
 
 BENCH_DESC=(
@@ -145,6 +149,10 @@ BENCH_DESC=(
     "Conditional increment/decrement + Collatz 3x+1 (superoptimizer + e-graph)"
     "Circular ring buffer with prime (non-power-of-2) capacity; modulo-wrap head/tail"
     "Sliding window sum; loop from positive constant, non-negative subtraction"
+    "Integer exponentiation loop: x**2..x**5 repeated; tests NSW-mul for exp"
+    "For-each loop over large array; tests auto-vectorize + inbounds GEP path"
+    "Repeated lcm() and gcd() calls; tests nonNeg tracking for lcm builtin"
+    "Boolean-to-int zero-extension: if(cond) acc+=1 → acc+zext(cond) patterns"
 )
 
 # Input sizes – tuned so each test runs ~20-200 ms in C.
@@ -187,6 +195,10 @@ BENCH_N=(
     10000000  # 35  cond_arithmetic
     5000000   # 36  ring_buffer
     5000000   # 37  sliding_window
+    5000000   # 38  exponent_chain
+    5000000   # 39  for_each
+    5000000   # 40  lcm_gcd
+    10000000  # 41  zext_pattern
 )
 
 BOTTLENECK_LABELS=(
@@ -228,6 +240,10 @@ BOTTLENECK_LABELS=(
     "conditional arithmetic + Collatz strength reduction"
     "Ring buffer with prime capacity; non-power-of-2 modulo on bounded indices"
     "Sliding window sum; loop starting at positive constant, NSW-annotated sub"
+    "NSW-mul for integer exponentiation (x**2..x**5 per iteration)"
+    "for-each loop auto-vectorization and inbounds GEP codegen"
+    "lcm nonNeg tracking: lcm/gcd results proven non-negative by the compiler"
+    "select(cmp,1,0) → zext(cond) strength reduction"
 )
 
 # ─── COLOR CODES ──────────────────────────────────────────────
@@ -969,6 +985,85 @@ fn bench_slidingwin(@prefetch n:int) -> int {
     return acc;
 }
 
+// ── 38. exponent_chain ───────────────────────────────────────
+// Integer exponentiation x**2, x**3, x**4, x**5 in a tight loop.
+// Tests NSW-mul path: when base is non-negative, each squaring/cube
+// uses nsw multiply. Even exponents always produce non-negative results.
+@hot @flatten @unroll
+fn bench_expchain(@prefetch n:int) -> int {
+    var acc:int = 0;
+    for (i:int in 1...n) {
+        var x:int = i % 1000;
+        acc += x ** 2;
+        acc += x ** 3;
+        acc += x ** 4;
+        acc += x ** 5;
+        acc = acc % 1000000007;
+    }
+    invalidate n;
+    return acc;
+}
+
+// ── 39. for_each ─────────────────────────────────────────────
+// For-each over an integer array exercises the auto-vectorization
+// path that uses inbounds GEP and parallel_accesses metadata.
+// Distinct from indexed for-in, which uses explicit index arithmetic.
+@hot @flatten @vectorize @unroll
+fn bench_foreach(@prefetch n:int) -> int {
+    var arr:int[] = array_fill(n, 0);
+    for (i:int in 0...n) {
+        arr[i] = (i * 7 + 3) % 10000;
+    }
+    var sum:int = 0;
+    for (x:int in arr) {
+        sum += x;
+    }
+    invalidate arr;
+    invalidate n;
+    return sum;
+}
+
+// ── 40. lcm_gcd ──────────────────────────────────────────────
+// Repeated lcm() and gcd() calls in a tight loop.
+// lcm is provably non-negative (nonNeg tracking via abs of inputs),
+// so the compiler can use NUW/NSW on further arithmetic with the result.
+@hot @flatten @unroll
+fn bench_lcmgcd(@prefetch n:int) -> int {
+    var acc:int = 0;
+    for (i:int in 1...n) {
+        var a:int = i % 1000 + 1;
+        var b:int = (i * 3 + 7) % 1000 + 1;
+        acc += gcd(a, b);
+        acc += lcm(a, b);
+        acc = acc % 1000000007;
+    }
+    invalidate n;
+    return acc;
+}
+
+// ── 41. zext_pattern ─────────────────────────────────────────
+// Tests bool-to-int zero-extension strength reduction.
+// The pattern: if (cond) { acc += 1; } is lowered as
+// acc += zext(cond) by the superoptimizer rather than a branch.
+// Also tests: acc += (a < b) ? 1 : 0 style comparisons.
+@hot @flatten @unroll
+fn bench_zext(@prefetch n:int) -> int {
+    var acc:int = 0;
+    for (i:int in 1...n) {
+        // Simple conditional increment: superoptimizer → zext
+        if (i % 3 == 0) { acc += 1; }
+        if (i % 5 == 0) { acc += 1; }
+        if (i % 7 == 0) { acc += 1; }
+        // Comparison accumulation
+        acc += (i % 2 == 0);
+        acc += (i % 4 == 0);
+        // Mixed: only subtract on rare condition
+        if (i % 11 == 0) { acc -= 1; }
+    }
+    invalidate n;
+    return acc;
+}
+
 OPTMAX!:
 
 // ── main dispatch ────────────────────────────────────────────
@@ -1015,6 +1110,10 @@ fn main() -> int {
         case 35: print(bench_condarith(n));      break;
         case 36: print(bench_ringbuf(n));        break;
         case 37: print(bench_slidingwin(n));     break;
+        case 38: print(bench_expchain(n));       break;
+        case 39: print(bench_foreach(n));        break;
+        case 40: print(bench_lcmgcd(n));         break;
+        case 41: print(bench_zext(n));           break;
         default: print(0);
     }
     invalidate n;
@@ -1655,6 +1754,66 @@ static long bench_slidingwin(long n) {
     return acc;
 }
 
+/* 38 ── exponent_chain ──────────────────────────── */
+static long bench_expchain(long n) {
+    long acc = 0;
+    for (long i = 1; i < n; i++) {
+        long x = i % 1000;
+        acc += x * x;
+        acc += x * x * x;
+        acc += x * x * x * x;
+        acc += x * x * x * x * x;
+        acc = acc % 1000000007L;
+    }
+    return acc;
+}
+
+/* 39 ── for_each ────────────────────────────────── */
+static long bench_foreach(long n) {
+    long *arr = malloc(n * sizeof(long));
+    for (long i = 0; i < n; i++) arr[i] = (i * 7 + 3) % 10000;
+    long sum = 0;
+    for (long i = 0; i < n; i++) sum += arr[i];
+    free(arr);
+    return sum;
+}
+
+/* 40 ── lcm_gcd ─────────────────────────────────── */
+static long lcm_c(long a, long b) {
+    long g = a;
+    long bb = b;
+    while (bb) { long t = bb; bb = g % bb; g = t; }
+    return (a / g) * b;
+}
+static long bench_lcmgcd(long n) {
+    long acc = 0;
+    for (long i = 1; i < n; i++) {
+        long a = i % 1000 + 1;
+        long b = (i * 3 + 7) % 1000 + 1;
+        long g = a;
+        long bb = b;
+        while (bb) { long t = bb; bb = g % bb; g = t; }
+        acc += g;
+        acc += lcm_c(a, b);
+        acc = acc % 1000000007L;
+    }
+    return acc;
+}
+
+/* 41 ── zext_pattern ────────────────────────────── */
+static long bench_zext(long n) {
+    long acc = 0;
+    for (long i = 1; i < n; i++) {
+        if (i % 3 == 0) acc += 1;
+        if (i % 5 == 0) acc += 1;
+        if (i % 7 == 0) acc += 1;
+        acc += (i % 2 == 0) ? 1 : 0;
+        acc += (i % 4 == 0) ? 1 : 0;
+        if (i % 11 == 0) acc -= 1;
+    }
+    return acc;
+}
+
 int main(void) {
     int test_id; long n;
     scanf("%d %ld", &test_id, &n);
@@ -1698,6 +1857,10 @@ int main(void) {
         case 35: r = bench_condarith(n);      break;
         case 36: r = bench_ringbuf(n);           break;
         case 37: r = bench_slidingwin(n);        break;
+        case 38: r = bench_expchain(n);          break;
+        case 39: r = bench_foreach(n);           break;
+        case 40: r = bench_lcmgcd(n);            break;
+        case 41: r = bench_zext(n);              break;
     }
     printf("%ld\n", r);
     return 0;
