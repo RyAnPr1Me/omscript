@@ -2403,6 +2403,29 @@ static unsigned applyAlgebraicSimplifications(llvm::Function& func) {
                     case 2304: simplified = builder.CreateAdd(shl(xv,11), shl(xv,8), "mul2304"); break;
                     case 2560: simplified = builder.CreateAdd(shl(xv,11), shl(xv,9), "mul2560"); break;
                     case 3072: simplified = builder.CreateAdd(shl(xv,11), shl(xv,10),"mul3072"); break;
+                    // ── n×4096 family ──────────────────────────────────────────
+                    case 3584: simplified = builder.CreateSub(shl(xv,12), shl(xv,9),  "mul3584"); break;
+                    case 3840: simplified = builder.CreateSub(shl(xv,12), shl(xv,8),  "mul3840"); break;
+                    case 3968: simplified = builder.CreateSub(shl(xv,12), shl(xv,7),  "mul3968"); break;
+                    case 4032: simplified = builder.CreateSub(shl(xv,12), shl(xv,6),  "mul4032"); break;
+                    case 4064: simplified = builder.CreateSub(shl(xv,12), shl(xv,5),  "mul4064"); break;
+                    case 4080: simplified = builder.CreateSub(shl(xv,12), shl(xv,4),  "mul4080"); break;
+                    case 4088: simplified = builder.CreateSub(shl(xv,12), shl(xv,3),  "mul4088"); break;
+                    case 4092: simplified = builder.CreateSub(shl(xv,12), shl(xv,2),  "mul4092"); break;
+                    case 4094: simplified = builder.CreateSub(shl(xv,12), shl(xv,1),  "mul4094"); break;
+                    case 4095: simplified = builder.CreateSub(shl(xv,12), xv,          "mul4095"); break;
+                    case 4097: simplified = builder.CreateAdd(shl(xv,12), xv,          "mul4097"); break;
+                    case 4098: simplified = builder.CreateAdd(shl(xv,12), shl(xv,1),   "mul4098"); break;
+                    case 4100: simplified = builder.CreateAdd(shl(xv,12), shl(xv,2),   "mul4100"); break;
+                    case 4104: simplified = builder.CreateAdd(shl(xv,12), shl(xv,3),   "mul4104"); break;
+                    case 4112: simplified = builder.CreateAdd(shl(xv,12), shl(xv,4),   "mul4112"); break;
+                    case 4128: simplified = builder.CreateAdd(shl(xv,12), shl(xv,5),   "mul4128"); break;
+                    case 4160: simplified = builder.CreateAdd(shl(xv,12), shl(xv,6),   "mul4160"); break;
+                    case 4224: simplified = builder.CreateAdd(shl(xv,12), shl(xv,7),   "mul4224"); break;
+                    case 4352: simplified = builder.CreateAdd(shl(xv,12), shl(xv,8),   "mul4352"); break;
+                    case 4608: simplified = builder.CreateAdd(shl(xv,12), shl(xv,9),   "mul4608"); break;
+                    case 5120: simplified = builder.CreateAdd(shl(xv,12), shl(xv,10),  "mul5120"); break;
+                    case 6144: simplified = builder.CreateAdd(shl(xv,12), shl(xv,11),  "mul6144"); break;
                     default:
                         // Negative constants: compute |cv|, strength-reduce, then negate.
                         if (*cv < -1) {
@@ -2533,6 +2556,29 @@ static unsigned applyAlgebraicSimplifications(llvm::Function& func) {
                             case 2304: posRep = builder.CreateAdd(shl(xv,11), shl(xv,8), "mulp2304"); break;
                             case 2560: posRep = builder.CreateAdd(shl(xv,11), shl(xv,9), "mulp2560"); break;
                             case 3072: posRep = builder.CreateAdd(shl(xv,11), shl(xv,10),"mulp3072"); break;
+                            // ── n×4096 family ───────────────────────────────────
+                            case 3584: posRep = builder.CreateSub(shl(xv,12), shl(xv,9),  "mulp3584"); break;
+                            case 3840: posRep = builder.CreateSub(shl(xv,12), shl(xv,8),  "mulp3840"); break;
+                            case 3968: posRep = builder.CreateSub(shl(xv,12), shl(xv,7),  "mulp3968"); break;
+                            case 4032: posRep = builder.CreateSub(shl(xv,12), shl(xv,6),  "mulp4032"); break;
+                            case 4064: posRep = builder.CreateSub(shl(xv,12), shl(xv,5),  "mulp4064"); break;
+                            case 4080: posRep = builder.CreateSub(shl(xv,12), shl(xv,4),  "mulp4080"); break;
+                            case 4088: posRep = builder.CreateSub(shl(xv,12), shl(xv,3),  "mulp4088"); break;
+                            case 4092: posRep = builder.CreateSub(shl(xv,12), shl(xv,2),  "mulp4092"); break;
+                            case 4094: posRep = builder.CreateSub(shl(xv,12), shl(xv,1),  "mulp4094"); break;
+                            case 4095: posRep = builder.CreateSub(shl(xv,12), xv,          "mulp4095"); break;
+                            case 4097: posRep = builder.CreateAdd(shl(xv,12), xv,          "mulp4097"); break;
+                            case 4098: posRep = builder.CreateAdd(shl(xv,12), shl(xv,1),   "mulp4098"); break;
+                            case 4100: posRep = builder.CreateAdd(shl(xv,12), shl(xv,2),   "mulp4100"); break;
+                            case 4104: posRep = builder.CreateAdd(shl(xv,12), shl(xv,3),   "mulp4104"); break;
+                            case 4112: posRep = builder.CreateAdd(shl(xv,12), shl(xv,4),   "mulp4112"); break;
+                            case 4128: posRep = builder.CreateAdd(shl(xv,12), shl(xv,5),   "mulp4128"); break;
+                            case 4160: posRep = builder.CreateAdd(shl(xv,12), shl(xv,6),   "mulp4160"); break;
+                            case 4224: posRep = builder.CreateAdd(shl(xv,12), shl(xv,7),   "mulp4224"); break;
+                            case 4352: posRep = builder.CreateAdd(shl(xv,12), shl(xv,8),   "mulp4352"); break;
+                            case 4608: posRep = builder.CreateAdd(shl(xv,12), shl(xv,9),   "mulp4608"); break;
+                            case 5120: posRep = builder.CreateAdd(shl(xv,12), shl(xv,10),  "mulp5120"); break;
+                            case 6144: posRep = builder.CreateAdd(shl(xv,12), shl(xv,11),  "mulp6144"); break;
                             // 3-instruction negative sequences (new cases not covered above)
                             case 37: posRep = builder.CreateAdd(builder.CreateAdd(shl(xv,5), shl(xv,2)), xv, "mulp37"); break;
                             case 41: posRep = builder.CreateAdd(builder.CreateAdd(shl(xv,5), shl(xv,3)), xv, "mulp41"); break;
