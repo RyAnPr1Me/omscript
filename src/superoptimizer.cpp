@@ -4733,11 +4733,18 @@ unsigned superopt::convertSDivToUDiv(llvm::Function& func) {
                 continue;
             }
 
-            // Sub: NUW (no unsigned wrap) requires a >= b (unsigned), i.e. the
-            // result is non-negative.  Knowing both a and b are non-negative is
-            // NOT sufficient — if a < b the result is negative and wraps unsigned.
-            // Without proven a >= b we cannot add NUW, so we skip this case.
+            // Sub: NUW (no unsigned wrap) requires a >= b, so we skip that.
+            // NSW (no signed wrap) IS provable when both operands are non-negative:
+            // a ∈ [0, 2^63-1], b ∈ [0, 2^63-1] → a-b ∈ [-(2^63-1), 2^63-1],
+            // which never overflows signed i64. This enables SCEV's trip-count
+            // and range analysis to derive tighter bounds for derived expressions.
             if (op == llvm::Instruction::Sub) {
+                if (!bo->hasNoSignedWrap() &&
+                    isValueNonNegative(bo->getOperand(0), DL) &&
+                    isValueNonNegative(bo->getOperand(1), DL)) {
+                    bo->setHasNoSignedWrap(true);
+                    ++count;
+                }
                 continue;
             }
         }

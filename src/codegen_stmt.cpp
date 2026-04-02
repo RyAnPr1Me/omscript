@@ -806,8 +806,21 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     llvm::Value* curVal = builder->CreateLoad(iterType, iterAlloca, stmt->iteratorVar.c_str());
     llvm::Value* continueCond;
     if (stepKnownPositive) {
-        // Fast path: known ascending loop, just compare i < end.
-        continueCond = builder->CreateICmpSLT(curVal, endVal, "forcond_lt");
+        // Fast path: known ascending loop.
+        // When the iterator alloca and end value are both proven non-negative,
+        // use an unsigned comparison.  Two non-negative i64 values compare
+        // identically whether the comparison is signed or unsigned, but unsigned
+        // comparisons allow LLVM's vectorizer and SCEV to work with unsigned
+        // induction variables, which unlocks more aggressive loop transforms.
+        const bool iterNonNeg = nonNegValues_.count(iterAlloca) > 0;
+        const bool endNonNeg  = nonNegValues_.count(endVal) > 0
+            || (llvm::dyn_cast<llvm::ConstantInt>(endVal)
+                && !llvm::dyn_cast<llvm::ConstantInt>(endVal)->isNegative());
+        if (iterNonNeg && endNonNeg) {
+            continueCond = builder->CreateICmpULT(curVal, endVal, "forcond_ult");
+        } else {
+            continueCond = builder->CreateICmpSLT(curVal, endVal, "forcond_lt");
+        }
     } else {
         llvm::Value* stepPositive = builder->CreateICmpSGT(stepVal, zero, "steppositive");
         llvm::Value* forwardCond = builder->CreateICmpSLT(curVal, endVal, "forcond_lt");
