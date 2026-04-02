@@ -677,6 +677,10 @@ test_cli_output "pkg-remove-quiet" "" 0 ./build/omsc -q pkg remove strings
 # Clean up
 rm -rf om_packages
 
+# Optimization correctness tests
+test_program "examples/runtime_div_opt_test.om" 5
+test_program "examples/loop_ucmp_test.om" 5
+
 echo ""
 echo "============================================"
 if [ $FAILURES -eq 0 ]; then

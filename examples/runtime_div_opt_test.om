@@ -1,0 +1,57 @@
+// runtime_div_opt_test.om
+// Correctness test for srem→urem and sdiv→udiv conversion with
+// runtime (non-constant) divisors proven to be non-negative.
+//
+// The compiler should convert srem(a, b) → urem(a, b) and
+// sdiv(a, b) → udiv(a, b) when both a and b are provably non-negative.
+// These transformations must produce identical results.
+fn main() {
+    var total = 0;
+
+    // Test 1: runtime modulo by a provably positive variable
+    // Both dividend (loop counter) and divisor are provably non-negative.
+    var m = 7;
+    var acc = 0;
+    for (i in 0...100) {
+        acc = acc + (i % m);
+    }
+    total = total + (acc == 295);  // sum of i%7 for i in [0,100) = 295
+    // total = 1
+
+    // Test 2: runtime division by a provably positive variable
+    var d = 4;
+    var acc2 = 0;
+    for (i in 0...100) {
+        acc2 = acc2 + (i / d);
+    }
+    total = total + (acc2 == 1200);  // sum of i/4 for i in [0,100) = 1200
+    // total = 2
+
+    // Test 3: non-trivial runtime modulo (prime divisor, non-constant)
+    var p = 11;
+    var acc3 = 0;
+    for (i in 1...50) {
+        acc3 = acc3 + (i % p);
+    }
+    total = total + (acc3 == 235);  // sum of i%11 for i in [1,50) = 235
+    // total = 3
+
+    // Test 4: runtime modulo combined with runtime division
+    var mod_val = 6;
+    var div_val = 3;
+    var acc4 = 0;
+    for (i in 0...30) {
+        acc4 = acc4 + (i % mod_val) + (i / div_val);
+    }
+    total = total + (acc4 == 210);  // (i%6) + (i/3) summed over [0,30) = 210
+    // total = 4
+
+    // Test 5: ensure negative inputs to sdiv/srem still work correctly
+    // (the srem→urem pass should NOT fire here since lhs can be negative)
+    var x = 0 - 7;
+    var rem = x % 3;       // C-style: (-7) % 3 = -1
+    total = total + (rem == (0 - 1));   // -1
+    // total = 5
+
+    return total;
+}
