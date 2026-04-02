@@ -230,10 +230,10 @@ find_package(Threads REQUIRED)
 target_link_libraries(omsc PRIVATE Threads::Threads)
 
 # ── OpenMP (optional — accelerates parallel compiler passes) ──────────────────
-# When available, superoptimizeModule dispatches function-level passes to a
-# thread pool using std::async (C++ standard) which automatically uses the
-# system thread pool.  OpenMP is also used for SIMD annotations (#pragma omp
-# simd) on numeric inner loops in the e-graph and strength reduction passes.
+# When available, superoptimizeModule dispatches function-level optimization
+# passes to a thread pool using std::async; each function's IR is disjoint
+# so concurrent modification is safe.  The SuperoptimizerConfig struct is
+# copied (captured by value) into each async task to avoid dangling references.
 if(WITH_OPENMP)
     find_package(OpenMP QUIET)
     if(OpenMP_CXX_FOUND)

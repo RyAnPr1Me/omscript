@@ -813,9 +813,9 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         // comparisons allow LLVM's vectorizer and SCEV to work with unsigned
         // induction variables, which unlocks more aggressive loop transforms.
         const bool iterNonNeg = nonNegValues_.count(iterAlloca) > 0;
+        const auto* endCI = llvm::dyn_cast<llvm::ConstantInt>(endVal);
         const bool endNonNeg  = nonNegValues_.count(endVal) > 0
-            || (llvm::dyn_cast<llvm::ConstantInt>(endVal)
-                && !llvm::dyn_cast<llvm::ConstantInt>(endVal)->isNegative());
+            || (endCI && !endCI->isNegative());
         if (iterNonNeg && endNonNeg) {
             continueCond = builder->CreateICmpULT(curVal, endVal, "forcond_ult");
         } else {

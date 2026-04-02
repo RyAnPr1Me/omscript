@@ -4570,8 +4570,10 @@ SuperoptimizerStats superoptimizeModule(llvm::Module& module,
         // so concurrent modification is safe.  IRBuilder objects are created
         // locally inside superoptimizeFunction which also makes them
         // thread-local by construction.
-        // config is captured by value to avoid a dangling-reference if any
-        // future outlives the current stack frame.
+        // config is captured by value into each async task (SuperoptimizerConfig
+        // is a plain struct of flags/integers).  Value capture is intentional:
+        // it ensures each future has its own copy and cannot observe dangling
+        // references if any future outlives the current stack frame.
         std::vector<std::future<SuperoptimizerStats>> futures;
         futures.reserve(funcs.size());
         for (llvm::Function* fn : funcs) {
@@ -4621,7 +4623,7 @@ unsigned superopt::convertSRemToURem(llvm::Function& func) {
                 // non-negative remainder identical to unsigned remainder.
                 auto* rhsConst = llvm::dyn_cast<llvm::Constant>(rhs);
                 const bool rhsPositive = (rhsConst && isConstantAllPositive(rhsConst))
-                    || (!rhsConst && isValueNonNegative(rhs, DL));
+                    || isValueNonNegative(rhs, DL);
                 if (rhsPositive && isValueNonNegative(lhs, DL)) {
                     llvm::IRBuilder<> builder(&inst);
                     auto* urem = builder.CreateURem(lhs, rhs, "srem_to_urem");
