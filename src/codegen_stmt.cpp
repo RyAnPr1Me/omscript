@@ -1038,12 +1038,24 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             // cost model sees the inner loop and emits no unroll hint,
             // leaving the outer loop as a single copy.
             //
-            // OPTMAX functions: let LLVM's unroller decide (same as clang -O3
-            // for performance-critical code where cross-iteration ILP matters).
-            if (!inOptMaxFunction && !currentFuncHintUnroll_) {
+            // For OPTMAX functions without an explicit @unroll: also disable
+            // unrolling.  The OPTMAX LoopUnrollPass uses OnlyWhenForced=false
+            // at OptLevel=3 and may ignore llvm.loop.unroll.disable.  Emitting
+            // both unroll.disable and unroll.count=1 ensures the constraint is
+            // respected even by aggressive unrollers.
+            if (!currentFuncHintUnroll_) {
                 loopMDs.push_back(llvm::MDNode::get(
                     *context, {llvm::MDString::get(*context, "llvm.loop.unroll.disable")}));
-            } else if (!inOptMaxFunction && currentFuncHintUnroll_) {
+                // llvm.loop.unroll.count = 1 is a belt-and-suspenders constraint:
+                // it explicitly tells LLVM's LoopUnroll pass to produce exactly 1
+                // copy even when the pass ignores unroll.disable (e.g. at OptLevel=3
+                // with OnlyWhenForced=false as used in the OPTMAX pass).
+                loopMDs.push_back(llvm::MDNode::get(
+                    *context,
+                    {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
+                     llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                         llvm::Type::getInt32Ty(*context), 1u))}));
+            } else {
                 // @unroll explicitly requested on an outer loop with inner loop:
                 // honour it with a conservative count (2) to allow minor ILP
                 // without the code-size explosion of large factors.
@@ -1053,7 +1065,6 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
                      llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
                          llvm::Type::getInt32Ty(*context), 2u))}));
             }
-            // For OPTMAX functions: no explicit hint — let LLVM decide.
         } else if (currentFuncHintUnroll_ && !addedUnrollHint && !suppressUnrollHint) {
             // @unroll on a non-suppressed loop: apply the unroll count hint.
             // For variable-trip-count loops, unroll.full is ignored by LLVM
