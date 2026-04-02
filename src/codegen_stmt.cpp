@@ -692,6 +692,8 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     bodyHasInnerLoop_ = false;
     const bool savedBodyHasNonPow2Modulo = bodyHasNonPow2Modulo_;
     bodyHasNonPow2Modulo_ = false;
+    const bool savedBodyHasNonPow2ModuloValue = bodyHasNonPow2ModuloValue_;
+    bodyHasNonPow2ModuloValue_ = false;
 
     const ScopeGuard scope(*this);
 
@@ -1043,8 +1045,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             //
             // Regular functions: cap at 4 as before.
             if (!inOptMaxFunction) {
-                const unsigned outerLoopCap =
-                    (currentFuncHintHot_ && optimizationLevel >= OptimizationLevel::O3) ? 8u : 4u;
+                const unsigned outerLoopCap = 4u;
                 loopMDs.push_back(llvm::MDNode::get(
                     *context,
                     {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
@@ -1078,16 +1079,18 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         // vectorizer proceed and produce profitable SIMD code that matches
         // clang's aggressive auto-vectorization of hot loops.
         if (currentFuncHintNoVectorize_
-                || (bodyHasNonPow2Modulo_ && !currentFuncHintVectorize_)) {
+                || (bodyHasNonPow2Modulo_ && !bodyHasNonPow2ModuloValue_
+                    && !currentFuncHintVectorize_)) {
             // Disable vectorization when:
             //  (a) @novectorize is set explicitly, OR
-            //  (b) the loop body has non-power-of-2 modular arithmetic and the
-            //      user has NOT requested vectorization with @vectorize.
-            // Reason for (b): LLVM's vectorizer converts urem to vector division
-            // sequences (urem <N x i64>) that serialise N software divisions —
-            // each ~25 cycles — making the "vectorised" loop far slower than
-            // the scalar magic-multiply path (~5 cycles).  Explicitly disabling
-            // lets the scalar loop use efficient magic-number reduction.
+            //  (b) loop has non-power-of-2 modular arithmetic used ONLY as a
+            //      branch condition (e.g. i%3==0), not as a value (i%100 for max).
+            // Vectorizing case (b) generates urem <N x i64> — N serialized
+            // ~25-cycle divisions vs scalar ~5-cycle magic-multiply reduction.
+            // Case (b) is detected via inComparisonContext_ during codegen:
+            //   bodyHasNonPow2Modulo_=true && bodyHasNonPow2ModuloValue_=false
+            // When modulo feeds into max(a%100, b%100), bodyHasNonPow2ModuloValue_
+            // is set, so we keep vectorize.enable=true for SIMD abs/min/max.
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
                            llvm::ConstantAsMetadata::get(
@@ -1205,6 +1208,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     // Restore the flag; propagate upward so enclosing for-loops also see it.
     bodyHasInnerLoop_ = savedBodyHasInnerLoop || bodyHasInnerLoop_;
     bodyHasNonPow2Modulo_ = savedBodyHasNonPow2Modulo || bodyHasNonPow2Modulo_;
+    bodyHasNonPow2ModuloValue_ = savedBodyHasNonPow2ModuloValue || bodyHasNonPow2ModuloValue_;
 }
 
 void CodeGenerator::generateForEach(ForEachStmt* stmt) {

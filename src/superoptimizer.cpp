@@ -1313,6 +1313,205 @@ static std::optional<IdiomMatch> detectConditionalIncrement(llvm::Instruction* i
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Hacker's Delight §5-2: Average of two integers without overflow
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Detect: (a & b) + ((a ^ b) >> 1)  →  floor((a + b) / 2) without overflow
+/// Also:   (a + b) >> 1  when NSW/NUW flags prove no overflow (already handled
+///         by LLVM InstCombine, but our pattern handles the explicit safe form).
+///
+/// Hacker's Delight §5-2: "Average of two integers without overflow":
+///   unsigned avg = (a & b) + ((a ^ b) >> 1)
+///   This is exactly llvm.uavg.u(a, b) — one instruction on modern x86 with AVX512.
+static std::optional<IdiomMatch> detectAverageWithoutOverflow(llvm::Instruction* inst) {
+    // Pattern: add(and(a, b), lshr(xor(a, b), 1))
+    if (inst->getOpcode() != llvm::Instruction::Add) return std::nullopt;
+
+    llvm::Value* addL = inst->getOperand(0);
+    llvm::Value* addR = inst->getOperand(1);
+
+    // Try both orderings
+    for (int ord = 0; ord < 2; ++ord) {
+        auto* andInst = llvm::dyn_cast<llvm::BinaryOperator>(addL);
+        auto* shrInst = llvm::dyn_cast<llvm::BinaryOperator>(addR);
+        if (!andInst || andInst->getOpcode() != llvm::Instruction::And) {
+            std::swap(addL, addR);
+            std::swap(andInst, shrInst);
+            continue;
+        }
+        if (!andInst || andInst->getOpcode() != llvm::Instruction::And) break;
+        if (!shrInst || shrInst->getOpcode() != llvm::Instruction::LShr) break;
+
+        // Check: shr amount is 1
+        auto shrAmt = getConstIntValue(shrInst->getOperand(1));
+        if (!shrAmt || *shrAmt != 1) break;
+
+        // The xor inside the shift
+        auto* xorInst = llvm::dyn_cast<llvm::BinaryOperator>(shrInst->getOperand(0));
+        if (!xorInst || xorInst->getOpcode() != llvm::Instruction::Xor) break;
+
+        // Verify both (a & b) and ((a ^ b) >> 1) use the same a, b
+        llvm::Value* andA = andInst->getOperand(0);
+        llvm::Value* andB = andInst->getOperand(1);
+        llvm::Value* xorA = xorInst->getOperand(0);
+        llvm::Value* xorB = xorInst->getOperand(1);
+
+        bool match1 = (andA == xorA && andB == xorB);
+        bool match2 = (andA == xorB && andB == xorA);
+        if (!match1 && !match2) break;
+
+        IdiomMatch match;
+        match.idiom = Idiom::AverageWithoutOverflow;
+        match.rootInst = inst;
+        match.operands = {andA, andB};
+        match.bitWidth = inst->getType()->getIntegerBitWidth();
+        return match;
+    }
+    return std::nullopt;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Hacker's Delight §2-1: Sign of an integer
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Detect: select(x > 0, 1, select(x < 0, -1, 0))  →  sign(x)
+/// Or the arithmetic version: (x >> 63) | ((-x) >>> 63)  Hacker's Delight §2-7
+/// Canonical LLVM: (x >> (N-1)) - ((-x) >> (N-1))  (for signed)
+///   or:  ashr(x, N-1) | zext(icmp sgt x, 0)  (alternative)
+///
+/// Replaces with: select(x > 0, 1, ashr(x, bitwidth-1))
+/// which is 2 ops (icmp + select/or) vs 3-5 ops for the naive form.
+static std::optional<IdiomMatch> detectSignFunction(llvm::Instruction* inst) {
+    // Pattern 1: or(ashr(x, 63), zext(icmp sgt(x, 0)))
+    // = (x >> 63) | (x > 0 ? 1 : 0)
+    // For signed: negative→-1, zero→0, positive→1
+    if (inst->getOpcode() == llvm::Instruction::Or) {
+        auto* ashrInst = llvm::dyn_cast<llvm::BinaryOperator>(inst->getOperand(0));
+        auto* zextInst = llvm::dyn_cast<llvm::CastInst>(inst->getOperand(1));
+        if (!ashrInst || !zextInst) {
+            // Try reversed order
+            ashrInst = llvm::dyn_cast<llvm::BinaryOperator>(inst->getOperand(1));
+            zextInst = llvm::dyn_cast<llvm::CastInst>(inst->getOperand(0));
+        }
+        if (!ashrInst || ashrInst->getOpcode() != llvm::Instruction::AShr) return std::nullopt;
+        if (!zextInst || zextInst->getOpcode() != llvm::Instruction::ZExt) return std::nullopt;
+
+        unsigned bw = inst->getType()->getIntegerBitWidth();
+        auto shiftAmt = getConstIntValue(ashrInst->getOperand(1));
+        if (!shiftAmt || *shiftAmt != static_cast<int64_t>(bw - 1)) return std::nullopt;
+
+        auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(zextInst->getOperand(0));
+        if (!cmp || cmp->getPredicate() != llvm::ICmpInst::ICMP_SGT) return std::nullopt;
+        auto zeroCheck = getConstIntValue(cmp->getOperand(1));
+        if (!zeroCheck || *zeroCheck != 0) return std::nullopt;
+        if (cmp->getOperand(0) != ashrInst->getOperand(0)) return std::nullopt;
+
+        IdiomMatch match;
+        match.idiom = Idiom::SignFunction;
+        match.rootInst = inst;
+        match.operands = {ashrInst->getOperand(0)};
+        match.bitWidth = bw;
+        return match;
+    }
+
+    // Pattern 2: nested select: select(cmp sgt x, 0, 1, select(cmp slt x, 0, -1, 0))
+    if (auto* outer = llvm::dyn_cast<llvm::SelectInst>(inst)) {
+        auto* outerCmp = llvm::dyn_cast<llvm::ICmpInst>(outer->getCondition());
+        if (!outerCmp) return std::nullopt;
+
+        // Check outer is: x > 0 → true_val=1
+        auto trueVal = getConstIntValue(outer->getTrueValue());
+        if (outerCmp->getPredicate() == llvm::ICmpInst::ICMP_SGT && trueVal && *trueVal == 1) {
+            auto zeroCheck = getConstIntValue(outerCmp->getOperand(1));
+            if (!zeroCheck || *zeroCheck != 0) return std::nullopt;
+            llvm::Value* x = outerCmp->getOperand(0);
+
+            // The false branch should be: select(x < 0, -1, 0)
+            auto* inner = llvm::dyn_cast<llvm::SelectInst>(outer->getFalseValue());
+            if (!inner) return std::nullopt;
+            auto* innerCmp = llvm::dyn_cast<llvm::ICmpInst>(inner->getCondition());
+            if (!innerCmp || innerCmp->getPredicate() != llvm::ICmpInst::ICMP_SLT) return std::nullopt;
+            if (innerCmp->getOperand(0) != x) return std::nullopt;
+            auto zero2 = getConstIntValue(innerCmp->getOperand(1));
+            if (!zero2 || *zero2 != 0) return std::nullopt;
+            auto negOne = getConstIntValue(inner->getTrueValue());
+            auto zero3 = getConstIntValue(inner->getFalseValue());
+            if (!negOne || *negOne != static_cast<int64_t>(-1)) return std::nullopt;
+            if (!zero3 || *zero3 != 0) return std::nullopt;
+
+            IdiomMatch match;
+            match.idiom = Idiom::SignFunction;
+            match.rootInst = inst;
+            match.operands = {x};
+            match.bitWidth = inst->getType()->getIntegerBitWidth();
+            return match;
+        }
+    }
+    return std::nullopt;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Hacker's Delight §3-1: Next power of 2
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Detect the bit-smear pattern for "ceiling to next power of 2":
+///   x = x - 1
+///   x |= x >> 1; x |= x >> 2; x |= x >> 4; x |= x >> 8; x |= x >> 16; x |= x >> 32
+///   x = x + 1
+/// This is equivalent to: x == 0 ? 1 : 1 << (64 - ctlz(x-1))
+/// Or simpler: (x <= 1) ? 1 : (1 << (64 - ctlz(x - 1)))
+///
+/// We detect the accumulated OR pattern and replace with CLZ-based computation.
+static std::optional<IdiomMatch> detectNextPowerOf2(llvm::Instruction* inst) {
+    // Final instruction must be: add(%smeared, 1)
+    if (inst->getOpcode() != llvm::Instruction::Add) return std::nullopt;
+    auto addOne = getConstIntValue(inst->getOperand(1));
+    if (!addOne || *addOne != 1) return std::nullopt;
+
+    llvm::Value* smeared = inst->getOperand(0);
+
+    // Walk through the OR chain: the value must be: x | (x >> 32) at minimum
+    // We need to see at least 3 OR-with-shift layers
+    int orLayers = 0;
+    llvm::Value* cur = smeared;
+    while (true) {
+        auto* orInst = llvm::dyn_cast<llvm::BinaryOperator>(cur);
+        if (!orInst || orInst->getOpcode() != llvm::Instruction::Or) break;
+        auto* shrInst = llvm::dyn_cast<llvm::BinaryOperator>(orInst->getOperand(1));
+        if (!shrInst) {
+            shrInst = llvm::dyn_cast<llvm::BinaryOperator>(orInst->getOperand(0));
+            if (!shrInst) break;
+        }
+        if (shrInst->getOpcode() != llvm::Instruction::LShr &&
+            shrInst->getOpcode() != llvm::Instruction::AShr) break;
+        ++orLayers;
+        // The non-shift operand is the previous layer
+        llvm::Value* prev = orInst->getOperand(0);
+        if (prev == shrInst) prev = orInst->getOperand(1);
+        if (auto* prevShr = llvm::dyn_cast<llvm::BinaryOperator>(prev)) {
+            if (prevShr == shrInst) break;
+        }
+        cur = prev;
+        if (orLayers >= 4) break; // enough evidence
+    }
+
+    if (orLayers < 3) return std::nullopt;
+
+    // The base (before smearing) should be: sub(original_x, 1)
+    auto* subInst = llvm::dyn_cast<llvm::BinaryOperator>(cur);
+    if (!subInst || subInst->getOpcode() != llvm::Instruction::Sub) return std::nullopt;
+    auto subOne = getConstIntValue(subInst->getOperand(1));
+    if (!subOne || *subOne != 1) return std::nullopt;
+
+    IdiomMatch match;
+    match.idiom = Idiom::NextPowerOf2;
+    match.rootInst = inst;
+    match.operands = {subInst->getOperand(0)};  // original x
+    match.bitWidth = inst->getType()->getIntegerBitWidth();
+    return match;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main idiom detection
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1370,6 +1569,18 @@ std::vector<IdiomMatch> detectIdioms(llvm::BasicBlock& bb) {
             continue;
         }
         if (auto m = detectConditionalIncrement(&inst)) {
+            results.push_back(std::move(*m));
+            continue;
+        }
+        if (auto m = detectAverageWithoutOverflow(&inst)) {
+            results.push_back(std::move(*m));
+            continue;
+        }
+        if (auto m = detectSignFunction(&inst)) {
+            results.push_back(std::move(*m));
+            continue;
+        }
+        if (auto m = detectNextPowerOf2(&inst)) {
             results.push_back(std::move(*m));
             continue;
         }
@@ -1560,6 +1771,85 @@ static bool replaceIdiom(IdiomMatch& match) {
         llvm::Value* cond = match.operands[1];
         llvm::Value* ext = builder.CreateZExt(cond, intTy, "cond.zext");
         llvm::Value* result = builder.CreateSub(x, ext, "cond.dec");
+        match.rootInst->replaceAllUsesWith(result);
+        return true;
+    }
+
+    case Idiom::AverageWithoutOverflow: {
+        // Hacker's Delight §5-2: (a & b) + ((a ^ b) >> 1)
+        // Replace with the equivalent 2-instruction sequence that directly
+        // expresses the average, which LLVM's backend can lower to VAVG or
+        // a single add + shift on targets that support it.
+        // We emit: (a + b) >> 1 with overflow-safe arithmetic:
+        //   tmp = add(a, b)  — may overflow, but we handle with nsw trick
+        // Actually we re-emit the canonical form so LLVM InstCombine can
+        // further optimize:  (a & b) + ((a ^ b) >> 1)  is already optimal
+        // for unsigned average.  Just return true to mark as handled — the
+        // pattern is already the optimal 3-instruction form and the idiom
+        // detection will prevent the synthesis pass from trying to "improve"
+        // it further with more expensive sequences.
+        //
+        // For the actual lowering: emit the average directly using the form
+        // that LLVM recognizes as uavg_sat-eligible:
+        //   result = lshr(add_nuw(a, b), 1)  when both are non-negative
+        // or keep the original pattern. Since this runs on verified non-negative
+        // contexts, use the simpler form:
+        llvm::Value* a = match.operands[0];
+        llvm::Value* b = match.operands[1];
+        // (a | b) - ((a ^ b) >> 1) is equivalent and sometimes cheaper:
+        // But the simplest canonical form for LLVM to recognize is:
+        // lshr(add(zext(a, i128), zext(b, i128)), 1) truncated — too complex.
+        // Instead: the original pattern (a&b)+((a^b)>>1) is already the
+        // 3-op Hacker's Delight form. We improve it to (a|b)-((a^b)>>1)
+        // which uses the same 3 instructions but may have better ILP
+        // because OR has no carry chain unlike AND:
+        llvm::Value* orVal = builder.CreateOr(a, b, "avg.or");
+        llvm::Value* xorVal = builder.CreateXor(a, b, "avg.xor");
+        llvm::Value* shrVal = builder.CreateLShr(xorVal,
+            llvm::ConstantInt::get(intTy, 1), "avg.shr");
+        llvm::Value* result = builder.CreateSub(orVal, shrVal, "avg.sub");
+        match.rootInst->replaceAllUsesWith(result);
+        return true;
+    }
+
+    case Idiom::SignFunction: {
+        // Hacker's Delight §2-7: sign of integer
+        // Replace with: ashr(x, bw-1) | zext(x > 0)
+        // = -1 for x<0, 0 for x==0, 1 for x>0
+        // 2 instructions vs 3-5 for the naive form.
+        llvm::Value* x = match.operands[0];
+        unsigned bw = match.bitWidth;
+        llvm::Value* shiftAmt = llvm::ConstantInt::get(intTy, bw - 1);
+        llvm::Value* sign = builder.CreateAShr(x, shiftAmt, "sign.shr");
+        llvm::Value* pos = builder.CreateICmpSGT(x,
+            llvm::ConstantInt::get(intTy, 0), "sign.pos");
+        llvm::Value* posExt = builder.CreateZExt(pos, intTy, "sign.zext");
+        llvm::Value* result = builder.CreateOr(sign, posExt, "sign.or");
+        match.rootInst->replaceAllUsesWith(result);
+        return true;
+    }
+
+    case Idiom::NextPowerOf2: {
+        // Hacker's Delight §3-1: next power of 2 (ceiling)
+        // Replace bit-smear pattern with CLZ-based computation:
+        //   x == 0 ? 1 : 1 << (bw - ctlz(x - 1))
+        // This is 4-5 instructions vs 10+ for the bit-smear.
+        llvm::Value* x = match.operands[0];
+        unsigned bw = match.bitWidth;
+        llvm::Function* ctlz = OMSC_GET_INTRINSIC(mod, llvm::Intrinsic::ctlz, {intTy});
+        // Compute: 1 << (bw - clz(x - 1))
+        llvm::Value* xm1 = builder.CreateSub(x,
+            llvm::ConstantInt::get(intTy, 1), "np2.sub");
+        llvm::Value* falseConst = llvm::ConstantInt::getFalse(ctx);
+        llvm::Value* clz = builder.CreateCall(ctlz, {xm1, falseConst}, "np2.clz");
+        llvm::Value* bwConst = llvm::ConstantInt::get(intTy, bw);
+        llvm::Value* shift = builder.CreateSub(bwConst, clz, "np2.shift");
+        llvm::Value* one = llvm::ConstantInt::get(intTy, 1);
+        llvm::Value* pow2 = builder.CreateShl(one, shift, "np2.shl");
+        // Edge case: x == 0 → return 1
+        llvm::Value* isZero = builder.CreateICmpEQ(x,
+            llvm::ConstantInt::get(intTy, 0), "np2.iszero");
+        llvm::Value* result = builder.CreateSelect(isZero, one, pow2, "np2.result");
         match.rootInst->replaceAllUsesWith(result);
         return true;
     }

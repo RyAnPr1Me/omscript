@@ -275,8 +275,8 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     }
 
     llvm::Value* right = generateExpression(expr->right.get());
-
-    // -----------------------------------------------------------------------
+    // Restore comparison context after both operands are generated.
+    inComparisonContext_ = savedInComparison;
     // SIMD vector operations — when either operand is a vector type,
     // dispatch to LLVM vector arithmetic instructions.
     // -----------------------------------------------------------------------
@@ -2209,8 +2209,17 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                             llvm::Value* cmp = builder->CreateICmpULT(
                                 result, right, "urem.ult");
                             builder->CreateCall(assumeFn, {cmp});
-                            // Flag non-pow2 for vectorization suppression
+                            // Flag non-pow2 modulo.  Also classify whether the
+                            // urem result is used as a VALUE (not just a branch
+                            // condition).  Vectorization suppression only fires
+                            // when the modulo is ONLY used for comparisons —
+                            // loops like i%3==0 — because vectorizing those
+                            // generates catastrophically slow vector division.
+                            // But loops like i%100 feeding into max(a,b) should
+                            // still be vectorized for profitable SIMD abs/min/max.
                             bodyHasNonPow2Modulo_ = true;
+                            if (!inComparisonContext_)
+                                bodyHasNonPow2ModuloValue_ = true;
                         }
                         return result;
                     }
