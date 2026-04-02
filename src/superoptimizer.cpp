@@ -11,6 +11,13 @@
 /// pipeline, targeting patterns that individual passes miss or that require
 /// cross-instruction analysis.
 
+// Apply maximum compiler optimizations to this hot path.
+// The idiom detection and algebraic simplification loops dominate
+// the post-LLVM optimization time for large programs.
+#ifdef __GNUC__
+#  pragma GCC optimize("O3,unroll-loops,tree-vectorize")
+#endif
+
 #include "superoptimizer.h"
 #include <llvm/Config/llvm-config.h>
 #include <llvm/Analysis/ValueTracking.h>
@@ -34,7 +41,9 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <future>
 #include <random>
+#include <thread>
 #include <unordered_set>
 
 namespace omscript {
@@ -2717,6 +2726,31 @@ static bool replaceIdiom(IdiomMatch& match) {
                     case 4608: simplified = builder.CreateAdd(shl(xv,12), shl(xv,9),   "mul4608"); break;
                     case 5120: simplified = builder.CreateAdd(shl(xv,12), shl(xv,10),  "mul5120"); break;
                     case 6144: simplified = builder.CreateAdd(shl(xv,12), shl(xv,11),  "mul6144"); break;
+                    // ── n×8192 family ────────────────────────────────────────────
+                    case 7168:  simplified = builder.CreateSub(shl(xv,13), shl(xv,10), "mul7168");  break;
+                    case 7680:  simplified = builder.CreateSub(shl(xv,13), shl(xv,9),  "mul7680");  break;
+                    case 7936:  simplified = builder.CreateSub(shl(xv,13), shl(xv,8),  "mul7936");  break;
+                    case 8064:  simplified = builder.CreateSub(shl(xv,13), shl(xv,7),  "mul8064");  break;
+                    case 8128:  simplified = builder.CreateSub(shl(xv,13), shl(xv,6),  "mul8128");  break;
+                    case 8160:  simplified = builder.CreateSub(shl(xv,13), shl(xv,5),  "mul8160");  break;
+                    case 8176:  simplified = builder.CreateSub(shl(xv,13), shl(xv,4),  "mul8176");  break;
+                    case 8184:  simplified = builder.CreateSub(shl(xv,13), shl(xv,3),  "mul8184");  break;
+                    case 8188:  simplified = builder.CreateSub(shl(xv,13), shl(xv,2),  "mul8188");  break;
+                    case 8190:  simplified = builder.CreateSub(shl(xv,13), shl(xv,1),  "mul8190");  break;
+                    case 8191:  simplified = builder.CreateSub(shl(xv,13), xv,          "mul8191");  break;
+                    case 8193:  simplified = builder.CreateAdd(shl(xv,13), xv,          "mul8193");  break;
+                    case 8194:  simplified = builder.CreateAdd(shl(xv,13), shl(xv,1),  "mul8194");  break;
+                    case 8196:  simplified = builder.CreateAdd(shl(xv,13), shl(xv,2),  "mul8196");  break;
+                    case 8200:  simplified = builder.CreateAdd(shl(xv,13), shl(xv,3),  "mul8200");  break;
+                    case 8208:  simplified = builder.CreateAdd(shl(xv,13), shl(xv,4),  "mul8208");  break;
+                    case 8224:  simplified = builder.CreateAdd(shl(xv,13), shl(xv,5),  "mul8224");  break;
+                    case 8256:  simplified = builder.CreateAdd(shl(xv,13), shl(xv,6),  "mul8256");  break;
+                    case 8320:  simplified = builder.CreateAdd(shl(xv,13), shl(xv,7),  "mul8320");  break;
+                    case 8448:  simplified = builder.CreateAdd(shl(xv,13), shl(xv,8),  "mul8448");  break;
+                    case 8704:  simplified = builder.CreateAdd(shl(xv,13), shl(xv,9),  "mul8704");  break;
+                    case 9216:  simplified = builder.CreateAdd(shl(xv,13), shl(xv,10), "mul9216");  break;
+                    case 10240: simplified = builder.CreateAdd(shl(xv,13), shl(xv,11), "mul10240"); break;
+                    case 12288: simplified = builder.CreateAdd(shl(xv,13), shl(xv,12), "mul12288"); break;
                     default:
                         // Negative constants: compute |cv|, strength-reduce, then negate.
                         if (*cv < -1) {
@@ -2870,6 +2904,31 @@ static bool replaceIdiom(IdiomMatch& match) {
                             case 4608: posRep = builder.CreateAdd(shl(xv,12), shl(xv,9),   "mulp4608"); break;
                             case 5120: posRep = builder.CreateAdd(shl(xv,12), shl(xv,10),  "mulp5120"); break;
                             case 6144: posRep = builder.CreateAdd(shl(xv,12), shl(xv,11),  "mulp6144"); break;
+                            // ── n×8192 family ──────────────────────────────────────────
+                            case 7168:  posRep = builder.CreateSub(shl(xv,13), shl(xv,10), "mulp7168");  break;
+                            case 7680:  posRep = builder.CreateSub(shl(xv,13), shl(xv,9),  "mulp7680");  break;
+                            case 7936:  posRep = builder.CreateSub(shl(xv,13), shl(xv,8),  "mulp7936");  break;
+                            case 8064:  posRep = builder.CreateSub(shl(xv,13), shl(xv,7),  "mulp8064");  break;
+                            case 8128:  posRep = builder.CreateSub(shl(xv,13), shl(xv,6),  "mulp8128");  break;
+                            case 8160:  posRep = builder.CreateSub(shl(xv,13), shl(xv,5),  "mulp8160");  break;
+                            case 8176:  posRep = builder.CreateSub(shl(xv,13), shl(xv,4),  "mulp8176");  break;
+                            case 8184:  posRep = builder.CreateSub(shl(xv,13), shl(xv,3),  "mulp8184");  break;
+                            case 8188:  posRep = builder.CreateSub(shl(xv,13), shl(xv,2),  "mulp8188");  break;
+                            case 8190:  posRep = builder.CreateSub(shl(xv,13), shl(xv,1),  "mulp8190");  break;
+                            case 8191:  posRep = builder.CreateSub(shl(xv,13), xv,          "mulp8191");  break;
+                            case 8193:  posRep = builder.CreateAdd(shl(xv,13), xv,          "mulp8193");  break;
+                            case 8194:  posRep = builder.CreateAdd(shl(xv,13), shl(xv,1),  "mulp8194");  break;
+                            case 8196:  posRep = builder.CreateAdd(shl(xv,13), shl(xv,2),  "mulp8196");  break;
+                            case 8200:  posRep = builder.CreateAdd(shl(xv,13), shl(xv,3),  "mulp8200");  break;
+                            case 8208:  posRep = builder.CreateAdd(shl(xv,13), shl(xv,4),  "mulp8208");  break;
+                            case 8224:  posRep = builder.CreateAdd(shl(xv,13), shl(xv,5),  "mulp8224");  break;
+                            case 8256:  posRep = builder.CreateAdd(shl(xv,13), shl(xv,6),  "mulp8256");  break;
+                            case 8320:  posRep = builder.CreateAdd(shl(xv,13), shl(xv,7),  "mulp8320");  break;
+                            case 8448:  posRep = builder.CreateAdd(shl(xv,13), shl(xv,8),  "mulp8448");  break;
+                            case 8704:  posRep = builder.CreateAdd(shl(xv,13), shl(xv,9),  "mulp8704");  break;
+                            case 9216:  posRep = builder.CreateAdd(shl(xv,13), shl(xv,10), "mulp9216");  break;
+                            case 10240: posRep = builder.CreateAdd(shl(xv,13), shl(xv,11), "mulp10240"); break;
+                            case 12288: posRep = builder.CreateAdd(shl(xv,13), shl(xv,12), "mulp12288"); break;
                             // 3-instruction negative sequences (new cases not covered above)
                             case 37: posRep = builder.CreateAdd(builder.CreateAdd(shl(xv,5), shl(xv,2)), xv, "mulp37"); break;
                             case 41: posRep = builder.CreateAdd(builder.CreateAdd(shl(xv,5), shl(xv,3)), xv, "mulp41"); break;
@@ -4488,13 +4547,52 @@ SuperoptimizerStats superoptimizeFunction(llvm::Function& func,
 SuperoptimizerStats superoptimizeModule(llvm::Module& module,
                                          const SuperoptimizerConfig& config) {
     SuperoptimizerStats total;
+
+    // Collect all non-declaration functions first to enable parallel dispatch.
+    std::vector<llvm::Function*> funcs;
+    funcs.reserve(32);
     for (auto& func : module) {
-        auto stats = superoptimizeFunction(func, config);
-        total.idiomsReplaced += stats.idiomsReplaced;
-        total.synthReplacements += stats.synthReplacements;
-        total.branchesSimplified += stats.branchesSimplified;
-        total.algebraicSimplified += stats.algebraicSimplified;
-        total.deadCodeEliminated += stats.deadCodeEliminated;
+        if (!func.isDeclaration())
+            funcs.push_back(&func);
+    }
+
+    // Parallel threshold: launch async tasks only when there are enough
+    // functions to amortise the thread-creation overhead (≥4 functions and
+    // more than one hardware thread available).  Below this threshold the
+    // sequential path is faster.
+    const unsigned hwThreads = std::max(1u, std::thread::hardware_concurrency());
+    const bool runParallel = funcs.size() >= 4 && hwThreads >= 2;
+
+    if (runParallel) {
+        // Launch one future per function so each function is processed on a
+        // worker thread independently.  LLVM IR operations on *different*
+        // functions are disjoint (separate basic-block / instruction lists),
+        // so concurrent modification is safe.  IRBuilder objects are created
+        // locally inside superoptimizeFunction which also makes them
+        // thread-local by construction.
+        std::vector<std::future<SuperoptimizerStats>> futures;
+        futures.reserve(funcs.size());
+        for (llvm::Function* fn : funcs) {
+            futures.push_back(std::async(std::launch::async,
+                [fn, &config]() { return superoptimizeFunction(*fn, config); }));
+        }
+        for (auto& fut : futures) {
+            auto stats = fut.get();
+            total.idiomsReplaced     += stats.idiomsReplaced;
+            total.synthReplacements  += stats.synthReplacements;
+            total.branchesSimplified += stats.branchesSimplified;
+            total.algebraicSimplified += stats.algebraicSimplified;
+            total.deadCodeEliminated += stats.deadCodeEliminated;
+        }
+    } else {
+        for (llvm::Function* fn : funcs) {
+            auto stats = superoptimizeFunction(*fn, config);
+            total.idiomsReplaced     += stats.idiomsReplaced;
+            total.synthReplacements  += stats.synthReplacements;
+            total.branchesSimplified += stats.branchesSimplified;
+            total.algebraicSimplified += stats.algebraicSimplified;
+            total.deadCodeEliminated += stats.deadCodeEliminated;
+        }
     }
     return total;
 }

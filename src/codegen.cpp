@@ -2846,6 +2846,34 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         }
     }
 
+    if (func->hintMinSize) {
+        // @minsize: optimize for minimum code size.  Maps to LLVM's OptimizeForSize
+        // + MinSize attributes which instruct the backend to prefer smaller code
+        // sequences over faster ones (fewer bytes, not fewer cycles).  Useful for
+        // rarely-called functions or embedded/size-critical scenarios.
+        function->addFnAttr(llvm::Attribute::OptimizeForSize);
+        function->addFnAttr(llvm::Attribute::MinSize);
+    }
+    if (func->hintOptNone) {
+        // @optnone: disable all optimizations for this function.  Maps to LLVM's
+        // OptimizeNone attribute which completely bypasses the optimizer for the
+        // function.  Useful for debugging (keep variable values observable in a
+        // debugger), testing (force a specific code path without optimization),
+        // or isolating performance regressions.
+        function->addFnAttr(llvm::Attribute::OptimizeNone);
+        // OptimizeNone requires NoInline per LLVM verifier rules.
+        function->addFnAttr(llvm::Attribute::NoInline);
+        function->removeFnAttr(llvm::Attribute::AlwaysInline);
+        function->removeFnAttr(llvm::Attribute::InlineHint);
+    }
+    if (func->hintNoUnwind) {
+        // @nounwind: function never throws C++ exceptions.  Maps to LLVM's
+        // NoUnwind attribute which enables the compiler to omit exception-handling
+        // (unwind) tables for this function, saving code size and allowing
+        // more aggressive inlining across call boundaries.
+        function->addFnAttr(llvm::Attribute::NoUnwind);
+    }
+
     // In OPTMAX functions, mark all parameters noalias and add WillReturn.
     // The OPTMAX annotation is the user's compile-time guarantee that the
     // function is safe and well-behaved, enabling maximum optimization.

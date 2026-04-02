@@ -691,6 +691,9 @@ Functions can be annotated with `@` directives placed before the `fn` keyword. T
 | `@nounroll` | `llvm.loop.unroll.disable` | Disable loop unrolling in this function — reduces code size, I-cache pressure |
 | `@vectorize` | `llvm.loop.vectorize.enable` | Enable loop vectorization for all loops in this function |
 | `@novectorize` | `llvm.loop.vectorize.enable=false` | Disable loop vectorization for all loops in this function |
+| `@minsize` | `optsize` + `minsize` | Optimize for minimum code size — prefer smaller sequences over faster ones |
+| `@optnone` | `optnone` + `noinline` | Disable all optimizations — useful for debugging, keeps variables observable |
+| `@nounwind` | `nounwind` | Function never throws exceptions — omits unwind tables, improves inlining |
 
 ```javascript
 @inline
@@ -755,6 +758,26 @@ fn scalar_work(n: int) -> int {
     }
     return total;
 }
+
+@minsize
+fn rarely_called_helper(x: int) -> int {
+    // Optimize for binary size — useful for cold paths in size-sensitive builds
+    return x * 7 + x * 3;
+}
+
+@optnone
+fn debug_me(x: int) -> int {
+    // All optimizations disabled — variables remain visible in a debugger
+    var y: int = x + 1;
+    var z: int = y * 2;
+    return z;
+}
+
+@nounwind @pure
+fn safe_hash(x: int) -> int {
+    // Never throws, no side effects — enables aggressive inlining and hoisting
+    return x * 2654435761;
+}
 ```
 
 **Notes:**
@@ -764,6 +787,9 @@ fn scalar_work(n: int) -> int {
 - `@static` changes the function's linkage to internal, which is only meaningful for AOT compilation — it has no effect in JIT mode.
 - `@unroll` and `@nounroll` apply to **all** loops within the annotated function. `@unroll` is most effective on small constant-trip-count loops; on large or variable-trip-count loops, the optimizer may ignore the hint if full unrolling would exceed code-size thresholds.
 - `@vectorize` and `@novectorize` apply to **all** loops within the annotated function. `@vectorize` hints the LLVM vectorizer to attempt vectorization even when the cost model is uncertain. `@novectorize` prevents vectorization when it hurts performance (e.g., small iteration counts, complex control flow, or high register pressure).
+- `@minsize` combines LLVM's `OptimizeForSize` and `MinSize` attributes. The backend selects smaller code sequences (e.g., shorter immediate encodings, fewer instructions) at the cost of some speed. Useful for rarely-called utility functions or memory-constrained targets.
+- `@optnone` completely bypasses the optimizer for the annotated function. The LLVM verifier requires `noinline` alongside `optnone`, so `@inline` is ignored when `@optnone` is present. Use for isolating performance regressions or keeping variables visible during debugging.
+- `@nounwind` marks the function as never propagating C++ exceptions. This lets the compiler omit DWARF unwind tables for the function, reducing binary size and allowing the inliner to skip exception-routing overhead at call sites.
 
 ### 6.9 Parameter Annotations
 

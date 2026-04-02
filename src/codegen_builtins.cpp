@@ -3,6 +3,13 @@
 #include "hardware_graph.h"
 #include <cstdlib>
 #include <iostream>
+
+// Apply maximum compiler optimizations to this hot path.
+// Builtin codegen covers array operations, string handling, and math builtins
+// which are called very frequently and contain tight inner loops.
+#ifdef __GNUC__
+#  pragma GCC optimize("O3,unroll-loops,tree-vectorize")
+#endif
 #include <llvm/Config/llvm-config.h>
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/MDBuilder.h>

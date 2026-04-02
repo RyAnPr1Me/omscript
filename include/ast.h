@@ -508,6 +508,9 @@ class FunctionDecl : public ASTNode {
     bool hintNoVectorize = false; ///< @novectorize — disable loop vectorization for all loops
     bool hintParallelize = false;   ///< @parallel — enable auto-parallelization for all loops
     bool hintNoParallelize = false; ///< @noparallel — disable auto-parallelization for all loops
+    bool hintMinSize = false;     ///< @minsize — optimize for minimum code size
+    bool hintOptNone = false;     ///< @optnone — disable all optimizations (useful for debugging)
+    bool hintNoUnwind = false;    ///< @nounwind — function never throws C++ exceptions
 
     FunctionDecl(const std::string& n, std::vector<std::string> tps, std::vector<Parameter> params, std::unique_ptr<BlockStmt> b, bool optMax = false, const std::string& retType = "")
         : ASTNode(ASTNodeType::FUNCTION), name(n), typeParams(std::move(tps)), parameters(std::move(params)), body(std::move(b)), isOptMax(optMax), returnType(retType) {
