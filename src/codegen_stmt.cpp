@@ -1117,6 +1117,10 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         const bool deeplyNested = loopNestDepth_ >= 2;
         const bool vectorizePreferred = currentFuncHintVectorize_ && !bodyHasInnerLoop_;
         const bool suppressUnrollHint = deeplyNested || vectorizePreferred;
+        // Comparison-context non-pow2 modulo loops (e.g. i%3==0): suppress
+        // distribute.enable, parallel_accesses, and cap OPTMAX unroll at 8x.
+        // Used in multiple places below so defined early.
+        const bool cmpModuloLoop = bodyHasNonPow2Modulo_ && !bodyHasNonPow2ModuloValue_;
 
         if (currentFuncHintNoUnroll_) {
             loopMDs.push_back(llvm::MDNode::get(
@@ -1202,30 +1206,40 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             // register PHI (1 cycle per element), matching C's recurrence handling.
             //
             // EXCEPTION: loops where a non-pow2 modulo result is stored to an array
-            // (bodyHasNonPow2ModuloArrayStore_=true).  Here, providing an explicit
-            // unroll.count=4 interferes with LLVM's O3 cost-model-driven unroller:
-            // the hint causes the unroll pass to set up divisibility scaffolding
-            // (an epilogue loop) but then the i128 magic-multiply cost model causes
-            // it to abort the body unrolling, leaving a 1x scalar loop instead.
-            // Without the explicit hint, LLVM's O3 cost-model unroller applies the
-            // same analysis it uses for equivalent C code and unrolls more
-            // aggressively (matching clang's 8x unrolling for modulo array-init loops).
-            const bool modArrayStore = bodyHasNonPow2ModuloArrayStore_
-                && optimizationLevel >= OptimizationLevel::O3;
-            if (!modArrayStore) {
-                static constexpr unsigned kOptMaxUnrollCount = 16;
-                static constexpr unsigned kDefaultUnrollCount = 4;
-                const unsigned unrollCount =
-                    bodyHasBackwardArrayRef_ ? kDefaultUnrollCount
-                    : (inOptMaxFunction ? kOptMaxUnrollCount : kDefaultUnrollCount);
-                loopMDs.push_back(llvm::MDNode::get(
-                    *context,
-                    {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
-                     llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
-                         llvm::Type::getInt32Ty(*context), unrollCount))}));
-            }
-            // modArrayStore: emit no unroll hint — let LLVM's O3 cost-model unroller
-            // decide the factor freely, matching how clang handles the equivalent C loop.
+             // (bodyHasNonPow2ModuloArrayStore_=true).  Here, providing an explicit
+             // unroll.count=4 interferes with LLVM's O3 cost-model-driven unroller:
+             // the hint causes the unroll pass to set up divisibility scaffolding
+             // (an epilogue loop) but then the i128 magic-multiply cost model causes
+             // it to abort the body unrolling, leaving a 1x scalar loop instead.
+             // Without the explicit hint, LLVM's O3 cost-model unroller applies the
+             // same analysis it uses for equivalent C code and unrolls more
+             // aggressively (matching clang's 8x unrolling for modulo array-init loops).
+             //
+             // EXCEPTION: loops with comparison-context non-pow2 modulo (e.g. i%3==0).
+             // OPTMAX would normally use unroll.count=16, but that creates 18 live
+             // PHI variables per loop header (16 LSR IVs + acc + niter), exceeding
+             // x86-64's 15 usable GP registers and causing 3+ register spills.
+             // Capping at 8 (matching clang's behaviour for equivalent C loops) reduces
+             // PHI count to 10, eliminating spills and matching C's performance.
+             const bool modArrayStore = bodyHasNonPow2ModuloArrayStore_
+                 && optimizationLevel >= OptimizationLevel::O3;
+             if (!modArrayStore) {
+                 static constexpr unsigned kOptMaxUnrollCount = 16;
+                 static constexpr unsigned kOptMaxCmpModuloUnrollCount = 8;
+                 static constexpr unsigned kDefaultUnrollCount = 4;
+                 const unsigned unrollCount =
+                     bodyHasBackwardArrayRef_ ? kDefaultUnrollCount
+                     : (inOptMaxFunction
+                         ? (cmpModuloLoop ? kOptMaxCmpModuloUnrollCount : kOptMaxUnrollCount)
+                         : kDefaultUnrollCount);
+                 loopMDs.push_back(llvm::MDNode::get(
+                     *context,
+                     {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
+                      llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                          llvm::Type::getInt32Ty(*context), unrollCount))}));
+             }
+             // modArrayStore: emit no unroll hint — let LLVM's O3 cost-model unroller
+             // decide the factor freely, matching how clang handles the equivalent C loop.
         }
         // @vectorize / @novectorize: per-function loop vectorization hints.
         // At O3, also enable vectorization for @hot functions even without
@@ -1295,9 +1309,14 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         //   → Loop 2: for i in 0...n { sum+=arr[i] }  (reduction)
         // At O2, enable distribution only for @hot functions since the
         // analysis cost is non-trivial for cold code.
+        // Loops with comparison-context non-pow2 modulo (e.g. i%3==0) must
+        // also suppress distribution.  LoopDistribute finds nothing to split
+        // (no arrays), but marks the loop with unroll.disable after failing,
+        // clobbering the unroll.count hint and leaving a 1x scalar loop.
         if (stepKnownPositive && !deeplyNested && !bodyHasInnerLoop_
             && !bodyHasBackwardArrayRef_
             && !bodyHasNonPow2ModuloArrayStore_
+            && !cmpModuloLoop
             && (optimizationLevel >= OptimizationLevel::O3
                 || (optimizationLevel >= OptimizationLevel::O2 && currentFuncHintHot_))) {
             loopMDs.push_back(llvm::MDNode::get(
@@ -1381,6 +1400,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             && !bodyHasInnerLoop_
             && !bodyHasBackwardArrayRef_
             && !bodyHasNonPow2ModuloArrayStore_
+            && !cmpModuloLoop
             && (currentFuncHintParallelize_
                 || currentFuncHintHot_
                 || optimizationLevel >= OptimizationLevel::O3);
