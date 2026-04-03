@@ -753,6 +753,8 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     bodyHasNonPow2Modulo_ = false;
     const bool savedBodyHasNonPow2ModuloValue = bodyHasNonPow2ModuloValue_;
     bodyHasNonPow2ModuloValue_ = false;
+    const bool savedBodyHasNonPow2ModuloArrayStore = bodyHasNonPow2ModuloArrayStore_;
+    bodyHasNonPow2ModuloArrayStore_ = false;
     const bool savedBodyHasBackwardArrayRef = bodyHasBackwardArrayRef_;
     bodyHasBackwardArrayRef_ = false;
     // Track this loop's iterator name unconditionally (used to detect backward
@@ -1219,7 +1221,8 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         // clang's aggressive auto-vectorization of hot loops.
         if (currentFuncHintNoVectorize_
                 || (bodyHasNonPow2Modulo_ && !bodyHasNonPow2ModuloValue_
-                    && !currentFuncHintVectorize_)) {
+                    && !currentFuncHintVectorize_)
+                || (bodyHasNonPow2ModuloArrayStore_ && !currentFuncHintVectorize_)) {
             // Disable vectorization when:
             //  (a) @novectorize is set explicitly, OR
             //  (b) loop has non-power-of-2 modular arithmetic used ONLY as a
@@ -1230,6 +1233,12 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             //   bodyHasNonPow2Modulo_=true && bodyHasNonPow2ModuloValue_=false
             // When modulo feeds into max(a%100, b%100), bodyHasNonPow2ModuloValue_
             // is set, so we keep vectorize.enable=true for SIMD abs/min/max.
+            //  (c) loop stores modulo result to an array element (arr[i]=val%K):
+            //      x86-64 has no native 64-bit vector division — the vectorizer
+            //      scalarizes urem <N x i64> to N sequential extract/divide/insert
+            //      sequences.  Scalar unrolled code achieves better ILP because
+            //      the CPU's OOO engine can pipeline N independent magic-multiply
+            //      chains simultaneously, while the scalar extract overhead is zero.
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
                            llvm::ConstantAsMetadata::get(
@@ -1237,6 +1246,10 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         } else if (currentFuncHintVectorize_
                    || (optimizationLevel >= OptimizationLevel::O3
                        && !bodyHasInnerLoop_ && stepKnownPositive)) {
+            // Force-enable vectorization at O3 for hot loops.
+            // Note: loops with non-power-of-2 modulo already have vectorize=0
+            // emitted above (when used as condition) or rely on LLVM cost model
+            // (when used as a value, e.g. for SIMD min/max patterns).
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
                            llvm::ConstantAsMetadata::get(
@@ -1377,6 +1390,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     bodyHasInnerLoop_ = savedBodyHasInnerLoop || bodyHasInnerLoop_;
     bodyHasNonPow2Modulo_ = savedBodyHasNonPow2Modulo || bodyHasNonPow2Modulo_;
     bodyHasNonPow2ModuloValue_ = savedBodyHasNonPow2ModuloValue || bodyHasNonPow2ModuloValue_;
+    bodyHasNonPow2ModuloArrayStore_ = savedBodyHasNonPow2ModuloArrayStore || bodyHasNonPow2ModuloArrayStore_;
     // Backward refs don't propagate upward: a backward access in an inner loop
     // doesn't imply the outer loop's iterations are dependent.
     bodyHasBackwardArrayRef_ = savedBodyHasBackwardArrayRef;

@@ -449,6 +449,8 @@ class CodeGenerator {
     bool bodyHasInnerLoop_ = false; ///< Set when a while/for loop is found inside a for-loop body
     bool bodyHasNonPow2Modulo_ = false; ///< Set when a for-loop body has non-power-of-2 modulo
     bool bodyHasNonPow2ModuloValue_ = false; ///< Set when non-pow2 modulo result is used as a VALUE (not just in a comparison). Combined with bodyHasNonPow2Modulo_, suppresses vectorize.enable=false when true — the profitable abs/min/max vectorization outweighs the cost of vector urem.
+    bool bodyHasNonPow2ModuloArrayStore_ = false; ///< Set when a non-pow2 modulo result is stored to an array element (arr[i] = expr%K). Disables forced vectorization because urem <N x i64> scalarizes on x86-64, and the extra extract/insert round-trip is slower than scalar ILP from unrolled code.
+    bool inIndexAssignValueContext_ = false; ///< True while generating the VALUE expression of an IndexAssignExpr (arr[i] = VALUE). Used to detect modulo operations that produce array-element values, which enables bodyHasNonPow2ModuloArrayStore_ tracking.
     bool bodyHasBackwardArrayRef_ = false; ///< Set when a for-loop body has a backward array reference (arr[i-K] where K>0). Suppresses parallel_accesses metadata — such loops have loop-carried dependencies that prevent LLVM from promoting arr[i-1] to a register accumulator.
     std::unordered_set<std::string> loopIterVars_; ///< Names of all active for-loop iterators (populated unconditionally, used to detect backward array refs at any optimization level).
     bool inComparisonContext_ = false; ///< True while generating operands of == != < > <= >= (used to classify urem as "for branch" vs "for value")

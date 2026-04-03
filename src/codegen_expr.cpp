@@ -2371,8 +2371,18 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                             // But loops like i%100 feeding into max(a,b) should
                             // still be vectorized for profitable SIMD abs/min/max.
                             bodyHasNonPow2Modulo_ = true;
-                            if (!inComparisonContext_)
+                            if (!inComparisonContext_) {
                                 bodyHasNonPow2ModuloValue_ = true;
+                                // Detect the pattern arr[i] = expr % K: modulo result
+                                // stored directly to an array element.  For this case
+                                // x86-64 has no native 64-bit vector division, so
+                                // urem <N x i64> is scalarized — the extra extract/
+                                // insert round-trip costs more than scalar ILP from
+                                // an unrolled loop.  Set the flag so generateFor can
+                                // disable forced vectorization for this loop.
+                                if (inIndexAssignValueContext_)
+                                    bodyHasNonPow2ModuloArrayStore_ = true;
+                            }
                         }
                         return result;
                     }
@@ -3875,7 +3885,16 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
 
     llvm::Value* arrVal = generateExpression(expr->array.get());
     llvm::Value* idxVal = generateExpression(expr->index.get());
+    // Track whether the value expression contains a non-pow2 modulo being
+    // stored to an array element.  This is the "urem <N x i64> scalarizes"
+    // pattern: arr[i] = (i * K + C) % M where M is a non-power-of-two.
+    // Set the context flag before generating the value so the modulo
+    // detection code in generateBinary can check it.  Only set for array
+    // stores (not string stores); isStringExpr is cheap (AST-only check).
+    const bool savedInIndexAssignValue = inIndexAssignValueContext_;
+    inIndexAssignValueContext_ = !isStringExpr(expr->array.get());
     llvm::Value* newVal = generateExpression(expr->value.get());
+    inIndexAssignValueContext_ = savedInIndexAssignValue;
     newVal = toDefaultType(newVal);
     idxVal = toDefaultType(idxVal);
 
