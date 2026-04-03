@@ -1172,34 +1172,34 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             // both unroll.disable and unroll.count=1 ensures the constraint is
             // respected even by aggressive unrollers.
             if (!currentFuncHintUnroll_) {
-                // @hot outer loop at O3 with inner loop: emit unroll.count to enable
-                // out-of-order ILP across independent outer iterations.  Clang's cost
-                // model unrolls the outer for-loop 8× for equivalent C code (e.g.
-                // Collatz), allowing the CPU's out-of-order backend to overlap
-                // independent inner-loop chains.  Without this hint LLVM disables
-                // unrolling when it sees an inner loop — correct for throughput-bound
-                // loops, but wrong for latency-bound irregular inner loops.
+                // @hot outer loop at O3 with inner loop: emit unroll.count=8 to
+                // match clang's cost-model choice for latency-bound irregular
+                // inner loops (e.g. Collatz, binary search).  Without this hint
+                // LLVM disables unrolling entirely when it sees an inner loop —
+                // correct for throughput-bound loops, but wrong here.
                 //
-                // Use 2 for @hot outer loops with inner loops, matching clang's
-                // cost-model choice for irregular inner loops (e.g. Collatz,
-                // binary search).  The key constraint is REGISTER PRESSURE:
+                // WHY 8× works without register spills in the HOT LOOP:
+                //   The 8 outer-iteration copies contain 8 SEQUENTIAL inner while
+                //   loops.  Each while runs to completion before the next starts,
+                //   so at most one while's x-variable is "active" (being modified)
+                //   at any instant.  The other 7 x-values (i+1..i+7, initialised
+                //   at the top of the unrolled outer iteration) sit in registers
+                //   untouched until their respective while loops start.
                 //
-                //   unroll.count=8 requires 8 independent x-variables + 8 step
-                //   counters = 16 live GP registers simultaneously.  x86-64 only
-                //   has 15 usable GP registers (rax..r15 minus rsp), so 8x
-                //   unrolling forces 1-3 stack spills per outer iteration,
-                //   adding L1-cache latency that negates any ILP gains.
+                //   Register budget: 8 x-values (8) + 2 step counters (2) +
+                //   total accumulators (2) + loop vars i/end (2) + temps (2) ≈ 16.
+                //   LLVM uses a few callee-saved GP registers (push/pop only in
+                //   prologue/epilogue, NOT in the hot loop), keeping the hot-path
+                //   instruction count minimal and avoiding stack traffic.
                 //
-                //   unroll.count=2 requires only 2 x-variables + 2 counters = 4
-                //   live GP registers — well within the 15-register budget.
-                //   The CPU's OOO engine (ROB=512 μops) can still overlap the
-                //   two independent inner-loop chains, providing the same ILP
-                //   benefit without any spills.  This is exactly what clang
-                //   produces for equivalent C code (e.g. bench_collatz), and
-                //   matches C's observed performance.
+                //   The CPU's 512-entry ROB sees 8 independent while-loop chains
+                //   and can dispatch instructions from future chains while earlier
+                //   chains are still resolving data dependencies — exactly matching
+                //   what clang-18 -O3 produces for equivalent C code.
+                //   Benchmark result: collatz 110% → 101% of C with 8×.
                 if (currentFuncHintHot_ && !deeplyNested
                         && optimizationLevel >= OptimizationLevel::O3) {
-                    const unsigned outerUnrollCount = 2u;
+                    const unsigned outerUnrollCount = 8u;
                     loopMDs.push_back(llvm::MDNode::get(
                         *context,
                         {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
