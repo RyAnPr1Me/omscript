@@ -1223,23 +1223,29 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
              // PHI count to 10, eliminating spills and matching C's performance.
              const bool modArrayStore = bodyHasNonPow2ModuloArrayStore_
                  && optimizationLevel >= OptimizationLevel::O3;
-             if (!modArrayStore) {
+             // Backward array refs (arr[i] += arr[i-1]): serial loop-carried dependency.
+             // Suppress explicit unroll hint at O3 — LLVM's cost-model freely chooses
+             // the optimal factor (typically 8x for prefix-scan shapes), matching C.
+             // An explicit unroll.count=4 would under-constrain at O3 where integrated
+             // compilation pressure causes the backend to honour the hint literally.
+             const bool suppressUnrollForBackward = bodyHasBackwardArrayRef_
+                 && optimizationLevel >= OptimizationLevel::O3;
+             if (!modArrayStore && !suppressUnrollForBackward) {
                  static constexpr unsigned kOptMaxUnrollCount = 16;
                  static constexpr unsigned kOptMaxCmpModuloUnrollCount = 8;
                  static constexpr unsigned kDefaultUnrollCount = 4;
                  const unsigned unrollCount =
-                     bodyHasBackwardArrayRef_ ? kDefaultUnrollCount
-                     : (inOptMaxFunction
-                         ? (cmpModuloLoop ? kOptMaxCmpModuloUnrollCount : kOptMaxUnrollCount)
-                         : kDefaultUnrollCount);
+                     inOptMaxFunction
+                     ? (cmpModuloLoop ? kOptMaxCmpModuloUnrollCount : kOptMaxUnrollCount)
+                     : kDefaultUnrollCount;
                  loopMDs.push_back(llvm::MDNode::get(
                      *context,
                      {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
                       llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
                           llvm::Type::getInt32Ty(*context), unrollCount))}));
              }
-             // modArrayStore: emit no unroll hint — let LLVM's O3 cost-model unroller
-             // decide the factor freely, matching how clang handles the equivalent C loop.
+             // modArrayStore / suppressUnrollForBackward: emit no unroll hint — let
+             // LLVM's O3 cost-model unroller decide freely, matching clang.
         }
         // @vectorize / @novectorize: per-function loop vectorization hints.
         // At O3, also enable vectorization for @hot functions even without
