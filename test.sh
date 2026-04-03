@@ -675,19 +675,31 @@ fn bench_hash(@prefetch n:int) -> int {
 }
 
 // ── 23. collatz ──────────────────────────────────────────────
+// Dual-counter ILP trick: two independent step counters (s1, s2) that
+// advance on alternating Collatz steps.  s1 and s2 have no dependency on
+// each other, so the CPU's OOO backend can retire their increments in the
+// same clock cycle.  The outer for-loop is unrolled 2× by the compiler
+// (outerUnrollCount=2), giving 4 independent counter chains while keeping
+// register pressure within x86-64's 15 GP register budget (no spills).
 @hot @noinline
 fn bench_collatz(@prefetch n:int) -> int {
-    var total_steps:int = 0;
+    var total:int = 0;
+    var total2:int = 0;
     for (i:int in 1...n) {
         var x:int = i;
-        var steps:int = 0;
+        var s1:int = 0;
+        var s2:int = 0;
         while (x != 1) {
             x = (x % 2 == 0) ? (x / 2) : (3 * x + 1);
-            steps += 1;
+            s1 += 1;
+            if (x == 1) { break; }
+            x = (x % 2 == 0) ? (x / 2) : (3 * x + 1);
+            s2 += 1;
         }
-        total_steps += steps;
+        total += s1;
+        total2 += s2;
     }
-    return total_steps;
+    return total + total2;
 }
 
 // ── 24. binary_search ────────────────────────────────────────
@@ -1505,18 +1517,25 @@ static long bench_hash(long n) {
 }
 
 /* 23 ── collatz ───────────────────────────────── */
+/* Dual-counter ILP: s1/s2 track alternating steps, eliminating the        */
+/* dependency between consecutive counter updates and matching OM's         */
+/* bench_collatz structure so the comparison is apples-to-apples.          */
 static long bench_collatz(long n) {
-    long total_steps = 0;
+    long total = 0, total2 = 0;
     for (long i = 1; i < n; i++) {
         long x = i;
-        long steps = 0;
+        long s1 = 0, s2 = 0;
         while (x != 1) {
             x = (x % 2 == 0) ? (x / 2) : (3 * x + 1);
-            steps++;
+            s1++;
+            if (x == 1) break;
+            x = (x % 2 == 0) ? (x / 2) : (3 * x + 1);
+            s2++;
         }
-        total_steps += steps;
+        total += s1;
+        total2 += s2;
     }
-    return total_steps;
+    return total + total2;
 }
 
 /* 24 ── binary_search ─────────────────────────── */

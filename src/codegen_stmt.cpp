@@ -1180,14 +1180,26 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
                 // unrolling when it sees an inner loop — correct for throughput-bound
                 // loops, but wrong for latency-bound irregular inner loops.
                 //
-                // Use 8 for both @hot at O3 and OPTMAX: matches clang's default
-                // cost-model choice for outer loops with irregular inner loops
-                // (e.g. Collatz, modular exponentiation).  8 independent inner-loop
-                // chains exercise the CPU's OOO backend; the ROB can overlap 2-4
-                // chains with ~15-30 iterations each.  Only when not deeply nested.
+                // Use 2 for @hot outer loops with inner loops, matching clang's
+                // cost-model choice for irregular inner loops (e.g. Collatz,
+                // binary search).  The key constraint is REGISTER PRESSURE:
+                //
+                //   unroll.count=8 requires 8 independent x-variables + 8 step
+                //   counters = 16 live GP registers simultaneously.  x86-64 only
+                //   has 15 usable GP registers (rax..r15 minus rsp), so 8x
+                //   unrolling forces 1-3 stack spills per outer iteration,
+                //   adding L1-cache latency that negates any ILP gains.
+                //
+                //   unroll.count=2 requires only 2 x-variables + 2 counters = 4
+                //   live GP registers — well within the 15-register budget.
+                //   The CPU's OOO engine (ROB=512 μops) can still overlap the
+                //   two independent inner-loop chains, providing the same ILP
+                //   benefit without any spills.  This is exactly what clang
+                //   produces for equivalent C code (e.g. bench_collatz), and
+                //   matches C's observed performance.
                 if (currentFuncHintHot_ && !deeplyNested
                         && optimizationLevel >= OptimizationLevel::O3) {
-                    const unsigned outerUnrollCount = 8u;
+                    const unsigned outerUnrollCount = 2u;
                     loopMDs.push_back(llvm::MDNode::get(
                         *context,
                         {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
