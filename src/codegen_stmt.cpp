@@ -1200,16 +1200,32 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             // per hop × 16 hops = 64 cycles per 16 elements).  Capping at 4 gives
             // LLVM the short chain it needs to promote the running value to a
             // register PHI (1 cycle per element), matching C's recurrence handling.
-            static constexpr unsigned kOptMaxUnrollCount = 16;
-            static constexpr unsigned kDefaultUnrollCount = 4;
-            const unsigned unrollCount =
-                bodyHasBackwardArrayRef_ ? kDefaultUnrollCount
-                : (inOptMaxFunction ? kOptMaxUnrollCount : kDefaultUnrollCount);
-            loopMDs.push_back(llvm::MDNode::get(
-                *context,
-                {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
-                 llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
-                     llvm::Type::getInt32Ty(*context), unrollCount))}));
+            //
+            // EXCEPTION: loops where a non-pow2 modulo result is stored to an array
+            // (bodyHasNonPow2ModuloArrayStore_=true).  Here, providing an explicit
+            // unroll.count=4 interferes with LLVM's O3 cost-model-driven unroller:
+            // the hint causes the unroll pass to set up divisibility scaffolding
+            // (an epilogue loop) but then the i128 magic-multiply cost model causes
+            // it to abort the body unrolling, leaving a 1x scalar loop instead.
+            // Without the explicit hint, LLVM's O3 cost-model unroller applies the
+            // same analysis it uses for equivalent C code and unrolls more
+            // aggressively (matching clang's 8x unrolling for modulo array-init loops).
+            const bool modArrayStore = bodyHasNonPow2ModuloArrayStore_
+                && optimizationLevel >= OptimizationLevel::O3;
+            if (!modArrayStore) {
+                static constexpr unsigned kOptMaxUnrollCount = 16;
+                static constexpr unsigned kDefaultUnrollCount = 4;
+                const unsigned unrollCount =
+                    bodyHasBackwardArrayRef_ ? kDefaultUnrollCount
+                    : (inOptMaxFunction ? kOptMaxUnrollCount : kDefaultUnrollCount);
+                loopMDs.push_back(llvm::MDNode::get(
+                    *context,
+                    {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
+                     llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                         llvm::Type::getInt32Ty(*context), unrollCount))}));
+            }
+            // modArrayStore: emit no unroll hint — let LLVM's O3 cost-model unroller
+            // decide the factor freely, matching how clang handles the equivalent C loop.
         }
         // @vectorize / @novectorize: per-function loop vectorization hints.
         // At O3, also enable vectorization for @hot functions even without
@@ -1281,6 +1297,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         // analysis cost is non-trivial for cold code.
         if (stepKnownPositive && !deeplyNested && !bodyHasInnerLoop_
             && !bodyHasBackwardArrayRef_
+            && !bodyHasNonPow2ModuloArrayStore_
             && (optimizationLevel >= OptimizationLevel::O3
                 || (optimizationLevel >= OptimizationLevel::O2 && currentFuncHintHot_))) {
             loopMDs.push_back(llvm::MDNode::get(
@@ -1350,12 +1367,20 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         // sliding windows, and similar recurrence patterns fast. Without
         // parallel_accesses, LLVM can convert the store-to-load chain (4-cycle
         // latency per iteration) to a register-carried accumulator (1-cycle).
+        // Also suppress for loops where a non-pow2 modulo result is stored to
+        // an array (bodyHasNonPow2ModuloArrayStore_=true): these loops have
+        // vectorize.enable=false, so parallel_accesses would trigger the
+        // LoopDistribute pass on a non-vectorizable loop.  LoopDistribute
+        // responds by rewriting the loop metadata and replacing the
+        // unroll.count=4 hint with unroll.disable, causing the loop to run
+        // scalar 1-element-per-iteration instead of 4x unrolled.
         const bool wantParallel = enableParallelize_
             && !currentFuncHintNoParallelize_
             && stepKnownPositive
             && !deeplyNested
             && !bodyHasInnerLoop_
             && !bodyHasBackwardArrayRef_
+            && !bodyHasNonPow2ModuloArrayStore_
             && (currentFuncHintParallelize_
                 || currentFuncHintHot_
                 || optimizationLevel >= OptimizationLevel::O3);
