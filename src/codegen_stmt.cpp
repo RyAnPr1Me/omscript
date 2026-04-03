@@ -753,6 +753,11 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     bodyHasNonPow2Modulo_ = false;
     const bool savedBodyHasNonPow2ModuloValue = bodyHasNonPow2ModuloValue_;
     bodyHasNonPow2ModuloValue_ = false;
+    const bool savedBodyHasBackwardArrayRef = bodyHasBackwardArrayRef_;
+    bodyHasBackwardArrayRef_ = false;
+    // Track this loop's iterator name unconditionally (used to detect backward
+    // array references at all optimization levels, not just O1+).
+    loopIterVars_.insert(stmt->iteratorVar);
 
     const ScopeGuard scope(*this);
 
@@ -1186,9 +1191,18 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             // GCC's aggressive unrolling for FP-heavy loops.
             // OPTMAX uses 16 to maximally hide FP/call latency through ILP;
             // regular functions use 4 to balance ILP gains vs I-cache pressure.
+            //
+            // EXCEPTION: loops with backward array references (arr[i-K]) have a
+            // loop-carried recurrence.  With 16x unrolling LLVM cannot recognize
+            // the carry pattern and emits a 16-deep store-to-load chain (4 cycles
+            // per hop × 16 hops = 64 cycles per 16 elements).  Capping at 4 gives
+            // LLVM the short chain it needs to promote the running value to a
+            // register PHI (1 cycle per element), matching C's recurrence handling.
             static constexpr unsigned kOptMaxUnrollCount = 16;
             static constexpr unsigned kDefaultUnrollCount = 4;
-            const unsigned unrollCount = inOptMaxFunction ? kOptMaxUnrollCount : kDefaultUnrollCount;
+            const unsigned unrollCount =
+                bodyHasBackwardArrayRef_ ? kDefaultUnrollCount
+                : (inOptMaxFunction ? kOptMaxUnrollCount : kDefaultUnrollCount);
             loopMDs.push_back(llvm::MDNode::get(
                 *context,
                 {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
@@ -1253,10 +1267,27 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         // At O2, enable distribution only for @hot functions since the
         // analysis cost is non-trivial for cold code.
         if (stepKnownPositive && !deeplyNested && !bodyHasInnerLoop_
+            && !bodyHasBackwardArrayRef_
             && (optimizationLevel >= OptimizationLevel::O3
                 || (optimizationLevel >= OptimizationLevel::O2 && currentFuncHintHot_))) {
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.distribute.enable"),
+                           llvm::ConstantAsMetadata::get(
+                               llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
+        }
+
+        // Loops with backward array references (arr[i-K]) have a loop-carried
+        // dependency.  Disable LoopVersioningLICM and LoopDistribute for these
+        // loops: both passes create multi-version loop structures that use
+        // N+1 element vector loads, causing partial store-to-load forwarding
+        // stalls instead of the efficient register-carry pattern.
+        if (bodyHasBackwardArrayRef_) {
+            loopMDs.push_back(llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.distribute.enable"),
+                           llvm::ConstantAsMetadata::get(
+                               llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 0))}));
+            loopMDs.push_back(llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.licm_versioning.disable"),
                            llvm::ConstantAsMetadata::get(
                                llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
         }
@@ -1296,11 +1327,22 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         //   - -fno-parallelize was not passed
         // At O3, all non-nested forward loops get the hint regardless of
         // @hot/@parallel annotations.
+        //
+        // IMPORTANT: Suppress parallel_accesses when the loop body has a
+        // backward array reference (arr[i-K] pattern). Such loops have
+        // loop-carried dependencies: iteration i reads arr[i-K] which was
+        // written in a previous iteration. Marking these accesses as parallel
+        // (independent) prevents LLVM from promoting arr[i-1] to a register
+        // accumulator — the critical optimization that makes prefix scans,
+        // sliding windows, and similar recurrence patterns fast. Without
+        // parallel_accesses, LLVM can convert the store-to-load chain (4-cycle
+        // latency per iteration) to a register-carried accumulator (1-cycle).
         const bool wantParallel = enableParallelize_
             && !currentFuncHintNoParallelize_
             && stepKnownPositive
             && !deeplyNested
             && !bodyHasInnerLoop_
+            && !bodyHasBackwardArrayRef_
             && (currentFuncHintParallelize_
                 || currentFuncHintHot_
                 || optimizationLevel >= OptimizationLevel::O3);
@@ -1330,10 +1372,14 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     // End block
     builder->SetInsertPoint(endBB);
     --loopNestDepth_;
+    loopIterVars_.erase(stmt->iteratorVar);
     // Restore the flag; propagate upward so enclosing for-loops also see it.
     bodyHasInnerLoop_ = savedBodyHasInnerLoop || bodyHasInnerLoop_;
     bodyHasNonPow2Modulo_ = savedBodyHasNonPow2Modulo || bodyHasNonPow2Modulo_;
     bodyHasNonPow2ModuloValue_ = savedBodyHasNonPow2ModuloValue || bodyHasNonPow2ModuloValue_;
+    // Backward refs don't propagate upward: a backward access in an inner loop
+    // doesn't imply the outer loop's iterations are dependent.
+    bodyHasBackwardArrayRef_ = savedBodyHasBackwardArrayRef;
 }
 
 void CodeGenerator::generateForEach(ForEachStmt* stmt) {

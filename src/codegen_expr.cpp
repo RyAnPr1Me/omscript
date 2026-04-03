@@ -3528,6 +3528,31 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
     //
     // @hot functions at O2+ also skip bounds checks: the user asserts the
     // function is performance-critical with safe array access patterns.
+
+    // ── Backward array reference detection (must run BEFORE boundsCheckElided) ──
+    // Detect arr[i - K] where i is a safe loop iterator and K > 0.
+    // This sets bodyHasBackwardArrayRef_ which suppresses parallel_accesses
+    // metadata on the enclosing loop, allowing LLVM to recognize the
+    // loop-carried dependency and promote arr[i-1] to a register accumulator.
+    // Must be checked BEFORE boundsCheckElided is set, because OPTMAX and @hot
+    // functions start with boundsCheckElided=true, which would skip this check.
+    if (!isStr && loopNestDepth_ > 0
+            && expr->index->type == ASTNodeType::BINARY_EXPR) {
+        auto* idxBin = static_cast<BinaryExpr*>(expr->index.get());
+        if (idxBin->op == "-") {
+            if (idxBin->left->type == ASTNodeType::IDENTIFIER_EXPR
+                    && idxBin->right->type == ASTNodeType::LITERAL_EXPR) {
+                auto* binIter = static_cast<IdentifierExpr*>(idxBin->left.get());
+                auto* binOffset = static_cast<LiteralExpr*>(idxBin->right.get());
+                if (loopIterVars_.count(binIter->name)
+                        && binOffset->literalType == LiteralExpr::LiteralType::INTEGER
+                        && binOffset->intValue > 0) {
+                    bodyHasBackwardArrayRef_ = true;
+                }
+            }
+        }
+    }
+
     bool boundsCheckElided = inOptMaxFunction
         || (currentFuncHintHot_ && !isStr && optimizationLevel >= OptimizationLevel::O2);
 
