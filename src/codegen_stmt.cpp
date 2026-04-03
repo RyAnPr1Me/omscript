@@ -1269,6 +1269,10 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             //      sequences.  Scalar unrolled code achieves better ILP because
             //      the CPU's OOO engine can pipeline N independent magic-multiply
             //      chains simultaneously, while the scalar extract overhead is zero.
+            //  (d) loop has a backward array reference (arr[i] += arr[i-1]):
+            //      serial loop-carried dependency — the vectorizer will correctly
+            //      reject it, but not before adding unroll.disable to the metadata
+            //      when it fails with vectorize.enable=true.  Suppress upfront.
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
                            llvm::ConstantAsMetadata::get(
