@@ -1276,10 +1276,15 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
                  static constexpr unsigned kOptMaxUnrollCount = 16;
                  static constexpr unsigned kOptMaxCmpModuloUnrollCount = 8;
                  static constexpr unsigned kDefaultUnrollCount = 4;
+                 // For comparison-context non-pow2 modulo loops (e.g. i%3==0 branch),
+                 // clang-18 -O3 unrolls by 8 regardless of optimization profile.
+                 // At non-OPTMAX level match this behaviour: 8x eliminates register
+                 // spills (PHI count ~10, well within 15 GP register budget) and
+                 // matches C's performance for benchmarks like cond_arithmetic.
                  const unsigned unrollCount =
                      inOptMaxFunction
                      ? (cmpModuloLoop ? kOptMaxCmpModuloUnrollCount : kOptMaxUnrollCount)
-                     : kDefaultUnrollCount;
+                     : (cmpModuloLoop ? kOptMaxCmpModuloUnrollCount : kDefaultUnrollCount);
                  loopMDs.push_back(llvm::MDNode::get(
                      *context,
                      {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
