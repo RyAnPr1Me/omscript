@@ -4758,22 +4758,18 @@ unsigned superopt::convertSDivToUDiv(llvm::Function& func) {
                 const bool rhsNonNeg = isValueNonNegative(bo->getOperand(1), DL);
                 if (lhsNonNeg && rhsNonNeg) {
                     bo->setHasNoUnsignedWrap(true);
-                    // Also set nsw when one operand comes from a zext-of-i1
-                    // (value ∈ {0,1}) and the other has at least 2 leading zeros
-                    // (≤ 2^62-1), guaranteeing sum ≤ 2^62 < 2^63-1.
+                    // Set NSW when KnownBits proves both operands have ≥ 2 leading zeros.
+                    // Then max(a+b) ≤ (2^62-1)+(2^62-1) = 2^63-2 < INT64_MAX, so signed
+                    // overflow cannot occur.  This applies to: 32-bit loop induction
+                    // variables (32+ leading zeros), modulo/urem results (≥ 1 leading
+                    // zero since result < divisor < 2^63), bounded accumulators, and
+                    // zext-of-bool operands (63 leading zeros).  More aggressive than
+                    // the prior zext-from-bool special case; enables LLVM SCEV/CVP to
+                    // derive tight trip counts and range-checked GEPs.
                     if (!bo->hasNoSignedWrap()) {
-                        auto isZextFromBool = [](llvm::Value* v) -> bool {
-                            auto* z = llvm::dyn_cast<llvm::ZExtInst>(v);
-                            return z && z->getOperand(0)->getType()->isIntegerTy(1);
-                        };
-                        auto isBoundedAbove = [&](llvm::Value* v, unsigned slack) -> bool {
-                            llvm::KnownBits kb = llvm::computeKnownBits(v, DL);
-                            return kb.countMinLeadingZeros() >= slack;
-                        };
-                        if ((isZextFromBool(bo->getOperand(1)) &&
-                             isBoundedAbove(bo->getOperand(0), 2)) ||
-                            (isZextFromBool(bo->getOperand(0)) &&
-                             isBoundedAbove(bo->getOperand(1), 2))) {
+                        llvm::KnownBits lhsKB = llvm::computeKnownBits(bo->getOperand(0), DL);
+                        llvm::KnownBits rhsKB = llvm::computeKnownBits(bo->getOperand(1), DL);
+                        if (lhsKB.countMinLeadingZeros() >= 2 && rhsKB.countMinLeadingZeros() >= 2) {
                             bo->setHasNoSignedWrap(true);
                             ++count;
                         }
