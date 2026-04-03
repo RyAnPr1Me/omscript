@@ -2383,8 +2383,15 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         }
 
         // For non-constant or runtime divisors, any srem/urem in a loop is flagged.
-        if (!isDivision && loopNestDepth_ > 0)
+        if (!isDivision && loopNestDepth_ > 0) {
             bodyHasNonPow2Modulo_ = true;
+            // Track whether the modulo result is used as a value (not just in a
+            // comparison context) so the unroll heuristic can distinguish between
+            // `if (i%k==0)` (comparison-only, benefits from 8x unroll) and
+            // `result = val % modulus` (value-producing, keep at 4x unroll).
+            if (!inComparisonContext_)
+                bodyHasNonPow2ModuloValue_ = true;
+        }
 
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
         llvm::Value* isZero = builder->CreateICmpEQ(right, zero, "divzero");

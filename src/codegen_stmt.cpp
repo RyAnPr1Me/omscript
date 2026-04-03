@@ -1139,12 +1139,14 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
                 // unrolling when it sees an inner loop — correct for throughput-bound
                 // loops, but wrong for latency-bound irregular inner loops.
                 //
-                // Use 8 for OPTMAX (maximal ILP), 4 for plain @hot (balance between
-                // ILP and I-cache pressure).  Only when not deeply nested so we do
-                // not unroll already-unrolled inner bodies.
+                // Use 8 for both @hot at O3 and OPTMAX: matches clang's default
+                // cost-model choice for outer loops with irregular inner loops
+                // (e.g. Collatz, modular exponentiation).  8 independent inner-loop
+                // chains exercise the CPU's OOO backend; the ROB can overlap 2-4
+                // chains with ~15-30 iterations each.  Only when not deeply nested.
                 if (currentFuncHintHot_ && !deeplyNested
                         && optimizationLevel >= OptimizationLevel::O3) {
-                    const unsigned outerUnrollCount = inOptMaxFunction ? 8u : 4u;
+                    const unsigned outerUnrollCount = 8u;
                     loopMDs.push_back(llvm::MDNode::get(
                         *context,
                         {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
@@ -1165,12 +1167,11 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
                 }
             } else {
                 // @unroll explicitly requested on an outer loop with inner loop:
-                // for @hot at O3 use 4 (or 8 for OPTMAX); otherwise conservative 2.
+                // use 8 for @hot at O3; otherwise conservative 2.
                 const unsigned explicitCount =
                     (currentFuncHintHot_ && !deeplyNested
                      && optimizationLevel >= OptimizationLevel::O3)
-                    ? (inOptMaxFunction ? 8u : 4u)
-                    : 2u;
+                    ? 8u : 2u;
                 loopMDs.push_back(llvm::MDNode::get(
                     *context,
                     {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
