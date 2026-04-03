@@ -486,6 +486,15 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
     bodyHasInnerLoop_ = true;
     ++loopNestDepth_;
 
+    // Save and reset body-analysis flags so this while loop's own body sets them
+    // from scratch (not inherited from outer/prior loops in the same function).
+    const bool savedBodyHasNonPow2Modulo = bodyHasNonPow2Modulo_;
+    const bool savedBodyHasNonPow2ModuloValue = bodyHasNonPow2ModuloValue_;
+    const bool savedBodyHasNonPow2ModuloArrayStore = bodyHasNonPow2ModuloArrayStore_;
+    bodyHasNonPow2Modulo_ = false;
+    bodyHasNonPow2ModuloValue_ = false;
+    bodyHasNonPow2ModuloArrayStore_ = false;
+
     const ScopeGuard scope(*this);
 
     // Constant condition elimination — match generateIf's dead-branch pruning.
@@ -599,14 +608,24 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
                 *context, {llvm::MDString::get(*context, "llvm.loop.unroll.disable")}));
         }
         // @vectorize / @novectorize: per-function loop vectorization hints.
+        // Suppress vectorize.enable when the body contains a non-power-of-2
+        // modulo used as a VALUE (e.g. `acc += (i*i) % 101`).  On x86-64
+        // there is no native 64-bit vector division, so vectorizing such loops
+        // scalarises urem anyway but causes LLVM to batch-process all unrolled
+        // iterations upfront, which exhausts general-purpose registers and
+        // introduces stack spills.  Without the hint LLVM's cost model picks
+        // the naturally-interleaved scalar pattern that C's clang produces,
+        // avoiding the spills and matching C performance.
+        const bool whileBodyHasNonPow2ModVal = bodyHasNonPow2ModuloValue_;
         if (currentFuncHintNoVectorize_) {
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
                            llvm::ConstantAsMetadata::get(
                                llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 0))}));
-        } else if (currentFuncHintVectorize_
-                   || (currentFuncHintHot_ && optimizationLevel >= OptimizationLevel::O3
-                       && loopNestDepth_ <= 1)) {
+        } else if (!whileBodyHasNonPow2ModVal
+                   && (currentFuncHintVectorize_
+                       || (currentFuncHintHot_ && optimizationLevel >= OptimizationLevel::O3
+                           && loopNestDepth_ <= 1))) {
             // @hot at O3: auto-enable vectorization for top-level while-loops.
             // While-loops are less amenable to vectorization than for-loops
             // (no known trip count), so we require @hot as a signal that the
@@ -617,6 +636,7 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
                                llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
         }
         if (currentFuncHintHot_ && currentFuncHintVectorize_
+            && !whileBodyHasNonPow2ModVal
             && optimizationLevel >= OptimizationLevel::O3
             && !currentFuncHintNoVectorize_) {
             loopMDs.push_back(llvm::MDNode::get(
@@ -624,8 +644,13 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
                            llvm::ConstantAsMetadata::get(
                                llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))}));
         }
+        // parallel_accesses: suppress when the body has non-pow2 modulo
+        // (scalar or value-producing).  In those loops, asserting independent
+        // memory accesses causes LLVM to batch all unrolled iterations, which
+        // creates excessive register pressure and stack spills.
         const bool wantParallelWhile = enableParallelize_
             && !currentFuncHintNoParallelize_
+            && !bodyHasNonPow2Modulo_
             && loopNestDepth_ <= 1
             && (currentFuncHintParallelize_
                 || currentFuncHintHot_
@@ -648,6 +673,11 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
     // End block
     builder->SetInsertPoint(endBB);
     --loopNestDepth_;
+    // Restore body-analysis flags, OR-ing this while loop's findings back in
+    // so enclosing loops can see them.
+    bodyHasNonPow2Modulo_ = savedBodyHasNonPow2Modulo || bodyHasNonPow2Modulo_;
+    bodyHasNonPow2ModuloValue_ = savedBodyHasNonPow2ModuloValue || bodyHasNonPow2ModuloValue_;
+    bodyHasNonPow2ModuloArrayStore_ = savedBodyHasNonPow2ModuloArrayStore || bodyHasNonPow2ModuloArrayStore_;
 }
 
 void CodeGenerator::generateDoWhile(DoWhileStmt* stmt) {
@@ -1298,8 +1328,19 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         // Interleaving: @hot+@vectorize at O3 → 4 iterations; plain O3
         // auto-vectorized loops → 2 iterations (balances register pressure
         // with latency hiding without the aggressive 4× that @hot requests).
+        // Suppress interleave.count for cmpModuloLoop (non-pow2 modulo used
+        // only in comparison context, e.g. i%3==0).  For those loops we
+        // already emit vectorize.enable=false + unroll.count=8.  When
+        // interleave.count is ALSO present, LLVM's vectorizer treats it as
+        // an implicit unroll-by-2 request, which conflicts with the explicit
+        // unroll.count=8, causes the loop unroller to add unroll.disable
+        // (preventing the 8× unrolling), and leaves a 4× scalar loop instead.
+        // Without interleave.count, the vectorize.enable=false + unroll.count=8
+        // combination cleanly produces the desired 8× unrolled loop, matching
+        // clang's natural cost-model behaviour for equivalent C code.
         if (optimizationLevel >= OptimizationLevel::O3
             && !currentFuncHintNoVectorize_
+            && !cmpModuloLoop
             && !bodyHasInnerLoop_ && stepKnownPositive) {
             const int32_t interleave = (currentFuncHintHot_ && currentFuncHintVectorize_) ? 4 : 2;
             loopMDs.push_back(llvm::MDNode::get(
