@@ -3403,6 +3403,140 @@ std::vector<RewriteRule> getAdvancedAlgebraicRules() {
             ClassId s14 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(14));
             return g.addBinOp(Op::Add, s15, s14);
         });
+    // ── n×65536 family ────────────────────────────────────────────────────
+    // x * 57344 → (x<<16) - (x<<13)  [65536x - 8192x]
+    rules.emplace_back("mul_57344_shift",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(57344)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId s16 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(16));
+            ClassId s13 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(13));
+            return g.addBinOp(Op::Sub, s16, s13);
+        });
+    // x * 61440 → (x<<16) - (x<<12)
+    rules.emplace_back("mul_61440_shift",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(61440)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId s16 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(16));
+            ClassId s12 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(12));
+            return g.addBinOp(Op::Sub, s16, s12);
+        });
+    // x * 65536 → x<<16  (pure power-of-2)
+    rules.emplace_back("mul_65536_shift",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(65536)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Shl, s.at("x"), g.addConst(16));
+        });
+    // x * 65537 → (x<<16) + x
+    rules.emplace_back("mul_65537_shift",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(65537)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId s16 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(16));
+            return g.addBinOp(Op::Add, s16, s.at("x"));
+        });
+    // x * 65538 → (x<<16) + (x<<1)
+    rules.emplace_back("mul_65538_shift",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(65538)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId s16 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(16));
+            ClassId s1  = g.addBinOp(Op::Shl, s.at("x"), g.addConst(1));
+            return g.addBinOp(Op::Add, s16, s1);
+        });
+    // x * 65540 → (x<<16) + (x<<2)
+    rules.emplace_back("mul_65540_shift",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(65540)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId s16 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(16));
+            ClassId s2  = g.addBinOp(Op::Shl, s.at("x"), g.addConst(2));
+            return g.addBinOp(Op::Add, s16, s2);
+        });
+    // x * 65544 → (x<<16) + (x<<3)
+    rules.emplace_back("mul_65544_shift",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(65544)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId s16 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(16));
+            ClassId s3  = g.addBinOp(Op::Shl, s.at("x"), g.addConst(3));
+            return g.addBinOp(Op::Add, s16, s3);
+        });
+    // x * 65600 → (x<<16) + (x<<6)
+    rules.emplace_back("mul_65600_shift",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(65600)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId s16 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(16));
+            ClassId s6  = g.addBinOp(Op::Shl, s.at("x"), g.addConst(6));
+            return g.addBinOp(Op::Add, s16, s6);
+        });
+    // x * 65664 → (x<<16) + (x<<7)
+    rules.emplace_back("mul_65664_shift",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(65664)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId s16 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(16));
+            ClassId s7  = g.addBinOp(Op::Shl, s.at("x"), g.addConst(7));
+            return g.addBinOp(Op::Add, s16, s7);
+        });
+    // x * 65792 → (x<<16) + (x<<8)
+    rules.emplace_back("mul_65792_shift",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(65792)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId s16 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(16));
+            ClassId s8  = g.addBinOp(Op::Shl, s.at("x"), g.addConst(8));
+            return g.addBinOp(Op::Add, s16, s8);
+        });
+    // x * 66048 → (x<<16) + (x<<9)
+    rules.emplace_back("mul_66048_shift",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(66048)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId s16 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(16));
+            ClassId s9  = g.addBinOp(Op::Shl, s.at("x"), g.addConst(9));
+            return g.addBinOp(Op::Add, s16, s9);
+        });
+    // x * 66560 → (x<<16) + (x<<10)
+    rules.emplace_back("mul_66560_shift",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(66560)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId s16 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(16));
+            ClassId s10 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(10));
+            return g.addBinOp(Op::Add, s16, s10);
+        });
+    // x * 67584 → (x<<16) + (x<<11)
+    rules.emplace_back("mul_67584_shift",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(67584)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId s16 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(16));
+            ClassId s11 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(11));
+            return g.addBinOp(Op::Add, s16, s11);
+        });
+    // x * 69632 → (x<<16) + (x<<12)
+    rules.emplace_back("mul_69632_shift",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(69632)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId s16 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(16));
+            ClassId s12 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(12));
+            return g.addBinOp(Op::Add, s16, s12);
+        });
+    // x * 73728 → (x<<16) + (x<<13)
+    rules.emplace_back("mul_73728_shift",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(73728)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId s16 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(16));
+            ClassId s13 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(13));
+            return g.addBinOp(Op::Add, s16, s13);
+        });
+    // x * 81920 → (x<<16) + (x<<14)
+    rules.emplace_back("mul_81920_shift",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(81920)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId s16 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(16));
+            ClassId s14 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(14));
+            return g.addBinOp(Op::Add, s16, s14);
+        });
+    // x * 98304 → (x<<16) + (x<<15)  [65536x + 32768x]
+    rules.emplace_back("mul_98304_shift",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(98304)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId s16 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(16));
+            ClassId s15 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(15));
+            return g.addBinOp(Op::Add, s16, s15);
+        });
     // ── Extended right-constant patterns added to match emitShiftAdd ─────
     // x * 57 → (x<<6) - (x<<3) + x  [64x - 8x + x = 57x]
     rules.emplace_back("mul_57_shift",
@@ -5166,6 +5300,140 @@ std::vector<RewriteRule> getAdvancedAlgebraicRules() {
             ClassId s15 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(15));
             ClassId s14 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(14));
             return g.addBinOp(Op::Add, s15, s14);
+        });
+    // ── n×65536 family (left-constant form) ──────────────────────────────
+    // 57344 * x → (x<<16) - (x<<13)
+    rules.emplace_back("mul_57344_left_shift",
+        P::OpPat(Op::Mul, {P::ConstPat(57344), P::Wild("x")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId s16 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(16));
+            ClassId s13 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(13));
+            return g.addBinOp(Op::Sub, s16, s13);
+        });
+    // 61440 * x → (x<<16) - (x<<12)
+    rules.emplace_back("mul_61440_left_shift",
+        P::OpPat(Op::Mul, {P::ConstPat(61440), P::Wild("x")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId s16 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(16));
+            ClassId s12 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(12));
+            return g.addBinOp(Op::Sub, s16, s12);
+        });
+    // 65536 * x → x<<16
+    rules.emplace_back("mul_65536_left_shift",
+        P::OpPat(Op::Mul, {P::ConstPat(65536), P::Wild("x")}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Shl, s.at("x"), g.addConst(16));
+        });
+    // 65537 * x → (x<<16) + x
+    rules.emplace_back("mul_65537_left_shift",
+        P::OpPat(Op::Mul, {P::ConstPat(65537), P::Wild("x")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId s16 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(16));
+            return g.addBinOp(Op::Add, s16, s.at("x"));
+        });
+    // 65538 * x → (x<<16) + (x<<1)
+    rules.emplace_back("mul_65538_left_shift",
+        P::OpPat(Op::Mul, {P::ConstPat(65538), P::Wild("x")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId s16 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(16));
+            ClassId s1  = g.addBinOp(Op::Shl, s.at("x"), g.addConst(1));
+            return g.addBinOp(Op::Add, s16, s1);
+        });
+    // 65540 * x → (x<<16) + (x<<2)
+    rules.emplace_back("mul_65540_left_shift",
+        P::OpPat(Op::Mul, {P::ConstPat(65540), P::Wild("x")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId s16 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(16));
+            ClassId s2  = g.addBinOp(Op::Shl, s.at("x"), g.addConst(2));
+            return g.addBinOp(Op::Add, s16, s2);
+        });
+    // 65544 * x → (x<<16) + (x<<3)
+    rules.emplace_back("mul_65544_left_shift",
+        P::OpPat(Op::Mul, {P::ConstPat(65544), P::Wild("x")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId s16 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(16));
+            ClassId s3  = g.addBinOp(Op::Shl, s.at("x"), g.addConst(3));
+            return g.addBinOp(Op::Add, s16, s3);
+        });
+    // 65600 * x → (x<<16) + (x<<6)
+    rules.emplace_back("mul_65600_left_shift",
+        P::OpPat(Op::Mul, {P::ConstPat(65600), P::Wild("x")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId s16 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(16));
+            ClassId s6  = g.addBinOp(Op::Shl, s.at("x"), g.addConst(6));
+            return g.addBinOp(Op::Add, s16, s6);
+        });
+    // 65664 * x → (x<<16) + (x<<7)
+    rules.emplace_back("mul_65664_left_shift",
+        P::OpPat(Op::Mul, {P::ConstPat(65664), P::Wild("x")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId s16 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(16));
+            ClassId s7  = g.addBinOp(Op::Shl, s.at("x"), g.addConst(7));
+            return g.addBinOp(Op::Add, s16, s7);
+        });
+    // 65792 * x → (x<<16) + (x<<8)
+    rules.emplace_back("mul_65792_left_shift",
+        P::OpPat(Op::Mul, {P::ConstPat(65792), P::Wild("x")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId s16 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(16));
+            ClassId s8  = g.addBinOp(Op::Shl, s.at("x"), g.addConst(8));
+            return g.addBinOp(Op::Add, s16, s8);
+        });
+    // 66048 * x → (x<<16) + (x<<9)
+    rules.emplace_back("mul_66048_left_shift",
+        P::OpPat(Op::Mul, {P::ConstPat(66048), P::Wild("x")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId s16 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(16));
+            ClassId s9  = g.addBinOp(Op::Shl, s.at("x"), g.addConst(9));
+            return g.addBinOp(Op::Add, s16, s9);
+        });
+    // 66560 * x → (x<<16) + (x<<10)
+    rules.emplace_back("mul_66560_left_shift",
+        P::OpPat(Op::Mul, {P::ConstPat(66560), P::Wild("x")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId s16 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(16));
+            ClassId s10 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(10));
+            return g.addBinOp(Op::Add, s16, s10);
+        });
+    // 67584 * x → (x<<16) + (x<<11)
+    rules.emplace_back("mul_67584_left_shift",
+        P::OpPat(Op::Mul, {P::ConstPat(67584), P::Wild("x")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId s16 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(16));
+            ClassId s11 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(11));
+            return g.addBinOp(Op::Add, s16, s11);
+        });
+    // 69632 * x → (x<<16) + (x<<12)
+    rules.emplace_back("mul_69632_left_shift",
+        P::OpPat(Op::Mul, {P::ConstPat(69632), P::Wild("x")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId s16 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(16));
+            ClassId s12 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(12));
+            return g.addBinOp(Op::Add, s16, s12);
+        });
+    // 73728 * x → (x<<16) + (x<<13)
+    rules.emplace_back("mul_73728_left_shift",
+        P::OpPat(Op::Mul, {P::ConstPat(73728), P::Wild("x")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId s16 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(16));
+            ClassId s13 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(13));
+            return g.addBinOp(Op::Add, s16, s13);
+        });
+    // 81920 * x → (x<<16) + (x<<14)
+    rules.emplace_back("mul_81920_left_shift",
+        P::OpPat(Op::Mul, {P::ConstPat(81920), P::Wild("x")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId s16 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(16));
+            ClassId s14 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(14));
+            return g.addBinOp(Op::Add, s16, s14);
+        });
+    // 98304 * x → (x<<16) + (x<<15)  [65536x + 32768x]
+    rules.emplace_back("mul_98304_left_shift",
+        P::OpPat(Op::Mul, {P::ConstPat(98304), P::Wild("x")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId s16 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(16));
+            ClassId s15 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(15));
+            return g.addBinOp(Op::Add, s16, s15);
         });
     // 30 * x → (x << 5) - (x << 1)  [32x - 2x = 30x]
     rules.emplace_back("mul_30_left_shift",
