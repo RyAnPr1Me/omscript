@@ -3,6 +3,13 @@
 #include "hardware_graph.h"
 #include <cstdlib>
 #include <iostream>
+
+// Apply maximum compiler optimizations to this hot path.
+// Builtin codegen covers array operations, string handling, and math builtins
+// which are called very frequently and contain tight inner loops.
+#ifdef __GNUC__
+#  pragma GCC optimize("O3,unroll-loops,tree-vectorize")
+#endif
 #include <llvm/Config/llvm-config.h>
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/MDBuilder.h>
@@ -4665,13 +4672,14 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
         llvm::Value* mapPtr = builder->CreateIntToPtr(mapArg, ptrTy, "mapkeys.ptr");
         llvm::Value* mapLen = builder->CreateLoad(getDefaultType(), mapPtr, "mapkeys.len");
+        // Number of pairs = mapLen / 2.  mapLen is always non-negative (it's
+        // a stored array length), so logical shift right by 1 is correct and
+        // avoids the ~25-cycle signed-division latency path.
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
         llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
         llvm::Value* two = llvm::ConstantInt::get(getDefaultType(), 2);
         llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
-
-        // Number of pairs = mapLen / 2
-        llvm::Value* numPairs = builder->CreateSDiv(mapLen, two, "mapkeys.numpairs");
+        llvm::Value* numPairs = builder->CreateLShr(mapLen, one, "mapkeys.numpairs");
         // Allocate: (numPairs + 1) * 8
         llvm::Value* arrSlots = builder->CreateAdd(numPairs, one, "mapkeys.arrslots", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* arrSize = builder->CreateMul(arrSlots, eight, "mapkeys.arrsize", /*HasNUW=*/true, /*HasNSW=*/true);
@@ -4739,7 +4747,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* two = llvm::ConstantInt::get(getDefaultType(), 2);
         llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
 
-        llvm::Value* numPairs = builder->CreateSDiv(mapLen, two, "mapvals.numpairs");
+        // mapLen is always non-negative; use lshr instead of sdiv.
+        llvm::Value* numPairs = builder->CreateLShr(mapLen, one, "mapvals.numpairs");
         llvm::Value* arrSlots = builder->CreateAdd(numPairs, one, "mapvals.arrslots", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* arrSize = builder->CreateMul(arrSlots, eight, "mapvals.arrsize", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {arrSize}, "mapvals.buf");
@@ -4799,9 +4808,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
         llvm::Value* mapPtr = builder->CreateIntToPtr(mapArg, ptrTy, "mapsize.ptr");
         llvm::Value* mapLen = builder->CreateLoad(getDefaultType(), mapPtr, "mapsize.len");
-        // Number of pairs = mapLen / 2
-        return builder->CreateSDiv(mapLen,
-            llvm::ConstantInt::get(getDefaultType(), 2), "mapsize.result");
+        // mapLen is always non-negative; use lshr instead of sdiv by 2.
+        return builder->CreateLShr(mapLen,
+            llvm::ConstantInt::get(getDefaultType(), 1), "mapsize.result");
     }
 
     // -----------------------------------------------------------------------

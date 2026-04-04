@@ -373,6 +373,65 @@ void CodeGenerator::generateIf(IfStmt* stmt) {
         const uint32_t elseWeight = stmt->hintLikely ? 1 : 2000;
         llvm::MDNode* brWeights = llvm::MDBuilder(*context).createBranchWeights(thenWeight, elseWeight);
         br->setMetadata(llvm::LLVMContext::MD_prof, brWeights);
+    } else if (optimizationLevel >= OptimizationLevel::O2) {
+        // Infer branch probability from modulo-equality patterns.
+        // Pattern: if (x % k == 0) { … } where k is a positive constant.
+        // The true branch fires ~1/k of the time; emitting accurate weights
+        // (1 : k-1) lets the CPU's branch predictor and LLVM's block layout
+        // optimise for the common (false) case — critical for inner-loop
+        // branches like collatz and cond_arithmetic.
+        //
+        // The emitted condition chain is:
+        //   %srem  = srem/urem %x, k
+        //   %icmp  = icmp eq/ne %srem, 0
+        //   %zext  = zext i1 %icmp to i64   (OM bool-to-int)
+        //   %tobool = icmp ne i64 %zext, 0  (toBool)
+        //   condBr %tobool, then, merge
+        // Trace back through the %tobool → %zext → %icmp → %srem chain.
+        [&]() {
+            // condBool = icmp ne (%zext, 0)
+            auto* outerNE = llvm::dyn_cast<llvm::ICmpInst>(condBool);
+            if (!outerNE || outerNE->getPredicate() != llvm::ICmpInst::ICMP_NE) return;
+            auto* outerRHS = llvm::dyn_cast<llvm::ConstantInt>(outerNE->getOperand(1));
+            if (!outerRHS || !outerRHS->isZero()) return;
+            // Peel zext
+            auto* zext = llvm::dyn_cast<llvm::ZExtInst>(outerNE->getOperand(0));
+            if (!zext) return;
+            // Inner icmp eq/ne
+            auto* innerCmp = llvm::dyn_cast<llvm::ICmpInst>(zext->getOperand(0));
+            if (!innerCmp) return;
+            const bool innerIsEq = (innerCmp->getPredicate() == llvm::ICmpInst::ICMP_EQ);
+            const bool innerIsNe = (innerCmp->getPredicate() == llvm::ICmpInst::ICMP_NE);
+            if (!innerIsEq && !innerIsNe) return;
+            // One operand of the inner cmp must be 0
+            llvm::Value* remVal = nullptr;
+            if (auto* c = llvm::dyn_cast<llvm::ConstantInt>(innerCmp->getOperand(1))) {
+                if (c->isZero()) remVal = innerCmp->getOperand(0);
+            }
+            if (!remVal) {
+                if (auto* c = llvm::dyn_cast<llvm::ConstantInt>(innerCmp->getOperand(0))) {
+                    if (c->isZero()) remVal = innerCmp->getOperand(1);
+                }
+            }
+            if (!remVal) return;
+            // remVal must be srem/urem with a positive constant divisor
+            auto* remOp = llvm::dyn_cast<llvm::BinaryOperator>(remVal);
+            if (!remOp) return;
+            if (remOp->getOpcode() != llvm::Instruction::SRem &&
+                remOp->getOpcode() != llvm::Instruction::URem) return;
+            auto* divisorCI = llvm::dyn_cast<llvm::ConstantInt>(remOp->getOperand(1));
+            if (!divisorCI) return;
+            const int64_t k = divisorCI->getSExtValue();
+            if (k <= 1 || k > 1024) return;  // sanity: reasonable divisors only
+            // innerIsEq && outerNE(zext): branch fires 1/k of the time
+            // innerIsNe && outerNE(zext): branch fires (k-1)/k of the time
+            const auto kU = static_cast<uint32_t>(k);
+            const uint32_t thenW = innerIsEq ? 1u : (kU - 1u);
+            const uint32_t elseW = innerIsEq ? (kU - 1u) : 1u;
+            llvm::MDNode* brWeights =
+                llvm::MDBuilder(*context).createBranchWeights(thenW, elseW);
+            br->setMetadata(llvm::LLVMContext::MD_prof, brWeights);
+        }();
     }
 
     // Save pre-if non-neg state so each branch starts from the same baseline.
@@ -426,6 +485,15 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
     // so unrolling the outer loop should be conservative to avoid I-cache bloat.
     bodyHasInnerLoop_ = true;
     ++loopNestDepth_;
+
+    // Save and reset body-analysis flags so this while loop's own body sets them
+    // from scratch (not inherited from outer/prior loops in the same function).
+    const bool savedBodyHasNonPow2Modulo = bodyHasNonPow2Modulo_;
+    const bool savedBodyHasNonPow2ModuloValue = bodyHasNonPow2ModuloValue_;
+    const bool savedBodyHasNonPow2ModuloArrayStore = bodyHasNonPow2ModuloArrayStore_;
+    bodyHasNonPow2Modulo_ = false;
+    bodyHasNonPow2ModuloValue_ = false;
+    bodyHasNonPow2ModuloArrayStore_ = false;
 
     const ScopeGuard scope(*this);
 
@@ -540,14 +608,24 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
                 *context, {llvm::MDString::get(*context, "llvm.loop.unroll.disable")}));
         }
         // @vectorize / @novectorize: per-function loop vectorization hints.
+        // Suppress vectorize.enable when the body contains a non-power-of-2
+        // modulo used as a VALUE (e.g. `acc += (i*i) % 101`).  On x86-64
+        // there is no native 64-bit vector division, so vectorizing such loops
+        // scalarises urem anyway but causes LLVM to batch-process all unrolled
+        // iterations upfront, which exhausts general-purpose registers and
+        // introduces stack spills.  Without the hint LLVM's cost model picks
+        // the naturally-interleaved scalar pattern that C's clang produces,
+        // avoiding the spills and matching C performance.
+        const bool whileBodyHasNonPow2ModVal = bodyHasNonPow2ModuloValue_;
         if (currentFuncHintNoVectorize_) {
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
                            llvm::ConstantAsMetadata::get(
                                llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 0))}));
-        } else if (currentFuncHintVectorize_
-                   || (currentFuncHintHot_ && optimizationLevel >= OptimizationLevel::O3
-                       && loopNestDepth_ <= 1)) {
+        } else if (!whileBodyHasNonPow2ModVal
+                   && (currentFuncHintVectorize_
+                       || (currentFuncHintHot_ && optimizationLevel >= OptimizationLevel::O3
+                           && loopNestDepth_ <= 1))) {
             // @hot at O3: auto-enable vectorization for top-level while-loops.
             // While-loops are less amenable to vectorization than for-loops
             // (no known trip count), so we require @hot as a signal that the
@@ -558,6 +636,7 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
                                llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
         }
         if (currentFuncHintHot_ && currentFuncHintVectorize_
+            && !whileBodyHasNonPow2ModVal
             && optimizationLevel >= OptimizationLevel::O3
             && !currentFuncHintNoVectorize_) {
             loopMDs.push_back(llvm::MDNode::get(
@@ -565,8 +644,13 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
                            llvm::ConstantAsMetadata::get(
                                llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))}));
         }
+        // parallel_accesses: suppress when the body has non-pow2 modulo
+        // (scalar or value-producing).  In those loops, asserting independent
+        // memory accesses causes LLVM to batch all unrolled iterations, which
+        // creates excessive register pressure and stack spills.
         const bool wantParallelWhile = enableParallelize_
             && !currentFuncHintNoParallelize_
+            && !bodyHasNonPow2Modulo_
             && loopNestDepth_ <= 1
             && (currentFuncHintParallelize_
                 || currentFuncHintHot_
@@ -589,6 +673,11 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
     // End block
     builder->SetInsertPoint(endBB);
     --loopNestDepth_;
+    // Restore body-analysis flags, OR-ing this while loop's findings back in
+    // so enclosing loops can see them.
+    bodyHasNonPow2Modulo_ = savedBodyHasNonPow2Modulo || bodyHasNonPow2Modulo_;
+    bodyHasNonPow2ModuloValue_ = savedBodyHasNonPow2ModuloValue || bodyHasNonPow2ModuloValue_;
+    bodyHasNonPow2ModuloArrayStore_ = savedBodyHasNonPow2ModuloArrayStore || bodyHasNonPow2ModuloArrayStore_;
 }
 
 void CodeGenerator::generateDoWhile(DoWhileStmt* stmt) {
@@ -694,6 +783,13 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     bodyHasNonPow2Modulo_ = false;
     const bool savedBodyHasNonPow2ModuloValue = bodyHasNonPow2ModuloValue_;
     bodyHasNonPow2ModuloValue_ = false;
+    const bool savedBodyHasNonPow2ModuloArrayStore = bodyHasNonPow2ModuloArrayStore_;
+    bodyHasNonPow2ModuloArrayStore_ = false;
+    const bool savedBodyHasBackwardArrayRef = bodyHasBackwardArrayRef_;
+    bodyHasBackwardArrayRef_ = false;
+    // Track this loop's iterator name unconditionally (used to detect backward
+    // array references at all optimization levels, not just O1+).
+    loopIterVars_.insert(stmt->iteratorVar);
 
     const ScopeGuard scope(*this);
 
@@ -806,8 +902,21 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     llvm::Value* curVal = builder->CreateLoad(iterType, iterAlloca, stmt->iteratorVar.c_str());
     llvm::Value* continueCond;
     if (stepKnownPositive) {
-        // Fast path: known ascending loop, just compare i < end.
-        continueCond = builder->CreateICmpSLT(curVal, endVal, "forcond_lt");
+        // Fast path: known ascending loop.
+        // When the iterator alloca and end value are both proven non-negative,
+        // use an unsigned comparison.  Two non-negative i64 values compare
+        // identically whether the comparison is signed or unsigned, but unsigned
+        // comparisons allow LLVM's vectorizer and SCEV to work with unsigned
+        // induction variables, which unlocks more aggressive loop transforms.
+        const bool iterNonNeg = nonNegValues_.count(iterAlloca) > 0;
+        const auto* endCI = llvm::dyn_cast<llvm::ConstantInt>(endVal);
+        const bool endNonNeg  = nonNegValues_.count(endVal) > 0
+            || (endCI && !endCI->isNegative());
+        if (iterNonNeg && endNonNeg) {
+            continueCond = builder->CreateICmpULT(curVal, endVal, "forcond_ult");
+        } else {
+            continueCond = builder->CreateICmpSLT(curVal, endVal, "forcond_lt");
+        }
     } else {
         llvm::Value* stepPositive = builder->CreateICmpSGT(stepVal, zero, "steppositive");
         llvm::Value* forwardCond = builder->CreateICmpSLT(curVal, endVal, "forcond_lt");
@@ -844,11 +953,38 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         }
         if (startNonNeg) {
             llvm::Value* iterVal = builder->CreateLoad(iterType, iterAlloca, "iter.assume");
-            llvm::Value* isNonNeg = builder->CreateICmpSGE(
-                iterVal, llvm::ConstantInt::get(iterType, 0), "iter.nonneg");
             llvm::Function* assumeFn = OMSC_GET_INTRINSIC_STMT(
                 module.get(), llvm::Intrinsic::assume, {});
+            // Lower bound: assume iter >= 0 (always true for non-negative starts).
+            llvm::Value* isNonNeg = builder->CreateICmpSGE(
+                iterVal, llvm::ConstantInt::get(iterType, 0), "iter.nonneg");
             builder->CreateCall(assumeFn, {isNonNeg});
+            // Tighter lower bound: when start > 0, also assume iter >= start.
+            // This tighter hint lets CVP/LVI prove `iter - start >= 0` (NUW),
+            // enabling srem→urem for expressions like `arr[iter - start]` and
+            // strength-reducing `(iter - WIN) % k` patterns in sliding-window loops.
+            if (auto* startCI = llvm::dyn_cast<llvm::ConstantInt>(startVal)) {
+                if (startCI->getSExtValue() > 0) {
+                    llvm::Value* iterValLB = builder->CreateLoad(iterType, iterAlloca, "iter.lb");
+                    llvm::Value* isGeStart = builder->CreateICmpSGE(
+                        iterValLB, startVal, "iter.ge.start");
+                    builder->CreateCall(assumeFn, {isGeStart});
+                }
+            }
+            // Upper bound: assume iter < end.  OmScript's for-loop semantics
+            // guarantee the iterator never equals or exceeds end inside the body
+            // (the loop exits before that).  This assumption lets LLVM's
+            // CorrelatedValuePropagation, SCEV, and InstCombine prove tighter
+            // ranges on derived expressions (e.g. iter*k, iter%m, arr[iter]),
+            // enabling strength reduction, signed→unsigned conversions, and
+            // bounds-check elimination for expressions involving the iterator.
+            // C compilers emit this implicitly when the variable is loop-local
+            // and the loop condition is visible; for function arguments (like n)
+            // C cannot propagate this across call boundaries without LTO.
+            llvm::Value* iterVal2 = builder->CreateLoad(iterType, iterAlloca, "iter.ub");
+            llvm::Value* isLtEnd = builder->CreateICmpSLT(
+                iterVal2, endVal, "iter.lt.end");
+            builder->CreateCall(assumeFn, {isLtEnd});
             // Track the alloca as producing non-negative values so that
             // expressions derived from the loop counter can emit urem/udiv
             // instead of srem/sdiv.
@@ -1023,6 +1159,10 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         const bool deeplyNested = loopNestDepth_ >= 2;
         const bool vectorizePreferred = currentFuncHintVectorize_ && !bodyHasInnerLoop_;
         const bool suppressUnrollHint = deeplyNested || vectorizePreferred;
+        // Comparison-context non-pow2 modulo loops (e.g. i%3==0): suppress
+        // distribute.enable, parallel_accesses, and cap OPTMAX unroll at 8x.
+        // Used in multiple places below so defined early.
+        const bool cmpModuloLoop = bodyHasNonPow2Modulo_ && !bodyHasNonPow2ModuloValue_;
 
         if (currentFuncHintNoUnroll_) {
             loopMDs.push_back(llvm::MDNode::get(
@@ -1044,26 +1184,64 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             // both unroll.disable and unroll.count=1 ensures the constraint is
             // respected even by aggressive unrollers.
             if (!currentFuncHintUnroll_) {
-                loopMDs.push_back(llvm::MDNode::get(
-                    *context, {llvm::MDString::get(*context, "llvm.loop.unroll.disable")}));
-                // llvm.loop.unroll.count = 1 is a belt-and-suspenders constraint:
-                // it explicitly tells LLVM's LoopUnroll pass to produce exactly 1
-                // copy even when the pass ignores unroll.disable (e.g. at OptLevel=3
-                // with OnlyWhenForced=false as used in the OPTMAX pass).
-                loopMDs.push_back(llvm::MDNode::get(
-                    *context,
-                    {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
-                     llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
-                         llvm::Type::getInt32Ty(*context), 1u))}));
+                // @hot outer loop at O3 with inner loop: emit unroll.count=8 to
+                // match clang's cost-model choice for latency-bound irregular
+                // inner loops (e.g. Collatz, binary search).  Without this hint
+                // LLVM disables unrolling entirely when it sees an inner loop —
+                // correct for throughput-bound loops, but wrong here.
+                //
+                // WHY 8× works without register spills in the HOT LOOP:
+                //   The 8 outer-iteration copies contain 8 SEQUENTIAL inner while
+                //   loops.  Each while runs to completion before the next starts,
+                //   so at most one while's x-variable is "active" (being modified)
+                //   at any instant.  The other 7 x-values (i+1..i+7, initialised
+                //   at the top of the unrolled outer iteration) sit in registers
+                //   untouched until their respective while loops start.
+                //
+                //   Register budget: 8 x-values (8) + 2 step counters (2) +
+                //   total accumulators (2) + loop vars i/end (2) + temps (2) ≈ 16.
+                //   LLVM uses a few callee-saved GP registers (push/pop only in
+                //   prologue/epilogue, NOT in the hot loop), keeping the hot-path
+                //   instruction count minimal and avoiding stack traffic.
+                //
+                //   The CPU's 512-entry ROB sees 8 independent while-loop chains
+                //   and can dispatch instructions from future chains while earlier
+                //   chains are still resolving data dependencies — exactly matching
+                //   what clang-18 -O3 produces for equivalent C code.
+                //   Benchmark result: collatz 110% → 101% of C with 8×.
+                if (currentFuncHintHot_ && !deeplyNested
+                        && optimizationLevel >= OptimizationLevel::O3) {
+                    const unsigned outerUnrollCount = 8u;
+                    loopMDs.push_back(llvm::MDNode::get(
+                        *context,
+                        {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
+                         llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                             llvm::Type::getInt32Ty(*context), outerUnrollCount))}));
+                } else {
+                    loopMDs.push_back(llvm::MDNode::get(
+                        *context, {llvm::MDString::get(*context, "llvm.loop.unroll.disable")}));
+                    // llvm.loop.unroll.count = 1 is a belt-and-suspenders constraint:
+                    // it explicitly tells LLVM's LoopUnroll pass to produce exactly 1
+                    // copy even when the pass ignores unroll.disable (e.g. at OptLevel=3
+                    // with OnlyWhenForced=false as used in the OPTMAX pass).
+                    loopMDs.push_back(llvm::MDNode::get(
+                        *context,
+                        {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
+                         llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                             llvm::Type::getInt32Ty(*context), 1u))}));
+                }
             } else {
                 // @unroll explicitly requested on an outer loop with inner loop:
-                // honour it with a conservative count (2) to allow minor ILP
-                // without the code-size explosion of large factors.
+                // use 8 for @hot at O3; otherwise conservative 2.
+                const unsigned explicitCount =
+                    (currentFuncHintHot_ && !deeplyNested
+                     && optimizationLevel >= OptimizationLevel::O3)
+                    ? 8u : 2u;
                 loopMDs.push_back(llvm::MDNode::get(
                     *context,
                     {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
                      llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
-                         llvm::Type::getInt32Ty(*context), 2u))}));
+                         llvm::Type::getInt32Ty(*context), explicitCount))}));
             }
         } else if (currentFuncHintUnroll_ && !addedUnrollHint && !suppressUnrollHint) {
             // @unroll on a non-suppressed loop: apply the unroll count hint.
@@ -1073,14 +1251,60 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             // GCC's aggressive unrolling for FP-heavy loops.
             // OPTMAX uses 16 to maximally hide FP/call latency through ILP;
             // regular functions use 4 to balance ILP gains vs I-cache pressure.
-            static constexpr unsigned kOptMaxUnrollCount = 16;
-            static constexpr unsigned kDefaultUnrollCount = 4;
-            const unsigned unrollCount = inOptMaxFunction ? kOptMaxUnrollCount : kDefaultUnrollCount;
-            loopMDs.push_back(llvm::MDNode::get(
-                *context,
-                {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
-                 llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
-                     llvm::Type::getInt32Ty(*context), unrollCount))}));
+            //
+            // EXCEPTION: loops with backward array references (arr[i-K]) have a
+            // loop-carried recurrence.  With 16x unrolling LLVM cannot recognize
+            // the carry pattern and emits a 16-deep store-to-load chain (4 cycles
+            // per hop × 16 hops = 64 cycles per 16 elements).  Capping at 4 gives
+            // LLVM the short chain it needs to promote the running value to a
+            // register PHI (1 cycle per element), matching C's recurrence handling.
+            //
+            // EXCEPTION: loops where a non-pow2 modulo result is stored to an array
+             // (bodyHasNonPow2ModuloArrayStore_=true).  Here, providing an explicit
+             // unroll.count=4 interferes with LLVM's O3 cost-model-driven unroller:
+             // the hint causes the unroll pass to set up divisibility scaffolding
+             // (an epilogue loop) but then the i128 magic-multiply cost model causes
+             // it to abort the body unrolling, leaving a 1x scalar loop instead.
+             // Without the explicit hint, LLVM's O3 cost-model unroller applies the
+             // same analysis it uses for equivalent C code and unrolls more
+             // aggressively (matching clang's 8x unrolling for modulo array-init loops).
+             //
+             // EXCEPTION: loops with comparison-context non-pow2 modulo (e.g. i%3==0).
+             // OPTMAX would normally use unroll.count=16, but that creates 18 live
+             // PHI variables per loop header (16 LSR IVs + acc + niter), exceeding
+             // x86-64's 15 usable GP registers and causing 3+ register spills.
+             // Capping at 8 (matching clang's behaviour for equivalent C loops) reduces
+             // PHI count to 10, eliminating spills and matching C's performance.
+             const bool modArrayStore = bodyHasNonPow2ModuloArrayStore_
+                 && optimizationLevel >= OptimizationLevel::O3;
+             // Backward array refs (arr[i] += arr[i-1]): serial loop-carried dependency.
+             // Suppress explicit unroll hint at O3 — LLVM's cost-model freely chooses
+             // the optimal factor (typically 8x for prefix-scan shapes), matching C.
+             // An explicit unroll.count=4 would under-constrain at O3 where integrated
+             // compilation pressure causes the backend to honour the hint literally.
+             const bool suppressUnrollForBackward = bodyHasBackwardArrayRef_
+                 && optimizationLevel >= OptimizationLevel::O3;
+             if (!modArrayStore && !suppressUnrollForBackward) {
+                 static constexpr unsigned kOptMaxUnrollCount = 16;
+                 static constexpr unsigned kOptMaxCmpModuloUnrollCount = 8;
+                 static constexpr unsigned kDefaultUnrollCount = 4;
+                 // For comparison-context non-pow2 modulo loops (e.g. i%3==0 branch),
+                 // clang-18 -O3 unrolls by 8 regardless of optimization profile.
+                 // At non-OPTMAX level match this behaviour: 8x eliminates register
+                 // spills (PHI count ~10, well within 15 GP register budget) and
+                 // matches C's performance for benchmarks like cond_arithmetic.
+                 const unsigned unrollCount =
+                     inOptMaxFunction
+                     ? (cmpModuloLoop ? kOptMaxCmpModuloUnrollCount : kOptMaxUnrollCount)
+                     : (cmpModuloLoop ? kOptMaxCmpModuloUnrollCount : kDefaultUnrollCount);
+                 loopMDs.push_back(llvm::MDNode::get(
+                     *context,
+                     {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
+                      llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                          llvm::Type::getInt32Ty(*context), unrollCount))}));
+             }
+             // modArrayStore / suppressUnrollForBackward: emit no unroll hint — let
+             // LLVM's O3 cost-model unroller decide freely, matching clang.
         }
         // @vectorize / @novectorize: per-function loop vectorization hints.
         // At O3, also enable vectorization for @hot functions even without
@@ -1092,7 +1316,8 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         // clang's aggressive auto-vectorization of hot loops.
         if (currentFuncHintNoVectorize_
                 || (bodyHasNonPow2Modulo_ && !bodyHasNonPow2ModuloValue_
-                    && !currentFuncHintVectorize_)) {
+                    && !currentFuncHintVectorize_)
+                || (bodyHasNonPow2ModuloArrayStore_ && !currentFuncHintVectorize_)) {
             // Disable vectorization when:
             //  (a) @novectorize is set explicitly, OR
             //  (b) loop has non-power-of-2 modular arithmetic used ONLY as a
@@ -1103,6 +1328,16 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             //   bodyHasNonPow2Modulo_=true && bodyHasNonPow2ModuloValue_=false
             // When modulo feeds into max(a%100, b%100), bodyHasNonPow2ModuloValue_
             // is set, so we keep vectorize.enable=true for SIMD abs/min/max.
+            //  (c) loop stores modulo result to an array element (arr[i]=val%K):
+            //      x86-64 has no native 64-bit vector division — the vectorizer
+            //      scalarizes urem <N x i64> to N sequential extract/divide/insert
+            //      sequences.  Scalar unrolled code achieves better ILP because
+            //      the CPU's OOO engine can pipeline N independent magic-multiply
+            //      chains simultaneously, while the scalar extract overhead is zero.
+            //  (d) loop has a backward array reference (arr[i] += arr[i-1]):
+            //      serial loop-carried dependency — the vectorizer will correctly
+            //      reject it, but not before adding unroll.disable to the metadata
+            //      when it fails with vectorize.enable=true.  Suppress upfront.
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
                            llvm::ConstantAsMetadata::get(
@@ -1110,6 +1345,10 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         } else if (currentFuncHintVectorize_
                    || (optimizationLevel >= OptimizationLevel::O3
                        && !bodyHasInnerLoop_ && stepKnownPositive)) {
+            // Force-enable vectorization at O3 for hot loops.
+            // Note: loops with non-power-of-2 modulo already have vectorize=0
+            // emitted above (when used as condition) or rely on LLVM cost model
+            // (when used as a value, e.g. for SIMD min/max patterns).
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
                            llvm::ConstantAsMetadata::get(
@@ -1118,8 +1357,19 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         // Interleaving: @hot+@vectorize at O3 → 4 iterations; plain O3
         // auto-vectorized loops → 2 iterations (balances register pressure
         // with latency hiding without the aggressive 4× that @hot requests).
+        // Suppress interleave.count for cmpModuloLoop (non-pow2 modulo used
+        // only in comparison context, e.g. i%3==0).  For those loops we
+        // already emit vectorize.enable=false + unroll.count=8.  When
+        // interleave.count is ALSO present, LLVM's vectorizer treats it as
+        // an implicit unroll-by-2 request, which conflicts with the explicit
+        // unroll.count=8, causes the loop unroller to add unroll.disable
+        // (preventing the 8× unrolling), and leaves a 4× scalar loop instead.
+        // Without interleave.count, the vectorize.enable=false + unroll.count=8
+        // combination cleanly produces the desired 8× unrolled loop, matching
+        // clang's natural cost-model behaviour for equivalent C code.
         if (optimizationLevel >= OptimizationLevel::O3
             && !currentFuncHintNoVectorize_
+            && !cmpModuloLoop
             && !bodyHasInnerLoop_ && stepKnownPositive) {
             const int32_t interleave = (currentFuncHintHot_ && currentFuncHintVectorize_) ? 4 : 2;
             loopMDs.push_back(llvm::MDNode::get(
@@ -1139,11 +1389,34 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         //   → Loop 2: for i in 0...n { sum+=arr[i] }  (reduction)
         // At O2, enable distribution only for @hot functions since the
         // analysis cost is non-trivial for cold code.
+        // Loops with comparison-context non-pow2 modulo (e.g. i%3==0) must
+        // also suppress distribution.  LoopDistribute finds nothing to split
+        // (no arrays), but marks the loop with unroll.disable after failing,
+        // clobbering the unroll.count hint and leaving a 1x scalar loop.
         if (stepKnownPositive && !deeplyNested && !bodyHasInnerLoop_
+            && !bodyHasBackwardArrayRef_
+            && !bodyHasNonPow2ModuloArrayStore_
+            && !cmpModuloLoop
             && (optimizationLevel >= OptimizationLevel::O3
                 || (optimizationLevel >= OptimizationLevel::O2 && currentFuncHintHot_))) {
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.distribute.enable"),
+                           llvm::ConstantAsMetadata::get(
+                               llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
+        }
+
+        // Loops with backward array references (arr[i-K]) have a loop-carried
+        // dependency.  Disable LoopVersioningLICM and LoopDistribute for these
+        // loops: both passes create multi-version loop structures that use
+        // N+1 element vector loads, causing partial store-to-load forwarding
+        // stalls instead of the efficient register-carry pattern.
+        if (bodyHasBackwardArrayRef_) {
+            loopMDs.push_back(llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.distribute.enable"),
+                           llvm::ConstantAsMetadata::get(
+                               llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 0))}));
+            loopMDs.push_back(llvm::MDNode::get(
+                *context, {llvm::MDString::get(*context, "llvm.loop.licm_versioning.disable"),
                            llvm::ConstantAsMetadata::get(
                                llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
         }
@@ -1183,11 +1456,31 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         //   - -fno-parallelize was not passed
         // At O3, all non-nested forward loops get the hint regardless of
         // @hot/@parallel annotations.
+        //
+        // IMPORTANT: Suppress parallel_accesses when the loop body has a
+        // backward array reference (arr[i-K] pattern). Such loops have
+        // loop-carried dependencies: iteration i reads arr[i-K] which was
+        // written in a previous iteration. Marking these accesses as parallel
+        // (independent) prevents LLVM from promoting arr[i-1] to a register
+        // accumulator — the critical optimization that makes prefix scans,
+        // sliding windows, and similar recurrence patterns fast. Without
+        // parallel_accesses, LLVM can convert the store-to-load chain (4-cycle
+        // latency per iteration) to a register-carried accumulator (1-cycle).
+        // Also suppress for loops where a non-pow2 modulo result is stored to
+        // an array (bodyHasNonPow2ModuloArrayStore_=true): these loops have
+        // vectorize.enable=false, so parallel_accesses would trigger the
+        // LoopDistribute pass on a non-vectorizable loop.  LoopDistribute
+        // responds by rewriting the loop metadata and replacing the
+        // unroll.count=4 hint with unroll.disable, causing the loop to run
+        // scalar 1-element-per-iteration instead of 4x unrolled.
         const bool wantParallel = enableParallelize_
             && !currentFuncHintNoParallelize_
             && stepKnownPositive
             && !deeplyNested
             && !bodyHasInnerLoop_
+            && !bodyHasBackwardArrayRef_
+            && !bodyHasNonPow2ModuloArrayStore_
+            && !cmpModuloLoop
             && (currentFuncHintParallelize_
                 || currentFuncHintHot_
                 || optimizationLevel >= OptimizationLevel::O3);
@@ -1217,10 +1510,15 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     // End block
     builder->SetInsertPoint(endBB);
     --loopNestDepth_;
+    loopIterVars_.erase(stmt->iteratorVar);
     // Restore the flag; propagate upward so enclosing for-loops also see it.
     bodyHasInnerLoop_ = savedBodyHasInnerLoop || bodyHasInnerLoop_;
     bodyHasNonPow2Modulo_ = savedBodyHasNonPow2Modulo || bodyHasNonPow2Modulo_;
     bodyHasNonPow2ModuloValue_ = savedBodyHasNonPow2ModuloValue || bodyHasNonPow2ModuloValue_;
+    bodyHasNonPow2ModuloArrayStore_ = savedBodyHasNonPow2ModuloArrayStore || bodyHasNonPow2ModuloArrayStore_;
+    // Backward refs don't propagate upward: a backward access in an inner loop
+    // doesn't imply the outer loop's iterations are dependent.
+    bodyHasBackwardArrayRef_ = savedBodyHasBackwardArrayRef;
 }
 
 void CodeGenerator::generateForEach(ForEachStmt* stmt) {

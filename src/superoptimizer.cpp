@@ -11,6 +11,13 @@
 /// pipeline, targeting patterns that individual passes miss or that require
 /// cross-instruction analysis.
 
+// Apply maximum compiler optimizations to this hot path.
+// The idiom detection and algebraic simplification loops dominate
+// the post-LLVM optimization time for large programs.
+#ifdef __GNUC__
+#  pragma GCC optimize("O3,unroll-loops,tree-vectorize")
+#endif
+
 #include "superoptimizer.h"
 #include <llvm/Config/llvm-config.h>
 #include <llvm/Analysis/ValueTracking.h>
@@ -34,7 +41,9 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <future>
 #include <random>
+#include <thread>
 #include <unordered_set>
 
 namespace omscript {
@@ -404,6 +413,22 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
         }
     }
 
+    // sdiv by positive constant with non-negative dividend: result is in [0, dividend/C],
+    // so it is always non-negative.  Mirrors the SRem case above.  This enables
+    // downstream adds/muls on quotients to get NSW/NUW flags without needing
+    // an extra llvm.assume.
+    if (op == llvm::Instruction::SDiv) {
+        if (isValueNonNegative(inst->getOperand(0), DL, depth + 1)) {
+            if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst->getOperand(1))) {
+                if (ci->getSExtValue() > 0) return true;
+            }
+            // Runtime positive divisor: if it's provably non-negative (and
+            // non-zero — assumed by the caller as sdiv by zero is UB), the
+            // quotient is also non-negative.
+            if (isValueNonNegative(inst->getOperand(1), DL, depth + 1)) return true;
+        }
+    }
+
     // lshr (logical shift right): always non-negative (fills with 0s)
     if (op == llvm::Instruction::LShr) return true;
 
@@ -450,6 +475,36 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
         }
     }
 
+    // and: bitmask with a positive constant always produces a non-negative
+    // result.  e.g. x & 1  →  result ∈ {0,1}, always ≥ 0.
+    // More generally, x & C where C ∈ [0, INT64_MAX] has the sign bit cleared
+    // so the result is non-negative regardless of x.
+    if (op == llvm::Instruction::And) {
+        auto checkNonNegConst = [](llvm::Value* v) -> bool {
+            if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(v))
+                return !ci->isNegative();
+            if (auto* cv = llvm::dyn_cast<llvm::Constant>(v))
+                return isConstantAllPositive(cv);
+            return false;
+        };
+        if (checkNonNegConst(inst->getOperand(1)) ||
+            checkNonNegConst(inst->getOperand(0)))
+            return true;
+        // If either operand is non-negative, the and result is too
+        // (anding with a non-negative value clears the sign bit).
+        if (isValueNonNegative(inst->getOperand(0), DL, depth + 1) ||
+            isValueNonNegative(inst->getOperand(1), DL, depth + 1))
+            return true;
+    }
+
+    // or disjoint (llvm.or.disjoint / or with known non-overlapping bits):
+    // if both operands are non-negative, the result is non-negative.
+    if (op == llvm::Instruction::Or) {
+        if (isValueNonNegative(inst->getOperand(0), DL, depth + 1) &&
+            isValueNonNegative(inst->getOperand(1), DL, depth + 1))
+            return true;
+    }
+
     // select: if both possible values are non-negative, the result is too
     if (auto* sel = llvm::dyn_cast<llvm::SelectInst>(inst)) {
         return isValueNonNegative(sel->getTrueValue(), DL, depth + 1) &&
@@ -480,11 +535,60 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
         }
     }
 
+    // Intrinsic calls with non-negative results:
+    //   abs(x)        — absolute value is always non-negative by definition.
+    //   umin/umax     — unsigned min/max results are always in [0, UINT64_MAX],
+    //                   which interpreted as i64 never has the sign bit set when
+    //                   both inputs are < 2^63.  We conservatively check that
+    //                   at least one operand is non-negative (the min/max result
+    //                   is bounded by the non-negative operand).
+    //   smin(a,b)     — signed min is non-negative when both a and b are ≥ 0.
+    //   smax(a,b)     — signed max is non-negative when at least one is ≥ 0
+    //                   (the result >= the non-negative operand).
+    // These enable NSW/NUW propagation through min/max chains in hot loops
+    // (e.g. clamp patterns, saturating accumulation).
+    if (auto* call = llvm::dyn_cast<llvm::CallInst>(inst)) {
+        if (auto* callee = call->getCalledFunction()) {
+            switch (callee->getIntrinsicID()) {
+            case llvm::Intrinsic::abs:
+                return true;
+            case llvm::Intrinsic::umin:
+            case llvm::Intrinsic::umax:
+                // Unsigned results are always non-negative as i64 when inputs < 2^63.
+                return isValueNonNegative(call->getArgOperand(0), DL, depth + 1) ||
+                       isValueNonNegative(call->getArgOperand(1), DL, depth + 1);
+            case llvm::Intrinsic::smin:
+                return isValueNonNegative(call->getArgOperand(0), DL, depth + 1) &&
+                       isValueNonNegative(call->getArgOperand(1), DL, depth + 1);
+            case llvm::Intrinsic::smax:
+                return isValueNonNegative(call->getArgOperand(0), DL, depth + 1) ||
+                       isValueNonNegative(call->getArgOperand(1), DL, depth + 1);
+            default:
+                break;
+            }
+        }
+    }
+
     // PHI node: check if all incoming values (excluding self-references) are
     // non-negative.  This handles loop induction variables that start from 0
     // and increment by a positive step, as well as PHIs from loop unrolling
     // where incoming values are other PHI nodes or or-disjoint increments.
+    //
+    // Cycle detection: a thread-local set of PHIs currently under analysis
+    // prevents infinite recursion when back-edges form cycles through select
+    // or other expressions that contain the PHI (e.g. Collatz x variable:
+    //   phi = [init, select(x&1, 3*phi+1, phi>>1)]).
+    // When we re-encounter a phi already being analyzed, we return true
+    // (assume non-negative inductively) — the base case is checked below
+    // on the non-back-edge incoming values, and the back-edge check tests
+    // whether the update expression preserves non-negativity given non-neg input.
     if (auto* phi = llvm::dyn_cast<llvm::PHINode>(inst)) {
+        // Cycle guard: if we're already analyzing this phi in the current
+        // call chain, assume it's non-negative (inductive hypothesis).
+        thread_local llvm::SmallPtrSet<const llvm::PHINode*, 8> activePHIs;
+        if (activePHIs.count(phi)) return true;
+        activePHIs.insert(phi);
+
         bool allNonNeg = true;
         for (unsigned i = 0; i < phi->getNumIncomingValues(); i++) {
             llvm::Value* incoming = phi->getIncomingValue(i);
@@ -577,6 +681,7 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
                 break;
             }
         }
+        activePHIs.erase(phi);
         if (allNonNeg && phi->getNumIncomingValues() > 0) return true;
     }
 
@@ -2717,6 +2822,102 @@ static bool replaceIdiom(IdiomMatch& match) {
                     case 4608: simplified = builder.CreateAdd(shl(xv,12), shl(xv,9),   "mul4608"); break;
                     case 5120: simplified = builder.CreateAdd(shl(xv,12), shl(xv,10),  "mul5120"); break;
                     case 6144: simplified = builder.CreateAdd(shl(xv,12), shl(xv,11),  "mul6144"); break;
+                    // ── n×8192 family ────────────────────────────────────────────
+                    case 7168:  simplified = builder.CreateSub(shl(xv,13), shl(xv,10), "mul7168");  break;
+                    case 7680:  simplified = builder.CreateSub(shl(xv,13), shl(xv,9),  "mul7680");  break;
+                    case 7936:  simplified = builder.CreateSub(shl(xv,13), shl(xv,8),  "mul7936");  break;
+                    case 8064:  simplified = builder.CreateSub(shl(xv,13), shl(xv,7),  "mul8064");  break;
+                    case 8128:  simplified = builder.CreateSub(shl(xv,13), shl(xv,6),  "mul8128");  break;
+                    case 8160:  simplified = builder.CreateSub(shl(xv,13), shl(xv,5),  "mul8160");  break;
+                    case 8176:  simplified = builder.CreateSub(shl(xv,13), shl(xv,4),  "mul8176");  break;
+                    case 8184:  simplified = builder.CreateSub(shl(xv,13), shl(xv,3),  "mul8184");  break;
+                    case 8188:  simplified = builder.CreateSub(shl(xv,13), shl(xv,2),  "mul8188");  break;
+                    case 8190:  simplified = builder.CreateSub(shl(xv,13), shl(xv,1),  "mul8190");  break;
+                    case 8191:  simplified = builder.CreateSub(shl(xv,13), xv,          "mul8191");  break;
+                    case 8193:  simplified = builder.CreateAdd(shl(xv,13), xv,          "mul8193");  break;
+                    case 8194:  simplified = builder.CreateAdd(shl(xv,13), shl(xv,1),  "mul8194");  break;
+                    case 8196:  simplified = builder.CreateAdd(shl(xv,13), shl(xv,2),  "mul8196");  break;
+                    case 8200:  simplified = builder.CreateAdd(shl(xv,13), shl(xv,3),  "mul8200");  break;
+                    case 8208:  simplified = builder.CreateAdd(shl(xv,13), shl(xv,4),  "mul8208");  break;
+                    case 8224:  simplified = builder.CreateAdd(shl(xv,13), shl(xv,5),  "mul8224");  break;
+                    case 8256:  simplified = builder.CreateAdd(shl(xv,13), shl(xv,6),  "mul8256");  break;
+                    case 8320:  simplified = builder.CreateAdd(shl(xv,13), shl(xv,7),  "mul8320");  break;
+                    case 8448:  simplified = builder.CreateAdd(shl(xv,13), shl(xv,8),  "mul8448");  break;
+                    case 8704:  simplified = builder.CreateAdd(shl(xv,13), shl(xv,9),  "mul8704");  break;
+                    case 9216:  simplified = builder.CreateAdd(shl(xv,13), shl(xv,10), "mul9216");  break;
+                    case 10240: simplified = builder.CreateAdd(shl(xv,13), shl(xv,11), "mul10240"); break;
+                    case 12288: simplified = builder.CreateAdd(shl(xv,13), shl(xv,12), "mul12288"); break;
+                    // ── n×16384 family ──────────────────────────────────────
+                    case 14336: simplified = builder.CreateSub(shl(xv,14), shl(xv,11), "mul14336"); break;
+                    case 15360: simplified = builder.CreateSub(shl(xv,14), shl(xv,10), "mul15360"); break;
+                    case 16384: simplified = shl(xv,14); break;
+                    case 16385: simplified = builder.CreateAdd(shl(xv,14), xv,          "mul16385"); break;
+                    case 16386: simplified = builder.CreateAdd(shl(xv,14), shl(xv,1),   "mul16386"); break;
+                    case 16388: simplified = builder.CreateAdd(shl(xv,14), shl(xv,2),   "mul16388"); break;
+                    case 16392: simplified = builder.CreateAdd(shl(xv,14), shl(xv,3),   "mul16392"); break;
+                    case 16400: simplified = builder.CreateAdd(shl(xv,14), shl(xv,4),   "mul16400"); break;
+                    case 16416: simplified = builder.CreateAdd(shl(xv,14), shl(xv,5),   "mul16416"); break;
+                    case 16448: simplified = builder.CreateAdd(shl(xv,14), shl(xv,6),   "mul16448"); break;
+                    case 16512: simplified = builder.CreateAdd(shl(xv,14), shl(xv,7),   "mul16512"); break;
+                    case 16640: simplified = builder.CreateAdd(shl(xv,14), shl(xv,8),   "mul16640"); break;
+                    case 16896: simplified = builder.CreateAdd(shl(xv,14), shl(xv,9),   "mul16896"); break;
+                    case 17408: simplified = builder.CreateAdd(shl(xv,14), shl(xv,10),  "mul17408"); break;
+                    case 18432: simplified = builder.CreateAdd(shl(xv,14), shl(xv,11),  "mul18432"); break;
+                    case 20480: simplified = builder.CreateAdd(shl(xv,14), shl(xv,12),  "mul20480"); break;
+                    case 24576: simplified = builder.CreateAdd(shl(xv,14), shl(xv,13),  "mul24576"); break;
+                    // ── n×32768 family ──────────────────────────────────────
+                    case 28672: simplified = builder.CreateSub(shl(xv,15), shl(xv,12), "mul28672"); break;
+                    case 30720: simplified = builder.CreateSub(shl(xv,15), shl(xv,11), "mul30720"); break;
+                    case 32768: simplified = shl(xv,15); break;
+                    case 32769: simplified = builder.CreateAdd(shl(xv,15), xv,          "mul32769"); break;
+                    case 32770: simplified = builder.CreateAdd(shl(xv,15), shl(xv,1),   "mul32770"); break;
+                    case 32772: simplified = builder.CreateAdd(shl(xv,15), shl(xv,2),   "mul32772"); break;
+                    case 32776: simplified = builder.CreateAdd(shl(xv,15), shl(xv,3),   "mul32776"); break;
+                    case 32800: simplified = builder.CreateAdd(shl(xv,15), shl(xv,5),   "mul32800"); break;
+                    case 32896: simplified = builder.CreateAdd(shl(xv,15), shl(xv,7),   "mul32896"); break;
+                    case 33024: simplified = builder.CreateAdd(shl(xv,15), shl(xv,8),   "mul33024"); break;
+                    case 33280: simplified = builder.CreateAdd(shl(xv,15), shl(xv,9),   "mul33280"); break;
+                    case 33792: simplified = builder.CreateAdd(shl(xv,15), shl(xv,10),  "mul33792"); break;
+                    case 34816: simplified = builder.CreateAdd(shl(xv,15), shl(xv,11),  "mul34816"); break;
+                    case 36864: simplified = builder.CreateAdd(shl(xv,15), shl(xv,12),  "mul36864"); break;
+                    case 40960: simplified = builder.CreateAdd(shl(xv,15), shl(xv,13),  "mul40960"); break;
+                    case 49152: simplified = builder.CreateAdd(shl(xv,15), shl(xv,14),  "mul49152"); break;
+                    // ── n×65536 family ──────────────────────────────────────
+                    case 57344: simplified = builder.CreateSub(shl(xv,16), shl(xv,13), "mul57344"); break;
+                    case 61440: simplified = builder.CreateSub(shl(xv,16), shl(xv,12), "mul61440"); break;
+                    case 65536: simplified = shl(xv,16); break;
+                    case 65537: simplified = builder.CreateAdd(shl(xv,16), xv,          "mul65537"); break;
+                    case 65538: simplified = builder.CreateAdd(shl(xv,16), shl(xv,1),   "mul65538"); break;
+                    case 65540: simplified = builder.CreateAdd(shl(xv,16), shl(xv,2),   "mul65540"); break;
+                    case 65544: simplified = builder.CreateAdd(shl(xv,16), shl(xv,3),   "mul65544"); break;
+                    case 65600: simplified = builder.CreateAdd(shl(xv,16), shl(xv,6),   "mul65600"); break;
+                    case 65664: simplified = builder.CreateAdd(shl(xv,16), shl(xv,7),   "mul65664"); break;
+                    case 65792: simplified = builder.CreateAdd(shl(xv,16), shl(xv,8),   "mul65792"); break;
+                    case 66048: simplified = builder.CreateAdd(shl(xv,16), shl(xv,9),   "mul66048"); break;
+                    case 66560: simplified = builder.CreateAdd(shl(xv,16), shl(xv,10),  "mul66560"); break;
+                    case 67584: simplified = builder.CreateAdd(shl(xv,16), shl(xv,11),  "mul67584"); break;
+                    case 69632: simplified = builder.CreateAdd(shl(xv,16), shl(xv,12),  "mul69632"); break;
+                    case 73728: simplified = builder.CreateAdd(shl(xv,16), shl(xv,13),  "mul73728"); break;
+                    case 81920: simplified = builder.CreateAdd(shl(xv,16), shl(xv,14),  "mul81920"); break;
+                    case 98304: simplified = builder.CreateAdd(shl(xv,16), shl(xv,15),  "mul98304"); break;
+                    case 114688: simplified = builder.CreateSub(shl(xv,17), shl(xv,14), "mul114688"); break;
+                    case 122880: simplified = builder.CreateSub(shl(xv,17), shl(xv,13), "mul122880"); break;
+                    case 131072: simplified = shl(xv,17); break;
+                    case 131073: simplified = builder.CreateAdd(shl(xv,17), xv,          "mul131073"); break;
+                    case 131074: simplified = builder.CreateAdd(shl(xv,17), shl(xv,1),   "mul131074"); break;
+                    case 131076: simplified = builder.CreateAdd(shl(xv,17), shl(xv,2),   "mul131076"); break;
+                    case 131080: simplified = builder.CreateAdd(shl(xv,17), shl(xv,3),   "mul131080"); break;
+                    case 131136: simplified = builder.CreateAdd(shl(xv,17), shl(xv,6),   "mul131136"); break;
+                    case 131200: simplified = builder.CreateAdd(shl(xv,17), shl(xv,7),   "mul131200"); break;
+                    case 131328: simplified = builder.CreateAdd(shl(xv,17), shl(xv,8),   "mul131328"); break;
+                    case 131584: simplified = builder.CreateAdd(shl(xv,17), shl(xv,9),   "mul131584"); break;
+                    case 132096: simplified = builder.CreateAdd(shl(xv,17), shl(xv,10),  "mul132096"); break;
+                    case 133120: simplified = builder.CreateAdd(shl(xv,17), shl(xv,11),  "mul133120"); break;
+                    case 135168: simplified = builder.CreateAdd(shl(xv,17), shl(xv,12),  "mul135168"); break;
+                    case 139264: simplified = builder.CreateAdd(shl(xv,17), shl(xv,13),  "mul139264"); break;
+                    case 147456: simplified = builder.CreateAdd(shl(xv,17), shl(xv,14),  "mul147456"); break;
+                    case 163840: simplified = builder.CreateAdd(shl(xv,17), shl(xv,15),  "mul163840"); break;
+                    case 196608: simplified = builder.CreateAdd(shl(xv,17), shl(xv,16),  "mul196608"); break;
                     default:
                         // Negative constants: compute |cv|, strength-reduce, then negate.
                         if (*cv < -1) {
@@ -2870,6 +3071,102 @@ static bool replaceIdiom(IdiomMatch& match) {
                             case 4608: posRep = builder.CreateAdd(shl(xv,12), shl(xv,9),   "mulp4608"); break;
                             case 5120: posRep = builder.CreateAdd(shl(xv,12), shl(xv,10),  "mulp5120"); break;
                             case 6144: posRep = builder.CreateAdd(shl(xv,12), shl(xv,11),  "mulp6144"); break;
+                            // ── n×8192 family ──────────────────────────────────────────
+                            case 7168:  posRep = builder.CreateSub(shl(xv,13), shl(xv,10), "mulp7168");  break;
+                            case 7680:  posRep = builder.CreateSub(shl(xv,13), shl(xv,9),  "mulp7680");  break;
+                            case 7936:  posRep = builder.CreateSub(shl(xv,13), shl(xv,8),  "mulp7936");  break;
+                            case 8064:  posRep = builder.CreateSub(shl(xv,13), shl(xv,7),  "mulp8064");  break;
+                            case 8128:  posRep = builder.CreateSub(shl(xv,13), shl(xv,6),  "mulp8128");  break;
+                            case 8160:  posRep = builder.CreateSub(shl(xv,13), shl(xv,5),  "mulp8160");  break;
+                            case 8176:  posRep = builder.CreateSub(shl(xv,13), shl(xv,4),  "mulp8176");  break;
+                            case 8184:  posRep = builder.CreateSub(shl(xv,13), shl(xv,3),  "mulp8184");  break;
+                            case 8188:  posRep = builder.CreateSub(shl(xv,13), shl(xv,2),  "mulp8188");  break;
+                            case 8190:  posRep = builder.CreateSub(shl(xv,13), shl(xv,1),  "mulp8190");  break;
+                            case 8191:  posRep = builder.CreateSub(shl(xv,13), xv,          "mulp8191");  break;
+                            case 8193:  posRep = builder.CreateAdd(shl(xv,13), xv,          "mulp8193");  break;
+                            case 8194:  posRep = builder.CreateAdd(shl(xv,13), shl(xv,1),  "mulp8194");  break;
+                            case 8196:  posRep = builder.CreateAdd(shl(xv,13), shl(xv,2),  "mulp8196");  break;
+                            case 8200:  posRep = builder.CreateAdd(shl(xv,13), shl(xv,3),  "mulp8200");  break;
+                            case 8208:  posRep = builder.CreateAdd(shl(xv,13), shl(xv,4),  "mulp8208");  break;
+                            case 8224:  posRep = builder.CreateAdd(shl(xv,13), shl(xv,5),  "mulp8224");  break;
+                            case 8256:  posRep = builder.CreateAdd(shl(xv,13), shl(xv,6),  "mulp8256");  break;
+                            case 8320:  posRep = builder.CreateAdd(shl(xv,13), shl(xv,7),  "mulp8320");  break;
+                            case 8448:  posRep = builder.CreateAdd(shl(xv,13), shl(xv,8),  "mulp8448");  break;
+                            case 8704:  posRep = builder.CreateAdd(shl(xv,13), shl(xv,9),  "mulp8704");  break;
+                            case 9216:  posRep = builder.CreateAdd(shl(xv,13), shl(xv,10), "mulp9216");  break;
+                            case 10240: posRep = builder.CreateAdd(shl(xv,13), shl(xv,11), "mulp10240"); break;
+                            case 12288: posRep = builder.CreateAdd(shl(xv,13), shl(xv,12), "mulp12288"); break;
+                            // ── n×16384 family ──────────────────────────────────────
+                            case 14336: posRep = builder.CreateSub(shl(xv,14), shl(xv,11), "mulp14336"); break;
+                            case 15360: posRep = builder.CreateSub(shl(xv,14), shl(xv,10), "mulp15360"); break;
+                            case 16384: posRep = shl(xv,14); break;
+                            case 16385: posRep = builder.CreateAdd(shl(xv,14), xv,          "mulp16385"); break;
+                            case 16386: posRep = builder.CreateAdd(shl(xv,14), shl(xv,1),   "mulp16386"); break;
+                            case 16388: posRep = builder.CreateAdd(shl(xv,14), shl(xv,2),   "mulp16388"); break;
+                            case 16392: posRep = builder.CreateAdd(shl(xv,14), shl(xv,3),   "mulp16392"); break;
+                            case 16400: posRep = builder.CreateAdd(shl(xv,14), shl(xv,4),   "mulp16400"); break;
+                            case 16416: posRep = builder.CreateAdd(shl(xv,14), shl(xv,5),   "mulp16416"); break;
+                            case 16448: posRep = builder.CreateAdd(shl(xv,14), shl(xv,6),   "mulp16448"); break;
+                            case 16512: posRep = builder.CreateAdd(shl(xv,14), shl(xv,7),   "mulp16512"); break;
+                            case 16640: posRep = builder.CreateAdd(shl(xv,14), shl(xv,8),   "mulp16640"); break;
+                            case 16896: posRep = builder.CreateAdd(shl(xv,14), shl(xv,9),   "mulp16896"); break;
+                            case 17408: posRep = builder.CreateAdd(shl(xv,14), shl(xv,10),  "mulp17408"); break;
+                            case 18432: posRep = builder.CreateAdd(shl(xv,14), shl(xv,11),  "mulp18432"); break;
+                            case 20480: posRep = builder.CreateAdd(shl(xv,14), shl(xv,12),  "mulp20480"); break;
+                            case 24576: posRep = builder.CreateAdd(shl(xv,14), shl(xv,13),  "mulp24576"); break;
+                            // ── n×32768 family ──────────────────────────────────────
+                            case 28672: posRep = builder.CreateSub(shl(xv,15), shl(xv,12), "mulp28672"); break;
+                            case 30720: posRep = builder.CreateSub(shl(xv,15), shl(xv,11), "mulp30720"); break;
+                            case 32768: posRep = shl(xv,15); break;
+                            case 32769: posRep = builder.CreateAdd(shl(xv,15), xv,          "mulp32769"); break;
+                            case 32770: posRep = builder.CreateAdd(shl(xv,15), shl(xv,1),   "mulp32770"); break;
+                            case 32772: posRep = builder.CreateAdd(shl(xv,15), shl(xv,2),   "mulp32772"); break;
+                            case 32776: posRep = builder.CreateAdd(shl(xv,15), shl(xv,3),   "mulp32776"); break;
+                            case 32800: posRep = builder.CreateAdd(shl(xv,15), shl(xv,5),   "mulp32800"); break;
+                            case 32896: posRep = builder.CreateAdd(shl(xv,15), shl(xv,7),   "mulp32896"); break;
+                            case 33024: posRep = builder.CreateAdd(shl(xv,15), shl(xv,8),   "mulp33024"); break;
+                            case 33280: posRep = builder.CreateAdd(shl(xv,15), shl(xv,9),   "mulp33280"); break;
+                            case 33792: posRep = builder.CreateAdd(shl(xv,15), shl(xv,10),  "mulp33792"); break;
+                            case 34816: posRep = builder.CreateAdd(shl(xv,15), shl(xv,11),  "mulp34816"); break;
+                            case 36864: posRep = builder.CreateAdd(shl(xv,15), shl(xv,12),  "mulp36864"); break;
+                            case 40960: posRep = builder.CreateAdd(shl(xv,15), shl(xv,13),  "mulp40960"); break;
+                            case 49152: posRep = builder.CreateAdd(shl(xv,15), shl(xv,14),  "mulp49152"); break;
+                            // ── n×65536 family ──────────────────────────────────────
+                            case 57344: posRep = builder.CreateSub(shl(xv,16), shl(xv,13), "mulp57344"); break;
+                            case 61440: posRep = builder.CreateSub(shl(xv,16), shl(xv,12), "mulp61440"); break;
+                            case 65536: posRep = shl(xv,16); break;
+                            case 65537: posRep = builder.CreateAdd(shl(xv,16), xv,          "mulp65537"); break;
+                            case 65538: posRep = builder.CreateAdd(shl(xv,16), shl(xv,1),   "mulp65538"); break;
+                            case 65540: posRep = builder.CreateAdd(shl(xv,16), shl(xv,2),   "mulp65540"); break;
+                            case 65544: posRep = builder.CreateAdd(shl(xv,16), shl(xv,3),   "mulp65544"); break;
+                            case 65600: posRep = builder.CreateAdd(shl(xv,16), shl(xv,6),   "mulp65600"); break;
+                            case 65664: posRep = builder.CreateAdd(shl(xv,16), shl(xv,7),   "mulp65664"); break;
+                            case 65792: posRep = builder.CreateAdd(shl(xv,16), shl(xv,8),   "mulp65792"); break;
+                            case 66048: posRep = builder.CreateAdd(shl(xv,16), shl(xv,9),   "mulp66048"); break;
+                            case 66560: posRep = builder.CreateAdd(shl(xv,16), shl(xv,10),  "mulp66560"); break;
+                            case 67584: posRep = builder.CreateAdd(shl(xv,16), shl(xv,11),  "mulp67584"); break;
+                            case 69632: posRep = builder.CreateAdd(shl(xv,16), shl(xv,12),  "mulp69632"); break;
+                            case 73728: posRep = builder.CreateAdd(shl(xv,16), shl(xv,13),  "mulp73728"); break;
+                            case 81920: posRep = builder.CreateAdd(shl(xv,16), shl(xv,14),  "mulp81920"); break;
+                            case 98304: posRep = builder.CreateAdd(shl(xv,16), shl(xv,15),  "mulp98304"); break;
+                            case 114688: posRep = builder.CreateSub(shl(xv,17), shl(xv,14), "mulp114688"); break;
+                            case 122880: posRep = builder.CreateSub(shl(xv,17), shl(xv,13), "mulp122880"); break;
+                            case 131072: posRep = shl(xv,17); break;
+                            case 131073: posRep = builder.CreateAdd(shl(xv,17), xv,          "mulp131073"); break;
+                            case 131074: posRep = builder.CreateAdd(shl(xv,17), shl(xv,1),   "mulp131074"); break;
+                            case 131076: posRep = builder.CreateAdd(shl(xv,17), shl(xv,2),   "mulp131076"); break;
+                            case 131080: posRep = builder.CreateAdd(shl(xv,17), shl(xv,3),   "mulp131080"); break;
+                            case 131136: posRep = builder.CreateAdd(shl(xv,17), shl(xv,6),   "mulp131136"); break;
+                            case 131200: posRep = builder.CreateAdd(shl(xv,17), shl(xv,7),   "mulp131200"); break;
+                            case 131328: posRep = builder.CreateAdd(shl(xv,17), shl(xv,8),   "mulp131328"); break;
+                            case 131584: posRep = builder.CreateAdd(shl(xv,17), shl(xv,9),   "mulp131584"); break;
+                            case 132096: posRep = builder.CreateAdd(shl(xv,17), shl(xv,10),  "mulp132096"); break;
+                            case 133120: posRep = builder.CreateAdd(shl(xv,17), shl(xv,11),  "mulp133120"); break;
+                            case 135168: posRep = builder.CreateAdd(shl(xv,17), shl(xv,12),  "mulp135168"); break;
+                            case 139264: posRep = builder.CreateAdd(shl(xv,17), shl(xv,13),  "mulp139264"); break;
+                            case 147456: posRep = builder.CreateAdd(shl(xv,17), shl(xv,14),  "mulp147456"); break;
+                            case 163840: posRep = builder.CreateAdd(shl(xv,17), shl(xv,15),  "mulp163840"); break;
+                            case 196608: posRep = builder.CreateAdd(shl(xv,17), shl(xv,16),  "mulp196608"); break;
                             // 3-instruction negative sequences (new cases not covered above)
                             case 37: posRep = builder.CreateAdd(builder.CreateAdd(shl(xv,5), shl(xv,2)), xv, "mulp37"); break;
                             case 41: posRep = builder.CreateAdd(builder.CreateAdd(shl(xv,5), shl(xv,3)), xv, "mulp41"); break;
@@ -4488,13 +4785,56 @@ SuperoptimizerStats superoptimizeFunction(llvm::Function& func,
 SuperoptimizerStats superoptimizeModule(llvm::Module& module,
                                          const SuperoptimizerConfig& config) {
     SuperoptimizerStats total;
+
+    // Collect all non-declaration functions first to enable parallel dispatch.
+    std::vector<llvm::Function*> funcs;
+    funcs.reserve(32);
     for (auto& func : module) {
-        auto stats = superoptimizeFunction(func, config);
-        total.idiomsReplaced += stats.idiomsReplaced;
-        total.synthReplacements += stats.synthReplacements;
-        total.branchesSimplified += stats.branchesSimplified;
-        total.algebraicSimplified += stats.algebraicSimplified;
-        total.deadCodeEliminated += stats.deadCodeEliminated;
+        if (!func.isDeclaration())
+            funcs.push_back(&func);
+    }
+
+    // Parallel threshold: launch async tasks only when there are enough
+    // functions to amortize the thread-creation overhead (≥4 functions and
+    // more than one hardware thread available).  Below this threshold the
+    // sequential path is faster.
+    const unsigned hwThreads = std::max(1u, std::thread::hardware_concurrency());
+    const bool runParallel = funcs.size() >= 4 && hwThreads >= 2;
+
+    if (runParallel) {
+        // Launch one future per function so each function is processed on a
+        // worker thread independently.  LLVM IR operations on *different*
+        // functions are disjoint (separate basic-block / instruction lists),
+        // so concurrent modification is safe.  IRBuilder objects are created
+        // locally inside superoptimizeFunction which also makes them
+        // thread-local by construction.
+        // config is captured by value into each async task (SuperoptimizerConfig
+        // is a plain struct of flags/integers).  Value capture is intentional:
+        // it ensures each future has its own copy and cannot observe dangling
+        // references if any future outlives the current stack frame.
+        std::vector<std::future<SuperoptimizerStats>> futures;
+        futures.reserve(funcs.size());
+        for (llvm::Function* fn : funcs) {
+            futures.push_back(std::async(std::launch::async,
+                [fn, config]() { return superoptimizeFunction(*fn, config); }));
+        }
+        for (auto& fut : futures) {
+            auto stats = fut.get();
+            total.idiomsReplaced     += stats.idiomsReplaced;
+            total.synthReplacements  += stats.synthReplacements;
+            total.branchesSimplified += stats.branchesSimplified;
+            total.algebraicSimplified += stats.algebraicSimplified;
+            total.deadCodeEliminated += stats.deadCodeEliminated;
+        }
+    } else {
+        for (llvm::Function* fn : funcs) {
+            auto stats = superoptimizeFunction(*fn, config);
+            total.idiomsReplaced     += stats.idiomsReplaced;
+            total.synthReplacements  += stats.synthReplacements;
+            total.branchesSimplified += stats.branchesSimplified;
+            total.algebraicSimplified += stats.algebraicSimplified;
+            total.deadCodeEliminated += stats.deadCodeEliminated;
+        }
     }
     return total;
 }
@@ -4514,17 +4854,15 @@ unsigned superopt::convertSRemToURem(llvm::Function& func) {
                 llvm::Value* rhs = inst.getOperand(1);
                 // Convert srem(a, b) → urem(a, b) when:
                 //   (a) dividend is non-negative, AND
-                //   (b) divisor is a positive constant.
+                //   (b) divisor is positive (constant or proven non-negative runtime value).
                 // Correctness: if a >= 0 and b > 0, srem(a,b) == urem(a,b)
                 // because the C/LLVM standard srem has the sign of the dividend,
                 // and a non-negative dividend with a positive divisor gives a
                 // non-negative remainder identical to unsigned remainder.
-                // Non-constant divisors are not handled here: proving b > 0 for
-                // runtime values requires range tracking beyond isValueNonNegative,
-                // and LLVM's own passes handle that after SCCP folds variables.
                 auto* rhsConst = llvm::dyn_cast<llvm::Constant>(rhs);
-                if (rhsConst && isConstantAllPositive(rhsConst) &&
-                    isValueNonNegative(lhs, DL)) {
+                const bool rhsPositive = (rhsConst && isConstantAllPositive(rhsConst))
+                    || isValueNonNegative(rhs, DL);
+                if (rhsPositive && isValueNonNegative(lhs, DL)) {
                     llvm::IRBuilder<> builder(&inst);
                     auto* urem = builder.CreateURem(lhs, rhs, "srem_to_urem");
                     inst.replaceAllUsesWith(urem);
@@ -4548,9 +4886,13 @@ unsigned superopt::convertSDivToUDiv(llvm::Function& func) {
             if (inst.getOpcode() == llvm::Instruction::SDiv) {
                 llvm::Value* lhs = inst.getOperand(0);
                 llvm::Value* rhs = inst.getOperand(1);
+                // Convert sdiv(a, b) → udiv(a, b) when both operands are
+                // proven non-negative.  Handles constant and runtime divisors.
                 bool rhsPositive = false;
                 if (auto* rhsConst = llvm::dyn_cast<llvm::Constant>(rhs)) {
                     rhsPositive = isConstantAllPositive(rhsConst);
+                } else {
+                    rhsPositive = isValueNonNegative(rhs, DL);
                 }
                 if (rhsPositive && isValueNonNegative(lhs, DL)) {
                     llvm::IRBuilder<> builder(&inst);
@@ -4590,6 +4932,26 @@ unsigned superopt::convertSDivToUDiv(llvm::Function& func) {
                 }
             }
 
+            // ICmp signed → unsigned when both operands are non-negative.
+            // For non-negative i64 values, signed and unsigned order comparisons
+            // give the same result.  Converting to unsigned enables:
+            //   1. SCEV's unsigned trip-count analysis (more vectorization
+            //      opportunities without signed-overflow guards)
+            //   2. LLVM's loop vectorizer to use unsigned induction variables
+            //   3. Downstream passes (GVN, LICM) to hoist loop conditions
+            //      without requiring signed-range assumptions.
+            // We run this AFTER inferring NSW/NUW flags so that the maximum
+            // number of operands are proven non-negative.
+            if (auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(&inst)) {
+                if (cmp->isSigned() &&
+                    isValueNonNegative(cmp->getOperand(0), DL) &&
+                    isValueNonNegative(cmp->getOperand(1), DL)) {
+                    cmp->setPredicate(cmp->getUnsignedPredicate());
+                    ++count;
+                }
+                continue;
+            }
+
             auto* bo = llvm::dyn_cast<llvm::BinaryOperator>(&inst);
             if (!bo) continue;
             if (bo->hasNoUnsignedWrap()) continue;
@@ -4598,10 +4960,32 @@ unsigned superopt::convertSDivToUDiv(llvm::Function& func) {
 
             // Add: if both operands are non-negative, nuw is safe because
             // max(2^63-1 + 2^63-1) = 2^64-2 < 2^64.
+            // nsw is also safe when one operand is a 1-bit zext (value ∈ {0,1})
+            // and the other is non-negative, because adding at most 1 to a
+            // value in [0, 2^63-1] stays in [0, 2^63], and the signed max is
+            // 2^63-1 — so this is only safe when the non-zext operand is
+            // bounded below 2^63-1.  Use KnownBits to check the leading zeros.
             if (op == llvm::Instruction::Add) {
-                if (isValueNonNegative(bo->getOperand(0), DL) &&
-                    isValueNonNegative(bo->getOperand(1), DL)) {
+                const bool lhsNonNeg = isValueNonNegative(bo->getOperand(0), DL);
+                const bool rhsNonNeg = isValueNonNegative(bo->getOperand(1), DL);
+                if (lhsNonNeg && rhsNonNeg) {
                     bo->setHasNoUnsignedWrap(true);
+                    // Set NSW when KnownBits proves both operands have ≥ 2 leading zeros.
+                    // Then max(a+b) ≤ (2^62-1)+(2^62-1) = 2^63-2 < INT64_MAX, so signed
+                    // overflow cannot occur.  This applies to: 32-bit loop induction
+                    // variables (32+ leading zeros), modulo/urem results (≥ 1 leading
+                    // zero since result < divisor < 2^63), bounded accumulators, and
+                    // zext-of-bool operands (63 leading zeros).  More aggressive than
+                    // the prior zext-from-bool special case; enables LLVM SCEV/CVP to
+                    // derive tight trip counts and range-checked GEPs.
+                    if (!bo->hasNoSignedWrap()) {
+                        llvm::KnownBits lhsKB = llvm::computeKnownBits(bo->getOperand(0), DL);
+                        llvm::KnownBits rhsKB = llvm::computeKnownBits(bo->getOperand(1), DL);
+                        if (lhsKB.countMinLeadingZeros() >= 2 && rhsKB.countMinLeadingZeros() >= 2) {
+                            bo->setHasNoSignedWrap(true);
+                            ++count;
+                        }
+                    }
                     ++count;
                 }
                 continue;
@@ -4610,32 +4994,81 @@ unsigned superopt::convertSDivToUDiv(llvm::Function& func) {
             // Mul: if both operands are non-negative and nsw is already set,
             // then the product is non-negative and fits in signed i64,
             // which means it also fits in unsigned i64 (nuw is safe).
+            // Additionally, if both operands are non-negative and at least one
+            // is bounded to a small value (many leading zeros), we can infer
+            // nsw: if product_max ≤ INT64_MAX, signed overflow cannot occur.
+            // This handles common patterns like i*3 or i*7 where i < n and
+            // n fits in 32 bits (KnownBits shows 32+ leading zeros on i).
             if (op == llvm::Instruction::Mul) {
-                if (bo->hasNoSignedWrap() &&
+                const bool lhsNN = isValueNonNegative(bo->getOperand(0), DL);
+                const bool rhsNN = isValueNonNegative(bo->getOperand(1), DL);
+                if (lhsNN && rhsNN) {
+                    if (bo->hasNoSignedWrap()) {
+                        // nsw already set → add nuw too
+                        bo->setHasNoUnsignedWrap(true);
+                        ++count;
+                    } else if (!bo->hasNoSignedWrap()) {
+                        // Try to prove nsw via KnownBits: product fits in signed i64
+                        // when log2(lhs_max) + log2(rhs_max) < 63.
+                        llvm::KnownBits lhsKB = llvm::computeKnownBits(bo->getOperand(0), DL);
+                        llvm::KnownBits rhsKB = llvm::computeKnownBits(bo->getOperand(1), DL);
+                        const unsigned lhsBits = lhsKB.getBitWidth() - lhsKB.countMinLeadingZeros();
+                        const unsigned rhsBits = rhsKB.getBitWidth() - rhsKB.countMinLeadingZeros();
+                        if (lhsBits + rhsBits < 63) {
+                            // max_product < 2^(lhsBits+rhsBits) ≤ 2^62 < INT64_MAX
+                            bo->setHasNoSignedWrap(true);
+                            bo->setHasNoUnsignedWrap(true);
+                            ++count;
+                        }
+                    }
+                }
+                continue;
+            }
+
+            // Shl: infer NSW via KnownBits when the operand is non-negative and
+            // shifting cannot move any bit into the sign position.  For x << k:
+            //   lhsBits = 64 - countMinLeadingZeros(x)  (bits needed to hold x)
+            //   NSW is safe iff lhsBits + k < 64  (shift can't corrupt sign bit)
+            // Once NSW is set, NUW is also safe when x >= 0:
+            //   x >= 0 and NSW means result = x << k >= 0 and <= 2^63-1, so
+            //   unsigned overflow (result > 2^64-1) cannot occur.
+            // This enables LLVM SCEV to compute tight trip counts for expressions
+            // like `i << log2(stride)` in array-indexing loops.
+            if (op == llvm::Instruction::Shl) {
+                const bool lhsNN = isValueNonNegative(bo->getOperand(0), DL);
+                if (!bo->hasNoSignedWrap() && lhsNN) {
+                    if (auto* shiftCI = llvm::dyn_cast<llvm::ConstantInt>(bo->getOperand(1))) {
+                        const unsigned k = (unsigned)shiftCI->getZExtValue();
+                        if (k < 64) {
+                            llvm::KnownBits lhsKB = llvm::computeKnownBits(bo->getOperand(0), DL);
+                            const unsigned lhsBits =
+                                lhsKB.getBitWidth() - lhsKB.countMinLeadingZeros();
+                            if (lhsBits + k < 64) {
+                                bo->setHasNoSignedWrap(true);
+                                ++count;
+                            }
+                        }
+                    }
+                }
+                if (bo->hasNoSignedWrap() && lhsNN && !bo->hasNoUnsignedWrap()) {
+                    bo->setHasNoUnsignedWrap(true);
+                    ++count;
+                }
+                continue;
+            }
+
+            // Sub: NUW (no unsigned wrap) requires a >= b, so we skip that.
+            // NSW (no signed wrap) IS provable when both operands are non-negative:
+            // a ∈ [0, 2^63-1], b ∈ [0, 2^63-1] → a-b ∈ [-(2^63-1), 2^63-1],
+            // which never overflows signed i64. This enables SCEV's trip-count
+            // and range analysis to derive tighter bounds for derived expressions.
+            if (op == llvm::Instruction::Sub) {
+                if (!bo->hasNoSignedWrap() &&
                     isValueNonNegative(bo->getOperand(0), DL) &&
                     isValueNonNegative(bo->getOperand(1), DL)) {
-                    bo->setHasNoUnsignedWrap(true);
+                    bo->setHasNoSignedWrap(true);
                     ++count;
                 }
-                continue;
-            }
-
-            // Shl: if the base is non-negative and nsw is set, then the
-            // result is non-negative and fits in signed i64, so nuw is safe.
-            if (op == llvm::Instruction::Shl) {
-                if (bo->hasNoSignedWrap() &&
-                    isValueNonNegative(bo->getOperand(0), DL)) {
-                    bo->setHasNoUnsignedWrap(true);
-                    ++count;
-                }
-                continue;
-            }
-
-            // Sub: NUW (no unsigned wrap) requires a >= b (unsigned), i.e. the
-            // result is non-negative.  Knowing both a and b are non-negative is
-            // NOT sufficient — if a < b the result is negative and wraps unsigned.
-            // Without proven a >= b we cannot add NUW, so we skip this case.
-            if (op == llvm::Instruction::Sub) {
                 continue;
             }
         }

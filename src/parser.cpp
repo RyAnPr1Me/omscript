@@ -167,7 +167,7 @@ std::unique_ptr<Program> Parser::parse() {
             }
             // Parse optional function annotations: @inline, @noinline, @cold,
             // @hot, @pure, @noreturn, @static, @flatten, @unroll, @nounroll,
-            // @restrict, @vectorize, @novectorize
+            // @restrict, @vectorize, @novectorize, @minsize, @optnone, @nounwind
             bool hintInline = false, hintNoInline = false, hintCold = false;
             bool hintHot = false, hintPure = false, hintNoReturn = false;
             bool hintStatic = false, hintFlatten = false;
@@ -175,6 +175,7 @@ std::unique_ptr<Program> Parser::parse() {
             bool hintRestrict = false;
             bool hintVectorize = false, hintNoVectorize = false;
             bool hintParallelize = false, hintNoParallelize = false;
+            bool hintMinSize = false, hintOptNone = false, hintNoUnwind = false;
             while (check(TokenType::AT)) {
                 advance(); // consume '@'
                 const Token ann = consume(TokenType::IDENTIFIER, "Expected annotation name after '@'");
@@ -210,9 +211,15 @@ std::unique_ptr<Program> Parser::parse() {
                     hintNoParallelize = true;
                 } else if (ann.lexeme == "noalias") {
                     hintRestrict = true;  // @noalias on functions = @restrict
+                } else if (ann.lexeme == "minsize") {
+                    hintMinSize = true;
+                } else if (ann.lexeme == "optnone") {
+                    hintOptNone = true;
+                } else if (ann.lexeme == "nounwind") {
+                    hintNoUnwind = true;
                 } else {
                     error("Unknown function annotation '@" + ann.lexeme +
-                          "'; supported: @inline, @noinline, @cold, @hot, @pure, @noreturn, @static, @flatten, @unroll, @nounroll, @restrict, @noalias, @vectorize, @novectorize, @parallel, @noparallel (use @prefetch on parameters)");
+                          "'; supported: @inline, @noinline, @cold, @hot, @pure, @noreturn, @static, @flatten, @unroll, @nounroll, @restrict, @noalias, @vectorize, @novectorize, @parallel, @noparallel, @minsize, @optnone, @nounwind (use @prefetch on parameters)");
                 }
             }
             auto func = parseFunction(optMaxTagActive);
@@ -231,6 +238,18 @@ std::unique_ptr<Program> Parser::parse() {
             func->hintNoVectorize = hintNoVectorize;
             func->hintParallelize = hintParallelize;
             func->hintNoParallelize = hintNoParallelize;
+            func->hintMinSize = hintMinSize;
+            func->hintOptNone = hintOptNone;
+            func->hintNoUnwind = hintNoUnwind;
+            // Warn about conflicting annotations at parse time.
+            if (hintOptNone && hintInline) {
+                std::cerr << "warning: '@optnone' and '@inline' are mutually exclusive on function '"
+                          << func->name << "' — '@inline' will be ignored (optnone requires noinline)\n";
+            }
+            if (hintOptNone && hintHot) {
+                std::cerr << "warning: '@optnone' disables all optimizations on function '"
+                          << func->name << "' — '@hot' annotation will have no effect\n";
+            }
             functions.push_back(std::move(func));
         } catch (const std::runtime_error& e) {
             errors_.push_back(e.what());

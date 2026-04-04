@@ -1,0 +1,63 @@
+// loop_ucmp_test.om
+// Correctness test for ICmpULT ascending loop optimization.
+//
+// Ascending for-loops where both the start and end bounds are proven
+// non-negative should use unsigned comparison (ICmpULT instead of ICmpSLT).
+// These produce identical results for non-negative values and enable better
+// SCEV and vectorizer analysis.
+fn main() {
+    var total = 0;
+
+    // Test 1: loop starting at 0 (non-negative constant)
+    var acc = 0;
+    for (i in 0...100) {
+        acc = acc + i;
+    }
+    total = total + (acc == 4950);  // sum 0..99 = 4950
+    // total = 1
+
+    // Test 2: loop starting at a positive constant (non-zero start)
+    const START:int = 10;
+    var acc2 = 0;
+    for (i:int in START...100) {
+        acc2 = acc2 + i;
+    }
+    total = total + (acc2 == 4905);  // sum 10..99 = 4905
+    // total = 2
+
+    // Test 3: loop starting at a larger positive constant
+    const WIN:int = 64;
+    var acc3 = 0;
+    for (i:int in WIN...200) {
+        acc3 = acc3 + (i - WIN);    // tests NSW on Sub: i >= WIN > 0
+    }
+    total = total + (acc3 == 9180);  // sum (i-64) for i in [64,200) = sum 0..135 = 9180
+
+    // Test 4: nested loop with positive constant bounds
+    const A:int = 5;
+    const B:int = 15;
+    var acc4 = 0;
+    for (i:int in A...B) {
+        for (j:int in A...B) {
+            acc4 = acc4 + i + j;
+        }
+    }
+    // 10 iterations each, sum(i) = sum(5..14) = 95, acc4 = 10*95 + 10*95 = 1900
+    total = total + (acc4 == 1900);
+    // total = 4
+
+    // Test 5: loop variable used in non-negative sub-expression
+    var arr:int[] = array_fill(100, 0);
+    for (i:int in 0...100) {
+        arr[i] = i * 3;
+    }
+    var sum:int = 0;
+    for (i:int in 1...100) {
+        // Both i and i-1 are non-negative; arr[i] and arr[i-1] are non-negative.
+        sum = sum + (arr[i] - arr[i - 1]);  // NSW on Sub: arr[i] - arr[i-1] = 3
+    }
+    total = total + (sum == 297);  // 99 * 3 = 297
+    // total = 5
+
+    return total;
+}

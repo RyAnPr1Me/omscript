@@ -38,6 +38,7 @@ option(NATIVE "-march=native" OFF)
 option(COVERAGE "Coverage" OFF)
 set(SANITIZE "" CACHE STRING "Sanitizers")
 option(UNITY_BUILD "Unity build (faster compile)" OFF)
+option(WITH_OPENMP "Enable OpenMP for parallel compilation passes" ON)
 
 # ── LLVM ──────────────────────────────────────────────────────────────────────
 find_package(LLVM REQUIRED CONFIG)
@@ -227,6 +228,22 @@ endif()
 # ── Threads ───────────────────────────────────────────────────────────────────
 find_package(Threads REQUIRED)
 target_link_libraries(omsc PRIVATE Threads::Threads)
+
+# ── OpenMP (optional — accelerates parallel compiler passes) ──────────────────
+# When available, superoptimizeModule dispatches function-level optimization
+# passes to a thread pool using std::async; each function's IR is disjoint
+# so concurrent modification is safe.  The SuperoptimizerConfig struct is
+# copied (captured by value) into each async task to avoid dangling references.
+if(WITH_OPENMP)
+    find_package(OpenMP QUIET)
+    if(OpenMP_CXX_FOUND)
+        target_link_libraries(omsc PRIVATE OpenMP::OpenMP_CXX)
+        target_compile_definitions(omsc PRIVATE OMSC_HAS_OPENMP=1)
+        message(STATUS "OpenMP ${OpenMP_CXX_VERSION} found — parallel compiler passes enabled")
+    else()
+        message(STATUS "OpenMP not found — compiler passes will run sequentially")
+    endif()
+endif()
 
 # ── LLVM linking ──────────────────────────────────────────────────────────────
 set(LLVM_COMPONENTS
