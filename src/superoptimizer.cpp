@@ -519,6 +519,40 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
         }
     }
 
+    // Intrinsic calls with non-negative results:
+    //   abs(x)        — absolute value is always non-negative by definition.
+    //   umin/umax     — unsigned min/max results are always in [0, UINT64_MAX],
+    //                   which interpreted as i64 never has the sign bit set when
+    //                   both inputs are < 2^63.  We conservatively check that
+    //                   at least one operand is non-negative (the min/max result
+    //                   is bounded by the non-negative operand).
+    //   smin(a,b)     — signed min is non-negative when both a and b are ≥ 0.
+    //   smax(a,b)     — signed max is non-negative when at least one is ≥ 0
+    //                   (the result >= the non-negative operand).
+    // These enable NSW/NUW propagation through min/max chains in hot loops
+    // (e.g. clamp patterns, saturating accumulation).
+    if (auto* call = llvm::dyn_cast<llvm::CallInst>(inst)) {
+        if (auto* callee = call->getCalledFunction()) {
+            switch (callee->getIntrinsicID()) {
+            case llvm::Intrinsic::abs:
+                return true;
+            case llvm::Intrinsic::umin:
+            case llvm::Intrinsic::umax:
+                // Unsigned results are always non-negative as i64 when inputs < 2^63.
+                return isValueNonNegative(call->getArgOperand(0), DL, depth + 1) ||
+                       isValueNonNegative(call->getArgOperand(1), DL, depth + 1);
+            case llvm::Intrinsic::smin:
+                return isValueNonNegative(call->getArgOperand(0), DL, depth + 1) &&
+                       isValueNonNegative(call->getArgOperand(1), DL, depth + 1);
+            case llvm::Intrinsic::smax:
+                return isValueNonNegative(call->getArgOperand(0), DL, depth + 1) ||
+                       isValueNonNegative(call->getArgOperand(1), DL, depth + 1);
+            default:
+                break;
+            }
+        }
+    }
+
     // PHI node: check if all incoming values (excluding self-references) are
     // non-negative.  This handles loop induction variables that start from 0
     // and increment by a positive step, as well as PHIs from loop unrolling
@@ -4955,11 +4989,32 @@ unsigned superopt::convertSDivToUDiv(llvm::Function& func) {
                 continue;
             }
 
-            // Shl: if the base is non-negative and nsw is set, then the
-            // result is non-negative and fits in signed i64, so nuw is safe.
+            // Shl: infer NSW via KnownBits when the operand is non-negative and
+            // shifting cannot move any bit into the sign position.  For x << k:
+            //   lhsBits = 64 - countMinLeadingZeros(x)  (bits needed to hold x)
+            //   NSW is safe iff lhsBits + k < 64  (shift can't corrupt sign bit)
+            // Once NSW is set, NUW is also safe when x >= 0:
+            //   x >= 0 and NSW means result = x << k >= 0 and <= 2^63-1, so
+            //   unsigned overflow (result > 2^64-1) cannot occur.
+            // This enables LLVM SCEV to compute tight trip counts for expressions
+            // like `i << log2(stride)` in array-indexing loops.
             if (op == llvm::Instruction::Shl) {
-                if (bo->hasNoSignedWrap() &&
-                    isValueNonNegative(bo->getOperand(0), DL)) {
+                const bool lhsNN = isValueNonNegative(bo->getOperand(0), DL);
+                if (!bo->hasNoSignedWrap() && lhsNN) {
+                    if (auto* shiftCI = llvm::dyn_cast<llvm::ConstantInt>(bo->getOperand(1))) {
+                        const unsigned k = (unsigned)shiftCI->getZExtValue();
+                        if (k < 64) {
+                            llvm::KnownBits lhsKB = llvm::computeKnownBits(bo->getOperand(0), DL);
+                            const unsigned lhsBits =
+                                lhsKB.getBitWidth() - lhsKB.countMinLeadingZeros();
+                            if (lhsBits + k < 64) {
+                                bo->setHasNoSignedWrap(true);
+                                ++count;
+                            }
+                        }
+                    }
+                }
+                if (bo->hasNoSignedWrap() && lhsNN && !bo->hasNoUnsignedWrap()) {
                     bo->setHasNoUnsignedWrap(true);
                     ++count;
                 }

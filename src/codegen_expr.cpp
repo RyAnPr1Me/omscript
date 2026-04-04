@@ -3657,12 +3657,32 @@ llvm::Value* CodeGenerator::generateTernary(TernaryExpr* expr) {
     llvm::Value* condBool = toBool(condition);
 
     // Branchless select optimization: when both arms are simple expressions
-    // (literals or identifiers with no side effects), emit a single `select`
-    // instruction instead of a branch+PHI diamond.  This eliminates branch
-    // misprediction entirely and enables the backend to use conditional-move
-    // (cmov) instructions.
+    // (literals, identifiers, or a binary op between an identifier and a
+    // literal with no side effects), emit a single `select` instruction instead
+    // of a branch+PHI diamond.  This eliminates branch misprediction entirely
+    // and enables the backend to use conditional-move (cmov) instructions.
+    // Arithmetic ops on identifiers/literals are side-effect-free, so evaluating
+    // both arms eagerly is safe.
     auto isSimpleExpr = [](Expression* e) -> bool {
-        return e->type == ASTNodeType::LITERAL_EXPR || e->type == ASTNodeType::IDENTIFIER_EXPR;
+        if (e->type == ASTNodeType::LITERAL_EXPR || e->type == ASTNodeType::IDENTIFIER_EXPR)
+            return true;
+        // Allow binary ops like `ident OP const` or `const OP ident` — these
+        // are side-effect-free and produce a single arithmetic instruction,
+        // so generating them unconditionally in the select path is correct.
+        if (auto* bin = dynamic_cast<BinaryExpr*>(e)) {
+            const bool leftSimple  = bin->left->type  == ASTNodeType::IDENTIFIER_EXPR ||
+                                     bin->left->type  == ASTNodeType::LITERAL_EXPR;
+            const bool rightSimple = bin->right->type == ASTNodeType::IDENTIFIER_EXPR ||
+                                     bin->right->type == ASTNodeType::LITERAL_EXPR;
+            // Only allow arithmetic/bitwise ops, not comparisons or assignments.
+            const std::string& op = bin->op;
+            const bool isSafeOp = (op == "+" || op == "-" || op == "*" || op == "/" ||
+                                   op == "%" || op == "&" || op == "|" || op == "^" ||
+                                   op == "<<" || op == ">>");
+            if (leftSimple && rightSimple && isSafeOp)
+                return true;
+        }
+        return false;
     };
     if (isSimpleExpr(expr->thenExpr.get()) && isSimpleExpr(expr->elseExpr.get())) {
         llvm::Value* thenVal = generateExpression(expr->thenExpr.get());
