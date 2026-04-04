@@ -56,6 +56,7 @@ enum class TokenType {
     LIKELY,
     UNLIKELY,
     REGISTER,
+    EXTERN,  ///< extern — declares an externally-linked function (no body)
 
     // Operators
     PLUS,

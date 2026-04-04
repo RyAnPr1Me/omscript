@@ -145,6 +145,16 @@ std::unique_ptr<Program> Parser::parse() {
             }
             continue;
         }
+        // extern fn — external function declaration (no body, resolved by linker).
+        if (check(TokenType::EXTERN)) {
+            try {
+                functions.push_back(parseExternFunctionDecl());
+            } catch (const std::runtime_error& e) {
+                errors_.push_back(e.what());
+                synchronize();
+            }
+            continue;
+        }
         try {
             // Check for file-level @noalias directive (appears before any function
             // keyword and is not followed by 'fn').
@@ -372,6 +382,43 @@ std::string Parser::parseTypeAnnotation() {
         typeName += "[]";
     }
     return prefix + typeName;
+}
+
+/// Parse an extern function declaration: extern fn name(params...) -> rettype;
+/// No body is expected; the declaration ends with a semicolon.
+std::unique_ptr<FunctionDecl> Parser::parseExternFunctionDecl() {
+    consume(TokenType::EXTERN, "Expected 'extern'");
+    consume(TokenType::FN, "Expected 'fn' after 'extern'");
+    const Token name = consume(TokenType::IDENTIFIER, "Expected function name");
+
+    consume(TokenType::LPAREN, "Expected '(' after extern function name");
+    std::vector<Parameter> parameters;
+    if (!check(TokenType::RPAREN)) {
+        do {
+            const Token paramName = consume(TokenType::IDENTIFIER, "Expected parameter name");
+            std::string typeName;
+            if (match(TokenType::COLON)) {
+                typeName = parseTypeAnnotation();
+            }
+            parameters.emplace_back(paramName.lexeme, typeName, nullptr);
+        } while (match(TokenType::COMMA));
+    }
+    consume(TokenType::RPAREN, "Expected ')' after extern parameters");
+
+    std::string returnType;
+    if (match(TokenType::ARROW)) {
+        returnType = parseTypeAnnotation();
+    }
+
+    consume(TokenType::SEMICOLON, "Expected ';' after extern function declaration");
+
+    auto funcDecl = std::make_unique<FunctionDecl>(
+        name.lexeme, std::vector<std::string>{}, std::move(parameters),
+        nullptr /*no body*/, false /*not optmax*/, returnType);
+    funcDecl->isExtern = true;
+    funcDecl->line = name.line;
+    funcDecl->column = name.column;
+    return funcDecl;
 }
 
 std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {

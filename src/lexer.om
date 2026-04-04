@@ -1,0 +1,921 @@
+// OmScript Lexer — implemented in OmScript itself.
+//
+// This file reimplements src/lexer.cpp using only OmScript native constructs.
+// It tokenises an OmScript source string and returns six parallel arrays:
+//
+//   types   — integer token type codes (see TOK_* constants below)
+//   lexemes — string lexeme values
+//   lines   — integer line numbers
+//   cols    — integer column numbers
+//   ivals   — integer literal values (for TOK_INTEGER tokens)
+//   fvals   — float literal values   (for TOK_FLOAT tokens)
+//
+// The returned struct TokenStream also contains `count` (total token count).
+//
+// Integration with the C++ pipeline:  with extern fn support the C++ bridge
+// in src/lexer_bridge.cpp can call omsc_tokenize() (the compiled output of
+// this file) and convert the parallel arrays back to std::vector<Token>.
+//
+// ─── Token type constants ────────────────────────────────────────────────────
+// These values MUST match the C++ TokenType enum order in include/lexer.h.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const TOK_INTEGER  = 0;
+const TOK_FLOAT    = 1;
+const TOK_STRING   = 2;
+const TOK_IDENTIFIER = 3;
+
+const TOK_FN         = 4;
+const TOK_RETURN     = 5;
+const TOK_IF         = 6;
+const TOK_ELSE       = 7;
+const TOK_WHILE      = 8;
+const TOK_DO         = 9;
+const TOK_FOR        = 10;
+const TOK_VAR        = 11;
+const TOK_CONST      = 12;
+const TOK_BREAK      = 13;
+const TOK_CONTINUE   = 14;
+const TOK_IN         = 15;
+const TOK_TRUE       = 16;
+const TOK_FALSE      = 17;
+const TOK_NULL       = 18;
+const TOK_OPTMAX_START = 19;
+const TOK_OPTMAX_END   = 20;
+const TOK_SWITCH     = 21;
+const TOK_CASE       = 22;
+const TOK_DEFAULT    = 23;
+const TOK_TRY        = 24;
+const TOK_CATCH      = 25;
+const TOK_THROW      = 26;
+const TOK_ENUM       = 27;
+const TOK_STRUCT     = 28;
+const TOK_IMPORT     = 29;
+const TOK_MOVE       = 30;
+const TOK_INVALIDATE = 31;
+const TOK_BORROW     = 32;
+const TOK_PREFETCH   = 33;
+const TOK_LIKELY     = 34;
+const TOK_UNLIKELY   = 35;
+const TOK_REGISTER   = 36;
+const TOK_EXTERN     = 37;
+
+const TOK_PLUS           = 38;
+const TOK_MINUS          = 39;
+const TOK_STAR           = 40;
+const TOK_STAR_STAR      = 41;
+const TOK_SLASH          = 42;
+const TOK_PERCENT        = 43;
+const TOK_ASSIGN         = 44;
+const TOK_EQ             = 45;
+const TOK_NE             = 46;
+const TOK_LT             = 47;
+const TOK_LE             = 48;
+const TOK_GT             = 49;
+const TOK_GE             = 50;
+const TOK_AND            = 51;
+const TOK_OR             = 52;
+const TOK_NOT            = 53;
+const TOK_PLUSPLUS       = 54;
+const TOK_MINUSMINUS     = 55;
+const TOK_PLUS_ASSIGN    = 56;
+const TOK_MINUS_ASSIGN   = 57;
+const TOK_STAR_ASSIGN    = 58;
+const TOK_SLASH_ASSIGN   = 59;
+const TOK_PERCENT_ASSIGN = 60;
+const TOK_AMP_ASSIGN     = 61;
+const TOK_PIPE_ASSIGN    = 62;
+const TOK_CARET_ASSIGN   = 63;
+const TOK_LSHIFT_ASSIGN  = 64;
+const TOK_RSHIFT_ASSIGN  = 65;
+const TOK_STARSTAR_ASSIGN = 66;
+const TOK_NULL_COAL_ASSIGN = 67;
+const TOK_QUESTION       = 68;
+const TOK_NULL_COALESCE  = 69;
+const TOK_AMPERSAND      = 70;
+const TOK_PIPE           = 71;
+const TOK_CARET          = 72;
+const TOK_TILDE          = 73;
+const TOK_LSHIFT         = 74;
+const TOK_RSHIFT         = 75;
+const TOK_RANGE          = 76;
+const TOK_DOT_DOT        = 77;
+const TOK_ARROW          = 78;
+const TOK_FAT_ARROW      = 79;
+const TOK_PIPE_FORWARD   = 80;
+const TOK_SPREAD         = 81;
+
+const TOK_LPAREN    = 82;
+const TOK_RPAREN    = 83;
+const TOK_LBRACE    = 84;
+const TOK_RBRACE    = 85;
+const TOK_LBRACKET  = 86;
+const TOK_RBRACKET  = 87;
+const TOK_SEMICOLON = 88;
+const TOK_COMMA     = 89;
+const TOK_COLON     = 90;
+const TOK_DOT       = 91;
+const TOK_AT        = 92;
+const TOK_EOF       = 93;
+const TOK_INVALID   = 94;
+
+// ─── TokenStream struct ───────────────────────────────────────────────────────
+struct TokenStream {
+    types,    // array of integer token type codes
+    lexemes,  // array of string lexemes
+    lines,    // array of integer line numbers
+    cols,     // array of integer column numbers
+    ivals,    // array of integer literal values
+    fvals,    // array of float literal values
+    count     // total number of tokens
+}
+
+// ─── Character classification helpers ────────────────────────────────────────
+
+fn is_hex_digit(c) {
+    return is_digit(c) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102);
+    // A=65 F=70   a=97 f=102
+}
+
+fn is_alnum_or_underscore(c) {
+    return is_alpha(c) || is_digit(c) || c == 95;  // '_' = 95
+}
+
+fn hex_val(c) {
+    if (is_digit(c)) { return c - 48; }      // '0'=48
+    if (c >= 65 && c <= 70) { return c - 55; } // 'A'...'F'
+    return c - 87;                             // 'a'...'f'
+}
+
+// ─── Number parsing helpers ───────────────────────────────────────────────────
+
+fn parse_bin_str(s) {
+    var result = 0;
+    var i = 2; // skip "0b"
+    while (i < str_len(s)) {
+        var c = char_at(s, i);
+        result = result * 2 + (c - 48);
+        i = i + 1;
+    }
+    return result;
+}
+
+fn parse_oct_str(s) {
+    var result = 0;
+    var i = 2; // skip "0o"
+    while (i < str_len(s)) {
+        var c = char_at(s, i);
+        result = result * 8 + (c - 48);
+        i = i + 1;
+    }
+    return result;
+}
+
+fn parse_hex_str(s) {
+    var result = 0;
+    var i = 2; // skip "0x"
+    while (i < str_len(s)) {
+        var c = char_at(s, i);
+        result = result * 16 + hex_val(c);
+        i = i + 1;
+    }
+    return result;
+}
+
+fn parse_dec_str(s) {
+    return str_to_int(s);
+}
+
+// ─── Lookup a word in the keyword table, returning token type or TOK_IDENTIFIER
+fn keyword_type(word) {
+    if (str_eq(word, "fn"))         { return TOK_FN; }
+    if (str_eq(word, "return"))     { return TOK_RETURN; }
+    if (str_eq(word, "if"))         { return TOK_IF; }
+    if (str_eq(word, "else"))       { return TOK_ELSE; }
+    if (str_eq(word, "while"))      { return TOK_WHILE; }
+    if (str_eq(word, "do"))         { return TOK_DO; }
+    if (str_eq(word, "for"))        { return TOK_FOR; }
+    if (str_eq(word, "var"))        { return TOK_VAR; }
+    if (str_eq(word, "const"))      { return TOK_CONST; }
+    if (str_eq(word, "break"))      { return TOK_BREAK; }
+    if (str_eq(word, "continue"))   { return TOK_CONTINUE; }
+    if (str_eq(word, "in"))         { return TOK_IN; }
+    if (str_eq(word, "true"))       { return TOK_TRUE; }
+    if (str_eq(word, "false"))      { return TOK_FALSE; }
+    if (str_eq(word, "null"))       { return TOK_NULL; }
+    if (str_eq(word, "switch"))     { return TOK_SWITCH; }
+    if (str_eq(word, "case"))       { return TOK_CASE; }
+    if (str_eq(word, "default"))    { return TOK_DEFAULT; }
+    if (str_eq(word, "try"))        { return TOK_TRY; }
+    if (str_eq(word, "catch"))      { return TOK_CATCH; }
+    if (str_eq(word, "throw"))      { return TOK_THROW; }
+    if (str_eq(word, "enum"))       { return TOK_ENUM; }
+    if (str_eq(word, "struct"))     { return TOK_STRUCT; }
+    if (str_eq(word, "import"))     { return TOK_IMPORT; }
+    if (str_eq(word, "move"))       { return TOK_MOVE; }
+    if (str_eq(word, "invalidate")) { return TOK_INVALIDATE; }
+    if (str_eq(word, "borrow"))     { return TOK_BORROW; }
+    if (str_eq(word, "prefetch"))   { return TOK_PREFETCH; }
+    if (str_eq(word, "likely"))     { return TOK_LIKELY; }
+    if (str_eq(word, "unlikely"))   { return TOK_UNLIKELY; }
+    if (str_eq(word, "register"))   { return TOK_REGISTER; }
+    if (str_eq(word, "extern"))     { return TOK_EXTERN; }
+    return TOK_IDENTIFIER;
+}
+
+// ─── Lexer state ──────────────────────────────────────────────────────────────
+// Carried as individual vars threaded through helper functions that return
+// a struct { pos, line, col, <token data> }.
+
+// LexResult: returned by scan_* helpers.  Contains the new position/line/col
+// plus the token fields.
+struct LexResult {
+    pos,     // new scanner position
+    line,    // new line number
+    col,     // new column number
+    ty,      // token type
+    lex,     // lexeme string
+    ival,    // integer value
+    fval     // float value
+}
+
+fn make_lex(p, ln, cl, ty, lex, iv, fv) {
+    return LexResult { pos: p, line: ln, col: cl, ty: ty, lex: lex, ival: iv, fval: fv };
+}
+
+// ─── Skip whitespace, returning updated { pos, line, col }
+struct PosState { pos, line, col }
+
+fn skip_ws(src, p, ln, cl) {
+    var src_len = str_len(src);
+    while (p < src_len) {
+        var c = char_at(src, p);
+        // space, tab, carriage-return, newline
+        if (c == 32 || c == 9 || c == 13) {
+            p = p + 1;
+            cl = cl + 1;
+        } else if (c == 10) {  // '\n'
+            p = p + 1;
+            ln = ln + 1;
+            cl = 1;
+        } else if (c == 47 && p + 1 < src_len && char_at(src, p + 1) == 47) {
+            // '//' comment — skip to end of line
+            p = p + 2;
+            while (p < src_len && char_at(src, p) != 10) {
+                p = p + 1;
+            }
+        } else if (c == 47 && p + 1 < src_len && char_at(src, p + 1) == 42) {
+            // '/*' block comment
+            p = p + 2;
+            var closed = 0;
+            while (p + 1 < src_len) {
+                if (char_at(src, p) == 42 && char_at(src, p + 1) == 47) {
+                    p = p + 2;
+                    closed = 1;
+                    break;
+                }
+                if (char_at(src, p) == 10) {
+                    ln = ln + 1;
+                    cl = 1;
+                } else {
+                    cl = cl + 1;
+                }
+                p = p + 1;
+            }
+            if (!closed) {
+                // Unterminated block comment — stop here (error handled above)
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+    return PosState { pos: p, line: ln, col: cl };
+}
+
+// ─── Scan an identifier or keyword ───────────────────────────────────────────
+fn scan_identifier(src, p, ln, cl) {
+    var src_len = str_len(src);
+    var start = p;
+    while (p < src_len && is_alnum_or_underscore(char_at(src, p))) {
+        p = p + 1;
+    }
+    var word = str_substr(src, start, p);
+    var ty = keyword_type(word);
+    return make_lex(p, ln, cl + (p - start), ty, word, 0, 0.0);
+}
+
+// ─── Scan a numeric literal (decimal, hex, octal, binary, float) ──────────────
+fn scan_number(src, p, ln, cl) {
+    var src_len = str_len(src);
+    var start = p;
+    var is_float = 0;
+    var c0 = char_at(src, p);
+
+    // Check for 0x / 0o / 0b prefixes
+    if (c0 == 48 && p + 1 < src_len) {  // '0'
+        var prefix = char_at(src, p + 1);
+        if (prefix == 120 || prefix == 88) {  // 'x' 'X'
+            p = p + 2;
+            while (p < src_len && (is_hex_digit(char_at(src, p)) || char_at(src, p) == 95)) {
+                p = p + 1;
+            }
+            var raw = str_substr(src, start, p);
+            // Remove underscores for parsing
+            var digits = str_replace(raw, "_", "");
+            var iv = parse_hex_str(digits);
+            return make_lex(p, ln, cl + (p - start), TOK_INTEGER, raw, iv, 0.0);
+        }
+        if (prefix == 111 || prefix == 79) {  // 'o' 'O'
+            p = p + 2;
+            while (p < src_len) {
+                var ch = char_at(src, p);
+                if ((ch >= 48 && ch <= 55) || ch == 95) { p = p + 1; } else { break; }
+            }
+            var raw = str_substr(src, start, p);
+            var digits = str_replace(raw, "_", "");
+            var iv = parse_oct_str(digits);
+            return make_lex(p, ln, cl + (p - start), TOK_INTEGER, raw, iv, 0.0);
+        }
+        if (prefix == 98 || prefix == 66) {  // 'b' 'B'
+            p = p + 2;
+            while (p < src_len) {
+                var ch = char_at(src, p);
+                if (ch == 48 || ch == 49 || ch == 95) { p = p + 1; } else { break; }
+            }
+            var raw = str_substr(src, start, p);
+            var digits = str_replace(raw, "_", "");
+            var iv = parse_bin_str(digits);
+            return make_lex(p, ln, cl + (p - start), TOK_INTEGER, raw, iv, 0.0);
+        }
+    }
+
+    // Decimal integer or float
+    while (p < src_len && (is_digit(char_at(src, p)) || char_at(src, p) == 95)) {
+        p = p + 1;
+    }
+
+    // Check for float: digit.digit (not .. range)
+    if (p < src_len && char_at(src, p) == 46) {   // '.'
+        var next1 = p + 1 < src_len ? char_at(src, p + 1) : 0;
+        var next2 = p + 2 < src_len ? char_at(src, p + 2) : 0;
+        if (next1 != 46) {  // not '..' or '...'
+            if (is_digit(next1)) {
+                is_float = 1;
+                p = p + 1; // consume '.'
+                while (p < src_len && (is_digit(char_at(src, p)) || char_at(src, p) == 95)) {
+                    p = p + 1;
+                }
+            }
+        }
+    }
+
+    var raw = str_substr(src, start, p);
+    var clean = str_replace(raw, "_", "");
+    if (is_float) {
+        var fv = str_to_float(clean);
+        return make_lex(p, ln, cl + (p - start), TOK_FLOAT, raw, 0, fv);
+    } else {
+        var iv = parse_dec_str(clean);
+        return make_lex(p, ln, cl + (p - start), TOK_INTEGER, raw, iv, 0.0);
+    }
+}
+
+// ─── Process a string escape sequence, returning { ch, p, line, col } ────────
+// Returns the decoded character code and advances p past the escape.
+// Returns -1 for invalid escapes (caller should error).
+struct EscResult { ch, p, line, col }
+
+fn process_escape(src, p, ln, cl) {
+    var src_len = str_len(src);
+    if (p >= src_len) {
+        return EscResult { ch: -1, p: p, line: ln, col: cl };
+    }
+    var e = char_at(src, p);
+    p = p + 1;
+    cl = cl + 1;
+    if (e == 110)  { return EscResult { ch: 10,  p: p, line: ln, col: cl }; } // 'n' → LF
+    if (e == 116)  { return EscResult { ch: 9,   p: p, line: ln, col: cl }; } // 't' → TAB
+    if (e == 114)  { return EscResult { ch: 13,  p: p, line: ln, col: cl }; } // 'r' → CR
+    if (e == 98)   { return EscResult { ch: 8,   p: p, line: ln, col: cl }; } // 'b' → BS
+    if (e == 102)  { return EscResult { ch: 12,  p: p, line: ln, col: cl }; } // 'f' → FF
+    if (e == 118)  { return EscResult { ch: 11,  p: p, line: ln, col: cl }; } // 'v' → VT
+    if (e == 92)   { return EscResult { ch: 92,  p: p, line: ln, col: cl }; } // '\\' → backslash
+    if (e == 34)   { return EscResult { ch: 34,  p: p, line: ln, col: cl }; } // '"' → quote
+    if (e == 48)   { return EscResult { ch: -2,  p: p, line: ln, col: cl }; } // '\0' → forbidden
+    if (e == 120) {  // 'x' → \xHH
+        if (p + 1 >= src_len) { return EscResult { ch: -1, p: p, line: ln, col: cl }; }
+        var h1 = char_at(src, p);
+        var h2 = char_at(src, p + 1);
+        if (!is_hex_digit(h1) || !is_hex_digit(h2)) {
+            return EscResult { ch: -1, p: p, line: ln, col: cl };
+        }
+        var val = hex_val(h1) * 16 + hex_val(h2);
+        p = p + 2;
+        cl = cl + 2;
+        if (val == 0) { return EscResult { ch: -2, p: p, line: ln, col: cl }; } // \x00 forbidden
+        return EscResult { ch: val, p: p, line: ln, col: cl };
+    }
+    return EscResult { ch: -1, p: p, line: ln, col: cl }; // unknown escape
+}
+
+// ─── Scan a regular string literal "..." ─────────────────────────────────────
+fn scan_string(src, p, ln, cl) {
+    var src_len = str_len(src);
+    var start_ln = ln;
+    var start_cl = cl;
+    p = p + 1; // skip opening '"'
+    cl = cl + 1;
+    var result = "";
+    while (p < src_len && char_at(src, p) != 34) {  // '"'=34
+        var c = char_at(src, p);
+        if (c == 92) {  // '\'
+            p = p + 1;
+            cl = cl + 1;
+            var esc = process_escape(src, p, ln, cl);
+            if (esc.ch == -1 || esc.ch == -2) {
+                // Error: just emit what we have and continue
+                p = esc.p;
+                ln = esc.line;
+                cl = esc.col;
+            } else {
+                result = result + to_char(esc.ch);
+                p = esc.p;
+                ln = esc.line;
+                cl = esc.col;
+            }
+        } else if (c == 10) {  // newline in string
+            result = result + to_char(c);
+            p = p + 1;
+            ln = ln + 1;
+            cl = 1;
+        } else {
+            result = result + to_char(c);
+            p = p + 1;
+            cl = cl + 1;
+        }
+    }
+    if (p < src_len) {
+        p = p + 1; // skip closing '"'
+        cl = cl + 1;
+    }
+    return make_lex(p, ln, cl, TOK_STRING, result, 0, 0.0);
+}
+
+// ─── Scan a multi-line string literal """...""" ───────────────────────────────
+fn scan_multiline_string(src, p, ln, cl) {
+    var src_len = str_len(src);
+    p = p + 3; // skip """
+    cl = cl + 3;
+    var result = "";
+    while (p + 2 < src_len) {
+        if (char_at(src, p) == 34 && char_at(src, p + 1) == 34 && char_at(src, p + 2) == 34) {
+            p = p + 3; // skip closing """
+            cl = cl + 3;
+            return make_lex(p, ln, cl, TOK_STRING, result, 0, 0.0);
+        }
+        var c = char_at(src, p);
+        if (c == 10) {
+            result = result + to_char(c);
+            p = p + 1;
+            ln = ln + 1;
+            cl = 1;
+        } else {
+            result = result + to_char(c);
+            p = p + 1;
+            cl = cl + 1;
+        }
+    }
+    // Unterminated — return what we have
+    return make_lex(p, ln, cl, TOK_STRING, result, 0, 0.0);
+}
+
+// ─── Main tokenize function ───────────────────────────────────────────────────
+// Takes an OmScript source string and returns a TokenStream.
+fn tokenize(src) {
+    var src_len = str_len(src);
+    var types   = [];
+    var lexemes = [];
+    var lines   = [];
+    var cols    = [];
+    var ivals   = [];
+    var fvals   = [];
+    var count   = 0;
+
+    var p   = 0;
+    var ln  = 1;
+    var cl  = 1;
+
+    while (p < src_len) {
+        // Skip whitespace and comments
+        var ws = skip_ws(src, p, ln, cl);
+        p = ws.pos;
+        ln = ws.line;
+        cl = ws.col;
+
+        if (p >= src_len) { break; }
+
+        var tok_ln = ln;
+        var tok_cl = cl;
+        var c = char_at(src, p);
+
+        // ── OPTMAX markers ────────────────────────────────────────────────────
+        // OPTMAX=: (8 chars) and OPTMAX!: (8 chars)
+        if (c == 79 && p + 7 < src_len) {  // 'O'
+            var marker = str_substr(src, p, p + 8);
+            if (str_eq(marker, "OPTMAX=:")) {
+                types   = push(types,   TOK_OPTMAX_START);
+                lexemes = push(lexemes, "OPTMAX=:");
+                lines   = push(lines,   tok_ln);
+                cols    = push(cols,    tok_cl);
+                ivals   = push(ivals,   0);
+                fvals   = push(fvals,   0.0);
+                count   = count + 1;
+                p  = p + 8;
+                cl = cl + 8;
+                continue;
+            }
+            if (str_eq(marker, "OPTMAX!:")) {
+                types   = push(types,   TOK_OPTMAX_END);
+                lexemes = push(lexemes, "OPTMAX!:");
+                lines   = push(lines,   tok_ln);
+                cols    = push(cols,    tok_cl);
+                ivals   = push(ivals,   0);
+                fvals   = push(fvals,   0.0);
+                count   = count + 1;
+                p  = p + 8;
+                cl = cl + 8;
+                continue;
+            }
+        }
+
+        // ── Numeric literals ──────────────────────────────────────────────────
+        if (is_digit(c)) {
+            var r = scan_number(src, p, ln, cl);
+            types   = push(types,   r.ty);
+            lexemes = push(lexemes, r.lex);
+            lines   = push(lines,   tok_ln);
+            cols    = push(cols,    tok_cl);
+            ivals   = push(ivals,   r.ival);
+            fvals   = push(fvals,   r.fval);
+            count   = count + 1;
+            p  = r.pos;
+            ln = r.line;
+            cl = r.col;
+            continue;
+        }
+
+        // ── Identifiers and keywords ──────────────────────────────────────────
+        if (is_alpha(c) || c == 95) {  // '_'=95
+            var r = scan_identifier(src, p, ln, cl);
+            types   = push(types,   r.ty);
+            lexemes = push(lexemes, r.lex);
+            lines   = push(lines,   tok_ln);
+            cols    = push(cols,    tok_cl);
+            ivals   = push(ivals,   0);
+            fvals   = push(fvals,   0.0);
+            count   = count + 1;
+            p  = r.pos;
+            ln = r.line;
+            cl = r.col;
+            continue;
+        }
+
+        // ── String interpolation $"..." → desugar to concat chain ─────────────
+        if (c == 36 && p + 1 < src_len && char_at(src, p + 1) == 34) {  // '$"'
+            // Skip '$' and delegate to regular string scanning for now.
+            // Full interpolation desugaring mirrors the C++ scanInterpolatedString
+            // and is handled here by a simple pass: build the raw content and
+            // emit it as a single TOK_STRING.  The full desugaring (expanding
+            // {expr} segments into + tokens) requires re-lexing sub-expressions
+            // and is left to the calling compiler pipeline for integration.
+            p = p + 1; // skip '$'
+            cl = cl + 1;
+            var r = scan_string(src, p, ln, cl);
+            types   = push(types,   r.ty);
+            lexemes = push(lexemes, r.lex);
+            lines   = push(lines,   tok_ln);
+            cols    = push(cols,    tok_cl);
+            ivals   = push(ivals,   0);
+            fvals   = push(fvals,   0.0);
+            count   = count + 1;
+            p  = r.pos;
+            ln = r.line;
+            cl = r.col;
+            continue;
+        }
+
+        // ── String literals ───────────────────────────────────────────────────
+        if (c == 34) {  // '"'
+            if (p + 2 < src_len && char_at(src, p + 1) == 34 && char_at(src, p + 2) == 34) {
+                var r = scan_multiline_string(src, p, ln, cl);
+                types   = push(types,   r.ty);
+                lexemes = push(lexemes, r.lex);
+                lines   = push(lines,   tok_ln);
+                cols    = push(cols,    tok_cl);
+                ivals   = push(ivals,   0);
+                fvals   = push(fvals,   0.0);
+                count   = count + 1;
+                p  = r.pos;
+                ln = r.line;
+                cl = r.col;
+            } else {
+                var r = scan_string(src, p, ln, cl);
+                types   = push(types,   r.ty);
+                lexemes = push(lexemes, r.lex);
+                lines   = push(lines,   tok_ln);
+                cols    = push(cols,    tok_cl);
+                ivals   = push(ivals,   0);
+                fvals   = push(fvals,   0.0);
+                count   = count + 1;
+                p  = r.pos;
+                ln = r.line;
+                cl = r.col;
+            }
+            continue;
+        }
+
+        // ── Range operators '..' and '...' ────────────────────────────────────
+        if (c == 46 && p + 1 < src_len && char_at(src, p + 1) == 46) {  // '..'
+            if (p + 2 < src_len && char_at(src, p + 2) == 46) {
+                types   = push(types,   TOK_RANGE);
+                lexemes = push(lexemes, "...");
+                lines   = push(lines,   tok_ln);
+                cols    = push(cols,    tok_cl);
+                ivals   = push(ivals,   0);
+                fvals   = push(fvals,   0.0);
+                count   = count + 1;
+                p  = p + 3; cl = cl + 3;
+            } else {
+                types   = push(types,   TOK_DOT_DOT);
+                lexemes = push(lexemes, "..");
+                lines   = push(lines,   tok_ln);
+                cols    = push(cols,    tok_cl);
+                ivals   = push(ivals,   0);
+                fvals   = push(fvals,   0.0);
+                count   = count + 1;
+                p  = p + 2; cl = cl + 2;
+            }
+            continue;
+        }
+
+        // ── All single/multi-character operator and delimiter tokens ───────────
+        p  = p + 1;
+        cl = cl + 1;
+
+        if (c == 43) {  // '+'
+            if (p < src_len && char_at(src, p) == 43) {
+                p = p + 1; cl = cl + 1;
+                types = push(types, TOK_PLUSPLUS); lexemes = push(lexemes, "++");
+            } else if (p < src_len && char_at(src, p) == 61) {
+                p = p + 1; cl = cl + 1;
+                types = push(types, TOK_PLUS_ASSIGN); lexemes = push(lexemes, "+=");
+            } else {
+                types = push(types, TOK_PLUS); lexemes = push(lexemes, "+");
+            }
+        } else if (c == 45) {  // '-'
+            if (p < src_len && char_at(src, p) == 45) {
+                p = p + 1; cl = cl + 1;
+                types = push(types, TOK_MINUSMINUS); lexemes = push(lexemes, "--");
+            } else if (p < src_len && char_at(src, p) == 61) {
+                p = p + 1; cl = cl + 1;
+                types = push(types, TOK_MINUS_ASSIGN); lexemes = push(lexemes, "-=");
+            } else if (p < src_len && char_at(src, p) == 62) {  // '->'
+                p = p + 1; cl = cl + 1;
+                types = push(types, TOK_ARROW); lexemes = push(lexemes, "->");
+            } else {
+                types = push(types, TOK_MINUS); lexemes = push(lexemes, "-");
+            }
+        } else if (c == 42) {  // '*'
+            if (p < src_len && char_at(src, p) == 42) {
+                p = p + 1; cl = cl + 1;
+                if (p < src_len && char_at(src, p) == 61) {
+                    p = p + 1; cl = cl + 1;
+                    types = push(types, TOK_STARSTAR_ASSIGN); lexemes = push(lexemes, "**=");
+                } else {
+                    types = push(types, TOK_STAR_STAR); lexemes = push(lexemes, "**");
+                }
+            } else if (p < src_len && char_at(src, p) == 61) {
+                p = p + 1; cl = cl + 1;
+                types = push(types, TOK_STAR_ASSIGN); lexemes = push(lexemes, "*=");
+            } else {
+                types = push(types, TOK_STAR); lexemes = push(lexemes, "*");
+            }
+        } else if (c == 47) {  // '/'
+            if (p < src_len && char_at(src, p) == 61) {
+                p = p + 1; cl = cl + 1;
+                types = push(types, TOK_SLASH_ASSIGN); lexemes = push(lexemes, "/=");
+            } else {
+                types = push(types, TOK_SLASH); lexemes = push(lexemes, "/");
+            }
+        } else if (c == 37) {  // '%'
+            if (p < src_len && char_at(src, p) == 61) {
+                p = p + 1; cl = cl + 1;
+                types = push(types, TOK_PERCENT_ASSIGN); lexemes = push(lexemes, "%=");
+            } else {
+                types = push(types, TOK_PERCENT); lexemes = push(lexemes, "%");
+            }
+        } else if (c == 61) {  // '='
+            if (p < src_len && char_at(src, p) == 61) {
+                p = p + 1; cl = cl + 1;
+                types = push(types, TOK_EQ); lexemes = push(lexemes, "==");
+            } else if (p < src_len && char_at(src, p) == 62) {  // '=>'
+                p = p + 1; cl = cl + 1;
+                types = push(types, TOK_FAT_ARROW); lexemes = push(lexemes, "=>");
+            } else {
+                types = push(types, TOK_ASSIGN); lexemes = push(lexemes, "=");
+            }
+        } else if (c == 33) {  // '!'
+            if (p < src_len && char_at(src, p) == 61) {
+                p = p + 1; cl = cl + 1;
+                types = push(types, TOK_NE); lexemes = push(lexemes, "!=");
+            } else {
+                types = push(types, TOK_NOT); lexemes = push(lexemes, "!");
+            }
+        } else if (c == 60) {  // '<'
+            if (p < src_len && char_at(src, p) == 61) {
+                p = p + 1; cl = cl + 1;
+                types = push(types, TOK_LE); lexemes = push(lexemes, "<=");
+            } else if (p < src_len && char_at(src, p) == 60) {  // '<<'
+                p = p + 1; cl = cl + 1;
+                if (p < src_len && char_at(src, p) == 61) {
+                    p = p + 1; cl = cl + 1;
+                    types = push(types, TOK_LSHIFT_ASSIGN); lexemes = push(lexemes, "<<=");
+                } else {
+                    types = push(types, TOK_LSHIFT); lexemes = push(lexemes, "<<");
+                }
+            } else {
+                types = push(types, TOK_LT); lexemes = push(lexemes, "<");
+            }
+        } else if (c == 62) {  // '>'
+            if (p < src_len && char_at(src, p) == 61) {
+                p = p + 1; cl = cl + 1;
+                types = push(types, TOK_GE); lexemes = push(lexemes, ">=");
+            } else if (p < src_len && char_at(src, p) == 62) {  // '>>'
+                p = p + 1; cl = cl + 1;
+                if (p < src_len && char_at(src, p) == 61) {
+                    p = p + 1; cl = cl + 1;
+                    types = push(types, TOK_RSHIFT_ASSIGN); lexemes = push(lexemes, ">>=");
+                } else {
+                    types = push(types, TOK_RSHIFT); lexemes = push(lexemes, ">>");
+                }
+            } else {
+                types = push(types, TOK_GT); lexemes = push(lexemes, ">");
+            }
+        } else if (c == 38) {  // '&'
+            if (p < src_len && char_at(src, p) == 38) {
+                p = p + 1; cl = cl + 1;
+                types = push(types, TOK_AND); lexemes = push(lexemes, "&&");
+            } else if (p < src_len && char_at(src, p) == 61) {
+                p = p + 1; cl = cl + 1;
+                types = push(types, TOK_AMP_ASSIGN); lexemes = push(lexemes, "&=");
+            } else {
+                types = push(types, TOK_AMPERSAND); lexemes = push(lexemes, "&");
+            }
+        } else if (c == 124) {  // '|'
+            if (p < src_len && char_at(src, p) == 124) {
+                p = p + 1; cl = cl + 1;
+                types = push(types, TOK_OR); lexemes = push(lexemes, "||");
+            } else if (p < src_len && char_at(src, p) == 62) {  // '|>'
+                p = p + 1; cl = cl + 1;
+                types = push(types, TOK_PIPE_FORWARD); lexemes = push(lexemes, "|>");
+            } else if (p < src_len && char_at(src, p) == 61) {
+                p = p + 1; cl = cl + 1;
+                types = push(types, TOK_PIPE_ASSIGN); lexemes = push(lexemes, "|=");
+            } else {
+                types = push(types, TOK_PIPE); lexemes = push(lexemes, "|");
+            }
+        } else if (c == 94) {  // '^'
+            if (p < src_len && char_at(src, p) == 61) {
+                p = p + 1; cl = cl + 1;
+                types = push(types, TOK_CARET_ASSIGN); lexemes = push(lexemes, "^=");
+            } else {
+                types = push(types, TOK_CARET); lexemes = push(lexemes, "^");
+            }
+        } else if (c == 126) {  // '~'
+            types = push(types, TOK_TILDE); lexemes = push(lexemes, "~");
+        } else if (c == 64) {  // '@'
+            types = push(types, TOK_AT); lexemes = push(lexemes, "@");
+        } else if (c == 63) {  // '?'
+            if (p < src_len && char_at(src, p) == 63) {
+                p = p + 1; cl = cl + 1;
+                if (p < src_len && char_at(src, p) == 61) {
+                    p = p + 1; cl = cl + 1;
+                    types = push(types, TOK_NULL_COAL_ASSIGN); lexemes = push(lexemes, "??=");
+                } else {
+                    types = push(types, TOK_NULL_COALESCE); lexemes = push(lexemes, "??");
+                }
+            } else {
+                types = push(types, TOK_QUESTION); lexemes = push(lexemes, "?");
+            }
+        } else if (c == 46) {  // '.' (single dot, after '..' and '...' handled above)
+            types = push(types, TOK_DOT); lexemes = push(lexemes, ".");
+        } else if (c == 40) {  // '('
+            types = push(types, TOK_LPAREN); lexemes = push(lexemes, "(");
+        } else if (c == 41) {  // ')'
+            types = push(types, TOK_RPAREN); lexemes = push(lexemes, ")");
+        } else if (c == 123) {  // '{'
+            types = push(types, TOK_LBRACE); lexemes = push(lexemes, "{");
+        } else if (c == 125) {  // '}'
+            types = push(types, TOK_RBRACE); lexemes = push(lexemes, "}");
+        } else if (c == 91) {  // '['
+            types = push(types, TOK_LBRACKET); lexemes = push(lexemes, "[");
+        } else if (c == 93) {  // ']'
+            types = push(types, TOK_RBRACKET); lexemes = push(lexemes, "]");
+        } else if (c == 59) {  // ';'
+            types = push(types, TOK_SEMICOLON); lexemes = push(lexemes, ";");
+        } else if (c == 44) {  // ','
+            types = push(types, TOK_COMMA); lexemes = push(lexemes, ",");
+        } else if (c == 58) {  // ':'
+            types = push(types, TOK_COLON); lexemes = push(lexemes, ":");
+        } else if (c == 46) {  // '.' (fallback)
+            types = push(types, TOK_DOT); lexemes = push(lexemes, ".");
+        } else {
+            types = push(types, TOK_INVALID);
+            lexemes = push(lexemes, to_char(c));
+        }
+
+        lines   = push(lines,   tok_ln);
+        cols    = push(cols,    tok_cl);
+        ivals   = push(ivals,   0);
+        fvals   = push(fvals,   0.0);
+        count   = count + 1;
+    }
+
+    // Append EOF token
+    types   = push(types,   TOK_EOF);
+    lexemes = push(lexemes, "");
+    lines   = push(lines,   ln);
+    cols    = push(cols,    cl);
+    ivals   = push(ivals,   0);
+    fvals   = push(fvals,   0.0);
+    count   = count + 1;
+
+    return TokenStream {
+        types:   types,
+        lexemes: lexemes,
+        lines:   lines,
+        cols:    cols,
+        ivals:   ivals,
+        fvals:   fvals,
+        count:   count
+    };
+}
+
+// ─── Standalone test harness ──────────────────────────────────────────────────
+// When compiled and run directly, tokenises a small sample and prints each
+// token type code, lexeme, line and column.
+
+fn tok_name(ty) {
+    if (ty == TOK_INTEGER)    { return "INTEGER"; }
+    if (ty == TOK_FLOAT)      { return "FLOAT"; }
+    if (ty == TOK_STRING)     { return "STRING"; }
+    if (ty == TOK_IDENTIFIER) { return "IDENTIFIER"; }
+    if (ty == TOK_FN)         { return "FN"; }
+    if (ty == TOK_RETURN)     { return "RETURN"; }
+    if (ty == TOK_IF)         { return "IF"; }
+    if (ty == TOK_ELSE)       { return "ELSE"; }
+    if (ty == TOK_WHILE)      { return "WHILE"; }
+    if (ty == TOK_DO)         { return "DO"; }
+    if (ty == TOK_FOR)        { return "FOR"; }
+    if (ty == TOK_VAR)        { return "VAR"; }
+    if (ty == TOK_CONST)      { return "CONST"; }
+    if (ty == TOK_BREAK)      { return "BREAK"; }
+    if (ty == TOK_CONTINUE)   { return "CONTINUE"; }
+    if (ty == TOK_IN)         { return "IN"; }
+    if (ty == TOK_TRUE)       { return "TRUE"; }
+    if (ty == TOK_FALSE)      { return "FALSE"; }
+    if (ty == TOK_NULL)       { return "NULL"; }
+    if (ty == TOK_SWITCH)     { return "SWITCH"; }
+    if (ty == TOK_CASE)       { return "CASE"; }
+    if (ty == TOK_DEFAULT)    { return "DEFAULT"; }
+    if (ty == TOK_TRY)        { return "TRY"; }
+    if (ty == TOK_CATCH)      { return "CATCH"; }
+    if (ty == TOK_THROW)      { return "THROW"; }
+    if (ty == TOK_ENUM)       { return "ENUM"; }
+    if (ty == TOK_STRUCT)     { return "STRUCT"; }
+    if (ty == TOK_IMPORT)     { return "IMPORT"; }
+    if (ty == TOK_EXTERN)     { return "EXTERN"; }
+    if (ty == TOK_OPTMAX_START) { return "OPTMAX_START"; }
+    if (ty == TOK_OPTMAX_END)   { return "OPTMAX_END"; }
+    if (ty == TOK_EOF)        { return "EOF"; }
+    return "OTHER";
+}
+
+fn main() {
+    var sample = "fn add(a: int, b: int) -> int {\n    return a + b;\n}\n\nextern fn printf(fmt: int) -> int;\n\nfn main() {\n    var x = 42;\n    var y = 3.14;\n    var s = \"hello\";\n    return add(x, 1);\n}";
+
+    var ts = tokenize(sample);
+
+    var i = 0;
+    while (i < ts.count) {
+        var ty  = ts.types[i];
+        var lex = ts.lexemes[i];
+        var ln  = ts.lines[i];
+        var cl  = ts.cols[i];
+        println(to_string(ln) + ":" + to_string(cl) + " " + tok_name(ty) + " [" + lex + "]");
+        i = i + 1;
+    }
+
+    return 0;
+}

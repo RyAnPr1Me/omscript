@@ -1604,6 +1604,8 @@ const char* tokenTypeToString(omscript::TokenType type) {
         return "UNLIKELY";
     case omscript::TokenType::REGISTER:
         return "REGISTER";
+    case omscript::TokenType::EXTERN:
+        return "EXTERN";
     case omscript::TokenType::PLUS:
         return "PLUS";
     case omscript::TokenType::MINUS:

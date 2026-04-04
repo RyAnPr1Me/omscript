@@ -2157,11 +2157,23 @@ void CodeGenerator::generate(Program* program) {
         }
         auto it = seenFunctions.find(func->name);
         if (it != seenFunctions.end()) {
-            codegenError("Duplicate function definition: '" + func->name + "' (previously defined at line " +
-                             std::to_string(it->second->line) + ")",
-                         func.get());
+            // Allow an extern declaration and a definition of the same name
+            // to coexist — the extern is just a forward declaration.
+            const bool prevIsExtern = it->second->isExtern;
+            const bool curIsExtern  = func->isExtern;
+            if (prevIsExtern && !curIsExtern) {
+                // Replace extern placeholder with the real definition.
+                seenFunctions[func->name] = func.get();
+            } else if (!prevIsExtern && curIsExtern) {
+                // Extern after definition is redundant but not an error; skip.
+            } else {
+                codegenError("Duplicate function definition: '" + func->name + "' (previously defined at line " +
+                                 std::to_string(it->second->line) + ")",
+                             func.get());
+            }
+        } else {
+            seenFunctions[func->name] = func.get();
         }
-        seenFunctions[func->name] = func.get();
 
         // Check for duplicate parameter names within this function.
         std::unordered_set<std::string> seenParams;
@@ -2207,6 +2219,10 @@ void CodeGenerator::generate(Program* program) {
     // Forward-declare all functions so that any function can reference any
     // other regardless of source-file ordering (enables mutual recursion).
     for (auto& func : program->functions) {
+        // Skip if already declared (e.g. extern decl followed by definition).
+        if (functions.count(func->name))
+            continue;
+
         // Resolve parameter types from annotations: "float" → double, else i64.
         std::vector<llvm::Type*> paramTypes;
         paramTypes.reserve(func->parameters.size());
@@ -2216,6 +2232,18 @@ void CodeGenerator::generate(Program* program) {
         // Resolve return type from annotation (e.g. "-> float" → double).
         llvm::Type* retType = resolveAnnotatedType(func->returnType);
         llvm::FunctionType* funcType = llvm::FunctionType::get(retType, paramTypes, false);
+
+        if (func->isExtern) {
+            // extern fn — declare with ExternalLinkage and no body attributes.
+            // The symbol will be resolved at link time from the linked library
+            // or object file that provides the definition.
+            llvm::Function* function =
+                llvm::Function::Create(funcType, llvm::Function::ExternalLinkage, func->name, module.get());
+            functions[func->name] = function;
+            functionDecls_[func->name] = func.get();
+            continue;
+        }
+
         // Non-main functions use InternalLinkage at O2+ (equivalent to C's
         // `static`).  This tells the optimizer that no external code can call
         // the function, enabling:
@@ -2394,8 +2422,10 @@ void CodeGenerator::generate(Program* program) {
                   << " functions..." << std::endl;
     }
 
-    // Generate all function bodies
+    // Generate all function bodies (skip extern declarations — no body to emit)
     for (auto& func : program->functions) {
+        if (func->isExtern)
+            continue;
         generateFunction(func.get());
     }
 

@@ -338,6 +338,7 @@ The following words are reserved:
 | `borrow` | Borrow a reference to a variable |
 | `prefetch` | Declare a register-pinned variable with optional cache prefetch |
 | `register` | Force variable into a CPU register via immediate mem2reg promotion |
+| `extern` | Declare an externally-linked function (no body; resolved at link time) |
 | `likely` | Branch prediction hint: then-branch is expected |
 | `unlikely` | Branch prediction hint: then-branch is rare |
 | `OPTMAX` | Begin exhaustive optimization block |
@@ -870,6 +871,60 @@ fn compute_immut(x: int) -> int {
 - For variables that hold pointer-sized values (i64 or ptr types), a value-based prefetch is emitted: the variable's value is treated as a memory address and `llvm.prefetch` is called on the pointed-to memory.
 - All prefetched variables must be explicitly invalidated (`invalidate name;`) before the function returns. The compiler emits a compile-time error if any prefetched variable is still live at a return statement.
 - Variables being returned (directly or via `move`) are exempt from the invalidation requirement.
+
+---
+
+### 6.11 External Function Declarations (`extern fn`)
+
+The `extern fn` keyword declares a function that is defined in an external C/C++
+or object file linked with the omscript program.  The declaration is resolved at
+link time; no function body is written.
+
+**Syntax:**
+
+```javascript
+extern fn name(param1: type1, param2: type2, ...) -> returntype;
+```
+
+- Parameters may include optional type annotations (`int`, `float`, `u64`, etc.).
+- The return type annotation after `->` is optional (defaults to `int`/`i64`).
+- The declaration ends with a semicolon — no `{...}` body.
+
+**Examples:**
+
+```javascript
+// Declare C standard-library functions
+extern fn printf(fmt: int) -> int;
+extern fn malloc(size: int) -> int;
+extern fn free(ptr: int);
+extern fn strlen(s: int) -> int;
+extern fn memcpy(dst: int, src: int, n: int) -> int;
+
+// Use them from omscript code
+fn main() {
+    var buf = malloc(64);
+    // ... use buf as an opaque pointer (i64) ...
+    free(buf);
+    return 0;
+}
+```
+
+**Semantics:**
+
+- The LLVM IR for an `extern fn` declaration is an external function prototype
+  with `ExternalLinkage` — exactly as if you had written `declare i64 @name(...)`.
+- Calling an `extern fn` from omscript code follows the system C calling
+  convention (since all omscript values are `i64` or `double`, and the
+  annotation controls which LLVM type is used).
+- You can also declare an `extern fn` and then define a regular `fn` with the
+  same name in the same source file; the compiler will prefer the definition.
+
+**Use with self-hosting:**
+
+`extern fn` is the bridge that allows omscript programs to call into C libraries
+(including the LLVM C API).  It is the mechanism by which the self-hosted
+components in `src/lexer.om`, `src/egraph_optimizer.om`, and future `.om` files
+can call external routines at link time.
 
 ---
 

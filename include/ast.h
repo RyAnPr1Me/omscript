@@ -511,6 +511,7 @@ class FunctionDecl : public ASTNode {
     bool hintMinSize = false;     ///< @minsize — optimize for minimum code size
     bool hintOptNone = false;     ///< @optnone — disable all optimizations (useful for debugging)
     bool hintNoUnwind = false;    ///< @nounwind — function never throws C++ exceptions
+    bool isExtern = false;        ///< extern fn — no body; resolved by the linker
 
     FunctionDecl(const std::string& n, std::vector<std::string> tps, std::vector<Parameter> params, std::unique_ptr<BlockStmt> b, bool optMax = false, const std::string& retType = "")
         : ASTNode(ASTNodeType::FUNCTION), name(n), typeParams(std::move(tps)), parameters(std::move(params)), body(std::move(b)), isOptMax(optMax), returnType(retType) {

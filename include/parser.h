@@ -90,6 +90,7 @@ class Parser {
 
     // Parsing methods
     std::unique_ptr<FunctionDecl> parseFunction(bool isOptMax);
+    std::unique_ptr<FunctionDecl> parseExternFunctionDecl();
     std::unique_ptr<Statement> parseStatement();
     std::unique_ptr<BlockStmt> parseBlock();
     std::unique_ptr<Statement> parseVarDecl(bool isConst);
