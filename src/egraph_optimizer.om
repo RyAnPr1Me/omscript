@@ -748,6 +748,7 @@ fn can_represent(ast, node_id) {
 
     if (ty == AST_BINARY) {
         var op = ast.node_svals[node_id];
+        // array_contains is a built-in function provided by the OmScript runtime.
         var ok_ops = ["+", "-", "*", "/", "%", "**", "&", "|", "^", "<<", ">>",
                       "==", "!=", "<", "<=", ">", ">=", "&&", "||"];
         if (!array_contains(ok_ops, op)) { return 0; }
@@ -768,6 +769,7 @@ fn can_represent(ast, node_id) {
     }
 
     if (ty == AST_CALL) {
+        // array_contains is a built-in provided by the OmScript runtime.
         var pure = ["abs", "min", "max", "sign", "clamp", "pow", "sqrt",
                     "is_even", "is_odd", "len", "str_len", "to_string",
                     "to_int", "to_float", "typeof", "log2", "gcd",
