@@ -955,10 +955,22 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             llvm::Value* iterVal = builder->CreateLoad(iterType, iterAlloca, "iter.assume");
             llvm::Function* assumeFn = OMSC_GET_INTRINSIC_STMT(
                 module.get(), llvm::Intrinsic::assume, {});
-            // Lower bound: assume iter >= 0.
+            // Lower bound: assume iter >= 0 (always true for non-negative starts).
             llvm::Value* isNonNeg = builder->CreateICmpSGE(
                 iterVal, llvm::ConstantInt::get(iterType, 0), "iter.nonneg");
             builder->CreateCall(assumeFn, {isNonNeg});
+            // Tighter lower bound: when start > 0, also assume iter >= start.
+            // This tighter hint lets CVP/LVI prove `iter - start >= 0` (NUW),
+            // enabling srem→urem for expressions like `arr[iter - start]` and
+            // strength-reducing `(iter - WIN) % k` patterns in sliding-window loops.
+            if (auto* startCI = llvm::dyn_cast<llvm::ConstantInt>(startVal)) {
+                if (startCI->getSExtValue() > 0) {
+                    llvm::Value* iterValLB = builder->CreateLoad(iterType, iterAlloca, "iter.lb");
+                    llvm::Value* isGeStart = builder->CreateICmpSGE(
+                        iterValLB, startVal, "iter.ge.start");
+                    builder->CreateCall(assumeFn, {isGeStart});
+                }
+            }
             // Upper bound: assume iter < end.  OmScript's for-loop semantics
             // guarantee the iterator never equals or exceeds end inside the body
             // (the loop exits before that).  This assumption lets LLVM's

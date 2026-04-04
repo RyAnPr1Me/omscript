@@ -413,6 +413,22 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
         }
     }
 
+    // sdiv by positive constant with non-negative dividend: result is in [0, dividend/C],
+    // so it is always non-negative.  Mirrors the SRem case above.  This enables
+    // downstream adds/muls on quotients to get NSW/NUW flags without needing
+    // an extra llvm.assume.
+    if (op == llvm::Instruction::SDiv) {
+        if (isValueNonNegative(inst->getOperand(0), DL, depth + 1)) {
+            if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst->getOperand(1))) {
+                if (ci->getSExtValue() > 0) return true;
+            }
+            // Runtime positive divisor: if it's provably non-negative (and
+            // non-zero — assumed by the caller as sdiv by zero is UB), the
+            // quotient is also non-negative.
+            if (isValueNonNegative(inst->getOperand(1), DL, depth + 1)) return true;
+        }
+    }
+
     // lshr (logical shift right): always non-negative (fills with 0s)
     if (op == llvm::Instruction::LShr) return true;
 
