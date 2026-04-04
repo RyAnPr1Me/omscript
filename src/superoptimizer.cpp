@@ -2850,6 +2850,24 @@ static bool replaceIdiom(IdiomMatch& match) {
                     case 73728: simplified = builder.CreateAdd(shl(xv,16), shl(xv,13),  "mul73728"); break;
                     case 81920: simplified = builder.CreateAdd(shl(xv,16), shl(xv,14),  "mul81920"); break;
                     case 98304: simplified = builder.CreateAdd(shl(xv,16), shl(xv,15),  "mul98304"); break;
+                    case 114688: simplified = builder.CreateSub(shl(xv,17), shl(xv,14), "mul114688"); break;
+                    case 122880: simplified = builder.CreateSub(shl(xv,17), shl(xv,13), "mul122880"); break;
+                    case 131072: simplified = shl(xv,17); break;
+                    case 131073: simplified = builder.CreateAdd(shl(xv,17), xv,          "mul131073"); break;
+                    case 131074: simplified = builder.CreateAdd(shl(xv,17), shl(xv,1),   "mul131074"); break;
+                    case 131076: simplified = builder.CreateAdd(shl(xv,17), shl(xv,2),   "mul131076"); break;
+                    case 131080: simplified = builder.CreateAdd(shl(xv,17), shl(xv,3),   "mul131080"); break;
+                    case 131136: simplified = builder.CreateAdd(shl(xv,17), shl(xv,6),   "mul131136"); break;
+                    case 131200: simplified = builder.CreateAdd(shl(xv,17), shl(xv,7),   "mul131200"); break;
+                    case 131328: simplified = builder.CreateAdd(shl(xv,17), shl(xv,8),   "mul131328"); break;
+                    case 131584: simplified = builder.CreateAdd(shl(xv,17), shl(xv,9),   "mul131584"); break;
+                    case 132096: simplified = builder.CreateAdd(shl(xv,17), shl(xv,10),  "mul132096"); break;
+                    case 133120: simplified = builder.CreateAdd(shl(xv,17), shl(xv,11),  "mul133120"); break;
+                    case 135168: simplified = builder.CreateAdd(shl(xv,17), shl(xv,12),  "mul135168"); break;
+                    case 139264: simplified = builder.CreateAdd(shl(xv,17), shl(xv,13),  "mul139264"); break;
+                    case 147456: simplified = builder.CreateAdd(shl(xv,17), shl(xv,14),  "mul147456"); break;
+                    case 163840: simplified = builder.CreateAdd(shl(xv,17), shl(xv,15),  "mul163840"); break;
+                    case 196608: simplified = builder.CreateAdd(shl(xv,17), shl(xv,16),  "mul196608"); break;
                     default:
                         // Negative constants: compute |cv|, strength-reduce, then negate.
                         if (*cv < -1) {
@@ -3081,6 +3099,24 @@ static bool replaceIdiom(IdiomMatch& match) {
                             case 73728: posRep = builder.CreateAdd(shl(xv,16), shl(xv,13),  "mulp73728"); break;
                             case 81920: posRep = builder.CreateAdd(shl(xv,16), shl(xv,14),  "mulp81920"); break;
                             case 98304: posRep = builder.CreateAdd(shl(xv,16), shl(xv,15),  "mulp98304"); break;
+                            case 114688: posRep = builder.CreateSub(shl(xv,17), shl(xv,14), "mulp114688"); break;
+                            case 122880: posRep = builder.CreateSub(shl(xv,17), shl(xv,13), "mulp122880"); break;
+                            case 131072: posRep = shl(xv,17); break;
+                            case 131073: posRep = builder.CreateAdd(shl(xv,17), xv,          "mulp131073"); break;
+                            case 131074: posRep = builder.CreateAdd(shl(xv,17), shl(xv,1),   "mulp131074"); break;
+                            case 131076: posRep = builder.CreateAdd(shl(xv,17), shl(xv,2),   "mulp131076"); break;
+                            case 131080: posRep = builder.CreateAdd(shl(xv,17), shl(xv,3),   "mulp131080"); break;
+                            case 131136: posRep = builder.CreateAdd(shl(xv,17), shl(xv,6),   "mulp131136"); break;
+                            case 131200: posRep = builder.CreateAdd(shl(xv,17), shl(xv,7),   "mulp131200"); break;
+                            case 131328: posRep = builder.CreateAdd(shl(xv,17), shl(xv,8),   "mulp131328"); break;
+                            case 131584: posRep = builder.CreateAdd(shl(xv,17), shl(xv,9),   "mulp131584"); break;
+                            case 132096: posRep = builder.CreateAdd(shl(xv,17), shl(xv,10),  "mulp132096"); break;
+                            case 133120: posRep = builder.CreateAdd(shl(xv,17), shl(xv,11),  "mulp133120"); break;
+                            case 135168: posRep = builder.CreateAdd(shl(xv,17), shl(xv,12),  "mulp135168"); break;
+                            case 139264: posRep = builder.CreateAdd(shl(xv,17), shl(xv,13),  "mulp139264"); break;
+                            case 147456: posRep = builder.CreateAdd(shl(xv,17), shl(xv,14),  "mulp147456"); break;
+                            case 163840: posRep = builder.CreateAdd(shl(xv,17), shl(xv,15),  "mulp163840"); break;
+                            case 196608: posRep = builder.CreateAdd(shl(xv,17), shl(xv,16),  "mulp196608"); break;
                             // 3-instruction negative sequences (new cases not covered above)
                             case 37: posRep = builder.CreateAdd(builder.CreateAdd(shl(xv,5), shl(xv,2)), xv, "mulp37"); break;
                             case 41: posRep = builder.CreateAdd(builder.CreateAdd(shl(xv,5), shl(xv,3)), xv, "mulp41"); break;
