@@ -2262,6 +2262,100 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 auto* shl13 = builder->CreateShl(base, mkShift(13), "mul24576.shl13");
                 return builder->CreateAdd(shl14, shl13, "mul24576", nf, ns);
             }
+            // ── n×32768 family ──────────────────────────────────────────────
+            case 28672: {
+                // n*28672 → (n<<15) - (n<<12)  (= 32768n - 4096n)
+                auto* shl15 = builder->CreateShl(base, mkShift(15), "mul28672.shl15");
+                auto* shl12 = builder->CreateShl(base, mkShift(12), "mul28672.shl12");
+                return builder->CreateSub(shl15, shl12, "mul28672", nf, ns);
+            }
+            case 30720: {
+                // n*30720 → (n<<15) - (n<<11)  (= 32768n - 2048n)
+                auto* shl15 = builder->CreateShl(base, mkShift(15), "mul30720.shl15");
+                auto* shl11 = builder->CreateShl(base, mkShift(11), "mul30720.shl11");
+                return builder->CreateSub(shl15, shl11, "mul30720", nf, ns);
+            }
+            case 32768: {
+                // n*32768 → n<<15
+                return builder->CreateShl(base, mkShift(15), "mul32768", nf, ns);
+            }
+            case 32769: {
+                // n*32769 → (n<<15) + n
+                auto* shl15 = builder->CreateShl(base, mkShift(15), "mul32769.shl15");
+                return builder->CreateAdd(shl15, base, "mul32769", nf, ns);
+            }
+            case 32770: {
+                // n*32770 → (n<<15) + (n<<1)
+                auto* shl15 = builder->CreateShl(base, mkShift(15), "mul32770.shl15");
+                auto* shl1  = builder->CreateShl(base, mkShift(1),  "mul32770.shl1");
+                return builder->CreateAdd(shl15, shl1, "mul32770", nf, ns);
+            }
+            case 32772: {
+                // n*32772 → (n<<15) + (n<<2)
+                auto* shl15 = builder->CreateShl(base, mkShift(15), "mul32772.shl15");
+                auto* shl2  = builder->CreateShl(base, mkShift(2),  "mul32772.shl2");
+                return builder->CreateAdd(shl15, shl2, "mul32772", nf, ns);
+            }
+            case 32776: {
+                // n*32776 → (n<<15) + (n<<3)
+                auto* shl15 = builder->CreateShl(base, mkShift(15), "mul32776.shl15");
+                auto* shl3  = builder->CreateShl(base, mkShift(3),  "mul32776.shl3");
+                return builder->CreateAdd(shl15, shl3, "mul32776", nf, ns);
+            }
+            case 32800: {
+                // n*32800 → (n<<15) + (n<<5)
+                auto* shl15 = builder->CreateShl(base, mkShift(15), "mul32800.shl15");
+                auto* shl5  = builder->CreateShl(base, mkShift(5),  "mul32800.shl5");
+                return builder->CreateAdd(shl15, shl5, "mul32800", nf, ns);
+            }
+            case 32896: {
+                // n*32896 → (n<<15) + (n<<7)
+                auto* shl15 = builder->CreateShl(base, mkShift(15), "mul32896.shl15");
+                auto* shl7  = builder->CreateShl(base, mkShift(7),  "mul32896.shl7");
+                return builder->CreateAdd(shl15, shl7, "mul32896", nf, ns);
+            }
+            case 33024: {
+                // n*33024 → (n<<15) + (n<<8)
+                auto* shl15 = builder->CreateShl(base, mkShift(15), "mul33024.shl15");
+                auto* shl8  = builder->CreateShl(base, mkShift(8),  "mul33024.shl8");
+                return builder->CreateAdd(shl15, shl8, "mul33024", nf, ns);
+            }
+            case 33280: {
+                // n*33280 → (n<<15) + (n<<9)
+                auto* shl15 = builder->CreateShl(base, mkShift(15), "mul33280.shl15");
+                auto* shl9  = builder->CreateShl(base, mkShift(9),  "mul33280.shl9");
+                return builder->CreateAdd(shl15, shl9, "mul33280", nf, ns);
+            }
+            case 33792: {
+                // n*33792 → (n<<15) + (n<<10)
+                auto* shl15 = builder->CreateShl(base, mkShift(15), "mul33792.shl15");
+                auto* shl10 = builder->CreateShl(base, mkShift(10), "mul33792.shl10");
+                return builder->CreateAdd(shl15, shl10, "mul33792", nf, ns);
+            }
+            case 34816: {
+                // n*34816 → (n<<15) + (n<<11)
+                auto* shl15 = builder->CreateShl(base, mkShift(15), "mul34816.shl15");
+                auto* shl11 = builder->CreateShl(base, mkShift(11), "mul34816.shl11");
+                return builder->CreateAdd(shl15, shl11, "mul34816", nf, ns);
+            }
+            case 36864: {
+                // n*36864 → (n<<15) + (n<<12)
+                auto* shl15 = builder->CreateShl(base, mkShift(15), "mul36864.shl15");
+                auto* shl12 = builder->CreateShl(base, mkShift(12), "mul36864.shl12");
+                return builder->CreateAdd(shl15, shl12, "mul36864", nf, ns);
+            }
+            case 40960: {
+                // n*40960 → (n<<15) + (n<<13)
+                auto* shl15 = builder->CreateShl(base, mkShift(15), "mul40960.shl15");
+                auto* shl13 = builder->CreateShl(base, mkShift(13), "mul40960.shl13");
+                return builder->CreateAdd(shl15, shl13, "mul40960", nf, ns);
+            }
+            case 49152: {
+                // n*49152 → (n<<15) + (n<<14)
+                auto* shl15 = builder->CreateShl(base, mkShift(15), "mul49152.shl15");
+                auto* shl14 = builder->CreateShl(base, mkShift(14), "mul49152.shl14");
+                return builder->CreateAdd(shl15, shl14, "mul49152", nf, ns);
+            }
             default:
                 return nullptr;
             }
