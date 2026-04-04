@@ -3682,6 +3682,17 @@ llvm::Value* CodeGenerator::generateTernary(TernaryExpr* expr) {
             if (leftSimple && rightSimple && isSafeOp)
                 return true;
         }
+        // Allow unary negation/bitwise-NOT on a simple operand — these are
+        // single side-effect-free instructions.  Enables `cond ? -x : x`
+        // (abs pattern), `cond ? ~mask : mask` (toggle pattern), etc.
+        // The superoptimizer's abs/neg idiom detectors can then fold the
+        // resulting select into llvm.abs or a branchless sequence.
+        if (auto* un = dynamic_cast<UnaryExpr*>(e)) {
+            const bool operandSimple = un->operand->type == ASTNodeType::IDENTIFIER_EXPR ||
+                                       un->operand->type == ASTNodeType::LITERAL_EXPR;
+            if (operandSimple && (un->op == "-" || un->op == "~"))
+                return true;
+        }
         return false;
     };
     if (isSimpleExpr(expr->thenExpr.get()) && isSimpleExpr(expr->elseExpr.get())) {

@@ -4916,6 +4916,26 @@ unsigned superopt::convertSDivToUDiv(llvm::Function& func) {
                 }
             }
 
+            // ICmp signed → unsigned when both operands are non-negative.
+            // For non-negative i64 values, signed and unsigned order comparisons
+            // give the same result.  Converting to unsigned enables:
+            //   1. SCEV's unsigned trip-count analysis (more vectorization
+            //      opportunities without signed-overflow guards)
+            //   2. LLVM's loop vectorizer to use unsigned induction variables
+            //   3. Downstream passes (GVN, LICM) to hoist loop conditions
+            //      without requiring signed-range assumptions.
+            // We run this AFTER inferring NSW/NUW flags so that the maximum
+            // number of operands are proven non-negative.
+            if (auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(&inst)) {
+                if (cmp->isSigned() &&
+                    isValueNonNegative(cmp->getOperand(0), DL) &&
+                    isValueNonNegative(cmp->getOperand(1), DL)) {
+                    cmp->setPredicate(cmp->getUnsignedPredicate());
+                    ++count;
+                }
+                continue;
+            }
+
             auto* bo = llvm::dyn_cast<llvm::BinaryOperator>(&inst);
             if (!bo) continue;
             if (bo->hasNoUnsignedWrap()) continue;
