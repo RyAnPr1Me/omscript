@@ -1,0 +1,810 @@
+// codegen.om — LLVM IR code generation backend for the bootstrapped OmScript compiler
+// Takes the flat-arena AST from parser.om and emits LLVM IR text.
+import "parser.om";
+
+// ─── Global codegen state ─────────────────────────────────────────────────────
+
+global var g_ir          = "";   // accumulated IR body (function definitions)
+global var g_ir_header   = "";   // module header (target, declares, string constants)
+global var g_tmp_count   = 0;    // SSA temporary counter (%tmp_0, %tmp_1, ...)
+global var g_label_count = 0;    // label counter (L_0, L_1, ...)
+global var g_str_count   = 0;    // string literal counter (@str_0, @str_1, ...)
+global var g_str_decls   = "";   // string constant declarations
+global var g_has_terminator = 0; // 1 if current block already has ret/br
+
+// Simple local variable symbol table (parallel arrays per function)
+global var g_local_names = [];   // variable name strings
+global var g_local_regs  = [];   // corresponding alloca register names
+global var g_local_count = 0;    // number of locals in current function
+
+// ─── Helper: fresh SSA temporary ──────────────────────────────────────────────
+
+fn fresh_tmp() {
+    var name = "%tmp_" + to_string(g_tmp_count);
+    g_tmp_count = g_tmp_count + 1;
+    return name;
+}
+
+// ─── Helper: fresh label ──────────────────────────────────────────────────────
+
+fn fresh_label() {
+    var name = "L_" + to_string(g_label_count);
+    g_label_count = g_label_count + 1;
+    return name;
+}
+
+// ─── Helper: emit a line of IR ────────────────────────────────────────────────
+
+fn emit(line) {
+    g_ir = g_ir + line + "\n";
+}
+
+fn emit_indent(line) {
+    g_ir = g_ir + "  " + line + "\n";
+}
+
+// ─── Helper: look up a local variable, return its alloca register ─────────────
+
+fn lookup_local(name) {
+    var i = g_local_count - 1;
+    while (i >= 0) {
+        if (str_eq(g_local_names[i], name)) {
+            return g_local_regs[i];
+        }
+        i = i - 1;
+    }
+    return "";
+}
+
+// ─── Helper: add a local variable to the symbol table ─────────────────────────
+
+fn add_local(name, reg) {
+    g_local_names = push(g_local_names, name);
+    g_local_regs  = push(g_local_regs, reg);
+    g_local_count = g_local_count + 1;
+}
+
+// ─── Helper: register a string literal, return its @str_N name ────────────────
+
+fn register_string_literal(value) {
+    var id = g_str_count;
+    g_str_count = g_str_count + 1;
+    var gname = "@str_" + to_string(id);
+
+    // Build the LLVM constant: [N x i8] c"...\00"
+    // We need to escape special characters for LLVM IR
+    var escaped = "";
+    var slen = str_len(value);
+    var j = 0;
+    while (j < slen) {
+        var c = char_at(value, j);
+        if (c == 10) {
+            escaped = escaped + "\\0A";
+        } else if (c == 13) {
+            escaped = escaped + "\\0D";
+        } else if (c == 9) {
+            escaped = escaped + "\\09";
+        } else if (c == 0) {
+            escaped = escaped + "\\00";
+        } else if (c == 92) {
+            escaped = escaped + "\\5C";
+        } else if (c == 34) {
+            escaped = escaped + "\\22";
+        } else {
+            escaped = escaped + to_char(c);
+        }
+        j = j + 1;
+    }
+    // +1 for null terminator
+    var total_len = slen + 1;
+    g_str_decls = g_str_decls + gname + " = private unnamed_addr constant ["
+        + to_string(total_len) + " x i8] c\"" + escaped + "\\00\"\n";
+    return gname;
+}
+
+// ─── Helper: get a pointer to a string constant ───────────────────────────────
+
+fn string_const_ptr(gname, byte_len) {
+    var tmp = fresh_tmp();
+    emit_indent(tmp + " = getelementptr inbounds [" + to_string(byte_len)
+        + " x i8], [" + to_string(byte_len) + " x i8]* " + gname + ", i64 0, i64 0");
+    return tmp;
+}
+
+// ─── Expression codegen: returns the SSA register holding the value ───────────
+
+fn codegen_expr(nd) {
+    if (nd < 0) {
+        return "0";
+    }
+    var ty = g_nd_type[nd];
+
+    // Integer literal
+    if (ty == ND_LIT_INT) {
+        return to_string(g_nd_ival[nd]);
+    }
+
+    // Boolean literal (0 or 1)
+    if (ty == ND_LIT_BOOL) {
+        return to_string(g_nd_ival[nd]);
+    }
+
+    // String literal — register as global constant, return i8* cast to i64
+    if (ty == ND_LIT_STRING) {
+        var sval = g_nd_sval[nd];
+        var gname = register_string_literal(sval);
+        var slen = str_len(sval) + 1;
+        var ptr = string_const_ptr(gname, slen);
+        var cast = fresh_tmp();
+        emit_indent(cast + " = ptrtoint i8* " + ptr + " to i64");
+        return cast;
+    }
+
+    // Identifier — load from alloca
+    if (ty == ND_IDENTIFIER) {
+        var name = g_nd_sval[nd];
+        var reg = lookup_local(name);
+        if (str_eq(reg, "")) {
+            // Unknown variable — emit a comment and return 0
+            emit_indent("; WARNING: unknown variable '" + name + "'");
+            return "0";
+        }
+        var tmp = fresh_tmp();
+        emit_indent(tmp + " = load i64, i64* " + reg);
+        return tmp;
+    }
+
+    // Binary expression
+    if (ty == ND_BINARY) {
+        var op = g_nd_sval[nd];
+
+        // Logical AND — short-circuit (must not pre-evaluate right)
+        if (str_eq(op, "&&")) {
+            return codegen_logical_and(g_nd_c0[nd], g_nd_c1[nd]);
+        }
+        // Logical OR — short-circuit (must not pre-evaluate right)
+        if (str_eq(op, "||")) {
+            return codegen_logical_or(g_nd_c0[nd], g_nd_c1[nd]);
+        }
+
+        var left_val = codegen_expr(g_nd_c0[nd]);
+        var right_val = codegen_expr(g_nd_c1[nd]);
+
+        var result = fresh_tmp();
+        if (str_eq(op, "+")) {
+            emit_indent(result + " = add i64 " + left_val + ", " + right_val);
+        } else if (str_eq(op, "-")) {
+            emit_indent(result + " = sub i64 " + left_val + ", " + right_val);
+        } else if (str_eq(op, "*")) {
+            emit_indent(result + " = mul i64 " + left_val + ", " + right_val);
+        } else if (str_eq(op, "/")) {
+            emit_indent(result + " = sdiv i64 " + left_val + ", " + right_val);
+        } else if (str_eq(op, "%")) {
+            emit_indent(result + " = srem i64 " + left_val + ", " + right_val);
+        } else if (str_eq(op, "==")) {
+            var cmp = fresh_tmp();
+            emit_indent(cmp + " = icmp eq i64 " + left_val + ", " + right_val);
+            emit_indent(result + " = zext i1 " + cmp + " to i64");
+        } else if (str_eq(op, "!=")) {
+            var cmp = fresh_tmp();
+            emit_indent(cmp + " = icmp ne i64 " + left_val + ", " + right_val);
+            emit_indent(result + " = zext i1 " + cmp + " to i64");
+        } else if (str_eq(op, "<")) {
+            var cmp = fresh_tmp();
+            emit_indent(cmp + " = icmp slt i64 " + left_val + ", " + right_val);
+            emit_indent(result + " = zext i1 " + cmp + " to i64");
+        } else if (str_eq(op, "<=")) {
+            var cmp = fresh_tmp();
+            emit_indent(cmp + " = icmp sle i64 " + left_val + ", " + right_val);
+            emit_indent(result + " = zext i1 " + cmp + " to i64");
+        } else if (str_eq(op, ">")) {
+            var cmp = fresh_tmp();
+            emit_indent(cmp + " = icmp sgt i64 " + left_val + ", " + right_val);
+            emit_indent(result + " = zext i1 " + cmp + " to i64");
+        } else if (str_eq(op, ">=")) {
+            var cmp = fresh_tmp();
+            emit_indent(cmp + " = icmp sge i64 " + left_val + ", " + right_val);
+            emit_indent(result + " = zext i1 " + cmp + " to i64");
+        } else if (str_eq(op, "&")) {
+            emit_indent(result + " = and i64 " + left_val + ", " + right_val);
+        } else if (str_eq(op, "|")) {
+            emit_indent(result + " = or i64 " + left_val + ", " + right_val);
+        } else if (str_eq(op, "^")) {
+            emit_indent(result + " = xor i64 " + left_val + ", " + right_val);
+        } else if (str_eq(op, "<<")) {
+            emit_indent(result + " = shl i64 " + left_val + ", " + right_val);
+        } else if (str_eq(op, ">>")) {
+            emit_indent(result + " = ashr i64 " + left_val + ", " + right_val);
+        } else {
+            emit_indent("; WARNING: unknown binary op '" + op + "'");
+            emit_indent(result + " = add i64 " + left_val + ", 0");
+        }
+        return result;
+    }
+
+    // Unary expression
+    if (ty == ND_UNARY) {
+        var op = g_nd_sval[nd];
+        var operand_val = codegen_expr(g_nd_c0[nd]);
+        var result = fresh_tmp();
+        if (str_eq(op, "-")) {
+            emit_indent(result + " = sub i64 0, " + operand_val);
+        } else if (str_eq(op, "!")) {
+            var cmp = fresh_tmp();
+            emit_indent(cmp + " = icmp eq i64 " + operand_val + ", 0");
+            emit_indent(result + " = zext i1 " + cmp + " to i64");
+        } else if (str_eq(op, "~")) {
+            emit_indent(result + " = xor i64 " + operand_val + ", -1");
+        } else {
+            emit_indent("; WARNING: unknown unary op '" + op + "'");
+            emit_indent(result + " = add i64 " + operand_val + ", 0");
+        }
+        return result;
+    }
+
+    // Function call
+    if (ty == ND_CALL) {
+        return codegen_call(nd);
+    }
+
+    // Assignment expression (can appear as expr in ND_EXPR_STMT)
+    if (ty == ND_ASSIGN) {
+        return codegen_assign_expr(nd);
+    }
+
+    emit_indent("; WARNING: unhandled expr node type " + to_string(ty));
+    return "0";
+}
+
+// ─── Logical AND with short-circuit ───────────────────────────────────────────
+
+fn codegen_logical_and(left_nd, right_nd) {
+    var left_val = codegen_expr(left_nd);
+    var lbl_right = fresh_label();
+    var lbl_end   = fresh_label();
+
+    var cond = fresh_tmp();
+    emit_indent(cond + " = icmp ne i64 " + left_val + ", 0");
+    emit_indent("br i1 " + cond + ", label %" + lbl_right + ", label %" + lbl_end);
+
+    var lbl_from_left = lbl_end;
+    emit(lbl_right + ":");
+    var right_val = codegen_expr(right_nd);
+    var rcmp = fresh_tmp();
+    emit_indent(rcmp + " = icmp ne i64 " + right_val + ", 0");
+    var rext = fresh_tmp();
+    emit_indent(rext + " = zext i1 " + rcmp + " to i64");
+    emit_indent("br label %" + lbl_end);
+
+    emit(lbl_end + ":");
+    var result = fresh_tmp();
+    emit_indent(result + " = phi i64 [ 0, %" + lbl_from_left + " ], [ " + rext + ", %" + lbl_right + " ]");
+    return result;
+}
+
+// ─── Logical OR with short-circuit ────────────────────────────────────────────
+
+fn codegen_logical_or(left_nd, right_nd) {
+    var left_val = codegen_expr(left_nd);
+    var lbl_right = fresh_label();
+    var lbl_end   = fresh_label();
+
+    var cond = fresh_tmp();
+    emit_indent(cond + " = icmp ne i64 " + left_val + ", 0");
+    emit_indent("br i1 " + cond + ", label %" + lbl_end + ", label %" + lbl_right);
+
+    var lbl_from_left = lbl_end;
+    emit(lbl_right + ":");
+    var right_val = codegen_expr(right_nd);
+    var rcmp = fresh_tmp();
+    emit_indent(rcmp + " = icmp ne i64 " + right_val + ", 0");
+    var rext = fresh_tmp();
+    emit_indent(rext + " = zext i1 " + rcmp + " to i64");
+    emit_indent("br label %" + lbl_end);
+
+    emit(lbl_end + ":");
+    var result = fresh_tmp();
+    emit_indent(result + " = phi i64 [ 1, %" + lbl_from_left + " ], [ " + rext + ", %" + lbl_right + " ]");
+    return result;
+}
+
+// ─── Call codegen ─────────────────────────────────────────────────────────────
+
+fn codegen_call(nd) {
+    var fname = g_nd_sval[nd];
+    var nargs = g_nd_nextra[nd];
+    var arg_start = g_nd_extra[nd];
+
+    // Built-in: println(expr) → printf("%ld\n", expr) for integers
+    if (str_eq(fname, "println") || str_eq(fname, "print")) {
+        if (nargs >= 1) {
+            var arg_nd = g_ch[arg_start];
+            var arg_ty = g_nd_type[arg_nd];
+
+            if (arg_ty == ND_LIT_STRING) {
+                // Print a string literal: printf("%s\n", str)
+                var sval = g_nd_sval[arg_nd];
+                var gname = register_string_literal(sval);
+                var slen = str_len(sval) + 1;
+                var ptr = string_const_ptr(gname, slen);
+                var fmt_ptr = string_const_ptr("@fmt_str", 4);
+                var result = fresh_tmp();
+                emit_indent(result + " = call i32 (i8*, ...) @printf(i8* " + fmt_ptr + ", i8* " + ptr + ")");
+                var cast = fresh_tmp();
+                emit_indent(cast + " = sext i32 " + result + " to i64");
+                return cast;
+            }
+
+            // Default: print as integer
+            var val = codegen_expr(arg_nd);
+            var fmt_ptr = string_const_ptr("@fmt_int_nl", 5);
+            var result = fresh_tmp();
+            emit_indent(result + " = call i32 (i8*, ...) @printf(i8* " + fmt_ptr + ", i64 " + val + ")");
+            var cast = fresh_tmp();
+            emit_indent(cast + " = sext i32 " + result + " to i64");
+            return cast;
+        }
+        return "0";
+    }
+
+    // Built-in: to_string(n) → snprintf into malloc'd buffer
+    if (str_eq(fname, "to_string")) {
+        if (nargs >= 1) {
+            var arg_nd = g_ch[arg_start];
+            var val = codegen_expr(arg_nd);
+            // Allocate 32 bytes for the string
+            var buf = fresh_tmp();
+            emit_indent(buf + " = call i8* @malloc(i64 32)");
+            var fmt_ptr = string_const_ptr("@fmt_int", 4);
+            var sn = fresh_tmp();
+            emit_indent(sn + " = call i32 (i8*, i64, i8*, ...) @snprintf(i8* " + buf + ", i64 32, i8* " + fmt_ptr + ", i64 " + val + ")");
+            var cast = fresh_tmp();
+            emit_indent(cast + " = ptrtoint i8* " + buf + " to i64");
+            return cast;
+        }
+        return "0";
+    }
+
+    // General function call
+    var args_str = "";
+    var k = 0;
+    while (k < nargs) {
+        var arg_nd = g_ch[arg_start + k];
+        var val = codegen_expr(arg_nd);
+        if (k > 0) {
+            args_str = args_str + ", ";
+        }
+        args_str = args_str + "i64 " + val;
+        k = k + 1;
+    }
+
+    var result = fresh_tmp();
+    emit_indent(result + " = call i64 @" + fname + "(" + args_str + ")");
+    return result;
+}
+
+// ─── Assignment expression codegen ────────────────────────────────────────────
+
+fn codegen_assign_expr(nd) {
+    // Simple variable assignment: sval2 = variable name, c0 = -1, c1 = value
+    var target = g_nd_c0[nd];
+    var val_nd = g_nd_c1[nd];
+    var val = codegen_expr(val_nd);
+
+    if (target == -1) {
+        // Simple variable assignment
+        var name = g_nd_sval2[nd];
+        var reg = lookup_local(name);
+        if (str_eq(reg, "")) {
+            emit_indent("; WARNING: assign to unknown variable '" + name + "'");
+            return val;
+        }
+        emit_indent("store i64 " + val + ", i64* " + reg);
+        return val;
+    }
+    // Complex assignment (index, member) — not yet handled
+    emit_indent("; WARNING: complex assignment not yet supported");
+    return val;
+}
+
+// ─── Statement codegen ────────────────────────────────────────────────────────
+
+fn codegen_stmt(nd) {
+    if (nd < 0) { return; }
+    if (g_has_terminator) { return; }
+    var ty = g_nd_type[nd];
+
+    // Block
+    if (ty == ND_BLOCK) {
+        codegen_block(nd);
+        return;
+    }
+
+    // Variable declaration
+    if (ty == ND_VAR_DECL) {
+        codegen_var_decl(nd);
+        return;
+    }
+
+    // If statement
+    if (ty == ND_IF) {
+        codegen_if(nd);
+        return;
+    }
+
+    // While loop
+    if (ty == ND_WHILE) {
+        codegen_while(nd);
+        return;
+    }
+
+    // For loop (range-based)
+    if (ty == ND_FOR) {
+        codegen_for(nd);
+        return;
+    }
+
+    // Return
+    if (ty == ND_RETURN) {
+        codegen_return(nd);
+        return;
+    }
+
+    // Expression statement
+    if (ty == ND_EXPR_STMT) {
+        codegen_expr(g_nd_c0[nd]);
+        return;
+    }
+
+    // Break / Continue — emit as comments (would need loop label tracking)
+    if (ty == ND_BREAK) {
+        emit_indent("; break (not yet wired to loop exit)");
+        return;
+    }
+    if (ty == ND_CONTINUE) {
+        emit_indent("; continue (not yet wired to loop header)");
+        return;
+    }
+
+    emit_indent("; WARNING: unhandled statement node type " + to_string(ty));
+}
+
+// ─── Block codegen ────────────────────────────────────────────────────────────
+
+fn codegen_block(nd) {
+    var nstmts = g_nd_nextra[nd];
+    var start  = g_nd_extra[nd];
+    var i = 0;
+    while (i < nstmts) {
+        var child = g_ch[start + i];
+        codegen_stmt(child);
+        i = i + 1;
+    }
+}
+
+// ─── Variable declaration ─────────────────────────────────────────────────────
+
+fn codegen_var_decl(nd) {
+    var name = g_nd_sval[nd];
+    var reg = "%" + name + ".addr";
+    emit_indent(reg + " = alloca i64");
+
+    // Initialize
+    var init = g_nd_c0[nd];
+    if (init >= 0) {
+        var val = codegen_expr(init);
+        emit_indent("store i64 " + val + ", i64* " + reg);
+    } else {
+        emit_indent("store i64 0, i64* " + reg);
+    }
+
+    add_local(name, reg);
+}
+
+// ─── If statement ─────────────────────────────────────────────────────────────
+
+fn codegen_if(nd) {
+    var cond_val = codegen_expr(g_nd_c0[nd]);
+    var cmp = fresh_tmp();
+    emit_indent(cmp + " = icmp ne i64 " + cond_val + ", 0");
+
+    var lbl_then = fresh_label();
+    var lbl_else = fresh_label();
+    var lbl_end  = fresh_label();
+
+    var else_nd = g_nd_c2[nd];
+    if (else_nd >= 0) {
+        emit_indent("br i1 " + cmp + ", label %" + lbl_then + ", label %" + lbl_else);
+    } else {
+        emit_indent("br i1 " + cmp + ", label %" + lbl_then + ", label %" + lbl_end);
+    }
+
+    // Then branch
+    emit(lbl_then + ":");
+    g_has_terminator = 0;
+    codegen_stmt(g_nd_c1[nd]);
+    if (!g_has_terminator) {
+        emit_indent("br label %" + lbl_end);
+    }
+
+    // Else branch
+    if (else_nd >= 0) {
+        emit(lbl_else + ":");
+        g_has_terminator = 0;
+        codegen_stmt(else_nd);
+        if (!g_has_terminator) {
+            emit_indent("br label %" + lbl_end);
+        }
+    }
+
+    emit(lbl_end + ":");
+    g_has_terminator = 0;
+}
+
+// ─── While loop ───────────────────────────────────────────────────────────────
+
+fn codegen_while(nd) {
+    var lbl_cond = fresh_label();
+    var lbl_body = fresh_label();
+    var lbl_end  = fresh_label();
+
+    emit_indent("br label %" + lbl_cond);
+    emit(lbl_cond + ":");
+    g_has_terminator = 0;
+    var cond_val = codegen_expr(g_nd_c0[nd]);
+    var cmp = fresh_tmp();
+    emit_indent(cmp + " = icmp ne i64 " + cond_val + ", 0");
+    emit_indent("br i1 " + cmp + ", label %" + lbl_body + ", label %" + lbl_end);
+
+    emit(lbl_body + ":");
+    g_has_terminator = 0;
+    codegen_stmt(g_nd_c1[nd]);
+    if (!g_has_terminator) {
+        emit_indent("br label %" + lbl_cond);
+    }
+
+    emit(lbl_end + ":");
+    g_has_terminator = 0;
+}
+
+// ─── For loop (range-based: for i in start...end) ─────────────────────────────
+
+fn codegen_for(nd) {
+    var iter_name = g_nd_sval[nd];
+    var start_val = codegen_expr(g_nd_c0[nd]);
+    var end_val   = codegen_expr(g_nd_c1[nd]);
+
+    // Allocate iterator variable
+    var iter_reg = "%" + iter_name + ".addr";
+    emit_indent(iter_reg + " = alloca i64");
+    emit_indent("store i64 " + start_val + ", i64* " + iter_reg);
+    add_local(iter_name, iter_reg);
+
+    var lbl_cond = fresh_label();
+    var lbl_body = fresh_label();
+    var lbl_inc  = fresh_label();
+    var lbl_end  = fresh_label();
+
+    emit_indent("br label %" + lbl_cond);
+
+    // Condition: i < end
+    emit(lbl_cond + ":");
+    g_has_terminator = 0;
+    var cur = fresh_tmp();
+    emit_indent(cur + " = load i64, i64* " + iter_reg);
+    var cmp = fresh_tmp();
+    emit_indent(cmp + " = icmp slt i64 " + cur + ", " + end_val);
+    emit_indent("br i1 " + cmp + ", label %" + lbl_body + ", label %" + lbl_end);
+
+    // Body
+    emit(lbl_body + ":");
+    g_has_terminator = 0;
+    codegen_stmt(g_nd_c2[nd]);
+    if (!g_has_terminator) {
+        emit_indent("br label %" + lbl_inc);
+    }
+
+    // Increment: i = i + 1
+    emit(lbl_inc + ":");
+    g_has_terminator = 0;
+    var cur2 = fresh_tmp();
+    emit_indent(cur2 + " = load i64, i64* " + iter_reg);
+    var next = fresh_tmp();
+    emit_indent(next + " = add i64 " + cur2 + ", 1");
+    emit_indent("store i64 " + next + ", i64* " + iter_reg);
+    emit_indent("br label %" + lbl_cond);
+
+    emit(lbl_end + ":");
+    g_has_terminator = 0;
+}
+
+// ─── Return statement ─────────────────────────────────────────────────────────
+
+fn codegen_return(nd) {
+    var val_nd = g_nd_c0[nd];
+    if (val_nd >= 0) {
+        var val = codegen_expr(val_nd);
+        emit_indent("ret i64 " + val);
+    } else {
+        emit_indent("ret i64 0");
+    }
+    g_has_terminator = 1;
+}
+
+// ─── Function codegen ─────────────────────────────────────────────────────────
+
+fn codegen_function(nd) {
+    var fname  = g_nd_sval[nd];
+    var body   = g_nd_c0[nd];
+    var nparams = g_nd_nextra[nd];
+    var p_start = g_nd_extra[nd];
+
+    // Reset per-function state
+    g_tmp_count   = 0;
+    g_label_count = 0;
+    g_local_names = [];
+    g_local_regs  = [];
+    g_local_count = 0;
+
+    // Build parameter list string
+    var params_str = "";
+    var k = 0;
+    while (k < nparams) {
+        var pid = g_ch[p_start + k];
+        var pname = g_nd_sval[pid];
+        if (k > 0) {
+            params_str = params_str + ", ";
+        }
+        params_str = params_str + "i64 %" + pname;
+        k = k + 1;
+    }
+
+    emit("define i64 @" + fname + "(" + params_str + ") {");
+    emit("entry:");
+    g_has_terminator = 0;
+
+    // Alloca + store for each parameter
+    k = 0;
+    while (k < nparams) {
+        var pid = g_ch[p_start + k];
+        var pname = g_nd_sval[pid];
+        var reg = "%" + pname + ".addr";
+        emit_indent(reg + " = alloca i64");
+        emit_indent("store i64 %" + pname + ", i64* " + reg);
+        add_local(pname, reg);
+        k = k + 1;
+    }
+
+    // Generate body
+    if (body >= 0) {
+        codegen_stmt(body);
+    }
+
+    // Safety net: add a default return if the function might fall through
+    if (!g_has_terminator) {
+        emit_indent("ret i64 0");
+    }
+    emit("}");
+    emit("");
+}
+
+// ─── Extern function declaration codegen ──────────────────────────────────────
+
+fn codegen_extern_fn(nd) {
+    var fname   = g_nd_sval[nd];
+    var nparams = g_nd_nextra[nd];
+
+    var params_str = "";
+    var k = 0;
+    while (k < nparams) {
+        if (k > 0) {
+            params_str = params_str + ", ";
+        }
+        params_str = params_str + "i64";
+        k = k + 1;
+    }
+
+    emit("declare i64 @" + fname + "(" + params_str + ")");
+}
+
+// ─── Top-level program codegen ────────────────────────────────────────────────
+
+fn codegen_program(root) {
+    var nchildren = g_nd_nextra[root];
+    var start     = g_nd_extra[root];
+
+    var i = 0;
+    while (i < nchildren) {
+        var child = g_ch[start + i];
+        var cty = g_nd_type[child];
+        if (cty == ND_FUNCTION) {
+            codegen_function(child);
+        } else if (cty == ND_EXTERN_FN) {
+            codegen_extern_fn(child);
+        } else if (cty == ND_TOP_CONST) {
+            emit("; top-level const: " + g_nd_sval[child]);
+        } else if (cty == ND_STRUCT_DECL) {
+            emit("; struct: " + g_nd_sval[child]);
+        } else if (cty == ND_GLOBAL_VAR) {
+            emit("; global var: " + g_nd_sval[child]);
+        } else {
+            emit("; unhandled top-level node type " + to_string(cty));
+        }
+        i = i + 1;
+    }
+}
+
+// ─── Main entry point ─────────────────────────────────────────────────────────
+
+fn generate_llvm_ir(root) {
+    // Reset all global state
+    g_ir          = "";
+    g_ir_header   = "";
+    g_tmp_count   = 0;
+    g_label_count = 0;
+    g_str_count   = 0;
+    g_str_decls   = "";
+    g_has_terminator = 0;
+    g_local_names = [];
+    g_local_regs  = [];
+    g_local_count = 0;
+
+    // Build the module header
+    g_ir_header = "; ModuleID = 'omscript'\n";
+    g_ir_header = g_ir_header + "target triple = \"x86_64-pc-linux-gnu\"\n";
+    g_ir_header = g_ir_header + "\n";
+
+    // Pre-register well-known format strings
+    g_str_decls = g_str_decls + "@fmt_str = private unnamed_addr constant [4 x i8] c\"%s\\0A\\00\"\n";
+    g_str_decls = g_str_decls + "@fmt_int = private unnamed_addr constant [4 x i8] c\"%ld\\00\"\n";
+    g_str_decls = g_str_decls + "@fmt_int_nl = private unnamed_addr constant [5 x i8] c\"%ld\\0A\\00\"\n";
+    g_str_decls = g_str_decls + "\n";
+
+    // External C library declarations
+    var c_decls = "";
+    c_decls = c_decls + "declare i32 @printf(i8*, ...)\n";
+    c_decls = c_decls + "declare i8* @malloc(i64)\n";
+    c_decls = c_decls + "declare i32 @snprintf(i8*, i64, i8*, ...)\n";
+    c_decls = c_decls + "\n";
+
+    // Generate code for all top-level declarations
+    codegen_program(root);
+
+    // Assemble the final IR: header + string decls + c decls + body
+    var result = g_ir_header + g_str_decls + c_decls + g_ir;
+    return result;
+}
+
+// ─── Demo function ────────────────────────────────────────────────────────────
+
+fn codegen_demo() {
+    var sample = "fn add(a, b) {\n    return a + b;\n}\n\nfn factorial(n) {\n    if (n <= 1) {\n        return 1;\n    }\n    return n * factorial(n - 1);\n}\n\nfn main() {\n    var x = 10;\n    var y = 20;\n    var sum = add(x, y);\n    var i = 0;\n    while (i < 5) {\n        sum = sum + i;\n        i = i + 1;\n    }\n    return sum;\n}\n";
+
+    var root = parse(sample);
+    if (root == -1) {
+        println("Parse FAILED: " + g_error_msg);
+        return 1;
+    }
+
+    println("Parse OK — " + to_string(g_nd_count) + " nodes");
+
+    var ir = generate_llvm_ir(root);
+    println("=== Generated LLVM IR ===");
+
+    // Print each section to preserve correct ordering
+    print_ir_header();
+    println(g_str_decls);
+    println("declare i32 @printf(i8*, ...)");
+    println("declare i8* @malloc(i64)");
+    println("declare i32 @snprintf(i8*, i64, i8*, ...)");
+    println("");
+    println(g_ir);
+    println("=== End LLVM IR ===");
+    return 0;
+}
+
+fn print_ir_header() {
+    println("; ModuleID = 'omscript'");
+    println("target triple = \"x86_64-pc-linux-gnu\"");
+    println("");
+}
