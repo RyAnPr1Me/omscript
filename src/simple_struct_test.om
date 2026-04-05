@@ -1,0 +1,11 @@
+struct Pair { x, y }
+
+fn make_pair(a, b) {
+    return Pair { x: a, y: b };
+}
+
+fn main() {
+    var p = make_pair(10, 20);
+    println(to_string(p.x) + " " + to_string(p.y));
+    return 0;
+}

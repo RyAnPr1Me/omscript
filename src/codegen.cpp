@@ -2073,6 +2073,30 @@ bool CodeGenerator::isStringArrayExpr(Expression* expr) const {
     // Variable whose name is tracked as a string array.
     if (expr->type == ASTNodeType::IDENTIFIER_EXPR)
         return stringArrayVars_.count(static_cast<IdentifierExpr*>(expr)->name) > 0;
+    // Struct field access: ts.lexemes, ts.lines, etc. — look up the struct type
+    // and check if the field was registered as a string array when the struct
+    // literal was created.  This propagates string-array type info through
+    // struct field boundaries (e.g. TokenStream.lexemes → string array).
+    if (expr->type == ASTNodeType::FIELD_ACCESS_EXPR) {
+        auto* fa = static_cast<FieldAccessExpr*>(expr);
+        const std::string structType = resolveStructType(fa->object.get());
+        if (!structType.empty()) {
+            auto it = structFieldStringArrays_.find(structType + "." + fa->fieldName);
+            if (it != structFieldStringArrays_.end() && it->second)
+                return true;
+        } else {
+            // Struct type is unknown (e.g. c = make_container() call result) —
+            // search all recorded struct field entries for a matching field name.
+            const std::string suffix = "." + fa->fieldName;
+            for (const auto& kv : structFieldStringArrays_) {
+                if (kv.second && kv.first.size() > suffix.size() &&
+                    kv.first.compare(kv.first.size() - suffix.size(), suffix.size(), suffix) == 0) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
     // Array literal whose elements are all strings.
     if (expr->type == ASTNodeType::ARRAY_EXPR) {
         auto* arr = static_cast<ArrayExpr*>(expr);
@@ -2091,8 +2115,17 @@ bool CodeGenerator::isStringArrayExpr(Expression* expr) const {
         auto* call = static_cast<CallExpr*>(expr);
         if (call->callee == "str_split")
             return true;
-        if ((call->callee == "push" || call->callee == "array_copy") && !call->arguments.empty())
-            return isStringArrayExpr(call->arguments[0].get());
+        if ((call->callee == "push" || call->callee == "array_copy") && !call->arguments.empty()) {
+            // push(arr, val): result is a string array if either:
+            //   1. arr is already a string array (type propagation), or
+            //   2. val is a string (first push initializes the element type).
+            if (isStringArrayExpr(call->arguments[0].get()))
+                return true;
+            if (call->callee == "push" && call->arguments.size() >= 2
+                    && isStringExpr(call->arguments[1].get()))
+                return true;
+            return false;
+        }
         if (call->callee == "array_concat" && !call->arguments.empty())
             return isStringArrayExpr(call->arguments[0].get());
         return false;
@@ -2108,6 +2141,7 @@ void CodeGenerator::generate(Program* program) {
     fileNoAlias_ = program->fileNoAlias;
     currentProgram_ = program;
     globalVarMap_.clear();
+    structFieldStringArrays_.clear();
 
     // --- DWARF debug info initialization ---
     if (debugMode_) {

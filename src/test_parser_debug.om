@@ -1,0 +1,20 @@
+import "parser.om";
+
+fn main() {
+    var src = "fn f(x) { return x + 1; }";
+    // Load tokens manually into globals 
+    var ts = tokenize(src);
+    println("token_count=" + to_string(ts.count));
+    var i = 0;
+    while (i < ts.count) {
+        println(to_string(i) + ": type=" + to_string(ts.types[i]) + " [" + ts.lexemes[i] + "]");
+        i = i + 1;
+    }
+    var root = parse(src);
+    if (root == -1) {
+        println("Parse FAILED: " + g_error_msg);
+    } else {
+        println("Parse OK: " + to_string(g_nd_count) + " nodes");
+    }
+    return 0;
+}

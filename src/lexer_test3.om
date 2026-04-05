@@ -1,0 +1,14 @@
+import "lexer.om";
+
+fn main() {
+    var sample = "fn f() {}";
+    var ts = tokenize(sample);
+    println("count=" + to_string(ts.count));
+    println("types_len=" + to_string(len(ts.types)));
+    println("lexemes_len=" + to_string(len(ts.lexemes)));
+    if (ts.count > 0) {
+        println("types[0]=" + to_string(ts.types[0]));
+        println("lexemes[0]=" + ts.lexemes[0]);
+    }
+    return 0;
+}

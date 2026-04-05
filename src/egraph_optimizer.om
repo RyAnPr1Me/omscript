@@ -800,7 +800,10 @@ fn optimize_expression(ast, node_id) {
 
 // ─── Standalone demo ──────────────────────────────────────────────────────────
 
-fn main() {
+// ─── Standalone demo entry point ─────────────────────────────────────────────
+// When egraph_optimizer.om is compiled directly, run a quick self-test.
+// When imported, this function is ignored — the importing file has its own main.
+fn egraph_demo() {
     var ast = ast_new();
 
     // Build: (2 + 3) * 1   which should fold to 5

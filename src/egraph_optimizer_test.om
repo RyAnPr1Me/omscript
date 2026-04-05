@@ -1,0 +1,7 @@
+// Standalone test driver for egraph_optimizer.om
+// Compile with: omsc src/egraph_optimizer_test.om -o egraph_test
+import "egraph_optimizer.om";
+
+fn main() {
+    return egraph_demo();
+}

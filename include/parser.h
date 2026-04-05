@@ -78,7 +78,8 @@ class Parser {
                      std::vector<std::unique_ptr<EnumDecl>>& enums,
                      std::vector<std::unique_ptr<StructDecl>>& structs,
                      std::vector<std::pair<std::string, long long>>& constants,
-                     std::vector<std::unique_ptr<ExternStructDecl>>& externStructs);
+                     std::vector<std::unique_ptr<ExternStructDecl>>& externStructs,
+                     std::vector<std::unique_ptr<VarDecl>>& globalVars);
 
     const Token& peek(int offset = 0) const noexcept;
     Token advance() noexcept;

@@ -2283,7 +2283,7 @@ fn print_node_summary(id, depth) {
 
 // ─── Test harness (main) ──────────────────────────────────────────────────────
 
-fn main() {
+fn parser_demo() {
     var sample = "struct Point { x, y }\n\nconst MAX = 100;\n\nextern fn printf(fmt: string) -> i64;\n\n@inline\nfn add(a: i64, b: i64) -> i64 {\n    return a + b;\n}\n\nfn fib(n: i64) -> i64 {\n    if (n <= 1) { return n; }\n    return fib(n - 1) + fib(n - 2);\n}\n\nfn main() {\n    var x = 42;\n    var p = Point { x: 1, y: 2 };\n    var arr = [1, 2, 3];\n    for (i in 0...10) {\n        x += i;\n    }\n    var r = add(x, fib(5));\n    return r;\n}\n";
 
     var root = parse(sample);

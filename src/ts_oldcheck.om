@@ -1,0 +1,7 @@
+import "lexer.om";
+fn main() {
+    var src = "fn f() {}";
+    var ts = tokenize(src);
+    println(to_string(ts.count));
+    return 0;
+}

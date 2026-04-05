@@ -4641,16 +4641,16 @@ llvm::Value* CodeGenerator::generateStructLiteral(StructLiteralExpr* expr) {
     const auto& fields = it->second;
     const size_t numFields = fields.size();
 
-    // Use stack allocation (alloca) for structs.  This avoids malloc overhead
-    // and allows LLVM's mem2reg / SROA passes to promote small structs to
-    // SSA registers, matching C's plain-variable performance.
-    llvm::Function* curFn = builder->GetInsertBlock()->getParent();
-    llvm::IRBuilder<> tmpBuilder(&curFn->getEntryBlock(), curFn->getEntryBlock().begin());
-    llvm::Type* slotTy = getDefaultType();
-    llvm::Value* ptr = tmpBuilder.CreateAlloca(
-        llvm::ArrayType::get(slotTy, numFields), nullptr, "struct.alloca");
-    // Cast to pointer for GEP
-    ptr = builder->CreateBitOrPointerCast(ptr, llvm::PointerType::getUnqual(*context), "struct.ptr");
+    // Use heap allocation (malloc) for structs so they survive function returns.
+    // Stack-allocated structs (alloca) become invalid when the declaring function
+    // returns, causing dangling-pointer bugs when a struct is returned by value
+    // (the ptrtoint representation carries a now-dead stack address).  Heap
+    // allocation ensures the memory is valid for the lifetime of the program,
+    // which is the correct semantics for value-type structs that may be returned
+    // from functions or stored in arrays.
+    llvm::Value* byteSize = llvm::ConstantInt::get(getDefaultType(),
+                                                    static_cast<uint64_t>(numFields) * 8);
+    llvm::Value* ptr = builder->CreateCall(getOrDeclareMalloc(), {byteSize}, "struct.heap");
 
     // Build field name → index map
     std::unordered_map<std::string, size_t> fieldIndex;
@@ -4660,7 +4660,7 @@ llvm::Value* CodeGenerator::generateStructLiteral(StructLiteralExpr* expr) {
 
     // Initialize all fields to 0
     for (size_t i = 0; i < numFields; i++) {
-        // inbounds: alloca is [numFields x i64], index i ∈ [0, numFields-1].
+        // inbounds: malloc'd numFields*8 bytes, index i ∈ [0, numFields-1].
         llvm::Value* elemPtr =
             builder->CreateInBoundsGEP(getDefaultType(), ptr, llvm::ConstantInt::get(getDefaultType(), i), "struct.field.ptr");
         builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 0), elemPtr);
@@ -4673,6 +4673,15 @@ llvm::Value* CodeGenerator::generateStructLiteral(StructLiteralExpr* expr) {
             codegenError("Unknown field '" + fieldName + "' in struct '" + expr->structName + "'", expr);
         }
         llvm::Value* val = generateExpression(valueExpr.get());
+        // Track string / string-array types for this struct field so that field
+        // access expressions can correctly propagate type information through
+        // struct boundaries.  E.g., TokenStream.lexemes is a string array, so
+        // ts.lexemes[i] must return a string rather than a raw i64.
+        const std::string key = expr->structName + "." + fieldName;
+        if (isStringExpr(valueExpr.get()) || val->getType()->isPointerTy())
+            structFieldStringArrays_[key] = false; // string (not string-array)
+        if (isStringArrayExpr(valueExpr.get()))
+            structFieldStringArrays_[key] = true;  // string array
         val = toDefaultType(val);
         // inbounds: fit->second is a validated index ∈ [0, numFields-1].
         llvm::Value* elemPtr = builder->CreateInBoundsGEP(

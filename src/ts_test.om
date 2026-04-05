@@ -1,0 +1,19 @@
+import "lexer.om";
+
+fn main() {
+    var src = "fn f() {}";
+    var ts = tokenize(src);
+    // access each field separately
+    var t = ts.types;
+    var l = ts.lexemes;
+    var n = ts.lines;
+    var c = ts.cols;
+    var iv = ts.ivals;
+    var fv = ts.fvals;
+    var cnt = ts.count;
+    println("t_len=" + to_string(len(t)));
+    println("l_len=" + to_string(len(l)));
+    println("n_len=" + to_string(len(n)));
+    println("cnt=" + to_string(cnt));
+    return 0;
+}

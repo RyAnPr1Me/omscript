@@ -109,7 +109,7 @@ std::unique_ptr<Program> Parser::parse() {
     while (!isAtEnd()) {
         if (match(TokenType::IMPORT)) {
             try {
-                parseImport(functions, enums, structs, constants, externStructs);
+                parseImport(functions, enums, structs, constants, externStructs, globalVars);
             } catch (const std::runtime_error& e) {
                 errors_.push_back(e.what());
                 synchronize();
@@ -364,7 +364,8 @@ void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
                          std::vector<std::unique_ptr<EnumDecl>>& enums,
                          std::vector<std::unique_ptr<StructDecl>>& structs,
                          std::vector<std::pair<std::string, long long>>& constants,
-                         std::vector<std::unique_ptr<ExternStructDecl>>& externStructs) {
+                         std::vector<std::unique_ptr<ExternStructDecl>>& externStructs,
+                         std::vector<std::unique_ptr<VarDecl>>& globalVars) {
     const Token fileToken = consume(TokenType::STRING, "Expected filename string after 'import'");
     consume(TokenType::SEMICOLON, "Expected ';' after import statement");
 
@@ -430,6 +431,10 @@ void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
     // Merge imported extern struct declarations
     for (auto& es : importedProgram->externStructs) {
         externStructs.push_back(std::move(es));
+    }
+    // Merge imported global variable declarations
+    for (auto& gv : importedProgram->globalVars) {
+        globalVars.push_back(std::move(gv));
     }
 
     // Also import struct names so struct literals can be parsed

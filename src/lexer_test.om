@@ -1,0 +1,7 @@
+// Standalone test driver for lexer.om
+// Compile with: omsc src/lexer_test.om -o lexer_test
+import "lexer.om";
+
+fn main() {
+    return lexer_demo();
+}

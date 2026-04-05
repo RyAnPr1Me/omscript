@@ -149,6 +149,7 @@ fn hex_val(c) {
 
 // ─── Number parsing helpers ───────────────────────────────────────────────────
 
+@noinline
 fn parse_bin_str(s) {
     var result = 0;
     var i = 2; // skip "0b"
@@ -160,6 +161,7 @@ fn parse_bin_str(s) {
     return result;
 }
 
+@noinline
 fn parse_oct_str(s) {
     var result = 0;
     var i = 2; // skip "0o"
@@ -171,6 +173,7 @@ fn parse_oct_str(s) {
     return result;
 }
 
+@noinline
 fn parse_hex_str(s) {
     var result = 0;
     var i = 2; // skip "0x"
@@ -187,6 +190,7 @@ fn parse_dec_str(s) {
 }
 
 // ─── Lookup a word in the keyword table, returning token type or TOK_IDENTIFIER
+@noinline
 fn keyword_type(word) {
     if (str_eq(word, "fn"))         { return TOK_FN; }
     if (str_eq(word, "return"))     { return TOK_RETURN; }
@@ -239,6 +243,7 @@ struct LexResult {
     fval     // float value
 }
 
+@noinline
 fn make_lex(p, ln, cl, ty, lex, iv, fv) {
     return LexResult { pos: p, line: ln, col: cl, ty: ty, lex: lex, ival: iv, fval: fv };
 }
@@ -246,6 +251,7 @@ fn make_lex(p, ln, cl, ty, lex, iv, fv) {
 // ─── Skip whitespace, returning updated { pos, line, col }
 struct PosState { pos, line, col }
 
+@noinline
 fn skip_ws(src, p, ln, cl) {
     var src_len = str_len(src);
     while (p < src_len) {
@@ -294,18 +300,20 @@ fn skip_ws(src, p, ln, cl) {
 }
 
 // ─── Scan an identifier or keyword ───────────────────────────────────────────
+@noinline
 fn scan_identifier(src, p, ln, cl) {
     var src_len = str_len(src);
     var start = p;
     while (p < src_len && is_alnum_or_underscore(char_at(src, p))) {
         p = p + 1;
     }
-    var word = str_substr(src, start, p);
+    var word = str_substr(src, start, p - start);
     var ty = keyword_type(word);
     return make_lex(p, ln, cl + (p - start), ty, word, 0, 0.0);
 }
 
 // ─── Scan a numeric literal (decimal, hex, octal, binary, float) ──────────────
+@noinline
 fn scan_number(src, p, ln, cl) {
     var src_len = str_len(src);
     var start = p;
@@ -320,7 +328,7 @@ fn scan_number(src, p, ln, cl) {
             while (p < src_len && (is_hex_digit(char_at(src, p)) || char_at(src, p) == 95)) {
                 p = p + 1;
             }
-            var raw = str_substr(src, start, p);
+            var raw = str_substr(src, start, p - start);
             // Remove underscores for parsing
             var digits = str_replace(raw, "_", "");
             var iv = parse_hex_str(digits);
@@ -332,7 +340,7 @@ fn scan_number(src, p, ln, cl) {
                 var ch = char_at(src, p);
                 if ((ch >= 48 && ch <= 55) || ch == 95) { p = p + 1; } else { break; }
             }
-            var raw = str_substr(src, start, p);
+            var raw = str_substr(src, start, p - start);
             var digits = str_replace(raw, "_", "");
             var iv = parse_oct_str(digits);
             return make_lex(p, ln, cl + (p - start), TOK_INTEGER, raw, iv, 0.0);
@@ -343,7 +351,7 @@ fn scan_number(src, p, ln, cl) {
                 var ch = char_at(src, p);
                 if (ch == 48 || ch == 49 || ch == 95) { p = p + 1; } else { break; }
             }
-            var raw = str_substr(src, start, p);
+            var raw = str_substr(src, start, p - start);
             var digits = str_replace(raw, "_", "");
             var iv = parse_bin_str(digits);
             return make_lex(p, ln, cl + (p - start), TOK_INTEGER, raw, iv, 0.0);
@@ -370,7 +378,7 @@ fn scan_number(src, p, ln, cl) {
         }
     }
 
-    var raw = str_substr(src, start, p);
+    var raw = str_substr(src, start, p - start);
     var clean = str_replace(raw, "_", "");
     if (is_float) {
         var fv = str_to_float(clean);
@@ -386,6 +394,7 @@ fn scan_number(src, p, ln, cl) {
 // Returns -1 for invalid escapes (caller should error).
 struct EscResult { ch, p, eln, ecl }
 
+@noinline
 fn process_escape(src, p, ln, cl) {
     var src_len = str_len(src);
     if (p >= src_len) {
@@ -420,6 +429,7 @@ fn process_escape(src, p, ln, cl) {
 }
 
 // ─── Scan a regular string literal "..." ─────────────────────────────────────
+@noinline
 fn scan_string(src, p, ln, cl) {
     var src_len = str_len(src);
     var start_ln = ln;
@@ -463,6 +473,7 @@ fn scan_string(src, p, ln, cl) {
 }
 
 // ─── Scan a multi-line string literal """...""" ───────────────────────────────
+@noinline
 fn scan_multiline_string(src, p, ln, cl) {
     var src_len = str_len(src);
     p = p + 3; // skip """
@@ -492,6 +503,7 @@ fn scan_multiline_string(src, p, ln, cl) {
 
 // ─── Main tokenize function ───────────────────────────────────────────────────
 // Takes an OmScript source string and returns a TokenStream.
+@noinline
 fn tokenize(src) {
     var src_len = str_len(src);
     var types   = [];
@@ -522,7 +534,7 @@ fn tokenize(src) {
         // ── OPTMAX markers ────────────────────────────────────────────────────
         // OPTMAX=: (8 chars) and OPTMAX!: (8 chars)
         if (c == 79 && p + 7 < src_len) {  // 'O'
-            var marker = str_substr(src, p, p + 8);
+            var marker = str_substr(src, p, 8);
             if (str_eq(marker, "OPTMAX=:")) {
                 types   = push(types,   TOK_OPTMAX_START);
                 lexemes = push(lexemes, "OPTMAX=:");
@@ -866,6 +878,7 @@ fn tokenize(src) {
 // When compiled and run directly, tokenises a small sample and prints each
 // token type code, lexeme, line and column.
 
+@noinline
 fn tok_name(ty) {
     if (ty == TOK_INTEGER)    { return "INTEGER"; }
     if (ty == TOK_FLOAT)      { return "FLOAT"; }
@@ -902,7 +915,12 @@ fn tok_name(ty) {
     return "OTHER";
 }
 
-fn main() {
+// ─── Standalone test entry point ─────────────────────────────────────────────
+// When lexer.om is compiled directly (not imported), run a quick self-test.
+// When imported by another .om file, this function is ignored — the importing
+// file provides its own main().  Call lexer_demo() from your main if you want
+// the demo output without the entry-point conflict.
+fn lexer_demo() {
     var sample = "fn add(a: int, b: int) -> int {\n    return a + b;\n}\n\nextern fn printf(fmt: int) -> int;\n\nfn main() {\n    var x = 42;\n    var y = 3.14;\n    var s = \"hello\";\n    return add(x, 1);\n}";
 
     var ts = tokenize(sample);

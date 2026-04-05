@@ -364,6 +364,10 @@ class CodeGenerator {
     llvm::StringSet<> stringReturningFunctions_;
     std::unordered_map<std::string, std::unordered_set<size_t>> funcParamStringTypes_;
     llvm::StringSet<> stringArrayVars_;
+    // structFieldStringArrays_: maps "structType.fieldName" to 1 when a struct
+    //   field is known to hold a string array.  Used by isStringArrayExpr when
+    //   the base expression is a FieldAccessExpr (e.g. ts.lexemes[i]).
+    std::unordered_map<std::string, bool> structFieldStringArrays_;
     // stringLenCache_: maps string variable names to an alloca that caches the
     // current strlen of the variable's value.  Used by str_concat to avoid
     // O(n) strlen calls on growing strings in append loops.
