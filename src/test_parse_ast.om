@@ -1,0 +1,153 @@
+// Comprehensive parser AST test — validates correct child indexing
+// after the flat-arena collect-then-flush fix.
+import "parser.om";
+
+// ─── AST walker: prints the full tree recursively ─────────────────────────────
+
+fn print_ast(id, depth) {
+    if (id < 0) { return 0; }
+    var indent = "";
+    var di = 0;
+    while (di < depth) {
+        indent = indent + "  ";
+        di = di + 1;
+    }
+
+    var ty   = g_nd_type[id];
+    var name = nd_type_name(ty);
+    var sval = g_nd_sval[id];
+
+    if (str_len(sval) > 0) {
+        println(indent + name + " [" + sval + "]");
+    } else {
+        println(indent + name);
+    }
+
+    // Print children stored via extra/nextra (struct fields, params, etc.)
+    var nch = g_nd_nextra[id];
+    if (nch > 0) {
+        var base = g_nd_extra[id];
+        var ci = 0;
+        while (ci < nch) {
+            var child_id = g_ch[base + ci];
+            print_ast(child_id, depth + 1);
+            ci = ci + 1;
+        }
+    }
+
+    // Print children stored in c0, c1, c2
+    if (g_nd_c0[id] >= 0 && ty != ND_PARAM) {
+        print_ast(g_nd_c0[id], depth + 1);
+    }
+    if (g_nd_c1[id] >= 0) {
+        print_ast(g_nd_c1[id], depth + 1);
+    }
+    if (g_nd_c2[id] >= 0) {
+        print_ast(g_nd_c2[id], depth + 1);
+    }
+
+    return 0;
+}
+
+fn assert_eq(actual, expected, msg) {
+    if (actual != expected) {
+        println("FAIL: " + msg + " — expected " + to_string(expected) + ", got " + to_string(actual));
+        return 1;
+    }
+    return 0;
+}
+
+fn assert_str_eq(actual, expected, msg) {
+    if (!str_eq(actual, expected)) {
+        println("FAIL: " + msg + " — expected '" + expected + "', got '" + actual + "'");
+        return 1;
+    }
+    return 0;
+}
+
+fn main() {
+    var sample = "fn foo(x: i64) -> i64 {\n  var a = x + 1;\n  if (a > 10) {\n    return a;\n  }\n  while (a < 100) {\n    a = a * 2;\n  }\n  return a;\n}\n\nfn bar() -> i64 {\n  return foo(5) + foo(10);\n}\n";
+
+    var root = parse(sample);
+    if (root == -1) {
+        println("Parse FAILED: " + g_error_msg);
+        return 1;
+    }
+
+    var fails = 0;
+
+    // Top-level should have exactly 2 functions
+    var top_cnt = g_nd_nextra[root];
+    fails = fails + assert_eq(top_cnt, 2, "top-level declaration count");
+
+    // First child should be function "foo"
+    var foo_id = g_ch[g_nd_extra[root] + 0];
+    fails = fails + assert_eq(g_nd_type[foo_id], ND_FUNCTION, "first decl is FUNCTION");
+    fails = fails + assert_str_eq(g_nd_sval[foo_id], "foo", "first function name");
+
+    // foo has 1 parameter
+    var foo_param_cnt = g_nd_nextra[foo_id];
+    fails = fails + assert_eq(foo_param_cnt, 1, "foo param count");
+
+    // foo's parameter is "x" with type "i64"
+    var foo_param0 = g_ch[g_nd_extra[foo_id] + 0];
+    fails = fails + assert_str_eq(g_nd_sval[foo_param0], "x", "foo param0 name");
+    fails = fails + assert_str_eq(g_nd_sval2[foo_param0], "i64", "foo param0 type");
+
+    // foo has a body (block)
+    var foo_body = g_nd_c0[foo_id];
+    fails = fails + assert_eq(g_nd_type[foo_body], ND_BLOCK, "foo body is BLOCK");
+
+    // foo's body should have 4 children: var_decl, if_stmt, while_stmt, return_stmt
+    var body_cnt = g_nd_nextra[foo_body];
+    fails = fails + assert_eq(body_cnt, 4, "foo body statement count");
+
+    // First statement in foo: var decl
+    var stmt0 = g_ch[g_nd_extra[foo_body] + 0];
+    fails = fails + assert_eq(g_nd_type[stmt0], ND_VAR_DECL, "foo stmt0 is VAR_DECL");
+    fails = fails + assert_str_eq(g_nd_sval[stmt0], "a", "foo stmt0 var name");
+
+    // Second statement in foo: if
+    var stmt1 = g_ch[g_nd_extra[foo_body] + 1];
+    fails = fails + assert_eq(g_nd_type[stmt1], ND_IF, "foo stmt1 is IF");
+
+    // Third statement in foo: while
+    var stmt2 = g_ch[g_nd_extra[foo_body] + 2];
+    fails = fails + assert_eq(g_nd_type[stmt2], ND_WHILE, "foo stmt2 is WHILE");
+
+    // Fourth statement in foo: return
+    var stmt3 = g_ch[g_nd_extra[foo_body] + 3];
+    fails = fails + assert_eq(g_nd_type[stmt3], ND_RETURN, "foo stmt3 is RETURN");
+
+    // Second top-level function should be "bar"
+    var bar_id = g_ch[g_nd_extra[root] + 1];
+    fails = fails + assert_eq(g_nd_type[bar_id], ND_FUNCTION, "second decl is FUNCTION");
+    fails = fails + assert_str_eq(g_nd_sval[bar_id], "bar", "second function name");
+
+    // bar has 0 params
+    fails = fails + assert_eq(g_nd_nextra[bar_id], 0, "bar param count");
+
+    // bar's body has 1 statement (return)
+    var bar_body = g_nd_c0[bar_id];
+    fails = fails + assert_eq(g_nd_nextra[bar_body], 1, "bar body statement count");
+    var bar_stmt0 = g_ch[g_nd_extra[bar_body] + 0];
+    fails = fails + assert_eq(g_nd_type[bar_stmt0], ND_RETURN, "bar stmt0 is RETURN");
+
+    // If-statement's then-body should have 1 statement
+    var if_body = g_nd_c1[stmt1];
+    fails = fails + assert_eq(g_nd_type[if_body], ND_BLOCK, "if then-body is BLOCK");
+    fails = fails + assert_eq(g_nd_nextra[if_body], 1, "if then-body statement count");
+
+    // While-statement's body should have 1 statement
+    var while_body = g_nd_c1[stmt2];
+    fails = fails + assert_eq(g_nd_type[while_body], ND_BLOCK, "while body is BLOCK");
+    fails = fails + assert_eq(g_nd_nextra[while_body], 1, "while body statement count");
+
+    if (fails == 0) {
+        println("All parser AST tests PASSED (" + to_string(g_nd_count) + " nodes)");
+    } else {
+        println(to_string(fails) + " test(s) FAILED");
+    }
+
+    return fails;
+}
