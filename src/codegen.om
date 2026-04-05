@@ -17,6 +17,10 @@ global var g_local_names = [];   // variable name strings
 global var g_local_regs  = [];   // corresponding alloca register names
 global var g_local_count = 0;    // number of locals in current function
 
+// String variable tracking: names of variables holding string (i8*) values
+global var g_str_vars     = [];  // variable names that are strings
+global var g_str_var_count = 0;  // count of string variables
+
 // ─── Helper: fresh SSA temporary ──────────────────────────────────────────────
 
 fn fresh_tmp() {
@@ -62,6 +66,57 @@ fn add_local(name, reg) {
     g_local_names = push(g_local_names, name);
     g_local_regs  = push(g_local_regs, reg);
     g_local_count = g_local_count + 1;
+}
+
+// ─── Helper: mark a variable as a string type ─────────────────────────────────
+
+fn mark_string_var(name) {
+    g_str_vars = push(g_str_vars, name);
+    g_str_var_count = g_str_var_count + 1;
+}
+
+fn is_string_var(name) {
+    var i = g_str_var_count - 1;
+    while (i >= 0) {
+        if (str_eq(g_str_vars[i], name)) {
+            return 1;
+        }
+        i = i - 1;
+    }
+    return 0;
+}
+
+// ─── Helper: check if an AST expression is a string ───────────────────────────
+
+fn is_string_expr(nd) {
+    if (nd == -1) { return 0; }
+    var ty = g_nd_type[nd];
+    // String literal node
+    if (ty == ND_LIT_STRING) {
+        return 1;
+    }
+    // Identifier — check if it's a known string variable
+    if (ty == ND_IDENTIFIER) {
+        return is_string_var(g_nd_sval[nd]);
+    }
+    // Binary + with a string operand = string concatenation
+    if (ty == ND_BINARY) {
+        var op = g_nd_sval[nd];
+        if (str_eq(op, "+")) {
+            if (is_string_expr(g_nd_c0[nd])) { return 1; }
+            if (is_string_expr(g_nd_c1[nd])) { return 1; }
+        }
+    }
+    // Known string-returning function calls
+    if (ty == ND_CALL) {
+        var callee = g_nd_sval[nd];
+        if (str_eq(callee, "to_string")) { return 1; }
+        if (str_eq(callee, "input_line")) { return 1; }
+        if (str_eq(callee, "file_read")) { return 1; }
+        if (str_eq(callee, "str_substr")) { return 1; }
+        if (str_eq(callee, "str_concat")) { return 1; }
+    }
+    return 0;
 }
 
 // ─── Helper: register a string literal, return its @str_N name ────────────────
@@ -172,6 +227,33 @@ fn codegen_expr(nd) {
 
         var result = fresh_tmp();
         if (str_eq(op, "+")) {
+            // Check if this is string concatenation
+            if (is_string_expr(g_nd_c0[nd]) || is_string_expr(g_nd_c1[nd])) {
+                // String concat: convert i64 values to i8* pointers
+                var left_ptr = fresh_tmp();
+                emit_indent(left_ptr + " = inttoptr i64 " + left_val + " to i8*");
+                var right_ptr = fresh_tmp();
+                emit_indent(right_ptr + " = inttoptr i64 " + right_val + " to i8*");
+                // Get lengths
+                var len1 = fresh_tmp();
+                emit_indent(len1 + " = call i64 @strlen(i8* " + left_ptr + ")");
+                var len2 = fresh_tmp();
+                emit_indent(len2 + " = call i64 @strlen(i8* " + right_ptr + ")");
+                // Allocate buffer: len1 + len2 + 1
+                var total = fresh_tmp();
+                emit_indent(total + " = add i64 " + len1 + ", " + len2);
+                var alloc_sz = fresh_tmp();
+                emit_indent(alloc_sz + " = add i64 " + total + ", 1");
+                var buf = fresh_tmp();
+                emit_indent(buf + " = call i8* @malloc(i64 " + alloc_sz + ")");
+                // Copy: strcpy(buf, left) then strcat(buf, right)
+                emit_indent("call i8* @strcpy(i8* " + buf + ", i8* " + left_ptr + ")");
+                emit_indent("call i8* @strcat(i8* " + buf + ", i8* " + right_ptr + ")");
+                // Convert result pointer back to i64
+                var concat_result = fresh_tmp();
+                emit_indent(concat_result + " = ptrtoint i8* " + buf + " to i64");
+                return concat_result;
+            }
             emit_indent(result + " = add i64 " + left_val + ", " + right_val);
         } else if (str_eq(op, "-")) {
             emit_indent(result + " = sub i64 " + left_val + ", " + right_val);
@@ -330,6 +412,27 @@ fn codegen_call(nd) {
                 var fmt_ptr = string_const_ptr("@fmt_str", 4);
                 var result = fresh_tmp();
                 emit_indent(result + " = call i32 (i8*, ...) @printf(i8* " + fmt_ptr + ", i8* " + ptr + ")");
+                var cast = fresh_tmp();
+                emit_indent(cast + " = sext i32 " + result + " to i64");
+                return cast;
+            }
+
+            // Print a string expression (variable, concatenation, etc.)
+            if (is_string_expr(arg_nd)) {
+                var val = codegen_expr(arg_nd);
+                var str_ptr = fresh_tmp();
+                emit_indent(str_ptr + " = inttoptr i64 " + val + " to i8*");
+                var use_nl = str_eq(fname, "println");
+                var fmt_name = "@fmt_str";
+                var fmt_len = 4;
+                if (!use_nl) {
+                    // print without newline — use "%s" format
+                    fmt_name = "@fmt_str_nonl";
+                    fmt_len = 3;
+                }
+                var fmt_ptr = string_const_ptr(fmt_name, fmt_len);
+                var result = fresh_tmp();
+                emit_indent(result + " = call i32 (i8*, ...) @printf(i8* " + fmt_ptr + ", i8* " + str_ptr + ")");
                 var cast = fresh_tmp();
                 emit_indent(cast + " = sext i32 " + result + " to i64");
                 return cast;
@@ -494,6 +597,10 @@ fn codegen_var_decl(nd) {
     if (init >= 0) {
         var val = codegen_expr(init);
         emit_indent("store i64 " + val + ", i64* " + reg);
+        // Track if this variable holds a string
+        if (is_string_expr(init)) {
+            mark_string_var(name);
+        }
     } else {
         emit_indent("store i64 0, i64* " + reg);
     }
@@ -645,6 +752,8 @@ fn codegen_function(nd) {
     g_local_names = [];
     g_local_regs  = [];
     g_local_count = 0;
+    g_str_vars     = [];
+    g_str_var_count = 0;
 
     // Build parameter list string
     var params_str = "";
@@ -748,6 +857,8 @@ fn generate_llvm_ir(root) {
     g_local_names = [];
     g_local_regs  = [];
     g_local_count = 0;
+    g_str_vars     = [];
+    g_str_var_count = 0;
 
     // Build the module header
     g_ir_header = "; ModuleID = 'omscript'\n";
@@ -756,6 +867,7 @@ fn generate_llvm_ir(root) {
 
     // Pre-register well-known format strings
     g_str_decls = g_str_decls + "@fmt_str = private unnamed_addr constant [4 x i8] c\"%s\\0A\\00\"\n";
+    g_str_decls = g_str_decls + "@fmt_str_nonl = private unnamed_addr constant [3 x i8] c\"%s\\00\"\n";
     g_str_decls = g_str_decls + "@fmt_int = private unnamed_addr constant [4 x i8] c\"%ld\\00\"\n";
     g_str_decls = g_str_decls + "@fmt_int_nl = private unnamed_addr constant [5 x i8] c\"%ld\\0A\\00\"\n";
     g_str_decls = g_str_decls + "\n";
@@ -765,6 +877,10 @@ fn generate_llvm_ir(root) {
     c_decls = c_decls + "declare i32 @printf(i8*, ...)\n";
     c_decls = c_decls + "declare i8* @malloc(i64)\n";
     c_decls = c_decls + "declare i32 @snprintf(i8*, i64, i8*, ...)\n";
+    c_decls = c_decls + "declare i64 @strlen(i8*)\n";
+    c_decls = c_decls + "declare i8* @strcpy(i8*, i8*)\n";
+    c_decls = c_decls + "declare i8* @strcat(i8*, i8*)\n";
+    c_decls = c_decls + "declare i8* @strdup(i8*)\n";
     c_decls = c_decls + "\n";
 
     // Generate code for all top-level declarations

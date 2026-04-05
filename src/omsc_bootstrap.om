@@ -44,7 +44,7 @@ fn main() {
     file_write(ir_file, ir);
 
     // Compile IR to object code with llc
-    var llc_cmd = "llc-18 -filetype=obj -O2 -o " + obj_file + " " + ir_file;
+    var llc_cmd = "llc-18 -filetype=obj -O2 -relocation-model=pic -o " + obj_file + " " + ir_file;
     var llc_rc = system(llc_cmd);
     if (llc_rc != 0) {
         println("Error: llc-18 failed (exit code " + to_string(llc_rc) + ")");

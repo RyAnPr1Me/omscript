@@ -2946,6 +2946,10 @@ int main(int argc, char* argv[]) {
         compiler.setLoopOptimize(flagLoopOptimize);
         compiler.setParallelize(flagParallelize);
         compiler.setDebugMode(flagDebug);
+        compiler.setEGraphOptimize(flagEGraph);
+        compiler.setSuperoptimize(flagSuperopt);
+        compiler.setSuperoptLevel(flagSuperoptLevel);
+        compiler.setHardwareGraphOpt(flagHGOE);
         if (quiet) {
             compiler.setVerbose(false);
             compiler.setQuiet(true);

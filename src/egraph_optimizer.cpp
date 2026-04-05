@@ -24,6 +24,49 @@
 namespace omscript {
 namespace egraph {
 
+/// Thread-local set of variable names known to hold string values in the
+/// current function scope.  Populated by optimizeFunction() before any
+/// expression optimization runs, so that canRepresentInEGraph() can reject
+/// expressions involving string variables (whose + and * have different
+/// semantics than integer arithmetic).
+static thread_local std::unordered_set<std::string> stringVarNames_;
+
+/// Check whether an expression tree might involve string values.
+/// Returns true if any leaf identifier is a known string variable, or any
+/// leaf literal is a string, or any call returns a known string-returning
+/// function.
+static bool mightInvolveStrings(const Expression* expr) {
+    if (!expr) return false;
+    switch (expr->type) {
+    case ASTNodeType::LITERAL_EXPR:
+        return static_cast<const LiteralExpr*>(expr)->literalType == LiteralExpr::LiteralType::STRING;
+    case ASTNodeType::IDENTIFIER_EXPR:
+        return stringVarNames_.count(static_cast<const IdentifierExpr*>(expr)->name) > 0;
+    case ASTNodeType::BINARY_EXPR: {
+        auto* bin = static_cast<const BinaryExpr*>(expr);
+        return mightInvolveStrings(bin->left.get()) || mightInvolveStrings(bin->right.get());
+    }
+    case ASTNodeType::UNARY_EXPR:
+        return mightInvolveStrings(static_cast<const UnaryExpr*>(expr)->operand.get());
+    case ASTNodeType::TERNARY_EXPR: {
+        auto* tern = static_cast<const TernaryExpr*>(expr);
+        return mightInvolveStrings(tern->thenExpr.get()) || mightInvolveStrings(tern->elseExpr.get());
+    }
+    case ASTNodeType::CALL_EXPR: {
+        auto* call = static_cast<const CallExpr*>(expr);
+        // Common string-returning builtins
+        static const std::unordered_set<std::string> stringFuncs = {
+            "to_string", "str_substr", "str_trim", "str_upper", "str_lower",
+            "str_replace", "str_repeat", "str_reverse", "str_concat",
+            "str_join", "char_at", "input_line", "file_read", "str_slice"
+        };
+        return stringFuncs.count(call->callee) > 0;
+    }
+    default:
+        return false;
+    }
+}
+
 /// Converts an AST Expression to an e-graph node, returning the class ID.
 /// Recursively converts sub-expressions.
 static ClassId astToEGraph(EGraph& graph, const Expression* expr) {
@@ -310,16 +353,11 @@ static bool canRepresentInEGraph(const Expression* expr) {
         if (supported.find(bin->op) == supported.end()) return false;
         // String operands with * or + have different semantics (repetition,
         // concatenation) than integer arithmetic.  The e-graph's algebraic
-        // rules (e.g. x*0→0, x*1→x) are not valid for string operations,
-        // so we must exclude them.
+        // rules (e.g. x*0→0, x*1→x, commutativity a+b→b+a) are not valid
+        // for string operations, so we must exclude them.
+        // Check both string literals AND string variables.
         if (bin->op == "*" || bin->op == "+") {
-            auto isStringLit = [](const Expression* e) -> bool {
-                if (!e) return false;
-                if (auto* lit = dynamic_cast<const LiteralExpr*>(e))
-                    return lit->literalType == LiteralExpr::LiteralType::STRING;
-                return false;
-            };
-            if (isStringLit(bin->left.get()) || isStringLit(bin->right.get()))
+            if (mightInvolveStrings(expr))
                 return false;
         }
         return canRepresentInEGraph(bin->left.get()) &&
@@ -485,11 +523,73 @@ static void optimizeStatement(Statement* stmt) {
 }
 
 /// Optimize an entire function's body using e-graph equality saturation.
+/// Recursively collect variable names that are known to hold string values
+/// by scanning statements for VarDecl with string initializers or assignments
+/// from string-returning functions.
+static void collectStringVars(const Statement* stmt) {
+    if (!stmt) return;
+    switch (stmt->type) {
+    case ASTNodeType::VAR_DECL: {
+        auto* vd = static_cast<const VarDecl*>(stmt);
+        if (vd->initializer && mightInvolveStrings(vd->initializer.get()))
+            stringVarNames_.insert(vd->name);
+        break;
+    }
+    case ASTNodeType::EXPR_STMT: {
+        auto* es = static_cast<const ExprStmt*>(stmt);
+        if (es->expression && es->expression->type == ASTNodeType::ASSIGN_EXPR) {
+            auto* assign = static_cast<const AssignExpr*>(es->expression.get());
+            if (assign->value && mightInvolveStrings(assign->value.get()))
+                stringVarNames_.insert(assign->name);
+        }
+        break;
+    }
+    case ASTNodeType::BLOCK: {
+        auto* block = static_cast<const BlockStmt*>(stmt);
+        for (auto& s : block->statements)
+            collectStringVars(s.get());
+        break;
+    }
+    case ASTNodeType::IF_STMT: {
+        auto* ifStmt = static_cast<const IfStmt*>(stmt);
+        if (ifStmt->thenBranch) collectStringVars(ifStmt->thenBranch.get());
+        if (ifStmt->elseBranch) collectStringVars(ifStmt->elseBranch.get());
+        break;
+    }
+    case ASTNodeType::WHILE_STMT: {
+        auto* w = static_cast<const WhileStmt*>(stmt);
+        if (w->body) collectStringVars(w->body.get());
+        break;
+    }
+    case ASTNodeType::FOR_STMT: {
+        auto* f = static_cast<const ForStmt*>(stmt);
+        if (f->body) collectStringVars(f->body.get());
+        break;
+    }
+    default: break;
+    }
+}
+
 void optimizeFunction(FunctionDecl* func) {
     if (!func || !func->body) return;
+    // Build the set of string variable names before optimizing expressions.
+    // This allows canRepresentInEGraph() to reject expressions involving
+    // string concatenation (+) or repetition (*) that the e-graph's algebraic
+    // rules (commutativity, associativity) would incorrectly transform.
+    stringVarNames_.clear();
+    // Function parameters named with string types
+    for (auto& param : func->parameters) {
+        if (param.typeName == "string")
+            stringVarNames_.insert(param.name);
+    }
+    // Scan all statements for string variable assignments
+    for (auto& stmt : func->body->statements)
+        collectStringVars(stmt.get());
+    // Now optimize with the string variable set in place
     for (auto& stmt : func->body->statements) {
         optimizeStatement(stmt.get());
     }
+    stringVarNames_.clear();
 }
 
 /// Optimize all functions in a program using e-graph equality saturation.

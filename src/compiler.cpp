@@ -119,6 +119,10 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
     codegen.setParallelize(parallelize_);
     codegen.setLTO(lto_);
     codegen.setDebugMode(debug_);
+    codegen.setEGraphOptimize(egraph_);
+    codegen.setSuperoptimize(superopt_);
+    codegen.setSuperoptLevel(superoptLevel_);
+    codegen.setHardwareGraphOpt(hgoe_);
     codegen.setSourceFilename(sourceFile);
     if (!pgoGenPath_.empty()) {
         codegen.setPGOGen(pgoGenPath_);
