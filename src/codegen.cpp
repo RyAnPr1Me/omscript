@@ -3149,6 +3149,17 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     constScopeStack.clear();
     stringVars_.clear();
     stringArrayVars_.clear();
+    // Pre-populate stringVars_ with global variables that hold strings.
+    // generateGlobalVarInits() tracks these in main, but other functions
+    // start with a fresh stringVars_ set and lose the information.  Without
+    // this, expressions like ("prefix" + g_string_var) are misidentified as
+    // integer arithmetic instead of string concatenation.
+    if (currentProgram_) {
+        for (auto& gv : currentProgram_->globalVars) {
+            if (gv->initializer && isStringExpr(gv->initializer.get()))
+                stringVars_.insert(gv->name);
+        }
+    }
     stringLenCache_.clear();
     stringCapCache_.clear();
     deadVars_.clear();

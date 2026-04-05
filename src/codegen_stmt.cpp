@@ -511,26 +511,34 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
     // Constant condition elimination — match generateIf's dead-branch pruning.
     // Evaluate the condition once; if it folds to a constant we can avoid
     // emitting the loop structure entirely (false) or the condition check (true).
-    llvm::Value* preCondition = generateExpression(stmt->condition.get());
-    if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(preCondition)) {
-        if (ci->isZero()) {
-            // Condition is statically false: loop body never executes.
+    // IMPORTANT: only pre-evaluate when the condition is side-effect-free.
+    // Function calls may modify global state (e.g. match_tok advances g_pos),
+    // and pre-evaluating them would cause those side effects to happen before
+    // the loop condition block, breaking the loop's first iteration.
+    const bool condIsPure = stmt->condition->type == ASTNodeType::LITERAL_EXPR
+                         || stmt->condition->type == ASTNodeType::IDENTIFIER_EXPR;
+    if (condIsPure) {
+        llvm::Value* preCondition = generateExpression(stmt->condition.get());
+        if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(preCondition)) {
+            if (ci->isZero()) {
+                // Condition is statically false: loop body never executes.
+                return;
+            }
+            // Condition is statically true: emit an unconditional infinite loop
+            // (no condition check on each iteration).
+            llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "whilebody", function);
+            llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "whileend", function);
+            builder->CreateBr(bodyBB);
+            builder->SetInsertPoint(bodyBB);
+            loopStack.push_back({endBB, bodyBB});
+            generateStatement(stmt->body.get());
+            loopStack.pop_back();
+            if (!builder->GetInsertBlock()->getTerminator()) {
+                builder->CreateBr(bodyBB);
+            }
+            builder->SetInsertPoint(endBB);
             return;
         }
-        // Condition is statically true: emit an unconditional infinite loop
-        // (no condition check on each iteration).
-        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "whilebody", function);
-        llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "whileend", function);
-        builder->CreateBr(bodyBB);
-        builder->SetInsertPoint(bodyBB);
-        loopStack.push_back({endBB, bodyBB});
-        generateStatement(stmt->body.get());
-        loopStack.pop_back();
-        if (!builder->GetInsertBlock()->getTerminator()) {
-            builder->CreateBr(bodyBB);
-        }
-        builder->SetInsertPoint(endBB);
-        return;
     }
 
     llvm::BasicBlock* condBB = llvm::BasicBlock::Create(*context, "whilecond", function);

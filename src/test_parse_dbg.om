@@ -1,0 +1,12 @@
+import "parser.om";
+
+fn main() {
+    var src = "fn add(a, b) { return a + b; }";
+    var root = parse(src);
+    if (root == -1) {
+        println("Parse FAILED: " + g_error_msg);
+        return 1;
+    }
+    println("Parse OK: " + to_string(g_nd_count) + " nodes");
+    return 0;
+}

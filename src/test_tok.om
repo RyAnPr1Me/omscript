@@ -1,13 +1,6 @@
 import "lexer.om";
+
 fn main() {
-    var src = "fn f() {}";
-    var ts = tokenize(src);
-    var cnt = ts.count;
-    var i = 0;
-    while (i < cnt) {
-        println(to_string(i) + ":" + ts.lexemes[i]);
-        i = i + 1;
-    }
-    println("done cnt=" + to_string(cnt));
+    println(to_string(TOK_COLON));
     return 0;
 }
