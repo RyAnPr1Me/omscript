@@ -2216,6 +2216,35 @@ void CodeGenerator::generate(Program* program) {
         builder->setFastMathFlags(FMF);
     }
 
+    // Pre-declare all well-known C runtime functions with their correct LLVM types
+    // BEFORE processing user extern fn declarations.  This ensures that if the
+    // user declares `extern fn malloc(n: i64) -> i64`, the module->getFunction()
+    // check in the scan below finds the ptr-returning version and reuses it.
+    // Without this, user extern fns that shadow runtime names (malloc, free,
+    // strlen, etc.) get declared first with i64 return type, causing type
+    // mismatches when the runtime's internal helpers (to_string, println, …)
+    // call getOrDeclareMalloc() and receive the wrong-typed function.
+    getOrDeclareMalloc();
+    getOrDeclareCalloc();
+    getOrDeclareFree();
+    getOrDeclareStrlen();
+    getOrDeclareStrcpy();
+    getOrDeclareStrcat();
+    getOrDeclareStrcmp();
+    getOrDeclareStrstr();
+    getOrDeclareSnprintf();
+    getOrDeclareMemcpy();
+    getOrDeclareMemmove();
+    getOrDeclareMemchr();
+    getOrDeclarePutchar();
+    getOrDeclareScanf();
+    getOrDeclareExit();
+    getOrDeclareAbort();
+    getOrDeclareToupper();
+    getOrDeclareTolower();
+    getOrDeclareIsspace();
+    getOrDeclareRealloc();
+
     // Forward-declare all functions so that any function can reference any
     // other regardless of source-file ordering (enables mutual recursion).
     for (auto& func : program->functions) {

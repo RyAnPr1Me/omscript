@@ -5605,7 +5605,18 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         }
     }
 
-    return builder->CreateCall(callee, args, "calltmp");
+    // If the callee returns void, don't give the call instruction a name —
+    // LLVM's verifier rejects named void instructions.
+    const bool returnsVoid = callee->getReturnType()->isVoidTy();
+    llvm::Value* result = builder->CreateCall(callee, args, returnsVoid ? "" : "calltmp");
+    if (returnsVoid)
+        return llvm::ConstantInt::get(getDefaultType(), 0);
+    // Normalize the return value to the OmScript default integer type (i64).
+    // When the user declares `extern fn malloc(n: i64) -> i64`, the LLVM
+    // function in the module may be the runtime's ptr-returning version
+    // (because of pre-declaration order). toDefaultType converts ptr→i64
+    // via ptrtoint, ensuring user code always receives an i64 as expected.
+    return toDefaultType(result);
 }
 
 } // namespace omscript
