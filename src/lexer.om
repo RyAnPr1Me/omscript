@@ -141,6 +141,7 @@ fn is_alnum_or_underscore(c) {
     return is_alpha(c) || is_digit(c) || c == 95;  // '_' = 95
 }
 
+@noinline
 fn hex_val(c) {
     if (is_digit(c)) { return c - 48; }      // '0'=48
     if (c >= 65 && c <= 70) { return c - 55; } // 'A'...'F'
