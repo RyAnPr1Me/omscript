@@ -2237,8 +2237,16 @@ void CodeGenerator::generate(Program* program) {
             // extern fn — declare with ExternalLinkage and no body attributes.
             // The symbol will be resolved at link time from the linked library
             // or object file that provides the definition.
-            llvm::Function* function =
-                llvm::Function::Create(funcType, llvm::Function::ExternalLinkage, func->name, module.get());
+            //
+            // If the runtime has already declared a function with this name
+            // (e.g. malloc, free, strlen) with a different LLVM type, reuse the
+            // existing declaration rather than creating a conflicting prototype.
+            // Call sites handle ptr ↔ i64 coercion automatically.
+            llvm::Function* function = module->getFunction(func->name);
+            if (!function) {
+                function = llvm::Function::Create(funcType, llvm::Function::ExternalLinkage,
+                                                  func->name, module.get());
+            }
             functions[func->name] = function;
             functionDecls_[func->name] = func.get();
             continue;
