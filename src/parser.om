@@ -276,8 +276,8 @@ fn parse_block() {
     if (r == -1) { return -1; }
 
     var id = alloc_node(ND_BLOCK, ln, cl);
-    var ch_start = g_ch_count;
-    var ch_cnt   = 0;
+    var ch_ids = [];
+    var ch_cnt = 0;
 
     while (!check_tok(TOK_RBRACE) && !is_at_end()) {
         if (g_had_error) { return -1; }
@@ -286,14 +286,12 @@ fn parse_block() {
             g_pos = g_pos + 1;
             var decl = parse_var_decl(is_const);
             if (decl == -1) { return -1; }
-            g_ch = push(g_ch, decl);
-            g_ch_count = g_ch_count + 1;
+            ch_ids = push(ch_ids, decl);
             ch_cnt = ch_cnt + 1;
             while (match_tok(TOK_COMMA)) {
                 var decl2 = parse_var_decl(is_const);
                 if (decl2 == -1) { return -1; }
-                g_ch = push(g_ch, decl2);
-                g_ch_count = g_ch_count + 1;
+                ch_ids = push(ch_ids, decl2);
                 ch_cnt = ch_cnt + 1;
             }
             var r2 = consume_tok(TOK_SEMICOLON, "Expected ';' after variable declaration");
@@ -301,8 +299,7 @@ fn parse_block() {
         } else {
             var stmt = parse_statement();
             if (stmt == -1) { return -1; }
-            g_ch = push(g_ch, stmt);
-            g_ch_count = g_ch_count + 1;
+            ch_ids = push(ch_ids, stmt);
             ch_cnt = ch_cnt + 1;
         }
     }
@@ -310,6 +307,13 @@ fn parse_block() {
     var r3 = consume_tok(TOK_RBRACE, "Expected '}'");
     if (r3 == -1) { return -1; }
 
+    var ch_start = g_ch_count;
+    var ci = 0;
+    while (ci < ch_cnt) {
+        g_ch = push(g_ch, ch_ids[ci]);
+        g_ch_count = g_ch_count + 1;
+        ci = ci + 1;
+    }
     g_nd_extra[id]  = ch_start;
     g_nd_nextra[id] = ch_cnt;
     return id;
@@ -674,7 +678,7 @@ fn parse_switch_stmt() {
 
     var id = alloc_node(ND_SWITCH, ln, cl);
     g_nd_c0[id] = cond;
-    var ch_start    = g_ch_count;
+    var ch_ids      = [];
     var ch_cnt      = 0;
     var has_default = 0;
 
@@ -683,32 +687,36 @@ fn parse_switch_stmt() {
         if (match_tok(TOK_CASE)) {
             var cln = peek_line();
             var ccl = peek_col();
-            var cv_start = g_ch_count;
-            var cv_cnt   = 0;
+            var cv_ids = [];
+            var cv_cnt = 0;
             var first_val = parse_expression();
             if (first_val == -1) { return -1; }
-            g_ch = push(g_ch, first_val);
-            g_ch_count = g_ch_count + 1;
+            cv_ids = push(cv_ids, first_val);
             cv_cnt = cv_cnt + 1;
             while (match_tok(TOK_COMMA)) {
                 var cv = parse_expression();
                 if (cv == -1) { return -1; }
-                g_ch = push(g_ch, cv);
-                g_ch_count = g_ch_count + 1;
+                cv_ids = push(cv_ids, cv);
                 cv_cnt = cv_cnt + 1;
             }
             var r4 = consume_tok(TOK_COLON, "Expected ':' after case value(s)");
             if (r4 == -1) { return -1; }
 
             var body_id = alloc_node(ND_BLOCK, cln, ccl);
-            var b_start = g_ch_count;
-            var b_cnt   = 0;
+            var b_ids = [];
+            var b_cnt = 0;
             while (!check_tok(TOK_CASE) && !check_tok(TOK_DEFAULT) && !check_tok(TOK_RBRACE) && !is_at_end()) {
                 var s = parse_statement();
                 if (s == -1) { return -1; }
-                g_ch = push(g_ch, s);
-                g_ch_count = g_ch_count + 1;
+                b_ids = push(b_ids, s);
                 b_cnt = b_cnt + 1;
+            }
+            var b_start = g_ch_count;
+            var bi = 0;
+            while (bi < b_cnt) {
+                g_ch = push(g_ch, b_ids[bi]);
+                g_ch_count = g_ch_count + 1;
+                bi = bi + 1;
             }
             g_nd_extra[body_id]  = b_start;
             g_nd_nextra[body_id] = b_cnt;
@@ -717,10 +725,16 @@ fn parse_switch_stmt() {
             g_nd_c0[case_id]     = first_val;
             g_nd_c1[case_id]     = body_id;
             g_nd_ival[case_id]   = 0;
+            var cv_start = g_ch_count;
+            var cvi = 0;
+            while (cvi < cv_cnt) {
+                g_ch = push(g_ch, cv_ids[cvi]);
+                g_ch_count = g_ch_count + 1;
+                cvi = cvi + 1;
+            }
             g_nd_extra[case_id]  = cv_start;
             g_nd_nextra[case_id] = cv_cnt;
-            g_ch = push(g_ch, case_id);
-            g_ch_count = g_ch_count + 1;
+            ch_ids = push(ch_ids, case_id);
             ch_cnt = ch_cnt + 1;
         } else if (match_tok(TOK_DEFAULT)) {
             if (has_default) {
@@ -733,14 +747,20 @@ fn parse_switch_stmt() {
             if (r5 == -1) { return -1; }
 
             var body_id2 = alloc_node(ND_BLOCK, dln, dcl);
-            var b2_start = g_ch_count;
-            var b2_cnt   = 0;
+            var b2_ids = [];
+            var b2_cnt = 0;
             while (!check_tok(TOK_CASE) && !check_tok(TOK_DEFAULT) && !check_tok(TOK_RBRACE) && !is_at_end()) {
                 var s2 = parse_statement();
                 if (s2 == -1) { return -1; }
-                g_ch = push(g_ch, s2);
-                g_ch_count = g_ch_count + 1;
+                b2_ids = push(b2_ids, s2);
                 b2_cnt = b2_cnt + 1;
+            }
+            var b2_start = g_ch_count;
+            var b2i = 0;
+            while (b2i < b2_cnt) {
+                g_ch = push(g_ch, b2_ids[b2i]);
+                g_ch_count = g_ch_count + 1;
+                b2i = b2i + 1;
             }
             g_nd_extra[body_id2]  = b2_start;
             g_nd_nextra[body_id2] = b2_cnt;
@@ -749,8 +769,7 @@ fn parse_switch_stmt() {
             g_nd_c0[def_id]   = -1;
             g_nd_c1[def_id]   = body_id2;
             g_nd_ival[def_id] = 1;
-            g_ch = push(g_ch, def_id);
-            g_ch_count = g_ch_count + 1;
+            ch_ids = push(ch_ids, def_id);
             ch_cnt = ch_cnt + 1;
         } else {
             return parse_error("Expected 'case' or 'default' in switch statement", peek_line(), peek_col());
@@ -759,6 +778,13 @@ fn parse_switch_stmt() {
 
     var r6 = consume_tok(TOK_RBRACE, "Expected '}' after switch body");
     if (r6 == -1) { return -1; }
+    var ch_start = g_ch_count;
+    var ci = 0;
+    while (ci < ch_cnt) {
+        g_ch = push(g_ch, ch_ids[ci]);
+        g_ch_count = g_ch_count + 1;
+        ci = ci + 1;
+    }
     g_nd_extra[id]  = ch_start;
     g_nd_nextra[id] = ch_cnt;
     return id;
@@ -1282,19 +1308,17 @@ fn parse_call() {
             var name = g_nd_sval[expr];
             var ln   = g_nd_line[expr];
             var cl   = g_nd_col[expr];
-            var ch_start = g_ch_count;
-            var ch_cnt   = 0;
+            var ch_ids = [];
+            var ch_cnt = 0;
             if (!check_tok(TOK_RPAREN)) {
                 var first_arg = parse_expression();
                 if (first_arg == -1) { return -1; }
-                g_ch = push(g_ch, first_arg);
-                g_ch_count = g_ch_count + 1;
+                ch_ids = push(ch_ids, first_arg);
                 ch_cnt = ch_cnt + 1;
                 while (match_tok(TOK_COMMA)) {
                     var arg = parse_expression();
                     if (arg == -1) { return -1; }
-                    g_ch = push(g_ch, arg);
-                    g_ch_count = g_ch_count + 1;
+                    ch_ids = push(ch_ids, arg);
                     ch_cnt = ch_cnt + 1;
                 }
             }
@@ -1302,6 +1326,13 @@ fn parse_call() {
             if (r == -1) { return -1; }
             var id = alloc_node(ND_CALL, ln, cl);
             g_nd_sval[id]   = name;
+            var ch_start = g_ch_count;
+            var ci = 0;
+            while (ci < ch_cnt) {
+                g_ch = push(g_ch, ch_ids[ci]);
+                g_ch_count = g_ch_count + 1;
+                ci = ci + 1;
+            }
             g_nd_extra[id]  = ch_start;
             g_nd_nextra[id] = ch_cnt;
             return id;
@@ -1398,8 +1429,8 @@ fn parse_primary() {
 
 fn parse_array_literal(ln, cl) {
     var id = alloc_node(ND_ARRAY_LIT, ln, cl);
-    var ch_start = g_ch_count;
-    var ch_cnt   = 0;
+    var ch_ids = [];
+    var ch_cnt = 0;
 
     if (!check_tok(TOK_RBRACKET)) {
         // First element (possibly spread)
@@ -1410,14 +1441,12 @@ fn parse_array_literal(ln, cl) {
             if (operand == -1) { return -1; }
             var sp = alloc_node(ND_SPREAD, sln, scl);
             g_nd_c0[sp] = operand;
-            g_ch = push(g_ch, sp);
-            g_ch_count = g_ch_count + 1;
+            ch_ids = push(ch_ids, sp);
             ch_cnt = ch_cnt + 1;
         } else {
             var e = parse_expression();
             if (e == -1) { return -1; }
-            g_ch = push(g_ch, e);
-            g_ch_count = g_ch_count + 1;
+            ch_ids = push(ch_ids, e);
             ch_cnt = ch_cnt + 1;
         }
         while (match_tok(TOK_COMMA)) {
@@ -1428,14 +1457,12 @@ fn parse_array_literal(ln, cl) {
                 if (operand == -1) { return -1; }
                 var sp = alloc_node(ND_SPREAD, sln, scl);
                 g_nd_c0[sp] = operand;
-                g_ch = push(g_ch, sp);
-                g_ch_count = g_ch_count + 1;
+                ch_ids = push(ch_ids, sp);
                 ch_cnt = ch_cnt + 1;
             } else {
                 var e = parse_expression();
                 if (e == -1) { return -1; }
-                g_ch = push(g_ch, e);
-                g_ch_count = g_ch_count + 1;
+                ch_ids = push(ch_ids, e);
                 ch_cnt = ch_cnt + 1;
             }
         }
@@ -1443,6 +1470,13 @@ fn parse_array_literal(ln, cl) {
 
     var r = consume_tok(TOK_RBRACKET, "Expected ']' after array elements");
     if (r == -1) { return -1; }
+    var ch_start = g_ch_count;
+    var ci = 0;
+    while (ci < ch_cnt) {
+        g_ch = push(g_ch, ch_ids[ci]);
+        g_ch_count = g_ch_count + 1;
+        ci = ci + 1;
+    }
     g_nd_extra[id]  = ch_start;
     g_nd_nextra[id] = ch_cnt;
     return id;
@@ -1451,8 +1485,8 @@ fn parse_array_literal(ln, cl) {
 fn parse_struct_literal(name, ln, cl) {
     var id = alloc_node(ND_STRUCT_LIT, ln, cl);
     g_nd_sval[id] = name;
-    var ch_start = g_ch_count;
-    var ch_cnt   = 0;
+    var ch_ids = [];
+    var ch_cnt = 0;
     while (!check_tok(TOK_RBRACE) && !is_at_end()) {
         var fp = consume_tok(TOK_IDENTIFIER, "Expected field name in struct literal");
         if (fp == -1) { return -1; }
@@ -1463,13 +1497,19 @@ fn parse_struct_literal(name, ln, cl) {
         var fa = alloc_node(ND_FIELD_ASSIGN, ln, cl);
         g_nd_sval[fa] = tok_lex_at(fp);
         g_nd_c0[fa]   = val;
-        g_ch = push(g_ch, fa);
-        g_ch_count = g_ch_count + 1;
+        ch_ids = push(ch_ids, fa);
         ch_cnt = ch_cnt + 1;
         match_tok(TOK_COMMA);
     }
     var r2 = consume_tok(TOK_RBRACE, "Expected '}' after struct literal");
     if (r2 == -1) { return -1; }
+    var ch_start = g_ch_count;
+    var ci = 0;
+    while (ci < ch_cnt) {
+        g_ch = push(g_ch, ch_ids[ci]);
+        g_ch_count = g_ch_count + 1;
+        ci = ci + 1;
+    }
     g_nd_extra[id]  = ch_start;
     g_nd_nextra[id] = ch_cnt;
     return id;
@@ -1477,16 +1517,15 @@ fn parse_struct_literal(name, ln, cl) {
 
 fn parse_lambda(ln, cl) {
     // Opening | already consumed
-    var ch_start = g_ch_count;
-    var ch_cnt   = 0;
+    var ch_ids = [];
+    var ch_cnt = 0;
     if (!check_tok(TOK_PIPE)) {
         var pp = consume_tok(TOK_IDENTIFIER, "Expected parameter name in lambda");
         if (pp == -1) { return -1; }
         var pid = alloc_node(ND_PARAM, ln, cl);
         g_nd_sval[pid] = tok_lex_at(pp);
         if (match_tok(TOK_COLON)) { parse_type_annotation(); }
-        g_ch = push(g_ch, pid);
-        g_ch_count = g_ch_count + 1;
+        ch_ids = push(ch_ids, pid);
         ch_cnt = ch_cnt + 1;
         while (match_tok(TOK_COMMA)) {
             var pp2 = consume_tok(TOK_IDENTIFIER, "Expected parameter name in lambda");
@@ -1494,10 +1533,16 @@ fn parse_lambda(ln, cl) {
             var pid2 = alloc_node(ND_PARAM, ln, cl);
             g_nd_sval[pid2] = tok_lex_at(pp2);
             if (match_tok(TOK_COLON)) { parse_type_annotation(); }
-            g_ch = push(g_ch, pid2);
-            g_ch_count = g_ch_count + 1;
+            ch_ids = push(ch_ids, pid2);
             ch_cnt = ch_cnt + 1;
         }
+    }
+    var ch_start = g_ch_count;
+    var ci = 0;
+    while (ci < ch_cnt) {
+        g_ch = push(g_ch, ch_ids[ci]);
+        g_ch_count = g_ch_count + 1;
+        ci = ci + 1;
     }
     var r = consume_tok(TOK_PIPE, "Expected '|' after lambda parameters");
     if (r == -1) { return -1; }
@@ -1534,8 +1579,8 @@ fn parse_enum_decl() {
 
     var id = alloc_node(ND_ENUM_DECL, ln, cl);
     g_nd_sval[id] = name;
-    var ch_start = g_ch_count;
-    var ch_cnt   = 0;
+    var ch_ids = [];
+    var ch_cnt = 0;
     var next_val = 0;
 
     while (!check_tok(TOK_RBRACE) && !is_at_end()) {
@@ -1555,14 +1600,20 @@ fn parse_enum_decl() {
         g_nd_sval[mem] = mname;
         g_nd_ival[mem] = mval;
         g_nd_c0[mem]   = explicit_val;
-        g_ch = push(g_ch, mem);
-        g_ch_count = g_ch_count + 1;
+        ch_ids = push(ch_ids, mem);
         ch_cnt = ch_cnt + 1;
         match_tok(TOK_COMMA);
     }
 
     var r2 = consume_tok(TOK_RBRACE, "Expected '}' after enum body");
     if (r2 == -1) { return -1; }
+    var ch_start = g_ch_count;
+    var ci = 0;
+    while (ci < ch_cnt) {
+        g_ch = push(g_ch, ch_ids[ci]);
+        g_ch_count = g_ch_count + 1;
+        ci = ci + 1;
+    }
     g_nd_extra[id]  = ch_start;
     g_nd_nextra[id] = ch_cnt;
     return id;
@@ -1581,8 +1632,8 @@ fn parse_struct_decl() {
 
     var id = alloc_node(ND_STRUCT_DECL, ln, cl);
     g_nd_sval[id] = name;
-    var ch_start = g_ch_count;
-    var ch_cnt   = 0;
+    var ch_ids = [];
+    var ch_cnt = 0;
 
     while (!check_tok(TOK_RBRACE) && !is_at_end()) {
         if (g_had_error) { return -1; }
@@ -1631,8 +1682,7 @@ fn parse_struct_decl() {
             g_nd_sval2[fn_id] = ret_type;
             g_nd_ival[fn_id]  = FN_INLINE;
             g_nd_c0[fn_id]    = body;
-            g_ch = push(g_ch, fn_id);
-            g_ch_count = g_ch_count + 1;
+            ch_ids = push(ch_ids, fn_id);
             ch_cnt = ch_cnt + 1;
             continue;
         }
@@ -1688,14 +1738,20 @@ fn parse_struct_decl() {
         var fid = alloc_node(ND_STRUCT_FIELD, ln, cl);
         g_nd_sval[fid]  = fname;
         g_nd_sval2[fid] = field_type;
-        g_ch = push(g_ch, fid);
-        g_ch_count = g_ch_count + 1;
+        ch_ids = push(ch_ids, fid);
         ch_cnt = ch_cnt + 1;
         match_tok(TOK_COMMA);
     }
 
     var r4 = consume_tok(TOK_RBRACE, "Expected '}' after struct body");
     if (r4 == -1) { return -1; }
+    var ch_start = g_ch_count;
+    var ci = 0;
+    while (ci < ch_cnt) {
+        g_ch = push(g_ch, ch_ids[ci]);
+        g_ch_count = g_ch_count + 1;
+        ci = ci + 1;
+    }
     g_nd_extra[id]  = ch_start;
     g_nd_nextra[id] = ch_cnt;
     return id;
@@ -1716,8 +1772,8 @@ fn parse_extern_struct_decl() {
 
     var id = alloc_node(ND_EXTERN_STRUCT, ln, cl);
     g_nd_sval[id] = name;
-    var ch_start = g_ch_count;
-    var ch_cnt   = 0;
+    var ch_ids = [];
+    var ch_cnt = 0;
 
     while (!check_tok(TOK_RBRACE) && !is_at_end()) {
         var fln = peek_line();
@@ -1739,8 +1795,7 @@ fn parse_extern_struct_decl() {
         g_nd_sval[fid]  = tok_lex_at(fp);
         g_nd_sval2[fid] = tok_lex_at(tp);
         g_nd_ival[fid]  = byte_off;
-        g_ch = push(g_ch, fid);
-        g_ch_count = g_ch_count + 1;
+        ch_ids = push(ch_ids, fid);
         ch_cnt = ch_cnt + 1;
         match_tok(TOK_COMMA);
     }
@@ -1748,6 +1803,13 @@ fn parse_extern_struct_decl() {
     var r5 = consume_tok(TOK_RBRACE, "Expected '}' after extern struct fields");
     if (r5 == -1) { return -1; }
     match_tok(TOK_SEMICOLON);
+    var ch_start = g_ch_count;
+    var ci = 0;
+    while (ci < ch_cnt) {
+        g_ch = push(g_ch, ch_ids[ci]);
+        g_ch_count = g_ch_count + 1;
+        ci = ci + 1;
+    }
     g_nd_extra[id]  = ch_start;
     g_nd_nextra[id] = ch_cnt;
     return id;
@@ -1766,8 +1828,8 @@ fn parse_extern_fn_decl() {
     var r3 = consume_tok(TOK_LPAREN, "Expected '(' after extern function name");
     if (r3 == -1) { return -1; }
 
-    var ch_start = g_ch_count;
-    var ch_cnt   = 0;
+    var ch_ids = [];
+    var ch_cnt = 0;
     if (!check_tok(TOK_RPAREN)) {
         var pp = consume_tok(TOK_IDENTIFIER, "Expected parameter name");
         if (pp == -1) { return -1; }
@@ -1779,8 +1841,7 @@ fn parse_extern_fn_decl() {
         var pid = alloc_node(ND_PARAM, ln, cl);
         g_nd_sval[pid]  = tok_lex_at(pp);
         g_nd_sval2[pid] = pt;
-        g_ch = push(g_ch, pid);
-        g_ch_count = g_ch_count + 1;
+        ch_ids = push(ch_ids, pid);
         ch_cnt = ch_cnt + 1;
         while (match_tok(TOK_COMMA)) {
             var pp2 = consume_tok(TOK_IDENTIFIER, "Expected parameter name");
@@ -1793,8 +1854,7 @@ fn parse_extern_fn_decl() {
             var pid2 = alloc_node(ND_PARAM, ln, cl);
             g_nd_sval[pid2]  = tok_lex_at(pp2);
             g_nd_sval2[pid2] = pt2;
-            g_ch = push(g_ch, pid2);
-            g_ch_count = g_ch_count + 1;
+            ch_ids = push(ch_ids, pid2);
             ch_cnt = ch_cnt + 1;
         }
     }
@@ -1814,6 +1874,13 @@ fn parse_extern_fn_decl() {
     g_nd_sval2[id]  = ret_type;
     g_nd_ival[id]   = FN_EXTERN;
     g_nd_c0[id]     = -1;
+    var ch_start = g_ch_count;
+    var ci = 0;
+    while (ci < ch_cnt) {
+        g_ch = push(g_ch, ch_ids[ci]);
+        g_ch_count = g_ch_count + 1;
+        ci = ci + 1;
+    }
     g_nd_extra[id]  = ch_start;
     g_nd_nextra[id] = ch_cnt;
     return id;
@@ -1846,8 +1913,8 @@ fn parse_function(is_optmax, fn_flags) {
     var r5 = consume_tok(TOK_LPAREN, "Expected '(' after function name");
     if (r5 == -1) { g_in_optmax = saved_optmax; return -1; }
 
-    var param_start = g_ch_count;
-    var param_cnt   = 0;
+    var param_ids = [];
+    var param_cnt = 0;
     var has_default = 0;
 
     if (!check_tok(TOK_RPAREN)) {
@@ -1885,8 +1952,7 @@ fn parse_function(is_optmax, fn_flags) {
         g_nd_sval2[pid] = p_type;
         g_nd_c0[pid]    = p_default;
         g_nd_ival[pid]  = p_prefetch;
-        g_ch = push(g_ch, pid);
-        g_ch_count = g_ch_count + 1;
+        param_ids = push(param_ids, pid);
         param_cnt = param_cnt + 1;
 
         while (match_tok(TOK_COMMA)) {
@@ -1926,8 +1992,7 @@ fn parse_function(is_optmax, fn_flags) {
             g_nd_sval2[pid2] = p2_type;
             g_nd_c0[pid2]    = p2_default;
             g_nd_ival[pid2]  = p2_prefetch;
-            g_ch = push(g_ch, pid2);
-            g_ch_count = g_ch_count + 1;
+            param_ids = push(param_ids, pid2);
             param_cnt = param_cnt + 1;
         }
     }
@@ -1949,6 +2014,14 @@ fn parse_function(is_optmax, fn_flags) {
     var flags = fn_flags;
     if (is_optmax) { flags = flags + FN_OPTMAX; }
 
+    var param_start = g_ch_count;
+    var pi = 0;
+    while (pi < param_cnt) {
+        g_ch = push(g_ch, param_ids[pi]);
+        g_ch_count = g_ch_count + 1;
+        pi = pi + 1;
+    }
+
     var id = alloc_node(ND_FUNCTION, ln, cl);
     g_nd_sval[id]   = name;
     g_nd_sval2[id]  = ret_type;
@@ -1963,7 +2036,11 @@ fn parse_function(is_optmax, fn_flags) {
 
 fn parse_program() {
     var prog_id = alloc_node(ND_PROGRAM, 0, 0);
-    var top_start    = g_ch_count;
+    // Collect top-level child IDs in a separate array first, then flush
+    // them to g_ch contiguously at the end.  This avoids interleaving with
+    // nested children (struct fields, function params, etc.) that also push
+    // into g_ch during recursive descent.
+    var top_ids      = [];
     var top_cnt      = 0;
     var enum_cnt     = 0;
     var struct_cnt   = 0;
@@ -2004,8 +2081,7 @@ fn parse_program() {
         if (match_tok(TOK_ENUM)) {
             var en = parse_enum_decl();
             if (en == -1) { break; }
-            g_ch = push(g_ch, en);
-            g_ch_count = g_ch_count + 1;
+            top_ids = push(top_ids, en);
             top_cnt  = top_cnt  + 1;
             enum_cnt = enum_cnt + 1;
             continue;
@@ -2014,8 +2090,7 @@ fn parse_program() {
         if (match_tok(TOK_STRUCT)) {
             var st = parse_struct_decl();
             if (st == -1) { break; }
-            g_ch = push(g_ch, st);
-            g_ch_count = g_ch_count + 1;
+            top_ids = push(top_ids, st);
             top_cnt    = top_cnt    + 1;
             struct_cnt = struct_cnt + 1;
             continue;
@@ -2025,14 +2100,12 @@ fn parse_program() {
             if (tok_type_at(g_pos + 1) == TOK_STRUCT) {
                 var es = parse_extern_struct_decl();
                 if (es == -1) { break; }
-                g_ch = push(g_ch, es);
-                g_ch_count = g_ch_count + 1;
+                top_ids = push(top_ids, es);
                 top_cnt = top_cnt + 1;
             } else {
                 var ef = parse_extern_fn_decl();
                 if (ef == -1) { break; }
-                g_ch = push(g_ch, ef);
-                g_ch_count = g_ch_count + 1;
+                top_ids = push(top_ids, ef);
                 top_cnt = top_cnt + 1;
             }
             continue;
@@ -2048,8 +2121,7 @@ fn parse_program() {
             var rg = consume_tok(TOK_SEMICOLON, "Expected ';' after global variable declaration");
             if (rg == -1) { break; }
             g_nd_type[gv] = ND_GLOBAL_VAR;
-            g_ch = push(g_ch, gv);
-            g_ch_count = g_ch_count + 1;
+            top_ids = push(top_ids, gv);
             top_cnt = top_cnt + 1;
             continue;
         }
@@ -2082,8 +2154,7 @@ fn parse_program() {
             var cid = alloc_node(ND_TOP_CONST, cln, ccl);
             g_nd_sval[cid] = cname;
             g_nd_ival[cid] = cval;
-            g_ch = push(g_ch, cid);
-            g_ch_count = g_ch_count + 1;
+            top_ids = push(top_ids, cid);
             top_cnt   = top_cnt   + 1;
             const_cnt = const_cnt + 1;
             continue;
@@ -2136,13 +2207,23 @@ fn parse_program() {
 
         var fn_node = parse_function(optmax_active, fn_flags);
         if (fn_node == -1) { break; }
-        g_ch = push(g_ch, fn_node);
-        g_ch_count = g_ch_count + 1;
+        top_ids = push(top_ids, fn_node);
         top_cnt = top_cnt + 1;
     }
 
     if (optmax_active && g_had_error == 0) {
         parse_error("Unterminated OPTMAX block", 0, 0);
+    }
+
+    // Flush top-level children to g_ch contiguously so the program node's
+    // extra/nextra indices correctly reference only top-level declarations
+    // (not interleaved struct fields, function params, etc.).
+    var top_start = g_ch_count;
+    var ti = 0;
+    while (ti < top_cnt) {
+        g_ch = push(g_ch, top_ids[ti]);
+        g_ch_count = g_ch_count + 1;
+        ti = ti + 1;
     }
 
     g_nd_extra[prog_id]  = top_start;
