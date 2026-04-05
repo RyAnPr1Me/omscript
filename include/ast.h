@@ -58,7 +58,8 @@ enum class ASTNodeType {
     BORROW_EXPR,
     INVALIDATE_STMT,
     MOVE_DECL,
-    PREFETCH_STMT
+    PREFETCH_STMT,
+    EXTERN_STRUCT_DECL
 };
 
 class ASTNode {
@@ -539,6 +540,27 @@ class FunctionDecl : public ASTNode {
     }
 };
 
+// ---------------------------------------------------------------------------
+// Extern struct declarations (C++ interoperability)
+// ---------------------------------------------------------------------------
+
+/// A single field in an `extern struct` declaration.
+struct ExternStructField {
+    std::string name;
+    std::string typeName;   ///< "i64", "i32", "u32", "f64", etc.
+    long long   byteOffset; ///< explicit byte offset (from @ syntax), or -1 for auto-layout
+};
+
+/// `extern struct Name { field: type @ offset, ... }` declaration.
+class ExternStructDecl : public ASTNode {
+  public:
+    std::string name;
+    std::vector<ExternStructField> fields;
+
+    ExternStructDecl(std::string n, std::vector<ExternStructField> f)
+        : ASTNode(ASTNodeType::EXTERN_STRUCT_DECL), name(std::move(n)), fields(std::move(f)) {}
+};
+
 class Program : public ASTNode {
   public:
     std::vector<std::unique_ptr<FunctionDecl>> functions;
@@ -546,14 +568,19 @@ class Program : public ASTNode {
     std::vector<std::unique_ptr<StructDecl>> structs;
     bool fileNoAlias = false;  ///< @noalias file directive: all pointers are noalias
 
+    /// File-level `const NAME = LITERAL;` declarations.
+    /// These are registered as named integer constants (like enum members without
+    /// a prefix) and can be used in any expression throughout the program.
+    std::vector<std::pair<std::string, long long>> constants;
+
+    /// `extern struct` declarations for C++ interoperability.
+    std::vector<std::unique_ptr<ExternStructDecl>> externStructs;
+
     Program(std::vector<std::unique_ptr<FunctionDecl>> funcs, std::vector<std::unique_ptr<EnumDecl>> enms = {},
             std::vector<std::unique_ptr<StructDecl>> strcts = {}, bool noAlias = false)
         : ASTNode(ASTNodeType::PROGRAM), functions(std::move(funcs)), enums(std::move(enms)),
           structs(std::move(strcts)), fileNoAlias(noAlias) {}
 };
-
-// ---------------------------------------------------------------------------
-// Ownership system nodes
 // ---------------------------------------------------------------------------
 
 /// `move x` — transfer ownership, source becomes logically dead.

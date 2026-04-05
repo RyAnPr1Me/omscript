@@ -313,6 +313,26 @@ class CodeGenerator {
     // Variables known to hold struct values, maps var name → struct type name.
     std::unordered_map<std::string, std::string> structVars_;
 
+    // ── Extern struct C++ interoperability ─────────────────────────────────
+    struct ExternFieldLayout {
+        long long  byteOffset; ///< byte offset of the field within the struct
+        std::string typeName;  ///< "i64", "i32", "u32", "f64", etc.
+    };
+    /// Maps extern struct name → (field name → layout)
+    std::unordered_map<std::string, std::unordered_map<std::string, ExternFieldLayout>> externStructLayouts_;
+    /// Maps extern struct name → total size in bytes
+    std::unordered_map<std::string, long long> externStructSizes_;
+    /// Variables annotated with an extern struct type (var name → struct name).
+    std::unordered_map<std::string, std::string> varTypeAnnotations_;
+
+    /// Return the natural size of a field type used in an extern struct.
+    static long long externFieldTypeSize(const std::string& typeName) {
+        if (typeName == "i8"  || typeName == "u8")  return 1;
+        if (typeName == "i16" || typeName == "u16") return 2;
+        if (typeName == "i32" || typeName == "u32" || typeName == "f32") return 4;
+        return 8; // i64, u64, f64, ptr, int
+    }
+
     // Operator overload registry: maps "StructName::op" → generated LLVM function name.
     // e.g. "Vec2::+" → "__op_Vec2_add"
     std::unordered_map<std::string, std::string> operatorOverloads_;
@@ -489,6 +509,11 @@ class CodeGenerator {
     llvm::Value* generateStructLiteral(StructLiteralExpr* expr);
     llvm::Value* generateFieldAccess(FieldAccessExpr* expr);
     llvm::Value* generateFieldAssign(FieldAssignExpr* expr);
+
+    /// Load a field from an extern struct pointer, returning i64.
+    llvm::Value* generateExternFieldLoad(llvm::Value* ptr, const std::string& typeName);
+    /// Store an i64 value into an extern struct field pointer.
+    void generateExternFieldStore(llvm::Value* ptr, const std::string& typeName, llvm::Value* val);
 
     // Struct type resolution helpers.
     std::string resolveStructType(Expression* objExpr) const;

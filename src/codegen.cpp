@@ -2320,6 +2320,32 @@ void CodeGenerator::generate(Program* program) {
         }
     }
 
+    // Process file-level const declarations: register without any prefix,
+    // exactly as written (e.g. `const FOO = 42;` → enumConstants_["FOO"] = 42).
+    for (auto& [name, value] : program->constants) {
+        enumConstants_[name] = value;
+    }
+
+    // Register extern struct layouts for C++ interoperability.
+    for (auto& es : program->externStructs) {
+        auto& layout = externStructLayouts_[es->name];
+        long long totalSize = 0;
+        for (auto& f : es->fields) {
+            long long byteOff = f.byteOffset;
+            if (byteOff < 0) {
+                // Auto-layout: align to field type's natural alignment.
+                long long fsz = externFieldTypeSize(f.typeName);
+                long long align = (fsz > 8) ? 8 : fsz;
+                byteOff = (totalSize + align - 1) & ~(align - 1);
+            }
+            layout[f.name] = {byteOff, f.typeName};
+            long long fsz = externFieldTypeSize(f.typeName);
+            long long end = byteOff + fsz;
+            if (end > totalSize) totalSize = end;
+        }
+        externStructSizes_[es->name] = totalSize;
+    }
+
     // Process struct declarations: store field layouts for struct operations.
     // When hot/cold field attributes are present, reorder fields so that
     // hot fields are grouped first (cache-friendly) and cold fields last.

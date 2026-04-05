@@ -2561,6 +2561,97 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 auto* shl16 = builder->CreateShl(base, mkShift(16), "mul196608.shl16");
                 return builder->CreateAdd(shl17, shl16, "mul196608", nf, ns);
             }
+            case 229376: {
+                // n*229376 → (n<<18) - (n<<15)  [262144n - 32768n]
+                auto* shl18 = builder->CreateShl(base, mkShift(18), "mul229376.shl18");
+                auto* shl15 = builder->CreateShl(base, mkShift(15), "mul229376.shl15");
+                return builder->CreateSub(shl18, shl15, "mul229376", nf, ns);
+            }
+            case 245760: {
+                // n*245760 → (n<<18) - (n<<14)  [262144n - 16384n]
+                auto* shl18 = builder->CreateShl(base, mkShift(18), "mul245760.shl18");
+                auto* shl14 = builder->CreateShl(base, mkShift(14), "mul245760.shl14");
+                return builder->CreateSub(shl18, shl14, "mul245760", nf, ns);
+            }
+            case 262144: {
+                // n*262144 → n<<18
+                return builder->CreateShl(base, mkShift(18), "mul262144", nf, ns);
+            }
+            case 262152: {
+                auto* shl18 = builder->CreateShl(base, mkShift(18), "mul262152.shl18");
+                auto* shl3  = builder->CreateShl(base, mkShift(3),  "mul262152.shl3");
+                return builder->CreateAdd(shl18, shl3, "mul262152", nf, ns);
+            }
+            case 262160: {
+                auto* shl18 = builder->CreateShl(base, mkShift(18), "mul262160.shl18");
+                auto* shl4  = builder->CreateShl(base, mkShift(4),  "mul262160.shl4");
+                return builder->CreateAdd(shl18, shl4, "mul262160", nf, ns);
+            }
+            case 262176: {
+                auto* shl18 = builder->CreateShl(base, mkShift(18), "mul262176.shl18");
+                auto* shl5  = builder->CreateShl(base, mkShift(5),  "mul262176.shl5");
+                return builder->CreateAdd(shl18, shl5, "mul262176", nf, ns);
+            }
+            case 262208: {
+                auto* shl18 = builder->CreateShl(base, mkShift(18), "mul262208.shl18");
+                auto* shl6  = builder->CreateShl(base, mkShift(6),  "mul262208.shl6");
+                return builder->CreateAdd(shl18, shl6, "mul262208", nf, ns);
+            }
+            case 262272: {
+                auto* shl18 = builder->CreateShl(base, mkShift(18), "mul262272.shl18");
+                auto* shl7  = builder->CreateShl(base, mkShift(7),  "mul262272.shl7");
+                return builder->CreateAdd(shl18, shl7, "mul262272", nf, ns);
+            }
+            case 262400: {
+                auto* shl18 = builder->CreateShl(base, mkShift(18), "mul262400.shl18");
+                auto* shl8  = builder->CreateShl(base, mkShift(8),  "mul262400.shl8");
+                return builder->CreateAdd(shl18, shl8, "mul262400", nf, ns);
+            }
+            case 262656: {
+                auto* shl18 = builder->CreateShl(base, mkShift(18), "mul262656.shl18");
+                auto* shl9  = builder->CreateShl(base, mkShift(9),  "mul262656.shl9");
+                return builder->CreateAdd(shl18, shl9, "mul262656", nf, ns);
+            }
+            case 263168: {
+                auto* shl18 = builder->CreateShl(base, mkShift(18), "mul263168.shl18");
+                auto* shl10 = builder->CreateShl(base, mkShift(10), "mul263168.shl10");
+                return builder->CreateAdd(shl18, shl10, "mul263168", nf, ns);
+            }
+            case 264192: {
+                auto* shl18 = builder->CreateShl(base, mkShift(18), "mul264192.shl18");
+                auto* shl11 = builder->CreateShl(base, mkShift(11), "mul264192.shl11");
+                return builder->CreateAdd(shl18, shl11, "mul264192", nf, ns);
+            }
+            case 266240: {
+                auto* shl18 = builder->CreateShl(base, mkShift(18), "mul266240.shl18");
+                auto* shl12 = builder->CreateShl(base, mkShift(12), "mul266240.shl12");
+                return builder->CreateAdd(shl18, shl12, "mul266240", nf, ns);
+            }
+            case 270336: {
+                auto* shl18 = builder->CreateShl(base, mkShift(18), "mul270336.shl18");
+                auto* shl13 = builder->CreateShl(base, mkShift(13), "mul270336.shl13");
+                return builder->CreateAdd(shl18, shl13, "mul270336", nf, ns);
+            }
+            case 278528: {
+                auto* shl18 = builder->CreateShl(base, mkShift(18), "mul278528.shl18");
+                auto* shl14 = builder->CreateShl(base, mkShift(14), "mul278528.shl14");
+                return builder->CreateAdd(shl18, shl14, "mul278528", nf, ns);
+            }
+            case 294912: {
+                auto* shl18 = builder->CreateShl(base, mkShift(18), "mul294912.shl18");
+                auto* shl15 = builder->CreateShl(base, mkShift(15), "mul294912.shl15");
+                return builder->CreateAdd(shl18, shl15, "mul294912", nf, ns);
+            }
+            case 327680: {
+                auto* shl18 = builder->CreateShl(base, mkShift(18), "mul327680.shl18");
+                auto* shl16 = builder->CreateShl(base, mkShift(16), "mul327680.shl16");
+                return builder->CreateAdd(shl18, shl16, "mul327680", nf, ns);
+            }
+            case 393216: {
+                auto* shl18 = builder->CreateShl(base, mkShift(18), "mul393216.shl18");
+                auto* shl17 = builder->CreateShl(base, mkShift(17), "mul393216.shl17");
+                return builder->CreateAdd(shl18, shl17, "mul393216", nf, ns);
+            }
             default:
                 return nullptr;
             }
@@ -4454,6 +4545,11 @@ std::string CodeGenerator::resolveStructType(Expression* objExpr) const {
         if (vit != structVars_.end()) {
             return vit->second;
         }
+        // Check if the variable has an extern struct type annotation.
+        auto tit = varTypeAnnotations_.find(id->name);
+        if (tit != varTypeAnnotations_.end() && externStructLayouts_.count(tit->second)) {
+            return tit->second;
+        }
     } else if (objExpr->type == ASTNodeType::STRUCT_LITERAL_EXPR) {
         return static_cast<StructLiteralExpr*>(objExpr)->structName;
     }
@@ -4555,6 +4651,25 @@ llvm::Value* CodeGenerator::generateStructLiteral(StructLiteralExpr* expr) {
 
 llvm::Value* CodeGenerator::generateFieldAccess(FieldAccessExpr* expr) {
     const std::string structType = resolveStructType(expr->object.get());
+
+    // Check if this is an extern struct field access (C++ interop).
+    auto extIt = externStructLayouts_.find(structType);
+    if (extIt != externStructLayouts_.end()) {
+        auto& layout = extIt->second;
+        auto fIt = layout.find(expr->fieldName);
+        if (fIt == layout.end())
+            codegenError("extern struct '" + structType + "' has no field '" + expr->fieldName + "'", expr);
+        const auto& fl = fIt->second;
+        llvm::Value* base = generateExpression(expr->object.get());
+        base = toDefaultType(base);
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* bytePtr = builder->CreateIntToPtr(base, ptrTy, "ext.baseptr");
+        auto* i8Ty = llvm::Type::getInt8Ty(*context);
+        llvm::Value* elemPtr = builder->CreateInBoundsGEP(
+            i8Ty, bytePtr, llvm::ConstantInt::get(getDefaultType(), fl.byteOffset), "ext.field.ptr");
+        return generateExternFieldLoad(elemPtr, fl.typeName);
+    }
+
     const size_t fieldIdx = resolveFieldIndex(structType, expr->fieldName, expr);
 
     llvm::Value* objVal = generateExpression(expr->object.get());
@@ -4637,6 +4752,28 @@ llvm::Value* CodeGenerator::generateFieldAccess(FieldAccessExpr* expr) {
 
 llvm::Value* CodeGenerator::generateFieldAssign(FieldAssignExpr* expr) {
     const std::string structType = resolveStructType(expr->object.get());
+
+    // Check if this is an extern struct field assignment (C++ interop).
+    auto extIt = externStructLayouts_.find(structType);
+    if (extIt != externStructLayouts_.end()) {
+        auto& layout = extIt->second;
+        auto fIt = layout.find(expr->fieldName);
+        if (fIt == layout.end())
+            codegenError("extern struct '" + structType + "' has no field '" + expr->fieldName + "'", expr);
+        const auto& fl = fIt->second;
+        llvm::Value* base = generateExpression(expr->object.get());
+        base = toDefaultType(base);
+        llvm::Value* newVal = generateExpression(expr->value.get());
+        newVal = toDefaultType(newVal);
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* bytePtr = builder->CreateIntToPtr(base, ptrTy, "ext.baseptr");
+        auto* i8Ty = llvm::Type::getInt8Ty(*context);
+        llvm::Value* elemPtr = builder->CreateInBoundsGEP(
+            i8Ty, bytePtr, llvm::ConstantInt::get(getDefaultType(), fl.byteOffset), "ext.field.ptr");
+        generateExternFieldStore(elemPtr, fl.typeName, newVal);
+        return newVal;
+    }
+
     const size_t fieldIdx = resolveFieldIndex(structType, expr->fieldName, expr);
 
     llvm::Value* objVal = generateExpression(expr->object.get());
@@ -4677,6 +4814,68 @@ llvm::Value* CodeGenerator::generateFieldAssign(FieldAssignExpr* expr) {
     }
 
     return newVal;
+}
+
+llvm::Value* CodeGenerator::generateExternFieldLoad(llvm::Value* ptr, const std::string& typeName) {
+    auto& ctx = *context;
+    if (typeName == "i8") {
+        auto* v = builder->CreateLoad(llvm::Type::getInt8Ty(ctx), ptr, "ef.i8");
+        return builder->CreateSExt(v, getDefaultType(), "ef.i8.ext");
+    }
+    if (typeName == "u8") {
+        auto* v = builder->CreateLoad(llvm::Type::getInt8Ty(ctx), ptr, "ef.u8");
+        return builder->CreateZExt(v, getDefaultType(), "ef.u8.ext");
+    }
+    if (typeName == "i16") {
+        auto* v = builder->CreateLoad(llvm::Type::getInt16Ty(ctx), ptr, "ef.i16");
+        return builder->CreateSExt(v, getDefaultType(), "ef.i16.ext");
+    }
+    if (typeName == "u16") {
+        auto* v = builder->CreateLoad(llvm::Type::getInt16Ty(ctx), ptr, "ef.u16");
+        return builder->CreateZExt(v, getDefaultType(), "ef.u16.ext");
+    }
+    if (typeName == "i32") {
+        auto* v = builder->CreateLoad(llvm::Type::getInt32Ty(ctx), ptr, "ef.i32");
+        return builder->CreateSExt(v, getDefaultType(), "ef.i32.ext");
+    }
+    if (typeName == "u32") {
+        auto* v = builder->CreateLoad(llvm::Type::getInt32Ty(ctx), ptr, "ef.u32");
+        return builder->CreateZExt(v, getDefaultType(), "ef.u32.ext");
+    }
+    if (typeName == "f32") {
+        auto* v = builder->CreateLoad(llvm::Type::getFloatTy(ctx), ptr, "ef.f32");
+        auto* vd = builder->CreateFPExt(v, llvm::Type::getDoubleTy(ctx), "ef.f32.ext");
+        return builder->CreateBitCast(vd, getDefaultType(), "ef.f32.bits");
+    }
+    if (typeName == "f64") {
+        auto* v = builder->CreateLoad(llvm::Type::getDoubleTy(ctx), ptr, "ef.f64");
+        return builder->CreateBitCast(v, getDefaultType(), "ef.f64.bits");
+    }
+    // i64, u64, ptr, int — all native i64
+    return builder->CreateLoad(getDefaultType(), ptr, "ef.i64");
+}
+
+void CodeGenerator::generateExternFieldStore(llvm::Value* ptr, const std::string& typeName, llvm::Value* val) {
+    auto& ctx = *context;
+    if (typeName == "i8" || typeName == "u8") {
+        auto* t = builder->CreateTrunc(val, llvm::Type::getInt8Ty(ctx), "ef.trunc.i8");
+        builder->CreateStore(t, ptr);
+    } else if (typeName == "i16" || typeName == "u16") {
+        auto* t = builder->CreateTrunc(val, llvm::Type::getInt16Ty(ctx), "ef.trunc.i16");
+        builder->CreateStore(t, ptr);
+    } else if (typeName == "i32" || typeName == "u32") {
+        auto* t = builder->CreateTrunc(val, llvm::Type::getInt32Ty(ctx), "ef.trunc.i32");
+        builder->CreateStore(t, ptr);
+    } else if (typeName == "f32") {
+        auto* d = builder->CreateBitCast(val, llvm::Type::getDoubleTy(ctx), "ef.f64.bc");
+        auto* f = builder->CreateFPTrunc(d, llvm::Type::getFloatTy(ctx), "ef.f32.trunc");
+        builder->CreateStore(f, ptr);
+    } else if (typeName == "f64") {
+        auto* d = builder->CreateBitCast(val, llvm::Type::getDoubleTy(ctx), "ef.f64.bc");
+        builder->CreateStore(d, ptr);
+    } else {
+        builder->CreateStore(val, ptr);
+    }
 }
 
 } // namespace omscript

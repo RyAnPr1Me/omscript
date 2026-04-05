@@ -68,7 +68,16 @@ enum class BuiltinId : uint8_t {
     LCM,
     // New intrinsic builtins
     ROTATE_LEFT, ROTATE_RIGHT, BSWAP, SATURATING_ADD, SATURATING_SUB,
-    FMA_BUILTIN, COPYSIGN, MIN_FLOAT, MAX_FLOAT
+    FMA_BUILTIN, COPYSIGN, MIN_FLOAT, MAX_FLOAT,
+    // Raw typed memory load/store (C++ interop, zero-overhead)
+    RAW_LOAD_I64, RAW_LOAD_I32, RAW_LOAD_U32,
+    RAW_LOAD_I16, RAW_LOAD_U16, RAW_LOAD_I8, RAW_LOAD_U8,
+    RAW_LOAD_F64, RAW_LOAD_F32,
+    RAW_STORE_I64, RAW_STORE_I32, RAW_STORE_I16, RAW_STORE_I8,
+    RAW_STORE_F64, RAW_STORE_F32,
+    BITS_TO_F64, F64_TO_BITS,
+    // sizeof — compile-time size of a type or extern struct
+    SIZEOF
 };
 
 static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
@@ -209,6 +218,25 @@ static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
     {"copysign", BuiltinId::COPYSIGN},
     {"min_float", BuiltinId::MIN_FLOAT},
     {"max_float", BuiltinId::MAX_FLOAT},
+    // Raw typed memory load/store
+    {"raw_load_i64", BuiltinId::RAW_LOAD_I64},
+    {"raw_load_i32", BuiltinId::RAW_LOAD_I32},
+    {"raw_load_u32", BuiltinId::RAW_LOAD_U32},
+    {"raw_load_i16", BuiltinId::RAW_LOAD_I16},
+    {"raw_load_u16", BuiltinId::RAW_LOAD_U16},
+    {"raw_load_i8",  BuiltinId::RAW_LOAD_I8},
+    {"raw_load_u8",  BuiltinId::RAW_LOAD_U8},
+    {"raw_load_f64", BuiltinId::RAW_LOAD_F64},
+    {"raw_load_f32", BuiltinId::RAW_LOAD_F32},
+    {"raw_store_i64", BuiltinId::RAW_STORE_I64},
+    {"raw_store_i32", BuiltinId::RAW_STORE_I32},
+    {"raw_store_i16", BuiltinId::RAW_STORE_I16},
+    {"raw_store_i8",  BuiltinId::RAW_STORE_I8},
+    {"raw_store_f64", BuiltinId::RAW_STORE_F64},
+    {"raw_store_f32", BuiltinId::RAW_STORE_F32},
+    {"bits_to_f64", BuiltinId::BITS_TO_F64},
+    {"f64_to_bits",  BuiltinId::F64_TO_BITS},
+    {"sizeof", BuiltinId::SIZEOF},
 };
 
 static BuiltinId lookupBuiltin(const std::string& name) {
@@ -5358,6 +5386,160 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         b = ensureFloat(b);
         llvm::Function* maxnumFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::maxnum, {getFloatType()});
         return builder->CreateCall(maxnumFn, {a, b}, "maxnum.result");
+    }
+
+    // ── Raw typed memory load builtins (C++ interop, zero overhead) ──────────
+    // All accept a single ptr (i64 holding the address).
+    // All return i64 (zero/sign-extended or bitcast as appropriate).
+    auto rawLoadPtr = [&](llvm::Value* ptrVal) -> llvm::Value* {
+        ptrVal = toDefaultType(ptrVal);
+        return builder->CreateIntToPtr(ptrVal, llvm::PointerType::getUnqual(*context), "raw.ptr");
+    };
+
+    if (bid == BuiltinId::RAW_LOAD_I64) {
+        validateArgCount(expr, "raw_load_i64", 1);
+        llvm::Value* ptr = rawLoadPtr(generateExpression(expr->arguments[0].get()));
+        return builder->CreateLoad(getDefaultType(), ptr, "raw.i64");
+    }
+    if (bid == BuiltinId::RAW_LOAD_I32) {
+        validateArgCount(expr, "raw_load_i32", 1);
+        llvm::Value* ptr = rawLoadPtr(generateExpression(expr->arguments[0].get()));
+        auto* v = builder->CreateLoad(llvm::Type::getInt32Ty(*context), ptr, "raw.i32");
+        return builder->CreateSExt(v, getDefaultType(), "raw.i32.sext");
+    }
+    if (bid == BuiltinId::RAW_LOAD_U32) {
+        validateArgCount(expr, "raw_load_u32", 1);
+        llvm::Value* ptr = rawLoadPtr(generateExpression(expr->arguments[0].get()));
+        auto* v = builder->CreateLoad(llvm::Type::getInt32Ty(*context), ptr, "raw.u32");
+        return builder->CreateZExt(v, getDefaultType(), "raw.u32.zext");
+    }
+    if (bid == BuiltinId::RAW_LOAD_I16) {
+        validateArgCount(expr, "raw_load_i16", 1);
+        llvm::Value* ptr = rawLoadPtr(generateExpression(expr->arguments[0].get()));
+        auto* v = builder->CreateLoad(llvm::Type::getInt16Ty(*context), ptr, "raw.i16");
+        return builder->CreateSExt(v, getDefaultType(), "raw.i16.sext");
+    }
+    if (bid == BuiltinId::RAW_LOAD_U16) {
+        validateArgCount(expr, "raw_load_u16", 1);
+        llvm::Value* ptr = rawLoadPtr(generateExpression(expr->arguments[0].get()));
+        auto* v = builder->CreateLoad(llvm::Type::getInt16Ty(*context), ptr, "raw.u16");
+        return builder->CreateZExt(v, getDefaultType(), "raw.u16.zext");
+    }
+    if (bid == BuiltinId::RAW_LOAD_I8) {
+        validateArgCount(expr, "raw_load_i8", 1);
+        llvm::Value* ptr = rawLoadPtr(generateExpression(expr->arguments[0].get()));
+        auto* v = builder->CreateLoad(llvm::Type::getInt8Ty(*context), ptr, "raw.i8");
+        return builder->CreateSExt(v, getDefaultType(), "raw.i8.sext");
+    }
+    if (bid == BuiltinId::RAW_LOAD_U8) {
+        validateArgCount(expr, "raw_load_u8", 1);
+        llvm::Value* ptr = rawLoadPtr(generateExpression(expr->arguments[0].get()));
+        auto* v = builder->CreateLoad(llvm::Type::getInt8Ty(*context), ptr, "raw.u8");
+        return builder->CreateZExt(v, getDefaultType(), "raw.u8.zext");
+    }
+    if (bid == BuiltinId::RAW_LOAD_F64) {
+        validateArgCount(expr, "raw_load_f64", 1);
+        llvm::Value* ptr = rawLoadPtr(generateExpression(expr->arguments[0].get()));
+        auto* v = builder->CreateLoad(llvm::Type::getDoubleTy(*context), ptr, "raw.f64");
+        return builder->CreateBitCast(v, getDefaultType(), "raw.f64.bits");
+    }
+    if (bid == BuiltinId::RAW_LOAD_F32) {
+        validateArgCount(expr, "raw_load_f32", 1);
+        llvm::Value* ptr = rawLoadPtr(generateExpression(expr->arguments[0].get()));
+        auto* v = builder->CreateLoad(llvm::Type::getFloatTy(*context), ptr, "raw.f32");
+        auto* vd = builder->CreateFPExt(v, llvm::Type::getDoubleTy(*context), "raw.f32.ext");
+        return builder->CreateBitCast(vd, getDefaultType(), "raw.f32.bits");
+    }
+
+    // ── Raw typed memory store builtins ─────────────────────────────────────
+    // All accept (ptr: i64, val: i64) and return 0.
+    if (bid == BuiltinId::RAW_STORE_I64) {
+        validateArgCount(expr, "raw_store_i64", 2);
+        llvm::Value* ptr = rawLoadPtr(generateExpression(expr->arguments[0].get()));
+        llvm::Value* val = toDefaultType(generateExpression(expr->arguments[1].get()));
+        builder->CreateStore(val, ptr);
+        return llvm::ConstantInt::get(getDefaultType(), 0);
+    }
+    if (bid == BuiltinId::RAW_STORE_I32) {
+        validateArgCount(expr, "raw_store_i32", 2);
+        llvm::Value* ptr = rawLoadPtr(generateExpression(expr->arguments[0].get()));
+        llvm::Value* val = toDefaultType(generateExpression(expr->arguments[1].get()));
+        auto* t = builder->CreateTrunc(val, llvm::Type::getInt32Ty(*context), "raw.trunc.i32");
+        builder->CreateStore(t, ptr);
+        return llvm::ConstantInt::get(getDefaultType(), 0);
+    }
+    if (bid == BuiltinId::RAW_STORE_I16) {
+        validateArgCount(expr, "raw_store_i16", 2);
+        llvm::Value* ptr = rawLoadPtr(generateExpression(expr->arguments[0].get()));
+        llvm::Value* val = toDefaultType(generateExpression(expr->arguments[1].get()));
+        auto* t = builder->CreateTrunc(val, llvm::Type::getInt16Ty(*context), "raw.trunc.i16");
+        builder->CreateStore(t, ptr);
+        return llvm::ConstantInt::get(getDefaultType(), 0);
+    }
+    if (bid == BuiltinId::RAW_STORE_I8) {
+        validateArgCount(expr, "raw_store_i8", 2);
+        llvm::Value* ptr = rawLoadPtr(generateExpression(expr->arguments[0].get()));
+        llvm::Value* val = toDefaultType(generateExpression(expr->arguments[1].get()));
+        auto* t = builder->CreateTrunc(val, llvm::Type::getInt8Ty(*context), "raw.trunc.i8");
+        builder->CreateStore(t, ptr);
+        return llvm::ConstantInt::get(getDefaultType(), 0);
+    }
+    if (bid == BuiltinId::RAW_STORE_F64) {
+        validateArgCount(expr, "raw_store_f64", 2);
+        llvm::Value* ptr = rawLoadPtr(generateExpression(expr->arguments[0].get()));
+        llvm::Value* val = toDefaultType(generateExpression(expr->arguments[1].get()));
+        auto* d = builder->CreateBitCast(val, llvm::Type::getDoubleTy(*context), "raw.f64.bc");
+        builder->CreateStore(d, ptr);
+        return llvm::ConstantInt::get(getDefaultType(), 0);
+    }
+    if (bid == BuiltinId::RAW_STORE_F32) {
+        validateArgCount(expr, "raw_store_f32", 2);
+        llvm::Value* ptr = rawLoadPtr(generateExpression(expr->arguments[0].get()));
+        llvm::Value* val = toDefaultType(generateExpression(expr->arguments[1].get()));
+        auto* d = builder->CreateBitCast(val, llvm::Type::getDoubleTy(*context), "raw.f64.bc");
+        auto* f = builder->CreateFPTrunc(d, llvm::Type::getFloatTy(*context), "raw.f32.trunc");
+        builder->CreateStore(f, ptr);
+        return llvm::ConstantInt::get(getDefaultType(), 0);
+    }
+
+    // ── Bitcast builtins ─────────────────────────────────────────────────────
+    if (bid == BuiltinId::BITS_TO_F64) {
+        validateArgCount(expr, "bits_to_f64", 1);
+        llvm::Value* val = toDefaultType(generateExpression(expr->arguments[0].get()));
+        // Semantically: reinterpret i64 bits as f64, then return bit pattern as i64.
+        // That is an identity on the bits — just return the i64 unchanged.
+        return val;
+    }
+    if (bid == BuiltinId::F64_TO_BITS) {
+        validateArgCount(expr, "f64_to_bits", 1);
+        llvm::Value* val = generateExpression(expr->arguments[0].get());
+        if (val->getType()->isDoubleTy())
+            return builder->CreateBitCast(val, getDefaultType(), "f64.bits");
+        // Already i64 (e.g. result of raw_load_f64)
+        return toDefaultType(val);
+    }
+
+    // ── sizeof builtin ───────────────────────────────────────────────────────
+    if (bid == BuiltinId::SIZEOF) {
+        if (expr->arguments.size() != 1)
+            codegenError("sizeof requires exactly 1 argument", expr);
+        std::string typeName;
+        auto* arg = expr->arguments[0].get();
+        if (auto* id = dynamic_cast<IdentifierExpr*>(arg)) {
+            typeName = id->name;
+        } else {
+            codegenError("sizeof argument must be a type name", expr);
+        }
+        long long sz = 0;
+        auto extIt = externStructSizes_.find(typeName);
+        if (extIt != externStructSizes_.end()) {
+            sz = extIt->second;
+        } else {
+            sz = externFieldTypeSize(typeName);
+            if (sz == 0)
+                codegenError("Unknown type for sizeof: " + typeName, expr);
+        }
+        return llvm::ConstantInt::get(getDefaultType(), sz);
     }
 
     if (inOptMaxFunction) {

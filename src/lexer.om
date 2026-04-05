@@ -384,39 +384,39 @@ fn scan_number(src, p, ln, cl) {
 // ─── Process a string escape sequence, returning { ch, p, line, col } ────────
 // Returns the decoded character code and advances p past the escape.
 // Returns -1 for invalid escapes (caller should error).
-struct EscResult { ch, p, line, col }
+struct EscResult { ch, p, eln, ecl }
 
 fn process_escape(src, p, ln, cl) {
     var src_len = str_len(src);
     if (p >= src_len) {
-        return EscResult { ch: -1, p: p, line: ln, col: cl };
+        return EscResult { ch: -1, p: p, eln: ln, ecl: cl };
     }
     var e = char_at(src, p);
     p = p + 1;
     cl = cl + 1;
-    if (e == 110)  { return EscResult { ch: 10,  p: p, line: ln, col: cl }; } // 'n' → LF
-    if (e == 116)  { return EscResult { ch: 9,   p: p, line: ln, col: cl }; } // 't' → TAB
-    if (e == 114)  { return EscResult { ch: 13,  p: p, line: ln, col: cl }; } // 'r' → CR
-    if (e == 98)   { return EscResult { ch: 8,   p: p, line: ln, col: cl }; } // 'b' → BS
-    if (e == 102)  { return EscResult { ch: 12,  p: p, line: ln, col: cl }; } // 'f' → FF
-    if (e == 118)  { return EscResult { ch: 11,  p: p, line: ln, col: cl }; } // 'v' → VT
-    if (e == 92)   { return EscResult { ch: 92,  p: p, line: ln, col: cl }; } // '\\' → backslash
-    if (e == 34)   { return EscResult { ch: 34,  p: p, line: ln, col: cl }; } // '"' → quote
-    if (e == 48)   { return EscResult { ch: -2,  p: p, line: ln, col: cl }; } // '\0' → forbidden
+    if (e == 110)  { return EscResult { ch: 10, p: p, eln: ln, ecl: cl }; } // 'n' → LF
+    if (e == 116)  { return EscResult { ch: 9,   p: p, eln: ln, ecl: cl }; } // 't' → TAB
+    if (e == 114)  { return EscResult { ch: 13, p: p, eln: ln, ecl: cl }; } // 'r' → CR
+    if (e == 98)   { return EscResult { ch: 8,   p: p, eln: ln, ecl: cl }; } // 'b' → BS
+    if (e == 102)  { return EscResult { ch: 12, p: p, eln: ln, ecl: cl }; } // 'f' → FF
+    if (e == 118)  { return EscResult { ch: 11, p: p, eln: ln, ecl: cl }; } // 'v' → VT
+    if (e == 92)   { return EscResult { ch: 92, p: p, eln: ln, ecl: cl }; } // '\\' → backslash
+    if (e == 34)   { return EscResult { ch: 34, p: p, eln: ln, ecl: cl }; } // '"' → quote
+    if (e == 48)   { return EscResult { ch: -2, p: p, eln: ln, ecl: cl }; } // '\0' → forbidden
     if (e == 120) {  // 'x' → \xHH
-        if (p + 1 >= src_len) { return EscResult { ch: -1, p: p, line: ln, col: cl }; }
+        if (p + 1 >= src_len) { return EscResult { ch: -1, p: p, eln: ln, ecl: cl }; }
         var h1 = char_at(src, p);
         var h2 = char_at(src, p + 1);
         if (!is_hex_digit(h1) || !is_hex_digit(h2)) {
-            return EscResult { ch: -1, p: p, line: ln, col: cl };
+            return EscResult { ch: -1, p: p, eln: ln, ecl: cl };
         }
         var val = hex_val(h1) * 16 + hex_val(h2);
         p = p + 2;
         cl = cl + 2;
-        if (val == 0) { return EscResult { ch: -2, p: p, line: ln, col: cl }; } // \x00 forbidden
-        return EscResult { ch: val, p: p, line: ln, col: cl };
+        if (val == 0) { return EscResult { ch: -2, p: p, eln: ln, ecl: cl }; } // \x00 forbidden
+        return EscResult { ch: val, p: p, eln: ln, ecl: cl };
     }
-    return EscResult { ch: -1, p: p, line: ln, col: cl }; // unknown escape
+    return EscResult { ch: -1, p: p, eln: ln, ecl: cl }; // unknown escape
 }
 
 // ─── Scan a regular string literal "..." ─────────────────────────────────────
@@ -436,13 +436,13 @@ fn scan_string(src, p, ln, cl) {
             if (esc.ch == -1 || esc.ch == -2) {
                 // Error: just emit what we have and continue
                 p = esc.p;
-                ln = esc.line;
-                cl = esc.col;
+                ln = esc.eln;
+                cl = esc.ecl;
             } else {
                 result = result + to_char(esc.ch);
                 p = esc.p;
-                ln = esc.line;
-                cl = esc.col;
+                ln = esc.eln;
+                cl = esc.ecl;
             }
         } else if (c == 10) {  // newline in string
             result = result + to_char(c);

@@ -190,6 +190,12 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
         } else {
             structVars_.erase(stmt->name);
         }
+        // Track extern struct type annotations for C++ interoperability.
+        if (!stmt->typeName.empty() && externStructLayouts_.count(stmt->typeName)) {
+            varTypeAnnotations_[stmt->name] = stmt->typeName;
+        } else {
+            varTypeAnnotations_.erase(stmt->name);
+        }
         // Track known array sizes from array_fill(N, val) calls.
         // When N is a compile-time constant (or a tracked value), record
         // the size so that subsequent bounds checks on arr[i] can be

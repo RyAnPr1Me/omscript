@@ -76,7 +76,9 @@ class Parser {
     /// Parse an import statement and return the imported program.
     void parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
                      std::vector<std::unique_ptr<EnumDecl>>& enums,
-                     std::vector<std::unique_ptr<StructDecl>>& structs);
+                     std::vector<std::unique_ptr<StructDecl>>& structs,
+                     std::vector<std::pair<std::string, long long>>& constants,
+                     std::vector<std::unique_ptr<ExternStructDecl>>& externStructs);
 
     const Token& peek(int offset = 0) const noexcept;
     Token advance() noexcept;
@@ -91,6 +93,7 @@ class Parser {
     // Parsing methods
     std::unique_ptr<FunctionDecl> parseFunction(bool isOptMax);
     std::unique_ptr<FunctionDecl> parseExternFunctionDecl();
+    std::unique_ptr<ExternStructDecl> parseExternStructDecl();
     std::unique_ptr<Statement> parseStatement();
     std::unique_ptr<BlockStmt> parseBlock();
     std::unique_ptr<Statement> parseVarDecl(bool isConst);
