@@ -67,6 +67,17 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
         codegenError("Use of " + reason + " variable '" + expr->name + "'", expr);
     }
 
+    // Check global variable map first (global vars take priority over local shadows).
+    auto gvIt = globalVarMap_.find(expr->name);
+    if (gvIt != globalVarMap_.end()) {
+        llvm::GlobalVariable* gVar = gvIt->second;
+        auto* load = builder->CreateAlignedLoad(gVar->getValueType(), gVar,
+                                                llvm::MaybeAlign(8), expr->name.c_str());
+        if (nonNegValues_.count(gVar))
+            nonNegValues_.insert(load);
+        return load;
+    }
+
     auto it = namedValues.find(expr->name);
     if (it == namedValues.end() || !it->second) {
         // Check if this is an enum constant
@@ -3505,6 +3516,29 @@ llvm::Value* CodeGenerator::generateUnary(UnaryExpr* expr) {
 
 llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
     llvm::Value* value = generateExpression(expr->value.get());
+
+    // Check if this is a global variable assignment.
+    auto gvIt = globalVarMap_.find(expr->name);
+    if (gvIt != globalVarMap_.end()) {
+        llvm::GlobalVariable* gVar = gvIt->second;
+        llvm::Type* gTy = gVar->getValueType();
+        llvm::Value* coerced = convertTo(value, gTy);
+        builder->CreateAlignedStore(coerced, gVar, llvm::MaybeAlign(8));
+        if (gTy->isIntegerTy()) {
+            bool vnn = nonNegValues_.count(value) > 0;
+            if (!vnn) {
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(value))
+                    vnn = !ci->isNegative();
+            }
+            if (vnn) nonNegValues_.insert(gVar); else nonNegValues_.erase(gVar);
+        }
+        if (value->getType()->isPointerTy() || isStringExpr(expr->value.get()))
+            stringVars_.insert(expr->name);
+        else
+            stringVars_.erase(expr->name);
+        return coerced;
+    }
+
     auto it = namedValues.find(expr->name);
     if (it == namedValues.end() || !it->second) {
         codegenError("Unknown variable: " + expr->name, expr);

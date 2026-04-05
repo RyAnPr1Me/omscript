@@ -257,6 +257,14 @@ class CodeGenerator {
     llvm::StringMap<llvm::Value*> namedValues;
     std::vector<std::unordered_map<std::string, llvm::Value*>> scopeStack;
 
+    /// Module-level global variables declared with `global var`.
+    /// Maps variable name → the llvm::GlobalVariable* (used by loads/stores).
+    llvm::StringMap<llvm::GlobalVariable*> globalVarMap_;
+
+    /// Pointer to the current Program being compiled (set in generate()).
+    /// Needed by generateGlobalVarInits() which runs inside generateFunction("main").
+    Program* currentProgram_ = nullptr;
+
     struct LoopContext {
         llvm::BasicBlock* breakTarget;
         llvm::BasicBlock* continueTarget;
@@ -529,6 +537,7 @@ class CodeGenerator {
     void generateFor(ForStmt* stmt);
     void generateForEach(ForEachStmt* stmt);
     void generateBlock(BlockStmt* stmt);
+    void generateGlobalVarInits(); ///< Emit initialization code for `global var` decls at start of main.
     void generateExprStmt(ExprStmt* stmt);
     void generateSwitch(SwitchStmt* stmt);
     void generateTryCatch(TryCatchStmt* stmt);

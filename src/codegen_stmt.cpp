@@ -22,6 +22,11 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
         codegenError("Variable declaration outside of function", stmt);
     }
 
+    // Global variables are registered at module level; their initializers are
+    // emitted at the start of main via generateGlobalVarInits().  Skip here.
+    if (stmt->isGlobal)
+        return;
+
     // Resolve the alloca type from the type annotation if present.
     llvm::Type* allocaType = stmt->typeName.empty()
                                  ? getDefaultType()
@@ -1752,6 +1757,47 @@ void CodeGenerator::generateBlock(BlockStmt* stmt) {
 void CodeGenerator::generateExprStmt(ExprStmt* stmt) {
     generateExpression(stmt->expression.get());
 }
+
+void CodeGenerator::generateGlobalVarInits() {
+    if (!currentProgram_)
+        return;
+    for (auto& gv : currentProgram_->globalVars) {
+        auto gvIt = globalVarMap_.find(gv->name);
+        if (gvIt == globalVarMap_.end() || !gv->initializer)
+            continue;
+        llvm::GlobalVariable* gVar = gvIt->second;
+        llvm::Type* gTy = gVar->getValueType();
+        // Integer/float constants are set as static initializers; skip if the
+        // global already has a non-zero constant initializer.
+        if (auto* ci = llvm::dyn_cast<llvm::Constant>(gVar->getInitializer())) {
+            if (!ci->isNullValue())
+                continue; // already statically initialized
+        }
+        // Generate the initializer expression and store it into the global.
+        llvm::Value* initVal = generateExpression(gv->initializer.get());
+        // For simple integer/float literals, also update the global's static initializer
+        // so that it's correct even if code somehow runs before main.
+        if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(initVal)) {
+            if (gTy->isIntegerTy())
+                gVar->setInitializer(ci);
+        } else if (auto* cf = llvm::dyn_cast<llvm::ConstantFP>(initVal)) {
+            if (gTy->isDoubleTy())
+                gVar->setInitializer(cf);
+        }
+        // Coerce the value to the global's type.
+        initVal = convertTo(initVal, gTy);
+        builder->CreateAlignedStore(initVal, gVar, llvm::MaybeAlign(8));
+        // Track non-negativity.
+        if (gTy->isIntegerTy() && nonNegValues_.count(initVal))
+            nonNegValues_.insert(gVar);
+        // Track string globals.
+        if (initVal->getType()->isPointerTy() ||
+            (gv->initializer && isStringExpr(gv->initializer.get())))
+            stringVars_.insert(gv->name);
+    }
+}
+
+
 
 void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
     llvm::Value* condVal = generateExpression(stmt->condition.get());

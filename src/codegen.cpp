@@ -2106,6 +2106,8 @@ void CodeGenerator::generate(Program* program) {
     optMaxFunctions.clear();
     irInstructionCount_ = 0;
     fileNoAlias_ = program->fileNoAlias;
+    currentProgram_ = program;
+    globalVarMap_.clear();
 
     // --- DWARF debug info initialization ---
     if (debugMode_) {
@@ -2244,6 +2246,36 @@ void CodeGenerator::generate(Program* program) {
     getOrDeclareTolower();
     getOrDeclareIsspace();
     getOrDeclareRealloc();
+
+    // Register file-level `const` and `extern struct` from the program.
+    // (These are processed below in their respective loops.)
+
+    // ── Global variables ────────────────────────────────────────────────────
+    // Create LLVM global variables for each `global var` declaration.
+    // All globals are zero-initialized in the IR; any non-trivial initializers
+    // (function calls, array literals, strings) are emitted at the start of
+    // `main` via generateGlobalVarInit().
+    for (auto& gv : program->globalVars) {
+        if (globalVarMap_.count(gv->name))
+            continue; // already declared (shouldn't happen)
+        // Determine the LLVM type: use the type annotation if present, else i64.
+        llvm::Type* gTy = gv->typeName.empty() ? getDefaultType()
+                                                : resolveAnnotatedType(gv->typeName);
+        // For constant initializers we can determine the type from the literal.
+        if (gv->typeName.empty() && gv->initializer) {
+            if (gv->initializer->type == ASTNodeType::LITERAL_EXPR) {
+                auto* lit = static_cast<LiteralExpr*>(gv->initializer.get());
+                if (lit->literalType == LiteralExpr::LiteralType::FLOAT)
+                    gTy = getFloatType();
+            }
+        }
+        auto* gVar = new llvm::GlobalVariable(*module, gTy, /*isConstant=*/false,
+                                              llvm::GlobalValue::InternalLinkage,
+                                              llvm::Constant::getNullValue(gTy),
+                                              "gv." + gv->name);
+        gVar->setAlignment(llvm::Align(8));
+        globalVarMap_[gv->name] = gVar;
+    }
 
     // Forward-declare all functions so that any function can reference any
     // other regardless of source-file ordering (enables mutual recursion).
@@ -3134,6 +3166,14 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         }
 
         ++argIt;
+    }
+
+    // If this is `main`, initialize all global variables that have non-trivial
+    // initializers (function calls, array/string literals, etc.).
+    // Simple integer/float constants are already zero-initialized in the LLVM
+    // global, so we only need to emit stores for real initializer expressions.
+    if (func->name == "main") {
+        generateGlobalVarInits();
     }
 
     // Generate function body

@@ -102,6 +102,7 @@ std::unique_ptr<Program> Parser::parse() {
     std::vector<std::unique_ptr<StructDecl>> structs;
     std::vector<std::pair<std::string, long long>> constants;
     std::vector<std::unique_ptr<ExternStructDecl>> externStructs;
+    std::vector<std::unique_ptr<VarDecl>> globalVars;
     bool optMaxTagActive = false;
     bool fileNoAlias = false;
 
@@ -162,6 +163,25 @@ std::unique_ptr<Program> Parser::parse() {
                 synchronize();
             }
             continue;
+        }
+        // File-level `global var name [: type] [= expr];` declaration.
+        // Creates a module-level mutable variable visible to all functions.
+        if (check(TokenType::IDENTIFIER) && peek().lexeme == "global") {
+            if (current + 1 < tokens.size() && tokens[current + 1].type == TokenType::VAR) {
+                try {
+                    advance(); // consume 'global'
+                    advance(); // consume 'var'
+                    auto stmt = parseVarDecl(/*isConst=*/false);
+                    consume(TokenType::SEMICOLON, "Expected ';' after global variable declaration");
+                    auto* vd = static_cast<VarDecl*>(stmt.get());
+                    vd->isGlobal = true;
+                    globalVars.push_back(std::unique_ptr<VarDecl>(static_cast<VarDecl*>(stmt.release())));
+                } catch (const std::runtime_error& e) {
+                    errors_.push_back(e.what());
+                    synchronize();
+                }
+                continue;
+            }
         }
         // File-level const NAME = LITERAL; — registers an integer constant
         // visible throughout the entire program (like an enum member without a prefix).
@@ -336,6 +356,7 @@ std::unique_ptr<Program> Parser::parse() {
     auto prog = std::make_unique<Program>(std::move(functions), std::move(enums), std::move(structs), fileNoAlias);
     prog->constants = std::move(constants);
     prog->externStructs = std::move(externStructs);
+    prog->globalVars = std::move(globalVars);
     return prog;
 }
 

@@ -244,6 +244,7 @@ class VarDecl : public Statement {
     bool isConst;
     std::string typeName;
     bool isRegister = false; ///< `register var` — force variable into CPU register via mem2reg
+    bool isGlobal   = false; ///< `global var`  — module-level mutable variable (visible to all functions)
 
     VarDecl(const std::string& n, std::unique_ptr<Expression> init, bool cnst = false, const std::string& type = "")
         : Statement(ASTNodeType::VAR_DECL), name(n), initializer(std::move(init)), isConst(cnst), typeName(type) {}
@@ -575,6 +576,10 @@ class Program : public ASTNode {
 
     /// `extern struct` declarations for C++ interoperability.
     std::vector<std::unique_ptr<ExternStructDecl>> externStructs;
+
+    /// File-level `global var name = expr;` declarations.
+    /// These become LLVM global variables visible (and mutable) from every function.
+    std::vector<std::unique_ptr<VarDecl>> globalVars;
 
     Program(std::vector<std::unique_ptr<FunctionDecl>> funcs, std::vector<std::unique_ptr<EnumDecl>> enms = {},
             std::vector<std::unique_ptr<StructDecl>> strcts = {}, bool noAlias = false)
