@@ -1,0 +1,9 @@
+import "codegen.om";
+fn main() {
+    var src = "fn main() { return 42; }";
+    var root = parse(src);
+    if (root == -1) { println("parse failed"); return 1; }
+    var ir = generate_llvm_ir(root);
+    print(ir);
+    return 0;
+}

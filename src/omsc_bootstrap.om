@@ -1,0 +1,69 @@
+// omsc_bootstrap.om — Compiler driver for the bootstrapped OmScript compiler.
+// Ties together lexer.om, parser.om, and codegen.om into a working compiler.
+//
+// Since OmScript doesn't have a built-in args() function, this driver
+// reads the input filename from stdin. Usage:
+//   echo "input.om" | ./omsc_boot
+// Or interactively:
+//   ./omsc_boot
+//   > input.om
+
+import "codegen.om";
+
+extern fn system(cmd: string) -> i64;
+
+fn main() {
+    println("omsc-bootstrap: enter input filename:");
+    var input_file = input_line();
+
+    if (str_len(input_file) == 0) {
+        println("Error: no input file specified");
+        return 1;
+    }
+
+    // Read source file
+    var source = file_read(input_file);
+    if (str_len(source) == 0) {
+        println("Error: could not read file or file is empty: " + input_file);
+        return 1;
+    }
+
+    // Parse
+    var root = parse(source);
+    if (root == -1) {
+        println("Error: parse failed: " + g_error_msg);
+        return 1;
+    }
+
+    // Generate LLVM IR
+    var ir = generate_llvm_ir(root);
+
+    // Write IR to temp file
+    var ir_file = "/tmp/_omsc_boot.ll";
+    var obj_file = "/tmp/_omsc_boot.o";
+    file_write(ir_file, ir);
+
+    // Compile IR to object code with llc
+    var llc_cmd = "llc-18 -filetype=obj -O2 -o " + obj_file + " " + ir_file;
+    var llc_rc = system(llc_cmd);
+    if (llc_rc != 0) {
+        println("Error: llc-18 failed (exit code " + to_string(llc_rc) + ")");
+        system("rm -f " + ir_file);
+        return 1;
+    }
+
+    // Link object file
+    var link_cmd = "cc -O2 -o a.out " + obj_file + " -lm";
+    var link_rc = system(link_cmd);
+    if (link_rc != 0) {
+        println("Error: linking failed (exit code " + to_string(link_rc) + ")");
+        system("rm -f " + ir_file + " " + obj_file);
+        return 1;
+    }
+
+    // Clean up temp files
+    system("rm -f " + ir_file + " " + obj_file);
+
+    println("compiled a.out");
+    return 0;
+}
