@@ -3536,6 +3536,11 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
             stringVars_.insert(expr->name);
         else
             stringVars_.erase(expr->name);
+        // Track string-array globals: push(g_arr, "str") makes g_arr a string array.
+        if (isStringArrayExpr(expr->value.get()))
+            stringArrayVars_.insert(expr->name);
+        else
+            stringArrayVars_.erase(expr->name);
         return coerced;
     }
 

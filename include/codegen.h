@@ -364,6 +364,10 @@ class CodeGenerator {
     llvm::StringSet<> stringReturningFunctions_;
     std::unordered_map<std::string, std::unordered_set<size_t>> funcParamStringTypes_;
     llvm::StringSet<> stringArrayVars_;
+    // globalStringArrayVars_: global vars known to hold string arrays.
+    //   Persists across function boundaries (not cleared in generateFunction).
+    //   Populated in generateGlobalVarInits when push(arr, str) is detected.
+    llvm::StringSet<> globalStringArrayVars_;
     // structFieldStringArrays_: maps "structType.fieldName" to 1 when a struct
     //   field is known to hold a string array.  Used by isStringArrayExpr when
     //   the base expression is a FieldAccessExpr (e.g. ts.lexemes[i]).

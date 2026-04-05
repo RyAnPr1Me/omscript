@@ -1,6 +1,0 @@
-import "lexer.om";
-
-fn main() {
-    println(to_string(TOK_COLON));
-    return 0;
-}

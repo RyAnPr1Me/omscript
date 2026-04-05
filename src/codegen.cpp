@@ -2071,8 +2071,11 @@ bool CodeGenerator::isStringArrayExpr(Expression* expr) const {
     if (!expr)
         return false;
     // Variable whose name is tracked as a string array.
-    if (expr->type == ASTNodeType::IDENTIFIER_EXPR)
-        return stringArrayVars_.count(static_cast<IdentifierExpr*>(expr)->name) > 0;
+    if (expr->type == ASTNodeType::IDENTIFIER_EXPR) {
+        const auto& name = static_cast<IdentifierExpr*>(expr)->name;
+        return stringArrayVars_.count(name) > 0
+            || globalStringArrayVars_.count(name) > 0;
+    }
     // Struct field access: ts.lexemes, ts.lines, etc. — look up the struct type
     // and check if the field was registered as a string array when the struct
     // literal was created.  This propagates string-array type info through
@@ -3148,7 +3151,20 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     constValues.clear();
     constScopeStack.clear();
     stringVars_.clear();
+    // Preserve string-array tracking for global vars across function boundaries.
+    // When a function does push(g_arr, "str"), g_arr gets added to stringArrayVars_.
+    // We persist this in globalStringArrayVars_ so all subsequent functions know
+    // g_arr holds strings (e.g. for g_nd_sval[id] in parser.om).
+    if (currentProgram_) {
+        for (auto& gv : currentProgram_->globalVars) {
+            if (stringArrayVars_.count(gv->name))
+                globalStringArrayVars_.insert(gv->name);
+        }
+    }
     stringArrayVars_.clear();
+    // Restore global string-array entries into per-function stringArrayVars_.
+    for (auto& entry : globalStringArrayVars_)
+        stringArrayVars_.insert(entry.first());
     // Pre-populate stringVars_ with global variables that hold strings.
     // generateGlobalVarInits() tracks these in main, but other functions
     // start with a fresh stringVars_ set and lose the information.  Without
