@@ -255,6 +255,16 @@ std::unique_ptr<llvm::TargetMachine> CodeGenerator::createTargetMachine() const 
         opt.NoNaNsFPMath = true;
         opt.NoSignedZerosFPMath = true;
     }
+    // At O2+, enable FP operation fusion (fmul+fadd → fma) at the backend
+    // level.  This is independent of fast-math flags — it tells the backend
+    // code generator to fuse FP operations when the hardware supports it
+    // (e.g. x86 FMA3, ARM NEON).  FMA fusion produces a more precise result
+    // (one rounding instead of two) and uses fewer cycles (1 fma vs 1 fmul +
+    // 1 fadd), so it is always beneficial.  Without this, the backend only
+    // fuses when fast-math is globally enabled.
+    if (optimizationLevel >= OptimizationLevel::O2) {
+        opt.AllowFPOpFusion = llvm::FPOpFusion::Fast;
+    }
     const std::optional<llvm::Reloc::Model> RM = usePIC_ ? llvm::Reloc::PIC_ : llvm::Reloc::Static;
 
     std::string cpu;
@@ -393,14 +403,25 @@ void CodeGenerator::runOptimizationPasses() {
     if (optimizationLevel >= OptimizationLevel::O2) {
         PTO.MergeFunctions = true;
         PTO.CallGraphProfile = true;
+        // Increase inliner threshold from the LLVM default (225) to account
+        // for OmScript's small-function style.  Most OmScript functions are
+        // short (10-30 statements), so a higher threshold enables full inlining
+        // of typical helper functions and loop bodies.  The threshold is the
+        // cost budget: instructions below this cost are always inlined.
+        PTO.InlinerThreshold = 500;
     }
     if (optimizationLevel == OptimizationLevel::O3) {
         PTO.InlinerThreshold = 1000; // aggressive inlining for maximum IPC
-        // ForgetAllSCEVInLoopUnroll forces SCEV to recompute trip counts after
-        // each unrolling step.  Without this, stale trip-count information from
-        // before unrolling can cause the unroller to make suboptimal decisions
-        // on subsequent iterations (e.g. under-unrolling a loop whose trip
-        // count became statically known after partial unrolling).
+    }
+    // ForgetAllSCEVInLoopUnroll forces SCEV to recompute trip counts after
+    // each unrolling step.  Without this, stale trip-count information from
+    // before unrolling can cause the unroller to make suboptimal decisions
+    // on subsequent iterations (e.g. under-unrolling a loop whose trip
+    // count became statically known after partial unrolling).
+    // Promoted from O3-only to O2+: the compile-time cost is small (one
+    // extra SCEV query per unroll iteration), and accurate trip counts are
+    // critical for OmScript's counted-loop patterns.
+    if (optimizationLevel >= OptimizationLevel::O2) {
         PTO.ForgetAllSCEVInLoopUnroll = true;
     }
 
@@ -665,13 +686,22 @@ void CodeGenerator::runOptimizationPasses() {
         PB.registerCGSCCOptimizerLateEPCallback(
             [](llvm::CGSCCPassManager& CGPM, llvm::OptimizationLevel /*Level*/) {
             CGPM.addPass(llvm::ArgumentPromotionPass());
-            // AttributorCGSCCPass performs context-sensitive, call-graph-aware
-            // attribute inference.  Unlike InferFunctionAttrsPass (which only
-            // infers library function attributes), Attributor propagates:
-            // noalias, nofree, nosync, nounwind, readnone, readonly, willreturn,
-            // nocapture, and more across the entire call graph.  This enables
-            // downstream passes (LICM, DSE, vectorizer) to make stronger
-            // assumptions about function behavior.
+        });
+    }
+    // AttributorCGSCCPass performs context-sensitive, call-graph-aware
+    // attribute inference.  Unlike InferFunctionAttrsPass (which only
+    // infers library function attributes), Attributor propagates:
+    // noalias, nofree, nosync, nounwind, readnone, readonly, willreturn,
+    // nocapture, and more across the entire call graph.  This enables
+    // downstream passes (LICM, DSE, vectorizer) to make stronger
+    // assumptions about function behavior.
+    // Promoted from O3 to O2: OmScript's ownership model already
+    // guarantees many of these attributes, but Attributor can infer
+    // additional ones (e.g. readnone for pure functions, nocapture for
+    // non-escaping parameters) that the manual codegen annotations miss.
+    if (optimizationLevel >= OptimizationLevel::O2) {
+        PB.registerCGSCCOptimizerLateEPCallback(
+            [](llvm::CGSCCPassManager& CGPM, llvm::OptimizationLevel /*Level*/) {
             CGPM.addPass(llvm::AttributorCGSCCPass());
         });
     }
@@ -777,9 +807,19 @@ void CodeGenerator::runOptimizationPasses() {
                 // for loops that contain freeze-guarded induction variables.
                 // This enables better vectorization and unrolling decisions.
                 LPM.addPass(llvm::CanonicalizeFreezeInLoopsPass());
-                if (isO3) {
+                // LoopFlatten collapses nested loops with a simple inner trip
+                // count into a single loop, reducing loop overhead (branch,
+                // compare, increment) and enabling better vectorization of
+                // matrix-style access patterns.  Promoted from O3-only to
+                // O2+ with -floop-optimize because OmScript's nested for-loops
+                // commonly iterate over 2D array patterns.
+                if (isO3 || loopOpt) {
                     LPM.addPass(llvm::LoopFlattenPass());
-                    LPM.addPass(llvm::LoopUnrollAndJamPass(/*OptLevel=*/3));
+                    // LoopUnrollAndJam unrolls an outer loop and fuses (jams)
+                    // iterations of the inner loop together, improving data
+                    // reuse across outer-loop iterations.  This is especially
+                    // beneficial for matrix multiplication and stencil patterns.
+                    LPM.addPass(llvm::LoopUnrollAndJamPass(/*OptLevel=*/isO3 ? 3 : 2));
                 }
                 // LoopPredication converts bounds checks inside loops into
                 // loop-invariant predicates (check once, not every iteration).
@@ -817,8 +857,16 @@ void CodeGenerator::runOptimizationPasses() {
     // At O2+, consolidate all ScalarOptimizerLateEP passes into one callback.
     if (optimizationLevel >= OptimizationLevel::O2) {
         const bool isO3 = optimizationLevel >= OptimizationLevel::O3;
-        PB.registerScalarOptimizerLateEPCallback([isO3](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel /*Level*/) {
-            if (isO3) FPM.addPass(llvm::LoopDataPrefetchPass());
+        const bool loopOpt = enableLoopOptimize_;
+        PB.registerScalarOptimizerLateEPCallback([isO3, loopOpt](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel /*Level*/) {
+            // LoopDataPrefetch inserts software prefetch instructions for loops
+            // with predictable stride access patterns.  Promoted from O3-only
+            // to O2+ with -floop-optimize: OmScript's array-walking loops
+            // benefit significantly from prefetching, and the overhead of extra
+            // prefetch instructions is offset by reduced cache miss latency.
+            // Without -floop-optimize, stays O3-only to avoid hurting tight
+            // loops with good L1 locality.
+            if (isO3 || loopOpt) FPM.addPass(llvm::LoopDataPrefetchPass());
             // CVP uses value-range info to sharpen comparisons and convert
             // signed ops to unsigned.
             FPM.addPass(llvm::CorrelatedValuePropagationPass());
@@ -984,18 +1032,19 @@ void CodeGenerator::runOptimizationPasses() {
             // always called with a specific constant argument.
             MPM.addPass(llvm::IPSCCPPass());
             MPM.addPass(llvm::DeadArgumentEliminationPass());
-            if (isO3) {
-                // PartialInlinerPass outlines cold regions (error handling, slow
-                // paths) from otherwise-hot functions and inlines only the hot
-                // entry region into callers.  This gives the performance benefit
-                // of inlining (no call overhead on the fast path) without the
-                // code-size cost of inlining the entire function body.
-                MPM.addPass(llvm::PartialInlinerPass());
-            }
+            // PartialInlinerPass outlines cold regions (error handling, slow
+            // paths) from otherwise-hot functions and inlines only the hot
+            // entry region into callers.  This gives the performance benefit
+            // of inlining (no call overhead on the fast path) without the
+            // code-size cost of inlining the entire function body.
+            // Promoted from O3 to O2: OmScript functions commonly have
+            // bounds-check error paths that are cold; partial inlining moves
+            // only the hot fast-path into callers.
+            MPM.addPass(llvm::PartialInlinerPass());
         });
     }
 
-    // At O3, run srem→urem and sdiv→udiv conversion as an OptimizerLast
+    // Run srem→urem and sdiv→udiv conversion as an OptimizerLast
     // callback BEFORE HotColdSplitting.  The vectorizer (which runs earlier
     // in the pipeline) creates vector srem instructions from the original
     // scalar urem/srem.  At this point the loop counter PHI nodes still
@@ -1003,7 +1052,11 @@ void CodeGenerator::runOptimizationPasses() {
     // After HotColdSplitting, the loop code may be outlined into a separate
     // function where the loop counters become parameters without non-negativity
     // metadata, making the srem→urem proof impossible.
-    if (enableSuperopt_ && optimizationLevel >= OptimizationLevel::O2) {
+    // Promoted from superopt-only to unconditional at O2+: srem→urem is
+    // always safe when the operands are provably non-negative, and the
+    // conversion saves ~10 instructions per modulo operation (no sign
+    // correction needed).
+    if (optimizationLevel >= OptimizationLevel::O2) {
         PB.registerOptimizerLastEPCallback(
             [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/ OM_MODULE_EP_EXTRA_PARAM) {
             struct SRemToURemPass : public llvm::PassInfoMixin<SRemToURemPass> {
@@ -1027,14 +1080,17 @@ void CodeGenerator::runOptimizationPasses() {
         });
     }
 
-    // At O3, run HotColdSplitting to outline cold code regions (error
-    // handlers, assertion failures, rarely-taken branches) into separate
-    // functions.  This improves I-cache density on the hot path and
-    // enables better register allocation and instruction scheduling in
-    // the remaining hot code.
-    if (optimizationLevel >= OptimizationLevel::O3) {
+    // HotColdSplitting outlines cold code regions (error handlers, assertion
+    // failures, rarely-taken branches) into separate functions.  This improves
+    // I-cache density on the hot path and enables better register allocation
+    // and instruction scheduling in the remaining hot code.
+    // Promoted from O3 to O2: OmScript generates bounds-check error paths
+    // on every array access, and HotColdSplitting moves these cold abort
+    // paths out of hot loops, significantly improving I-cache utilization.
+    if (optimizationLevel >= OptimizationLevel::O2) {
+        const bool isO3 = optimizationLevel >= OptimizationLevel::O3;
         PB.registerOptimizerLastEPCallback(
-            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/ OM_MODULE_EP_EXTRA_PARAM) {
+            [isO3](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/ OM_MODULE_EP_EXTRA_PARAM) {
             MPM.addPass(llvm::HotColdSplittingPass());
             // StripDeadPrototypes removes unused external function declarations.
             // After inlining, dead argument elimination, and DCE, many declared-
@@ -1045,18 +1101,13 @@ void CodeGenerator::runOptimizationPasses() {
             // separate globals, enabling more precise alias analysis and
             // allowing SROA/mem2reg to promote individual fields to registers.
             MPM.addPass(llvm::GlobalSplitPass());
-            // MergeFunctions deduplicates identical function bodies, reducing
-            // code size and I-cache pressure.  OmScript's monomorphization of
-            // generic functions often produces identical machine code for
-            // different type instantiations.
-            MPM.addPass(llvm::MergeFunctionsPass());
-        });
-    }
-    // At O2, still strip dead prototypes for cleaner output.
-    if (optimizationLevel == OptimizationLevel::O2) {
-        PB.registerOptimizerLastEPCallback(
-            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/ OM_MODULE_EP_EXTRA_PARAM) {
-            MPM.addPass(llvm::StripDeadPrototypesPass());
+            if (isO3) {
+                // MergeFunctions deduplicates identical function bodies, reducing
+                // code size and I-cache pressure.  OmScript's monomorphization of
+                // generic functions often produces identical machine code for
+                // different type instantiations.
+                MPM.addPass(llvm::MergeFunctionsPass());
+            }
         });
     }
 

@@ -1089,6 +1089,13 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         // signed overflow cannot occur, enabling nsw even when we can't
         // statically prove non-negativity.  nsw enables SCEV to compute
         // tighter loop trip counts and proves induction variable monotonicity.
+        //
+        // Two-tier flag assignment:
+        //   canNSWNUW (both non-neg proven) → nsw + nuw (strongest, enables
+        //     unsigned SCEV ranges and non-negative tracking)
+        //   canNSW (@optmax or partial proof) → nsw only (no nuw because
+        //     negative operands can still wrap unsigned)
+        //   neither → no flags (conservative, no UB assumptions)
         const bool canNSWNUW = bothOperandsNonNeg || constNonNeg;
         const bool canNSW = canNSWNUW || inOptMaxFunction;
         auto* result = canNSWNUW
@@ -1099,7 +1106,8 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         // Track non-negativity: if both operands are known non-negative
         // (including constant operands), the result is non-negative
         // (assuming no overflow, which is true for typical loop counter
-        // arithmetic).
+        // arithmetic).  canNSW-only (@optmax) does NOT prove non-negativity
+        // of the result — the operands might be negative.
         if (canNSWNUW)
             nonNegValues_.insert(result);
         return result;
@@ -1134,9 +1142,11 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 const bool leftNonNeg = nonNegValues_.count(left);
                 // For non-negative base × positive power-of-2: emit NSWMul so
                 // LLVM's SCEV can track the result range (shift loses flags).
-                if (leftNonNeg) {
+                // @optmax: always use NSWMul since the user guarantees no overflow.
+                if (leftNonNeg || inOptMaxFunction) {
                     auto* result = builder->CreateNSWMul(left, right, "multmp");
-                    nonNegValues_.insert(result);
+                    if (leftNonNeg)
+                        nonNegValues_.insert(result);
                     return result;
                 }
                 return builder->CreateShl(left, llvm::ConstantInt::get(getDefaultType(), s), "shltmp");
@@ -1146,9 +1156,10 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             const int s = log2IfPowerOf2(ci->getSExtValue());
             if (s >= 0) {
                 const bool rightNonNeg = nonNegValues_.count(right);
-                if (rightNonNeg) {
+                if (rightNonNeg || inOptMaxFunction) {
                     auto* result = builder->CreateNSWMul(right, left, "multmp");
-                    nonNegValues_.insert(result);
+                    if (rightNonNeg)
+                        nonNegValues_.insert(result);
                     return result;
                 }
                 return builder->CreateShl(right, llvm::ConstantInt::get(getDefaultType(), s), "shltmp");

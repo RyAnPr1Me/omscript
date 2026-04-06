@@ -3152,6 +3152,10 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     //   4. Use reciprocal approximations for division
     // The flags are saved and restored after the function body so they don't
     // leak into subsequent non-OPTMAX functions.
+    // Guard: when useFastMath_ is already globally enabled, the builder's FMF
+    // is already set to fast (line 2314-2316), so no per-function override is
+    // needed.  The save/restore is still correct — savedFMF captures the
+    // existing fast flags and restores them identically.
     llvm::FastMathFlags savedFMF = builder->getFastMathFlags();
     if (inOptMaxFunction && !useFastMath_) {
         llvm::FastMathFlags FMF;

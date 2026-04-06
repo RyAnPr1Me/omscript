@@ -263,7 +263,12 @@ void CodeGenerator::generateReturn(ReturnStmt* stmt) {
 
         // Tail call optimization: if the return value is a direct function
         // call, mark it as a tail call so LLVM can eliminate the stack frame.
-        if (optimizationLevel >= OptimizationLevel::O2) {
+        // Lowered from O2 to O1: TCO eliminates stack frame overhead (save/
+        // restore of callee-saved registers, stack pointer manipulation) and
+        // is always beneficial.  At O1, the inliner is less aggressive, so
+        // tail calls that would be inlined at O2+ are still present and
+        // benefit from TCO marking.
+        if (optimizationLevel >= OptimizationLevel::O1) {
             if (auto* callInst = llvm::dyn_cast<llvm::CallInst>(retValue)) {
                 callInst->setTailCallKind(llvm::CallInst::TCK_Tail);
             }
@@ -1624,7 +1629,9 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
     llvm::Value* elemVal;
     if (isStr) {
         // String: load single byte at offset bodyIdx, zero-extend to i64
-        llvm::Value* charPtr = builder->CreateGEP(llvm::Type::getInt8Ty(*context), basePtr, bodyIdx, "foreach.charptr");
+        // inbounds GEP: the loop guard (bodyIdx < strlen) guarantees the
+        // index is within the allocated string buffer.
+        llvm::Value* charPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), basePtr, bodyIdx, "foreach.charptr");
         llvm::Value* charByte = builder->CreateLoad(llvm::Type::getInt8Ty(*context), charPtr, "foreach.char");
         elemVal = builder->CreateZExt(charByte, getDefaultType(), "foreach.charext");
     } else {
