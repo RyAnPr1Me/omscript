@@ -1173,8 +1173,13 @@ llvm::Function* CodeGenerator::getOrDeclareStrcpy() {
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strcpy", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    fn->addFnAttr(llvm::Attribute::NoSync);
+    // memory(argmem: readwrite): strcpy only accesses memory through its pointer args.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::argMemOnly()));
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     fn->addParamAttr(0, llvm::Attribute::Returned); // strcpy returns the destination pointer
+    OMSC_ADD_NOCAPTURE(fn, 0);
     fn->addParamAttr(1, llvm::Attribute::ReadOnly);
     fn->addParamAttr(1, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 1);
@@ -1189,8 +1194,13 @@ llvm::Function* CodeGenerator::getOrDeclareStrcat() {
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strcat", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    fn->addFnAttr(llvm::Attribute::NoSync);
+    // memory(argmem: readwrite): strcat only accesses memory through its pointer args.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::argMemOnly()));
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     fn->addParamAttr(0, llvm::Attribute::Returned); // strcat returns the destination pointer
+    OMSC_ADD_NOCAPTURE(fn, 0);
     fn->addParamAttr(1, llvm::Attribute::ReadOnly);
     fn->addParamAttr(1, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 1);
@@ -1277,6 +1287,11 @@ llvm::Function* CodeGenerator::getOrDeclarePuts() {
                                        {llvm::PointerType::getUnqual(*context)}, false);
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "puts", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    fn->addParamAttr(0, llvm::Attribute::ReadOnly);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    OMSC_ADD_NOCAPTURE(fn, 0);
     return fn;
 }
 

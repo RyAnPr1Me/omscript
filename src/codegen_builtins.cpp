@@ -259,11 +259,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             if (!arg->getType()->isPointerTy()) {
                 arg = builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "print.str.ptr");
             }
-            llvm::GlobalVariable* strFmt = module->getGlobalVariable("print_str_fmt", true);
-            if (!strFmt) {
-                strFmt = builder->CreateGlobalString("%s\n", "print_str_fmt");
-            }
-            builder->CreateCall(getPrintfFunction(), {strFmt, arg});
+            // Use puts() instead of printf("%s\n", ...) — puts appends a
+            // newline automatically and avoids format-string parsing overhead.
+            builder->CreateCall(getOrDeclarePuts(), {arg});
             return llvm::ConstantInt::get(getDefaultType(), 0);
         } else {
             // Print integer
@@ -3612,11 +3610,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             if (!arg->getType()->isPointerTy()) {
                 arg = builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "println.str.ptr");
             }
-            llvm::GlobalVariable* strFmt = module->getGlobalVariable("println_str_fmt", true);
-            if (!strFmt) {
-                strFmt = builder->CreateGlobalString("%s\n", "println_str_fmt");
-            }
-            builder->CreateCall(getPrintfFunction(), {strFmt, arg});
+            // Use puts() instead of printf("%s\n", ...) — puts appends a
+            // newline automatically and avoids format-string parsing overhead.
+            builder->CreateCall(getOrDeclarePuts(), {arg});
         } else {
             llvm::GlobalVariable* formatStr = module->getGlobalVariable("println_fmt", true);
             if (!formatStr) {
