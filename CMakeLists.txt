@@ -190,6 +190,11 @@ if(PGO_GENERATE)
     if(PGO_PROFILE_DIR)
         set(flags "${flags}=${PGO_PROFILE_DIR}")
     endif()
+    # Atomic profile updates: safe when the instrumented binary is invoked
+    # concurrently (e.g. run_tests.sh compiling multiple .om files).
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+        set(flags "${flags} -fprofile-update=atomic")
+    endif()
     target_compile_options(omsc PRIVATE ${flags})
     target_link_options(omsc PRIVATE ${flags})
 endif()
@@ -202,6 +207,11 @@ if(PGO_USE)
         target_compile_options(omsc PRIVATE
             -fprofile-use=${PGO_USE}
             -fprofile-correction
+            # Treat untrained code paths as cold.  Without this flag GCC
+            # gives equal weight to trained and untrained paths, which
+            # pollutes branch-probability estimates for functions that were
+            # only partially covered during PGO training.
+            -fprofile-partial-training
             -Wno-missing-profile
         )
         target_link_options(omsc PRIVATE -fprofile-use=${PGO_USE})
