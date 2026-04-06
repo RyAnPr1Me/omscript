@@ -321,7 +321,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Convert to integer first if needed (e.g. if stored in a float variable)
         arg = toDefaultType(arg);
         llvm::Value* arrPtr = builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "arrptr");
-        auto* arrlenLoad = builder->CreateLoad(getDefaultType(), arrPtr, "arrlen");
+        auto* arrlenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "arrlen");
         arrlenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
         arrlenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
         nonNegValues_.insert(arrlenLoad);
@@ -5491,7 +5491,14 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         }
     }
 
-    return builder->CreateCall(callee, args, "calltmp");
+    auto* callResult = builder->CreateCall(callee, args, "calltmp");
+    // When the callee is marked nounwind (all user-defined functions are at
+    // O2+), propagate that to the call site so LLVM can eliminate invoke/
+    // landingpad overhead at the call boundary and enable better inlining.
+    if (callee->doesNotThrow()) {
+        callResult->setDoesNotThrow();
+    }
+    return callResult;
 }
 
 } // namespace omscript

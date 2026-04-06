@@ -2602,7 +2602,11 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 nonNegValues_.insert(result);
                 return result;
             }
-            if (auto* result = emitShiftAdd(left, rv, false)) {
+            // Pass leftNonNeg so that shift+add decompositions set NSW on
+            // intermediate additions when the base is non-negative — this
+            // enables SCEV to compute tighter trip counts when the multiply
+            // result feeds a loop bound or induction variable.
+            if (auto* result = emitShiftAdd(left, rv, leftNonNeg)) {
                 return result;
             }
             // Negative constant strength reduction: n * (-K) → neg(n * K).
@@ -2610,7 +2614,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             // value, then negates the result.  A single neg (sub 0, x) is far
             // cheaper than a hardware multiply.
             if (rv < -1) {
-                if (auto* posResult = emitShiftAdd(left, -rv, false)) {
+                if (auto* posResult = emitShiftAdd(left, -rv, leftNonNeg)) {
                     return builder->CreateNeg(posResult, "mulneg");
                 }
             }
@@ -2625,11 +2629,11 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 nonNegValues_.insert(result);
                 return result;
             }
-            if (auto* result = emitShiftAdd(right, lv, false)) {
+            if (auto* result = emitShiftAdd(right, lv, rightNonNeg)) {
                 return result;
             }
             if (lv < -1) {
-                if (auto* posResult = emitShiftAdd(right, -lv, false)) {
+                if (auto* posResult = emitShiftAdd(right, -lv, rightNonNeg)) {
                     return builder->CreateNeg(posResult, "mulneg");
                 }
             }
