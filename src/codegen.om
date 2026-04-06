@@ -442,6 +442,11 @@ fn codegen_expr(nd) {
             emit(pow_end + ":"); g_current_block = pow_end;
             var pow_result = fresh_tmp(); emit_indent(pow_result + " = load i64, i64* " + res_reg);
             return pow_result;
+        } else if (str_eq(op, "??")) {
+            // Null coalesce: left ?? right → left if non-zero, else right
+            var cmp = fresh_tmp();
+            emit_indent(cmp + " = icmp ne i64 " + left_val + ", 0");
+            emit_indent(result + " = select i1 " + cmp + ", i64 " + left_val + ", i64 " + right_val);
         } else {
             emit_indent("; WARNING: unknown binary op '" + op + "'");
             emit_indent(result + " = add i64 " + left_val + ", 0");
@@ -1563,7 +1568,14 @@ fn codegen_call(nd) {
     // ────── gcd(a, b) ──────
     if (str_eq(fname, "gcd")) {
         var a_nd = g_ch[arg_start]; var b_nd = g_ch[arg_start + 1];
-        var a = codegen_expr(a_nd); var b = codegen_expr(b_nd);
+        var a_raw = codegen_expr(a_nd); var b_raw = codegen_expr(b_nd);
+        // Take absolute values
+        var a_neg = fresh_tmp(); emit_indent(a_neg + " = sub i64 0, " + a_raw);
+        var a_lt = fresh_tmp(); emit_indent(a_lt + " = icmp slt i64 " + a_raw + ", 0");
+        var a = fresh_tmp(); emit_indent(a + " = select i1 " + a_lt + ", i64 " + a_neg + ", i64 " + a_raw);
+        var b_neg = fresh_tmp(); emit_indent(b_neg + " = sub i64 0, " + b_raw);
+        var b_lt = fresh_tmp(); emit_indent(b_lt + " = icmp slt i64 " + b_raw + ", 0");
+        var b = fresh_tmp(); emit_indent(b + " = select i1 " + b_lt + ", i64 " + b_neg + ", i64 " + b_raw);
         var ar = fresh_tmp(); emit_indent(ar + " = alloca i64"); emit_indent("store i64 " + a + ", i64* " + ar);
         var br2 = fresh_tmp(); emit_indent(br2 + " = alloca i64"); emit_indent("store i64 " + b + ", i64* " + br2);
         var gl = fresh_label(); var gb = fresh_label(); var ge = fresh_label();
@@ -1586,9 +1598,16 @@ fn codegen_call(nd) {
 
     // ────── lcm(a, b) ──────
     if (str_eq(fname, "lcm")) {
-        // lcm(a, b) = a / gcd(a, b) * b — avoid overflow
+        // lcm(a, b) = |a| / gcd(|a|, |b|) * |b|
         var a_nd = g_ch[arg_start]; var b_nd = g_ch[arg_start + 1];
-        var a = codegen_expr(a_nd); var b = codegen_expr(b_nd);
+        var a_raw = codegen_expr(a_nd); var b_raw = codegen_expr(b_nd);
+        // Absolute values
+        var a_neg2 = fresh_tmp(); emit_indent(a_neg2 + " = sub i64 0, " + a_raw);
+        var a_lt2 = fresh_tmp(); emit_indent(a_lt2 + " = icmp slt i64 " + a_raw + ", 0");
+        var a = fresh_tmp(); emit_indent(a + " = select i1 " + a_lt2 + ", i64 " + a_neg2 + ", i64 " + a_raw);
+        var b_neg2 = fresh_tmp(); emit_indent(b_neg2 + " = sub i64 0, " + b_raw);
+        var b_lt2 = fresh_tmp(); emit_indent(b_lt2 + " = icmp slt i64 " + b_raw + ", 0");
+        var b = fresh_tmp(); emit_indent(b + " = select i1 " + b_lt2 + ", i64 " + b_neg2 + ", i64 " + b_raw);
         // Inline gcd
         var ar = fresh_tmp(); emit_indent(ar + " = alloca i64"); emit_indent("store i64 " + a + ", i64* " + ar);
         var br2 = fresh_tmp(); emit_indent(br2 + " = alloca i64"); emit_indent("store i64 " + b + ", i64* " + br2);
