@@ -1159,6 +1159,10 @@ llvm::Function* CodeGenerator::getOrDeclareCalloc() {
     fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addFnAttr(llvm::Attribute::NoBuiltin);
     fn->addRetAttr(llvm::Attribute::NoAlias);
+    // allocsize(0, 1): allocation size is arg0 * arg1 — enables LLVM to
+    // reason about the returned buffer size for alias analysis and to
+    // eliminate redundant bounds checks on the allocated memory.
+    fn->addFnAttr(llvm::Attribute::getWithAllocSizeArgs(*context, 0, 1));
     // Note: calloc CAN return NULL on OOM, so we do NOT add NonNull here.
     // The call site in array_fill does not check for NULL because OmScript's
     // runtime assumes allocation always succeeds (same as C benchmarks).
@@ -1555,6 +1559,13 @@ llvm::Function* CodeGenerator::getOrDeclareStrdup() {
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addFnAttr(llvm::Attribute::NoSync);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    // memory(argmem: read, inaccessiblemem: readwrite): strdup reads the source
+    // string and allocates new memory through the heap allocator.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects(
+            llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::Ref) |
+            llvm::MemoryEffects::inaccessibleMemOnly())));
     fn->addRetAttr(llvm::Attribute::NoAlias);
     fn->addParamAttr(0, llvm::Attribute::ReadOnly);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
