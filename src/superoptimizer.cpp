@@ -2013,12 +2013,9 @@ static bool replaceIdiom(IdiomMatch& match) {
     }
 
     case Idiom::SignExtend: {
-        // (x << (bw-n)) >> (bw-n) → shl + ashr
-        // Replace with explicit sext_inreg by truncate + sext if the target
-        // supports it more efficiently, or keep as-is but mark the value with
-        // a range for downstream passes.
-        // For LLVM IR, the canonical form is trunc + sext which the backend
-        // can lower to a single MOVSX/SXTB instruction.
+        // (x << (bw-n)) >> (bw-n) → trunc to n bits + sext back to bw
+        // The canonical trunc+sext form lets the backend lower to a single
+        // MOVSX/SXTB instruction instead of a shift pair.
         llvm::Value* x = match.operands[0];
         unsigned srcBits = match.bitWidth;
         llvm::Type* narrowTy = llvm::IntegerType::get(ctx, srcBits);

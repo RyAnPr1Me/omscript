@@ -220,7 +220,7 @@ jobs:
             examples/benchmark_loops_math.om
             examples/optimization_stress_test.om
           )
-          for repeat in 1 2 3; do
+          for _iteration in 1 2 3; do
             for f in "${BENCH_FILES[@]}"; do
               [ -f "$f" ] || continue
               timeout 120 "$OMSC" "$f" -O3 -o /tmp/pgo_out 2>/dev/null || true

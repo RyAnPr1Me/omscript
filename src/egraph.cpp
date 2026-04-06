@@ -11719,26 +11719,6 @@ std::vector<RewriteRule> getStrengthReductionRules() {
             return g.addBinOp(Op::Add, axbx, s.at("c"));
         });
 
-    // ── Integer sign extraction ─────────────────────────────────────────
-    // ternary(x < 0, -1, ternary(x > 0, 1, 0)) → (x >> 63) | ((-x) >> 63)
-    // This is the sign function — handled by the superoptimizer idiom,
-    // but also add it as an e-graph rule for AST-level optimization.
-    rules.emplace_back("ternary_sign_to_shift",
-        P::OpPat(Op::Ternary, {
-            P::OpPat(Op::Lt, {P::Wild("x"), P::ConstPat(0)}),
-            P::ConstPat(-1),
-            P::OpPat(Op::Ternary, {
-                P::OpPat(Op::Gt, {P::Wild("x"), P::ConstPat(0)}),
-                P::ConstPat(1),
-                P::ConstPat(0)})}),
-        [](EGraph& g, const Subst& s) {
-            ClassId c63 = g.addConst(63);
-            ClassId shr = g.addBinOp(Op::Shr, s.at("x"), c63);
-            ClassId negX = g.addUnaryOp(Op::Neg, s.at("x"));
-            ClassId shrNeg = g.addBinOp(Op::Shr, negX, c63);
-            return g.addBinOp(Op::BitOr, shr, shrNeg);
-        });
-
     return rules;
 }
 
