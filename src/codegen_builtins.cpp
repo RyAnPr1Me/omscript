@@ -2373,7 +2373,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         newBuf->addIncoming(arrPtr, nogrowBB);
 
         // Update length
-        builder->CreateStore(newLen, newBuf);
+        auto* pushLenSt = builder->CreateStore(newLen, newBuf);
+        pushLenSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
         // Store new value at index oldLen + 1 (after header)
         llvm::Value* newElemIdx =
             builder->CreateAdd(oldLen, llvm::ConstantInt::get(getDefaultType(), 1), "push.elemidx");
@@ -2415,9 +2416,11 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                                llvm::ConstantInt::get(getDefaultType(), 1), "pop.lastidx");
         llvm::Value* lastPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, lastIdx, "pop.lastptr");
         llvm::Value* lastVal = builder->CreateLoad(getDefaultType(), lastPtr, "pop.lastval");
+        llvm::cast<llvm::LoadInst>(lastVal)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
         // Decrease length in-place
         llvm::Value* newLen = builder->CreateSub(oldLen, llvm::ConstantInt::get(getDefaultType(), 1), "pop.newlen");
-        builder->CreateStore(newLen, arrPtr);
+        auto* popLenSt = builder->CreateStore(newLen, arrPtr);
+        popLenSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
         return lastVal;
     }
 

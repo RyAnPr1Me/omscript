@@ -2944,8 +2944,17 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         return result;
     } else if (expr->op == "&") {
         auto* result = builder->CreateAnd(left, right, "andtmp");
-        // AND with a non-negative value always produces a non-negative result
-        if (nonNegValues_.count(left) || nonNegValues_.count(right))
+        // AND with a non-negative value always produces a non-negative result.
+        // Additionally, AND with a non-negative constant mask forces the sign
+        // bit to 0, so the result is always non-negative regardless of left.
+        bool resultNonNeg = nonNegValues_.count(left) || nonNegValues_.count(right);
+        if (!resultNonNeg) {
+            if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right))
+                resultNonNeg = !ci->isNegative();
+            else if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left))
+                resultNonNeg = !ci->isNegative();
+        }
+        if (resultNonNeg)
             nonNegValues_.insert(result);
         return result;
     } else if (expr->op == "|") {
@@ -2974,17 +2983,24 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         // and marking nsw would let LLVM treat overflowing shifts as poison.
         return builder->CreateShl(left, safeShift, "shltmp");
     } else if (expr->op == ">>") {
+        // Logical (unsigned) right shift: result is always non-negative since
+        // high bits are filled with 0 — the sign bit is always cleared.
+        llvm::Value* result;
         // For constant shift amounts already in [0, 63], skip the mask.
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
             const int64_t sv = ci->getSExtValue();
-            if (sv >= 0 && sv < 64)
-                return builder->CreateLShr(left, right, "lshrtmp");
+            if (sv >= 0 && sv < 64) {
+                result = builder->CreateLShr(left, right, "lshrtmp");
+                nonNegValues_.insert(result);
+                return result;
+            }
         }
         // Mask shift amount to [0, 63] to prevent undefined behavior
         llvm::Value* mask = llvm::ConstantInt::get(getDefaultType(), 63);
         llvm::Value* safeShift = builder->CreateAnd(right, mask, "shrmask");
-        // Logical (unsigned) shift right: fills high bits with 0.
-        return builder->CreateLShr(left, safeShift, "lshrtmp");
+        result = builder->CreateLShr(left, safeShift, "lshrtmp");
+        nonNegValues_.insert(result);
+        return result;
     } else if (expr->op == "**") {
         // Small constant exponent specialization — emit inline multiplications
         // instead of the general binary-exponentiation loop.  This eliminates
