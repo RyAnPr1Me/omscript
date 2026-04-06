@@ -223,6 +223,45 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 return builder->CreateZExt(rightBool, getDefaultType(), "booltmp");
             }
         }
+
+        // Branchless optimization: when the right-hand side is a simple
+        // side-effect-free expression (literal, identifier, or comparison),
+        // emit a bitwise AND/OR instead of branch+PHI.  This eliminates a
+        // branch misprediction penalty and enables LLVM's vectorizer to
+        // handle boolean conditions without control-flow diamond patterns.
+        auto isSideEffectFree = [](Expression* e) -> bool {
+            if (e->type == ASTNodeType::LITERAL_EXPR) return true;
+            if (e->type == ASTNodeType::IDENTIFIER_EXPR) return true;
+            if (e->type == ASTNodeType::BINARY_EXPR) {
+                auto* bin = static_cast<BinaryExpr*>(e);
+                const auto& op = bin->op;
+                // Comparisons and arithmetic on simple operands are side-effect-free
+                if (op == "==" || op == "!=" || op == "<" || op == "<=" ||
+                    op == ">" || op == ">=" || op == "&" || op == "|" || op == "^") {
+                    return (bin->left->type == ASTNodeType::IDENTIFIER_EXPR ||
+                            bin->left->type == ASTNodeType::LITERAL_EXPR) &&
+                           (bin->right->type == ASTNodeType::IDENTIFIER_EXPR ||
+                            bin->right->type == ASTNodeType::LITERAL_EXPR);
+                }
+            }
+            return false;
+        };
+
+        if (isSideEffectFree(expr->right.get())) {
+            llvm::Value* leftBool = toBool(left);
+            llvm::Value* right = generateExpression(expr->right.get());
+            llvm::Value* rightBool = toBool(right);
+            llvm::Value* result;
+            if (expr->op == "&&") {
+                result = builder->CreateAnd(leftBool, rightBool, "logic.and");
+            } else {
+                result = builder->CreateOr(leftBool, rightBool, "logic.or");
+            }
+            auto* logicResult = builder->CreateZExt(result, getDefaultType(), "booltmp");
+            nonNegValues_.insert(logicResult);
+            return logicResult;
+        }
+
         llvm::Function* function = builder->GetInsertBlock()->getParent();
         llvm::Value* leftBool = toBool(left);
         llvm::BasicBlock* rhsBB = llvm::BasicBlock::Create(*context, "logic.rhs", function);
