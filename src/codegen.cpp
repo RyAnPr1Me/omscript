@@ -929,6 +929,13 @@ llvm::Value* CodeGenerator::convertTo(llvm::Value* v, llvm::Type* targetTy) {
 }
 
 llvm::Value* CodeGenerator::toBool(llvm::Value* v) {
+    // When the value is already i1 (from a comparison), it IS the boolean
+    // — no need to generate a redundant `icmp ne i1 %v, 0`.  This saves
+    // one instruction per condition check and produces cleaner IR that
+    // LLVM's branch analysis and vectorizer can process more efficiently.
+    if (v->getType()->isIntegerTy(1)) {
+        return v;
+    }
     if (v->getType()->isDoubleTy()) {
         return builder->CreateFCmpONE(v, llvm::ConstantFP::get(getFloatType(), 0.0), "tobool");
     } else if (v->getType()->isPointerTy()) {
