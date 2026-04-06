@@ -2416,7 +2416,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                                llvm::ConstantInt::get(getDefaultType(), 1), "pop.lastidx");
         llvm::Value* lastPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, lastIdx, "pop.lastptr");
         llvm::Value* lastVal = builder->CreateLoad(getDefaultType(), lastPtr, "pop.lastval");
-        llvm::cast<llvm::LoadInst>(lastVal)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        if (auto* load = llvm::dyn_cast<llvm::LoadInst>(lastVal))
+            load->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
         // Decrease length in-place
         llvm::Value* newLen = builder->CreateSub(oldLen, llvm::ConstantInt::get(getDefaultType(), 1), "pop.newlen");
         auto* popLenSt = builder->CreateStore(newLen, arrPtr);
@@ -2555,6 +2556,16 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         sortLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
         llvm::Value* arrLen = sortLenLoad;
 
+        // Early exit: skip qsort for arrays with 0 or 1 elements (already sorted).
+        // This avoids the overhead of a function call to qsort for trivial cases.
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* sortBB = llvm::BasicBlock::Create(*context, "sort.call", function);
+        llvm::BasicBlock* skipBB = llvm::BasicBlock::Create(*context, "sort.skip", function);
+        llvm::Value* needsSort = builder->CreateICmpUGT(arrLen,
+            llvm::ConstantInt::get(getDefaultType(), 1), "sort.needed");
+        builder->CreateCondBr(needsSort, sortBB, skipBB);
+        builder->SetInsertPoint(sortBB);
+
         // Use libc qsort() — O(n log n) instead of the previous O(n²)
         // bubble sort.  Each element is an i64 (8 bytes); string arrays
         // store char* pointers cast to i64.
@@ -2630,6 +2641,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* dataPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, one, "sort.data");
         llvm::Value* elemSize = llvm::ConstantInt::get(getDefaultType(), 8); // sizeof(i64)
         builder->CreateCall(getOrDeclareQsort(), {dataPtr, arrLen, elemSize, comparator});
+        builder->CreateBr(skipBB);
+        builder->SetInsertPoint(skipBB);
         return arrArg; // Return the array itself
     }
 
