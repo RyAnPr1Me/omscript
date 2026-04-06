@@ -810,15 +810,15 @@ void CodeGenerator::runOptimizationPasses() {
                 // LoopFlatten collapses nested loops with a simple inner trip
                 // count into a single loop, reducing loop overhead (branch,
                 // compare, increment) and enabling better vectorization of
-                // matrix-style access patterns.  Promoted from O3-only to
-                // O2+ with -floop-optimize because OmScript's nested for-loops
-                // commonly iterate over 2D array patterns.
+                // matrix-style access patterns.  Enabled at O3 unconditionally,
+                // or at O2 when -floop-optimize is active.
                 if (isO3 || loopOpt) {
                     LPM.addPass(llvm::LoopFlattenPass());
                     // LoopUnrollAndJam unrolls an outer loop and fuses (jams)
                     // iterations of the inner loop together, improving data
                     // reuse across outer-loop iterations.  This is especially
                     // beneficial for matrix multiplication and stencil patterns.
+                    // OptLevel controls aggressiveness: 3 at O3, 2 at O2.
                     LPM.addPass(llvm::LoopUnrollAndJamPass(/*OptLevel=*/isO3 ? 3 : 2));
                 }
                 // LoopPredication converts bounds checks inside loops into

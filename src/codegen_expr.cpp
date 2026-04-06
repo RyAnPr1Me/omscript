@@ -4129,11 +4129,12 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
             gv->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
 
             // memcpy(arrPtr, @arr.const, totalBytes)
-            // malloc guarantees at least 16-byte alignment on all platforms,
-            // matching the global constant's alignment.  Using 16-byte
-            // alignment enables the backend to emit wider stores (e.g.
-            // MOVDQA / VMOVDQA instead of scalar MOV on x86-64).
-            builder->CreateMemCpy(arrPtr, llvm::MaybeAlign(16),
+            // malloc typically returns 16-byte aligned on most 64-bit
+            // platforms (glibc, musl, macOS), but the C standard only
+            // guarantees alignment for max_align_t (usually 8 or 16 bytes).
+            // Use 8-byte alignment for safety on all targets — this still
+            // enables i64-width stores and matches the element size.
+            builder->CreateMemCpy(arrPtr, llvm::MaybeAlign(8),
                                   gv, llvm::MaybeAlign(16), totalBytes);
         } else {
             // Mixed constant/dynamic elements: store individually
