@@ -1141,6 +1141,10 @@ llvm::Function* CodeGenerator::getOrDeclareMalloc() {
     fn->addFnAttr(llvm::Attribute::NoBuiltin);
     fn->addRetAttr(llvm::Attribute::NoAlias);
     fn->addRetAttr(llvm::Attribute::NonNull);
+    // allocsize(0): parameter 0 is the allocation size — enables LLVM to
+    // reason about the returned buffer size for alias analysis and to
+    // eliminate redundant bounds checks on the allocated memory.
+    fn->addFnAttr(llvm::Attribute::getWithAllocSizeArgs(*context, 0, std::nullopt));
     return fn;
 }
 
@@ -1274,6 +1278,32 @@ llvm::Function* CodeGenerator::getOrDeclarePuts() {
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "puts", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     return fn;
+}
+
+llvm::Function* CodeGenerator::getOrDeclareFputs() {
+    if (auto* fn = module->getFunction("fputs"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    // fputs(const char* str, FILE* stream) -> int
+    auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context),
+                                       {ptrTy, ptrTy}, false);
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "fputs", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addParamAttr(0, llvm::Attribute::ReadOnly);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    OMSC_ADD_NOCAPTURE(fn, 0);
+    return fn;
+}
+
+llvm::Value* CodeGenerator::getOrDeclareStdout() {
+    // Get the C library 'stdout' global (extern FILE *stdout).
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    if (auto* gv = module->getGlobalVariable("stdout"))
+        return builder->CreateLoad(ptrTy, gv, "stdout.val");
+    auto* gv = new llvm::GlobalVariable(
+        *module, ptrTy, /*isConstant=*/false,
+        llvm::GlobalValue::ExternalLinkage, nullptr, "stdout");
+    return builder->CreateLoad(ptrTy, gv, "stdout.val");
 }
 
 llvm::Function* CodeGenerator::getOrDeclareScanf() {

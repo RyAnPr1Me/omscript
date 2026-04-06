@@ -3591,6 +3591,16 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     if (bid == BuiltinId::PRINTLN) {
         validateArgCount(expr, "println", 1);
         Expression* argExpr = expr->arguments[0].get();
+        // Fast path: string literal → use puts() instead of printf("%s\n", ...)
+        // puts() appends a newline automatically and avoids format-string parsing.
+        if (argExpr->type == ASTNodeType::LITERAL_EXPR) {
+            auto* lit = static_cast<LiteralExpr*>(argExpr);
+            if (lit->literalType == LiteralExpr::LiteralType::STRING) {
+                llvm::Value* strVal = builder->CreateGlobalString(lit->stringValue, "println.lit");
+                builder->CreateCall(getOrDeclarePuts(), {strVal});
+                return llvm::ConstantInt::get(getDefaultType(), 0);
+            }
+        }
         llvm::Value* arg = generateExpression(argExpr);
         if (arg->getType()->isDoubleTy()) {
             llvm::GlobalVariable* floatFmt = module->getGlobalVariable("println_float_fmt", true);
@@ -3634,11 +3644,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             if (!arg->getType()->isPointerTy()) {
                 arg = builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "write.str.ptr");
             }
-            llvm::GlobalVariable* strFmt = module->getGlobalVariable("write_str_fmt", true);
-            if (!strFmt) {
-                strFmt = builder->CreateGlobalString("%s", "write_str_fmt");
-            }
-            builder->CreateCall(getPrintfFunction(), {strFmt, arg});
+            // Use fputs(str, stdout) instead of printf("%s", str) to avoid
+            // format-string parsing overhead.  fputs writes the string directly
+            // to stdout without scanning for % conversion specifiers.
+            builder->CreateCall(getOrDeclareFputs(), {arg, getOrDeclareStdout()});
         } else {
             llvm::GlobalVariable* formatStr = module->getGlobalVariable("write_fmt", true);
             if (!formatStr) {

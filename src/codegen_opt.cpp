@@ -781,9 +781,14 @@ void CodeGenerator::runOptimizationPasses() {
                     LPM.addPass(llvm::LoopFlattenPass());
                     LPM.addPass(llvm::LoopUnrollAndJamPass(/*OptLevel=*/3));
                 }
+                // LoopBoundSplit splits loops by bounds to enable better
+                // vectorization (e.g. separate aligned/unaligned iterations).
+                // LoopPredication converts bounds checks inside loops into
+                // loop-invariant predicates (check once, not every iteration).
+                // Both are safe at O2 and benefit array-heavy OmScript code.
+                LPM.addPass(llvm::LoopBoundSplitPass());
+                LPM.addPass(llvm::LoopPredicationPass());
                 if (isO3) {
-                    LPM.addPass(llvm::LoopBoundSplitPass());
-                    LPM.addPass(llvm::LoopPredicationPass());
 #if LLVM_VERSION_MAJOR < 20
                     // LoopReroll recognizes manually-unrolled loop patterns and
                     // "rerolls" them into a single iteration with a larger trip
