@@ -2926,6 +2926,13 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         function->addFnAttr(llvm::Attribute::NoUnwind);
     }
 
+    // At O2+, align function entry to 16 bytes for better I-cache locality
+    // and branch target prediction.  Hot functions get 32-byte alignment to
+    // avoid crossing cache-line boundaries on the entry block.
+    if (optimizationLevel >= OptimizationLevel::O2) {
+        function->setAlignment(func->hintHot ? llvm::Align(32) : llvm::Align(16));
+    }
+
     // In OPTMAX functions, mark all parameters noalias and add WillReturn.
     // The OPTMAX annotation is the user's compile-time guarantee that the
     // function is safe and well-behaved, enabling maximum optimization.

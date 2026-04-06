@@ -1056,6 +1056,11 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         if (auto* startCI = llvm::dyn_cast<llvm::ConstantInt>(startVal)) {
             startNonNegForInc = startCI->getSExtValue() >= 0;
         }
+        // Also check nonNegValues_ for non-constant start values (e.g., function
+        // args known to be non-negative from caller context).
+        if (!startNonNegForInc && nonNegValues_.count(startVal) > 0) {
+            startNonNegForInc = true;
+        }
     }
     if (startNonNegForInc) {
         incVal = builder->CreateAdd(nextVal, stepVal, "nextvar", /*HasNUW=*/true, /*HasNSW=*/true);
