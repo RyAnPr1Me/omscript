@@ -1784,17 +1784,38 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::STR_CONTAINS) {
         validateArgCount(expr, "str_contains", 2);
+        // Detect single-character literal needle → use memchr (SIMD-optimized)
+        // instead of strstr (byte-by-byte scan).
+        Expression* needleExpr = expr->arguments[1].get();
+        bool isSingleChar = false;
+        char singleCharVal = 0;
+        if (needleExpr->type == ASTNodeType::LITERAL_EXPR) {
+            auto* lit = static_cast<LiteralExpr*>(needleExpr);
+            if (lit->literalType == LiteralExpr::LiteralType::STRING && lit->stringValue.size() == 1) {
+                isSingleChar = true;
+                singleCharVal = lit->stringValue[0];
+            }
+        }
         llvm::Value* haystackArg = generateExpression(expr->arguments[0].get());
-        llvm::Value* needleArg = generateExpression(expr->arguments[1].get());
         llvm::Value* haystackPtr =
             haystackArg->getType()->isPointerTy()
                 ? haystackArg
                 : builder->CreateIntToPtr(haystackArg, llvm::PointerType::getUnqual(*context), "contains.haystack");
-        llvm::Value* needlePtr =
-            needleArg->getType()->isPointerTy()
-                ? needleArg
-                : builder->CreateIntToPtr(needleArg, llvm::PointerType::getUnqual(*context), "contains.needle");
-        llvm::Value* result = builder->CreateCall(getOrDeclareStrstr(), {haystackPtr, needlePtr}, "contains.strstr");
+        llvm::Value* result;
+        if (isSingleChar) {
+            // memchr(haystack, char, strlen(haystack)) is SIMD-optimized on
+            // modern libc, ~2-3x faster than strstr for single-char searches.
+            llvm::Value* len = builder->CreateCall(getOrDeclareStrlen(), {haystackPtr}, "contains.len");
+            llvm::Value* charVal = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), static_cast<unsigned char>(singleCharVal));
+            result = builder->CreateCall(getOrDeclareMemchr(), {haystackPtr, charVal, len}, "contains.memchr");
+        } else {
+            llvm::Value* needleArg = generateExpression(needleExpr);
+            llvm::Value* needlePtr =
+                needleArg->getType()->isPointerTy()
+                    ? needleArg
+                    : builder->CreateIntToPtr(needleArg, llvm::PointerType::getUnqual(*context), "contains.needle");
+            result = builder->CreateCall(getOrDeclareStrstr(), {haystackPtr, needlePtr}, "contains.strstr");
+        }
         llvm::Value* nullPtr = llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context));
         llvm::Value* isNotNull = builder->CreateICmpNE(result, nullPtr, "contains.notnull");
         return builder->CreateZExt(isNotNull, getDefaultType(), "contains.result");
@@ -1802,17 +1823,36 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::STR_INDEX_OF) {
         validateArgCount(expr, "str_index_of", 2);
+        // Detect single-character literal needle → use memchr (SIMD-optimized)
+        // instead of strstr (byte-by-byte scan).
+        Expression* needleExpr = expr->arguments[1].get();
+        bool isSingleChar = false;
+        char singleCharVal = 0;
+        if (needleExpr->type == ASTNodeType::LITERAL_EXPR) {
+            auto* lit = static_cast<LiteralExpr*>(needleExpr);
+            if (lit->literalType == LiteralExpr::LiteralType::STRING && lit->stringValue.size() == 1) {
+                isSingleChar = true;
+                singleCharVal = lit->stringValue[0];
+            }
+        }
         llvm::Value* haystackArg = generateExpression(expr->arguments[0].get());
-        llvm::Value* needleArg = generateExpression(expr->arguments[1].get());
         llvm::Value* haystackPtr =
             haystackArg->getType()->isPointerTy()
                 ? haystackArg
                 : builder->CreateIntToPtr(haystackArg, llvm::PointerType::getUnqual(*context), "indexof.haystack");
-        llvm::Value* needlePtr =
-            needleArg->getType()->isPointerTy()
-                ? needleArg
-                : builder->CreateIntToPtr(needleArg, llvm::PointerType::getUnqual(*context), "indexof.needle");
-        llvm::Value* result = builder->CreateCall(getOrDeclareStrstr(), {haystackPtr, needlePtr}, "indexof.strstr");
+        llvm::Value* result;
+        if (isSingleChar) {
+            llvm::Value* len = builder->CreateCall(getOrDeclareStrlen(), {haystackPtr}, "indexof.len");
+            llvm::Value* charVal = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), static_cast<unsigned char>(singleCharVal));
+            result = builder->CreateCall(getOrDeclareMemchr(), {haystackPtr, charVal, len}, "indexof.memchr");
+        } else {
+            llvm::Value* needleArg = generateExpression(needleExpr);
+            llvm::Value* needlePtr =
+                needleArg->getType()->isPointerTy()
+                    ? needleArg
+                    : builder->CreateIntToPtr(needleArg, llvm::PointerType::getUnqual(*context), "indexof.needle");
+            result = builder->CreateCall(getOrDeclareStrstr(), {haystackPtr, needlePtr}, "indexof.strstr");
+        }
         llvm::Value* nullPtr = llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context));
         llvm::Value* isNull = builder->CreateICmpEQ(result, nullPtr, "indexof.isnull");
         llvm::Value* foundInt = builder->CreatePtrToInt(result, getDefaultType(), "indexof.foundint");
