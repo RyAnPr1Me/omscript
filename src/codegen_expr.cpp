@@ -3703,6 +3703,147 @@ llvm::Value* CodeGenerator::generateTernary(TernaryExpr* expr) {
 
     llvm::Value* condBool = toBool(condition);
 
+    // --- Intrinsic idiom recognition for ternary expressions ---
+    // Detect min/max/abs patterns and emit LLVM intrinsics directly, which
+    // map to single hardware instructions on most targets (e.g. cmov, smin,
+    // or pabs).  This avoids the select+cmp overhead and gives LLVM's cost
+    // model perfect information for vectorization decisions.
+    if (auto* binCond = dynamic_cast<BinaryExpr*>(expr->condition.get())) {
+        auto* thenE = expr->thenExpr.get();
+        auto* elseE = expr->elseExpr.get();
+
+        // Helper: check if two AST expressions refer to the same identifier
+        auto sameIdent = [](Expression* a, Expression* b) -> bool {
+            if (a->type == ASTNodeType::IDENTIFIER_EXPR &&
+                b->type == ASTNodeType::IDENTIFIER_EXPR) {
+                return static_cast<IdentifierExpr*>(a)->name ==
+                       static_cast<IdentifierExpr*>(b)->name;
+            }
+            return false;
+        };
+        // Helper: check if expression is unary negation of another
+        auto isNegOf = [&sameIdent](Expression* neg, Expression* pos) -> bool {
+            if (neg->type == ASTNodeType::UNARY_EXPR) {
+                auto* u = static_cast<UnaryExpr*>(neg);
+                if (u->op == "-" && sameIdent(u->operand.get(), pos))
+                    return true;
+            }
+            return false;
+        };
+
+        auto* condLeft  = binCond->left.get();
+        auto* condRight = binCond->right.get();
+        const std::string& op = binCond->op;
+
+        // --- MIN pattern: (a < b) ? a : b  or  (a <= b) ? a : b ---
+        if ((op == "<" || op == "<=") &&
+            sameIdent(condLeft, thenE) && sameIdent(condRight, elseE)) {
+            llvm::Value* a = generateExpression(condLeft);
+            llvm::Value* b = generateExpression(condRight);
+            a = toDefaultType(a); b = toDefaultType(b);
+            bool aNonNeg = nonNegValues_.count(a) || (llvm::isa<llvm::ConstantInt>(a) && !llvm::cast<llvm::ConstantInt>(a)->isNegative());
+            bool bNonNeg = nonNegValues_.count(b) || (llvm::isa<llvm::ConstantInt>(b) && !llvm::cast<llvm::ConstantInt>(b)->isNegative());
+            llvm::Intrinsic::ID id = (aNonNeg && bNonNeg) ? llvm::Intrinsic::umin : llvm::Intrinsic::smin;
+            auto* fn = OMSC_GET_INTRINSIC(module.get(), id, {getDefaultType()});
+            auto* result = builder->CreateCall(fn, {a, b}, "tern.min");
+            if (aNonNeg && bNonNeg) nonNegValues_.insert(result);
+            return result;
+        }
+        // --- MIN pattern: (a > b) ? b : a  or  (a >= b) ? b : a ---
+        if ((op == ">" || op == ">=") &&
+            sameIdent(condLeft, elseE) && sameIdent(condRight, thenE)) {
+            llvm::Value* a = generateExpression(condLeft);
+            llvm::Value* b = generateExpression(condRight);
+            a = toDefaultType(a); b = toDefaultType(b);
+            bool aNonNeg = nonNegValues_.count(a) || (llvm::isa<llvm::ConstantInt>(a) && !llvm::cast<llvm::ConstantInt>(a)->isNegative());
+            bool bNonNeg = nonNegValues_.count(b) || (llvm::isa<llvm::ConstantInt>(b) && !llvm::cast<llvm::ConstantInt>(b)->isNegative());
+            llvm::Intrinsic::ID id = (aNonNeg && bNonNeg) ? llvm::Intrinsic::umin : llvm::Intrinsic::smin;
+            auto* fn = OMSC_GET_INTRINSIC(module.get(), id, {getDefaultType()});
+            auto* result = builder->CreateCall(fn, {a, b}, "tern.min");
+            if (aNonNeg && bNonNeg) nonNegValues_.insert(result);
+            return result;
+        }
+
+        // --- MAX pattern: (a > b) ? a : b  or  (a >= b) ? a : b ---
+        if ((op == ">" || op == ">=") &&
+            sameIdent(condLeft, thenE) && sameIdent(condRight, elseE)) {
+            llvm::Value* a = generateExpression(condLeft);
+            llvm::Value* b = generateExpression(condRight);
+            a = toDefaultType(a); b = toDefaultType(b);
+            bool aNonNeg = nonNegValues_.count(a) || (llvm::isa<llvm::ConstantInt>(a) && !llvm::cast<llvm::ConstantInt>(a)->isNegative());
+            bool bNonNeg = nonNegValues_.count(b) || (llvm::isa<llvm::ConstantInt>(b) && !llvm::cast<llvm::ConstantInt>(b)->isNegative());
+            llvm::Intrinsic::ID id = (aNonNeg && bNonNeg) ? llvm::Intrinsic::umax : llvm::Intrinsic::smax;
+            auto* fn = OMSC_GET_INTRINSIC(module.get(), id, {getDefaultType()});
+            auto* result = builder->CreateCall(fn, {a, b}, "tern.max");
+            if (aNonNeg || bNonNeg) nonNegValues_.insert(result);
+            return result;
+        }
+        // --- MAX pattern: (a < b) ? b : a  or  (a <= b) ? b : a ---
+        if ((op == "<" || op == "<=") &&
+            sameIdent(condLeft, elseE) && sameIdent(condRight, thenE)) {
+            llvm::Value* a = generateExpression(condLeft);
+            llvm::Value* b = generateExpression(condRight);
+            a = toDefaultType(a); b = toDefaultType(b);
+            bool aNonNeg = nonNegValues_.count(a) || (llvm::isa<llvm::ConstantInt>(a) && !llvm::cast<llvm::ConstantInt>(a)->isNegative());
+            bool bNonNeg = nonNegValues_.count(b) || (llvm::isa<llvm::ConstantInt>(b) && !llvm::cast<llvm::ConstantInt>(b)->isNegative());
+            llvm::Intrinsic::ID id = (aNonNeg && bNonNeg) ? llvm::Intrinsic::umax : llvm::Intrinsic::smax;
+            auto* fn = OMSC_GET_INTRINSIC(module.get(), id, {getDefaultType()});
+            auto* result = builder->CreateCall(fn, {a, b}, "tern.max");
+            if (aNonNeg || bNonNeg) nonNegValues_.insert(result);
+            return result;
+        }
+
+        // --- ABS pattern: (x >= 0) ? x : -x  or  (x < 0) ? -x : x ---
+        auto isZeroLit = [](Expression* e) -> bool {
+            if (e->type == ASTNodeType::LITERAL_EXPR) {
+                auto* lit = static_cast<LiteralExpr*>(e);
+                return lit->literalType == LiteralExpr::LiteralType::INTEGER &&
+                       lit->intValue == 0;
+            }
+            return false;
+        };
+        // (x >= 0) ? x : -x
+        if (op == ">=" && isZeroLit(condRight) &&
+            sameIdent(condLeft, thenE) && isNegOf(elseE, condLeft)) {
+            llvm::Value* x = generateExpression(condLeft);
+            x = toDefaultType(x);
+            auto* absFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::abs, {getDefaultType()});
+            auto* result = builder->CreateCall(absFn, {x, builder->getFalse()}, "tern.abs");
+            nonNegValues_.insert(result);
+            return result;
+        }
+        // (x < 0) ? -x : x
+        if (op == "<" && isZeroLit(condRight) &&
+            sameIdent(condLeft, elseE) && isNegOf(thenE, condLeft)) {
+            llvm::Value* x = generateExpression(condLeft);
+            x = toDefaultType(x);
+            auto* absFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::abs, {getDefaultType()});
+            auto* result = builder->CreateCall(absFn, {x, builder->getFalse()}, "tern.abs");
+            nonNegValues_.insert(result);
+            return result;
+        }
+        // (x > 0) ? x : -x  (equivalent to abs for all but x==0)
+        if (op == ">" && isZeroLit(condRight) &&
+            sameIdent(condLeft, thenE) && isNegOf(elseE, condLeft)) {
+            llvm::Value* x = generateExpression(condLeft);
+            x = toDefaultType(x);
+            auto* absFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::abs, {getDefaultType()});
+            auto* result = builder->CreateCall(absFn, {x, builder->getFalse()}, "tern.abs");
+            nonNegValues_.insert(result);
+            return result;
+        }
+        // (x <= 0) ? -x : x
+        if (op == "<=" && isZeroLit(condRight) &&
+            sameIdent(condLeft, elseE) && isNegOf(thenE, condLeft)) {
+            llvm::Value* x = generateExpression(condLeft);
+            x = toDefaultType(x);
+            auto* absFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::abs, {getDefaultType()});
+            auto* result = builder->CreateCall(absFn, {x, builder->getFalse()}, "tern.abs");
+            nonNegValues_.insert(result);
+            return result;
+        }
+    }
+
     // Branchless select optimization: when both arms are simple expressions
     // (literals, identifiers, or a binary op between an identifier and a
     // literal with no side effects), emit a single `select` instruction instead
@@ -3850,19 +3991,74 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
         // Original fast path: all elements are plain expressions with known count
         const size_t numElements = expr->elements.size();
         const size_t totalSlots = 1 + numElements;
+        const size_t totalBytes = totalSlots * 8;
 
-        llvm::Value* byteSize = llvm::ConstantInt::get(getDefaultType(), totalSlots * 8);
+        llvm::Value* byteSize = llvm::ConstantInt::get(getDefaultType(), totalBytes);
         llvm::Value* arrPtr = builder->CreateCall(getOrDeclareMalloc(), {byteSize}, "arr");
 
-        builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), numElements), arrPtr);
+        // Fast path: if ALL elements are compile-time integer constants, build
+        // a global constant array and initialize with a single memcpy.  This
+        // replaces N individual store instructions with one memcpy intrinsic,
+        // which the backend can lower to efficient wide stores or rep movsq.
+        bool allConst = true;
+        std::vector<int64_t> constVals;
+        constVals.reserve(numElements);
+        for (size_t i = 0; i < numElements && allConst; i++) {
+            auto* elem = expr->elements[i].get();
+            if (elem->type == ASTNodeType::LITERAL_EXPR) {
+                auto* lit = static_cast<LiteralExpr*>(elem);
+                if (lit->literalType == LiteralExpr::LiteralType::INTEGER) {
+                    constVals.push_back(lit->intValue);
+                    continue;
+                }
+            }
+            // Check for negative integer literal: unary minus on integer
+            if (elem->type == ASTNodeType::UNARY_EXPR) {
+                auto* unary = static_cast<UnaryExpr*>(elem);
+                if (unary->op == "-" && unary->operand &&
+                    unary->operand->type == ASTNodeType::LITERAL_EXPR) {
+                    auto* lit = static_cast<LiteralExpr*>(unary->operand.get());
+                    if (lit->literalType == LiteralExpr::LiteralType::INTEGER) {
+                        constVals.push_back(-lit->intValue);
+                        continue;
+                    }
+                }
+            }
+            allConst = false;
+        }
 
-        for (size_t i = 0; i < numElements; i++) {
-            llvm::Value* elemVal = generateExpression(expr->elements[i].get());
-            elemVal = toDefaultType(elemVal);
-            // inbounds: malloc'd (1+numElements)*8 bytes, slots [0,numElements] all within.
-            llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr,
-                                                      llvm::ConstantInt::get(getDefaultType(), i + 1), "arr.elem.ptr");
-            builder->CreateStore(elemVal, elemPtr);
+        if (allConst && numElements > 0) {
+            // Build a global constant: [length, elem0, elem1, ...]
+            std::vector<llvm::Constant*> initVals;
+            initVals.reserve(totalSlots);
+            initVals.push_back(llvm::ConstantInt::get(getDefaultType(), numElements));
+            for (int64_t v : constVals) {
+                initVals.push_back(llvm::ConstantInt::get(getDefaultType(), v));
+            }
+            auto* arrTy = llvm::ArrayType::get(getDefaultType(), totalSlots);
+            auto* initArray = llvm::ConstantArray::get(arrTy, initVals);
+            auto* gv = new llvm::GlobalVariable(
+                *module, arrTy, /*isConstant=*/true,
+                llvm::GlobalValue::PrivateLinkage, initArray, "arr.const");
+            gv->setAlignment(llvm::Align(16));
+            gv->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+
+            // memcpy(arrPtr, @arr.const, totalBytes)
+            builder->CreateMemCpy(arrPtr, llvm::MaybeAlign(8),
+                                  gv, llvm::MaybeAlign(16), totalBytes);
+        } else {
+            // Mixed constant/dynamic elements: store individually
+            builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), numElements), arrPtr);
+
+            for (size_t i = 0; i < numElements; i++) {
+                llvm::Value* elemVal = generateExpression(expr->elements[i].get());
+                elemVal = toDefaultType(elemVal);
+                // inbounds: malloc'd (1+numElements)*8 bytes, slots [0,numElements] all within.
+                llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr,
+                                                          llvm::ConstantInt::get(getDefaultType(), i + 1), "arr.elem.ptr");
+                auto* st = builder->CreateStore(elemVal, elemPtr);
+                st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+            }
         }
 
         return builder->CreatePtrToInt(arrPtr, getDefaultType(), "arr.int");
@@ -3947,7 +4143,8 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
             llvm::Value* curIdx = builder->CreateLoad(getDefaultType(), writeIdx, "spread.curidx");
             llvm::Value* dstIdx = builder->CreateAdd(curIdx, one, "spread.dstidx");
             llvm::Value* dstPtr = builder->CreateInBoundsGEP(getDefaultType(), buf, dstIdx, "spread.dstptr");
-            builder->CreateStore(elem, dstPtr);
+            auto* spreadSt = builder->CreateStore(elem, dstPtr);
+            spreadSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
             // Increment write index
             llvm::Value* newIdx = builder->CreateAdd(curIdx, one, "spread.newidx");
             builder->CreateStore(newIdx, writeIdx);
