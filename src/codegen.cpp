@@ -3166,7 +3166,7 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     // needed.  The save/restore is still correct — savedFMF captures the
     // existing fast flags and restores them identically.
     llvm::FastMathFlags savedFMF = builder->getFastMathFlags();
-    if (inOptMaxFunction && !useFastMath_) {
+    if (inOptMaxFunction && !useFastMath_) { // skip if globally fast (already set)
         llvm::FastMathFlags FMF;
         FMF.setFast();
         builder->setFastMathFlags(FMF);

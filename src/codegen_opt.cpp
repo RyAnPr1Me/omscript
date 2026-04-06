@@ -407,7 +407,8 @@ void CodeGenerator::runOptimizationPasses() {
         // for OmScript's small-function style.  Most OmScript functions are
         // short (10-30 statements), so a higher threshold enables full inlining
         // of typical helper functions and loop bodies.  The threshold is the
-        // cost budget: instructions below this cost are always inlined.
+        // cost budget (LLVM 18 default is 225 at O2): instructions below this
+        // cost are always inlined.
         PTO.InlinerThreshold = 500;
     }
     if (optimizationLevel == OptimizationLevel::O3) {
