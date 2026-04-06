@@ -679,6 +679,7 @@ class CodeGenerator {
     llvm::Function* getOrDeclareStrcat();
     llvm::Function* getOrDeclareStrcmp();
     llvm::Function* getOrDeclarePutchar();
+    llvm::Function* getOrDeclarePuts();
     llvm::Function* getOrDeclareScanf();
     llvm::Function* getOrDeclareExit();
     llvm::Function* getOrDeclareAbort();

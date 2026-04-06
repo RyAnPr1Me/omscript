@@ -1041,6 +1041,36 @@ std::vector<RewriteRule> getAlgebraicRules() {
         [](EGraph& g, const Subst& s) {
             return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(1023));
         });
+    rules.emplace_back("mod_2048_to_and",
+        P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(2048)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(2047));
+        });
+    rules.emplace_back("mod_4096_to_and",
+        P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(4096)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(4095));
+        });
+    rules.emplace_back("mod_8192_to_and",
+        P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(8192)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(8191));
+        });
+    rules.emplace_back("mod_16384_to_and",
+        P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(16384)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(16383));
+        });
+    rules.emplace_back("mod_32768_to_and",
+        P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(32768)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(32767));
+        });
+    rules.emplace_back("mod_65536_to_and",
+        P::OpPat(Op::Mod, {P::Wild("x"), P::ConstPat(65536)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(65535));
+        });
 
     // ── Negation distribution: -(a - b) → b - a ─────────────────────────
     rules.emplace_back("neg_sub_to_swap",
@@ -1318,6 +1348,21 @@ std::vector<RewriteRule> getAlgebraicRules() {
         [](EGraph& g, const Subst& s) {
             ClassId ten = g.addConst(10);
             return g.addBinOp(Op::Shl, s.at("x"), ten);
+        });
+    rules.emplace_back("mul_2048_to_shl11",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(2048)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Shl, s.at("x"), g.addConst(11));
+        });
+    rules.emplace_back("mul_4096_to_shl12",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(4096)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Shl, s.at("x"), g.addConst(12));
+        });
+    rules.emplace_back("mul_8192_to_shl13",
+        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(8192)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Shl, s.at("x"), g.addConst(13));
         });
 
     // ─────────────────────────────────────────────────────────────────────
@@ -2184,6 +2229,15 @@ std::vector<RewriteRule> getAdvancedAlgebraicRules() {
     rules.emplace_back("mul_1024_left_shl10",
         P::OpPat(Op::Mul, {P::ConstPat(1024), P::Wild("x")}),
         [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Shl, s.at("x"), g.addConst(10)); });
+    rules.emplace_back("mul_2048_left_shl11",
+        P::OpPat(Op::Mul, {P::ConstPat(2048), P::Wild("x")}),
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Shl, s.at("x"), g.addConst(11)); });
+    rules.emplace_back("mul_4096_left_shl12",
+        P::OpPat(Op::Mul, {P::ConstPat(4096), P::Wild("x")}),
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Shl, s.at("x"), g.addConst(12)); });
+    rules.emplace_back("mul_8192_left_shl13",
+        P::OpPat(Op::Mul, {P::ConstPat(8192), P::Wild("x")}),
+        [](EGraph& g, const Subst& s) { return g.addBinOp(Op::Shl, s.at("x"), g.addConst(13)); });
 
     // Left-constant non-power-of-2 strength reductions
     rules.emplace_back("mul_3_left_shift",

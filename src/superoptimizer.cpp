@@ -2209,7 +2209,7 @@ static bool replaceIdiom(IdiomMatch& match) {
                     if (inner->getOpcode() == llvm::Instruction::Shl && hasOneUse(inner)) {
                         auto c1 = getConstIntValue(inner->getOperand(1));
                         auto c2 = getConstIntValue(inst.getOperand(1));
-                        if (c1 && c2) {
+                        if (c1 && c2 && *c1 >= 0 && *c2 >= 0) {
                             unsigned bitWidth = inst.getType()->getIntegerBitWidth();
                             int64_t total = *c1 + *c2;
                             if (total >= 0 && total < static_cast<int64_t>(bitWidth)) {
@@ -2230,7 +2230,7 @@ static bool replaceIdiom(IdiomMatch& match) {
                     if (inner->getOpcode() == llvm::Instruction::LShr && hasOneUse(inner)) {
                         auto c1 = getConstIntValue(inner->getOperand(1));
                         auto c2 = getConstIntValue(inst.getOperand(1));
-                        if (c1 && c2) {
+                        if (c1 && c2 && *c1 >= 0 && *c2 >= 0) {
                             unsigned bitWidth = inst.getType()->getIntegerBitWidth();
                             int64_t total = *c1 + *c2;
                             if (total >= 0 && total < static_cast<int64_t>(bitWidth)) {
@@ -2438,6 +2438,60 @@ static bool replaceIdiom(IdiomMatch& match) {
                 }
             }
 
+            // Pattern: (x & C1) & C2 → x & (C1 & C2)  (redundant AND folding)
+            if (!simplified && inst.getOpcode() == llvm::Instruction::And) {
+                if (auto* inner = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0))) {
+                    if (inner->getOpcode() == llvm::Instruction::And && hasOneUse(inner)) {
+                        auto c1 = getConstIntValue(inner->getOperand(1));
+                        auto c2 = getConstIntValue(inst.getOperand(1));
+                        if (c1 && c2) {
+                            llvm::IRBuilder<> builder(&inst);
+                            int64_t combined = *c1 & *c2;
+                            simplified = builder.CreateAnd(
+                                inner->getOperand(0),
+                                llvm::ConstantInt::get(inst.getType(), combined),
+                                "and_combine_consts");
+                        }
+                    }
+                }
+            }
+
+            // Pattern: (x | C1) | C2 → x | (C1 | C2)  (redundant OR folding)
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Or) {
+                if (auto* inner = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0))) {
+                    if (inner->getOpcode() == llvm::Instruction::Or && hasOneUse(inner)) {
+                        auto c1 = getConstIntValue(inner->getOperand(1));
+                        auto c2 = getConstIntValue(inst.getOperand(1));
+                        if (c1 && c2) {
+                            llvm::IRBuilder<> builder(&inst);
+                            int64_t combined = *c1 | *c2;
+                            simplified = builder.CreateOr(
+                                inner->getOperand(0),
+                                llvm::ConstantInt::get(inst.getType(), combined),
+                                "or_combine_consts");
+                        }
+                    }
+                }
+            }
+
+            // Pattern: (x ^ C1) ^ C2 → x ^ (C1 ^ C2)  (redundant XOR folding)
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Xor) {
+                if (auto* inner = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0))) {
+                    if (inner->getOpcode() == llvm::Instruction::Xor && hasOneUse(inner)) {
+                        auto c1 = getConstIntValue(inner->getOperand(1));
+                        auto c2 = getConstIntValue(inst.getOperand(1));
+                        if (c1 && c2) {
+                            llvm::IRBuilder<> builder(&inst);
+                            int64_t combined = *c1 ^ *c2;
+                            simplified = builder.CreateXor(
+                                inner->getOperand(0),
+                                llvm::ConstantInt::get(inst.getType(), combined),
+                                "xor_combine_consts");
+                        }
+                    }
+                }
+            }
+
             // Pattern: add(x, 0) → x
             if (!simplified && inst.getOpcode() == llvm::Instruction::Add) {
                 if (isConstInt(inst.getOperand(1), 0)) {
@@ -2476,7 +2530,7 @@ static bool replaceIdiom(IdiomMatch& match) {
                     if (inner->getOpcode() == llvm::Instruction::AShr && hasOneUse(inner)) {
                         auto c1 = getConstIntValue(inner->getOperand(1));
                         auto c2 = getConstIntValue(inst.getOperand(1));
-                        if (c1 && c2) {
+                        if (c1 && c2 && *c1 >= 0 && *c2 >= 0) {
                             unsigned bitWidth = inst.getType()->getIntegerBitWidth();
                             int64_t total = *c1 + *c2;
                             if (total >= 0 && total < static_cast<int64_t>(bitWidth)) {

@@ -1224,6 +1224,16 @@ llvm::Function* CodeGenerator::getOrDeclarePutchar() {
     return fn;
 }
 
+llvm::Function* CodeGenerator::getOrDeclarePuts() {
+    if (auto* fn = module->getFunction("puts"))
+        return fn;
+    auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context),
+                                       {llvm::PointerType::getUnqual(*context)}, false);
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "puts", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    return fn;
+}
+
 llvm::Function* CodeGenerator::getOrDeclareScanf() {
     if (auto* fn = module->getFunction("scanf"))
         return fn;

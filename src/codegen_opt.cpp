@@ -838,6 +838,10 @@ void CodeGenerator::runOptimizationPasses() {
             // through phi nodes and conditional branches.
             FPM.addPass(llvm::SCCPPass());
             FPM.addPass(llvm::InstCombinePass());
+            // ConstraintElimination uses branch conditions to narrow value
+            // ranges, enabling unsigned loop vectorization and eliminating
+            // redundant bounds checks.  Beneficial at O2+ (not just O3).
+            FPM.addPass(llvm::ConstraintEliminationPass());
             if (isO3) {
                 // LibCallsShrinkWrap wraps math library calls (sqrt, exp2, pow,
                 // log, etc.) with fast-path domain checks.  When the argument
@@ -846,7 +850,6 @@ void CodeGenerator::runOptimizationPasses() {
                 // bypassed entirely.  This is especially beneficial for
                 // floating-point benchmarks that call math functions in loops.
                 FPM.addPass(llvm::LibCallsShrinkWrapPass());
-                FPM.addPass(llvm::ConstraintEliminationPass());
                 // JumpThreading threads branches through basic blocks with
                 // known conditions, reducing branch mispredictions.
                 FPM.addPass(llvm::JumpThreadingPass());

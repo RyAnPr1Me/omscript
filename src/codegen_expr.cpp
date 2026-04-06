@@ -1384,6 +1384,18 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 // n*1024 → (n<<10)
                 return builder->CreateShl(base, mkShift(10), "mul1024");
             }
+            case 2048: {
+                // n*2048 → (n<<11)
+                return builder->CreateShl(base, mkShift(11), "mul2048");
+            }
+            case 4096: {
+                // n*4096 → (n<<12)
+                return builder->CreateShl(base, mkShift(12), "mul4096");
+            }
+            case 8192: {
+                // n*8192 → (n<<13)
+                return builder->CreateShl(base, mkShift(13), "mul8192");
+            }
             // ── Extended multiply-by-constant patterns (2-instruction) ─────────
             case 34: {
                 // n*34 → (n<<5) + (n<<1)  (= 32n + 2n)

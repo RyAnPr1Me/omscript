@@ -234,6 +234,16 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     if (bid == BuiltinId::PRINT) {
         validateArgCount(expr, "print", 1);
         Expression* argExpr = expr->arguments[0].get();
+        // Fast path: string literal → use puts() instead of printf("%s\n", ...)
+        // puts() appends a newline automatically and avoids format-string parsing.
+        if (argExpr->type == ASTNodeType::LITERAL_EXPR) {
+            auto* lit = static_cast<LiteralExpr*>(argExpr);
+            if (lit->literalType == LiteralExpr::LiteralType::STRING) {
+                llvm::Value* strVal = builder->CreateGlobalString(lit->stringValue, "print.lit");
+                builder->CreateCall(getOrDeclarePuts(), {strVal});
+                return llvm::ConstantInt::get(getDefaultType(), 0);
+            }
+        }
         llvm::Value* arg = generateExpression(argExpr);
         if (arg->getType()->isDoubleTy()) {
             // Print float value
