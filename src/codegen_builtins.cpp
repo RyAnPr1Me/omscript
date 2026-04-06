@@ -1809,8 +1809,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             // Cast char to i32 for memchr.  Use unsigned char intermediate to
             // ensure correct zero-extension (plain char may be signed on some
             // platforms, which would sign-extend values > 127 incorrectly).
-            auto memchrCharConst = static_cast<uint32_t>(static_cast<unsigned char>(singleCharVal));
-            llvm::Value* charVal = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), memchrCharConst);
+            auto unsignedCharValue = static_cast<uint32_t>(static_cast<unsigned char>(singleCharVal));
+            llvm::Value* charVal = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), unsignedCharValue);
             result = builder->CreateCall(getOrDeclareMemchr(), {haystackPtr, charVal, len}, "contains.memchr");
         } else {
             llvm::Value* needleArg = generateExpression(needleExpr);
@@ -1848,8 +1848,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         if (isSingleChar) {
             llvm::Value* len = builder->CreateCall(getOrDeclareStrlen(), {haystackPtr}, "indexof.len");
             // Cast char to i32 for memchr (see str_contains above for rationale).
-            auto memchrCharConst2 = static_cast<uint32_t>(static_cast<unsigned char>(singleCharVal));
-            llvm::Value* charVal = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), memchrCharConst2);
+            auto unsignedCharValue = static_cast<uint32_t>(static_cast<unsigned char>(singleCharVal));
+            llvm::Value* charVal = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), unsignedCharValue);
             result = builder->CreateCall(getOrDeclareMemchr(), {haystackPtr, charVal, len}, "indexof.memchr");
         } else {
             llvm::Value* needleArg = generateExpression(needleExpr);
