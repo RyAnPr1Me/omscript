@@ -3141,6 +3141,24 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     // and other performance-critical optimizations.
     currentFuncHintHot_ = func->hintHot;
 
+    // @optmax: enable full fast-math flags for all float operations in this
+    // function.  The user's @optmax annotation is a compile-time guarantee
+    // that the function is safe and well-behaved, which includes IEEE-754
+    // relaxation.  Enabling all FMF flags (nnan, ninf, nsz, arcp, contract,
+    // reassoc, afn) allows LLVM to:
+    //   1. Form FMA instructions (fmul+fadd → fmadd): 2x float throughput
+    //   2. Reassociate float reductions for vectorization (sum += a[i])
+    //   3. Eliminate NaN/Inf checks on known-finite values
+    //   4. Use reciprocal approximations for division
+    // The flags are saved and restored after the function body so they don't
+    // leak into subsequent non-OPTMAX functions.
+    llvm::FastMathFlags savedFMF = builder->getFastMathFlags();
+    if (inOptMaxFunction && !useFastMath_) {
+        llvm::FastMathFlags FMF;
+        FMF.setFast();
+        builder->setFastMathFlags(FMF);
+    }
+
     // Create entry basic block
     llvm::BasicBlock* entry = llvm::BasicBlock::Create(*context, "entry", function);
     builder->SetInsertPoint(entry);
@@ -3268,6 +3286,10 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     }
 
     inOptMaxFunction = false;
+
+    // Restore fast-math flags to pre-OPTMAX state so subsequent functions
+    // are not affected by the aggressive flags set for this function.
+    builder->setFastMathFlags(savedFMF);
 
     return function;
 }

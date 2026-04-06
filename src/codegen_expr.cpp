@@ -1085,10 +1085,17 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         // overflow cannot occur (each value fits in [0, INT64_MAX]), and
         // their sum is at most 2·INT64_MAX = 2^64−2 < UINT64_MAX so unsigned
         // overflow cannot occur either.
+        // @optmax: the user's guarantee of well-behaved arithmetic means
+        // signed overflow cannot occur, enabling nsw even when we can't
+        // statically prove non-negativity.  nsw enables SCEV to compute
+        // tighter loop trip counts and proves induction variable monotonicity.
         const bool canNSWNUW = bothOperandsNonNeg || constNonNeg;
+        const bool canNSW = canNSWNUW || inOptMaxFunction;
         auto* result = canNSWNUW
             ? builder->CreateAdd(left, right, "addtmp", /*HasNUW=*/true, /*HasNSW=*/true)
-            : builder->CreateAdd(left, right, "addtmp");
+            : canNSW
+                ? builder->CreateNSWAdd(left, right, "addtmp")
+                : builder->CreateAdd(left, right, "addtmp");
         // Track non-negativity: if both operands are known non-negative
         // (including constant operands), the result is non-negative
         // (assuming no overflow, which is true for typical loop counter
@@ -1116,7 +1123,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             else if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left))
                 constNSW = rightNonNeg && !ci->isNegative();
         }
-        const bool canNSW = bothNonNeg || constNSW;
+        const bool canNSW = bothNonNeg || constNSW || inOptMaxFunction;
         return canNSW ? builder->CreateNSWSub(left, right, "subtmp")
                       : builder->CreateSub(left, right, "subtmp");
     } else if (expr->op == "*") {
@@ -1156,7 +1163,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         // to compute tighter ranges for induction variable analysis.
         auto emitShiftAdd = [&](llvm::Value* base, int64_t multiplier, bool baseNonNeg = false) -> llvm::Value* {
             const bool nf = false;  // nuw: never set on these (could wrap unsigned)
-            const bool ns = baseNonNeg;  // nsw: safe when base >= 0
+            const bool ns = baseNonNeg || inOptMaxFunction;  // nsw: safe when base >= 0 or @optmax
             // Use the actual type of the base value for shift amounts so that the
             // shift instruction is well-typed for all integer widths (i8/i16/i32/i64).
             llvm::Type* baseTy = base->getType();
@@ -2727,7 +2734,11 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             nonNegValues_.insert(result);
             return result;
         }
-        return builder->CreateMul(left, right, "multmp");
+        // @optmax: the user's guarantee of well-behaved arithmetic means
+        // signed overflow cannot occur, enabling nsw for better SCEV analysis.
+        return inOptMaxFunction
+            ? builder->CreateNSWMul(left, right, "multmp")
+            : builder->CreateMul(left, right, "multmp");
     } else if (expr->op == "/" || expr->op == "%") {
         const bool isDivision = expr->op == "/";
 
@@ -4571,7 +4582,9 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
 
     if (isStr) {
         // Load single byte at offset index, zero-extend to i64
-        llvm::Value* charPtr = builder->CreateGEP(llvm::Type::getInt8Ty(*context), basePtr, idxVal, "idx.charptr");
+        // inbounds GEP: the bounds check above guarantees the index is within
+        // the allocated string buffer, so the pointer is always valid.
+        llvm::Value* charPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), basePtr, idxVal, "idx.charptr");
         llvm::Value* charVal = builder->CreateLoad(llvm::Type::getInt8Ty(*context), charPtr, "idx.char");
         return builder->CreateZExt(charVal, getDefaultType(), "idx.charext");
     }
@@ -4740,8 +4753,10 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
 
     if (isStr) {
         // Truncate to i8 and store at byte offset index
+        // inbounds GEP: the bounds check above guarantees the index is within
+        // the allocated string buffer, so the pointer is always valid.
         llvm::Value* byteVal = builder->CreateTrunc(newVal, llvm::Type::getInt8Ty(*context), "idxa.byte");
-        llvm::Value* charPtr = builder->CreateGEP(llvm::Type::getInt8Ty(*context), basePtr, idxVal, "idxa.charptr");
+        llvm::Value* charPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), basePtr, idxVal, "idxa.charptr");
         builder->CreateStore(byteVal, charPtr);
     } else {
         // Array: store i64 element at slot (index + 1)

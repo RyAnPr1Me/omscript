@@ -863,6 +863,31 @@ void CodeGenerator::runOptimizationPasses() {
             // shares them across basic blocks, reducing code size and
             // register pressure.  Promoted from O3 to O2.
             FPM.addPass(llvm::ConstantHoistingPass());
+            // IRCE (Inductive Range Check Elimination) removes bounds checks
+            // from loops with inductive ranges.  Promoted from O3 to O2
+            // because OmScript's array-heavy loops with bounds checks benefit
+            // significantly: the pass proves that the induction variable stays
+            // within bounds for the entire loop, eliminating per-iteration checks.
+            FPM.addPass(llvm::IRCEPass());
+            // PartiallyInlineLibCalls inlines the fast path of math library
+            // functions (sqrt, floor, ceil, etc.) and only calls the slow
+            // errno-setting path when needed.  Promoted from O3 to O2 because
+            // the fast path is a single instruction (e.g. sqrtsd) vs. a full
+            // library call (~50 cycles), and OmScript's float operations
+            // commonly use these functions.
+            FPM.addPass(llvm::PartiallyInlineLibCallsPass());
+            // SeparateConstOffsetFromGEP canonicalizes GEP chains by factoring
+            // out constant offsets, enabling better CSE and addressing mode
+            // selection.  Promoted from O3 to O2 because OmScript's array
+            // layout (length header + data) creates GEP patterns with constant
+            // +1 offsets that benefit from factoring.
+            FPM.addPass(llvm::SeparateConstOffsetFromGEPPass());
+            // GuardWidening merges multiple guard checks into a single
+            // wider check, reducing branching overhead in bounds-checked
+            // loops.  Promoted from O3 to O2 because OmScript generates
+            // bounds checks on every array access, and widening them
+            // eliminates redundant checks in multi-access loops.
+            FPM.addPass(llvm::GuardWideningPass());
             if (isO3) {
                 // LibCallsShrinkWrap wraps math library calls (sqrt, exp2, pow,
                 // log, etc.) with fast-path domain checks.  When the argument
@@ -872,18 +897,11 @@ void CodeGenerator::runOptimizationPasses() {
                 // floating-point benchmarks that call math functions in loops.
                 FPM.addPass(llvm::LibCallsShrinkWrapPass());
                 FPM.addPass(llvm::SpeculativeExecutionPass());
-                FPM.addPass(llvm::IRCEPass());
                 FPM.addPass(llvm::DFAJumpThreadingPass());
-                FPM.addPass(llvm::SeparateConstOffsetFromGEPPass());
-                FPM.addPass(llvm::PartiallyInlineLibCallsPass());
                 FPM.addPass(llvm::SinkingPass());
                 // NewGVN is a graph-based GVN that catches redundancies
                 // classic GVN misses (e.g. through PHI nodes and memory).
                 FPM.addPass(llvm::NewGVNPass());
-                // GuardWidening merges multiple guard checks into a single
-                // wider check, reducing branching overhead in bounds-checked
-                // loops.
-                FPM.addPass(llvm::GuardWideningPass());
             }
             // Aggressive SimplifyCFG at the end to convert if-else chains
             // into select instructions or lookup tables after all inlining,
