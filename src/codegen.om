@@ -11,6 +11,7 @@ global var g_label_count = 0;    // label counter (L_0, L_1, ...)
 global var g_str_count   = 0;    // string literal counter (@str_0, @str_1, ...)
 global var g_str_decls   = "";   // string constant declarations
 global var g_has_terminator = 0; // 1 if current block already has ret/br
+global var g_current_block  = "entry"; // name of the current basic block (for PHI predecessors)
 
 // Simple local variable symbol table (parallel arrays per function)
 global var g_local_names = [];   // variable name strings
@@ -20,6 +21,59 @@ global var g_local_count = 0;    // number of locals in current function
 // String variable tracking: names of variables holding string (i8*) values
 global var g_str_vars     = [];  // variable names that are strings
 global var g_str_var_count = 0;  // count of string variables
+
+// Loop label stack for break/continue (max nesting depth 16)
+global var g_loop_cond_0 = ""; global var g_loop_end_0 = "";
+global var g_loop_cond_1 = ""; global var g_loop_end_1 = "";
+global var g_loop_cond_2 = ""; global var g_loop_end_2 = "";
+global var g_loop_cond_3 = ""; global var g_loop_end_3 = "";
+global var g_loop_cond_4 = ""; global var g_loop_end_4 = "";
+global var g_loop_cond_5 = ""; global var g_loop_end_5 = "";
+global var g_loop_cond_6 = ""; global var g_loop_end_6 = "";
+global var g_loop_cond_7 = ""; global var g_loop_end_7 = "";
+global var g_loop_depth       = 0;   // current nesting depth
+
+fn push_loop(cond_lbl, end_lbl) {
+    if (g_loop_depth == 0) { g_loop_cond_0 = cond_lbl; g_loop_end_0 = end_lbl; }
+    else if (g_loop_depth == 1) { g_loop_cond_1 = cond_lbl; g_loop_end_1 = end_lbl; }
+    else if (g_loop_depth == 2) { g_loop_cond_2 = cond_lbl; g_loop_end_2 = end_lbl; }
+    else if (g_loop_depth == 3) { g_loop_cond_3 = cond_lbl; g_loop_end_3 = end_lbl; }
+    else if (g_loop_depth == 4) { g_loop_cond_4 = cond_lbl; g_loop_end_4 = end_lbl; }
+    else if (g_loop_depth == 5) { g_loop_cond_5 = cond_lbl; g_loop_end_5 = end_lbl; }
+    else if (g_loop_depth == 6) { g_loop_cond_6 = cond_lbl; g_loop_end_6 = end_lbl; }
+    else if (g_loop_depth == 7) { g_loop_cond_7 = cond_lbl; g_loop_end_7 = end_lbl; }
+    g_loop_depth = g_loop_depth + 1;
+}
+
+fn get_loop_cond() {
+    var d = g_loop_depth - 1;
+    if (d == 0) { return g_loop_cond_0; }
+    if (d == 1) { return g_loop_cond_1; }
+    if (d == 2) { return g_loop_cond_2; }
+    if (d == 3) { return g_loop_cond_3; }
+    if (d == 4) { return g_loop_cond_4; }
+    if (d == 5) { return g_loop_cond_5; }
+    if (d == 6) { return g_loop_cond_6; }
+    if (d == 7) { return g_loop_cond_7; }
+    return "";
+}
+
+fn get_loop_end() {
+    var d = g_loop_depth - 1;
+    if (d == 0) { return g_loop_end_0; }
+    if (d == 1) { return g_loop_end_1; }
+    if (d == 2) { return g_loop_end_2; }
+    if (d == 3) { return g_loop_end_3; }
+    if (d == 4) { return g_loop_end_4; }
+    if (d == 5) { return g_loop_end_5; }
+    if (d == 6) { return g_loop_end_6; }
+    if (d == 7) { return g_loop_end_7; }
+    return "";
+}
+
+fn pop_loop() {
+    g_loop_depth = g_loop_depth - 1;
+}
 
 // ─── Helper: fresh SSA temporary ──────────────────────────────────────────────
 
@@ -345,13 +399,15 @@ fn codegen_logical_and(left_nd, right_nd) {
     var lbl_right = fresh_label();
     var lbl_end   = fresh_label();
 
+    var lbl_from_left = g_current_block;
     var cond = fresh_tmp();
     emit_indent(cond + " = icmp ne i64 " + left_val + ", 0");
     emit_indent("br i1 " + cond + ", label %" + lbl_right + ", label %" + lbl_end);
 
-    var lbl_from_left = lbl_end;
     emit(lbl_right + ":");
+    g_current_block = lbl_right;
     var right_val = codegen_expr(right_nd);
+    var lbl_from_right = g_current_block;
     var rcmp = fresh_tmp();
     emit_indent(rcmp + " = icmp ne i64 " + right_val + ", 0");
     var rext = fresh_tmp();
@@ -359,8 +415,9 @@ fn codegen_logical_and(left_nd, right_nd) {
     emit_indent("br label %" + lbl_end);
 
     emit(lbl_end + ":");
+    g_current_block = lbl_end;
     var result = fresh_tmp();
-    emit_indent(result + " = phi i64 [ 0, %" + lbl_from_left + " ], [ " + rext + ", %" + lbl_right + " ]");
+    emit_indent(result + " = phi i64 [ 0, %" + lbl_from_left + " ], [ " + rext + ", %" + lbl_from_right + " ]");
     return result;
 }
 
@@ -371,13 +428,15 @@ fn codegen_logical_or(left_nd, right_nd) {
     var lbl_right = fresh_label();
     var lbl_end   = fresh_label();
 
+    var lbl_from_left = g_current_block;
     var cond = fresh_tmp();
     emit_indent(cond + " = icmp ne i64 " + left_val + ", 0");
     emit_indent("br i1 " + cond + ", label %" + lbl_end + ", label %" + lbl_right);
 
-    var lbl_from_left = lbl_end;
     emit(lbl_right + ":");
+    g_current_block = lbl_right;
     var right_val = codegen_expr(right_nd);
+    var lbl_from_right = g_current_block;
     var rcmp = fresh_tmp();
     emit_indent(rcmp + " = icmp ne i64 " + right_val + ", 0");
     var rext = fresh_tmp();
@@ -385,8 +444,9 @@ fn codegen_logical_or(left_nd, right_nd) {
     emit_indent("br label %" + lbl_end);
 
     emit(lbl_end + ":");
+    g_current_block = lbl_end;
     var result = fresh_tmp();
-    emit_indent(result + " = phi i64 [ 1, %" + lbl_from_left + " ], [ " + rext + ", %" + lbl_right + " ]");
+    emit_indent(result + " = phi i64 [ 1, %" + lbl_from_left + " ], [ " + rext + ", %" + lbl_from_right + " ]");
     return result;
 }
 
@@ -559,13 +619,25 @@ fn codegen_stmt(nd) {
         return;
     }
 
-    // Break / Continue — emit as comments (would need loop label tracking)
+    // Break — branch to loop end
     if (ty == ND_BREAK) {
-        emit_indent("; break (not yet wired to loop exit)");
+        if (g_loop_depth > 0) {
+            var break_target = get_loop_end();
+            emit_indent("br label %" + break_target);
+            g_has_terminator = 1;
+        } else {
+            emit_indent("; WARNING: break outside of loop");
+        }
         return;
     }
     if (ty == ND_CONTINUE) {
-        emit_indent("; continue (not yet wired to loop header)");
+        if (g_loop_depth > 0) {
+            var cont_target = get_loop_cond();
+            emit_indent("br label %" + cont_target);
+            g_has_terminator = 1;
+        } else {
+            emit_indent("; WARNING: continue outside of loop");
+        }
         return;
     }
 
@@ -628,6 +700,7 @@ fn codegen_if(nd) {
 
     // Then branch
     emit(lbl_then + ":");
+    g_current_block = lbl_then;
     g_has_terminator = 0;
     codegen_stmt(g_nd_c1[nd]);
     if (!g_has_terminator) {
@@ -637,6 +710,7 @@ fn codegen_if(nd) {
     // Else branch
     if (else_nd >= 0) {
         emit(lbl_else + ":");
+        g_current_block = lbl_else;
         g_has_terminator = 0;
         codegen_stmt(else_nd);
         if (!g_has_terminator) {
@@ -645,6 +719,7 @@ fn codegen_if(nd) {
     }
 
     emit(lbl_end + ":");
+    g_current_block = lbl_end;
     g_has_terminator = 0;
 }
 
@@ -655,8 +730,12 @@ fn codegen_while(nd) {
     var lbl_body = fresh_label();
     var lbl_end  = fresh_label();
 
+    // Push loop labels for break/continue
+    push_loop(lbl_cond, lbl_end);
+
     emit_indent("br label %" + lbl_cond);
     emit(lbl_cond + ":");
+    g_current_block = lbl_cond;
     g_has_terminator = 0;
     var cond_val = codegen_expr(g_nd_c0[nd]);
     var cmp = fresh_tmp();
@@ -664,6 +743,7 @@ fn codegen_while(nd) {
     emit_indent("br i1 " + cmp + ", label %" + lbl_body + ", label %" + lbl_end);
 
     emit(lbl_body + ":");
+    g_current_block = lbl_body;
     g_has_terminator = 0;
     codegen_stmt(g_nd_c1[nd]);
     if (!g_has_terminator) {
@@ -671,7 +751,11 @@ fn codegen_while(nd) {
     }
 
     emit(lbl_end + ":");
+    g_current_block = lbl_end;
     g_has_terminator = 0;
+
+    // Pop loop labels
+    pop_loop();
 }
 
 // ─── For loop (range-based: for i in start...end) ─────────────────────────────
@@ -692,10 +776,14 @@ fn codegen_for(nd) {
     var lbl_inc  = fresh_label();
     var lbl_end  = fresh_label();
 
+    // Push loop labels for break/continue (continue goes to increment)
+    push_loop(lbl_inc, lbl_end);
+
     emit_indent("br label %" + lbl_cond);
 
     // Condition: i < end
     emit(lbl_cond + ":");
+    g_current_block = lbl_cond;
     g_has_terminator = 0;
     var cur = fresh_tmp();
     emit_indent(cur + " = load i64, i64* " + iter_reg);
@@ -705,6 +793,7 @@ fn codegen_for(nd) {
 
     // Body
     emit(lbl_body + ":");
+    g_current_block = lbl_body;
     g_has_terminator = 0;
     codegen_stmt(g_nd_c2[nd]);
     if (!g_has_terminator) {
@@ -713,6 +802,7 @@ fn codegen_for(nd) {
 
     // Increment: i = i + 1
     emit(lbl_inc + ":");
+    g_current_block = lbl_inc;
     g_has_terminator = 0;
     var cur2 = fresh_tmp();
     emit_indent(cur2 + " = load i64, i64* " + iter_reg);
@@ -722,7 +812,11 @@ fn codegen_for(nd) {
     emit_indent("br label %" + lbl_cond);
 
     emit(lbl_end + ":");
+    g_current_block = lbl_end;
     g_has_terminator = 0;
+
+    // Pop loop labels
+    pop_loop();
 }
 
 // ─── Return statement ─────────────────────────────────────────────────────────
@@ -754,6 +848,8 @@ fn codegen_function(nd) {
     g_local_count = 0;
     g_str_vars     = [];
     g_str_var_count = 0;
+    g_loop_depth       = 0;
+    g_current_block    = "entry";
 
     // Build parameter list string
     var params_str = "";
@@ -859,6 +955,8 @@ fn generate_llvm_ir(root) {
     g_local_count = 0;
     g_str_vars     = [];
     g_str_var_count = 0;
+    g_loop_depth       = 0;
+    g_current_block    = "entry";
 
     // Build the module header
     g_ir_header = "; ModuleID = 'omscript'\n";
