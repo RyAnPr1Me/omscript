@@ -3708,9 +3708,11 @@ llvm::Value* CodeGenerator::generateTernary(TernaryExpr* expr) {
             const bool rightSimple = bin->right->type == ASTNodeType::IDENTIFIER_EXPR ||
                                      bin->right->type == ASTNodeType::LITERAL_EXPR;
             // Allow arithmetic/bitwise ops AND comparisons — all are
-            // side-effect-free single instructions.  Comparisons return i1
-            // which gets zext'd, enabling patterns like:
-            //   cond ? (a > b) : (a < b) → select + 2 icmp
+            // side-effect-free single instructions.  Including comparisons
+            // here avoids generating a branch+PHI diamond when the ternary
+            // arms are simple compare expressions, producing a branchless
+            // select instead (e.g. `flag ? a + 1 : a - 1` or
+            // `flag ? x == 0 : y == 0`).
             const std::string& op = bin->op;
             const bool isSafeOp = (op == "+" || op == "-" || op == "*" || op == "/" ||
                                    op == "%" || op == "&" || op == "|" || op == "^" ||

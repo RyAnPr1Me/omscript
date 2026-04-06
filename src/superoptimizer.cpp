@@ -2056,8 +2056,8 @@ static bool replaceIdiom(IdiomMatch& match) {
                 }
             }
 
-            // Pattern: x + x → x << 1  (shift is cheaper than add on some
-            // microarchitectures and enables further shift combining)
+            // Pattern: x + x → x << 1  (enables further shift combining
+            // with adjacent shl/mul-by-power-of-2 operations)
             if (!simplified && inst.getOpcode() == llvm::Instruction::Add) {
                 if (inst.getOperand(0) == inst.getOperand(1)) {
                     llvm::IRBuilder<> builder(&inst);
