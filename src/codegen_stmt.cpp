@@ -1056,6 +1056,11 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         if (auto* startCI = llvm::dyn_cast<llvm::ConstantInt>(startVal)) {
             startNonNegForInc = startCI->getSExtValue() >= 0;
         }
+        // Also check nonNegValues_ for non-constant start values (e.g., function
+        // args known to be non-negative from caller context).
+        if (!startNonNegForInc && nonNegValues_.count(startVal) > 0) {
+            startNonNegForInc = true;
+        }
     }
     if (startNonNegForInc) {
         incVal = builder->CreateAdd(nextVal, stepVal, "nextvar", /*HasNUW=*/true, /*HasNSW=*/true);
@@ -1585,9 +1590,12 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
     builder->CreateBr(condBB);
 
     // Condition: idx < length
+    // Use unsigned compare: the foreach index starts at 0 and only
+    // increments, and array length is always non-negative.  Unsigned
+    // comparison enables better loop vectorization and SCEV analysis.
     builder->SetInsertPoint(condBB);
     llvm::Value* curIdx = builder->CreateLoad(getDefaultType(), idxAlloca, "foreach.idx");
-    llvm::Value* cond = builder->CreateICmpSLT(curIdx, lenVal, "foreach.cmp");
+    llvm::Value* cond = builder->CreateICmpULT(curIdx, lenVal, "foreach.cmp");
     auto* foreachCondBr = builder->CreateCondBr(cond, bodyBB, endBB);
     // Hint the back-edge (body) as likely-taken.
     if (optimizationLevel >= OptimizationLevel::O2) {
@@ -1631,6 +1639,13 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
                                /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), basePtr, offset, "foreach.elem.ptr");
         elemVal = builder->CreateLoad(getDefaultType(), elemPtr, "foreach.elem");
+        // TBAA: foreach element loads (slots 1+) never alias the array length
+        // (slot 0).  This enables LLVM's alias analysis to prove that element
+        // loads are independent from length loads, which is critical for LICM
+        // to hoist the length load out of the loop body.
+        if (auto* elemLoad = llvm::dyn_cast<llvm::LoadInst>(elemVal)) {
+            elemLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        }
     }
     builder->CreateStore(elemVal, iterAlloca);
 

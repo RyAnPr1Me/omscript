@@ -929,6 +929,13 @@ llvm::Value* CodeGenerator::convertTo(llvm::Value* v, llvm::Type* targetTy) {
 }
 
 llvm::Value* CodeGenerator::toBool(llvm::Value* v) {
+    // When the value is already i1 (from a comparison), it IS the boolean
+    // — no need to generate a redundant `icmp ne i1 %v, 0`.  This saves
+    // one instruction per condition check and produces cleaner IR that
+    // LLVM's branch analysis and vectorizer can process more efficiently.
+    if (v->getType()->isIntegerTy(1)) {
+        return v;
+    }
     if (v->getType()->isDoubleTy()) {
         return builder->CreateFCmpONE(v, llvm::ConstantFP::get(getFloatType(), 0.0), "tobool");
     } else if (v->getType()->isPointerTy()) {
@@ -1141,6 +1148,10 @@ llvm::Function* CodeGenerator::getOrDeclareMalloc() {
     fn->addFnAttr(llvm::Attribute::NoBuiltin);
     fn->addRetAttr(llvm::Attribute::NoAlias);
     fn->addRetAttr(llvm::Attribute::NonNull);
+    // allocsize(0): parameter 0 is the allocation size — enables LLVM to
+    // reason about the returned buffer size for alias analysis and to
+    // eliminate redundant bounds checks on the allocated memory.
+    fn->addFnAttr(llvm::Attribute::getWithAllocSizeArgs(*context, 0, std::nullopt));
     return fn;
 }
 
@@ -1155,6 +1166,10 @@ llvm::Function* CodeGenerator::getOrDeclareCalloc() {
     fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addFnAttr(llvm::Attribute::NoBuiltin);
     fn->addRetAttr(llvm::Attribute::NoAlias);
+    // allocsize(0, 1): allocation size is arg0 * arg1 — enables LLVM to
+    // reason about the returned buffer size for alias analysis and to
+    // eliminate redundant bounds checks on the allocated memory.
+    fn->addFnAttr(llvm::Attribute::getWithAllocSizeArgs(*context, 0, 1));
     // Note: calloc CAN return NULL on OOM, so we do NOT add NonNull here.
     // The call site in array_fill does not check for NULL because OmScript's
     // runtime assumes allocation always succeeds (same as C benchmarks).
@@ -1169,8 +1184,13 @@ llvm::Function* CodeGenerator::getOrDeclareStrcpy() {
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strcpy", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    fn->addFnAttr(llvm::Attribute::NoSync);
+    // memory(argmem: readwrite): strcpy only accesses memory through its pointer args.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::argMemOnly()));
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     fn->addParamAttr(0, llvm::Attribute::Returned); // strcpy returns the destination pointer
+    OMSC_ADD_NOCAPTURE(fn, 0);
     fn->addParamAttr(1, llvm::Attribute::ReadOnly);
     fn->addParamAttr(1, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 1);
@@ -1185,8 +1205,13 @@ llvm::Function* CodeGenerator::getOrDeclareStrcat() {
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strcat", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    fn->addFnAttr(llvm::Attribute::NoSync);
+    // memory(argmem: readwrite): strcat only accesses memory through its pointer args.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::argMemOnly()));
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     fn->addParamAttr(0, llvm::Attribute::Returned); // strcat returns the destination pointer
+    OMSC_ADD_NOCAPTURE(fn, 0);
     fn->addParamAttr(1, llvm::Attribute::ReadOnly);
     fn->addParamAttr(1, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 1);
@@ -1214,6 +1239,48 @@ llvm::Function* CodeGenerator::getOrDeclareStrcmp() {
     return fn;
 }
 
+llvm::Function* CodeGenerator::getOrDeclareStrncmp() {
+    if (auto* fn = module->getFunction("strncmp"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* sizeTy = getDefaultType();  // size_t mapped to i64
+    auto* ty = llvm::FunctionType::get(builder->getInt32Ty(), {ptrTy, ptrTy, sizeTy}, false);
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strncmp", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    fn->addFnAttr(llvm::Attribute::NoSync);
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::Ref)));
+    fn->addParamAttr(0, llvm::Attribute::ReadOnly);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    OMSC_ADD_NOCAPTURE(fn, 0);
+    fn->addParamAttr(1, llvm::Attribute::ReadOnly);
+    fn->addParamAttr(1, llvm::Attribute::NonNull);
+    OMSC_ADD_NOCAPTURE(fn, 1);
+    return fn;
+}
+
+llvm::Function* CodeGenerator::getOrDeclareMemcmp() {
+    if (auto* fn = module->getFunction("memcmp"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* sizeTy = getDefaultType();  // size_t mapped to i64
+    auto* ty = llvm::FunctionType::get(builder->getInt32Ty(), {ptrTy, ptrTy, sizeTy}, false);
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "memcmp", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    fn->addFnAttr(llvm::Attribute::NoSync);
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::Ref)));
+    fn->addParamAttr(0, llvm::Attribute::ReadOnly);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    OMSC_ADD_NOCAPTURE(fn, 0);
+    fn->addParamAttr(1, llvm::Attribute::ReadOnly);
+    fn->addParamAttr(1, llvm::Attribute::NonNull);
+    OMSC_ADD_NOCAPTURE(fn, 1);
+    return fn;
+}
+
 llvm::Function* CodeGenerator::getOrDeclarePutchar() {
     if (auto* fn = module->getFunction("putchar"))
         return fn;
@@ -1221,7 +1288,49 @@ llvm::Function* CodeGenerator::getOrDeclarePutchar() {
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "putchar", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
     return fn;
+}
+
+llvm::Function* CodeGenerator::getOrDeclarePuts() {
+    if (auto* fn = module->getFunction("puts"))
+        return fn;
+    auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context),
+                                       {llvm::PointerType::getUnqual(*context)}, false);
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "puts", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    fn->addParamAttr(0, llvm::Attribute::ReadOnly);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    OMSC_ADD_NOCAPTURE(fn, 0);
+    return fn;
+}
+
+llvm::Function* CodeGenerator::getOrDeclareFputs() {
+    if (auto* fn = module->getFunction("fputs"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    // fputs(const char* str, FILE* stream) -> int
+    auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context),
+                                       {ptrTy, ptrTy}, false);
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "fputs", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addParamAttr(0, llvm::Attribute::ReadOnly);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    OMSC_ADD_NOCAPTURE(fn, 0);
+    return fn;
+}
+
+llvm::Value* CodeGenerator::getOrDeclareStdout() {
+    // Get the C library 'stdout' global (extern FILE *stdout).
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    if (auto* gv = module->getGlobalVariable("stdout"))
+        return builder->CreateLoad(ptrTy, gv, "stdout.val");
+    auto* gv = new llvm::GlobalVariable(
+        *module, ptrTy, /*isConstant=*/false,
+        llvm::GlobalValue::ExternalLinkage, nullptr, "stdout");
+    return builder->CreateLoad(ptrTy, gv, "stdout.val");
 }
 
 llvm::Function* CodeGenerator::getOrDeclareScanf() {
@@ -1267,6 +1376,8 @@ llvm::Function* CodeGenerator::getOrDeclareSnprintf() {
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "snprintf", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    fn->addFnAttr(llvm::Attribute::NoSync);
     return fn;
 }
 
@@ -1424,6 +1535,8 @@ llvm::Function* CodeGenerator::getOrDeclareStrtoll() {
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strtoll", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    fn->addFnAttr(llvm::Attribute::NoSync);
     fn->addParamAttr(0, llvm::Attribute::ReadOnly);
     OMSC_ADD_NOCAPTURE(fn, 0);
     return fn;
@@ -1437,6 +1550,8 @@ llvm::Function* CodeGenerator::getOrDeclareStrtod() {
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strtod", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    fn->addFnAttr(llvm::Attribute::NoSync);
     fn->addParamAttr(0, llvm::Attribute::ReadOnly);
     OMSC_ADD_NOCAPTURE(fn, 0);
     return fn;
@@ -1450,6 +1565,14 @@ llvm::Function* CodeGenerator::getOrDeclareStrdup() {
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strdup", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoSync);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    // memory(argmem: read, inaccessiblemem: readwrite): strdup reads the source
+    // string and allocates new memory through the heap allocator.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects(
+            llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::Ref) |
+            llvm::MemoryEffects::inaccessibleMemOnly())));
     fn->addRetAttr(llvm::Attribute::NoAlias);
     fn->addParamAttr(0, llvm::Attribute::ReadOnly);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
@@ -2872,6 +2995,46 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         // (unwind) tables for this function, saving code size and allowing
         // more aggressive inlining across call boundaries.
         function->addFnAttr(llvm::Attribute::NoUnwind);
+    }
+
+    // OmScript uses a flag-based error model (not C++ exceptions / DWARF
+    // unwind), so all user-defined functions are inherently nounwind.  Adding
+    // this unconditionally (at O2+) lets LLVM:
+    //   1. Omit .eh_frame / .gcc_except_table sections → smaller binaries
+    //   2. Inline across call boundaries without needing invoke/landingpad
+    //   3. Eliminate dead exception-handling code in the backend
+    if (optimizationLevel >= OptimizationLevel::O2 &&
+        !function->hasFnAttribute(llvm::Attribute::NoUnwind)) {
+        function->addFnAttr(llvm::Attribute::NoUnwind);
+    }
+
+    // At O2+, align function entry to 16 bytes for better I-cache locality
+    // and branch target prediction.  Hot functions get 32-byte alignment to
+    // avoid crossing cache-line boundaries on the entry block.
+    if (optimizationLevel >= OptimizationLevel::O2) {
+        function->setAlignment(func->hintHot ? llvm::Align(32) : llvm::Align(16));
+
+        // mustprogress: tells LLVM that every loop in this function will
+        // eventually terminate (no infinite spin-loops).  This enables:
+        //   1. Dead store elimination through loops
+        //   2. LICM of loads/stores across loop boundaries
+        //   3. Loop deletion when the loop body has no observable side effects
+        // OmScript programs don't intentionally spin-loop, so this is safe for
+        // all user functions.  Functions with @optnone are excluded.
+        if (!function->hasFnAttribute(llvm::Attribute::OptimizeNone)) {
+            function->addFnAttr(llvm::Attribute::MustProgress);
+        }
+
+        // OmScript's ownership model guarantees that pointer parameters
+        // (arrays, strings) are always valid (non-null) distinct allocations.
+        // Mark ALL pointer parameters as nonnull at O2+ — this lets LLVM
+        // eliminate null-checks and enables speculative loads/hoisting.
+        // @hot and @optmax functions get additional noalias below.
+        for (unsigned i = 0; i < function->arg_size(); ++i) {
+            if (function->getArg(i)->getType()->isPointerTy()) {
+                function->addParamAttr(i, llvm::Attribute::NonNull);
+            }
+        }
     }
 
     // In OPTMAX functions, mark all parameters noalias and add WillReturn.

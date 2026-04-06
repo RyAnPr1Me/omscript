@@ -234,6 +234,16 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     if (bid == BuiltinId::PRINT) {
         validateArgCount(expr, "print", 1);
         Expression* argExpr = expr->arguments[0].get();
+        // Fast path: string literal → use puts() instead of printf("%s\n", ...)
+        // puts() appends a newline automatically and avoids format-string parsing.
+        if (argExpr->type == ASTNodeType::LITERAL_EXPR) {
+            auto* lit = static_cast<LiteralExpr*>(argExpr);
+            if (lit->literalType == LiteralExpr::LiteralType::STRING) {
+                llvm::Value* strVal = builder->CreateGlobalString(lit->stringValue, "print.lit");
+                builder->CreateCall(getOrDeclarePuts(), {strVal});
+                return llvm::ConstantInt::get(getDefaultType(), 0);
+            }
+        }
         llvm::Value* arg = generateExpression(argExpr);
         if (arg->getType()->isDoubleTy()) {
             // Print float value
@@ -249,11 +259,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             if (!arg->getType()->isPointerTy()) {
                 arg = builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "print.str.ptr");
             }
-            llvm::GlobalVariable* strFmt = module->getGlobalVariable("print_str_fmt", true);
-            if (!strFmt) {
-                strFmt = builder->CreateGlobalString("%s\n", "print_str_fmt");
-            }
-            builder->CreateCall(getPrintfFunction(), {strFmt, arg});
+            // Use puts() instead of printf("%s\n", ...) — puts appends a
+            // newline automatically and avoids format-string parsing overhead.
+            builder->CreateCall(getOrDeclarePuts(), {arg});
             return llvm::ConstantInt::get(getDefaultType(), 0);
         } else {
             // Print integer
@@ -313,7 +321,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Convert to integer first if needed (e.g. if stored in a float variable)
         arg = toDefaultType(arg);
         llvm::Value* arrPtr = builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "arrptr");
-        auto* arrlenLoad = builder->CreateLoad(getDefaultType(), arrPtr, "arrlen");
+        auto* arrlenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "arrlen");
         arrlenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
         arrlenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
         nonNegValues_.insert(arrlenLoad);
@@ -1776,17 +1784,42 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::STR_CONTAINS) {
         validateArgCount(expr, "str_contains", 2);
+        // Detect single-character literal needle → use memchr (SIMD-optimized)
+        // instead of strstr (byte-by-byte scan).
+        Expression* needleExpr = expr->arguments[1].get();
+        bool isSingleChar = false;
+        char singleCharVal = 0;
+        if (needleExpr->type == ASTNodeType::LITERAL_EXPR) {
+            auto* lit = static_cast<LiteralExpr*>(needleExpr);
+            if (lit->literalType == LiteralExpr::LiteralType::STRING && lit->stringValue.size() == 1) {
+                isSingleChar = true;
+                singleCharVal = lit->stringValue[0];
+            }
+        }
         llvm::Value* haystackArg = generateExpression(expr->arguments[0].get());
-        llvm::Value* needleArg = generateExpression(expr->arguments[1].get());
         llvm::Value* haystackPtr =
             haystackArg->getType()->isPointerTy()
                 ? haystackArg
                 : builder->CreateIntToPtr(haystackArg, llvm::PointerType::getUnqual(*context), "contains.haystack");
-        llvm::Value* needlePtr =
-            needleArg->getType()->isPointerTy()
-                ? needleArg
-                : builder->CreateIntToPtr(needleArg, llvm::PointerType::getUnqual(*context), "contains.needle");
-        llvm::Value* result = builder->CreateCall(getOrDeclareStrstr(), {haystackPtr, needlePtr}, "contains.strstr");
+        llvm::Value* result;
+        if (isSingleChar) {
+            // memchr(haystack, char, strlen(haystack)) is SIMD-optimized on
+            // modern libc, ~2-3x faster than strstr for single-char searches.
+            llvm::Value* len = builder->CreateCall(getOrDeclareStrlen(), {haystackPtr}, "contains.len");
+            // Cast char to i32 for memchr.  Use unsigned char intermediate to
+            // ensure correct zero-extension (plain char may be signed on some
+            // platforms, which would sign-extend values > 127 incorrectly).
+            auto unsignedCharValue = static_cast<uint32_t>(static_cast<unsigned char>(singleCharVal));
+            llvm::Value* charVal = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), unsignedCharValue);
+            result = builder->CreateCall(getOrDeclareMemchr(), {haystackPtr, charVal, len}, "contains.memchr");
+        } else {
+            llvm::Value* needleArg = generateExpression(needleExpr);
+            llvm::Value* needlePtr =
+                needleArg->getType()->isPointerTy()
+                    ? needleArg
+                    : builder->CreateIntToPtr(needleArg, llvm::PointerType::getUnqual(*context), "contains.needle");
+            result = builder->CreateCall(getOrDeclareStrstr(), {haystackPtr, needlePtr}, "contains.strstr");
+        }
         llvm::Value* nullPtr = llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context));
         llvm::Value* isNotNull = builder->CreateICmpNE(result, nullPtr, "contains.notnull");
         return builder->CreateZExt(isNotNull, getDefaultType(), "contains.result");
@@ -1794,17 +1827,38 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::STR_INDEX_OF) {
         validateArgCount(expr, "str_index_of", 2);
+        // Detect single-character literal needle → use memchr (SIMD-optimized)
+        // instead of strstr (byte-by-byte scan).
+        Expression* needleExpr = expr->arguments[1].get();
+        bool isSingleChar = false;
+        char singleCharVal = 0;
+        if (needleExpr->type == ASTNodeType::LITERAL_EXPR) {
+            auto* lit = static_cast<LiteralExpr*>(needleExpr);
+            if (lit->literalType == LiteralExpr::LiteralType::STRING && lit->stringValue.size() == 1) {
+                isSingleChar = true;
+                singleCharVal = lit->stringValue[0];
+            }
+        }
         llvm::Value* haystackArg = generateExpression(expr->arguments[0].get());
-        llvm::Value* needleArg = generateExpression(expr->arguments[1].get());
         llvm::Value* haystackPtr =
             haystackArg->getType()->isPointerTy()
                 ? haystackArg
                 : builder->CreateIntToPtr(haystackArg, llvm::PointerType::getUnqual(*context), "indexof.haystack");
-        llvm::Value* needlePtr =
-            needleArg->getType()->isPointerTy()
-                ? needleArg
-                : builder->CreateIntToPtr(needleArg, llvm::PointerType::getUnqual(*context), "indexof.needle");
-        llvm::Value* result = builder->CreateCall(getOrDeclareStrstr(), {haystackPtr, needlePtr}, "indexof.strstr");
+        llvm::Value* result;
+        if (isSingleChar) {
+            llvm::Value* len = builder->CreateCall(getOrDeclareStrlen(), {haystackPtr}, "indexof.len");
+            // Cast char to i32 for memchr (see str_contains above for rationale).
+            auto unsignedCharValue = static_cast<uint32_t>(static_cast<unsigned char>(singleCharVal));
+            llvm::Value* charVal = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), unsignedCharValue);
+            result = builder->CreateCall(getOrDeclareMemchr(), {haystackPtr, charVal, len}, "indexof.memchr");
+        } else {
+            llvm::Value* needleArg = generateExpression(needleExpr);
+            llvm::Value* needlePtr =
+                needleArg->getType()->isPointerTy()
+                    ? needleArg
+                    : builder->CreateIntToPtr(needleArg, llvm::PointerType::getUnqual(*context), "indexof.needle");
+            result = builder->CreateCall(getOrDeclareStrstr(), {haystackPtr, needlePtr}, "indexof.strstr");
+        }
         llvm::Value* nullPtr = llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context));
         llvm::Value* isNull = builder->CreateICmpEQ(result, nullPtr, "indexof.isnull");
         llvm::Value* foundInt = builder->CreatePtrToInt(result, getDefaultType(), "indexof.foundint");
@@ -2064,10 +2118,14 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             prefixArg->getType()->isPointerTy()
                 ? prefixArg
                 : builder->CreateIntToPtr(prefixArg, llvm::PointerType::getUnqual(*context), "startswith.prefix");
-        // Check if strstr(str, prefix) == str
-        llvm::Value* found = builder->CreateCall(getOrDeclareStrstr(), {strPtr, prefixPtr}, "startswith.found");
-        llvm::Value* isSame = builder->CreateICmpEQ(found, strPtr, "startswith.eq");
-        return builder->CreateZExt(isSame, getDefaultType(), "startswith.result");
+        // Use strncmp(str, prefix, prefix_len) == 0 instead of strstr
+        // strncmp only examines the first prefix_len bytes, while strstr
+        // would scan the entire string looking for the prefix anywhere.
+        llvm::Value* prefixLen = builder->CreateCall(getOrDeclareStrlen(), {prefixPtr}, "startswith.plen");
+        llvm::Value* cmpResult = builder->CreateCall(getOrDeclareStrncmp(),
+            {strPtr, prefixPtr, prefixLen}, "startswith.cmp");
+        llvm::Value* isEqual = builder->CreateICmpEQ(cmpResult, builder->getInt32(0), "startswith.eq");
+        return builder->CreateZExt(isEqual, getDefaultType(), "startswith.result");
     }
 
     if (bid == BuiltinId::STR_ENDS_WITH) {
@@ -2094,10 +2152,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(failBB);
         builder->CreateBr(mergeBB);
         builder->SetInsertPoint(checkBB);
-        // Compare str + (strLen - sufLen) with suffix
+        // Compare str + (strLen - sufLen) with suffix using memcmp.
+        // memcmp is faster than strcmp because we already know the exact
+        // length to compare and it can use SIMD-optimized comparison.
         llvm::Value* offset = builder->CreateSub(strLen, sufLen, "endswith.offset");
         llvm::Value* tailPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), strPtr, offset, "endswith.tail");
-        llvm::Value* cmpResult = builder->CreateCall(getOrDeclareStrcmp(), {tailPtr, suffixPtr}, "endswith.cmp");
+        llvm::Value* cmpResult = builder->CreateCall(getOrDeclareMemcmp(), {tailPtr, suffixPtr, sufLen}, "endswith.cmp");
         llvm::Value* isEqual = builder->CreateICmpEQ(cmpResult, builder->getInt32(0), "endswith.eq");
         llvm::Value* resultCheck = builder->CreateZExt(isEqual, getDefaultType(), "endswith.result");
         builder->CreateBr(mergeBB);
@@ -2313,7 +2373,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         newBuf->addIncoming(arrPtr, nogrowBB);
 
         // Update length
-        builder->CreateStore(newLen, newBuf);
+        auto* pushLenSt = builder->CreateStore(newLen, newBuf);
+        pushLenSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
         // Store new value at index oldLen + 1 (after header)
         llvm::Value* newElemIdx =
             builder->CreateAdd(oldLen, llvm::ConstantInt::get(getDefaultType(), 1), "push.elemidx");
@@ -2355,9 +2416,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                                llvm::ConstantInt::get(getDefaultType(), 1), "pop.lastidx");
         llvm::Value* lastPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, lastIdx, "pop.lastptr");
         llvm::Value* lastVal = builder->CreateLoad(getDefaultType(), lastPtr, "pop.lastval");
+        if (auto* load = llvm::dyn_cast<llvm::LoadInst>(lastVal))
+            load->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
         // Decrease length in-place
         llvm::Value* newLen = builder->CreateSub(oldLen, llvm::ConstantInt::get(getDefaultType(), 1), "pop.newlen");
-        builder->CreateStore(newLen, arrPtr);
+        auto* popLenSt = builder->CreateStore(newLen, arrPtr);
+        popLenSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
         return lastVal;
     }
 
@@ -2491,92 +2555,94 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         sortLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
         sortLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
         llvm::Value* arrLen = sortLenLoad;
-        // Simple bubble sort in LLVM IR (in-place)
+
+        // Early exit: skip qsort for arrays with 0 or 1 elements (already sorted).
+        // This avoids the overhead of a function call to qsort for trivial cases.
         llvm::Function* function = builder->GetInsertBlock()->getParent();
-        llvm::BasicBlock* preheader = builder->GetInsertBlock();
-        llvm::BasicBlock* outerLoopBB = llvm::BasicBlock::Create(*context, "sort.outer", function);
-        llvm::BasicBlock* innerLoopBB = llvm::BasicBlock::Create(*context, "sort.inner", function);
-        llvm::BasicBlock* innerBodyBB = llvm::BasicBlock::Create(*context, "sort.innerbody", function);
-        llvm::BasicBlock* swapBB = llvm::BasicBlock::Create(*context, "sort.swap", function);
-        llvm::BasicBlock* noswapBB = llvm::BasicBlock::Create(*context, "sort.noswap", function);
-        llvm::BasicBlock* outerIncBB = llvm::BasicBlock::Create(*context, "sort.outerinc", function);
-        llvm::BasicBlock* outerDoneBB = llvm::BasicBlock::Create(*context, "sort.done", function);
-        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
-        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
-        llvm::Value* limit = builder->CreateSub(arrLen, one, "sort.limit");
-        auto* backBr_2265 = builder->CreateBr(outerLoopBB);
-        if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 2> mds;
-            mds.push_back(nullptr);
-            mds.push_back(llvm::MDNode::get(*context,
-                {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-            llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-            md->replaceOperandWith(0, md);
-            backBr_2265->setMetadata(llvm::LLVMContext::MD_loop, md);
-        }
+        llvm::BasicBlock* sortBB = llvm::BasicBlock::Create(*context, "sort.call", function);
+        llvm::BasicBlock* skipBB = llvm::BasicBlock::Create(*context, "sort.skip", function);
+        llvm::Value* needsSort = builder->CreateICmpUGT(arrLen,
+            llvm::ConstantInt::get(getDefaultType(), 1), "sort.needed");
+        builder->CreateCondBr(needsSort, sortBB, skipBB);
+        builder->SetInsertPoint(sortBB);
 
-        builder->SetInsertPoint(outerLoopBB);
-        llvm::PHINode* i = builder->CreatePHI(getDefaultType(), 2, "sort.i");
-        i->addIncoming(zero, preheader);
-        llvm::Value* outerCond = builder->CreateICmpSLT(i, limit, "sort.outercond");
-        builder->CreateCondBr(outerCond, innerLoopBB, outerDoneBB);
+        // Use libc qsort() — O(n log n) instead of the previous O(n²)
+        // bubble sort.  Each element is an i64 (8 bytes); string arrays
+        // store char* pointers cast to i64.
+        //
+        // Emit a tiny static comparator function into the module on first
+        // use (one for integers, one for strings).
 
-        builder->SetInsertPoint(innerLoopBB);
-        llvm::PHINode* j = builder->CreatePHI(getDefaultType(), 2, "sort.j");
-        j->addIncoming(zero, outerLoopBB);
-        llvm::Value* innerLimit = builder->CreateSub(limit, i, "sort.innerlimit");
-        llvm::Value* innerCond = builder->CreateICmpSLT(j, innerLimit, "sort.innercond");
-        builder->CreateCondBr(innerCond, innerBodyBB, outerIncBB);
-
-        builder->SetInsertPoint(innerBodyBB);
-        llvm::Value* idx1 = builder->CreateAdd(j, one, "sort.idx1");
-        llvm::Value* idx2 = builder->CreateAdd(j, llvm::ConstantInt::get(getDefaultType(), 2), "sort.idx2");
-        llvm::Value* ptr1 = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, idx1, "sort.ptr1");
-        llvm::Value* ptr2 = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, idx2, "sort.ptr2");
-        llvm::Value* val1 = builder->CreateLoad(getDefaultType(), ptr1, "sort.val1");
-        llvm::Value* val2 = builder->CreateLoad(getDefaultType(), ptr2, "sort.val2");
-        llvm::cast<llvm::Instruction>(val1)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
-        llvm::cast<llvm::Instruction>(val2)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
-        llvm::Value* needSwap;
-        if (sortStrings) {
-            // String sort: use strcmp(val1_as_ptr, val2_as_ptr) > 0
+        auto getOrEmitIntCmp = [&]() -> llvm::Function* {
+            const char* name = "__omsc_cmp_i64_asc";
+            if (auto* fn = module->getFunction(name))
+                return fn;
             auto* ptrTy = llvm::PointerType::getUnqual(*context);
-            llvm::Value* sptr1 = builder->CreateIntToPtr(val1, ptrTy, "sort.sptr1");
-            llvm::Value* sptr2 = builder->CreateIntToPtr(val2, ptrTy, "sort.sptr2");
-            llvm::Value* cmpRes = builder->CreateCall(getOrDeclareStrcmp(), {sptr1, sptr2}, "sort.strcmp");
-            needSwap = builder->CreateICmpSGT(cmpRes, builder->getInt32(0), "sort.needswap");
-        } else {
-            needSwap = builder->CreateICmpSGT(val1, val2, "sort.needswap");
-        }
-        builder->CreateCondBr(needSwap, swapBB, noswapBB);
+            auto* cmpTy = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context),
+                                                   {ptrTy, ptrTy}, false);
+            auto* fn = llvm::Function::Create(cmpTy, llvm::Function::InternalLinkage,
+                                              name, module.get());
+            fn->addFnAttr(llvm::Attribute::NoUnwind);
+            fn->addFnAttr(llvm::Attribute::WillReturn);
+            fn->addFnAttr(llvm::Attribute::NoFree);
+            fn->addFnAttr(llvm::Attribute::NoSync);
+            fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+                *context, llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::Ref)));
+            // Comparator body: load two i64s, return (a > b) - (a < b)
+            auto savedIP = builder->saveIP();
+            auto* entry = llvm::BasicBlock::Create(*context, "entry", fn);
+            builder->SetInsertPoint(entry);
+            auto* aPtr = fn->getArg(0);
+            auto* bPtr = fn->getArg(1);
+            auto* a = builder->CreateLoad(getDefaultType(), aPtr, "a");
+            auto* b = builder->CreateLoad(getDefaultType(), bPtr, "b");
+            auto* gt = builder->CreateZExt(builder->CreateICmpSGT(a, b, "gt"),
+                                           llvm::Type::getInt32Ty(*context));
+            auto* lt = builder->CreateZExt(builder->CreateICmpSLT(a, b, "lt"),
+                                           llvm::Type::getInt32Ty(*context));
+            builder->CreateRet(builder->CreateSub(gt, lt, "cmp"));
+            builder->restoreIP(savedIP);
+            return fn;
+        };
 
-        builder->SetInsertPoint(swapBB);
-        auto* sortSt1 = builder->CreateStore(val2, ptr1);
-        auto* sortSt2 = builder->CreateStore(val1, ptr2);
-        sortSt1->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
-        sortSt2->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
-        builder->CreateBr(noswapBB);
+        auto getOrEmitStrCmp = [&]() -> llvm::Function* {
+            const char* name = "__omsc_cmp_str_asc";
+            if (auto* fn = module->getFunction(name))
+                return fn;
+            auto* ptrTy = llvm::PointerType::getUnqual(*context);
+            auto* cmpTy = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context),
+                                                   {ptrTy, ptrTy}, false);
+            auto* fn = llvm::Function::Create(cmpTy, llvm::Function::InternalLinkage,
+                                              name, module.get());
+            fn->addFnAttr(llvm::Attribute::NoUnwind);
+            fn->addFnAttr(llvm::Attribute::WillReturn);
+            fn->addFnAttr(llvm::Attribute::NoFree);
+            fn->addFnAttr(llvm::Attribute::NoSync);
+            // String comparator: load i64 pointers, cast to char*, strcmp
+            auto savedIP = builder->saveIP();
+            auto* entry = llvm::BasicBlock::Create(*context, "entry", fn);
+            builder->SetInsertPoint(entry);
+            auto* aSlotPtr = fn->getArg(0);  // ptr to i64 slot
+            auto* bSlotPtr = fn->getArg(1);  // ptr to i64 slot
+            auto* aI64 = builder->CreateLoad(getDefaultType(), aSlotPtr, "a.i64");
+            auto* bI64 = builder->CreateLoad(getDefaultType(), bSlotPtr, "b.i64");
+            auto* aStr = builder->CreateIntToPtr(aI64, ptrTy, "a.str");
+            auto* bStr = builder->CreateIntToPtr(bI64, ptrTy, "b.str");
+            auto* result = builder->CreateCall(getOrDeclareStrcmp(), {aStr, bStr}, "cmp");
+            builder->CreateRet(result);
+            builder->restoreIP(savedIP);
+            return fn;
+        };
 
-        builder->SetInsertPoint(noswapBB);
-        llvm::Value* nextJ = builder->CreateAdd(j, one, "sort.nextj");
-        j->addIncoming(nextJ, noswapBB);
-        builder->CreateBr(innerLoopBB);
+        llvm::Function* comparator = sortStrings ? getOrEmitStrCmp() : getOrEmitIntCmp();
 
-        builder->SetInsertPoint(outerIncBB);
-        llvm::Value* nextI = builder->CreateAdd(i, one, "sort.nexti");
-        i->addIncoming(nextI, outerIncBB);
-        auto* backBr_2313 = builder->CreateBr(outerLoopBB);
-        if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 2> mds;
-            mds.push_back(nullptr);
-            mds.push_back(llvm::MDNode::get(*context,
-                {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-            llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-            md->replaceOperandWith(0, md);
-            backBr_2313->setMetadata(llvm::LLVMContext::MD_loop, md);
-        }
-
-        builder->SetInsertPoint(outerDoneBB);
+        // Data pointer: skip the length header (element 0 is the count).
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* dataPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, one, "sort.data");
+        llvm::Value* elemSize = llvm::ConstantInt::get(getDefaultType(), 8); // sizeof(i64)
+        builder->CreateCall(getOrDeclareQsort(), {dataPtr, arrLen, elemSize, comparator});
+        builder->CreateBr(skipBB);
+        builder->SetInsertPoint(skipBB);
         return arrArg; // Return the array itself
     }
 
@@ -2651,10 +2717,18 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             idx->addIncoming(nextIdx, bodyBB);
             auto* backBr_2379 = builder->CreateBr(loopBB);
             if (optimizationLevel >= OptimizationLevel::O1) {
-                llvm::SmallVector<llvm::Metadata*, 2> mds;
+                llvm::SmallVector<llvm::Metadata*, 4> mds;
                 mds.push_back(nullptr);
                 mds.push_back(llvm::MDNode::get(*context,
                     {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
+                // Enable vectorization: the fill loop is trivially parallel
+                // (every iteration writes to a unique index) and benefits from
+                // SIMD store widening at O2+.
+                if (optimizationLevel >= OptimizationLevel::O2) {
+                    mds.push_back(llvm::MDNode::get(*context,
+                        {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
+                         llvm::ConstantAsMetadata::get(builder->getTrue())}));
+                }
                 llvm::MDNode* md = llvm::MDNode::get(*context, mds);
                 md->replaceOperandWith(0, md);
                 backBr_2379->setMetadata(llvm::LLVMContext::MD_loop, md);
@@ -3575,6 +3649,16 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     if (bid == BuiltinId::PRINTLN) {
         validateArgCount(expr, "println", 1);
         Expression* argExpr = expr->arguments[0].get();
+        // Fast path: string literal → use puts() instead of printf("%s\n", ...)
+        // puts() appends a newline automatically and avoids format-string parsing.
+        if (argExpr->type == ASTNodeType::LITERAL_EXPR) {
+            auto* lit = static_cast<LiteralExpr*>(argExpr);
+            if (lit->literalType == LiteralExpr::LiteralType::STRING) {
+                llvm::Value* strVal = builder->CreateGlobalString(lit->stringValue, "println.lit");
+                builder->CreateCall(getOrDeclarePuts(), {strVal});
+                return llvm::ConstantInt::get(getDefaultType(), 0);
+            }
+        }
         llvm::Value* arg = generateExpression(argExpr);
         if (arg->getType()->isDoubleTy()) {
             llvm::GlobalVariable* floatFmt = module->getGlobalVariable("println_float_fmt", true);
@@ -3586,11 +3670,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             if (!arg->getType()->isPointerTy()) {
                 arg = builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "println.str.ptr");
             }
-            llvm::GlobalVariable* strFmt = module->getGlobalVariable("println_str_fmt", true);
-            if (!strFmt) {
-                strFmt = builder->CreateGlobalString("%s\n", "println_str_fmt");
-            }
-            builder->CreateCall(getPrintfFunction(), {strFmt, arg});
+            // Use puts() instead of printf("%s\n", ...) — puts appends a
+            // newline automatically and avoids format-string parsing overhead.
+            builder->CreateCall(getOrDeclarePuts(), {arg});
         } else {
             llvm::GlobalVariable* formatStr = module->getGlobalVariable("println_fmt", true);
             if (!formatStr) {
@@ -3618,11 +3700,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             if (!arg->getType()->isPointerTy()) {
                 arg = builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "write.str.ptr");
             }
-            llvm::GlobalVariable* strFmt = module->getGlobalVariable("write_str_fmt", true);
-            if (!strFmt) {
-                strFmt = builder->CreateGlobalString("%s", "write_str_fmt");
-            }
-            builder->CreateCall(getPrintfFunction(), {strFmt, arg});
+            // Use fputs(str, stdout) instead of printf("%s", str) to avoid
+            // format-string parsing overhead.  fputs writes the string directly
+            // to stdout without scanning for % conversion specifiers.
+            builder->CreateCall(getOrDeclareFputs(), {arg, getOrDeclareStdout()});
         } else {
             llvm::GlobalVariable* formatStr = module->getGlobalVariable("write_fmt", true);
             if (!formatStr) {
@@ -5423,7 +5504,14 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         }
     }
 
-    return builder->CreateCall(callee, args, "calltmp");
+    auto* callResult = builder->CreateCall(callee, args, "calltmp");
+    // When the callee is marked nounwind (all user-defined functions are at
+    // O2+), propagate that to the call site so LLVM can eliminate invoke/
+    // landingpad overhead at the call boundary and enable better inlining.
+    if (callee->doesNotThrow()) {
+        callResult->setDoesNotThrow();
+    }
+    return callResult;
 }
 
 } // namespace omscript
