@@ -2990,11 +2990,33 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         function->addFnAttr(llvm::Attribute::NoUnwind);
     }
 
+    // OmScript uses a flag-based error model (not C++ exceptions / DWARF
+    // unwind), so all user-defined functions are inherently nounwind.  Adding
+    // this unconditionally (at O2+) lets LLVM:
+    //   1. Omit .eh_frame / .gcc_except_table sections → smaller binaries
+    //   2. Inline across call boundaries without needing invoke/landingpad
+    //   3. Eliminate dead exception-handling code in the backend
+    if (optimizationLevel >= OptimizationLevel::O2 &&
+        !function->hasFnAttribute(llvm::Attribute::NoUnwind)) {
+        function->addFnAttr(llvm::Attribute::NoUnwind);
+    }
+
     // At O2+, align function entry to 16 bytes for better I-cache locality
     // and branch target prediction.  Hot functions get 32-byte alignment to
     // avoid crossing cache-line boundaries on the entry block.
     if (optimizationLevel >= OptimizationLevel::O2) {
         function->setAlignment(func->hintHot ? llvm::Align(32) : llvm::Align(16));
+
+        // mustprogress: tells LLVM that every loop in this function will
+        // eventually terminate (no infinite spin-loops).  This enables:
+        //   1. Dead store elimination through loops
+        //   2. LICM of loads/stores across loop boundaries
+        //   3. Loop deletion when the loop body has no observable side effects
+        // OmScript programs don't intentionally spin-loop, so this is safe for
+        // all user functions.  Functions with @optnone are excluded.
+        if (!function->hasFnAttribute(llvm::Attribute::OptimizeNone)) {
+            function->addFnAttr(llvm::Attribute::MustProgress);
+        }
     }
 
     // In OPTMAX functions, mark all parameters noalias and add WillReturn.
