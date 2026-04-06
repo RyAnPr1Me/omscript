@@ -1590,9 +1590,12 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
     builder->CreateBr(condBB);
 
     // Condition: idx < length
+    // Use unsigned compare: the foreach index starts at 0 and only
+    // increments, and array length is always non-negative.  Unsigned
+    // comparison enables better loop vectorization and SCEV analysis.
     builder->SetInsertPoint(condBB);
     llvm::Value* curIdx = builder->CreateLoad(getDefaultType(), idxAlloca, "foreach.idx");
-    llvm::Value* cond = builder->CreateICmpSLT(curIdx, lenVal, "foreach.cmp");
+    llvm::Value* cond = builder->CreateICmpULT(curIdx, lenVal, "foreach.cmp");
     auto* foreachCondBr = builder->CreateCondBr(cond, bodyBB, endBB);
     // Hint the back-edge (body) as likely-taken.
     if (optimizationLevel >= OptimizationLevel::O2) {

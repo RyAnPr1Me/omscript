@@ -2710,10 +2710,18 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             idx->addIncoming(nextIdx, bodyBB);
             auto* backBr_2379 = builder->CreateBr(loopBB);
             if (optimizationLevel >= OptimizationLevel::O1) {
-                llvm::SmallVector<llvm::Metadata*, 2> mds;
+                llvm::SmallVector<llvm::Metadata*, 4> mds;
                 mds.push_back(nullptr);
                 mds.push_back(llvm::MDNode::get(*context,
                     {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
+                // Enable vectorization: the fill loop is trivially parallel
+                // (every iteration writes to a unique index) and benefits from
+                // SIMD store widening at O2+.
+                if (optimizationLevel >= OptimizationLevel::O2) {
+                    mds.push_back(llvm::MDNode::get(*context,
+                        {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
+                         llvm::ConstantAsMetadata::get(builder->getTrue())}));
+                }
                 llvm::MDNode* md = llvm::MDNode::get(*context, mds);
                 md->replaceOperandWith(0, md);
                 backBr_2379->setMetadata(llvm::LLVMContext::MD_loop, md);
