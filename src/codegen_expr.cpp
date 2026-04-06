@@ -661,9 +661,13 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
 
             llvm::Value* len1 = builder->CreateCall(getOrDeclareStrlen(), {left}, "len1");
             llvm::Value* len2 = builder->CreateCall(getOrDeclareStrlen(), {right}, "len2");
-            llvm::Value* totalLen = builder->CreateAdd(len1, len2, "totallen");
+            // strlen results are always non-negative and bounded by addressable
+            // memory, so their sum cannot overflow a 64-bit signed integer.
+            // nsw+nuw enable SCEV to compute tight bounds through strlen-based
+            // expressions and help downstream passes (vectorizer, LICM).
+            llvm::Value* totalLen = builder->CreateAdd(len1, len2, "totallen", /*HasNUW=*/true, /*HasNSW=*/true);
             llvm::Value* allocSize =
-                builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "allocsize");
+                builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "allocsize", /*HasNUW=*/true, /*HasNSW=*/true);
             llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {allocSize}, "strbuf");
             // Use memcpy instead of strcpy+strcat: strcat must scan for the
             // null terminator in buf (O(len1)), so replacing with two memcpy
@@ -673,7 +677,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 llvm::Type::getInt8Ty(*context), buf, len1, "concat.dst2");
             // Copy len2+1 bytes from right to include the null terminator.
             llvm::Value* len2Plus1 = builder->CreateAdd(
-                len2, llvm::ConstantInt::get(getDefaultType(), 1), "len2p1");
+                len2, llvm::ConstantInt::get(getDefaultType(), 1), "len2p1", /*HasNUW=*/true, /*HasNSW=*/true);
             builder->CreateCall(getOrDeclareMemcpy(), {dest2, right, len2Plus1});
             return buf;
         }
@@ -3674,7 +3678,7 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
                     auto it = loopIterEndBound_.find(idxIdent->name);
                     if (it != loopIterEndBound_.end()) {
                         llvm::Value* endBound = it->second;
-                        auto* lenLoadE = builder->CreateLoad(getDefaultType(), arrPtr, "incdec.len.elim");
+                        auto* lenLoadE = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "incdec.len.elim");
                         lenLoadE->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
                         lenLoadE->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
                         llvm::Value* lenVal = lenLoadE;
@@ -3696,7 +3700,7 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
         }
 
         if (!boundsCheckElidedID) {
-            auto* lenLoadID = builder->CreateLoad(getDefaultType(), arrPtr, "incdec.len");
+            auto* lenLoadID = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "incdec.len");
             lenLoadID->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
             lenLoadID->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
             llvm::Value* lenVal = lenLoadID;
@@ -4125,7 +4129,11 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
             gv->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
 
             // memcpy(arrPtr, @arr.const, totalBytes)
-            builder->CreateMemCpy(arrPtr, llvm::MaybeAlign(8),
+            // malloc guarantees at least 16-byte alignment on all platforms,
+            // matching the global constant's alignment.  Using 16-byte
+            // alignment enables the backend to emit wider stores (e.g.
+            // MOVDQA / VMOVDQA instead of scalar MOV on x86-64).
+            builder->CreateMemCpy(arrPtr, llvm::MaybeAlign(16),
                                   gv, llvm::MaybeAlign(16), totalBytes);
         } else {
             // Mixed constant/dynamic elements: store individually
@@ -4169,7 +4177,7 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
             arrVal = toDefaultType(arrVal);
             llvm::Value* arrPtr =
                 builder->CreateIntToPtr(arrVal, llvm::PointerType::getUnqual(*context), "spread.arrptr");
-            auto* spreadLenLoad = builder->CreateLoad(getDefaultType(), arrPtr, "spread.len");
+            auto* spreadLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "spread.len");
             spreadLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
             spreadLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
             llvm::Value* arrLen = spreadLenLoad;
@@ -4219,9 +4227,9 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
             // Load element from source: srcPtr[i + 1]
             llvm::Value* srcIdx = builder->CreateAdd(i, one, "spread.srcidx");
             llvm::Value* srcElemPtr = builder->CreateInBoundsGEP(getDefaultType(), srcPtr, srcIdx, "spread.srcelem");
-            llvm::Value* elem = builder->CreateLoad(getDefaultType(), srcElemPtr, "spread.elem");
+            llvm::Value* elem = builder->CreateAlignedLoad(getDefaultType(), srcElemPtr, llvm::MaybeAlign(8), "spread.elem");
             // Store in dest: buf[writeIdx + 1]
-            llvm::Value* curIdx = builder->CreateLoad(getDefaultType(), writeIdx, "spread.curidx");
+            llvm::Value* curIdx = builder->CreateAlignedLoad(getDefaultType(), writeIdx, llvm::MaybeAlign(8), "spread.curidx");
             llvm::Value* dstIdx = builder->CreateAdd(curIdx, one, "spread.dstidx");
             llvm::Value* dstPtr = builder->CreateInBoundsGEP(getDefaultType(), buf, dstIdx, "spread.dstptr");
             auto* spreadSt = builder->CreateStore(elem, dstPtr);
@@ -4246,7 +4254,7 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
             builder->SetInsertPoint(doneBB);
         } else {
             // Single element: store at buf[writeIdx + 1]
-            llvm::Value* curIdx = builder->CreateLoad(getDefaultType(), writeIdx, "spread.curidx");
+            llvm::Value* curIdx = builder->CreateAlignedLoad(getDefaultType(), writeIdx, llvm::MaybeAlign(8), "spread.curidx");
             llvm::Value* dstIdx = builder->CreateAdd(curIdx, one, "spread.dstidx");
             llvm::Value* dstPtr = builder->CreateInBoundsGEP(getDefaultType(), buf, dstIdx, "spread.dstptr");
             builder->CreateStore(ei.val, dstPtr);
@@ -4373,7 +4381,7 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
             if (it != loopIterEndBound_.end()) {
                 llvm::Value* endBound = it->second;
                 // Load the array length from slot 0.
-                auto* lenLoadElim = builder->CreateLoad(getDefaultType(), basePtr, "idx.len.elim");
+                auto* lenLoadElim = builder->CreateAlignedLoad(getDefaultType(), basePtr, llvm::MaybeAlign(8), "idx.len.elim");
                 lenLoadElim->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
                 lenLoadElim->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
                 llvm::Value* lenVal = lenLoadElim;
@@ -4555,7 +4563,7 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
             lenVal = builder->CreateCall(getOrDeclareStrlen(), {basePtr}, "idx.strlen");
         } else {
             // Array: length is stored in slot 0 of the buffer.
-            auto* lenLoad = builder->CreateLoad(getDefaultType(), basePtr, "idx.len");
+            auto* lenLoad = builder->CreateAlignedLoad(getDefaultType(), basePtr, llvm::MaybeAlign(8), "idx.len");
             lenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
             lenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
             // Borrowed arrays cannot resize — mark length as invariant so
@@ -4694,7 +4702,7 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
             auto it = loopIterEndBound_.find(idxIdent->name);
             if (it != loopIterEndBound_.end()) {
                 llvm::Value* endBound = it->second;
-                auto* lenLoadAElim = builder->CreateLoad(getDefaultType(), basePtr, "idxa.len.elim");
+                auto* lenLoadAElim = builder->CreateAlignedLoad(getDefaultType(), basePtr, llvm::MaybeAlign(8), "idxa.len.elim");
                 lenLoadAElim->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
                 lenLoadAElim->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
                 llvm::Value* lenVal = lenLoadAElim;
@@ -4730,7 +4738,7 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
         if (isStr) {
             lenVal = builder->CreateCall(getOrDeclareStrlen(), {basePtr}, "idxa.strlen");
         } else {
-            auto* lenLoad = builder->CreateLoad(getDefaultType(), basePtr, "idxa.len");
+            auto* lenLoad = builder->CreateAlignedLoad(getDefaultType(), basePtr, llvm::MaybeAlign(8), "idxa.len");
             lenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
             lenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
             // Borrowed arrays cannot resize — length is invariant.

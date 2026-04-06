@@ -1101,7 +1101,16 @@ void CodeGenerator::validateScopeStacksMatch(const char* location) {
 llvm::AllocaInst* CodeGenerator::createEntryBlockAlloca(llvm::Function* function, const std::string& name,
                                                         llvm::Type* type) {
     llvm::IRBuilder<> entryBuilder(&function->getEntryBlock(), function->getEntryBlock().begin());
-    return entryBuilder.CreateAlloca(type ? type : getDefaultType(), nullptr, name);
+    auto* alloca = entryBuilder.CreateAlloca(type ? type : getDefaultType(), nullptr, name);
+    // Set explicit alignment for i64 allocas — the default type in OmScript.
+    // This avoids backend alignment computation overhead and ensures that
+    // loads/stores from these allocas can use aligned instructions (movq
+    // instead of unaligned loads on x86-64).
+    llvm::Type* allocaType = type ? type : getDefaultType();
+    if (allocaType->isIntegerTy(64) || allocaType->isDoubleTy() || allocaType->isPointerTy()) {
+        alloca->setAlignment(llvm::Align(8));
+    }
+    return alloca;
 }
 
 void CodeGenerator::codegenError(const std::string& message, const ASTNode* node) {
