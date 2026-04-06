@@ -990,6 +990,40 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Idiom detection — sign extension
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Detect: (x << (bw-n)) >> (bw-n)  →  sext from n bits
+/// Also:   ashr(shl(x, bw-n), bw-n)  →  sext from n bits
+/// This pattern manually sign-extends an n-bit value stored in a wider integer.
+[[nodiscard]] static std::optional<IdiomMatch> detectSignExtend(llvm::Instruction* inst) {
+    if (inst->getOpcode() != llvm::Instruction::AShr)
+        return std::nullopt;
+
+    auto* shl = llvm::dyn_cast<llvm::BinaryOperator>(inst->getOperand(0));
+    if (!shl || shl->getOpcode() != llvm::Instruction::Shl)
+        return std::nullopt;
+
+    auto shlAmt = getConstIntValue(shl->getOperand(1));
+    auto shrAmt = getConstIntValue(inst->getOperand(1));
+    if (!shlAmt || !shrAmt || *shlAmt != *shrAmt)
+        return std::nullopt;
+
+    unsigned bw = inst->getType()->getIntegerBitWidth();
+    unsigned srcBits = bw - static_cast<unsigned>(*shlAmt);
+    if (srcBits == 0 || srcBits >= bw)
+        return std::nullopt;
+
+    // We have a valid sign-extension from srcBits to bw
+    IdiomMatch match;
+    match.idiom = Idiom::SignExtend;
+    match.rootInst = inst;
+    match.operands = {shl->getOperand(0)};
+    match.bitWidth = srcBits;
+    return match;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Idiom detection — conditional negation
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1649,6 +1683,10 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
             results.push_back(std::move(*m));
             continue;
         }
+        if (auto m = detectSignExtend(&inst)) {
+            results.push_back(std::move(*m));
+            continue;
+        }
         if (auto m = detectIsolateLowestBit(&inst)) {
             results.push_back(std::move(*m));
             continue;
@@ -1955,6 +1993,37 @@ static bool replaceIdiom(IdiomMatch& match) {
         llvm::Value* isZero = builder.CreateICmpEQ(x,
             llvm::ConstantInt::get(intTy, 0), "np2.iszero");
         llvm::Value* result = builder.CreateSelect(isZero, one, pow2, "np2.result");
+        match.rootInst->replaceAllUsesWith(result);
+        return true;
+    }
+
+    case Idiom::ConditionalNeg: {
+        // select(cond, -x, x) → (x ^ mask) - mask  where mask = -sext(cond)
+        // This replaces a conditional negation with branchless two's complement:
+        //   mask = sext(cond)    (all-1s if true, all-0s if false)
+        //   result = (x ^ mask) - mask
+        // 3 instructions and fully branchless on all targets.
+        llvm::Value* x = match.operands[0];
+        llvm::Value* cond = match.operands[1];
+        llvm::Value* ext = builder.CreateSExt(cond, intTy, "cneg.sext");
+        llvm::Value* xored = builder.CreateXor(x, ext, "cneg.xor");
+        llvm::Value* result = builder.CreateSub(xored, ext, "cneg.sub");
+        match.rootInst->replaceAllUsesWith(result);
+        return true;
+    }
+
+    case Idiom::SignExtend: {
+        // (x << (bw-n)) >> (bw-n) → shl + ashr
+        // Replace with explicit sext_inreg by truncate + sext if the target
+        // supports it more efficiently, or keep as-is but mark the value with
+        // a range for downstream passes.
+        // For LLVM IR, the canonical form is trunc + sext which the backend
+        // can lower to a single MOVSX/SXTB instruction.
+        llvm::Value* x = match.operands[0];
+        unsigned srcBits = match.bitWidth;
+        llvm::Type* narrowTy = llvm::IntegerType::get(ctx, srcBits);
+        llvm::Value* truncated = builder.CreateTrunc(x, narrowTy, "sext.trunc");
+        llvm::Value* result = builder.CreateSExt(truncated, intTy, "sext.ext");
         match.rootInst->replaceAllUsesWith(result);
         return true;
     }
