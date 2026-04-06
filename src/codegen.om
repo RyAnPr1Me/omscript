@@ -1893,6 +1893,12 @@ fn codegen_stmt(nd) {
         return;
     }
 
+    // For-each loop
+    if (ty == ND_FOR_EACH) {
+        codegen_for_each(nd);
+        return;
+    }
+
     // Return
     if (ty == ND_RETURN) {
         codegen_return(nd);
@@ -2136,12 +2142,13 @@ fn codegen_while(nd) {
     pop_loop();
 }
 
-// ─── For loop (range-based: for i in start...end) ─────────────────────────────
+// ─── For loop (range-based: for i in start...end or start...end...step) ──────
 
 fn codegen_for(nd) {
     var iter_name = g_nd_sval[nd];
     var start_val = codegen_expr(g_nd_c0[nd]);
     var end_val   = codegen_expr(g_nd_c1[nd]);
+    var has_step  = g_nd_ival[nd];
 
     // Allocate iterator variable
     var iter_reg = "%" + iter_name + ".addr";
@@ -2159,15 +2166,32 @@ fn codegen_for(nd) {
 
     emit_indent("br label %" + lbl_cond);
 
-    // Condition: i < end
+    // Condition: depends on step direction
     emit(lbl_cond + ":");
     g_current_block = lbl_cond;
     g_has_terminator = 0;
     var cur = fresh_tmp();
     emit_indent(cur + " = load i64, i64* " + iter_reg);
-    var cmp = fresh_tmp();
-    emit_indent(cmp + " = icmp slt i64 " + cur + ", " + end_val);
-    emit_indent("br i1 " + cmp + ", label %" + lbl_body + ", label %" + lbl_end);
+
+    if (has_step) {
+        // With step: check direction by comparing step to 0
+        var step_nd = g_ch[g_nd_extra[nd]];
+        var step_val = codegen_expr(step_nd);
+        // If step > 0: i < end; if step < 0: i > end
+        var step_pos = fresh_tmp();
+        emit_indent(step_pos + " = icmp sgt i64 " + step_val + ", 0");
+        var cmp_lt = fresh_tmp();
+        emit_indent(cmp_lt + " = icmp slt i64 " + cur + ", " + end_val);
+        var cmp_gt = fresh_tmp();
+        emit_indent(cmp_gt + " = icmp sgt i64 " + cur + ", " + end_val);
+        var cmp = fresh_tmp();
+        emit_indent(cmp + " = select i1 " + step_pos + ", i1 " + cmp_lt + ", i1 " + cmp_gt);
+        emit_indent("br i1 " + cmp + ", label %" + lbl_body + ", label %" + lbl_end);
+    } else {
+        var cmp = fresh_tmp();
+        emit_indent(cmp + " = icmp slt i64 " + cur + ", " + end_val);
+        emit_indent("br i1 " + cmp + ", label %" + lbl_body + ", label %" + lbl_end);
+    }
 
     // Body
     emit(lbl_body + ":");
@@ -2178,14 +2202,20 @@ fn codegen_for(nd) {
         emit_indent("br label %" + lbl_inc);
     }
 
-    // Increment: i = i + 1
+    // Increment
     emit(lbl_inc + ":");
     g_current_block = lbl_inc;
     g_has_terminator = 0;
     var cur2 = fresh_tmp();
     emit_indent(cur2 + " = load i64, i64* " + iter_reg);
     var next = fresh_tmp();
-    emit_indent(next + " = add i64 " + cur2 + ", 1");
+    if (has_step) {
+        var step_nd2 = g_ch[g_nd_extra[nd]];
+        var step_val2 = codegen_expr(step_nd2);
+        emit_indent(next + " = add i64 " + cur2 + ", " + step_val2);
+    } else {
+        emit_indent(next + " = add i64 " + cur2 + ", 1");
+    }
     emit_indent("store i64 " + next + ", i64* " + iter_reg);
     emit_indent("br label %" + lbl_cond);
 
@@ -2194,6 +2224,80 @@ fn codegen_for(nd) {
     g_has_terminator = 0;
 
     // Pop loop labels
+    pop_loop();
+}
+
+// ─── For-each loop (for i in collection) ──────────────────────────────────────
+
+fn codegen_for_each(nd) {
+    var iter_name = g_nd_sval[nd];
+    var coll_val = codegen_expr(g_nd_c0[nd]);
+    var body_nd = g_nd_c1[nd];
+
+    // Get collection length
+    var coll_ptr = fresh_tmp();
+    emit_indent(coll_ptr + " = inttoptr i64 " + coll_val + " to i64*");
+    var coll_len = fresh_tmp();
+    emit_indent(coll_len + " = load i64, i64* " + coll_ptr);
+
+    // Allocate loop index and iterator variable
+    var idx_reg = "%" + iter_name + ".idx";
+    emit_indent(idx_reg + " = alloca i64");
+    emit_indent("store i64 0, i64* " + idx_reg);
+    var iter_reg = "%" + iter_name + ".addr";
+    emit_indent(iter_reg + " = alloca i64");
+    emit_indent("store i64 0, i64* " + iter_reg);
+    add_local(iter_name, iter_reg);
+
+    var lbl_cond = fresh_label();
+    var lbl_body = fresh_label();
+    var lbl_inc  = fresh_label();
+    var lbl_end  = fresh_label();
+
+    push_loop(lbl_inc, lbl_end);
+
+    emit_indent("br label %" + lbl_cond);
+
+    emit(lbl_cond + ":");
+    g_current_block = lbl_cond;
+    g_has_terminator = 0;
+    var idx = fresh_tmp();
+    emit_indent(idx + " = load i64, i64* " + idx_reg);
+    var cmp = fresh_tmp();
+    emit_indent(cmp + " = icmp slt i64 " + idx + ", " + coll_len);
+    emit_indent("br i1 " + cmp + ", label %" + lbl_body + ", label %" + lbl_end);
+
+    emit(lbl_body + ":");
+    g_current_block = lbl_body;
+    g_has_terminator = 0;
+    // Load current element: arr[idx + 1]
+    var actual_idx = fresh_tmp();
+    emit_indent(actual_idx + " = add i64 " + idx + ", 1");
+    var elem_ptr = fresh_tmp();
+    emit_indent(elem_ptr + " = getelementptr i64, i64* " + coll_ptr + ", i64 " + actual_idx);
+    var elem_val = fresh_tmp();
+    emit_indent(elem_val + " = load i64, i64* " + elem_ptr);
+    emit_indent("store i64 " + elem_val + ", i64* " + iter_reg);
+
+    codegen_stmt(body_nd);
+    if (!g_has_terminator) {
+        emit_indent("br label %" + lbl_inc);
+    }
+
+    emit(lbl_inc + ":");
+    g_current_block = lbl_inc;
+    g_has_terminator = 0;
+    var idx2 = fresh_tmp();
+    emit_indent(idx2 + " = load i64, i64* " + idx_reg);
+    var idx_next = fresh_tmp();
+    emit_indent(idx_next + " = add i64 " + idx2 + ", 1");
+    emit_indent("store i64 " + idx_next + ", i64* " + idx_reg);
+    emit_indent("br label %" + lbl_cond);
+
+    emit(lbl_end + ":");
+    g_current_block = lbl_end;
+    g_has_terminator = 0;
+
     pop_loop();
 }
 
