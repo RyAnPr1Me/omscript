@@ -1108,54 +1108,190 @@ fn codegen_call(nd) {
         return result;
     }
 
-    // ────── push(array, val) — runtime array push ──────
+    // ────── push(array, val) — inline array push ──────
     if (str_eq(fname, "push")) {
         var arr_nd = g_ch[arg_start];
         var val_nd = g_ch[arg_start + 1];
         var arr_val = codegen_expr(arr_nd);
         var val = codegen_expr(val_nd);
+        // Load current length
+        var arr_ptr = fresh_tmp();
+        emit_indent(arr_ptr + " = inttoptr i64 " + arr_val + " to i64*");
+        var old_len = fresh_tmp();
+        emit_indent(old_len + " = load i64, i64* " + arr_ptr);
+        var new_len = fresh_tmp();
+        emit_indent(new_len + " = add i64 " + old_len + ", 1");
+        // Realloc to (new_len + 1) * 8 bytes
+        var new_bytes = fresh_tmp();
+        emit_indent(new_bytes + " = add i64 " + new_len + ", 1");
+        var new_alloc = fresh_tmp();
+        emit_indent(new_alloc + " = mul i64 " + new_bytes + ", 8");
+        var raw = fresh_tmp();
+        emit_indent(raw + " = bitcast i64* " + arr_ptr + " to i8*");
+        var new_raw = fresh_tmp();
+        emit_indent(new_raw + " = call i8* @realloc(i8* " + raw + ", i64 " + new_alloc + ")");
+        var new_arr_ptr = fresh_tmp();
+        emit_indent(new_arr_ptr + " = bitcast i8* " + new_raw + " to i64*");
+        // Store new length
+        emit_indent("store i64 " + new_len + ", i64* " + new_arr_ptr);
+        // Store value at index (old_len + 1)
+        var store_idx = fresh_tmp();
+        emit_indent(store_idx + " = add i64 " + old_len + ", 1");
+        var elem_ptr = fresh_tmp();
+        emit_indent(elem_ptr + " = getelementptr i64, i64* " + new_arr_ptr + ", i64 " + store_idx);
+        emit_indent("store i64 " + val + ", i64* " + elem_ptr);
+        // Return new array pointer
         var result = fresh_tmp();
-        emit_indent(result + " = call i64 @om_push(i64 " + arr_val + ", i64 " + val + ")");
+        emit_indent(result + " = ptrtoint i64* " + new_arr_ptr + " to i64");
         return result;
     }
 
-    // ────── pop(array) — runtime array pop ──────
+    // ────── pop(array) — inline array pop ──────
     if (str_eq(fname, "pop")) {
         var arr_nd = g_ch[arg_start];
         var arr_val = codegen_expr(arr_nd);
-        var result = fresh_tmp();
-        emit_indent(result + " = call i64 @om_pop(i64 " + arr_val + ")");
-        return result;
+        var arr_ptr = fresh_tmp();
+        emit_indent(arr_ptr + " = inttoptr i64 " + arr_val + " to i64*");
+        var old_len = fresh_tmp();
+        emit_indent(old_len + " = load i64, i64* " + arr_ptr);
+        // Load last element (at index old_len)
+        var last_ptr = fresh_tmp();
+        emit_indent(last_ptr + " = getelementptr i64, i64* " + arr_ptr + ", i64 " + old_len);
+        var last_val = fresh_tmp();
+        emit_indent(last_val + " = load i64, i64* " + last_ptr);
+        // Decrement length
+        var new_len = fresh_tmp();
+        emit_indent(new_len + " = sub i64 " + old_len + ", 1");
+        emit_indent("store i64 " + new_len + ", i64* " + arr_ptr);
+        return last_val;
     }
 
-    // ────── len(array) — runtime array length ──────
+    // ────── len(array) — inline array length ──────
     if (str_eq(fname, "len")) {
         var arr_nd = g_ch[arg_start];
+        // Check if this is a string
+        if (is_string_expr(arr_nd)) {
+            var val = codegen_expr(arr_nd);
+            var ptr = fresh_tmp();
+            emit_indent(ptr + " = inttoptr i64 " + val + " to i8*");
+            var result = fresh_tmp();
+            emit_indent(result + " = call i64 @strlen(i8* " + ptr + ")");
+            return result;
+        }
         var arr_val = codegen_expr(arr_nd);
+        var arr_ptr = fresh_tmp();
+        emit_indent(arr_ptr + " = inttoptr i64 " + arr_val + " to i64*");
         var result = fresh_tmp();
-        emit_indent(result + " = call i64 @om_len(i64 " + arr_val + ")");
+        emit_indent(result + " = load i64, i64* " + arr_ptr);
         return result;
     }
 
-    // ────── sort(array) — runtime sort ──────
+    // ────── sort(array) — inline bubble sort ──────
     if (str_eq(fname, "sort")) {
         var arr_nd = g_ch[arg_start];
         var arr_val = codegen_expr(arr_nd);
-        var result = fresh_tmp();
-        emit_indent(result + " = call i64 @om_sort(i64 " + arr_val + ")");
-        return result;
+        // Inline bubble sort
+        var arr_ptr = fresh_tmp();
+        emit_indent(arr_ptr + " = inttoptr i64 " + arr_val + " to i64*");
+        var n = fresh_tmp();
+        emit_indent(n + " = load i64, i64* " + arr_ptr);
+
+        var outer_lbl = fresh_label(); var outer_body = fresh_label(); var outer_end = fresh_label();
+        var inner_lbl = fresh_label(); var inner_body = fresh_label(); var inner_end = fresh_label();
+        var swap_lbl = fresh_label(); var no_swap_lbl = fresh_label();
+
+        // Outer loop: i from 0 to n-1
+        var i_reg = fresh_tmp(); emit_indent(i_reg + " = alloca i64"); emit_indent("store i64 0, i64* " + i_reg);
+        emit_indent("br label %" + outer_lbl);
+        emit(outer_lbl + ":"); g_current_block = outer_lbl;
+        var i_val = fresh_tmp(); emit_indent(i_val + " = load i64, i64* " + i_reg);
+        var n_1 = fresh_tmp(); emit_indent(n_1 + " = sub i64 " + n + ", 1");
+        var i_cmp = fresh_tmp(); emit_indent(i_cmp + " = icmp slt i64 " + i_val + ", " + n_1);
+        emit_indent("br i1 " + i_cmp + ", label %" + outer_body + ", label %" + outer_end);
+
+        emit(outer_body + ":"); g_current_block = outer_body;
+        // Inner loop: j from 0 to n-1-i
+        var j_reg = fresh_tmp(); emit_indent(j_reg + " = alloca i64"); emit_indent("store i64 0, i64* " + j_reg);
+        emit_indent("br label %" + inner_lbl);
+        emit(inner_lbl + ":"); g_current_block = inner_lbl;
+        var j_val = fresh_tmp(); emit_indent(j_val + " = load i64, i64* " + j_reg);
+        var i_val2 = fresh_tmp(); emit_indent(i_val2 + " = load i64, i64* " + i_reg);
+        var n_1_i = fresh_tmp(); emit_indent(n_1_i + " = sub i64 " + n_1 + ", " + i_val2);
+        var j_cmp = fresh_tmp(); emit_indent(j_cmp + " = icmp slt i64 " + j_val + ", " + n_1_i);
+        emit_indent("br i1 " + j_cmp + ", label %" + inner_body + ", label %" + inner_end);
+
+        emit(inner_body + ":"); g_current_block = inner_body;
+        // Load arr[j+1] and arr[j+2] (1-based due to header)
+        var j_idx1 = fresh_tmp(); emit_indent(j_idx1 + " = add i64 " + j_val + ", 1");
+        var j_idx2 = fresh_tmp(); emit_indent(j_idx2 + " = add i64 " + j_val + ", 2");
+        var p1 = fresh_tmp(); emit_indent(p1 + " = getelementptr i64, i64* " + arr_ptr + ", i64 " + j_idx1);
+        var p2 = fresh_tmp(); emit_indent(p2 + " = getelementptr i64, i64* " + arr_ptr + ", i64 " + j_idx2);
+        var v1 = fresh_tmp(); emit_indent(v1 + " = load i64, i64* " + p1);
+        var v2 = fresh_tmp(); emit_indent(v2 + " = load i64, i64* " + p2);
+        var swap_cmp = fresh_tmp(); emit_indent(swap_cmp + " = icmp sgt i64 " + v1 + ", " + v2);
+        emit_indent("br i1 " + swap_cmp + ", label %" + swap_lbl + ", label %" + no_swap_lbl);
+
+        emit(swap_lbl + ":"); g_current_block = swap_lbl;
+        emit_indent("store i64 " + v2 + ", i64* " + p1);
+        emit_indent("store i64 " + v1 + ", i64* " + p2);
+        emit_indent("br label %" + no_swap_lbl);
+
+        emit(no_swap_lbl + ":"); g_current_block = no_swap_lbl;
+        var j_next = fresh_tmp(); emit_indent(j_next + " = add i64 " + j_val + ", 1");
+        emit_indent("store i64 " + j_next + ", i64* " + j_reg);
+        emit_indent("br label %" + inner_lbl);
+
+        emit(inner_end + ":"); g_current_block = inner_end;
+        var i_next = fresh_tmp(); emit_indent(i_next + " = add i64 " + i_val + ", 1");
+        emit_indent("store i64 " + i_next + ", i64* " + i_reg);
+        emit_indent("br label %" + outer_lbl);
+
+        emit(outer_end + ":"); g_current_block = outer_end;
+        return arr_val;
     }
 
-    // ────── reverse(array) — runtime reverse ──────
+    // ────── reverse(array) — inline array reverse ──────
     if (str_eq(fname, "reverse")) {
         var arr_nd = g_ch[arg_start];
         var arr_val = codegen_expr(arr_nd);
-        var result = fresh_tmp();
-        emit_indent(result + " = call i64 @om_reverse(i64 " + arr_val + ")");
-        return result;
+        var arr_ptr = fresh_tmp();
+        emit_indent(arr_ptr + " = inttoptr i64 " + arr_val + " to i64*");
+        var n = fresh_tmp();
+        emit_indent(n + " = load i64, i64* " + arr_ptr);
+
+        var lo_reg = fresh_tmp(); emit_indent(lo_reg + " = alloca i64"); emit_indent("store i64 0, i64* " + lo_reg);
+        var hi_reg = fresh_tmp();
+        emit_indent(hi_reg + " = alloca i64");
+        var n_1 = fresh_tmp(); emit_indent(n_1 + " = sub i64 " + n + ", 1");
+        emit_indent("store i64 " + n_1 + ", i64* " + hi_reg);
+
+        var rev_lbl = fresh_label(); var rev_body = fresh_label(); var rev_end = fresh_label();
+        emit_indent("br label %" + rev_lbl);
+        emit(rev_lbl + ":"); g_current_block = rev_lbl;
+        var lo = fresh_tmp(); emit_indent(lo + " = load i64, i64* " + lo_reg);
+        var hi = fresh_tmp(); emit_indent(hi + " = load i64, i64* " + hi_reg);
+        var rev_cmp = fresh_tmp(); emit_indent(rev_cmp + " = icmp slt i64 " + lo + ", " + hi);
+        emit_indent("br i1 " + rev_cmp + ", label %" + rev_body + ", label %" + rev_end);
+
+        emit(rev_body + ":"); g_current_block = rev_body;
+        var li = fresh_tmp(); emit_indent(li + " = add i64 " + lo + ", 1");
+        var hi2 = fresh_tmp(); emit_indent(hi2 + " = add i64 " + hi + ", 1");
+        var lp = fresh_tmp(); emit_indent(lp + " = getelementptr i64, i64* " + arr_ptr + ", i64 " + li);
+        var hp = fresh_tmp(); emit_indent(hp + " = getelementptr i64, i64* " + arr_ptr + ", i64 " + hi2);
+        var lv = fresh_tmp(); emit_indent(lv + " = load i64, i64* " + lp);
+        var hv = fresh_tmp(); emit_indent(hv + " = load i64, i64* " + hp);
+        emit_indent("store i64 " + hv + ", i64* " + lp);
+        emit_indent("store i64 " + lv + ", i64* " + hp);
+        var lo_next = fresh_tmp(); emit_indent(lo_next + " = add i64 " + lo + ", 1");
+        var hi_prev = fresh_tmp(); emit_indent(hi_prev + " = sub i64 " + hi + ", 1");
+        emit_indent("store i64 " + lo_next + ", i64* " + lo_reg);
+        emit_indent("store i64 " + hi_prev + ", i64* " + hi_reg);
+        emit_indent("br label %" + rev_lbl);
+        emit(rev_end + ":"); g_current_block = rev_end;
+        return arr_val;
     }
 
-    // ────── swap(arr, i, j) ──────
+    // ────── swap(arr, i, j) — inline ──────
     if (str_eq(fname, "swap")) {
         var arr_nd = g_ch[arg_start];
         var i_nd = g_ch[arg_start + 1];
@@ -1163,9 +1299,17 @@ fn codegen_call(nd) {
         var arr_val = codegen_expr(arr_nd);
         var i_val = codegen_expr(i_nd);
         var j_val = codegen_expr(j_nd);
-        var result = fresh_tmp();
-        emit_indent(result + " = call i64 @om_swap(i64 " + arr_val + ", i64 " + i_val + ", i64 " + j_val + ")");
-        return result;
+        var arr_ptr = fresh_tmp();
+        emit_indent(arr_ptr + " = inttoptr i64 " + arr_val + " to i64*");
+        var ii = fresh_tmp(); emit_indent(ii + " = add i64 " + i_val + ", 1");
+        var ji = fresh_tmp(); emit_indent(ji + " = add i64 " + j_val + ", 1");
+        var ip = fresh_tmp(); emit_indent(ip + " = getelementptr i64, i64* " + arr_ptr + ", i64 " + ii);
+        var jp = fresh_tmp(); emit_indent(jp + " = getelementptr i64, i64* " + arr_ptr + ", i64 " + ji);
+        var iv = fresh_tmp(); emit_indent(iv + " = load i64, i64* " + ip);
+        var jv = fresh_tmp(); emit_indent(jv + " = load i64, i64* " + jp);
+        emit_indent("store i64 " + jv + ", i64* " + ip);
+        emit_indent("store i64 " + iv + ", i64* " + jp);
+        return arr_val;
     }
 
     // ────── time() ──────
@@ -1280,7 +1424,34 @@ fn codegen_assign_expr(nd) {
         emit_indent("store i64 " + val + ", i64* " + reg);
         return val;
     }
-    // Complex assignment (index, member) — not yet handled
+    // Complex assignment: target is ND_INDEX (array[idx] = val) or ND_MEMBER (obj.field = val)
+    if (g_nd_type[target] == ND_INDEX) {
+        // Array index assignment
+        var arr_val = codegen_expr(g_nd_c0[target]);
+        var idx_val = codegen_expr(g_nd_c1[target]);
+
+        // Check if string indexing
+        if (is_string_expr(g_nd_c0[target])) {
+            var s_ptr = fresh_tmp();
+            emit_indent(s_ptr + " = inttoptr i64 " + arr_val + " to i8*");
+            var gep = fresh_tmp();
+            emit_indent(gep + " = getelementptr i8, i8* " + s_ptr + ", i64 " + idx_val);
+            var trunc = fresh_tmp();
+            emit_indent(trunc + " = trunc i64 " + val + " to i8");
+            emit_indent("store i8 " + trunc + ", i8* " + gep);
+            return val;
+        }
+
+        // Array element assignment
+        var arr_ptr = fresh_tmp();
+        emit_indent(arr_ptr + " = inttoptr i64 " + arr_val + " to i64*");
+        var actual_idx = fresh_tmp();
+        emit_indent(actual_idx + " = add i64 " + idx_val + ", 1");
+        var elem_ptr = fresh_tmp();
+        emit_indent(elem_ptr + " = getelementptr i64, i64* " + arr_ptr + ", i64 " + actual_idx);
+        emit_indent("store i64 " + val + ", i64* " + elem_ptr);
+        return val;
+    }
     emit_indent("; WARNING: complex assignment not yet supported");
     return val;
 }
@@ -1351,28 +1522,38 @@ fn codegen_ternary(nd) {
 }
 
 // ─── Array literal codegen ────────────────────────────────────────────────────
+// Arrays are header-based: [length | elem0 | elem1 | ...]
+// Length stored as i64 at offset 0, elements at offset 8, 16, 24, ...
 
 fn codegen_array_lit(nd) {
     var nelems = g_nd_nextra[nd];
     var start  = g_nd_extra[nd];
 
-    // Allocate array: om_array_new(capacity) → returns pointer as i64
-    var cap = fresh_tmp();
-    emit_indent(cap + " = add i64 0, " + to_string(nelems + 4));
-    var arr = fresh_tmp();
-    emit_indent(arr + " = call i64 @om_array_new(i64 " + cap + ")");
+    // Allocate (nelems+1) * 8 bytes (header + elements)
+    var total_bytes = (nelems + 1) * 8;
+    var buf = fresh_tmp();
+    emit_indent(buf + " = call i8* @malloc(i64 " + to_string(total_bytes) + ")");
+    var arr_ptr = fresh_tmp();
+    emit_indent(arr_ptr + " = bitcast i8* " + buf + " to i64*");
 
-    // Push each element
+    // Store length at offset 0
+    emit_indent("store i64 " + to_string(nelems) + ", i64* " + arr_ptr);
+
+    // Store each element at offset (k+1)
     var k = 0;
     while (k < nelems) {
         var elem_nd = g_ch[start + k];
         var val = codegen_expr(elem_nd);
-        var push_result = fresh_tmp();
-        emit_indent(push_result + " = call i64 @om_array_push(i64 " + arr + ", i64 " + val + ")");
+        var idx = fresh_tmp();
+        emit_indent(idx + " = getelementptr i64, i64* " + arr_ptr + ", i64 " + to_string(k + 1));
+        emit_indent("store i64 " + val + ", i64* " + idx);
         k = k + 1;
     }
 
-    return arr;
+    // Return pointer as i64
+    var result = fresh_tmp();
+    emit_indent(result + " = ptrtoint i64* " + arr_ptr + " to i64");
+    return result;
 }
 
 // ─── Array index access codegen ───────────────────────────────────────────────
@@ -1380,8 +1561,30 @@ fn codegen_array_lit(nd) {
 fn codegen_index(nd) {
     var arr_val = codegen_expr(g_nd_c0[nd]);
     var idx_val = codegen_expr(g_nd_c1[nd]);
+
+    // Check if this is string indexing
+    if (is_string_expr(g_nd_c0[nd])) {
+        // String indexing: load byte at index
+        var s_ptr = fresh_tmp();
+        emit_indent(s_ptr + " = inttoptr i64 " + arr_val + " to i8*");
+        var gep = fresh_tmp();
+        emit_indent(gep + " = getelementptr i8, i8* " + s_ptr + ", i64 " + idx_val);
+        var byte_val = fresh_tmp();
+        emit_indent(byte_val + " = load i8, i8* " + gep);
+        var result = fresh_tmp();
+        emit_indent(result + " = zext i8 " + byte_val + " to i64");
+        return result;
+    }
+
+    // Array indexing: load from (ptr + (index+1) * 8)
+    var arr_ptr = fresh_tmp();
+    emit_indent(arr_ptr + " = inttoptr i64 " + arr_val + " to i64*");
+    var actual_idx = fresh_tmp();
+    emit_indent(actual_idx + " = add i64 " + idx_val + ", 1");
+    var elem_ptr = fresh_tmp();
+    emit_indent(elem_ptr + " = getelementptr i64, i64* " + arr_ptr + ", i64 " + actual_idx);
     var result = fresh_tmp();
-    emit_indent(result + " = call i64 @om_array_get(i64 " + arr_val + ", i64 " + idx_val + ")");
+    emit_indent(result + " = load i64, i64* " + elem_ptr);
     return result;
 }
 
@@ -1481,6 +1684,12 @@ fn codegen_stmt(nd) {
         return;
     }
 
+    // Switch statement
+    if (ty == ND_SWITCH) {
+        codegen_switch(nd);
+        return;
+    }
+
     emit_indent("; WARNING: unhandled statement node type " + to_string(ty));
 }
 
@@ -1495,6 +1704,92 @@ fn codegen_block(nd) {
         codegen_stmt(child);
         i = i + 1;
     }
+}
+
+// ─── Switch statement codegen ─────────────────────────────────────────────────
+
+fn codegen_switch(nd) {
+    var cond_val = codegen_expr(g_nd_c0[nd]);
+    var ncases = g_nd_nextra[nd];
+    var cs_start = g_nd_extra[nd];
+
+    var lbl_end = fresh_label();
+
+    // Push a "loop" for break to target the end of switch
+    push_loop(lbl_end, lbl_end);
+
+    // Emit as chained if-else
+    var k = 0;
+    var default_body = -1;
+    while (k < ncases) {
+        var case_nd = g_ch[cs_start + k];
+        var is_default = g_nd_ival[case_nd];
+        var body_nd = g_nd_c1[case_nd];
+
+        if (is_default == 1) {
+            default_body = body_nd;
+        } else {
+            // Check all case values (multi-value case)
+            var nvals = g_nd_nextra[case_nd];
+            var val_start = g_nd_extra[case_nd];
+            var lbl_match = fresh_label();
+            var lbl_next  = fresh_label();
+
+            // OR together all the case value comparisons
+            var any_match = "0";
+            var vi = 0;
+            while (vi < nvals) {
+                var val_nd = g_ch[val_start + vi];
+                var val = codegen_expr(val_nd);
+                var cmp = fresh_tmp();
+                emit_indent(cmp + " = icmp eq i64 " + cond_val + ", " + val);
+                var ext = fresh_tmp();
+                emit_indent(ext + " = zext i1 " + cmp + " to i64");
+                if (vi == 0) {
+                    any_match = ext;
+                } else {
+                    var combined = fresh_tmp();
+                    emit_indent(combined + " = or i64 " + any_match + ", " + ext);
+                    any_match = combined;
+                }
+                vi = vi + 1;
+            }
+
+            var final_cmp = fresh_tmp();
+            emit_indent(final_cmp + " = icmp ne i64 " + any_match + ", 0");
+            emit_indent("br i1 " + final_cmp + ", label %" + lbl_match + ", label %" + lbl_next);
+
+            emit(lbl_match + ":");
+            g_current_block = lbl_match;
+            g_has_terminator = 0;
+            codegen_stmt(body_nd);
+            if (!g_has_terminator) {
+                emit_indent("br label %" + lbl_end);
+            }
+
+            emit(lbl_next + ":");
+            g_current_block = lbl_next;
+            g_has_terminator = 0;
+        }
+        k = k + 1;
+    }
+
+    // Default case
+    if (default_body >= 0) {
+        g_has_terminator = 0;
+        codegen_stmt(default_body);
+        if (!g_has_terminator) {
+            emit_indent("br label %" + lbl_end);
+        }
+    } else {
+        emit_indent("br label %" + lbl_end);
+    }
+
+    emit(lbl_end + ":");
+    g_current_block = lbl_end;
+    g_has_terminator = 0;
+
+    pop_loop();
 }
 
 // ─── Variable declaration ─────────────────────────────────────────────────────
@@ -1802,8 +2097,9 @@ fn codegen_enum_decl(nd) {
         if (g_nd_type[mem] == ND_ENUM_MEMBER) {
             var mname = g_nd_sval[mem];
             var mval  = g_nd_ival[mem];
-            // Register as both "EnumName.MemberName" and "MemberName"
+            // Register as "EnumName.MemberName", "EnumName_MemberName", and "MemberName"
             add_const(enum_name + "." + mname, mval);
+            add_const(enum_name + "_" + mname, mval);
             add_const(mname, mval);
         }
         k = k + 1;
@@ -1883,20 +2179,6 @@ fn generate_llvm_ir(root) {
     c_decls = c_decls + "declare i64 @time(i8*)\n";
     c_decls = c_decls + "declare i64 @rand()\n";
     c_decls = c_decls + "@stdin = external global i8*\n";
-    c_decls = c_decls + "\n";
-    // Runtime array/string helpers (linked from runtime library)
-    c_decls = c_decls + "declare i64 @om_array_new(i64)\n";
-    c_decls = c_decls + "declare i64 @om_array_push(i64, i64)\n";
-    c_decls = c_decls + "declare i64 @om_array_get(i64, i64)\n";
-    c_decls = c_decls + "declare i64 @om_array_set(i64, i64, i64)\n";
-    c_decls = c_decls + "declare i64 @om_push(i64, i64)\n";
-    c_decls = c_decls + "declare i64 @om_pop(i64)\n";
-    c_decls = c_decls + "declare i64 @om_len(i64)\n";
-    c_decls = c_decls + "declare i64 @om_sort(i64)\n";
-    c_decls = c_decls + "declare i64 @om_reverse(i64)\n";
-    c_decls = c_decls + "declare i64 @om_swap(i64, i64, i64)\n";
-    c_decls = c_decls + "declare i64 @om_str_replace(i64, i64, i64)\n";
-    c_decls = c_decls + "declare i64 @om_sleep(i64)\n";
     c_decls = c_decls + "\n";
 
     // Generate code for all top-level declarations
