@@ -1,0 +1,18 @@
+struct Big { a, b, c, d, e, f, g, h }
+
+fn make_big() {
+    var arr_a = [1, 2, 3];
+    var arr_b = [4, 5, 6];
+    var arr_c = [7, 8, 9];
+    return Big { a: arr_a, b: arr_b, c: arr_c, d: 10, e: 11, f: 12, g: 13, h: 99 };
+}
+
+fn main() {
+    var r = make_big();
+    println("a_len=" + to_string(len(r.a)));
+    println("b_len=" + to_string(len(r.b)));
+    println("c_len=" + to_string(len(r.c)));
+    println("d=" + to_string(r.d));
+    println("h=" + to_string(r.h));
+    return 0;
+}

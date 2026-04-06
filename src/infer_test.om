@@ -1,0 +1,18 @@
+// Test that inferNonNegativeFlags works at O2 with structs
+struct Pair { a, b }
+
+fn make_pair_big(x, y, z, w) {
+    var s = "";
+    var i = 0;
+    while (i < x) {
+        s = s + to_string(i);
+        i = i + 1;
+    }
+    return Pair { a: str_len(s), b: y + z + w };
+}
+
+fn main() {
+    var p = make_pair_big(5, 10, 20, 30);
+    println(to_string(p.a) + " " + to_string(p.b));
+    return 0;
+}

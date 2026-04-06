@@ -1,0 +1,13 @@
+import "lexer.om";
+
+fn main() {
+    var sample = "fn f() {}";
+    var ts = tokenize(sample);
+    println("count=" + to_string(ts.count));
+    var i = 0;
+    while (i < ts.count) {
+        println(to_string(i) + ": " + ts.lexemes[i]);
+        i = i + 1;
+    }
+    return 0;
+}

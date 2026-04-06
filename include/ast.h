@@ -58,7 +58,8 @@ enum class ASTNodeType {
     BORROW_EXPR,
     INVALIDATE_STMT,
     MOVE_DECL,
-    PREFETCH_STMT
+    PREFETCH_STMT,
+    EXTERN_STRUCT_DECL
 };
 
 class ASTNode {
@@ -243,6 +244,7 @@ class VarDecl : public Statement {
     bool isConst;
     std::string typeName;
     bool isRegister = false; ///< `register var` — force variable into CPU register via mem2reg
+    bool isGlobal   = false; ///< `global var`  — module-level mutable variable (visible to all functions)
 
     VarDecl(const std::string& n, std::unique_ptr<Expression> init, bool cnst = false, const std::string& type = "")
         : Statement(ASTNodeType::VAR_DECL), name(n), initializer(std::move(init)), isConst(cnst), typeName(type) {}
@@ -511,6 +513,7 @@ class FunctionDecl : public ASTNode {
     bool hintMinSize = false;     ///< @minsize — optimize for minimum code size
     bool hintOptNone = false;     ///< @optnone — disable all optimizations (useful for debugging)
     bool hintNoUnwind = false;    ///< @nounwind — function never throws C++ exceptions
+    bool isExtern = false;        ///< extern fn — no body; resolved by the linker
 
     FunctionDecl(const std::string& n, std::vector<std::string> tps, std::vector<Parameter> params, std::unique_ptr<BlockStmt> b, bool optMax = false, const std::string& retType = "")
         : ASTNode(ASTNodeType::FUNCTION), name(n), typeParams(std::move(tps)), parameters(std::move(params)), body(std::move(b)), isOptMax(optMax), returnType(retType) {
@@ -538,6 +541,27 @@ class FunctionDecl : public ASTNode {
     }
 };
 
+// ---------------------------------------------------------------------------
+// Extern struct declarations (C++ interoperability)
+// ---------------------------------------------------------------------------
+
+/// A single field in an `extern struct` declaration.
+struct ExternStructField {
+    std::string name;
+    std::string typeName;   ///< "i64", "i32", "u32", "f64", etc.
+    long long   byteOffset; ///< explicit byte offset (from @ syntax), or -1 for auto-layout
+};
+
+/// `extern struct Name { field: type @ offset, ... }` declaration.
+class ExternStructDecl : public ASTNode {
+  public:
+    std::string name;
+    std::vector<ExternStructField> fields;
+
+    ExternStructDecl(std::string n, std::vector<ExternStructField> f)
+        : ASTNode(ASTNodeType::EXTERN_STRUCT_DECL), name(std::move(n)), fields(std::move(f)) {}
+};
+
 class Program : public ASTNode {
   public:
     std::vector<std::unique_ptr<FunctionDecl>> functions;
@@ -545,14 +569,23 @@ class Program : public ASTNode {
     std::vector<std::unique_ptr<StructDecl>> structs;
     bool fileNoAlias = false;  ///< @noalias file directive: all pointers are noalias
 
+    /// File-level `const NAME = LITERAL;` declarations.
+    /// These are registered as named integer constants (like enum members without
+    /// a prefix) and can be used in any expression throughout the program.
+    std::vector<std::pair<std::string, long long>> constants;
+
+    /// `extern struct` declarations for C++ interoperability.
+    std::vector<std::unique_ptr<ExternStructDecl>> externStructs;
+
+    /// File-level `global var name = expr;` declarations.
+    /// These become LLVM global variables visible (and mutable) from every function.
+    std::vector<std::unique_ptr<VarDecl>> globalVars;
+
     Program(std::vector<std::unique_ptr<FunctionDecl>> funcs, std::vector<std::unique_ptr<EnumDecl>> enms = {},
             std::vector<std::unique_ptr<StructDecl>> strcts = {}, bool noAlias = false)
         : ASTNode(ASTNodeType::PROGRAM), functions(std::move(funcs)), enums(std::move(enms)),
           structs(std::move(strcts)), fileNoAlias(noAlias) {}
 };
-
-// ---------------------------------------------------------------------------
-// Ownership system nodes
 // ---------------------------------------------------------------------------
 
 /// `move x` — transfer ownership, source becomes logically dead.

@@ -1,0 +1,7 @@
+// Standalone test driver for parser.om
+// Compile with: omsc src/parser_test.om -o parser_test
+import "parser.om";
+
+fn main() {
+    return parser_demo();
+}

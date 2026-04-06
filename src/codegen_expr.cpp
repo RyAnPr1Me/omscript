@@ -67,6 +67,17 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
         codegenError("Use of " + reason + " variable '" + expr->name + "'", expr);
     }
 
+    // Check global variable map first (global vars take priority over local shadows).
+    auto gvIt = globalVarMap_.find(expr->name);
+    if (gvIt != globalVarMap_.end()) {
+        llvm::GlobalVariable* gVar = gvIt->second;
+        auto* load = builder->CreateAlignedLoad(gVar->getValueType(), gVar,
+                                                llvm::MaybeAlign(8), expr->name.c_str());
+        if (nonNegValues_.count(gVar))
+            nonNegValues_.insert(load);
+        return load;
+    }
+
     auto it = namedValues.find(expr->name);
     if (it == namedValues.end() || !it->second) {
         // Check if this is an enum constant
@@ -2561,6 +2572,97 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 auto* shl16 = builder->CreateShl(base, mkShift(16), "mul196608.shl16");
                 return builder->CreateAdd(shl17, shl16, "mul196608", nf, ns);
             }
+            case 229376: {
+                // n*229376 → (n<<18) - (n<<15)  [262144n - 32768n]
+                auto* shl18 = builder->CreateShl(base, mkShift(18), "mul229376.shl18");
+                auto* shl15 = builder->CreateShl(base, mkShift(15), "mul229376.shl15");
+                return builder->CreateSub(shl18, shl15, "mul229376", nf, ns);
+            }
+            case 245760: {
+                // n*245760 → (n<<18) - (n<<14)  [262144n - 16384n]
+                auto* shl18 = builder->CreateShl(base, mkShift(18), "mul245760.shl18");
+                auto* shl14 = builder->CreateShl(base, mkShift(14), "mul245760.shl14");
+                return builder->CreateSub(shl18, shl14, "mul245760", nf, ns);
+            }
+            case 262144: {
+                // n*262144 → n<<18
+                return builder->CreateShl(base, mkShift(18), "mul262144", nf, ns);
+            }
+            case 262152: {
+                auto* shl18 = builder->CreateShl(base, mkShift(18), "mul262152.shl18");
+                auto* shl3  = builder->CreateShl(base, mkShift(3),  "mul262152.shl3");
+                return builder->CreateAdd(shl18, shl3, "mul262152", nf, ns);
+            }
+            case 262160: {
+                auto* shl18 = builder->CreateShl(base, mkShift(18), "mul262160.shl18");
+                auto* shl4  = builder->CreateShl(base, mkShift(4),  "mul262160.shl4");
+                return builder->CreateAdd(shl18, shl4, "mul262160", nf, ns);
+            }
+            case 262176: {
+                auto* shl18 = builder->CreateShl(base, mkShift(18), "mul262176.shl18");
+                auto* shl5  = builder->CreateShl(base, mkShift(5),  "mul262176.shl5");
+                return builder->CreateAdd(shl18, shl5, "mul262176", nf, ns);
+            }
+            case 262208: {
+                auto* shl18 = builder->CreateShl(base, mkShift(18), "mul262208.shl18");
+                auto* shl6  = builder->CreateShl(base, mkShift(6),  "mul262208.shl6");
+                return builder->CreateAdd(shl18, shl6, "mul262208", nf, ns);
+            }
+            case 262272: {
+                auto* shl18 = builder->CreateShl(base, mkShift(18), "mul262272.shl18");
+                auto* shl7  = builder->CreateShl(base, mkShift(7),  "mul262272.shl7");
+                return builder->CreateAdd(shl18, shl7, "mul262272", nf, ns);
+            }
+            case 262400: {
+                auto* shl18 = builder->CreateShl(base, mkShift(18), "mul262400.shl18");
+                auto* shl8  = builder->CreateShl(base, mkShift(8),  "mul262400.shl8");
+                return builder->CreateAdd(shl18, shl8, "mul262400", nf, ns);
+            }
+            case 262656: {
+                auto* shl18 = builder->CreateShl(base, mkShift(18), "mul262656.shl18");
+                auto* shl9  = builder->CreateShl(base, mkShift(9),  "mul262656.shl9");
+                return builder->CreateAdd(shl18, shl9, "mul262656", nf, ns);
+            }
+            case 263168: {
+                auto* shl18 = builder->CreateShl(base, mkShift(18), "mul263168.shl18");
+                auto* shl10 = builder->CreateShl(base, mkShift(10), "mul263168.shl10");
+                return builder->CreateAdd(shl18, shl10, "mul263168", nf, ns);
+            }
+            case 264192: {
+                auto* shl18 = builder->CreateShl(base, mkShift(18), "mul264192.shl18");
+                auto* shl11 = builder->CreateShl(base, mkShift(11), "mul264192.shl11");
+                return builder->CreateAdd(shl18, shl11, "mul264192", nf, ns);
+            }
+            case 266240: {
+                auto* shl18 = builder->CreateShl(base, mkShift(18), "mul266240.shl18");
+                auto* shl12 = builder->CreateShl(base, mkShift(12), "mul266240.shl12");
+                return builder->CreateAdd(shl18, shl12, "mul266240", nf, ns);
+            }
+            case 270336: {
+                auto* shl18 = builder->CreateShl(base, mkShift(18), "mul270336.shl18");
+                auto* shl13 = builder->CreateShl(base, mkShift(13), "mul270336.shl13");
+                return builder->CreateAdd(shl18, shl13, "mul270336", nf, ns);
+            }
+            case 278528: {
+                auto* shl18 = builder->CreateShl(base, mkShift(18), "mul278528.shl18");
+                auto* shl14 = builder->CreateShl(base, mkShift(14), "mul278528.shl14");
+                return builder->CreateAdd(shl18, shl14, "mul278528", nf, ns);
+            }
+            case 294912: {
+                auto* shl18 = builder->CreateShl(base, mkShift(18), "mul294912.shl18");
+                auto* shl15 = builder->CreateShl(base, mkShift(15), "mul294912.shl15");
+                return builder->CreateAdd(shl18, shl15, "mul294912", nf, ns);
+            }
+            case 327680: {
+                auto* shl18 = builder->CreateShl(base, mkShift(18), "mul327680.shl18");
+                auto* shl16 = builder->CreateShl(base, mkShift(16), "mul327680.shl16");
+                return builder->CreateAdd(shl18, shl16, "mul327680", nf, ns);
+            }
+            case 393216: {
+                auto* shl18 = builder->CreateShl(base, mkShift(18), "mul393216.shl18");
+                auto* shl17 = builder->CreateShl(base, mkShift(17), "mul393216.shl17");
+                return builder->CreateAdd(shl18, shl17, "mul393216", nf, ns);
+            }
             default:
                 return nullptr;
             }
@@ -3414,6 +3516,34 @@ llvm::Value* CodeGenerator::generateUnary(UnaryExpr* expr) {
 
 llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
     llvm::Value* value = generateExpression(expr->value.get());
+
+    // Check if this is a global variable assignment.
+    auto gvIt = globalVarMap_.find(expr->name);
+    if (gvIt != globalVarMap_.end()) {
+        llvm::GlobalVariable* gVar = gvIt->second;
+        llvm::Type* gTy = gVar->getValueType();
+        llvm::Value* coerced = convertTo(value, gTy);
+        builder->CreateAlignedStore(coerced, gVar, llvm::MaybeAlign(8));
+        if (gTy->isIntegerTy()) {
+            bool vnn = nonNegValues_.count(value) > 0;
+            if (!vnn) {
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(value))
+                    vnn = !ci->isNegative();
+            }
+            if (vnn) nonNegValues_.insert(gVar); else nonNegValues_.erase(gVar);
+        }
+        if (value->getType()->isPointerTy() || isStringExpr(expr->value.get()))
+            stringVars_.insert(expr->name);
+        else
+            stringVars_.erase(expr->name);
+        // Track string-array globals: push(g_arr, "str") makes g_arr a string array.
+        if (isStringArrayExpr(expr->value.get()))
+            stringArrayVars_.insert(expr->name);
+        else
+            stringArrayVars_.erase(expr->name);
+        return coerced;
+    }
+
     auto it = namedValues.find(expr->name);
     if (it == namedValues.end() || !it->second) {
         codegenError("Unknown variable: " + expr->name, expr);
@@ -4454,6 +4584,11 @@ std::string CodeGenerator::resolveStructType(Expression* objExpr) const {
         if (vit != structVars_.end()) {
             return vit->second;
         }
+        // Check if the variable has an extern struct type annotation.
+        auto tit = varTypeAnnotations_.find(id->name);
+        if (tit != varTypeAnnotations_.end() && externStructLayouts_.count(tit->second)) {
+            return tit->second;
+        }
     } else if (objExpr->type == ASTNodeType::STRUCT_LITERAL_EXPR) {
         return static_cast<StructLiteralExpr*>(objExpr)->structName;
     }
@@ -4511,16 +4646,16 @@ llvm::Value* CodeGenerator::generateStructLiteral(StructLiteralExpr* expr) {
     const auto& fields = it->second;
     const size_t numFields = fields.size();
 
-    // Use stack allocation (alloca) for structs.  This avoids malloc overhead
-    // and allows LLVM's mem2reg / SROA passes to promote small structs to
-    // SSA registers, matching C's plain-variable performance.
-    llvm::Function* curFn = builder->GetInsertBlock()->getParent();
-    llvm::IRBuilder<> tmpBuilder(&curFn->getEntryBlock(), curFn->getEntryBlock().begin());
-    llvm::Type* slotTy = getDefaultType();
-    llvm::Value* ptr = tmpBuilder.CreateAlloca(
-        llvm::ArrayType::get(slotTy, numFields), nullptr, "struct.alloca");
-    // Cast to pointer for GEP
-    ptr = builder->CreateBitOrPointerCast(ptr, llvm::PointerType::getUnqual(*context), "struct.ptr");
+    // Use heap allocation (malloc) for structs so they survive function returns.
+    // Stack-allocated structs (alloca) become invalid when the declaring function
+    // returns, causing dangling-pointer bugs when a struct is returned by value
+    // (the ptrtoint representation carries a now-dead stack address).  Heap
+    // allocation ensures the memory is valid for the lifetime of the program,
+    // which is the correct semantics for value-type structs that may be returned
+    // from functions or stored in arrays.
+    llvm::Value* byteSize = llvm::ConstantInt::get(getDefaultType(),
+                                                    static_cast<uint64_t>(numFields) * 8);
+    llvm::Value* ptr = builder->CreateCall(getOrDeclareMalloc(), {byteSize}, "struct.heap");
 
     // Build field name → index map
     std::unordered_map<std::string, size_t> fieldIndex;
@@ -4530,7 +4665,7 @@ llvm::Value* CodeGenerator::generateStructLiteral(StructLiteralExpr* expr) {
 
     // Initialize all fields to 0
     for (size_t i = 0; i < numFields; i++) {
-        // inbounds: alloca is [numFields x i64], index i ∈ [0, numFields-1].
+        // inbounds: malloc'd numFields*8 bytes, index i ∈ [0, numFields-1].
         llvm::Value* elemPtr =
             builder->CreateInBoundsGEP(getDefaultType(), ptr, llvm::ConstantInt::get(getDefaultType(), i), "struct.field.ptr");
         builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 0), elemPtr);
@@ -4543,6 +4678,15 @@ llvm::Value* CodeGenerator::generateStructLiteral(StructLiteralExpr* expr) {
             codegenError("Unknown field '" + fieldName + "' in struct '" + expr->structName + "'", expr);
         }
         llvm::Value* val = generateExpression(valueExpr.get());
+        // Track string / string-array types for this struct field so that field
+        // access expressions can correctly propagate type information through
+        // struct boundaries.  E.g., TokenStream.lexemes is a string array, so
+        // ts.lexemes[i] must return a string rather than a raw i64.
+        const std::string key = expr->structName + "." + fieldName;
+        if (isStringExpr(valueExpr.get()) || val->getType()->isPointerTy())
+            structFieldStringArrays_[key] = false; // string (not string-array)
+        if (isStringArrayExpr(valueExpr.get()))
+            structFieldStringArrays_[key] = true;  // string array
         val = toDefaultType(val);
         // inbounds: fit->second is a validated index ∈ [0, numFields-1].
         llvm::Value* elemPtr = builder->CreateInBoundsGEP(
@@ -4555,6 +4699,25 @@ llvm::Value* CodeGenerator::generateStructLiteral(StructLiteralExpr* expr) {
 
 llvm::Value* CodeGenerator::generateFieldAccess(FieldAccessExpr* expr) {
     const std::string structType = resolveStructType(expr->object.get());
+
+    // Check if this is an extern struct field access (C++ interop).
+    auto extIt = externStructLayouts_.find(structType);
+    if (extIt != externStructLayouts_.end()) {
+        auto& layout = extIt->second;
+        auto fIt = layout.find(expr->fieldName);
+        if (fIt == layout.end())
+            codegenError("extern struct '" + structType + "' has no field '" + expr->fieldName + "'", expr);
+        const auto& fl = fIt->second;
+        llvm::Value* base = generateExpression(expr->object.get());
+        base = toDefaultType(base);
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* bytePtr = builder->CreateIntToPtr(base, ptrTy, "ext.baseptr");
+        auto* i8Ty = llvm::Type::getInt8Ty(*context);
+        llvm::Value* elemPtr = builder->CreateInBoundsGEP(
+            i8Ty, bytePtr, llvm::ConstantInt::get(getDefaultType(), fl.byteOffset), "ext.field.ptr");
+        return generateExternFieldLoad(elemPtr, fl.typeName);
+    }
+
     const size_t fieldIdx = resolveFieldIndex(structType, expr->fieldName, expr);
 
     llvm::Value* objVal = generateExpression(expr->object.get());
@@ -4637,6 +4800,28 @@ llvm::Value* CodeGenerator::generateFieldAccess(FieldAccessExpr* expr) {
 
 llvm::Value* CodeGenerator::generateFieldAssign(FieldAssignExpr* expr) {
     const std::string structType = resolveStructType(expr->object.get());
+
+    // Check if this is an extern struct field assignment (C++ interop).
+    auto extIt = externStructLayouts_.find(structType);
+    if (extIt != externStructLayouts_.end()) {
+        auto& layout = extIt->second;
+        auto fIt = layout.find(expr->fieldName);
+        if (fIt == layout.end())
+            codegenError("extern struct '" + structType + "' has no field '" + expr->fieldName + "'", expr);
+        const auto& fl = fIt->second;
+        llvm::Value* base = generateExpression(expr->object.get());
+        base = toDefaultType(base);
+        llvm::Value* newVal = generateExpression(expr->value.get());
+        newVal = toDefaultType(newVal);
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* bytePtr = builder->CreateIntToPtr(base, ptrTy, "ext.baseptr");
+        auto* i8Ty = llvm::Type::getInt8Ty(*context);
+        llvm::Value* elemPtr = builder->CreateInBoundsGEP(
+            i8Ty, bytePtr, llvm::ConstantInt::get(getDefaultType(), fl.byteOffset), "ext.field.ptr");
+        generateExternFieldStore(elemPtr, fl.typeName, newVal);
+        return newVal;
+    }
+
     const size_t fieldIdx = resolveFieldIndex(structType, expr->fieldName, expr);
 
     llvm::Value* objVal = generateExpression(expr->object.get());
@@ -4677,6 +4862,68 @@ llvm::Value* CodeGenerator::generateFieldAssign(FieldAssignExpr* expr) {
     }
 
     return newVal;
+}
+
+llvm::Value* CodeGenerator::generateExternFieldLoad(llvm::Value* ptr, const std::string& typeName) {
+    auto& ctx = *context;
+    if (typeName == "i8") {
+        auto* v = builder->CreateLoad(llvm::Type::getInt8Ty(ctx), ptr, "ef.i8");
+        return builder->CreateSExt(v, getDefaultType(), "ef.i8.ext");
+    }
+    if (typeName == "u8") {
+        auto* v = builder->CreateLoad(llvm::Type::getInt8Ty(ctx), ptr, "ef.u8");
+        return builder->CreateZExt(v, getDefaultType(), "ef.u8.ext");
+    }
+    if (typeName == "i16") {
+        auto* v = builder->CreateLoad(llvm::Type::getInt16Ty(ctx), ptr, "ef.i16");
+        return builder->CreateSExt(v, getDefaultType(), "ef.i16.ext");
+    }
+    if (typeName == "u16") {
+        auto* v = builder->CreateLoad(llvm::Type::getInt16Ty(ctx), ptr, "ef.u16");
+        return builder->CreateZExt(v, getDefaultType(), "ef.u16.ext");
+    }
+    if (typeName == "i32") {
+        auto* v = builder->CreateLoad(llvm::Type::getInt32Ty(ctx), ptr, "ef.i32");
+        return builder->CreateSExt(v, getDefaultType(), "ef.i32.ext");
+    }
+    if (typeName == "u32") {
+        auto* v = builder->CreateLoad(llvm::Type::getInt32Ty(ctx), ptr, "ef.u32");
+        return builder->CreateZExt(v, getDefaultType(), "ef.u32.ext");
+    }
+    if (typeName == "f32") {
+        auto* v = builder->CreateLoad(llvm::Type::getFloatTy(ctx), ptr, "ef.f32");
+        auto* vd = builder->CreateFPExt(v, llvm::Type::getDoubleTy(ctx), "ef.f32.ext");
+        return builder->CreateBitCast(vd, getDefaultType(), "ef.f32.bits");
+    }
+    if (typeName == "f64") {
+        auto* v = builder->CreateLoad(llvm::Type::getDoubleTy(ctx), ptr, "ef.f64");
+        return builder->CreateBitCast(v, getDefaultType(), "ef.f64.bits");
+    }
+    // i64, u64, ptr, int — all native i64
+    return builder->CreateLoad(getDefaultType(), ptr, "ef.i64");
+}
+
+void CodeGenerator::generateExternFieldStore(llvm::Value* ptr, const std::string& typeName, llvm::Value* val) {
+    auto& ctx = *context;
+    if (typeName == "i8" || typeName == "u8") {
+        auto* t = builder->CreateTrunc(val, llvm::Type::getInt8Ty(ctx), "ef.trunc.i8");
+        builder->CreateStore(t, ptr);
+    } else if (typeName == "i16" || typeName == "u16") {
+        auto* t = builder->CreateTrunc(val, llvm::Type::getInt16Ty(ctx), "ef.trunc.i16");
+        builder->CreateStore(t, ptr);
+    } else if (typeName == "i32" || typeName == "u32") {
+        auto* t = builder->CreateTrunc(val, llvm::Type::getInt32Ty(ctx), "ef.trunc.i32");
+        builder->CreateStore(t, ptr);
+    } else if (typeName == "f32") {
+        auto* d = builder->CreateBitCast(val, llvm::Type::getDoubleTy(ctx), "ef.f64.bc");
+        auto* f = builder->CreateFPTrunc(d, llvm::Type::getFloatTy(ctx), "ef.f32.trunc");
+        builder->CreateStore(f, ptr);
+    } else if (typeName == "f64") {
+        auto* d = builder->CreateBitCast(val, llvm::Type::getDoubleTy(ctx), "ef.f64.bc");
+        builder->CreateStore(d, ptr);
+    } else {
+        builder->CreateStore(val, ptr);
+    }
 }
 
 } // namespace omscript

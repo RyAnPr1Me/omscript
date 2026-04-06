@@ -1,0 +1,14 @@
+import "lexer.om";
+
+fn main() {
+    var src = "fn add(a, b) { return a + b; }";
+    println("src len=" + to_string(str_len(src)));
+    var ts = tokenize(src);
+    println("count=" + to_string(ts.count));
+    var i = 0;
+    while (i < ts.count) {
+        println(to_string(i) + ":" + ts.lexemes[i]);
+        i = i + 1;
+    }
+    return 0;
+}

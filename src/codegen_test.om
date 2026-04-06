@@ -1,0 +1,5 @@
+import "codegen.om";
+
+fn main() {
+    return codegen_demo();
+}

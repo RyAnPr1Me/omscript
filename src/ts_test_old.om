@@ -1,0 +1,15 @@
+struct TokenStream { types, lexemes, count }
+
+fn make_ts() {
+    var t = [1, 2, 3];
+    var l = ["a", "b", "c"];
+    return TokenStream { types: t, lexemes: l, count: 3 };
+}
+
+fn main() {
+    var ts = make_ts();
+    println("t_len=" + to_string(len(ts.types)));
+    println("l_len=" + to_string(len(ts.lexemes)));
+    println("cnt=" + to_string(ts.count));
+    return 0;
+}

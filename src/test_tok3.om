@@ -1,0 +1,12 @@
+import "lexer.om";
+
+fn main() {
+    var src = "fn f() {}";
+    var ts = tokenize(src);
+    println("count=" + to_string(ts.count));
+    // directly access struct
+    var lex0 = ts.lexemes[0];
+    println("lex0 as int=" + to_string(lex0));
+    println("lex0 as str=" + lex0);
+    return 0;
+}

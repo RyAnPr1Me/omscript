@@ -22,6 +22,11 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
         codegenError("Variable declaration outside of function", stmt);
     }
 
+    // Global variables are registered at module level; their initializers are
+    // emitted at the start of main via generateGlobalVarInits().  Skip here.
+    if (stmt->isGlobal)
+        return;
+
     // Resolve the alloca type from the type annotation if present.
     llvm::Type* allocaType = stmt->typeName.empty()
                                  ? getDefaultType()
@@ -189,6 +194,12 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             structVars_[stmt->name] = structLit->structName;
         } else {
             structVars_.erase(stmt->name);
+        }
+        // Track extern struct type annotations for C++ interoperability.
+        if (!stmt->typeName.empty() && externStructLayouts_.count(stmt->typeName)) {
+            varTypeAnnotations_[stmt->name] = stmt->typeName;
+        } else {
+            varTypeAnnotations_.erase(stmt->name);
         }
         // Track known array sizes from array_fill(N, val) calls.
         // When N is a compile-time constant (or a tracked value), record
@@ -500,26 +511,34 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
     // Constant condition elimination — match generateIf's dead-branch pruning.
     // Evaluate the condition once; if it folds to a constant we can avoid
     // emitting the loop structure entirely (false) or the condition check (true).
-    llvm::Value* preCondition = generateExpression(stmt->condition.get());
-    if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(preCondition)) {
-        if (ci->isZero()) {
-            // Condition is statically false: loop body never executes.
+    // IMPORTANT: only pre-evaluate when the condition is side-effect-free.
+    // Function calls may modify global state (e.g. match_tok advances g_pos),
+    // and pre-evaluating them would cause those side effects to happen before
+    // the loop condition block, breaking the loop's first iteration.
+    const bool condIsPure = stmt->condition->type == ASTNodeType::LITERAL_EXPR
+                         || stmt->condition->type == ASTNodeType::IDENTIFIER_EXPR;
+    if (condIsPure) {
+        llvm::Value* preCondition = generateExpression(stmt->condition.get());
+        if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(preCondition)) {
+            if (ci->isZero()) {
+                // Condition is statically false: loop body never executes.
+                return;
+            }
+            // Condition is statically true: emit an unconditional infinite loop
+            // (no condition check on each iteration).
+            llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "whilebody", function);
+            llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "whileend", function);
+            builder->CreateBr(bodyBB);
+            builder->SetInsertPoint(bodyBB);
+            loopStack.push_back({endBB, bodyBB});
+            generateStatement(stmt->body.get());
+            loopStack.pop_back();
+            if (!builder->GetInsertBlock()->getTerminator()) {
+                builder->CreateBr(bodyBB);
+            }
+            builder->SetInsertPoint(endBB);
             return;
         }
-        // Condition is statically true: emit an unconditional infinite loop
-        // (no condition check on each iteration).
-        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "whilebody", function);
-        llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "whileend", function);
-        builder->CreateBr(bodyBB);
-        builder->SetInsertPoint(bodyBB);
-        loopStack.push_back({endBB, bodyBB});
-        generateStatement(stmt->body.get());
-        loopStack.pop_back();
-        if (!builder->GetInsertBlock()->getTerminator()) {
-            builder->CreateBr(bodyBB);
-        }
-        builder->SetInsertPoint(endBB);
-        return;
     }
 
     llvm::BasicBlock* condBB = llvm::BasicBlock::Create(*context, "whilecond", function);
@@ -1746,6 +1765,47 @@ void CodeGenerator::generateBlock(BlockStmt* stmt) {
 void CodeGenerator::generateExprStmt(ExprStmt* stmt) {
     generateExpression(stmt->expression.get());
 }
+
+void CodeGenerator::generateGlobalVarInits() {
+    if (!currentProgram_)
+        return;
+    for (auto& gv : currentProgram_->globalVars) {
+        auto gvIt = globalVarMap_.find(gv->name);
+        if (gvIt == globalVarMap_.end() || !gv->initializer)
+            continue;
+        llvm::GlobalVariable* gVar = gvIt->second;
+        llvm::Type* gTy = gVar->getValueType();
+        // Integer/float constants are set as static initializers; skip if the
+        // global already has a non-zero constant initializer.
+        if (auto* ci = llvm::dyn_cast<llvm::Constant>(gVar->getInitializer())) {
+            if (!ci->isNullValue())
+                continue; // already statically initialized
+        }
+        // Generate the initializer expression and store it into the global.
+        llvm::Value* initVal = generateExpression(gv->initializer.get());
+        // For simple integer/float literals, also update the global's static initializer
+        // so that it's correct even if code somehow runs before main.
+        if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(initVal)) {
+            if (gTy->isIntegerTy())
+                gVar->setInitializer(ci);
+        } else if (auto* cf = llvm::dyn_cast<llvm::ConstantFP>(initVal)) {
+            if (gTy->isDoubleTy())
+                gVar->setInitializer(cf);
+        }
+        // Coerce the value to the global's type.
+        initVal = convertTo(initVal, gTy);
+        builder->CreateAlignedStore(initVal, gVar, llvm::MaybeAlign(8));
+        // Track non-negativity.
+        if (gTy->isIntegerTy() && nonNegValues_.count(initVal))
+            nonNegValues_.insert(gVar);
+        // Track string globals.
+        if (initVal->getType()->isPointerTy() ||
+            (gv->initializer && isStringExpr(gv->initializer.get())))
+            stringVars_.insert(gv->name);
+    }
+}
+
+
 
 void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
     llvm::Value* condVal = generateExpression(stmt->condition.get());

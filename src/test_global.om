@@ -1,0 +1,16 @@
+global var g_count = 0;
+global var g_arr = [];
+
+fn increment() {
+    g_count = g_count + 1;
+    g_arr = push(g_arr, g_count);
+}
+
+fn main() {
+    increment();
+    increment();
+    increment();
+    println("count: " + to_string(g_count));
+    println("len: " + to_string(len(g_arr)));
+    return 0;
+}

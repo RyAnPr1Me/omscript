@@ -2071,8 +2071,35 @@ bool CodeGenerator::isStringArrayExpr(Expression* expr) const {
     if (!expr)
         return false;
     // Variable whose name is tracked as a string array.
-    if (expr->type == ASTNodeType::IDENTIFIER_EXPR)
-        return stringArrayVars_.count(static_cast<IdentifierExpr*>(expr)->name) > 0;
+    if (expr->type == ASTNodeType::IDENTIFIER_EXPR) {
+        const auto& name = static_cast<IdentifierExpr*>(expr)->name;
+        return stringArrayVars_.count(name) > 0
+            || globalStringArrayVars_.count(name) > 0;
+    }
+    // Struct field access: ts.lexemes, ts.lines, etc. — look up the struct type
+    // and check if the field was registered as a string array when the struct
+    // literal was created.  This propagates string-array type info through
+    // struct field boundaries (e.g. TokenStream.lexemes → string array).
+    if (expr->type == ASTNodeType::FIELD_ACCESS_EXPR) {
+        auto* fa = static_cast<FieldAccessExpr*>(expr);
+        const std::string structType = resolveStructType(fa->object.get());
+        if (!structType.empty()) {
+            auto it = structFieldStringArrays_.find(structType + "." + fa->fieldName);
+            if (it != structFieldStringArrays_.end() && it->second)
+                return true;
+        } else {
+            // Struct type is unknown (e.g. c = make_container() call result) —
+            // search all recorded struct field entries for a matching field name.
+            const std::string suffix = "." + fa->fieldName;
+            for (const auto& kv : structFieldStringArrays_) {
+                if (kv.second && kv.first.size() > suffix.size() &&
+                    kv.first.compare(kv.first.size() - suffix.size(), suffix.size(), suffix) == 0) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
     // Array literal whose elements are all strings.
     if (expr->type == ASTNodeType::ARRAY_EXPR) {
         auto* arr = static_cast<ArrayExpr*>(expr);
@@ -2091,8 +2118,17 @@ bool CodeGenerator::isStringArrayExpr(Expression* expr) const {
         auto* call = static_cast<CallExpr*>(expr);
         if (call->callee == "str_split")
             return true;
-        if ((call->callee == "push" || call->callee == "array_copy") && !call->arguments.empty())
-            return isStringArrayExpr(call->arguments[0].get());
+        if ((call->callee == "push" || call->callee == "array_copy") && !call->arguments.empty()) {
+            // push(arr, val): result is a string array if either:
+            //   1. arr is already a string array (type propagation), or
+            //   2. val is a string (first push initializes the element type).
+            if (isStringArrayExpr(call->arguments[0].get()))
+                return true;
+            if (call->callee == "push" && call->arguments.size() >= 2
+                    && isStringExpr(call->arguments[1].get()))
+                return true;
+            return false;
+        }
         if (call->callee == "array_concat" && !call->arguments.empty())
             return isStringArrayExpr(call->arguments[0].get());
         return false;
@@ -2106,6 +2142,9 @@ void CodeGenerator::generate(Program* program) {
     optMaxFunctions.clear();
     irInstructionCount_ = 0;
     fileNoAlias_ = program->fileNoAlias;
+    currentProgram_ = program;
+    globalVarMap_.clear();
+    structFieldStringArrays_.clear();
 
     // --- DWARF debug info initialization ---
     if (debugMode_) {
@@ -2157,11 +2196,23 @@ void CodeGenerator::generate(Program* program) {
         }
         auto it = seenFunctions.find(func->name);
         if (it != seenFunctions.end()) {
-            codegenError("Duplicate function definition: '" + func->name + "' (previously defined at line " +
-                             std::to_string(it->second->line) + ")",
-                         func.get());
+            // Allow an extern declaration and a definition of the same name
+            // to coexist — the extern is just a forward declaration.
+            const bool prevIsExtern = it->second->isExtern;
+            const bool curIsExtern  = func->isExtern;
+            if (prevIsExtern && !curIsExtern) {
+                // Replace extern placeholder with the real definition.
+                seenFunctions[func->name] = func.get();
+            } else if (!prevIsExtern && curIsExtern) {
+                // Extern after definition is redundant but not an error; skip.
+            } else {
+                codegenError("Duplicate function definition: '" + func->name + "' (previously defined at line " +
+                                 std::to_string(it->second->line) + ")",
+                             func.get());
+            }
+        } else {
+            seenFunctions[func->name] = func.get();
         }
-        seenFunctions[func->name] = func.get();
 
         // Check for duplicate parameter names within this function.
         std::unordered_set<std::string> seenParams;
@@ -2204,9 +2255,72 @@ void CodeGenerator::generate(Program* program) {
         builder->setFastMathFlags(FMF);
     }
 
+    // Pre-declare all well-known C runtime functions with their correct LLVM types
+    // BEFORE processing user extern fn declarations.  This ensures that if the
+    // user declares `extern fn malloc(n: i64) -> i64`, the module->getFunction()
+    // check in the scan below finds the ptr-returning version and reuses it.
+    // Without this, user extern fns that shadow runtime names (malloc, free,
+    // strlen, etc.) get declared first with i64 return type, causing type
+    // mismatches when the runtime's internal helpers (to_string, println, …)
+    // call getOrDeclareMalloc() and receive the wrong-typed function.
+    getOrDeclareMalloc();
+    getOrDeclareCalloc();
+    getOrDeclareFree();
+    getOrDeclareStrlen();
+    getOrDeclareStrcpy();
+    getOrDeclareStrcat();
+    getOrDeclareStrcmp();
+    getOrDeclareStrstr();
+    getOrDeclareSnprintf();
+    getOrDeclareMemcpy();
+    getOrDeclareMemmove();
+    getOrDeclareMemchr();
+    getOrDeclarePutchar();
+    getOrDeclareScanf();
+    getOrDeclareExit();
+    getOrDeclareAbort();
+    getOrDeclareToupper();
+    getOrDeclareTolower();
+    getOrDeclareIsspace();
+    getOrDeclareRealloc();
+
+    // Register file-level `const` and `extern struct` from the program.
+    // (These are processed below in their respective loops.)
+
+    // ── Global variables ────────────────────────────────────────────────────
+    // Create LLVM global variables for each `global var` declaration.
+    // All globals are zero-initialized in the IR; any non-trivial initializers
+    // (function calls, array literals, strings) are emitted at the start of
+    // `main` via generateGlobalVarInit().
+    for (auto& gv : program->globalVars) {
+        if (globalVarMap_.count(gv->name))
+            continue; // already declared (shouldn't happen)
+        // Determine the LLVM type: use the type annotation if present, else i64.
+        llvm::Type* gTy = gv->typeName.empty() ? getDefaultType()
+                                                : resolveAnnotatedType(gv->typeName);
+        // For constant initializers we can determine the type from the literal.
+        if (gv->typeName.empty() && gv->initializer) {
+            if (gv->initializer->type == ASTNodeType::LITERAL_EXPR) {
+                auto* lit = static_cast<LiteralExpr*>(gv->initializer.get());
+                if (lit->literalType == LiteralExpr::LiteralType::FLOAT)
+                    gTy = getFloatType();
+            }
+        }
+        auto* gVar = new llvm::GlobalVariable(*module, gTy, /*isConstant=*/false,
+                                              llvm::GlobalValue::InternalLinkage,
+                                              llvm::Constant::getNullValue(gTy),
+                                              "gv." + gv->name);
+        gVar->setAlignment(llvm::Align(8));
+        globalVarMap_[gv->name] = gVar;
+    }
+
     // Forward-declare all functions so that any function can reference any
     // other regardless of source-file ordering (enables mutual recursion).
     for (auto& func : program->functions) {
+        // Skip if already declared (e.g. extern decl followed by definition).
+        if (functions.count(func->name))
+            continue;
+
         // Resolve parameter types from annotations: "float" → double, else i64.
         std::vector<llvm::Type*> paramTypes;
         paramTypes.reserve(func->parameters.size());
@@ -2216,6 +2330,26 @@ void CodeGenerator::generate(Program* program) {
         // Resolve return type from annotation (e.g. "-> float" → double).
         llvm::Type* retType = resolveAnnotatedType(func->returnType);
         llvm::FunctionType* funcType = llvm::FunctionType::get(retType, paramTypes, false);
+
+        if (func->isExtern) {
+            // extern fn — declare with ExternalLinkage and no body attributes.
+            // The symbol will be resolved at link time from the linked library
+            // or object file that provides the definition.
+            //
+            // If the runtime has already declared a function with this name
+            // (e.g. malloc, free, strlen) with a different LLVM type, reuse the
+            // existing declaration rather than creating a conflicting prototype.
+            // Call sites handle ptr ↔ i64 coercion automatically.
+            llvm::Function* function = module->getFunction(func->name);
+            if (!function) {
+                function = llvm::Function::Create(funcType, llvm::Function::ExternalLinkage,
+                                                  func->name, module.get());
+            }
+            functions[func->name] = function;
+            functionDecls_[func->name] = func.get();
+            continue;
+        }
+
         // Non-main functions use InternalLinkage at O2+ (equivalent to C's
         // `static`).  This tells the optimizer that no external code can call
         // the function, enabling:
@@ -2290,6 +2424,32 @@ void CodeGenerator::generate(Program* program) {
             const std::string fullName = enumDecl->name + "_" + memberName;
             enumConstants_[fullName] = memberValue;
         }
+    }
+
+    // Process file-level const declarations: register without any prefix,
+    // exactly as written (e.g. `const FOO = 42;` → enumConstants_["FOO"] = 42).
+    for (auto& [name, value] : program->constants) {
+        enumConstants_[name] = value;
+    }
+
+    // Register extern struct layouts for C++ interoperability.
+    for (auto& es : program->externStructs) {
+        auto& layout = externStructLayouts_[es->name];
+        long long totalSize = 0;
+        for (auto& f : es->fields) {
+            long long byteOff = f.byteOffset;
+            if (byteOff < 0) {
+                // Auto-layout: align to field type's natural alignment.
+                long long fsz = externFieldTypeSize(f.typeName);
+                long long align = (fsz > 8) ? 8 : fsz;
+                byteOff = (totalSize + align - 1) & ~(align - 1);
+            }
+            layout[f.name] = {byteOff, f.typeName};
+            long long fsz = externFieldTypeSize(f.typeName);
+            long long end = byteOff + fsz;
+            if (end > totalSize) totalSize = end;
+        }
+        externStructSizes_[es->name] = totalSize;
     }
 
     // Process struct declarations: store field layouts for struct operations.
@@ -2394,8 +2554,10 @@ void CodeGenerator::generate(Program* program) {
                   << " functions..." << std::endl;
     }
 
-    // Generate all function bodies
+    // Generate all function bodies (skip extern declarations — no body to emit)
     for (auto& func : program->functions) {
+        if (func->isExtern)
+            continue;
         generateFunction(func.get());
     }
 
@@ -2989,7 +3151,31 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     constValues.clear();
     constScopeStack.clear();
     stringVars_.clear();
+    // Preserve string-array tracking for global vars across function boundaries.
+    // When a function does push(g_arr, "str"), g_arr gets added to stringArrayVars_.
+    // We persist this in globalStringArrayVars_ so all subsequent functions know
+    // g_arr holds strings (e.g. for g_nd_sval[id] in parser.om).
+    if (currentProgram_) {
+        for (auto& gv : currentProgram_->globalVars) {
+            if (stringArrayVars_.count(gv->name))
+                globalStringArrayVars_.insert(gv->name);
+        }
+    }
     stringArrayVars_.clear();
+    // Restore global string-array entries into per-function stringArrayVars_.
+    for (auto& entry : globalStringArrayVars_)
+        stringArrayVars_.insert(entry.first());
+    // Pre-populate stringVars_ with global variables that hold strings.
+    // generateGlobalVarInits() tracks these in main, but other functions
+    // start with a fresh stringVars_ set and lose the information.  Without
+    // this, expressions like ("prefix" + g_string_var) are misidentified as
+    // integer arithmetic instead of string concatenation.
+    if (currentProgram_) {
+        for (auto& gv : currentProgram_->globalVars) {
+            if (gv->initializer && isStringExpr(gv->initializer.get()))
+                stringVars_.insert(gv->name);
+        }
+    }
     stringLenCache_.clear();
     stringCapCache_.clear();
     deadVars_.clear();
@@ -3041,6 +3227,14 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         }
 
         ++argIt;
+    }
+
+    // If this is `main`, initialize all global variables that have non-trivial
+    // initializers (function calls, array/string literals, etc.).
+    // Simple integer/float constants are already zero-initialized in the LLVM
+    // global, so we only need to emit stores for real initializer expressions.
+    if (func->name == "main") {
+        generateGlobalVarInits();
     }
 
     // Generate function body

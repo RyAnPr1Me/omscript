@@ -257,6 +257,14 @@ class CodeGenerator {
     llvm::StringMap<llvm::Value*> namedValues;
     std::vector<std::unordered_map<std::string, llvm::Value*>> scopeStack;
 
+    /// Module-level global variables declared with `global var`.
+    /// Maps variable name → the llvm::GlobalVariable* (used by loads/stores).
+    llvm::StringMap<llvm::GlobalVariable*> globalVarMap_;
+
+    /// Pointer to the current Program being compiled (set in generate()).
+    /// Needed by generateGlobalVarInits() which runs inside generateFunction("main").
+    Program* currentProgram_ = nullptr;
+
     struct LoopContext {
         llvm::BasicBlock* breakTarget;
         llvm::BasicBlock* continueTarget;
@@ -313,6 +321,26 @@ class CodeGenerator {
     // Variables known to hold struct values, maps var name → struct type name.
     std::unordered_map<std::string, std::string> structVars_;
 
+    // ── Extern struct C++ interoperability ─────────────────────────────────
+    struct ExternFieldLayout {
+        long long  byteOffset; ///< byte offset of the field within the struct
+        std::string typeName;  ///< "i64", "i32", "u32", "f64", etc.
+    };
+    /// Maps extern struct name → (field name → layout)
+    std::unordered_map<std::string, std::unordered_map<std::string, ExternFieldLayout>> externStructLayouts_;
+    /// Maps extern struct name → total size in bytes
+    std::unordered_map<std::string, long long> externStructSizes_;
+    /// Variables annotated with an extern struct type (var name → struct name).
+    std::unordered_map<std::string, std::string> varTypeAnnotations_;
+
+    /// Return the natural size of a field type used in an extern struct.
+    static long long externFieldTypeSize(const std::string& typeName) {
+        if (typeName == "i8"  || typeName == "u8")  return 1;
+        if (typeName == "i16" || typeName == "u16") return 2;
+        if (typeName == "i32" || typeName == "u32" || typeName == "f32") return 4;
+        return 8; // i64, u64, f64, ptr, int
+    }
+
     // Operator overload registry: maps "StructName::op" → generated LLVM function name.
     // e.g. "Vec2::+" → "__op_Vec2_add"
     std::unordered_map<std::string, std::string> operatorOverloads_;
@@ -336,6 +364,14 @@ class CodeGenerator {
     llvm::StringSet<> stringReturningFunctions_;
     std::unordered_map<std::string, std::unordered_set<size_t>> funcParamStringTypes_;
     llvm::StringSet<> stringArrayVars_;
+    // globalStringArrayVars_: global vars known to hold string arrays.
+    //   Persists across function boundaries (not cleared in generateFunction).
+    //   Populated in generateGlobalVarInits when push(arr, str) is detected.
+    llvm::StringSet<> globalStringArrayVars_;
+    // structFieldStringArrays_: maps "structType.fieldName" to 1 when a struct
+    //   field is known to hold a string array.  Used by isStringArrayExpr when
+    //   the base expression is a FieldAccessExpr (e.g. ts.lexemes[i]).
+    std::unordered_map<std::string, bool> structFieldStringArrays_;
     // stringLenCache_: maps string variable names to an alloca that caches the
     // current strlen of the variable's value.  Used by str_concat to avoid
     // O(n) strlen calls on growing strings in append loops.
@@ -490,6 +526,11 @@ class CodeGenerator {
     llvm::Value* generateFieldAccess(FieldAccessExpr* expr);
     llvm::Value* generateFieldAssign(FieldAssignExpr* expr);
 
+    /// Load a field from an extern struct pointer, returning i64.
+    llvm::Value* generateExternFieldLoad(llvm::Value* ptr, const std::string& typeName);
+    /// Store an i64 value into an extern struct field pointer.
+    void generateExternFieldStore(llvm::Value* ptr, const std::string& typeName, llvm::Value* val);
+
     // Struct type resolution helpers.
     std::string resolveStructType(Expression* objExpr) const;
     size_t resolveFieldIndex(const std::string& structType, const std::string& fieldName,
@@ -504,6 +545,7 @@ class CodeGenerator {
     void generateFor(ForStmt* stmt);
     void generateForEach(ForEachStmt* stmt);
     void generateBlock(BlockStmt* stmt);
+    void generateGlobalVarInits(); ///< Emit initialization code for `global var` decls at start of main.
     void generateExprStmt(ExprStmt* stmt);
     void generateSwitch(SwitchStmt* stmt);
     void generateTryCatch(TryCatchStmt* stmt);

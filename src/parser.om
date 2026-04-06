@@ -1,0 +1,2390 @@
+// OmScript Parser — implemented in OmScript itself.
+//
+// This file reimplements src/parser.cpp using only OmScript native constructs.
+// It produces a flat arena AST from a token stream supplied by lexer.om.
+
+import "lexer.om";
+
+// ─── Node type constants ──────────────────────────────────────────────────────
+const ND_PROGRAM      = 0;
+const ND_FUNCTION     = 1;
+const ND_PARAM        = 2;
+const ND_BLOCK        = 3;
+const ND_VAR_DECL     = 4;
+const ND_IF           = 5;
+const ND_WHILE        = 6;
+const ND_DO_WHILE     = 7;
+const ND_FOR          = 8;
+const ND_FOR_EACH     = 9;
+const ND_RETURN       = 10;
+const ND_BREAK        = 11;
+const ND_CONTINUE     = 12;
+const ND_EXPR_STMT    = 13;
+const ND_SWITCH       = 14;
+const ND_CASE         = 15;
+const ND_TRY_CATCH    = 16;
+const ND_THROW        = 17;
+
+const ND_BINARY       = 30;
+const ND_UNARY        = 31;
+const ND_TERNARY      = 32;
+const ND_LIT_INT      = 33;
+const ND_LIT_FLOAT    = 34;
+const ND_LIT_STRING   = 35;
+const ND_LIT_BOOL     = 36;
+const ND_LIT_NULL     = 37;
+const ND_IDENTIFIER   = 38;
+const ND_CALL         = 39;
+const ND_INDEX        = 40;
+const ND_ASSIGN       = 41;
+const ND_ARRAY_LIT    = 42;
+const ND_MEMBER       = 43;
+const ND_STRUCT_LIT   = 44;
+const ND_FIELD_ASSIGN = 45;
+const ND_NULL_COALESCE = 46;
+const ND_PIPE         = 47;
+const ND_SPREAD       = 48;
+const ND_LAMBDA       = 49;
+const ND_MOVE_EXPR    = 50;
+const ND_BORROW_EXPR  = 51;
+
+const ND_ENUM_DECL    = 60;
+const ND_ENUM_MEMBER  = 61;
+const ND_STRUCT_DECL  = 62;
+const ND_STRUCT_FIELD = 63;
+const ND_EXTERN_FN    = 64;
+const ND_EXTERN_STRUCT = 65;
+const ND_EXTERN_FIELD = 66;
+const ND_TOP_CONST    = 67;
+const ND_GLOBAL_VAR   = 68;
+
+// ─── Function annotation flag constants ──────────────────────────────────────
+const FN_EXTERN       = 1;
+const FN_OPTMAX       = 2;
+const FN_INLINE       = 4;
+const FN_NOINLINE     = 8;
+const FN_COLD         = 16;
+const FN_HOT          = 32;
+const FN_PURE         = 64;
+const FN_NORETURN     = 128;
+const FN_STATIC       = 256;
+const FN_FLATTEN      = 512;
+const FN_UNROLL       = 1024;
+const FN_NOUNROLL     = 2048;
+const FN_RESTRICT     = 4096;
+const FN_VECTORIZE    = 8192;
+const FN_NOVECTORIZE  = 16384;
+const FN_PARALLEL     = 32768;
+const FN_NOPARALLEL   = 65536;
+const FN_MINSIZE      = 131072;
+const FN_OPTNONE      = 262144;
+const FN_NOUNWIND     = 524288;
+
+// ─── Token stream globals ─────────────────────────────────────────────────────
+global var g_tok_types   = [];
+global var g_tok_lexemes = [];
+global var g_tok_lines   = [];
+global var g_tok_cols    = [];
+global var g_tok_ivals   = [];
+global var g_tok_fvals   = [];
+global var g_tok_count   = 0;
+global var g_pos         = 0;
+
+// ─── Arena node globals ───────────────────────────────────────────────────────
+global var g_nd_count   = 0;
+global var g_nd_type    = [];
+global var g_nd_ival    = [];
+global var g_nd_fval    = [];
+global var g_nd_sval    = [];
+global var g_nd_sval2   = [];
+global var g_nd_c0      = [];
+global var g_nd_c1      = [];
+global var g_nd_c2      = [];
+global var g_nd_extra   = [];
+global var g_nd_nextra  = [];
+global var g_nd_line    = [];
+global var g_nd_col     = [];
+
+// Variable-arity child list
+global var g_ch         = [];
+global var g_ch_count   = 0;
+
+// Error tracking
+global var g_had_error  = 0;
+global var g_error_msg  = "";
+
+// Struct name registry
+global var g_struct_names    = [];
+global var g_struct_name_cnt = 0;
+
+// Flags
+global var g_in_optmax      = 0;
+global var g_lambda_counter = 0;
+
+// ─── Arena allocation ─────────────────────────────────────────────────────────
+
+fn alloc_node(ty, ln, cl) {
+    var id = g_nd_count;
+    g_nd_type   = push(g_nd_type,   ty);
+    g_nd_ival   = push(g_nd_ival,   0);
+    g_nd_fval   = push(g_nd_fval,   0.0);
+    g_nd_sval   = push(g_nd_sval,   "");
+    g_nd_sval2  = push(g_nd_sval2,  "");
+    g_nd_c0     = push(g_nd_c0,     -1);
+    g_nd_c1     = push(g_nd_c1,     -1);
+    g_nd_c2     = push(g_nd_c2,     -1);
+    g_nd_extra  = push(g_nd_extra,  -1);
+    g_nd_nextra = push(g_nd_nextra, 0);
+    g_nd_line   = push(g_nd_line,   ln);
+    g_nd_col    = push(g_nd_col,    cl);
+    g_nd_count  = id + 1;
+    return id;
+}
+
+// ─── Error handling ───────────────────────────────────────────────────────────
+
+fn parse_error(msg, line, col) {
+    if (g_had_error == 0) {
+        g_error_msg = "Parse error at " + to_string(line) + ":" + to_string(col) + ": " + msg;
+        g_had_error = 1;
+    }
+    return -1;
+}
+
+// ─── Token stream accessors ───────────────────────────────────────────────────
+
+fn tok_type_at(pos) {
+    if (pos >= g_tok_count) { return TOK_EOF; }
+    return g_tok_types[pos];
+}
+
+fn tok_lex_at(pos) {
+    if (pos >= g_tok_count) { return ""; }
+    return g_tok_lexemes[pos];
+}
+
+fn tok_line_at(pos) {
+    if (pos >= g_tok_count) { return 0; }
+    return g_tok_lines[pos];
+}
+
+fn tok_col_at(pos) {
+    if (pos >= g_tok_count) { return 0; }
+    return g_tok_cols[pos];
+}
+
+fn tok_ival_at(pos) {
+    if (pos >= g_tok_count) { return 0; }
+    return g_tok_ivals[pos];
+}
+
+fn peek_type() { return tok_type_at(g_pos); }
+fn peek_lex()  { return tok_lex_at(g_pos); }
+fn peek_line() { return tok_line_at(g_pos); }
+fn peek_col()  { return tok_col_at(g_pos); }
+
+fn is_at_end() { return tok_type_at(g_pos) == TOK_EOF; }
+
+fn check_tok(ty) {
+    if (is_at_end()) { return 0; }
+    return peek_type() == ty;
+}
+
+fn match_tok(ty) {
+    if (check_tok(ty)) {
+        g_pos = g_pos + 1;
+        return 1;
+    }
+    return 0;
+}
+
+// Returns the position of the consumed token, or -1 on error.
+fn consume_tok(ty, msg) {
+    if (check_tok(ty)) {
+        var pos = g_pos;
+        g_pos = g_pos + 1;
+        return pos;
+    }
+    return parse_error(msg, peek_line(), peek_col());
+}
+
+// ─── Struct name registry ─────────────────────────────────────────────────────
+
+fn register_struct_name(name) {
+    g_struct_names    = push(g_struct_names, name);
+    g_struct_name_cnt = g_struct_name_cnt + 1;
+}
+
+fn is_struct_name(name) {
+    var i = 0;
+    while (i < g_struct_name_cnt) {
+        if (str_eq(g_struct_names[i], name)) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+// ─── Type helpers ─────────────────────────────────────────────────────────────
+
+fn is_known_type_name(name) {
+    if (str_eq(name, "u8"))     { return 1; }
+    if (str_eq(name, "u16"))    { return 1; }
+    if (str_eq(name, "u32"))    { return 1; }
+    if (str_eq(name, "u64"))    { return 1; }
+    if (str_eq(name, "i8"))     { return 1; }
+    if (str_eq(name, "i16"))    { return 1; }
+    if (str_eq(name, "i32"))    { return 1; }
+    if (str_eq(name, "i64"))    { return 1; }
+    if (str_eq(name, "int"))    { return 1; }
+    if (str_eq(name, "float"))  { return 1; }
+    if (str_eq(name, "double")) { return 1; }
+    if (str_eq(name, "bool"))   { return 1; }
+    if (str_eq(name, "string")) { return 1; }
+    return 0;
+}
+
+// Returns type annotation string; empty string on failure (error already set).
+fn parse_type_annotation() {
+    var prefix = "";
+    if (match_tok(TOK_AMPERSAND)) {
+        prefix = "&";
+    }
+    var type_name = "";
+    if (check_tok(TOK_STRUCT)) {
+        type_name = peek_lex();
+        g_pos = g_pos + 1;
+    } else {
+        var p = consume_tok(TOK_IDENTIFIER, "Expected type name");
+        if (p == -1) { return ""; }
+        type_name = tok_lex_at(p);
+    }
+    // Array brackets: type[], type[][], etc.
+    while (check_tok(TOK_LBRACKET) && tok_type_at(g_pos + 1) == TOK_RBRACKET) {
+        g_pos = g_pos + 1;
+        g_pos = g_pos + 1;
+        type_name = type_name + "[]";
+    }
+    return prefix + type_name;
+}
+
+// ─── parse_block ──────────────────────────────────────────────────────────────
+
+fn parse_block() {
+    var ln = peek_line();
+    var cl = peek_col();
+    var r = consume_tok(TOK_LBRACE, "Expected '{'");
+    if (r == -1) { return -1; }
+
+    var id = alloc_node(ND_BLOCK, ln, cl);
+    var ch_ids = [];
+    var ch_cnt = 0;
+
+    while (!check_tok(TOK_RBRACE) && !is_at_end()) {
+        if (g_had_error) { return -1; }
+        if (check_tok(TOK_VAR) || check_tok(TOK_CONST)) {
+            var is_const = check_tok(TOK_CONST);
+            g_pos = g_pos + 1;
+            var decl = parse_var_decl(is_const);
+            if (decl == -1) { return -1; }
+            ch_ids = push(ch_ids, decl);
+            ch_cnt = ch_cnt + 1;
+            while (match_tok(TOK_COMMA)) {
+                var decl2 = parse_var_decl(is_const);
+                if (decl2 == -1) { return -1; }
+                ch_ids = push(ch_ids, decl2);
+                ch_cnt = ch_cnt + 1;
+            }
+            var r2 = consume_tok(TOK_SEMICOLON, "Expected ';' after variable declaration");
+            if (r2 == -1) { return -1; }
+        } else {
+            var stmt = parse_statement();
+            if (stmt == -1) { return -1; }
+            ch_ids = push(ch_ids, stmt);
+            ch_cnt = ch_cnt + 1;
+        }
+    }
+
+    var r3 = consume_tok(TOK_RBRACE, "Expected '}'");
+    if (r3 == -1) { return -1; }
+
+    var ch_start = g_ch_count;
+    var ci = 0;
+    while (ci < ch_cnt) {
+        g_ch = push(g_ch, ch_ids[ci]);
+        g_ch_count = g_ch_count + 1;
+        ci = ci + 1;
+    }
+    g_nd_extra[id]  = ch_start;
+    g_nd_nextra[id] = ch_cnt;
+    return id;
+}
+
+// ─── parse_var_decl (called after var/const token consumed) ──────────────────
+
+fn parse_var_decl(is_const) {
+    var ln = peek_line();
+    var cl = peek_col();
+    var p = consume_tok(TOK_IDENTIFIER, "Expected variable name");
+    if (p == -1) { return -1; }
+    var name = tok_lex_at(p);
+
+    var type_name = "";
+    if (match_tok(TOK_COLON)) {
+        type_name = parse_type_annotation();
+        if (g_had_error) { return -1; }
+    } else if (g_in_optmax) {
+        return parse_error("OPTMAX variables must include type annotations", ln, cl);
+    }
+
+    var init_node = -1;
+    if (match_tok(TOK_ASSIGN)) {
+        init_node = parse_expression();
+        if (init_node == -1) { return -1; }
+    }
+
+    var id = alloc_node(ND_VAR_DECL, ln, cl);
+    g_nd_sval[id]  = name;
+    g_nd_sval2[id] = type_name;
+    g_nd_ival[id]  = is_const;
+    g_nd_c0[id]    = init_node;
+    return id;
+}
+
+// ─── parse_statement ──────────────────────────────────────────────────────────
+
+fn parse_statement() {
+    var ln = peek_line();
+    var cl = peek_col();
+
+    if (check_tok(TOK_LIKELY) || check_tok(TOK_UNLIKELY)) {
+        g_pos = g_pos + 1;
+        if (!match_tok(TOK_IF)) {
+            return parse_error("Expected 'if' after branch hint", peek_line(), peek_col());
+        }
+        return parse_if_stmt();
+    }
+
+    if (match_tok(TOK_IF))       { return parse_if_stmt(); }
+    if (match_tok(TOK_WHILE))    { return parse_while_stmt(); }
+    if (match_tok(TOK_DO))       { return parse_do_while_stmt(); }
+    if (match_tok(TOK_FOR))      { return parse_for_stmt(); }
+    if (match_tok(TOK_RETURN))   { return parse_return_stmt(); }
+    if (match_tok(TOK_BREAK))    { return parse_break_stmt(); }
+    if (match_tok(TOK_CONTINUE)) { return parse_continue_stmt(); }
+    if (match_tok(TOK_SWITCH))   { return parse_switch_stmt(); }
+    if (match_tok(TOK_TRY))      { return parse_try_catch_stmt(); }
+    if (match_tok(TOK_THROW))    { return parse_throw_stmt(); }
+
+    if (check_tok(TOK_LBRACE)) { return parse_block(); }
+
+    if (match_tok(TOK_VAR)) {
+        var decl = parse_var_decl(0);
+        if (decl == -1) { return -1; }
+        var r = consume_tok(TOK_SEMICOLON, "Expected ';' after variable declaration");
+        if (r == -1) { return -1; }
+        return decl;
+    }
+
+    if (match_tok(TOK_CONST)) {
+        var decl = parse_var_decl(1);
+        if (decl == -1) { return -1; }
+        var r = consume_tok(TOK_SEMICOLON, "Expected ';' after variable declaration");
+        if (r == -1) { return -1; }
+        return decl;
+    }
+
+    if (match_tok(TOK_INVALIDATE)) {
+        var np = consume_tok(TOK_IDENTIFIER, "Expected variable name after 'invalidate'");
+        if (np == -1) { return -1; }
+        var r = consume_tok(TOK_SEMICOLON, "Expected ';' after invalidate statement");
+        if (r == -1) { return -1; }
+        var eid = alloc_node(ND_IDENTIFIER, ln, cl);
+        g_nd_sval[eid] = tok_lex_at(np);
+        var sid = alloc_node(ND_EXPR_STMT, ln, cl);
+        g_nd_c0[sid] = eid;
+        return sid;
+    }
+
+    if (match_tok(TOK_REGISTER)) {
+        var is_const_r = check_tok(TOK_CONST);
+        if (!match_tok(TOK_VAR) && !match_tok(TOK_CONST)) {
+            return parse_error("Expected 'var' or 'const' after 'register'", peek_line(), peek_col());
+        }
+        var decl = parse_var_decl(is_const_r);
+        if (decl == -1) { return -1; }
+        g_nd_ival[decl] = g_nd_ival[decl] + 2;  // bit1 = isRegister
+        var r = consume_tok(TOK_SEMICOLON, "Expected ';' after register variable declaration");
+        if (r == -1) { return -1; }
+        return decl;
+    }
+
+    if (match_tok(TOK_PREFETCH)) {
+        while (check_tok(TOK_IDENTIFIER) && !is_at_end()) {
+            var kw = peek_lex();
+            if (str_eq(kw, "hot") || str_eq(kw, "immut")) {
+                g_pos = g_pos + 1;
+            } else {
+                break;
+            }
+        }
+        if (check_tok(TOK_VAR)) {
+            g_pos = g_pos + 1;
+            var decl = parse_var_decl(0);
+            if (decl == -1) { return -1; }
+            var r = consume_tok(TOK_SEMICOLON, "Expected ';' after prefetch declaration");
+            if (r == -1) { return -1; }
+            return decl;
+        }
+        if (check_tok(TOK_IDENTIFIER)) {
+            var saved_p = g_pos;
+            var name_p = g_pos;
+            g_pos = g_pos + 1;
+            if (match_tok(TOK_COLON)) { parse_type_annotation(); }
+            var r = consume_tok(TOK_SEMICOLON, "Expected ';' after prefetch");
+            if (r == -1) { return -1; }
+            var eid = alloc_node(ND_IDENTIFIER, ln, cl);
+            g_nd_sval[eid] = tok_lex_at(name_p);
+            var sid = alloc_node(ND_EXPR_STMT, ln, cl);
+            g_nd_c0[sid] = eid;
+            return sid;
+        }
+        return parse_error("Expected variable name or declaration after 'prefetch'", peek_line(), peek_col());
+    }
+
+    if (match_tok(TOK_MOVE)) {
+        if (check_tok(TOK_VAR) || (check_tok(TOK_IDENTIFIER) && tok_type_at(g_pos + 1) == TOK_IDENTIFIER)) {
+            var type_name = "";
+            if (match_tok(TOK_VAR)) {
+                type_name = "";
+            } else {
+                type_name = peek_lex();
+                g_pos = g_pos + 1;
+            }
+            var np = consume_tok(TOK_IDENTIFIER, "Expected variable name in move declaration");
+            if (np == -1) { return -1; }
+            var r_eq = consume_tok(TOK_ASSIGN, "Expected '=' in move declaration");
+            if (r_eq == -1) { return -1; }
+            var init = parse_expression();
+            if (init == -1) { return -1; }
+            var r_sc = consume_tok(TOK_SEMICOLON, "Expected ';' after move declaration");
+            if (r_sc == -1) { return -1; }
+            var mv = alloc_node(ND_MOVE_EXPR, ln, cl);
+            g_nd_c0[mv] = init;
+            var vid = alloc_node(ND_VAR_DECL, ln, cl);
+            g_nd_sval[vid]  = tok_lex_at(np);
+            g_nd_sval2[vid] = type_name;
+            g_nd_c0[vid]    = mv;
+            return vid;
+        }
+        g_pos = g_pos - 1;
+        return parse_expr_stmt();
+    }
+
+    if (match_tok(TOK_BORROW)) {
+        var type_name = "";
+        if (match_tok(TOK_VAR)) {
+            type_name = "";
+        } else if (check_tok(TOK_IDENTIFIER) && tok_type_at(g_pos + 1) == TOK_IDENTIFIER) {
+            type_name = peek_lex();
+            g_pos = g_pos + 1;
+        }
+        var np = consume_tok(TOK_IDENTIFIER, "Expected variable name in borrow declaration");
+        if (np == -1) { return -1; }
+        if (str_len(type_name) == 0 && match_tok(TOK_COLON)) {
+            type_name = parse_type_annotation();
+            if (g_had_error) { return -1; }
+        }
+        var r_eq = consume_tok(TOK_ASSIGN, "Expected '=' in borrow declaration");
+        if (r_eq == -1) { return -1; }
+        var init = parse_expression();
+        if (init == -1) { return -1; }
+        var r_sc = consume_tok(TOK_SEMICOLON, "Expected ';' after borrow declaration");
+        if (r_sc == -1) { return -1; }
+        var brw = alloc_node(ND_BORROW_EXPR, ln, cl);
+        g_nd_c0[brw] = init;
+        var vid = alloc_node(ND_VAR_DECL, ln, cl);
+        g_nd_sval[vid]  = tok_lex_at(np);
+        g_nd_sval2[vid] = type_name;
+        g_nd_c0[vid]    = brw;
+        return vid;
+    }
+
+    return parse_expr_stmt();
+}
+
+fn parse_if_stmt() {
+    var ln = peek_line();
+    var cl = peek_col();
+    var r = consume_tok(TOK_LPAREN, "Expected '(' after 'if'");
+    if (r == -1) { return -1; }
+    var cond = parse_expression();
+    if (cond == -1) { return -1; }
+    var r2 = consume_tok(TOK_RPAREN, "Expected ')' after condition");
+    if (r2 == -1) { return -1; }
+    var then_br = parse_statement();
+    if (then_br == -1) { return -1; }
+    var else_br = -1;
+    if (match_tok(TOK_ELSE)) {
+        else_br = parse_statement();
+        if (else_br == -1) { return -1; }
+    }
+    var id = alloc_node(ND_IF, ln, cl);
+    g_nd_c0[id] = cond;
+    g_nd_c1[id] = then_br;
+    g_nd_c2[id] = else_br;
+    return id;
+}
+
+fn parse_while_stmt() {
+    var ln = peek_line();
+    var cl = peek_col();
+    var r = consume_tok(TOK_LPAREN, "Expected '(' after 'while'");
+    if (r == -1) { return -1; }
+    var cond = parse_expression();
+    if (cond == -1) { return -1; }
+    var r2 = consume_tok(TOK_RPAREN, "Expected ')' after condition");
+    if (r2 == -1) { return -1; }
+    var body = parse_statement();
+    if (body == -1) { return -1; }
+    var id = alloc_node(ND_WHILE, ln, cl);
+    g_nd_c0[id] = cond;
+    g_nd_c1[id] = body;
+    return id;
+}
+
+fn parse_do_while_stmt() {
+    var ln = peek_line();
+    var cl = peek_col();
+    var body = parse_statement();
+    if (body == -1) { return -1; }
+    var r = consume_tok(TOK_WHILE, "Expected 'while' after do-while body");
+    if (r == -1) { return -1; }
+    var r2 = consume_tok(TOK_LPAREN, "Expected '(' after 'while'");
+    if (r2 == -1) { return -1; }
+    var cond = parse_expression();
+    if (cond == -1) { return -1; }
+    var r3 = consume_tok(TOK_RPAREN, "Expected ')' after condition");
+    if (r3 == -1) { return -1; }
+    var r4 = consume_tok(TOK_SEMICOLON, "Expected ';' after do-while statement");
+    if (r4 == -1) { return -1; }
+    var id = alloc_node(ND_DO_WHILE, ln, cl);
+    g_nd_c0[id] = body;
+    g_nd_c1[id] = cond;
+    return id;
+}
+
+fn parse_for_stmt() {
+    var ln = peek_line();
+    var cl = peek_col();
+    var r = consume_tok(TOK_LPAREN, "Expected '(' after 'for'");
+    if (r == -1) { return -1; }
+    var vp = consume_tok(TOK_IDENTIFIER, "Expected iterator variable");
+    if (vp == -1) { return -1; }
+    var var_name  = tok_lex_at(vp);
+    var iter_type = "";
+    if (match_tok(TOK_COLON)) {
+        iter_type = parse_type_annotation();
+        if (g_had_error) { return -1; }
+    } else if (g_in_optmax) {
+        return parse_error("OPTMAX loop variables must include type annotations", ln, cl);
+    }
+    var r2 = consume_tok(TOK_IN, "Expected 'in' after iterator variable");
+    if (r2 == -1) { return -1; }
+
+    var first = parse_expression();
+    if (first == -1) { return -1; }
+
+    if (match_tok(TOK_RANGE) || match_tok(TOK_DOT_DOT)) {
+        var end_expr = parse_expression();
+        if (end_expr == -1) { return -1; }
+        var step_expr = -1;
+        var has_step  = 0;
+        if (match_tok(TOK_RANGE)) {
+            step_expr = parse_expression();
+            if (step_expr == -1) { return -1; }
+            has_step = 1;
+        }
+        var r3 = consume_tok(TOK_RPAREN, "Expected ')' after for range");
+        if (r3 == -1) { return -1; }
+        var body = parse_statement();
+        if (body == -1) { return -1; }
+        var id = alloc_node(ND_FOR, ln, cl);
+        g_nd_sval[id]  = var_name;
+        g_nd_sval2[id] = iter_type;
+        g_nd_c0[id]    = first;
+        g_nd_c1[id]    = end_expr;
+        g_nd_c2[id]    = body;
+        g_nd_ival[id]  = has_step;
+        if (has_step) {
+            var step_start = g_ch_count;
+            g_ch = push(g_ch, step_expr);
+            g_ch_count = g_ch_count + 1;
+            g_nd_extra[id] = step_start;
+        }
+        return id;
+    }
+
+    // For-each over collection
+    var r4 = consume_tok(TOK_RPAREN, "Expected ')' after for-each collection");
+    if (r4 == -1) { return -1; }
+    var body = parse_statement();
+    if (body == -1) { return -1; }
+    var id = alloc_node(ND_FOR_EACH, ln, cl);
+    g_nd_sval[id]  = var_name;
+    g_nd_sval2[id] = iter_type;
+    g_nd_c0[id]    = first;
+    g_nd_c1[id]    = body;
+    return id;
+}
+
+fn parse_return_stmt() {
+    var ln = peek_line();
+    var cl = peek_col();
+    var val = -1;
+    if (!check_tok(TOK_SEMICOLON)) {
+        val = parse_expression();
+        if (val == -1) { return -1; }
+    }
+    var r = consume_tok(TOK_SEMICOLON, "Expected ';' after return statement");
+    if (r == -1) { return -1; }
+    var id = alloc_node(ND_RETURN, ln, cl);
+    g_nd_c0[id] = val;
+    return id;
+}
+
+fn parse_break_stmt() {
+    var r = consume_tok(TOK_SEMICOLON, "Expected ';' after 'break'");
+    if (r == -1) { return -1; }
+    return alloc_node(ND_BREAK, 0, 0);
+}
+
+fn parse_continue_stmt() {
+    var r = consume_tok(TOK_SEMICOLON, "Expected ';' after 'continue'");
+    if (r == -1) { return -1; }
+    return alloc_node(ND_CONTINUE, 0, 0);
+}
+
+fn parse_switch_stmt() {
+    var ln = peek_line();
+    var cl = peek_col();
+    var r = consume_tok(TOK_LPAREN, "Expected '(' after 'switch'");
+    if (r == -1) { return -1; }
+    var cond = parse_expression();
+    if (cond == -1) { return -1; }
+    var r2 = consume_tok(TOK_RPAREN, "Expected ')' after switch condition");
+    if (r2 == -1) { return -1; }
+    var r3 = consume_tok(TOK_LBRACE, "Expected '{' after switch condition");
+    if (r3 == -1) { return -1; }
+
+    var id = alloc_node(ND_SWITCH, ln, cl);
+    g_nd_c0[id] = cond;
+    var ch_ids      = [];
+    var ch_cnt      = 0;
+    var has_default = 0;
+
+    while (!check_tok(TOK_RBRACE) && !is_at_end()) {
+        if (g_had_error) { return -1; }
+        if (match_tok(TOK_CASE)) {
+            var cln = peek_line();
+            var ccl = peek_col();
+            var cv_ids = [];
+            var cv_cnt = 0;
+            var first_val = parse_expression();
+            if (first_val == -1) { return -1; }
+            cv_ids = push(cv_ids, first_val);
+            cv_cnt = cv_cnt + 1;
+            while (match_tok(TOK_COMMA)) {
+                var cv = parse_expression();
+                if (cv == -1) { return -1; }
+                cv_ids = push(cv_ids, cv);
+                cv_cnt = cv_cnt + 1;
+            }
+            var r4 = consume_tok(TOK_COLON, "Expected ':' after case value(s)");
+            if (r4 == -1) { return -1; }
+
+            var body_id = alloc_node(ND_BLOCK, cln, ccl);
+            var b_ids = [];
+            var b_cnt = 0;
+            while (!check_tok(TOK_CASE) && !check_tok(TOK_DEFAULT) && !check_tok(TOK_RBRACE) && !is_at_end()) {
+                var s = parse_statement();
+                if (s == -1) { return -1; }
+                b_ids = push(b_ids, s);
+                b_cnt = b_cnt + 1;
+            }
+            var b_start = g_ch_count;
+            var bi = 0;
+            while (bi < b_cnt) {
+                g_ch = push(g_ch, b_ids[bi]);
+                g_ch_count = g_ch_count + 1;
+                bi = bi + 1;
+            }
+            g_nd_extra[body_id]  = b_start;
+            g_nd_nextra[body_id] = b_cnt;
+
+            var case_id = alloc_node(ND_CASE, cln, ccl);
+            g_nd_c0[case_id]     = first_val;
+            g_nd_c1[case_id]     = body_id;
+            g_nd_ival[case_id]   = 0;
+            var cv_start = g_ch_count;
+            var cvi = 0;
+            while (cvi < cv_cnt) {
+                g_ch = push(g_ch, cv_ids[cvi]);
+                g_ch_count = g_ch_count + 1;
+                cvi = cvi + 1;
+            }
+            g_nd_extra[case_id]  = cv_start;
+            g_nd_nextra[case_id] = cv_cnt;
+            ch_ids = push(ch_ids, case_id);
+            ch_cnt = ch_cnt + 1;
+        } else if (match_tok(TOK_DEFAULT)) {
+            if (has_default) {
+                return parse_error("Duplicate default case in switch statement", peek_line(), peek_col());
+            }
+            has_default = 1;
+            var dln = peek_line();
+            var dcl = peek_col();
+            var r5 = consume_tok(TOK_COLON, "Expected ':' after 'default'");
+            if (r5 == -1) { return -1; }
+
+            var body_id2 = alloc_node(ND_BLOCK, dln, dcl);
+            var b2_ids = [];
+            var b2_cnt = 0;
+            while (!check_tok(TOK_CASE) && !check_tok(TOK_DEFAULT) && !check_tok(TOK_RBRACE) && !is_at_end()) {
+                var s2 = parse_statement();
+                if (s2 == -1) { return -1; }
+                b2_ids = push(b2_ids, s2);
+                b2_cnt = b2_cnt + 1;
+            }
+            var b2_start = g_ch_count;
+            var b2i = 0;
+            while (b2i < b2_cnt) {
+                g_ch = push(g_ch, b2_ids[b2i]);
+                g_ch_count = g_ch_count + 1;
+                b2i = b2i + 1;
+            }
+            g_nd_extra[body_id2]  = b2_start;
+            g_nd_nextra[body_id2] = b2_cnt;
+
+            var def_id = alloc_node(ND_CASE, dln, dcl);
+            g_nd_c0[def_id]   = -1;
+            g_nd_c1[def_id]   = body_id2;
+            g_nd_ival[def_id] = 1;
+            ch_ids = push(ch_ids, def_id);
+            ch_cnt = ch_cnt + 1;
+        } else {
+            return parse_error("Expected 'case' or 'default' in switch statement", peek_line(), peek_col());
+        }
+    }
+
+    var r6 = consume_tok(TOK_RBRACE, "Expected '}' after switch body");
+    if (r6 == -1) { return -1; }
+    var ch_start = g_ch_count;
+    var ci = 0;
+    while (ci < ch_cnt) {
+        g_ch = push(g_ch, ch_ids[ci]);
+        g_ch_count = g_ch_count + 1;
+        ci = ci + 1;
+    }
+    g_nd_extra[id]  = ch_start;
+    g_nd_nextra[id] = ch_cnt;
+    return id;
+}
+
+fn parse_try_catch_stmt() {
+    var ln = peek_line();
+    var cl = peek_col();
+    var try_body = parse_block();
+    if (try_body == -1) { return -1; }
+    var r = consume_tok(TOK_CATCH, "Expected 'catch' after try block");
+    if (r == -1) { return -1; }
+    var r2 = consume_tok(TOK_LPAREN, "Expected '(' after 'catch'");
+    if (r2 == -1) { return -1; }
+    var vp = consume_tok(TOK_IDENTIFIER, "Expected error variable name in catch");
+    if (vp == -1) { return -1; }
+    var r3 = consume_tok(TOK_RPAREN, "Expected ')' after catch variable");
+    if (r3 == -1) { return -1; }
+    var catch_body = parse_block();
+    if (catch_body == -1) { return -1; }
+    var id = alloc_node(ND_TRY_CATCH, ln, cl);
+    g_nd_sval[id] = tok_lex_at(vp);
+    g_nd_c0[id]   = try_body;
+    g_nd_c1[id]   = catch_body;
+    return id;
+}
+
+fn parse_throw_stmt() {
+    var ln = peek_line();
+    var cl = peek_col();
+    var val = parse_expression();
+    if (val == -1) { return -1; }
+    var r = consume_tok(TOK_SEMICOLON, "Expected ';' after throw expression");
+    if (r == -1) { return -1; }
+    var id = alloc_node(ND_THROW, ln, cl);
+    g_nd_c0[id] = val;
+    return id;
+}
+
+fn parse_expr_stmt() {
+    var ln = peek_line();
+    var cl = peek_col();
+    var expr = parse_expression();
+    if (expr == -1) { return -1; }
+    var r = consume_tok(TOK_SEMICOLON, "Expected ';' after expression");
+    if (r == -1) { return -1; }
+    var id = alloc_node(ND_EXPR_STMT, ln, cl);
+    g_nd_c0[id] = expr;
+    return id;
+}
+
+// ─── Expression parsing ───────────────────────────────────────────────────────
+
+fn parse_expression() {
+    return parse_assignment();
+}
+
+fn parse_assignment() {
+    var expr = parse_pipe();
+    if (expr == -1) { return -1; }
+    var ln = g_nd_line[expr];
+    var cl = g_nd_col[expr];
+
+    if (match_tok(TOK_ASSIGN)) {
+        var ty = g_nd_type[expr];
+        if (ty == ND_IDENTIFIER) {
+            var name = g_nd_sval[expr];
+            var val = parse_assignment();
+            if (val == -1) { return -1; }
+            var id = alloc_node(ND_ASSIGN, ln, cl);
+            g_nd_sval[id]  = "=";
+            g_nd_sval2[id] = name;
+            g_nd_c0[id]    = -1;
+            g_nd_c1[id]    = val;
+            return id;
+        } else if (ty == ND_INDEX) {
+            var val = parse_assignment();
+            if (val == -1) { return -1; }
+            var id = alloc_node(ND_ASSIGN, ln, cl);
+            g_nd_sval[id] = "=";
+            g_nd_c0[id]   = expr;
+            g_nd_c1[id]   = val;
+            return id;
+        } else if (ty == ND_MEMBER) {
+            var val = parse_assignment();
+            if (val == -1) { return -1; }
+            var id = alloc_node(ND_ASSIGN, ln, cl);
+            g_nd_sval[id] = "=";
+            g_nd_c0[id]   = expr;
+            g_nd_c1[id]   = val;
+            return id;
+        } else {
+            return parse_error("Invalid assignment target", ln, cl);
+        }
+    }
+
+    // Compound assignment operators
+    var is_compound = 0;
+    var comp_op = "";
+    if (check_tok(TOK_PLUS_ASSIGN))      { is_compound = 1; comp_op = "+"; }
+    if (check_tok(TOK_MINUS_ASSIGN))     { is_compound = 1; comp_op = "-"; }
+    if (check_tok(TOK_STAR_ASSIGN))      { is_compound = 1; comp_op = "*"; }
+    if (check_tok(TOK_SLASH_ASSIGN))     { is_compound = 1; comp_op = "/"; }
+    if (check_tok(TOK_PERCENT_ASSIGN))   { is_compound = 1; comp_op = "%"; }
+    if (check_tok(TOK_AMP_ASSIGN))       { is_compound = 1; comp_op = "&"; }
+    if (check_tok(TOK_PIPE_ASSIGN))      { is_compound = 1; comp_op = "|"; }
+    if (check_tok(TOK_CARET_ASSIGN))     { is_compound = 1; comp_op = "^"; }
+    if (check_tok(TOK_LSHIFT_ASSIGN))    { is_compound = 1; comp_op = "<<"; }
+    if (check_tok(TOK_RSHIFT_ASSIGN))    { is_compound = 1; comp_op = ">>"; }
+    if (check_tok(TOK_STARSTAR_ASSIGN))  { is_compound = 1; comp_op = "**"; }
+    if (check_tok(TOK_NULL_COAL_ASSIGN)) { is_compound = 1; comp_op = "??"; }
+
+    if (is_compound) {
+        g_pos = g_pos + 1;
+        var ty = g_nd_type[expr];
+        var rhs = parse_assignment();
+        if (rhs == -1) { return -1; }
+
+        if (ty == ND_IDENTIFIER) {
+            var name = g_nd_sval[expr];
+            var lhs_ref = alloc_node(ND_IDENTIFIER, ln, cl);
+            g_nd_sval[lhs_ref] = name;
+            var bin = alloc_node(ND_BINARY, ln, cl);
+            g_nd_sval[bin] = comp_op;
+            g_nd_c0[bin]   = lhs_ref;
+            g_nd_c1[bin]   = rhs;
+            var id = alloc_node(ND_ASSIGN, ln, cl);
+            g_nd_sval[id]  = "=";
+            g_nd_sval2[id] = name;
+            g_nd_c0[id]    = -1;
+            g_nd_c1[id]    = bin;
+            return id;
+        } else if (ty == ND_INDEX) {
+            var arr_id = g_nd_c0[expr];
+            var idx_id = g_nd_c1[expr];
+            var read_idx = alloc_node(ND_INDEX, ln, cl);
+            g_nd_c0[read_idx] = arr_id;
+            g_nd_c1[read_idx] = idx_id;
+            var bin = alloc_node(ND_BINARY, ln, cl);
+            g_nd_sval[bin] = comp_op;
+            g_nd_c0[bin]   = read_idx;
+            g_nd_c1[bin]   = rhs;
+            var id = alloc_node(ND_ASSIGN, ln, cl);
+            g_nd_sval[id] = "=";
+            g_nd_c0[id]   = expr;
+            g_nd_c1[id]   = bin;
+            return id;
+        } else if (ty == ND_MEMBER) {
+            var obj_id = g_nd_c0[expr];
+            var fname  = g_nd_sval[expr];
+            var read_m = alloc_node(ND_MEMBER, ln, cl);
+            g_nd_c0[read_m]   = obj_id;
+            g_nd_sval[read_m] = fname;
+            var bin = alloc_node(ND_BINARY, ln, cl);
+            g_nd_sval[bin] = comp_op;
+            g_nd_c0[bin]   = read_m;
+            g_nd_c1[bin]   = rhs;
+            var id = alloc_node(ND_ASSIGN, ln, cl);
+            g_nd_sval[id] = "=";
+            g_nd_c0[id]   = expr;
+            g_nd_c1[id]   = bin;
+            return id;
+        } else {
+            return parse_error("Compound assignment requires a variable, array element, or struct field", ln, cl);
+        }
+    }
+
+    return expr;
+}
+
+fn parse_pipe() {
+    var expr = parse_ternary();
+    if (expr == -1) { return -1; }
+    while (match_tok(TOK_PIPE_FORWARD)) {
+        var ln = peek_line();
+        var cl = peek_col();
+        var fp = consume_tok(TOK_IDENTIFIER, "Expected function name after '|>'");
+        if (fp == -1) { return -1; }
+        var id = alloc_node(ND_PIPE, ln, cl);
+        g_nd_c0[id]     = expr;
+        g_nd_sval[id]   = tok_lex_at(fp);
+        g_nd_extra[id]  = g_ch_count;
+        g_nd_nextra[id] = 0;
+        expr = id;
+    }
+    return expr;
+}
+
+fn parse_ternary() {
+    var expr = parse_null_coalesce();
+    if (expr == -1) { return -1; }
+    if (match_tok(TOK_QUESTION)) {
+        var ln = g_nd_line[expr];
+        var cl = g_nd_col[expr];
+        var then_e = parse_expression();
+        if (then_e == -1) { return -1; }
+        var r = consume_tok(TOK_COLON, "Expected ':' in ternary expression");
+        if (r == -1) { return -1; }
+        var else_e = parse_ternary();
+        if (else_e == -1) { return -1; }
+        var id = alloc_node(ND_TERNARY, ln, cl);
+        g_nd_c0[id] = expr;
+        g_nd_c1[id] = then_e;
+        g_nd_c2[id] = else_e;
+        return id;
+    }
+    return expr;
+}
+
+fn parse_null_coalesce() {
+    var left = parse_logical_or();
+    if (left == -1) { return -1; }
+    while (match_tok(TOK_NULL_COALESCE)) {
+        var ln = g_nd_line[left];
+        var cl = g_nd_col[left];
+        var right = parse_logical_or();
+        if (right == -1) { return -1; }
+        var id = alloc_node(ND_BINARY, ln, cl);
+        g_nd_sval[id] = "??";
+        g_nd_c0[id]   = left;
+        g_nd_c1[id]   = right;
+        left = id;
+    }
+    return left;
+}
+
+fn parse_logical_or() {
+    var left = parse_logical_and();
+    if (left == -1) { return -1; }
+    while (match_tok(TOK_OR)) {
+        var ln = g_nd_line[left];
+        var cl = g_nd_col[left];
+        var right = parse_logical_and();
+        if (right == -1) { return -1; }
+        var id = alloc_node(ND_BINARY, ln, cl);
+        g_nd_sval[id] = "||";
+        g_nd_c0[id]   = left;
+        g_nd_c1[id]   = right;
+        left = id;
+    }
+    return left;
+}
+
+fn parse_logical_and() {
+    var left = parse_bitwise_or();
+    if (left == -1) { return -1; }
+    while (match_tok(TOK_AND)) {
+        var ln = g_nd_line[left];
+        var cl = g_nd_col[left];
+        var right = parse_bitwise_or();
+        if (right == -1) { return -1; }
+        var id = alloc_node(ND_BINARY, ln, cl);
+        g_nd_sval[id] = "&&";
+        g_nd_c0[id]   = left;
+        g_nd_c1[id]   = right;
+        left = id;
+    }
+    return left;
+}
+
+fn parse_bitwise_or() {
+    var left = parse_bitwise_xor();
+    if (left == -1) { return -1; }
+    while (match_tok(TOK_PIPE)) {
+        var ln = g_nd_line[left];
+        var cl = g_nd_col[left];
+        var right = parse_bitwise_xor();
+        if (right == -1) { return -1; }
+        var id = alloc_node(ND_BINARY, ln, cl);
+        g_nd_sval[id] = "|";
+        g_nd_c0[id]   = left;
+        g_nd_c1[id]   = right;
+        left = id;
+    }
+    return left;
+}
+
+fn parse_bitwise_xor() {
+    var left = parse_bitwise_and();
+    if (left == -1) { return -1; }
+    while (match_tok(TOK_CARET)) {
+        var ln = g_nd_line[left];
+        var cl = g_nd_col[left];
+        var right = parse_bitwise_and();
+        if (right == -1) { return -1; }
+        var id = alloc_node(ND_BINARY, ln, cl);
+        g_nd_sval[id] = "^";
+        g_nd_c0[id]   = left;
+        g_nd_c1[id]   = right;
+        left = id;
+    }
+    return left;
+}
+
+fn parse_bitwise_and() {
+    var left = parse_equality();
+    if (left == -1) { return -1; }
+    while (match_tok(TOK_AMPERSAND)) {
+        var ln = g_nd_line[left];
+        var cl = g_nd_col[left];
+        var right = parse_equality();
+        if (right == -1) { return -1; }
+        var id = alloc_node(ND_BINARY, ln, cl);
+        g_nd_sval[id] = "&";
+        g_nd_c0[id]   = left;
+        g_nd_c1[id]   = right;
+        left = id;
+    }
+    return left;
+}
+
+fn parse_equality() {
+    var left = parse_comparison();
+    if (left == -1) { return -1; }
+    while (check_tok(TOK_EQ) || check_tok(TOK_NE)) {
+        var op = peek_lex();
+        g_pos = g_pos + 1;
+        var ln = g_nd_line[left];
+        var cl = g_nd_col[left];
+        var right = parse_comparison();
+        if (right == -1) { return -1; }
+        var id = alloc_node(ND_BINARY, ln, cl);
+        g_nd_sval[id] = op;
+        g_nd_c0[id]   = left;
+        g_nd_c1[id]   = right;
+        left = id;
+    }
+    return left;
+}
+
+fn parse_comparison() {
+    var left = parse_shift();
+    if (left == -1) { return -1; }
+    while (check_tok(TOK_LT) || check_tok(TOK_LE) || check_tok(TOK_GT) || check_tok(TOK_GE)) {
+        var op = peek_lex();
+        g_pos = g_pos + 1;
+        var ln = g_nd_line[left];
+        var cl = g_nd_col[left];
+        var right = parse_shift();
+        if (right == -1) { return -1; }
+        var id = alloc_node(ND_BINARY, ln, cl);
+        g_nd_sval[id] = op;
+        g_nd_c0[id]   = left;
+        g_nd_c1[id]   = right;
+        left = id;
+    }
+    return left;
+}
+
+fn parse_shift() {
+    var left = parse_addition();
+    if (left == -1) { return -1; }
+    while (check_tok(TOK_LSHIFT) || check_tok(TOK_RSHIFT)) {
+        var op = peek_lex();
+        g_pos = g_pos + 1;
+        var ln = g_nd_line[left];
+        var cl = g_nd_col[left];
+        var right = parse_addition();
+        if (right == -1) { return -1; }
+        var id = alloc_node(ND_BINARY, ln, cl);
+        g_nd_sval[id] = op;
+        g_nd_c0[id]   = left;
+        g_nd_c1[id]   = right;
+        left = id;
+    }
+    return left;
+}
+
+fn parse_addition() {
+    var left = parse_multiplication();
+    if (left == -1) { return -1; }
+    while (check_tok(TOK_PLUS) || check_tok(TOK_MINUS)) {
+        var op = peek_lex();
+        g_pos = g_pos + 1;
+        var ln = g_nd_line[left];
+        var cl = g_nd_col[left];
+        var right = parse_multiplication();
+        if (right == -1) { return -1; }
+        var id = alloc_node(ND_BINARY, ln, cl);
+        g_nd_sval[id] = op;
+        g_nd_c0[id]   = left;
+        g_nd_c1[id]   = right;
+        left = id;
+    }
+    return left;
+}
+
+fn parse_multiplication() {
+    var left = parse_power();
+    if (left == -1) { return -1; }
+    while (check_tok(TOK_STAR) || check_tok(TOK_SLASH) || check_tok(TOK_PERCENT)) {
+        var op = peek_lex();
+        g_pos = g_pos + 1;
+        var ln = g_nd_line[left];
+        var cl = g_nd_col[left];
+        var right = parse_power();
+        if (right == -1) { return -1; }
+        var id = alloc_node(ND_BINARY, ln, cl);
+        g_nd_sval[id] = op;
+        g_nd_c0[id]   = left;
+        g_nd_c1[id]   = right;
+        left = id;
+    }
+    return left;
+}
+
+fn parse_power() {
+    var left = parse_unary();
+    if (left == -1) { return -1; }
+    if (match_tok(TOK_STAR_STAR)) {
+        var ln = g_nd_line[left];
+        var cl = g_nd_col[left];
+        var right = parse_power();
+        if (right == -1) { return -1; }
+        var id = alloc_node(ND_BINARY, ln, cl);
+        g_nd_sval[id] = "**";
+        g_nd_c0[id]   = left;
+        g_nd_c1[id]   = right;
+        return id;
+    }
+    return left;
+}
+
+fn parse_unary() {
+    if (check_tok(TOK_MINUS) || check_tok(TOK_NOT) || check_tok(TOK_TILDE)) {
+        var op = peek_lex();
+        var ln = peek_line();
+        var cl = peek_col();
+        g_pos = g_pos + 1;
+        var operand = parse_unary();
+        if (operand == -1) { return -1; }
+        var id = alloc_node(ND_UNARY, ln, cl);
+        g_nd_sval[id] = op;
+        g_nd_c0[id]   = operand;
+        g_nd_ival[id] = 1;
+        return id;
+    }
+    if (check_tok(TOK_AMPERSAND)) {
+        var ln = peek_line();
+        var cl = peek_col();
+        g_pos = g_pos + 1;
+        var operand = parse_unary();
+        if (operand == -1) { return -1; }
+        var id = alloc_node(ND_UNARY, ln, cl);
+        g_nd_sval[id] = "&";
+        g_nd_c0[id]   = operand;
+        g_nd_ival[id] = 1;
+        return id;
+    }
+    if (check_tok(TOK_PLUSPLUS) || check_tok(TOK_MINUSMINUS)) {
+        var op = peek_lex();
+        var ln = peek_line();
+        var cl = peek_col();
+        g_pos = g_pos + 1;
+        var operand = parse_unary();
+        if (operand == -1) { return -1; }
+        var id = alloc_node(ND_UNARY, ln, cl);
+        g_nd_sval[id] = op;
+        g_nd_c0[id]   = operand;
+        g_nd_ival[id] = 1;
+        return id;
+    }
+    if (match_tok(TOK_MOVE)) {
+        var ln = peek_line();
+        var cl = peek_col();
+        var operand = parse_unary();
+        if (operand == -1) { return -1; }
+        var id = alloc_node(ND_MOVE_EXPR, ln, cl);
+        g_nd_c0[id] = operand;
+        return id;
+    }
+    return parse_postfix();
+}
+
+fn parse_postfix() {
+    var expr = parse_call();
+    if (expr == -1) { return -1; }
+    while (1) {
+        if (check_tok(TOK_PLUSPLUS) || check_tok(TOK_MINUSMINUS)) {
+            var op = peek_lex();
+            var ln = peek_line();
+            var cl = peek_col();
+            g_pos = g_pos + 1;
+            var id = alloc_node(ND_UNARY, ln, cl);
+            g_nd_sval[id] = op;
+            g_nd_c0[id]   = expr;
+            g_nd_ival[id] = 0;
+            expr = id;
+        } else if (match_tok(TOK_LBRACKET)) {
+            var ln = peek_line();
+            var cl = peek_col();
+            var idx = parse_expression();
+            if (idx == -1) { return -1; }
+            var r = consume_tok(TOK_RBRACKET, "Expected ']' after array index");
+            if (r == -1) { return -1; }
+            var id = alloc_node(ND_INDEX, ln, cl);
+            g_nd_c0[id] = expr;
+            g_nd_c1[id] = idx;
+            expr = id;
+        } else if (match_tok(TOK_DOT)) {
+            var ln = peek_line();
+            var cl = peek_col();
+            var fp = consume_tok(TOK_IDENTIFIER, "Expected field name after '.'");
+            if (fp == -1) { return -1; }
+            var id = alloc_node(ND_MEMBER, ln, cl);
+            g_nd_c0[id]   = expr;
+            g_nd_sval[id] = tok_lex_at(fp);
+            expr = id;
+        } else {
+            break;
+        }
+    }
+    return expr;
+}
+
+fn parse_call() {
+    var expr = parse_primary();
+    if (expr == -1) { return -1; }
+    if (match_tok(TOK_LPAREN)) {
+        if (g_nd_type[expr] == ND_IDENTIFIER) {
+            var name = g_nd_sval[expr];
+            var ln   = g_nd_line[expr];
+            var cl   = g_nd_col[expr];
+            var ch_ids = [];
+            var ch_cnt = 0;
+            if (!check_tok(TOK_RPAREN)) {
+                var first_arg = parse_expression();
+                if (first_arg == -1) { return -1; }
+                ch_ids = push(ch_ids, first_arg);
+                ch_cnt = ch_cnt + 1;
+                while (match_tok(TOK_COMMA)) {
+                    var arg = parse_expression();
+                    if (arg == -1) { return -1; }
+                    ch_ids = push(ch_ids, arg);
+                    ch_cnt = ch_cnt + 1;
+                }
+            }
+            var r = consume_tok(TOK_RPAREN, "Expected ')' after arguments");
+            if (r == -1) { return -1; }
+            var id = alloc_node(ND_CALL, ln, cl);
+            g_nd_sval[id]   = name;
+            var ch_start = g_ch_count;
+            var ci = 0;
+            while (ci < ch_cnt) {
+                g_ch = push(g_ch, ch_ids[ci]);
+                g_ch_count = g_ch_count + 1;
+                ci = ci + 1;
+            }
+            g_nd_extra[id]  = ch_start;
+            g_nd_nextra[id] = ch_cnt;
+            return id;
+        } else {
+            return parse_error("Invalid function call", peek_line(), peek_col());
+        }
+    }
+    return expr;
+}
+
+fn parse_primary() {
+    var ln = peek_line();
+    var cl = peek_col();
+
+    if (match_tok(TOK_INTEGER)) {
+        var p = g_pos - 1;
+        var id = alloc_node(ND_LIT_INT, ln, cl);
+        g_nd_ival[id] = tok_ival_at(p);
+        return id;
+    }
+
+    if (match_tok(TOK_FLOAT)) {
+        var p = g_pos - 1;
+        var id = alloc_node(ND_LIT_FLOAT, ln, cl);
+        g_nd_fval[id] = g_tok_fvals[p];
+        return id;
+    }
+
+    if (match_tok(TOK_STRING)) {
+        var p = g_pos - 1;
+        var id = alloc_node(ND_LIT_STRING, ln, cl);
+        g_nd_sval[id] = tok_lex_at(p);
+        return id;
+    }
+
+    if (match_tok(TOK_TRUE)) {
+        var id = alloc_node(ND_LIT_BOOL, ln, cl);
+        g_nd_ival[id] = 1;
+        return id;
+    }
+
+    if (match_tok(TOK_FALSE)) {
+        var id = alloc_node(ND_LIT_BOOL, ln, cl);
+        g_nd_ival[id] = 0;
+        return id;
+    }
+
+    if (match_tok(TOK_NULL)) {
+        return alloc_node(ND_LIT_NULL, ln, cl);
+    }
+
+    if (match_tok(TOK_IDENTIFIER)) {
+        var p = g_pos - 1;
+        var name = tok_lex_at(p);
+        if (is_struct_name(name) && check_tok(TOK_LBRACE)) {
+            g_pos = g_pos + 1;
+            return parse_struct_literal(name, ln, cl);
+        }
+        var id = alloc_node(ND_IDENTIFIER, ln, cl);
+        g_nd_sval[id] = name;
+        // Consume optional :knowntype annotation on identifier in expression context
+        if (check_tok(TOK_COLON) && tok_type_at(g_pos + 1) == TOK_IDENTIFIER &&
+            is_known_type_name(tok_lex_at(g_pos + 1))) {
+            g_pos = g_pos + 1;
+            g_pos = g_pos + 1;
+        }
+        return id;
+    }
+
+    if (match_tok(TOK_LPAREN)) {
+        var expr = parse_expression();
+        if (expr == -1) { return -1; }
+        var r = consume_tok(TOK_RPAREN, "Expected ')' after expression");
+        if (r == -1) { return -1; }
+        return expr;
+    }
+
+    if (match_tok(TOK_LBRACKET)) {
+        return parse_array_literal(ln, cl);
+    }
+
+    // Lambda: |params| expr
+    if (match_tok(TOK_PIPE)) {
+        return parse_lambda(ln, cl);
+    }
+
+    // Lambda: || expr  (empty parameter list)
+    if (match_tok(TOK_OR)) {
+        return parse_lambda_empty(ln, cl);
+    }
+
+    return parse_error("Expected expression", ln, cl);
+}
+
+fn parse_array_literal(ln, cl) {
+    var id = alloc_node(ND_ARRAY_LIT, ln, cl);
+    var ch_ids = [];
+    var ch_cnt = 0;
+
+    if (!check_tok(TOK_RBRACKET)) {
+        // First element (possibly spread)
+        if (match_tok(TOK_RANGE)) {
+            var sln = peek_line();
+            var scl = peek_col();
+            var operand = parse_expression();
+            if (operand == -1) { return -1; }
+            var sp = alloc_node(ND_SPREAD, sln, scl);
+            g_nd_c0[sp] = operand;
+            ch_ids = push(ch_ids, sp);
+            ch_cnt = ch_cnt + 1;
+        } else {
+            var e = parse_expression();
+            if (e == -1) { return -1; }
+            ch_ids = push(ch_ids, e);
+            ch_cnt = ch_cnt + 1;
+        }
+        while (match_tok(TOK_COMMA)) {
+            if (match_tok(TOK_RANGE)) {
+                var sln = peek_line();
+                var scl = peek_col();
+                var operand = parse_expression();
+                if (operand == -1) { return -1; }
+                var sp = alloc_node(ND_SPREAD, sln, scl);
+                g_nd_c0[sp] = operand;
+                ch_ids = push(ch_ids, sp);
+                ch_cnt = ch_cnt + 1;
+            } else {
+                var e = parse_expression();
+                if (e == -1) { return -1; }
+                ch_ids = push(ch_ids, e);
+                ch_cnt = ch_cnt + 1;
+            }
+        }
+    }
+
+    var r = consume_tok(TOK_RBRACKET, "Expected ']' after array elements");
+    if (r == -1) { return -1; }
+    var ch_start = g_ch_count;
+    var ci = 0;
+    while (ci < ch_cnt) {
+        g_ch = push(g_ch, ch_ids[ci]);
+        g_ch_count = g_ch_count + 1;
+        ci = ci + 1;
+    }
+    g_nd_extra[id]  = ch_start;
+    g_nd_nextra[id] = ch_cnt;
+    return id;
+}
+
+fn parse_struct_literal(name, ln, cl) {
+    var id = alloc_node(ND_STRUCT_LIT, ln, cl);
+    g_nd_sval[id] = name;
+    var ch_ids = [];
+    var ch_cnt = 0;
+    while (!check_tok(TOK_RBRACE) && !is_at_end()) {
+        var fp = consume_tok(TOK_IDENTIFIER, "Expected field name in struct literal");
+        if (fp == -1) { return -1; }
+        var r = consume_tok(TOK_COLON, "Expected ':' after field name");
+        if (r == -1) { return -1; }
+        var val = parse_expression();
+        if (val == -1) { return -1; }
+        var fa = alloc_node(ND_FIELD_ASSIGN, ln, cl);
+        g_nd_sval[fa] = tok_lex_at(fp);
+        g_nd_c0[fa]   = val;
+        ch_ids = push(ch_ids, fa);
+        ch_cnt = ch_cnt + 1;
+        match_tok(TOK_COMMA);
+    }
+    var r2 = consume_tok(TOK_RBRACE, "Expected '}' after struct literal");
+    if (r2 == -1) { return -1; }
+    var ch_start = g_ch_count;
+    var ci = 0;
+    while (ci < ch_cnt) {
+        g_ch = push(g_ch, ch_ids[ci]);
+        g_ch_count = g_ch_count + 1;
+        ci = ci + 1;
+    }
+    g_nd_extra[id]  = ch_start;
+    g_nd_nextra[id] = ch_cnt;
+    return id;
+}
+
+fn parse_lambda(ln, cl) {
+    // Opening | already consumed
+    var ch_ids = [];
+    var ch_cnt = 0;
+    if (!check_tok(TOK_PIPE)) {
+        var pp = consume_tok(TOK_IDENTIFIER, "Expected parameter name in lambda");
+        if (pp == -1) { return -1; }
+        var pid = alloc_node(ND_PARAM, ln, cl);
+        g_nd_sval[pid] = tok_lex_at(pp);
+        if (match_tok(TOK_COLON)) { parse_type_annotation(); }
+        ch_ids = push(ch_ids, pid);
+        ch_cnt = ch_cnt + 1;
+        while (match_tok(TOK_COMMA)) {
+            var pp2 = consume_tok(TOK_IDENTIFIER, "Expected parameter name in lambda");
+            if (pp2 == -1) { return -1; }
+            var pid2 = alloc_node(ND_PARAM, ln, cl);
+            g_nd_sval[pid2] = tok_lex_at(pp2);
+            if (match_tok(TOK_COLON)) { parse_type_annotation(); }
+            ch_ids = push(ch_ids, pid2);
+            ch_cnt = ch_cnt + 1;
+        }
+    }
+    var ch_start = g_ch_count;
+    var ci = 0;
+    while (ci < ch_cnt) {
+        g_ch = push(g_ch, ch_ids[ci]);
+        g_ch_count = g_ch_count + 1;
+        ci = ci + 1;
+    }
+    var r = consume_tok(TOK_PIPE, "Expected '|' after lambda parameters");
+    if (r == -1) { return -1; }
+    var body = parse_expression();
+    if (body == -1) { return -1; }
+    var lambda_name = "__lambda_" + to_string(g_lambda_counter);
+    g_lambda_counter = g_lambda_counter + 1;
+    // Emit as string literal containing the generated function name
+    var id = alloc_node(ND_LIT_STRING, ln, cl);
+    g_nd_sval[id] = lambda_name;
+    return id;
+}
+
+fn parse_lambda_empty(ln, cl) {
+    var body = parse_expression();
+    if (body == -1) { return -1; }
+    var lambda_name = "__lambda_" + to_string(g_lambda_counter);
+    g_lambda_counter = g_lambda_counter + 1;
+    var id = alloc_node(ND_LIT_STRING, ln, cl);
+    g_nd_sval[id] = lambda_name;
+    return id;
+}
+
+// ─── Declaration parsers ──────────────────────────────────────────────────────
+
+fn parse_enum_decl() {
+    var ln = peek_line();
+    var cl = peek_col();
+    var np = consume_tok(TOK_IDENTIFIER, "Expected enum name");
+    if (np == -1) { return -1; }
+    var name = tok_lex_at(np);
+    var r = consume_tok(TOK_LBRACE, "Expected '{' after enum name");
+    if (r == -1) { return -1; }
+
+    var id = alloc_node(ND_ENUM_DECL, ln, cl);
+    g_nd_sval[id] = name;
+    var ch_ids = [];
+    var ch_cnt = 0;
+    var next_val = 0;
+
+    while (!check_tok(TOK_RBRACE) && !is_at_end()) {
+        var mp = consume_tok(TOK_IDENTIFIER, "Expected enum member name");
+        if (mp == -1) { return -1; }
+        var mname = tok_lex_at(mp);
+        var mval  = next_val;
+        var explicit_val = -1;
+        if (match_tok(TOK_ASSIGN)) {
+            var vp = consume_tok(TOK_INTEGER, "Expected integer value for enum member");
+            if (vp == -1) { return -1; }
+            mval = tok_ival_at(vp);
+            explicit_val = mval;
+        }
+        next_val = mval + 1;
+        var mem = alloc_node(ND_ENUM_MEMBER, ln, cl);
+        g_nd_sval[mem] = mname;
+        g_nd_ival[mem] = mval;
+        g_nd_c0[mem]   = explicit_val;
+        ch_ids = push(ch_ids, mem);
+        ch_cnt = ch_cnt + 1;
+        match_tok(TOK_COMMA);
+    }
+
+    var r2 = consume_tok(TOK_RBRACE, "Expected '}' after enum body");
+    if (r2 == -1) { return -1; }
+    var ch_start = g_ch_count;
+    var ci = 0;
+    while (ci < ch_cnt) {
+        g_ch = push(g_ch, ch_ids[ci]);
+        g_ch_count = g_ch_count + 1;
+        ci = ci + 1;
+    }
+    g_nd_extra[id]  = ch_start;
+    g_nd_nextra[id] = ch_cnt;
+    return id;
+}
+
+fn parse_struct_decl() {
+    var ln = peek_line();
+    var cl = peek_col();
+    var np = consume_tok(TOK_IDENTIFIER, "Expected struct name");
+    if (np == -1) { return -1; }
+    var name = tok_lex_at(np);
+    var r = consume_tok(TOK_LBRACE, "Expected '{' after struct name");
+    if (r == -1) { return -1; }
+
+    register_struct_name(name);
+
+    var id = alloc_node(ND_STRUCT_DECL, ln, cl);
+    g_nd_sval[id] = name;
+    var ch_ids = [];
+    var ch_cnt = 0;
+
+    while (!check_tok(TOK_RBRACE) && !is_at_end()) {
+        if (g_had_error) { return -1; }
+
+        // Operator overload: fn operator+ (param) -> ret { body }
+        if (check_tok(TOK_FN) && tok_type_at(g_pos + 1) == TOK_IDENTIFIER &&
+            str_eq(tok_lex_at(g_pos + 1), "operator")) {
+            g_pos = g_pos + 1;
+            g_pos = g_pos + 1;
+            var op_sym = "";
+            if (check_tok(TOK_PLUS))    { op_sym = "+";  g_pos = g_pos + 1; }
+            else if (check_tok(TOK_MINUS))   { op_sym = "-";  g_pos = g_pos + 1; }
+            else if (check_tok(TOK_STAR))    { op_sym = "*";  g_pos = g_pos + 1; }
+            else if (check_tok(TOK_SLASH))   { op_sym = "/";  g_pos = g_pos + 1; }
+            else if (check_tok(TOK_PERCENT)) { op_sym = "%";  g_pos = g_pos + 1; }
+            else if (check_tok(TOK_EQ))      { op_sym = "=="; g_pos = g_pos + 1; }
+            else if (check_tok(TOK_NE))      { op_sym = "!="; g_pos = g_pos + 1; }
+            else if (check_tok(TOK_LT))      { op_sym = "<";  g_pos = g_pos + 1; }
+            else if (check_tok(TOK_GT))      { op_sym = ">";  g_pos = g_pos + 1; }
+            else if (check_tok(TOK_LE))      { op_sym = "<="; g_pos = g_pos + 1; }
+            else if (check_tok(TOK_GE))      { op_sym = ">="; g_pos = g_pos + 1; }
+            else {
+                return parse_error("Expected operator symbol after 'operator'", peek_line(), peek_col());
+            }
+            var r2 = consume_tok(TOK_LPAREN, "Expected '(' after operator");
+            if (r2 == -1) { return -1; }
+            var pp = consume_tok(TOK_IDENTIFIER, "Expected parameter name");
+            if (pp == -1) { return -1; }
+            var param_type = "";
+            if (match_tok(TOK_COLON)) {
+                param_type = parse_type_annotation();
+                if (g_had_error) { return -1; }
+            }
+            var r3 = consume_tok(TOK_RPAREN, "Expected ')' after operator parameter");
+            if (r3 == -1) { return -1; }
+            var ret_type = "";
+            if (match_tok(TOK_ARROW)) {
+                ret_type = parse_type_annotation();
+                if (g_had_error) { return -1; }
+            }
+            var body = parse_block();
+            if (body == -1) { return -1; }
+            var func_name = "__op_" + name + "_" + op_sym;
+            var fn_id = alloc_node(ND_FUNCTION, ln, cl);
+            g_nd_sval[fn_id]  = func_name;
+            g_nd_sval2[fn_id] = ret_type;
+            g_nd_ival[fn_id]  = FN_INLINE;
+            g_nd_c0[fn_id]    = body;
+            ch_ids = push(ch_ids, fn_id);
+            ch_cnt = ch_cnt + 1;
+            continue;
+        }
+
+        // Field attribute keywords before field name
+        while ((check_tok(TOK_IDENTIFIER) || check_tok(TOK_MOVE)) && !is_at_end()) {
+            if (check_tok(TOK_MOVE)) { g_pos = g_pos + 1; continue; }
+            var kw = peek_lex();
+            if (str_eq(kw, "hot") || str_eq(kw, "cold") || str_eq(kw, "noalias") || str_eq(kw, "immut")) {
+                g_pos = g_pos + 1; continue;
+            }
+            if (str_eq(kw, "align")) {
+                g_pos = g_pos + 1;
+                var ra = consume_tok(TOK_LPAREN, "Expected '(' after 'align'");
+                if (ra == -1) { return -1; }
+                var rb = consume_tok(TOK_INTEGER, "Expected integer alignment");
+                if (rb == -1) { return -1; }
+                var rc = consume_tok(TOK_RPAREN, "Expected ')'");
+                if (rc == -1) { return -1; }
+                continue;
+            }
+            if (str_eq(kw, "range")) {
+                g_pos = g_pos + 1;
+                var ra = consume_tok(TOK_LPAREN, "Expected '(' after 'range'");
+                if (ra == -1) { return -1; }
+                var rb = consume_tok(TOK_INTEGER, "Expected integer min");
+                if (rb == -1) { return -1; }
+                var rc = consume_tok(TOK_COMMA, "Expected ','");
+                if (rc == -1) { return -1; }
+                var rd = consume_tok(TOK_INTEGER, "Expected integer max");
+                if (rd == -1) { return -1; }
+                var re = consume_tok(TOK_RPAREN, "Expected ')'");
+                if (re == -1) { return -1; }
+                continue;
+            }
+            break;
+        }
+
+        // Optional type name before field name: if two identifiers in a row
+        var field_type = "";
+        if (check_tok(TOK_IDENTIFIER) && tok_type_at(g_pos + 1) == TOK_IDENTIFIER) {
+            field_type = peek_lex();
+            g_pos = g_pos + 1;
+        }
+
+        var fp = consume_tok(TOK_IDENTIFIER, "Expected field name");
+        if (fp == -1) { return -1; }
+        var fname = tok_lex_at(fp);
+        if (match_tok(TOK_COLON)) {
+            field_type = parse_type_annotation();
+            if (g_had_error) { return -1; }
+        }
+        var fid = alloc_node(ND_STRUCT_FIELD, ln, cl);
+        g_nd_sval[fid]  = fname;
+        g_nd_sval2[fid] = field_type;
+        ch_ids = push(ch_ids, fid);
+        ch_cnt = ch_cnt + 1;
+        match_tok(TOK_COMMA);
+    }
+
+    var r4 = consume_tok(TOK_RBRACE, "Expected '}' after struct body");
+    if (r4 == -1) { return -1; }
+    var ch_start = g_ch_count;
+    var ci = 0;
+    while (ci < ch_cnt) {
+        g_ch = push(g_ch, ch_ids[ci]);
+        g_ch_count = g_ch_count + 1;
+        ci = ci + 1;
+    }
+    g_nd_extra[id]  = ch_start;
+    g_nd_nextra[id] = ch_cnt;
+    return id;
+}
+
+fn parse_extern_struct_decl() {
+    var r = consume_tok(TOK_EXTERN, "Expected 'extern'");
+    if (r == -1) { return -1; }
+    var r2 = consume_tok(TOK_STRUCT, "Expected 'struct' after 'extern'");
+    if (r2 == -1) { return -1; }
+    var ln = peek_line();
+    var cl = peek_col();
+    var np = consume_tok(TOK_IDENTIFIER, "Expected struct name after 'extern struct'");
+    if (np == -1) { return -1; }
+    var name = tok_lex_at(np);
+    var r3 = consume_tok(TOK_LBRACE, "Expected '{' after extern struct name");
+    if (r3 == -1) { return -1; }
+
+    var id = alloc_node(ND_EXTERN_STRUCT, ln, cl);
+    g_nd_sval[id] = name;
+    var ch_ids = [];
+    var ch_cnt = 0;
+
+    while (!check_tok(TOK_RBRACE) && !is_at_end()) {
+        var fln = peek_line();
+        var fcl = peek_col();
+        var fp = consume_tok(TOK_IDENTIFIER, "Expected field name");
+        if (fp == -1) { return -1; }
+        var r4 = consume_tok(TOK_COLON, "Expected ':' after field name");
+        if (r4 == -1) { return -1; }
+        var tp = consume_tok(TOK_IDENTIFIER, "Expected field type");
+        if (tp == -1) { return -1; }
+        var byte_off = -1;
+        if (check_tok(TOK_AT)) {
+            g_pos = g_pos + 1;
+            var op = consume_tok(TOK_INTEGER, "Expected integer byte offset after '@'");
+            if (op == -1) { return -1; }
+            byte_off = tok_ival_at(op);
+        }
+        var fid = alloc_node(ND_EXTERN_FIELD, fln, fcl);
+        g_nd_sval[fid]  = tok_lex_at(fp);
+        g_nd_sval2[fid] = tok_lex_at(tp);
+        g_nd_ival[fid]  = byte_off;
+        ch_ids = push(ch_ids, fid);
+        ch_cnt = ch_cnt + 1;
+        match_tok(TOK_COMMA);
+    }
+
+    var r5 = consume_tok(TOK_RBRACE, "Expected '}' after extern struct fields");
+    if (r5 == -1) { return -1; }
+    match_tok(TOK_SEMICOLON);
+    var ch_start = g_ch_count;
+    var ci = 0;
+    while (ci < ch_cnt) {
+        g_ch = push(g_ch, ch_ids[ci]);
+        g_ch_count = g_ch_count + 1;
+        ci = ci + 1;
+    }
+    g_nd_extra[id]  = ch_start;
+    g_nd_nextra[id] = ch_cnt;
+    return id;
+}
+
+fn parse_extern_fn_decl() {
+    var r = consume_tok(TOK_EXTERN, "Expected 'extern'");
+    if (r == -1) { return -1; }
+    var r2 = consume_tok(TOK_FN, "Expected 'fn' after 'extern'");
+    if (r2 == -1) { return -1; }
+    var ln = peek_line();
+    var cl = peek_col();
+    var np = consume_tok(TOK_IDENTIFIER, "Expected function name");
+    if (np == -1) { return -1; }
+    var name = tok_lex_at(np);
+    var r3 = consume_tok(TOK_LPAREN, "Expected '(' after extern function name");
+    if (r3 == -1) { return -1; }
+
+    var ch_ids = [];
+    var ch_cnt = 0;
+    if (!check_tok(TOK_RPAREN)) {
+        var pp = consume_tok(TOK_IDENTIFIER, "Expected parameter name");
+        if (pp == -1) { return -1; }
+        var pt = "";
+        if (match_tok(TOK_COLON)) {
+            pt = parse_type_annotation();
+            if (g_had_error) { return -1; }
+        }
+        var pid = alloc_node(ND_PARAM, ln, cl);
+        g_nd_sval[pid]  = tok_lex_at(pp);
+        g_nd_sval2[pid] = pt;
+        ch_ids = push(ch_ids, pid);
+        ch_cnt = ch_cnt + 1;
+        while (match_tok(TOK_COMMA)) {
+            var pp2 = consume_tok(TOK_IDENTIFIER, "Expected parameter name");
+            if (pp2 == -1) { return -1; }
+            var pt2 = "";
+            if (match_tok(TOK_COLON)) {
+                pt2 = parse_type_annotation();
+                if (g_had_error) { return -1; }
+            }
+            var pid2 = alloc_node(ND_PARAM, ln, cl);
+            g_nd_sval[pid2]  = tok_lex_at(pp2);
+            g_nd_sval2[pid2] = pt2;
+            ch_ids = push(ch_ids, pid2);
+            ch_cnt = ch_cnt + 1;
+        }
+    }
+
+    var r4 = consume_tok(TOK_RPAREN, "Expected ')' after extern parameters");
+    if (r4 == -1) { return -1; }
+    var ret_type = "";
+    if (match_tok(TOK_ARROW)) {
+        ret_type = parse_type_annotation();
+        if (g_had_error) { return -1; }
+    }
+    var r5 = consume_tok(TOK_SEMICOLON, "Expected ';' after extern function declaration");
+    if (r5 == -1) { return -1; }
+
+    var id = alloc_node(ND_FUNCTION, ln, cl);
+    g_nd_sval[id]   = name;
+    g_nd_sval2[id]  = ret_type;
+    g_nd_ival[id]   = FN_EXTERN;
+    g_nd_c0[id]     = -1;
+    var ch_start = g_ch_count;
+    var ci = 0;
+    while (ci < ch_cnt) {
+        g_ch = push(g_ch, ch_ids[ci]);
+        g_ch_count = g_ch_count + 1;
+        ci = ci + 1;
+    }
+    g_nd_extra[id]  = ch_start;
+    g_nd_nextra[id] = ch_cnt;
+    return id;
+}
+
+fn parse_function(is_optmax, fn_flags) {
+    var saved_optmax = g_in_optmax;
+    if (is_optmax) { g_in_optmax = 1; }
+
+    var r = consume_tok(TOK_FN, "Expected 'fn'");
+    if (r == -1) { g_in_optmax = saved_optmax; return -1; }
+    var ln = peek_line();
+    var cl = peek_col();
+    var np = consume_tok(TOK_IDENTIFIER, "Expected function name");
+    if (np == -1) { g_in_optmax = saved_optmax; return -1; }
+    var name = tok_lex_at(np);
+
+    // Optional type parameters <T, R, ...> — consume and discard
+    if (match_tok(TOK_LT)) {
+        var r2 = consume_tok(TOK_IDENTIFIER, "Expected type parameter name");
+        if (r2 == -1) { g_in_optmax = saved_optmax; return -1; }
+        while (match_tok(TOK_COMMA)) {
+            var r3 = consume_tok(TOK_IDENTIFIER, "Expected type parameter name");
+            if (r3 == -1) { g_in_optmax = saved_optmax; return -1; }
+        }
+        var r4 = consume_tok(TOK_GT, "Expected '>' after type parameters");
+        if (r4 == -1) { g_in_optmax = saved_optmax; return -1; }
+    }
+
+    var r5 = consume_tok(TOK_LPAREN, "Expected '(' after function name");
+    if (r5 == -1) { g_in_optmax = saved_optmax; return -1; }
+
+    var param_ids = [];
+    var param_cnt = 0;
+    var has_default = 0;
+
+    if (!check_tok(TOK_RPAREN)) {
+        // First parameter
+        var p_prefetch = 0;
+        if (check_tok(TOK_AT)) {
+            g_pos = g_pos + 1;
+            if (check_tok(TOK_PREFETCH)) {
+                g_pos = g_pos + 1;
+                p_prefetch = 1;
+            } else {
+                var ap = consume_tok(TOK_IDENTIFIER, "Expected annotation name after '@'");
+                if (ap == -1) { g_in_optmax = saved_optmax; return -1; }
+                if (str_eq(tok_lex_at(ap), "prefetch")) { p_prefetch = 1; }
+            }
+        }
+        var pp = consume_tok(TOK_IDENTIFIER, "Expected parameter name");
+        if (pp == -1) { g_in_optmax = saved_optmax; return -1; }
+        var p_type = "";
+        if (match_tok(TOK_COLON)) {
+            p_type = parse_type_annotation();
+            if (g_had_error) { g_in_optmax = saved_optmax; return -1; }
+        } else if (g_in_optmax) {
+            g_in_optmax = saved_optmax;
+            return parse_error("OPTMAX parameters must include type annotations", peek_line(), peek_col());
+        }
+        var p_default = -1;
+        if (match_tok(TOK_ASSIGN)) {
+            p_default = parse_primary();
+            if (p_default == -1) { g_in_optmax = saved_optmax; return -1; }
+            has_default = 1;
+        }
+        var pid = alloc_node(ND_PARAM, ln, cl);
+        g_nd_sval[pid]  = tok_lex_at(pp);
+        g_nd_sval2[pid] = p_type;
+        g_nd_c0[pid]    = p_default;
+        g_nd_ival[pid]  = p_prefetch;
+        param_ids = push(param_ids, pid);
+        param_cnt = param_cnt + 1;
+
+        while (match_tok(TOK_COMMA)) {
+            var p2_prefetch = 0;
+            if (check_tok(TOK_AT)) {
+                g_pos = g_pos + 1;
+                if (check_tok(TOK_PREFETCH)) {
+                    g_pos = g_pos + 1;
+                    p2_prefetch = 1;
+                } else {
+                    var ap2 = consume_tok(TOK_IDENTIFIER, "Expected annotation name after '@'");
+                    if (ap2 == -1) { g_in_optmax = saved_optmax; return -1; }
+                    if (str_eq(tok_lex_at(ap2), "prefetch")) { p2_prefetch = 1; }
+                }
+            }
+            var pp2 = consume_tok(TOK_IDENTIFIER, "Expected parameter name");
+            if (pp2 == -1) { g_in_optmax = saved_optmax; return -1; }
+            var p2_type = "";
+            if (match_tok(TOK_COLON)) {
+                p2_type = parse_type_annotation();
+                if (g_had_error) { g_in_optmax = saved_optmax; return -1; }
+            } else if (g_in_optmax) {
+                g_in_optmax = saved_optmax;
+                return parse_error("OPTMAX parameters must include type annotations", peek_line(), peek_col());
+            }
+            var p2_default = -1;
+            if (match_tok(TOK_ASSIGN)) {
+                p2_default = parse_primary();
+                if (p2_default == -1) { g_in_optmax = saved_optmax; return -1; }
+                has_default = 1;
+            } else if (has_default) {
+                g_in_optmax = saved_optmax;
+                return parse_error("Non-default parameter cannot follow a default parameter", peek_line(), peek_col());
+            }
+            var pid2 = alloc_node(ND_PARAM, ln, cl);
+            g_nd_sval[pid2]  = tok_lex_at(pp2);
+            g_nd_sval2[pid2] = p2_type;
+            g_nd_c0[pid2]    = p2_default;
+            g_nd_ival[pid2]  = p2_prefetch;
+            param_ids = push(param_ids, pid2);
+            param_cnt = param_cnt + 1;
+        }
+    }
+
+    var r6 = consume_tok(TOK_RPAREN, "Expected ')' after parameters");
+    if (r6 == -1) { g_in_optmax = saved_optmax; return -1; }
+
+    var ret_type = "";
+    if (match_tok(TOK_ARROW)) {
+        ret_type = parse_type_annotation();
+        if (g_had_error) { g_in_optmax = saved_optmax; return -1; }
+    }
+
+    var body = parse_block();
+    if (body == -1) { g_in_optmax = saved_optmax; return -1; }
+
+    g_in_optmax = saved_optmax;
+
+    var flags = fn_flags;
+    if (is_optmax) { flags = flags + FN_OPTMAX; }
+
+    var param_start = g_ch_count;
+    var pi = 0;
+    while (pi < param_cnt) {
+        g_ch = push(g_ch, param_ids[pi]);
+        g_ch_count = g_ch_count + 1;
+        pi = pi + 1;
+    }
+
+    var id = alloc_node(ND_FUNCTION, ln, cl);
+    g_nd_sval[id]   = name;
+    g_nd_sval2[id]  = ret_type;
+    g_nd_ival[id]   = flags;
+    g_nd_c0[id]     = body;
+    g_nd_extra[id]  = param_start;
+    g_nd_nextra[id] = param_cnt;
+    return id;
+}
+
+// ─── Top-level program parser ─────────────────────────────────────────────────
+
+fn parse_program() {
+    var prog_id = alloc_node(ND_PROGRAM, 0, 0);
+    // Collect top-level child IDs in a separate array first, then flush
+    // them to g_ch contiguously at the end.  This avoids interleaving with
+    // nested children (struct fields, function params, etc.) that also push
+    // into g_ch during recursive descent.
+    var top_ids      = [];
+    var top_cnt      = 0;
+    var enum_cnt     = 0;
+    var struct_cnt   = 0;
+    var const_cnt    = 0;
+    var optmax_active = 0;
+    var file_no_alias = 0;
+
+    while (!is_at_end()) {
+        if (g_had_error) { break; }
+
+        if (match_tok(TOK_IMPORT)) {
+            var sp = consume_tok(TOK_STRING, "Expected filename string after 'import'");
+            if (sp == -1) { break; }
+            var ri = consume_tok(TOK_SEMICOLON, "Expected ';' after import statement");
+            if (ri == -1) { break; }
+            // In the self-hosted parser, imports are recorded but not resolved here
+            continue;
+        }
+
+        if (match_tok(TOK_OPTMAX_START)) {
+            if (optmax_active) {
+                parse_error("Nested OPTMAX blocks are not allowed", peek_line(), peek_col());
+                break;
+            }
+            optmax_active = 1;
+            continue;
+        }
+
+        if (match_tok(TOK_OPTMAX_END)) {
+            if (!optmax_active) {
+                parse_error("OPTMAX end tag without matching start tag", peek_line(), peek_col());
+                break;
+            }
+            optmax_active = 0;
+            continue;
+        }
+
+        if (match_tok(TOK_ENUM)) {
+            var en = parse_enum_decl();
+            if (en == -1) { break; }
+            top_ids = push(top_ids, en);
+            top_cnt  = top_cnt  + 1;
+            enum_cnt = enum_cnt + 1;
+            continue;
+        }
+
+        if (match_tok(TOK_STRUCT)) {
+            var st = parse_struct_decl();
+            if (st == -1) { break; }
+            top_ids = push(top_ids, st);
+            top_cnt    = top_cnt    + 1;
+            struct_cnt = struct_cnt + 1;
+            continue;
+        }
+
+        if (check_tok(TOK_EXTERN)) {
+            if (tok_type_at(g_pos + 1) == TOK_STRUCT) {
+                var es = parse_extern_struct_decl();
+                if (es == -1) { break; }
+                top_ids = push(top_ids, es);
+                top_cnt = top_cnt + 1;
+            } else {
+                var ef = parse_extern_fn_decl();
+                if (ef == -1) { break; }
+                top_ids = push(top_ids, ef);
+                top_cnt = top_cnt + 1;
+            }
+            continue;
+        }
+
+        // global var name ...
+        if (check_tok(TOK_IDENTIFIER) && str_eq(peek_lex(), "global") &&
+            tok_type_at(g_pos + 1) == TOK_VAR) {
+            g_pos = g_pos + 1;
+            g_pos = g_pos + 1;
+            var gv = parse_var_decl(0);
+            if (gv == -1) { break; }
+            var rg = consume_tok(TOK_SEMICOLON, "Expected ';' after global variable declaration");
+            if (rg == -1) { break; }
+            g_nd_type[gv] = ND_GLOBAL_VAR;
+            top_ids = push(top_ids, gv);
+            top_cnt = top_cnt + 1;
+            continue;
+        }
+
+        // const NAME = VALUE;
+        if (check_tok(TOK_CONST)) {
+            g_pos = g_pos + 1;
+            var cln = peek_line();
+            var ccl = peek_col();
+            var cnp = consume_tok(TOK_IDENTIFIER, "Expected constant name after 'const'");
+            if (cnp == -1) { break; }
+            var cname = tok_lex_at(cnp);
+            var rca = consume_tok(TOK_ASSIGN, "Expected '=' after constant name");
+            if (rca == -1) { break; }
+            var negative = 0;
+            if (check_tok(TOK_MINUS)) {
+                g_pos = g_pos + 1;
+                negative = 1;
+            }
+            if (!check_tok(TOK_INTEGER) && !check_tok(TOK_FLOAT)) {
+                parse_error("File-level 'const' value must be an integer or float literal", cln, ccl);
+                break;
+            }
+            var vp = g_pos;
+            g_pos = g_pos + 1;
+            var cval = tok_ival_at(vp);
+            if (negative) { cval = 0 - cval; }
+            var rcs = consume_tok(TOK_SEMICOLON, "Expected ';' after file-level constant");
+            if (rcs == -1) { break; }
+            var cid = alloc_node(ND_TOP_CONST, cln, ccl);
+            g_nd_sval[cid] = cname;
+            g_nd_ival[cid] = cval;
+            top_ids = push(top_ids, cid);
+            top_cnt   = top_cnt   + 1;
+            const_cnt = const_cnt + 1;
+            continue;
+        }
+
+        // File-level @noalias directive
+        if (check_tok(TOK_AT) && !file_no_alias) {
+            var saved_pos = g_pos;
+            g_pos = g_pos + 1;
+            if (check_tok(TOK_IDENTIFIER) && str_eq(peek_lex(), "noalias")) {
+                g_pos = g_pos + 1;
+                if (check_tok(TOK_AT) || check_tok(TOK_FN) || check_tok(TOK_STRUCT) ||
+                    check_tok(TOK_ENUM) || check_tok(TOK_OPTMAX_START) ||
+                    check_tok(TOK_IMPORT) || is_at_end()) {
+                    file_no_alias = 1;
+                    continue;
+                }
+            }
+            g_pos = saved_pos;
+        }
+
+        // Function annotations followed by fn
+        var fn_flags = 0;
+        while (check_tok(TOK_AT)) {
+            g_pos = g_pos + 1;
+            var ap = consume_tok(TOK_IDENTIFIER, "Expected annotation name after '@'");
+            if (ap == -1) { break; }
+            var ann = tok_lex_at(ap);
+            if      (str_eq(ann, "inline"))      { fn_flags = fn_flags + FN_INLINE; }
+            else if (str_eq(ann, "noinline"))     { fn_flags = fn_flags + FN_NOINLINE; }
+            else if (str_eq(ann, "cold"))         { fn_flags = fn_flags + FN_COLD; }
+            else if (str_eq(ann, "hot"))          { fn_flags = fn_flags + FN_HOT; }
+            else if (str_eq(ann, "pure"))         { fn_flags = fn_flags + FN_PURE; }
+            else if (str_eq(ann, "noreturn"))     { fn_flags = fn_flags + FN_NORETURN; }
+            else if (str_eq(ann, "static"))       { fn_flags = fn_flags + FN_STATIC; }
+            else if (str_eq(ann, "flatten"))      { fn_flags = fn_flags + FN_FLATTEN; }
+            else if (str_eq(ann, "unroll"))       { fn_flags = fn_flags + FN_UNROLL; }
+            else if (str_eq(ann, "nounroll"))     { fn_flags = fn_flags + FN_NOUNROLL; }
+            else if (str_eq(ann, "restrict"))     { fn_flags = fn_flags + FN_RESTRICT; }
+            else if (str_eq(ann, "noalias"))      { fn_flags = fn_flags + FN_RESTRICT; }
+            else if (str_eq(ann, "vectorize"))    { fn_flags = fn_flags + FN_VECTORIZE; }
+            else if (str_eq(ann, "novectorize"))  { fn_flags = fn_flags + FN_NOVECTORIZE; }
+            else if (str_eq(ann, "parallel"))     { fn_flags = fn_flags + FN_PARALLEL; }
+            else if (str_eq(ann, "noparallel"))   { fn_flags = fn_flags + FN_NOPARALLEL; }
+            else if (str_eq(ann, "minsize"))      { fn_flags = fn_flags + FN_MINSIZE; }
+            else if (str_eq(ann, "optnone"))      { fn_flags = fn_flags + FN_OPTNONE; }
+            else if (str_eq(ann, "nounwind"))     { fn_flags = fn_flags + FN_NOUNWIND; }
+        }
+        if (g_had_error) { break; }
+
+        var fn_node = parse_function(optmax_active, fn_flags);
+        if (fn_node == -1) { break; }
+        top_ids = push(top_ids, fn_node);
+        top_cnt = top_cnt + 1;
+    }
+
+    if (optmax_active && g_had_error == 0) {
+        parse_error("Unterminated OPTMAX block", 0, 0);
+    }
+
+    // Flush top-level children to g_ch contiguously so the program node's
+    // extra/nextra indices correctly reference only top-level declarations
+    // (not interleaved struct fields, function params, etc.).
+    var top_start = g_ch_count;
+    var ti = 0;
+    while (ti < top_cnt) {
+        g_ch = push(g_ch, top_ids[ti]);
+        g_ch_count = g_ch_count + 1;
+        ti = ti + 1;
+    }
+
+    g_nd_extra[prog_id]  = top_start;
+    g_nd_nextra[prog_id] = top_cnt;
+    // Pack small counts: enum in low bits, struct in next, const in next
+    g_nd_ival[prog_id]   = enum_cnt + struct_cnt * 65536;
+    g_nd_sval[prog_id]   = to_string(file_no_alias) + ":" + to_string(const_cnt);
+    return prog_id;
+}
+
+// ─── Main parse entry point ───────────────────────────────────────────────────
+
+fn parse(src) {
+    // Reset all global state
+    g_tok_types   = [];
+    g_tok_lexemes = [];
+    g_tok_lines   = [];
+    g_tok_cols    = [];
+    g_tok_ivals   = [];
+    g_tok_fvals   = [];
+    g_tok_count   = 0;
+    g_pos         = 0;
+
+    g_nd_count  = 0;
+    g_nd_type   = [];
+    g_nd_ival   = [];
+    g_nd_fval   = [];
+    g_nd_sval   = [];
+    g_nd_sval2  = [];
+    g_nd_c0     = [];
+    g_nd_c1     = [];
+    g_nd_c2     = [];
+    g_nd_extra  = [];
+    g_nd_nextra = [];
+    g_nd_line   = [];
+    g_nd_col    = [];
+
+    g_ch         = [];
+    g_ch_count   = 0;
+    g_had_error  = 0;
+    g_error_msg  = "";
+
+    g_struct_names    = [];
+    g_struct_name_cnt = 0;
+    g_in_optmax       = 0;
+    g_lambda_counter  = 0;
+
+    var ts = tokenize(src);
+    g_tok_types   = ts.types;
+    g_tok_lexemes = ts.lexemes;
+    g_tok_lines   = ts.lines;
+    g_tok_cols    = ts.cols;
+    g_tok_ivals   = ts.ivals;
+    g_tok_fvals   = ts.fvals;
+    g_tok_count   = ts.count;
+
+    var root = parse_program();
+    if (g_had_error) { return -1; }
+    return root;
+}
+
+// ─── Node type name for display ───────────────────────────────────────────────
+
+fn nd_type_name(ty) {
+    if (ty == ND_PROGRAM)       { return "PROGRAM"; }
+    if (ty == ND_FUNCTION)      { return "FUNCTION"; }
+    if (ty == ND_PARAM)         { return "PARAM"; }
+    if (ty == ND_BLOCK)         { return "BLOCK"; }
+    if (ty == ND_VAR_DECL)      { return "VAR_DECL"; }
+    if (ty == ND_IF)            { return "IF"; }
+    if (ty == ND_WHILE)         { return "WHILE"; }
+    if (ty == ND_DO_WHILE)      { return "DO_WHILE"; }
+    if (ty == ND_FOR)           { return "FOR"; }
+    if (ty == ND_FOR_EACH)      { return "FOR_EACH"; }
+    if (ty == ND_RETURN)        { return "RETURN"; }
+    if (ty == ND_BREAK)         { return "BREAK"; }
+    if (ty == ND_CONTINUE)      { return "CONTINUE"; }
+    if (ty == ND_EXPR_STMT)     { return "EXPR_STMT"; }
+    if (ty == ND_SWITCH)        { return "SWITCH"; }
+    if (ty == ND_CASE)          { return "CASE"; }
+    if (ty == ND_TRY_CATCH)     { return "TRY_CATCH"; }
+    if (ty == ND_THROW)         { return "THROW"; }
+    if (ty == ND_BINARY)        { return "BINARY"; }
+    if (ty == ND_UNARY)         { return "UNARY"; }
+    if (ty == ND_TERNARY)       { return "TERNARY"; }
+    if (ty == ND_LIT_INT)       { return "LIT_INT"; }
+    if (ty == ND_LIT_FLOAT)     { return "LIT_FLOAT"; }
+    if (ty == ND_LIT_STRING)    { return "LIT_STRING"; }
+    if (ty == ND_LIT_BOOL)      { return "LIT_BOOL"; }
+    if (ty == ND_LIT_NULL)      { return "LIT_NULL"; }
+    if (ty == ND_IDENTIFIER)    { return "IDENTIFIER"; }
+    if (ty == ND_CALL)          { return "CALL"; }
+    if (ty == ND_INDEX)         { return "INDEX"; }
+    if (ty == ND_ASSIGN)        { return "ASSIGN"; }
+    if (ty == ND_ARRAY_LIT)     { return "ARRAY_LIT"; }
+    if (ty == ND_MEMBER)        { return "MEMBER"; }
+    if (ty == ND_STRUCT_LIT)    { return "STRUCT_LIT"; }
+    if (ty == ND_FIELD_ASSIGN)  { return "FIELD_ASSIGN"; }
+    if (ty == ND_NULL_COALESCE) { return "NULL_COALESCE"; }
+    if (ty == ND_PIPE)          { return "PIPE"; }
+    if (ty == ND_SPREAD)        { return "SPREAD"; }
+    if (ty == ND_LAMBDA)        { return "LAMBDA"; }
+    if (ty == ND_MOVE_EXPR)     { return "MOVE_EXPR"; }
+    if (ty == ND_BORROW_EXPR)   { return "BORROW_EXPR"; }
+    if (ty == ND_ENUM_DECL)     { return "ENUM_DECL"; }
+    if (ty == ND_ENUM_MEMBER)   { return "ENUM_MEMBER"; }
+    if (ty == ND_STRUCT_DECL)   { return "STRUCT_DECL"; }
+    if (ty == ND_STRUCT_FIELD)  { return "STRUCT_FIELD"; }
+    if (ty == ND_EXTERN_FN)     { return "EXTERN_FN"; }
+    if (ty == ND_EXTERN_STRUCT) { return "EXTERN_STRUCT"; }
+    if (ty == ND_EXTERN_FIELD)  { return "EXTERN_FIELD"; }
+    if (ty == ND_TOP_CONST)     { return "TOP_CONST"; }
+    if (ty == ND_GLOBAL_VAR)    { return "GLOBAL_VAR"; }
+    return "UNKNOWN";
+}
+
+// ─── Print AST summary ────────────────────────────────────────────────────────
+
+fn print_node_summary(id, depth) {
+    if (id < 0) { return 0; }
+    var indent = "";
+    var di = 0;
+    while (di < depth) {
+        indent = indent + "  ";
+        di = di + 1;
+    }
+    var ty   = g_nd_type[id];
+    var name = nd_type_name(ty);
+    var sval = g_nd_sval[id];
+    var line = g_nd_line[id];
+    if (str_len(sval) > 0) {
+        println(indent + name + " [" + sval + "] @" + to_string(line));
+    } else {
+        println(indent + name + " @" + to_string(line));
+    }
+    return 0;
+}
+
+// ─── Test harness (main) ──────────────────────────────────────────────────────
+
+fn parser_demo() {
+    var sample = "struct Point { x, y }\n\nconst MAX = 100;\n\nextern fn printf(fmt: string) -> i64;\n\n@inline\nfn add(a: i64, b: i64) -> i64 {\n    return a + b;\n}\n\nfn fib(n: i64) -> i64 {\n    if (n <= 1) { return n; }\n    return fib(n - 1) + fib(n - 2);\n}\n\nfn main() {\n    var x = 42;\n    var p = Point { x: 1, y: 2 };\n    var arr = [1, 2, 3];\n    for (i in 0...10) {\n        x += i;\n    }\n    var r = add(x, fib(5));\n    return r;\n}\n";
+
+    var root = parse(sample);
+
+    if (root == -1) {
+        println("Parse FAILED: " + g_error_msg);
+        return 1;
+    }
+
+    println("Parse OK — " + to_string(g_nd_count) + " nodes, " + to_string(g_ch_count) + " child entries");
+
+    var prog_children = g_nd_nextra[root];
+    println("Top-level declarations: " + to_string(prog_children));
+
+    var i = 0;
+    while (i < prog_children) {
+        var child_id = g_ch[g_nd_extra[root] + i];
+        print_node_summary(child_id, 1);
+        i = i + 1;
+    }
+
+    return 0;
+}

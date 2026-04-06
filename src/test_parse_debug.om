@@ -1,0 +1,9 @@
+import "lexer.om";
+
+fn main() {
+    var src = "fn add(a, b) { return a + b; }\nfn main() { return add(1, 2); }";
+    var ts = tokenize(src);
+    println("ts.count=" + to_string(ts.count));
+    println("types len=" + to_string(len(ts.types)));
+    return 0;
+}

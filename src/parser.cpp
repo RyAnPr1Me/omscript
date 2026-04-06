@@ -100,13 +100,16 @@ std::unique_ptr<Program> Parser::parse() {
     std::vector<std::unique_ptr<FunctionDecl>> functions;
     std::vector<std::unique_ptr<EnumDecl>> enums;
     std::vector<std::unique_ptr<StructDecl>> structs;
+    std::vector<std::pair<std::string, long long>> constants;
+    std::vector<std::unique_ptr<ExternStructDecl>> externStructs;
+    std::vector<std::unique_ptr<VarDecl>> globalVars;
     bool optMaxTagActive = false;
     bool fileNoAlias = false;
 
     while (!isAtEnd()) {
         if (match(TokenType::IMPORT)) {
             try {
-                parseImport(functions, enums, structs);
+                parseImport(functions, enums, structs, constants, externStructs, globalVars);
             } catch (const std::runtime_error& e) {
                 errors_.push_back(e.what());
                 synchronize();
@@ -139,6 +142,76 @@ std::unique_ptr<Program> Parser::parse() {
         if (match(TokenType::STRUCT)) {
             try {
                 structs.push_back(parseStructDecl());
+            } catch (const std::runtime_error& e) {
+                errors_.push_back(e.what());
+                synchronize();
+            }
+            continue;
+        }
+        // extern fn — external function declaration (no body, resolved by linker).
+        // extern struct — C++ interop struct layout declaration.
+        if (check(TokenType::EXTERN)) {
+            try {
+                // Peek at next token to determine which kind of extern declaration
+                if (current + 1 < tokens.size() && tokens[current + 1].type == TokenType::STRUCT) {
+                    externStructs.push_back(parseExternStructDecl());
+                } else {
+                    functions.push_back(parseExternFunctionDecl());
+                }
+            } catch (const std::runtime_error& e) {
+                errors_.push_back(e.what());
+                synchronize();
+            }
+            continue;
+        }
+        // File-level `global var name [: type] [= expr];` declaration.
+        // Creates a module-level mutable variable visible to all functions.
+        if (check(TokenType::IDENTIFIER) && peek().lexeme == "global") {
+            if (current + 1 < tokens.size() && tokens[current + 1].type == TokenType::VAR) {
+                try {
+                    advance(); // consume 'global'
+                    advance(); // consume 'var'
+                    auto stmt = parseVarDecl(/*isConst=*/false);
+                    consume(TokenType::SEMICOLON, "Expected ';' after global variable declaration");
+                    auto* vd = static_cast<VarDecl*>(stmt.get());
+                    vd->isGlobal = true;
+                    globalVars.push_back(std::unique_ptr<VarDecl>(static_cast<VarDecl*>(stmt.release())));
+                } catch (const std::runtime_error& e) {
+                    errors_.push_back(e.what());
+                    synchronize();
+                }
+                continue;
+            }
+        }
+        // File-level const NAME = LITERAL; — registers an integer constant
+        // visible throughout the entire program (like an enum member without a prefix).
+        if (check(TokenType::CONST)) {
+            try {
+                advance(); // consume 'const'
+                const Token nameToken = consume(TokenType::IDENTIFIER, "Expected constant name after 'const'");
+                consume(TokenType::ASSIGN, "Expected '=' after constant name");
+                // Only integer and float literals are supported for file-level constants.
+                if (!check(TokenType::INTEGER) && !check(TokenType::FLOAT) && !check(TokenType::MINUS)) {
+                    error("File-level 'const' value must be an integer or float literal");
+                }
+                bool negative = false;
+                if (check(TokenType::MINUS)) {
+                    advance();
+                    negative = true;
+                }
+                if (!check(TokenType::INTEGER) && !check(TokenType::FLOAT)) {
+                    error("Expected numeric literal after '-' in file-level 'const'");
+                }
+                const Token valToken = advance();
+                long long iv = 0;
+                if (valToken.type == TokenType::INTEGER) {
+                    iv = valToken.intValue;
+                } else {
+                    iv = static_cast<long long>(valToken.floatValue);
+                }
+                if (negative) iv = -iv;
+                consume(TokenType::SEMICOLON, "Expected ';' after file-level constant declaration");
+                constants.emplace_back(nameToken.lexeme, iv);
             } catch (const std::runtime_error& e) {
                 errors_.push_back(e.what());
                 synchronize();
@@ -280,12 +353,19 @@ std::unique_ptr<Program> Parser::parse() {
     }
     lambdaFunctions_.clear();
 
-    return std::make_unique<Program>(std::move(functions), std::move(enums), std::move(structs), fileNoAlias);
+    auto prog = std::make_unique<Program>(std::move(functions), std::move(enums), std::move(structs), fileNoAlias);
+    prog->constants = std::move(constants);
+    prog->externStructs = std::move(externStructs);
+    prog->globalVars = std::move(globalVars);
+    return prog;
 }
 
 void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
                          std::vector<std::unique_ptr<EnumDecl>>& enums,
-                         std::vector<std::unique_ptr<StructDecl>>& structs) {
+                         std::vector<std::unique_ptr<StructDecl>>& structs,
+                         std::vector<std::pair<std::string, long long>>& constants,
+                         std::vector<std::unique_ptr<ExternStructDecl>>& externStructs,
+                         std::vector<std::unique_ptr<VarDecl>>& globalVars) {
     const Token fileToken = consume(TokenType::STRING, "Expected filename string after 'import'");
     consume(TokenType::SEMICOLON, "Expected ';' after import statement");
 
@@ -344,6 +424,18 @@ void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
     for (auto& st : importedProgram->structs) {
         structs.push_back(std::move(st));
     }
+    // Merge imported file-level constants
+    for (auto& c : importedProgram->constants) {
+        constants.push_back(std::move(c));
+    }
+    // Merge imported extern struct declarations
+    for (auto& es : importedProgram->externStructs) {
+        externStructs.push_back(std::move(es));
+    }
+    // Merge imported global variable declarations
+    for (auto& gv : importedProgram->globalVars) {
+        globalVars.push_back(std::move(gv));
+    }
 
     // Also import struct names so struct literals can be parsed
     for (const auto& name : importParser.structNames_) {
@@ -372,6 +464,75 @@ std::string Parser::parseTypeAnnotation() {
         typeName += "[]";
     }
     return prefix + typeName;
+}
+
+/// Parse an extern function declaration: extern fn name(params...) -> rettype;
+/// No body is expected; the declaration ends with a semicolon.
+std::unique_ptr<FunctionDecl> Parser::parseExternFunctionDecl() {
+    consume(TokenType::EXTERN, "Expected 'extern'");
+    consume(TokenType::FN, "Expected 'fn' after 'extern'");
+    const Token name = consume(TokenType::IDENTIFIER, "Expected function name");
+
+    consume(TokenType::LPAREN, "Expected '(' after extern function name");
+    std::vector<Parameter> parameters;
+    if (!check(TokenType::RPAREN)) {
+        do {
+            const Token paramName = consume(TokenType::IDENTIFIER, "Expected parameter name");
+            std::string typeName;
+            if (match(TokenType::COLON)) {
+                typeName = parseTypeAnnotation();
+            }
+            parameters.emplace_back(paramName.lexeme, typeName, nullptr);
+        } while (match(TokenType::COMMA));
+    }
+    consume(TokenType::RPAREN, "Expected ')' after extern parameters");
+
+    std::string returnType;
+    if (match(TokenType::ARROW)) {
+        returnType = parseTypeAnnotation();
+    }
+
+    consume(TokenType::SEMICOLON, "Expected ';' after extern function declaration");
+
+    auto funcDecl = std::make_unique<FunctionDecl>(
+        name.lexeme, std::vector<std::string>{}, std::move(parameters),
+        nullptr /*no body*/, false /*not optmax*/, returnType);
+    funcDecl->isExtern = true;
+    funcDecl->line = name.line;
+    funcDecl->column = name.column;
+    return funcDecl;
+}
+
+std::unique_ptr<ExternStructDecl> Parser::parseExternStructDecl() {
+    consume(TokenType::EXTERN, "Expected 'extern'");
+    consume(TokenType::STRUCT, "Expected 'struct' after 'extern'");
+    const Token nameToken = consume(TokenType::IDENTIFIER, "Expected struct name after 'extern struct'");
+    consume(TokenType::LBRACE, "Expected '{' after extern struct name");
+
+    std::vector<ExternStructField> fields;
+    while (!check(TokenType::RBRACE) && !isAtEnd()) {
+        const Token fieldName = consume(TokenType::IDENTIFIER, "Expected field name");
+        consume(TokenType::COLON, "Expected ':' after field name");
+        const Token typeTok = consume(TokenType::IDENTIFIER, "Expected field type");
+
+        long long byteOffset = -1;
+        if (check(TokenType::AT)) {
+            advance(); // consume '@'
+            const Token offTok = consume(TokenType::INTEGER, "Expected integer byte offset after '@'");
+            byteOffset = std::stoll(offTok.lexeme);
+        }
+
+        fields.push_back({fieldName.lexeme, typeTok.lexeme, byteOffset});
+
+        if (check(TokenType::COMMA))
+            advance();
+    }
+    consume(TokenType::RBRACE, "Expected '}' after extern struct fields");
+    // Optional semicolon
+    if (check(TokenType::SEMICOLON))
+        advance();
+
+    return std::make_unique<ExternStructDecl>(nameToken.lexeme, std::move(fields));
 }
 
 std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {

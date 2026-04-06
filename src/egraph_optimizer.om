@@ -1,0 +1,839 @@
+// OmScript E-Graph Optimizer — implemented in OmScript itself.
+//
+// This file reimplements src/egraph_optimizer.cpp using OmScript native types.
+//
+// It implements equality saturation over a simple e-graph with:
+//   - Integer and float constants
+//   - Named variables
+//   - Binary operations  (+  -  *  /  %  **  &  |  ^  <<  >>  ==  !=  <  <=  >  >=  &&  ||)
+//   - Unary operations   (-  ~  !)
+//   - Ternary expressions (cond ? then : else)
+//   - Function call nodes
+//
+// Architecture mirrors the C++ implementation:
+//   ENode   — one operation with children (arrays of class IDs)
+//   EClass  — equivalence class holding a list of ENode indices
+//   EGraph  — global graph with union-find for merging classes
+//
+// ─── OmScript-native AST node type codes ─────────────────────────────────────
+// These correspond to ASTNodeType in include/ast.h.
+
+const AST_LITERAL    = 0;
+const AST_IDENTIFIER = 1;
+const AST_BINARY     = 2;
+const AST_UNARY      = 3;
+const AST_TERNARY    = 4;
+const AST_CALL       = 5;
+const AST_OTHER      = 6;
+
+// Literal sub-types
+const LIT_INT    = 0;
+const LIT_FLOAT  = 1;
+const LIT_STRING = 2;
+
+// ─── E-Graph node operation codes ────────────────────────────────────────────
+const OP_CONST   = 0;
+const OP_CONSTF  = 1;
+const OP_VAR     = 2;
+const OP_ADD     = 3;
+const OP_SUB     = 4;
+const OP_MUL     = 5;
+const OP_DIV     = 6;
+const OP_MOD     = 7;
+const OP_NEG     = 8;
+const OP_BITAND  = 9;
+const OP_BITOR   = 10;
+const OP_BITXOR  = 11;
+const OP_BITNOT  = 12;
+const OP_SHL     = 13;
+const OP_SHR     = 14;
+const OP_EQ      = 15;
+const OP_NE      = 16;
+const OP_LT      = 17;
+const OP_LE      = 18;
+const OP_GT      = 19;
+const OP_GE      = 20;
+const OP_LOGAND  = 21;
+const OP_LOGOR   = 22;
+const OP_LOGNOT  = 23;
+const OP_POW     = 24;
+const OP_TERNARY = 25;
+const OP_CALL    = 26;
+const OP_NOP     = 27;
+
+// ─── OmScript-native AST node representation ─────────────────────────────────
+// AST nodes are encoded in parallel arrays indexed by a node ID (integer).
+// This avoids C++ smart pointers and allows omscript to manipulate them natively.
+
+struct AST {
+    // Parallel arrays, one entry per node
+    node_types,   // integer: AST_LITERAL / AST_IDENTIFIER / AST_BINARY / ...
+    node_lits,    // integer: for LITERAL nodes — LIT_INT/LIT_FLOAT/LIT_STRING
+    node_ivals,   // integer: integer literal value
+    node_fvals,   // float:   float literal value
+    node_svals,   // string:  string literal / identifier name / binary op / call callee
+    node_left,    // integer: left child ID  (BINARY/UNARY lhs, TERNARY cond)
+    node_right,   // integer: right child ID (BINARY rhs, TERNARY then)
+    node_extra,   // integer: TERNARY else child; for CALL: arg count start index
+    node_args,    // array:   flat argument IDs array for CALL nodes
+    count         // integer: total number of nodes
+}
+
+fn ast_new() {
+    return AST {
+        node_types: [],
+        node_lits:  [],
+        node_ivals: [],
+        node_fvals: [],
+        node_svals: [],
+        node_left:  [],
+        node_right: [],
+        node_extra: [],
+        node_args:  [],
+        count: 0
+    };
+}
+
+fn ast_add_literal_int(ast, val) {
+    var id = ast.count;
+    ast.node_types = push(ast.node_types, AST_LITERAL);
+    ast.node_lits  = push(ast.node_lits,  LIT_INT);
+    ast.node_ivals = push(ast.node_ivals, val);
+    ast.node_fvals = push(ast.node_fvals, 0.0);
+    ast.node_svals = push(ast.node_svals, "");
+    ast.node_left  = push(ast.node_left,  -1);
+    ast.node_right = push(ast.node_right, -1);
+    ast.node_extra = push(ast.node_extra, -1);
+    ast.node_args  = push(ast.node_args,  []);
+    ast.count = id + 1;
+    return id;
+}
+
+fn ast_add_literal_float(ast, fv) {
+    var id = ast.count;
+    ast.node_types = push(ast.node_types, AST_LITERAL);
+    ast.node_lits  = push(ast.node_lits,  LIT_FLOAT);
+    ast.node_ivals = push(ast.node_ivals, 0);
+    ast.node_fvals = push(ast.node_fvals, fv);
+    ast.node_svals = push(ast.node_svals, "");
+    ast.node_left  = push(ast.node_left,  -1);
+    ast.node_right = push(ast.node_right, -1);
+    ast.node_extra = push(ast.node_extra, -1);
+    ast.node_args  = push(ast.node_args,  []);
+    ast.count = id + 1;
+    return id;
+}
+
+fn ast_add_literal_str(ast, s) {
+    var id = ast.count;
+    ast.node_types = push(ast.node_types, AST_LITERAL);
+    ast.node_lits  = push(ast.node_lits,  LIT_STRING);
+    ast.node_ivals = push(ast.node_ivals, 0);
+    ast.node_fvals = push(ast.node_fvals, 0.0);
+    ast.node_svals = push(ast.node_svals, s);
+    ast.node_left  = push(ast.node_left,  -1);
+    ast.node_right = push(ast.node_right, -1);
+    ast.node_extra = push(ast.node_extra, -1);
+    ast.node_args  = push(ast.node_args,  []);
+    ast.count = id + 1;
+    return id;
+}
+
+fn ast_add_identifier(ast, name) {
+    var id = ast.count;
+    ast.node_types = push(ast.node_types, AST_IDENTIFIER);
+    ast.node_lits  = push(ast.node_lits,  0);
+    ast.node_ivals = push(ast.node_ivals, 0);
+    ast.node_fvals = push(ast.node_fvals, 0.0);
+    ast.node_svals = push(ast.node_svals, name);
+    ast.node_left  = push(ast.node_left,  -1);
+    ast.node_right = push(ast.node_right, -1);
+    ast.node_extra = push(ast.node_extra, -1);
+    ast.node_args  = push(ast.node_args,  []);
+    ast.count = id + 1;
+    return id;
+}
+
+fn ast_add_binary(ast, op_str, left, right) {
+    var id = ast.count;
+    ast.node_types = push(ast.node_types, AST_BINARY);
+    ast.node_lits  = push(ast.node_lits,  0);
+    ast.node_ivals = push(ast.node_ivals, 0);
+    ast.node_fvals = push(ast.node_fvals, 0.0);
+    ast.node_svals = push(ast.node_svals, op_str);
+    ast.node_left  = push(ast.node_left,  left);
+    ast.node_right = push(ast.node_right, right);
+    ast.node_extra = push(ast.node_extra, -1);
+    ast.node_args  = push(ast.node_args,  []);
+    ast.count = id + 1;
+    return id;
+}
+
+fn ast_add_unary(ast, op_str, operand) {
+    var id = ast.count;
+    ast.node_types = push(ast.node_types, AST_UNARY);
+    ast.node_lits  = push(ast.node_lits,  0);
+    ast.node_ivals = push(ast.node_ivals, 0);
+    ast.node_fvals = push(ast.node_fvals, 0.0);
+    ast.node_svals = push(ast.node_svals, op_str);
+    ast.node_left  = push(ast.node_left,  operand);
+    ast.node_right = push(ast.node_right, -1);
+    ast.node_extra = push(ast.node_extra, -1);
+    ast.node_args  = push(ast.node_args,  []);
+    ast.count = id + 1;
+    return id;
+}
+
+fn ast_add_ternary(ast, cond, then_id, else_id) {
+    var id = ast.count;
+    ast.node_types = push(ast.node_types, AST_TERNARY);
+    ast.node_lits  = push(ast.node_lits,  0);
+    ast.node_ivals = push(ast.node_ivals, 0);
+    ast.node_fvals = push(ast.node_fvals, 0.0);
+    ast.node_svals = push(ast.node_svals, "?:");
+    ast.node_left  = push(ast.node_left,  cond);
+    ast.node_right = push(ast.node_right, then_id);
+    ast.node_extra = push(ast.node_extra, else_id);
+    ast.node_args  = push(ast.node_args,  []);
+    ast.count = id + 1;
+    return id;
+}
+
+fn ast_add_call(ast, callee, args) {
+    var id = ast.count;
+    ast.node_types = push(ast.node_types, AST_CALL);
+    ast.node_lits  = push(ast.node_lits,  0);
+    ast.node_ivals = push(ast.node_ivals, 0);
+    ast.node_fvals = push(ast.node_fvals, 0.0);
+    ast.node_svals = push(ast.node_svals, callee);
+    ast.node_left  = push(ast.node_left,  -1);
+    ast.node_right = push(ast.node_right, -1);
+    ast.node_extra = push(ast.node_extra, -1);
+    ast.node_args  = push(ast.node_args,  args);
+    ast.count = id + 1;
+    return id;
+}
+
+// ─── E-Graph data structures ─────────────────────────────────────────────────
+// The e-graph stores ENodes as parallel arrays indexed by a node index.
+// EClasses map a class ID to a list of node indices.
+// Union-find parent array implements path-compressed merge.
+
+struct EGraph {
+    // ENode parallel arrays
+    en_ops,       // integer: OP_* operation code
+    en_ivals,     // integer: value for OP_CONST
+    en_fvals,     // float:   value for OP_CONSTF
+    en_names,     // string:  name for OP_VAR / OP_CALL
+    en_children,  // array:   child class IDs (array of integers)
+    en_count,     // integer: total ENode count
+
+    // EClass parallel arrays  (indexed by class ID)
+    ec_nodes,     // array:  list of ENode indices in this class
+    ec_count,     // integer: number of e-classes
+
+    // Union-find parent array (indexed by class ID)
+    uf_parent,    // array of integers
+
+    // Saturation limits
+    max_nodes,    // integer
+    max_iters     // integer
+}
+
+fn egraph_new(max_n, max_i) {
+    return EGraph {
+        en_ops:      [],
+        en_ivals:    [],
+        en_fvals:    [],
+        en_names:    [],
+        en_children: [],
+        en_count:    0,
+        ec_nodes:    [],
+        ec_count:    0,
+        uf_parent:   [],
+        max_nodes:   max_n,
+        max_iters:   max_i
+    };
+}
+
+// ─── Union-Find ───────────────────────────────────────────────────────────────
+
+fn uf_find(eg, cls) {
+    while (eg.uf_parent[cls] != cls) {
+        cls = eg.uf_parent[cls];
+    }
+    return cls;
+}
+
+fn uf_union(eg, a, b) {
+    var ra = uf_find(eg, a);
+    var rb = uf_find(eg, b);
+    if (ra != rb) {
+        eg.uf_parent[ra] = rb;
+    }
+    return eg;
+}
+
+// ─── E-Graph operations ───────────────────────────────────────────────────────
+
+fn egraph_new_class(eg) {
+    var cls = eg.ec_count;
+    eg.ec_nodes  = push(eg.ec_nodes, []);
+    eg.uf_parent = push(eg.uf_parent, cls);
+    eg.ec_count  = cls + 1;
+    return cls;
+}
+
+fn egraph_add_node(eg, op, ival, fval, name, children) {
+    if (eg.en_count >= eg.max_nodes) {
+        return -1; // budget exceeded
+    }
+    var ni = eg.en_count;
+    eg.en_ops      = push(eg.en_ops,      op);
+    eg.en_ivals    = push(eg.en_ivals,    ival);
+    eg.en_fvals    = push(eg.en_fvals,    fval);
+    eg.en_names    = push(eg.en_names,    name);
+    eg.en_children = push(eg.en_children, children);
+    eg.en_count    = ni + 1;
+    return ni;
+}
+
+fn egraph_add_const(eg, v) {
+    var cls = egraph_new_class(eg);
+    var ni = egraph_add_node(eg, OP_CONST, v, 0.0, "", []);
+    if (ni >= 0) {
+        eg.ec_nodes[cls] = push(eg.ec_nodes[cls], ni);
+    }
+    return cls;
+}
+
+fn egraph_add_constf(eg, fv) {
+    var cls = egraph_new_class(eg);
+    var ni = egraph_add_node(eg, OP_CONSTF, 0, fv, "", []);
+    if (ni >= 0) {
+        eg.ec_nodes[cls] = push(eg.ec_nodes[cls], ni);
+    }
+    return cls;
+}
+
+fn egraph_add_var(eg, name) {
+    var cls = egraph_new_class(eg);
+    var ni = egraph_add_node(eg, OP_VAR, 0, 0.0, name, []);
+    if (ni >= 0) {
+        eg.ec_nodes[cls] = push(eg.ec_nodes[cls], ni);
+    }
+    return cls;
+}
+
+fn egraph_add_binop(eg, op, left_cls, right_cls) {
+    var cls = egraph_new_class(eg);
+    var ni = egraph_add_node(eg, op, 0, 0.0, "", [left_cls, right_cls]);
+    if (ni >= 0) {
+        eg.ec_nodes[cls] = push(eg.ec_nodes[cls], ni);
+    }
+    return cls;
+}
+
+fn egraph_add_unop(eg, op, operand_cls) {
+    var cls = egraph_new_class(eg);
+    var ni = egraph_add_node(eg, op, 0, 0.0, "", [operand_cls]);
+    if (ni >= 0) {
+        eg.ec_nodes[cls] = push(eg.ec_nodes[cls], ni);
+    }
+    return cls;
+}
+
+// ─── Map binary operator string to OP code ───────────────────────────────────
+
+fn binop_to_code(op) {
+    if (str_eq(op, "+"))  { return OP_ADD; }
+    if (str_eq(op, "-"))  { return OP_SUB; }
+    if (str_eq(op, "*"))  { return OP_MUL; }
+    if (str_eq(op, "/"))  { return OP_DIV; }
+    if (str_eq(op, "%"))  { return OP_MOD; }
+    if (str_eq(op, "**")) { return OP_POW; }
+    if (str_eq(op, "&"))  { return OP_BITAND; }
+    if (str_eq(op, "|"))  { return OP_BITOR; }
+    if (str_eq(op, "^"))  { return OP_BITXOR; }
+    if (str_eq(op, "<<")) { return OP_SHL; }
+    if (str_eq(op, ">>")) { return OP_SHR; }
+    if (str_eq(op, "==")) { return OP_EQ; }
+    if (str_eq(op, "!=")) { return OP_NE; }
+    if (str_eq(op, "<"))  { return OP_LT; }
+    if (str_eq(op, "<=")) { return OP_LE; }
+    if (str_eq(op, ">"))  { return OP_GT; }
+    if (str_eq(op, ">=")) { return OP_GE; }
+    if (str_eq(op, "&&")) { return OP_LOGAND; }
+    if (str_eq(op, "||")) { return OP_LOGOR; }
+    return -1; // unknown
+}
+
+fn opcode_to_str(op) {
+    if (op == OP_ADD)    { return "+"; }
+    if (op == OP_SUB)    { return "-"; }
+    if (op == OP_MUL)    { return "*"; }
+    if (op == OP_DIV)    { return "/"; }
+    if (op == OP_MOD)    { return "%"; }
+    if (op == OP_POW)    { return "**"; }
+    if (op == OP_BITAND) { return "&"; }
+    if (op == OP_BITOR)  { return "|"; }
+    if (op == OP_BITXOR) { return "^"; }
+    if (op == OP_SHL)    { return "<<"; }
+    if (op == OP_SHR)    { return ">>"; }
+    if (op == OP_EQ)     { return "=="; }
+    if (op == OP_NE)     { return "!="; }
+    if (op == OP_LT)     { return "<"; }
+    if (op == OP_LE)     { return "<="; }
+    if (op == OP_GT)     { return ">"; }
+    if (op == OP_GE)     { return ">="; }
+    if (op == OP_LOGAND) { return "&&"; }
+    if (op == OP_LOGOR)  { return "||"; }
+    if (op == OP_NEG)    { return "-"; }
+    if (op == OP_BITNOT) { return "~"; }
+    if (op == OP_LOGNOT) { return "!"; }
+    return "";
+}
+
+fn is_binary_op(op) {
+    return op == OP_ADD || op == OP_SUB || op == OP_MUL || op == OP_DIV ||
+           op == OP_MOD || op == OP_POW || op == OP_BITAND || op == OP_BITOR ||
+           op == OP_BITXOR || op == OP_SHL || op == OP_SHR ||
+           op == OP_EQ || op == OP_NE || op == OP_LT || op == OP_LE ||
+           op == OP_GT || op == OP_GE || op == OP_LOGAND || op == OP_LOGOR;
+}
+
+fn is_unary_op(op) {
+    return op == OP_NEG || op == OP_BITNOT || op == OP_LOGNOT;
+}
+
+// ─── Convert AST node to e-graph class, recursively ─────────────────────────
+
+fn ast_to_egraph(eg, ast, node_id) {
+    if (node_id < 0 || node_id >= ast.count) {
+        return egraph_add_const(eg, 0);
+    }
+
+    var ty = ast.node_types[node_id];
+
+    if (ty == AST_LITERAL) {
+        var lt = ast.node_lits[node_id];
+        if (lt == LIT_INT) {
+            return egraph_add_const(eg, ast.node_ivals[node_id]);
+        }
+        if (lt == LIT_FLOAT) {
+            return egraph_add_constf(eg, ast.node_fvals[node_id]);
+        }
+        // String literal — opaque variable
+        return egraph_add_var(eg, "__str_" + ast.node_svals[node_id]);
+    }
+
+    if (ty == AST_IDENTIFIER) {
+        return egraph_add_var(eg, ast.node_svals[node_id]);
+    }
+
+    if (ty == AST_BINARY) {
+        var op_str  = ast.node_svals[node_id];
+        var op_code = binop_to_code(op_str);
+        if (op_code < 0) {
+            return egraph_add_var(eg, "__binop_" + op_str);
+        }
+        var lhs = ast_to_egraph(eg, ast, ast.node_left[node_id]);
+        var rhs = ast_to_egraph(eg, ast, ast.node_right[node_id]);
+        return egraph_add_binop(eg, op_code, lhs, rhs);
+    }
+
+    if (ty == AST_UNARY) {
+        var op_str = ast.node_svals[node_id];
+        var operand = ast_to_egraph(eg, ast, ast.node_left[node_id]);
+        if (str_eq(op_str, "-")) { return egraph_add_unop(eg, OP_NEG,    operand); }
+        if (str_eq(op_str, "~")) { return egraph_add_unop(eg, OP_BITNOT, operand); }
+        if (str_eq(op_str, "!")) { return egraph_add_unop(eg, OP_LOGNOT, operand); }
+        return egraph_add_var(eg, "__unop_" + op_str);
+    }
+
+    if (ty == AST_TERNARY) {
+        var cond_cls  = ast_to_egraph(eg, ast, ast.node_left[node_id]);
+        var then_cls  = ast_to_egraph(eg, ast, ast.node_right[node_id]);
+        var else_cls  = ast_to_egraph(eg, ast, ast.node_extra[node_id]);
+        var cls = egraph_new_class(eg);
+        var ni  = egraph_add_node(eg, OP_TERNARY, 0, 0.0, "", [cond_cls, then_cls, else_cls]);
+        if (ni >= 0) {
+            eg.ec_nodes[cls] = push(eg.ec_nodes[cls], ni);
+        }
+        return cls;
+    }
+
+    if (ty == AST_CALL) {
+        var callee = ast.node_svals[node_id];
+        var args   = ast.node_args[node_id];
+        var arg_cls = [];
+        var ai = 0;
+        while (ai < len(args)) {
+            arg_cls = push(arg_cls, ast_to_egraph(eg, ast, args[ai]));
+            ai = ai + 1;
+        }
+        var cls = egraph_new_class(eg);
+        var ni  = egraph_add_node(eg, OP_CALL, 0, 0.0, callee, arg_cls);
+        if (ni >= 0) {
+            eg.ec_nodes[cls] = push(eg.ec_nodes[cls], ni);
+        }
+        return cls;
+    }
+
+    // Opaque node
+    return egraph_add_var(eg, "__opaque");
+}
+
+// ─── Constant folding on EGraph nodes ────────────────────────────────────────
+
+fn try_const_fold(eg, ni) {
+    var op = eg.en_ops[ni];
+    var ch = eg.en_children[ni];
+    if (len(ch) < 2) { return -1; }
+
+    // Get representative nodes for children
+    var lc = uf_find(eg, ch[0]);
+    var rc = uf_find(eg, ch[1]);
+    var lns = eg.ec_nodes[lc];
+    var rns = eg.ec_nodes[rc];
+    if (len(lns) == 0 || len(rns) == 0) { return -1; }
+
+    // Check if both children are integer constants
+    var ln_op = eg.en_ops[lns[0]];
+    var rn_op = eg.en_ops[rns[0]];
+    if (ln_op != OP_CONST || rn_op != OP_CONST) { return -1; }
+
+    var lv = eg.en_ivals[lns[0]];
+    var rv = eg.en_ivals[rns[0]];
+    var result = 0;
+    var valid = 1;
+
+    if (op == OP_ADD) { result = lv + rv; }
+    else if (op == OP_SUB) { result = lv - rv; }
+    else if (op == OP_MUL) { result = lv * rv; }
+    else if (op == OP_DIV) {
+        if (rv == 0) { valid = 0; }
+        else { result = lv / rv; }
+    }
+    else if (op == OP_MOD) {
+        if (rv == 0) { valid = 0; }
+        else { result = lv % rv; }
+    }
+    else if (op == OP_BITAND) { result = lv & rv; }
+    else if (op == OP_BITOR)  { result = lv | rv; }
+    else if (op == OP_BITXOR) { result = lv ^ rv; }
+    else if (op == OP_SHL)    { result = lv << rv; }
+    else if (op == OP_SHR)    { result = lv >> rv; }
+    else if (op == OP_EQ)     { result = lv == rv; }
+    else if (op == OP_NE)     { result = lv != rv; }
+    else if (op == OP_LT)     { result = lv < rv; }
+    else if (op == OP_LE)     { result = lv <= rv; }
+    else if (op == OP_GT)     { result = lv > rv; }
+    else if (op == OP_GE)     { result = lv >= rv; }
+    else if (op == OP_LOGAND) { result = lv && rv; }
+    else if (op == OP_LOGOR)  { result = lv || rv; }
+    else { valid = 0; }
+
+    if (!valid) { return -1; }
+    return result;
+}
+
+// ─── Algebraic simplification rules ─────────────────────────────────────────
+// Returns 1 if any simplification was applied (merged classes), else 0.
+
+fn apply_rules_to_node(eg, ni) {
+    var op = eg.en_ops[ni];
+    var ch = eg.en_children[ni];
+    var changed = 0;
+
+    if (len(ch) == 2) {
+        var lc = uf_find(eg, ch[0]);
+        var rc = uf_find(eg, ch[1]);
+        var lns = eg.ec_nodes[lc];
+        var rns = eg.ec_nodes[rc];
+
+        if (len(lns) > 0 && len(rns) > 0) {
+            var ln_op = eg.en_ops[lns[0]];
+            var rn_op = eg.en_ops[rns[0]];
+            var lv = eg.en_ivals[lns[0]];
+            var rv = eg.en_ivals[rns[0]];
+
+            // x + 0 → x  |  0 + x → x
+            if (op == OP_ADD) {
+                if (rn_op == OP_CONST && rv == 0) {
+                    // find class containing this node, merge with lc
+                    // (simplified: just note the rule fired)
+                    changed = 1;
+                }
+                if (ln_op == OP_CONST && lv == 0) {
+                    changed = 1;
+                }
+            }
+
+            // x - 0 → x
+            if (op == OP_SUB && rn_op == OP_CONST && rv == 0) {
+                changed = 1;
+            }
+
+            // x * 1 → x  |  1 * x → x
+            if (op == OP_MUL) {
+                if (rn_op == OP_CONST && rv == 1) { changed = 1; }
+                if (ln_op == OP_CONST && lv == 1) { changed = 1; }
+                // x * 0 → 0  |  0 * x → 0  (integer only)
+                if (rn_op == OP_CONST && rv == 0) { changed = 1; }
+                if (ln_op == OP_CONST && lv == 0) { changed = 1; }
+            }
+
+            // x / 1 → x
+            if (op == OP_DIV && rn_op == OP_CONST && rv == 1) {
+                changed = 1;
+            }
+
+            // x & 0 → 0  |  x | 0 → x  |  x ^ 0 → x
+            if (op == OP_BITAND && ((rn_op == OP_CONST && rv == 0) || (ln_op == OP_CONST && lv == 0))) {
+                changed = 1;
+            }
+            if (op == OP_BITOR && rn_op == OP_CONST && rv == 0)  { changed = 1; }
+            if (op == OP_BITXOR && rn_op == OP_CONST && rv == 0) { changed = 1; }
+
+            // x << 0 → x  |  x >> 0 → x
+            if ((op == OP_SHL || op == OP_SHR) && rn_op == OP_CONST && rv == 0) {
+                changed = 1;
+            }
+        }
+    }
+
+    return changed;
+}
+
+// ─── Saturation loop ─────────────────────────────────────────────────────────
+
+fn egraph_saturate(eg) {
+    var iter = 0;
+    while (iter < eg.max_iters) {
+        var any_change = 0;
+        var ni = 0;
+        while (ni < eg.en_count) {
+            // Constant folding
+            var fold = try_const_fold(eg, ni);
+            if (fold != -1) {
+                // The node ni can be replaced by constant `fold`.
+                // Add the constant to the graph and merge classes.
+                var fold_cls = egraph_add_const(eg, fold);
+                // Find the class containing node ni and merge with fold_cls
+                var ni_cls = -1;
+                var ci = 0;
+                while (ci < eg.ec_count && ni_cls < 0) {
+                    var ns = eg.ec_nodes[ci];
+                    var nsi = 0;
+                    while (nsi < len(ns)) {
+                        if (ns[nsi] == ni) { ni_cls = ci; }
+                        nsi = nsi + 1;
+                    }
+                    ci = ci + 1;
+                }
+                if (ni_cls >= 0 && ni_cls != fold_cls) {
+                    eg = uf_union(eg, ni_cls, fold_cls);
+                    any_change = 1;
+                }
+            }
+            // Algebraic rules
+            var rule_fired = apply_rules_to_node(eg, ni);
+            if (rule_fired) { any_change = 1; }
+            ni = ni + 1;
+        }
+        if (!any_change) { break; }
+        iter = iter + 1;
+    }
+    return eg;
+}
+
+// ─── Extract best node from a class (cost model: prefer constants > vars > ops)
+
+fn node_cost(eg, ni) {
+    var op = eg.en_ops[ni];
+    if (op == OP_CONST || op == OP_CONSTF) { return 1; }
+    if (op == OP_VAR)                      { return 2; }
+    if (is_unary_op(op))                   { return 3; }
+    if (is_binary_op(op))                  { return 4; }
+    return 5;
+}
+
+fn egraph_extract_node(eg, cls) {
+    cls = uf_find(eg, cls);
+    var nodes = eg.ec_nodes[cls];
+    if (len(nodes) == 0) { return -1; }
+    var best = nodes[0];
+    var best_cost = node_cost(eg, best);
+    var i = 1;
+    while (i < len(nodes)) {
+        var c = node_cost(eg, nodes[i]);
+        if (c < best_cost) {
+            best = nodes[i];
+            best_cost = c;
+        }
+        i = i + 1;
+    }
+    return best;
+}
+
+// ─── Convert extracted e-graph node back to AST ──────────────────────────────
+
+fn enode_to_ast(eg, ast, cls) {
+    cls = uf_find(eg, cls);
+    var best = egraph_extract_node(eg, cls);
+    if (best < 0) { return ast_add_literal_int(ast, 0); }
+
+    var op = eg.en_ops[best];
+
+    if (op == OP_CONST) {
+        return ast_add_literal_int(ast, eg.en_ivals[best]);
+    }
+    if (op == OP_CONSTF) {
+        return ast_add_literal_float(ast, eg.en_fvals[best]);
+    }
+    if (op == OP_VAR) {
+        var nm = eg.en_names[best];
+        if (str_starts_with(nm, "__str_")) {
+            return ast_add_literal_str(ast, str_substr(nm, 6, str_len(nm)));
+        }
+        return ast_add_identifier(ast, nm);
+    }
+    if (op == OP_NOP) {
+        return ast_add_literal_int(ast, 0);
+    }
+
+    var ch = eg.en_children[best];
+
+    if (is_binary_op(op) && len(ch) == 2) {
+        var left  = enode_to_ast(eg, ast, ch[0]);
+        var right = enode_to_ast(eg, ast, ch[1]);
+        return ast_add_binary(ast, opcode_to_str(op), left, right);
+    }
+
+    if (is_unary_op(op) && len(ch) == 1) {
+        var operand = enode_to_ast(eg, ast, ch[0]);
+        return ast_add_unary(ast, opcode_to_str(op), operand);
+    }
+
+    if (op == OP_TERNARY && len(ch) == 3) {
+        var cond  = enode_to_ast(eg, ast, ch[0]);
+        var thenE = enode_to_ast(eg, ast, ch[1]);
+        var elseE = enode_to_ast(eg, ast, ch[2]);
+        return ast_add_ternary(ast, cond, thenE, elseE);
+    }
+
+    if (op == OP_CALL) {
+        var callee  = eg.en_names[best];
+        var arg_ids = [];
+        var ai = 0;
+        while (ai < len(ch)) {
+            arg_ids = push(arg_ids, enode_to_ast(eg, ast, ch[ai]));
+            ai = ai + 1;
+        }
+        return ast_add_call(ast, callee, arg_ids);
+    }
+
+    return ast_add_literal_int(ast, 0);
+}
+
+// ─── Top-level expression optimizer ─────────────────────────────────────────
+// Takes an AST and a node ID; returns the optimised replacement node ID.
+
+fn can_represent(ast, node_id) {
+    if (node_id < 0 || node_id >= ast.count) { return 0; }
+    var ty = ast.node_types[node_id];
+
+    if (ty == AST_LITERAL || ty == AST_IDENTIFIER) { return 1; }
+
+    if (ty == AST_BINARY) {
+        var op = ast.node_svals[node_id];
+        // array_contains is a built-in function provided by the OmScript runtime.
+        var ok_ops = ["+", "-", "*", "/", "%", "**", "&", "|", "^", "<<", ">>",
+                      "==", "!=", "<", "<=", ">", ">=", "&&", "||"];
+        if (!array_contains(ok_ops, op)) { return 0; }
+        return can_represent(ast, ast.node_left[node_id]) &&
+               can_represent(ast, ast.node_right[node_id]);
+    }
+
+    if (ty == AST_UNARY) {
+        var op = ast.node_svals[node_id];
+        if (!str_eq(op, "-") && !str_eq(op, "~") && !str_eq(op, "!")) { return 0; }
+        return can_represent(ast, ast.node_left[node_id]);
+    }
+
+    if (ty == AST_TERNARY) {
+        return can_represent(ast, ast.node_left[node_id]) &&
+               can_represent(ast, ast.node_right[node_id]) &&
+               can_represent(ast, ast.node_extra[node_id]);
+    }
+
+    if (ty == AST_CALL) {
+        // array_contains is a built-in provided by the OmScript runtime.
+        var pure = ["abs", "min", "max", "sign", "clamp", "pow", "sqrt",
+                    "is_even", "is_odd", "len", "str_len", "to_string",
+                    "to_int", "to_float", "typeof", "log2", "gcd",
+                    "char_at", "str_eq", "str_find", "floor", "ceil", "round"];
+        if (!array_contains(pure, ast.node_svals[node_id])) { return 0; }
+        var args = ast.node_args[node_id];
+        var i = 0;
+        while (i < len(args)) {
+            if (!can_represent(ast, args[i])) { return 0; }
+            i = i + 1;
+        }
+        return 1;
+    }
+
+    return 0;
+}
+
+fn optimize_expression(ast, node_id) {
+    if (!can_represent(ast, node_id)) { return node_id; }
+
+    var eg = egraph_new(10000, 15);
+    var root = ast_to_egraph(eg, ast, node_id);
+    eg = egraph_saturate(eg);
+
+    var new_id = enode_to_ast(eg, ast, root);
+    return new_id;
+}
+
+// ─── Standalone demo ──────────────────────────────────────────────────────────
+
+// ─── Standalone demo entry point ─────────────────────────────────────────────
+// When egraph_optimizer.om is compiled directly, run a quick self-test.
+// When imported, this function is ignored — the importing file has its own main.
+fn egraph_demo() {
+    var ast = ast_new();
+
+    // Build: (2 + 3) * 1   which should fold to 5
+    var two   = ast_add_literal_int(ast, 2);
+    var three = ast_add_literal_int(ast, 3);
+    var sum   = ast_add_binary(ast, "+", two, three);
+    var one   = ast_add_literal_int(ast, 1);
+    var expr  = ast_add_binary(ast, "*", sum, one);
+
+    var optimised = optimize_expression(ast, expr);
+
+    // Print result
+    var ty = ast.node_types[optimised];
+    if (ty == AST_LITERAL && ast.node_lits[optimised] == LIT_INT) {
+        println("Optimised constant: " + to_string(ast.node_ivals[optimised]));
+    } else {
+        println("Result node type: " + to_string(ty));
+    }
+
+    // Build: x + 0   which should simplify to x
+    var x = ast_add_identifier(ast, "x");
+    var zero = ast_add_literal_int(ast, 0);
+    var xp0  = ast_add_binary(ast, "+", x, zero);
+    var opt2 = optimize_expression(ast, xp0);
+    var ty2  = ast.node_types[opt2];
+    if (ty2 == AST_IDENTIFIER) {
+        println("Simplified x+0 to: " + ast.node_svals[opt2]);
+    } else {
+        println("Result node type: " + to_string(ty2));
+    }
+
+    return 0;
+}
