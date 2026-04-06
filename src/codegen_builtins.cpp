@@ -1806,7 +1806,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             // memchr(haystack, char, strlen(haystack)) is SIMD-optimized on
             // modern libc, ~2-3x faster than strstr for single-char searches.
             llvm::Value* len = builder->CreateCall(getOrDeclareStrlen(), {haystackPtr}, "contains.len");
-            llvm::Value* charVal = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), static_cast<unsigned char>(singleCharVal));
+            // Cast to unsigned char → i32 matching memchr's internal conversion
+            // (C standard 7.24.5.1: memchr converts its int arg to unsigned char).
+            llvm::Value* charVal = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context),
+                                                          static_cast<uint32_t>(static_cast<unsigned char>(singleCharVal)));
             result = builder->CreateCall(getOrDeclareMemchr(), {haystackPtr, charVal, len}, "contains.memchr");
         } else {
             llvm::Value* needleArg = generateExpression(needleExpr);
@@ -1843,7 +1846,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* result;
         if (isSingleChar) {
             llvm::Value* len = builder->CreateCall(getOrDeclareStrlen(), {haystackPtr}, "indexof.len");
-            llvm::Value* charVal = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), static_cast<unsigned char>(singleCharVal));
+            // Cast to unsigned char → i32 matching memchr's internal conversion.
+            llvm::Value* charVal = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context),
+                                                          static_cast<uint32_t>(static_cast<unsigned char>(singleCharVal)));
             result = builder->CreateCall(getOrDeclareMemchr(), {haystackPtr, charVal, len}, "indexof.memchr");
         } else {
             llvm::Value* needleArg = generateExpression(needleExpr);

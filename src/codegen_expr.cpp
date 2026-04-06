@@ -2846,17 +2846,20 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 llvm::KnownBits KB = llvm::computeKnownBits(left, module->getDataLayout());
                 leftNonNeg = KB.isNonNegative();
             }
-            bool rightNonNeg = nonNegValues_.count(right) > 0;
-            if (!rightNonNeg) {
-                llvm::KnownBits KB = llvm::computeKnownBits(right, module->getDataLayout());
-                rightNonNeg = KB.isNonNegative();
-            }
-            if (leftNonNeg && rightNonNeg) {
-                auto* result = isDivision
-                    ? builder->CreateUDiv(left, right, "udivtmp")
-                    : builder->CreateURem(left, right, "uremtmp");
-                nonNegValues_.insert(result);
-                return result;
+            // Short-circuit: only check the right operand if left is non-negative.
+            if (leftNonNeg) {
+                bool rightNonNeg = nonNegValues_.count(right) > 0;
+                if (!rightNonNeg) {
+                    llvm::KnownBits KB = llvm::computeKnownBits(right, module->getDataLayout());
+                    rightNonNeg = KB.isNonNegative();
+                }
+                if (rightNonNeg) {
+                    auto* result = isDivision
+                        ? builder->CreateUDiv(left, right, "udivtmp")
+                        : builder->CreateURem(left, right, "uremtmp");
+                    nonNegValues_.insert(result);
+                    return result;
+                }
             }
         }
         return isDivision ? builder->CreateSDiv(left, right, "divtmp") : builder->CreateSRem(left, right, "modtmp");
