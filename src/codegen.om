@@ -329,12 +329,34 @@ fn codegen_expr(nd) {
         var result = fresh_tmp();
         if (str_eq(op, "+")) {
             // Check if this is string concatenation
-            if (is_string_expr(g_nd_c0[nd]) || is_string_expr(g_nd_c1[nd])) {
-                // String concat: convert i64 values to i8* pointers
-                var left_ptr = fresh_tmp();
-                emit_indent(left_ptr + " = inttoptr i64 " + left_val + " to i8*");
-                var right_ptr = fresh_tmp();
-                emit_indent(right_ptr + " = inttoptr i64 " + right_val + " to i8*");
+            var left_is_str = is_string_expr(g_nd_c0[nd]);
+            var right_is_str = is_string_expr(g_nd_c1[nd]);
+            if (left_is_str || right_is_str) {
+                // Convert non-string operands to strings via snprintf
+                var left_ptr = ""; var right_ptr = "";
+                if (left_is_str) {
+                    left_ptr = fresh_tmp();
+                    emit_indent(left_ptr + " = inttoptr i64 " + left_val + " to i8*");
+                } else {
+                    // Convert integer to string
+                    var tbuf = fresh_tmp();
+                    emit_indent(tbuf + " = call i8* @malloc(i64 32)");
+                    var tfmt = string_const_ptr("@fmt_int", 4);
+                    var tsn = fresh_tmp();
+                    emit_indent(tsn + " = call i32 (i8*, i64, i8*, ...) @snprintf(i8* " + tbuf + ", i64 32, i8* " + tfmt + ", i64 " + left_val + ")");
+                    left_ptr = tbuf;
+                }
+                if (right_is_str) {
+                    right_ptr = fresh_tmp();
+                    emit_indent(right_ptr + " = inttoptr i64 " + right_val + " to i8*");
+                } else {
+                    var tbuf = fresh_tmp();
+                    emit_indent(tbuf + " = call i8* @malloc(i64 32)");
+                    var tfmt = string_const_ptr("@fmt_int", 4);
+                    var tsn = fresh_tmp();
+                    emit_indent(tsn + " = call i32 (i8*, i64, i8*, ...) @snprintf(i8* " + tbuf + ", i64 32, i8* " + tfmt + ", i64 " + right_val + ")");
+                    right_ptr = tbuf;
+                }
                 // Get lengths
                 var len1 = fresh_tmp();
                 emit_indent(len1 + " = call i64 @strlen(i8* " + left_ptr + ")");
@@ -398,6 +420,28 @@ fn codegen_expr(nd) {
             emit_indent(result + " = shl i64 " + left_val + ", " + right_val);
         } else if (str_eq(op, ">>")) {
             emit_indent(result + " = ashr i64 " + left_val + ", " + right_val);
+        } else if (str_eq(op, "**")) {
+            // Power operator: inline loop for integer exponentiation
+            var base_reg = fresh_tmp(); emit_indent(base_reg + " = alloca i64"); emit_indent("store i64 " + left_val + ", i64* " + base_reg);
+            var exp_reg = fresh_tmp(); emit_indent(exp_reg + " = alloca i64"); emit_indent("store i64 " + right_val + ", i64* " + exp_reg);
+            var res_reg = fresh_tmp(); emit_indent(res_reg + " = alloca i64"); emit_indent("store i64 1, i64* " + res_reg);
+            var pow_lbl = fresh_label(); var pow_body = fresh_label(); var pow_end = fresh_label();
+            emit_indent("br label %" + pow_lbl);
+            emit(pow_lbl + ":"); g_current_block = pow_lbl;
+            var exp_val = fresh_tmp(); emit_indent(exp_val + " = load i64, i64* " + exp_reg);
+            var pow_cmp = fresh_tmp(); emit_indent(pow_cmp + " = icmp sgt i64 " + exp_val + ", 0");
+            emit_indent("br i1 " + pow_cmp + ", label %" + pow_body + ", label %" + pow_end);
+            emit(pow_body + ":"); g_current_block = pow_body;
+            var cur_res = fresh_tmp(); emit_indent(cur_res + " = load i64, i64* " + res_reg);
+            var cur_base = fresh_tmp(); emit_indent(cur_base + " = load i64, i64* " + base_reg);
+            var new_res = fresh_tmp(); emit_indent(new_res + " = mul i64 " + cur_res + ", " + cur_base);
+            emit_indent("store i64 " + new_res + ", i64* " + res_reg);
+            var dec_exp = fresh_tmp(); emit_indent(dec_exp + " = sub i64 " + exp_val + ", 1");
+            emit_indent("store i64 " + dec_exp + ", i64* " + exp_reg);
+            emit_indent("br label %" + pow_lbl);
+            emit(pow_end + ":"); g_current_block = pow_end;
+            var pow_result = fresh_tmp(); emit_indent(pow_result + " = load i64, i64* " + res_reg);
+            return pow_result;
         } else {
             emit_indent("; WARNING: unknown binary op '" + op + "'");
             emit_indent(result + " = add i64 " + left_val + ", 0");
@@ -408,6 +452,35 @@ fn codegen_expr(nd) {
     // Unary expression
     if (ty == ND_UNARY) {
         var op = g_nd_sval[nd];
+        var is_prefix = g_nd_ival[nd];
+
+        // Postfix/prefix ++ and --
+        if (str_eq(op, "++") || str_eq(op, "--")) {
+            var operand = g_nd_c0[nd];
+            if (g_nd_type[operand] == ND_IDENTIFIER) {
+                var vname = g_nd_sval[operand];
+                var reg = lookup_local(vname);
+                if (str_eq(reg, "")) {
+                    emit_indent("; WARNING: increment/decrement of unknown variable");
+                    return "0";
+                }
+                var old_val = fresh_tmp();
+                emit_indent(old_val + " = load i64, i64* " + reg);
+                var new_val = fresh_tmp();
+                if (str_eq(op, "++")) {
+                    emit_indent(new_val + " = add i64 " + old_val + ", 1");
+                } else {
+                    emit_indent(new_val + " = sub i64 " + old_val + ", 1");
+                }
+                emit_indent("store i64 " + new_val + ", i64* " + reg);
+                if (is_prefix) {
+                    return new_val;
+                } else {
+                    return old_val;
+                }
+            }
+        }
+
         var operand_val = codegen_expr(g_nd_c0[nd]);
         var result = fresh_tmp();
         if (str_eq(op, "-")) {
@@ -525,6 +598,7 @@ fn codegen_call(nd) {
     var arg_start = g_nd_extra[nd];
 
     // ────── println / print ──────
+    // NOTE: In the C++ compiler, both print and println add a newline
     if (str_eq(fname, "println") || str_eq(fname, "print")) {
         if (nargs >= 1) {
             var arg_nd = g_ch[arg_start];
@@ -535,11 +609,7 @@ fn codegen_call(nd) {
                 var gname = register_string_literal(sval);
                 var slen = str_len(sval) + 1;
                 var ptr = string_const_ptr(gname, slen);
-                var use_nl = str_eq(fname, "println");
-                var fmtn = "@fmt_str";
-                var fmtl = 4;
-                if (!use_nl) { fmtn = "@fmt_str_nonl"; fmtl = 3; }
-                var fmt_ptr = string_const_ptr(fmtn, fmtl);
+                var fmt_ptr = string_const_ptr("@fmt_str", 4);
                 var result = fresh_tmp();
                 emit_indent(result + " = call i32 (i8*, ...) @printf(i8* " + fmt_ptr + ", i8* " + ptr + ")");
                 var cast = fresh_tmp();
@@ -551,11 +621,7 @@ fn codegen_call(nd) {
                 var val = codegen_expr(arg_nd);
                 var str_ptr = fresh_tmp();
                 emit_indent(str_ptr + " = inttoptr i64 " + val + " to i8*");
-                var use_nl = str_eq(fname, "println");
-                var fmtn = "@fmt_str";
-                var fmtl = 4;
-                if (!use_nl) { fmtn = "@fmt_str_nonl"; fmtl = 3; }
-                var fmt_ptr = string_const_ptr(fmtn, fmtl);
+                var fmt_ptr = string_const_ptr("@fmt_str", 4);
                 var result = fresh_tmp();
                 emit_indent(result + " = call i32 (i8*, ...) @printf(i8* " + fmt_ptr + ", i8* " + str_ptr + ")");
                 var cast = fresh_tmp();
@@ -565,11 +631,7 @@ fn codegen_call(nd) {
 
             // Integer
             var val = codegen_expr(arg_nd);
-            var use_nl = str_eq(fname, "println");
-            var fmtn = "@fmt_int_nl";
-            var fmtl = 5;
-            if (!use_nl) { fmtn = "@fmt_int"; fmtl = 4; }
-            var fmt_ptr = string_const_ptr(fmtn, fmtl);
+            var fmt_ptr = string_const_ptr("@fmt_int_nl", 5);
             var result = fresh_tmp();
             emit_indent(result + " = call i32 (i8*, ...) @printf(i8* " + fmt_ptr + ", i64 " + val + ")");
             var cast = fresh_tmp();
@@ -1384,6 +1446,187 @@ fn codegen_call(nd) {
         var pos = fresh_tmp(); emit_indent(pos + " = icmp sgt i64 " + val + ", 0");
         var t1 = fresh_tmp(); emit_indent(t1 + " = select i1 " + neg + ", i64 -1, i64 0");
         var result = fresh_tmp(); emit_indent(result + " = select i1 " + pos + ", i64 1, i64 " + t1);
+        return result;
+    }
+
+    // ────── pow(base, exp) ──────
+    if (str_eq(fname, "pow")) {
+        var base_nd = g_ch[arg_start]; var exp_nd = g_ch[arg_start + 1];
+        var base_val = codegen_expr(base_nd); var exp_val = codegen_expr(exp_nd);
+        var br = fresh_tmp(); emit_indent(br + " = alloca i64"); emit_indent("store i64 " + base_val + ", i64* " + br);
+        var er = fresh_tmp(); emit_indent(er + " = alloca i64"); emit_indent("store i64 " + exp_val + ", i64* " + er);
+        var rr = fresh_tmp(); emit_indent(rr + " = alloca i64"); emit_indent("store i64 1, i64* " + rr);
+        var pl = fresh_label(); var pb = fresh_label(); var pe = fresh_label();
+        emit_indent("br label %" + pl);
+        emit(pl + ":"); g_current_block = pl;
+        var ev = fresh_tmp(); emit_indent(ev + " = load i64, i64* " + er);
+        var pc = fresh_tmp(); emit_indent(pc + " = icmp sgt i64 " + ev + ", 0");
+        emit_indent("br i1 " + pc + ", label %" + pb + ", label %" + pe);
+        emit(pb + ":"); g_current_block = pb;
+        var cr = fresh_tmp(); emit_indent(cr + " = load i64, i64* " + rr);
+        var cb = fresh_tmp(); emit_indent(cb + " = load i64, i64* " + br);
+        var nr = fresh_tmp(); emit_indent(nr + " = mul i64 " + cr + ", " + cb);
+        emit_indent("store i64 " + nr + ", i64* " + rr);
+        var de = fresh_tmp(); emit_indent(de + " = sub i64 " + ev + ", 1");
+        emit_indent("store i64 " + de + ", i64* " + er);
+        emit_indent("br label %" + pl);
+        emit(pe + ":"); g_current_block = pe;
+        var result = fresh_tmp(); emit_indent(result + " = load i64, i64* " + rr);
+        return result;
+    }
+
+    // ────── index_of(array, value) ──────
+    if (str_eq(fname, "index_of")) {
+        var arr_nd = g_ch[arg_start]; var val_nd = g_ch[arg_start + 1];
+        var arr_val = codegen_expr(arr_nd); var search_val = codegen_expr(val_nd);
+        var arr_ptr = fresh_tmp(); emit_indent(arr_ptr + " = inttoptr i64 " + arr_val + " to i64*");
+        var n = fresh_tmp(); emit_indent(n + " = load i64, i64* " + arr_ptr);
+        var ir_reg = fresh_tmp(); emit_indent(ir_reg + " = alloca i64"); emit_indent("store i64 0, i64* " + ir_reg);
+        var found_reg = fresh_tmp(); emit_indent(found_reg + " = alloca i64"); emit_indent("store i64 -1, i64* " + found_reg);
+        var sl = fresh_label(); var sb = fresh_label(); var sf = fresh_label(); var sn = fresh_label(); var se = fresh_label();
+        emit_indent("br label %" + sl);
+        emit(sl + ":"); g_current_block = sl;
+        var si = fresh_tmp(); emit_indent(si + " = load i64, i64* " + ir_reg);
+        var sc = fresh_tmp(); emit_indent(sc + " = icmp slt i64 " + si + ", " + n);
+        emit_indent("br i1 " + sc + ", label %" + sb + ", label %" + se);
+        emit(sb + ":"); g_current_block = sb;
+        var sidx = fresh_tmp(); emit_indent(sidx + " = add i64 " + si + ", 1");
+        var sp = fresh_tmp(); emit_indent(sp + " = getelementptr i64, i64* " + arr_ptr + ", i64 " + sidx);
+        var sv = fresh_tmp(); emit_indent(sv + " = load i64, i64* " + sp);
+        var seq = fresh_tmp(); emit_indent(seq + " = icmp eq i64 " + sv + ", " + search_val);
+        emit_indent("br i1 " + seq + ", label %" + sf + ", label %" + sn);
+        emit(sf + ":"); g_current_block = sf;
+        emit_indent("store i64 " + si + ", i64* " + found_reg);
+        emit_indent("br label %" + se);
+        emit(sn + ":"); g_current_block = sn;
+        var snx = fresh_tmp(); emit_indent(snx + " = add i64 " + si + ", 1");
+        emit_indent("store i64 " + snx + ", i64* " + ir_reg);
+        emit_indent("br label %" + sl);
+        emit(se + ":"); g_current_block = se;
+        var result = fresh_tmp(); emit_indent(result + " = load i64, i64* " + found_reg);
+        return result;
+    }
+
+    // ────── array_fill(array, value) ──────
+    if (str_eq(fname, "array_fill")) {
+        var arr_nd = g_ch[arg_start]; var val_nd = g_ch[arg_start + 1];
+        var arr_val = codegen_expr(arr_nd); var fill_val = codegen_expr(val_nd);
+        var arr_ptr = fresh_tmp(); emit_indent(arr_ptr + " = inttoptr i64 " + arr_val + " to i64*");
+        var n = fresh_tmp(); emit_indent(n + " = load i64, i64* " + arr_ptr);
+        var fr = fresh_tmp(); emit_indent(fr + " = alloca i64"); emit_indent("store i64 0, i64* " + fr);
+        var fl = fresh_label(); var fb = fresh_label(); var fe = fresh_label();
+        emit_indent("br label %" + fl);
+        emit(fl + ":"); g_current_block = fl;
+        var fi = fresh_tmp(); emit_indent(fi + " = load i64, i64* " + fr);
+        var fc = fresh_tmp(); emit_indent(fc + " = icmp slt i64 " + fi + ", " + n);
+        emit_indent("br i1 " + fc + ", label %" + fb + ", label %" + fe);
+        emit(fb + ":"); g_current_block = fb;
+        var fidx = fresh_tmp(); emit_indent(fidx + " = add i64 " + fi + ", 1");
+        var fp = fresh_tmp(); emit_indent(fp + " = getelementptr i64, i64* " + arr_ptr + ", i64 " + fidx);
+        emit_indent("store i64 " + fill_val + ", i64* " + fp);
+        var fnx = fresh_tmp(); emit_indent(fnx + " = add i64 " + fi + ", 1");
+        emit_indent("store i64 " + fnx + ", i64* " + fr);
+        emit_indent("br label %" + fl);
+        emit(fe + ":"); g_current_block = fe;
+        return arr_val;
+    }
+
+    // ────── sum(array) ──────
+    if (str_eq(fname, "sum")) {
+        var arr_nd = g_ch[arg_start];
+        var arr_val = codegen_expr(arr_nd);
+        var arr_ptr = fresh_tmp(); emit_indent(arr_ptr + " = inttoptr i64 " + arr_val + " to i64*");
+        var n = fresh_tmp(); emit_indent(n + " = load i64, i64* " + arr_ptr);
+        var sr = fresh_tmp(); emit_indent(sr + " = alloca i64"); emit_indent("store i64 0, i64* " + sr);
+        var si_reg = fresh_tmp(); emit_indent(si_reg + " = alloca i64"); emit_indent("store i64 0, i64* " + si_reg);
+        var sl = fresh_label(); var sb = fresh_label(); var se = fresh_label();
+        emit_indent("br label %" + sl);
+        emit(sl + ":"); g_current_block = sl;
+        var si = fresh_tmp(); emit_indent(si + " = load i64, i64* " + si_reg);
+        var sc = fresh_tmp(); emit_indent(sc + " = icmp slt i64 " + si + ", " + n);
+        emit_indent("br i1 " + sc + ", label %" + sb + ", label %" + se);
+        emit(sb + ":"); g_current_block = sb;
+        var sidx = fresh_tmp(); emit_indent(sidx + " = add i64 " + si + ", 1");
+        var sp = fresh_tmp(); emit_indent(sp + " = getelementptr i64, i64* " + arr_ptr + ", i64 " + sidx);
+        var sv = fresh_tmp(); emit_indent(sv + " = load i64, i64* " + sp);
+        var cs = fresh_tmp(); emit_indent(cs + " = load i64, i64* " + sr);
+        var ns = fresh_tmp(); emit_indent(ns + " = add i64 " + cs + ", " + sv);
+        emit_indent("store i64 " + ns + ", i64* " + sr);
+        var snx = fresh_tmp(); emit_indent(snx + " = add i64 " + si + ", 1");
+        emit_indent("store i64 " + snx + ", i64* " + si_reg);
+        emit_indent("br label %" + sl);
+        emit(se + ":"); g_current_block = se;
+        var result = fresh_tmp(); emit_indent(result + " = load i64, i64* " + sr);
+        return result;
+    }
+
+    // ────── gcd(a, b) ──────
+    if (str_eq(fname, "gcd")) {
+        var a_nd = g_ch[arg_start]; var b_nd = g_ch[arg_start + 1];
+        var a = codegen_expr(a_nd); var b = codegen_expr(b_nd);
+        var ar = fresh_tmp(); emit_indent(ar + " = alloca i64"); emit_indent("store i64 " + a + ", i64* " + ar);
+        var br2 = fresh_tmp(); emit_indent(br2 + " = alloca i64"); emit_indent("store i64 " + b + ", i64* " + br2);
+        var gl = fresh_label(); var gb = fresh_label(); var ge = fresh_label();
+        emit_indent("br label %" + gl);
+        emit(gl + ":"); g_current_block = gl;
+        var bv = fresh_tmp(); emit_indent(bv + " = load i64, i64* " + br2);
+        var gc = fresh_tmp(); emit_indent(gc + " = icmp ne i64 " + bv + ", 0");
+        emit_indent("br i1 " + gc + ", label %" + gb + ", label %" + ge);
+        emit(gb + ":"); g_current_block = gb;
+        var av = fresh_tmp(); emit_indent(av + " = load i64, i64* " + ar);
+        var bv2 = fresh_tmp(); emit_indent(bv2 + " = load i64, i64* " + br2);
+        var rm = fresh_tmp(); emit_indent(rm + " = srem i64 " + av + ", " + bv2);
+        emit_indent("store i64 " + bv2 + ", i64* " + ar);
+        emit_indent("store i64 " + rm + ", i64* " + br2);
+        emit_indent("br label %" + gl);
+        emit(ge + ":"); g_current_block = ge;
+        var result = fresh_tmp(); emit_indent(result + " = load i64, i64* " + ar);
+        return result;
+    }
+
+    // ────── lcm(a, b) ──────
+    if (str_eq(fname, "lcm")) {
+        // lcm(a, b) = a / gcd(a, b) * b — avoid overflow
+        var a_nd = g_ch[arg_start]; var b_nd = g_ch[arg_start + 1];
+        var a = codegen_expr(a_nd); var b = codegen_expr(b_nd);
+        // Inline gcd
+        var ar = fresh_tmp(); emit_indent(ar + " = alloca i64"); emit_indent("store i64 " + a + ", i64* " + ar);
+        var br2 = fresh_tmp(); emit_indent(br2 + " = alloca i64"); emit_indent("store i64 " + b + ", i64* " + br2);
+        var gl = fresh_label(); var gb = fresh_label(); var ge = fresh_label();
+        emit_indent("br label %" + gl);
+        emit(gl + ":"); g_current_block = gl;
+        var bv = fresh_tmp(); emit_indent(bv + " = load i64, i64* " + br2);
+        var gc = fresh_tmp(); emit_indent(gc + " = icmp ne i64 " + bv + ", 0");
+        emit_indent("br i1 " + gc + ", label %" + gb + ", label %" + ge);
+        emit(gb + ":"); g_current_block = gb;
+        var av = fresh_tmp(); emit_indent(av + " = load i64, i64* " + ar);
+        var bv2 = fresh_tmp(); emit_indent(bv2 + " = load i64, i64* " + br2);
+        var rm = fresh_tmp(); emit_indent(rm + " = srem i64 " + av + ", " + bv2);
+        emit_indent("store i64 " + bv2 + ", i64* " + ar);
+        emit_indent("store i64 " + rm + ", i64* " + br2);
+        emit_indent("br label %" + gl);
+        emit(ge + ":"); g_current_block = ge;
+        var gcd_val = fresh_tmp(); emit_indent(gcd_val + " = load i64, i64* " + ar);
+        var d = fresh_tmp(); emit_indent(d + " = sdiv i64 " + a + ", " + gcd_val);
+        var result = fresh_tmp(); emit_indent(result + " = mul i64 " + d + ", " + b);
+        return result;
+    }
+
+    // ────── typeof(x) → always returns "int" or "string" ──────
+    if (str_eq(fname, "typeof")) {
+        // Simplified: return "int" always (bootstrap doesn't track runtime types)
+        var arg_nd = g_ch[arg_start];
+        if (is_string_expr(arg_nd)) {
+            var gn = register_string_literal("string");
+            var ptr = string_const_ptr(gn, 7);
+            var result = fresh_tmp();
+            emit_indent(result + " = ptrtoint i8* " + ptr + " to i64");
+            return result;
+        }
+        var gn = register_string_literal("int");
+        var ptr = string_const_ptr(gn, 4);
+        var result = fresh_tmp();
+        emit_indent(result + " = ptrtoint i8* " + ptr + " to i64");
         return result;
     }
 
