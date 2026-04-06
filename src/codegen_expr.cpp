@@ -3615,7 +3615,10 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
             llvm::Function* function = builder->GetInsertBlock()->getParent();
             llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "incdec.ok", function);
             llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "incdec.fail", function);
-            builder->CreateCondBr(valid, okBB, failBB);
+            // Bounds checks almost never fail — mark the success path hot
+            // to favor branch prediction and keep error handlers out of I-cache.
+            llvm::MDNode* brWeights = llvm::MDBuilder(*context).createBranchWeights(1000000, 1);
+            builder->CreateCondBr(valid, okBB, failBB, brWeights);
 
             builder->SetInsertPoint(failBB);
             llvm::Value* errMsg = builder->CreateGlobalString("Runtime error: array index out of bounds\n", "idx_oob_msg");
@@ -4281,7 +4284,10 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
         // signed values become large unsigned values that exceed len.
         llvm::Value* valid = builder->CreateICmpULT(idxVal, lenVal, "idx.valid");
 
-        builder->CreateCondBr(valid, okBB, failBB);
+        // Bounds checks almost never fail — mark the success path hot
+        // to favor branch prediction and keep error handlers out of I-cache.
+        llvm::MDNode* boundsWeights = llvm::MDBuilder(*context).createBranchWeights(1000000, 1);
+        builder->CreateCondBr(valid, okBB, failBB, boundsWeights);
 
         // Out-of-bounds path: print error and abort
         builder->SetInsertPoint(failBB);
@@ -4447,7 +4453,10 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
         // Bounds check: 0 <= index < length (single unsigned compare)
         llvm::Value* valid = builder->CreateICmpULT(idxVal, lenVal, "idxa.valid");
 
-        builder->CreateCondBr(valid, okBB, failBB);
+        // Bounds checks almost never fail — mark the success path hot
+        // to favor branch prediction and keep error handlers out of I-cache.
+        llvm::MDNode* boundsWeightsA = llvm::MDBuilder(*context).createBranchWeights(1000000, 1);
+        builder->CreateCondBr(valid, okBB, failBB, boundsWeightsA);
 
         // Out-of-bounds path: print error and abort
         builder->SetInsertPoint(failBB);
