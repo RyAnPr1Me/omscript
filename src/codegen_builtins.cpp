@@ -2551,92 +2551,82 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         sortLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
         sortLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
         llvm::Value* arrLen = sortLenLoad;
-        // Simple bubble sort in LLVM IR (in-place)
-        llvm::Function* function = builder->GetInsertBlock()->getParent();
-        llvm::BasicBlock* preheader = builder->GetInsertBlock();
-        llvm::BasicBlock* outerLoopBB = llvm::BasicBlock::Create(*context, "sort.outer", function);
-        llvm::BasicBlock* innerLoopBB = llvm::BasicBlock::Create(*context, "sort.inner", function);
-        llvm::BasicBlock* innerBodyBB = llvm::BasicBlock::Create(*context, "sort.innerbody", function);
-        llvm::BasicBlock* swapBB = llvm::BasicBlock::Create(*context, "sort.swap", function);
-        llvm::BasicBlock* noswapBB = llvm::BasicBlock::Create(*context, "sort.noswap", function);
-        llvm::BasicBlock* outerIncBB = llvm::BasicBlock::Create(*context, "sort.outerinc", function);
-        llvm::BasicBlock* outerDoneBB = llvm::BasicBlock::Create(*context, "sort.done", function);
-        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
-        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
-        llvm::Value* limit = builder->CreateSub(arrLen, one, "sort.limit");
-        auto* backBr_2265 = builder->CreateBr(outerLoopBB);
-        if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 2> mds;
-            mds.push_back(nullptr);
-            mds.push_back(llvm::MDNode::get(*context,
-                {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-            llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-            md->replaceOperandWith(0, md);
-            backBr_2265->setMetadata(llvm::LLVMContext::MD_loop, md);
-        }
 
-        builder->SetInsertPoint(outerLoopBB);
-        llvm::PHINode* i = builder->CreatePHI(getDefaultType(), 2, "sort.i");
-        i->addIncoming(zero, preheader);
-        llvm::Value* outerCond = builder->CreateICmpSLT(i, limit, "sort.outercond");
-        builder->CreateCondBr(outerCond, innerLoopBB, outerDoneBB);
+        // Use libc qsort() — O(n log n) instead of the previous O(n²)
+        // bubble sort.  Each element is an i64 (8 bytes); string arrays
+        // store char* pointers cast to i64.
+        //
+        // Emit a tiny static comparator function into the module on first
+        // use (one for integers, one for strings).
 
-        builder->SetInsertPoint(innerLoopBB);
-        llvm::PHINode* j = builder->CreatePHI(getDefaultType(), 2, "sort.j");
-        j->addIncoming(zero, outerLoopBB);
-        llvm::Value* innerLimit = builder->CreateSub(limit, i, "sort.innerlimit");
-        llvm::Value* innerCond = builder->CreateICmpSLT(j, innerLimit, "sort.innercond");
-        builder->CreateCondBr(innerCond, innerBodyBB, outerIncBB);
-
-        builder->SetInsertPoint(innerBodyBB);
-        llvm::Value* idx1 = builder->CreateAdd(j, one, "sort.idx1");
-        llvm::Value* idx2 = builder->CreateAdd(j, llvm::ConstantInt::get(getDefaultType(), 2), "sort.idx2");
-        llvm::Value* ptr1 = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, idx1, "sort.ptr1");
-        llvm::Value* ptr2 = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, idx2, "sort.ptr2");
-        llvm::Value* val1 = builder->CreateLoad(getDefaultType(), ptr1, "sort.val1");
-        llvm::Value* val2 = builder->CreateLoad(getDefaultType(), ptr2, "sort.val2");
-        llvm::cast<llvm::Instruction>(val1)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
-        llvm::cast<llvm::Instruction>(val2)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
-        llvm::Value* needSwap;
-        if (sortStrings) {
-            // String sort: use strcmp(val1_as_ptr, val2_as_ptr) > 0
+        auto getOrEmitIntCmp = [&]() -> llvm::Function* {
+            const char* name = "__omsc_cmp_i64_asc";
+            if (auto* fn = module->getFunction(name))
+                return fn;
             auto* ptrTy = llvm::PointerType::getUnqual(*context);
-            llvm::Value* sptr1 = builder->CreateIntToPtr(val1, ptrTy, "sort.sptr1");
-            llvm::Value* sptr2 = builder->CreateIntToPtr(val2, ptrTy, "sort.sptr2");
-            llvm::Value* cmpRes = builder->CreateCall(getOrDeclareStrcmp(), {sptr1, sptr2}, "sort.strcmp");
-            needSwap = builder->CreateICmpSGT(cmpRes, builder->getInt32(0), "sort.needswap");
-        } else {
-            needSwap = builder->CreateICmpSGT(val1, val2, "sort.needswap");
-        }
-        builder->CreateCondBr(needSwap, swapBB, noswapBB);
+            auto* cmpTy = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context),
+                                                   {ptrTy, ptrTy}, false);
+            auto* fn = llvm::Function::Create(cmpTy, llvm::Function::InternalLinkage,
+                                              name, module.get());
+            fn->addFnAttr(llvm::Attribute::NoUnwind);
+            fn->addFnAttr(llvm::Attribute::WillReturn);
+            fn->addFnAttr(llvm::Attribute::NoFree);
+            fn->addFnAttr(llvm::Attribute::NoSync);
+            fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+                *context, llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::Ref)));
+            // Comparator body: load two i64s, return (a > b) - (a < b)
+            auto savedIP = builder->saveIP();
+            auto* entry = llvm::BasicBlock::Create(*context, "entry", fn);
+            builder->SetInsertPoint(entry);
+            auto* aPtr = fn->getArg(0);
+            auto* bPtr = fn->getArg(1);
+            auto* a = builder->CreateLoad(getDefaultType(), aPtr, "a");
+            auto* b = builder->CreateLoad(getDefaultType(), bPtr, "b");
+            auto* gt = builder->CreateZExt(builder->CreateICmpSGT(a, b, "gt"),
+                                           llvm::Type::getInt32Ty(*context));
+            auto* lt = builder->CreateZExt(builder->CreateICmpSLT(a, b, "lt"),
+                                           llvm::Type::getInt32Ty(*context));
+            builder->CreateRet(builder->CreateSub(gt, lt, "cmp"));
+            builder->restoreIP(savedIP);
+            return fn;
+        };
 
-        builder->SetInsertPoint(swapBB);
-        auto* sortSt1 = builder->CreateStore(val2, ptr1);
-        auto* sortSt2 = builder->CreateStore(val1, ptr2);
-        sortSt1->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
-        sortSt2->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
-        builder->CreateBr(noswapBB);
+        auto getOrEmitStrCmp = [&]() -> llvm::Function* {
+            const char* name = "__omsc_cmp_str_asc";
+            if (auto* fn = module->getFunction(name))
+                return fn;
+            auto* ptrTy = llvm::PointerType::getUnqual(*context);
+            auto* cmpTy = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context),
+                                                   {ptrTy, ptrTy}, false);
+            auto* fn = llvm::Function::Create(cmpTy, llvm::Function::InternalLinkage,
+                                              name, module.get());
+            fn->addFnAttr(llvm::Attribute::NoUnwind);
+            fn->addFnAttr(llvm::Attribute::WillReturn);
+            fn->addFnAttr(llvm::Attribute::NoFree);
+            fn->addFnAttr(llvm::Attribute::NoSync);
+            // String comparator: load i64 pointers, cast to char*, strcmp
+            auto savedIP = builder->saveIP();
+            auto* entry = llvm::BasicBlock::Create(*context, "entry", fn);
+            builder->SetInsertPoint(entry);
+            auto* aSlotPtr = fn->getArg(0);  // ptr to i64 slot
+            auto* bSlotPtr = fn->getArg(1);  // ptr to i64 slot
+            auto* aI64 = builder->CreateLoad(getDefaultType(), aSlotPtr, "a.i64");
+            auto* bI64 = builder->CreateLoad(getDefaultType(), bSlotPtr, "b.i64");
+            auto* aStr = builder->CreateIntToPtr(aI64, ptrTy, "a.str");
+            auto* bStr = builder->CreateIntToPtr(bI64, ptrTy, "b.str");
+            auto* result = builder->CreateCall(getOrDeclareStrcmp(), {aStr, bStr}, "cmp");
+            builder->CreateRet(result);
+            builder->restoreIP(savedIP);
+            return fn;
+        };
 
-        builder->SetInsertPoint(noswapBB);
-        llvm::Value* nextJ = builder->CreateAdd(j, one, "sort.nextj");
-        j->addIncoming(nextJ, noswapBB);
-        builder->CreateBr(innerLoopBB);
+        llvm::Function* comparator = sortStrings ? getOrEmitStrCmp() : getOrEmitIntCmp();
 
-        builder->SetInsertPoint(outerIncBB);
-        llvm::Value* nextI = builder->CreateAdd(i, one, "sort.nexti");
-        i->addIncoming(nextI, outerIncBB);
-        auto* backBr_2313 = builder->CreateBr(outerLoopBB);
-        if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 2> mds;
-            mds.push_back(nullptr);
-            mds.push_back(llvm::MDNode::get(*context,
-                {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-            llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-            md->replaceOperandWith(0, md);
-            backBr_2313->setMetadata(llvm::LLVMContext::MD_loop, md);
-        }
-
-        builder->SetInsertPoint(outerDoneBB);
+        // Data pointer: skip the length header (element 0 is the count).
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* dataPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, one, "sort.data");
+        llvm::Value* elemSize = llvm::ConstantInt::get(getDefaultType(), 8); // sizeof(i64)
+        builder->CreateCall(getOrDeclareQsort(), {dataPtr, arrLen, elemSize, comparator});
         return arrArg; // Return the array itself
     }
 
