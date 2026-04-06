@@ -1639,6 +1639,13 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
                                /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), basePtr, offset, "foreach.elem.ptr");
         elemVal = builder->CreateLoad(getDefaultType(), elemPtr, "foreach.elem");
+        // TBAA: foreach element loads (slots 1+) never alias the array length
+        // (slot 0).  This enables LLVM's alias analysis to prove that element
+        // loads are independent from length loads, which is critical for LICM
+        // to hoist the length load out of the loop body.
+        if (auto* elemLoad = llvm::dyn_cast<llvm::LoadInst>(elemVal)) {
+            elemLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        }
     }
     builder->CreateStore(elemVal, iterAlloca);
 

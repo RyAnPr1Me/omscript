@@ -3017,6 +3017,17 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         if (!function->hasFnAttribute(llvm::Attribute::OptimizeNone)) {
             function->addFnAttr(llvm::Attribute::MustProgress);
         }
+
+        // OmScript's ownership model guarantees that pointer parameters
+        // (arrays, strings) are always valid (non-null) distinct allocations.
+        // Mark ALL pointer parameters as nonnull at O2+ — this lets LLVM
+        // eliminate null-checks and enables speculative loads/hoisting.
+        // @hot and @optmax functions get additional noalias below.
+        for (unsigned i = 0; i < function->arg_size(); ++i) {
+            if (function->getArg(i)->getType()->isPointerTy()) {
+                function->addParamAttr(i, llvm::Attribute::NonNull);
+            }
+        }
     }
 
     // In OPTMAX functions, mark all parameters noalias and add WillReturn.

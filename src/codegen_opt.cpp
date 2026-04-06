@@ -848,6 +848,21 @@ void CodeGenerator::runOptimizationPasses() {
             // ranges, enabling unsigned loop vectorization and eliminating
             // redundant bounds checks.  Beneficial at O2+ (not just O3).
             FPM.addPass(llvm::ConstraintEliminationPass());
+            // JumpThreading threads branches through basic blocks with
+            // known conditions, reducing branch mispredictions.  Promoted
+            // from O3 to O2 because OmScript generates many conditional
+            // patterns (bounds checks, type checks) that benefit from
+            // threading even at moderate optimization levels.
+            FPM.addPass(llvm::JumpThreadingPass());
+            // DivRemPairs reuses quotient from div for rem, saving an
+            // expensive division instruction.  Promoted from O3 to O2
+            // because OmScript's modulo-heavy patterns (hash tables,
+            // index wrapping) directly benefit.
+            FPM.addPass(llvm::DivRemPairsPass());
+            // ConstantHoisting materializes expensive constants once and
+            // shares them across basic blocks, reducing code size and
+            // register pressure.  Promoted from O3 to O2.
+            FPM.addPass(llvm::ConstantHoistingPass());
             if (isO3) {
                 // LibCallsShrinkWrap wraps math library calls (sqrt, exp2, pow,
                 // log, etc.) with fast-path domain checks.  When the argument
@@ -856,15 +871,9 @@ void CodeGenerator::runOptimizationPasses() {
                 // bypassed entirely.  This is especially beneficial for
                 // floating-point benchmarks that call math functions in loops.
                 FPM.addPass(llvm::LibCallsShrinkWrapPass());
-                // JumpThreading threads branches through basic blocks with
-                // known conditions, reducing branch mispredictions.
-                FPM.addPass(llvm::JumpThreadingPass());
-                // DivRemPairs reuses quotient from div for rem.
-                FPM.addPass(llvm::DivRemPairsPass());
                 FPM.addPass(llvm::SpeculativeExecutionPass());
                 FPM.addPass(llvm::IRCEPass());
                 FPM.addPass(llvm::DFAJumpThreadingPass());
-                FPM.addPass(llvm::ConstantHoistingPass());
                 FPM.addPass(llvm::SeparateConstOffsetFromGEPPass());
                 FPM.addPass(llvm::PartiallyInlineLibCallsPass());
                 FPM.addPass(llvm::SinkingPass());
