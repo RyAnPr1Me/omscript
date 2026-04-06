@@ -2837,6 +2837,28 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         builder->CreateUnreachable();
 
         builder->SetInsertPoint(opBB);
+        // For non-constant divisors: check if both operands are non-negative
+        // to use faster unsigned operations.  Signed div/rem requires extra
+        // sign-correction instructions in the lowered code.
+        {
+            bool leftNonNeg = nonNegValues_.count(left) > 0;
+            if (!leftNonNeg) {
+                llvm::KnownBits KB = llvm::computeKnownBits(left, module->getDataLayout());
+                leftNonNeg = KB.isNonNegative();
+            }
+            bool rightNonNeg = nonNegValues_.count(right) > 0;
+            if (!rightNonNeg) {
+                llvm::KnownBits KB = llvm::computeKnownBits(right, module->getDataLayout());
+                rightNonNeg = KB.isNonNegative();
+            }
+            if (leftNonNeg && rightNonNeg) {
+                auto* result = isDivision
+                    ? builder->CreateUDiv(left, right, "udivtmp")
+                    : builder->CreateURem(left, right, "uremtmp");
+                nonNegValues_.insert(result);
+                return result;
+            }
+        }
         return isDivision ? builder->CreateSDiv(left, right, "divtmp") : builder->CreateSRem(left, right, "modtmp");
     } else if (expr->op == "==") {
         llvm::Value* cmp = builder->CreateICmpEQ(left, right, "cmptmp");
@@ -3586,10 +3608,9 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
             lenLoadID->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
             lenLoadID->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
             llvm::Value* lenVal = lenLoadID;
-            llvm::Value* inBounds = builder->CreateICmpSLT(idxVal, lenVal, "incdec.inbounds");
-            llvm::Value* notNeg =
-                builder->CreateICmpSGE(idxVal, llvm::ConstantInt::get(getDefaultType(), 0), "incdec.notneg");
-            llvm::Value* valid = builder->CreateAnd(inBounds, notNeg, "incdec.valid");
+            // Single unsigned compare: (unsigned)idx < len checks both
+            // non-negativity and upper bound simultaneously.
+            llvm::Value* valid = builder->CreateICmpULT(idxVal, lenVal, "incdec.valid");
 
             llvm::Function* function = builder->GetInsertBlock()->getParent();
             llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "incdec.ok", function);
@@ -3686,11 +3707,16 @@ llvm::Value* CodeGenerator::generateTernary(TernaryExpr* expr) {
                                      bin->left->type  == ASTNodeType::LITERAL_EXPR;
             const bool rightSimple = bin->right->type == ASTNodeType::IDENTIFIER_EXPR ||
                                      bin->right->type == ASTNodeType::LITERAL_EXPR;
-            // Only allow arithmetic/bitwise ops, not comparisons or assignments.
+            // Allow arithmetic/bitwise ops AND comparisons — all are
+            // side-effect-free single instructions.  Comparisons return i1
+            // which gets zext'd, enabling patterns like:
+            //   cond ? (a > b) : (a < b) → select + 2 icmp
             const std::string& op = bin->op;
             const bool isSafeOp = (op == "+" || op == "-" || op == "*" || op == "/" ||
                                    op == "%" || op == "&" || op == "|" || op == "^" ||
-                                   op == "<<" || op == ">>");
+                                   op == "<<" || op == ">>" ||
+                                   op == "==" || op == "!=" || op == "<" || op == ">" ||
+                                   op == "<=" || op == ">=");
             if (leftSimple && rightSimple && isSafeOp)
                 return true;
         }
@@ -4248,9 +4274,10 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
         }
 
         // Bounds check: 0 <= index < length
-        llvm::Value* inBounds = builder->CreateICmpSLT(idxVal, lenVal, "idx.inbounds");
-        llvm::Value* notNeg = builder->CreateICmpSGE(idxVal, llvm::ConstantInt::get(getDefaultType(), 0), "idx.notneg");
-        llvm::Value* valid = builder->CreateAnd(inBounds, notNeg, "idx.valid");
+        // Use a single unsigned compare: (unsigned)idx < len checks both
+        // non-negativity and upper bound in one instruction, since negative
+        // signed values become large unsigned values that exceed len.
+        llvm::Value* valid = builder->CreateICmpULT(idxVal, lenVal, "idx.valid");
 
         builder->CreateCondBr(valid, okBB, failBB);
 
@@ -4415,10 +4442,8 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
             lenVal = lenLoad;
         }
 
-        // Bounds check: 0 <= index < length
-        llvm::Value* inBounds = builder->CreateICmpSLT(idxVal, lenVal, "idxa.inbounds");
-        llvm::Value* notNeg = builder->CreateICmpSGE(idxVal, llvm::ConstantInt::get(getDefaultType(), 0), "idxa.notneg");
-        llvm::Value* valid = builder->CreateAnd(inBounds, notNeg, "idxa.valid");
+        // Bounds check: 0 <= index < length (single unsigned compare)
+        llvm::Value* valid = builder->CreateICmpULT(idxVal, lenVal, "idxa.valid");
 
         builder->CreateCondBr(valid, okBB, failBB);
 

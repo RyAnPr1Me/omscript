@@ -2056,6 +2056,16 @@ static bool replaceIdiom(IdiomMatch& match) {
                 }
             }
 
+            // Pattern: x + x → x << 1  (shift is cheaper than add on some
+            // microarchitectures and enables further shift combining)
+            if (!simplified && inst.getOpcode() == llvm::Instruction::Add) {
+                if (inst.getOperand(0) == inst.getOperand(1)) {
+                    llvm::IRBuilder<> builder(&inst);
+                    simplified = builder.CreateShl(inst.getOperand(0),
+                        llvm::ConstantInt::get(inst.getType(), 1), "add_self_shl");
+                }
+            }
+
             // Pattern: x + 0 → x
             if (!simplified && inst.getOpcode() == llvm::Instruction::Add) {
                 if (isConstInt(inst.getOperand(1), 0)) {
@@ -3911,6 +3921,28 @@ static bool replaceIdiom(IdiomMatch& match) {
                     llvm::IRBuilder<> builder(&inst);
                     llvm::Value* notCond = builder.CreateNot(sel->getCondition(), "bool_not");
                     simplified = builder.CreateZExt(notCond, sel->getType(), "bool_notzext");
+                }
+                // select(cond, x, 0) → and(x, sext(cond))
+                // Branchless masking: sext(i1 cond) produces 0 or -1 (all ones),
+                // so AND keeps x unchanged when true and zeroes it when false.
+                // This is more amenable to vectorization than select.
+                if (!simplified && isConstInt(sel->getFalseValue(), 0) &&
+                    !isConstInt(sel->getTrueValue(), 1) &&
+                    sel->getType()->isIntegerTy()) {
+                    llvm::IRBuilder<> builder(&inst);
+                    llvm::Value* mask = builder.CreateSExt(sel->getCondition(),
+                        sel->getType(), "sel_mask");
+                    simplified = builder.CreateAnd(sel->getTrueValue(), mask, "sel_and");
+                }
+                // select(cond, 0, x) → and(x, sext(!cond))
+                if (!simplified && isConstInt(sel->getTrueValue(), 0) &&
+                    !isConstInt(sel->getFalseValue(), 1) &&
+                    sel->getType()->isIntegerTy()) {
+                    llvm::IRBuilder<> builder(&inst);
+                    llvm::Value* notCond = builder.CreateNot(sel->getCondition(), "sel_notcond");
+                    llvm::Value* mask = builder.CreateSExt(notCond,
+                        sel->getType(), "sel_mask");
+                    simplified = builder.CreateAnd(sel->getFalseValue(), mask, "sel_and");
                 }
             }
 
