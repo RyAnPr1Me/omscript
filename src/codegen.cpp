@@ -1214,6 +1214,48 @@ llvm::Function* CodeGenerator::getOrDeclareStrcmp() {
     return fn;
 }
 
+llvm::Function* CodeGenerator::getOrDeclareStrncmp() {
+    if (auto* fn = module->getFunction("strncmp"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* sizeTy = getDefaultType();  // size_t mapped to i64
+    auto* ty = llvm::FunctionType::get(builder->getInt32Ty(), {ptrTy, ptrTy, sizeTy}, false);
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strncmp", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    fn->addFnAttr(llvm::Attribute::NoSync);
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::Ref)));
+    fn->addParamAttr(0, llvm::Attribute::ReadOnly);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    OMSC_ADD_NOCAPTURE(fn, 0);
+    fn->addParamAttr(1, llvm::Attribute::ReadOnly);
+    fn->addParamAttr(1, llvm::Attribute::NonNull);
+    OMSC_ADD_NOCAPTURE(fn, 1);
+    return fn;
+}
+
+llvm::Function* CodeGenerator::getOrDeclareMemcmp() {
+    if (auto* fn = module->getFunction("memcmp"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* sizeTy = getDefaultType();  // size_t mapped to i64
+    auto* ty = llvm::FunctionType::get(builder->getInt32Ty(), {ptrTy, ptrTy, sizeTy}, false);
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "memcmp", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    fn->addFnAttr(llvm::Attribute::NoSync);
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::Ref)));
+    fn->addParamAttr(0, llvm::Attribute::ReadOnly);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    OMSC_ADD_NOCAPTURE(fn, 0);
+    fn->addParamAttr(1, llvm::Attribute::ReadOnly);
+    fn->addParamAttr(1, llvm::Attribute::NonNull);
+    OMSC_ADD_NOCAPTURE(fn, 1);
+    return fn;
+}
+
 llvm::Function* CodeGenerator::getOrDeclarePutchar() {
     if (auto* fn = module->getFunction("putchar"))
         return fn;

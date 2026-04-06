@@ -2074,10 +2074,14 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             prefixArg->getType()->isPointerTy()
                 ? prefixArg
                 : builder->CreateIntToPtr(prefixArg, llvm::PointerType::getUnqual(*context), "startswith.prefix");
-        // Check if strstr(str, prefix) == str
-        llvm::Value* found = builder->CreateCall(getOrDeclareStrstr(), {strPtr, prefixPtr}, "startswith.found");
-        llvm::Value* isSame = builder->CreateICmpEQ(found, strPtr, "startswith.eq");
-        return builder->CreateZExt(isSame, getDefaultType(), "startswith.result");
+        // Use strncmp(str, prefix, prefix_len) == 0 instead of strstr
+        // strncmp only examines the first prefix_len bytes, while strstr
+        // would scan the entire string looking for the prefix anywhere.
+        llvm::Value* prefixLen = builder->CreateCall(getOrDeclareStrlen(), {prefixPtr}, "startswith.plen");
+        llvm::Value* cmpResult = builder->CreateCall(getOrDeclareStrncmp(),
+            {strPtr, prefixPtr, prefixLen}, "startswith.cmp");
+        llvm::Value* isEqual = builder->CreateICmpEQ(cmpResult, builder->getInt32(0), "startswith.eq");
+        return builder->CreateZExt(isEqual, getDefaultType(), "startswith.result");
     }
 
     if (bid == BuiltinId::STR_ENDS_WITH) {
@@ -2104,10 +2108,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(failBB);
         builder->CreateBr(mergeBB);
         builder->SetInsertPoint(checkBB);
-        // Compare str + (strLen - sufLen) with suffix
+        // Compare str + (strLen - sufLen) with suffix using memcmp.
+        // memcmp is faster than strcmp because we already know the exact
+        // length to compare and it can use SIMD-optimized comparison.
         llvm::Value* offset = builder->CreateSub(strLen, sufLen, "endswith.offset");
         llvm::Value* tailPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), strPtr, offset, "endswith.tail");
-        llvm::Value* cmpResult = builder->CreateCall(getOrDeclareStrcmp(), {tailPtr, suffixPtr}, "endswith.cmp");
+        llvm::Value* cmpResult = builder->CreateCall(getOrDeclareMemcmp(), {tailPtr, suffixPtr, sufLen}, "endswith.cmp");
         llvm::Value* isEqual = builder->CreateICmpEQ(cmpResult, builder->getInt32(0), "endswith.eq");
         llvm::Value* resultCheck = builder->CreateZExt(isEqual, getDefaultType(), "endswith.result");
         builder->CreateBr(mergeBB);
