@@ -822,8 +822,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* valJ = builder->CreateAlignedLoad(getDefaultType(), ptrJ, llvm::MaybeAlign(8), "swap.valj");
         llvm::cast<llvm::Instruction>(valI)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
         llvm::cast<llvm::Instruction>(valJ)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
-        auto* stI = builder->CreateStore(valJ, ptrI);
-        auto* stJ = builder->CreateStore(valI, ptrJ);
+        auto* stI = builder->CreateAlignedStore(valJ, ptrI, llvm::MaybeAlign(8));
+        auto* stJ = builder->CreateAlignedStore(valI, ptrJ, llvm::MaybeAlign(8));
         stI->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
         stJ->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
         return llvm::ConstantInt::get(getDefaultType(), 0);
@@ -876,8 +876,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* valHi = builder->CreateAlignedLoad(getDefaultType(), ptrHi, llvm::MaybeAlign(8), "rev.valhi");
         llvm::cast<llvm::Instruction>(valLo)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
         llvm::cast<llvm::Instruction>(valHi)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
-        auto* stLo = builder->CreateStore(valHi, ptrLo);
-        auto* stHi = builder->CreateStore(valLo, ptrHi);
+        auto* stLo = builder->CreateAlignedStore(valHi, ptrLo, llvm::MaybeAlign(8));
+        auto* stHi = builder->CreateAlignedStore(valLo, ptrHi, llvm::MaybeAlign(8));
         stLo->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
         stHi->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
         llvm::Value* newLo = builder->CreateAdd(lo, one, "rev.newlo", /*HasNUW=*/true, /*HasNSW=*/true);
@@ -2373,13 +2373,13 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         newBuf->addIncoming(arrPtr, nogrowBB);
 
         // Update length
-        auto* pushLenSt = builder->CreateStore(newLen, newBuf);
+        auto* pushLenSt = builder->CreateAlignedStore(newLen, newBuf, llvm::MaybeAlign(8));
         pushLenSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
         // Store new value at index oldLen + 1 (after header)
         llvm::Value* newElemIdx =
             builder->CreateAdd(oldLen, llvm::ConstantInt::get(getDefaultType(), 1), "push.elemidx", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* newElemPtr = builder->CreateInBoundsGEP(getDefaultType(), newBuf, newElemIdx, "push.elemptr");
-        auto* pushElemSt = builder->CreateStore(valArg, newElemPtr);
+        auto* pushElemSt = builder->CreateAlignedStore(valArg, newElemPtr, llvm::MaybeAlign(8));
         pushElemSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
         // Return new array pointer as i64
         return builder->CreatePtrToInt(newBuf, getDefaultType(), "push.result");
@@ -2420,7 +2420,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             load->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
         // Decrease length in-place
         llvm::Value* newLen = builder->CreateSub(oldLen, llvm::ConstantInt::get(getDefaultType(), 1), "pop.newlen", /*HasNUW=*/true, /*HasNSW=*/true);
-        auto* popLenSt = builder->CreateStore(newLen, arrPtr);
+        auto* popLenSt = builder->CreateAlignedStore(newLen, arrPtr, llvm::MaybeAlign(8));
         popLenSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
         return lastVal;
     }
