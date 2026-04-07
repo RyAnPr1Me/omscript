@@ -16,7 +16,9 @@ std::string Value::toString() const {
         int len = std::snprintf(buf, sizeof(buf), "%" PRId64, intValue);
         if (__builtin_expect(len >= 0 && static_cast<size_t>(len) < sizeof(buf), 1))
             return std::string(buf, static_cast<size_t>(len));
-        return std::to_string(intValue); // fallback (unreachable in practice)
+        // buf[32] is large enough for any i64 in base-10 (max 20 digits + sign).
+        // snprintf failure here is genuinely unreachable.
+        __builtin_unreachable();
     }
     case Type::FLOAT: {
         // Use snprintf instead of std::ostringstream to avoid dynamic memory

@@ -3258,7 +3258,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         idx->addIncoming(newIdx, bodyBB);
         auto* backBr_2825 = builder->CreateBr(loopBB);
         if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 6> mds;
+            llvm::SmallVector<llvm::Metadata*, 4> mds;
             mds.push_back(nullptr);
             mds.push_back(llvm::MDNode::get(*context,
                 {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
@@ -3361,7 +3361,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         idx->addIncoming(newIdx, bodyBB);
         auto* backBr_2892 = builder->CreateBr(loopBB);
         if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 6> mds;
+            llvm::SmallVector<llvm::Metadata*, 4> mds;
             mds.push_back(nullptr);
             mds.push_back(llvm::MDNode::get(*context,
                 {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
