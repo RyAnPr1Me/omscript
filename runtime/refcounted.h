@@ -158,6 +158,10 @@ class RefCountedString {
         // Same underlying data pointer → strings are identical → not less-than.
         // Mirrors the operator== fast path and avoids an unnecessary memcmp when
         // comparing a string to a copy of itself (common in sorted containers).
+        // This relies on the ref-counting semantics: two RefCountedStrings that
+        // share the same StringData allocation are, by construction, equal in
+        // content; distinct allocations with identical content will still fall
+        // through to the full lexicographic comparison below.
         if (data == other.data)
             return false;
         size_t len1 = length();

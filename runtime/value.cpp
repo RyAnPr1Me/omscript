@@ -14,7 +14,7 @@ std::string Value::toString() const {
         // before constructing the returned std::string.
         char buf[32];
         int len = std::snprintf(buf, sizeof(buf), "%" PRId64, intValue);
-        if (__builtin_expect(len > 0 && static_cast<size_t>(len) < sizeof(buf), 1))
+        if (__builtin_expect(len >= 0 && static_cast<size_t>(len) < sizeof(buf), 1))
             return std::string(buf, static_cast<size_t>(len));
         return std::to_string(intValue); // fallback (unreachable in practice)
     }

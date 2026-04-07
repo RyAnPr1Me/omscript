@@ -172,6 +172,13 @@ target_link_options(omsc PRIVATE
         # dynamic-only system libraries (libffi, libz, etc.).
         -static-libgcc
         -static-libstdc++
+        # Build a non-PIE (position-dependent) executable on Linux.
+        # BOLT (Binary Optimization and Layout Tool) used in the release
+        # pipeline cannot instrument PIE executables.  omsc is a developer
+        # tool, not a user-facing daemon, so the ASLR trade-off is fine.
+        # --export-dynamic (below) still gives the ORC JIT full dynamic
+        # symbol visibility in a non-PIE executable.
+        -no-pie
     >
 )
 
@@ -210,16 +217,21 @@ if(PGO_GENERATE)
     if(PGO_PROFILE_DIR)
         set(_pgo_gen_flag "${_pgo_gen_flag}=${PGO_PROFILE_DIR}")
     endif()
-    # Build compile flag list separately so each flag is its own list element.
-    set(_pgo_compile_flags "${_pgo_gen_flag}")
+    # Pass each PGO flag as its own target_compile_options call.
+    # Using list(APPEND) + a single target_compile_options expansion can cause
+    # CMake (particularly for the precompiled-header compilation step in GCC
+    # builds) to concatenate the semicolon-separated list into one shell
+    # argument ("-fprofile-generate -fprofile-update=atomic"), producing:
+    #   g++: error: unrecognized command-line option '-fprofile-generate ...'
+    # Separate calls guarantee each flag lands in its own argv slot.
+    target_compile_options(omsc PRIVATE "${_pgo_gen_flag}")
     # Atomic profile updates: safe when the instrumented binary is invoked
     # concurrently (e.g. run_tests.sh compiling multiple .om files).
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
-        list(APPEND _pgo_compile_flags "-fprofile-update=atomic")
+        target_compile_options(omsc PRIVATE -fprofile-update=atomic)
     endif()
-    target_compile_options(omsc PRIVATE ${_pgo_compile_flags})
     # Only -fprofile-generate[=dir] is needed at link time.
-    target_link_options(omsc PRIVATE ${_pgo_gen_flag})
+    target_link_options(omsc PRIVATE "${_pgo_gen_flag}")
 endif()
 
 if(PGO_USE)
