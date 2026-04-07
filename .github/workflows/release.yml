@@ -119,7 +119,6 @@ jobs:
             -DCMAKE_CXX_COMPILER=g++ \
             -DLLVM_DIR="$LLVM_DIR" \
             -DPGO_GENERATE=ON \
-            -DPGO_PROFILE_DIR="$PWD/pgo-profiles" \
             -DLTO=ON \
             -DUSE_MOLD=ON \
             "-DOMSC_VERSION=${{ steps.version.outputs.VERSION }}"
@@ -235,8 +234,11 @@ jobs:
           "$OMSC" /dev/null 2>/dev/null || true  # error: empty file
 
           # ── Verify profile data was generated ────────────────────────
-          # GCC creates .gcda files; Clang creates .profraw files.
-          GCDA_COUNT=$(find pgo-profiles -name '*.gcda' 2>/dev/null | wc -l)
+          # GCC creates .gcda files in the build tree (next to the .gcno
+          # files).  Without an explicit -fprofile-generate=DIR the path
+          # embedded in the binary matches the path GCC uses in the use
+          # phase, so no directory translation is needed.
+          GCDA_COUNT=$(find build -name '*.gcda' 2>/dev/null | wc -l)
           PROFRAW_COUNT=$(find pgo-profiles -name '*.profraw' 2>/dev/null | wc -l)
           echo ""
           echo "=== PGO profile summary ==="
@@ -245,23 +247,10 @@ jobs:
           echo "  Total compilations: $PGO_COUNT"
 
           if [ "$GCDA_COUNT" -gt 0 ]; then
-            # GCC: PGO_USE takes the profile directory directly.
-            # The omsc executable and omscript_lib library compile the same
-            # source files into different object directories (omsc.dir/ vs
-            # omscript_lib.dir/), so the #-mangled .gcda filenames differ.
-            # Copy profiles so both targets find matching profile data.
-            DUP_COUNT=0
-            for f in pgo-profiles/*omsc.dir*; do
-              [ -f "$f" ] || continue
-              dest="${f//omsc.dir/omscript_lib.dir}"
-              if [ ! -f "$dest" ]; then
-                cp "$f" "$dest"
-                DUP_COUNT=$((DUP_COUNT + 1))
-              fi
-            done
-            echo "  Duplicated $DUP_COUNT profiles for omscript_lib target"
-            echo "PGO_PROFILE_PATH=$PWD/pgo-profiles" >> "$GITHUB_ENV"
-            echo "  → GCC profiles detected; will use directory for PGO rebuild"
+            # GCC: -fprofile-use (no dir) finds .gcda files next to the
+            # .gcno files in the build tree.  Signal Step 3 to enable PGO.
+            echo "PGO_FOUND=1" >> "$GITHUB_ENV"
+            echo "  → GCC profiles detected in build tree; will use for PGO rebuild"
           elif [ "$PROFRAW_COUNT" -gt 0 ]; then
             # Clang: merge .profraw → .profdata, then PGO_USE takes the file.
             PROFDATA="$PWD/pgo-profiles/default.profdata"
@@ -281,14 +270,21 @@ jobs:
           fi
 
       # Step 3: Reconfigure the SAME build directory with PGO-use + LTO.
-      # Using the same directory is critical: GCC embeds the build-dir path
-      # in .gcda filenames, so a different directory causes a silent mismatch.
+      # Using the same directory is critical: GCC writes .gcda files next to
+      # the .gcno files in the build tree, and -fprofile-use (no dir) locates
+      # them by the same embedded path, ensuring a perfect match.
       - name: "PGO Step 3: Rebuild with PGO + LTO (Linux)"
         if: runner.os == 'Linux'
         shell: bash
         run: |
           pgo_args=()
-          if [ -n "${PGO_PROFILE_PATH:-}" ] && [ -e "${PGO_PROFILE_PATH:-}" ]; then
+          if [ "${PGO_FOUND:-0}" = "1" ]; then
+            # GCC no-dir mode: finds .gcda files next to .gcno files in the
+            # build tree without needing an explicit profile directory.
+            pgo_args+=("-DPGO_USE=ON")
+            echo "PGO profile-use: build tree (no explicit dir)"
+          elif [ -n "${PGO_PROFILE_PATH:-}" ] && [ -f "${PGO_PROFILE_PATH:-}" ]; then
+            # Clang .profdata path
             pgo_args+=("-DPGO_USE=$PGO_PROFILE_PATH")
             echo "PGO profile-use: $PGO_PROFILE_PATH"
           else
@@ -450,10 +446,12 @@ jobs:
         shell: bash
         run: |
           LLVM_PREFIX="$(brew --prefix llvm)"
+          SDKROOT="$(xcrun --show-sdk-path)"
           cmake -B build \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER="${LLVM_PREFIX}/bin/clang" \
             -DCMAKE_CXX_COMPILER="${LLVM_PREFIX}/bin/clang++" \
+            -DCMAKE_OSX_SYSROOT="${SDKROOT}" \
             -DLTO=ON \
             -DPGO_GENERATE=ON \
             -DPGO_PROFILE_DIR="$PWD/pgo-profiles" \
@@ -511,6 +509,7 @@ jobs:
         shell: bash
         run: |
           LLVM_PREFIX="$(brew --prefix llvm)"
+          SDKROOT="$(xcrun --show-sdk-path)"
           pgo_args=()
           if [ -n "${PGO_PROFILE_PATH:-}" ] && [ -f "${PGO_PROFILE_PATH:-}" ]; then
             pgo_args+=("-DPGO_USE=$PGO_PROFILE_PATH")
@@ -522,6 +521,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER="${LLVM_PREFIX}/bin/clang" \
             -DCMAKE_CXX_COMPILER="${LLVM_PREFIX}/bin/clang++" \
+            -DCMAKE_OSX_SYSROOT="${SDKROOT}" \
             -DLTO=ON \
             -DPGO_GENERATE=OFF \
             ${LLVM_DIR:+-DLLVM_DIR="$LLVM_DIR"} \

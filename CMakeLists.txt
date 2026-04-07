@@ -224,8 +224,20 @@ if(PGO_USE)
         target_compile_options(omsc PRIVATE -fprofile-use=${PGO_USE})
         target_link_options(omsc PRIVATE -fprofile-use=${PGO_USE})
     elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+        # When PGO_USE is a boolean true value (ON/1/TRUE), use -fprofile-use
+        # without a directory: GCC then finds .gcda files in the same location
+        # as the .gcno files produced during the generate phase (the build
+        # tree).  Supplying an explicit absolute directory causes a path-
+        # mangling mismatch — GCC #-encodes the absolute object-file path into
+        # the .gcda filename, but the use phase looks up the source-file path,
+        # so the two never match and all profile data is silently ignored.
+        if(PGO_USE STREQUAL "ON" OR PGO_USE STREQUAL "1" OR PGO_USE STREQUAL "TRUE")
+            set(_pgo_use_flag "-fprofile-use")
+        else()
+            set(_pgo_use_flag "-fprofile-use=${PGO_USE}")
+        endif()
         target_compile_options(omsc PRIVATE
-            -fprofile-use=${PGO_USE}
+            ${_pgo_use_flag}
             -fprofile-correction
             # Treat untrained code paths as cold.  Without this flag GCC
             # gives equal weight to trained and untrained paths, which
@@ -234,7 +246,7 @@ if(PGO_USE)
             -fprofile-partial-training
             -Wno-missing-profile
         )
-        target_link_options(omsc PRIVATE -fprofile-use=${PGO_USE})
+        target_link_options(omsc PRIVATE ${_pgo_use_flag})
     endif()
 endif()
 
