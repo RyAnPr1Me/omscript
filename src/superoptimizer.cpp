@@ -29,8 +29,10 @@
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/MDBuilder.h>
 #include <llvm/IR/PatternMatch.h>
+#include <llvm/IR/Verifier.h>
 #include <llvm/Support/KnownBits.h>
 #include <llvm/Support/MathExtras.h>
+#include <iostream>
 
 // LLVM 19 introduced getOrInsertDeclaration; older versions only have getDeclaration.
 #if LLVM_VERSION_MAJOR >= 19
@@ -5128,22 +5130,40 @@ SuperoptimizerStats superoptimizeFunction(llvm::Function& func,
     SuperoptimizerStats stats;
     if (func.isDeclaration()) return stats;
 
+    // DEBUG: phase-level verifier helper
+    auto dbgVerify = [&](const char* phase) {
+        std::string err;
+        llvm::raw_string_ostream es(err);
+        if (llvm::verifyFunction(func, &es)) {
+            std::cerr << "DEBUG VERIFY AFTER " << phase << " in " << func.getName().str() << ": " << err << "\n";
+        }
+    };
+
     // Phase 1: Idiom recognition and replacement
     if (config.enableIdiomRecognition) {
         for (auto& bb : func) {
             auto idioms = detectIdioms(bb);
             for (auto& match : idioms) {
+                // DEBUG: print the idiom being replaced
+                std::string instStr;
+                llvm::raw_string_ostream os(instStr);
+                match.rootInst->print(os);
+                std::cerr << "DEBUG IDIOM REPLACE idiom=" << (int)match.idiom
+                          << " type=" << match.rootInst->getType()->getTypeID()
+                          << " inst=" << instStr << "\n";
                 if (replaceIdiom(match)) {
                     stats.idiomsReplaced++;
                 }
             }
         }
     }
+    dbgVerify("Phase1-idiom");
 
     // Phase 2: Algebraic simplification
     if (config.enableAlgebraic) {
         stats.algebraicSimplified = applyAlgebraicSimplifications(func);
     }
+    dbgVerify("Phase2-algebraic");
 
     // Phase 2.5: Loop strength reduction — convert i*C to additive IVs
     // Runs after algebraic simplification but before branch opts so that
@@ -5151,6 +5171,7 @@ SuperoptimizerStats superoptimizeFunction(llvm::Function& func,
     if (config.enableAlgebraic) {
         stats.algebraicSimplified += loopStrengthReduce(func);
     }
+    dbgVerify("Phase2.5-lsr");
 
     // Phase 2.8: Known-bits narrowing (Souper-inspired) — use KnownBits to
     // prove redundant OR/AND masks, add NUW/NSW flags to shifts and adds.
@@ -5160,11 +5181,13 @@ SuperoptimizerStats superoptimizeFunction(llvm::Function& func,
     if (config.enableAlgebraic) {
         stats.algebraicSimplified += applyKnownBitsNarrowing(func);
     }
+    dbgVerify("Phase2.8-knownbits");
 
     // Phase 3: Branch simplification (branch-to-select)
     if (config.enableBranchOpt) {
         stats.branchesSimplified = simplifyBranches(func);
     }
+    dbgVerify("Phase3-branch");
 
     // Phase 3.2: Select chain simplification (Souper-inspired) — flatten
     // nested select(C, select(C, ...), ...) patterns that arise from OmScript
@@ -5173,6 +5196,7 @@ SuperoptimizerStats superoptimizeFunction(llvm::Function& func,
     if (config.enableBranchOpt) {
         stats.branchesSimplified += simplifySelectChains(func);
     }
+    dbgVerify("Phase3.2-selectchains");
 
     // Phase 3.5: Select operand sinking — factor common operands out of both
     // arms of a select, exposing idiom patterns to the recogniser.
@@ -5194,6 +5218,7 @@ SuperoptimizerStats superoptimizeFunction(llvm::Function& func,
             stats.algebraicSimplified += sinkCount;
         }
     }
+    dbgVerify("Phase3.5-selectsink+idiom");
 
     // Phase 3.8: MACS — Modular-Addition-to-Conditional-Subtract.
     // Replace urem(add(a,b), C) with select(s<C, s, s-C) when a,b ∈ [0,C).
