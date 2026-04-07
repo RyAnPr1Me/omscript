@@ -11719,6 +11719,101 @@ std::vector<RewriteRule> getStrengthReductionRules() {
             return g.addBinOp(Op::Add, axbx, s.at("c"));
         });
 
+    // ── Ternary (select) chain simplification ───────────────────────────
+    // These rules simplify nested ternary expressions at the AST level,
+    // complementing the IR-level select-chain pass in the superoptimizer.
+
+    // ternary(C, ternary(C, A, B), D) → ternary(C, A, D)
+    rules.emplace_back("ternary_redundant_inner_true",
+        P::OpPat(Op::Ternary, {P::Wild("c"),
+            P::OpPat(Op::Ternary, {P::Wild("c"), P::Wild("a"), P::Wild("b")}),
+            P::Wild("d")}),
+        [](EGraph& g, const Subst& s) {
+            ENode ternaryNode(Op::Ternary, std::vector<ClassId>{s.at("c"), s.at("a"), s.at("d")});
+            return g.add(ternaryNode);
+        });
+
+    // ternary(C, A, ternary(C, B, D)) → ternary(C, A, D)
+    rules.emplace_back("ternary_redundant_inner_false",
+        P::OpPat(Op::Ternary, {P::Wild("c"),
+            P::Wild("a"),
+            P::OpPat(Op::Ternary, {P::Wild("c"), P::Wild("b"), P::Wild("d")})}),
+        [](EGraph& g, const Subst& s) {
+            ENode ternaryNode(Op::Ternary, std::vector<ClassId>{s.at("c"), s.at("a"), s.at("d")});
+            return g.add(ternaryNode);
+        });
+
+    // ternary(!C, A, B) → ternary(C, B, A)  [swap arms on negated condition]
+    rules.emplace_back("ternary_not_swap",
+        P::OpPat(Op::Ternary, {P::OpPat(Op::LogNot, {P::Wild("c")}), P::Wild("a"), P::Wild("b")}),
+        [](EGraph& g, const Subst& s) {
+            ENode ternaryNode(Op::Ternary, std::vector<ClassId>{s.at("c"), s.at("b"), s.at("a")});
+            return g.add(ternaryNode);
+        });
+
+    // ── Modular arithmetic identities ───────────────────────────────────
+    // (a % c + b % c) % c → (a + b) % c  [modular addition]
+    rules.emplace_back("mod_add_combine",
+        P::OpPat(Op::Mod, {
+            P::OpPat(Op::Add, {
+                P::OpPat(Op::Mod, {P::Wild("a"), P::Wild("c")}),
+                P::OpPat(Op::Mod, {P::Wild("b"), P::Wild("c")})}),
+            P::Wild("c")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId sum = g.addBinOp(Op::Add, s.at("a"), s.at("b"));
+            return g.addBinOp(Op::Mod, sum, s.at("c"));
+        });
+
+    // (a % c * b % c) % c → (a * b) % c  [modular multiplication]
+    rules.emplace_back("mod_mul_combine",
+        P::OpPat(Op::Mod, {
+            P::OpPat(Op::Mul, {
+                P::OpPat(Op::Mod, {P::Wild("a"), P::Wild("c")}),
+                P::OpPat(Op::Mod, {P::Wild("b"), P::Wild("c")})}),
+            P::Wild("c")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId product = g.addBinOp(Op::Mul, s.at("a"), s.at("b"));
+            return g.addBinOp(Op::Mod, product, s.at("c"));
+        });
+
+    // (a % c - b % c + c) % c → (a - b + c) % c  [modular subtraction, safe]
+    // Simplified version: (a % c) % c → a % c  [double mod elimination]
+    rules.emplace_back("mod_double_elim",
+        P::OpPat(Op::Mod, {P::OpPat(Op::Mod, {P::Wild("a"), P::Wild("c")}), P::Wild("c")}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Mod, s.at("a"), s.at("c"));
+        });
+
+    // ── Integer power / exponentiation identities ───────────────────────
+    // x^2 → x * x  [strength reduce small power]
+    rules.emplace_back("pow2_to_mul",
+        P::OpPat(Op::Pow, {P::Wild("x"), P::ConstPat(2)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Mul, s.at("x"), s.at("x"));
+        });
+
+    // x^3 → x * x * x
+    rules.emplace_back("pow3_to_mul",
+        P::OpPat(Op::Pow, {P::Wild("x"), P::ConstPat(3)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId xx = g.addBinOp(Op::Mul, s.at("x"), s.at("x"));
+            return g.addBinOp(Op::Mul, xx, s.at("x"));
+        });
+
+    // x^1 → x
+    rules.emplace_back("pow1_identity",
+        P::OpPat(Op::Pow, {P::Wild("x"), P::ConstPat(1)}),
+        [](EGraph& /*g*/, const Subst& s) {
+            return s.at("x");
+        });
+
+    // x^0 → 1
+    rules.emplace_back("pow0_identity",
+        P::OpPat(Op::Pow, {P::Wild("x"), P::ConstPat(0)}),
+        [](EGraph& g, const Subst& /*s*/) {
+            return g.addConst(1);
+        });
+
     return rules;
 }
 

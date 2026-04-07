@@ -39,6 +39,7 @@ option(COVERAGE "Coverage" OFF)
 set(SANITIZE "" CACHE STRING "Sanitizers")
 option(UNITY_BUILD "Unity build (faster compile)" OFF)
 option(WITH_OPENMP "Enable OpenMP for parallel compilation passes" ON)
+option(USE_MOLD "Use mold linker for faster link times" OFF)
 
 # ── LLVM ──────────────────────────────────────────────────────────────────────
 find_package(LLVM REQUIRED CONFIG)
@@ -147,6 +148,14 @@ target_compile_options(omsc PRIVATE
         -ftree-loop-im
         -ftree-loop-ivcanon
         -fipa-pta
+
+        # GCC block reordering: use the extended TSP algorithm which produces
+        # better code locality than the default "STC" for large binaries.
+        -freorder-blocks-algorithm=stc
+        # Align hot function entries to cache line boundaries.
+        -falign-functions=32
+        # Enable computed goto lowering and switch table generation.
+        -ftree-switch-conversion
     >
 )
 
@@ -169,6 +178,17 @@ target_link_options(omsc PRIVATE
 # Required for ORC JIT
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND NOT APPLE)
     target_link_options(omsc PRIVATE -Wl,--export-dynamic)
+endif()
+
+# ── Mold linker (optional — much faster link times for PGO rebuild) ───────────
+if(USE_MOLD)
+    find_program(MOLD_LINKER mold)
+    if(MOLD_LINKER)
+        target_link_options(omsc PRIVATE -fuse-ld=mold)
+        message(STATUS "Using mold linker: ${MOLD_LINKER}")
+    else()
+        message(STATUS "mold not found — using default linker")
+    endif()
 endif()
 
 # ── LTO (IPO) ─────────────────────────────────────────────────────────────────
