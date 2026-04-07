@@ -8,8 +8,16 @@ namespace omscript {
 
 std::string Value::toString() const {
     switch (type) {
-    case Type::INTEGER:
-        return std::to_string(intValue);
+    case Type::INTEGER: {
+        // Use snprintf (like the FLOAT case below) to avoid the extra
+        // intermediate allocation that std::to_string performs internally
+        // before constructing the returned std::string.
+        char buf[32];
+        int len = std::snprintf(buf, sizeof(buf), "%" PRId64, intValue);
+        if (__builtin_expect(len > 0 && static_cast<size_t>(len) < sizeof(buf), 1))
+            return std::string(buf, static_cast<size_t>(len));
+        return std::to_string(intValue); // fallback (unreachable in practice)
+    }
     case Type::FLOAT: {
         // Use snprintf instead of std::ostringstream to avoid dynamic memory
         // allocation overhead. The buffer is large enough for any double in

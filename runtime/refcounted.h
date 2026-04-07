@@ -155,6 +155,11 @@ class RefCountedString {
     }
 
     [[nodiscard]] bool operator<(const RefCountedString& other) const {
+        // Same underlying data pointer → strings are identical → not less-than.
+        // Mirrors the operator== fast path and avoids an unnecessary memcmp when
+        // comparing a string to a copy of itself (common in sorted containers).
+        if (data == other.data)
+            return false;
         size_t len1 = length();
         size_t len2 = other.length();
         size_t minLen = len1 < len2 ? len1 : len2;
@@ -200,7 +205,18 @@ class RefCountedString {
     // Decrement reference count and free if zero
     void release() noexcept {
         if (__builtin_expect(data != nullptr, 1)) {
-            if (__builtin_expect(data->refCount.fetch_sub(1, std::memory_order_acq_rel) == 1, 0)) {
+            // Use release ordering on the decrement so all prior accesses to
+            // the object's data are visible to whichever thread observes the
+            // reference count drop to zero.
+            // An acquire fence is inserted only on the final decrement (when
+            // the count was 1 and now becomes 0).  This is cheaper than
+            // acq_rel on every decrement: on x86/TSO both are equivalent, but
+            // on ARM/AArch64 the acquire barrier is a full dmb ish — skipping
+            // it on non-final decrements avoids the barrier on the common path.
+            if (__builtin_expect(data->refCount.fetch_sub(1, std::memory_order_release) == 1, 0)) {
+                // Synchronize with all prior release-decrements so we see every
+                // write to the object before we free it.
+                std::atomic_thread_fence(std::memory_order_acquire);
                 std::free(data);
                 data = nullptr;
             }
