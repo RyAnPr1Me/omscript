@@ -453,6 +453,7 @@ jobs:
             -DLTO=ON \
             -DPGO_GENERATE=ON \
             -DPGO_PROFILE_DIR="$PWD/pgo-profiles" \
+            -DCMAKE_OSX_SYSROOT="$(xcrun --show-sdk-path)" \
             ${LLVM_DIR:+-DLLVM_DIR="$LLVM_DIR"} \
             "-DOMSC_VERSION=${{ steps.version.outputs.VERSION }}"
           cmake --build build --config Release --parallel 4
@@ -487,8 +488,10 @@ jobs:
           # Merge profiles — always use Homebrew LLVM's llvm-profdata to match
           # the clang version used to generate the profiles.
           PROFRAW_COUNT=$(find pgo-profiles -name '*.profraw' 2>/dev/null | wc -l)
-          echo "macOS PGO: $PROFRAW_COUNT .profraw files"
+          GCDA_COUNT=$(find pgo-profiles -name '*.gcda' 2>/dev/null | wc -l)
+          echo "macOS PGO: $PROFRAW_COUNT .profraw files, $GCDA_COUNT .gcda files"
           if [ "$PROFRAW_COUNT" -gt 0 ]; then
+            # Clang instrumentation-based profiling (-fprofile-instr-generate)
             PROFDATA="$PWD/pgo-profiles/default.profdata"
             LLVM_PROFDATA="$(brew --prefix llvm)/bin/llvm-profdata"
             if [ -x "$LLVM_PROFDATA" ]; then
@@ -498,8 +501,14 @@ jobs:
             fi
             if [ -f "$PROFDATA" ]; then
               echo "PGO_PROFILE_PATH=$PROFDATA" >> "$GITHUB_ENV"
-              echo "  → macOS Clang profiles merged"
+              echo "  → macOS Clang instrumentation profiles merged"
             fi
+          elif [ "$GCDA_COUNT" -gt 0 ]; then
+            # GCC-style profiling (-fprofile-generate) — pass the directory
+            echo "PGO_PROFILE_PATH=$PWD/pgo-profiles" >> "$GITHUB_ENV"
+            echo "  → macOS Clang GCC-style profiles in $PWD/pgo-profiles"
+          else
+            echo "::warning::No macOS PGO profile data found; building with LTO only"
           fi
 
       - name: "PGO Step 3: Rebuild with PGO + LTO (macOS)"
@@ -508,7 +517,7 @@ jobs:
         run: |
           LLVM_PREFIX="$(brew --prefix llvm)"
           pgo_args=()
-          if [ -n "${PGO_PROFILE_PATH:-}" ] && [ -f "${PGO_PROFILE_PATH:-}" ]; then
+          if [ -n "${PGO_PROFILE_PATH:-}" ] && [ -e "${PGO_PROFILE_PATH:-}" ]; then
             pgo_args+=("-DPGO_USE=$PGO_PROFILE_PATH")
             echo "macOS PGO profile-use: $PGO_PROFILE_PATH"
           else
@@ -520,6 +529,7 @@ jobs:
             -DCMAKE_CXX_COMPILER="${LLVM_PREFIX}/bin/clang++" \
             -DLTO=ON \
             -DPGO_GENERATE=OFF \
+            -DCMAKE_OSX_SYSROOT="$(xcrun --show-sdk-path)" \
             ${LLVM_DIR:+-DLLVM_DIR="$LLVM_DIR"} \
             "${pgo_args[@]}" \
             "-DOMSC_VERSION=${{ steps.version.outputs.VERSION }}"
