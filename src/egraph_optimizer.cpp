@@ -275,9 +275,12 @@ std::unique_ptr<Expression> optimizeExpression(const Expression* expr) {
     EGraph graph(config);
     ClassId root = astToEGraph(graph, expr);
 
-    // Run equality saturation with all rules
-    auto rules = getAllRules();
-    graph.saturate(rules);
+    // Run equality saturation with all rules.
+    // The rule set is constant across the lifetime of the process, so we build
+    // it once and reuse it for every expression.  C++11 guarantees that the
+    // initialisation of a function-local static is thread-safe.
+    static const std::vector<RewriteRule> kAllRules = getAllRules();
+    graph.saturate(kAllRules);
 
     // Extract the optimal expression
     CostModel model;
