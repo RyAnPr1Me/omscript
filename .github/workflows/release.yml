@@ -449,8 +449,11 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: |
+          LLVM_PREFIX="$(brew --prefix llvm)"
           cmake -B build \
             -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER="${LLVM_PREFIX}/bin/clang" \
+            -DCMAKE_CXX_COMPILER="${LLVM_PREFIX}/bin/clang++" \
             -DLTO=ON \
             -DPGO_GENERATE=ON \
             -DPGO_PROFILE_DIR="$PWD/pgo-profiles" \
@@ -485,16 +488,17 @@ jobs:
             done
           done
 
-          # Merge profiles
+          # Merge profiles — always use Homebrew LLVM's llvm-profdata to match
+          # the clang version used to generate the profiles.
           PROFRAW_COUNT=$(find pgo-profiles -name '*.profraw' 2>/dev/null | wc -l)
           echo "macOS PGO: $PROFRAW_COUNT .profraw files"
           if [ "$PROFRAW_COUNT" -gt 0 ]; then
             PROFDATA="$PWD/pgo-profiles/default.profdata"
-            # Try versioned llvm-profdata first, then unversioned
-            if command -v llvm-profdata &>/dev/null; then
+            LLVM_PROFDATA="$(brew --prefix llvm)/bin/llvm-profdata"
+            if [ -x "$LLVM_PROFDATA" ]; then
+              "$LLVM_PROFDATA" merge -output="$PROFDATA" pgo-profiles/*.profraw
+            elif command -v llvm-profdata &>/dev/null; then
               llvm-profdata merge -output="$PROFDATA" pgo-profiles/*.profraw
-            elif [ -x "$(brew --prefix llvm)/bin/llvm-profdata" ]; then
-              "$(brew --prefix llvm)/bin/llvm-profdata" merge -output="$PROFDATA" pgo-profiles/*.profraw
             fi
             if [ -f "$PROFDATA" ]; then
               echo "PGO_PROFILE_PATH=$PROFDATA" >> "$GITHUB_ENV"
@@ -506,6 +510,7 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: |
+          LLVM_PREFIX="$(brew --prefix llvm)"
           pgo_args=()
           if [ -n "${PGO_PROFILE_PATH:-}" ] && [ -f "${PGO_PROFILE_PATH:-}" ]; then
             pgo_args+=("-DPGO_USE=$PGO_PROFILE_PATH")
@@ -515,6 +520,8 @@ jobs:
           fi
           cmake -B build \
             -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER="${LLVM_PREFIX}/bin/clang" \
+            -DCMAKE_CXX_COMPILER="${LLVM_PREFIX}/bin/clang++" \
             -DLTO=ON \
             -DPGO_GENERATE=OFF \
             ${LLVM_DIR:+-DLLVM_DIR="$LLVM_DIR"} \
