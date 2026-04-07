@@ -206,17 +206,20 @@ if(PGO_GENERATE AND PGO_USE)
 endif()
 
 if(PGO_GENERATE)
-    set(flags "-fprofile-generate")
+    set(_pgo_gen_flag "-fprofile-generate")
     if(PGO_PROFILE_DIR)
-        set(flags "${flags}=${PGO_PROFILE_DIR}")
+        set(_pgo_gen_flag "${_pgo_gen_flag}=${PGO_PROFILE_DIR}")
     endif()
+    # Build compile flag list separately so each flag is its own list element.
+    set(_pgo_compile_flags "${_pgo_gen_flag}")
     # Atomic profile updates: safe when the instrumented binary is invoked
     # concurrently (e.g. run_tests.sh compiling multiple .om files).
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
-        set(flags "${flags} -fprofile-update=atomic")
+        list(APPEND _pgo_compile_flags "-fprofile-update=atomic")
     endif()
-    target_compile_options(omsc PRIVATE ${flags})
-    target_link_options(omsc PRIVATE ${flags})
+    target_compile_options(omsc PRIVATE ${_pgo_compile_flags})
+    # Only -fprofile-generate[=dir] is needed at link time.
+    target_link_options(omsc PRIVATE ${_pgo_gen_flag})
 endif()
 
 if(PGO_USE)

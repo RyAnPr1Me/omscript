@@ -446,12 +446,10 @@ jobs:
         shell: bash
         run: |
           LLVM_PREFIX="$(brew --prefix llvm)"
-          SDKROOT="$(xcrun --show-sdk-path)"
           cmake -B build \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER="${LLVM_PREFIX}/bin/clang" \
             -DCMAKE_CXX_COMPILER="${LLVM_PREFIX}/bin/clang++" \
-            -DCMAKE_OSX_SYSROOT="${SDKROOT}" \
             -DLTO=ON \
             -DPGO_GENERATE=ON \
             -DPGO_PROFILE_DIR="$PWD/pgo-profiles" \
@@ -509,7 +507,6 @@ jobs:
         shell: bash
         run: |
           LLVM_PREFIX="$(brew --prefix llvm)"
-          SDKROOT="$(xcrun --show-sdk-path)"
           pgo_args=()
           if [ -n "${PGO_PROFILE_PATH:-}" ] && [ -f "${PGO_PROFILE_PATH:-}" ]; then
             pgo_args+=("-DPGO_USE=$PGO_PROFILE_PATH")
@@ -521,7 +518,6 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER="${LLVM_PREFIX}/bin/clang" \
             -DCMAKE_CXX_COMPILER="${LLVM_PREFIX}/bin/clang++" \
-            -DCMAKE_OSX_SYSROOT="${SDKROOT}" \
             -DLTO=ON \
             -DPGO_GENERATE=OFF \
             ${LLVM_DIR:+-DLLVM_DIR="$LLVM_DIR"} \
