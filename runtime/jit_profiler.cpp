@@ -22,6 +22,7 @@ namespace omscript {
 // every 16th event (1/16); 0x7 samples every 8th event (1/8).  Using bit-masks
 // instead of modulo keeps the hot-path check to a single AND instruction.
 static constexpr uint64_t kBranchSampleMask   = 0xF; // 1-in-16 sampling
+static constexpr uint64_t kArgSampleMask      = 0xF; // 1-in-16 sampling
 static constexpr uint64_t kLoopSampleMask     = 0x7; // 1-in-8 sampling
 static constexpr uint64_t kCallSiteSampleMask = 0xF; // 1-in-16 sampling
 
@@ -63,6 +64,16 @@ void JITProfiler::recordBranch(const char* funcName, uint32_t branchId, bool tak
 }
 
 void JITProfiler::recordArg(const char* funcName, uint32_t argIndex, ArgType type, int64_t value) {
+    // Sample at the callback level: only record every 16th observation.
+    // This reduces mutex contention and cache-line bouncing by 16× while
+    // maintaining statistically accurate type/constant distributions.
+    // thread_local avoids atomic operations on the hot path and prevents
+    // cross-thread counter aliasing that would bias per-function profiles.
+    thread_local uint64_t argSampleCounter = 0;
+    uint64_t sample = argSampleCounter++;
+    if (__builtin_expect((sample & kArgSampleMask) != 0, 1))
+        return;
+
     std::unique_lock<std::mutex> lk(mtx_, std::try_to_lock);
     if (__builtin_expect(!lk.owns_lock(), 0))
         return;

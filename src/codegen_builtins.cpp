@@ -733,7 +733,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         acc->addIncoming(zero, entryBB);
         idx->addIncoming(zero, entryBB);
 
-        llvm::Value* done = builder->CreateICmpSGE(idx, length, "sum.done");
+        // Unsigned comparison: idx starts at 0 and length has !range [0, i64max],
+        // so both are provably non-negative.  UGE gives SCEV a canonical unsigned
+        // trip count which improves vectorizer cost modeling and IndVarSimplify.
+        llvm::Value* done = builder->CreateICmpUGE(idx, length, "sum.done");
         auto* sumCondBr = builder->CreateCondBr(done, doneBB, bodyBB);
         if (optimizationLevel >= OptimizationLevel::O2) {
             sumCondBr->setMetadata(llvm::LLVMContext::MD_prof,
@@ -2460,7 +2463,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(loopBB);
         llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "indexof.idx");
         idx->addIncoming(zero, preheader);
-        llvm::Value* cond = builder->CreateICmpSLT(idx, arrLen, "indexof.cond");
+        // Unsigned: idx starts at 0, arrLen ≥ 0 (range metadata).
+        llvm::Value* cond = builder->CreateICmpULT(idx, arrLen, "indexof.cond");
         builder->CreateCondBr(cond, bodyBB, doneBB);
         builder->SetInsertPoint(bodyBB);
         llvm::Value* elemIdx = builder->CreateAdd(idx, one, "indexof.elemidx", /*HasNUW=*/true, /*HasNSW=*/true);
@@ -2525,7 +2529,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(loopBB);
         llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "contains.idx");
         idx->addIncoming(zero, preheader);
-        llvm::Value* cond = builder->CreateICmpSLT(idx, arrLen, "contains.cond");
+        // Unsigned: idx starts at 0, arrLen ≥ 0 (range metadata).
+        llvm::Value* cond = builder->CreateICmpULT(idx, arrLen, "contains.cond");
         builder->CreateCondBr(cond, bodyBB, doneBB);
         builder->SetInsertPoint(bodyBB);
         llvm::Value* elemIdx = builder->CreateAdd(idx, one, "contains.elemidx", /*HasNUW=*/true, /*HasNSW=*/true);
@@ -2945,7 +2950,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(loopBB);
         llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "amap.idx");
         idx->addIncoming(zero, preheader);
-        llvm::Value* cond = builder->CreateICmpSLT(idx, arrLen, "amap.cond");
+        // Unsigned: idx starts at 0, arrLen ≥ 0 (range metadata).
+        llvm::Value* cond = builder->CreateICmpULT(idx, arrLen, "amap.cond");
         builder->CreateCondBr(cond, bodyBB, doneBB);
         builder->SetInsertPoint(bodyBB);
         // Load element from source: arrPtr[idx + 1]
@@ -3038,7 +3044,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         idx->addIncoming(zero, preheader);
         llvm::PHINode* outIdx = builder->CreatePHI(getDefaultType(), 2, "afilt.outidx");
         outIdx->addIncoming(zero, preheader);
-        llvm::Value* cond = builder->CreateICmpSLT(idx, arrLen, "afilt.cond");
+        // Unsigned: idx starts at 0, arrLen ≥ 0 (range metadata).
+        llvm::Value* cond = builder->CreateICmpULT(idx, arrLen, "afilt.cond");
         builder->CreateCondBr(cond, testBB, doneBB);
 
         builder->SetInsertPoint(testBB);
@@ -3144,7 +3151,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         idx->addIncoming(zero, preheader);
         llvm::PHINode* acc = builder->CreatePHI(getDefaultType(), 2, "areduce.acc");
         acc->addIncoming(initVal, preheader);
-        llvm::Value* cond = builder->CreateICmpSLT(idx, arrLen, "areduce.cond");
+        // Unsigned: idx starts at 0, arrLen ≥ 0 (range metadata).
+        llvm::Value* cond = builder->CreateICmpULT(idx, arrLen, "areduce.cond");
         builder->CreateCondBr(cond, bodyBB, doneBB);
 
         builder->SetInsertPoint(bodyBB);
@@ -3197,8 +3205,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
         llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
 
-        // Check if empty
-        llvm::Value* isEmpty = builder->CreateICmpSLE(length, zero, "amin.isempty");
+        // length has !range metadata [0, i64max], so len <= 0 ≡ len == 0.
+        // ICmpEQ is more direct and avoids LLVM having to prove non-negativity.
+        llvm::Value* isEmpty = builder->CreateICmpEQ(length, zero, "amin.isempty");
         builder->CreateCondBr(isEmpty, emptyBB, initBB);
 
         // Empty: return 0
@@ -3227,7 +3236,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         curMin->addIncoming(firstElem, initBB);
         idx->addIncoming(one, initBB);
 
-        llvm::Value* doneCheck = builder->CreateICmpSGE(idx, length, "amin.donecheck");
+        // Unsigned: idx starts at 1, length ≥ 0 (range metadata) → UGE is equivalent
+        // to SGE but gives SCEV a clean unsigned trip count for the vectorizer.
+        llvm::Value* doneCheck = builder->CreateICmpUGE(idx, length, "amin.donecheck");
         builder->CreateCondBr(doneCheck, doneBB, bodyBB);
 
         // Body: compare and update min
@@ -3236,17 +3247,36 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, offset, "amin.elemptr");
         llvm::Value* elem = builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "amin.elem");
         llvm::cast<llvm::Instruction>(elem)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
-        llvm::Value* isLess = builder->CreateICmpSLT(elem, curMin, "amin.isless");
-        llvm::Value* newMin = builder->CreateSelect(isLess, elem, curMin, "amin.newmin");
+        // Use llvm.smin intrinsic instead of icmp+select.  The intrinsic:
+        //  1. Generates a single cmov/SIMD-min instruction rather than a branch
+        //  2. Is recognized by the vectorizer as a min-reduction, enabling
+        //     SIMD vpcmpq+vpminsd (AVX2) or vpminq (AVX-512) instructions
+        llvm::Function* sminFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::smin, {getDefaultType()});
+        llvm::Value* newMin = builder->CreateCall(sminFn, {elem, curMin}, "amin.newmin");
         llvm::Value* newIdx = builder->CreateAdd(idx, one, "amin.newidx", /*HasNUW=*/true, /*HasNSW=*/true);
         curMin->addIncoming(newMin, bodyBB);
         idx->addIncoming(newIdx, bodyBB);
         auto* backBr_2825 = builder->CreateBr(loopBB);
         if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 2> mds;
+            llvm::SmallVector<llvm::Metadata*, 4> mds;
             mds.push_back(nullptr);
             mds.push_back(llvm::MDNode::get(*context,
                 {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
+            // Vectorization: amin is a reduction loop — each iteration is
+            // independent (depends only on curMin which tracks the minimum).
+            // With llvm.smin intrinsic + vectorize.enable, LLVM emits a
+            // vectorized min-reduction (vpminsd/vpminq on x86) and then
+            // reduces the vector at the end with a single horizontal min.
+            if (optimizationLevel >= OptimizationLevel::O2) {
+                mds.push_back(llvm::MDNode::get(*context,
+                    {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
+                     llvm::ConstantAsMetadata::get(
+                         llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
+                mds.push_back(llvm::MDNode::get(*context,
+                    {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
+                     llvm::ConstantAsMetadata::get(
+                         llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))}));
+            }
             llvm::MDNode* md = llvm::MDNode::get(*context, mds);
             md->replaceOperandWith(0, md);
             backBr_2825->setMetadata(llvm::LLVMContext::MD_loop, md);
@@ -3282,8 +3312,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
         llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
 
-        // Check if empty
-        llvm::Value* isEmpty = builder->CreateICmpSLE(length, zero, "amax.isempty");
+        // length has !range metadata [0, i64max], so len <= 0 ≡ len == 0.
+        llvm::Value* isEmpty = builder->CreateICmpEQ(length, zero, "amax.isempty");
         builder->CreateCondBr(isEmpty, emptyBB, initBB);
 
         // Empty: return 0
@@ -3312,7 +3342,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         curMax->addIncoming(firstElem, initBB);
         idx->addIncoming(one, initBB);
 
-        llvm::Value* doneCheck = builder->CreateICmpSGE(idx, length, "amax.donecheck");
+        // Unsigned: idx starts at 1, length ≥ 0 (range metadata).
+        llvm::Value* doneCheck = builder->CreateICmpUGE(idx, length, "amax.donecheck");
         builder->CreateCondBr(doneCheck, doneBB, bodyBB);
 
         // Body: compare and update max
@@ -3321,17 +3352,29 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, offset, "amax.elemptr");
         llvm::Value* elem = builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "amax.elem");
         llvm::cast<llvm::Instruction>(elem)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
-        llvm::Value* isGreater = builder->CreateICmpSGT(elem, curMax, "amax.isgreater");
-        llvm::Value* newMax = builder->CreateSelect(isGreater, elem, curMax, "amax.newmax");
+        // Use llvm.smax intrinsic instead of icmp+select for the same reasons
+        // as amin: direct SIMD max instruction + vectorizer-friendly reduction.
+        llvm::Function* smaxFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::smax, {getDefaultType()});
+        llvm::Value* newMax = builder->CreateCall(smaxFn, {elem, curMax}, "amax.newmax");
         llvm::Value* newIdx = builder->CreateAdd(idx, one, "amax.newidx");
         curMax->addIncoming(newMax, bodyBB);
         idx->addIncoming(newIdx, bodyBB);
         auto* backBr_2892 = builder->CreateBr(loopBB);
         if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 2> mds;
+            llvm::SmallVector<llvm::Metadata*, 4> mds;
             mds.push_back(nullptr);
             mds.push_back(llvm::MDNode::get(*context,
                 {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
+            if (optimizationLevel >= OptimizationLevel::O2) {
+                mds.push_back(llvm::MDNode::get(*context,
+                    {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
+                     llvm::ConstantAsMetadata::get(
+                         llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
+                mds.push_back(llvm::MDNode::get(*context,
+                    {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
+                     llvm::ConstantAsMetadata::get(
+                         llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))}));
+            }
             llvm::MDNode* md = llvm::MDNode::get(*context, mds);
             md->replaceOperandWith(0, md);
             backBr_2892->setMetadata(llvm::LLVMContext::MD_loop, md);
@@ -3396,7 +3439,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(loopBB);
         llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "aany.idx");
         idx->addIncoming(zero, entryBB);
-        llvm::Value* doneCheck = builder->CreateICmpSGE(idx, length, "aany.donecheck");
+        // Unsigned: idx starts at 0, length ≥ 0 (range metadata).
+        llvm::Value* doneCheck = builder->CreateICmpUGE(idx, length, "aany.donecheck");
         builder->CreateCondBr(doneCheck, doneBB, bodyBB);
 
         builder->SetInsertPoint(bodyBB);
@@ -3472,7 +3516,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(loopBB);
         llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "aevery.idx");
         idx->addIncoming(zero, entryBB);
-        llvm::Value* doneCheck = builder->CreateICmpSGE(idx, length, "aevery.donecheck");
+        // Unsigned: idx starts at 0, length ≥ 0 (range metadata).
+        llvm::Value* doneCheck = builder->CreateICmpUGE(idx, length, "aevery.donecheck");
         builder->CreateCondBr(doneCheck, doneBB, bodyBB);
 
         builder->SetInsertPoint(bodyBB);
@@ -3537,7 +3582,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "afind.idx");
         idx->addIncoming(zero, entryBB);
 
-        llvm::Value* doneCheck = builder->CreateICmpSGE(idx, length, "afind.donecheck");
+        // Unsigned: idx starts at 0, length ≥ 0 (range metadata).
+        llvm::Value* doneCheck = builder->CreateICmpUGE(idx, length, "afind.donecheck");
         builder->CreateCondBr(doneCheck, doneBB, bodyBB);
 
         builder->SetInsertPoint(bodyBB);
@@ -3612,7 +3658,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "acnt.idx");
         acc->addIncoming(zero, entryBB);
         idx->addIncoming(zero, entryBB);
-        llvm::Value* doneCheck = builder->CreateICmpSGE(idx, length, "acnt.donecheck");
+        // Unsigned: idx starts at 0, length ≥ 0 (range metadata).
+        llvm::Value* doneCheck = builder->CreateICmpUGE(idx, length, "acnt.donecheck");
         builder->CreateCondBr(doneCheck, doneBB, bodyBB);
 
         builder->SetInsertPoint(bodyBB);
