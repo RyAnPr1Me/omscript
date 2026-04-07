@@ -827,14 +827,15 @@ void CodeGenerator::runOptimizationPasses() {
                 // Safe at O2 and benefits array-heavy OmScript code.
                 LPM.addPass(llvm::LoopPredicationPass());
                 if (isO3) {
-                    // NOTE: LoopBoundSplitPass is intentionally disabled.
-                    // LLVM 18's hasProcessableCondition() dereferences a null
-                    // pointer when the loop condition involves certain integer
-                    // comparisons with loop-variant bounds (as seen in
-                    // benchmark_jit_aot.om).  The pass is unsafe at all
-                    // optimisation levels on LLVM <= 19 and is omitted here.
-                    // Re-evaluate when upgrading to LLVM 20+.
-#if LLVM_VERSION_MAJOR < 20
+#if LLVM_VERSION_MAJOR >= 20
+                    // LoopBoundSplit splits loops by bounds to enable better
+                    // vectorization (e.g. separate aligned/unaligned iterations).
+                    // Disabled on LLVM <= 19: hasProcessableCondition() null-
+                    // dereferences on certain integer-comparison loop bounds
+                    // (as seen in benchmark_jit_aot.om), causing a segfault
+                    // during the PGO training run and the final build.
+                    LPM.addPass(llvm::LoopBoundSplitPass());
+#else
                     // LoopReroll recognizes manually-unrolled loop patterns and
                     // "rerolls" them into a single iteration with a larger trip
                     // count.  This enables the vectorizer to handle patterns
