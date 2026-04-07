@@ -319,10 +319,12 @@ jobs:
         continue-on-error: true
         shell: bash
         run: |
-          # Check if BOLT tools are available (part of LLVM)
+          # Check if BOLT tools are available (part of LLVM).
+          # Try the unsuffixed name first (matches the `llvm-bolt` apt package),
+          # then fall back to versioned suffixes found in `bolt-18`.
           BOLT=""
           MERGE=""
-          for suffix in "-18" "-17" ""; do
+          for suffix in "" "-18" "-17"; do
             if command -v "llvm-bolt${suffix}" &>/dev/null; then
               BOLT="llvm-bolt${suffix}"
               MERGE="merge-fdata${suffix}"
@@ -378,7 +380,11 @@ jobs:
             "$MERGE" bolt-profiles/prof.* > bolt-profiles/merged.fdata 2>/dev/null
           else
             # Fallback: use the largest profile file as the merged data
-            ls -S bolt-profiles/prof.* | head -1 | xargs -I{} cp {} bolt-profiles/merged.fdata 2>/dev/null || true
+            echo "::warning::merge-fdata not found; using largest profile file as fallback"
+            if ! ls -S bolt-profiles/prof.* 2>/dev/null | head -1 | xargs -I{} cp {} bolt-profiles/merged.fdata; then
+              echo "::warning::BOLT profile fallback copy failed; skipping BOLT"
+              exit 0
+            fi
           fi
 
           if [ ! -s bolt-profiles/merged.fdata ]; then
