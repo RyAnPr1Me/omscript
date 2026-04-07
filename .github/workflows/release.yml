@@ -66,6 +66,7 @@ jobs:
             cmake \
             build-essential \
             llvm-18-dev \
+            llvm-bolt \
             libgtest-dev \
             gcc \
             mold
@@ -303,50 +304,17 @@ jobs:
             "-DOMSC_VERSION=${{ steps.version.outputs.VERSION }}"
           cmake --build build --config Release --parallel "$(nproc)"
 
-      # Step 3.5: IR-level superoptimization (Souper-inspired).
-      # Run LLVM's own opt tool on the compiled object files with aggressive
-      # passes that GCC's LTO doesn't invoke.  This applies LLVM's superior
-      # scalar optimizer, GVN, InstCombine, and SCCP to the compiler's own
-      # code, catching patterns the host compiler (GCC) misses.
-      #
-      # We do this by extracting the object files, running opt on each,
-      # then relinking.  For LTO builds, GCC generates GIMPLE-encoded
-      # objects, so we skip this step (it only works on non-LTO objects).
-      # Instead, we compile the most performance-critical files with both
-      # GCC and LLVM flags at the same time.
-      - name: "PGO Step 3.5: IR-level opt pass on critical paths (Linux)"
-        if: runner.os == 'Linux'
-        continue-on-error: true
-        shell: bash
-        run: |
-          # Use LLVM's opt for extra optimization on the final binary.
-          # Since GCC LTO produces GIMPLE bitcode (not LLVM IR), we can't
-          # run opt on individual object files directly.  Instead, we run
-          # opt-level flags through the GCC PGO rebuild which already has
-          # -O3 + PGO + LTO.
-          #
-          # What we CAN do: use strip + objcopy to remove debug info and
-          # optimize the binary layout, and use LLVM's llvm-strip for
-          # minimal binary size.
-          OMSC="./build/omsc"
-          if [ -f "$OMSC" ]; then
-            ORIG_SIZE=$(stat -c%s "$OMSC")
-            # Strip debug info and unnecessary sections
-            strip --strip-debug --strip-unneeded "$OMSC" 2>/dev/null || true
-            # Remove comment and note sections for smaller binary
-            objcopy --remove-section=.comment --remove-section=.note \
-              --remove-section=.note.gnu.build-id "$OMSC" 2>/dev/null || true
-            NEW_SIZE=$(stat -c%s "$OMSC")
-            echo "Binary size: $ORIG_SIZE → $NEW_SIZE ($(( (ORIG_SIZE - NEW_SIZE) / 1024 ))K saved)"
-          fi
-
-      # Step 4 (optional): BOLT post-link optimization.
+      # Step 3.5 (optional): BOLT post-link optimization.
       # BOLT (Binary Optimization and Layout Tool) reorders functions and
       # basic blocks in the final binary based on execution profiles,
       # improving instruction cache utilization.  This is complementary to
       # PGO (which optimizes at compile time) — BOLT optimizes the final
       # linked binary layout.  Typical improvement: 5-15% on large binaries.
-      - name: "PGO Step 4: BOLT post-link optimization (Linux)"
+      #
+      # IMPORTANT: BOLT must run BEFORE any stripping step because it needs
+      # the symbol table to identify function boundaries.  strip --strip-unneeded
+      # removes those symbols and causes BOLT instrumentation to fail.
+      - name: "PGO Step 3.5: BOLT post-link optimization (Linux)"
         if: runner.os == 'Linux'
         continue-on-error: true
         shell: bash
@@ -354,12 +322,10 @@ jobs:
           # Check if BOLT tools are available (part of LLVM)
           BOLT=""
           MERGE=""
-          PERF2BOLT=""
           for suffix in "-18" "-17" ""; do
             if command -v "llvm-bolt${suffix}" &>/dev/null; then
               BOLT="llvm-bolt${suffix}"
               MERGE="merge-fdata${suffix}"
-              PERF2BOLT="perf2bolt${suffix}"
               break
             fi
           done
@@ -372,6 +338,10 @@ jobs:
           echo "Using BOLT: $BOLT"
           OMSC="./build/omsc"
 
+          # Create the profiles directory BEFORE instrumentation so BOLT can
+          # write profile data into it during the training run.
+          mkdir -p bolt-profiles
+
           # BOLT instrumentation: add profiling counters to the binary
           "$BOLT" "$OMSC" -o "${OMSC}.bolt.inst" \
             -instrument \
@@ -382,7 +352,6 @@ jobs:
           }
 
           # Run the BOLT-instrumented binary on representative workloads
-          mkdir -p bolt-profiles
           BOLT_OMSC="${OMSC}.bolt.inst"
           for f in examples/benchmark_jit_aot.om examples/bench_suite.om examples/optimization_stress_test.om; do
             [ -f "$f" ] || continue
@@ -408,9 +377,8 @@ jobs:
           if command -v "$MERGE" &>/dev/null; then
             "$MERGE" bolt-profiles/prof.* > bolt-profiles/merged.fdata 2>/dev/null
           else
-            # Fallback: use the largest profile file
-            ls -S bolt-profiles/prof.* | head -1 | xargs cp -t bolt-profiles/ 2>/dev/null
-            mv bolt-profiles/prof.* bolt-profiles/merged.fdata 2>/dev/null || true
+            # Fallback: use the largest profile file as the merged data
+            ls -S bolt-profiles/prof.* | head -1 | xargs -I{} cp {} bolt-profiles/merged.fdata 2>/dev/null || true
           fi
 
           if [ ! -s bolt-profiles/merged.fdata ]; then
@@ -437,6 +405,26 @@ jobs:
           fi
           # Clean up instrumented binary
           rm -f "${OMSC}.bolt.inst"
+
+      # Step 4: Strip binary after BOLT has finished.
+      # Stripping must happen AFTER BOLT because strip --strip-unneeded removes
+      # the symbol table that BOLT needs to identify function boundaries.
+      - name: "PGO Step 4: Strip binary (Linux)"
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        shell: bash
+        run: |
+          OMSC="./build/omsc"
+          if [ -f "$OMSC" ]; then
+            ORIG_SIZE=$(stat -c%s "$OMSC")
+            # Strip debug info and unnecessary sections
+            strip --strip-debug --strip-unneeded "$OMSC" 2>/dev/null || true
+            # Remove comment and note sections for smaller binary
+            objcopy --remove-section=.comment --remove-section=.note \
+              --remove-section=.note.gnu.build-id "$OMSC" 2>/dev/null || true
+            NEW_SIZE=$(stat -c%s "$OMSC")
+            echo "Binary size: $ORIG_SIZE → $NEW_SIZE ($(( (ORIG_SIZE - NEW_SIZE) / 1024 ))K saved)"
+          fi
 
       # ── PGO + LTO build (macOS) ─────────────────────────────────────
       # macOS uses Clang which supports instrumentation-based PGO via
