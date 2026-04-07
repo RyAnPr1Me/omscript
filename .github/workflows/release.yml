@@ -284,7 +284,7 @@ jobs:
             pgo_args+=("-DPGO_USE=ON")
             echo "PGO profile-use: build tree (no explicit dir)"
           elif [ -n "${PGO_PROFILE_PATH:-}" ] && [ -f "${PGO_PROFILE_PATH:-}" ]; then
-            # Clang .profdata path
+            # Clang-generated .profdata file path (set by Step 2 on Clang builds)
             pgo_args+=("-DPGO_USE=$PGO_PROFILE_PATH")
             echo "PGO profile-use: $PGO_PROFILE_PATH"
           else

@@ -231,10 +231,12 @@ if(PGO_USE)
         # mangling mismatch — GCC #-encodes the absolute object-file path into
         # the .gcda filename, but the use phase looks up the source-file path,
         # so the two never match and all profile data is silently ignored.
-        if(PGO_USE STREQUAL "ON" OR PGO_USE STREQUAL "1" OR PGO_USE STREQUAL "TRUE")
-            set(_pgo_use_flag "-fprofile-use")
-        else()
+        if(IS_ABSOLUTE "${PGO_USE}" OR PGO_USE MATCHES "^\\./")
+            # Explicit path supplied (e.g. for Clang .profdata)
             set(_pgo_use_flag "-fprofile-use=${PGO_USE}")
+        else()
+            # Boolean/sentinel value — no-dir mode; gcda files are in the build tree
+            set(_pgo_use_flag "-fprofile-use")
         endif()
         target_compile_options(omsc PRIVATE
             ${_pgo_use_flag}
