@@ -179,6 +179,11 @@ target_link_options(omsc PRIVATE
         # --export-dynamic (below) still gives the ORC JIT full dynamic
         # symbol visibility in a non-PIE executable.
         -no-pie
+        # Keep relocation records in the output binary so that BOLT can
+        # correctly resolve indirect branches, PLT entries, and function
+        # references when instrumenting or optimizing the binary.
+        # Without this, BOLT instrumentation fails on mold-linked binaries.
+        -Wl,--emit-relocs
     >
 )
 

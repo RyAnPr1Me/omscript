@@ -320,11 +320,12 @@ jobs:
         shell: bash
         run: |
           # Check if BOLT tools are available (part of LLVM).
-          # Try the unsuffixed name first (matches the `llvm-bolt` apt package),
-          # then fall back to versioned suffixes found in `bolt-18`.
+          # Prefer versioned suffixes from the `bolt-18` package (which also
+          # provides merge-fdata-18) over the unsuffixed `llvm-bolt` wrapper,
+          # which is a metapackage that may not install merge-fdata.
           BOLT=""
           MERGE=""
-          for suffix in "" "-18" "-17"; do
+          for suffix in "-18" "-17" ""; do
             if command -v "llvm-bolt${suffix}" &>/dev/null; then
               BOLT="llvm-bolt${suffix}"
               MERGE="merge-fdata${suffix}"
@@ -344,14 +345,18 @@ jobs:
           # write profile data into it during the training run.
           mkdir -p bolt-profiles
 
-          # BOLT instrumentation: add profiling counters to the binary
-          "$BOLT" "$OMSC" -o "${OMSC}.bolt.inst" \
+          # BOLT instrumentation: add profiling counters to the binary.
+          # Capture stderr so errors are visible in CI logs on failure.
+          if ! "$BOLT" "$OMSC" -o "${OMSC}.bolt.inst" \
             -instrument \
             -instrumentation-file-append-pid \
-            -instrumentation-file="$PWD/bolt-profiles/prof" 2>/dev/null || {
+            -instrumentation-file="$PWD/bolt-profiles/prof" \
+            2>bolt-profiles/bolt-inst.log; then
             echo "BOLT instrumentation failed; skipping"
+            echo "--- BOLT error output ---"
+            cat bolt-profiles/bolt-inst.log || true
             exit 0
-          }
+          fi
 
           # Run the BOLT-instrumented binary on representative workloads
           BOLT_OMSC="${OMSC}.bolt.inst"
@@ -377,7 +382,7 @@ jobs:
           fi
 
           if command -v "$MERGE" &>/dev/null; then
-            "$MERGE" bolt-profiles/prof.* > bolt-profiles/merged.fdata 2>/dev/null
+            "$MERGE" bolt-profiles/prof.* > bolt-profiles/merged.fdata
           else
             # Fallback: use the largest profile file as the merged data
             echo "::warning::merge-fdata not found; using largest profile file as fallback"
@@ -409,8 +414,8 @@ jobs:
             mv "${OMSC}.bolt" "$OMSC"
             echo "✓ BOLT optimization applied successfully"
           fi
-          # Clean up instrumented binary
-          rm -f "${OMSC}.bolt.inst"
+          # Clean up instrumented binary and log
+          rm -f "${OMSC}.bolt.inst" bolt-profiles/bolt-inst.log
 
       # Step 4: Strip binary after BOLT has finished.
       # Stripping must happen AFTER BOLT because strip --strip-unneeded removes
