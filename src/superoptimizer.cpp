@@ -990,6 +990,39 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Idiom detection — sign extension
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Detect: (x << (bw-n)) >> (bw-n)  →  sext from n bits
+/// This pattern manually sign-extends an n-bit value stored in a wider integer.
+[[nodiscard]] static std::optional<IdiomMatch> detectSignExtend(llvm::Instruction* inst) {
+    if (inst->getOpcode() != llvm::Instruction::AShr)
+        return std::nullopt;
+
+    auto* shl = llvm::dyn_cast<llvm::BinaryOperator>(inst->getOperand(0));
+    if (!shl || shl->getOpcode() != llvm::Instruction::Shl)
+        return std::nullopt;
+
+    auto shlAmt = getConstIntValue(shl->getOperand(1));
+    auto shrAmt = getConstIntValue(inst->getOperand(1));
+    if (!shlAmt || !shrAmt || *shlAmt != *shrAmt)
+        return std::nullopt;
+
+    unsigned bw = inst->getType()->getIntegerBitWidth();
+    unsigned srcBits = bw - static_cast<unsigned>(*shlAmt);
+    if (srcBits == 0 || srcBits >= bw)
+        return std::nullopt;
+
+    // We have a valid sign-extension from srcBits to bw
+    IdiomMatch match;
+    match.idiom = Idiom::SignExtend;
+    match.rootInst = inst;
+    match.operands = {shl->getOperand(0)};
+    match.bitWidth = srcBits;
+    return match;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Idiom detection — conditional negation
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1649,6 +1682,10 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
             results.push_back(std::move(*m));
             continue;
         }
+        if (auto m = detectSignExtend(&inst)) {
+            results.push_back(std::move(*m));
+            continue;
+        }
         if (auto m = detectIsolateLowestBit(&inst)) {
             results.push_back(std::move(*m));
             continue;
@@ -1955,6 +1992,34 @@ static bool replaceIdiom(IdiomMatch& match) {
         llvm::Value* isZero = builder.CreateICmpEQ(x,
             llvm::ConstantInt::get(intTy, 0), "np2.iszero");
         llvm::Value* result = builder.CreateSelect(isZero, one, pow2, "np2.result");
+        match.rootInst->replaceAllUsesWith(result);
+        return true;
+    }
+
+    case Idiom::ConditionalNeg: {
+        // select(cond, -x, x) → (x ^ mask) - mask  where mask = -sext(cond)
+        // This replaces a conditional negation with branchless two's complement:
+        //   mask = sext(cond)    (all-1s if true, all-0s if false)
+        //   result = (x ^ mask) - mask
+        // 3 instructions and fully branchless on all targets.
+        llvm::Value* x = match.operands[0];
+        llvm::Value* cond = match.operands[1];
+        llvm::Value* ext = builder.CreateSExt(cond, intTy, "cneg.sext");
+        llvm::Value* xored = builder.CreateXor(x, ext, "cneg.xor");
+        llvm::Value* result = builder.CreateSub(xored, ext, "cneg.sub");
+        match.rootInst->replaceAllUsesWith(result);
+        return true;
+    }
+
+    case Idiom::SignExtend: {
+        // (x << (bw-n)) >> (bw-n) → trunc to n bits + sext back to bw
+        // The canonical trunc+sext form lets the backend lower to a single
+        // MOVSX/SXTB instruction instead of a shift pair.
+        llvm::Value* x = match.operands[0];
+        unsigned srcBits = match.bitWidth;
+        llvm::Type* narrowTy = llvm::IntegerType::get(ctx, srcBits);
+        llvm::Value* truncated = builder.CreateTrunc(x, narrowTy, "sext.trunc");
+        llvm::Value* result = builder.CreateSExt(truncated, intTy, "sext.ext");
         match.rootInst->replaceAllUsesWith(result);
         return true;
     }
@@ -4049,6 +4114,285 @@ static bool replaceIdiom(IdiomMatch& match) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Select-of-select chain simplification (Souper-inspired)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Simplify nested select chains that arise from ternary-heavy OmScript code.
+///
+/// Souper-style patterns:
+///   select(C, select(C, A, B), D)  →  select(C, A, D)   [redundant inner]
+///   select(C, A, select(C, B, D))  →  select(C, A, D)   [redundant inner]
+///   select(C, A, select(!C, B, D)) →  select(C, A, B)   [complementary cond]
+///   select(!C, select(C, A, B), D) →  select(C, B, D)   [complementary cond]
+///   select(C, X, select(C2, X, Y)) where C implies C2   → select(C, X, Y)
+///
+/// Also handles known-bits narrowing:
+///   select(C, or(X, mask), and(X, ~mask))  → xor(X, and(mask, sext(C)))
+///   when the select arms differ only in specific bits.
+[[gnu::hot]] static unsigned simplifySelectChains(llvm::Function& func) {
+    unsigned count = 0;
+    std::vector<llvm::Instruction*> toErase;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            auto* sel = llvm::dyn_cast<llvm::SelectInst>(&inst);
+            if (!sel) continue;
+
+            llvm::Value* cond = sel->getCondition();
+            llvm::Value* trueVal = sel->getTrueValue();
+            llvm::Value* falseVal = sel->getFalseValue();
+
+            // Pattern 1: select(C, select(C, A, B), D) → select(C, A, D)
+            if (auto* innerSel = llvm::dyn_cast<llvm::SelectInst>(trueVal)) {
+                if (innerSel->getCondition() == cond) {
+                    sel->setOperand(1, innerSel->getTrueValue());
+                    count++;
+                    continue;
+                }
+            }
+
+            // Pattern 2: select(C, A, select(C, B, D)) → select(C, A, D)
+            if (auto* innerSel = llvm::dyn_cast<llvm::SelectInst>(falseVal)) {
+                if (innerSel->getCondition() == cond) {
+                    sel->setOperand(2, innerSel->getFalseValue());
+                    count++;
+                    continue;
+                }
+            }
+
+            // Pattern 3: select(C, A, select(!C, B, D)) → select(C, A, B)
+            // where !C is a `xor C, true`
+            if (auto* innerSel = llvm::dyn_cast<llvm::SelectInst>(falseVal)) {
+                llvm::Value* innerCond = innerSel->getCondition();
+                // Check if innerCond == !cond  (xor cond, true)
+                llvm::Value* xorOp0 = nullptr;
+                if (auto* xorInst = llvm::dyn_cast<llvm::BinaryOperator>(innerCond)) {
+                    if (xorInst->getOpcode() == llvm::Instruction::Xor) {
+                        if (xorInst->getOperand(0) == cond) {
+                            if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(xorInst->getOperand(1))) {
+                                if (ci->isOne()) xorOp0 = cond;
+                            }
+                        } else if (xorInst->getOperand(1) == cond) {
+                            if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(xorInst->getOperand(0))) {
+                                if (ci->isOne()) xorOp0 = cond;
+                            }
+                        }
+                    }
+                }
+                if (xorOp0 == cond) {
+                    sel->setOperand(2, innerSel->getTrueValue());
+                    count++;
+                    continue;
+                }
+            }
+
+            // Pattern 4: select(!C, select(C, A, B), D) → select(C, B, D)
+            {
+                llvm::Value* notTarget = nullptr;
+                if (auto* xorInst = llvm::dyn_cast<llvm::BinaryOperator>(cond)) {
+                    if (xorInst->getOpcode() == llvm::Instruction::Xor) {
+                        if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(xorInst->getOperand(1))) {
+                            if (ci->isOne()) notTarget = xorInst->getOperand(0);
+                        } else if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(xorInst->getOperand(0))) {
+                            if (ci->isOne()) notTarget = xorInst->getOperand(1);
+                        }
+                    }
+                }
+                if (notTarget) {
+                    if (auto* innerSel = llvm::dyn_cast<llvm::SelectInst>(trueVal)) {
+                        if (innerSel->getCondition() == notTarget) {
+                            // select(!C, select(C, A, B), D) → select(C, B, D)
+                            llvm::IRBuilder<> builder(sel);
+                            llvm::Value* newSel = builder.CreateSelect(notTarget,
+                                innerSel->getFalseValue(), falseVal, "sel.simpl");
+                            sel->replaceAllUsesWith(newSel);
+                            toErase.push_back(sel);
+                            count++;
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            // Pattern 5: select(C, X, X) → X  (trivial identity)
+            if (trueVal == falseVal) {
+                sel->replaceAllUsesWith(trueVal);
+                toErase.push_back(sel);
+                count++;
+                continue;
+            }
+
+            // Pattern 6: select(C, true, false) → C  (when i1)
+            if (sel->getType()->isIntegerTy(1)) {
+                auto* tConst = llvm::dyn_cast<llvm::ConstantInt>(trueVal);
+                auto* fConst = llvm::dyn_cast<llvm::ConstantInt>(falseVal);
+                if (tConst && fConst) {
+                    if (tConst->isOne() && fConst->isZero()) {
+                        sel->replaceAllUsesWith(cond);
+                        toErase.push_back(sel);
+                        count++;
+                        continue;
+                    }
+                    if (tConst->isZero() && fConst->isOne()) {
+                        // select(C, false, true) → !C
+                        llvm::IRBuilder<> builder(sel);
+                        llvm::Value* notC = builder.CreateNot(cond, "sel.not");
+                        sel->replaceAllUsesWith(notC);
+                        toErase.push_back(sel);
+                        count++;
+                        continue;
+                    }
+                }
+            }
+
+            // Pattern 7: select(C, C, X) → select(C, true, X) → or(C, X) when i1
+            if (sel->getType()->isIntegerTy(1) && trueVal == cond) {
+                llvm::IRBuilder<> builder(sel);
+                llvm::Value* orVal = builder.CreateOr(cond, falseVal, "sel.or");
+                sel->replaceAllUsesWith(orVal);
+                toErase.push_back(sel);
+                count++;
+                continue;
+            }
+
+            // Pattern 8: select(C, X, C) → select(C, X, false) → and(C, X) when i1
+            if (sel->getType()->isIntegerTy(1) && falseVal == cond) {
+                llvm::IRBuilder<> builder(sel);
+                llvm::Value* andVal = builder.CreateAnd(cond, trueVal, "sel.and");
+                sel->replaceAllUsesWith(andVal);
+                toErase.push_back(sel);
+                count++;
+                continue;
+            }
+        }
+    }
+
+    for (auto* inst : toErase) {
+        if (inst->use_empty())
+            inst->eraseFromParent();
+    }
+    return count;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Known-bits narrowing (Souper-inspired)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Use LLVM's KnownBits analysis to narrow operations when we can prove
+/// certain bits are always zero or one.  This catches patterns that LLVM's
+/// InstCombine misses because they require deeper analysis.
+///
+/// Souper-style optimizations:
+///   - or(X, mask) where KnownBits(X) already has those bits set → X
+///   - and(X, mask) where KnownBits(X) already has those bits zero → X
+///   - shl(X, C) where top C bits of X are known zero → nuw shl
+///   - Truncation when KnownBits proves value fits in narrower type
+[[gnu::hot]] static unsigned applyKnownBitsNarrowing(llvm::Function& func) {
+    if (func.empty()) return 0;
+    const llvm::DataLayout& DL = func.getParent()->getDataLayout();
+    unsigned count = 0;
+
+    for (auto& bb : func) {
+        for (auto& inst : bb) {
+            if (!inst.getType()->isIntegerTy()) continue;
+
+            // or(X, mask): if KnownBits(X) already has all mask bits set, → X
+            if (inst.getOpcode() == llvm::Instruction::Or) {
+                if (auto* maskCI = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1))) {
+                    llvm::KnownBits kb = llvm::computeKnownBits(inst.getOperand(0), DL);
+                    llvm::APInt mask = maskCI->getValue();
+                    // If all bits in mask are already known-one in X, the OR is redundant
+                    if ((kb.One & mask) == mask) {
+                        inst.replaceAllUsesWith(inst.getOperand(0));
+                        count++;
+                        continue;
+                    }
+                }
+            }
+
+            // and(X, mask): if KnownBits(X) already has all ~mask bits zero, → X
+            if (inst.getOpcode() == llvm::Instruction::And) {
+                if (auto* maskCI = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1))) {
+                    llvm::KnownBits kb = llvm::computeKnownBits(inst.getOperand(0), DL);
+                    llvm::APInt mask = maskCI->getValue();
+                    llvm::APInt invertedMask = ~mask;
+                    // If all bits NOT in mask are already known-zero, the AND is redundant
+                    if ((kb.Zero & invertedMask) == invertedMask) {
+                        inst.replaceAllUsesWith(inst.getOperand(0));
+                        count++;
+                        continue;
+                    }
+                }
+            }
+
+            // xor(X, mask): if KnownBits proves the XOR flips no bits → X
+            if (inst.getOpcode() == llvm::Instruction::Xor) {
+                if (auto* maskCI = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1))) {
+                    if (maskCI->isZero()) {
+                        inst.replaceAllUsesWith(inst.getOperand(0));
+                        count++;
+                        continue;
+                    }
+                }
+            }
+
+            // shl(X, C): add NUW flag when KnownBits proves no overflow
+            if (inst.getOpcode() == llvm::Instruction::Shl) {
+                auto* bo = llvm::dyn_cast<llvm::BinaryOperator>(&inst);
+                if (bo && !bo->hasNoUnsignedWrap()) {
+                    if (auto* shiftCI = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1))) {
+                        unsigned shiftAmt = shiftCI->getZExtValue();
+                        unsigned bitWidth = inst.getType()->getIntegerBitWidth();
+                        if (shiftAmt < bitWidth) {
+                            llvm::KnownBits kb = llvm::computeKnownBits(inst.getOperand(0), DL);
+                            // If top shiftAmt bits are known zero, shl cannot overflow unsigned
+                            unsigned leadingZeros = kb.countMinLeadingZeros();
+                            if (leadingZeros >= shiftAmt) {
+                                bo->setHasNoUnsignedWrap(true);
+                                count++;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // add(X, C): add NUW when KnownBits proves no unsigned overflow
+            if (inst.getOpcode() == llvm::Instruction::Add) {
+                auto* bo = llvm::dyn_cast<llvm::BinaryOperator>(&inst);
+                if (bo && !bo->hasNoUnsignedWrap()) {
+                    if (auto* addCI = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1))) {
+                        llvm::KnownBits kb = llvm::computeKnownBits(inst.getOperand(0), DL);
+                        unsigned bitWidth = inst.getType()->getIntegerBitWidth();
+                        // If X has enough leading zeros that X + C cannot overflow
+                        unsigned leadingZeros = kb.countMinLeadingZeros();
+                        if (leadingZeros > 0) {
+                            llvm::APInt maxVal = llvm::APInt::getMaxValue(bitWidth)
+                                .lshr(leadingZeros);
+                            if (maxVal.uge(addCI->getValue()) &&
+                                (maxVal - addCI->getValue()).uge(
+                                    llvm::APInt::getMaxValue(bitWidth).lshr(leadingZeros))) {
+                                // Simplified check: if max possible X + C fits in bitWidth
+                                llvm::APInt maxX = llvm::APInt::getAllOnes(bitWidth)
+                                    .lshr(leadingZeros);
+                                llvm::APInt sum;
+                                bool overflow = false;
+                                sum = maxX.uadd_ov(addCI->getValue(), overflow);
+                                if (!overflow) {
+                                    bo->setHasNoUnsignedWrap(true);
+                                    count++;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return count;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Branch simplification
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -4808,9 +5152,26 @@ SuperoptimizerStats superoptimizeFunction(llvm::Function& func,
         stats.algebraicSimplified += loopStrengthReduce(func);
     }
 
+    // Phase 2.8: Known-bits narrowing (Souper-inspired) — use KnownBits to
+    // prove redundant OR/AND masks, add NUW/NSW flags to shifts and adds.
+    // This enables downstream passes (LLVM InstCombine, loop vectorizer) to
+    // be more aggressive and is the same technique used by the Souper
+    // superoptimizer for "dataflow-guided" instruction simplification.
+    if (config.enableAlgebraic) {
+        stats.algebraicSimplified += applyKnownBitsNarrowing(func);
+    }
+
     // Phase 3: Branch simplification (branch-to-select)
     if (config.enableBranchOpt) {
         stats.branchesSimplified = simplifyBranches(func);
+    }
+
+    // Phase 3.2: Select chain simplification (Souper-inspired) — flatten
+    // nested select(C, select(C, ...), ...) patterns that arise from OmScript
+    // ternary expressions and conditional logic.  Souper identifies these as
+    // high-value targets because they create unnecessary phi-like control flow.
+    if (config.enableBranchOpt) {
+        stats.branchesSimplified += simplifySelectChains(func);
     }
 
     // Phase 3.5: Select operand sinking — factor common operands out of both

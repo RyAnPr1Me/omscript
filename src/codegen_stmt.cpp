@@ -263,7 +263,12 @@ void CodeGenerator::generateReturn(ReturnStmt* stmt) {
 
         // Tail call optimization: if the return value is a direct function
         // call, mark it as a tail call so LLVM can eliminate the stack frame.
-        if (optimizationLevel >= OptimizationLevel::O2) {
+        // Lowered from O2 to O1: TCO eliminates stack frame overhead (save/
+        // restore of callee-saved registers, stack pointer manipulation) and
+        // is always beneficial.  At O1, the inliner is less aggressive, so
+        // tail calls that would be inlined at O2+ are still present and
+        // benefit from TCO marking.
+        if (optimizationLevel >= OptimizationLevel::O1) {
             if (auto* callInst = llvm::dyn_cast<llvm::CallInst>(retValue)) {
                 callInst->setTailCallKind(llvm::CallInst::TCK_Tail);
             }
@@ -899,7 +904,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     }
 
     builder->SetInsertPoint(condBB);
-    llvm::Value* curVal = builder->CreateLoad(iterType, iterAlloca, stmt->iteratorVar.c_str());
+    llvm::Value* curVal = builder->CreateAlignedLoad(iterType, iterAlloca, llvm::MaybeAlign(8), stmt->iteratorVar.c_str());
     llvm::Value* continueCond;
     if (stepKnownPositive) {
         // Fast path: known ascending loop.
@@ -952,7 +957,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             startNonNeg = startCI->getSExtValue() >= 0;
         }
         if (startNonNeg) {
-            llvm::Value* iterVal = builder->CreateLoad(iterType, iterAlloca, "iter.assume");
+            llvm::Value* iterVal = builder->CreateAlignedLoad(iterType, iterAlloca, llvm::MaybeAlign(8), "iter.assume");
             llvm::Function* assumeFn = OMSC_GET_INTRINSIC_STMT(
                 module.get(), llvm::Intrinsic::assume, {});
             // Lower bound: assume iter >= 0 (always true for non-negative starts).
@@ -965,7 +970,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             // strength-reducing `(iter - WIN) % k` patterns in sliding-window loops.
             if (auto* startCI = llvm::dyn_cast<llvm::ConstantInt>(startVal)) {
                 if (startCI->getSExtValue() > 0) {
-                    llvm::Value* iterValLB = builder->CreateLoad(iterType, iterAlloca, "iter.lb");
+                    llvm::Value* iterValLB = builder->CreateAlignedLoad(iterType, iterAlloca, llvm::MaybeAlign(8), "iter.lb");
                     llvm::Value* isGeStart = builder->CreateICmpSGE(
                         iterValLB, startVal, "iter.ge.start");
                     builder->CreateCall(assumeFn, {isGeStart});
@@ -981,7 +986,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             // C compilers emit this implicitly when the variable is loop-local
             // and the loop condition is visible; for function arguments (like n)
             // C cannot propagate this across call boundaries without LTO.
-            llvm::Value* iterVal2 = builder->CreateLoad(iterType, iterAlloca, "iter.ub");
+            llvm::Value* iterVal2 = builder->CreateAlignedLoad(iterType, iterAlloca, llvm::MaybeAlign(8), "iter.ub");
             llvm::Value* isLtEnd = builder->CreateICmpSLT(
                 iterVal2, endVal, "iter.lt.end");
             builder->CreateCall(assumeFn, {isLtEnd});
@@ -1033,7 +1038,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
 
     // Increment block
     builder->SetInsertPoint(incBB);
-    llvm::Value* nextVal = builder->CreateLoad(iterType, iterAlloca, stmt->iteratorVar.c_str());
+    llvm::Value* nextVal = builder->CreateAlignedLoad(iterType, iterAlloca, llvm::MaybeAlign(8), stmt->iteratorVar.c_str());
     // OmScript advantage: for ascending loops starting from a non-negative
     // value, both nsw AND nuw flags are correct on the increment.
     //
@@ -1594,7 +1599,7 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
     // increments, and array length is always non-negative.  Unsigned
     // comparison enables better loop vectorization and SCEV analysis.
     builder->SetInsertPoint(condBB);
-    llvm::Value* curIdx = builder->CreateLoad(getDefaultType(), idxAlloca, "foreach.idx");
+    llvm::Value* curIdx = builder->CreateAlignedLoad(getDefaultType(), idxAlloca, llvm::MaybeAlign(8), "foreach.idx");
     llvm::Value* cond = builder->CreateICmpULT(curIdx, lenVal, "foreach.cmp");
     auto* foreachCondBr = builder->CreateCondBr(cond, bodyBB, endBB);
     // Hint the back-edge (body) as likely-taken.
@@ -1605,7 +1610,7 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
 
     // Body: load current element into iterator variable, then execute body
     builder->SetInsertPoint(bodyBB);
-    llvm::Value* bodyIdx = builder->CreateLoad(getDefaultType(), idxAlloca, "foreach.bidx");
+    llvm::Value* bodyIdx = builder->CreateAlignedLoad(getDefaultType(), idxAlloca, llvm::MaybeAlign(8), "foreach.bidx");
 
     // Emit @llvm.assume(idx >= 0) so LLVM's CorrelatedValuePropagation and
     // SCEV passes can prove non-negativity of the foreach index.  This
@@ -1624,7 +1629,9 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
     llvm::Value* elemVal;
     if (isStr) {
         // String: load single byte at offset bodyIdx, zero-extend to i64
-        llvm::Value* charPtr = builder->CreateGEP(llvm::Type::getInt8Ty(*context), basePtr, bodyIdx, "foreach.charptr");
+        // inbounds GEP: the loop guard (bodyIdx < strlen) guarantees the
+        // index is within the allocated string buffer.
+        llvm::Value* charPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), basePtr, bodyIdx, "foreach.charptr");
         llvm::Value* charByte = builder->CreateLoad(llvm::Type::getInt8Ty(*context), charPtr, "foreach.char");
         elemVal = builder->CreateZExt(charByte, getDefaultType(), "foreach.charext");
     } else {
@@ -1638,7 +1645,7 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
             builder->CreateAdd(bodyIdx, llvm::ConstantInt::get(getDefaultType(), 1), "foreach.offset",
                                /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), basePtr, offset, "foreach.elem.ptr");
-        elemVal = builder->CreateLoad(getDefaultType(), elemPtr, "foreach.elem");
+        elemVal = builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "foreach.elem");
         // TBAA: foreach element loads (slots 1+) never alias the array length
         // (slot 0).  This enables LLVM's alias analysis to prove that element
         // loads are independent from length loads, which is critical for LICM
@@ -1662,7 +1669,7 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
     // SCEV to compute exact trip counts and prove induction variable
     // monotonicity, which is critical for loop vectorization and unrolling.
     builder->SetInsertPoint(incBB);
-    llvm::Value* nextIdx = builder->CreateLoad(getDefaultType(), idxAlloca, "foreach.nidx");
+    llvm::Value* nextIdx = builder->CreateAlignedLoad(getDefaultType(), idxAlloca, llvm::MaybeAlign(8), "foreach.nidx");
     llvm::Value* incIdx = builder->CreateAdd(nextIdx, llvm::ConstantInt::get(getDefaultType(), 1), "foreach.next",
                                              /*HasNUW=*/true, /*HasNSW=*/true);
     builder->CreateStore(incIdx, idxAlloca);
@@ -2354,7 +2361,7 @@ void CodeGenerator::generatePrefetch(PrefetchStmt* stmt) {
                     for (uint64_t offset = 64; offset < totalBytes; offset += 64) {
                         llvm::Value* gepIdx = llvm::ConstantInt::get(
                             getDefaultType(), offset / slotSize);
-                        llvm::Value* nextPtr = builder->CreateGEP(
+                        llvm::Value* nextPtr = builder->CreateInBoundsGEP(
                             arrTy->getElementType(), alloca, gepIdx,
                             varName + ".pf.cacheline");
                         auto* pfCall2 = builder->CreateCall(prefetchFn, {

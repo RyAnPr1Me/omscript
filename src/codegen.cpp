@@ -1101,7 +1101,16 @@ void CodeGenerator::validateScopeStacksMatch(const char* location) {
 llvm::AllocaInst* CodeGenerator::createEntryBlockAlloca(llvm::Function* function, const std::string& name,
                                                         llvm::Type* type) {
     llvm::IRBuilder<> entryBuilder(&function->getEntryBlock(), function->getEntryBlock().begin());
-    return entryBuilder.CreateAlloca(type ? type : getDefaultType(), nullptr, name);
+    auto* alloca = entryBuilder.CreateAlloca(type ? type : getDefaultType(), nullptr, name);
+    // Set explicit alignment for i64 allocas — the default type in OmScript.
+    // This avoids backend alignment computation overhead and ensures that
+    // loads/stores from these allocas can use aligned instructions (movq
+    // instead of unaligned loads on x86-64).
+    llvm::Type* allocaType = type ? type : getDefaultType();
+    if (allocaType->isIntegerTy(64) || allocaType->isDoubleTy() || allocaType->isPointerTy()) {
+        alloca->setAlignment(llvm::Align(8));
+    }
+    return alloca;
 }
 
 void CodeGenerator::codegenError(const std::string& message, const ASTNode* node) {
@@ -3141,6 +3150,28 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     // and other performance-critical optimizations.
     currentFuncHintHot_ = func->hintHot;
 
+    // @optmax: enable full fast-math flags for all float operations in this
+    // function.  The user's @optmax annotation is a compile-time guarantee
+    // that the function is safe and well-behaved, which includes IEEE-754
+    // relaxation.  Enabling all FMF flags (nnan, ninf, nsz, arcp, contract,
+    // reassoc, afn) allows LLVM to:
+    //   1. Form FMA instructions (fmul+fadd → fmadd): 2x float throughput
+    //   2. Reassociate float reductions for vectorization (sum += a[i])
+    //   3. Eliminate NaN/Inf checks on known-finite values
+    //   4. Use reciprocal approximations for division
+    // The flags are saved and restored after the function body so they don't
+    // leak into subsequent non-OPTMAX functions.
+    // Guard: when useFastMath_ is already globally enabled, the builder's FMF
+    // is already set to fast (line 2314-2316), so no per-function override is
+    // needed.  The save/restore is still correct — savedFMF captures the
+    // existing fast flags and restores them identically.
+    llvm::FastMathFlags savedFMF = builder->getFastMathFlags();
+    if (inOptMaxFunction && !useFastMath_) { // skip if globally fast (already set)
+        llvm::FastMathFlags FMF;
+        FMF.setFast();
+        builder->setFastMathFlags(FMF);
+    }
+
     // Create entry basic block
     llvm::BasicBlock* entry = llvm::BasicBlock::Create(*context, "entry", function);
     builder->SetInsertPoint(entry);
@@ -3268,6 +3299,10 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     }
 
     inOptMaxFunction = false;
+
+    // Restore fast-math flags to pre-OPTMAX state so subsequent functions
+    // are not affected by the aggressive flags set for this function.
+    builder->setFastMathFlags(savedFMF);
 
     return function;
 }

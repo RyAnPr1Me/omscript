@@ -11575,6 +11575,245 @@ std::vector<RewriteRule> getStrengthReductionRules() {
             return g.addBinOp(Op::Mul, na, s.at("b"));
         });
 
+    // ── Conditional negation: ternary(c, -x, x) → (x ^ mask) - mask ────
+    // where mask = -sext(c).  This is a branchless two's complement negate.
+    // At the AST e-graph level we express it as:  ternary(c, neg(x), x) → sub(xor(x, neg(c)), neg(c))
+    // which the cost model will prefer when the ternary is more expensive.
+    rules.emplace_back("cond_neg_to_xor_sub",
+        P::OpPat(Op::Ternary, {P::Wild("c"), P::OpPat(Op::Neg, {P::Wild("x")}), P::Wild("x")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId negC = g.addUnaryOp(Op::Neg, s.at("c"));
+            ClassId xored = g.addBinOp(Op::BitXor, s.at("x"), negC);
+            return g.addBinOp(Op::Sub, xored, negC);
+        });
+
+    // ── Conditional select to masked arithmetic ─────────────────────────
+    // ternary(c, x+1, x) → x + c   (when c is boolean 0/1)
+    rules.emplace_back("cond_inc_to_add",
+        P::OpPat(Op::Ternary, {P::Wild("c"),
+            P::OpPat(Op::Add, {P::Wild("x"), P::ConstPat(1)}),
+            P::Wild("x")}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Add, s.at("x"), s.at("c"));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            return g.isClassBoolean(s.at("c"));
+        });
+
+    // ternary(c, x-1, x) → x - c   (when c is boolean 0/1)
+    rules.emplace_back("cond_dec_to_sub",
+        P::OpPat(Op::Ternary, {P::Wild("c"),
+            P::OpPat(Op::Sub, {P::Wild("x"), P::ConstPat(1)}),
+            P::Wild("x")}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Sub, s.at("x"), s.at("c"));
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            return g.isClassBoolean(s.at("c"));
+        });
+
+    // ── Absorption laws for bitwise/arithmetic ──────────────────────────
+    // a & (a | b) → a   (absorption law)
+    rules.emplace_back("absorption_and_or",
+        P::OpPat(Op::BitAnd, {P::Wild("a"), P::OpPat(Op::BitOr, {P::Wild("a"), P::Wild("b")})}),
+        [](EGraph& /*g*/, const Subst& s) {
+            return s.at("a");
+        });
+
+    // a | (a & b) → a   (absorption law)
+    rules.emplace_back("absorption_or_and",
+        P::OpPat(Op::BitOr, {P::Wild("a"), P::OpPat(Op::BitAnd, {P::Wild("a"), P::Wild("b")})}),
+        [](EGraph& /*g*/, const Subst& s) {
+            return s.at("a");
+        });
+
+    // ── Extended De Morgan's laws ───────────────────────────────────────
+    // ~(a & b) → (~a) | (~b)
+    rules.emplace_back("demorgan_nand",
+        P::OpPat(Op::BitNot, {P::OpPat(Op::BitAnd, {P::Wild("a"), P::Wild("b")})}),
+        [](EGraph& g, const Subst& s) {
+            ClassId na = g.addUnaryOp(Op::BitNot, s.at("a"));
+            ClassId nb = g.addUnaryOp(Op::BitNot, s.at("b"));
+            return g.addBinOp(Op::BitOr, na, nb);
+        });
+
+    // ~(a | b) → (~a) & (~b)
+    rules.emplace_back("demorgan_nor",
+        P::OpPat(Op::BitNot, {P::OpPat(Op::BitOr, {P::Wild("a"), P::Wild("b")})}),
+        [](EGraph& g, const Subst& s) {
+            ClassId na = g.addUnaryOp(Op::BitNot, s.at("a"));
+            ClassId nb = g.addUnaryOp(Op::BitNot, s.at("b"));
+            return g.addBinOp(Op::BitAnd, na, nb);
+        });
+
+    // ── XOR-based identities ────────────────────────────────────────────
+    // a ^ (a & b) → a & (~b)   (clear bits in a that are set in b)
+    rules.emplace_back("xor_and_to_andn",
+        P::OpPat(Op::BitXor, {P::Wild("a"), P::OpPat(Op::BitAnd, {P::Wild("a"), P::Wild("b")})}),
+        [](EGraph& g, const Subst& s) {
+            ClassId nb = g.addUnaryOp(Op::BitNot, s.at("b"));
+            return g.addBinOp(Op::BitAnd, s.at("a"), nb);
+        });
+
+    // (a ^ b) & a → a & (~b)  (same pattern, different arrangement)
+    rules.emplace_back("xor_and_to_andn2",
+        P::OpPat(Op::BitAnd, {P::OpPat(Op::BitXor, {P::Wild("a"), P::Wild("b")}), P::Wild("a")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId nb = g.addUnaryOp(Op::BitNot, s.at("b"));
+            return g.addBinOp(Op::BitAnd, s.at("a"), nb);
+        });
+
+    // ── Average without overflow (Hacker's Delight §2-5) ────────────────
+    // (a + b) / 2 → (a & b) + ((a ^ b) >> 1)  when non-negative
+    rules.emplace_back("avg_no_overflow",
+        P::OpPat(Op::Div, {P::OpPat(Op::Add, {P::Wild("a"), P::Wild("b")}), P::ConstPat(2)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId andAB = g.addBinOp(Op::BitAnd, s.at("a"), s.at("b"));
+            ClassId xorAB = g.addBinOp(Op::BitXor, s.at("a"), s.at("b"));
+            ClassId one = g.addConst(1);
+            ClassId shr = g.addBinOp(Op::Shr, xorAB, one);
+            return g.addBinOp(Op::Add, andAB, shr);
+        },
+        [](const EGraph& g, const Subst& s) -> bool {
+            return g.isClassNonNeg(s.at("a")) && g.isClassNonNeg(s.at("b"));
+        });
+
+    // ── Multiply-accumulate patterns ────────────────────────────────────
+    // a + (b * c) + (d * e) → a + (b*c + d*e)  (group multiplies for MAC)
+    // a * b + a * c → a * (b + c)  (factor common multiply — already have this)
+
+    // ── Difference of squares ───────────────────────────────────────────
+    // a*a - b*b → (a+b) * (a-b)
+    rules.emplace_back("diff_of_squares",
+        P::OpPat(Op::Sub, {P::OpPat(Op::Mul, {P::Wild("a"), P::Wild("a")}),
+                           P::OpPat(Op::Mul, {P::Wild("b"), P::Wild("b")})}),
+        [](EGraph& g, const Subst& s) {
+            ClassId sum = g.addBinOp(Op::Add, s.at("a"), s.at("b"));
+            ClassId diff = g.addBinOp(Op::Sub, s.at("a"), s.at("b"));
+            return g.addBinOp(Op::Mul, sum, diff);
+        });
+
+    // (a+b) * (a-b) → a*a - b*b  (reverse: unfactor for cost comparison)
+    rules.emplace_back("diff_of_squares_rev",
+        P::OpPat(Op::Mul, {P::OpPat(Op::Add, {P::Wild("a"), P::Wild("b")}),
+                           P::OpPat(Op::Sub, {P::Wild("a"), P::Wild("b")})}),
+        [](EGraph& g, const Subst& s) {
+            ClassId aa = g.addBinOp(Op::Mul, s.at("a"), s.at("a"));
+            ClassId bb = g.addBinOp(Op::Mul, s.at("b"), s.at("b"));
+            return g.addBinOp(Op::Sub, aa, bb);
+        });
+
+    // ── Horner form for polynomial evaluation ───────────────────────────
+    // a*x*x + b*x + c → (a*x + b)*x + c  (Horner: fewer multiplies)
+    rules.emplace_back("horner_quadratic",
+        P::OpPat(Op::Add, {
+            P::OpPat(Op::Add, {
+                P::OpPat(Op::Mul, {P::OpPat(Op::Mul, {P::Wild("a"), P::Wild("x")}), P::Wild("x")}),
+                P::OpPat(Op::Mul, {P::Wild("b"), P::Wild("x")})}),
+            P::Wild("c")}),
+        [](EGraph& g, const Subst& s) {
+            // (a*x + b)*x + c
+            ClassId ax = g.addBinOp(Op::Mul, s.at("a"), s.at("x"));
+            ClassId axb = g.addBinOp(Op::Add, ax, s.at("b"));
+            ClassId axbx = g.addBinOp(Op::Mul, axb, s.at("x"));
+            return g.addBinOp(Op::Add, axbx, s.at("c"));
+        });
+
+    // ── Ternary (select) chain simplification ───────────────────────────
+    // These rules simplify nested ternary expressions at the AST level,
+    // complementing the IR-level select-chain pass in the superoptimizer.
+
+    // ternary(C, ternary(C, A, B), D) → ternary(C, A, D)
+    rules.emplace_back("ternary_redundant_inner_true",
+        P::OpPat(Op::Ternary, {P::Wild("c"),
+            P::OpPat(Op::Ternary, {P::Wild("c"), P::Wild("a"), P::Wild("b")}),
+            P::Wild("d")}),
+        [](EGraph& g, const Subst& s) {
+            ENode ternaryNode(Op::Ternary, std::vector<ClassId>{s.at("c"), s.at("a"), s.at("d")});
+            return g.add(ternaryNode);
+        });
+
+    // ternary(C, A, ternary(C, B, D)) → ternary(C, A, D)
+    rules.emplace_back("ternary_redundant_inner_false",
+        P::OpPat(Op::Ternary, {P::Wild("c"),
+            P::Wild("a"),
+            P::OpPat(Op::Ternary, {P::Wild("c"), P::Wild("b"), P::Wild("d")})}),
+        [](EGraph& g, const Subst& s) {
+            ENode ternaryNode(Op::Ternary, std::vector<ClassId>{s.at("c"), s.at("a"), s.at("d")});
+            return g.add(ternaryNode);
+        });
+
+    // ternary(!C, A, B) → ternary(C, B, A)  [swap arms on negated condition]
+    rules.emplace_back("ternary_not_swap",
+        P::OpPat(Op::Ternary, {P::OpPat(Op::LogNot, {P::Wild("c")}), P::Wild("a"), P::Wild("b")}),
+        [](EGraph& g, const Subst& s) {
+            ENode ternaryNode(Op::Ternary, std::vector<ClassId>{s.at("c"), s.at("b"), s.at("a")});
+            return g.add(ternaryNode);
+        });
+
+    // ── Modular arithmetic identities ───────────────────────────────────
+    // (a % c + b % c) % c → (a + b) % c  [modular addition]
+    rules.emplace_back("mod_add_combine",
+        P::OpPat(Op::Mod, {
+            P::OpPat(Op::Add, {
+                P::OpPat(Op::Mod, {P::Wild("a"), P::Wild("c")}),
+                P::OpPat(Op::Mod, {P::Wild("b"), P::Wild("c")})}),
+            P::Wild("c")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId sum = g.addBinOp(Op::Add, s.at("a"), s.at("b"));
+            return g.addBinOp(Op::Mod, sum, s.at("c"));
+        });
+
+    // (a % c * b % c) % c → (a * b) % c  [modular multiplication]
+    rules.emplace_back("mod_mul_combine",
+        P::OpPat(Op::Mod, {
+            P::OpPat(Op::Mul, {
+                P::OpPat(Op::Mod, {P::Wild("a"), P::Wild("c")}),
+                P::OpPat(Op::Mod, {P::Wild("b"), P::Wild("c")})}),
+            P::Wild("c")}),
+        [](EGraph& g, const Subst& s) {
+            ClassId product = g.addBinOp(Op::Mul, s.at("a"), s.at("b"));
+            return g.addBinOp(Op::Mod, product, s.at("c"));
+        });
+
+    // (a % c - b % c + c) % c → (a - b + c) % c  [modular subtraction, safe]
+    // Simplified version: (a % c) % c → a % c  [double mod elimination]
+    rules.emplace_back("mod_double_elim",
+        P::OpPat(Op::Mod, {P::OpPat(Op::Mod, {P::Wild("a"), P::Wild("c")}), P::Wild("c")}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Mod, s.at("a"), s.at("c"));
+        });
+
+    // ── Integer power / exponentiation identities ───────────────────────
+    // x^2 → x * x  [strength reduce small power]
+    rules.emplace_back("pow2_to_mul",
+        P::OpPat(Op::Pow, {P::Wild("x"), P::ConstPat(2)}),
+        [](EGraph& g, const Subst& s) {
+            return g.addBinOp(Op::Mul, s.at("x"), s.at("x"));
+        });
+
+    // x^3 → x * x * x
+    rules.emplace_back("pow3_to_mul",
+        P::OpPat(Op::Pow, {P::Wild("x"), P::ConstPat(3)}),
+        [](EGraph& g, const Subst& s) {
+            ClassId xx = g.addBinOp(Op::Mul, s.at("x"), s.at("x"));
+            return g.addBinOp(Op::Mul, xx, s.at("x"));
+        });
+
+    // x^1 → x
+    rules.emplace_back("pow1_identity",
+        P::OpPat(Op::Pow, {P::Wild("x"), P::ConstPat(1)}),
+        [](EGraph& /*g*/, const Subst& s) {
+            return s.at("x");
+        });
+
+    // x^0 → 1
+    rules.emplace_back("pow0_identity",
+        P::OpPat(Op::Pow, {P::Wild("x"), P::ConstPat(0)}),
+        [](EGraph& g, const Subst& /*s*/) {
+            return g.addConst(1);
+        });
+
     return rules;
 }
 

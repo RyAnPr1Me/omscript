@@ -661,9 +661,13 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
 
             llvm::Value* len1 = builder->CreateCall(getOrDeclareStrlen(), {left}, "len1");
             llvm::Value* len2 = builder->CreateCall(getOrDeclareStrlen(), {right}, "len2");
-            llvm::Value* totalLen = builder->CreateAdd(len1, len2, "totallen");
+            // strlen results are always non-negative and bounded by addressable
+            // memory, so their sum cannot overflow a 64-bit signed integer.
+            // nsw+nuw enable SCEV to compute tight bounds through strlen-based
+            // expressions and help downstream passes (vectorizer, LICM).
+            llvm::Value* totalLen = builder->CreateAdd(len1, len2, "totallen", /*HasNUW=*/true, /*HasNSW=*/true);
             llvm::Value* allocSize =
-                builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "allocsize");
+                builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "allocsize", /*HasNUW=*/true, /*HasNSW=*/true);
             llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {allocSize}, "strbuf");
             // Use memcpy instead of strcpy+strcat: strcat must scan for the
             // null terminator in buf (O(len1)), so replacing with two memcpy
@@ -673,7 +677,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 llvm::Type::getInt8Ty(*context), buf, len1, "concat.dst2");
             // Copy len2+1 bytes from right to include the null terminator.
             llvm::Value* len2Plus1 = builder->CreateAdd(
-                len2, llvm::ConstantInt::get(getDefaultType(), 1), "len2p1");
+                len2, llvm::ConstantInt::get(getDefaultType(), 1), "len2p1", /*HasNUW=*/true, /*HasNSW=*/true);
             builder->CreateCall(getOrDeclareMemcpy(), {dest2, right, len2Plus1});
             return buf;
         }
@@ -1085,14 +1089,29 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         // overflow cannot occur (each value fits in [0, INT64_MAX]), and
         // their sum is at most 2·INT64_MAX = 2^64−2 < UINT64_MAX so unsigned
         // overflow cannot occur either.
+        // @optmax: the user's guarantee of well-behaved arithmetic means
+        // signed overflow cannot occur, enabling nsw even when we can't
+        // statically prove non-negativity.  nsw enables SCEV to compute
+        // tighter loop trip counts and proves induction variable monotonicity.
+        //
+        // Two-tier flag assignment:
+        //   canNSWNUW (both non-neg proven) → nsw + nuw (strongest, enables
+        //     unsigned SCEV ranges and non-negative tracking)
+        //   canNSW (@optmax or partial proof) → nsw only (no nuw because
+        //     negative operands can still wrap unsigned)
+        //   neither → no flags (conservative, no UB assumptions)
         const bool canNSWNUW = bothOperandsNonNeg || constNonNeg;
+        const bool canNSW = canNSWNUW || inOptMaxFunction;
         auto* result = canNSWNUW
             ? builder->CreateAdd(left, right, "addtmp", /*HasNUW=*/true, /*HasNSW=*/true)
-            : builder->CreateAdd(left, right, "addtmp");
+            : canNSW
+                ? builder->CreateNSWAdd(left, right, "addtmp")
+                : builder->CreateAdd(left, right, "addtmp");
         // Track non-negativity: if both operands are known non-negative
         // (including constant operands), the result is non-negative
         // (assuming no overflow, which is true for typical loop counter
-        // arithmetic).
+        // arithmetic).  canNSW-only (@optmax) does NOT prove non-negativity
+        // of the result — the operands might be negative.
         if (canNSWNUW)
             nonNegValues_.insert(result);
         return result;
@@ -1116,7 +1135,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             else if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left))
                 constNSW = rightNonNeg && !ci->isNegative();
         }
-        const bool canNSW = bothNonNeg || constNSW;
+        const bool canNSW = bothNonNeg || constNSW || inOptMaxFunction;
         return canNSW ? builder->CreateNSWSub(left, right, "subtmp")
                       : builder->CreateSub(left, right, "subtmp");
     } else if (expr->op == "*") {
@@ -1127,9 +1146,11 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 const bool leftNonNeg = nonNegValues_.count(left);
                 // For non-negative base × positive power-of-2: emit NSWMul so
                 // LLVM's SCEV can track the result range (shift loses flags).
-                if (leftNonNeg) {
+                // @optmax: always use NSWMul since the user guarantees no overflow.
+                if (leftNonNeg || inOptMaxFunction) {
                     auto* result = builder->CreateNSWMul(left, right, "multmp");
-                    nonNegValues_.insert(result);
+                    if (leftNonNeg)
+                        nonNegValues_.insert(result);
                     return result;
                 }
                 return builder->CreateShl(left, llvm::ConstantInt::get(getDefaultType(), s), "shltmp");
@@ -1139,9 +1160,10 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             const int s = log2IfPowerOf2(ci->getSExtValue());
             if (s >= 0) {
                 const bool rightNonNeg = nonNegValues_.count(right);
-                if (rightNonNeg) {
+                if (rightNonNeg || inOptMaxFunction) {
                     auto* result = builder->CreateNSWMul(right, left, "multmp");
-                    nonNegValues_.insert(result);
+                    if (rightNonNeg)
+                        nonNegValues_.insert(result);
                     return result;
                 }
                 return builder->CreateShl(right, llvm::ConstantInt::get(getDefaultType(), s), "shltmp");
@@ -1156,7 +1178,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         // to compute tighter ranges for induction variable analysis.
         auto emitShiftAdd = [&](llvm::Value* base, int64_t multiplier, bool baseNonNeg = false) -> llvm::Value* {
             const bool nf = false;  // nuw: never set on these (could wrap unsigned)
-            const bool ns = baseNonNeg;  // nsw: safe when base >= 0
+            const bool ns = baseNonNeg || inOptMaxFunction;  // nsw: safe when base >= 0 or @optmax
             // Use the actual type of the base value for shift amounts so that the
             // shift instruction is well-typed for all integer widths (i8/i16/i32/i64).
             llvm::Type* baseTy = base->getType();
@@ -2727,7 +2749,11 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             nonNegValues_.insert(result);
             return result;
         }
-        return builder->CreateMul(left, right, "multmp");
+        // @optmax: the user's guarantee of well-behaved arithmetic means
+        // signed overflow cannot occur, enabling nsw for better SCEV analysis.
+        return inOptMaxFunction
+            ? builder->CreateNSWMul(left, right, "multmp")
+            : builder->CreateMul(left, right, "multmp");
     } else if (expr->op == "/" || expr->op == "%") {
         const bool isDivision = expr->op == "/";
 
@@ -3652,7 +3678,7 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
                     auto it = loopIterEndBound_.find(idxIdent->name);
                     if (it != loopIterEndBound_.end()) {
                         llvm::Value* endBound = it->second;
-                        auto* lenLoadE = builder->CreateLoad(getDefaultType(), arrPtr, "incdec.len.elim");
+                        auto* lenLoadE = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "incdec.len.elim");
                         lenLoadE->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
                         lenLoadE->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
                         llvm::Value* lenVal = lenLoadE;
@@ -3674,7 +3700,7 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
         }
 
         if (!boundsCheckElidedID) {
-            auto* lenLoadID = builder->CreateLoad(getDefaultType(), arrPtr, "incdec.len");
+            auto* lenLoadID = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "incdec.len");
             lenLoadID->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
             lenLoadID->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
             llvm::Value* lenVal = lenLoadID;
@@ -4103,6 +4129,11 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
             gv->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
 
             // memcpy(arrPtr, @arr.const, totalBytes)
+            // malloc typically returns 16-byte aligned on most 64-bit
+            // platforms (glibc, musl, macOS), but the C standard only
+            // guarantees alignment for max_align_t (usually 8 or 16 bytes).
+            // Use 8-byte alignment for safety on all targets — this still
+            // enables i64-width stores and matches the element size.
             builder->CreateMemCpy(arrPtr, llvm::MaybeAlign(8),
                                   gv, llvm::MaybeAlign(16), totalBytes);
         } else {
@@ -4147,7 +4178,7 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
             arrVal = toDefaultType(arrVal);
             llvm::Value* arrPtr =
                 builder->CreateIntToPtr(arrVal, llvm::PointerType::getUnqual(*context), "spread.arrptr");
-            auto* spreadLenLoad = builder->CreateLoad(getDefaultType(), arrPtr, "spread.len");
+            auto* spreadLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "spread.len");
             spreadLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
             spreadLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
             llvm::Value* arrLen = spreadLenLoad;
@@ -4197,9 +4228,9 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
             // Load element from source: srcPtr[i + 1]
             llvm::Value* srcIdx = builder->CreateAdd(i, one, "spread.srcidx");
             llvm::Value* srcElemPtr = builder->CreateInBoundsGEP(getDefaultType(), srcPtr, srcIdx, "spread.srcelem");
-            llvm::Value* elem = builder->CreateLoad(getDefaultType(), srcElemPtr, "spread.elem");
+            llvm::Value* elem = builder->CreateAlignedLoad(getDefaultType(), srcElemPtr, llvm::MaybeAlign(8), "spread.elem");
             // Store in dest: buf[writeIdx + 1]
-            llvm::Value* curIdx = builder->CreateLoad(getDefaultType(), writeIdx, "spread.curidx");
+            llvm::Value* curIdx = builder->CreateAlignedLoad(getDefaultType(), writeIdx, llvm::MaybeAlign(8), "spread.curidx");
             llvm::Value* dstIdx = builder->CreateAdd(curIdx, one, "spread.dstidx");
             llvm::Value* dstPtr = builder->CreateInBoundsGEP(getDefaultType(), buf, dstIdx, "spread.dstptr");
             auto* spreadSt = builder->CreateStore(elem, dstPtr);
@@ -4224,7 +4255,7 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
             builder->SetInsertPoint(doneBB);
         } else {
             // Single element: store at buf[writeIdx + 1]
-            llvm::Value* curIdx = builder->CreateLoad(getDefaultType(), writeIdx, "spread.curidx");
+            llvm::Value* curIdx = builder->CreateAlignedLoad(getDefaultType(), writeIdx, llvm::MaybeAlign(8), "spread.curidx");
             llvm::Value* dstIdx = builder->CreateAdd(curIdx, one, "spread.dstidx");
             llvm::Value* dstPtr = builder->CreateInBoundsGEP(getDefaultType(), buf, dstIdx, "spread.dstptr");
             builder->CreateStore(ei.val, dstPtr);
@@ -4351,7 +4382,7 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
             if (it != loopIterEndBound_.end()) {
                 llvm::Value* endBound = it->second;
                 // Load the array length from slot 0.
-                auto* lenLoadElim = builder->CreateLoad(getDefaultType(), basePtr, "idx.len.elim");
+                auto* lenLoadElim = builder->CreateAlignedLoad(getDefaultType(), basePtr, llvm::MaybeAlign(8), "idx.len.elim");
                 lenLoadElim->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
                 lenLoadElim->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
                 llvm::Value* lenVal = lenLoadElim;
@@ -4533,7 +4564,7 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
             lenVal = builder->CreateCall(getOrDeclareStrlen(), {basePtr}, "idx.strlen");
         } else {
             // Array: length is stored in slot 0 of the buffer.
-            auto* lenLoad = builder->CreateLoad(getDefaultType(), basePtr, "idx.len");
+            auto* lenLoad = builder->CreateAlignedLoad(getDefaultType(), basePtr, llvm::MaybeAlign(8), "idx.len");
             lenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
             lenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
             // Borrowed arrays cannot resize — mark length as invariant so
@@ -4571,7 +4602,9 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
 
     if (isStr) {
         // Load single byte at offset index, zero-extend to i64
-        llvm::Value* charPtr = builder->CreateGEP(llvm::Type::getInt8Ty(*context), basePtr, idxVal, "idx.charptr");
+        // inbounds GEP: the bounds check above guarantees the index is within
+        // the allocated string buffer, so the pointer is always valid.
+        llvm::Value* charPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), basePtr, idxVal, "idx.charptr");
         llvm::Value* charVal = builder->CreateLoad(llvm::Type::getInt8Ty(*context), charPtr, "idx.char");
         return builder->CreateZExt(charVal, getDefaultType(), "idx.charext");
     }
@@ -4670,7 +4703,7 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
             auto it = loopIterEndBound_.find(idxIdent->name);
             if (it != loopIterEndBound_.end()) {
                 llvm::Value* endBound = it->second;
-                auto* lenLoadAElim = builder->CreateLoad(getDefaultType(), basePtr, "idxa.len.elim");
+                auto* lenLoadAElim = builder->CreateAlignedLoad(getDefaultType(), basePtr, llvm::MaybeAlign(8), "idxa.len.elim");
                 lenLoadAElim->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
                 lenLoadAElim->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
                 llvm::Value* lenVal = lenLoadAElim;
@@ -4706,7 +4739,7 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
         if (isStr) {
             lenVal = builder->CreateCall(getOrDeclareStrlen(), {basePtr}, "idxa.strlen");
         } else {
-            auto* lenLoad = builder->CreateLoad(getDefaultType(), basePtr, "idxa.len");
+            auto* lenLoad = builder->CreateAlignedLoad(getDefaultType(), basePtr, llvm::MaybeAlign(8), "idxa.len");
             lenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
             lenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
             // Borrowed arrays cannot resize — length is invariant.
@@ -4740,8 +4773,10 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
 
     if (isStr) {
         // Truncate to i8 and store at byte offset index
+        // inbounds GEP: the bounds check above guarantees the index is within
+        // the allocated string buffer, so the pointer is always valid.
         llvm::Value* byteVal = builder->CreateTrunc(newVal, llvm::Type::getInt8Ty(*context), "idxa.byte");
-        llvm::Value* charPtr = builder->CreateGEP(llvm::Type::getInt8Ty(*context), basePtr, idxVal, "idxa.charptr");
+        llvm::Value* charPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), basePtr, idxVal, "idxa.charptr");
         builder->CreateStore(byteVal, charPtr);
     } else {
         // Array: store i64 element at slot (index + 1)

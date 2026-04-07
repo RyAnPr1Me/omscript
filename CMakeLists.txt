@@ -39,6 +39,7 @@ option(COVERAGE "Coverage" OFF)
 set(SANITIZE "" CACHE STRING "Sanitizers")
 option(UNITY_BUILD "Unity build (faster compile)" OFF)
 option(WITH_OPENMP "Enable OpenMP for parallel compilation passes" ON)
+option(USE_MOLD "Use mold linker for faster link times" OFF)
 
 # ── LLVM ──────────────────────────────────────────────────────────────────────
 find_package(LLVM REQUIRED CONFIG)
@@ -147,6 +148,14 @@ target_compile_options(omsc PRIVATE
         -ftree-loop-im
         -ftree-loop-ivcanon
         -fipa-pta
+
+        # GCC block reordering: STC (software trace cache) produces good
+        # code locality for large binaries with many branches.
+        -freorder-blocks-algorithm=stc
+        # Align hot function entries to cache line boundaries.
+        -falign-functions=32
+        # Enable computed goto lowering and switch table generation.
+        -ftree-switch-conversion
     >
 )
 
@@ -171,6 +180,17 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND NOT APPLE)
     target_link_options(omsc PRIVATE -Wl,--export-dynamic)
 endif()
 
+# ── Mold linker (optional — much faster link times for PGO rebuild) ───────────
+if(USE_MOLD)
+    find_program(MOLD_LINKER mold)
+    if(MOLD_LINKER)
+        target_link_options(omsc PRIVATE -fuse-ld=mold)
+        message(STATUS "Using mold linker: ${MOLD_LINKER}")
+    else()
+        message(STATUS "mold not found — using default linker")
+    endif()
+endif()
+
 # ── LTO (IPO) ─────────────────────────────────────────────────────────────────
 if(LTO)
     include(CheckIPOSupported)
@@ -190,6 +210,11 @@ if(PGO_GENERATE)
     if(PGO_PROFILE_DIR)
         set(flags "${flags}=${PGO_PROFILE_DIR}")
     endif()
+    # Atomic profile updates: safe when the instrumented binary is invoked
+    # concurrently (e.g. run_tests.sh compiling multiple .om files).
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+        set(flags "${flags} -fprofile-update=atomic")
+    endif()
     target_compile_options(omsc PRIVATE ${flags})
     target_link_options(omsc PRIVATE ${flags})
 endif()
@@ -202,6 +227,11 @@ if(PGO_USE)
         target_compile_options(omsc PRIVATE
             -fprofile-use=${PGO_USE}
             -fprofile-correction
+            # Treat untrained code paths as cold.  Without this flag GCC
+            # gives equal weight to trained and untrained paths, which
+            # pollutes branch-probability estimates for functions that were
+            # only partially covered during PGO training.
+            -fprofile-partial-training
             -Wno-missing-profile
         )
         target_link_options(omsc PRIVATE -fprofile-use=${PGO_USE})
