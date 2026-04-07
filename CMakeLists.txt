@@ -250,6 +250,11 @@ if(PGO_USE)
             # only partially covered during PGO training.
             -fprofile-partial-training
             -Wno-missing-profile
+            # Suppress "control flow does not match profile data" errors that
+            # arise when a function is modified after the training run (e.g.
+            # estimateWorkingSet).  -fprofile-partial-training handles missing
+            # arcs but not structural mismatches; this flag covers the rest.
+            -Wno-coverage-mismatch
         )
         target_link_options(omsc PRIVATE ${_pgo_use_flag})
     endif()
