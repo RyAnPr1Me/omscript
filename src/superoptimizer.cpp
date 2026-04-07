@@ -994,7 +994,6 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Detect: (x << (bw-n)) >> (bw-n)  →  sext from n bits
-/// Also:   ashr(shl(x, bw-n), bw-n)  →  sext from n bits
 /// This pattern manually sign-extends an n-bit value stored in a wider integer.
 [[nodiscard]] static std::optional<IdiomMatch> detectSignExtend(llvm::Instruction* inst) {
     if (inst->getOpcode() != llvm::Instruction::AShr)

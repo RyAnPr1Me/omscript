@@ -149,8 +149,8 @@ target_compile_options(omsc PRIVATE
         -ftree-loop-ivcanon
         -fipa-pta
 
-        # GCC block reordering: use the extended TSP algorithm which produces
-        # better code locality than the default "STC" for large binaries.
+        # GCC block reordering: STC (software trace cache) produces good
+        # code locality for large binaries with many branches.
         -freorder-blocks-algorithm=stc
         # Align hot function entries to cache line boundaries.
         -falign-functions=32

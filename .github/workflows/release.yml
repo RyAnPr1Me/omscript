@@ -92,7 +92,7 @@ jobs:
       # ── PGO + LTO optimized build (Linux) ──────────────────────────
       # Three-phase build: instrument → profile → rebuild.
       # The instrumented compiler is run on the full integration test suite
-      # (~150+ .om files) to produce accurate profile data covering every
+      # (~150 .om files) to produce accurate profile data covering every
       # compiler subsystem: lexer, parser, codegen, optimizer, e-graph,
       # superoptimizer, builtins, and all optimization levels.
       #
@@ -355,7 +355,7 @@ jobs:
         continue-on-error: true
         shell: bash
         run: |
-          # Check if BOLT tools are available (part of LLVM 18+)
+          # Check if BOLT tools are available (part of LLVM)
           BOLT=""
           MERGE=""
           PERF2BOLT=""
