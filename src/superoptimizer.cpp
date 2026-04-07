@@ -1051,21 +1051,27 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
                 IdiomMatch match;
                 match.idiom = Idiom::ConditionalNeg;
                 match.rootInst = inst;
-                match.operands = {sel->getCondition(), falseVal};
+                // operands[0] = x (the value), operands[1] = cond (the condition)
+                // replaceIdiom(ConditionalNeg) reads: x = operands[0], cond = operands[1]
+                match.operands = {falseVal, sel->getCondition()};
                 match.bitWidth = inst->getType()->getIntegerBitWidth();
                 return match;
             }
         }
-        // Check reverse: select(cond, x, -x)
+        // Check reverse: select(cond, x, -x) == select(!cond, -x, x)
+        // Emit !cond so the replacement can use the standard formula with inverted mask.
         if (auto* sub = llvm::dyn_cast<llvm::BinaryOperator>(falseVal)) {
             if (sub->getOpcode() == llvm::Instruction::Sub &&
                 isConstInt(sub->getOperand(0), 0) &&
                 sub->getOperand(1) == trueVal) {
+                llvm::IRBuilder<> invBuilder(sel);
+                llvm::Value* invCond = invBuilder.CreateNot(
+                    sel->getCondition(), "cneg.invcond");
                 IdiomMatch match;
                 match.idiom = Idiom::ConditionalNeg;
                 match.rootInst = inst;
-                // Invert: select(!cond, -x, x)
-                match.operands = {sel->getCondition(), trueVal};
+                // operands[0] = x (the value), operands[1] = !cond
+                match.operands = {trueVal, invCond};
                 match.bitWidth = inst->getType()->getIntegerBitWidth();
                 return match;
             }
