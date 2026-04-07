@@ -1444,14 +1444,6 @@ void CodeGenerator::runOptimizationPasses() {
         const unsigned totalSuperOpts = superStats.idiomsReplaced + superStats.synthReplacements +
                                  superStats.algebraicSimplified + superStats.branchesSimplified +
                                  superStats.deadCodeEliminated;
-        // DEBUG: verify module after superoptimizer to find type mismatches
-        {
-            std::string dbgErr;
-            llvm::raw_string_ostream dbgStream(dbgErr);
-            if (llvm::verifyModule(*module, &dbgStream)) {
-                std::cerr << "DEBUG VERIFY AFTER SUPEROPTIMIZER: " << dbgErr << "\n";
-            }
-        }
         if (verbose_) {
             std::cout << "    Superoptimizer complete: "
                       << superStats.idiomsReplaced << " idioms replaced, "
