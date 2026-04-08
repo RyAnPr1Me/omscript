@@ -82,11 +82,8 @@ set(SRC
     src/compiler.cpp
     src/main.cpp
 
-    # Runtime (AOT + profiling + deopt)
+    # Runtime
     runtime/value.cpp
-    runtime/aot_profile.cpp
-    runtime/jit_profiler.cpp
-    runtime/deopt.cpp
 )
 
 add_executable(omsc ${SRC})
@@ -176,8 +173,6 @@ target_link_options(omsc PRIVATE
         # BOLT (Binary Optimization and Layout Tool) used in the release
         # pipeline cannot instrument PIE executables.  omsc is a developer
         # tool, not a user-facing daemon, so the ASLR trade-off is fine.
-        # --export-dynamic (below) still gives the ORC JIT full dynamic
-        # symbol visibility in a non-PIE executable.
         -no-pie
         # Keep relocation records in the output binary so that BOLT can
         # correctly resolve indirect branches, PLT entries, and function
@@ -186,11 +181,6 @@ target_link_options(omsc PRIVATE
         -Wl,--emit-relocs
     >
 )
-
-# Required for ORC JIT
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND NOT APPLE)
-    target_link_options(omsc PRIVATE -Wl,--export-dynamic)
-endif()
 
 # ── Mold linker (optional — much faster link times for PGO rebuild) ───────────
 if(USE_MOLD)
@@ -316,8 +306,7 @@ endif()
 
 # ── LLVM linking ──────────────────────────────────────────────────────────────
 set(LLVM_COMPONENTS
-    core executionengine interpreter orcjit orctargetprocess
-    native support passes target transformutils analysis
+    core native support passes target transformutils analysis
     asmparser codegen mc mcparser bitreader
 )
 

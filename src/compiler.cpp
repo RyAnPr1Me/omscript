@@ -127,14 +127,7 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
         codegen.setPGOUse(pgoUsePath_);
     }
     try {
-        // Compile all functions to LLVM IR.  When JIT is enabled the resulting
-        // module is used by the adaptive JIT runtime (Tier-1 native code via
-        // MCJIT, with call-count monitoring and O3+PGO hot recompile).
-        if (jit_) {
-            codegen.generateHybrid(program.get());
-        } else {
-            codegen.generate(program.get());
-        }
+        codegen.generate(program.get());
     } catch (const DiagnosticError&) {
         throw;
     } catch (const std::exception& e) {

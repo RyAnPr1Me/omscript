@@ -66,41 +66,6 @@ enum class OwnershipState {
     Invalidated  ///< Explicitly killed — use is a compile error
 };
 
-/// Execution tier assigned to each function during compilation.
-///
-/// All user-defined functions compile to native LLVM IR and are executed via
-/// the adaptive two-tier AOT pipeline:
-///
-///  - **AOT (Tier 1)**: Every function is compiled to native machine code
-///    ahead-of-time by LLVM MCJIT at O2.  The adaptive runtime injects
-///    call-counting dispatch prologs so hot functions can be promoted.
-///
-///  - **Tier 2**: When a function's call count reaches kRecompileThreshold
-///    the runtime re-optimises it at O3 with a PGO entry-count annotation
-///    and hot-patches the function pointer so subsequent calls bypass the
-///    dispatch prolog entirely.
-///
-/// There is no bytecode or interpreter tier — every function produces
-/// native machine code from the first call.
-enum class ExecutionTier {
-    AOT,         // Compiled to native code via LLVM IR (Tier 1); hot functions promoted to O3+PGO (Tier 2)
-    Interpreted, // Executed via tree-walking interpreter (no LLVM compilation)
-    JIT          // Just-in-time compiled at runtime
-};
-
-/// Return a human-readable label for an ExecutionTier value.
-inline const char* executionTierName(ExecutionTier tier) {
-    switch (tier) {
-    case ExecutionTier::AOT:
-        return "AOT";
-    case ExecutionTier::Interpreted:
-        return "Interpreted";
-    case ExecutionTier::JIT:
-        return "JIT";
-    }
-    return "Unknown";
-}
-
 class CodeGenerator {
   public:
     CodeGenerator(OptimizationLevel optLevel = OptimizationLevel::O2);
@@ -208,16 +173,6 @@ class CodeGenerator {
         pgoUsePath_ = profilePath;
     }
 
-    /// Check whether dynamic (JIT) compilation mode is enabled.
-    [[nodiscard]] bool isDynamicCompilation() const noexcept {
-        return dynamicCompilation_;
-    }
-
-    /// Enable or disable dynamic (JIT) compilation mode.
-    void setDynamicCompilation(bool enable) {
-        dynamicCompilation_ = enable;
-    }
-
     /// Enable LTO pre-link optimization pipeline.
     /// When true, runOptimizationPasses() uses buildLTOPreLinkDefaultPipeline()
     /// instead of buildPerModuleDefaultPipeline(), deferring heavy IPO to the
@@ -318,9 +273,6 @@ class CodeGenerator {
     std::unordered_map<std::string, std::string> operatorOverloads_;
 
     OptimizationLevel optimizationLevel;
-
-    // Per-function execution tier decided during code generation.
-    std::unordered_map<std::string, ExecutionTier> functionTiers;
 
     // String type tracking across function boundaries.
     // stringVars_: names of variables/parameters that hold string values in the
@@ -463,10 +415,6 @@ class CodeGenerator {
     /// the ones where the divisor is immediately visible.
     llvm::DenseMap<llvm::Value*, int64_t> allocaUpperBound_;
     llvm::MDNode* currentLoopAccessGroup_ = nullptr; ///< Access group for parallel loop metadata
-
-    /// Classify a function into its execution tier based on type annotations,
-    /// OPTMAX status, and whether it is a special function (main/stdlib).
-    ExecutionTier classifyFunction(const FunctionDecl* func) const;
 
     // Code generation methods
     [[gnu::hot]] llvm::Function* generateFunction(FunctionDecl* func);
@@ -627,7 +575,6 @@ class CodeGenerator {
     unsigned preferredVectorWidth_ = 4; // SIMD vector width for loop hints (target-aware)
     std::string pgoGenPath_;          // --pgo-gen=<path>: emit raw profile to this file
     std::string pgoUsePath_;          // --pgo-use=<path>: read profile data from this file
-    bool dynamicCompilation_ = false; // Dynamic (JIT) compilation mode
     bool lto_ = false;                // LTO mode: use pre-link pipeline
     bool verbose_ = false;            // -V: print optimization pass messages
 
@@ -738,31 +685,9 @@ class CodeGenerator {
     void runOptimizationPasses();
     void optimizeOptMaxFunctions();
 
-    /// Apply intra-procedural optimization passes for the JIT baseline.
-    /// Improves IR quality (mem2reg, instcombine, GVN, LICM, etc.) without
-    /// IPO passes that would destroy function boundaries needed for hot-patching.
-    void runJITBaselinePasses();
-
   public:
     // Per-function optimization for targeted optimization of individual functions
     void optimizeFunction(llvm::Function* func);
-
-    /// Compile all functions to native LLVM IR.  Equivalent to generate()
-    /// in the current single-tier model; retained as a separate entry point
-    /// so the adaptive JIT runner can use a distinct call site from the
-    /// traditional AOT compile path.
-    void generateHybrid(Program* program);
-
-    /// Return the execution tier assigned to a function, or AOT if not found.
-    [[nodiscard]] ExecutionTier getFunctionTier(const std::string& name) const {
-        auto it = functionTiers.find(name);
-        return it != functionTiers.end() ? it->second : ExecutionTier::AOT;
-    }
-
-    /// Return a read-only view of all function tier assignments.
-    [[nodiscard]] const std::unordered_map<std::string, ExecutionTier>& getFunctionTiers() const noexcept {
-        return functionTiers;
-    }
 };
 
 } // namespace omscript

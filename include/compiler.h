@@ -66,10 +66,6 @@ class Compiler {
     void setOptMax(bool enable) {
         optMax_ = enable;
     }
-    /// Enable or disable adaptive JIT runtime for hot function recompilation (default: true).
-    void setJIT(bool enable) {
-        jit_ = enable;
-    }
     /// Enable or disable link-time optimization (default: false).
     void setLTO(bool enable) {
         lto_ = enable;
@@ -126,7 +122,6 @@ class Compiler {
     bool pic_ = true;
     bool fastMath_ = false;
     bool optMax_ = true;
-    bool jit_ = true;
     bool lto_ = false;
     bool staticLink_ = false;
     bool strip_ = false;

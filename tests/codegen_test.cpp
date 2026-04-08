@@ -348,19 +348,6 @@ TEST(CodegenTest, LogicalOperators) {
 }
 
 // ===========================================================================
-// Dynamic compilation flag
-// ===========================================================================
-
-TEST(CodegenTest, DynamicCompilationFlag) {
-    CodeGenerator codegen(OptimizationLevel::O0);
-    EXPECT_FALSE(codegen.isDynamicCompilation());
-    codegen.setDynamicCompilation(true);
-    EXPECT_TRUE(codegen.isDynamicCompilation());
-    codegen.setDynamicCompilation(false);
-    EXPECT_FALSE(codegen.isDynamicCompilation());
-}
-
-// ===========================================================================
 // SetOptimizationLevel
 // ===========================================================================
 
@@ -2305,219 +2292,6 @@ TEST(CodegenTest, MultiplyStrengthReduction) {
 }
 
 // ===========================================================================
-// Execution-tier classification
-// ===========================================================================
-
-TEST(CodegenTest, ClassifyMainAsAOT) {
-    std::string src = "fn main() { return 0; }";
-    CodeGenerator codegen;
-    generateIR(src, codegen);
-    EXPECT_EQ(codegen.getFunctionTier("main"), ExecutionTier::AOT);
-}
-
-TEST(CodegenTest, ClassifyOptMaxAsAOT) {
-    std::string src = R"(
-        OPTMAX=: fn optimized(x: int) { return x * 2; } OPTMAX!:
-        fn main() { return optimized(5); }
-    )";
-    CodeGenerator codegen;
-    generateIR(src, codegen);
-    EXPECT_EQ(codegen.getFunctionTier("optimized"), ExecutionTier::AOT);
-}
-
-TEST(CodegenTest, ClassifyFullyAnnotatedAsAOT) {
-    std::string src = R"(
-        fn add(a: int, b: int) { return a + b; }
-        fn main() { return add(1, 2); }
-    )";
-    CodeGenerator codegen;
-    generateIR(src, codegen);
-    EXPECT_EQ(codegen.getFunctionTier("add"), ExecutionTier::AOT);
-}
-
-TEST(CodegenTest, ClassifyUnannotatedAsAOT) {
-    // All user-defined functions compile to LLVM IR (AOT Tier 1) regardless
-    // of type-annotation coverage.  The adaptive JIT runtime monitors call
-    // counts and promotes hot functions to O3+PGO at runtime.
-    std::string src = R"(
-        fn compute(x, y) { return x + y; }
-        fn main() { return compute(3, 4); }
-    )";
-    CodeGenerator codegen;
-    generateIR(src, codegen);
-    EXPECT_EQ(codegen.getFunctionTier("compute"), ExecutionTier::AOT);
-}
-
-TEST(CodegenTest, ClassifyPartiallyAnnotatedAsAOT) {
-    // Partially-annotated functions also compile to LLVM IR — type
-    // annotations are optional since all functions go through the
-    // adaptive JIT Tier-1 (MCJIT O2) path.
-    std::string src = R"(
-        fn mixed(a: int, b) { return a + b; }
-        fn main() { return mixed(1, 2); }
-    )";
-    CodeGenerator codegen;
-    generateIR(src, codegen);
-    EXPECT_EQ(codegen.getFunctionTier("mixed"), ExecutionTier::AOT);
-}
-
-TEST(CodegenTest, ClassifyNoParamsAsAOT) {
-    // Functions with no parameters are trivially fully-annotated.
-    std::string src = R"(
-        fn zero() { return 0; }
-        fn main() { return zero(); }
-    )";
-    CodeGenerator codegen;
-    generateIR(src, codegen);
-    EXPECT_EQ(codegen.getFunctionTier("zero"), ExecutionTier::AOT);
-}
-
-TEST(CodegenTest, ExecutionTierNameStrings) {
-    EXPECT_STREQ(executionTierName(ExecutionTier::AOT), "AOT");
-    EXPECT_STREQ(executionTierName(ExecutionTier::Interpreted), "Interpreted");
-    EXPECT_STREQ(executionTierName(ExecutionTier::JIT), "JIT");
-}
-
-TEST(CodegenTest, FunctionTierMapContainsAllFunctions) {
-    std::string src = R"(
-        fn helper(x) { return x; }
-        fn main() { return helper(0); }
-    )";
-    CodeGenerator codegen;
-    generateIR(src, codegen);
-    auto& tiers = codegen.getFunctionTiers();
-    EXPECT_NE(tiers.find("helper"), tiers.end());
-    EXPECT_NE(tiers.find("main"), tiers.end());
-}
-
-TEST(CodegenTest, HasFullTypeAnnotationsHelper) {
-    auto prog = parseSource(R"(
-        fn typed(a: int, b: int) { return a + b; }
-        fn untyped(a, b) { return a + b; }
-        fn main() { return 0; }
-    )");
-    bool foundTyped = false, foundUntyped = false;
-    for (auto& fn : prog->functions) {
-        if (fn->name == "typed") {
-            EXPECT_TRUE(fn->hasFullTypeAnnotations());
-            foundTyped = true;
-        }
-        if (fn->name == "untyped") {
-            EXPECT_FALSE(fn->hasFullTypeAnnotations());
-            foundUntyped = true;
-        }
-    }
-    EXPECT_TRUE(foundTyped);
-    EXPECT_TRUE(foundUntyped);
-}
-
-// ===========================================================================
-// Hybrid compilation
-// ===========================================================================
-
-// Helper: run hybrid generation and return the codegen
-static void generateHybridIR(const std::string& source, CodeGenerator& codegen) {
-    Lexer lexer(source);
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    codegen.generateHybrid(program.get());
-}
-
-TEST(CodegenTest, HybridAllFunctionsCompileToIR) {
-    // generateHybrid() compiles every function to LLVM IR regardless of
-    // type-annotation coverage.  No bytecode is produced — all functions
-    // run as native code via the adaptive JIT (Tier-1 MCJIT O2).
-    std::string src = R"(
-        fn compute(x, y) { return x + y; }
-        fn main() { return compute(3, 4); }
-    )";
-    CodeGenerator codegen;
-    generateHybridIR(src, codegen);
-
-    // All functions are AOT in the new model
-    EXPECT_EQ(codegen.getFunctionTier("compute"), ExecutionTier::AOT);
-    EXPECT_EQ(codegen.getFunctionTier("main"), ExecutionTier::AOT);
-}
-
-TEST(CodegenTest, HybridNoBytecodeForFullyTyped) {
-    std::string src = R"(
-        fn add(a: int, b: int) { return a + b; }
-        fn main() { return add(1, 2); }
-    )";
-    CodeGenerator codegen;
-    generateHybridIR(src, codegen);
-
-    // Both functions are AOT — no bytecode should be emitted
-    EXPECT_EQ(codegen.getFunctionTier("add"), ExecutionTier::AOT);
-    EXPECT_EQ(codegen.getFunctionTier("main"), ExecutionTier::AOT);
-}
-
-TEST(CodegenTest, HybridMultipleUntypedFunctions) {
-    // All user functions — typed or not — compile to LLVM IR.
-    std::string src = R"(
-        fn helper(x) { return x * 2; }
-        fn dynamic_add(a, b) { return a + b; }
-        fn main() { return helper(5) + dynamic_add(1, 2); }
-    )";
-    CodeGenerator codegen;
-    generateHybridIR(src, codegen);
-
-    EXPECT_EQ(codegen.getFunctionTier("helper"), ExecutionTier::AOT);
-    EXPECT_EQ(codegen.getFunctionTier("dynamic_add"), ExecutionTier::AOT);
-    EXPECT_EQ(codegen.getFunctionTier("main"), ExecutionTier::AOT);
-}
-
-TEST(CodegenTest, HybridMixedTiersWithOptMax) {
-    // OPTMAX functions are still AOT; unannotated functions are also AOT.
-    std::string src = R"(
-        OPTMAX=: fn fast(x: int) { return x * x; } OPTMAX!:
-        fn dynamic(x) { return x + 1; }
-        fn main() { return fast(3) + dynamic(2); }
-    )";
-    CodeGenerator codegen;
-    generateHybridIR(src, codegen);
-
-    EXPECT_EQ(codegen.getFunctionTier("fast"), ExecutionTier::AOT);
-    EXPECT_EQ(codegen.getFunctionTier("dynamic"), ExecutionTier::AOT);
-    EXPECT_EQ(codegen.getFunctionTier("main"), ExecutionTier::AOT);
-}
-
-TEST(CodegenTest, HybridPreservesLLVMIR) {
-    std::string src = R"(
-        fn dynamic_fn(x) { return x; }
-        fn main() { return dynamic_fn(42); }
-    )";
-    CodeGenerator codegen;
-    generateHybridIR(src, codegen);
-
-    // The LLVM module should still have both functions as IR
-    auto* mod = codegen.getModule();
-    ASSERT_NE(mod, nullptr);
-    EXPECT_NE(mod->getFunction("main"), nullptr);
-    EXPECT_NE(mod->getFunction("dynamic_fn"), nullptr);
-}
-
-TEST(CodegenTest, HybridGeneratesIRForAllFunctions) {
-    // generateHybrid() produces LLVM IR for all functions, including
-    // unannotated ones.  No bytecode is emitted — the LLVM module is the
-    // sole output.
-    std::string src = R"(
-        fn identity(x) { return x; }
-        fn main() { return identity(5); }
-    )";
-    CodeGenerator codegen;
-    generateHybridIR(src, codegen);
-
-
-    // Both functions must be present in the LLVM IR module
-    auto* mod = codegen.getModule();
-    ASSERT_NE(mod, nullptr);
-    EXPECT_NE(mod->getFunction("identity"), nullptr);
-    EXPECT_NE(mod->getFunction("main"), nullptr);
-}
-
-// ===========================================================================
 // IR-level algebraic identity optimizations
 // ===========================================================================
 
@@ -3212,14 +2986,14 @@ TEST(CodegenTest, PureFunctionsHaveMemoryNone) {
 }
 
 // ===========================================================================
-// Hybrid algebraic identity tests (generateHybrid → LLVM IR)
+// IR-level algebraic identity tests (generate → LLVM IR)
 // ===========================================================================
 
 TEST(CodegenTest, BytecodeAlgebraicIdentityAddZero) {
     CodeGenerator codegen(OptimizationLevel::O0);
     auto program = parseSource("fn add_zero(x) { return x + 0; }\n"
                                "fn main() { return 0; }");
-    codegen.generateHybrid(program.get());
+    codegen.generate(program.get());
     EXPECT_NE(codegen.getModule()->getFunction("add_zero"), nullptr);
 }
 
@@ -3227,7 +3001,7 @@ TEST(CodegenTest, BytecodeAlgebraicIdentityMulZero) {
     CodeGenerator codegen(OptimizationLevel::O0);
     auto program = parseSource("fn mul_zero(x) { return x * 0; }\n"
                                "fn main() { return 0; }");
-    codegen.generateHybrid(program.get());
+    codegen.generate(program.get());
     EXPECT_NE(codegen.getModule()->getFunction("mul_zero"), nullptr);
 }
 
@@ -3235,7 +3009,7 @@ TEST(CodegenTest, BytecodeAlgebraicIdentityMulOne) {
     CodeGenerator codegen(OptimizationLevel::O0);
     auto program = parseSource("fn mul_one(x) { return x * 1; }\n"
                                "fn main() { return 0; }");
-    codegen.generateHybrid(program.get());
+    codegen.generate(program.get());
     EXPECT_NE(codegen.getModule()->getFunction("mul_one"), nullptr);
 }
 
@@ -3243,7 +3017,7 @@ TEST(CodegenTest, BytecodeAlgebraicIdentityPowZero) {
     CodeGenerator codegen(OptimizationLevel::O0);
     auto program = parseSource("fn pow_zero(x) { return x ** 0; }\n"
                                "fn main() { return 0; }");
-    codegen.generateHybrid(program.get());
+    codegen.generate(program.get());
     EXPECT_NE(codegen.getModule()->getFunction("pow_zero"), nullptr);
 }
 
@@ -3255,7 +3029,7 @@ TEST(CodegenTest, BytecodeAlgebraicMulZeroPreservesSideEffects) {
     CodeGenerator codegen(OptimizationLevel::O0);
     auto program = parseSource("fn mul_zero(x) { return x * 0; }\n"
                                "fn main() { return 0; }");
-    codegen.generateHybrid(program.get());
+    codegen.generate(program.get());
     EXPECT_NE(codegen.getModule()->getFunction("mul_zero"), nullptr);
 }
 
@@ -3263,7 +3037,7 @@ TEST(CodegenTest, BytecodeAlgebraicPowZeroPreservesSideEffects) {
     CodeGenerator codegen(OptimizationLevel::O0);
     auto program = parseSource("fn pow_zero(x) { return x ** 0; }\n"
                                "fn main() { return 0; }");
-    codegen.generateHybrid(program.get());
+    codegen.generate(program.get());
     EXPECT_NE(codegen.getModule()->getFunction("pow_zero"), nullptr);
 }
 
@@ -3271,7 +3045,7 @@ TEST(CodegenTest, BytecodeAlgebraicZeroMulPreservesSideEffects) {
     CodeGenerator codegen(OptimizationLevel::O0);
     auto program = parseSource("fn zero_mul(x) { return 0 * x; }\n"
                                "fn main() { return 0; }");
-    codegen.generateHybrid(program.get());
+    codegen.generate(program.get());
     EXPECT_NE(codegen.getModule()->getFunction("zero_mul"), nullptr);
 }
 
@@ -4063,206 +3837,6 @@ TEST(CodegenTest, OptmaxSelfOr) {
             if (I.getOpcode() == llvm::Instruction::Or)
                 hasOr = true;
     EXPECT_FALSE(hasOr) << "OPTMAX x | x should simplify to x, no OR instruction";
-}
-
-// ===========================================================================
-// JIT baseline passes respect optimization levels
-// ===========================================================================
-
-TEST(CodegenTest, JITBaselinePassesDoNotCrash) {
-    // Ensure generateHybrid (which runs JIT baseline passes with the new
-    // LoopUnroll and LoopDataPrefetch passes) completes without errors.
-    CodeGenerator codegen(OptimizationLevel::O2);
-    Lexer lexer(
-        "fn compute(n) { var s = 0; for (i in 0...n) { s = s + i; } return s; } fn main() { return compute(100); }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    codegen.generateHybrid(program.get());
-    auto* mod = codegen.getModule();
-    ASSERT_NE(mod, nullptr);
-}
-
-TEST(CodegenTest, JITBaselineO3AggressiveOptimization) {
-    // At O3, the JIT baseline should produce more aggressively optimized IR
-    // than at O0/O1.  Verify that O3 produces fewer instructions (the
-    // aggressive passes fold, simplify, and eliminate more code).
-    const char* src = "fn compute(n) { var s = 0; for (i in 0...n) { s = s + i * i; } return s; }"
-                      " fn main() { return compute(100); }";
-
-    // O0: no baseline optimization (skip entirely)
-    CodeGenerator codegenO0(OptimizationLevel::O0);
-    {
-        Lexer lexer(src);
-        auto tokens = lexer.tokenize();
-        Parser parser(tokens);
-        auto program = parser.parse();
-        codegenO0.generateHybrid(program.get());
-    }
-    auto* modO0 = codegenO0.getModule();
-    ASSERT_NE(modO0, nullptr);
-    auto* fnO0 = modO0->getFunction("compute");
-    ASSERT_NE(fnO0, nullptr);
-    size_t instCountO0 = 0;
-    for (auto& BB : *fnO0)
-        instCountO0 += BB.size();
-
-    // O3: aggressive baseline optimization
-    CodeGenerator codegenO3(OptimizationLevel::O3);
-    {
-        Lexer lexer(src);
-        auto tokens = lexer.tokenize();
-        Parser parser(tokens);
-        auto program = parser.parse();
-        codegenO3.generateHybrid(program.get());
-    }
-    auto* modO3 = codegenO3.getModule();
-    ASSERT_NE(modO3, nullptr);
-    auto* fnO3 = modO3->getFunction("compute");
-    ASSERT_NE(fnO3, nullptr);
-    size_t instCountO3 = 0;
-    for (auto& BB : *fnO3)
-        instCountO3 += BB.size();
-
-    // O3 should produce strictly fewer instructions than O0 (which skips passes)
-    EXPECT_LT(instCountO3, instCountO0) << "O3 JIT baseline should optimize more aggressively than O0 (O3="
-                                        << instCountO3 << " vs O0=" << instCountO0 << ")";
-}
-
-TEST(CodegenTest, JITBaselineO0SkipsOptimization) {
-    // At O0, generateHybrid should skip baseline passes for fast startup.
-    CodeGenerator codegen(OptimizationLevel::O0);
-    Lexer lexer("fn add(a, b) { return a + b; } fn main() { return add(1, 2); }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    codegen.generateHybrid(program.get());
-    auto* mod = codegen.getModule();
-    ASSERT_NE(mod, nullptr);
-    // At O0 the function should still have alloca instructions (mem2reg didn't run)
-    auto* fn = mod->getFunction("add");
-    ASSERT_NE(fn, nullptr);
-    bool hasAlloca = false;
-    for (auto& BB : *fn) {
-        for (auto& I : BB) {
-            if (llvm::isa<llvm::AllocaInst>(&I))
-                hasAlloca = true;
-        }
-    }
-    EXPECT_TRUE(hasAlloca) << "O0 JIT should preserve allocas (no mem2reg)";
-}
-
-TEST(CodegenTest, JITHybridAttachesLoopMetadataAtO3) {
-    // Verify that generateHybrid at O3 attaches SIMD vectorization metadata
-    // to loop back-edges (this was previously broken when O0 was forced).
-    CodeGenerator codegen(OptimizationLevel::O3);
-    codegen.setVectorize(true);
-    Lexer lexer("fn sum(n) { var s = 0; for (i in 0...n) { s = s + i; } return s; } fn main() { return sum(100); }");
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    codegen.generateHybrid(program.get());
-    auto* mod = codegen.getModule();
-    ASSERT_NE(mod, nullptr);
-    // Check that at least one branch instruction has loop metadata
-    auto* fn = mod->getFunction("sum");
-    ASSERT_NE(fn, nullptr);
-    bool hasLoopMD = false;
-    for (auto& BB : *fn) {
-        for (auto& I : BB) {
-            if (I.getMetadata(llvm::LLVMContext::MD_loop)) {
-                hasLoopMD = true;
-                break;
-            }
-        }
-        if (hasLoopMD)
-            break;
-    }
-    // After O3 baseline passes the loop structure may be transformed, but
-    // the IR generation should have attached metadata during codegen.
-    // The test verifies generateHybrid doesn't force O0 anymore.
-    // (Loop metadata may be consumed by passes, so we just verify the
-    // module is valid and the function exists with optimized code.)
-    EXPECT_NE(fn->size(), 0u) << "Function should have basic blocks";
-}
-
-TEST(CodegenTest, JITBaselineO3MergedLoadStoreMotion) {
-    // Verify that the O3 JIT baseline with MergedLoadStoreMotion, SpeculativeExecution,
-    // and SeparateConstOffsetFromGEP passes doesn't crash on diamond-shaped control flow
-    // (if/else with shared memory accesses).
-    CodeGenerator codegen(OptimizationLevel::O3);
-    const char* src = "fn diamond(x) { var r = 0; if (x > 0) { r = x * 2; } else { r = x * 3; } return r; }"
-                      " fn main() { return diamond(5); }";
-    Lexer lexer(src);
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    codegen.generateHybrid(program.get());
-    auto* mod = codegen.getModule();
-    ASSERT_NE(mod, nullptr);
-    auto* fn = mod->getFunction("diamond");
-    ASSERT_NE(fn, nullptr);
-    // Verify the function was optimized (not just raw O0 IR)
-    bool hasAlloca = false;
-    for (auto& BB : *fn)
-        for (auto& I : BB)
-            if (llvm::isa<llvm::AllocaInst>(&I))
-                hasAlloca = true;
-    EXPECT_FALSE(hasAlloca) << "O3 JIT should eliminate allocas via mem2reg";
-}
-
-TEST(CodegenTest, JITBaselineO3ArrayHeavyCode) {
-    // Long-running programs are typically array-heavy and compute-heavy.
-    // Verify that nested loops with array operations compile successfully
-    // through the full O3 JIT baseline pipeline.
-    CodeGenerator codegen(OptimizationLevel::O3);
-    const char* src = "fn matmul(n) {"
-                      "  var sum = 0;"
-                      "  for (i in 0...n) {"
-                      "    for (j in 0...n) {"
-                      "      sum = sum + i * j;"
-                      "    }"
-                      "  }"
-                      "  return sum;"
-                      "}"
-                      " fn main() { return matmul(10); }";
-    Lexer lexer(src);
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    codegen.generateHybrid(program.get());
-    auto* mod = codegen.getModule();
-    ASSERT_NE(mod, nullptr);
-    auto* fn = mod->getFunction("matmul");
-    ASSERT_NE(fn, nullptr);
-    EXPECT_GT(fn->size(), 0u) << "matmul function should have basic blocks";
-}
-
-TEST(CodegenTest, JITBaselineO2HasMergedLoadStoreMotion) {
-    // MergedLoadStoreMotion is added at O2+ for memory-heavy code.
-    // Verify it doesn't crash on basic if/else patterns.
-    CodeGenerator codegen(OptimizationLevel::O2);
-    const char* src = "fn branch(x) { if (x > 0) { return x + 1; } else { return x - 1; } }"
-                      " fn main() { return branch(5); }";
-    Lexer lexer(src);
-    auto tokens = lexer.tokenize();
-    Parser parser(tokens);
-    auto program = parser.parse();
-    codegen.generateHybrid(program.get());
-    auto* mod = codegen.getModule();
-    ASSERT_NE(mod, nullptr);
-}
-
-TEST(CodegenTest, OptmaxHasMergedLoadStoreAndSpecExec) {
-    // OPTMAX functions should benefit from MergedLoadStoreMotion,
-    // SeparateConstOffsetFromGEP, and SpeculativeExecution passes.
-    CodeGenerator codegen(OptimizationLevel::O0);
-    auto* mod = generateIR("OPTMAX=: fn fast(x: int) { if (x > 0) { return x * 2; } else { return x * 3; } }"
-                           " OPTMAX!: fn main() { return fast(5); }",
-                           codegen);
-    ASSERT_NE(mod, nullptr);
-    auto* fn = mod->getFunction("fast");
-    ASSERT_NE(fn, nullptr);
 }
 
 // ===========================================================================
