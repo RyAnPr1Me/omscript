@@ -1,4 +1,3 @@
-#include "aot_profile.h"
 #include "codegen.h"
 #include "compiler.h"
 #include "diagnostic.h"
@@ -1492,7 +1491,6 @@ void printUsage(const char* progName) {
                  "  -fparallelize    Auto-parallelize loops (default: on)\n"
                  "  -fpic            Position-independent code (default: on)\n"
                  "  -foptmax         OPTMAX block optimization (default: on)\n"
-                 "  -fjit            Hybrid JIT mode (default: on)\n"
                  "  -fstack-protector Stack protection\n"
                  "  -fegraph         E-graph equality saturation (default: on at O2+)\n"
                  "  -fsuperopt       Superoptimizer pass (default: on at O2+)\n"
@@ -2113,7 +2111,6 @@ int main(int argc, char* argv[]) {
     bool flagPIC = true;
     bool flagFastMath = false;
     bool flagOptMax = true;
-    bool flagJIT = true;
     bool flagStatic = false;
     bool flagStrip = false;
     bool flagStackProtector = false;
@@ -2180,14 +2177,6 @@ int main(int argc, char* argv[]) {
         }
         if (arg == "-fno-optmax") {
             flagOptMax = false;
-            return true;
-        }
-        if (arg == "-fjit") {
-            flagJIT = true;
-            return true;
-        }
-        if (arg == "-fno-jit") {
-            flagJIT = false;
             return true;
         }
         if (arg == "-fstack-protector") {
@@ -2705,11 +2694,7 @@ int main(int argc, char* argv[]) {
             codegen.setHardwareGraphOpt(flagHGOE);
             codegen.setDebugMode(flagDebug);
             codegen.setSourceFilename(sourceFile);
-            if (flagJIT) {
-                codegen.generateHybrid(program.get());
-            } else {
-                codegen.generate(program.get());
-            }
+            codegen.generate(program.get());
             auto codegenEnd = std::chrono::steady_clock::now();
 
             if (!quiet) {
@@ -2755,11 +2740,7 @@ int main(int argc, char* argv[]) {
             codegen.setHardwareGraphOpt(flagHGOE);
             codegen.setDebugMode(flagDebug);
             codegen.setSourceFilename(sourceFile);
-            if (flagJIT) {
-                codegen.generateHybrid(program.get());
-            } else {
-                codegen.generate(program.get());
-            }
+            codegen.generate(program.get());
 
             const std::string objFile =
                 outputSpecified ? outputFile : (std::filesystem::path(sourceFile).stem().string() + ".o");
@@ -2777,148 +2758,6 @@ int main(int argc, char* argv[]) {
             return 0;
         }
 
-        // -------------------------------------------------------------------
-        // Adaptive JIT execution — `omsc run` with JIT enabled (default)
-        // -------------------------------------------------------------------
-        // The program goes through a three-phase execution model:
-        //   1. Compile: source → LLVM IR → MCJIT native code (Tier-1, O2).
-        //   2. Monitor: each non-main function counts invocations via an
-        //      injected dispatch prolog (atomic call counter).
-        //   3. Recompile: when the count reaches kRecompileThreshold the
-        //      function is recompiled at O3 with a PGO entry-count annotation
-        //      (Tier-2) and the native function pointer is hot-patched so
-        //      future calls skip the counter entirely.
-        //
-        // This path handles all programs, including directly recursive ones —
-        // the dispatch prolog uses a regular (non-tail) call so that Tier-2
-        // hot-patches are safe even when Tier-1 frames are on the call stack.
-        if (command == Command::Run && flagJIT) {
-            const std::string source = readSourceFile(sourceFile);
-
-            if (verbose) {
-                std::cout << "Running " << sourceFile << " (JIT mode)..." << std::endl;
-                std::cout << "  Lexing..." << std::endl;
-            }
-            auto lexStart2 = std::chrono::steady_clock::now();
-            omscript::Lexer lexer2(source);
-            auto tokens2 = lexer2.tokenize();
-            auto lexEnd2 = std::chrono::steady_clock::now();
-
-            if (verbose)
-                std::cout << "  Parsing..." << std::endl;
-            auto parseStart2 = std::chrono::steady_clock::now();
-            omscript::Parser parser2(tokens2);
-            auto program2 = parser2.parse();
-            auto parseEnd2 = std::chrono::steady_clock::now();
-
-            if (verbose)
-                std::cout << "  Generating code..." << std::endl;
-            auto codegenStart2 = std::chrono::steady_clock::now();
-            omscript::CodeGenerator cg(optLevel);
-            cg.setVerbose(verbose);
-            cg.setMarch(marchCpu);
-            cg.setMtune(mtuneCpu);
-            cg.setPIC(false); // not needed for in-process JIT
-            cg.setFastMath(flagFastMath);
-            cg.setOptMax(flagOptMax);
-            cg.setVectorize(flagVectorize);
-            cg.setUnrollLoops(flagUnrollLoops);
-            cg.setLoopOptimize(flagLoopOptimize);
-            cg.setParallelize(flagParallelize);
-            cg.generateHybrid(program2.get());
-            auto codegenEnd2 = std::chrono::steady_clock::now();
-
-            if (verbose) {
-                std::cout << "  LLVM IR:" << std::endl;
-                cg.getModule()->print(llvm::outs(), nullptr);
-            }
-
-            if (showTiming) {
-                auto lexMs2 =
-                    std::chrono::duration_cast<std::chrono::microseconds>(lexEnd2 - lexStart2).count() / 1000.0;
-                auto parseMs2 =
-                    std::chrono::duration_cast<std::chrono::microseconds>(parseEnd2 - parseStart2).count() / 1000.0;
-                auto codegenMs2 =
-                    std::chrono::duration_cast<std::chrono::microseconds>(codegenEnd2 - codegenStart2).count() / 1000.0;
-                std::cerr << "Timing: lex " << lexMs2 << "ms, parse " << parseMs2 << "ms, codegen " << codegenMs2
-                          << "ms\n";
-            }
-
-            // When --keep-temps is set, also write the AOT binary to disk so
-            // the user can inspect the compiled output.  We compile the already-
-            // generated LLVM IR to a native object file and link it.  The JIT
-            // still runs in-process from the same module — no recompilation.
-            if (keepTemps) {
-                const std::string objFile = outputFile + ".o";
-                bool objWritten = false;
-                try {
-                    cg.writeObjectFile(objFile);
-                    objWritten = true;
-                    std::string linkerProgram;
-                    for (const char* candidate : {"gcc", "cc", "clang"}) {
-                        auto p = llvm::sys::findProgramByName(candidate);
-                        if (p) {
-                            linkerProgram = *p;
-                            break;
-                        }
-                    }
-                    if (linkerProgram.empty()) {
-                        std::cerr << "Warning: --keep-temps: no C linker found (tried gcc, cc, clang); "
-                                     "AOT binary not written\n";
-                    } else {
-                        const std::vector<std::string> linkArgs = {objFile, "-o", outputFile, "-lm", "-lpthread"};
-                        llvm::SmallVector<llvm::StringRef, 8> laRefs;
-                        laRefs.push_back(linkerProgram);
-                        for (const auto& a : linkArgs)
-                            laRefs.push_back(a);
-                        const int linkResult = llvm::sys::ExecuteAndWait(linkerProgram, laRefs);
-                        if (linkResult != 0)
-                            std::cerr << "Warning: --keep-temps: linker exited with code " << linkResult
-                                      << "; AOT binary may be incomplete\n";
-                    }
-                } catch (const std::exception& ke) {
-                    std::cerr << "Warning: --keep-temps: failed to write AOT binary: " << ke.what() << "\n";
-                }
-                if (objWritten) {
-                    std::error_code ec;
-                    std::filesystem::remove(objFile, ec);
-                }
-            }
-
-            omscript::AdaptiveJITRunner runner;
-            runner.setVerbose(verbose);
-            runner.setFastMath(flagFastMath);
-            runner.setVectorize(flagVectorize);
-            runner.setUnrollLoops(flagUnrollLoops);
-            runner.setLoopOptimize(flagLoopOptimize);
-            runner.setParallelize(flagParallelize);
-            int exitCode = 1;
-            try {
-                exitCode = runner.run(cg.getModule());
-            } catch (const std::exception& e) {
-                std::cerr << "Error: JIT execution failed: " << e.what() << "\n";
-                return 1;
-            }
-
-            // "JIT-compiled" satisfies the existing test suite which checks
-            // for the substring "compiled" in the run-command output.
-            if (!quiet)
-                std::cout << "JIT-compiled " << sourceFile << std::endl;
-
-            if (showTiming) {
-                auto totalMs2 =
-                    std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - totalStart)
-                        .count() /
-                    1000.0;
-                std::cerr << "Timing: total " << totalMs2 << "ms\n";
-            }
-
-            if (exitCode != 0)
-                std::cout << "Program exited with code " << exitCode << "\n";
-
-            return exitCode;
-        }
-
         omscript::Compiler compiler;
         compiler.setVerbose(verbose);
         compiler.setOptimizationLevel(optLevel);
@@ -2928,14 +2767,6 @@ int main(int argc, char* argv[]) {
         compiler.setPIC(flagPIC);
         compiler.setFastMath(flagFastMath);
         compiler.setOptMax(flagOptMax);
-        // For AOT compilation (compile/build), always use the full LLVM
-        // optimization pipeline including IPO.  The JIT-friendly
-        // generateHybrid() path skips interprocedural optimizations
-        // (inlining, IPSCCP, GlobalOpt) to preserve function boundaries
-        // for hot-patching — this is only needed for `omsc run`.
-        // For the compile command, the Run path with adaptive JIT is
-        // handled separately above; here we always want full AOT.
-        compiler.setJIT(command == Command::Run && flagJIT);
         compiler.setStaticLinking(flagStatic);
         compiler.setStrip(flagStrip);
         compiler.setStackProtector(flagStackProtector);

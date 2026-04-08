@@ -818,20 +818,6 @@ void CodeGenerator::initTBAAMetadata() {
     });
 }
 
-// ---------------------------------------------------------------------------
-// Execution-tier classification
-// ---------------------------------------------------------------------------
-
-ExecutionTier CodeGenerator::classifyFunction(const FunctionDecl* func) const {
-    // All user-defined functions compile to native LLVM IR regardless of
-    // type-annotation coverage.  The adaptive JIT runtime (AdaptiveJITRunner)
-    // then monitors call counts at runtime and recompiles hot functions at O3
-    // with PGO guidance, replacing the running Tier-1 native code in-place.
-    // There is no bytecode or interpreter tier — every function is AOT.
-    (void)func;
-    return ExecutionTier::AOT;
-}
-
 void CodeGenerator::setupPrintfDeclaration() {
     // Declare printf function for output
     std::vector<llvm::Type*> printfArgs;
@@ -2307,9 +2293,6 @@ void CodeGenerator::generate(Program* program) {
         if (func->isOptMax) {
             optMaxFunctions.insert(func->name);
         }
-
-        // Classify the execution tier for this function.
-        functionTiers[func->name] = classifyFunction(func.get());
     }
     if (!hasMain) {
         // Program-level error — no specific AST node to reference for location.
@@ -2699,37 +2682,10 @@ void CodeGenerator::generate(Program* program) {
         optimizeOptMaxFunctions();
     }
 
-    if (dynamicCompilation_) {
-        if (verbose_) {
-            std::cout << "  [opt] JIT mode: skipping module-wide IPO pipeline" << std::endl;
-        }
-        // JIT mode: skip the module-wide IPO pipeline (inlining, IPSCCP,
-        // GlobalDCE) to preserve function boundaries for hot-patching.
-        // Still set target triple and data layout so MCJIT and the JIT
-        // baseline passes can reason about pointer sizes, alignment, and
-        // target-specific instruction selection.
-        llvm::InitializeNativeTarget();
-        llvm::InitializeNativeTargetAsmPrinter();
-        llvm::InitializeNativeTargetAsmParser();
-        const std::string targetTripleStr = llvm::sys::getDefaultTargetTriple();
-#if LLVM_VERSION_MAJOR >= 19
-        llvm::Triple targetTriple(targetTripleStr);
-        module->setTargetTriple(targetTriple);
-#else
-        module->setTargetTriple(targetTripleStr);
-#endif
-        auto targetMachine = createTargetMachine();
-        if (targetMachine) {
-            module->setDataLayout(targetMachine->createDataLayout());
-        }
-    } else {
-        // AOT mode: run the full module-wide optimization pipeline including
-        // interprocedural optimizations (inlining, constant propagation, etc.).
-        if (verbose_) {
-            std::cout << "  [opt] Running LLVM optimization pipeline..." << std::endl;
-        }
-        runOptimizationPasses();
+    if (verbose_) {
+        std::cout << "  [opt] Running LLVM optimization pipeline..." << std::endl;
     }
+    runOptimizationPasses();
 
     // Finalize DWARF debug info before module verification.
     if (debugMode_ && debugBuilder_) {
@@ -3445,38 +3401,6 @@ llvm::Value* CodeGenerator::generateExpression(Expression* expr) {
     default:
         codegenError("Unknown expression type", expr);
     }
-}
-
-// ---------------------------------------------------------------------------
-// Code generation for the adaptive JIT execution path (omsc run)
-// ---------------------------------------------------------------------------
-
-void CodeGenerator::generateHybrid(Program* program) {
-    // For the JIT execution path the module must preserve distinct, callable
-    // function bodies so that the AdaptiveJITRunner can inject per-function
-    // call-count dispatch prologs and hot-patch individual functions after
-    // Tier-2 recompilation.
-    //
-    // The standard AOT pipeline runs inter-procedural optimizations (IPO):
-    // inlining + constant propagation can fold all calls to a hot function
-    // directly into its callers, making the function unreachable at runtime
-    // so its call counter never increments and Tier-2 never fires.
-    //
-    // Solution: generate IR at the USER'S requested optimization level so that
-    // codegen-time decisions (loop vectorization hints, SIMD metadata, strength
-    // reduction, constant folding) use the correct level.  Setting
-    // dynamicCompilation_ = true tells generate() to skip the module-wide IPO
-    // pipeline while still setting the target triple and data layout.
-    // Then runJITBaselinePasses() applies aggressive per-function optimization
-    // (without IPO) scaled to the user's optimization level.
-    dynamicCompilation_ = true;
-    generate(program);
-
-    // Apply intra-procedural optimization passes scaled to the user's
-    // optimization level.  These passes preserve function boundaries for
-    // JIT hot-patching while producing high-quality IR for both Tier-1
-    // (MCJIT backend) and Tier-2 (O3+PGO recompilation from clean bitcode).
-    runJITBaselinePasses();
 }
 
 } // namespace omscript

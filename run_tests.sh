@@ -332,9 +332,7 @@ test_program "examples/array_higher_order_test.om" 0
 test_program "examples/swap_oob.om" 134
 test_program "examples/char_at_oob.om" 134
 test_program "examples/overflow_wrap_test.om" 42
-test_program "examples/jit_hot_demo.om" 144
 test_program "examples/benchmark_loops_math.om" 192
-test_program "examples/benchmark_jit_aot.om" 0
 test_program "examples/try_catch_test.om" 88
 test_program "examples/throw_in_called_fn_test.om" 147
 test_program "examples/len_string_test.om" 8
@@ -462,10 +460,6 @@ test_cli_output "fno-optmax" "compiled" 0 ./build/omsc -fno-optmax examples/optm
 rm -f /tmp/test_nooptmax /tmp/test_nooptmax.o
 test_cli_output "foptmax" "compiled" 0 ./build/omsc -foptmax examples/optmax.om -o /tmp/test_optmax
 rm -f /tmp/test_optmax /tmp/test_optmax.o
-test_cli_output "fno-jit" "compiled" 0 ./build/omsc -fno-jit examples/exit_zero.om -o /tmp/test_nojit
-rm -f /tmp/test_nojit /tmp/test_nojit.o
-test_cli_output "fjit" "compiled" 0 ./build/omsc -fjit examples/exit_zero.om -o /tmp/test_jit
-rm -f /tmp/test_jit /tmp/test_jit.o
 test_cli_output "flto" "compiled" 0 ./build/omsc -flto examples/exit_zero.om -o /tmp/test_lto
 rm -f /tmp/test_lto /tmp/test_lto.o /tmp/test_lto.bc
 test_cli_output "fno-lto" "compiled" 0 ./build/omsc -fno-lto examples/exit_zero.om -o /tmp/test_nolto
@@ -480,7 +474,6 @@ test_cli_output "strip-short" "compiled" 0 ./build/omsc -s examples/exit_zero.om
 rm -f /tmp/test_strip_s /tmp/test_strip_s.o
 
 # Test combined flags with run
-test_cli_output "run-march-fno-jit" "compiled" 0 ./build/omsc run -march=native -fno-jit examples/exit_zero.om
 test_cli_output "run-combined-flags" "compiled" 0 ./build/omsc run -O3 -march=x86-64 -ffast-math examples/exit_zero.om
 
 # Test help output includes new flags
@@ -490,7 +483,6 @@ test_cli_output "help-shows-flto" "-flto" 0 ./build/omsc --help
 test_cli_output "help-shows-fpic" "-fpic" 0 ./build/omsc --help
 test_cli_output "help-shows-ffast-math" "-ffast-math" 0 ./build/omsc --help
 test_cli_output "help-shows-foptmax" "-foptmax" 0 ./build/omsc --help
-test_cli_output "help-shows-fjit" "-fjit" 0 ./build/omsc --help
 test_cli_output "help-shows-static" "-static" 0 ./build/omsc --help
 test_cli_output "help-shows-strip" "--strip" 0 ./build/omsc --help
 test_cli_output "help-shows-fstack-protector" "-fstack-protector" 0 ./build/omsc --help

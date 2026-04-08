@@ -558,7 +558,7 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
     // accumulation-interleaving and other dependency-chain optimisations.
     // Adding the assume INSIDE the body (on the phi successor value) gives
     // CVP and SCEV the evidence they need to keep nsw on derived operations.
-    if (optimizationLevel >= OptimizationLevel::O2 && !dynamicCompilation_) {
+    if (optimizationLevel >= OptimizationLevel::O2) {
         llvm::Function* assumeFn = OMSC_GET_INTRINSIC_STMT(
             module.get(), llvm::Intrinsic::assume, {});
         llvm::Type* i64Ty = getDefaultType();
@@ -950,7 +950,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     // Skip in JIT/dynamic mode: the assume adds raw instruction count that
     // the JIT baseline passes may not eliminate, and the per-function
     // optimization in JIT mode doesn't run the full CVP pipeline anyway.
-    if (optimizationLevel >= OptimizationLevel::O2 && stepKnownPositive && !dynamicCompilation_) {
+    if (optimizationLevel >= OptimizationLevel::O2 && stepKnownPositive) {
         // Check if start is known non-negative (common: for (i in 0...n))
         bool startNonNeg = false;
         if (auto* startCI = llvm::dyn_cast<llvm::ConstantInt>(startVal)) {
@@ -1617,8 +1617,7 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
     // enables srem→urem and sdiv→udiv conversions for expressions derived
     // from the index variable.  The foreach index always starts at 0 and
     // increments by 1, so the assume is unconditionally correct.
-    // Skip in JIT/dynamic mode to avoid adding instruction overhead.
-    if (optimizationLevel >= OptimizationLevel::O2 && !dynamicCompilation_) {
+    if (optimizationLevel >= OptimizationLevel::O2) {
         llvm::Value* isNonNeg = builder->CreateICmpSGE(
             bodyIdx, llvm::ConstantInt::get(getDefaultType(), 0), "foreach.nonneg");
         llvm::Function* assumeFn = OMSC_GET_INTRINSIC_STMT(
@@ -1689,7 +1688,7 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
         // At O3 with unrolling enabled, hint the unroller with a moderate
         // count for static (non-JIT) compilation.  OPTMAX functions use
         // LLVM's cost model instead.  Matches generateFor/generateWhile logic.
-        if (!inOptMaxFunction && optimizationLevel >= OptimizationLevel::O3 && enableUnrollLoops_ && !dynamicCompilation_) {
+        if (!inOptMaxFunction && optimizationLevel >= OptimizationLevel::O3 && enableUnrollLoops_) {
             loopMDs.push_back(llvm::MDNode::get(
                 *context,
                 {llvm::MDString::get(*context, "llvm.loop.unroll.count"),

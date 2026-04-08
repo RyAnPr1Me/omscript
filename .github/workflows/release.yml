@@ -216,7 +216,6 @@ jobs:
           # (LLVM pass pipeline, e-graph saturation, superoptimizer).
           echo "=== PGO Phase F: Benchmark workloads (repeated) ==="
           BENCH_FILES=(
-            examples/benchmark_jit_aot.om
             examples/bench_suite.om
             examples/benchmark_loops_math.om
             examples/optimization_stress_test.om
@@ -360,7 +359,7 @@ jobs:
 
           # Run the BOLT-instrumented binary on representative workloads
           BOLT_OMSC="${OMSC}.bolt.inst"
-          for f in examples/benchmark_jit_aot.om examples/bench_suite.om examples/optimization_stress_test.om; do
+          for f in examples/bench_suite.om examples/optimization_stress_test.om; do
             [ -f "$f" ] || continue
             for opt in -O2 -O3; do
               timeout 120 "$BOLT_OMSC" "$f" $opt -o /tmp/bolt_out 2>/dev/null || true
@@ -477,7 +476,7 @@ jobs:
           bash run_tests.sh > /dev/null 2>&1 || true
 
           # Repeat benchmarks for hot path coverage
-          for f in examples/benchmark_jit_aot.om examples/bench_suite.om examples/benchmark_loops_math.om; do
+          for f in examples/bench_suite.om examples/benchmark_loops_math.om; do
             [ -f "$f" ] || continue
             for i in 1 2 3; do
               timeout 120 "$OMSC" "$f" -O3 -o /tmp/pgo_out 2>/dev/null || true

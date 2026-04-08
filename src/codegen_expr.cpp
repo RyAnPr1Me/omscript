@@ -4406,7 +4406,7 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
 
                 // Case 3 (fallback): emit llvm.assume(endBound <= len) so LLVM
                 // can fold the bounds check branch via CorrelatedValuePropagation.
-                if (!boundsCheckElided && !dynamicCompilation_
+                if (!boundsCheckElided
                     && optimizationLevel >= OptimizationLevel::O2) {
                     llvm::Value* endLELen = builder->CreateICmpSLE(endBound, lenVal, "idx.endlelen");
                     llvm::Function* assumeFn = OMSC_GET_INTRINSIC(
@@ -4473,7 +4473,7 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
                                             }
                                         }
                                         // Emit assume hint for LLVM's CVP pass
-                                        if (!boundsCheckElided && !dynamicCompilation_
+                                        if (!boundsCheckElided
                                             && optimizationLevel >= OptimizationLevel::O2) {
                                             llvm::Value* adjustedEnd = builder->CreateAdd(
                                                 endIt->second,
@@ -4512,7 +4512,7 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
                                             }
 
                                             // Fallback: emit assume hints for LLVM CVP
-                                            if (!boundsCheckElided && !dynamicCompilation_
+                                            if (!boundsCheckElided
                                                 && optimizationLevel >= OptimizationLevel::O2) {
                                                 auto* arithLenLoad = builder->CreateLoad(
                                                     getDefaultType(), basePtr, "idx.len.arith.neg");
@@ -4719,7 +4719,7 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
                         }
                     }
                 }
-                if (!boundsCheckElidedA && !dynamicCompilation_
+                if (!boundsCheckElidedA
                     && optimizationLevel >= OptimizationLevel::O2) {
                     llvm::Value* endLELen = builder->CreateICmpSLE(endBound, lenVal, "idxa.endlelen");
                     llvm::Function* assumeFn = OMSC_GET_INTRINSIC(
