@@ -5,11 +5,7 @@ fn arr_average(arr) {
     if (length == 0) {
         return 0;
     }
-    var total = 0;
-    for (i in 0...length) {
-        total = total + arr[i];
-    }
-    return total / length;
+    return sum(arr) / length;
 }
 
 fn arr_product(arr) {
@@ -25,13 +21,7 @@ fn arr_product(arr) {
 }
 
 fn arr_index_of(arr, target) {
-    var length = len(arr);
-    for (i in 0...length) {
-        if (arr[i] == target) {
-            return i;
-        }
-    }
-    return -1;
+    return index_of(arr, target);
 }
 
 fn arr_last_index_of(arr, target) {

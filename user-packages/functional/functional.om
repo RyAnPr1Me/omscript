@@ -1,12 +1,7 @@
 // functional package - functional-style array operations
 
 fn func_reduce_sum(arr) {
-    var n = len(arr);
-    var acc = 0;
-    for (i in 0...n) {
-        acc = acc + arr[i];
-    }
-    return acc;
+    return sum(arr);
 }
 
 fn func_reduce_product(arr) {

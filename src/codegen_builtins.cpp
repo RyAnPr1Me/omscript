@@ -3356,9 +3356,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // as amin: direct SIMD max instruction + vectorizer-friendly reduction.
         llvm::Function* smaxFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::smax, {getDefaultType()});
         llvm::Value* newMax = builder->CreateCall(smaxFn, {elem, curMax}, "amax.newmax");
-        llvm::Value* newIdx = builder->CreateAdd(idx, one, "amax.newidx");
+        // Reuse offset (= idx+1, nsw+nuw — no signed wrap, no unsigned wrap) as
+        // the loop induction increment. This eliminates a redundant add instruction
+        // and gives SCEV the same flags as the GEP offset for accurate trip-count
+        // modeling.
         curMax->addIncoming(newMax, bodyBB);
-        idx->addIncoming(newIdx, bodyBB);
+        idx->addIncoming(offset, bodyBB);
         auto* backBr_2892 = builder->CreateBr(loopBB);
         if (optimizationLevel >= OptimizationLevel::O1) {
             llvm::SmallVector<llvm::Metadata*, 4> mds;
@@ -3451,8 +3454,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* predResult = builder->CreateCall(predFn, {elem}, "aany.pred");
         predResult = toDefaultType(predResult);
         llvm::Value* isNonZero = builder->CreateICmpNE(predResult, zero, "aany.nz");
-        llvm::Value* newIdx = builder->CreateAdd(idx, one, "aany.newidx");
-        idx->addIncoming(newIdx, bodyBB);
+        // Reuse offset (= idx+1, nsw+nuw) as the loop induction increment.
+        // Eliminates a redundant add and provides SCEV with tight nsw+nuw flags.
+        idx->addIncoming(offset, bodyBB);
         builder->CreateCondBr(isNonZero, foundBB, loopBB);
 
         builder->SetInsertPoint(foundBB);
@@ -3528,8 +3532,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* predResult = builder->CreateCall(predFn, {elem}, "aevery.pred");
         predResult = toDefaultType(predResult);
         llvm::Value* isZero = builder->CreateICmpEQ(predResult, zero, "aevery.iszero");
-        llvm::Value* newIdx = builder->CreateAdd(idx, one, "aevery.newidx");
-        idx->addIncoming(newIdx, bodyBB);
+        // Reuse offset (= idx+1, nsw+nuw) as the loop induction increment.
+        idx->addIncoming(offset, bodyBB);
         builder->CreateCondBr(isZero, failBB, loopBB);
 
         builder->SetInsertPoint(failBB);
@@ -3592,8 +3596,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* elem = builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "afind.elem");
         llvm::cast<llvm::Instruction>(elem)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
         llvm::Value* isEqual = builder->CreateICmpEQ(elem, target, "afind.iseq");
-        llvm::Value* newIdx = builder->CreateAdd(idx, one, "afind.newidx");
-        idx->addIncoming(newIdx, bodyBB);
+        // Reuse offset (= idx+1, nsw+nuw) as the loop induction increment.
+        idx->addIncoming(offset, bodyBB);
         builder->CreateCondBr(isEqual, foundBB, loopBB);
 
         builder->SetInsertPoint(foundBB);
@@ -3671,10 +3675,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         predResult = toDefaultType(predResult);
         llvm::Value* isNonZero = builder->CreateICmpNE(predResult, zero, "acnt.nz");
         llvm::Value* incr = builder->CreateZExt(isNonZero, getDefaultType(), "acnt.incr");
-        llvm::Value* newAcc = builder->CreateAdd(acc, incr, "acnt.newacc");
-        llvm::Value* newIdx = builder->CreateAdd(idx, one, "acnt.newidx");
+        // acnt.newacc: acc is in [0, length], incr in {0,1}; sum ≤ INT64_MAX so
+        // both nsw and nuw are safe and let SCEV prove the accumulator is non-negative.
+        llvm::Value* newAcc = builder->CreateAdd(acc, incr, "acnt.newacc", /*HasNUW=*/true, /*HasNSW=*/true);
+        // Reuse offset (= idx+1, nsw+nuw) as the loop induction increment.
         acc->addIncoming(newAcc, bodyBB);
-        idx->addIncoming(newIdx, bodyBB);
+        idx->addIncoming(offset, bodyBB);
         auto* backBr_3149 = builder->CreateBr(loopBB);
         if (optimizationLevel >= OptimizationLevel::O1) {
             llvm::SmallVector<llvm::Metadata*, 2> mds;
@@ -4479,20 +4485,26 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
         llvm::Value* mapPtr = builder->CreateIntToPtr(mapArg, ptrTy, "mapset.ptr");
-        llvm::Value* mapLen = builder->CreateLoad(getDefaultType(), mapPtr, "mapset.len");
-        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
-        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
-        llvm::Value* two = llvm::ConstantInt::get(getDefaultType(), 2);
+        // Use AlignedLoad + TBAA + range: map length slot is 8-byte aligned,
+        // TBAA enables alias analysis between length and element loads,
+        // range metadata tells the optimizer mapLen ∈ [0, INT64_MAX).
+        auto* mapLenLoad = builder->CreateAlignedLoad(getDefaultType(), mapPtr, llvm::MaybeAlign(8), "mapset.len");
+        mapLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+        mapLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+        llvm::Value* mapLen = mapLenLoad;
+        llvm::Value* zero  = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one   = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* two   = llvm::ConstantInt::get(getDefaultType(), 2);
         llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
 
         llvm::Function* parentFn = builder->GetInsertBlock()->getParent();
-        llvm::BasicBlock* entryBB = builder->GetInsertBlock();
-        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "mapset.loop", parentFn);
-        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "mapset.body", parentFn);
-        llvm::BasicBlock* foundBB = llvm::BasicBlock::Create(*context, "mapset.found", parentFn);
-        llvm::BasicBlock* nextBB = llvm::BasicBlock::Create(*context, "mapset.next", parentFn);
+        llvm::BasicBlock* entryBB  = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB   = llvm::BasicBlock::Create(*context, "mapset.loop",   parentFn);
+        llvm::BasicBlock* bodyBB   = llvm::BasicBlock::Create(*context, "mapset.body",   parentFn);
+        llvm::BasicBlock* foundBB  = llvm::BasicBlock::Create(*context, "mapset.found",  parentFn);
+        llvm::BasicBlock* nextBB   = llvm::BasicBlock::Create(*context, "mapset.next",   parentFn);
         llvm::BasicBlock* appendBB = llvm::BasicBlock::Create(*context, "mapset.append", parentFn);
-        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "mapset.done", parentFn);
+        llvm::BasicBlock* doneBB   = llvm::BasicBlock::Create(*context, "mapset.done",   parentFn);
 
         auto* backBr_3916 = builder->CreateBr(loopBB);
         if (optimizationLevel >= OptimizationLevel::O1) {
@@ -4507,21 +4519,31 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(loopBB);
         llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "mapset.idx");
         idx->addIncoming(zero, entryBB);
-        llvm::Value* cond = builder->CreateICmpSLT(idx, mapLen, "mapset.cond");
+        // ULT (unsigned): mapLen is non-negative (range metadata) so ULT ≡ SLT
+        // but ULT is consistent with all other builtin loops and gives SCEV
+        // better induction variable analysis.
+        llvm::Value* cond = builder->CreateICmpULT(idx, mapLen, "mapset.cond");
         builder->CreateCondBr(cond, bodyBB, appendBB);
 
         // Body: check if key matches
         builder->SetInsertPoint(bodyBB);
-        llvm::Value* keySlot = builder->CreateAdd(idx, one, "mapset.keyslot");
-        llvm::Value* keyPtr = builder->CreateInBoundsGEP(getDefaultType(), mapPtr, keySlot, "mapset.keyptr");
-        llvm::Value* existingKey = builder->CreateLoad(getDefaultType(), keyPtr, "mapset.existkey");
-        llvm::Value* keyMatch = builder->CreateICmpEQ(existingKey, keyArg, "mapset.match");
+        // keySlot = idx+1 (nsw+nuw): idx starts at 0, step is 2; the header
+        // is always < mapLen ≤ INT64_MAX-1, so +1 never overflows signed or unsigned.
+        llvm::Value* keySlot = builder->CreateAdd(idx, one, "mapset.keyslot", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* keyPtr  = builder->CreateInBoundsGEP(getDefaultType(), mapPtr, keySlot, "mapset.keyptr");
+        // AlignedLoad + TBAA: key slots are 8-byte aligned; TBAA distinguishes
+        // key/value element loads from the length-header load.
+        auto* existKeyLoad = builder->CreateAlignedLoad(getDefaultType(), keyPtr, llvm::MaybeAlign(8), "mapset.existkey");
+        existKeyLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        llvm::Value* keyMatch = builder->CreateICmpEQ(existKeyLoad, keyArg, "mapset.match");
+        // nxt = keySlot+1 = idx+2 (nsw+nuw): used as the loop back-edge (saves
+        // a redundant add in nextBB) and as valSlot in foundBB.
+        llvm::Value* nxt = builder->CreateAdd(keySlot, one, "mapset.nxt", /*HasNUW=*/true, /*HasNSW=*/true);
         builder->CreateCondBr(keyMatch, foundBB, nextBB);
 
-        // Next: increment and loop back
+        // Next: advance by 2 slots — reuse nxt computed in bodyBB
         builder->SetInsertPoint(nextBB);
-        llvm::Value* nextIdx = builder->CreateAdd(idx, two, "mapset.next");
-        idx->addIncoming(nextIdx, nextBB);
+        idx->addIncoming(nxt, nextBB);
         auto* backBr_3935 = builder->CreateBr(loopBB);
         if (optimizationLevel >= OptimizationLevel::O1) {
             llvm::SmallVector<llvm::Metadata*, 2> mds;
@@ -4533,33 +4555,37 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             backBr_3935->setMetadata(llvm::LLVMContext::MD_loop, md);
         }
 
-        // Found: update value in place
+        // Found: update value in place — valSlot = nxt = idx+2 (no new add)
         builder->SetInsertPoint(foundBB);
-        llvm::Value* valSlot = builder->CreateAdd(idx, two, "mapset.valslot");
-        llvm::Value* valPtr = builder->CreateInBoundsGEP(getDefaultType(), mapPtr, valSlot, "mapset.valptr");
-        builder->CreateStore(valArg, valPtr);
+        llvm::Value* valPtr = builder->CreateInBoundsGEP(getDefaultType(), mapPtr, nxt, "mapset.valptr");
+        auto* valStore = builder->CreateAlignedStore(valArg, valPtr, llvm::MaybeAlign(8));
+        valStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
         builder->CreateBr(doneBB);
 
         // Append: allocate new buffer with 2 more slots
         builder->SetInsertPoint(appendBB);
-        llvm::Value* newLen = builder->CreateAdd(mapLen, two, "mapset.newlen");
-        llvm::Value* newSlots = builder->CreateAdd(newLen, one, "mapset.newslots", /*HasNUW=*/true, /*HasNSW=*/true);
-        llvm::Value* newSize = builder->CreateMul(newSlots, eight, "mapset.newsize", /*HasNUW=*/true, /*HasNSW=*/true);
-        llvm::Value* newBuf = builder->CreateCall(getOrDeclareMalloc(), {newSize}, "mapset.newbuf");
+        // newKeySlot = mapLen+1 (nsw+nuw): mapLen ∈ [0, INT64_MAX-2) so safe.
+        llvm::Value* newKeySlot = builder->CreateAdd(mapLen, one, "mapset.nkeyslot", /*HasNUW=*/true, /*HasNSW=*/true);
+        // newLen = newKeySlot+1 = mapLen+2 (nsw+nuw)
+        llvm::Value* newLen    = builder->CreateAdd(newKeySlot, one, "mapset.newlen", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* newSlots  = builder->CreateAdd(newLen, one, "mapset.newslots", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* newSize   = builder->CreateMul(newSlots, eight, "mapset.newsize", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* newBuf    = builder->CreateCall(getOrDeclareMalloc(), {newSize}, "mapset.newbuf");
         // Copy old data
         llvm::Value* oldSlots = builder->CreateAdd(mapLen, one, "mapset.oldslots", /*HasNUW=*/true, /*HasNSW=*/true);
-        llvm::Value* oldSize = builder->CreateMul(oldSlots, eight, "mapset.oldsize", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* oldSize  = builder->CreateMul(oldSlots, eight, "mapset.oldsize", /*HasNUW=*/true, /*HasNSW=*/true);
         builder->CreateCall(getOrDeclareMemcpy(), {newBuf, mapPtr, oldSize});
-        // Store new length
-        builder->CreateStore(newLen, newBuf);
-        // Store new key at [mapLen + 1]
-        llvm::Value* newKeySlot = builder->CreateAdd(mapLen, one, "mapset.nkeyslot");
+        // Store new length header (aligned, TBAA)
+        auto* newLenStore = builder->CreateAlignedStore(newLen, newBuf, llvm::MaybeAlign(8));
+        newLenStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+        // Store new key at [mapLen+1] (aligned, TBAA)
         llvm::Value* newKeyPtr = builder->CreateInBoundsGEP(getDefaultType(), newBuf, newKeySlot, "mapset.nkeyptr");
-        builder->CreateStore(keyArg, newKeyPtr);
-        // Store new value at [mapLen + 2]
-        llvm::Value* newValSlot = builder->CreateAdd(mapLen, two, "mapset.nvalslot");
-        llvm::Value* newValPtr = builder->CreateInBoundsGEP(getDefaultType(), newBuf, newValSlot, "mapset.nvalptr");
-        builder->CreateStore(valArg, newValPtr);
+        auto* newKeyStore = builder->CreateAlignedStore(keyArg, newKeyPtr, llvm::MaybeAlign(8));
+        newKeyStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        // Store new value at [mapLen+2] = [newLen] — reuse newLen as slot (aligned, TBAA)
+        llvm::Value* newValPtr = builder->CreateInBoundsGEP(getDefaultType(), newBuf, newLen, "mapset.nvalptr");
+        auto* newValStore = builder->CreateAlignedStore(valArg, newValPtr, llvm::MaybeAlign(8));
+        newValStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
         llvm::Value* appendResult = builder->CreatePtrToInt(newBuf, getDefaultType(), "mapset.appendres");
         builder->CreateBr(doneBB);
 
@@ -4581,17 +4607,19 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
         llvm::Value* mapPtr = builder->CreateIntToPtr(mapArg, ptrTy, "mapget.ptr");
-        llvm::Value* mapLen = builder->CreateLoad(getDefaultType(), mapPtr, "mapget.len");
+        auto* mapLenLoad = builder->CreateAlignedLoad(getDefaultType(), mapPtr, llvm::MaybeAlign(8), "mapget.len");
+        mapLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+        mapLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+        llvm::Value* mapLen = mapLenLoad;
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
-        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
-        llvm::Value* two = llvm::ConstantInt::get(getDefaultType(), 2);
+        llvm::Value* one  = llvm::ConstantInt::get(getDefaultType(), 1);
 
         llvm::Function* parentFn = builder->GetInsertBlock()->getParent();
-        llvm::BasicBlock* entryBB = builder->GetInsertBlock();
-        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "mapget.loop", parentFn);
-        llvm::BasicBlock* checkBB = llvm::BasicBlock::Create(*context, "mapget.check", parentFn);
-        llvm::BasicBlock* foundBB = llvm::BasicBlock::Create(*context, "mapget.found", parentFn);
-        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "mapget.done", parentFn);
+        llvm::BasicBlock* entryBB  = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB   = llvm::BasicBlock::Create(*context, "mapget.loop",  parentFn);
+        llvm::BasicBlock* checkBB  = llvm::BasicBlock::Create(*context, "mapget.check", parentFn);
+        llvm::BasicBlock* foundBB  = llvm::BasicBlock::Create(*context, "mapget.found", parentFn);
+        llvm::BasicBlock* doneBB   = llvm::BasicBlock::Create(*context, "mapget.done",  parentFn);
 
         auto* backBr_3997 = builder->CreateBr(loopBB);
         if (optimizationLevel >= OptimizationLevel::O1) {
@@ -4606,28 +4634,34 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(loopBB);
         llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "mapget.idx");
         idx->addIncoming(zero, entryBB);
-        llvm::Value* cond = builder->CreateICmpSLT(idx, mapLen, "mapget.cond");
+        // ULT: mapLen ≥ 0 (range metadata), so ULT ≡ SLT but enables better SCEV.
+        llvm::Value* cond = builder->CreateICmpULT(idx, mapLen, "mapget.cond");
         builder->CreateCondBr(cond, checkBB, doneBB);
 
         builder->SetInsertPoint(checkBB);
-        llvm::Value* keySlot = builder->CreateAdd(idx, one, "mapget.keyslot");
-        llvm::Value* keyPtr = builder->CreateInBoundsGEP(getDefaultType(), mapPtr, keySlot, "mapget.keyptr");
-        llvm::Value* existingKey = builder->CreateLoad(getDefaultType(), keyPtr, "mapget.existkey");
-        llvm::Value* keyMatch = builder->CreateICmpEQ(existingKey, keyArg, "mapget.match");
-        llvm::Value* nextIdx = builder->CreateAdd(idx, two, "mapget.next");
-        idx->addIncoming(nextIdx, checkBB);
-        builder->CreateCondBr(keyMatch, foundBB, loopBB);
+        llvm::Value* keySlot = builder->CreateAdd(idx, one, "mapget.keyslot", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* keyPtr  = builder->CreateInBoundsGEP(getDefaultType(), mapPtr, keySlot, "mapget.keyptr");
+        auto* existKeyLoad = builder->CreateAlignedLoad(getDefaultType(), keyPtr, llvm::MaybeAlign(8), "mapget.existkey");
+        existKeyLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        llvm::Value* keyMatch = builder->CreateICmpEQ(existKeyLoad, keyArg, "mapget.match");
+        // nxt = keySlot+1 = idx+2 (nsw+nuw): loop back-edge AND val slot (no extra add)
+        llvm::Value* nxt = builder->CreateAdd(keySlot, one, "mapget.nxt", /*HasNUW=*/true, /*HasNSW=*/true);
+        idx->addIncoming(nxt, checkBB);
+        // Hot branch weight: dict lookups typically succeed.
+        llvm::MDNode* hitWeights = llvm::MDBuilder(*context).createBranchWeights(1000000, 1);
+        builder->CreateCondBr(keyMatch, foundBB, loopBB, hitWeights);
 
+        // Found: value is at slot nxt = idx+2 (no new add)
         builder->SetInsertPoint(foundBB);
-        llvm::Value* valSlot = builder->CreateAdd(idx, two, "mapget.valslot");
-        llvm::Value* valPtr = builder->CreateInBoundsGEP(getDefaultType(), mapPtr, valSlot, "mapget.valptr");
-        llvm::Value* foundVal = builder->CreateLoad(getDefaultType(), valPtr, "mapget.val");
+        llvm::Value* valPtr = builder->CreateInBoundsGEP(getDefaultType(), mapPtr, nxt, "mapget.valptr");
+        auto* foundLoad = builder->CreateAlignedLoad(getDefaultType(), valPtr, llvm::MaybeAlign(8), "mapget.val");
+        foundLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
         builder->CreateBr(doneBB);
 
         builder->SetInsertPoint(doneBB);
         llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "mapget.result");
         result->addIncoming(defArg, loopBB);
-        result->addIncoming(foundVal, foundBB);
+        result->addIncoming(foundLoad, foundBB);
         return result;
     }
 
@@ -4640,16 +4674,19 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
         llvm::Value* mapPtr = builder->CreateIntToPtr(mapArg, ptrTy, "maphas.ptr");
-        llvm::Value* mapLen = builder->CreateLoad(getDefaultType(), mapPtr, "maphas.len");
+        auto* mapLenLoad = builder->CreateAlignedLoad(getDefaultType(), mapPtr, llvm::MaybeAlign(8), "maphas.len");
+        mapLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+        mapLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+        llvm::Value* mapLen = mapLenLoad;
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
-        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
-        llvm::Value* two = llvm::ConstantInt::get(getDefaultType(), 2);
+        llvm::Value* one  = llvm::ConstantInt::get(getDefaultType(), 1);
 
         llvm::Function* parentFn = builder->GetInsertBlock()->getParent();
-        llvm::BasicBlock* entryBB = builder->GetInsertBlock();
-        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "maphas.loop", parentFn);
-        llvm::BasicBlock* checkBB = llvm::BasicBlock::Create(*context, "maphas.check", parentFn);
-        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "maphas.done", parentFn);
+        llvm::BasicBlock* entryBB  = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB   = llvm::BasicBlock::Create(*context, "maphas.loop",  parentFn);
+        llvm::BasicBlock* checkBB  = llvm::BasicBlock::Create(*context, "maphas.check", parentFn);
+        llvm::BasicBlock* foundBB  = llvm::BasicBlock::Create(*context, "maphas.found", parentFn);
+        llvm::BasicBlock* doneBB   = llvm::BasicBlock::Create(*context, "maphas.done",  parentFn);
 
         auto* backBr_4046 = builder->CreateBr(loopBB);
         if (optimizationLevel >= OptimizationLevel::O1) {
@@ -4664,19 +4701,21 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(loopBB);
         llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "maphas.idx");
         idx->addIncoming(zero, entryBB);
-        llvm::Value* cond = builder->CreateICmpSLT(idx, mapLen, "maphas.cond");
+        llvm::Value* cond = builder->CreateICmpULT(idx, mapLen, "maphas.cond");
         builder->CreateCondBr(cond, checkBB, doneBB);
 
         builder->SetInsertPoint(checkBB);
-        llvm::Value* keySlot = builder->CreateAdd(idx, one, "maphas.keyslot");
-        llvm::Value* keyPtr = builder->CreateInBoundsGEP(getDefaultType(), mapPtr, keySlot, "maphas.keyptr");
-        llvm::Value* existingKey = builder->CreateLoad(getDefaultType(), keyPtr, "maphas.existkey");
-        llvm::Value* keyMatch = builder->CreateICmpEQ(existingKey, keyArg, "maphas.match");
-        llvm::Value* nextIdx = builder->CreateAdd(idx, two, "maphas.next");
-        idx->addIncoming(nextIdx, checkBB);
-        // If found, go to done with 1; otherwise loop
-        llvm::BasicBlock* foundBB = llvm::BasicBlock::Create(*context, "maphas.found", parentFn);
-        builder->CreateCondBr(keyMatch, foundBB, loopBB);
+        llvm::Value* keySlot = builder->CreateAdd(idx, one, "maphas.keyslot", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* keyPtr  = builder->CreateInBoundsGEP(getDefaultType(), mapPtr, keySlot, "maphas.keyptr");
+        auto* existKeyLoad = builder->CreateAlignedLoad(getDefaultType(), keyPtr, llvm::MaybeAlign(8), "maphas.existkey");
+        existKeyLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        llvm::Value* keyMatch = builder->CreateICmpEQ(existKeyLoad, keyArg, "maphas.match");
+        // nxt = keySlot+1 = idx+2 (nsw+nuw): back-edge advance (no extra add)
+        llvm::Value* nxt = builder->CreateAdd(keySlot, one, "maphas.nxt", /*HasNUW=*/true, /*HasNSW=*/true);
+        idx->addIncoming(nxt, checkBB);
+        // Hot branch weight: presence checks typically succeed.
+        llvm::MDNode* hitWeights = llvm::MDBuilder(*context).createBranchWeights(1000000, 1);
+        builder->CreateCondBr(keyMatch, foundBB, loopBB, hitWeights);
 
         builder->SetInsertPoint(foundBB);
         builder->CreateBr(doneBB);
@@ -4697,19 +4736,22 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
         llvm::Value* mapPtr = builder->CreateIntToPtr(mapArg, ptrTy, "maprem.ptr");
-        llvm::Value* mapLen = builder->CreateLoad(getDefaultType(), mapPtr, "maprem.len");
-        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
-        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
-        llvm::Value* two = llvm::ConstantInt::get(getDefaultType(), 2);
+        auto* mapLenLoad = builder->CreateAlignedLoad(getDefaultType(), mapPtr, llvm::MaybeAlign(8), "maprem.len");
+        mapLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+        mapLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+        llvm::Value* mapLen = mapLenLoad;
+        llvm::Value* zero  = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one   = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* two   = llvm::ConstantInt::get(getDefaultType(), 2);
         llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
 
-        llvm::Function* parentFn = builder->GetInsertBlock()->getParent();
-        llvm::BasicBlock* entryBB = builder->GetInsertBlock();
-        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "maprem.loop", parentFn);
-        llvm::BasicBlock* checkBB = llvm::BasicBlock::Create(*context, "maprem.check", parentFn);
-        llvm::BasicBlock* foundBB = llvm::BasicBlock::Create(*context, "maprem.found", parentFn);
-        llvm::BasicBlock* notFoundBB = llvm::BasicBlock::Create(*context, "maprem.notfound", parentFn);
-        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "maprem.done", parentFn);
+        llvm::Function* parentFn    = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* entryBB   = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB    = llvm::BasicBlock::Create(*context, "maprem.loop",     parentFn);
+        llvm::BasicBlock* checkBB   = llvm::BasicBlock::Create(*context, "maprem.check",    parentFn);
+        llvm::BasicBlock* foundBB   = llvm::BasicBlock::Create(*context, "maprem.found",    parentFn);
+        llvm::BasicBlock* notFoundBB= llvm::BasicBlock::Create(*context, "maprem.notfound", parentFn);
+        llvm::BasicBlock* doneBB    = llvm::BasicBlock::Create(*context, "maprem.done",     parentFn);
 
         auto* backBr_4097 = builder->CreateBr(loopBB);
         if (optimizationLevel >= OptimizationLevel::O1) {
@@ -4724,36 +4766,42 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(loopBB);
         llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "maprem.idx");
         idx->addIncoming(zero, entryBB);
-        llvm::Value* cond = builder->CreateICmpSLT(idx, mapLen, "maprem.cond");
+        // ULT: mapLen ≥ 0, so ULT ≡ SLT but gives SCEV unsigned induction info.
+        llvm::Value* cond = builder->CreateICmpULT(idx, mapLen, "maprem.cond");
         builder->CreateCondBr(cond, checkBB, notFoundBB);
 
         builder->SetInsertPoint(checkBB);
-        llvm::Value* keySlot = builder->CreateAdd(idx, one, "maprem.keyslot");
-        llvm::Value* keyPtr = builder->CreateInBoundsGEP(getDefaultType(), mapPtr, keySlot, "maprem.keyptr");
-        llvm::Value* existingKey = builder->CreateLoad(getDefaultType(), keyPtr, "maprem.existkey");
-        llvm::Value* keyMatch = builder->CreateICmpEQ(existingKey, keyArg, "maprem.match");
-        llvm::Value* nextIdx = builder->CreateAdd(idx, two, "maprem.next");
-        idx->addIncoming(nextIdx, checkBB);
+        llvm::Value* keySlot = builder->CreateAdd(idx, one, "maprem.keyslot", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* keyPtr  = builder->CreateInBoundsGEP(getDefaultType(), mapPtr, keySlot, "maprem.keyptr");
+        auto* existKeyLoad = builder->CreateAlignedLoad(getDefaultType(), keyPtr, llvm::MaybeAlign(8), "maprem.existkey");
+        existKeyLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        llvm::Value* keyMatch = builder->CreateICmpEQ(existKeyLoad, keyArg, "maprem.match");
+        // nxt = keySlot+1 = idx+2 (nsw+nuw): back-edge and afterStart (no extra add)
+        llvm::Value* nxt = builder->CreateAdd(keySlot, one, "maprem.nxt", /*HasNUW=*/true, /*HasNSW=*/true);
+        idx->addIncoming(nxt, checkBB);
         builder->CreateCondBr(keyMatch, foundBB, loopBB);
 
         // Not found: return original map
         builder->SetInsertPoint(notFoundBB);
         builder->CreateBr(doneBB);
 
-        // Found: build new array without this pair
+        // Found: build new buffer without this pair
         builder->SetInsertPoint(foundBB);
-        llvm::Value* newLen = builder->CreateSub(mapLen, two, "maprem.newlen");
+        llvm::Value* newLen   = builder->CreateSub(mapLen, two, "maprem.newlen");
         llvm::Value* newSlots = builder->CreateAdd(newLen, one, "maprem.newslots", /*HasNUW=*/true, /*HasNSW=*/true);
-        llvm::Value* newSize = builder->CreateMul(newSlots, eight, "maprem.newsize", /*HasNUW=*/true, /*HasNSW=*/true);
-        llvm::Value* newBuf = builder->CreateCall(getOrDeclareMalloc(), {newSize}, "maprem.newbuf");
-        builder->CreateStore(newLen, newBuf);
+        llvm::Value* newSize  = builder->CreateMul(newSlots, eight, "maprem.newsize", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* newBuf   = builder->CreateCall(getOrDeclareMalloc(), {newSize}, "maprem.newbuf");
+        auto* newLenStore = builder->CreateAlignedStore(newLen, newBuf, llvm::MaybeAlign(8));
+        newLenStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
 
-        // Copy elements before the removed pair: slots 1..idx (idx elements)
+        // Copy pairs before the removed one: idx elements at slots [1..idx].
         llvm::Value* beforeBytes = builder->CreateMul(idx, eight, "maprem.beforebytes", /*HasNUW=*/true, /*HasNSW=*/true);
-        llvm::Value* hasBefore = builder->CreateICmpSGT(idx, zero, "maprem.hasbefore");
+        // UGT: idx is always ≥ 0 (non-negative induction variable), so UGT ≡ SGT
+        // but avoids a sign-extension in the generated machine code.
+        llvm::Value* hasBefore = builder->CreateICmpUGT(idx, zero, "maprem.hasbefore");
 
-        llvm::BasicBlock* copyBeforeBB = llvm::BasicBlock::Create(*context, "maprem.copybefore", parentFn);
-        llvm::BasicBlock* afterCopyBeforeBB = llvm::BasicBlock::Create(*context, "maprem.afterbefore", parentFn);
+        llvm::BasicBlock* copyBeforeBB     = llvm::BasicBlock::Create(*context, "maprem.copybefore",  parentFn);
+        llvm::BasicBlock* afterCopyBeforeBB= llvm::BasicBlock::Create(*context, "maprem.afterbefore", parentFn);
         builder->CreateCondBr(hasBefore, copyBeforeBB, afterCopyBeforeBB);
 
         builder->SetInsertPoint(copyBeforeBB);
@@ -4763,21 +4811,21 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateBr(afterCopyBeforeBB);
 
         builder->SetInsertPoint(afterCopyBeforeBB);
-        // Copy elements after the removed pair
-        llvm::Value* afterStart = builder->CreateAdd(idx, two, "maprem.afterstart");
-        llvm::Value* afterCount = builder->CreateSub(mapLen, afterStart, "maprem.aftercount");
-        llvm::Value* hasAfter = builder->CreateICmpSGT(afterCount, zero, "maprem.hasafter");
+        // Copy pairs after the removed one: reuse nxt (= idx+2) as afterStart.
+        // afterCount = mapLen - nxt; UGT: afterCount ≥ 0 since nxt ≤ mapLen.
+        llvm::Value* afterCount = builder->CreateSub(mapLen, nxt, "maprem.aftercount");
+        llvm::Value* hasAfter   = builder->CreateICmpUGT(afterCount, zero, "maprem.hasafter");
 
-        llvm::BasicBlock* copyAfterBB = llvm::BasicBlock::Create(*context, "maprem.copyafter", parentFn);
-        llvm::BasicBlock* afterCopyAfterBB = llvm::BasicBlock::Create(*context, "maprem.afterafter", parentFn);
+        llvm::BasicBlock* copyAfterBB    = llvm::BasicBlock::Create(*context, "maprem.copyafter",  parentFn);
+        llvm::BasicBlock* afterCopyAfterBB= llvm::BasicBlock::Create(*context, "maprem.afterafter", parentFn);
         builder->CreateCondBr(hasAfter, copyAfterBB, afterCopyAfterBB);
 
         builder->SetInsertPoint(copyAfterBB);
-        llvm::Value* srcAfterSlot = builder->CreateAdd(afterStart, one, "maprem.srcafterslot");
-        llvm::Value* srcAfter = builder->CreateInBoundsGEP(getDefaultType(), mapPtr, srcAfterSlot, "maprem.srcafter");
-        llvm::Value* dstAfterSlot = builder->CreateAdd(idx, one, "maprem.dstafterslot");
-        llvm::Value* dstAfter = builder->CreateInBoundsGEP(getDefaultType(), newBuf, dstAfterSlot, "maprem.dstafter");
-        llvm::Value* afterBytes = builder->CreateMul(afterCount, eight, "maprem.afterbytes", /*HasNUW=*/true, /*HasNSW=*/true);
+        // srcAfterSlot = nxt+1 (header offset); dstAfterSlot = idx+1 = keySlot
+        llvm::Value* srcAfterSlot = builder->CreateAdd(nxt, one, "maprem.srcafterslot", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* srcAfter  = builder->CreateInBoundsGEP(getDefaultType(), mapPtr, srcAfterSlot, "maprem.srcafter");
+        llvm::Value* dstAfter  = builder->CreateInBoundsGEP(getDefaultType(), newBuf, keySlot, "maprem.dstafter");
+        llvm::Value* afterBytes= builder->CreateMul(afterCount, eight, "maprem.afterbytes", /*HasNUW=*/true, /*HasNSW=*/true);
         builder->CreateCall(getOrDeclareMemcpy(), {dstAfter, srcAfter, afterBytes});
         builder->CreateBr(afterCopyAfterBB);
 
@@ -4799,26 +4847,29 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
         llvm::Value* mapPtr = builder->CreateIntToPtr(mapArg, ptrTy, "mapkeys.ptr");
-        llvm::Value* mapLen = builder->CreateLoad(getDefaultType(), mapPtr, "mapkeys.len");
-        // Number of pairs = mapLen / 2.  mapLen is always non-negative (it's
-        // a stored array length), so logical shift right by 1 is correct and
-        // avoids the ~25-cycle signed-division latency path.
-        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
-        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
-        llvm::Value* two = llvm::ConstantInt::get(getDefaultType(), 2);
+        auto* mapLenLoad = builder->CreateAlignedLoad(getDefaultType(), mapPtr, llvm::MaybeAlign(8), "mapkeys.len");
+        mapLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+        mapLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+        llvm::Value* mapLen = mapLenLoad;
+        // numPairs = mapLen / 2 via lshr: mapLen is non-negative (range metadata)
+        // so logical shift right is correct and avoids the ~25-cycle signed-div path.
+        llvm::Value* zero  = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one   = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* two   = llvm::ConstantInt::get(getDefaultType(), 2);
         llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
         llvm::Value* numPairs = builder->CreateLShr(mapLen, one, "mapkeys.numpairs");
         // Allocate: (numPairs + 1) * 8
         llvm::Value* arrSlots = builder->CreateAdd(numPairs, one, "mapkeys.arrslots", /*HasNUW=*/true, /*HasNSW=*/true);
-        llvm::Value* arrSize = builder->CreateMul(arrSlots, eight, "mapkeys.arrsize", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* arrSize  = builder->CreateMul(arrSlots, eight, "mapkeys.arrsize", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {arrSize}, "mapkeys.buf");
-        builder->CreateStore(numPairs, buf);
+        auto* numPairsStore = builder->CreateAlignedStore(numPairs, buf, llvm::MaybeAlign(8));
+        numPairsStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
 
         llvm::Function* parentFn = builder->GetInsertBlock()->getParent();
         llvm::BasicBlock* entryBB = builder->GetInsertBlock();
-        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "mapkeys.loop", parentFn);
-        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "mapkeys.body", parentFn);
-        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "mapkeys.done", parentFn);
+        llvm::BasicBlock* loopBB  = llvm::BasicBlock::Create(*context, "mapkeys.loop", parentFn);
+        llvm::BasicBlock* bodyBB  = llvm::BasicBlock::Create(*context, "mapkeys.body", parentFn);
+        llvm::BasicBlock* doneBB  = llvm::BasicBlock::Create(*context, "mapkeys.done", parentFn);
 
         auto* backBr_4196 = builder->CreateBr(loopBB);
         if (optimizationLevel >= OptimizationLevel::O1) {
@@ -4833,20 +4884,24 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(loopBB);
         llvm::PHINode* i = builder->CreatePHI(getDefaultType(), 2, "mapkeys.i");
         i->addIncoming(zero, entryBB);
-        llvm::Value* cond = builder->CreateICmpSLT(i, numPairs, "mapkeys.cond");
+        // ULT: numPairs ≥ 0 (lshr of non-negative value), so ULT ≡ SLT.
+        llvm::Value* cond = builder->CreateICmpULT(i, numPairs, "mapkeys.cond");
         builder->CreateCondBr(cond, bodyBB, doneBB);
 
         builder->SetInsertPoint(bodyBB);
-        // Key is at map slot: i*2 + 1
-        llvm::Value* mapSlot = builder->CreateAdd(builder->CreateMul(i, two, "mapkeys.mi"), one, "mapkeys.mapslot");
-        llvm::Value* keyPtr = builder->CreateInBoundsGEP(getDefaultType(), mapPtr, mapSlot, "mapkeys.keyptr");
-        llvm::Value* keyVal = builder->CreateLoad(getDefaultType(), keyPtr, "mapkeys.key");
-        // Store at buf slot: i + 1
-        llvm::Value* arrSlot = builder->CreateAdd(i, one, "mapkeys.arrslot");
+        // Key is at map slot: i*2+1 (nsw+nuw: i < numPairs ≤ INT64_MAX/2)
+        llvm::Value* mi      = builder->CreateMul(i, two, "mapkeys.mi", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* mapSlot = builder->CreateAdd(mi, one, "mapkeys.mapslot", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* keyPtr  = builder->CreateInBoundsGEP(getDefaultType(), mapPtr, mapSlot, "mapkeys.keyptr");
+        auto* keyLoad = builder->CreateAlignedLoad(getDefaultType(), keyPtr, llvm::MaybeAlign(8), "mapkeys.key");
+        keyLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        // Store at output buf slot: i+1 (nsw+nuw: i < numPairs ≤ arrSlots-1)
+        llvm::Value* arrSlot = builder->CreateAdd(i, one, "mapkeys.arrslot", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* arrElemPtr = builder->CreateInBoundsGEP(getDefaultType(), buf, arrSlot, "mapkeys.arrptr");
-        builder->CreateStore(keyVal, arrElemPtr);
-        llvm::Value* nextI = builder->CreateAdd(i, one, "mapkeys.next");
-        i->addIncoming(nextI, bodyBB);
+        auto* keyStore = builder->CreateAlignedStore(keyLoad, arrElemPtr, llvm::MaybeAlign(8));
+        keyStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        // Back-edge: reuse arrSlot (= i+1) as the loop counter increment
+        i->addIncoming(arrSlot, bodyBB);
         auto* backBr_4214 = builder->CreateBr(loopBB);
         if (optimizationLevel >= OptimizationLevel::O1) {
             llvm::SmallVector<llvm::Metadata*, 2> mds;
@@ -4869,24 +4924,28 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
         llvm::Value* mapPtr = builder->CreateIntToPtr(mapArg, ptrTy, "mapvals.ptr");
-        llvm::Value* mapLen = builder->CreateLoad(getDefaultType(), mapPtr, "mapvals.len");
-        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
-        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
-        llvm::Value* two = llvm::ConstantInt::get(getDefaultType(), 2);
+        auto* mapLenLoad = builder->CreateAlignedLoad(getDefaultType(), mapPtr, llvm::MaybeAlign(8), "mapvals.len");
+        mapLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+        mapLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+        llvm::Value* mapLen = mapLenLoad;
+        llvm::Value* zero  = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one   = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* two   = llvm::ConstantInt::get(getDefaultType(), 2);
         llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
 
-        // mapLen is always non-negative; use lshr instead of sdiv.
+        // mapLen is always non-negative (range metadata); use lshr instead of sdiv.
         llvm::Value* numPairs = builder->CreateLShr(mapLen, one, "mapvals.numpairs");
         llvm::Value* arrSlots = builder->CreateAdd(numPairs, one, "mapvals.arrslots", /*HasNUW=*/true, /*HasNSW=*/true);
-        llvm::Value* arrSize = builder->CreateMul(arrSlots, eight, "mapvals.arrsize", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* arrSize  = builder->CreateMul(arrSlots, eight, "mapvals.arrsize", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {arrSize}, "mapvals.buf");
-        builder->CreateStore(numPairs, buf);
+        auto* numPairsStore = builder->CreateAlignedStore(numPairs, buf, llvm::MaybeAlign(8));
+        numPairsStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
 
         llvm::Function* parentFn = builder->GetInsertBlock()->getParent();
         llvm::BasicBlock* entryBB = builder->GetInsertBlock();
-        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "mapvals.loop", parentFn);
-        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "mapvals.body", parentFn);
-        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "mapvals.done", parentFn);
+        llvm::BasicBlock* loopBB  = llvm::BasicBlock::Create(*context, "mapvals.loop", parentFn);
+        llvm::BasicBlock* bodyBB  = llvm::BasicBlock::Create(*context, "mapvals.body", parentFn);
+        llvm::BasicBlock* doneBB  = llvm::BasicBlock::Create(*context, "mapvals.done", parentFn);
 
         auto* backBr_4245 = builder->CreateBr(loopBB);
         if (optimizationLevel >= OptimizationLevel::O1) {
@@ -4901,19 +4960,24 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(loopBB);
         llvm::PHINode* i = builder->CreatePHI(getDefaultType(), 2, "mapvals.i");
         i->addIncoming(zero, entryBB);
-        llvm::Value* cond = builder->CreateICmpSLT(i, numPairs, "mapvals.cond");
+        // ULT: numPairs ≥ 0 (lshr of non-negative value), so ULT ≡ SLT.
+        llvm::Value* cond = builder->CreateICmpULT(i, numPairs, "mapvals.cond");
         builder->CreateCondBr(cond, bodyBB, doneBB);
 
         builder->SetInsertPoint(bodyBB);
-        // Value is at map slot: i*2 + 2
-        llvm::Value* mapSlot = builder->CreateAdd(builder->CreateMul(i, two, "mapvals.mi"), two, "mapvals.mapslot");
-        llvm::Value* valPtr = builder->CreateInBoundsGEP(getDefaultType(), mapPtr, mapSlot, "mapvals.valptr");
-        llvm::Value* valVal = builder->CreateLoad(getDefaultType(), valPtr, "mapvals.val");
-        llvm::Value* arrSlot = builder->CreateAdd(i, one, "mapvals.arrslot");
+        // Value is at map slot: i*2+2 (nsw+nuw)
+        llvm::Value* mi      = builder->CreateMul(i, two, "mapvals.mi", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* mapSlot = builder->CreateAdd(mi, two, "mapvals.mapslot", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* valPtr  = builder->CreateInBoundsGEP(getDefaultType(), mapPtr, mapSlot, "mapvals.valptr");
+        auto* valLoad = builder->CreateAlignedLoad(getDefaultType(), valPtr, llvm::MaybeAlign(8), "mapvals.val");
+        valLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        // Store at output buf slot: i+1 (nsw+nuw)
+        llvm::Value* arrSlot = builder->CreateAdd(i, one, "mapvals.arrslot", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* arrElemPtr = builder->CreateInBoundsGEP(getDefaultType(), buf, arrSlot, "mapvals.arrptr");
-        builder->CreateStore(valVal, arrElemPtr);
-        llvm::Value* nextI = builder->CreateAdd(i, one, "mapvals.next");
-        i->addIncoming(nextI, bodyBB);
+        auto* valStore = builder->CreateAlignedStore(valLoad, arrElemPtr, llvm::MaybeAlign(8));
+        valStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        // Back-edge: reuse arrSlot (= i+1) as loop counter increment
+        i->addIncoming(arrSlot, bodyBB);
         auto* backBr_4262 = builder->CreateBr(loopBB);
         if (optimizationLevel >= OptimizationLevel::O1) {
             llvm::SmallVector<llvm::Metadata*, 2> mds;
@@ -4935,9 +4999,11 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         mapArg = toDefaultType(mapArg);
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
         llvm::Value* mapPtr = builder->CreateIntToPtr(mapArg, ptrTy, "mapsize.ptr");
-        llvm::Value* mapLen = builder->CreateLoad(getDefaultType(), mapPtr, "mapsize.len");
-        // mapLen is always non-negative; use lshr instead of sdiv by 2.
-        return builder->CreateLShr(mapLen,
+        auto* mapLenLoad = builder->CreateAlignedLoad(getDefaultType(), mapPtr, llvm::MaybeAlign(8), "mapsize.len");
+        mapLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+        mapLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+        // mapLen is always non-negative (range metadata); lshr avoids sdiv by 2.
+        return builder->CreateLShr(mapLenLoad,
             llvm::ConstantInt::get(getDefaultType(), 1), "mapsize.result");
     }
 

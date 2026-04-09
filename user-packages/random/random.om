@@ -18,15 +18,11 @@ fn rand_range(lo, hi) {
     if (lo >= hi) {
         return lo;
     }
-    var r = rand_next();
-    if (r < 0) {
-        r = abs(r);
-    }
-    return lo + r % (hi - lo);
+    return lo + rand_next() % (hi - lo);
 }
 
 fn rand_bool() {
-    return rand_next() % 2;
+    return rand_next() & 1;
 }
 
 fn rand_shuffle(arr) {

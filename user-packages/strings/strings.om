@@ -16,5 +16,11 @@ fn str_char_count(s, ch) {
 }
 
 fn str_contains_char(s, ch) {
-    return str_char_count(s, ch) > 0;
+    var length = str_len(s);
+    for (i in 0...length) {
+        if (char_at(s, i) == ch) {
+            return 1;
+        }
+    }
+    return 0;
 }

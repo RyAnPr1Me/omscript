@@ -1,12 +1,7 @@
 // bitwise package - utility functions for bitwise operations
 
 fn bit_count_ones(n) {
-    var count = 0;
-    while (n != 0) {
-        count = count + (n & 1);
-        n = n >> 1;
-    }
-    return count;
+    return popcount(n);
 }
 
 fn bit_is_power_of_two(n) {
@@ -20,17 +15,13 @@ fn bit_is_power_of_two(n) {
 }
 
 fn bit_next_power_of_two(n) {
-    if (n <= 0) {
+    if (n <= 1) {
         return 1;
     }
     if ((n & (n - 1)) == 0) {
         return n;
     }
-    var result = 1;
-    while (result < n) {
-        result = result << 1;
-    }
-    return result;
+    return 1 << (64 - clz(n - 1));
 }
 
 fn bit_lowest_set(n) {
@@ -41,10 +32,5 @@ fn bit_highest_bit_pos(n) {
     if (n <= 0) {
         return -1;
     }
-    var pos = 0;
-    while (n > 1) {
-        n = n >> 1;
-        pos = pos + 1;
-    }
-    return pos;
+    return 63 - clz(n);
 }

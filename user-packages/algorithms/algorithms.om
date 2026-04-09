@@ -1,50 +1,19 @@
 // algorithms package - common algorithms for arrays
 
 fn algo_sum(arr) {
-    var total = 0;
-    var length = len(arr);
-    for (i in 0...length) {
-        total = total + arr[i];
-    }
-    return total;
+    return sum(arr);
 }
 
 fn algo_find_max(arr) {
-    var length = len(arr);
-    if (length == 0) {
-        return 0;
-    }
-    var best = arr[0];
-    for (i in 1...length) {
-        if (arr[i] > best) {
-            best = arr[i];
-        }
-    }
-    return best;
+    return array_max(arr);
 }
 
 fn algo_find_min(arr) {
-    var length = len(arr);
-    if (length == 0) {
-        return 0;
-    }
-    var best = arr[0];
-    for (i in 1...length) {
-        if (arr[i] < best) {
-            best = arr[i];
-        }
-    }
-    return best;
+    return array_min(arr);
 }
 
 fn algo_contains(arr, target) {
-    var length = len(arr);
-    for (i in 0...length) {
-        if (arr[i] == target) {
-            return 1;
-        }
-    }
-    return 0;
+    return array_contains(arr, target);
 }
 
 fn algo_count(arr, target) {

@@ -1,0 +1,47 @@
+// Test chained dict indexing: dict["key1"]["key2"], list-in-dict, etc.
+fn main() {
+    var total = 0;
+
+    // Basic single-level [] access on a dict literal
+    var d = {"a": 1, "b": 2, "c": 3};
+    total = total + (d["a"] == 1);   // 1
+    total = total + (d["b"] == 2);   // 1
+    total = total + (d["c"] == 3);   // 1
+    total = total + (d["z"] == 0);   // 1 — missing key returns 0
+
+    // Integer keys
+    var nums = {10: 100, 20: 200};
+    total = total + (nums[10] == 100);  // 1
+    total = total + (nums[20] == 200);  // 1
+    total = total + (nums[99] == 0);    // 1
+
+    // [] access after map_set (reassignment tracked)
+    var m = map_new();
+    m = map_set(m, "x", 42);
+    m = map_set(m, "y", 99);
+    total = total + (m["x"] == 42);   // 1
+    total = total + (m["y"] == 99);   // 1
+    total = total + (m["z"] == 0);    // 1
+
+    // Nested / recursive dict: dict["k1"]["k2"]
+    // Build inner dict, store its pointer as the value of the outer dict
+    var inner = {"p": 7, "q": 8};
+    var outer = map_new();
+    outer = map_set(outer, "inner", inner);
+    total = total + (outer["inner"]["p"] == 7);  // 1
+    total = total + (outer["inner"]["q"] == 8);  // 1
+
+    // Array inside a dict: dict["arr"][0]
+    var arr = [10, 20, 30];
+    var container = map_new();
+    container = map_set(container, "data", arr);
+    total = total + (container["data"][0] == 10);  // 1
+    total = total + (container["data"][1] == 20);  // 1
+    total = total + (container["data"][2] == 30);  // 1
+
+    // [] on dict literal directly (no variable)
+    total = total + ({"hello": 55}["hello"] == 55);  // 1
+
+    println(total);
+    return total;
+}

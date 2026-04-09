@@ -1,0 +1,47 @@
+// Test dict literal syntax and zero-cost construction
+fn main() {
+    var total = 0;
+
+    // Empty dict
+    var empty = {};
+    total = total + (map_size(empty) == 0);   // 1
+
+    // Single-pair dict
+    var single = {"x": 99};
+    total = total + (map_get(single, "x", 0) == 99);  // 1
+
+    // Multi-pair dict
+    var d = {"a": 1, "b": 2, "c": 3};
+    total = total + (map_size(d) == 3);              // 1
+    total = total + (map_get(d, "a", 0) == 1);       // 1
+    total = total + (map_get(d, "b", 0) == 2);       // 1
+    total = total + (map_get(d, "c", 0) == 3);       // 1
+    total = total + (map_has(d, "b") == 1);          // 1
+    total = total + (map_has(d, "z") == 0);          // 1
+
+    // Integer keys
+    var nums = {1: 100, 2: 200, 3: 300};
+    total = total + (map_get(nums, 1, 0) == 100);    // 1
+    total = total + (map_get(nums, 2, 0) == 200);    // 1
+    total = total + (map_get(nums, 3, 0) == 300);    // 1
+
+    // Dict passed to map_set / map_remove still works
+    var m = {"key": 42};
+    m = map_set(m, "key2", 99);
+    total = total + (map_size(m) == 2);              // 1
+    total = total + (map_get(m, "key", 0) == 42);   // 1
+    total = total + (map_get(m, "key2", 0) == 99);  // 1
+
+    // map_remove on a dict literal
+    m = map_remove(m, "key");
+    total = total + (map_size(m) == 1);              // 1
+    total = total + (map_has(m, "key") == 0);        // 1
+
+    // Type annotation (non-intrusive — does not affect codegen)
+    var typed: dict = {"p": 7, "q": 8};
+    total = total + (map_get(typed, "p", 0) == 7);  // 1
+    total = total + (map_get(typed, "q", 0) == 8);  // 1
+
+    println(total);
+    return total;
+}

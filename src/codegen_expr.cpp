@@ -232,17 +232,36 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         auto isSideEffectFree = [](Expression* e) -> bool {
             if (e->type == ASTNodeType::LITERAL_EXPR) return true;
             if (e->type == ASTNodeType::IDENTIFIER_EXPR) return true;
+            if (e->type == ASTNodeType::UNARY_EXPR) {
+                auto* un = static_cast<UnaryExpr*>(e);
+                // Arithmetic/logical unary on a simple operand is side-effect-free
+                // in OmScript's semantics: integer arithmetic wraps by definition
+                // (OmScript does not have UB for integer overflow), there is no
+                // memory access, and no function calls are emitted.
+                if (un->op == "-" || un->op == "!" || un->op == "~") {
+                    return un->operand->type == ASTNodeType::IDENTIFIER_EXPR ||
+                           un->operand->type == ASTNodeType::LITERAL_EXPR;
+                }
+                return false;
+            }
             if (e->type == ASTNodeType::BINARY_EXPR) {
                 auto* bin = static_cast<BinaryExpr*>(e);
                 const auto& op = bin->op;
-                // Comparisons and arithmetic on simple operands are side-effect-free
+                const bool lhsSimple = bin->left->type == ASTNodeType::IDENTIFIER_EXPR ||
+                                       bin->left->type == ASTNodeType::LITERAL_EXPR;
+                const bool rhsSimple = bin->right->type == ASTNodeType::IDENTIFIER_EXPR ||
+                                       bin->right->type == ASTNodeType::LITERAL_EXPR;
+                if (!lhsSimple || !rhsSimple) return false;
+                // Comparisons are always side-effect-free on simple operands.
                 if (op == "==" || op == "!=" || op == "<" || op == "<=" ||
-                    op == ">" || op == ">=" || op == "&" || op == "|" || op == "^") {
-                    return (bin->left->type == ASTNodeType::IDENTIFIER_EXPR ||
-                            bin->left->type == ASTNodeType::LITERAL_EXPR) &&
-                           (bin->right->type == ASTNodeType::IDENTIFIER_EXPR ||
-                            bin->right->type == ASTNodeType::LITERAL_EXPR);
-                }
+                    op == ">" || op == ">=") return true;
+                // Bitwise and shift ops: integer-only, no memory, no traps.
+                // + / - / * are intentionally excluded: on string operands they
+                // call str_concat / str_repeat which allocate memory.
+                // / and % are excluded for an additional reason: they trap on
+                // a zero divisor, making them unsafe to evaluate eagerly.
+                if (op == "&" || op == "|" || op == "^" ||
+                    op == "<<" || op == ">>") return true;
             }
             return false;
         };
@@ -3573,6 +3592,10 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
     }
 
     builder->CreateAlignedStore(value, it->second, llvm::MaybeAlign(8));
+    // Track dict variables on reassignment so dict["key"] continues to work
+    // after patterns like: m = map_set(m, "k", v) or m = {"a": 1}.
+    if (isDictExpr(expr->value.get()))
+        dictVarNames_.insert(expr->name);
     // Update non-negativity tracking on assignment.
     // When the assigned value is provably non-negative, mark the alloca so
     // subsequent loads can benefit from unsigned operations and NSW flags.
@@ -3628,6 +3651,10 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
         stringArrayVars_.insert(expr->name);
     else
         stringArrayVars_.erase(expr->name);
+    // When a variable is reassigned, its previous knownArraySize(Allocas) entry
+    // is no longer valid — the new value may have a different length.
+    knownArraySizes_.erase(expr->name);
+    knownArraySizeAllocas_.erase(expr->name);
     return value;
 }
 
@@ -3675,6 +3702,31 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
             if (indexExpr->index->type == ASTNodeType::IDENTIFIER_EXPR) {
                 auto* idxIdent = static_cast<IdentifierExpr*>(indexExpr->index.get());
                 if (safeIndexVars_.count(idxIdent->name)) {
+                    // Zero-cost elision A: for(i in 0...len(arr)) { arr[i]++ }
+                    if (!boundsCheckElidedID && indexExpr->array->type == ASTNodeType::IDENTIFIER_EXPR) {
+                        auto* arrId = static_cast<IdentifierExpr*>(indexExpr->array.get());
+                        auto endArrIt = loopIterEndArray_.find(idxIdent->name);
+                        if (endArrIt != loopIterEndArray_.end() && endArrIt->second == arrId->name) {
+                            boundsCheckElidedID = true;
+                        }
+                    }
+                    // Zero-cost elision B: array_fill(n,...) + for(i in 0...n)
+                    if (!boundsCheckElidedID && indexExpr->array->type == ASTNodeType::IDENTIFIER_EXPR) {
+                        auto* arrId = static_cast<IdentifierExpr*>(indexExpr->array.get());
+                        auto sizeAllocaIt = knownArraySizeAllocas_.find(arrId->name);
+                        if (sizeAllocaIt != knownArraySizeAllocas_.end()) {
+                            auto endIt = loopIterEndBound_.find(idxIdent->name);
+                            if (endIt != loopIterEndBound_.end()) {
+                                auto* endLoad = llvm::dyn_cast<llvm::LoadInst>(endIt->second);
+                                if (endLoad && endLoad->getPointerOperand() == sizeAllocaIt->second) {
+                                    boundsCheckElidedID = true;
+                                }
+                                if (!boundsCheckElidedID && endIt->second == sizeAllocaIt->second) {
+                                    boundsCheckElidedID = true;
+                                }
+                            }
+                        }
+                    }
                     auto it = loopIterEndBound_.find(idxIdent->name);
                     if (it != loopIterEndBound_.end()) {
                         llvm::Value* endBound = it->second;
@@ -3682,7 +3734,7 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
                         lenLoadE->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
                         lenLoadE->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
                         llvm::Value* lenVal = lenLoadE;
-                        if (endBound == lenVal) {
+                        if (!boundsCheckElidedID && endBound == lenVal) {
                             boundsCheckElidedID = true;
                         }
                         if (!boundsCheckElidedID) {
@@ -4138,7 +4190,11 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
                                   gv, llvm::MaybeAlign(16), totalBytes);
         } else {
             // Mixed constant/dynamic elements: store individually
-            builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), numElements), arrPtr);
+            // AlignedStore(8) + tbaaArrayLen_: length header at slot 0 is 8-byte
+            // aligned; TBAA separates it from element stores in slots 1+.
+            auto* lenHdrSt = builder->CreateAlignedStore(
+                llvm::ConstantInt::get(getDefaultType(), numElements), arrPtr, llvm::MaybeAlign(8));
+            lenHdrSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
 
             for (size_t i = 0; i < numElements; i++) {
                 llvm::Value* elemVal = generateExpression(expr->elements[i].get());
@@ -4146,7 +4202,8 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
                 // inbounds: malloc'd (1+numElements)*8 bytes, slots [0,numElements] all within.
                 llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr,
                                                           llvm::ConstantInt::get(getDefaultType(), i + 1), "arr.elem.ptr");
-                auto* st = builder->CreateStore(elemVal, elemPtr);
+                // AlignedStore(8) + tbaaArrayElem_: element slots are 8-byte aligned.
+                auto* st = builder->CreateAlignedStore(elemVal, elemPtr, llvm::MaybeAlign(8));
                 st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
             }
         }
@@ -4196,7 +4253,9 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
     llvm::Value* slots = builder->CreateAdd(totalLen, one, "spread.slots");
     llvm::Value* bytes = builder->CreateMul(slots, eight, "spread.bytes");
     llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "spread.buf");
-    builder->CreateStore(totalLen, buf);
+    // AlignedStore(8) + tbaaArrayLen_: length header in slot 0 is 8-byte aligned.
+    auto* totalLenSt = builder->CreateAlignedStore(totalLen, buf, llvm::MaybeAlign(8));
+    totalLenSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
 
     // Second pass: copy elements into the result array
     // We use an alloca to track the current write index
@@ -4221,26 +4280,26 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
             builder->SetInsertPoint(loopBB);
             llvm::PHINode* i = builder->CreatePHI(getDefaultType(), 2, "spread.i");
             i->addIncoming(zero, preheader);
-            llvm::Value* cond = builder->CreateICmpSLT(i, srcLen, "spread.cond");
+            // ULT: srcLen is non-negative (range metadata on spread length load).
+            llvm::Value* cond = builder->CreateICmpULT(i, srcLen, "spread.cond");
             builder->CreateCondBr(cond, bodyBB, doneBB);
 
             builder->SetInsertPoint(bodyBB);
-            // Load element from source: srcPtr[i + 1]
-            llvm::Value* srcIdx = builder->CreateAdd(i, one, "spread.srcidx");
+            // Load element from source: srcPtr[i + 1] (nsw+nuw: i < srcLen ≤ INT64_MAX-1)
+            llvm::Value* srcIdx = builder->CreateAdd(i, one, "spread.srcidx", /*HasNUW=*/true, /*HasNSW=*/true);
             llvm::Value* srcElemPtr = builder->CreateInBoundsGEP(getDefaultType(), srcPtr, srcIdx, "spread.srcelem");
             llvm::Value* elem = builder->CreateAlignedLoad(getDefaultType(), srcElemPtr, llvm::MaybeAlign(8), "spread.elem");
-            // Store in dest: buf[writeIdx + 1]
+            llvm::cast<llvm::Instruction>(elem)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+            // Store in dest: buf[writeIdx + 1] (nsw+nuw: curIdx starts at 0 and grows < totalLen ≤ INT64_MAX-1)
             llvm::Value* curIdx = builder->CreateAlignedLoad(getDefaultType(), writeIdx, llvm::MaybeAlign(8), "spread.curidx");
-            llvm::Value* dstIdx = builder->CreateAdd(curIdx, one, "spread.dstidx");
+            llvm::Value* dstIdx = builder->CreateAdd(curIdx, one, "spread.dstidx", /*HasNUW=*/true, /*HasNSW=*/true);
             llvm::Value* dstPtr = builder->CreateInBoundsGEP(getDefaultType(), buf, dstIdx, "spread.dstptr");
-            auto* spreadSt = builder->CreateStore(elem, dstPtr);
+            auto* spreadSt = builder->CreateAlignedStore(elem, dstPtr, llvm::MaybeAlign(8));
             spreadSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
-            // Increment write index
-            llvm::Value* newIdx = builder->CreateAdd(curIdx, one, "spread.newidx");
-            builder->CreateStore(newIdx, writeIdx);
-            // Increment loop counter
-            llvm::Value* nextI = builder->CreateAdd(i, one, "spread.nexti");
-            i->addIncoming(nextI, bodyBB);
+            // Increment write index (reuse dstIdx = curIdx+1, nsw+nuw)
+            builder->CreateStore(dstIdx, writeIdx);
+            // Increment loop counter (reuse srcIdx = i+1, nsw+nuw)
+            i->addIncoming(srcIdx, bodyBB);
             auto* spreadBackBr = builder->CreateBr(loopBB);
             if (optimizationLevel >= OptimizationLevel::O1) {
                 llvm::SmallVector<llvm::Metadata*, 2> mds;
@@ -4254,13 +4313,14 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
 
             builder->SetInsertPoint(doneBB);
         } else {
-            // Single element: store at buf[writeIdx + 1]
+            // Single element: store at buf[writeIdx + 1] (nsw+nuw)
             llvm::Value* curIdx = builder->CreateAlignedLoad(getDefaultType(), writeIdx, llvm::MaybeAlign(8), "spread.curidx");
-            llvm::Value* dstIdx = builder->CreateAdd(curIdx, one, "spread.dstidx");
+            llvm::Value* dstIdx = builder->CreateAdd(curIdx, one, "spread.dstidx", /*HasNUW=*/true, /*HasNSW=*/true);
             llvm::Value* dstPtr = builder->CreateInBoundsGEP(getDefaultType(), buf, dstIdx, "spread.dstptr");
-            builder->CreateStore(ei.val, dstPtr);
-            llvm::Value* newIdx = builder->CreateAdd(curIdx, one, "spread.newidx");
-            builder->CreateStore(newIdx, writeIdx);
+            auto* singleSt = builder->CreateAlignedStore(ei.val, dstPtr, llvm::MaybeAlign(8));
+            singleSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+            // Reuse dstIdx (= curIdx+1, nsw+nuw) as new write index
+            builder->CreateStore(dstIdx, writeIdx);
         }
     }
 
@@ -4284,6 +4344,25 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
         else if (elem->getType()->isIntegerTy() && elem->getType() != getDefaultType())
             elem = builder->CreateSExt(elem, getDefaultType(), "simd.ext.i64");
         return elem;
+    }
+
+    // Dict indexing: dict["key"] or dict[intKey] → inline map_get (zero cost).
+    if (isDictExpr(expr->array.get())) {
+        return emitMapGet(toDefaultType(arrVal), toDefaultType(idxVal));
+    }
+
+    // Chained dict access: dict["k1"]["k2"].
+    // The base is an IndexExpr whose own base is a known dict.  The value
+    // stored under "k1" could be another dict OR an array.  We use the type
+    // of the *current* key as a static discriminator:
+    //   • string key  → treat retrieved value as a dict and do map_get
+    //   • integer key → treat retrieved value as an array (falls through below)
+    // This is zero-cost: the decision is made at compile time; no runtime tag.
+    if (expr->array->type == ASTNodeType::INDEX_EXPR) {
+        auto* innerIdx = static_cast<IndexExpr*>(expr->array.get());
+        if (isDictExpr(innerIdx->array.get()) && isStringExpr(expr->index.get())) {
+            return emitMapGet(toDefaultType(arrVal), toDefaultType(idxVal));
+        }
     }
 
     idxVal = toDefaultType(idxVal);
@@ -4378,6 +4457,43 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
         IdentifierExpr* idxIdent = (expr->index->type == ASTNodeType::IDENTIFIER_EXPR)
             ? static_cast<IdentifierExpr*>(expr->index.get()) : nullptr;
         if (idxIdent && safeIndexVars_.count(idxIdent->name)) {
+            // ── Zero-cost elision A: for(i in 0...len(arr)) { arr[i] } ────
+            // The loop condition i < len(arr) already proves arr[i] is in bounds.
+            // This pattern is the most common safe iteration pattern; OmScript's
+            // semantics guarantee the iterator cannot be modified in the body,
+            // so the loop condition is a compile-time proof of safety.
+            if (!boundsCheckElided && expr->array->type == ASTNodeType::IDENTIFIER_EXPR) {
+                auto* arrId = static_cast<IdentifierExpr*>(expr->array.get());
+                auto endArrIt = loopIterEndArray_.find(idxIdent->name);
+                if (endArrIt != loopIterEndArray_.end() && endArrIt->second == arrId->name) {
+                    boundsCheckElided = true;
+                }
+            }
+
+            // ── Zero-cost elision B: array_fill(n,...) + for(i in 0...n) ──
+            // arr has exactly n elements; loop iterates 0..n-1; arr[i] is safe.
+            // Works for any runtime n, including values from input().
+            if (!boundsCheckElided && expr->array->type == ASTNodeType::IDENTIFIER_EXPR) {
+                auto* arrId = static_cast<IdentifierExpr*>(expr->array.get());
+                auto sizeAllocaIt = knownArraySizeAllocas_.find(arrId->name);
+                if (sizeAllocaIt != knownArraySizeAllocas_.end()) {
+                    auto endIt = loopIterEndBound_.find(idxIdent->name);
+                    if (endIt != loopIterEndBound_.end()) {
+                        // The end bound is a load from the size variable's alloca
+                        // (or IS the alloca value) — same alloca means same value.
+                        auto* endLoad = llvm::dyn_cast<llvm::LoadInst>(endIt->second);
+                        if (endLoad && endLoad->getPointerOperand() == sizeAllocaIt->second) {
+                            boundsCheckElided = true;
+                        }
+                        // Also check if endBound is the alloca itself (e.g. after
+                        // mem2reg, the load may be folded to the stored value).
+                        if (!boundsCheckElided && endIt->second == sizeAllocaIt->second) {
+                            boundsCheckElided = true;
+                        }
+                    }
+                }
+            }
+
             auto it = loopIterEndBound_.find(idxIdent->name);
             if (it != loopIterEndBound_.end()) {
                 llvm::Value* endBound = it->second;
@@ -4389,7 +4505,7 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
 
                 // Case 1: end bound and length are the same SSA value (e.g.,
                 // both come from len(arr) or same variable).
-                if (endBound == lenVal) {
+                if (!boundsCheckElided && endBound == lenVal) {
                     boundsCheckElided = true;
                 }
 
@@ -4452,8 +4568,8 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
                                     // Range is [start+C, end+C). Safe if end+C <= len.
                                     if (effectiveOffset >= 0) {
                                         auto* endCI = llvm::dyn_cast<llvm::ConstantInt>(endIt->second);
-                                        auto* arithLenLoad = builder->CreateLoad(
-                                            getDefaultType(), basePtr, "idx.len.arith");
+                                        auto* arithLenLoad = builder->CreateAlignedLoad(
+                                            getDefaultType(), basePtr, llvm::MaybeAlign(8), "idx.len.arith");
                                         arithLenLoad->setMetadata(
                                             llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
                                         arithLenLoad->setMetadata(
@@ -4514,8 +4630,8 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
                                             // Fallback: emit assume hints for LLVM CVP
                                             if (!boundsCheckElided
                                                 && optimizationLevel >= OptimizationLevel::O2) {
-                                                auto* arithLenLoad = builder->CreateLoad(
-                                                    getDefaultType(), basePtr, "idx.len.arith.neg");
+                                                auto* arithLenLoad = builder->CreateAlignedLoad(
+                                                    getDefaultType(), basePtr, llvm::MaybeAlign(8), "idx.len.arith.neg");
                                                 arithLenLoad->setMetadata(
                                                     llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
                                                 arithLenLoad->setMetadata(
@@ -4700,6 +4816,31 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
         IdentifierExpr* idxIdent = (expr->index->type == ASTNodeType::IDENTIFIER_EXPR)
             ? static_cast<IdentifierExpr*>(expr->index.get()) : nullptr;
         if (idxIdent && safeIndexVars_.count(idxIdent->name)) {
+            // ── Zero-cost elision A: for(i in 0...len(arr)) { arr[i] = v } ──
+            if (!boundsCheckElidedA && expr->array->type == ASTNodeType::IDENTIFIER_EXPR) {
+                auto* arrId = static_cast<IdentifierExpr*>(expr->array.get());
+                auto endArrIt = loopIterEndArray_.find(idxIdent->name);
+                if (endArrIt != loopIterEndArray_.end() && endArrIt->second == arrId->name) {
+                    boundsCheckElidedA = true;
+                }
+            }
+            // ── Zero-cost elision B: array_fill(n,...) + for(i in 0...n) ──
+            if (!boundsCheckElidedA && expr->array->type == ASTNodeType::IDENTIFIER_EXPR) {
+                auto* arrId = static_cast<IdentifierExpr*>(expr->array.get());
+                auto sizeAllocaIt = knownArraySizeAllocas_.find(arrId->name);
+                if (sizeAllocaIt != knownArraySizeAllocas_.end()) {
+                    auto endIt = loopIterEndBound_.find(idxIdent->name);
+                    if (endIt != loopIterEndBound_.end()) {
+                        auto* endLoad = llvm::dyn_cast<llvm::LoadInst>(endIt->second);
+                        if (endLoad && endLoad->getPointerOperand() == sizeAllocaIt->second) {
+                            boundsCheckElidedA = true;
+                        }
+                        if (!boundsCheckElidedA && endIt->second == sizeAllocaIt->second) {
+                            boundsCheckElidedA = true;
+                        }
+                    }
+                }
+            }
             auto it = loopIterEndBound_.find(idxIdent->name);
             if (it != loopIterEndBound_.end()) {
                 llvm::Value* endBound = it->second;
@@ -4707,7 +4848,7 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
                 lenLoadAElim->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
                 lenLoadAElim->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
                 llvm::Value* lenVal = lenLoadAElim;
-                if (endBound == lenVal) {
+                if (!boundsCheckElidedA && endBound == lenVal) {
                     boundsCheckElidedA = true;
                 }
                 if (!boundsCheckElidedA) {
@@ -5027,6 +5168,155 @@ llvm::Value* CodeGenerator::generateFieldAssign(FieldAssignExpr* expr) {
     }
 
     return newVal;
+}
+
+bool CodeGenerator::isDictExpr(Expression* expr) const {
+    if (!expr) return false;
+    // Direct dict literal
+    if (expr->type == ASTNodeType::DICT_EXPR) return true;
+    // Known dict variable
+    if (expr->type == ASTNodeType::IDENTIFIER_EXPR) {
+        auto* id = static_cast<const IdentifierExpr*>(expr);
+        return dictVarNames_.count(id->name) > 0;
+    }
+    // Call returning a dict: map_new(), map_set(), map_remove()
+    if (expr->type == ASTNodeType::CALL_EXPR) {
+        auto* call = static_cast<const CallExpr*>(expr);
+        return call->callee == "map_new" || call->callee == "map_set" ||
+               call->callee == "map_remove";
+    }
+    // NOTE: INDEX_EXPR is intentionally NOT included here.  The value returned
+    // by dict["key"] may be another dict OR an array — we cannot know statically
+    // without type inference.  Chained string-key access (dict["k1"]["k2"]) is
+    // handled explicitly in generateIndex using the key type as a discriminator.
+    return false;
+}
+
+llvm::Value* CodeGenerator::emitMapGet(llvm::Value* mapVal, llvm::Value* keyVal) {
+    // Inline map_get: linear scan through [len, k0, v0, k1, v1, ...] layout.
+    // Returns the value for keyVal, or 0 if the key is absent.
+    //
+    // IR quality targets (same as expert hand-written assembly):
+    //   • MaybeAlign(8) on all i64 loads  — communicates 8-byte alignment
+    //   • TBAA on len/key/val loads        — enables load-CSE and alias analysis
+    //   • range metadata on len load       — tells LLVM len ∈ [0, INT64_MAX)
+    //   • nsw+nuw on slot arithmetic       — enables induction variable opts
+    //   • mustprogress loop metadata       — enables LICM and DSE through loop
+    //   • ULT comparison                   — unsigned, consistent with builtins
+    //   • Hot branch weights on found path — branch predictor hint
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    llvm::Value* mapPtr = builder->CreateIntToPtr(mapVal, ptrTy, "didx.ptr");
+
+    auto* lenLoad = builder->CreateAlignedLoad(getDefaultType(), mapPtr, llvm::MaybeAlign(8), "didx.len");
+    lenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+    lenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+    llvm::Value* mapLen = lenLoad;
+
+    llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+    llvm::Value* one  = llvm::ConstantInt::get(getDefaultType(), 1);
+    llvm::Value* two  = llvm::ConstantInt::get(getDefaultType(), 2);
+
+    llvm::Function* fn      = builder->GetInsertBlock()->getParent();
+    llvm::BasicBlock* preBB = builder->GetInsertBlock();
+    llvm::BasicBlock* loopBB  = llvm::BasicBlock::Create(*context, "didx.loop",  fn);
+    llvm::BasicBlock* checkBB = llvm::BasicBlock::Create(*context, "didx.check", fn);
+    llvm::BasicBlock* foundBB = llvm::BasicBlock::Create(*context, "didx.found", fn);
+    llvm::BasicBlock* doneBB  = llvm::BasicBlock::Create(*context, "didx.done",  fn);
+
+    auto* entryBr = builder->CreateBr(loopBB);
+
+    // mustprogress: the loop always terminates (bounded by mapLen).
+    // This lets LLVM apply LICM and DSE through the loop body.
+    if (optimizationLevel >= OptimizationLevel::O1) {
+        llvm::SmallVector<llvm::Metadata*, 2> mds;
+        mds.push_back(nullptr);
+        mds.push_back(llvm::MDNode::get(*context,
+            {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
+        llvm::MDNode* md = llvm::MDNode::get(*context, mds);
+        md->replaceOperandWith(0, md);
+        entryBr->setMetadata(llvm::LLVMContext::MD_loop, md);
+    }
+
+    // Loop header: idx PHI, exit if idx >= mapLen (unsigned: UGE)
+    builder->SetInsertPoint(loopBB);
+    llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "didx.i");
+    idx->addIncoming(zero, preBB);
+    // Use unsigned compare (ULT): mapLen is always non-negative, so ULT and
+    // SLT are equivalent for valid maps, but ULT is consistent with all other
+    // builtin loops and allows the strength-reduction pass to fold better.
+    builder->CreateCondBr(
+        builder->CreateICmpULT(idx, mapLen, "didx.cond"), checkBB, doneBB);
+
+    // Check block: load key at slot (idx+1), compare with target
+    builder->SetInsertPoint(checkBB);
+    llvm::Value* kSlot = builder->CreateAdd(idx, one,
+        llvm::Twine("didx.kslot"), /*HasNUW=*/true, /*HasNSW=*/true);
+    llvm::Value* kPtr  = builder->CreateInBoundsGEP(getDefaultType(), mapPtr, kSlot, "didx.kptr");
+    auto* keyLoad = builder->CreateAlignedLoad(getDefaultType(), kPtr, llvm::MaybeAlign(8), "didx.ekey");
+    keyLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+    llvm::Value* match = builder->CreateICmpEQ(keyLoad, keyVal, "didx.match");
+
+    // Back-edge: advance by 2 slots (skip key+value pair), nsw+nuw
+    llvm::Value* nextIdx = builder->CreateAdd(idx, two,
+        llvm::Twine("didx.next"), /*HasNUW=*/true, /*HasNSW=*/true);
+    idx->addIncoming(nextIdx, checkBB);
+
+    // Mark the "not found" branch cold — dict lookups usually succeed
+    llvm::MDNode* hitWeights = llvm::MDBuilder(*context).createBranchWeights(1000000, 1);
+    builder->CreateCondBr(match, foundBB, loopBB, hitWeights);
+
+    // Found block: load value at slot (idx+2)
+    builder->SetInsertPoint(foundBB);
+    llvm::Value* vSlot = builder->CreateAdd(idx, two,
+        llvm::Twine("didx.vslot"), /*HasNUW=*/true, /*HasNSW=*/true);
+    llvm::Value* vPtr  = builder->CreateInBoundsGEP(getDefaultType(), mapPtr, vSlot, "didx.vptr");
+    auto* valLoad = builder->CreateAlignedLoad(getDefaultType(), vPtr, llvm::MaybeAlign(8), "didx.val");
+    valLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+    builder->CreateBr(doneBB);
+
+    // Merge: PHI selects found value or 0 (key absent)
+    builder->SetInsertPoint(doneBB);
+    llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "didx.result");
+    result->addIncoming(zero, loopBB);   // key not found → 0
+    result->addIncoming(valLoad, foundBB);
+    return result;
+}
+
+llvm::Value* CodeGenerator::generateDict(DictExpr* expr) {
+    const size_t numPairs = expr->pairs.size();
+    const size_t totalSlots = 1 + 2 * numPairs;
+    const size_t totalBytes = totalSlots * 8;
+
+    llvm::Value* dictPtr = builder->CreateCall(
+        getOrDeclareMalloc(),
+        {llvm::ConstantInt::get(getDefaultType(), totalBytes)},
+        "dict");
+
+    // Store length = 2 * numPairs (aligned, TBAA): same layout as map_set/map_get.
+    auto* lenStore = builder->CreateAlignedStore(
+        llvm::ConstantInt::get(getDefaultType(), 2 * numPairs), dictPtr, llvm::MaybeAlign(8));
+    lenStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+
+    // Store each key-value pair at a known compile-time offset —
+    // no search loop needed because this is a fresh allocation.
+    for (size_t i = 0; i < numPairs; i++) {
+        llvm::Value* keyVal = toDefaultType(generateExpression(expr->pairs[i].first.get()));
+        llvm::Value* valVal = toDefaultType(generateExpression(expr->pairs[i].second.get()));
+
+        llvm::Value* keyPtr = builder->CreateInBoundsGEP(
+            getDefaultType(), dictPtr,
+            llvm::ConstantInt::get(getDefaultType(), 1 + 2 * i), "dict.kp");
+        auto* keyStore = builder->CreateAlignedStore(keyVal, keyPtr, llvm::MaybeAlign(8));
+        keyStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+
+        llvm::Value* valPtr = builder->CreateInBoundsGEP(
+            getDefaultType(), dictPtr,
+            llvm::ConstantInt::get(getDefaultType(), 2 + 2 * i), "dict.vp");
+        auto* valStore = builder->CreateAlignedStore(valVal, valPtr, llvm::MaybeAlign(8));
+        valStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+    }
+
+    return builder->CreatePtrToInt(dictPtr, getDefaultType(), "dict.i");
 }
 
 } // namespace omscript

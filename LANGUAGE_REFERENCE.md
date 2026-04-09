@@ -1647,6 +1647,90 @@ fn main() {
 }
 ```
 
+### 13.7 Dict Literal Syntax
+
+OmScript supports a concise **dict literal** syntax for constructing maps inline:
+
+```omscript
+var d = {"a": 1, "b": 2, "c": 3};
+var typed: dict = {"x": 10};
+var empty = {};
+```
+
+Dict literals are zero-cost — the compiler allocates a single block and writes all key-value pairs at compile-time-known offsets, with no search loop. They are fully compatible with all `map_*` built-ins:
+
+```omscript
+var d = {"key": 42};
+d = map_set(d, "key2", 99);
+println(map_get(d, "key", 0));   // 42
+println(map_size(d));             // 2
+```
+
+The type annotation `dict` (and `dict[K, V]` for documentation purposes) is supported but does not affect code generation.
+
+---
+
+## 13b. Preprocessor
+
+OmScript includes a source-level preprocessor that runs **before** the lexer. It supports standard C-style directives plus several OmScript-specific extensions.
+
+### Macro Definition
+
+```omscript
+#define ANSWER 42
+#define DOUBLE(x) x * 2
+#undef ANSWER
+```
+
+### Conditional Compilation
+
+```omscript
+#ifdef FEATURE_X
+    // compiled if FEATURE_X is defined
+#endif
+
+#ifndef DEBUG
+    // compiled if DEBUG is not defined
+#endif
+
+#if VERSION >= 2
+    // compiled if expression is true
+#elif VERSION == 1
+    // ...
+#else
+    // ...
+#endif
+```
+
+### Predefined Macros
+
+| Macro | Description |
+|-------|-------------|
+| `__FILE__` | Current source file name (string) |
+| `__LINE__` | Current line number (integer) |
+| `__VERSION__` | Compiler version string (e.g. `"3.7.0"`) |
+| `__OS__` | Target OS: `"linux"`, `"macos"`, or `"windows"` |
+| `__ARCH__` | Target architecture: `"x86_64"`, `"aarch64"`, `"arm"`, or `"unknown"` |
+| `__COUNTER__` | Auto-incrementing integer counter |
+
+### OmScript-Specific Directives
+
+```omscript
+#info This message is printed as a compiler info note
+#warning This message is printed as a compiler warning
+
+// Compile-time assertion (throws error if condition is false)
+#assert VERSION >= 1 "Version must be at least 1"
+
+// Require minimum compiler version
+#require "3.7.0"
+
+// Named auto-incrementing counter (each use increments by 1)
+#counter MY_ID
+var a = MY_ID;   // 0
+var b = MY_ID;   // 1
+```
+
 ---
 
 ## 14. Ownership System

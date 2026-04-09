@@ -56,10 +56,7 @@ fn counter_most_frequent(arr) {
 }
 
 fn counter_fill(arr, val) {
-    var n = len(arr);
-    for (i in 0...n) {
-        arr[i] = val;
-    }
+    array_fill(arr, val);
     return 0;
 }
 

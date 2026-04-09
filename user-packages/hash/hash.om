@@ -6,19 +6,12 @@ fn hash_int(n) {
     h = (h ^ (h >> 16)) * 73244475;
     h = (h ^ (h >> 16)) * 73244475;
     h = h ^ (h >> 16);
-    if (h < 0) {
-        h = abs(h);
-    }
-    return h;
+    return abs(h);
 }
 
 fn hash_combine(h1, h2) {
     // Combine two hash values
-    var result = h1 ^ (h2 + 2654435761 + (h1 << 6) + (h1 >> 2));
-    if (result < 0) {
-        result = abs(result);
-    }
-    return result;
+    return abs(h1 ^ (h2 + 2654435761 + (h1 << 6) + (h1 >> 2)));
 }
 
 fn hash_array(arr) {
@@ -36,10 +29,7 @@ fn hash_string(s) {
     for (i in 0...n) {
         h = h * 31 + char_at(s, i);
     }
-    if (h < 0) {
-        h = abs(h);
-    }
-    return h;
+    return abs(h);
 }
 
 fn hash_mod(val, m) {

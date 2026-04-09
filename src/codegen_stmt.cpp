@@ -126,6 +126,28 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
     if (isSimdType)
         simdVars_.insert(stmt->name);
 
+    // Track dict variables so dict["key"] routes to map_get IR.
+    {
+        bool isDict = false;
+        if (!stmt->typeName.empty() &&
+            (stmt->typeName == "dict" || stmt->typeName.rfind("dict[", 0) == 0)) {
+            isDict = true;
+        }
+        if (!isDict && stmt->initializer) {
+            if (stmt->initializer->type == ASTNodeType::DICT_EXPR) {
+                isDict = true;
+            } else if (stmt->initializer->type == ASTNodeType::CALL_EXPR) {
+                auto* call = static_cast<CallExpr*>(stmt->initializer.get());
+                if (call->callee == "map_new" || call->callee == "map_set" ||
+                    call->callee == "map_remove") {
+                    isDict = true;
+                }
+            }
+        }
+        if (isDict)
+            dictVarNames_.insert(stmt->name);
+    }
+
     bindVariable(stmt->name, alloca, stmt->isConst);
 
     if (initValue) {
@@ -206,6 +228,20 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                     if (lit->literalType == LiteralExpr::LiteralType::INTEGER && lit->intValue > 0) {
                         knownArraySizes_[stmt->name] =
                             llvm::ConstantInt::get(getDefaultType(), lit->intValue);
+                    }
+                } else if (sizeExpr->type == ASTNodeType::IDENTIFIER_EXPR) {
+                    // Variable-size array_fill(varName, val): track the alloca of
+                    // the size variable so that for(i in 0...varName) { arr[i] }
+                    // can elide bounds checks even when varName is a runtime value
+                    // (e.g. from input()).  This is a zero-cost abstraction: the
+                    // array has exactly varName elements, and the loop iterates
+                    // exactly varName times, so arr[i] is always in bounds.
+                    auto* varIdent = static_cast<IdentifierExpr*>(sizeExpr);
+                    auto varIt = namedValues.find(varIdent->name);
+                    if (varIt != namedValues.end()) {
+                        if (auto* sizeAlloca = llvm::dyn_cast<llvm::AllocaInst>(varIt->second)) {
+                            knownArraySizeAllocas_[stmt->name] = sizeAlloca;
+                        }
                     }
                 }
             }
@@ -1020,6 +1056,19 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             // elision: for patterns like for(i in C...n) { arr[i - K] },
             // knowing start == C proves i - K >= C - K >= 0 when C >= K.
             loopIterStartBound_[stmt->iteratorVar] = startVal;
+            // Zero-cost abstraction: detect for(i in 0...len(arr)) pattern.
+            // When the end bound is len(arr), the loop condition i < len(arr)
+            // already proves arr[i] is in bounds.  Record the array name so
+            // generateIndex can elide the redundant bounds check without any
+            // runtime overhead — matching what a hand-written loop would produce.
+            if (stmt->end->type == ASTNodeType::CALL_EXPR) {
+                auto* callEnd = static_cast<CallExpr*>(stmt->end.get());
+                if (callEnd->callee == "len" && callEnd->arguments.size() == 1 &&
+                    callEnd->arguments[0]->type == ASTNodeType::IDENTIFIER_EXPR) {
+                    auto* arrIdent = static_cast<IdentifierExpr*>(callEnd->arguments[0].get());
+                    loopIterEndArray_[stmt->iteratorVar] = arrIdent->name;
+                }
+            }
         }
     }
 
@@ -1031,6 +1080,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     safeIndexVars_.erase(stmt->iteratorVar);
     loopIterEndBound_.erase(stmt->iteratorVar);
     loopIterStartBound_.erase(stmt->iteratorVar);
+    loopIterEndArray_.erase(stmt->iteratorVar);
 
     if (!builder->GetInsertBlock()->getTerminator()) {
         builder->CreateBr(incBB);
@@ -1562,10 +1612,13 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
         lenVal = builder->CreateCall(getOrDeclareStrlen(), {basePtr}, "foreach.strlen");
     } else {
         // Array: length stored in slot 0
-        auto* lenLoad = builder->CreateLoad(getDefaultType(), basePtr, "foreach.len");
-        // TBAA: array length (slot 0) never aliases element stores (slots 1+).
+        // AlignedLoad(8) + TBAA + range: array length is stored in slot 0 which
+        // is 8-byte aligned (malloc/arena returns ≥8-byte aligned memory).
+        // TBAA distinguishes the length slot from element loads (slots 1+), enabling
+        // LICM to hoist this load out of the loop body.  range communicates
+        // lenVal ∈ [0, INT64_MAX) to SCEV for exact trip-count analysis.
+        auto* lenLoad = builder->CreateAlignedLoad(getDefaultType(), basePtr, llvm::MaybeAlign(8), "foreach.len");
         lenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-        // !range: array lengths are always in [0, INT64_MAX).
         lenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
         lenVal = lenLoad;
     }

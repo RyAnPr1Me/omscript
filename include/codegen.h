@@ -234,6 +234,19 @@ class CodeGenerator {
     /// for (i in C...n) { arr[i - K] }, knowing start >= K proves i-K >= 0.
     llvm::StringMap<llvm::Value*> loopIterStartBound_;
 
+    /// Maps iterator variable name → the array variable name whose len()
+    /// was used as the for-loop end bound (for(i in 0...len(arr))).
+    /// Enables zero-cost bounds check elision for arr[i] inside such loops:
+    /// the loop condition i < len(arr) already proves the index is valid.
+    llvm::StringMap<std::string> loopIterEndArray_;
+
+    /// Maps array variable name → the AllocaInst of the variable passed as
+    /// size to array_fill(sizeVar, val).  Enables bounds check elision when
+    /// the same variable is used as both the array size and the loop end bound
+    /// (e.g. var arr = array_fill(n, 0); for (i in 0...n) { arr[i] }).
+    /// Works for any runtime size, including values from input().
+    llvm::StringMap<llvm::AllocaInst*> knownArraySizeAllocas_;
+
     // Stack of innermost catch-entry basic blocks, pushed/popped by
     // generateTryCatch(). generateThrow() branches directly to the top of this
     // stack when a throw occurs inside a try block, ensuring that control flow
@@ -389,6 +402,11 @@ class CodeGenerator {
     /// Variables with SIMD vector types for operator dispatch.
     llvm::StringSet<> simdVars_;
 
+    /// Variables that hold dict/map values (created via dict literal, map_new,
+    /// map_set, map_remove, or declared with type "dict").  Used to route
+    /// dict["key"] index expressions through map_get IR instead of array IR.
+    llvm::StringSet<> dictVarNames_;
+
     /// Per-function loop unrolling hints from @unroll / @nounroll annotations.
     bool currentFuncHintUnroll_ = false;
     bool currentFuncHintNoUnroll_ = false;
@@ -432,7 +450,17 @@ class CodeGenerator {
     llvm::Value* generatePrefix(PrefixExpr* expr);
     llvm::Value* generateTernary(TernaryExpr* expr);
     llvm::Value* generateArray(ArrayExpr* expr);
+    llvm::Value* generateDict(DictExpr* expr);
     llvm::Value* generateIndex(IndexExpr* expr);
+
+    /// Returns true if @p expr statically resolves to a dict/map value.
+    /// Used to route dict["key"] through map_get IR rather than array element IR.
+    bool isDictExpr(Expression* expr) const;
+
+    /// Emit an inline map_get loop that looks up @p keyVal in the map whose
+    /// i64 pointer is @p mapVal.  Returns the associated value or 0 if absent.
+    /// Equivalent to map_get(mapVal, keyVal, 0) but emitted inline.
+    llvm::Value* emitMapGet(llvm::Value* mapVal, llvm::Value* keyVal);
     llvm::Value* generateIndexAssign(IndexAssignExpr* expr);
     llvm::Value* generateStructLiteral(StructLiteralExpr* expr);
     llvm::Value* generateFieldAccess(FieldAccessExpr* expr);

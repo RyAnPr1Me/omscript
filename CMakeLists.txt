@@ -79,6 +79,7 @@ set(SRC
     src/hardware_graph.cpp
 
     # Driver
+    src/preprocessor.cpp
     src/compiler.cpp
     src/main.cpp
 

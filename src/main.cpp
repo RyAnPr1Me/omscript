@@ -3,6 +3,7 @@
 #include "diagnostic.h"
 #include "lexer.h"
 #include "parser.h"
+#include "preprocessor.h"
 #include <chrono>
 #include <csignal>
 #include <cstdlib>
@@ -1883,6 +1884,19 @@ void dumpExpression(const omscript::Expression* expr, int indent) {
         dumpExpression(bw->source.get(), indent + 1);
         break;
     }
+    case omscript::ASTNodeType::DICT_EXPR: {
+        auto* d = static_cast<const omscript::DictExpr*>(expr);
+        std::cout << "DictExpr pairs=" << d->pairs.size() << "\n";
+        for (const auto& p : d->pairs) {
+            printIndent(indent + 1);
+            std::cout << "key:\n";
+            dumpExpression(p.first.get(), indent + 2);
+            printIndent(indent + 1);
+            std::cout << "val:\n";
+            dumpExpression(p.second.get(), indent + 2);
+        }
+        break;
+    }
     default:
         std::cout << "Expression(unknown)\n";
         break;
@@ -2559,7 +2573,10 @@ int main(int argc, char* argv[]) {
         if (command == Command::Lex || command == Command::Parse || command == Command::EmitIR ||
             command == Command::Check) {
             auto lexStart = std::chrono::steady_clock::now();
-            const std::string source = readSourceFile(sourceFile);
+            std::string source = readSourceFile(sourceFile);
+            omscript::Preprocessor pp(sourceFile);
+            source = pp.process(source);
+            for (const auto& w : pp.warnings()) { std::cerr << w << "\n"; }
             omscript::Lexer lexer(source);
             auto tokens = lexer.tokenize();
             auto lexEnd = std::chrono::steady_clock::now();
@@ -2666,7 +2683,10 @@ int main(int argc, char* argv[]) {
         if (dryRun) {
             // For compile/run with --dry-run: lex, parse, codegen but don't write files.
             auto lexStart = std::chrono::steady_clock::now();
-            const std::string source = readSourceFile(sourceFile);
+            std::string source = readSourceFile(sourceFile);
+            omscript::Preprocessor pp(sourceFile);
+            source = pp.process(source);
+            for (const auto& w : pp.warnings()) { std::cerr << w << "\n"; }
             omscript::Lexer lexer(source);
             auto tokens = lexer.tokenize();
             auto lexEnd = std::chrono::steady_clock::now();
@@ -2718,7 +2738,10 @@ int main(int argc, char* argv[]) {
 
         if (emitObjOnly) {
             // Compile to object file only (no linking).
-            const std::string source = readSourceFile(sourceFile);
+            std::string source = readSourceFile(sourceFile);
+            omscript::Preprocessor pp(sourceFile);
+            source = pp.process(source);
+            for (const auto& w : pp.warnings()) { std::cerr << w << "\n"; }
             omscript::Lexer lexer(source);
             auto tokens = lexer.tokenize();
             omscript::Parser parser(tokens);
