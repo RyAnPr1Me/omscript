@@ -2020,10 +2020,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
         h = builder->CreateMul(builder->CreateXor(h, b), prime, "fnv");
     }
     // Ensure hash >= 2 (0=empty, 1=tombstone are reserved)
-    llvm::Value* hashVal = builder->CreateOr(
-        builder->CreateOr(h, llvm::ConstantInt::get(i64Ty, 2)), llvm::ConstantInt::get(i64Ty, 0));
-    // Actually: just OR with 2
-    hashVal = builder->CreateOr(h, llvm::ConstantInt::get(i64Ty, 2), "hash");
+    llvm::Value* hashVal = builder->CreateOr(h, llvm::ConstantInt::get(i64Ty, 2), "hash");
 
     // Load capacity and size
     auto* capPtr = mapArg;  // slot 0
@@ -2343,15 +2340,12 @@ llvm::Function* CodeGenerator::getOrEmitHashMapGet() {
     llvm::Value* val = builder->CreateAlignedLoad(i64Ty, eValPtr, llvm::MaybeAlign(8), "val");
     builder->CreateRet(val);
 
-    // Next: advance slot
+    // Next: advance slot (both tombstone and no-match paths funnel here)
     builder->SetInsertPoint(nextBB);
     llvm::Value* nextSlot = builder->CreateAnd(
         builder->CreateAdd(slot, llvm::ConstantInt::get(i64Ty, 1)),
         mask, "nextslot");
     slot->addIncoming(nextSlot, nextBB);
-    // Also need incoming from checkBB (tombstone path) — wait, nextBB already has
-    // incoming from checkBB and checkKeyBB. Let me fix: the PHI in probeBB needs
-    // incoming from nextBB only (since all paths through check/checkKey funnel to nextBB)
     builder->CreateBr(probeBB);
 
     // Not found: return default
