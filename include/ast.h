@@ -56,6 +56,7 @@ enum class ASTNodeType {
     PIPE_EXPR,
     MOVE_EXPR,
     BORROW_EXPR,
+    DICT_EXPR,
     INVALIDATE_STMT,
     MOVE_DECL,
     PREFETCH_STMT
@@ -571,6 +572,18 @@ class BorrowExpr : public Expression {
 
     explicit BorrowExpr(std::unique_ptr<Expression> src)
         : Expression(ASTNodeType::BORROW_EXPR), source(std::move(src)) {}
+};
+
+/// Dict literal: `{"key": val, ...}` — zero-cost map construction.
+/// Compiles to a single malloc + direct stores with no search loops,
+/// in contrast to repeated map_set() calls which each do malloc+memcpy+loop.
+class DictExpr : public Expression {
+  public:
+    /// Each entry is a (key-expression, value-expression) pair.
+    std::vector<std::pair<std::unique_ptr<Expression>, std::unique_ptr<Expression>>> pairs;
+
+    explicit DictExpr(std::vector<std::pair<std::unique_ptr<Expression>, std::unique_ptr<Expression>>> p)
+        : Expression(ASTNodeType::DICT_EXPR), pairs(std::move(p)) {}
 };
 
 /// `invalidate x;` — explicitly mark a variable as dead.
