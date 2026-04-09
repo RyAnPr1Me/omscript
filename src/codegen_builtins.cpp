@@ -320,7 +320,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Array is stored as an i64 holding a pointer to [length, elem0, elem1, ...]
         // Convert to integer first if needed (e.g. if stored in a float variable)
         arg = toDefaultType(arg);
-        llvm::Value* arrPtr = builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "arrptr");
+        llvm::Value* arrPtr =
+            arg->getType()->isPointerTy() ? arg : builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "arrptr");
         auto* arrlenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "arrlen");
         arrlenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
         arrlenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
@@ -703,7 +704,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         validateArgCount(expr, "sum", 1);
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         // Array layout: [length, elem0, elem1, ...]
-        llvm::Value* arrPtr = builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "sum.arrptr");
+        llvm::Value* arrPtr =
+            arg->getType()->isPointerTy() ? arg : builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "sum.arrptr");
         auto* sumLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "sum.len");
         sumLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
         sumLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
@@ -787,7 +789,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* i = generateExpression(expr->arguments[1].get());
         llvm::Value* j = generateExpression(expr->arguments[2].get());
 
-        llvm::Value* arrPtr = builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "swap.arrptr");
+        llvm::Value* arrPtr =
+            arg->getType()->isPointerTy() ? arg : builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "swap.arrptr");
         auto* swapLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "swap.len");
         swapLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
         swapLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
@@ -835,7 +838,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     if (bid == BuiltinId::REVERSE) {
         validateArgCount(expr, "reverse", 1);
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
-        llvm::Value* arrPtr = builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "rev.arrptr");
+        llvm::Value* arrPtr =
+            arg->getType()->isPointerTy() ? arg : builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "rev.arrptr");
         auto* revLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "rev.len");
         revLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
         revLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
@@ -2314,7 +2318,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         arrArg = toDefaultType(arrArg);
         valArg = toDefaultType(valArg);
         // Array layout: [length, elem0, elem1, ...]
-        llvm::Value* arrPtr = builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "push.arrptr");
+        llvm::Value* arrPtr =
+            arrArg->getType()->isPointerTy() ? arrArg : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "push.arrptr");
         auto* pushLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "push.oldlen");
         pushLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
         pushLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
@@ -2393,7 +2398,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         validateArgCount(expr, "pop", 1);
         llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
         arrArg = toDefaultType(arrArg);
-        llvm::Value* arrPtr = builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "pop.arrptr");
+        llvm::Value* arrPtr =
+            arrArg->getType()->isPointerTy() ? arrArg : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "pop.arrptr");
         auto* popLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "pop.oldlen");
         popLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
         popLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
@@ -2435,7 +2441,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* valArg = generateExpression(expr->arguments[1].get());
         arrArg = toDefaultType(arrArg);
         valArg = toDefaultType(valArg);
-        llvm::Value* arrPtr = builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "indexof.arrptr");
+        llvm::Value* arrPtr =
+            arrArg->getType()->isPointerTy() ? arrArg : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "indexof.arrptr");
         auto* idxofLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "indexof.len");
         idxofLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
         idxofLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
@@ -2503,7 +2510,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         arrArg = toDefaultType(arrArg);
         valArg = toDefaultType(valArg);
         llvm::Value* arrPtr =
-            builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "contains.arrptr");
+            arrArg->getType()->isPointerTy() ? arrArg : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "contains.arrptr");
         auto* containsLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "contains.len");
         containsLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
         containsLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
@@ -2556,7 +2563,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         bool sortStrings = isStringArrayExpr(expr->arguments[0].get());
         llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
         arrArg = toDefaultType(arrArg);
-        llvm::Value* arrPtr = builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "sort.arrptr");
+        llvm::Value* arrPtr =
+            arrArg->getType()->isPointerTy() ? arrArg : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "sort.arrptr");
         auto* sortLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "sort.len");
         sortLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
         sortLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
@@ -2791,7 +2799,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         arrArg = toDefaultType(arrArg);
         startArg = toDefaultType(startArg);
         endArg = toDefaultType(endArg);
-        llvm::Value* arrPtr = builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "slice.arrptr");
+        llvm::Value* arrPtr =
+            arrArg->getType()->isPointerTy() ? arrArg : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "slice.arrptr");
         auto* sliceLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "slice.arrlen");
         sliceLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
         sliceLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
@@ -2829,7 +2838,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         validateArgCount(expr, "array_copy", 1);
         llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
         arrArg = toDefaultType(arrArg);
-        llvm::Value* arrPtr = builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "acopy.arrptr");
+        llvm::Value* arrPtr =
+            arrArg->getType()->isPointerTy() ? arrArg : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "acopy.arrptr");
         auto* acopyLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "acopy.len");
         acopyLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
         acopyLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
@@ -2851,7 +2861,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* idxArg = generateExpression(expr->arguments[1].get());
         arrArg = toDefaultType(arrArg);
         idxArg = toDefaultType(idxArg);
-        llvm::Value* arrPtr = builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "aremove.arrptr");
+        llvm::Value* arrPtr =
+            arrArg->getType()->isPointerTy() ? arrArg : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "aremove.arrptr");
         auto* aremLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "aremove.len");
         aremLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
         aremLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
@@ -2916,7 +2927,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
         arrArg = toDefaultType(arrArg);
-        llvm::Value* arrPtr = builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "amap.arrptr");
+        llvm::Value* arrPtr =
+            arrArg->getType()->isPointerTy() ? arrArg : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "amap.arrptr");
         auto* amapLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "amap.len");
         amapLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
         amapLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
@@ -3004,7 +3016,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
         arrArg = toDefaultType(arrArg);
-        llvm::Value* arrPtr = builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "afilt.arrptr");
+        llvm::Value* arrPtr =
+            arrArg->getType()->isPointerTy() ? arrArg : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "afilt.arrptr");
         auto* afiltLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "afilt.len");
         afiltLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
         afiltLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
@@ -3121,7 +3134,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* initVal = generateExpression(expr->arguments[2].get());
         arrArg = toDefaultType(arrArg);
         initVal = toDefaultType(initVal);
-        llvm::Value* arrPtr = builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "areduce.arrptr");
+        llvm::Value* arrPtr =
+            arrArg->getType()->isPointerTy() ? arrArg : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "areduce.arrptr");
         auto* aredLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "areduce.len");
         aredLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
         aredLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
@@ -3413,7 +3427,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
         arrArg = toDefaultType(arrArg);
-        llvm::Value* arrPtr = builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "aany.arrptr");
+        llvm::Value* arrPtr =
+            arrArg->getType()->isPointerTy() ? arrArg : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "aany.arrptr");
         auto* aanyLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "aany.len");
         aanyLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
         aanyLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
@@ -3491,7 +3506,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
         arrArg = toDefaultType(arrArg);
-        llvm::Value* arrPtr = builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "aevery.arrptr");
+        llvm::Value* arrPtr =
+            arrArg->getType()->isPointerTy() ? arrArg : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "aevery.arrptr");
         auto* aeveryLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "aevery.len");
         aeveryLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
         aeveryLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
@@ -3632,7 +3648,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
         arrArg = toDefaultType(arrArg);
-        llvm::Value* arrPtr = builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "acnt.arrptr");
+        llvm::Value* arrPtr =
+            arrArg->getType()->isPointerTy() ? arrArg : builder->CreateIntToPtr(arrArg, llvm::PointerType::getUnqual(*context), "acnt.arrptr");
         auto* acntLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "acnt.len");
         acntLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
         acntLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
@@ -4485,7 +4502,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         valArg = toDefaultType(valArg);
 
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
-        llvm::Value* mapPtr = builder->CreateIntToPtr(mapArg, ptrTy, "mapset.ptr");
+        llvm::Value* mapPtr =
+            mapArg->getType()->isPointerTy() ? mapArg : builder->CreateIntToPtr(mapArg, ptrTy, "mapset.ptr");
         // Use AlignedLoad + TBAA + range: map length slot is 8-byte aligned,
         // TBAA enables alias analysis between length and element loads,
         // range metadata tells the optimizer mapLen ∈ [0, INT64_MAX).
@@ -4606,7 +4624,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         defArg = toDefaultType(defArg);
 
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
-        llvm::Value* mapPtr = builder->CreateIntToPtr(mapArg, ptrTy, "mapget.ptr");
+        llvm::Value* mapPtr =
+            mapArg->getType()->isPointerTy() ? mapArg : builder->CreateIntToPtr(mapArg, ptrTy, "mapget.ptr");
         auto* mapLenLoad = builder->CreateAlignedLoad(getDefaultType(), mapPtr, llvm::MaybeAlign(8), "mapget.len");
         mapLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
         mapLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
@@ -4673,7 +4692,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         keyArg = toDefaultType(keyArg);
 
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
-        llvm::Value* mapPtr = builder->CreateIntToPtr(mapArg, ptrTy, "maphas.ptr");
+        llvm::Value* mapPtr =
+            mapArg->getType()->isPointerTy() ? mapArg : builder->CreateIntToPtr(mapArg, ptrTy, "maphas.ptr");
         auto* mapLenLoad = builder->CreateAlignedLoad(getDefaultType(), mapPtr, llvm::MaybeAlign(8), "maphas.len");
         mapLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
         mapLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
@@ -4735,7 +4755,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         keyArg = toDefaultType(keyArg);
 
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
-        llvm::Value* mapPtr = builder->CreateIntToPtr(mapArg, ptrTy, "maprem.ptr");
+        llvm::Value* mapPtr =
+            mapArg->getType()->isPointerTy() ? mapArg : builder->CreateIntToPtr(mapArg, ptrTy, "maprem.ptr");
         auto* mapLenLoad = builder->CreateAlignedLoad(getDefaultType(), mapPtr, llvm::MaybeAlign(8), "maprem.len");
         mapLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
         mapLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
@@ -4846,7 +4867,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         mapArg = toDefaultType(mapArg);
 
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
-        llvm::Value* mapPtr = builder->CreateIntToPtr(mapArg, ptrTy, "mapkeys.ptr");
+        llvm::Value* mapPtr =
+            mapArg->getType()->isPointerTy() ? mapArg : builder->CreateIntToPtr(mapArg, ptrTy, "mapkeys.ptr");
         auto* mapLenLoad = builder->CreateAlignedLoad(getDefaultType(), mapPtr, llvm::MaybeAlign(8), "mapkeys.len");
         mapLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
         mapLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
@@ -4923,7 +4945,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         mapArg = toDefaultType(mapArg);
 
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
-        llvm::Value* mapPtr = builder->CreateIntToPtr(mapArg, ptrTy, "mapvals.ptr");
+        llvm::Value* mapPtr =
+            mapArg->getType()->isPointerTy() ? mapArg : builder->CreateIntToPtr(mapArg, ptrTy, "mapvals.ptr");
         auto* mapLenLoad = builder->CreateAlignedLoad(getDefaultType(), mapPtr, llvm::MaybeAlign(8), "mapvals.len");
         mapLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
         mapLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
@@ -4998,7 +5021,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* mapArg = generateExpression(expr->arguments[0].get());
         mapArg = toDefaultType(mapArg);
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
-        llvm::Value* mapPtr = builder->CreateIntToPtr(mapArg, ptrTy, "mapsize.ptr");
+        llvm::Value* mapPtr =
+            mapArg->getType()->isPointerTy() ? mapArg : builder->CreateIntToPtr(mapArg, ptrTy, "mapsize.ptr");
         auto* mapLenLoad = builder->CreateAlignedLoad(getDefaultType(), mapPtr, llvm::MaybeAlign(8), "mapsize.len");
         mapLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
         mapLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);

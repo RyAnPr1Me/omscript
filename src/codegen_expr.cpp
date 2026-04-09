@@ -4844,7 +4844,8 @@ llvm::Value* CodeGenerator::generateFieldAccess(FieldAccessExpr* expr) {
     objVal = toDefaultType(objVal);
 
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
-    llvm::Value* basePtr = builder->CreateIntToPtr(objVal, ptrTy, "struct.baseptr");
+    llvm::Value* basePtr =
+        objVal->getType()->isPointerTy() ? objVal : builder->CreateIntToPtr(objVal, ptrTy, "struct.baseptr");
     // inbounds: fieldIdx is validated against the declared struct size by
     // resolveFieldIndex, so it is always within [0, numFields-1].
     llvm::Value* elemPtr = builder->CreateInBoundsGEP(
@@ -4931,7 +4932,8 @@ llvm::Value* CodeGenerator::generateFieldAssign(FieldAssignExpr* expr) {
     newVal = toDefaultType(newVal);
 
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
-    llvm::Value* basePtr = builder->CreateIntToPtr(objVal, ptrTy, "struct.baseptr");
+    llvm::Value* basePtr =
+        objVal->getType()->isPointerTy() ? objVal : builder->CreateIntToPtr(objVal, ptrTy, "struct.baseptr");
     // inbounds: fieldIdx is validated against the declared struct size by
     // resolveFieldIndex, so it is always within [0, numFields-1].
     llvm::Value* elemPtr = builder->CreateInBoundsGEP(
@@ -5003,7 +5005,8 @@ llvm::Value* CodeGenerator::emitMapGet(llvm::Value* mapVal, llvm::Value* keyVal)
     //   • ULT comparison                   — unsigned, consistent with builtins
     //   • Hot branch weights on found path — branch predictor hint
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
-    llvm::Value* mapPtr = builder->CreateIntToPtr(mapVal, ptrTy, "didx.ptr");
+    llvm::Value* mapPtr =
+        mapVal->getType()->isPointerTy() ? mapVal : builder->CreateIntToPtr(mapVal, ptrTy, "didx.ptr");
 
     auto* lenLoad = builder->CreateAlignedLoad(getDefaultType(), mapPtr, llvm::MaybeAlign(8), "didx.len");
     lenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
