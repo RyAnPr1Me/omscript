@@ -4161,7 +4161,11 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
                                   gv, llvm::MaybeAlign(16), totalBytes);
         } else {
             // Mixed constant/dynamic elements: store individually
-            builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), numElements), arrPtr);
+            // AlignedStore(8) + tbaaArrayLen_: length header at slot 0 is 8-byte
+            // aligned; TBAA separates it from element stores in slots 1+.
+            auto* lenHdrSt = builder->CreateAlignedStore(
+                llvm::ConstantInt::get(getDefaultType(), numElements), arrPtr, llvm::MaybeAlign(8));
+            lenHdrSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
 
             for (size_t i = 0; i < numElements; i++) {
                 llvm::Value* elemVal = generateExpression(expr->elements[i].get());
@@ -4169,7 +4173,8 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
                 // inbounds: malloc'd (1+numElements)*8 bytes, slots [0,numElements] all within.
                 llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr,
                                                           llvm::ConstantInt::get(getDefaultType(), i + 1), "arr.elem.ptr");
-                auto* st = builder->CreateStore(elemVal, elemPtr);
+                // AlignedStore(8) + tbaaArrayElem_: element slots are 8-byte aligned.
+                auto* st = builder->CreateAlignedStore(elemVal, elemPtr, llvm::MaybeAlign(8));
                 st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
             }
         }
@@ -4219,7 +4224,9 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
     llvm::Value* slots = builder->CreateAdd(totalLen, one, "spread.slots");
     llvm::Value* bytes = builder->CreateMul(slots, eight, "spread.bytes");
     llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "spread.buf");
-    builder->CreateStore(totalLen, buf);
+    // AlignedStore(8) + tbaaArrayLen_: length header in slot 0 is 8-byte aligned.
+    auto* totalLenSt = builder->CreateAlignedStore(totalLen, buf, llvm::MaybeAlign(8));
+    totalLenSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
 
     // Second pass: copy elements into the result array
     // We use an alloca to track the current write index
@@ -4244,26 +4251,26 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
             builder->SetInsertPoint(loopBB);
             llvm::PHINode* i = builder->CreatePHI(getDefaultType(), 2, "spread.i");
             i->addIncoming(zero, preheader);
-            llvm::Value* cond = builder->CreateICmpSLT(i, srcLen, "spread.cond");
+            // ULT: srcLen is non-negative (range metadata on spread length load).
+            llvm::Value* cond = builder->CreateICmpULT(i, srcLen, "spread.cond");
             builder->CreateCondBr(cond, bodyBB, doneBB);
 
             builder->SetInsertPoint(bodyBB);
-            // Load element from source: srcPtr[i + 1]
-            llvm::Value* srcIdx = builder->CreateAdd(i, one, "spread.srcidx");
+            // Load element from source: srcPtr[i + 1] (nsw+nuw: i < srcLen ≤ INT64_MAX-1)
+            llvm::Value* srcIdx = builder->CreateAdd(i, one, "spread.srcidx", /*HasNUW=*/true, /*HasNSW=*/true);
             llvm::Value* srcElemPtr = builder->CreateInBoundsGEP(getDefaultType(), srcPtr, srcIdx, "spread.srcelem");
             llvm::Value* elem = builder->CreateAlignedLoad(getDefaultType(), srcElemPtr, llvm::MaybeAlign(8), "spread.elem");
-            // Store in dest: buf[writeIdx + 1]
+            llvm::cast<llvm::Instruction>(elem)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+            // Store in dest: buf[writeIdx + 1] (nsw+nuw: curIdx starts at 0 and grows < totalLen ≤ INT64_MAX-1)
             llvm::Value* curIdx = builder->CreateAlignedLoad(getDefaultType(), writeIdx, llvm::MaybeAlign(8), "spread.curidx");
-            llvm::Value* dstIdx = builder->CreateAdd(curIdx, one, "spread.dstidx");
+            llvm::Value* dstIdx = builder->CreateAdd(curIdx, one, "spread.dstidx", /*HasNUW=*/true, /*HasNSW=*/true);
             llvm::Value* dstPtr = builder->CreateInBoundsGEP(getDefaultType(), buf, dstIdx, "spread.dstptr");
-            auto* spreadSt = builder->CreateStore(elem, dstPtr);
+            auto* spreadSt = builder->CreateAlignedStore(elem, dstPtr, llvm::MaybeAlign(8));
             spreadSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
-            // Increment write index
-            llvm::Value* newIdx = builder->CreateAdd(curIdx, one, "spread.newidx");
-            builder->CreateStore(newIdx, writeIdx);
-            // Increment loop counter
-            llvm::Value* nextI = builder->CreateAdd(i, one, "spread.nexti");
-            i->addIncoming(nextI, bodyBB);
+            // Increment write index (reuse dstIdx = curIdx+1, nsw+nuw)
+            builder->CreateStore(dstIdx, writeIdx);
+            // Increment loop counter (reuse srcIdx = i+1, nsw+nuw)
+            i->addIncoming(srcIdx, bodyBB);
             auto* spreadBackBr = builder->CreateBr(loopBB);
             if (optimizationLevel >= OptimizationLevel::O1) {
                 llvm::SmallVector<llvm::Metadata*, 2> mds;
@@ -4277,13 +4284,14 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
 
             builder->SetInsertPoint(doneBB);
         } else {
-            // Single element: store at buf[writeIdx + 1]
+            // Single element: store at buf[writeIdx + 1] (nsw+nuw)
             llvm::Value* curIdx = builder->CreateAlignedLoad(getDefaultType(), writeIdx, llvm::MaybeAlign(8), "spread.curidx");
-            llvm::Value* dstIdx = builder->CreateAdd(curIdx, one, "spread.dstidx");
+            llvm::Value* dstIdx = builder->CreateAdd(curIdx, one, "spread.dstidx", /*HasNUW=*/true, /*HasNSW=*/true);
             llvm::Value* dstPtr = builder->CreateInBoundsGEP(getDefaultType(), buf, dstIdx, "spread.dstptr");
-            builder->CreateStore(ei.val, dstPtr);
-            llvm::Value* newIdx = builder->CreateAdd(curIdx, one, "spread.newidx");
-            builder->CreateStore(newIdx, writeIdx);
+            auto* singleSt = builder->CreateAlignedStore(ei.val, dstPtr, llvm::MaybeAlign(8));
+            singleSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+            // Reuse dstIdx (= curIdx+1, nsw+nuw) as new write index
+            builder->CreateStore(dstIdx, writeIdx);
         }
     }
 
@@ -4494,8 +4502,8 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
                                     // Range is [start+C, end+C). Safe if end+C <= len.
                                     if (effectiveOffset >= 0) {
                                         auto* endCI = llvm::dyn_cast<llvm::ConstantInt>(endIt->second);
-                                        auto* arithLenLoad = builder->CreateLoad(
-                                            getDefaultType(), basePtr, "idx.len.arith");
+                                        auto* arithLenLoad = builder->CreateAlignedLoad(
+                                            getDefaultType(), basePtr, llvm::MaybeAlign(8), "idx.len.arith");
                                         arithLenLoad->setMetadata(
                                             llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
                                         arithLenLoad->setMetadata(
@@ -4556,8 +4564,8 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
                                             // Fallback: emit assume hints for LLVM CVP
                                             if (!boundsCheckElided
                                                 && optimizationLevel >= OptimizationLevel::O2) {
-                                                auto* arithLenLoad = builder->CreateLoad(
-                                                    getDefaultType(), basePtr, "idx.len.arith.neg");
+                                                auto* arithLenLoad = builder->CreateAlignedLoad(
+                                                    getDefaultType(), basePtr, llvm::MaybeAlign(8), "idx.len.arith.neg");
                                                 arithLenLoad->setMetadata(
                                                     llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
                                                 arithLenLoad->setMetadata(

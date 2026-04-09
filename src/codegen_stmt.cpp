@@ -1584,10 +1584,13 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
         lenVal = builder->CreateCall(getOrDeclareStrlen(), {basePtr}, "foreach.strlen");
     } else {
         // Array: length stored in slot 0
-        auto* lenLoad = builder->CreateLoad(getDefaultType(), basePtr, "foreach.len");
-        // TBAA: array length (slot 0) never aliases element stores (slots 1+).
+        // AlignedLoad(8) + TBAA + range: array length is stored in slot 0 which
+        // is 8-byte aligned (malloc/arena returns ≥8-byte aligned memory).
+        // TBAA distinguishes the length slot from element loads (slots 1+), enabling
+        // LICM to hoist this load out of the loop body.  range communicates
+        // lenVal ∈ [0, INT64_MAX) to SCEV for exact trip-count analysis.
+        auto* lenLoad = builder->CreateAlignedLoad(getDefaultType(), basePtr, llvm::MaybeAlign(8), "foreach.len");
         lenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-        // !range: array lengths are always in [0, INT64_MAX).
         lenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
         lenVal = lenLoad;
     }
