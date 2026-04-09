@@ -1657,11 +1657,13 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateCondBr(cond, bodyBB, doneBB);
         builder->SetInsertPoint(bodyBB);
         llvm::Value* charPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), buf, idx, "upper.charptr");
-        llvm::Value* ch = builder->CreateLoad(llvm::Type::getInt8Ty(*context), charPtr, "upper.ch");
-        llvm::Value* ch32 = builder->CreateZExt(ch, llvm::Type::getInt32Ty(*context), "upper.ch32");
+        auto* chLoad = builder->CreateLoad(llvm::Type::getInt8Ty(*context), charPtr, "upper.ch");
+        chLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
+        llvm::Value* ch32 = builder->CreateZExt(chLoad, llvm::Type::getInt32Ty(*context), "upper.ch32");
         llvm::Value* upper = builder->CreateCall(getOrDeclareToupper(), {ch32}, "upper.toupper");
         llvm::Value* upper8 = builder->CreateTrunc(upper, llvm::Type::getInt8Ty(*context), "upper.trunc");
-        builder->CreateStore(upper8, charPtr);
+        auto* upperStore = builder->CreateStore(upper8, charPtr);
+        upperStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
         llvm::Value* nextIdx = builder->CreateAdd(idx, one, "upper.next", /*HasNUW=*/true, /*HasNSW=*/true);
         idx->addIncoming(nextIdx, bodyBB);
         attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
@@ -1696,11 +1698,13 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateCondBr(cond, bodyBB, doneBB);
         builder->SetInsertPoint(bodyBB);
         llvm::Value* charPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), buf, idx, "lower.charptr");
-        llvm::Value* ch = builder->CreateLoad(llvm::Type::getInt8Ty(*context), charPtr, "lower.ch");
-        llvm::Value* ch32 = builder->CreateZExt(ch, llvm::Type::getInt32Ty(*context), "lower.ch32");
+        auto* chLoad = builder->CreateLoad(llvm::Type::getInt8Ty(*context), charPtr, "lower.ch");
+        chLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
+        llvm::Value* ch32 = builder->CreateZExt(chLoad, llvm::Type::getInt32Ty(*context), "lower.ch32");
         llvm::Value* lower = builder->CreateCall(getOrDeclareTolower(), {ch32}, "lower.tolower");
         llvm::Value* lower8 = builder->CreateTrunc(lower, llvm::Type::getInt8Ty(*context), "lower.trunc");
-        builder->CreateStore(lower8, charPtr);
+        auto* lowerStore = builder->CreateStore(lower8, charPtr);
+        lowerStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
         llvm::Value* nextIdx = builder->CreateAdd(idx, one, "lower.next", /*HasNUW=*/true, /*HasNSW=*/true);
         idx->addIncoming(nextIdx, bodyBB);
         attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
@@ -1969,8 +1973,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(startBodyBB);
         llvm::Value* startCharPtr =
             builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), strPtr, startIdx, "trim.startcharptr");
-        llvm::Value* startChar = builder->CreateLoad(llvm::Type::getInt8Ty(*context), startCharPtr, "trim.startchar");
-        llvm::Value* startChar32 = builder->CreateZExt(startChar, llvm::Type::getInt32Ty(*context), "trim.startchar32");
+        auto* startCharLoad = builder->CreateLoad(llvm::Type::getInt8Ty(*context), startCharPtr, "trim.startchar");
+        startCharLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
+        llvm::Value* startChar32 = builder->CreateZExt(startCharLoad, llvm::Type::getInt32Ty(*context), "trim.startchar32");
         llvm::Value* isStartSpace = builder->CreateCall(getOrDeclareIsspace(), {startChar32}, "trim.isspace");
         llvm::Value* isStartSpaceBool = builder->CreateICmpNE(isStartSpace, builder->getInt32(0), "trim.isspacebool");
         llvm::Value* nextStartIdx = builder->CreateAdd(startIdx, one, "trim.nextstartidx", /*HasNUW=*/true, /*HasNSW=*/true);
@@ -2006,8 +2011,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* prevEndIdx = builder->CreateSub(endIdx, one, "trim.prevendidx", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* endCharPtr =
             builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), strPtr, prevEndIdx, "trim.endcharptr");
-        llvm::Value* endChar = builder->CreateLoad(llvm::Type::getInt8Ty(*context), endCharPtr, "trim.endchar");
-        llvm::Value* endChar32 = builder->CreateZExt(endChar, llvm::Type::getInt32Ty(*context), "trim.endchar32");
+        auto* endCharLoad = builder->CreateLoad(llvm::Type::getInt8Ty(*context), endCharPtr, "trim.endchar");
+        endCharLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
+        llvm::Value* endChar32 = builder->CreateZExt(endCharLoad, llvm::Type::getInt32Ty(*context), "trim.endchar32");
         llvm::Value* isEndSpace = builder->CreateCall(getOrDeclareIsspace(), {endChar32}, "trim.isendspace");
         llvm::Value* isEndSpaceBool = builder->CreateICmpNE(isEndSpace, builder->getInt32(0), "trim.isendbool");
         llvm::BasicBlock* endContBB = llvm::BasicBlock::Create(*context, "trim.endcont", function);
@@ -2175,9 +2181,11 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(bodyBB);
         llvm::Value* revIdx = builder->CreateSub(builder->CreateSub(strLen, one, "strrev.lenm1", /*HasNUW=*/true, /*HasNSW=*/true), idx, "strrev.revidx", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* srcPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), strPtr, revIdx, "strrev.srcptr");
-        llvm::Value* ch = builder->CreateLoad(llvm::Type::getInt8Ty(*context), srcPtr, "strrev.ch");
+        auto* revLoad = builder->CreateLoad(llvm::Type::getInt8Ty(*context), srcPtr, "strrev.ch");
+        revLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
         llvm::Value* dstPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), buf, idx, "strrev.dstptr");
-        builder->CreateStore(ch, dstPtr);
+        auto* revStore = builder->CreateStore(revLoad, dstPtr);
+        revStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
         llvm::Value* nextIdx = builder->CreateAdd(idx, one, "strrev.next", /*HasNUW=*/true, /*HasNSW=*/true);
         idx->addIncoming(nextIdx, bodyBB);
         attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
@@ -3647,8 +3655,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 : builder->CreateIntToPtr(delimArg, llvm::PointerType::getUnqual(*context), "split.delim");
 
         // Get the delimiter character (first char of delimiter string)
-        llvm::Value* delimChar = builder->CreateLoad(llvm::Type::getInt8Ty(*context), delimPtr, "split.delimch");
-        llvm::Value* delimChar32 = builder->CreateZExt(delimChar, llvm::Type::getInt32Ty(*context), "split.delimch32");
+        auto* delimCharLoad = builder->CreateLoad(llvm::Type::getInt8Ty(*context), delimPtr, "split.delimch");
+        delimCharLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
+        llvm::Value* delimChar32 = builder->CreateZExt(delimCharLoad, llvm::Type::getInt32Ty(*context), "split.delimch32");
 
         // Count delimiters to know array size
         llvm::Value* strLen = builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "split.strlen");
@@ -3676,8 +3685,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         builder->SetInsertPoint(countBodyBB);
         llvm::Value* charPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), strPtr, ci, "split.cptr");
-        llvm::Value* ch = builder->CreateLoad(llvm::Type::getInt8Ty(*context), charPtr, "split.ch");
-        llvm::Value* ch32 = builder->CreateZExt(ch, llvm::Type::getInt32Ty(*context), "split.ch32");
+        auto* splitChLoad = builder->CreateLoad(llvm::Type::getInt8Ty(*context), charPtr, "split.ch");
+        splitChLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
+        llvm::Value* ch32 = builder->CreateZExt(splitChLoad, llvm::Type::getInt32Ty(*context), "split.ch32");
         llvm::Value* isDelim = builder->CreateICmpEQ(ch32, delimChar32, "split.isdelim");
         llvm::Value* inc = builder->CreateSelect(isDelim, one, zero, "split.inc");
         llvm::Value* newCnt = builder->CreateAdd(cnt, inc, "split.newcnt", /*HasNUW=*/true, /*HasNSW=*/true);
@@ -3722,8 +3732,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Check if at end of string or at delimiter
         llvm::Value* atEnd = builder->CreateICmpEQ(si, strLen, "split.atend");
         llvm::Value* bodyCharPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), strPtr, si, "split.bptr");
-        llvm::Value* bodyCh = builder->CreateLoad(llvm::Type::getInt8Ty(*context), bodyCharPtr, "split.bch");
-        llvm::Value* bodyCh32 = builder->CreateZExt(bodyCh, llvm::Type::getInt32Ty(*context), "split.bch32");
+        auto* bodyChLoad = builder->CreateLoad(llvm::Type::getInt8Ty(*context), bodyCharPtr, "split.bch");
+        bodyChLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
+        llvm::Value* bodyCh32 = builder->CreateZExt(bodyChLoad, llvm::Type::getInt32Ty(*context), "split.bch32");
         llvm::Value* bodyIsDelim = builder->CreateICmpEQ(bodyCh32, delimChar32, "split.bisdelim");
         llvm::Value* shouldSplit = builder->CreateOr(atEnd, bodyIsDelim, "split.shouldsplit");
         builder->CreateCondBr(shouldSplit, splitDelimBB, splitContBB);
@@ -3798,8 +3809,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         builder->SetInsertPoint(bodyBB);
         llvm::Value* charP = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), strPtr, idx, "chars.cptr");
-        llvm::Value* ch = builder->CreateLoad(llvm::Type::getInt8Ty(*context), charP, "chars.ch");
-        llvm::Value* chExt = builder->CreateZExt(ch, getDefaultType(), "chars.chext");
+        auto* charsChLoad = builder->CreateLoad(llvm::Type::getInt8Ty(*context), charP, "chars.ch");
+        charsChLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
+        llvm::Value* chExt = builder->CreateZExt(charsChLoad, getDefaultType(), "chars.chext");
         llvm::Value* arrSlot = builder->CreateAdd(idx, one, "chars.slot", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* arrSlotPtr = builder->CreateInBoundsGEP(getDefaultType(), buf, arrSlot, "chars.slotptr");
         builder->CreateStore(chExt, arrSlotPtr);
