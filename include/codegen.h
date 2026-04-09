@@ -389,6 +389,11 @@ class CodeGenerator {
     /// Variables with SIMD vector types for operator dispatch.
     llvm::StringSet<> simdVars_;
 
+    /// Variables that hold dict/map values (created via dict literal, map_new,
+    /// map_set, map_remove, or declared with type "dict").  Used to route
+    /// dict["key"] index expressions through map_get IR instead of array IR.
+    llvm::StringSet<> dictVarNames_;
+
     /// Per-function loop unrolling hints from @unroll / @nounroll annotations.
     bool currentFuncHintUnroll_ = false;
     bool currentFuncHintNoUnroll_ = false;
@@ -434,6 +439,15 @@ class CodeGenerator {
     llvm::Value* generateArray(ArrayExpr* expr);
     llvm::Value* generateDict(DictExpr* expr);
     llvm::Value* generateIndex(IndexExpr* expr);
+
+    /// Returns true if @p expr statically resolves to a dict/map value.
+    /// Used to route dict["key"] through map_get IR rather than array element IR.
+    bool isDictExpr(Expression* expr) const;
+
+    /// Emit an inline map_get loop that looks up @p keyVal in the map whose
+    /// i64 pointer is @p mapVal.  Returns the associated value or 0 if absent.
+    /// Equivalent to map_get(mapVal, keyVal, 0) but emitted inline.
+    llvm::Value* emitMapGet(llvm::Value* mapVal, llvm::Value* keyVal);
     llvm::Value* generateIndexAssign(IndexAssignExpr* expr);
     llvm::Value* generateStructLiteral(StructLiteralExpr* expr);
     llvm::Value* generateFieldAccess(FieldAccessExpr* expr);

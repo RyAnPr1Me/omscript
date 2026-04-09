@@ -126,6 +126,28 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
     if (isSimdType)
         simdVars_.insert(stmt->name);
 
+    // Track dict variables so dict["key"] routes to map_get IR.
+    {
+        bool isDict = false;
+        if (!stmt->typeName.empty() &&
+            (stmt->typeName == "dict" || stmt->typeName.rfind("dict[", 0) == 0)) {
+            isDict = true;
+        }
+        if (!isDict && stmt->initializer) {
+            if (stmt->initializer->type == ASTNodeType::DICT_EXPR) {
+                isDict = true;
+            } else if (stmt->initializer->type == ASTNodeType::CALL_EXPR) {
+                auto* call = static_cast<CallExpr*>(stmt->initializer.get());
+                if (call->callee == "map_new" || call->callee == "map_set" ||
+                    call->callee == "map_remove") {
+                    isDict = true;
+                }
+            }
+        }
+        if (isDict)
+            dictVarNames_.insert(stmt->name);
+    }
+
     bindVariable(stmt->name, alloca, stmt->isConst);
 
     if (initValue) {

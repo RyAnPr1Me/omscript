@@ -3149,6 +3149,7 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     prefetchedImmutVars_.clear();
     registerVars_.clear();
     simdVars_.clear();
+    dictVarNames_.clear();
     nonNegValues_.clear();
     constIntFolds_.clear();
 

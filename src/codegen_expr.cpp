@@ -3573,6 +3573,10 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
     }
 
     builder->CreateAlignedStore(value, it->second, llvm::MaybeAlign(8));
+    // Track dict variables on reassignment so dict["key"] continues to work
+    // after patterns like: m = map_set(m, "k", v) or m = {"a": 1}.
+    if (isDictExpr(expr->value.get()))
+        dictVarNames_.insert(expr->name);
     // Update non-negativity tracking on assignment.
     // When the assigned value is provably non-negative, mark the alloca so
     // subsequent loads can benefit from unsigned operations and NSW flags.
@@ -4284,6 +4288,13 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
         else if (elem->getType()->isIntegerTy() && elem->getType() != getDefaultType())
             elem = builder->CreateSExt(elem, getDefaultType(), "simd.ext.i64");
         return elem;
+    }
+
+    // Dict indexing: dict["key"] or dict[intKey] → inline map_get (zero cost).
+    // This also handles chained access: dict["k1"]["k2"] because the inner
+    // IndexExpr on a dict variable is itself recognised as a dict expression.
+    if (isDictExpr(expr->array.get())) {
+        return emitMapGet(toDefaultType(arrVal), toDefaultType(idxVal));
     }
 
     idxVal = toDefaultType(idxVal);
@@ -5027,6 +5038,76 @@ llvm::Value* CodeGenerator::generateFieldAssign(FieldAssignExpr* expr) {
     }
 
     return newVal;
+}
+
+bool CodeGenerator::isDictExpr(Expression* expr) const {
+    if (!expr) return false;
+    // Direct dict literal
+    if (expr->type == ASTNodeType::DICT_EXPR) return true;
+    // Known dict variable
+    if (expr->type == ASTNodeType::IDENTIFIER_EXPR) {
+        auto* id = static_cast<const IdentifierExpr*>(expr);
+        return dictVarNames_.count(id->name) > 0;
+    }
+    // Chained: dict["k1"]["k2"] — inner IndexExpr on a dict
+    if (expr->type == ASTNodeType::INDEX_EXPR) {
+        return isDictExpr(static_cast<const IndexExpr*>(expr)->array.get());
+    }
+    // Call returning a dict: map_new(), map_set(), map_remove()
+    if (expr->type == ASTNodeType::CALL_EXPR) {
+        auto* call = static_cast<const CallExpr*>(expr);
+        return call->callee == "map_new" || call->callee == "map_set" ||
+               call->callee == "map_remove";
+    }
+    return false;
+}
+
+llvm::Value* CodeGenerator::emitMapGet(llvm::Value* mapVal, llvm::Value* keyVal) {
+    // Inline map_get: linear scan through [len, k0, v0, k1, v1, ...] layout.
+    // Returns the value for keyVal, or 0 if the key is absent.
+    // This is identical IR to what the map_get() builtin emits — zero overhead.
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    llvm::Value* mapPtr = builder->CreateIntToPtr(mapVal, ptrTy, "didx.ptr");
+    llvm::Value* mapLen = builder->CreateLoad(getDefaultType(), mapPtr, "didx.len");
+    llvm::Value* zero   = llvm::ConstantInt::get(getDefaultType(), 0);
+    llvm::Value* one    = llvm::ConstantInt::get(getDefaultType(), 1);
+    llvm::Value* two    = llvm::ConstantInt::get(getDefaultType(), 2);
+
+    llvm::Function* fn      = builder->GetInsertBlock()->getParent();
+    llvm::BasicBlock* preBB = builder->GetInsertBlock();
+    llvm::BasicBlock* loopBB  = llvm::BasicBlock::Create(*context, "didx.loop",  fn);
+    llvm::BasicBlock* checkBB = llvm::BasicBlock::Create(*context, "didx.check", fn);
+    llvm::BasicBlock* foundBB = llvm::BasicBlock::Create(*context, "didx.found", fn);
+    llvm::BasicBlock* doneBB  = llvm::BasicBlock::Create(*context, "didx.done",  fn);
+
+    builder->CreateBr(loopBB);
+
+    builder->SetInsertPoint(loopBB);
+    llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "didx.i");
+    idx->addIncoming(zero, preBB);
+    builder->CreateCondBr(
+        builder->CreateICmpSLT(idx, mapLen, "didx.cond"), checkBB, doneBB);
+
+    builder->SetInsertPoint(checkBB);
+    llvm::Value* kSlot = builder->CreateAdd(idx, one, "didx.kslot");
+    llvm::Value* kPtr  = builder->CreateInBoundsGEP(getDefaultType(), mapPtr, kSlot, "didx.kptr");
+    llvm::Value* eKey  = builder->CreateLoad(getDefaultType(), kPtr, "didx.ekey");
+    llvm::Value* match = builder->CreateICmpEQ(eKey, keyVal, "didx.match");
+    llvm::Value* nextIdx = builder->CreateAdd(idx, two, "didx.next");
+    idx->addIncoming(nextIdx, checkBB);
+    builder->CreateCondBr(match, foundBB, loopBB);
+
+    builder->SetInsertPoint(foundBB);
+    llvm::Value* vSlot = builder->CreateAdd(idx, two, "didx.vslot");
+    llvm::Value* vPtr  = builder->CreateInBoundsGEP(getDefaultType(), mapPtr, vSlot, "didx.vptr");
+    llvm::Value* val   = builder->CreateLoad(getDefaultType(), vPtr, "didx.val");
+    builder->CreateBr(doneBB);
+
+    builder->SetInsertPoint(doneBB);
+    llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "didx.result");
+    result->addIncoming(zero, loopBB);   // key not found → 0
+    result->addIncoming(val,  foundBB);  // key found
+    return result;
 }
 
 llvm::Value* CodeGenerator::generateDict(DictExpr* expr) {
