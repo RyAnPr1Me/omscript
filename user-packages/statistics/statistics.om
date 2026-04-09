@@ -5,43 +5,19 @@ fn stat_mean(arr) {
     if (n == 0) {
         return 0;
     }
-    var total = 0;
-    for (i in 0...n) {
-        total = total + arr[i];
-    }
-    return total / n;
+    return sum(arr) / n;
 }
 
 fn stat_min_val(arr) {
-    var n = len(arr);
-    if (n == 0) {
-        return 0;
-    }
-    var best = arr[0];
-    for (i in 1...n) {
-        if (arr[i] < best) {
-            best = arr[i];
-        }
-    }
-    return best;
+    return array_min(arr);
 }
 
 fn stat_max_val(arr) {
-    var n = len(arr);
-    if (n == 0) {
-        return 0;
-    }
-    var best = arr[0];
-    for (i in 1...n) {
-        if (arr[i] > best) {
-            best = arr[i];
-        }
-    }
-    return best;
+    return array_max(arr);
 }
 
 fn stat_range(arr) {
-    return stat_max_val(arr) - stat_min_val(arr);
+    return array_max(arr) - array_min(arr);
 }
 
 fn stat_sum_of_squares(arr) {
@@ -58,7 +34,7 @@ fn stat_variance(arr) {
     if (n == 0) {
         return 0;
     }
-    var m = stat_mean(arr);
+    var m = sum(arr) / n;
     var total = 0;
     for (i in 0...n) {
         var diff = arr[i] - m;

@@ -4,7 +4,11 @@ fn math_factorial(n) {
     if (n <= 1) {
         return 1;
     }
-    return n * math_factorial(n - 1);
+    var result = 1;
+    for (i in 2...n + 1) {
+        result = result * i;
+    }
+    return result;
 }
 
 fn math_fibonacci(n) {
@@ -25,22 +29,13 @@ fn math_fibonacci(n) {
 }
 
 fn math_gcd(a, b) {
-    while (b != 0) {
-        var temp = b;
-        b = a % temp;
-        a = temp;
-    }
-    return a;
+    return gcd(a, b);
 }
 
 fn math_lcm(a, b) {
-    return a / math_gcd(a, b) * b;
+    return a / gcd(a, b) * b;
 }
 
 fn math_power(base, exp) {
-    var result = 1;
-    for (i in 0...exp) {
-        result = result * base;
-    }
-    return result;
+    return pow(base, exp);
 }
