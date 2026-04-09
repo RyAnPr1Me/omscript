@@ -1127,16 +1127,21 @@ void CodeGenerator::codegenError(const std::string& message, const ASTNode* node
 // the LLVM module, eliminating duplicated getFunction()/Create() blocks
 // that were previously scattered across multiple built-in handlers.
 
+llvm::Function* CodeGenerator::declareExternalFn(llvm::StringRef name, llvm::FunctionType* ty) {
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, name, module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    fn->addFnAttr(llvm::Attribute::NoSync);
+    return fn;
+}
+
 llvm::Function* CodeGenerator::getOrDeclareStrlen() {
     if (auto* fn = module->getFunction("strlen"))
         return fn;
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     auto* ty = llvm::FunctionType::get(getDefaultType(), {ptrTy}, false);
-    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strlen", module.get());
-    fn->addFnAttr(llvm::Attribute::NoUnwind);
-    fn->addFnAttr(llvm::Attribute::WillReturn);
-    fn->addFnAttr(llvm::Attribute::NoFree);
-    fn->addFnAttr(llvm::Attribute::NoSync);
+    llvm::Function* fn = declareExternalFn("strlen", ty);
     // memory(argmem: read): strlen only reads through its pointer arg.
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::Ref)));
     OMSC_ADD_NOCAPTURE(fn, 0);                      // does not capture its pointer arg
@@ -1188,11 +1193,7 @@ llvm::Function* CodeGenerator::getOrDeclareStrcpy() {
         return fn;
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy, ptrTy}, false);
-    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strcpy", module.get());
-    fn->addFnAttr(llvm::Attribute::NoUnwind);
-    fn->addFnAttr(llvm::Attribute::WillReturn);
-    fn->addFnAttr(llvm::Attribute::NoFree);
-    fn->addFnAttr(llvm::Attribute::NoSync);
+    llvm::Function* fn = declareExternalFn("strcpy", ty);
     // memory(argmem: readwrite): strcpy only accesses memory through its pointer args.
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::argMemOnly()));
     fn->addParamAttr(0, llvm::Attribute::NonNull);
@@ -1209,11 +1210,7 @@ llvm::Function* CodeGenerator::getOrDeclareStrcat() {
         return fn;
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy, ptrTy}, false);
-    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strcat", module.get());
-    fn->addFnAttr(llvm::Attribute::NoUnwind);
-    fn->addFnAttr(llvm::Attribute::WillReturn);
-    fn->addFnAttr(llvm::Attribute::NoFree);
-    fn->addFnAttr(llvm::Attribute::NoSync);
+    llvm::Function* fn = declareExternalFn("strcat", ty);
     // memory(argmem: readwrite): strcat only accesses memory through its pointer args.
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::argMemOnly()));
     fn->addParamAttr(0, llvm::Attribute::NonNull);
@@ -1230,11 +1227,7 @@ llvm::Function* CodeGenerator::getOrDeclareStrcmp() {
         return fn;
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     auto* ty = llvm::FunctionType::get(builder->getInt32Ty(), {ptrTy, ptrTy}, false);
-    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strcmp", module.get());
-    fn->addFnAttr(llvm::Attribute::NoUnwind);
-    fn->addFnAttr(llvm::Attribute::WillReturn);
-    fn->addFnAttr(llvm::Attribute::NoFree);
-    fn->addFnAttr(llvm::Attribute::NoSync);
+    llvm::Function* fn = declareExternalFn("strcmp", ty);
     // memory(argmem: read): strcmp only reads through its pointer args.
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::Ref)));
     fn->addParamAttr(0, llvm::Attribute::ReadOnly);
@@ -1252,11 +1245,7 @@ llvm::Function* CodeGenerator::getOrDeclareStrncmp() {
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     auto* sizeTy = getDefaultType();  // size_t mapped to i64
     auto* ty = llvm::FunctionType::get(builder->getInt32Ty(), {ptrTy, ptrTy, sizeTy}, false);
-    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strncmp", module.get());
-    fn->addFnAttr(llvm::Attribute::NoUnwind);
-    fn->addFnAttr(llvm::Attribute::WillReturn);
-    fn->addFnAttr(llvm::Attribute::NoFree);
-    fn->addFnAttr(llvm::Attribute::NoSync);
+    llvm::Function* fn = declareExternalFn("strncmp", ty);
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::Ref)));
     fn->addParamAttr(0, llvm::Attribute::ReadOnly);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
@@ -1273,11 +1262,7 @@ llvm::Function* CodeGenerator::getOrDeclareMemcmp() {
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     auto* sizeTy = getDefaultType();  // size_t mapped to i64
     auto* ty = llvm::FunctionType::get(builder->getInt32Ty(), {ptrTy, ptrTy, sizeTy}, false);
-    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "memcmp", module.get());
-    fn->addFnAttr(llvm::Attribute::NoUnwind);
-    fn->addFnAttr(llvm::Attribute::WillReturn);
-    fn->addFnAttr(llvm::Attribute::NoFree);
-    fn->addFnAttr(llvm::Attribute::NoSync);
+    llvm::Function* fn = declareExternalFn("memcmp", ty);
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::Ref)));
     fn->addParamAttr(0, llvm::Attribute::ReadOnly);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
@@ -1393,11 +1378,7 @@ llvm::Function* CodeGenerator::getOrDeclareMemchr() {
         return fn;
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy, llvm::Type::getInt32Ty(*context), getDefaultType()}, false);
-    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "memchr", module.get());
-    fn->addFnAttr(llvm::Attribute::NoUnwind);
-    fn->addFnAttr(llvm::Attribute::WillReturn);
-    fn->addFnAttr(llvm::Attribute::NoFree);
-    fn->addFnAttr(llvm::Attribute::NoSync);
+    llvm::Function* fn = declareExternalFn("memchr", ty);
     // memory(argmem: read): memchr only reads through its pointer arg.
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::Ref)));
     fn->addParamAttr(0, llvm::Attribute::ReadOnly);
@@ -1433,11 +1414,7 @@ llvm::Function* CodeGenerator::getOrDeclareStrstr() {
         return fn;
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy, ptrTy}, false);
-    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strstr", module.get());
-    fn->addFnAttr(llvm::Attribute::NoUnwind);
-    fn->addFnAttr(llvm::Attribute::WillReturn);
-    fn->addFnAttr(llvm::Attribute::NoFree);
-    fn->addFnAttr(llvm::Attribute::NoSync);
+    llvm::Function* fn = declareExternalFn("strstr", ty);
     // memory(argmem: read): strstr only reads through its pointer args.
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::Ref)));
     fn->addParamAttr(0, llvm::Attribute::ReadOnly);
@@ -1454,11 +1431,7 @@ llvm::Function* CodeGenerator::getOrDeclareMemcpy() {
         return fn;
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy, ptrTy, getDefaultType()}, false);
-    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "memcpy", module.get());
-    fn->addFnAttr(llvm::Attribute::NoUnwind);
-    fn->addFnAttr(llvm::Attribute::WillReturn);
-    fn->addFnAttr(llvm::Attribute::NoFree);
-    fn->addFnAttr(llvm::Attribute::NoSync);
+    llvm::Function* fn = declareExternalFn("memcpy", ty);
     // memory(argmem: readwrite): memcpy only accesses memory through its pointer args.
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::argMemOnly()));
     fn->addParamAttr(0, llvm::Attribute::NonNull);
@@ -1475,11 +1448,7 @@ llvm::Function* CodeGenerator::getOrDeclareMemmove() {
         return fn;
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy, ptrTy, getDefaultType()}, false);
-    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "memmove", module.get());
-    fn->addFnAttr(llvm::Attribute::NoUnwind);
-    fn->addFnAttr(llvm::Attribute::WillReturn);
-    fn->addFnAttr(llvm::Attribute::NoFree);
-    fn->addFnAttr(llvm::Attribute::NoSync);
+    llvm::Function* fn = declareExternalFn("memmove", ty);
     // memory(argmem: readwrite): memmove only accesses memory through its pointer args.
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::argMemOnly()));
     fn->addParamAttr(0, llvm::Attribute::NonNull);
@@ -1495,11 +1464,7 @@ llvm::Function* CodeGenerator::getOrDeclareToupper() {
     if (auto* fn = module->getFunction("toupper"))
         return fn;
     auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {llvm::Type::getInt32Ty(*context)}, false);
-    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "toupper", module.get());
-    fn->addFnAttr(llvm::Attribute::NoUnwind);
-    fn->addFnAttr(llvm::Attribute::WillReturn);
-    fn->addFnAttr(llvm::Attribute::NoFree);
-    fn->addFnAttr(llvm::Attribute::NoSync);
+    llvm::Function* fn = declareExternalFn("toupper", ty);
     // memory(none): toupper is a pure function — no reads or writes to memory.
     // This lets the optimizer hoist it out of loops and CSE duplicate calls.
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::none()));
@@ -1510,11 +1475,7 @@ llvm::Function* CodeGenerator::getOrDeclareTolower() {
     if (auto* fn = module->getFunction("tolower"))
         return fn;
     auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {llvm::Type::getInt32Ty(*context)}, false);
-    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "tolower", module.get());
-    fn->addFnAttr(llvm::Attribute::NoUnwind);
-    fn->addFnAttr(llvm::Attribute::WillReturn);
-    fn->addFnAttr(llvm::Attribute::NoFree);
-    fn->addFnAttr(llvm::Attribute::NoSync);
+    llvm::Function* fn = declareExternalFn("tolower", ty);
     // memory(none): tolower is a pure function — no reads or writes to memory.
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::none()));
     return fn;
@@ -1524,11 +1485,7 @@ llvm::Function* CodeGenerator::getOrDeclareIsspace() {
     if (auto* fn = module->getFunction("isspace"))
         return fn;
     auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {llvm::Type::getInt32Ty(*context)}, false);
-    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "isspace", module.get());
-    fn->addFnAttr(llvm::Attribute::NoUnwind);
-    fn->addFnAttr(llvm::Attribute::WillReturn);
-    fn->addFnAttr(llvm::Attribute::NoFree);
-    fn->addFnAttr(llvm::Attribute::NoSync);
+    llvm::Function* fn = declareExternalFn("isspace", ty);
     // memory(none): isspace is a pure function — no reads or writes to memory.
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::none()));
     return fn;
@@ -1539,11 +1496,7 @@ llvm::Function* CodeGenerator::getOrDeclareStrtoll() {
         return fn;
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     auto* ty = llvm::FunctionType::get(getDefaultType(), {ptrTy, ptrTy, llvm::Type::getInt32Ty(*context)}, false);
-    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strtoll", module.get());
-    fn->addFnAttr(llvm::Attribute::NoUnwind);
-    fn->addFnAttr(llvm::Attribute::WillReturn);
-    fn->addFnAttr(llvm::Attribute::NoFree);
-    fn->addFnAttr(llvm::Attribute::NoSync);
+    llvm::Function* fn = declareExternalFn("strtoll", ty);
     fn->addParamAttr(0, llvm::Attribute::ReadOnly);
     OMSC_ADD_NOCAPTURE(fn, 0);
     return fn;
@@ -1554,11 +1507,7 @@ llvm::Function* CodeGenerator::getOrDeclareStrtod() {
         return fn;
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     auto* ty = llvm::FunctionType::get(getFloatType(), {ptrTy, ptrTy}, false);
-    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strtod", module.get());
-    fn->addFnAttr(llvm::Attribute::NoUnwind);
-    fn->addFnAttr(llvm::Attribute::WillReturn);
-    fn->addFnAttr(llvm::Attribute::NoFree);
-    fn->addFnAttr(llvm::Attribute::NoSync);
+    llvm::Function* fn = declareExternalFn("strtod", ty);
     fn->addParamAttr(0, llvm::Attribute::ReadOnly);
     OMSC_ADD_NOCAPTURE(fn, 0);
     return fn;
@@ -1569,11 +1518,7 @@ llvm::Function* CodeGenerator::getOrDeclareStrdup() {
         return fn;
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy}, false);
-    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "strdup", module.get());
-    fn->addFnAttr(llvm::Attribute::NoUnwind);
-    fn->addFnAttr(llvm::Attribute::WillReturn);
-    fn->addFnAttr(llvm::Attribute::NoSync);
-    fn->addFnAttr(llvm::Attribute::NoFree);
+    llvm::Function* fn = declareExternalFn("strdup", ty);
     // memory(argmem: read, inaccessiblemem: readwrite): strdup reads the source
     // string and allocates new memory through the heap allocator.
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
@@ -1591,11 +1536,7 @@ llvm::Function* CodeGenerator::getOrDeclareFloor() {
     if (auto* fn = module->getFunction("floor"))
         return fn;
     auto* ty = llvm::FunctionType::get(getFloatType(), {getFloatType()}, false);
-    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "floor", module.get());
-    fn->addFnAttr(llvm::Attribute::NoUnwind);
-    fn->addFnAttr(llvm::Attribute::WillReturn);
-    fn->addFnAttr(llvm::Attribute::NoFree);
-    fn->addFnAttr(llvm::Attribute::NoSync);
+    llvm::Function* fn = declareExternalFn("floor", ty);
     // memory(none): floor is a pure mathematical function.
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::none()));
     // speculatable: floor never reads/writes memory or has side effects, so
@@ -1608,11 +1549,7 @@ llvm::Function* CodeGenerator::getOrDeclareCeil() {
     if (auto* fn = module->getFunction("ceil"))
         return fn;
     auto* ty = llvm::FunctionType::get(getFloatType(), {getFloatType()}, false);
-    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "ceil", module.get());
-    fn->addFnAttr(llvm::Attribute::NoUnwind);
-    fn->addFnAttr(llvm::Attribute::WillReturn);
-    fn->addFnAttr(llvm::Attribute::NoFree);
-    fn->addFnAttr(llvm::Attribute::NoSync);
+    llvm::Function* fn = declareExternalFn("ceil", ty);
     // memory(none): ceil is a pure mathematical function.
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::none()));
     // speculatable: same rationale as floor.
@@ -1624,11 +1561,7 @@ llvm::Function* CodeGenerator::getOrDeclareRound() {
     if (auto* fn = module->getFunction("round"))
         return fn;
     auto* ty = llvm::FunctionType::get(getFloatType(), {getFloatType()}, false);
-    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "round", module.get());
-    fn->addFnAttr(llvm::Attribute::NoUnwind);
-    fn->addFnAttr(llvm::Attribute::WillReturn);
-    fn->addFnAttr(llvm::Attribute::NoFree);
-    fn->addFnAttr(llvm::Attribute::NoSync);
+    llvm::Function* fn = declareExternalFn("round", ty);
     // memory(none): round is a pure mathematical function.
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::none()));
     // speculatable: same rationale as floor.

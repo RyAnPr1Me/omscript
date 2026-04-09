@@ -543,6 +543,12 @@ class CodeGenerator {
     [[noreturn]] [[gnu::cold]] void codegenError(const std::string& message, const ASTNode* node);
     void validateArgCount(const CallExpr* expr, const std::string& funcName, size_t expected);
 
+    /// Declare a C library function with common attributes.
+    /// Most runtime functions share {NoUnwind, WillReturn, NoFree, NoSync} —
+    /// this helper avoids repeating those four addFnAttr calls.
+    /// Returns the newly created Function so callers can add extra attributes.
+    llvm::Function* declareExternalFn(llvm::StringRef name, llvm::FunctionType* ty);
+
     /// RAII guard that calls beginScope() on construction and endScope()
     /// on destruction, ensuring scope stacks are always balanced even
     /// when exceptions interrupt code generation.
