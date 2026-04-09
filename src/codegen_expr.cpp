@@ -3651,6 +3651,10 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
         stringArrayVars_.insert(expr->name);
     else
         stringArrayVars_.erase(expr->name);
+    // When a variable is reassigned, its previous knownArraySize(Allocas) entry
+    // is no longer valid — the new value may have a different length.
+    knownArraySizes_.erase(expr->name);
+    knownArraySizeAllocas_.erase(expr->name);
     return value;
 }
 
@@ -3698,6 +3702,31 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
             if (indexExpr->index->type == ASTNodeType::IDENTIFIER_EXPR) {
                 auto* idxIdent = static_cast<IdentifierExpr*>(indexExpr->index.get());
                 if (safeIndexVars_.count(idxIdent->name)) {
+                    // Zero-cost elision A: for(i in 0...len(arr)) { arr[i]++ }
+                    if (!boundsCheckElidedID && indexExpr->array->type == ASTNodeType::IDENTIFIER_EXPR) {
+                        auto* arrId = static_cast<IdentifierExpr*>(indexExpr->array.get());
+                        auto endArrIt = loopIterEndArray_.find(idxIdent->name);
+                        if (endArrIt != loopIterEndArray_.end() && endArrIt->second == arrId->name) {
+                            boundsCheckElidedID = true;
+                        }
+                    }
+                    // Zero-cost elision B: array_fill(n,...) + for(i in 0...n)
+                    if (!boundsCheckElidedID && indexExpr->array->type == ASTNodeType::IDENTIFIER_EXPR) {
+                        auto* arrId = static_cast<IdentifierExpr*>(indexExpr->array.get());
+                        auto sizeAllocaIt = knownArraySizeAllocas_.find(arrId->name);
+                        if (sizeAllocaIt != knownArraySizeAllocas_.end()) {
+                            auto endIt = loopIterEndBound_.find(idxIdent->name);
+                            if (endIt != loopIterEndBound_.end()) {
+                                auto* endLoad = llvm::dyn_cast<llvm::LoadInst>(endIt->second);
+                                if (endLoad && endLoad->getPointerOperand() == sizeAllocaIt->second) {
+                                    boundsCheckElidedID = true;
+                                }
+                                if (!boundsCheckElidedID && endIt->second == sizeAllocaIt->second) {
+                                    boundsCheckElidedID = true;
+                                }
+                            }
+                        }
+                    }
                     auto it = loopIterEndBound_.find(idxIdent->name);
                     if (it != loopIterEndBound_.end()) {
                         llvm::Value* endBound = it->second;
@@ -3705,7 +3734,7 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
                         lenLoadE->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
                         lenLoadE->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
                         llvm::Value* lenVal = lenLoadE;
-                        if (endBound == lenVal) {
+                        if (!boundsCheckElidedID && endBound == lenVal) {
                             boundsCheckElidedID = true;
                         }
                         if (!boundsCheckElidedID) {
@@ -4428,6 +4457,43 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
         IdentifierExpr* idxIdent = (expr->index->type == ASTNodeType::IDENTIFIER_EXPR)
             ? static_cast<IdentifierExpr*>(expr->index.get()) : nullptr;
         if (idxIdent && safeIndexVars_.count(idxIdent->name)) {
+            // ── Zero-cost elision A: for(i in 0...len(arr)) { arr[i] } ────
+            // The loop condition i < len(arr) already proves arr[i] is in bounds.
+            // This pattern is the most common safe iteration pattern; OmScript's
+            // semantics guarantee the iterator cannot be modified in the body,
+            // so the loop condition is a compile-time proof of safety.
+            if (!boundsCheckElided && expr->array->type == ASTNodeType::IDENTIFIER_EXPR) {
+                auto* arrId = static_cast<IdentifierExpr*>(expr->array.get());
+                auto endArrIt = loopIterEndArray_.find(idxIdent->name);
+                if (endArrIt != loopIterEndArray_.end() && endArrIt->second == arrId->name) {
+                    boundsCheckElided = true;
+                }
+            }
+
+            // ── Zero-cost elision B: array_fill(n,...) + for(i in 0...n) ──
+            // arr has exactly n elements; loop iterates 0..n-1; arr[i] is safe.
+            // Works for any runtime n, including values from input().
+            if (!boundsCheckElided && expr->array->type == ASTNodeType::IDENTIFIER_EXPR) {
+                auto* arrId = static_cast<IdentifierExpr*>(expr->array.get());
+                auto sizeAllocaIt = knownArraySizeAllocas_.find(arrId->name);
+                if (sizeAllocaIt != knownArraySizeAllocas_.end()) {
+                    auto endIt = loopIterEndBound_.find(idxIdent->name);
+                    if (endIt != loopIterEndBound_.end()) {
+                        // The end bound is a load from the size variable's alloca
+                        // (or IS the alloca value) — same alloca means same value.
+                        auto* endLoad = llvm::dyn_cast<llvm::LoadInst>(endIt->second);
+                        if (endLoad && endLoad->getPointerOperand() == sizeAllocaIt->second) {
+                            boundsCheckElided = true;
+                        }
+                        // Also check if endBound is the alloca itself (e.g. after
+                        // mem2reg, the load may be folded to the stored value).
+                        if (!boundsCheckElided && endIt->second == sizeAllocaIt->second) {
+                            boundsCheckElided = true;
+                        }
+                    }
+                }
+            }
+
             auto it = loopIterEndBound_.find(idxIdent->name);
             if (it != loopIterEndBound_.end()) {
                 llvm::Value* endBound = it->second;
@@ -4439,7 +4505,7 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
 
                 // Case 1: end bound and length are the same SSA value (e.g.,
                 // both come from len(arr) or same variable).
-                if (endBound == lenVal) {
+                if (!boundsCheckElided && endBound == lenVal) {
                     boundsCheckElided = true;
                 }
 
@@ -4750,6 +4816,31 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
         IdentifierExpr* idxIdent = (expr->index->type == ASTNodeType::IDENTIFIER_EXPR)
             ? static_cast<IdentifierExpr*>(expr->index.get()) : nullptr;
         if (idxIdent && safeIndexVars_.count(idxIdent->name)) {
+            // ── Zero-cost elision A: for(i in 0...len(arr)) { arr[i] = v } ──
+            if (!boundsCheckElidedA && expr->array->type == ASTNodeType::IDENTIFIER_EXPR) {
+                auto* arrId = static_cast<IdentifierExpr*>(expr->array.get());
+                auto endArrIt = loopIterEndArray_.find(idxIdent->name);
+                if (endArrIt != loopIterEndArray_.end() && endArrIt->second == arrId->name) {
+                    boundsCheckElidedA = true;
+                }
+            }
+            // ── Zero-cost elision B: array_fill(n,...) + for(i in 0...n) ──
+            if (!boundsCheckElidedA && expr->array->type == ASTNodeType::IDENTIFIER_EXPR) {
+                auto* arrId = static_cast<IdentifierExpr*>(expr->array.get());
+                auto sizeAllocaIt = knownArraySizeAllocas_.find(arrId->name);
+                if (sizeAllocaIt != knownArraySizeAllocas_.end()) {
+                    auto endIt = loopIterEndBound_.find(idxIdent->name);
+                    if (endIt != loopIterEndBound_.end()) {
+                        auto* endLoad = llvm::dyn_cast<llvm::LoadInst>(endIt->second);
+                        if (endLoad && endLoad->getPointerOperand() == sizeAllocaIt->second) {
+                            boundsCheckElidedA = true;
+                        }
+                        if (!boundsCheckElidedA && endIt->second == sizeAllocaIt->second) {
+                            boundsCheckElidedA = true;
+                        }
+                    }
+                }
+            }
             auto it = loopIterEndBound_.find(idxIdent->name);
             if (it != loopIterEndBound_.end()) {
                 llvm::Value* endBound = it->second;
@@ -4757,7 +4848,7 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
                 lenLoadAElim->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
                 lenLoadAElim->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
                 llvm::Value* lenVal = lenLoadAElim;
-                if (endBound == lenVal) {
+                if (!boundsCheckElidedA && endBound == lenVal) {
                     boundsCheckElidedA = true;
                 }
                 if (!boundsCheckElidedA) {

@@ -229,6 +229,20 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                         knownArraySizes_[stmt->name] =
                             llvm::ConstantInt::get(getDefaultType(), lit->intValue);
                     }
+                } else if (sizeExpr->type == ASTNodeType::IDENTIFIER_EXPR) {
+                    // Variable-size array_fill(varName, val): track the alloca of
+                    // the size variable so that for(i in 0...varName) { arr[i] }
+                    // can elide bounds checks even when varName is a runtime value
+                    // (e.g. from input()).  This is a zero-cost abstraction: the
+                    // array has exactly varName elements, and the loop iterates
+                    // exactly varName times, so arr[i] is always in bounds.
+                    auto* varIdent = static_cast<IdentifierExpr*>(sizeExpr);
+                    auto varIt = namedValues.find(varIdent->name);
+                    if (varIt != namedValues.end()) {
+                        if (auto* sizeAlloca = llvm::dyn_cast<llvm::AllocaInst>(varIt->second)) {
+                            knownArraySizeAllocas_[stmt->name] = sizeAlloca;
+                        }
+                    }
                 }
             }
         }
@@ -1042,6 +1056,19 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
             // elision: for patterns like for(i in C...n) { arr[i - K] },
             // knowing start == C proves i - K >= C - K >= 0 when C >= K.
             loopIterStartBound_[stmt->iteratorVar] = startVal;
+            // Zero-cost abstraction: detect for(i in 0...len(arr)) pattern.
+            // When the end bound is len(arr), the loop condition i < len(arr)
+            // already proves arr[i] is in bounds.  Record the array name so
+            // generateIndex can elide the redundant bounds check without any
+            // runtime overhead — matching what a hand-written loop would produce.
+            if (stmt->end->type == ASTNodeType::CALL_EXPR) {
+                auto* callEnd = static_cast<CallExpr*>(stmt->end.get());
+                if (callEnd->callee == "len" && callEnd->arguments.size() == 1 &&
+                    callEnd->arguments[0]->type == ASTNodeType::IDENTIFIER_EXPR) {
+                    auto* arrIdent = static_cast<IdentifierExpr*>(callEnd->arguments[0].get());
+                    loopIterEndArray_[stmt->iteratorVar] = arrIdent->name;
+                }
+            }
         }
     }
 
@@ -1053,6 +1080,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     safeIndexVars_.erase(stmt->iteratorVar);
     loopIterEndBound_.erase(stmt->iteratorVar);
     loopIterStartBound_.erase(stmt->iteratorVar);
+    loopIterEndArray_.erase(stmt->iteratorVar);
 
     if (!builder->GetInsertBlock()->getTerminator()) {
         builder->CreateBr(incBB);

@@ -234,6 +234,19 @@ class CodeGenerator {
     /// for (i in C...n) { arr[i - K] }, knowing start >= K proves i-K >= 0.
     llvm::StringMap<llvm::Value*> loopIterStartBound_;
 
+    /// Maps iterator variable name → the array variable name whose len()
+    /// was used as the for-loop end bound (for(i in 0...len(arr))).
+    /// Enables zero-cost bounds check elision for arr[i] inside such loops:
+    /// the loop condition i < len(arr) already proves the index is valid.
+    llvm::StringMap<std::string> loopIterEndArray_;
+
+    /// Maps array variable name → the AllocaInst of the variable passed as
+    /// size to array_fill(sizeVar, val).  Enables bounds check elision when
+    /// the same variable is used as both the array size and the loop end bound
+    /// (e.g. var arr = array_fill(n, 0); for (i in 0...n) { arr[i] }).
+    /// Works for any runtime size, including values from input().
+    llvm::StringMap<llvm::AllocaInst*> knownArraySizeAllocas_;
+
     // Stack of innermost catch-entry basic blocks, pushed/popped by
     // generateTryCatch(). generateThrow() branches directly to the top of this
     // stack when a throw occurs inside a try block, ensuring that control flow

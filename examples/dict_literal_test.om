@@ -32,6 +32,11 @@ fn main() {
     total = total + (map_get(m, "key", 0) == 42);   // 1
     total = total + (map_get(m, "key2", 0) == 99);  // 1
 
+    // map_remove on a dict literal
+    m = map_remove(m, "key");
+    total = total + (map_size(m) == 1);              // 1
+    total = total + (map_has(m, "key") == 0);        // 1
+
     // Type annotation (non-intrusive — does not affect codegen)
     var typed: dict = {"p": 7, "q": 8};
     total = total + (map_get(typed, "p", 0) == 7);  // 1

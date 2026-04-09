@@ -49,6 +49,7 @@ fn main() {
     total = total + (MY_ID == 0);                    // 1
     total = total + (MY_ID == 1);                    // 1
     total = total + (MY_ID == 2);                    // 1
+    total = total + (MY_ID == 3);                    // 1
 
     println(total);
     return total;
