@@ -1136,6 +1136,18 @@ llvm::Function* CodeGenerator::declareExternalFn(llvm::StringRef name, llvm::Fun
     return fn;
 }
 
+void CodeGenerator::attachLoopMetadata(llvm::BranchInst* backEdgeBr) {
+    if (optimizationLevel < OptimizationLevel::O1)
+        return;
+    llvm::SmallVector<llvm::Metadata*, 2> mds;
+    mds.push_back(nullptr);
+    mds.push_back(llvm::MDNode::get(*context,
+        {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
+    llvm::MDNode* md = llvm::MDNode::get(*context, mds);
+    md->replaceOperandWith(0, md);
+    backEdgeBr->setMetadata(llvm::LLVMContext::MD_loop, md);
+}
+
 llvm::Function* CodeGenerator::getOrDeclareStrlen() {
     if (auto* fn = module->getFunction("strlen"))
         return fn;

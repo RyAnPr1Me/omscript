@@ -549,6 +549,11 @@ class CodeGenerator {
     /// Returns the newly created Function so callers can add extra attributes.
     llvm::Function* declareExternalFn(llvm::StringRef name, llvm::FunctionType* ty);
 
+    /// Attach mustprogress loop metadata to a back-edge branch instruction.
+    /// Gated behind optimizationLevel >= O1.  Consolidates the 6-line
+    /// metadata construction pattern used by 50+ builtin and statement loops.
+    void attachLoopMetadata(llvm::BranchInst* backEdgeBr);
+
     /// RAII guard that calls beginScope() on construction and endScope()
     /// on destruction, ensuring scope stacks are always balanced even
     /// when exceptions interrupt code generation.

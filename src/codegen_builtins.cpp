@@ -465,16 +465,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateBr(doneBB);
 
         builder->SetInsertPoint(posExpBB);
-        auto* backBr_419 = builder->CreateBr(loopBB);
-        if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 2> mds;
-            mds.push_back(nullptr);
-            mds.push_back(llvm::MDNode::get(*context,
-                {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-            llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-            md->replaceOperandWith(0, md);
-            backBr_419->setMetadata(llvm::LLVMContext::MD_loop, md);
-        }
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
 
         // Loop: result *= base when exponent is odd; base *= base; exp >>= 1
         builder->SetInsertPoint(loopBB);
@@ -503,16 +494,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         result->addIncoming(resultSel, squareBB);
         curBase->addIncoming(newBase, squareBB);
         counter->addIncoming(newCounter, squareBB);
-        auto* backBr_448 = builder->CreateBr(loopBB);
-        if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 2> mds;
-            mds.push_back(nullptr);
-            mds.push_back(llvm::MDNode::get(*context,
-                {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-            llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-            md->replaceOperandWith(0, md);
-            backBr_448->setMetadata(llvm::LLVMContext::MD_loop, md);
-        }
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
 
         builder->SetInsertPoint(doneBB);
         llvm::PHINode* finalResult = builder->CreatePHI(getDefaultType(), 2, "pow.final");
@@ -717,16 +699,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "sum.body", function);
         llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "sum.done", function);
 
-        auto* backBr_648 = builder->CreateBr(loopBB);
-        if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 2> mds;
-            mds.push_back(nullptr);
-            mds.push_back(llvm::MDNode::get(*context,
-                {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-            llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-            md->replaceOperandWith(0, md);
-            backBr_648->setMetadata(llvm::LLVMContext::MD_loop, md);
-        }
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
 
         builder->SetInsertPoint(loopBB);
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
@@ -854,16 +827,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
         llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
         llvm::Value* lastIdx = builder->CreateSub(length, one, "rev.last", /*HasNUW=*/true, /*HasNSW=*/true);
-        auto* backBr_745 = builder->CreateBr(loopBB);
-        if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 2> mds;
-            mds.push_back(nullptr);
-            mds.push_back(llvm::MDNode::get(*context,
-                {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-            llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-            md->replaceOperandWith(0, md);
-            backBr_745->setMetadata(llvm::LLVMContext::MD_loop, md);
-        }
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
 
         builder->SetInsertPoint(loopBB);
         llvm::PHINode* lo = builder->CreatePHI(getDefaultType(), 2, "rev.lo");
@@ -1330,16 +1294,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(mainBB);
         llvm::Value* ctzA = builder->CreateCall(cttzFn, {a, builder->getTrue()}, "gcd.ctza");
         llvm::Value* aOdd = builder->CreateLShr(a, ctzA, "gcd.aodd");
-        auto* backBr_1187 = builder->CreateBr(loopBB);
-        if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 2> mds;
-            mds.push_back(nullptr);
-            mds.push_back(llvm::MDNode::get(*context,
-                {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-            llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-            md->replaceOperandWith(0, md);
-            backBr_1187->setMetadata(llvm::LLVMContext::MD_loop, md);
-        }
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
 
         // Loop header
         builder->SetInsertPoint(loopBB);
@@ -1694,20 +1649,11 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "upper.done", function);
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
         llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
-        auto* backBr_1539 = builder->CreateBr(loopBB);
-        if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 2> mds;
-            mds.push_back(nullptr);
-            mds.push_back(llvm::MDNode::get(*context,
-                {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-            llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-            md->replaceOperandWith(0, md);
-            backBr_1539->setMetadata(llvm::LLVMContext::MD_loop, md);
-        }
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
         builder->SetInsertPoint(loopBB);
         llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "upper.idx");
         idx->addIncoming(zero, preheader);
-        llvm::Value* cond = builder->CreateICmpSLT(idx, strLen, "upper.cond");
+        llvm::Value* cond = builder->CreateICmpULT(idx, strLen, "upper.cond");
         builder->CreateCondBr(cond, bodyBB, doneBB);
         builder->SetInsertPoint(bodyBB);
         llvm::Value* charPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), buf, idx, "upper.charptr");
@@ -1718,16 +1664,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateStore(upper8, charPtr);
         llvm::Value* nextIdx = builder->CreateAdd(idx, one, "upper.next", /*HasNUW=*/true, /*HasNSW=*/true);
         idx->addIncoming(nextIdx, bodyBB);
-        auto* backBr_1554 = builder->CreateBr(loopBB);
-        if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 2> mds;
-            mds.push_back(nullptr);
-            mds.push_back(llvm::MDNode::get(*context,
-                {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-            llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-            md->replaceOperandWith(0, md);
-            backBr_1554->setMetadata(llvm::LLVMContext::MD_loop, md);
-        }
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
         builder->SetInsertPoint(doneBB);
         stringReturningFunctions_.insert("str_upper");
         return buf;
@@ -1751,20 +1688,11 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "lower.done", function);
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
         llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
-        auto* backBr_1578 = builder->CreateBr(loopBB);
-        if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 2> mds;
-            mds.push_back(nullptr);
-            mds.push_back(llvm::MDNode::get(*context,
-                {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-            llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-            md->replaceOperandWith(0, md);
-            backBr_1578->setMetadata(llvm::LLVMContext::MD_loop, md);
-        }
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
         builder->SetInsertPoint(loopBB);
         llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "lower.idx");
         idx->addIncoming(zero, preheader);
-        llvm::Value* cond = builder->CreateICmpSLT(idx, strLen, "lower.cond");
+        llvm::Value* cond = builder->CreateICmpULT(idx, strLen, "lower.cond");
         builder->CreateCondBr(cond, bodyBB, doneBB);
         builder->SetInsertPoint(bodyBB);
         llvm::Value* charPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), buf, idx, "lower.charptr");
@@ -1775,16 +1703,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateStore(lower8, charPtr);
         llvm::Value* nextIdx = builder->CreateAdd(idx, one, "lower.next", /*HasNUW=*/true, /*HasNSW=*/true);
         idx->addIncoming(nextIdx, bodyBB);
-        auto* backBr_1593 = builder->CreateBr(loopBB);
-        if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 2> mds;
-            mds.push_back(nullptr);
-            mds.push_back(llvm::MDNode::get(*context,
-                {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-            llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-            md->replaceOperandWith(0, md);
-            backBr_1593->setMetadata(llvm::LLVMContext::MD_loop, md);
-        }
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
         builder->SetInsertPoint(doneBB);
         stringReturningFunctions_.insert("str_lower");
         return buf;
@@ -2044,7 +1963,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(startLoopBB);
         llvm::PHINode* startIdx = builder->CreatePHI(getDefaultType(), 2, "trim.startidx");
         startIdx->addIncoming(zero, preheader);
-        llvm::Value* startCond = builder->CreateICmpSLT(startIdx, strLen, "trim.startcond");
+        llvm::Value* startCond = builder->CreateICmpULT(startIdx, strLen, "trim.startcond");
         builder->CreateCondBr(startCond, startBodyBB, startDoneBB);
 
         builder->SetInsertPoint(startBodyBB);
@@ -2080,7 +1999,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(endLoopBB);
         llvm::PHINode* endIdx = builder->CreatePHI(getDefaultType(), 2, "trim.endidx");
         endIdx->addIncoming(strLen, endPreBB);
-        llvm::Value* endCond = builder->CreateICmpSGT(endIdx, trimStart, "trim.endcond");
+        llvm::Value* endCond = builder->CreateICmpUGT(endIdx, trimStart, "trim.endcond");
         builder->CreateCondBr(endCond, endBodyBB, endDoneBB);
 
         builder->SetInsertPoint(endBodyBB);
@@ -2203,22 +2122,13 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "repeat.body", function);
         llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "repeat.done", function);
         llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
-        auto* backBr_1960 = builder->CreateBr(loopBB);
-        if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 2> mds;
-            mds.push_back(nullptr);
-            mds.push_back(llvm::MDNode::get(*context,
-                {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-            llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-            md->replaceOperandWith(0, md);
-            backBr_1960->setMetadata(llvm::LLVMContext::MD_loop, md);
-        }
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
         builder->SetInsertPoint(loopBB);
         llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "repeat.idx");
         idx->addIncoming(zero, preheader);
         llvm::PHINode* offset = builder->CreatePHI(getDefaultType(), 2, "repeat.off");
         offset->addIncoming(zero, preheader);
-        llvm::Value* cond = builder->CreateICmpSLT(idx, countArg, "repeat.cond");
+        llvm::Value* cond = builder->CreateICmpULT(idx, countArg, "repeat.cond");
         builder->CreateCondBr(cond, bodyBB, doneBB);
         builder->SetInsertPoint(bodyBB);
         // memcpy(buf + offset, str, strLen)
@@ -2228,16 +2138,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* nextIdx = builder->CreateAdd(idx, one, "repeat.next", /*HasNUW=*/true, /*HasNSW=*/true);
         idx->addIncoming(nextIdx, bodyBB);
         offset->addIncoming(nextOffset, bodyBB);
-        auto* backBr_1976 = builder->CreateBr(loopBB);
-        if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 2> mds;
-            mds.push_back(nullptr);
-            mds.push_back(llvm::MDNode::get(*context,
-                {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-            llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-            md->replaceOperandWith(0, md);
-            backBr_1976->setMetadata(llvm::LLVMContext::MD_loop, md);
-        }
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
         builder->SetInsertPoint(doneBB);
         // Null-terminate: buf[totalLen] = '\0'
         llvm::Value* endPtr = builder->CreateInBoundsGEP(builder->getInt8Ty(), buf, totalLen, "repeat.end");
@@ -2265,20 +2166,11 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "strrev.done", function);
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
         llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
-        auto* backBr_2004 = builder->CreateBr(loopBB);
-        if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 2> mds;
-            mds.push_back(nullptr);
-            mds.push_back(llvm::MDNode::get(*context,
-                {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-            llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-            md->replaceOperandWith(0, md);
-            backBr_2004->setMetadata(llvm::LLVMContext::MD_loop, md);
-        }
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
         builder->SetInsertPoint(loopBB);
         llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "strrev.idx");
         idx->addIncoming(zero, preheader);
-        llvm::Value* cond = builder->CreateICmpSLT(idx, strLen, "strrev.cond");
+        llvm::Value* cond = builder->CreateICmpULT(idx, strLen, "strrev.cond");
         builder->CreateCondBr(cond, bodyBB, doneBB);
         builder->SetInsertPoint(bodyBB);
         llvm::Value* revIdx = builder->CreateSub(builder->CreateSub(strLen, one, "strrev.lenm1", /*HasNUW=*/true, /*HasNSW=*/true), idx, "strrev.revidx", /*HasNUW=*/true, /*HasNSW=*/true);
@@ -2288,16 +2180,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateStore(ch, dstPtr);
         llvm::Value* nextIdx = builder->CreateAdd(idx, one, "strrev.next", /*HasNUW=*/true, /*HasNSW=*/true);
         idx->addIncoming(nextIdx, bodyBB);
-        auto* backBr_2018 = builder->CreateBr(loopBB);
-        if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 2> mds;
-            mds.push_back(nullptr);
-            mds.push_back(llvm::MDNode::get(*context,
-                {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-            llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-            md->replaceOperandWith(0, md);
-            backBr_2018->setMetadata(llvm::LLVMContext::MD_loop, md);
-        }
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
         builder->SetInsertPoint(doneBB);
         // Null-terminate
         llvm::Value* endPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), buf, strLen, "strrev.endptr");
@@ -2458,16 +2341,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
         llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
         llvm::Value* negOne = llvm::ConstantInt::get(getDefaultType(), -1, true);
-        auto* backBr_2171 = builder->CreateBr(loopBB);
-        if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 2> mds;
-            mds.push_back(nullptr);
-            mds.push_back(llvm::MDNode::get(*context,
-                {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-            llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-            md->replaceOperandWith(0, md);
-            backBr_2171->setMetadata(llvm::LLVMContext::MD_loop, md);
-        }
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
         builder->SetInsertPoint(loopBB);
         llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "indexof.idx");
         idx->addIncoming(zero, preheader);
@@ -2484,16 +2358,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(nextBB);
         llvm::Value* nextIdx = builder->CreateAdd(idx, one, "indexof.next", /*HasNUW=*/true, /*HasNSW=*/true);
         idx->addIncoming(nextIdx, nextBB);
-        auto* backBr_2187 = builder->CreateBr(loopBB);
-        if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 2> mds;
-            mds.push_back(nullptr);
-            mds.push_back(llvm::MDNode::get(*context,
-                {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-            llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-            md->replaceOperandWith(0, md);
-            backBr_2187->setMetadata(llvm::LLVMContext::MD_loop, md);
-        }
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
         builder->SetInsertPoint(foundBB);
         builder->CreateBr(doneBB);
         builder->SetInsertPoint(doneBB);
@@ -2524,16 +2389,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "contains.done", function);
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
         llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
-        auto* backBr_2218 = builder->CreateBr(loopBB);
-        if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 2> mds;
-            mds.push_back(nullptr);
-            mds.push_back(llvm::MDNode::get(*context,
-                {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-            llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-            md->replaceOperandWith(0, md);
-            backBr_2218->setMetadata(llvm::LLVMContext::MD_loop, md);
-        }
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
         builder->SetInsertPoint(loopBB);
         llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "contains.idx");
         idx->addIncoming(zero, preheader);
@@ -2708,16 +2564,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "fill.done", function);
             llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
             llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
-            auto* backBr_2367 = builder->CreateBr(loopBB);
-            if (optimizationLevel >= OptimizationLevel::O1) {
-                llvm::SmallVector<llvm::Metadata*, 2> mds;
-                mds.push_back(nullptr);
-                mds.push_back(llvm::MDNode::get(*context,
-                    {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-                llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-                md->replaceOperandWith(0, md);
-                backBr_2367->setMetadata(llvm::LLVMContext::MD_loop, md);
-            }
+            attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
             builder->SetInsertPoint(loopBB);
             llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "fill.idx");
             idx->addIncoming(zero, preheader);
@@ -2950,16 +2797,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "amap.loop", function);
         llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "amap.body", function);
         llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "amap.done", function);
-        auto* backBr_2579 = builder->CreateBr(loopBB);
-        if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 2> mds;
-            mds.push_back(nullptr);
-            mds.push_back(llvm::MDNode::get(*context,
-                {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-            llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-            md->replaceOperandWith(0, md);
-            backBr_2579->setMetadata(llvm::LLVMContext::MD_loop, md);
-        }
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
         builder->SetInsertPoint(loopBB);
         llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "amap.idx");
         idx->addIncoming(zero, preheader);
@@ -2981,16 +2819,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         mappedStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
         llvm::Value* nextIdx = builder->CreateAdd(idx, one, "amap.next", /*HasNUW=*/true, /*HasNSW=*/true);
         idx->addIncoming(nextIdx, bodyBB);
-        auto* backBr_2600 = builder->CreateBr(loopBB);
-        if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 2> mds;
-            mds.push_back(nullptr);
-            mds.push_back(llvm::MDNode::get(*context,
-                {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-            llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-            md->replaceOperandWith(0, md);
-            backBr_2600->setMetadata(llvm::LLVMContext::MD_loop, md);
-        }
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
         builder->SetInsertPoint(doneBB);
         return builder->CreatePtrToInt(buf, getDefaultType(), "amap.result");
     }
@@ -3042,16 +2871,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::BasicBlock* addBB = llvm::BasicBlock::Create(*context, "afilt.add", function);
         llvm::BasicBlock* incBB = llvm::BasicBlock::Create(*context, "afilt.inc", function);
         llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "afilt.done", function);
-        auto* backBr_2651 = builder->CreateBr(loopBB);
-        if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 2> mds;
-            mds.push_back(nullptr);
-            mds.push_back(llvm::MDNode::get(*context,
-                {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-            llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-            md->replaceOperandWith(0, md);
-            backBr_2651->setMetadata(llvm::LLVMContext::MD_loop, md);
-        }
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
 
         builder->SetInsertPoint(loopBB);
         llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "afilt.idx");
@@ -3091,16 +2911,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* nextIdx = builder->CreateAdd(idx, one, "afilt.next", /*HasNUW=*/true, /*HasNSW=*/true);
         idx->addIncoming(nextIdx, incBB);
         outIdx->addIncoming(outIdxMerge, incBB);
-        auto* backBr_2690 = builder->CreateBr(loopBB);
-        if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 2> mds;
-            mds.push_back(nullptr);
-            mds.push_back(llvm::MDNode::get(*context,
-                {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-            llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-            md->replaceOperandWith(0, md);
-            backBr_2690->setMetadata(llvm::LLVMContext::MD_loop, md);
-        }
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
 
         // Done: store final length
         builder->SetInsertPoint(doneBB);
@@ -3150,16 +2961,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "areduce.loop", function);
         llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "areduce.body", function);
         llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "areduce.done", function);
-        auto* backBr_2739 = builder->CreateBr(loopBB);
-        if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 2> mds;
-            mds.push_back(nullptr);
-            mds.push_back(llvm::MDNode::get(*context,
-                {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-            llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-            md->replaceOperandWith(0, md);
-            backBr_2739->setMetadata(llvm::LLVMContext::MD_loop, md);
-        }
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
 
         builder->SetInsertPoint(loopBB);
         llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "areduce.idx");
@@ -3182,16 +2984,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* nextIdx = builder->CreateAdd(idx, one, "areduce.next", /*HasNUW=*/true, /*HasNSW=*/true);
         idx->addIncoming(nextIdx, bodyBB);
         acc->addIncoming(newAcc, bodyBB);
-        auto* backBr_2761 = builder->CreateBr(loopBB);
-        if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 2> mds;
-            mds.push_back(nullptr);
-            mds.push_back(llvm::MDNode::get(*context,
-                {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-            llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-            md->replaceOperandWith(0, md);
-            backBr_2761->setMetadata(llvm::LLVMContext::MD_loop, md);
-        }
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
 
         // Done: return final accumulator
         builder->SetInsertPoint(doneBB);
@@ -3233,16 +3026,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(initBB);
         llvm::Value* firstPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, one, "amin.firstptr");
         llvm::Value* firstElem = builder->CreateAlignedLoad(getDefaultType(), firstPtr, llvm::MaybeAlign(8), "amin.first");
-        auto* backBr_2802 = builder->CreateBr(loopBB);
-        if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 2> mds;
-            mds.push_back(nullptr);
-            mds.push_back(llvm::MDNode::get(*context,
-                {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-            llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-            md->replaceOperandWith(0, md);
-            backBr_2802->setMetadata(llvm::LLVMContext::MD_loop, md);
-        }
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
 
         // Loop header
         builder->SetInsertPoint(loopBB);
@@ -3339,16 +3123,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(initBB);
         llvm::Value* firstPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, one, "amax.firstptr");
         llvm::Value* firstElem = builder->CreateAlignedLoad(getDefaultType(), firstPtr, llvm::MaybeAlign(8), "amax.first");
-        auto* backBr_2869 = builder->CreateBr(loopBB);
-        if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 2> mds;
-            mds.push_back(nullptr);
-            mds.push_back(llvm::MDNode::get(*context,
-                {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-            llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-            md->replaceOperandWith(0, md);
-            backBr_2869->setMetadata(llvm::LLVMContext::MD_loop, md);
-        }
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
 
         // Loop header
         builder->SetInsertPoint(loopBB);
@@ -3444,16 +3219,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
         llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
 
-        auto* backBr_2939 = builder->CreateBr(loopBB);
-        if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 2> mds;
-            mds.push_back(nullptr);
-            mds.push_back(llvm::MDNode::get(*context,
-                {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-            llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-            md->replaceOperandWith(0, md);
-            backBr_2939->setMetadata(llvm::LLVMContext::MD_loop, md);
-        }
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
 
         builder->SetInsertPoint(loopBB);
         llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "aany.idx");
@@ -3523,16 +3289,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
         llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
 
-        auto* backBr_3006 = builder->CreateBr(loopBB);
-        if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 2> mds;
-            mds.push_back(nullptr);
-            mds.push_back(llvm::MDNode::get(*context,
-                {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-            llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-            md->replaceOperandWith(0, md);
-            backBr_3006->setMetadata(llvm::LLVMContext::MD_loop, md);
-        }
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
 
         builder->SetInsertPoint(loopBB);
         llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "aevery.idx");
@@ -3588,16 +3345,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
         llvm::Value* negOne = llvm::ConstantInt::get(getDefaultType(), -1, true);
 
-        auto* backBr_3061 = builder->CreateBr(loopBB);
-        if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 2> mds;
-            mds.push_back(nullptr);
-            mds.push_back(llvm::MDNode::get(*context,
-                {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-            llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-            md->replaceOperandWith(0, md);
-            backBr_3061->setMetadata(llvm::LLVMContext::MD_loop, md);
-        }
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
 
         builder->SetInsertPoint(loopBB);
         llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "afind.idx");
@@ -3664,16 +3412,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
         llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
 
-        auto* backBr_3126 = builder->CreateBr(loopBB);
-        if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 2> mds;
-            mds.push_back(nullptr);
-            mds.push_back(llvm::MDNode::get(*context,
-                {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-            llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-            md->replaceOperandWith(0, md);
-            backBr_3126->setMetadata(llvm::LLVMContext::MD_loop, md);
-        }
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
 
         builder->SetInsertPoint(loopBB);
         llvm::PHINode* acc = builder->CreatePHI(getDefaultType(), 2, "acnt.acc");
@@ -3699,16 +3438,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Reuse offset (= idx+1, nsw+nuw) as the loop induction increment.
         acc->addIncoming(newAcc, bodyBB);
         idx->addIncoming(offset, bodyBB);
-        auto* backBr_3149 = builder->CreateBr(loopBB);
-        if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 2> mds;
-            mds.push_back(nullptr);
-            mds.push_back(llvm::MDNode::get(*context,
-                {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-            llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-            md->replaceOperandWith(0, md);
-            backBr_3149->setMetadata(llvm::LLVMContext::MD_loop, md);
-        }
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
 
         builder->SetInsertPoint(doneBB);
         return acc;
@@ -3941,7 +3671,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         ci->addIncoming(zero, preheader);
         llvm::PHINode* cnt = builder->CreatePHI(getDefaultType(), 2, "split.cnt");
         cnt->addIncoming(one, preheader); // at least 1 part
-        llvm::Value* ccond = builder->CreateICmpSLT(ci, strLen, "split.ccond");
+        llvm::Value* ccond = builder->CreateICmpULT(ci, strLen, "split.ccond");
         builder->CreateCondBr(ccond, countBodyBB, countDoneBB);
 
         builder->SetInsertPoint(countBodyBB);
@@ -3985,7 +3715,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         partIdx->addIncoming(zero, splitPreBB);
         llvm::PHINode* partStart = builder->CreatePHI(getDefaultType(), 2, "split.pstart");
         partStart->addIncoming(zero, splitPreBB);
-        llvm::Value* scond = builder->CreateICmpSLE(si, strLen, "split.scond");
+        llvm::Value* scond = builder->CreateICmpULE(si, strLen, "split.scond");
         builder->CreateCondBr(scond, splitBodyBB, splitDoneBB);
 
         builder->SetInsertPoint(splitBodyBB);
@@ -4058,21 +3788,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "chars.loop", function);
         llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "chars.body", function);
         llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "chars.done", function);
-        auto* backBr_3492 = builder->CreateBr(loopBB);
-        if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 2> mds;
-            mds.push_back(nullptr);
-            mds.push_back(llvm::MDNode::get(*context,
-                {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-            llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-            md->replaceOperandWith(0, md);
-            backBr_3492->setMetadata(llvm::LLVMContext::MD_loop, md);
-        }
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
 
         builder->SetInsertPoint(loopBB);
         llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "chars.idx");
         idx->addIncoming(zero, preBB);
-        llvm::Value* cond = builder->CreateICmpSLT(idx, strLen, "chars.cond");
+        llvm::Value* cond = builder->CreateICmpULT(idx, strLen, "chars.cond");
         builder->CreateCondBr(cond, bodyBB, doneBB);
 
         builder->SetInsertPoint(bodyBB);
@@ -4084,16 +3805,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateStore(chExt, arrSlotPtr);
         llvm::Value* nextIdx = builder->CreateAdd(idx, one, "chars.next", /*HasNUW=*/true, /*HasNSW=*/true);
         idx->addIncoming(nextIdx, bodyBB);
-        auto* backBr_3509 = builder->CreateBr(loopBB);
-        if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 2> mds;
-            mds.push_back(nullptr);
-            mds.push_back(llvm::MDNode::get(*context,
-                {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-            llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-            md->replaceOperandWith(0, md);
-            backBr_3509->setMetadata(llvm::LLVMContext::MD_loop, md);
-        }
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
 
         builder->SetInsertPoint(doneBB);
         return builder->CreatePtrToInt(buf, getDefaultType(), "chars.result");
@@ -4143,7 +3855,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         li->addIncoming(zero, lenPreBB);
         llvm::PHINode* totalLen = builder->CreatePHI(getDefaultType(), 2, "join.totlen");
         totalLen->addIncoming(zero, lenPreBB);
-        llvm::Value* lcond = builder->CreateICmpSLT(li, arrLen, "join.lcond");
+        llvm::Value* lcond = builder->CreateICmpULT(li, arrLen, "join.lcond");
         builder->CreateCondBr(lcond, lenBodyBB, lenDoneBB);
 
         builder->SetInsertPoint(lenBodyBB);
@@ -4183,7 +3895,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         ci->addIncoming(zero, catPreBB);
         llvm::PHINode* writePos = builder->CreatePHI(getDefaultType(), 2, "join.wpos");
         writePos->addIncoming(zero, catPreBB);
-        llvm::Value* ccond = builder->CreateICmpSLT(ci, arrLen, "join.ccond");
+        llvm::Value* ccond = builder->CreateICmpULT(ci, arrLen, "join.ccond");
         builder->CreateCondBr(ccond, catBodyBB, catDoneBB);
 
         builder->SetInsertPoint(catBodyBB);
@@ -4257,16 +3969,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "scount.body", function);
         llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "scount.done", function);
 
-        auto* backBr_3673 = builder->CreateBr(loopBB);
-        if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 2> mds;
-            mds.push_back(nullptr);
-            mds.push_back(llvm::MDNode::get(*context,
-                {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-            llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-            md->replaceOperandWith(0, md);
-            backBr_3673->setMetadata(llvm::LLVMContext::MD_loop, md);
-        }
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
 
         builder->SetInsertPoint(loopBB);
         llvm::PHINode* cursor = builder->CreatePHI(ptrTy, 2, "scount.cursor");
@@ -4280,20 +3983,11 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         builder->SetInsertPoint(bodyBB);
         llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
-        llvm::Value* newCount = builder->CreateAdd(count, one, "scount.newcount");
+        llvm::Value* newCount = builder->CreateAdd(count, one, "scount.newcount", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* nextCursor = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), found, subLen, "scount.next");
         cursor->addIncoming(nextCursor, bodyBB);
         count->addIncoming(newCount, bodyBB);
-        auto* backBr_3691 = builder->CreateBr(loopBB);
-        if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 2> mds;
-            mds.push_back(nullptr);
-            mds.push_back(llvm::MDNode::get(*context,
-                {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-            llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-            md->replaceOperandWith(0, md);
-            backBr_3691->setMetadata(llvm::LLVMContext::MD_loop, md);
-        }
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
 
         builder->SetInsertPoint(doneBB);
         builder->CreateBr(mergeBB);
@@ -4606,39 +4300,21 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "range.body", parentFn);
         llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "range.done", parentFn);
 
-        auto* backBr_4312 = builder->CreateBr(loopBB);
-        if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 2> mds;
-            mds.push_back(nullptr);
-            mds.push_back(llvm::MDNode::get(*context,
-                {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-            llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-            md->replaceOperandWith(0, md);
-            backBr_4312->setMetadata(llvm::LLVMContext::MD_loop, md);
-        }
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
         builder->SetInsertPoint(loopBB);
         llvm::PHINode* i = builder->CreatePHI(getDefaultType(), 2, "range.i");
         i->addIncoming(zero, entryBB);
-        llvm::Value* cond = builder->CreateICmpSLT(i, count, "range.cond");
+        llvm::Value* cond = builder->CreateICmpULT(i, count, "range.cond");
         builder->CreateCondBr(cond, bodyBB, doneBB);
 
         builder->SetInsertPoint(bodyBB);
         llvm::Value* val = builder->CreateAdd(startArg, i, "range.val");
-        llvm::Value* slot = builder->CreateAdd(i, one, "range.slot");
+        llvm::Value* slot = builder->CreateAdd(i, one, "range.slot", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), buf, slot, "range.elemptr");
         builder->CreateStore(val, elemPtr);
-        llvm::Value* nextI = builder->CreateAdd(i, one, "range.next");
+        llvm::Value* nextI = builder->CreateAdd(i, one, "range.next", /*HasNUW=*/true, /*HasNSW=*/true);
         i->addIncoming(nextI, bodyBB);
-        auto* backBr_4326 = builder->CreateBr(loopBB);
-        if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 2> mds;
-            mds.push_back(nullptr);
-            mds.push_back(llvm::MDNode::get(*context,
-                {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-            llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-            md->replaceOperandWith(0, md);
-            backBr_4326->setMetadata(llvm::LLVMContext::MD_loop, md);
-        }
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
 
         builder->SetInsertPoint(doneBB);
         return builder->CreatePtrToInt(buf, getDefaultType(), "range.result");
@@ -4694,16 +4370,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "rstep.body", parentFn);
         llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "rstep.done", parentFn);
 
-        auto* backBr_4382 = builder->CreateBr(loopBB);
-        if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 2> mds;
-            mds.push_back(nullptr);
-            mds.push_back(llvm::MDNode::get(*context,
-                {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-            llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-            md->replaceOperandWith(0, md);
-            backBr_4382->setMetadata(llvm::LLVMContext::MD_loop, md);
-        }
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
         builder->SetInsertPoint(loopBB);
         llvm::PHINode* i = builder->CreatePHI(getDefaultType(), 2, "rstep.i");
         i->addIncoming(zero, entryBB);
@@ -4718,16 +4385,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateStore(val, elemPtr);
         llvm::Value* nextI = builder->CreateAdd(i, one, "rstep.next");
         i->addIncoming(nextI, bodyBB);
-        auto* backBr_4397 = builder->CreateBr(loopBB);
-        if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 2> mds;
-            mds.push_back(nullptr);
-            mds.push_back(llvm::MDNode::get(*context,
-                {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-            llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-            md->replaceOperandWith(0, md);
-            backBr_4397->setMetadata(llvm::LLVMContext::MD_loop, md);
-        }
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
 
         builder->SetInsertPoint(doneBB);
         return builder->CreatePtrToInt(buf, getDefaultType(), "rstep.result");
@@ -4981,16 +4639,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "lcm.gcd.body", function);
         llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "lcm.gcd.done", function);
 
-        auto* backBr_4643 = builder->CreateBr(loopBB);
-        if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 2> mds;
-            mds.push_back(nullptr);
-            mds.push_back(llvm::MDNode::get(*context,
-                {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-            llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-            md->replaceOperandWith(0, md);
-            backBr_4643->setMetadata(llvm::LLVMContext::MD_loop, md);
-        }
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
 
         builder->SetInsertPoint(loopBB);
         llvm::PHINode* phiA = builder->CreatePHI(getDefaultType(), 2, "lcm.gcd.a");
@@ -5005,16 +4654,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* remainder = builder->CreateURem(phiA, phiB, "lcm.gcd.rem");
         phiA->addIncoming(phiB, bodyBB);
         phiB->addIncoming(remainder, bodyBB);
-        auto* backBr_4658 = builder->CreateBr(loopBB);
-        if (optimizationLevel >= OptimizationLevel::O1) {
-            llvm::SmallVector<llvm::Metadata*, 2> mds;
-            mds.push_back(nullptr);
-            mds.push_back(llvm::MDNode::get(*context,
-                {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-            llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-            md->replaceOperandWith(0, md);
-            backBr_4658->setMetadata(llvm::LLVMContext::MD_loop, md);
-        }
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
 
         // lcm(a, b) = |a| / gcd(a, b) * |b|  (divide first to avoid overflow)
         builder->SetInsertPoint(doneBB);
