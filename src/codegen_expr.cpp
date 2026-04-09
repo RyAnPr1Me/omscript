@@ -5029,4 +5029,38 @@ llvm::Value* CodeGenerator::generateFieldAssign(FieldAssignExpr* expr) {
     return newVal;
 }
 
+llvm::Value* CodeGenerator::generateDict(DictExpr* expr) {
+    const size_t numPairs = expr->pairs.size();
+    const size_t totalSlots = 1 + 2 * numPairs;
+    const size_t totalBytes = totalSlots * 8;
+
+    llvm::Value* dictPtr = builder->CreateCall(
+        getOrDeclareMalloc(),
+        {llvm::ConstantInt::get(getDefaultType(), totalBytes)},
+        "dict");
+
+    // Store length = 2 * numPairs (compatible with map_set/map_get layout)
+    builder->CreateStore(
+        llvm::ConstantInt::get(getDefaultType(), 2 * numPairs), dictPtr);
+
+    // Store each key-value pair at a known compile-time offset —
+    // no search loop needed because this is a fresh allocation.
+    for (size_t i = 0; i < numPairs; i++) {
+        llvm::Value* keyVal = toDefaultType(generateExpression(expr->pairs[i].first.get()));
+        llvm::Value* valVal = toDefaultType(generateExpression(expr->pairs[i].second.get()));
+
+        llvm::Value* keyPtr = builder->CreateInBoundsGEP(
+            getDefaultType(), dictPtr,
+            llvm::ConstantInt::get(getDefaultType(), 1 + 2 * i), "dict.kp");
+        builder->CreateStore(keyVal, keyPtr);
+
+        llvm::Value* valPtr = builder->CreateInBoundsGEP(
+            getDefaultType(), dictPtr,
+            llvm::ConstantInt::get(getDefaultType(), 2 + 2 * i), "dict.vp");
+        builder->CreateStore(valVal, valPtr);
+    }
+
+    return builder->CreatePtrToInt(dictPtr, getDefaultType(), "dict.i");
+}
+
 } // namespace omscript

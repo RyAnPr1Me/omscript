@@ -432,6 +432,7 @@ class CodeGenerator {
     llvm::Value* generatePrefix(PrefixExpr* expr);
     llvm::Value* generateTernary(TernaryExpr* expr);
     llvm::Value* generateArray(ArrayExpr* expr);
+    llvm::Value* generateDict(DictExpr* expr);
     llvm::Value* generateIndex(IndexExpr* expr);
     llvm::Value* generateIndexAssign(IndexAssignExpr* expr);
     llvm::Value* generateStructLiteral(StructLiteralExpr* expr);

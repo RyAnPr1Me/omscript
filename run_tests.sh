@@ -672,6 +672,8 @@ rm -rf om_packages
 # Optimization correctness tests
 test_program "examples/runtime_div_opt_test.om" 5
 test_program "examples/loop_ucmp_test.om" 5
+test_program "examples/dict_literal_test.om" 18
+test_program "examples/preprocessor_test.om" 12
 
 echo ""
 echo "============================================"

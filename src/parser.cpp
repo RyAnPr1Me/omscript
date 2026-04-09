@@ -1,5 +1,6 @@
 #include "parser.h"
 #include "diagnostic.h"
+#include "preprocessor.h"
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -14,7 +15,7 @@ static bool isKnownTypeName(const std::string& name) {
     return name == "u8" || name == "u16" || name == "u32" || name == "u64" ||
            name == "i8" || name == "i16" || name == "i32" || name == "i64" ||
            name == "int" || name == "float" || name == "double" || name == "bool" ||
-           name == "string";
+           name == "string" || name == "dict";
 }
 
 Parser::Parser(const std::vector<Token>& tokens)
@@ -322,7 +323,14 @@ void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
     std::string source((std::istreambuf_iterator<char>(file)),
                         std::istreambuf_iterator<char>());
 
-    // Lex the imported file
+    // Preprocess then lex the imported file
+    {
+        Preprocessor importPP(fullPath);
+        source = importPP.process(source);
+        for (const auto& w : importPP.warnings()) {
+            std::cerr << w << "\n";
+        }
+    }
     Lexer importLexer(std::move(source));
     std::vector<Token> importTokens = importLexer.tokenize();
 
@@ -370,6 +378,22 @@ std::string Parser::parseTypeAnnotation() {
         advance(); // consume '['
         advance(); // consume ']'
         typeName += "[]";
+    }
+    // Support dict[KeyType, ValType] generic annotation (e.g., dict[str, int])
+    // Only activates when the type name is exactly "dict" followed by '[' with
+    // non-empty content — avoids any collision with the existing type[] handling.
+    if (typeName == "dict" && check(TokenType::LBRACKET) && current + 1 < tokens.size() &&
+        tokens[current + 1].type != TokenType::RBRACKET) {
+        advance(); // consume '['
+        std::string typeParams;
+        int depth = 1;
+        while (!isAtEnd() && depth > 0) {
+            const Token& t = advance();
+            if (t.type == TokenType::LBRACKET) depth++;
+            else if (t.type == TokenType::RBRACKET) { depth--; if (depth == 0) break; }
+            if (depth > 0) typeParams += t.lexeme;
+        }
+        typeName += "[" + typeParams + "]";
     }
     return prefix + typeName;
 }
@@ -1685,6 +1709,31 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
     // Lambda expression: |params| body
     if (match(TokenType::PIPE)) {
         return parseLambda();
+    }
+
+    // Dict literal: {"key": val, "key2": val2, ...}
+    // Desugared at parse time into a DictExpr for zero-cost codegen
+    // (single malloc + direct stores, no loops).
+    // Note: works in expression context; standalone dict-statement uses LBRACE
+    // which the statement-level parser already routes to block parsing.
+    if (match(TokenType::LBRACE)) {
+        const Token braceToken = tokens[current - 1];
+        std::vector<std::pair<std::unique_ptr<Expression>, std::unique_ptr<Expression>>> pairs;
+        if (!check(TokenType::RBRACE)) {
+            do {
+                // Allow trailing comma before '}'
+                if (check(TokenType::RBRACE)) break;
+                auto key = parseExpression();
+                consume(TokenType::COLON, "Expected ':' after dict key");
+                auto val = parseExpression();
+                pairs.emplace_back(std::move(key), std::move(val));
+            } while (match(TokenType::COMMA));
+        }
+        consume(TokenType::RBRACE, "Expected '}' after dict literal");
+        auto node = std::make_unique<DictExpr>(std::move(pairs));
+        node->line = braceToken.line;
+        node->column = braceToken.column;
+        return node;
     }
 
     // Lambda with || (empty params): || body

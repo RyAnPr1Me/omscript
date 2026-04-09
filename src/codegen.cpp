@@ -3398,6 +3398,8 @@ llvm::Value* CodeGenerator::generateExpression(Expression* expr) {
         return generateMoveExpr(static_cast<MoveExpr*>(expr));
     case ASTNodeType::BORROW_EXPR:
         return generateBorrowExpr(static_cast<BorrowExpr*>(expr));
+    case ASTNodeType::DICT_EXPR:
+        return generateDict(static_cast<DictExpr*>(expr));
     default:
         codegenError("Unknown expression type", expr);
     }

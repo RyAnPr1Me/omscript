@@ -3,6 +3,7 @@
 #include "diagnostic.h"
 #include "lexer.h"
 #include "parser.h"
+#include "preprocessor.h"
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -72,6 +73,13 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
 
     // Read source code
     std::string source = readFile(sourceFile);
+
+    // Preprocessor pass
+    Preprocessor pp(sourceFile);
+    source = pp.process(source);
+    for (const auto& w : pp.warnings()) {
+        std::cerr << w << "\n";
+    }
 
     // Lexical analysis
     if (verbose_) {

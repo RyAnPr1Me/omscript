@@ -1,0 +1,55 @@
+// Test preprocessor directives
+#define ANSWER 42
+#define DOUBLE(x) x * 2
+#define MSG "hello"
+
+fn main() {
+    var total = 0;
+
+    // Simple macro
+    total = total + (ANSWER == 42);                  // 1
+
+    // Function-like macro
+    total = total + (DOUBLE(21) == 42);              // 1
+
+    // String macro
+    total = total + (len(MSG) == 5);                 // 1
+
+    // #ifdef / #ifndef
+#ifdef ANSWER
+    total = total + 1;                               // 1
+#endif
+#ifndef UNDEFINED_MACRO
+    total = total + 1;                               // 1
+#endif
+
+    // #if / #elif / #else
+#if ANSWER == 42
+    total = total + 1;                               // 1
+#elif ANSWER == 0
+    total = total + 0;
+#else
+    total = total + 0;
+#endif
+
+    // #undef
+#undef ANSWER
+#ifdef ANSWER
+    total = total + 0;
+#else
+    total = total + 1;                               // 1
+#endif
+
+    // __VERSION__ predefined macro (just check it's non-empty by using len)
+    var ver = __VERSION__;
+    total = total + (len(ver) > 0);                  // 1
+
+    // #counter
+#counter MY_ID
+    total = total + (MY_ID == 0);                    // 1
+    total = total + (MY_ID == 1);                    // 1
+    total = total + (MY_ID == 2);                    // 1
+
+    println(total);
+    return total;
+}
