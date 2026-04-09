@@ -552,7 +552,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             scanfFmt = builder->CreateGlobalString("%lld", "scanf_fmt");
         }
         builder->CreateCall(getOrDeclareScanf(), {scanfFmt, inputAlloca});
-        return builder->CreateLoad(getDefaultType(), inputAlloca, "input_read");
+        return builder->CreateAlignedLoad(getDefaultType(), inputAlloca, llvm::MaybeAlign(8), "input_read");
     }
 
     if (bid == BuiltinId::INPUT_LINE) {
@@ -1117,7 +1117,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* len1;
         if (lenCacheAlloca) {
             // Load cached length; if -1 (sentinel), fall back to strlen.
-            llvm::Value* cachedLen = builder->CreateLoad(getDefaultType(), lenCacheAlloca, "concat.cachedlen1");
+            llvm::Value* cachedLen = builder->CreateAlignedLoad(getDefaultType(), lenCacheAlloca, llvm::MaybeAlign(8), "concat.cachedlen1");
             llvm::Value* isSentinel = builder->CreateICmpEQ(
                 cachedLen, llvm::ConstantInt::get(getDefaultType(), -1, true), "concat.issent");
             llvm::Function* fn = builder->GetInsertBlock()->getParent();
@@ -1179,7 +1179,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             // This matches the C pattern: if (len+1 > cap) { cap*=2; realloc; }
             llvm::Value* needed =
                 builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "concat.needed", /*HasNUW=*/true, /*HasNSW=*/true);
-            llvm::Value* curCap = builder->CreateLoad(getDefaultType(), capCacheAlloca, "concat.curcap");
+            llvm::Value* curCap = builder->CreateAlignedLoad(getDefaultType(), capCacheAlloca, llvm::MaybeAlign(8), "concat.curcap");
             llvm::Value* needGrow = builder->CreateICmpUGT(needed, curCap, "concat.needgrow");
 
             llvm::Function* fn = builder->GetInsertBlock()->getParent();
@@ -2192,7 +2192,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 ? strArg
                 : builder->CreateIntToPtr(strArg, llvm::PointerType::getUnqual(*context), "repeat.ptr");
         llvm::Value* strLen = builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "repeat.len");
-        llvm::Value* totalLen = builder->CreateMul(strLen, countArg, "repeat.total");
+        llvm::Value* totalLen = builder->CreateMul(strLen, countArg, "repeat.total", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* allocSize =
             builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "repeat.alloc", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {allocSize}, "repeat.buf");
@@ -2224,7 +2224,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // memcpy(buf + offset, str, strLen)
         llvm::Value* dst = builder->CreateInBoundsGEP(builder->getInt8Ty(), buf, offset, "repeat.dst");
         builder->CreateCall(getOrDeclareMemcpy(), {dst, strPtr, strLen});
-        llvm::Value* nextOffset = builder->CreateAdd(offset, strLen, "repeat.nextoff");
+        llvm::Value* nextOffset = builder->CreateAdd(offset, strLen, "repeat.nextoff", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* nextIdx = builder->CreateAdd(idx, one, "repeat.next", /*HasNUW=*/true, /*HasNSW=*/true);
         idx->addIncoming(nextIdx, bodyBB);
         offset->addIncoming(nextOffset, bodyBB);
@@ -2281,7 +2281,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* cond = builder->CreateICmpSLT(idx, strLen, "strrev.cond");
         builder->CreateCondBr(cond, bodyBB, doneBB);
         builder->SetInsertPoint(bodyBB);
-        llvm::Value* revIdx = builder->CreateSub(builder->CreateSub(strLen, one, "strrev.lenm1"), idx, "strrev.revidx");
+        llvm::Value* revIdx = builder->CreateSub(builder->CreateSub(strLen, one, "strrev.lenm1", /*HasNUW=*/true, /*HasNSW=*/true), idx, "strrev.revidx", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* srcPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), strPtr, revIdx, "strrev.srcptr");
         llvm::Value* ch = builder->CreateLoad(llvm::Type::getInt8Ty(*context), srcPtr, "strrev.ch");
         llvm::Value* dstPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), buf, idx, "strrev.dstptr");
@@ -2356,18 +2356,18 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(growBB);
         llvm::Value* slots = builder->CreateAdd(newLen, one64, "push.slots", /*HasNUW=*/true, /*HasNSW=*/true);
         // nextPow2 via OR-cascade (covers 64-bit values)
-        llvm::Value* v = builder->CreateSub(slots, one64, "push.pm1");
+        llvm::Value* v = builder->CreateSub(slots, one64, "push.pm1", /*HasNUW=*/true, /*HasNSW=*/true);
         v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 1)), "push.p2a");
         v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 2)), "push.p2b");
         v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 4)), "push.p2c");
         v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 8)), "push.p2d");
         v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 16)), "push.p2e");
         v = builder->CreateOr(v, builder->CreateLShr(v, llvm::ConstantInt::get(getDefaultType(), 32)), "push.p2f");
-        llvm::Value* cap = builder->CreateAdd(v, one64, "push.cap");
+        llvm::Value* cap = builder->CreateAdd(v, one64, "push.cap", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* useMin = builder->CreateICmpSLT(cap, minSlots, "push.usemin");
         cap = builder->CreateSelect(useMin, minSlots, cap, "push.finalcap");
         llvm::Value* newSize = builder->CreateMul(cap,
-            llvm::ConstantInt::get(getDefaultType(), 8), "push.bytes");
+            llvm::ConstantInt::get(getDefaultType(), 8), "push.bytes", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* grownBuf = builder->CreateCall(getOrDeclareRealloc(), {arrPtr, newSize}, "push.newbuf");
         builder->CreateBr(mergeBB);
 
@@ -2768,7 +2768,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         acatLen2Load->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
         acatLen2Load->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
         llvm::Value* len2 = acatLen2Load;
-        llvm::Value* totalLen = builder->CreateAdd(len1, len2, "aconcat.total");
+        llvm::Value* totalLen = builder->CreateAdd(len1, len2, "aconcat.total", /*HasNUW=*/true, /*HasNSW=*/true);
         // Allocate: (totalLen + 1) * 8
         llvm::Value* slots = builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "aconcat.slots", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* bytes = builder->CreateMul(slots, llvm::ConstantInt::get(getDefaultType(), 8), "aconcat.bytes", /*HasNUW=*/true, /*HasNSW=*/true);
@@ -3950,11 +3950,11 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* ch32 = builder->CreateZExt(ch, llvm::Type::getInt32Ty(*context), "split.ch32");
         llvm::Value* isDelim = builder->CreateICmpEQ(ch32, delimChar32, "split.isdelim");
         llvm::Value* inc = builder->CreateSelect(isDelim, one, zero, "split.inc");
-        llvm::Value* newCnt = builder->CreateAdd(cnt, inc, "split.newcnt");
+        llvm::Value* newCnt = builder->CreateAdd(cnt, inc, "split.newcnt", /*HasNUW=*/true, /*HasNSW=*/true);
         builder->CreateBr(countIncBB);
 
         builder->SetInsertPoint(countIncBB);
-        llvm::Value* nextCi = builder->CreateAdd(ci, one, "split.nextci");
+        llvm::Value* nextCi = builder->CreateAdd(ci, one, "split.nextci", /*HasNUW=*/true, /*HasNSW=*/true);
         ci->addIncoming(nextCi, countIncBB);
         cnt->addIncoming(newCnt, countIncBB);
         builder->CreateBr(countLoopBB);
@@ -4000,17 +4000,17 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         builder->SetInsertPoint(splitDelimBB);
         // Create substring from partStart to si
-        llvm::Value* partLen = builder->CreateSub(si, partStart, "split.plen");
+        llvm::Value* partLen = builder->CreateSub(si, partStart, "split.plen", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* srcStart =
             builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), strPtr, partStart, "split.srcstart");
         llvm::Value* sub = builder->CreateCall(getOrDeclareStrndup(), {srcStart, partLen}, "split.sub");
         llvm::Value* subInt = builder->CreatePtrToInt(sub, getDefaultType(), "split.subint");
         // Store in array at (partIdx + 1) position
-        llvm::Value* arrSlot = builder->CreateAdd(partIdx, one, "split.slot");
+        llvm::Value* arrSlot = builder->CreateAdd(partIdx, one, "split.slot", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* arrSlotPtr = builder->CreateInBoundsGEP(getDefaultType(), arrBuf, arrSlot, "split.slotptr");
         builder->CreateStore(subInt, arrSlotPtr);
-        llvm::Value* nextPartIdx = builder->CreateAdd(partIdx, one, "split.npidx");
-        llvm::Value* nextPartStart = builder->CreateAdd(si, one, "split.npstart");
+        llvm::Value* nextPartIdx = builder->CreateAdd(partIdx, one, "split.npidx", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* nextPartStart = builder->CreateAdd(si, one, "split.npstart", /*HasNUW=*/true, /*HasNSW=*/true);
         builder->CreateBr(splitContBB);
 
         builder->SetInsertPoint(splitContBB);
@@ -4020,7 +4020,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::PHINode* mergedStart = builder->CreatePHI(getDefaultType(), 2, "split.mstart");
         mergedStart->addIncoming(partStart, splitBodyBB);
         mergedStart->addIncoming(nextPartStart, splitDelimBB);
-        llvm::Value* nextSi = builder->CreateAdd(si, one, "split.nextsi");
+        llvm::Value* nextSi = builder->CreateAdd(si, one, "split.nextsi", /*HasNUW=*/true, /*HasNSW=*/true);
         si->addIncoming(nextSi, splitContBB);
         partIdx->addIncoming(mergedIdx, splitContBB);
         partStart->addIncoming(mergedStart, splitContBB);
@@ -4079,10 +4079,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* charP = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), strPtr, idx, "chars.cptr");
         llvm::Value* ch = builder->CreateLoad(llvm::Type::getInt8Ty(*context), charP, "chars.ch");
         llvm::Value* chExt = builder->CreateZExt(ch, getDefaultType(), "chars.chext");
-        llvm::Value* arrSlot = builder->CreateAdd(idx, one, "chars.slot");
+        llvm::Value* arrSlot = builder->CreateAdd(idx, one, "chars.slot", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* arrSlotPtr = builder->CreateInBoundsGEP(getDefaultType(), buf, arrSlot, "chars.slotptr");
         builder->CreateStore(chExt, arrSlotPtr);
-        llvm::Value* nextIdx = builder->CreateAdd(idx, one, "chars.next");
+        llvm::Value* nextIdx = builder->CreateAdd(idx, one, "chars.next", /*HasNUW=*/true, /*HasNSW=*/true);
         idx->addIncoming(nextIdx, bodyBB);
         auto* backBr_3509 = builder->CreateBr(loopBB);
         if (optimizationLevel >= OptimizationLevel::O1) {
@@ -4148,24 +4148,24 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         builder->SetInsertPoint(lenBodyBB);
         // Load string pointer from array slot (index li + 1)
-        llvm::Value* lslot = builder->CreateAdd(li, one, "join.lslot");
+        llvm::Value* lslot = builder->CreateAdd(li, one, "join.lslot", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* lslotPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, lslot, "join.lslotptr");
         llvm::Value* elemInt = builder->CreateAlignedLoad(getDefaultType(), lslotPtr, llvm::MaybeAlign(8), "join.elemint");
         llvm::Value* elemPtr = builder->CreateIntToPtr(elemInt, ptrTy, "join.elemptr");
         llvm::Value* elemLen = builder->CreateCall(getOrDeclareStrlen(), {elemPtr}, "join.elemlen");
-        llvm::Value* newTotal = builder->CreateAdd(totalLen, elemLen, "join.newtot");
+        llvm::Value* newTotal = builder->CreateAdd(totalLen, elemLen, "join.newtot", /*HasNUW=*/true, /*HasNSW=*/true);
         // Add delimiter length for all elements except the first
         llvm::Value* isFirst = builder->CreateICmpEQ(li, zero, "join.isfirst");
         llvm::Value* delimAdd = builder->CreateSelect(isFirst, zero, delimLen, "join.delimadd");
-        llvm::Value* newTotal2 = builder->CreateAdd(newTotal, delimAdd, "join.newtot2");
-        llvm::Value* nextLi = builder->CreateAdd(li, one, "join.nextli");
+        llvm::Value* newTotal2 = builder->CreateAdd(newTotal, delimAdd, "join.newtot2", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* nextLi = builder->CreateAdd(li, one, "join.nextli", /*HasNUW=*/true, /*HasNSW=*/true);
         li->addIncoming(nextLi, lenBodyBB);
         totalLen->addIncoming(newTotal2, lenBodyBB);
         builder->CreateBr(lenLoopBB);
 
         // --- Allocate output buffer ---
         builder->SetInsertPoint(lenDoneBB);
-        llvm::Value* bufSize = builder->CreateAdd(totalLen, one, "join.bufsize");
+        llvm::Value* bufSize = builder->CreateAdd(totalLen, one, "join.bufsize", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bufSize}, "join.buf");
         // Store null terminator at position 0 initially
         builder->CreateStore(i8zero, buf);
@@ -4193,17 +4193,17 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* delimCopyLen = builder->CreateSelect(ciIsFirst, zero, delimLen, "join.dcplen");
         // Conditionally copy delimiter
         builder->CreateCall(getOrDeclareMemcpy(), {dstPtr, delimPtr, delimCopyLen});
-        llvm::Value* afterDelim = builder->CreateAdd(writePos, delimCopyLen, "join.afterdelim");
+        llvm::Value* afterDelim = builder->CreateAdd(writePos, delimCopyLen, "join.afterdelim", /*HasNUW=*/true, /*HasNSW=*/true);
         // Load and copy element
-        llvm::Value* cslot = builder->CreateAdd(ci, one, "join.cslot");
+        llvm::Value* cslot = builder->CreateAdd(ci, one, "join.cslot", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* cslotPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, cslot, "join.cslotptr");
         llvm::Value* celemInt = builder->CreateAlignedLoad(getDefaultType(), cslotPtr, llvm::MaybeAlign(8), "join.celemint");
         llvm::Value* celemPtr = builder->CreateIntToPtr(celemInt, ptrTy, "join.celemptr");
         llvm::Value* celemLen = builder->CreateCall(getOrDeclareStrlen(), {celemPtr}, "join.celemlen");
         llvm::Value* elemDst = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), buf, afterDelim, "join.elemdst");
         builder->CreateCall(getOrDeclareMemcpy(), {elemDst, celemPtr, celemLen});
-        llvm::Value* afterElem = builder->CreateAdd(afterDelim, celemLen, "join.afterelem");
-        llvm::Value* nextCi = builder->CreateAdd(ci, one, "join.nextci");
+        llvm::Value* afterElem = builder->CreateAdd(afterDelim, celemLen, "join.afterelem", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* nextCi = builder->CreateAdd(ci, one, "join.nextci", /*HasNUW=*/true, /*HasNSW=*/true);
         ci->addIncoming(nextCi, catBodyBB);
         writePos->addIncoming(afterElem, catBodyBB);
         builder->CreateBr(catLoopBB);
@@ -4834,7 +4834,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                             {tidAlloca, nullAttr, wrapper, nullArg});
 
         // Return the thread id
-        return builder->CreateLoad(getDefaultType(), tidAlloca, "tid.val");
+        return builder->CreateAlignedLoad(getDefaultType(), tidAlloca, llvm::MaybeAlign(8), "tid.val");
     }
 
     if (bid == BuiltinId::THREAD_JOIN) {

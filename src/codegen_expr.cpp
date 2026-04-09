@@ -3907,6 +3907,34 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
     // is no longer valid — the new value may have a different length.
     knownArraySizes_.erase(expr->name);
     knownArraySizeAllocas_.erase(expr->name);
+    // When a string variable is reassigned to something other than a
+    // str_concat result (which updates the cache itself), invalidate the
+    // stringLenCache_ entry by writing the -1 sentinel.  Without this,
+    // a subsequent str_concat(s, ...) would use a stale cached strlen.
+    // Similarly reset the capacity cache since the new value may point to
+    // a buffer with a different capacity.
+    {
+        bool isConcat = false;
+        if (expr->value->type == ASTNodeType::CALL_EXPR) {
+            auto* call = static_cast<CallExpr*>(expr->value.get());
+            if (call->callee == "str_concat")
+                isConcat = true;
+        }
+        if (!isConcat) {
+            auto cacheIt = stringLenCache_.find(expr->name);
+            if (cacheIt != stringLenCache_.end()) {
+                builder->CreateStore(
+                    llvm::ConstantInt::get(getDefaultType(), -1, true),
+                    cacheIt->second);
+            }
+            auto capIt = stringCapCache_.find(expr->name);
+            if (capIt != stringCapCache_.end()) {
+                builder->CreateStore(
+                    llvm::ConstantInt::get(getDefaultType(), 0),
+                    capIt->second);
+            }
+        }
+    }
     return value;
 }
 
