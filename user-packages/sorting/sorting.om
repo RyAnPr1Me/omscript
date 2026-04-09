@@ -6,32 +6,12 @@ fn sort_bubble(arr) {
 }
 
 fn sort_selection(arr) {
-    var n = len(arr);
-    for (i in 0...n) {
-        var min_idx = i;
-        for (j in i + 1...n) {
-            if (arr[j] < arr[min_idx]) {
-                min_idx = j;
-            }
-        }
-        if (min_idx != i) {
-            swap(arr, i, min_idx);
-        }
-    }
+    sort(arr);
     return 0;
 }
 
 fn sort_insertion(arr) {
-    var n = len(arr);
-    for (i in 1...n) {
-        var key = arr[i];
-        var j = i - 1;
-        while (j >= 0 && arr[j] > key) {
-            arr[j + 1] = arr[j];
-            j = j - 1;
-        }
-        arr[j + 1] = key;
-    }
+    sort(arr);
     return 0;
 }
 

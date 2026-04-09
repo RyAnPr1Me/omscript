@@ -24,16 +24,16 @@ fn geo_area_triangle(base, height) {
 
 fn geo_is_right_triangle(a, b, c) {
     // Check if sides a, b, c form a right triangle (Pythagorean theorem)
-    var ab = a * a + b * b;
-    var ac = a * a + c * c;
-    var bc = b * b + c * c;
-    if (ab == c * c) {
+    var aa = a * a;
+    var bb = b * b;
+    var cc = c * c;
+    if (aa + bb == cc) {
         return 1;
     }
-    if (ac == b * b) {
+    if (aa + cc == bb) {
         return 1;
     }
-    if (bc == a * a) {
+    if (bb + cc == aa) {
         return 1;
     }
     return 0;
