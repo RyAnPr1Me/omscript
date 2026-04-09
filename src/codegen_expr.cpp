@@ -5193,9 +5193,10 @@ llvm::Value* CodeGenerator::generateDict(DictExpr* expr) {
         {llvm::ConstantInt::get(getDefaultType(), totalBytes)},
         "dict");
 
-    // Store length = 2 * numPairs (compatible with map_set/map_get layout)
-    builder->CreateStore(
-        llvm::ConstantInt::get(getDefaultType(), 2 * numPairs), dictPtr);
+    // Store length = 2 * numPairs (aligned, TBAA): same layout as map_set/map_get.
+    auto* lenStore = builder->CreateAlignedStore(
+        llvm::ConstantInt::get(getDefaultType(), 2 * numPairs), dictPtr, llvm::MaybeAlign(8));
+    lenStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
 
     // Store each key-value pair at a known compile-time offset —
     // no search loop needed because this is a fresh allocation.
@@ -5206,12 +5207,14 @@ llvm::Value* CodeGenerator::generateDict(DictExpr* expr) {
         llvm::Value* keyPtr = builder->CreateInBoundsGEP(
             getDefaultType(), dictPtr,
             llvm::ConstantInt::get(getDefaultType(), 1 + 2 * i), "dict.kp");
-        builder->CreateStore(keyVal, keyPtr);
+        auto* keyStore = builder->CreateAlignedStore(keyVal, keyPtr, llvm::MaybeAlign(8));
+        keyStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
 
         llvm::Value* valPtr = builder->CreateInBoundsGEP(
             getDefaultType(), dictPtr,
             llvm::ConstantInt::get(getDefaultType(), 2 + 2 * i), "dict.vp");
-        builder->CreateStore(valVal, valPtr);
+        auto* valStore = builder->CreateAlignedStore(valVal, valPtr, llvm::MaybeAlign(8));
+        valStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
     }
 
     return builder->CreatePtrToInt(dictPtr, getDefaultType(), "dict.i");
