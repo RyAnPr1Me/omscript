@@ -372,6 +372,10 @@ class CodeGenerator {
     llvm::MDNode* tbaaRoot_ = nullptr;       ///< Root of TBAA type hierarchy
     llvm::MDNode* tbaaArrayLen_ = nullptr;   ///< TBAA access tag for array length (slot 0)
     llvm::MDNode* tbaaArrayElem_ = nullptr;  ///< TBAA access tag for array elements (slots 1+)
+    llvm::MDNode* tbaaStructField_ = nullptr; ///< TBAA access tag for struct field loads/stores
+    llvm::MDNode* tbaaStringData_ = nullptr;  ///< TBAA access tag for string character data
+    llvm::MDNode* tbaaMapKey_ = nullptr;      ///< TBAA access tag for map key slots
+    llvm::MDNode* tbaaMapVal_ = nullptr;      ///< TBAA access tag for map value slots
 
     /// !range metadata for array length loads: [0, INT64_MAX).
     /// Array lengths are always non-negative (they're sizes).
@@ -539,6 +543,17 @@ class CodeGenerator {
     [[noreturn]] [[gnu::cold]] void codegenError(const std::string& message, const ASTNode* node);
     void validateArgCount(const CallExpr* expr, const std::string& funcName, size_t expected);
 
+    /// Declare a C library function with common attributes.
+    /// Most runtime functions share {NoUnwind, WillReturn, NoFree, NoSync} —
+    /// this helper avoids repeating those four addFnAttr calls.
+    /// Returns the newly created Function so callers can add extra attributes.
+    llvm::Function* declareExternalFn(llvm::StringRef name, llvm::FunctionType* ty);
+
+    /// Attach mustprogress loop metadata to a back-edge branch instruction.
+    /// Gated behind optimizationLevel >= O1.  Consolidates the 6-line
+    /// metadata construction pattern used by 50+ builtin and statement loops.
+    void attachLoopMetadata(llvm::BranchInst* backEdgeBr);
+
     /// RAII guard that calls beginScope() on construction and endScope()
     /// on destruction, ensuring scope stacks are always balanced even
     /// when exceptions interrupt code generation.
@@ -703,11 +718,65 @@ class CodeGenerator {
     llvm::Function* getOrDeclarePthreadMutexUnlock();
     llvm::Function* getOrDeclarePthreadMutexDestroy();
 
+    // ── Hash-table map runtime helpers (emitted into the LLVM module) ────
+    // These implement an open-addressing hash table with linear probing,
+    // power-of-2 capacity, and FNV-1a hashing.  Each helper is emitted once
+    // per module as an internal function (InternalLinkage) with appropriate
+    // attributes for inlining at O2+.
+    //
+    // Hash table layout (all i64):
+    //   [capacity, size, hash0, key0, val0, hash1, key1, val1, ...]
+    //   Total allocation: (2 + 3 * capacity) * 8 bytes
+    //   Empty slot: hash == 0
+    //   Tombstone:  hash == 1
+    //   Occupied:   hash >= 2 (actual hash OR'd with 2)
+    llvm::Function* getOrEmitHashMapNew();
+    llvm::Function* getOrEmitHashMapSet();
+    llvm::Function* getOrEmitHashMapGet();
+    llvm::Function* getOrEmitHashMapHas();
+    llvm::Function* getOrEmitHashMapRemove();
+    llvm::Function* getOrEmitHashMapKeys();
+    llvm::Function* getOrEmitHashMapValues();
+    llvm::Function* getOrEmitHashMapSize();
+
     /// Shared implementation for prefix and postfix increment/decrement.
     /// Returns the *old* value for postfix (isPostfix=true) and the *new*
     /// value for prefix (isPostfix=false).
     llvm::Value* generateIncDec(Expression* operandExpr, const std::string& op, bool isPostfix,
                                 const ASTNode* errorNode);
+
+    /// Shared bounds check elision analysis.
+    ///
+    /// Determines whether an array index operation arr[index] can provably
+    /// skip the runtime bounds check.  Consolidates all elision patterns:
+    ///   A) for(i in 0...len(arr)) { arr[i] }
+    ///   B) array_fill(n,...) + for(i in 0...n) { arr[i] }
+    ///   C) Known compile-time array sizes with constant loop bounds
+    ///   D) SSA value equality (endBound == lenVal)
+    ///   E) Compile-time constant comparison (endConst <= lenConst)
+    ///   F) Arithmetic patterns: arr[i + K] and arr[i - K]
+    ///
+    /// @param arrayExpr  The array sub-expression (for identifier checks)
+    /// @param indexExpr  The index sub-expression (for iterator/arithmetic checks)
+    /// @param basePtr    The LLVM pointer to the array base (for length loads)
+    /// @param isStr      True if the value is a string (skips array-specific checks)
+    /// @param prefix     Name prefix for emitted IR instructions (e.g. "idx", "idxa", "incdec")
+    /// @return true if the bounds check can be safely elided
+    bool canElideBoundsCheck(Expression* arrayExpr, Expression* indexExpr,
+                             llvm::Value* basePtr, bool isStr,
+                             const char* prefix);
+
+    /// Emit a runtime bounds check for an array/string index operation.
+    /// Generates the compare + branch + abort pattern, placing the insertion
+    /// point at the success block on return.
+    ///
+    /// @param idxVal   The index value to check
+    /// @param basePtr  The base pointer to load length from
+    /// @param isStr    True for string access (uses strlen instead of header load)
+    /// @param isBorrowed True if the array is borrowed (length marked invariant)
+    /// @param prefix   Name prefix for emitted IR instructions
+    void emitBoundsCheck(llvm::Value* idxVal, llvm::Value* basePtr,
+                         bool isStr, bool isBorrowed, const char* prefix);
 
     // Optimization methods
     void runOptimizationPasses();

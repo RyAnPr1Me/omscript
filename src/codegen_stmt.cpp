@@ -1598,12 +1598,17 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
     // Detect whether this is an array whose elements are string pointers.
     const bool isStrArray = !isStr && isStringArrayExpr(stmt->collection.get());
 
-    // Normalise to i64 for uniformity; we'll re-cast to ptr below.
-    collVal = toDefaultType(collVal);
-
-    // Convert i64 → pointer
+    // Convert to pointer for element access.  When the collection value is
+    // already a pointer (e.g., from a direct alloca or malloc), avoid the
+    // redundant ptr→i64→ptr round-trip that toDefaultType+IntToPtr would cause.
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
-    llvm::Value* basePtr = builder->CreateIntToPtr(collVal, ptrTy, "foreach.baseptr");
+    llvm::Value* basePtr;
+    if (collVal->getType()->isPointerTy()) {
+        basePtr = collVal;
+    } else {
+        collVal = toDefaultType(collVal);
+        basePtr = builder->CreateIntToPtr(collVal, ptrTy, "foreach.baseptr");
+    }
 
     // Get the collection length
     llvm::Value* lenVal;
