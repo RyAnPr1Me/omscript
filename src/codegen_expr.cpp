@@ -4610,8 +4610,9 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
         // inbounds GEP: the bounds check above guarantees the index is within
         // the allocated string buffer, so the pointer is always valid.
         llvm::Value* charPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), basePtr, idxVal, "idx.charptr");
-        llvm::Value* charVal = builder->CreateLoad(llvm::Type::getInt8Ty(*context), charPtr, "idx.char");
-        return builder->CreateZExt(charVal, getDefaultType(), "idx.charext");
+        auto* charLoad = builder->CreateLoad(llvm::Type::getInt8Ty(*context), charPtr, "idx.char");
+        charLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
+        return builder->CreateZExt(charLoad, getDefaultType(), "idx.charext");
     }
     // Array: element is at slot (index + 1) in the i64 buffer.
     // Compute data pointer (base + 1 slot) then GEP by just the index.
@@ -4708,7 +4709,8 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
         // the allocated string buffer, so the pointer is always valid.
         llvm::Value* byteVal = builder->CreateTrunc(newVal, llvm::Type::getInt8Ty(*context), "idxa.byte");
         llvm::Value* charPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), basePtr, idxVal, "idxa.charptr");
-        builder->CreateStore(byteVal, charPtr);
+        auto* charStore = builder->CreateStore(byteVal, charPtr);
+        charStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
     } else {
         // Array: store i64 element at slot (index + 1)
         // Use two-step GEP so LLVM can hoist the data-pointer out of loops.

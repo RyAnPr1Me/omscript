@@ -1046,7 +1046,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(okBB);
         // Load char via GEP
         llvm::Value* charPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), strPtr, idxArg, "charat.gep");
-        llvm::Value* charVal = builder->CreateLoad(llvm::Type::getInt8Ty(*context), charPtr, "charat.char");
+        auto* charVal = builder->CreateLoad(llvm::Type::getInt8Ty(*context), charPtr, "charat.char");
+        charVal->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
         // Zero-extend to i64
         return builder->CreateZExt(charVal, getDefaultType(), "charat.ext");
     }
@@ -4494,7 +4495,6 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* mapLen = mapLenLoad;
         llvm::Value* zero  = llvm::ConstantInt::get(getDefaultType(), 0);
         llvm::Value* one   = llvm::ConstantInt::get(getDefaultType(), 1);
-        llvm::Value* two   = llvm::ConstantInt::get(getDefaultType(), 2);
         llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
 
         llvm::Function* parentFn = builder->GetInsertBlock()->getParent();
