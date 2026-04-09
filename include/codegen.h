@@ -713,6 +713,27 @@ class CodeGenerator {
     llvm::Function* getOrDeclarePthreadMutexUnlock();
     llvm::Function* getOrDeclarePthreadMutexDestroy();
 
+    // ── Hash-table map runtime helpers (emitted into the LLVM module) ────
+    // These implement an open-addressing hash table with linear probing,
+    // power-of-2 capacity, and FNV-1a hashing.  Each helper is emitted once
+    // per module as an internal function (InternalLinkage) with appropriate
+    // attributes for inlining at O2+.
+    //
+    // Hash table layout (all i64):
+    //   [capacity, size, hash0, key0, val0, hash1, key1, val1, ...]
+    //   Total allocation: (2 + 3 * capacity) * 8 bytes
+    //   Empty slot: hash == 0
+    //   Tombstone:  hash == 1
+    //   Occupied:   hash >= 2 (actual hash OR'd with 2)
+    llvm::Function* getOrEmitHashMapNew();
+    llvm::Function* getOrEmitHashMapSet();
+    llvm::Function* getOrEmitHashMapGet();
+    llvm::Function* getOrEmitHashMapHas();
+    llvm::Function* getOrEmitHashMapRemove();
+    llvm::Function* getOrEmitHashMapKeys();
+    llvm::Function* getOrEmitHashMapValues();
+    llvm::Function* getOrEmitHashMapSize();
+
     /// Shared implementation for prefix and postfix increment/decrement.
     /// Returns the *old* value for postfix (isPostfix=true) and the *new*
     /// value for prefix (isPostfix=false).

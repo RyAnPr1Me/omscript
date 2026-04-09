@@ -4998,131 +4998,29 @@ bool CodeGenerator::isDictExpr(Expression* expr) const {
 }
 
 llvm::Value* CodeGenerator::emitMapGet(llvm::Value* mapVal, llvm::Value* keyVal) {
-    // Inline map_get: linear scan through [len, k0, v0, k1, v1, ...] layout.
+    // Use the hash table __omsc_hmap_get helper.
     // Returns the value for keyVal, or 0 if the key is absent.
-    //
-    // IR quality targets (same as expert hand-written assembly):
-    //   • MaybeAlign(8) on all i64 loads  — communicates 8-byte alignment
-    //   • TBAA on len/key/val loads        — enables load-CSE and alias analysis
-    //   • range metadata on len load       — tells LLVM len ∈ [0, INT64_MAX)
-    //   • nsw+nuw on slot arithmetic       — enables induction variable opts
-    //   • mustprogress loop metadata       — enables LICM and DSE through loop
-    //   • ULT comparison                   — unsigned, consistent with builtins
-    //   • Hot branch weights on found path — branch predictor hint
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     llvm::Value* mapPtr =
         mapVal->getType()->isPointerTy() ? mapVal : builder->CreateIntToPtr(mapVal, ptrTy, "didx.ptr");
-
-    auto* lenLoad = builder->CreateAlignedLoad(getDefaultType(), mapPtr, llvm::MaybeAlign(8), "didx.len");
-    lenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-    lenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
-    llvm::Value* mapLen = lenLoad;
-
-    llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
-    llvm::Value* one  = llvm::ConstantInt::get(getDefaultType(), 1);
-    llvm::Value* two  = llvm::ConstantInt::get(getDefaultType(), 2);
-
-    llvm::Function* fn      = builder->GetInsertBlock()->getParent();
-    llvm::BasicBlock* preBB = builder->GetInsertBlock();
-    llvm::BasicBlock* loopBB  = llvm::BasicBlock::Create(*context, "didx.loop",  fn);
-    llvm::BasicBlock* checkBB = llvm::BasicBlock::Create(*context, "didx.check", fn);
-    llvm::BasicBlock* foundBB = llvm::BasicBlock::Create(*context, "didx.found", fn);
-    llvm::BasicBlock* doneBB  = llvm::BasicBlock::Create(*context, "didx.done",  fn);
-
-    auto* entryBr = builder->CreateBr(loopBB);
-
-    // mustprogress: the loop always terminates (bounded by mapLen).
-    // This lets LLVM apply LICM and DSE through the loop body.
-    if (optimizationLevel >= OptimizationLevel::O1) {
-        llvm::SmallVector<llvm::Metadata*, 2> mds;
-        mds.push_back(nullptr);
-        mds.push_back(llvm::MDNode::get(*context,
-            {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
-        llvm::MDNode* md = llvm::MDNode::get(*context, mds);
-        md->replaceOperandWith(0, md);
-        entryBr->setMetadata(llvm::LLVMContext::MD_loop, md);
-    }
-
-    // Loop header: idx PHI, exit if idx >= mapLen (unsigned: UGE)
-    builder->SetInsertPoint(loopBB);
-    llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "didx.i");
-    idx->addIncoming(zero, preBB);
-    // Use unsigned compare (ULT): mapLen is always non-negative, so ULT and
-    // SLT are equivalent for valid maps, but ULT is consistent with all other
-    // builtin loops and allows the strength-reduction pass to fold better.
-    builder->CreateCondBr(
-        builder->CreateICmpULT(idx, mapLen, "didx.cond"), checkBB, doneBB);
-
-    // Check block: load key at slot (idx+1), compare with target
-    builder->SetInsertPoint(checkBB);
-    llvm::Value* kSlot = builder->CreateAdd(idx, one,
-        llvm::Twine("didx.kslot"), /*HasNUW=*/true, /*HasNSW=*/true);
-    llvm::Value* kPtr  = builder->CreateInBoundsGEP(getDefaultType(), mapPtr, kSlot, "didx.kptr");
-    auto* keyLoad = builder->CreateAlignedLoad(getDefaultType(), kPtr, llvm::MaybeAlign(8), "didx.ekey");
-    keyLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapKey_);
-    llvm::Value* match = builder->CreateICmpEQ(keyLoad, keyVal, "didx.match");
-
-    // Back-edge: advance by 2 slots (skip key+value pair), nsw+nuw
-    llvm::Value* nextIdx = builder->CreateAdd(idx, two,
-        llvm::Twine("didx.next"), /*HasNUW=*/true, /*HasNSW=*/true);
-    idx->addIncoming(nextIdx, checkBB);
-
-    // Mark the "not found" branch cold — dict lookups usually succeed
-    llvm::MDNode* hitWeights = llvm::MDBuilder(*context).createBranchWeights(1000000, 1);
-    builder->CreateCondBr(match, foundBB, loopBB, hitWeights);
-
-    // Found block: load value at slot (idx+2)
-    builder->SetInsertPoint(foundBB);
-    llvm::Value* vSlot = builder->CreateAdd(idx, two,
-        llvm::Twine("didx.vslot"), /*HasNUW=*/true, /*HasNSW=*/true);
-    llvm::Value* vPtr  = builder->CreateInBoundsGEP(getDefaultType(), mapPtr, vSlot, "didx.vptr");
-    auto* valLoad = builder->CreateAlignedLoad(getDefaultType(), vPtr, llvm::MaybeAlign(8), "didx.val");
-    valLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapVal_);
-    builder->CreateBr(doneBB);
-
-    // Merge: PHI selects found value or 0 (key absent)
-    builder->SetInsertPoint(doneBB);
-    llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "didx.result");
-    result->addIncoming(zero, loopBB);   // key not found → 0
-    result->addIncoming(valLoad, foundBB);
-    return result;
+    llvm::Value* defVal = llvm::ConstantInt::get(getDefaultType(), 0);
+    return builder->CreateCall(getOrEmitHashMapGet(), {mapPtr, keyVal, defVal}, "didx.result");
 }
 
 llvm::Value* CodeGenerator::generateDict(DictExpr* expr) {
     const size_t numPairs = expr->pairs.size();
-    const size_t totalSlots = 1 + 2 * numPairs;
-    const size_t totalBytes = totalSlots * 8;
 
-    llvm::Value* dictPtr = builder->CreateCall(
-        getOrDeclareMalloc(),
-        {llvm::ConstantInt::get(getDefaultType(), totalBytes)},
-        "dict");
+    // Create an empty hash table, then insert each pair via __omsc_hmap_set.
+    // Each set call returns the (possibly reallocated) map pointer.
+    llvm::Value* mapPtr = builder->CreateCall(getOrEmitHashMapNew(), {}, "dict.new");
 
-    // Store length = 2 * numPairs (aligned, TBAA): same layout as map_set/map_get.
-    auto* lenStore = builder->CreateAlignedStore(
-        llvm::ConstantInt::get(getDefaultType(), 2 * numPairs), dictPtr, llvm::MaybeAlign(8));
-    lenStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-
-    // Store each key-value pair at a known compile-time offset —
-    // no search loop needed because this is a fresh allocation.
     for (size_t i = 0; i < numPairs; i++) {
         llvm::Value* keyVal = toDefaultType(generateExpression(expr->pairs[i].first.get()));
         llvm::Value* valVal = toDefaultType(generateExpression(expr->pairs[i].second.get()));
-
-        llvm::Value* keyPtr = builder->CreateInBoundsGEP(
-            getDefaultType(), dictPtr,
-            llvm::ConstantInt::get(getDefaultType(), 1 + 2 * i), "dict.kp");
-        auto* keyStore = builder->CreateAlignedStore(keyVal, keyPtr, llvm::MaybeAlign(8));
-        keyStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapKey_);
-
-        llvm::Value* valPtr = builder->CreateInBoundsGEP(
-            getDefaultType(), dictPtr,
-            llvm::ConstantInt::get(getDefaultType(), 2 + 2 * i), "dict.vp");
-        auto* valStore = builder->CreateAlignedStore(valVal, valPtr, llvm::MaybeAlign(8));
-        valStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapVal_);
+        mapPtr = builder->CreateCall(getOrEmitHashMapSet(), {mapPtr, keyVal, valVal}, "dict.set");
     }
 
-    return builder->CreatePtrToInt(dictPtr, getDefaultType(), "dict.i");
+    return builder->CreatePtrToInt(mapPtr, getDefaultType(), "dict.i");
 }
 
 } // namespace omscript

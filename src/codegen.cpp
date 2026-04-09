@@ -1915,6 +1915,808 @@ llvm::Function* CodeGenerator::getOrDeclarePthreadMutexDestroy() {
 }
 
 // ---------------------------------------------------------------------------
+// Hash-table map runtime helpers (emitted into the LLVM module)
+// ---------------------------------------------------------------------------
+//
+// Layout (all i64):
+//   slot 0: capacity (power of 2, always >= 8)
+//   slot 1: size     (number of active key-value pairs)
+//   slot 2 + i*3 + 0: hash_i  (0 = empty, 1 = tombstone, >=2 = occupied)
+//   slot 2 + i*3 + 1: key_i
+//   slot 2 + i*3 + 2: val_i
+//
+// Total allocation: (2 + 3 * capacity) * 8 bytes
+//
+// Hash function: FNV-1a on the 64-bit key value.
+//   result = ((hash_raw >> 2) | 2)  -- ensure result >= 2
+
+/// Helper: set common attributes on emitted map functions.
+static void setHashMapFnAttrs(llvm::Function* fn) {
+    fn->setLinkage(llvm::Function::InternalLinkage);
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
+    // AlwaysInline: these are small helpers (typically < 50 LLVM IR instructions)
+    // that benefit greatly from inlining at all opt levels to enable CSE of
+    // hash computations and elimination of redundant loads.
+    fn->addFnAttr(llvm::Attribute::AlwaysInline);
+}
+
+// __omsc_hmap_new() -> ptr
+//   Allocates a hash table with capacity 8, size 0, all entries zeroed.
+llvm::Function* CodeGenerator::getOrEmitHashMapNew() {
+    if (auto* fn = module->getFunction("__omsc_hmap_new"))
+        return fn;
+
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* i64Ty = getDefaultType();
+    auto* fnTy = llvm::FunctionType::get(ptrTy, {}, false);
+    auto* fn = llvm::Function::Create(fnTy, llvm::Function::InternalLinkage, "__omsc_hmap_new", module.get());
+    setHashMapFnAttrs(fn);
+
+    auto savedIP = builder->saveIP();
+    auto* entryBB = llvm::BasicBlock::Create(*context, "entry", fn);
+    builder->SetInsertPoint(entryBB);
+
+    // capacity = 8, total slots = 2 + 3*8 = 26, bytes = 26*8 = 208
+    llvm::Value* cap = llvm::ConstantInt::get(i64Ty, 8);
+    llvm::Value* totalBytes = llvm::ConstantInt::get(i64Ty, (2 + 3 * 8) * 8);
+    // Use calloc so all hash slots start as 0 (empty)
+    llvm::Value* buf = builder->CreateCall(getOrDeclareCalloc(), {
+        llvm::ConstantInt::get(i64Ty, 1), totalBytes
+    }, "hmap.buf");
+    // Store capacity in slot 0
+    builder->CreateAlignedStore(cap, buf, llvm::MaybeAlign(8));
+    // Size (slot 1) is already 0 from calloc
+    builder->CreateRet(buf);
+
+    builder->restoreIP(savedIP);
+    return fn;
+}
+
+// __omsc_hmap_set(map: ptr, key: i64, val: i64) -> ptr
+//   Insert or update a key-value pair.  Returns the (possibly reallocated) map.
+llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
+    if (auto* fn = module->getFunction("__omsc_hmap_set"))
+        return fn;
+
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* i64Ty = getDefaultType();
+    auto* fnTy = llvm::FunctionType::get(ptrTy, {ptrTy, i64Ty, i64Ty}, false);
+    auto* fn = llvm::Function::Create(fnTy, llvm::Function::InternalLinkage, "__omsc_hmap_set", module.get());
+    setHashMapFnAttrs(fn);
+    fn->getArg(0)->setName("map");
+    fn->getArg(1)->setName("key");
+    fn->getArg(2)->setName("val");
+
+    auto savedIP = builder->saveIP();
+
+    // Basic blocks
+    auto* entryBB    = llvm::BasicBlock::Create(*context, "entry", fn);
+    auto* probeBB    = llvm::BasicBlock::Create(*context, "probe", fn);
+    auto* checkBB    = llvm::BasicBlock::Create(*context, "check", fn);
+    auto* emptyBB    = llvm::BasicBlock::Create(*context, "empty", fn);
+    auto* occupBB    = llvm::BasicBlock::Create(*context, "occup", fn);
+    auto* matchBB    = llvm::BasicBlock::Create(*context, "match", fn);
+    auto* nextBB     = llvm::BasicBlock::Create(*context, "next", fn);
+    auto* insertBB   = llvm::BasicBlock::Create(*context, "insert", fn);
+    auto* growBB     = llvm::BasicBlock::Create(*context, "grow", fn);
+    auto* doneBB     = llvm::BasicBlock::Create(*context, "done", fn);
+
+    // Entry: compute hash, load capacity/size
+    builder->SetInsertPoint(entryBB);
+    llvm::Value* mapArg = fn->getArg(0);
+    llvm::Value* keyArg = fn->getArg(1);
+    llvm::Value* valArg = fn->getArg(2);
+
+    // FNV-1a hash of the 64-bit key
+    // hash = fnv1a(key) — unrolled over 8 bytes
+    llvm::Value* basis = llvm::ConstantInt::get(i64Ty, 14695981039346656037ULL);
+    llvm::Value* prime = llvm::ConstantInt::get(i64Ty, 1099511628211ULL);
+    llvm::Value* ff    = llvm::ConstantInt::get(i64Ty, 0xFF);
+    llvm::Value* h = basis;
+    for (int byte = 0; byte < 8; byte++) {
+        llvm::Value* shift = llvm::ConstantInt::get(i64Ty, byte * 8);
+        llvm::Value* b = builder->CreateAnd(builder->CreateLShr(keyArg, shift), ff);
+        h = builder->CreateMul(builder->CreateXor(h, b), prime, "fnv");
+    }
+    // Ensure hash >= 2 (0=empty, 1=tombstone are reserved)
+    llvm::Value* hashVal = builder->CreateOr(
+        builder->CreateOr(h, llvm::ConstantInt::get(i64Ty, 2)), llvm::ConstantInt::get(i64Ty, 0));
+    // Actually: just OR with 2
+    hashVal = builder->CreateOr(h, llvm::ConstantInt::get(i64Ty, 2), "hash");
+
+    // Load capacity and size
+    auto* capPtr = mapArg;  // slot 0
+    llvm::Value* cap = builder->CreateAlignedLoad(i64Ty, capPtr, llvm::MaybeAlign(8), "cap");
+    llvm::Value* sizePtr = builder->CreateInBoundsGEP(i64Ty, mapArg, llvm::ConstantInt::get(i64Ty, 1), "sizeptr");
+    llvm::Value* size = builder->CreateAlignedLoad(i64Ty, sizePtr, llvm::MaybeAlign(8), "size");
+    llvm::Value* mask = builder->CreateSub(cap, llvm::ConstantInt::get(i64Ty, 1), "mask");
+    llvm::Value* startSlot = builder->CreateAnd(hashVal, mask, "startslot");
+    builder->CreateBr(probeBB);
+
+    // Probe loop: linear probing
+    builder->SetInsertPoint(probeBB);
+    llvm::PHINode* slot = builder->CreatePHI(i64Ty, 2, "slot");
+    slot->addIncoming(startSlot, entryBB);
+    llvm::PHINode* firstTombstone = builder->CreatePHI(i64Ty, 2, "first.tomb");
+    firstTombstone->addIncoming(llvm::ConstantInt::get(i64Ty, -1), entryBB);  // -1 = no tombstone seen
+
+    // Compute entry base: mapPtr + 2 + slot*3
+    llvm::Value* three = llvm::ConstantInt::get(i64Ty, 3);
+    llvm::Value* entryOff = builder->CreateAdd(
+        builder->CreateMul(slot, three, "slot3"),
+        llvm::ConstantInt::get(i64Ty, 2), "entryoff");
+    llvm::Value* hashPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, entryOff, "hashptr");
+    llvm::Value* slotHash = builder->CreateAlignedLoad(i64Ty, hashPtr, llvm::MaybeAlign(8), "slothash");
+    // Check if empty (hash == 0)
+    llvm::Value* isEmpty = builder->CreateICmpEQ(slotHash, llvm::ConstantInt::get(i64Ty, 0), "isempty");
+    builder->CreateCondBr(isEmpty, emptyBB, checkBB);
+
+    // Check: is it occupied or tombstone?
+    builder->SetInsertPoint(checkBB);
+    llvm::Value* isTomb = builder->CreateICmpEQ(slotHash, llvm::ConstantInt::get(i64Ty, 1), "istomb");
+    // Update first tombstone tracker
+    llvm::Value* hasTomb = builder->CreateICmpNE(firstTombstone, llvm::ConstantInt::get(i64Ty, -1), "hastomb");
+    llvm::Value* newTomb = builder->CreateSelect(
+        builder->CreateAnd(isTomb, builder->CreateNot(hasTomb)),
+        slot, firstTombstone, "newtomb");
+    builder->CreateCondBr(isTomb, nextBB, occupBB);
+
+    // Occupied: check if key matches
+    builder->SetInsertPoint(occupBB);
+    llvm::Value* keyOff = builder->CreateAdd(entryOff, llvm::ConstantInt::get(i64Ty, 1), "keyoff");
+    llvm::Value* eKeyPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, keyOff, "ekeyptr");
+    llvm::Value* eKey = builder->CreateAlignedLoad(i64Ty, eKeyPtr, llvm::MaybeAlign(8), "ekey");
+    llvm::Value* keyMatch = builder->CreateICmpEQ(eKey, keyArg, "keymatch");
+    builder->CreateCondBr(keyMatch, matchBB, nextBB);
+
+    // Match: update value in place
+    builder->SetInsertPoint(matchBB);
+    llvm::Value* valOff = builder->CreateAdd(entryOff, llvm::ConstantInt::get(i64Ty, 2), "valoff");
+    llvm::Value* eValPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, valOff, "evalptr");
+    builder->CreateAlignedStore(valArg, eValPtr, llvm::MaybeAlign(8));
+    builder->CreateBr(doneBB);
+
+    // Next: advance to next slot (linear probe), wrap around
+    builder->SetInsertPoint(nextBB);
+    llvm::PHINode* tombForNext = builder->CreatePHI(i64Ty, 2, "tomb.next");
+    tombForNext->addIncoming(newTomb, checkBB);
+    tombForNext->addIncoming(firstTombstone, occupBB);  // no change if occupied but no match
+    llvm::Value* nextSlot = builder->CreateAnd(
+        builder->CreateAdd(slot, llvm::ConstantInt::get(i64Ty, 1), "slot1"),
+        mask, "nextslot");
+    slot->addIncoming(nextSlot, nextBB);
+    firstTombstone->addIncoming(tombForNext, nextBB);
+    builder->CreateBr(probeBB);
+
+    // Empty: key not found — insert
+    builder->SetInsertPoint(emptyBB);
+    // Check if we need to grow: size+1 > cap*3/4
+    llvm::Value* newSize = builder->CreateAdd(size, llvm::ConstantInt::get(i64Ty, 1), "newsize");
+    llvm::Value* threshold = builder->CreateLShr(
+        builder->CreateMul(cap, llvm::ConstantInt::get(i64Ty, 3)), llvm::ConstantInt::get(i64Ty, 2), "threshold");
+    llvm::Value* needGrow = builder->CreateICmpUGT(newSize, threshold, "needgrow");
+    builder->CreateCondBr(needGrow, growBB, insertBB);
+
+    // Insert: write into the slot (prefer tombstone slot if available)
+    builder->SetInsertPoint(insertBB);
+    llvm::Value* hasTombForInsert = builder->CreateICmpNE(firstTombstone, llvm::ConstantInt::get(i64Ty, -1), "hastomb2");
+    llvm::Value* insSlot = builder->CreateSelect(hasTombForInsert, firstTombstone, slot, "insslot");
+    llvm::Value* insOff = builder->CreateAdd(
+        builder->CreateMul(insSlot, three),
+        llvm::ConstantInt::get(i64Ty, 2), "insoff");
+    llvm::Value* insHashPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, insOff, "inshashptr");
+    builder->CreateAlignedStore(hashVal, insHashPtr, llvm::MaybeAlign(8));
+    llvm::Value* insKeyPtr = builder->CreateInBoundsGEP(i64Ty, mapArg,
+        builder->CreateAdd(insOff, llvm::ConstantInt::get(i64Ty, 1)), "inskeyptr");
+    builder->CreateAlignedStore(keyArg, insKeyPtr, llvm::MaybeAlign(8));
+    llvm::Value* insValPtr = builder->CreateInBoundsGEP(i64Ty, mapArg,
+        builder->CreateAdd(insOff, llvm::ConstantInt::get(i64Ty, 2)), "insvalptr");
+    builder->CreateAlignedStore(valArg, insValPtr, llvm::MaybeAlign(8));
+    // Update size
+    builder->CreateAlignedStore(newSize, sizePtr, llvm::MaybeAlign(8));
+    builder->CreateBr(doneBB);
+
+    // Grow: double capacity, rehash all entries, then insert the new key
+    builder->SetInsertPoint(growBB);
+    llvm::Value* newCap = builder->CreateShl(cap, llvm::ConstantInt::get(i64Ty, 1), "newcap");
+    llvm::Value* newTotalSlots = builder->CreateAdd(
+        builder->CreateMul(newCap, three),
+        llvm::ConstantInt::get(i64Ty, 2), "newtotalslots");
+    llvm::Value* newTotalBytes = builder->CreateMul(newTotalSlots, llvm::ConstantInt::get(i64Ty, 8), "newtotalbytes");
+    llvm::Value* newBuf = builder->CreateCall(getOrDeclareCalloc(), {
+        llvm::ConstantInt::get(i64Ty, 1), newTotalBytes
+    }, "newbuf");
+    // Store new capacity and size+1
+    builder->CreateAlignedStore(newCap, newBuf, llvm::MaybeAlign(8));
+    llvm::Value* newSizePtr = builder->CreateInBoundsGEP(i64Ty, newBuf, llvm::ConstantInt::get(i64Ty, 1));
+    builder->CreateAlignedStore(newSize, newSizePtr, llvm::MaybeAlign(8));
+    // Rehash loop: iterate old entries, insert non-empty/non-tombstone into new table
+    llvm::Value* newMask = builder->CreateSub(newCap, llvm::ConstantInt::get(i64Ty, 1), "newmask");
+    auto* rehashLoopBB = llvm::BasicBlock::Create(*context, "rehash.loop", fn);
+    auto* rehashBodyBB = llvm::BasicBlock::Create(*context, "rehash.body", fn);
+    auto* rehashProbeBB = llvm::BasicBlock::Create(*context, "rehash.probe", fn);
+    auto* rehashWriteBB = llvm::BasicBlock::Create(*context, "rehash.write", fn);
+    auto* rehashNextBB = llvm::BasicBlock::Create(*context, "rehash.next", fn);
+    auto* rehashDoneBB = llvm::BasicBlock::Create(*context, "rehash.done", fn);
+    auto* insertNewBB  = llvm::BasicBlock::Create(*context, "insertnew", fn);
+
+    builder->CreateBr(rehashLoopBB);
+    builder->SetInsertPoint(rehashLoopBB);
+    llvm::PHINode* ri = builder->CreatePHI(i64Ty, 2, "ri");
+    ri->addIncoming(llvm::ConstantInt::get(i64Ty, 0), growBB);
+    llvm::Value* riDone = builder->CreateICmpULT(ri, cap, "ridone");
+    builder->CreateCondBr(riDone, rehashBodyBB, rehashDoneBB);
+
+    // Rehash body: read old entry, skip empty/tombstone
+    builder->SetInsertPoint(rehashBodyBB);
+    llvm::Value* oldOff = builder->CreateAdd(
+        builder->CreateMul(ri, three),
+        llvm::ConstantInt::get(i64Ty, 2), "oldoff");
+    llvm::Value* oldHashPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, oldOff, "oldhashptr");
+    llvm::Value* oldHash = builder->CreateAlignedLoad(i64Ty, oldHashPtr, llvm::MaybeAlign(8), "oldhash");
+    llvm::Value* isActive = builder->CreateICmpUGE(oldHash, llvm::ConstantInt::get(i64Ty, 2), "isactive");
+    builder->CreateCondBr(isActive, rehashProbeBB, rehashNextBB);
+
+    // Rehash probe: find empty slot in new table
+    builder->SetInsertPoint(rehashProbeBB);
+    llvm::Value* oldKeyPtr = builder->CreateInBoundsGEP(i64Ty, mapArg,
+        builder->CreateAdd(oldOff, llvm::ConstantInt::get(i64Ty, 1)), "oldkeyptr");
+    llvm::Value* oldKey = builder->CreateAlignedLoad(i64Ty, oldKeyPtr, llvm::MaybeAlign(8), "oldkey");
+    llvm::Value* oldValPtr = builder->CreateInBoundsGEP(i64Ty, mapArg,
+        builder->CreateAdd(oldOff, llvm::ConstantInt::get(i64Ty, 2)), "oldvalptr");
+    llvm::Value* oldVal = builder->CreateAlignedLoad(i64Ty, oldValPtr, llvm::MaybeAlign(8), "oldval");
+    // Find empty slot in new table using oldHash
+    llvm::Value* rStartSlot = builder->CreateAnd(oldHash, newMask, "rstartslot");
+
+    // Inner probe loop for rehash: find empty slot in new table
+    auto* rProbeLpBB  = llvm::BasicBlock::Create(*context, "rprobe.lp", fn);
+    auto* rAdvanceBB  = llvm::BasicBlock::Create(*context, "rprobe.adv", fn);
+
+    builder->CreateBr(rProbeLpBB);
+    builder->SetInsertPoint(rProbeLpBB);
+    llvm::PHINode* rs = builder->CreatePHI(i64Ty, 2, "rs");
+    rs->addIncoming(rStartSlot, rehashProbeBB);
+    llvm::Value* rEntryOff = builder->CreateAdd(
+        builder->CreateMul(rs, three),
+        llvm::ConstantInt::get(i64Ty, 2), "rentryoff");
+    llvm::Value* rHashPtr = builder->CreateInBoundsGEP(i64Ty, newBuf, rEntryOff, "rhashptr");
+    llvm::Value* rSlotHash = builder->CreateAlignedLoad(i64Ty, rHashPtr, llvm::MaybeAlign(8), "rslothash");
+    llvm::Value* rIsEmpty = builder->CreateICmpEQ(rSlotHash, llvm::ConstantInt::get(i64Ty, 0), "risempty");
+    builder->CreateCondBr(rIsEmpty, rehashWriteBB, rAdvanceBB);
+
+    // Advance probe: compute next slot, loop back
+    builder->SetInsertPoint(rAdvanceBB);
+    llvm::Value* rNext = builder->CreateAnd(
+        builder->CreateAdd(rs, llvm::ConstantInt::get(i64Ty, 1)),
+        newMask, "rnext");
+    rs->addIncoming(rNext, rAdvanceBB);
+    builder->CreateBr(rProbeLpBB);
+
+    // Write rehashed entry into new table
+    builder->SetInsertPoint(rehashWriteBB);
+    builder->CreateAlignedStore(oldHash, rHashPtr, llvm::MaybeAlign(8));
+    llvm::Value* rKeyPtr = builder->CreateInBoundsGEP(i64Ty, newBuf,
+        builder->CreateAdd(rEntryOff, llvm::ConstantInt::get(i64Ty, 1)), "rkeyptr");
+    builder->CreateAlignedStore(oldKey, rKeyPtr, llvm::MaybeAlign(8));
+    llvm::Value* rValPtr = builder->CreateInBoundsGEP(i64Ty, newBuf,
+        builder->CreateAdd(rEntryOff, llvm::ConstantInt::get(i64Ty, 2)), "rvalptr");
+    builder->CreateAlignedStore(oldVal, rValPtr, llvm::MaybeAlign(8));
+    builder->CreateBr(rehashNextBB);
+
+    // Rehash next: advance outer loop
+    builder->SetInsertPoint(rehashNextBB);
+    llvm::Value* riNext = builder->CreateAdd(ri, llvm::ConstantInt::get(i64Ty, 1), "rinext");
+    ri->addIncoming(riNext, rehashNextBB);
+    builder->CreateBr(rehashLoopBB);
+
+    // After rehash: insert the new key into the new table
+    builder->SetInsertPoint(rehashDoneBB);
+    // Free old buffer
+    builder->CreateCall(getOrDeclareFree(), {mapArg});
+    builder->CreateBr(insertNewBB);
+
+    // Insert new key into grown table (same linear probe logic)
+    builder->SetInsertPoint(insertNewBB);
+    llvm::Value* nStartSlot = builder->CreateAnd(hashVal, newMask, "nstartslot");
+    auto* nProbeLpBB = llvm::BasicBlock::Create(*context, "nprobe.lp", fn);
+    builder->CreateBr(nProbeLpBB);
+    builder->SetInsertPoint(nProbeLpBB);
+    llvm::PHINode* ns = builder->CreatePHI(i64Ty, 2, "ns");
+    ns->addIncoming(nStartSlot, insertNewBB);
+    llvm::Value* nEntryOff = builder->CreateAdd(
+        builder->CreateMul(ns, three),
+        llvm::ConstantInt::get(i64Ty, 2), "nentryoff");
+    llvm::Value* nHashPtr = builder->CreateInBoundsGEP(i64Ty, newBuf, nEntryOff, "nhashptr");
+    llvm::Value* nSlotHash = builder->CreateAlignedLoad(i64Ty, nHashPtr, llvm::MaybeAlign(8), "nslothash");
+    llvm::Value* nIsEmpty = builder->CreateICmpEQ(nSlotHash, llvm::ConstantInt::get(i64Ty, 0), "nisempty");
+    auto* nWriteBB = llvm::BasicBlock::Create(*context, "nprobe.write", fn);
+    auto* nAdvBB   = llvm::BasicBlock::Create(*context, "nprobe.adv", fn);
+    builder->CreateCondBr(nIsEmpty, nWriteBB, nAdvBB);
+
+    builder->SetInsertPoint(nAdvBB);
+    llvm::Value* nNext = builder->CreateAnd(
+        builder->CreateAdd(ns, llvm::ConstantInt::get(i64Ty, 1)),
+        newMask, "nnext");
+    ns->addIncoming(nNext, nAdvBB);
+    builder->CreateBr(nProbeLpBB);
+
+    builder->SetInsertPoint(nWriteBB);
+    builder->CreateAlignedStore(hashVal, nHashPtr, llvm::MaybeAlign(8));
+    llvm::Value* nKeyPtr = builder->CreateInBoundsGEP(i64Ty, newBuf,
+        builder->CreateAdd(nEntryOff, llvm::ConstantInt::get(i64Ty, 1)), "nkeyptr");
+    builder->CreateAlignedStore(keyArg, nKeyPtr, llvm::MaybeAlign(8));
+    llvm::Value* nValPtr = builder->CreateInBoundsGEP(i64Ty, newBuf,
+        builder->CreateAdd(nEntryOff, llvm::ConstantInt::get(i64Ty, 2)), "nvalptr");
+    builder->CreateAlignedStore(valArg, nValPtr, llvm::MaybeAlign(8));
+    builder->CreateBr(doneBB);
+
+    // Done: return map pointer
+    builder->SetInsertPoint(doneBB);
+    llvm::PHINode* result = builder->CreatePHI(ptrTy, 3, "result");
+    result->addIncoming(mapArg, matchBB);   // updated in place
+    result->addIncoming(mapArg, insertBB);  // inserted without grow
+    result->addIncoming(newBuf, nWriteBB);  // grew and inserted
+    builder->CreateRet(result);
+
+    builder->restoreIP(savedIP);
+    return fn;
+}
+
+// __omsc_hmap_get(map: ptr, key: i64, def: i64) -> i64
+llvm::Function* CodeGenerator::getOrEmitHashMapGet() {
+    if (auto* fn = module->getFunction("__omsc_hmap_get"))
+        return fn;
+
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* i64Ty = getDefaultType();
+    auto* fnTy = llvm::FunctionType::get(i64Ty, {ptrTy, i64Ty, i64Ty}, false);
+    auto* fn = llvm::Function::Create(fnTy, llvm::Function::InternalLinkage, "__omsc_hmap_get", module.get());
+    setHashMapFnAttrs(fn);
+    fn->getArg(0)->setName("map");
+    fn->getArg(1)->setName("key");
+    fn->getArg(2)->setName("def");
+
+    auto savedIP = builder->saveIP();
+
+    auto* entryBB = llvm::BasicBlock::Create(*context, "entry", fn);
+    auto* probeBB = llvm::BasicBlock::Create(*context, "probe", fn);
+    auto* checkBB = llvm::BasicBlock::Create(*context, "check", fn);
+    auto* foundBB = llvm::BasicBlock::Create(*context, "found", fn);
+    auto* nextBB  = llvm::BasicBlock::Create(*context, "next", fn);
+    auto* notfoundBB = llvm::BasicBlock::Create(*context, "notfound", fn);
+
+    builder->SetInsertPoint(entryBB);
+    llvm::Value* mapArg = fn->getArg(0);
+    llvm::Value* keyArg = fn->getArg(1);
+    llvm::Value* defArg = fn->getArg(2);
+
+    // FNV-1a hash
+    llvm::Value* basis = llvm::ConstantInt::get(i64Ty, 14695981039346656037ULL);
+    llvm::Value* prime = llvm::ConstantInt::get(i64Ty, 1099511628211ULL);
+    llvm::Value* ff    = llvm::ConstantInt::get(i64Ty, 0xFF);
+    llvm::Value* h = basis;
+    for (int byte = 0; byte < 8; byte++) {
+        llvm::Value* shift = llvm::ConstantInt::get(i64Ty, byte * 8);
+        llvm::Value* b = builder->CreateAnd(builder->CreateLShr(keyArg, shift), ff);
+        h = builder->CreateMul(builder->CreateXor(h, b), prime, "fnv");
+    }
+    llvm::Value* hashVal = builder->CreateOr(h, llvm::ConstantInt::get(i64Ty, 2), "hash");
+
+    llvm::Value* cap = builder->CreateAlignedLoad(i64Ty, mapArg, llvm::MaybeAlign(8), "cap");
+    llvm::Value* mask = builder->CreateSub(cap, llvm::ConstantInt::get(i64Ty, 1), "mask");
+    llvm::Value* startSlot = builder->CreateAnd(hashVal, mask, "startslot");
+    builder->CreateBr(probeBB);
+
+    // Probe loop
+    builder->SetInsertPoint(probeBB);
+    llvm::PHINode* slot = builder->CreatePHI(i64Ty, 2, "slot");
+    slot->addIncoming(startSlot, entryBB);
+
+    llvm::Value* three = llvm::ConstantInt::get(i64Ty, 3);
+    llvm::Value* entryOff = builder->CreateAdd(
+        builder->CreateMul(slot, three), llvm::ConstantInt::get(i64Ty, 2), "entryoff");
+    llvm::Value* hashPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, entryOff, "hashptr");
+    llvm::Value* slotHash = builder->CreateAlignedLoad(i64Ty, hashPtr, llvm::MaybeAlign(8), "slothash");
+    // Empty => not found
+    llvm::Value* isEmpty = builder->CreateICmpEQ(slotHash, llvm::ConstantInt::get(i64Ty, 0), "isempty");
+    builder->CreateCondBr(isEmpty, notfoundBB, checkBB);
+
+    // Check: tombstone or occupied?
+    builder->SetInsertPoint(checkBB);
+    llvm::Value* isTomb = builder->CreateICmpEQ(slotHash, llvm::ConstantInt::get(i64Ty, 1), "istomb");
+    // If tombstone, skip to next; otherwise check key
+    auto* checkKeyBB = llvm::BasicBlock::Create(*context, "checkkey", fn);
+    builder->CreateCondBr(isTomb, nextBB, checkKeyBB);
+
+    builder->SetInsertPoint(checkKeyBB);
+    llvm::Value* keyOff = builder->CreateAdd(entryOff, llvm::ConstantInt::get(i64Ty, 1), "keyoff");
+    llvm::Value* eKeyPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, keyOff, "ekeyptr");
+    llvm::Value* eKey = builder->CreateAlignedLoad(i64Ty, eKeyPtr, llvm::MaybeAlign(8), "ekey");
+    llvm::Value* keyMatch = builder->CreateICmpEQ(eKey, keyArg, "keymatch");
+    builder->CreateCondBr(keyMatch, foundBB, nextBB);
+
+    // Found: load value
+    builder->SetInsertPoint(foundBB);
+    llvm::Value* valOff = builder->CreateAdd(entryOff, llvm::ConstantInt::get(i64Ty, 2), "valoff");
+    llvm::Value* eValPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, valOff, "evalptr");
+    llvm::Value* val = builder->CreateAlignedLoad(i64Ty, eValPtr, llvm::MaybeAlign(8), "val");
+    builder->CreateRet(val);
+
+    // Next: advance slot
+    builder->SetInsertPoint(nextBB);
+    llvm::Value* nextSlot = builder->CreateAnd(
+        builder->CreateAdd(slot, llvm::ConstantInt::get(i64Ty, 1)),
+        mask, "nextslot");
+    slot->addIncoming(nextSlot, nextBB);
+    // Also need incoming from checkBB (tombstone path) — wait, nextBB already has
+    // incoming from checkBB and checkKeyBB. Let me fix: the PHI in probeBB needs
+    // incoming from nextBB only (since all paths through check/checkKey funnel to nextBB)
+    builder->CreateBr(probeBB);
+
+    // Not found: return default
+    builder->SetInsertPoint(notfoundBB);
+    builder->CreateRet(defArg);
+
+    builder->restoreIP(savedIP);
+    return fn;
+}
+
+// __omsc_hmap_has(map: ptr, key: i64) -> i64 (0 or 1)
+llvm::Function* CodeGenerator::getOrEmitHashMapHas() {
+    if (auto* fn = module->getFunction("__omsc_hmap_has"))
+        return fn;
+
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* i64Ty = getDefaultType();
+    auto* fnTy = llvm::FunctionType::get(i64Ty, {ptrTy, i64Ty}, false);
+    auto* fn = llvm::Function::Create(fnTy, llvm::Function::InternalLinkage, "__omsc_hmap_has", module.get());
+    setHashMapFnAttrs(fn);
+    fn->getArg(0)->setName("map");
+    fn->getArg(1)->setName("key");
+
+    auto savedIP = builder->saveIP();
+
+    auto* entryBB    = llvm::BasicBlock::Create(*context, "entry", fn);
+    auto* probeBB    = llvm::BasicBlock::Create(*context, "probe", fn);
+    auto* checkBB    = llvm::BasicBlock::Create(*context, "check", fn);
+    auto* checkKeyBB = llvm::BasicBlock::Create(*context, "checkkey", fn);
+    auto* foundBB    = llvm::BasicBlock::Create(*context, "found", fn);
+    auto* nextBB     = llvm::BasicBlock::Create(*context, "next", fn);
+    auto* notfoundBB = llvm::BasicBlock::Create(*context, "notfound", fn);
+
+    builder->SetInsertPoint(entryBB);
+    llvm::Value* mapArg = fn->getArg(0);
+    llvm::Value* keyArg = fn->getArg(1);
+
+    // FNV-1a hash
+    llvm::Value* basis = llvm::ConstantInt::get(i64Ty, 14695981039346656037ULL);
+    llvm::Value* prime = llvm::ConstantInt::get(i64Ty, 1099511628211ULL);
+    llvm::Value* ff    = llvm::ConstantInt::get(i64Ty, 0xFF);
+    llvm::Value* h = basis;
+    for (int byte = 0; byte < 8; byte++) {
+        llvm::Value* shift = llvm::ConstantInt::get(i64Ty, byte * 8);
+        llvm::Value* b = builder->CreateAnd(builder->CreateLShr(keyArg, shift), ff);
+        h = builder->CreateMul(builder->CreateXor(h, b), prime, "fnv");
+    }
+    llvm::Value* hashVal = builder->CreateOr(h, llvm::ConstantInt::get(i64Ty, 2), "hash");
+
+    llvm::Value* cap = builder->CreateAlignedLoad(i64Ty, mapArg, llvm::MaybeAlign(8), "cap");
+    llvm::Value* mask = builder->CreateSub(cap, llvm::ConstantInt::get(i64Ty, 1), "mask");
+    llvm::Value* startSlot = builder->CreateAnd(hashVal, mask, "startslot");
+    builder->CreateBr(probeBB);
+
+    builder->SetInsertPoint(probeBB);
+    llvm::PHINode* slot = builder->CreatePHI(i64Ty, 2, "slot");
+    slot->addIncoming(startSlot, entryBB);
+
+    llvm::Value* three = llvm::ConstantInt::get(i64Ty, 3);
+    llvm::Value* entryOff = builder->CreateAdd(
+        builder->CreateMul(slot, three), llvm::ConstantInt::get(i64Ty, 2), "entryoff");
+    llvm::Value* hashPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, entryOff, "hashptr");
+    llvm::Value* slotHash = builder->CreateAlignedLoad(i64Ty, hashPtr, llvm::MaybeAlign(8), "slothash");
+    llvm::Value* isEmpty = builder->CreateICmpEQ(slotHash, llvm::ConstantInt::get(i64Ty, 0), "isempty");
+    builder->CreateCondBr(isEmpty, notfoundBB, checkBB);
+
+    builder->SetInsertPoint(checkBB);
+    llvm::Value* isTomb = builder->CreateICmpEQ(slotHash, llvm::ConstantInt::get(i64Ty, 1), "istomb");
+    builder->CreateCondBr(isTomb, nextBB, checkKeyBB);
+
+    builder->SetInsertPoint(checkKeyBB);
+    llvm::Value* keyOff = builder->CreateAdd(entryOff, llvm::ConstantInt::get(i64Ty, 1), "keyoff");
+    llvm::Value* eKeyPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, keyOff, "ekeyptr");
+    llvm::Value* eKey = builder->CreateAlignedLoad(i64Ty, eKeyPtr, llvm::MaybeAlign(8), "ekey");
+    llvm::Value* keyMatch = builder->CreateICmpEQ(eKey, keyArg, "keymatch");
+    builder->CreateCondBr(keyMatch, foundBB, nextBB);
+
+    builder->SetInsertPoint(foundBB);
+    builder->CreateRet(llvm::ConstantInt::get(i64Ty, 1));
+
+    builder->SetInsertPoint(nextBB);
+    llvm::Value* nextSlot = builder->CreateAnd(
+        builder->CreateAdd(slot, llvm::ConstantInt::get(i64Ty, 1)),
+        mask, "nextslot");
+    slot->addIncoming(nextSlot, nextBB);
+    builder->CreateBr(probeBB);
+
+    builder->SetInsertPoint(notfoundBB);
+    builder->CreateRet(llvm::ConstantInt::get(i64Ty, 0));
+
+    builder->restoreIP(savedIP);
+    return fn;
+}
+
+// __omsc_hmap_remove(map: ptr, key: i64) -> ptr
+//   Mark the entry as tombstone (hash=1).  Returns the same map pointer.
+llvm::Function* CodeGenerator::getOrEmitHashMapRemove() {
+    if (auto* fn = module->getFunction("__omsc_hmap_remove"))
+        return fn;
+
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* i64Ty = getDefaultType();
+    auto* fnTy = llvm::FunctionType::get(ptrTy, {ptrTy, i64Ty}, false);
+    auto* fn = llvm::Function::Create(fnTy, llvm::Function::InternalLinkage, "__omsc_hmap_remove", module.get());
+    setHashMapFnAttrs(fn);
+    fn->getArg(0)->setName("map");
+    fn->getArg(1)->setName("key");
+
+    auto savedIP = builder->saveIP();
+
+    auto* entryBB    = llvm::BasicBlock::Create(*context, "entry", fn);
+    auto* probeBB    = llvm::BasicBlock::Create(*context, "probe", fn);
+    auto* checkBB    = llvm::BasicBlock::Create(*context, "check", fn);
+    auto* checkKeyBB = llvm::BasicBlock::Create(*context, "checkkey", fn);
+    auto* foundBB    = llvm::BasicBlock::Create(*context, "found", fn);
+    auto* nextBB     = llvm::BasicBlock::Create(*context, "next", fn);
+    auto* doneBB     = llvm::BasicBlock::Create(*context, "done", fn);
+
+    builder->SetInsertPoint(entryBB);
+    llvm::Value* mapArg = fn->getArg(0);
+    llvm::Value* keyArg = fn->getArg(1);
+
+    // FNV-1a hash
+    llvm::Value* basis = llvm::ConstantInt::get(i64Ty, 14695981039346656037ULL);
+    llvm::Value* prime = llvm::ConstantInt::get(i64Ty, 1099511628211ULL);
+    llvm::Value* ff    = llvm::ConstantInt::get(i64Ty, 0xFF);
+    llvm::Value* h = basis;
+    for (int byte = 0; byte < 8; byte++) {
+        llvm::Value* shift = llvm::ConstantInt::get(i64Ty, byte * 8);
+        llvm::Value* b = builder->CreateAnd(builder->CreateLShr(keyArg, shift), ff);
+        h = builder->CreateMul(builder->CreateXor(h, b), prime, "fnv");
+    }
+    llvm::Value* hashVal = builder->CreateOr(h, llvm::ConstantInt::get(i64Ty, 2), "hash");
+
+    llvm::Value* cap = builder->CreateAlignedLoad(i64Ty, mapArg, llvm::MaybeAlign(8), "cap");
+    llvm::Value* mask = builder->CreateSub(cap, llvm::ConstantInt::get(i64Ty, 1), "mask");
+    llvm::Value* startSlot = builder->CreateAnd(hashVal, mask, "startslot");
+    builder->CreateBr(probeBB);
+
+    builder->SetInsertPoint(probeBB);
+    llvm::PHINode* slot = builder->CreatePHI(i64Ty, 2, "slot");
+    slot->addIncoming(startSlot, entryBB);
+
+    llvm::Value* three = llvm::ConstantInt::get(i64Ty, 3);
+    llvm::Value* entryOff = builder->CreateAdd(
+        builder->CreateMul(slot, three), llvm::ConstantInt::get(i64Ty, 2), "entryoff");
+    llvm::Value* hashPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, entryOff, "hashptr");
+    llvm::Value* slotHash = builder->CreateAlignedLoad(i64Ty, hashPtr, llvm::MaybeAlign(8), "slothash");
+    llvm::Value* isEmpty = builder->CreateICmpEQ(slotHash, llvm::ConstantInt::get(i64Ty, 0), "isempty");
+    builder->CreateCondBr(isEmpty, doneBB, checkBB);
+
+    builder->SetInsertPoint(checkBB);
+    llvm::Value* isTomb = builder->CreateICmpEQ(slotHash, llvm::ConstantInt::get(i64Ty, 1), "istomb");
+    builder->CreateCondBr(isTomb, nextBB, checkKeyBB);
+
+    builder->SetInsertPoint(checkKeyBB);
+    llvm::Value* keyOff = builder->CreateAdd(entryOff, llvm::ConstantInt::get(i64Ty, 1), "keyoff");
+    llvm::Value* eKeyPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, keyOff, "ekeyptr");
+    llvm::Value* eKey = builder->CreateAlignedLoad(i64Ty, eKeyPtr, llvm::MaybeAlign(8), "ekey");
+    llvm::Value* keyMatch = builder->CreateICmpEQ(eKey, keyArg, "keymatch");
+    builder->CreateCondBr(keyMatch, foundBB, nextBB);
+
+    // Found: mark as tombstone, decrement size
+    builder->SetInsertPoint(foundBB);
+    builder->CreateAlignedStore(llvm::ConstantInt::get(i64Ty, 1), hashPtr, llvm::MaybeAlign(8));
+    llvm::Value* sizePtr = builder->CreateInBoundsGEP(i64Ty, mapArg, llvm::ConstantInt::get(i64Ty, 1));
+    llvm::Value* size = builder->CreateAlignedLoad(i64Ty, sizePtr, llvm::MaybeAlign(8), "size");
+    llvm::Value* newSize = builder->CreateSub(size, llvm::ConstantInt::get(i64Ty, 1), "newsize");
+    builder->CreateAlignedStore(newSize, sizePtr, llvm::MaybeAlign(8));
+    builder->CreateBr(doneBB);
+
+    builder->SetInsertPoint(nextBB);
+    llvm::Value* nextSlot = builder->CreateAnd(
+        builder->CreateAdd(slot, llvm::ConstantInt::get(i64Ty, 1)),
+        mask, "nextslot");
+    slot->addIncoming(nextSlot, nextBB);
+    builder->CreateBr(probeBB);
+
+    // Done: return same map pointer (mutated in place)
+    builder->SetInsertPoint(doneBB);
+    builder->CreateRet(mapArg);
+
+    builder->restoreIP(savedIP);
+    return fn;
+}
+
+// __omsc_hmap_keys(map: ptr) -> ptr (array)
+llvm::Function* CodeGenerator::getOrEmitHashMapKeys() {
+    if (auto* fn = module->getFunction("__omsc_hmap_keys"))
+        return fn;
+
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* i64Ty = getDefaultType();
+    auto* fnTy = llvm::FunctionType::get(ptrTy, {ptrTy}, false);
+    auto* fn = llvm::Function::Create(fnTy, llvm::Function::InternalLinkage, "__omsc_hmap_keys", module.get());
+    setHashMapFnAttrs(fn);
+    fn->getArg(0)->setName("map");
+
+    auto savedIP = builder->saveIP();
+    auto* entryBB = llvm::BasicBlock::Create(*context, "entry", fn);
+    auto* loopBB  = llvm::BasicBlock::Create(*context, "loop", fn);
+    auto* bodyBB  = llvm::BasicBlock::Create(*context, "body", fn);
+    auto* storeBB = llvm::BasicBlock::Create(*context, "store", fn);
+    auto* nextBB  = llvm::BasicBlock::Create(*context, "next", fn);
+    auto* doneBB  = llvm::BasicBlock::Create(*context, "done", fn);
+
+    builder->SetInsertPoint(entryBB);
+    llvm::Value* mapArg = fn->getArg(0);
+    llvm::Value* cap = builder->CreateAlignedLoad(i64Ty, mapArg, llvm::MaybeAlign(8), "cap");
+    llvm::Value* sizePtr = builder->CreateInBoundsGEP(i64Ty, mapArg, llvm::ConstantInt::get(i64Ty, 1));
+    llvm::Value* size = builder->CreateAlignedLoad(i64Ty, sizePtr, llvm::MaybeAlign(8), "size");
+
+    // Allocate output array: (size + 1) * 8
+    llvm::Value* eight = llvm::ConstantInt::get(i64Ty, 8);
+    llvm::Value* arrSlots = builder->CreateAdd(size, llvm::ConstantInt::get(i64Ty, 1), "arrslots");
+    llvm::Value* arrBytes = builder->CreateMul(arrSlots, eight, "arrbytes");
+    llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {arrBytes}, "buf");
+    builder->CreateAlignedStore(size, buf, llvm::MaybeAlign(8));
+    builder->CreateBr(loopBB);
+
+    // Loop over hash table slots
+    builder->SetInsertPoint(loopBB);
+    llvm::PHINode* i = builder->CreatePHI(i64Ty, 2, "i");
+    i->addIncoming(llvm::ConstantInt::get(i64Ty, 0), entryBB);
+    llvm::PHINode* writeIdx = builder->CreatePHI(i64Ty, 2, "widx");
+    writeIdx->addIncoming(llvm::ConstantInt::get(i64Ty, 0), entryBB);
+    llvm::Value* cond = builder->CreateICmpULT(i, cap, "cond");
+    builder->CreateCondBr(cond, bodyBB, doneBB);
+
+    builder->SetInsertPoint(bodyBB);
+    llvm::Value* three = llvm::ConstantInt::get(i64Ty, 3);
+    llvm::Value* off = builder->CreateAdd(
+        builder->CreateMul(i, three), llvm::ConstantInt::get(i64Ty, 2), "off");
+    llvm::Value* hashPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, off, "hashptr");
+    llvm::Value* slotHash = builder->CreateAlignedLoad(i64Ty, hashPtr, llvm::MaybeAlign(8), "slothash");
+    llvm::Value* isActive = builder->CreateICmpUGE(slotHash, llvm::ConstantInt::get(i64Ty, 2), "isactive");
+    builder->CreateCondBr(isActive, storeBB, nextBB);
+
+    builder->SetInsertPoint(storeBB);
+    llvm::Value* keyOff = builder->CreateAdd(off, llvm::ConstantInt::get(i64Ty, 1), "keyoff");
+    llvm::Value* keyPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, keyOff, "keyptr");
+    llvm::Value* key = builder->CreateAlignedLoad(i64Ty, keyPtr, llvm::MaybeAlign(8), "key");
+    llvm::Value* arrOff = builder->CreateAdd(writeIdx, llvm::ConstantInt::get(i64Ty, 1), "arroff");
+    llvm::Value* arrPtr = builder->CreateInBoundsGEP(i64Ty, buf, arrOff, "arrptr");
+    builder->CreateAlignedStore(key, arrPtr, llvm::MaybeAlign(8));
+    llvm::Value* newWIdx = builder->CreateAdd(writeIdx, llvm::ConstantInt::get(i64Ty, 1), "newidx");
+    builder->CreateBr(nextBB);
+
+    builder->SetInsertPoint(nextBB);
+    llvm::PHINode* wPhi = builder->CreatePHI(i64Ty, 2, "wphi");
+    wPhi->addIncoming(writeIdx, bodyBB);   // not active: unchanged
+    wPhi->addIncoming(newWIdx, storeBB);   // active: incremented
+    llvm::Value* iNext = builder->CreateAdd(i, llvm::ConstantInt::get(i64Ty, 1), "inext");
+    i->addIncoming(iNext, nextBB);
+    writeIdx->addIncoming(wPhi, nextBB);
+    builder->CreateBr(loopBB);
+
+    builder->SetInsertPoint(doneBB);
+    builder->CreateRet(buf);
+
+    builder->restoreIP(savedIP);
+    return fn;
+}
+
+// __omsc_hmap_values(map: ptr) -> ptr (array)
+llvm::Function* CodeGenerator::getOrEmitHashMapValues() {
+    if (auto* fn = module->getFunction("__omsc_hmap_values"))
+        return fn;
+
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* i64Ty = getDefaultType();
+    auto* fnTy = llvm::FunctionType::get(ptrTy, {ptrTy}, false);
+    auto* fn = llvm::Function::Create(fnTy, llvm::Function::InternalLinkage, "__omsc_hmap_values", module.get());
+    setHashMapFnAttrs(fn);
+    fn->getArg(0)->setName("map");
+
+    auto savedIP = builder->saveIP();
+    auto* entryBB = llvm::BasicBlock::Create(*context, "entry", fn);
+    auto* loopBB  = llvm::BasicBlock::Create(*context, "loop", fn);
+    auto* bodyBB  = llvm::BasicBlock::Create(*context, "body", fn);
+    auto* storeBB = llvm::BasicBlock::Create(*context, "store", fn);
+    auto* nextBB  = llvm::BasicBlock::Create(*context, "next", fn);
+    auto* doneBB  = llvm::BasicBlock::Create(*context, "done", fn);
+
+    builder->SetInsertPoint(entryBB);
+    llvm::Value* mapArg = fn->getArg(0);
+    llvm::Value* cap = builder->CreateAlignedLoad(i64Ty, mapArg, llvm::MaybeAlign(8), "cap");
+    llvm::Value* sizePtr = builder->CreateInBoundsGEP(i64Ty, mapArg, llvm::ConstantInt::get(i64Ty, 1));
+    llvm::Value* size = builder->CreateAlignedLoad(i64Ty, sizePtr, llvm::MaybeAlign(8), "size");
+
+    llvm::Value* eight = llvm::ConstantInt::get(i64Ty, 8);
+    llvm::Value* arrSlots = builder->CreateAdd(size, llvm::ConstantInt::get(i64Ty, 1), "arrslots");
+    llvm::Value* arrBytes = builder->CreateMul(arrSlots, eight, "arrbytes");
+    llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {arrBytes}, "buf");
+    builder->CreateAlignedStore(size, buf, llvm::MaybeAlign(8));
+    builder->CreateBr(loopBB);
+
+    builder->SetInsertPoint(loopBB);
+    llvm::PHINode* i = builder->CreatePHI(i64Ty, 2, "i");
+    i->addIncoming(llvm::ConstantInt::get(i64Ty, 0), entryBB);
+    llvm::PHINode* writeIdx = builder->CreatePHI(i64Ty, 2, "widx");
+    writeIdx->addIncoming(llvm::ConstantInt::get(i64Ty, 0), entryBB);
+    llvm::Value* cond = builder->CreateICmpULT(i, cap, "cond");
+    builder->CreateCondBr(cond, bodyBB, doneBB);
+
+    builder->SetInsertPoint(bodyBB);
+    llvm::Value* three = llvm::ConstantInt::get(i64Ty, 3);
+    llvm::Value* off = builder->CreateAdd(
+        builder->CreateMul(i, three), llvm::ConstantInt::get(i64Ty, 2), "off");
+    llvm::Value* hashPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, off, "hashptr");
+    llvm::Value* slotHash = builder->CreateAlignedLoad(i64Ty, hashPtr, llvm::MaybeAlign(8), "slothash");
+    llvm::Value* isActive = builder->CreateICmpUGE(slotHash, llvm::ConstantInt::get(i64Ty, 2), "isactive");
+    builder->CreateCondBr(isActive, storeBB, nextBB);
+
+    builder->SetInsertPoint(storeBB);
+    llvm::Value* valOff = builder->CreateAdd(off, llvm::ConstantInt::get(i64Ty, 2), "valoff");
+    llvm::Value* valPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, valOff, "valptr");
+    llvm::Value* val = builder->CreateAlignedLoad(i64Ty, valPtr, llvm::MaybeAlign(8), "val");
+    llvm::Value* arrOff = builder->CreateAdd(writeIdx, llvm::ConstantInt::get(i64Ty, 1), "arroff");
+    llvm::Value* arrPtr = builder->CreateInBoundsGEP(i64Ty, buf, arrOff, "arrptr");
+    builder->CreateAlignedStore(val, arrPtr, llvm::MaybeAlign(8));
+    llvm::Value* newWIdx = builder->CreateAdd(writeIdx, llvm::ConstantInt::get(i64Ty, 1), "newidx");
+    builder->CreateBr(nextBB);
+
+    builder->SetInsertPoint(nextBB);
+    llvm::PHINode* wPhi = builder->CreatePHI(i64Ty, 2, "wphi");
+    wPhi->addIncoming(writeIdx, bodyBB);
+    wPhi->addIncoming(newWIdx, storeBB);
+    llvm::Value* iNext = builder->CreateAdd(i, llvm::ConstantInt::get(i64Ty, 1), "inext");
+    i->addIncoming(iNext, nextBB);
+    writeIdx->addIncoming(wPhi, nextBB);
+    builder->CreateBr(loopBB);
+
+    builder->SetInsertPoint(doneBB);
+    builder->CreateRet(buf);
+
+    builder->restoreIP(savedIP);
+    return fn;
+}
+
+// __omsc_hmap_size(map: ptr) -> i64
+llvm::Function* CodeGenerator::getOrEmitHashMapSize() {
+    if (auto* fn = module->getFunction("__omsc_hmap_size"))
+        return fn;
+
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* i64Ty = getDefaultType();
+    auto* fnTy = llvm::FunctionType::get(i64Ty, {ptrTy}, false);
+    auto* fn = llvm::Function::Create(fnTy, llvm::Function::InternalLinkage, "__omsc_hmap_size", module.get());
+    setHashMapFnAttrs(fn);
+    fn->getArg(0)->setName("map");
+
+    auto savedIP = builder->saveIP();
+    auto* entryBB = llvm::BasicBlock::Create(*context, "entry", fn);
+    builder->SetInsertPoint(entryBB);
+    llvm::Value* sizePtr = builder->CreateInBoundsGEP(i64Ty, fn->getArg(0),
+        llvm::ConstantInt::get(i64Ty, 1), "sizeptr");
+    llvm::Value* size = builder->CreateAlignedLoad(i64Ty, sizePtr, llvm::MaybeAlign(8), "size");
+    builder->CreateRet(size);
+
+    builder->restoreIP(savedIP);
+    return fn;
+}
+
+// ---------------------------------------------------------------------------
 // String type inference helpers
 // ---------------------------------------------------------------------------
 
