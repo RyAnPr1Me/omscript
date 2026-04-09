@@ -709,6 +709,39 @@ class CodeGenerator {
     llvm::Value* generateIncDec(Expression* operandExpr, const std::string& op, bool isPostfix,
                                 const ASTNode* errorNode);
 
+    /// Shared bounds check elision analysis.
+    ///
+    /// Determines whether an array index operation arr[index] can provably
+    /// skip the runtime bounds check.  Consolidates all elision patterns:
+    ///   A) for(i in 0...len(arr)) { arr[i] }
+    ///   B) array_fill(n,...) + for(i in 0...n) { arr[i] }
+    ///   C) Known compile-time array sizes with constant loop bounds
+    ///   D) SSA value equality (endBound == lenVal)
+    ///   E) Compile-time constant comparison (endConst <= lenConst)
+    ///   F) Arithmetic patterns: arr[i + K] and arr[i - K]
+    ///
+    /// @param arrayExpr  The array sub-expression (for identifier checks)
+    /// @param indexExpr  The index sub-expression (for iterator/arithmetic checks)
+    /// @param basePtr    The LLVM pointer to the array base (for length loads)
+    /// @param isStr      True if the value is a string (skips array-specific checks)
+    /// @param prefix     Name prefix for emitted IR instructions (e.g. "idx", "idxa", "incdec")
+    /// @return true if the bounds check can be safely elided
+    bool canElideBoundsCheck(Expression* arrayExpr, Expression* indexExpr,
+                             llvm::Value* basePtr, bool isStr,
+                             const char* prefix);
+
+    /// Emit a runtime bounds check for an array/string index operation.
+    /// Generates the compare + branch + abort pattern, placing the insertion
+    /// point at the success block on return.
+    ///
+    /// @param idxVal   The index value to check
+    /// @param basePtr  The base pointer to load length from
+    /// @param isStr    True for string access (uses strlen instead of header load)
+    /// @param isBorrowed True if the array is borrowed (length marked invariant)
+    /// @param prefix   Name prefix for emitted IR instructions
+    void emitBoundsCheck(llvm::Value* idxVal, llvm::Value* basePtr,
+                         bool isStr, bool isBorrowed, const char* prefix);
+
     // Optimization methods
     void runOptimizationPasses();
     void optimizeOptMaxFunctions();

@@ -46,6 +46,258 @@ inline int log2IfPowerOf2(int64_t val) {
 
 namespace omscript {
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Shared bounds check elision and runtime check emission
+// ═══════════════════════════════════════════════════════════════════════════
+
+bool CodeGenerator::canElideBoundsCheck(Expression* arrayExpr,
+                                         Expression* indexExpr,
+                                         llvm::Value* basePtr,
+                                         bool isStr,
+                                         const char* prefix) {
+    // Always elide in OPTMAX functions or @hot functions at O2+.
+    if (inOptMaxFunction)
+        return true;
+    if (currentFuncHintHot_ && !isStr && optimizationLevel >= OptimizationLevel::O2)
+        return true;
+    // Skip array-specific elision for strings or below O1.
+    if (isStr || optimizationLevel < OptimizationLevel::O1)
+        return false;
+
+    // ── Known-array-size optimization ────────────────────────────────
+    // When the array was created via array_fill(N, val) with constant N,
+    // and the loop iterator is bounded by a constant <= N, prove safety
+    // without loading the length header.
+    if (arrayExpr->type == ASTNodeType::IDENTIFIER_EXPR) {
+        auto* arrIdent = static_cast<IdentifierExpr*>(arrayExpr);
+        auto sizeIt = knownArraySizes_.find(arrIdent->name);
+        if (sizeIt != knownArraySizes_.end()) {
+            if (indexExpr->type == ASTNodeType::IDENTIFIER_EXPR) {
+                auto* idxIdent2 = static_cast<IdentifierExpr*>(indexExpr);
+                if (safeIndexVars_.count(idxIdent2->name)) {
+                    auto endIt = loopIterEndBound_.find(idxIdent2->name);
+                    if (endIt != loopIterEndBound_.end()) {
+                        auto* endCI = llvm::dyn_cast<llvm::ConstantInt>(endIt->second);
+                        auto* sizeCI = llvm::dyn_cast<llvm::ConstantInt>(sizeIt->second);
+                        if (endCI && sizeCI &&
+                            endCI->getSExtValue() <= sizeCI->getSExtValue()) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Safe loop iterator checks ────────────────────────────────────
+    IdentifierExpr* idxIdent = (indexExpr->type == ASTNodeType::IDENTIFIER_EXPR)
+        ? static_cast<IdentifierExpr*>(indexExpr) : nullptr;
+    if (idxIdent && safeIndexVars_.count(idxIdent->name)) {
+        // ── Elision A: for(i in 0...len(arr)) { arr[i] } ────────────
+        if (arrayExpr->type == ASTNodeType::IDENTIFIER_EXPR) {
+            auto* arrId = static_cast<IdentifierExpr*>(arrayExpr);
+            auto endArrIt = loopIterEndArray_.find(idxIdent->name);
+            if (endArrIt != loopIterEndArray_.end() && endArrIt->second == arrId->name) {
+                return true;
+            }
+        }
+
+        // ── Elision B: array_fill(n,...) + for(i in 0...n) ──────────
+        if (arrayExpr->type == ASTNodeType::IDENTIFIER_EXPR) {
+            auto* arrId = static_cast<IdentifierExpr*>(arrayExpr);
+            auto sizeAllocaIt = knownArraySizeAllocas_.find(arrId->name);
+            if (sizeAllocaIt != knownArraySizeAllocas_.end()) {
+                auto endIt = loopIterEndBound_.find(idxIdent->name);
+                if (endIt != loopIterEndBound_.end()) {
+                    auto* endLoad = llvm::dyn_cast<llvm::LoadInst>(endIt->second);
+                    if (endLoad && endLoad->getPointerOperand() == sizeAllocaIt->second)
+                        return true;
+                    if (endIt->second == sizeAllocaIt->second)
+                        return true;
+                }
+            }
+        }
+
+        // ── Elision C/D/E: SSA or constant comparison with array length ─
+        auto it = loopIterEndBound_.find(idxIdent->name);
+        if (it != loopIterEndBound_.end()) {
+            llvm::Value* endBound = it->second;
+            std::string lenName = std::string(prefix) + ".len.elim";
+            auto* lenLoadElim = builder->CreateAlignedLoad(
+                getDefaultType(), basePtr, llvm::MaybeAlign(8), lenName.c_str());
+            lenLoadElim->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+            lenLoadElim->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+            llvm::Value* lenVal = lenLoadElim;
+
+            // Case D: same SSA value
+            if (endBound == lenVal)
+                return true;
+
+            // Case E: both compile-time constants
+            if (auto* endCI = llvm::dyn_cast<llvm::ConstantInt>(endBound)) {
+                if (auto* lenCI = llvm::dyn_cast<llvm::ConstantInt>(lenVal)) {
+                    if (endCI->getSExtValue() <= lenCI->getSExtValue())
+                        return true;
+                }
+            }
+
+            // Fallback: emit llvm.assume(endBound <= len) for CVP
+            if (optimizationLevel >= OptimizationLevel::O2) {
+                std::string cmpName = std::string(prefix) + ".endlelen";
+                llvm::Value* endLELen = builder->CreateICmpSLE(
+                    endBound, lenVal, cmpName.c_str());
+                llvm::Function* assumeFn = OMSC_GET_INTRINSIC(
+                    module.get(), llvm::Intrinsic::assume, {});
+                builder->CreateCall(assumeFn, {endLELen});
+            }
+        }
+    }
+
+    // ── Enhanced elision F: arithmetic index arr[i ± K] ──────────────
+    if (!idxIdent && indexExpr->type == ASTNodeType::BINARY_EXPR) {
+        auto* idxBinary = static_cast<BinaryExpr*>(indexExpr);
+        if (idxBinary->op == "+" || idxBinary->op == "-") {
+            IdentifierExpr* iterIdent = (idxBinary->left->type == ASTNodeType::IDENTIFIER_EXPR)
+                ? static_cast<IdentifierExpr*>(idxBinary->left.get()) : nullptr;
+            LiteralExpr* offsetLit = (idxBinary->right->type == ASTNodeType::LITERAL_EXPR)
+                ? static_cast<LiteralExpr*>(idxBinary->right.get()) : nullptr;
+            if (iterIdent && offsetLit && safeIndexVars_.count(iterIdent->name)) {
+                auto endIt = loopIterEndBound_.find(iterIdent->name);
+                if (endIt != loopIterEndBound_.end()
+                    && offsetLit->literalType == LiteralExpr::LiteralType::INTEGER) {
+                    int64_t offset = offsetLit->intValue;
+                    int64_t effectiveOffset = (idxBinary->op == "-") ? -offset : offset;
+
+                    // ── Positive offset: arr[i + C] ─────────────────
+                    if (effectiveOffset >= 0) {
+                        std::string arithLenName = std::string(prefix) + ".len.arith";
+                        auto* arithLenLoad = builder->CreateAlignedLoad(
+                            getDefaultType(), basePtr, llvm::MaybeAlign(8), arithLenName.c_str());
+                        arithLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+                        arithLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+
+                        auto* endCI = llvm::dyn_cast<llvm::ConstantInt>(endIt->second);
+                        if (endCI) {
+                            if (auto* lenCI = llvm::dyn_cast<llvm::ConstantInt>(endIt->second)) {
+                                if (endCI->getSExtValue() + effectiveOffset <= lenCI->getSExtValue())
+                                    return true;
+                            }
+                        }
+                        // Emit assume hint for LLVM's CVP pass
+                        if (optimizationLevel >= OptimizationLevel::O2) {
+                            llvm::Value* adjustedEnd = builder->CreateAdd(
+                                endIt->second,
+                                llvm::ConstantInt::get(getDefaultType(), effectiveOffset),
+                                std::string(prefix) + ".adjend");
+                            llvm::Value* cmp = builder->CreateICmpSLE(
+                                adjustedEnd, arithLenLoad,
+                                std::string(prefix) + ".arith.safe");
+                            llvm::Function* assumeFn = OMSC_GET_INTRINSIC(
+                                module.get(), llvm::Intrinsic::assume, {});
+                            builder->CreateCall(assumeFn, {cmp});
+                        }
+                    }
+
+                    // ── Negative offset: arr[i - K] ─────────────────
+                    if (effectiveOffset < 0) {
+                        int64_t absOffset = -effectiveOffset;
+                        auto startIt = loopIterStartBound_.find(iterIdent->name);
+                        if (startIt != loopIterStartBound_.end()) {
+                            auto* startCI = llvm::dyn_cast<llvm::ConstantInt>(startIt->second);
+                            if (startCI && startCI->getSExtValue() >= absOffset)
+                                return true;
+
+                            // Fallback: emit assume hints
+                            if (optimizationLevel >= OptimizationLevel::O2) {
+                                std::string negLenName = std::string(prefix) + ".len.arith.neg";
+                                auto* negLenLoad = builder->CreateAlignedLoad(
+                                    getDefaultType(), basePtr, llvm::MaybeAlign(8), negLenName.c_str());
+                                negLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+                                negLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                                llvm::Value* adjustedStart = builder->CreateSub(
+                                    startIt->second,
+                                    llvm::ConstantInt::get(getDefaultType(), absOffset),
+                                    std::string(prefix) + ".adjstart");
+                                llvm::Value* geZero = builder->CreateICmpSGE(
+                                    adjustedStart,
+                                    llvm::ConstantInt::get(getDefaultType(), 0),
+                                    std::string(prefix) + ".negoff.ge0");
+                                llvm::Value* adjustedEnd = builder->CreateSub(
+                                    endIt->second,
+                                    llvm::ConstantInt::get(getDefaultType(), absOffset),
+                                    std::string(prefix) + ".adjend.neg");
+                                llvm::Value* leLen = builder->CreateICmpSLE(
+                                    adjustedEnd, negLenLoad,
+                                    std::string(prefix) + ".negoff.safe");
+                                llvm::Value* bothSafe = builder->CreateAnd(
+                                    geZero, leLen,
+                                    std::string(prefix) + ".negoff.both");
+                                llvm::Function* assumeFn = OMSC_GET_INTRINSIC(
+                                    module.get(), llvm::Intrinsic::assume, {});
+                                builder->CreateCall(assumeFn, {bothSafe});
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return false;
+}
+
+void CodeGenerator::emitBoundsCheck(llvm::Value* idxVal,
+                                     llvm::Value* basePtr,
+                                     bool isStr,
+                                     bool isBorrowed,
+                                     const char* prefix) {
+    llvm::Function* function = builder->GetInsertBlock()->getParent();
+    std::string okName = std::string(prefix) + ".ok";
+    std::string failName = std::string(prefix) + ".fail";
+    llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, okName.c_str(), function);
+    llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, failName.c_str(), function);
+
+    llvm::Value* lenVal;
+    if (isStr) {
+        std::string strlenName = std::string(prefix) + ".strlen";
+        lenVal = builder->CreateCall(getOrDeclareStrlen(), {basePtr}, strlenName.c_str());
+    } else {
+        std::string lenName = std::string(prefix) + ".len";
+        auto* lenLoad = builder->CreateAlignedLoad(
+            getDefaultType(), basePtr, llvm::MaybeAlign(8), lenName.c_str());
+        lenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+        lenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+        if (isBorrowed) {
+            lenLoad->setMetadata(llvm::LLVMContext::MD_invariant_load,
+                                 llvm::MDNode::get(*context, {}));
+        }
+        lenVal = lenLoad;
+    }
+
+    // Single unsigned compare: (unsigned)idx < len checks both non-negativity
+    // and upper bound simultaneously.
+    std::string validName = std::string(prefix) + ".valid";
+    llvm::Value* valid = builder->CreateICmpULT(idxVal, lenVal, validName.c_str());
+
+    // Bounds checks almost never fail — mark the success path hot.
+    llvm::MDNode* brWeights = llvm::MDBuilder(*context).createBranchWeights(1000000, 1);
+    builder->CreateCondBr(valid, okBB, failBB, brWeights);
+
+    // Out-of-bounds path: print error and abort
+    builder->SetInsertPoint(failBB);
+    llvm::Value* errMsg =
+        isStr ? builder->CreateGlobalString("Runtime error: string index out of bounds\n",
+                                            std::string(prefix) + "_str_oob_msg")
+              : builder->CreateGlobalString("Runtime error: array index out of bounds\n",
+                                            std::string(prefix) + "_arr_oob_msg");
+    builder->CreateCall(getPrintfFunction(), {errMsg});
+    builder->CreateCall(getOrDeclareAbort());
+    builder->CreateUnreachable();
+
+    // Success path
+    builder->SetInsertPoint(okBB);
+}
+
 llvm::Value* CodeGenerator::generateLiteral(LiteralExpr* expr) {
     if (expr->literalType == LiteralExpr::LiteralType::INTEGER) {
         return llvm::ConstantInt::get(*context, llvm::APInt(64, expr->intValue));
@@ -3691,90 +3943,13 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
         llvm::Value* arrPtr =
             arrVal->getType()->isPointerTy() ? arrVal : builder->CreateIntToPtr(arrVal, ptrTy, "incdec.arrptr");
 
-        // Bounds check — elided in OPTMAX functions where compile-time
-        // ownership analysis guarantees safety (zero-cost abstraction).
-        // Also elided in @hot functions at O2+ (user asserts performance-critical
-        // code with safe indices) and when the index is a provably-safe loop iterator.
-        bool boundsCheckElidedID = inOptMaxFunction
-            || (currentFuncHintHot_ && optimizationLevel >= OptimizationLevel::O2);
-
-        if (!boundsCheckElidedID && optimizationLevel >= OptimizationLevel::O1) {
-            if (indexExpr->index->type == ASTNodeType::IDENTIFIER_EXPR) {
-                auto* idxIdent = static_cast<IdentifierExpr*>(indexExpr->index.get());
-                if (safeIndexVars_.count(idxIdent->name)) {
-                    // Zero-cost elision A: for(i in 0...len(arr)) { arr[i]++ }
-                    if (!boundsCheckElidedID && indexExpr->array->type == ASTNodeType::IDENTIFIER_EXPR) {
-                        auto* arrId = static_cast<IdentifierExpr*>(indexExpr->array.get());
-                        auto endArrIt = loopIterEndArray_.find(idxIdent->name);
-                        if (endArrIt != loopIterEndArray_.end() && endArrIt->second == arrId->name) {
-                            boundsCheckElidedID = true;
-                        }
-                    }
-                    // Zero-cost elision B: array_fill(n,...) + for(i in 0...n)
-                    if (!boundsCheckElidedID && indexExpr->array->type == ASTNodeType::IDENTIFIER_EXPR) {
-                        auto* arrId = static_cast<IdentifierExpr*>(indexExpr->array.get());
-                        auto sizeAllocaIt = knownArraySizeAllocas_.find(arrId->name);
-                        if (sizeAllocaIt != knownArraySizeAllocas_.end()) {
-                            auto endIt = loopIterEndBound_.find(idxIdent->name);
-                            if (endIt != loopIterEndBound_.end()) {
-                                auto* endLoad = llvm::dyn_cast<llvm::LoadInst>(endIt->second);
-                                if (endLoad && endLoad->getPointerOperand() == sizeAllocaIt->second) {
-                                    boundsCheckElidedID = true;
-                                }
-                                if (!boundsCheckElidedID && endIt->second == sizeAllocaIt->second) {
-                                    boundsCheckElidedID = true;
-                                }
-                            }
-                        }
-                    }
-                    auto it = loopIterEndBound_.find(idxIdent->name);
-                    if (it != loopIterEndBound_.end()) {
-                        llvm::Value* endBound = it->second;
-                        auto* lenLoadE = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "incdec.len.elim");
-                        lenLoadE->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-                        lenLoadE->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
-                        llvm::Value* lenVal = lenLoadE;
-                        if (!boundsCheckElidedID && endBound == lenVal) {
-                            boundsCheckElidedID = true;
-                        }
-                        if (!boundsCheckElidedID) {
-                            if (auto* endCI = llvm::dyn_cast<llvm::ConstantInt>(endBound)) {
-                                if (auto* lenCI = llvm::dyn_cast<llvm::ConstantInt>(lenVal)) {
-                                    if (endCI->getSExtValue() <= lenCI->getSExtValue()) {
-                                        boundsCheckElidedID = true;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // Bounds check — elided when canElideBoundsCheck proves safety.
+        bool boundsCheckElidedID = canElideBoundsCheck(
+            indexExpr->array.get(), indexExpr->index.get(),
+            arrPtr, /*isStr=*/false, "incdec");
 
         if (!boundsCheckElidedID) {
-            auto* lenLoadID = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "incdec.len");
-            lenLoadID->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-            lenLoadID->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
-            llvm::Value* lenVal = lenLoadID;
-            // Single unsigned compare: (unsigned)idx < len checks both
-            // non-negativity and upper bound simultaneously.
-            llvm::Value* valid = builder->CreateICmpULT(idxVal, lenVal, "incdec.valid");
-
-            llvm::Function* function = builder->GetInsertBlock()->getParent();
-            llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "incdec.ok", function);
-            llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "incdec.fail", function);
-            // Bounds checks almost never fail — mark the success path hot
-            // to favor branch prediction and keep error handlers out of I-cache.
-            llvm::MDNode* brWeights = llvm::MDBuilder(*context).createBranchWeights(1000000, 1);
-            builder->CreateCondBr(valid, okBB, failBB, brWeights);
-
-            builder->SetInsertPoint(failBB);
-            llvm::Value* errMsg = builder->CreateGlobalString("Runtime error: array index out of bounds\n", "idx_oob_msg");
-            builder->CreateCall(getPrintfFunction(), {errMsg});
-            builder->CreateCall(getOrDeclareAbort());
-            builder->CreateUnreachable();
-
-            builder->SetInsertPoint(okBB);
+            emitBoundsCheck(idxVal, arrPtr, /*isStr=*/false, /*isBorrowed=*/false, "incdec");
         }
         llvm::Value* dataPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr,
             llvm::ConstantInt::get(getDefaultType(), 1), "incdec.data");
@@ -4413,8 +4588,8 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
         }
     }
 
-    bool boundsCheckElided = inOptMaxFunction
-        || (currentFuncHintHot_ && !isStr && optimizationLevel >= OptimizationLevel::O2);
+    bool boundsCheckElided = canElideBoundsCheck(
+        expr->array.get(), expr->index.get(), basePtr, isStr, "idx");
 
     // Ownership-aware optimization: borrowed arrays cannot be resized,
     // so their length is invariant.  Mark the length load with !invariant.load
@@ -4426,294 +4601,8 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
         }
     }
 
-    if (!boundsCheckElided && !isStr && optimizationLevel >= OptimizationLevel::O1) {
-        // ── Known-array-size optimization ────────────────────────────
-        // When the array was created via array_fill(N, val) with constant
-        // N, and the loop iterator is bounded by a constant <= N, we can
-        // prove bounds safety without loading the length header.
-        if (expr->array->type == ASTNodeType::IDENTIFIER_EXPR) {
-            auto* arrIdent = static_cast<IdentifierExpr*>(expr->array.get());
-            auto sizeIt = knownArraySizes_.find(arrIdent->name);
-            if (sizeIt != knownArraySizes_.end()) {
-                if (expr->index->type == ASTNodeType::IDENTIFIER_EXPR) {
-                    auto* idxIdent2 = static_cast<IdentifierExpr*>(expr->index.get());
-                    if (safeIndexVars_.count(idxIdent2->name)) {
-                        auto endIt = loopIterEndBound_.find(idxIdent2->name);
-                        if (endIt != loopIterEndBound_.end()) {
-                            auto* endCI = llvm::dyn_cast<llvm::ConstantInt>(endIt->second);
-                            auto* sizeCI = llvm::dyn_cast<llvm::ConstantInt>(sizeIt->second);
-                            if (endCI && sizeCI &&
-                                endCI->getSExtValue() <= sizeCI->getSExtValue()) {
-                                boundsCheckElided = true;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Check if the index value is a safe loop iterator (non-negative,
-        // ascending, bounded by loop end).
-        IdentifierExpr* idxIdent = (expr->index->type == ASTNodeType::IDENTIFIER_EXPR)
-            ? static_cast<IdentifierExpr*>(expr->index.get()) : nullptr;
-        if (idxIdent && safeIndexVars_.count(idxIdent->name)) {
-            // ── Zero-cost elision A: for(i in 0...len(arr)) { arr[i] } ────
-            // The loop condition i < len(arr) already proves arr[i] is in bounds.
-            // This pattern is the most common safe iteration pattern; OmScript's
-            // semantics guarantee the iterator cannot be modified in the body,
-            // so the loop condition is a compile-time proof of safety.
-            if (!boundsCheckElided && expr->array->type == ASTNodeType::IDENTIFIER_EXPR) {
-                auto* arrId = static_cast<IdentifierExpr*>(expr->array.get());
-                auto endArrIt = loopIterEndArray_.find(idxIdent->name);
-                if (endArrIt != loopIterEndArray_.end() && endArrIt->second == arrId->name) {
-                    boundsCheckElided = true;
-                }
-            }
-
-            // ── Zero-cost elision B: array_fill(n,...) + for(i in 0...n) ──
-            // arr has exactly n elements; loop iterates 0..n-1; arr[i] is safe.
-            // Works for any runtime n, including values from input().
-            if (!boundsCheckElided && expr->array->type == ASTNodeType::IDENTIFIER_EXPR) {
-                auto* arrId = static_cast<IdentifierExpr*>(expr->array.get());
-                auto sizeAllocaIt = knownArraySizeAllocas_.find(arrId->name);
-                if (sizeAllocaIt != knownArraySizeAllocas_.end()) {
-                    auto endIt = loopIterEndBound_.find(idxIdent->name);
-                    if (endIt != loopIterEndBound_.end()) {
-                        // The end bound is a load from the size variable's alloca
-                        // (or IS the alloca value) — same alloca means same value.
-                        auto* endLoad = llvm::dyn_cast<llvm::LoadInst>(endIt->second);
-                        if (endLoad && endLoad->getPointerOperand() == sizeAllocaIt->second) {
-                            boundsCheckElided = true;
-                        }
-                        // Also check if endBound is the alloca itself (e.g. after
-                        // mem2reg, the load may be folded to the stored value).
-                        if (!boundsCheckElided && endIt->second == sizeAllocaIt->second) {
-                            boundsCheckElided = true;
-                        }
-                    }
-                }
-            }
-
-            auto it = loopIterEndBound_.find(idxIdent->name);
-            if (it != loopIterEndBound_.end()) {
-                llvm::Value* endBound = it->second;
-                // Load the array length from slot 0.
-                auto* lenLoadElim = builder->CreateAlignedLoad(getDefaultType(), basePtr, llvm::MaybeAlign(8), "idx.len.elim");
-                lenLoadElim->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-                lenLoadElim->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
-                llvm::Value* lenVal = lenLoadElim;
-
-                // Case 1: end bound and length are the same SSA value (e.g.,
-                // both come from len(arr) or same variable).
-                if (!boundsCheckElided && endBound == lenVal) {
-                    boundsCheckElided = true;
-                }
-
-                // Case 2: both are compile-time constants — compare directly.
-                if (!boundsCheckElided) {
-                    if (auto* endCI = llvm::dyn_cast<llvm::ConstantInt>(endBound)) {
-                        if (auto* lenCI = llvm::dyn_cast<llvm::ConstantInt>(lenVal)) {
-                            if (endCI->getSExtValue() <= lenCI->getSExtValue()) {
-                                boundsCheckElided = true;
-                            }
-                        }
-                    }
-                }
-
-                // Case 3 (fallback): emit llvm.assume(endBound <= len) so LLVM
-                // can fold the bounds check branch via CorrelatedValuePropagation.
-                if (!boundsCheckElided
-                    && optimizationLevel >= OptimizationLevel::O2) {
-                    llvm::Value* endLELen = builder->CreateICmpSLE(endBound, lenVal, "idx.endlelen");
-                    llvm::Function* assumeFn = OMSC_GET_INTRINSIC(
-                        module.get(), llvm::Intrinsic::assume, {});
-                    builder->CreateCall(assumeFn, {endLELen});
-                }
-            }
-        }
-
-        // ── Enhanced bounds elision: arithmetic index expressions ─────
-        // For arr[i + const] or arr[i - const] where i is a safe iterator,
-        // verify that the adjusted range [start+const, end+const) still
-        // falls within [0, len).  This handles common patterns like:
-        //   for (i in 1...n) { arr[i - 1] }     // lookback
-        //   for (i in 0...n-1) { arr[i + 1] }   // lookahead
-        if (!boundsCheckElided && !idxIdent) {
-            if (expr->index->type == ASTNodeType::BINARY_EXPR) {
-                auto* idxBinary = static_cast<BinaryExpr*>(expr->index.get());
-                if (idxBinary->op == "+" || idxBinary->op == "-") {
-                    IdentifierExpr* iterIdent = (idxBinary->left->type == ASTNodeType::IDENTIFIER_EXPR)
-                        ? static_cast<IdentifierExpr*>(idxBinary->left.get()) : nullptr;
-                    LiteralExpr* offsetLit = (idxBinary->right->type == ASTNodeType::LITERAL_EXPR)
-                        ? static_cast<LiteralExpr*>(idxBinary->right.get()) : nullptr;
-                    if (iterIdent && offsetLit && safeIndexVars_.count(iterIdent->name)) {
-                        auto endIt = loopIterEndBound_.find(iterIdent->name);
-                        if (endIt != loopIterEndBound_.end()) {
-                            // We know iterator is in [0, end).  For i+c the access
-                            // range is [c, end+c).  Safe if end+c <= len and c >= 0.
-                            // For i-c the range is [-c, end-c).  Safe if c <= start
-                            // (i.e., c <= 0 after adjustment) and end-c <= len.
-                            // We only handle constant offsets for compile-time proof.
-                            if (offsetLit->type == ASTNodeType::LITERAL_EXPR) {
-                                // Retrieve the constant offset from the literal
-                                int64_t offset = 0;
-                                bool offsetKnown = false;
-                                if (offsetLit->literalType == LiteralExpr::LiteralType::INTEGER) {
-                                    offset = offsetLit->intValue;
-                                    offsetKnown = true;
-                                }
-                                if (offsetKnown) {
-                                    int64_t effectiveOffset = (idxBinary->op == "-") ? -offset : offset;
-                                    // ── Positive effective offset: arr[i + C] ─────
-                                    // Range is [start+C, end+C). Safe if end+C <= len.
-                                    if (effectiveOffset >= 0) {
-                                        auto* endCI = llvm::dyn_cast<llvm::ConstantInt>(endIt->second);
-                                        auto* arithLenLoad = builder->CreateAlignedLoad(
-                                            getDefaultType(), basePtr, llvm::MaybeAlign(8), "idx.len.arith");
-                                        arithLenLoad->setMetadata(
-                                            llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-                                        arithLenLoad->setMetadata(
-                                            llvm::LLVMContext::MD_range, arrayLenRangeMD_);
-
-                                        // When both end bound and length are
-                                        // compile-time constants, prove statically.
-                                        if (endCI) {
-                                            if (auto* lenCI = llvm::dyn_cast<llvm::ConstantInt>(
-                                                    endIt->second)) {
-                                                // If the end bound itself satisfies
-                                                // end + offset <= len, elide.
-                                                if (endCI->getSExtValue() + effectiveOffset
-                                                    <= lenCI->getSExtValue()) {
-                                                    boundsCheckElided = true;
-                                                }
-                                            }
-                                        }
-                                        // Emit assume hint for LLVM's CVP pass
-                                        if (!boundsCheckElided
-                                            && optimizationLevel >= OptimizationLevel::O2) {
-                                            llvm::Value* adjustedEnd = builder->CreateAdd(
-                                                endIt->second,
-                                                llvm::ConstantInt::get(getDefaultType(), effectiveOffset),
-                                                "idx.adjend");
-                                            llvm::Value* cmp = builder->CreateICmpSLE(
-                                                adjustedEnd, arithLenLoad, "idx.arith.safe");
-                                            llvm::Function* assumeFn = OMSC_GET_INTRINSIC(
-                                                module.get(), llvm::Intrinsic::assume, {});
-                                            builder->CreateCall(assumeFn, {cmp});
-                                        }
-                                    }
-
-                                    // ── Negative effective offset: arr[i - K] ────
-                                    // Range is [start-K, end-K). Safe if:
-                                    //   (a) start - K >= 0  (lower bound non-negative)
-                                    //   (b) end - K <= len  (upper bound within array)
-                                    // Use loopIterStartBound_ to prove (a) at compile
-                                    // time.  For (b), since i is a safe index variable,
-                                    // we know end <= len(arr).  Since K > 0, we have
-                                    // end - K < end <= len, so (b) is automatically true.
-                                    // This handles the common lookback pattern:
-                                    //   for (i in K...n) { arr[i - K] }
-                                    if (effectiveOffset < 0 && !boundsCheckElided) {
-                                        int64_t absOffset = -effectiveOffset;
-                                        auto startIt = loopIterStartBound_.find(iterIdent->name);
-                                        if (startIt != loopIterStartBound_.end()) {
-                                            // Check (a): start >= absOffset
-                                            auto* startCI = llvm::dyn_cast<llvm::ConstantInt>(startIt->second);
-                                            if (startCI && startCI->getSExtValue() >= absOffset) {
-                                                // Lower bound safe: start - K >= 0.
-                                                // Upper bound is automatically safe since
-                                                // K > 0 and end <= len (safe index var
-                                                // invariant), so end - K < end <= len.
-                                                boundsCheckElided = true;
-                                            }
-
-                                            // Fallback: emit assume hints for LLVM CVP
-                                            if (!boundsCheckElided
-                                                && optimizationLevel >= OptimizationLevel::O2) {
-                                                auto* arithLenLoad = builder->CreateAlignedLoad(
-                                                    getDefaultType(), basePtr, llvm::MaybeAlign(8), "idx.len.arith.neg");
-                                                arithLenLoad->setMetadata(
-                                                    llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-                                                arithLenLoad->setMetadata(
-                                                    llvm::LLVMContext::MD_range, arrayLenRangeMD_);
-                                                // Assume: start - absOffset >= 0
-                                                llvm::Value* adjustedStart = builder->CreateSub(
-                                                    startIt->second,
-                                                    llvm::ConstantInt::get(getDefaultType(), absOffset),
-                                                    "idx.adjstart");
-                                                llvm::Value* geZero = builder->CreateICmpSGE(
-                                                    adjustedStart,
-                                                    llvm::ConstantInt::get(getDefaultType(), 0),
-                                                    "idx.negoff.ge0");
-                                                // Assume: end - absOffset <= len
-                                                llvm::Value* adjustedEnd = builder->CreateSub(
-                                                    endIt->second,
-                                                    llvm::ConstantInt::get(getDefaultType(), absOffset),
-                                                    "idx.adjend.neg");
-                                                llvm::Value* leLen = builder->CreateICmpSLE(
-                                                    adjustedEnd, arithLenLoad, "idx.negoff.safe");
-                                                llvm::Value* bothSafe = builder->CreateAnd(
-                                                    geZero, leLen, "idx.negoff.both");
-                                                llvm::Function* assumeFn = OMSC_GET_INTRINSIC(
-                                                    module.get(), llvm::Intrinsic::assume, {});
-                                                builder->CreateCall(assumeFn, {bothSafe});
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     if (!boundsCheckElided) {
-        llvm::Function* function = builder->GetInsertBlock()->getParent();
-        llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "idx.ok", function);
-        llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "idx.fail", function);
-
-        llvm::Value* lenVal;
-        if (isStr) {
-            // String: use strlen to get length — no length header.
-            lenVal = builder->CreateCall(getOrDeclareStrlen(), {basePtr}, "idx.strlen");
-        } else {
-            // Array: length is stored in slot 0 of the buffer.
-            auto* lenLoad = builder->CreateAlignedLoad(getDefaultType(), basePtr, llvm::MaybeAlign(8), "idx.len");
-            lenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-            lenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
-            // Borrowed arrays cannot resize — mark length as invariant so
-            // LLVM can hoist it out of loops and CSE multiple loads.
-            if (arrayIsBorrowed) {
-                lenLoad->setMetadata(llvm::LLVMContext::MD_invariant_load,
-                                     llvm::MDNode::get(*context, {}));
-            }
-            lenVal = lenLoad;
-        }
-
-        // Bounds check: 0 <= index < length
-        // Use a single unsigned compare: (unsigned)idx < len checks both
-        // non-negativity and upper bound in one instruction, since negative
-        // signed values become large unsigned values that exceed len.
-        llvm::Value* valid = builder->CreateICmpULT(idxVal, lenVal, "idx.valid");
-
-        // Bounds checks almost never fail — mark the success path hot
-        // to favor branch prediction and keep error handlers out of I-cache.
-        llvm::MDNode* boundsWeights = llvm::MDBuilder(*context).createBranchWeights(1000000, 1);
-        builder->CreateCondBr(valid, okBB, failBB, boundsWeights);
-
-        // Out-of-bounds path: print error and abort
-        builder->SetInsertPoint(failBB);
-        llvm::Value* errMsg =
-            isStr ? builder->CreateGlobalString("Runtime error: string index out of bounds\n", "idx_str_oob_msg")
-                  : builder->CreateGlobalString("Runtime error: array index out of bounds\n", "idx_arr_oob_msg");
-        builder->CreateCall(getPrintfFunction(), {errMsg});
-        builder->CreateCall(getOrDeclareAbort());
-        builder->CreateUnreachable();
-
-        // Success path
-        builder->SetInsertPoint(okBB);
+        emitBoundsCheck(idxVal, basePtr, isStr, arrayIsBorrowed, "idx");
     }
 
     if (isStr) {
@@ -4798,12 +4687,9 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
     llvm::Value* basePtr =
         arrVal->getType()->isPointerTy() ? arrVal : builder->CreateIntToPtr(arrVal, ptrTy, "idxa.baseptr");
 
-    // Bounds check — elided in OPTMAX functions where compile-time
-    // ownership analysis guarantees safety (zero-cost abstraction).
-    // Also elided in @hot functions at O2+ and when the index is a
-    // provably-safe for-loop iterator.
-    bool boundsCheckElidedA = inOptMaxFunction
-        || (currentFuncHintHot_ && !isStr && optimizationLevel >= OptimizationLevel::O2);
+    // Bounds check — elided when canElideBoundsCheck proves safety.
+    bool boundsCheckElidedA = canElideBoundsCheck(
+        expr->array.get(), expr->index.get(), basePtr, isStr, "idxa");
 
     // Ownership-aware: borrowed arrays cannot resize, so length is stable.
     bool arrayIsBorrowedA = false;
@@ -4812,104 +4698,8 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
             arrayIsBorrowedA = isVariableBorrowed(static_cast<IdentifierExpr*>(expr->array.get())->name);
     }
 
-    if (!boundsCheckElidedA && !isStr && optimizationLevel >= OptimizationLevel::O1) {
-        IdentifierExpr* idxIdent = (expr->index->type == ASTNodeType::IDENTIFIER_EXPR)
-            ? static_cast<IdentifierExpr*>(expr->index.get()) : nullptr;
-        if (idxIdent && safeIndexVars_.count(idxIdent->name)) {
-            // ── Zero-cost elision A: for(i in 0...len(arr)) { arr[i] = v } ──
-            if (!boundsCheckElidedA && expr->array->type == ASTNodeType::IDENTIFIER_EXPR) {
-                auto* arrId = static_cast<IdentifierExpr*>(expr->array.get());
-                auto endArrIt = loopIterEndArray_.find(idxIdent->name);
-                if (endArrIt != loopIterEndArray_.end() && endArrIt->second == arrId->name) {
-                    boundsCheckElidedA = true;
-                }
-            }
-            // ── Zero-cost elision B: array_fill(n,...) + for(i in 0...n) ──
-            if (!boundsCheckElidedA && expr->array->type == ASTNodeType::IDENTIFIER_EXPR) {
-                auto* arrId = static_cast<IdentifierExpr*>(expr->array.get());
-                auto sizeAllocaIt = knownArraySizeAllocas_.find(arrId->name);
-                if (sizeAllocaIt != knownArraySizeAllocas_.end()) {
-                    auto endIt = loopIterEndBound_.find(idxIdent->name);
-                    if (endIt != loopIterEndBound_.end()) {
-                        auto* endLoad = llvm::dyn_cast<llvm::LoadInst>(endIt->second);
-                        if (endLoad && endLoad->getPointerOperand() == sizeAllocaIt->second) {
-                            boundsCheckElidedA = true;
-                        }
-                        if (!boundsCheckElidedA && endIt->second == sizeAllocaIt->second) {
-                            boundsCheckElidedA = true;
-                        }
-                    }
-                }
-            }
-            auto it = loopIterEndBound_.find(idxIdent->name);
-            if (it != loopIterEndBound_.end()) {
-                llvm::Value* endBound = it->second;
-                auto* lenLoadAElim = builder->CreateAlignedLoad(getDefaultType(), basePtr, llvm::MaybeAlign(8), "idxa.len.elim");
-                lenLoadAElim->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-                lenLoadAElim->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
-                llvm::Value* lenVal = lenLoadAElim;
-                if (!boundsCheckElidedA && endBound == lenVal) {
-                    boundsCheckElidedA = true;
-                }
-                if (!boundsCheckElidedA) {
-                    if (auto* endCI = llvm::dyn_cast<llvm::ConstantInt>(endBound)) {
-                        if (auto* lenCI = llvm::dyn_cast<llvm::ConstantInt>(lenVal)) {
-                            if (endCI->getSExtValue() <= lenCI->getSExtValue()) {
-                                boundsCheckElidedA = true;
-                            }
-                        }
-                    }
-                }
-                if (!boundsCheckElidedA
-                    && optimizationLevel >= OptimizationLevel::O2) {
-                    llvm::Value* endLELen = builder->CreateICmpSLE(endBound, lenVal, "idxa.endlelen");
-                    llvm::Function* assumeFn = OMSC_GET_INTRINSIC(
-                        module.get(), llvm::Intrinsic::assume, {});
-                    builder->CreateCall(assumeFn, {endLELen});
-                }
-            }
-        }
-    }
-
     if (!boundsCheckElidedA) {
-        llvm::Function* function = builder->GetInsertBlock()->getParent();
-        llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "idxa.ok", function);
-        llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "idxa.fail", function);
-
-        llvm::Value* lenVal;
-        if (isStr) {
-            lenVal = builder->CreateCall(getOrDeclareStrlen(), {basePtr}, "idxa.strlen");
-        } else {
-            auto* lenLoad = builder->CreateAlignedLoad(getDefaultType(), basePtr, llvm::MaybeAlign(8), "idxa.len");
-            lenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-            lenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
-            // Borrowed arrays cannot resize — length is invariant.
-            if (arrayIsBorrowedA) {
-                lenLoad->setMetadata(llvm::LLVMContext::MD_invariant_load,
-                                     llvm::MDNode::get(*context, {}));
-            }
-            lenVal = lenLoad;
-        }
-
-        // Bounds check: 0 <= index < length (single unsigned compare)
-        llvm::Value* valid = builder->CreateICmpULT(idxVal, lenVal, "idxa.valid");
-
-        // Bounds checks almost never fail — mark the success path hot
-        // to favor branch prediction and keep error handlers out of I-cache.
-        llvm::MDNode* boundsWeightsA = llvm::MDBuilder(*context).createBranchWeights(1000000, 1);
-        builder->CreateCondBr(valid, okBB, failBB, boundsWeightsA);
-
-        // Out-of-bounds path: print error and abort
-        builder->SetInsertPoint(failBB);
-        llvm::Value* errMsg =
-            isStr ? builder->CreateGlobalString("Runtime error: string index out of bounds\n", "idxa_str_oob_msg")
-                  : builder->CreateGlobalString("Runtime error: array index out of bounds\n", "idxa_arr_oob_msg");
-        builder->CreateCall(getPrintfFunction(), {errMsg});
-        builder->CreateCall(getOrDeclareAbort());
-        builder->CreateUnreachable();
-
-        // Success path
-        builder->SetInsertPoint(okBB);
+        emitBoundsCheck(idxVal, basePtr, isStr, arrayIsBorrowedA, "idxa");
     }
 
     if (isStr) {
