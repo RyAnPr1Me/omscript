@@ -234,8 +234,10 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             if (e->type == ASTNodeType::IDENTIFIER_EXPR) return true;
             if (e->type == ASTNodeType::UNARY_EXPR) {
                 auto* un = static_cast<UnaryExpr*>(e);
-                // Arithmetic/logical unary on a simple operand has no side effects:
-                // no memory access, no traps, no function calls.
+                // Arithmetic/logical unary on a simple operand is side-effect-free
+                // in OmScript's semantics: integer arithmetic wraps by definition
+                // (OmScript does not have UB for integer overflow), there is no
+                // memory access, and no function calls are emitted.
                 if (un->op == "-" || un->op == "!" || un->op == "~") {
                     return un->operand->type == ASTNodeType::IDENTIFIER_EXPR ||
                            un->operand->type == ASTNodeType::LITERAL_EXPR;
@@ -256,6 +258,8 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 // Bitwise and shift ops: integer-only, no memory, no traps.
                 // + / - / * are intentionally excluded: on string operands they
                 // call str_concat / str_repeat which allocate memory.
+                // / and % are excluded for an additional reason: they trap on
+                // a zero divisor, making them unsafe to evaluate eagerly.
                 if (op == "&" || op == "|" || op == "^" ||
                     op == "<<" || op == ">>") return true;
             }

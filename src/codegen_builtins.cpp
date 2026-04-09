@@ -3356,9 +3356,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // as amin: direct SIMD max instruction + vectorizer-friendly reduction.
         llvm::Function* smaxFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::smax, {getDefaultType()});
         llvm::Value* newMax = builder->CreateCall(smaxFn, {elem, curMax}, "amax.newmax");
-        // Reuse offset (= idx+1, nsw+nuw) as the loop induction increment.
-        // This eliminates a redundant add instruction and gives SCEV the same
-        // nsw+nuw flags as the GEP offset so the trip count is accurately modeled.
+        // Reuse offset (= idx+1, nsw+nuw — no signed wrap, no unsigned wrap) as
+        // the loop induction increment. This eliminates a redundant add instruction
+        // and gives SCEV the same flags as the GEP offset for accurate trip-count
+        // modeling.
         curMax->addIncoming(newMax, bodyBB);
         idx->addIncoming(offset, bodyBB);
         auto* backBr_2892 = builder->CreateBr(loopBB);
