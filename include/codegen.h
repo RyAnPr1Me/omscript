@@ -372,6 +372,10 @@ class CodeGenerator {
     llvm::MDNode* tbaaRoot_ = nullptr;       ///< Root of TBAA type hierarchy
     llvm::MDNode* tbaaArrayLen_ = nullptr;   ///< TBAA access tag for array length (slot 0)
     llvm::MDNode* tbaaArrayElem_ = nullptr;  ///< TBAA access tag for array elements (slots 1+)
+    llvm::MDNode* tbaaStructField_ = nullptr; ///< TBAA access tag for struct field loads/stores
+    llvm::MDNode* tbaaStringData_ = nullptr;  ///< TBAA access tag for string character data
+    llvm::MDNode* tbaaMapKey_ = nullptr;      ///< TBAA access tag for map key slots
+    llvm::MDNode* tbaaMapVal_ = nullptr;      ///< TBAA access tag for map value slots
 
     /// !range metadata for array length loads: [0, INT64_MAX).
     /// Array lengths are always non-negative (they're sizes).

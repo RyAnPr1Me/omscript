@@ -4534,7 +4534,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // AlignedLoad + TBAA: key slots are 8-byte aligned; TBAA distinguishes
         // key/value element loads from the length-header load.
         auto* existKeyLoad = builder->CreateAlignedLoad(getDefaultType(), keyPtr, llvm::MaybeAlign(8), "mapset.existkey");
-        existKeyLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        existKeyLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapKey_);
         llvm::Value* keyMatch = builder->CreateICmpEQ(existKeyLoad, keyArg, "mapset.match");
         // nxt = keySlot+1 = idx+2 (nsw+nuw): used as the loop back-edge (saves
         // a redundant add in nextBB) and as valSlot in foundBB.
@@ -4559,7 +4559,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(foundBB);
         llvm::Value* valPtr = builder->CreateInBoundsGEP(getDefaultType(), mapPtr, nxt, "mapset.valptr");
         auto* valStore = builder->CreateAlignedStore(valArg, valPtr, llvm::MaybeAlign(8));
-        valStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        valStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapVal_);
         builder->CreateBr(doneBB);
 
         // Append: allocate new buffer with 2 more slots
@@ -4581,11 +4581,11 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Store new key at [mapLen+1] (aligned, TBAA)
         llvm::Value* newKeyPtr = builder->CreateInBoundsGEP(getDefaultType(), newBuf, newKeySlot, "mapset.nkeyptr");
         auto* newKeyStore = builder->CreateAlignedStore(keyArg, newKeyPtr, llvm::MaybeAlign(8));
-        newKeyStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        newKeyStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapKey_);
         // Store new value at [mapLen+2] = [newLen] — reuse newLen as slot (aligned, TBAA)
         llvm::Value* newValPtr = builder->CreateInBoundsGEP(getDefaultType(), newBuf, newLen, "mapset.nvalptr");
         auto* newValStore = builder->CreateAlignedStore(valArg, newValPtr, llvm::MaybeAlign(8));
-        newValStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        newValStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapVal_);
         llvm::Value* appendResult = builder->CreatePtrToInt(newBuf, getDefaultType(), "mapset.appendres");
         builder->CreateBr(doneBB);
 
@@ -4642,7 +4642,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* keySlot = builder->CreateAdd(idx, one, "mapget.keyslot", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* keyPtr  = builder->CreateInBoundsGEP(getDefaultType(), mapPtr, keySlot, "mapget.keyptr");
         auto* existKeyLoad = builder->CreateAlignedLoad(getDefaultType(), keyPtr, llvm::MaybeAlign(8), "mapget.existkey");
-        existKeyLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        existKeyLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapKey_);
         llvm::Value* keyMatch = builder->CreateICmpEQ(existKeyLoad, keyArg, "mapget.match");
         // nxt = keySlot+1 = idx+2 (nsw+nuw): loop back-edge AND val slot (no extra add)
         llvm::Value* nxt = builder->CreateAdd(keySlot, one, "mapget.nxt", /*HasNUW=*/true, /*HasNSW=*/true);
@@ -4655,7 +4655,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(foundBB);
         llvm::Value* valPtr = builder->CreateInBoundsGEP(getDefaultType(), mapPtr, nxt, "mapget.valptr");
         auto* foundLoad = builder->CreateAlignedLoad(getDefaultType(), valPtr, llvm::MaybeAlign(8), "mapget.val");
-        foundLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        foundLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapVal_);
         builder->CreateBr(doneBB);
 
         builder->SetInsertPoint(doneBB);
@@ -4708,7 +4708,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* keySlot = builder->CreateAdd(idx, one, "maphas.keyslot", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* keyPtr  = builder->CreateInBoundsGEP(getDefaultType(), mapPtr, keySlot, "maphas.keyptr");
         auto* existKeyLoad = builder->CreateAlignedLoad(getDefaultType(), keyPtr, llvm::MaybeAlign(8), "maphas.existkey");
-        existKeyLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        existKeyLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapKey_);
         llvm::Value* keyMatch = builder->CreateICmpEQ(existKeyLoad, keyArg, "maphas.match");
         // nxt = keySlot+1 = idx+2 (nsw+nuw): back-edge advance (no extra add)
         llvm::Value* nxt = builder->CreateAdd(keySlot, one, "maphas.nxt", /*HasNUW=*/true, /*HasNSW=*/true);
@@ -4774,7 +4774,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* keySlot = builder->CreateAdd(idx, one, "maprem.keyslot", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* keyPtr  = builder->CreateInBoundsGEP(getDefaultType(), mapPtr, keySlot, "maprem.keyptr");
         auto* existKeyLoad = builder->CreateAlignedLoad(getDefaultType(), keyPtr, llvm::MaybeAlign(8), "maprem.existkey");
-        existKeyLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        existKeyLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapKey_);
         llvm::Value* keyMatch = builder->CreateICmpEQ(existKeyLoad, keyArg, "maprem.match");
         // nxt = keySlot+1 = idx+2 (nsw+nuw): back-edge and afterStart (no extra add)
         llvm::Value* nxt = builder->CreateAdd(keySlot, one, "maprem.nxt", /*HasNUW=*/true, /*HasNSW=*/true);
@@ -4894,7 +4894,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* mapSlot = builder->CreateAdd(mi, one, "mapkeys.mapslot", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* keyPtr  = builder->CreateInBoundsGEP(getDefaultType(), mapPtr, mapSlot, "mapkeys.keyptr");
         auto* keyLoad = builder->CreateAlignedLoad(getDefaultType(), keyPtr, llvm::MaybeAlign(8), "mapkeys.key");
-        keyLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        keyLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapKey_);
         // Store at output buf slot: i+1 (nsw+nuw: i < numPairs ≤ arrSlots-1)
         llvm::Value* arrSlot = builder->CreateAdd(i, one, "mapkeys.arrslot", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* arrElemPtr = builder->CreateInBoundsGEP(getDefaultType(), buf, arrSlot, "mapkeys.arrptr");
@@ -4970,7 +4970,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* mapSlot = builder->CreateAdd(mi, two, "mapvals.mapslot", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* valPtr  = builder->CreateInBoundsGEP(getDefaultType(), mapPtr, mapSlot, "mapvals.valptr");
         auto* valLoad = builder->CreateAlignedLoad(getDefaultType(), valPtr, llvm::MaybeAlign(8), "mapvals.val");
-        valLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        valLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapVal_);
         // Store at output buf slot: i+1 (nsw+nuw)
         llvm::Value* arrSlot = builder->CreateAdd(i, one, "mapvals.arrslot", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* arrElemPtr = builder->CreateInBoundsGEP(getDefaultType(), buf, arrSlot, "mapvals.arrptr");

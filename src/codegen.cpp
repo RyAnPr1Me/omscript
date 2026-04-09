@@ -774,40 +774,52 @@ CodeGenerator::~CodeGenerator() = default;
 // ---------------------------------------------------------------------------
 
 void CodeGenerator::initTBAAMetadata() {
-    // Build a TBAA type hierarchy so LLVM knows that array lengths (slot 0)
-    // and array elements (slots 1+) are distinct memory types.  This allows
-    // LLVM to freely reorder length loads past element stores and hoist
-    // length loads out of element-mutation loops.
+    // Build a TBAA type hierarchy so LLVM knows that different memory regions
+    // are distinct types.  This allows LLVM to freely reorder loads/stores
+    // across different categories and hoist invariant loads out of loops.
     //
     // LLVM scalar TBAA format (path-based):
     //   Root:    !{ !"label" }
     //   Type:    !{ !"label", !root, i64 0 }        (0 = may-alias-others)
     //   Access:  !{ !type, !type, i64 0 }            (offset 0, not constant)
     //
-    // We use two sibling types under one root so they're guaranteed disjoint.
+    // Hierarchy:
+    //   OmScript TBAA (root)
+    //   ├── array length      — slot 0 of arrays/maps
+    //   ├── array element     — slots 1+ of arrays
+    //   ├── struct field      — struct field loads/stores
+    //   ├── string data       — string character byte accesses
+    //   ├── map key           — key slots in map layout
+    //   └── map value         — value slots in map layout
     auto& C = *context;
     tbaaRoot_ = llvm::MDNode::get(C, {llvm::MDString::get(C, "OmScript TBAA")});
 
-    // Scalar type nodes: children of root, constant=0 means NOT constant memory.
-    llvm::MDNode* tbaaLenType = llvm::MDNode::get(C, {
-        llvm::MDString::get(C, "array length"),
-        tbaaRoot_,
-        llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
-            llvm::Type::getInt64Ty(C), 0))
-    });
-    llvm::MDNode* tbaaElemType = llvm::MDNode::get(C, {
-        llvm::MDString::get(C, "array element"),
-        tbaaRoot_,
-        llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
-            llvm::Type::getInt64Ty(C), 0))
-    });
+    auto makeTBAAType = [&](const char* name) -> llvm::MDNode* {
+        return llvm::MDNode::get(C, {
+            llvm::MDString::get(C, name),
+            tbaaRoot_,
+            llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                llvm::Type::getInt64Ty(C), 0))
+        });
+    };
+
+    llvm::MDNode* tbaaLenType    = makeTBAAType("array length");
+    llvm::MDNode* tbaaElemType   = makeTBAAType("array element");
+    llvm::MDNode* tbaaStructType = makeTBAAType("struct field");
+    llvm::MDNode* tbaaStrType    = makeTBAAType("string data");
+    llvm::MDNode* tbaaMapKeyType = makeTBAAType("map key");
+    llvm::MDNode* tbaaMapValType = makeTBAAType("map value");
 
     // Access tag nodes: !{ !base-type, !access-type, offset }
     // For scalar types, base == access.
     auto* zero = llvm::ConstantAsMetadata::get(
         llvm::ConstantInt::get(llvm::Type::getInt64Ty(C), 0));
-    tbaaArrayLen_  = llvm::MDNode::get(C, {tbaaLenType, tbaaLenType, zero});
-    tbaaArrayElem_ = llvm::MDNode::get(C, {tbaaElemType, tbaaElemType, zero});
+    tbaaArrayLen_    = llvm::MDNode::get(C, {tbaaLenType, tbaaLenType, zero});
+    tbaaArrayElem_   = llvm::MDNode::get(C, {tbaaElemType, tbaaElemType, zero});
+    tbaaStructField_ = llvm::MDNode::get(C, {tbaaStructType, tbaaStructType, zero});
+    tbaaStringData_  = llvm::MDNode::get(C, {tbaaStrType, tbaaStrType, zero});
+    tbaaMapKey_      = llvm::MDNode::get(C, {tbaaMapKeyType, tbaaMapKeyType, zero});
+    tbaaMapVal_      = llvm::MDNode::get(C, {tbaaMapValType, tbaaMapValType, zero});
 
     // !range metadata: array lengths are always in [0, INT64_MAX).
     auto* i64Ty = llvm::Type::getInt64Ty(C);

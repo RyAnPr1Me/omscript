@@ -4867,6 +4867,9 @@ llvm::Value* CodeGenerator::generateFieldAccess(FieldAccessExpr* expr) {
         load = builder->CreateLoad(getDefaultType(), elemPtr, "struct.field.val");
     }
 
+    // TBAA: struct fields are distinct from array elements/lengths/map slots.
+    load->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStructField_);
+
     // Apply LLVM metadata from struct field attributes.
     if (attrs) {
         // immut → !invariant.load metadata: tells LLVM the value never changes
@@ -4946,6 +4949,9 @@ llvm::Value* CodeGenerator::generateFieldAssign(FieldAssignExpr* expr) {
     } else {
         store = builder->CreateStore(newVal, elemPtr);
     }
+
+    // TBAA: struct fields are distinct from array elements/lengths/map slots.
+    store->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStructField_);
 
     // !nontemporal hint for cold fields — bypass cache on write
     if (attrs && attrs->cold) {
@@ -5043,7 +5049,7 @@ llvm::Value* CodeGenerator::emitMapGet(llvm::Value* mapVal, llvm::Value* keyVal)
         llvm::Twine("didx.kslot"), /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* kPtr  = builder->CreateInBoundsGEP(getDefaultType(), mapPtr, kSlot, "didx.kptr");
     auto* keyLoad = builder->CreateAlignedLoad(getDefaultType(), kPtr, llvm::MaybeAlign(8), "didx.ekey");
-    keyLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+    keyLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapKey_);
     llvm::Value* match = builder->CreateICmpEQ(keyLoad, keyVal, "didx.match");
 
     // Back-edge: advance by 2 slots (skip key+value pair), nsw+nuw
@@ -5061,7 +5067,7 @@ llvm::Value* CodeGenerator::emitMapGet(llvm::Value* mapVal, llvm::Value* keyVal)
         llvm::Twine("didx.vslot"), /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* vPtr  = builder->CreateInBoundsGEP(getDefaultType(), mapPtr, vSlot, "didx.vptr");
     auto* valLoad = builder->CreateAlignedLoad(getDefaultType(), vPtr, llvm::MaybeAlign(8), "didx.val");
-    valLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+    valLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapVal_);
     builder->CreateBr(doneBB);
 
     // Merge: PHI selects found value or 0 (key absent)
@@ -5097,13 +5103,13 @@ llvm::Value* CodeGenerator::generateDict(DictExpr* expr) {
             getDefaultType(), dictPtr,
             llvm::ConstantInt::get(getDefaultType(), 1 + 2 * i), "dict.kp");
         auto* keyStore = builder->CreateAlignedStore(keyVal, keyPtr, llvm::MaybeAlign(8));
-        keyStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        keyStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapKey_);
 
         llvm::Value* valPtr = builder->CreateInBoundsGEP(
             getDefaultType(), dictPtr,
             llvm::ConstantInt::get(getDefaultType(), 2 + 2 * i), "dict.vp");
         auto* valStore = builder->CreateAlignedStore(valVal, valPtr, llvm::MaybeAlign(8));
-        valStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        valStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapVal_);
     }
 
     return builder->CreatePtrToInt(dictPtr, getDefaultType(), "dict.i");
