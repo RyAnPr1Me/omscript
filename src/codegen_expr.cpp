@@ -178,7 +178,7 @@ bool CodeGenerator::canElideBoundsCheck(Expression* arrayExpr,
 
                         auto* endCI = llvm::dyn_cast<llvm::ConstantInt>(endIt->second);
                         if (endCI) {
-                            if (auto* lenCI = llvm::dyn_cast<llvm::ConstantInt>(endIt->second)) {
+                            if (auto* lenCI = llvm::dyn_cast<llvm::ConstantInt>(arithLenLoad)) {
                                 if (endCI->getSExtValue() + effectiveOffset <= lenCI->getSExtValue())
                                     return true;
                             }
