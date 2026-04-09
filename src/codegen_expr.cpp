@@ -4407,9 +4407,13 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
         if (elem->type == ASTNodeType::SPREAD_EXPR) {
             auto* spread = static_cast<SpreadExpr*>(elem.get());
             llvm::Value* arrVal = generateExpression(spread->operand.get());
-            arrVal = toDefaultType(arrVal);
-            llvm::Value* arrPtr =
-                builder->CreateIntToPtr(arrVal, llvm::PointerType::getUnqual(*context), "spread.arrptr");
+            llvm::Value* arrPtr;
+            if (arrVal->getType()->isPointerTy()) {
+                arrPtr = arrVal;
+            } else {
+                arrVal = toDefaultType(arrVal);
+                arrPtr = builder->CreateIntToPtr(arrVal, llvm::PointerType::getUnqual(*context), "spread.arrptr");
+            }
             auto* spreadLenLoad = builder->CreateAlignedLoad(getDefaultType(), arrPtr, llvm::MaybeAlign(8), "spread.len");
             spreadLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
             spreadLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
@@ -4442,7 +4446,8 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
         if (ei.isSpread) {
             // Copy all elements from the spread array
             llvm::Value* srcVal = ei.val;
-            llvm::Value* srcPtr = builder->CreateIntToPtr(srcVal, llvm::PointerType::getUnqual(*context), "spread.src");
+            llvm::Value* srcPtr = srcVal->getType()->isPointerTy()
+                ? srcVal : builder->CreateIntToPtr(srcVal, llvm::PointerType::getUnqual(*context), "spread.src");
             llvm::Value* srcLen = ei.len;
 
             // Loop: copy srcLen elements
