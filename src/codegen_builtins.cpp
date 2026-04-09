@@ -3356,9 +3356,11 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // as amin: direct SIMD max instruction + vectorizer-friendly reduction.
         llvm::Function* smaxFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::smax, {getDefaultType()});
         llvm::Value* newMax = builder->CreateCall(smaxFn, {elem, curMax}, "amax.newmax");
-        llvm::Value* newIdx = builder->CreateAdd(idx, one, "amax.newidx");
+        // Reuse offset (= idx+1, nsw+nuw) as the loop induction increment.
+        // This eliminates a redundant add instruction and gives SCEV the same
+        // nsw+nuw flags as the GEP offset so the trip count is accurately modeled.
         curMax->addIncoming(newMax, bodyBB);
-        idx->addIncoming(newIdx, bodyBB);
+        idx->addIncoming(offset, bodyBB);
         auto* backBr_2892 = builder->CreateBr(loopBB);
         if (optimizationLevel >= OptimizationLevel::O1) {
             llvm::SmallVector<llvm::Metadata*, 4> mds;
@@ -3451,8 +3453,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* predResult = builder->CreateCall(predFn, {elem}, "aany.pred");
         predResult = toDefaultType(predResult);
         llvm::Value* isNonZero = builder->CreateICmpNE(predResult, zero, "aany.nz");
-        llvm::Value* newIdx = builder->CreateAdd(idx, one, "aany.newidx");
-        idx->addIncoming(newIdx, bodyBB);
+        // Reuse offset (= idx+1, nsw+nuw) as the loop induction increment.
+        // Eliminates a redundant add and provides SCEV with tight nsw+nuw flags.
+        idx->addIncoming(offset, bodyBB);
         builder->CreateCondBr(isNonZero, foundBB, loopBB);
 
         builder->SetInsertPoint(foundBB);
@@ -3528,8 +3531,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* predResult = builder->CreateCall(predFn, {elem}, "aevery.pred");
         predResult = toDefaultType(predResult);
         llvm::Value* isZero = builder->CreateICmpEQ(predResult, zero, "aevery.iszero");
-        llvm::Value* newIdx = builder->CreateAdd(idx, one, "aevery.newidx");
-        idx->addIncoming(newIdx, bodyBB);
+        // Reuse offset (= idx+1, nsw+nuw) as the loop induction increment.
+        idx->addIncoming(offset, bodyBB);
         builder->CreateCondBr(isZero, failBB, loopBB);
 
         builder->SetInsertPoint(failBB);
@@ -3592,8 +3595,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* elem = builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "afind.elem");
         llvm::cast<llvm::Instruction>(elem)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
         llvm::Value* isEqual = builder->CreateICmpEQ(elem, target, "afind.iseq");
-        llvm::Value* newIdx = builder->CreateAdd(idx, one, "afind.newidx");
-        idx->addIncoming(newIdx, bodyBB);
+        // Reuse offset (= idx+1, nsw+nuw) as the loop induction increment.
+        idx->addIncoming(offset, bodyBB);
         builder->CreateCondBr(isEqual, foundBB, loopBB);
 
         builder->SetInsertPoint(foundBB);
@@ -3671,10 +3674,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         predResult = toDefaultType(predResult);
         llvm::Value* isNonZero = builder->CreateICmpNE(predResult, zero, "acnt.nz");
         llvm::Value* incr = builder->CreateZExt(isNonZero, getDefaultType(), "acnt.incr");
-        llvm::Value* newAcc = builder->CreateAdd(acc, incr, "acnt.newacc");
-        llvm::Value* newIdx = builder->CreateAdd(idx, one, "acnt.newidx");
+        // acnt.newacc: acc is in [0, length], incr in {0,1}; sum ≤ INT64_MAX so
+        // both nsw and nuw are safe and let SCEV prove the accumulator is non-negative.
+        llvm::Value* newAcc = builder->CreateAdd(acc, incr, "acnt.newacc", /*HasNUW=*/true, /*HasNSW=*/true);
+        // Reuse offset (= idx+1, nsw+nuw) as the loop induction increment.
         acc->addIncoming(newAcc, bodyBB);
-        idx->addIncoming(newIdx, bodyBB);
+        idx->addIncoming(offset, bodyBB);
         auto* backBr_3149 = builder->CreateBr(loopBB);
         if (optimizationLevel >= OptimizationLevel::O1) {
             llvm::SmallVector<llvm::Metadata*, 2> mds;

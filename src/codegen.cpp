@@ -1586,6 +1586,9 @@ llvm::Function* CodeGenerator::getOrDeclareFloor() {
     fn->addFnAttr(llvm::Attribute::NoSync);
     // memory(none): floor is a pure mathematical function.
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::none()));
+    // speculatable: floor never reads/writes memory or has side effects, so
+    // LLVM may hoist or speculate calls across branches and into loop preheaders.
+    fn->addFnAttr(llvm::Attribute::Speculatable);
     return fn;
 }
 
@@ -1600,6 +1603,8 @@ llvm::Function* CodeGenerator::getOrDeclareCeil() {
     fn->addFnAttr(llvm::Attribute::NoSync);
     // memory(none): ceil is a pure mathematical function.
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::none()));
+    // speculatable: same rationale as floor.
+    fn->addFnAttr(llvm::Attribute::Speculatable);
     return fn;
 }
 
@@ -1614,6 +1619,8 @@ llvm::Function* CodeGenerator::getOrDeclareRound() {
     fn->addFnAttr(llvm::Attribute::NoSync);
     // memory(none): round is a pure mathematical function.
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::none()));
+    // speculatable: same rationale as floor.
+    fn->addFnAttr(llvm::Attribute::Speculatable);
     return fn;
 }
 

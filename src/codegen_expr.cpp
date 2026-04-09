@@ -232,17 +232,32 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         auto isSideEffectFree = [](Expression* e) -> bool {
             if (e->type == ASTNodeType::LITERAL_EXPR) return true;
             if (e->type == ASTNodeType::IDENTIFIER_EXPR) return true;
+            if (e->type == ASTNodeType::UNARY_EXPR) {
+                auto* un = static_cast<UnaryExpr*>(e);
+                // Arithmetic/logical unary on a simple operand has no side effects:
+                // no memory access, no traps, no function calls.
+                if (un->op == "-" || un->op == "!" || un->op == "~") {
+                    return un->operand->type == ASTNodeType::IDENTIFIER_EXPR ||
+                           un->operand->type == ASTNodeType::LITERAL_EXPR;
+                }
+                return false;
+            }
             if (e->type == ASTNodeType::BINARY_EXPR) {
                 auto* bin = static_cast<BinaryExpr*>(e);
                 const auto& op = bin->op;
-                // Comparisons and arithmetic on simple operands are side-effect-free
+                const bool lhsSimple = bin->left->type == ASTNodeType::IDENTIFIER_EXPR ||
+                                       bin->left->type == ASTNodeType::LITERAL_EXPR;
+                const bool rhsSimple = bin->right->type == ASTNodeType::IDENTIFIER_EXPR ||
+                                       bin->right->type == ASTNodeType::LITERAL_EXPR;
+                if (!lhsSimple || !rhsSimple) return false;
+                // Comparisons are always side-effect-free on simple operands.
                 if (op == "==" || op == "!=" || op == "<" || op == "<=" ||
-                    op == ">" || op == ">=" || op == "&" || op == "|" || op == "^") {
-                    return (bin->left->type == ASTNodeType::IDENTIFIER_EXPR ||
-                            bin->left->type == ASTNodeType::LITERAL_EXPR) &&
-                           (bin->right->type == ASTNodeType::IDENTIFIER_EXPR ||
-                            bin->right->type == ASTNodeType::LITERAL_EXPR);
-                }
+                    op == ">" || op == ">=") return true;
+                // Bitwise and shift ops: integer-only, no memory, no traps.
+                // + / - / * are intentionally excluded: on string operands they
+                // call str_concat / str_repeat which allocate memory.
+                if (op == "&" || op == "|" || op == "^" ||
+                    op == "<<" || op == ">>") return true;
             }
             return false;
         };
