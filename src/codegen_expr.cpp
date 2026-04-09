@@ -4291,10 +4291,22 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
     }
 
     // Dict indexing: dict["key"] or dict[intKey] → inline map_get (zero cost).
-    // This also handles chained access: dict["k1"]["k2"] because the inner
-    // IndexExpr on a dict variable is itself recognised as a dict expression.
     if (isDictExpr(expr->array.get())) {
         return emitMapGet(toDefaultType(arrVal), toDefaultType(idxVal));
+    }
+
+    // Chained dict access: dict["k1"]["k2"].
+    // The base is an IndexExpr whose own base is a known dict.  The value
+    // stored under "k1" could be another dict OR an array.  We use the type
+    // of the *current* key as a static discriminator:
+    //   • string key  → treat retrieved value as a dict and do map_get
+    //   • integer key → treat retrieved value as an array (falls through below)
+    // This is zero-cost: the decision is made at compile time; no runtime tag.
+    if (expr->array->type == ASTNodeType::INDEX_EXPR) {
+        auto* innerIdx = static_cast<IndexExpr*>(expr->array.get());
+        if (isDictExpr(innerIdx->array.get()) && isStringExpr(expr->index.get())) {
+            return emitMapGet(toDefaultType(arrVal), toDefaultType(idxVal));
+        }
     }
 
     idxVal = toDefaultType(idxVal);
@@ -5049,29 +5061,42 @@ bool CodeGenerator::isDictExpr(Expression* expr) const {
         auto* id = static_cast<const IdentifierExpr*>(expr);
         return dictVarNames_.count(id->name) > 0;
     }
-    // Chained: dict["k1"]["k2"] — inner IndexExpr on a dict
-    if (expr->type == ASTNodeType::INDEX_EXPR) {
-        return isDictExpr(static_cast<const IndexExpr*>(expr)->array.get());
-    }
     // Call returning a dict: map_new(), map_set(), map_remove()
     if (expr->type == ASTNodeType::CALL_EXPR) {
         auto* call = static_cast<const CallExpr*>(expr);
         return call->callee == "map_new" || call->callee == "map_set" ||
                call->callee == "map_remove";
     }
+    // NOTE: INDEX_EXPR is intentionally NOT included here.  The value returned
+    // by dict["key"] may be another dict OR an array — we cannot know statically
+    // without type inference.  Chained string-key access (dict["k1"]["k2"]) is
+    // handled explicitly in generateIndex using the key type as a discriminator.
     return false;
 }
 
 llvm::Value* CodeGenerator::emitMapGet(llvm::Value* mapVal, llvm::Value* keyVal) {
     // Inline map_get: linear scan through [len, k0, v0, k1, v1, ...] layout.
     // Returns the value for keyVal, or 0 if the key is absent.
-    // This is identical IR to what the map_get() builtin emits — zero overhead.
+    //
+    // IR quality targets (same as expert hand-written assembly):
+    //   • MaybeAlign(8) on all i64 loads  — communicates 8-byte alignment
+    //   • TBAA on len/key/val loads        — enables load-CSE and alias analysis
+    //   • range metadata on len load       — tells LLVM len ∈ [0, INT64_MAX)
+    //   • nsw+nuw on slot arithmetic       — enables induction variable opts
+    //   • mustprogress loop metadata       — enables LICM and DSE through loop
+    //   • ULT comparison                   — unsigned, consistent with builtins
+    //   • Hot branch weights on found path — branch predictor hint
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     llvm::Value* mapPtr = builder->CreateIntToPtr(mapVal, ptrTy, "didx.ptr");
-    llvm::Value* mapLen = builder->CreateLoad(getDefaultType(), mapPtr, "didx.len");
-    llvm::Value* zero   = llvm::ConstantInt::get(getDefaultType(), 0);
-    llvm::Value* one    = llvm::ConstantInt::get(getDefaultType(), 1);
-    llvm::Value* two    = llvm::ConstantInt::get(getDefaultType(), 2);
+
+    auto* lenLoad = builder->CreateAlignedLoad(getDefaultType(), mapPtr, llvm::MaybeAlign(8), "didx.len");
+    lenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+    lenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+    llvm::Value* mapLen = lenLoad;
+
+    llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+    llvm::Value* one  = llvm::ConstantInt::get(getDefaultType(), 1);
+    llvm::Value* two  = llvm::ConstantInt::get(getDefaultType(), 2);
 
     llvm::Function* fn      = builder->GetInsertBlock()->getParent();
     llvm::BasicBlock* preBB = builder->GetInsertBlock();
@@ -5080,33 +5105,62 @@ llvm::Value* CodeGenerator::emitMapGet(llvm::Value* mapVal, llvm::Value* keyVal)
     llvm::BasicBlock* foundBB = llvm::BasicBlock::Create(*context, "didx.found", fn);
     llvm::BasicBlock* doneBB  = llvm::BasicBlock::Create(*context, "didx.done",  fn);
 
-    builder->CreateBr(loopBB);
+    auto* entryBr = builder->CreateBr(loopBB);
 
+    // mustprogress: the loop always terminates (bounded by mapLen).
+    // This lets LLVM apply LICM and DSE through the loop body.
+    if (optimizationLevel >= OptimizationLevel::O1) {
+        llvm::SmallVector<llvm::Metadata*, 2> mds;
+        mds.push_back(nullptr);
+        mds.push_back(llvm::MDNode::get(*context,
+            {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
+        llvm::MDNode* md = llvm::MDNode::get(*context, mds);
+        md->replaceOperandWith(0, md);
+        entryBr->setMetadata(llvm::LLVMContext::MD_loop, md);
+    }
+
+    // Loop header: idx PHI, exit if idx >= mapLen (unsigned: UGE)
     builder->SetInsertPoint(loopBB);
     llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "didx.i");
     idx->addIncoming(zero, preBB);
+    // Use unsigned compare (ULT): mapLen is always non-negative, so ULT and
+    // SLT are equivalent for valid maps, but ULT is consistent with all other
+    // builtin loops and allows the strength-reduction pass to fold better.
     builder->CreateCondBr(
-        builder->CreateICmpSLT(idx, mapLen, "didx.cond"), checkBB, doneBB);
+        builder->CreateICmpULT(idx, mapLen, "didx.cond"), checkBB, doneBB);
 
+    // Check block: load key at slot (idx+1), compare with target
     builder->SetInsertPoint(checkBB);
-    llvm::Value* kSlot = builder->CreateAdd(idx, one, "didx.kslot");
+    llvm::Value* kSlot = builder->CreateAdd(idx, one,
+        llvm::Twine("didx.kslot"), /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* kPtr  = builder->CreateInBoundsGEP(getDefaultType(), mapPtr, kSlot, "didx.kptr");
-    llvm::Value* eKey  = builder->CreateLoad(getDefaultType(), kPtr, "didx.ekey");
-    llvm::Value* match = builder->CreateICmpEQ(eKey, keyVal, "didx.match");
-    llvm::Value* nextIdx = builder->CreateAdd(idx, two, "didx.next");
-    idx->addIncoming(nextIdx, checkBB);
-    builder->CreateCondBr(match, foundBB, loopBB);
+    auto* keyLoad = builder->CreateAlignedLoad(getDefaultType(), kPtr, llvm::MaybeAlign(8), "didx.ekey");
+    keyLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+    llvm::Value* match = builder->CreateICmpEQ(keyLoad, keyVal, "didx.match");
 
+    // Back-edge: advance by 2 slots (skip key+value pair), nsw+nuw
+    llvm::Value* nextIdx = builder->CreateAdd(idx, two,
+        llvm::Twine("didx.next"), /*HasNUW=*/true, /*HasNSW=*/true);
+    idx->addIncoming(nextIdx, checkBB);
+
+    // Mark the "not found" branch cold — dict lookups usually succeed
+    llvm::MDNode* hitWeights = llvm::MDBuilder(*context).createBranchWeights(1000000, 1);
+    builder->CreateCondBr(match, foundBB, loopBB, hitWeights);
+
+    // Found block: load value at slot (idx+2)
     builder->SetInsertPoint(foundBB);
-    llvm::Value* vSlot = builder->CreateAdd(idx, two, "didx.vslot");
+    llvm::Value* vSlot = builder->CreateAdd(idx, two,
+        llvm::Twine("didx.vslot"), /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* vPtr  = builder->CreateInBoundsGEP(getDefaultType(), mapPtr, vSlot, "didx.vptr");
-    llvm::Value* val   = builder->CreateLoad(getDefaultType(), vPtr, "didx.val");
+    auto* valLoad = builder->CreateAlignedLoad(getDefaultType(), vPtr, llvm::MaybeAlign(8), "didx.val");
+    valLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
     builder->CreateBr(doneBB);
 
+    // Merge: PHI selects found value or 0 (key absent)
     builder->SetInsertPoint(doneBB);
     llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "didx.result");
     result->addIncoming(zero, loopBB);   // key not found → 0
-    result->addIncoming(val,  foundBB);  // key found
+    result->addIncoming(valLoad, foundBB);
     return result;
 }
 
