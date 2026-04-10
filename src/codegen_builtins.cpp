@@ -2581,7 +2581,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             builder->SetInsertPoint(loopBB);
             llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "fill.idx");
             idx->addIncoming(zero, preheader);
-            llvm::Value* cond = builder->CreateICmpSLT(idx, sizeArg, "fill.cond");
+            llvm::Value* cond = builder->CreateICmpULT(idx, sizeArg, "fill.cond");
             builder->CreateCondBr(cond, bodyBB, doneBB);
             builder->SetInsertPoint(bodyBB);
             llvm::Value* elemIdx = builder->CreateAdd(idx, one, "fill.elemidx", /*HasNUW=*/true, /*HasNSW=*/true);
@@ -4391,7 +4391,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(loopBB);
         llvm::PHINode* i = builder->CreatePHI(getDefaultType(), 2, "rstep.i");
         i->addIncoming(zero, entryBB);
-        llvm::Value* cond = builder->CreateICmpSLT(i, count, "rstep.cond");
+        llvm::Value* cond = builder->CreateICmpULT(i, count, "rstep.cond");
         builder->CreateCondBr(cond, bodyBB, doneBB);
 
         builder->SetInsertPoint(bodyBB);
@@ -4400,7 +4400,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* slot = builder->CreateAdd(i, one, "rstep.slot");
         llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), buf, slot, "rstep.elemptr");
         builder->CreateStore(val, elemPtr);
-        llvm::Value* nextI = builder->CreateAdd(i, one, "rstep.next");
+        llvm::Value* nextI = builder->CreateAdd(i, one, "rstep.next", /*HasNUW=*/true, /*HasNSW=*/true);
         i->addIncoming(nextI, bodyBB);
         attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
 

@@ -2052,8 +2052,8 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
     // Compute entry base: mapPtr + 2 + slot*3
     llvm::Value* three = llvm::ConstantInt::get(i64Ty, 3);
     llvm::Value* entryOff = builder->CreateAdd(
-        builder->CreateMul(slot, three, "slot3"),
-        llvm::ConstantInt::get(i64Ty, 2), "entryoff");
+        builder->CreateMul(slot, three, "slot3", /*HasNUW=*/true, /*HasNSW=*/true),
+        llvm::ConstantInt::get(i64Ty, 2), "entryoff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* hashPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, entryOff, "hashptr");
     llvm::Value* slotHash = builder->CreateAlignedLoad(i64Ty, hashPtr, llvm::MaybeAlign(8), "slothash");
     // Check if empty (hash == 0)
@@ -2072,7 +2072,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
 
     // Occupied: check if key matches
     builder->SetInsertPoint(occupBB);
-    llvm::Value* keyOff = builder->CreateAdd(entryOff, llvm::ConstantInt::get(i64Ty, 1), "keyoff");
+    llvm::Value* keyOff = builder->CreateAdd(entryOff, llvm::ConstantInt::get(i64Ty, 1), "keyoff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* eKeyPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, keyOff, "ekeyptr");
     llvm::Value* eKey = builder->CreateAlignedLoad(i64Ty, eKeyPtr, llvm::MaybeAlign(8), "ekey");
     llvm::Value* keyMatch = builder->CreateICmpEQ(eKey, keyArg, "keymatch");
@@ -2080,7 +2080,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
 
     // Match: update value in place
     builder->SetInsertPoint(matchBB);
-    llvm::Value* valOff = builder->CreateAdd(entryOff, llvm::ConstantInt::get(i64Ty, 2), "valoff");
+    llvm::Value* valOff = builder->CreateAdd(entryOff, llvm::ConstantInt::get(i64Ty, 2), "valoff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* eValPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, valOff, "evalptr");
     builder->CreateAlignedStore(valArg, eValPtr, llvm::MaybeAlign(8));
     builder->CreateBr(doneBB);
@@ -2091,7 +2091,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
     tombForNext->addIncoming(newTomb, checkBB);
     tombForNext->addIncoming(firstTombstone, occupBB);  // no change if occupied but no match
     llvm::Value* nextSlot = builder->CreateAnd(
-        builder->CreateAdd(slot, llvm::ConstantInt::get(i64Ty, 1), "slot1"),
+        builder->CreateAdd(slot, llvm::ConstantInt::get(i64Ty, 1), "slot1", /*HasNUW=*/true, /*HasNSW=*/true),
         mask, "nextslot");
     slot->addIncoming(nextSlot, nextBB);
     firstTombstone->addIncoming(tombForNext, nextBB);
@@ -2100,9 +2100,9 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
     // Empty: key not found — insert
     builder->SetInsertPoint(emptyBB);
     // Check if we need to grow: size+1 > cap*3/4
-    llvm::Value* newSize = builder->CreateAdd(size, llvm::ConstantInt::get(i64Ty, 1), "newsize");
+    llvm::Value* newSize = builder->CreateAdd(size, llvm::ConstantInt::get(i64Ty, 1), "newsize", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* threshold = builder->CreateLShr(
-        builder->CreateMul(cap, llvm::ConstantInt::get(i64Ty, 3)), llvm::ConstantInt::get(i64Ty, 2), "threshold");
+        builder->CreateMul(cap, llvm::ConstantInt::get(i64Ty, 3), "cap3thr", /*HasNUW=*/true, /*HasNSW=*/true), llvm::ConstantInt::get(i64Ty, 2), "threshold");
     llvm::Value* needGrow = builder->CreateICmpUGT(newSize, threshold, "needgrow");
     builder->CreateCondBr(needGrow, growBB, insertBB);
 
@@ -2111,15 +2111,15 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
     llvm::Value* hasTombForInsert = builder->CreateICmpNE(firstTombstone, llvm::ConstantInt::get(i64Ty, -1), "hastomb2");
     llvm::Value* insSlot = builder->CreateSelect(hasTombForInsert, firstTombstone, slot, "insslot");
     llvm::Value* insOff = builder->CreateAdd(
-        builder->CreateMul(insSlot, three),
-        llvm::ConstantInt::get(i64Ty, 2), "insoff");
+        builder->CreateMul(insSlot, three, "ins3", /*HasNUW=*/true, /*HasNSW=*/true),
+        llvm::ConstantInt::get(i64Ty, 2), "insoff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* insHashPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, insOff, "inshashptr");
     builder->CreateAlignedStore(hashVal, insHashPtr, llvm::MaybeAlign(8));
     llvm::Value* insKeyPtr = builder->CreateInBoundsGEP(i64Ty, mapArg,
-        builder->CreateAdd(insOff, llvm::ConstantInt::get(i64Ty, 1)), "inskeyptr");
+        builder->CreateAdd(insOff, llvm::ConstantInt::get(i64Ty, 1), "inskeyoff", /*HasNUW=*/true, /*HasNSW=*/true), "inskeyptr");
     builder->CreateAlignedStore(keyArg, insKeyPtr, llvm::MaybeAlign(8));
     llvm::Value* insValPtr = builder->CreateInBoundsGEP(i64Ty, mapArg,
-        builder->CreateAdd(insOff, llvm::ConstantInt::get(i64Ty, 2)), "insvalptr");
+        builder->CreateAdd(insOff, llvm::ConstantInt::get(i64Ty, 2), "insvaloff", /*HasNUW=*/true, /*HasNSW=*/true), "insvalptr");
     builder->CreateAlignedStore(valArg, insValPtr, llvm::MaybeAlign(8));
     // Update size
     builder->CreateAlignedStore(newSize, sizePtr, llvm::MaybeAlign(8));
@@ -2129,9 +2129,9 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
     builder->SetInsertPoint(growBB);
     llvm::Value* newCap = builder->CreateShl(cap, llvm::ConstantInt::get(i64Ty, 1), "newcap");
     llvm::Value* newTotalSlots = builder->CreateAdd(
-        builder->CreateMul(newCap, three),
-        llvm::ConstantInt::get(i64Ty, 2), "newtotalslots");
-    llvm::Value* newTotalBytes = builder->CreateMul(newTotalSlots, llvm::ConstantInt::get(i64Ty, 8), "newtotalbytes");
+        builder->CreateMul(newCap, three, "cap3", /*HasNUW=*/true, /*HasNSW=*/true),
+        llvm::ConstantInt::get(i64Ty, 2), "newtotalslots", /*HasNUW=*/true, /*HasNSW=*/true);
+    llvm::Value* newTotalBytes = builder->CreateMul(newTotalSlots, llvm::ConstantInt::get(i64Ty, 8), "newtotalbytes", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* newBuf = builder->CreateCall(getOrDeclareCalloc(), {
         llvm::ConstantInt::get(i64Ty, 1), newTotalBytes
     }, "newbuf");
@@ -2159,8 +2159,8 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
     // Rehash body: read old entry, skip empty/tombstone
     builder->SetInsertPoint(rehashBodyBB);
     llvm::Value* oldOff = builder->CreateAdd(
-        builder->CreateMul(ri, three),
-        llvm::ConstantInt::get(i64Ty, 2), "oldoff");
+        builder->CreateMul(ri, three, "ri3", /*HasNUW=*/true, /*HasNSW=*/true),
+        llvm::ConstantInt::get(i64Ty, 2), "oldoff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* oldHashPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, oldOff, "oldhashptr");
     llvm::Value* oldHash = builder->CreateAlignedLoad(i64Ty, oldHashPtr, llvm::MaybeAlign(8), "oldhash");
     llvm::Value* isActive = builder->CreateICmpUGE(oldHash, llvm::ConstantInt::get(i64Ty, 2), "isactive");
@@ -2169,10 +2169,10 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
     // Rehash probe: find empty slot in new table
     builder->SetInsertPoint(rehashProbeBB);
     llvm::Value* oldKeyPtr = builder->CreateInBoundsGEP(i64Ty, mapArg,
-        builder->CreateAdd(oldOff, llvm::ConstantInt::get(i64Ty, 1)), "oldkeyptr");
+        builder->CreateAdd(oldOff, llvm::ConstantInt::get(i64Ty, 1), "oldkeyoff", /*HasNUW=*/true, /*HasNSW=*/true), "oldkeyptr");
     llvm::Value* oldKey = builder->CreateAlignedLoad(i64Ty, oldKeyPtr, llvm::MaybeAlign(8), "oldkey");
     llvm::Value* oldValPtr = builder->CreateInBoundsGEP(i64Ty, mapArg,
-        builder->CreateAdd(oldOff, llvm::ConstantInt::get(i64Ty, 2)), "oldvalptr");
+        builder->CreateAdd(oldOff, llvm::ConstantInt::get(i64Ty, 2), "oldvaloff", /*HasNUW=*/true, /*HasNSW=*/true), "oldvalptr");
     llvm::Value* oldVal = builder->CreateAlignedLoad(i64Ty, oldValPtr, llvm::MaybeAlign(8), "oldval");
     // Find empty slot in new table using oldHash
     llvm::Value* rStartSlot = builder->CreateAnd(oldHash, newMask, "rstartslot");
@@ -2186,8 +2186,8 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
     llvm::PHINode* rs = builder->CreatePHI(i64Ty, 2, "rs");
     rs->addIncoming(rStartSlot, rehashProbeBB);
     llvm::Value* rEntryOff = builder->CreateAdd(
-        builder->CreateMul(rs, three),
-        llvm::ConstantInt::get(i64Ty, 2), "rentryoff");
+        builder->CreateMul(rs, three, "rs3", /*HasNUW=*/true, /*HasNSW=*/true),
+        llvm::ConstantInt::get(i64Ty, 2), "rentryoff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* rHashPtr = builder->CreateInBoundsGEP(i64Ty, newBuf, rEntryOff, "rhashptr");
     llvm::Value* rSlotHash = builder->CreateAlignedLoad(i64Ty, rHashPtr, llvm::MaybeAlign(8), "rslothash");
     llvm::Value* rIsEmpty = builder->CreateICmpEQ(rSlotHash, llvm::ConstantInt::get(i64Ty, 0), "risempty");
@@ -2196,7 +2196,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
     // Advance probe: compute next slot, loop back
     builder->SetInsertPoint(rAdvanceBB);
     llvm::Value* rNext = builder->CreateAnd(
-        builder->CreateAdd(rs, llvm::ConstantInt::get(i64Ty, 1)),
+        builder->CreateAdd(rs, llvm::ConstantInt::get(i64Ty, 1), "rs1", /*HasNUW=*/true, /*HasNSW=*/true),
         newMask, "rnext");
     rs->addIncoming(rNext, rAdvanceBB);
     builder->CreateBr(rProbeLpBB);
@@ -2205,16 +2205,16 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
     builder->SetInsertPoint(rehashWriteBB);
     builder->CreateAlignedStore(oldHash, rHashPtr, llvm::MaybeAlign(8));
     llvm::Value* rKeyPtr = builder->CreateInBoundsGEP(i64Ty, newBuf,
-        builder->CreateAdd(rEntryOff, llvm::ConstantInt::get(i64Ty, 1)), "rkeyptr");
+        builder->CreateAdd(rEntryOff, llvm::ConstantInt::get(i64Ty, 1), "rkeyoff", /*HasNUW=*/true, /*HasNSW=*/true), "rkeyptr");
     builder->CreateAlignedStore(oldKey, rKeyPtr, llvm::MaybeAlign(8));
     llvm::Value* rValPtr = builder->CreateInBoundsGEP(i64Ty, newBuf,
-        builder->CreateAdd(rEntryOff, llvm::ConstantInt::get(i64Ty, 2)), "rvalptr");
+        builder->CreateAdd(rEntryOff, llvm::ConstantInt::get(i64Ty, 2), "rvaloff", /*HasNUW=*/true, /*HasNSW=*/true), "rvalptr");
     builder->CreateAlignedStore(oldVal, rValPtr, llvm::MaybeAlign(8));
     builder->CreateBr(rehashNextBB);
 
     // Rehash next: advance outer loop
     builder->SetInsertPoint(rehashNextBB);
-    llvm::Value* riNext = builder->CreateAdd(ri, llvm::ConstantInt::get(i64Ty, 1), "rinext");
+    llvm::Value* riNext = builder->CreateAdd(ri, llvm::ConstantInt::get(i64Ty, 1), "rinext", /*HasNUW=*/true, /*HasNSW=*/true);
     ri->addIncoming(riNext, rehashNextBB);
     builder->CreateBr(rehashLoopBB);
 
@@ -2233,8 +2233,8 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
     llvm::PHINode* ns = builder->CreatePHI(i64Ty, 2, "ns");
     ns->addIncoming(nStartSlot, insertNewBB);
     llvm::Value* nEntryOff = builder->CreateAdd(
-        builder->CreateMul(ns, three),
-        llvm::ConstantInt::get(i64Ty, 2), "nentryoff");
+        builder->CreateMul(ns, three, "ns3", /*HasNUW=*/true, /*HasNSW=*/true),
+        llvm::ConstantInt::get(i64Ty, 2), "nentryoff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* nHashPtr = builder->CreateInBoundsGEP(i64Ty, newBuf, nEntryOff, "nhashptr");
     llvm::Value* nSlotHash = builder->CreateAlignedLoad(i64Ty, nHashPtr, llvm::MaybeAlign(8), "nslothash");
     llvm::Value* nIsEmpty = builder->CreateICmpEQ(nSlotHash, llvm::ConstantInt::get(i64Ty, 0), "nisempty");
@@ -2244,7 +2244,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
 
     builder->SetInsertPoint(nAdvBB);
     llvm::Value* nNext = builder->CreateAnd(
-        builder->CreateAdd(ns, llvm::ConstantInt::get(i64Ty, 1)),
+        builder->CreateAdd(ns, llvm::ConstantInt::get(i64Ty, 1), "ns1", /*HasNUW=*/true, /*HasNSW=*/true),
         newMask, "nnext");
     ns->addIncoming(nNext, nAdvBB);
     builder->CreateBr(nProbeLpBB);
@@ -2252,10 +2252,10 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
     builder->SetInsertPoint(nWriteBB);
     builder->CreateAlignedStore(hashVal, nHashPtr, llvm::MaybeAlign(8));
     llvm::Value* nKeyPtr = builder->CreateInBoundsGEP(i64Ty, newBuf,
-        builder->CreateAdd(nEntryOff, llvm::ConstantInt::get(i64Ty, 1)), "nkeyptr");
+        builder->CreateAdd(nEntryOff, llvm::ConstantInt::get(i64Ty, 1), "nkeyoff", /*HasNUW=*/true, /*HasNSW=*/true), "nkeyptr");
     builder->CreateAlignedStore(keyArg, nKeyPtr, llvm::MaybeAlign(8));
     llvm::Value* nValPtr = builder->CreateInBoundsGEP(i64Ty, newBuf,
-        builder->CreateAdd(nEntryOff, llvm::ConstantInt::get(i64Ty, 2)), "nvalptr");
+        builder->CreateAdd(nEntryOff, llvm::ConstantInt::get(i64Ty, 2), "nvaloff", /*HasNUW=*/true, /*HasNSW=*/true), "nvalptr");
     builder->CreateAlignedStore(valArg, nValPtr, llvm::MaybeAlign(8));
     builder->CreateBr(doneBB);
 
@@ -2317,7 +2317,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapGet() {
 
     llvm::Value* three = llvm::ConstantInt::get(i64Ty, 3);
     llvm::Value* entryOff = builder->CreateAdd(
-        builder->CreateMul(slot, three), llvm::ConstantInt::get(i64Ty, 2), "entryoff");
+        builder->CreateMul(slot, three, "slot3", /*HasNUW=*/true, /*HasNSW=*/true), llvm::ConstantInt::get(i64Ty, 2), "entryoff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* hashPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, entryOff, "hashptr");
     llvm::Value* slotHash = builder->CreateAlignedLoad(i64Ty, hashPtr, llvm::MaybeAlign(8), "slothash");
     // Empty => not found
@@ -2332,7 +2332,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapGet() {
     builder->CreateCondBr(isTomb, nextBB, checkKeyBB);
 
     builder->SetInsertPoint(checkKeyBB);
-    llvm::Value* keyOff = builder->CreateAdd(entryOff, llvm::ConstantInt::get(i64Ty, 1), "keyoff");
+    llvm::Value* keyOff = builder->CreateAdd(entryOff, llvm::ConstantInt::get(i64Ty, 1), "keyoff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* eKeyPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, keyOff, "ekeyptr");
     llvm::Value* eKey = builder->CreateAlignedLoad(i64Ty, eKeyPtr, llvm::MaybeAlign(8), "ekey");
     llvm::Value* keyMatch = builder->CreateICmpEQ(eKey, keyArg, "keymatch");
@@ -2340,7 +2340,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapGet() {
 
     // Found: load value
     builder->SetInsertPoint(foundBB);
-    llvm::Value* valOff = builder->CreateAdd(entryOff, llvm::ConstantInt::get(i64Ty, 2), "valoff");
+    llvm::Value* valOff = builder->CreateAdd(entryOff, llvm::ConstantInt::get(i64Ty, 2), "valoff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* eValPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, valOff, "evalptr");
     llvm::Value* val = builder->CreateAlignedLoad(i64Ty, eValPtr, llvm::MaybeAlign(8), "val");
     builder->CreateRet(val);
@@ -2348,7 +2348,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapGet() {
     // Next: advance slot (both tombstone and no-match paths funnel here)
     builder->SetInsertPoint(nextBB);
     llvm::Value* nextSlot = builder->CreateAnd(
-        builder->CreateAdd(slot, llvm::ConstantInt::get(i64Ty, 1)),
+        builder->CreateAdd(slot, llvm::ConstantInt::get(i64Ty, 1), "slot1", /*HasNUW=*/true, /*HasNSW=*/true),
         mask, "nextslot");
     slot->addIncoming(nextSlot, nextBB);
     builder->CreateBr(probeBB);
@@ -2405,7 +2405,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapHas() {
 
     llvm::Value* three = llvm::ConstantInt::get(i64Ty, 3);
     llvm::Value* entryOff = builder->CreateAdd(
-        builder->CreateMul(slot, three), llvm::ConstantInt::get(i64Ty, 2), "entryoff");
+        builder->CreateMul(slot, three, "slot3", /*HasNUW=*/true, /*HasNSW=*/true), llvm::ConstantInt::get(i64Ty, 2), "entryoff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* hashPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, entryOff, "hashptr");
     llvm::Value* slotHash = builder->CreateAlignedLoad(i64Ty, hashPtr, llvm::MaybeAlign(8), "slothash");
     llvm::Value* isEmpty = builder->CreateICmpEQ(slotHash, llvm::ConstantInt::get(i64Ty, 0), "isempty");
@@ -2416,7 +2416,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapHas() {
     builder->CreateCondBr(isTomb, nextBB, checkKeyBB);
 
     builder->SetInsertPoint(checkKeyBB);
-    llvm::Value* keyOff = builder->CreateAdd(entryOff, llvm::ConstantInt::get(i64Ty, 1), "keyoff");
+    llvm::Value* keyOff = builder->CreateAdd(entryOff, llvm::ConstantInt::get(i64Ty, 1), "keyoff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* eKeyPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, keyOff, "ekeyptr");
     llvm::Value* eKey = builder->CreateAlignedLoad(i64Ty, eKeyPtr, llvm::MaybeAlign(8), "ekey");
     llvm::Value* keyMatch = builder->CreateICmpEQ(eKey, keyArg, "keymatch");
@@ -2427,7 +2427,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapHas() {
 
     builder->SetInsertPoint(nextBB);
     llvm::Value* nextSlot = builder->CreateAnd(
-        builder->CreateAdd(slot, llvm::ConstantInt::get(i64Ty, 1)),
+        builder->CreateAdd(slot, llvm::ConstantInt::get(i64Ty, 1), "slot1", /*HasNUW=*/true, /*HasNSW=*/true),
         mask, "nextslot");
     slot->addIncoming(nextSlot, nextBB);
     builder->CreateBr(probeBB);
@@ -2484,7 +2484,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapRemove() {
 
     llvm::Value* three = llvm::ConstantInt::get(i64Ty, 3);
     llvm::Value* entryOff = builder->CreateAdd(
-        builder->CreateMul(slot, three), llvm::ConstantInt::get(i64Ty, 2), "entryoff");
+        builder->CreateMul(slot, three, "slot3", /*HasNUW=*/true, /*HasNSW=*/true), llvm::ConstantInt::get(i64Ty, 2), "entryoff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* hashPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, entryOff, "hashptr");
     llvm::Value* slotHash = builder->CreateAlignedLoad(i64Ty, hashPtr, llvm::MaybeAlign(8), "slothash");
     llvm::Value* isEmpty = builder->CreateICmpEQ(slotHash, llvm::ConstantInt::get(i64Ty, 0), "isempty");
@@ -2495,7 +2495,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapRemove() {
     builder->CreateCondBr(isTomb, nextBB, checkKeyBB);
 
     builder->SetInsertPoint(checkKeyBB);
-    llvm::Value* keyOff = builder->CreateAdd(entryOff, llvm::ConstantInt::get(i64Ty, 1), "keyoff");
+    llvm::Value* keyOff = builder->CreateAdd(entryOff, llvm::ConstantInt::get(i64Ty, 1), "keyoff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* eKeyPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, keyOff, "ekeyptr");
     llvm::Value* eKey = builder->CreateAlignedLoad(i64Ty, eKeyPtr, llvm::MaybeAlign(8), "ekey");
     llvm::Value* keyMatch = builder->CreateICmpEQ(eKey, keyArg, "keymatch");
@@ -2512,7 +2512,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapRemove() {
 
     builder->SetInsertPoint(nextBB);
     llvm::Value* nextSlot = builder->CreateAnd(
-        builder->CreateAdd(slot, llvm::ConstantInt::get(i64Ty, 1)),
+        builder->CreateAdd(slot, llvm::ConstantInt::get(i64Ty, 1), "slot1", /*HasNUW=*/true, /*HasNSW=*/true),
         mask, "nextslot");
     slot->addIncoming(nextSlot, nextBB);
     builder->CreateBr(probeBB);
@@ -2571,27 +2571,27 @@ llvm::Function* CodeGenerator::getOrEmitHashMapKeys() {
     builder->SetInsertPoint(bodyBB);
     llvm::Value* three = llvm::ConstantInt::get(i64Ty, 3);
     llvm::Value* off = builder->CreateAdd(
-        builder->CreateMul(i, three), llvm::ConstantInt::get(i64Ty, 2), "off");
+        builder->CreateMul(i, three, "i3", /*HasNUW=*/true, /*HasNSW=*/true), llvm::ConstantInt::get(i64Ty, 2), "off", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* hashPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, off, "hashptr");
     llvm::Value* slotHash = builder->CreateAlignedLoad(i64Ty, hashPtr, llvm::MaybeAlign(8), "slothash");
     llvm::Value* isActive = builder->CreateICmpUGE(slotHash, llvm::ConstantInt::get(i64Ty, 2), "isactive");
     builder->CreateCondBr(isActive, storeBB, nextBB);
 
     builder->SetInsertPoint(storeBB);
-    llvm::Value* keyOff = builder->CreateAdd(off, llvm::ConstantInt::get(i64Ty, 1), "keyoff");
+    llvm::Value* keyOff = builder->CreateAdd(off, llvm::ConstantInt::get(i64Ty, 1), "keyoff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* keyPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, keyOff, "keyptr");
     llvm::Value* key = builder->CreateAlignedLoad(i64Ty, keyPtr, llvm::MaybeAlign(8), "key");
-    llvm::Value* arrOff = builder->CreateAdd(writeIdx, llvm::ConstantInt::get(i64Ty, 1), "arroff");
+    llvm::Value* arrOff = builder->CreateAdd(writeIdx, llvm::ConstantInt::get(i64Ty, 1), "arroff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* arrPtr = builder->CreateInBoundsGEP(i64Ty, buf, arrOff, "arrptr");
     builder->CreateAlignedStore(key, arrPtr, llvm::MaybeAlign(8));
-    llvm::Value* newWIdx = builder->CreateAdd(writeIdx, llvm::ConstantInt::get(i64Ty, 1), "newidx");
+    llvm::Value* newWIdx = builder->CreateAdd(writeIdx, llvm::ConstantInt::get(i64Ty, 1), "newidx", /*HasNUW=*/true, /*HasNSW=*/true);
     builder->CreateBr(nextBB);
 
     builder->SetInsertPoint(nextBB);
     llvm::PHINode* wPhi = builder->CreatePHI(i64Ty, 2, "wphi");
     wPhi->addIncoming(writeIdx, bodyBB);   // not active: unchanged
     wPhi->addIncoming(newWIdx, storeBB);   // active: incremented
-    llvm::Value* iNext = builder->CreateAdd(i, llvm::ConstantInt::get(i64Ty, 1), "inext");
+    llvm::Value* iNext = builder->CreateAdd(i, llvm::ConstantInt::get(i64Ty, 1), "inext", /*HasNUW=*/true, /*HasNSW=*/true);
     i->addIncoming(iNext, nextBB);
     writeIdx->addIncoming(wPhi, nextBB);
     builder->CreateBr(loopBB);
@@ -2647,27 +2647,27 @@ llvm::Function* CodeGenerator::getOrEmitHashMapValues() {
     builder->SetInsertPoint(bodyBB);
     llvm::Value* three = llvm::ConstantInt::get(i64Ty, 3);
     llvm::Value* off = builder->CreateAdd(
-        builder->CreateMul(i, three), llvm::ConstantInt::get(i64Ty, 2), "off");
+        builder->CreateMul(i, three, "i3", /*HasNUW=*/true, /*HasNSW=*/true), llvm::ConstantInt::get(i64Ty, 2), "off", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* hashPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, off, "hashptr");
     llvm::Value* slotHash = builder->CreateAlignedLoad(i64Ty, hashPtr, llvm::MaybeAlign(8), "slothash");
     llvm::Value* isActive = builder->CreateICmpUGE(slotHash, llvm::ConstantInt::get(i64Ty, 2), "isactive");
     builder->CreateCondBr(isActive, storeBB, nextBB);
 
     builder->SetInsertPoint(storeBB);
-    llvm::Value* valOff = builder->CreateAdd(off, llvm::ConstantInt::get(i64Ty, 2), "valoff");
+    llvm::Value* valOff = builder->CreateAdd(off, llvm::ConstantInt::get(i64Ty, 2), "valoff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* valPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, valOff, "valptr");
     llvm::Value* val = builder->CreateAlignedLoad(i64Ty, valPtr, llvm::MaybeAlign(8), "val");
-    llvm::Value* arrOff = builder->CreateAdd(writeIdx, llvm::ConstantInt::get(i64Ty, 1), "arroff");
+    llvm::Value* arrOff = builder->CreateAdd(writeIdx, llvm::ConstantInt::get(i64Ty, 1), "arroff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* arrPtr = builder->CreateInBoundsGEP(i64Ty, buf, arrOff, "arrptr");
     builder->CreateAlignedStore(val, arrPtr, llvm::MaybeAlign(8));
-    llvm::Value* newWIdx = builder->CreateAdd(writeIdx, llvm::ConstantInt::get(i64Ty, 1), "newidx");
+    llvm::Value* newWIdx = builder->CreateAdd(writeIdx, llvm::ConstantInt::get(i64Ty, 1), "newidx", /*HasNUW=*/true, /*HasNSW=*/true);
     builder->CreateBr(nextBB);
 
     builder->SetInsertPoint(nextBB);
     llvm::PHINode* wPhi = builder->CreatePHI(i64Ty, 2, "wphi");
     wPhi->addIncoming(writeIdx, bodyBB);
     wPhi->addIncoming(newWIdx, storeBB);
-    llvm::Value* iNext = builder->CreateAdd(i, llvm::ConstantInt::get(i64Ty, 1), "inext");
+    llvm::Value* iNext = builder->CreateAdd(i, llvm::ConstantInt::get(i64Ty, 1), "inext", /*HasNUW=*/true, /*HasNSW=*/true);
     i->addIncoming(iNext, nextBB);
     writeIdx->addIncoming(wPhi, nextBB);
     builder->CreateBr(loopBB);
