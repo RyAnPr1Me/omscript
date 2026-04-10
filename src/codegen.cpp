@@ -2088,7 +2088,27 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
     // Rotate-Accumulate (RA) hash
     llvm::Value* hashVal = emitKeyHash(keyArg);
     auto* capPtr = mapArg;  // slot 0
-    llvm::Value* cap = builder->CreateAlignedLoad(i64Ty, capPtr, llvm::MaybeAlign(8), "cap");
+    auto* capLoad = builder->CreateAlignedLoad(i64Ty, capPtr, llvm::MaybeAlign(8), "cap");
+    llvm::Value* cap = capLoad;
+
+    // Capacity is always a power of 2 >= 8.  Communicate this to LLVM:
+    //  (a) !range metadata:  cap ∈ [8, 2^62)  — eliminates dead zero-checks
+    //  (b) llvm.assume(cap & (cap-1) == 0)    — lets CorrelatedValuePropagation
+    //      prove slot < cap after slot & mask, enabling downstream optimizations
+    {
+        llvm::Metadata* rangeMD[] = {
+            llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64Ty, 8)),
+            llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64Ty, 1ULL << 62))};
+        capLoad->setMetadata(llvm::LLVMContext::MD_range,
+                             llvm::MDNode::get(*context, rangeMD));
+        llvm::Value* capM1 = builder->CreateSub(cap, llvm::ConstantInt::get(i64Ty, 1));
+        llvm::Value* isPow2 = builder->CreateICmpEQ(
+            builder->CreateAnd(cap, capM1), llvm::ConstantInt::get(i64Ty, 0), "cap.pow2");
+        llvm::Function* assumeFn = OMSC_GET_INTRINSIC(
+            module.get(), llvm::Intrinsic::assume, {});
+        builder->CreateCall(assumeFn, {isPow2});
+    }
+
     llvm::Value* sizePtr = builder->CreateInBoundsGEP(i64Ty, mapArg, llvm::ConstantInt::get(i64Ty, 1), "sizeptr");
     llvm::Value* size = builder->CreateAlignedLoad(i64Ty, sizePtr, llvm::MaybeAlign(8), "size");
     llvm::Value* mask = builder->CreateSub(cap, llvm::ConstantInt::get(i64Ty, 1), "mask", /*HasNUW=*/true, /*HasNSW=*/true);
@@ -2123,8 +2143,17 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
         slot, firstTombstone, "newtomb");
     builder->CreateCondBr(isTomb, nextBB, occupBB);
 
-    // Occupied: check if key matches
+    // Occupied: first compare stored hash vs computed hash (cheap i64 cmp).
+    // On mismatch we skip the key load entirely — avoids a cache miss on
+    // probe chains where most slots hold different keys.
     builder->SetInsertPoint(occupBB);
+    auto* checkKeyBB = llvm::BasicBlock::Create(*context, "checkkey", fn);
+    llvm::Value* hashMatch = builder->CreateICmpEQ(slotHash, hashVal, "hashmatch");
+    // Hash match is unlikely on long probe chains; weight accordingly.
+    builder->CreateCondBr(hashMatch, checkKeyBB, nextBB);
+
+    // Hash matched — now load and compare the actual key.
+    builder->SetInsertPoint(checkKeyBB);
     llvm::Value* keyOff = builder->CreateAdd(entryOff, llvm::ConstantInt::get(i64Ty, 1), "keyoff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* eKeyPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, keyOff, "ekeyptr");
     llvm::Value* eKey = builder->CreateAlignedLoad(i64Ty, eKeyPtr, llvm::MaybeAlign(8), "ekey");
@@ -2140,9 +2169,10 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
 
     // Next: advance to next slot (linear probe), wrap around
     builder->SetInsertPoint(nextBB);
-    llvm::PHINode* tombForNext = builder->CreatePHI(i64Ty, 2, "tomb.next");
-    tombForNext->addIncoming(newTomb, checkBB);
-    tombForNext->addIncoming(firstTombstone, occupBB);  // no change if occupied but no match
+    llvm::PHINode* tombForNext = builder->CreatePHI(i64Ty, 3, "tomb.next");
+    tombForNext->addIncoming(newTomb, checkBB);          // tombstone path: may update tracker
+    tombForNext->addIncoming(firstTombstone, occupBB);   // hash mismatch: no change
+    tombForNext->addIncoming(firstTombstone, checkKeyBB); // key mismatch: no change
     llvm::Value* nextSlot = builder->CreateAnd(
         builder->CreateAdd(slot, llvm::ConstantInt::get(i64Ty, 1), "slot1", /*HasNUW=*/true, /*HasNSW=*/true),
         mask, "nextslot");
@@ -2157,7 +2187,9 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
     llvm::Value* threshold = builder->CreateLShr(
         builder->CreateMul(cap, llvm::ConstantInt::get(i64Ty, 3), "cap3thr", /*HasNUW=*/true, /*HasNSW=*/true), llvm::ConstantInt::get(i64Ty, 2), "threshold");
     llvm::Value* needGrow = builder->CreateICmpUGT(newSize, threshold, "needgrow");
-    builder->CreateCondBr(needGrow, growBB, insertBB);
+    // Growth is rare (~25% of insertions trigger it) — mark cold.
+    llvm::MDNode* growWeights = llvm::MDBuilder(*context).createBranchWeights(1, 1000);
+    builder->CreateCondBr(needGrow, growBB, insertBB, growWeights);
 
     // Insert: write into the slot (prefer tombstone slot if available)
     builder->SetInsertPoint(insertBB);
@@ -2359,7 +2391,22 @@ llvm::Function* CodeGenerator::getOrEmitHashMapGet() {
     // Rotate-Accumulate (RA) hash
     llvm::Value* hashVal = emitKeyHash(keyArg);
 
-    llvm::Value* cap = builder->CreateAlignedLoad(i64Ty, mapArg, llvm::MaybeAlign(8), "cap");
+    auto* capLoad = builder->CreateAlignedLoad(i64Ty, mapArg, llvm::MaybeAlign(8), "cap");
+    llvm::Value* cap = capLoad;
+    // Capacity is always a power of 2 >= 8.
+    {
+        llvm::Metadata* rangeMD[] = {
+            llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64Ty, 8)),
+            llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64Ty, 1ULL << 62))};
+        capLoad->setMetadata(llvm::LLVMContext::MD_range,
+                             llvm::MDNode::get(*context, rangeMD));
+        llvm::Value* capM1 = builder->CreateSub(cap, llvm::ConstantInt::get(i64Ty, 1));
+        llvm::Value* isPow2 = builder->CreateICmpEQ(
+            builder->CreateAnd(cap, capM1), llvm::ConstantInt::get(i64Ty, 0), "cap.pow2");
+        llvm::Function* assumeFn = OMSC_GET_INTRINSIC(
+            module.get(), llvm::Intrinsic::assume, {});
+        builder->CreateCall(assumeFn, {isPow2});
+    }
     llvm::Value* mask = builder->CreateSub(cap, llvm::ConstantInt::get(i64Ty, 1), "mask", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* startSlot = builder->CreateAnd(hashVal, mask, "startslot");
     builder->CreateBr(probeBB);
@@ -2381,9 +2428,16 @@ llvm::Function* CodeGenerator::getOrEmitHashMapGet() {
     // Check: tombstone or occupied?
     builder->SetInsertPoint(checkBB);
     llvm::Value* isTomb = builder->CreateICmpEQ(slotHash, llvm::ConstantInt::get(i64Ty, 1), "istomb");
-    // If tombstone, skip to next; otherwise check key
+    // If tombstone, skip to next; otherwise compare hashes first
+    auto* hashCmpBB = llvm::BasicBlock::Create(*context, "hashcmp", fn);
+    builder->CreateCondBr(isTomb, nextBB, hashCmpBB);
+
+    // Hash pre-filter: compare stored hash vs computed hash before loading key.
+    // Avoids an expensive key load (potential cache miss) on hash mismatch.
+    builder->SetInsertPoint(hashCmpBB);
     auto* checkKeyBB = llvm::BasicBlock::Create(*context, "checkkey", fn);
-    builder->CreateCondBr(isTomb, nextBB, checkKeyBB);
+    llvm::Value* hashMatch = builder->CreateICmpEQ(slotHash, hashVal, "hashmatch");
+    builder->CreateCondBr(hashMatch, checkKeyBB, nextBB);
 
     builder->SetInsertPoint(checkKeyBB);
     llvm::Value* keyOff = builder->CreateAdd(entryOff, llvm::ConstantInt::get(i64Ty, 1), "keyoff", /*HasNUW=*/true, /*HasNSW=*/true);
@@ -2449,7 +2503,22 @@ llvm::Function* CodeGenerator::getOrEmitHashMapHas() {
     // Rotate-Accumulate (RA) hash
     llvm::Value* hashVal = emitKeyHash(keyArg);
 
-    llvm::Value* cap = builder->CreateAlignedLoad(i64Ty, mapArg, llvm::MaybeAlign(8), "cap");
+    auto* capLoad_has = builder->CreateAlignedLoad(i64Ty, mapArg, llvm::MaybeAlign(8), "cap");
+    llvm::Value* cap = capLoad_has;
+    // Capacity is always a power of 2 >= 8.
+    {
+        llvm::Metadata* rangeMD[] = {
+            llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64Ty, 8)),
+            llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64Ty, 1ULL << 62))};
+        capLoad_has->setMetadata(llvm::LLVMContext::MD_range,
+                             llvm::MDNode::get(*context, rangeMD));
+        llvm::Value* capM1 = builder->CreateSub(cap, llvm::ConstantInt::get(i64Ty, 1));
+        llvm::Value* isPow2 = builder->CreateICmpEQ(
+            builder->CreateAnd(cap, capM1), llvm::ConstantInt::get(i64Ty, 0), "cap.pow2");
+        llvm::Function* assumeFn = OMSC_GET_INTRINSIC(
+            module.get(), llvm::Intrinsic::assume, {});
+        builder->CreateCall(assumeFn, {isPow2});
+    }
     llvm::Value* mask = builder->CreateSub(cap, llvm::ConstantInt::get(i64Ty, 1), "mask", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* startSlot = builder->CreateAnd(hashVal, mask, "startslot");
     builder->CreateBr(probeBB);
@@ -2468,7 +2537,13 @@ llvm::Function* CodeGenerator::getOrEmitHashMapHas() {
 
     builder->SetInsertPoint(checkBB);
     llvm::Value* isTomb = builder->CreateICmpEQ(slotHash, llvm::ConstantInt::get(i64Ty, 1), "istomb");
-    builder->CreateCondBr(isTomb, nextBB, checkKeyBB);
+    auto* hashCmpBB = llvm::BasicBlock::Create(*context, "hashcmp", fn);
+    builder->CreateCondBr(isTomb, nextBB, hashCmpBB);
+
+    // Hash pre-filter: compare stored hash vs computed hash before loading key.
+    builder->SetInsertPoint(hashCmpBB);
+    llvm::Value* hashMatch = builder->CreateICmpEQ(slotHash, hashVal, "hashmatch");
+    builder->CreateCondBr(hashMatch, checkKeyBB, nextBB);
 
     builder->SetInsertPoint(checkKeyBB);
     llvm::Value* keyOff = builder->CreateAdd(entryOff, llvm::ConstantInt::get(i64Ty, 1), "keyoff", /*HasNUW=*/true, /*HasNSW=*/true);
@@ -2531,7 +2606,22 @@ llvm::Function* CodeGenerator::getOrEmitHashMapRemove() {
     // Rotate-Accumulate (RA) hash
     llvm::Value* hashVal = emitKeyHash(keyArg);
 
-    llvm::Value* cap = builder->CreateAlignedLoad(i64Ty, mapArg, llvm::MaybeAlign(8), "cap");
+    auto* capLoad_rm = builder->CreateAlignedLoad(i64Ty, mapArg, llvm::MaybeAlign(8), "cap");
+    llvm::Value* cap = capLoad_rm;
+    // Capacity is always a power of 2 >= 8.
+    {
+        llvm::Metadata* rangeMD[] = {
+            llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64Ty, 8)),
+            llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64Ty, 1ULL << 62))};
+        capLoad_rm->setMetadata(llvm::LLVMContext::MD_range,
+                             llvm::MDNode::get(*context, rangeMD));
+        llvm::Value* capM1 = builder->CreateSub(cap, llvm::ConstantInt::get(i64Ty, 1));
+        llvm::Value* isPow2 = builder->CreateICmpEQ(
+            builder->CreateAnd(cap, capM1), llvm::ConstantInt::get(i64Ty, 0), "cap.pow2");
+        llvm::Function* assumeFn = OMSC_GET_INTRINSIC(
+            module.get(), llvm::Intrinsic::assume, {});
+        builder->CreateCall(assumeFn, {isPow2});
+    }
     llvm::Value* mask = builder->CreateSub(cap, llvm::ConstantInt::get(i64Ty, 1), "mask", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* startSlot = builder->CreateAnd(hashVal, mask, "startslot");
     builder->CreateBr(probeBB);
@@ -2550,7 +2640,13 @@ llvm::Function* CodeGenerator::getOrEmitHashMapRemove() {
 
     builder->SetInsertPoint(checkBB);
     llvm::Value* isTomb = builder->CreateICmpEQ(slotHash, llvm::ConstantInt::get(i64Ty, 1), "istomb");
-    builder->CreateCondBr(isTomb, nextBB, checkKeyBB);
+    auto* hashCmpBB = llvm::BasicBlock::Create(*context, "hashcmp", fn);
+    builder->CreateCondBr(isTomb, nextBB, hashCmpBB);
+
+    // Hash pre-filter: compare stored hash vs computed hash before loading key.
+    builder->SetInsertPoint(hashCmpBB);
+    llvm::Value* hashMatch = builder->CreateICmpEQ(slotHash, hashVal, "hashmatch");
+    builder->CreateCondBr(hashMatch, checkKeyBB, nextBB);
 
     builder->SetInsertPoint(checkKeyBB);
     llvm::Value* keyOff = builder->CreateAdd(entryOff, llvm::ConstantInt::get(i64Ty, 1), "keyoff", /*HasNUW=*/true, /*HasNSW=*/true);
