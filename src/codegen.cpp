@@ -2189,7 +2189,8 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
     auto* checkKeyBB = llvm::BasicBlock::Create(*context, "checkkey", fn);
     llvm::Value* hashMatch = builder->CreateICmpEQ(slotHash, hashVal, "hashmatch");
     // Hash match is unlikely on long probe chains; weight accordingly.
-    builder->CreateCondBr(hashMatch, checkKeyBB, nextBB);
+    auto* hashW = llvm::MDBuilder(*context).createBranchWeights(1, 4);
+    builder->CreateCondBr(hashMatch, checkKeyBB, nextBB, hashW);
 
     // Hash matched — now load and compare the actual key.
     builder->SetInsertPoint(checkKeyBB);
@@ -2198,7 +2199,9 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
     llvm::Value* eKey = builder->CreateAlignedLoad(i64Ty, eKeyPtr, llvm::MaybeAlign(8), "ekey");
     llvm::cast<llvm::Instruction>(eKey)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapKey_);
     llvm::Value* keyMatch = builder->CreateICmpEQ(eKey, keyArg, "keymatch");
-    builder->CreateCondBr(keyMatch, matchBB, nextBB);
+    // When hashes match, key match is overwhelmingly likely (collision ~1/2^62).
+    auto* keyW = llvm::MDBuilder(*context).createBranchWeights(1000, 1);
+    builder->CreateCondBr(keyMatch, matchBB, nextBB, keyW);
 
     // Match: update value in place
     builder->SetInsertPoint(matchBB);
@@ -2219,7 +2222,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
         mask, "nextslot");
     slot->addIncoming(nextSlot, nextBB);
     firstTombstone->addIncoming(tombForNext, nextBB);
-    builder->CreateBr(probeBB);
+    attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(probeBB)));
 
     // Empty: key not found — insert
     builder->SetInsertPoint(emptyBB);
@@ -2334,7 +2337,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
         builder->CreateAdd(rs, llvm::ConstantInt::get(i64Ty, 1), "rs1", /*HasNUW=*/true, /*HasNSW=*/true),
         newMask, "rnext");
     rs->addIncoming(rNext, rAdvanceBB);
-    builder->CreateBr(rProbeLpBB);
+    attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(rProbeLpBB)));
 
     // Write rehashed entry into new table
     builder->SetInsertPoint(rehashWriteBB);
@@ -2354,7 +2357,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
     builder->SetInsertPoint(rehashNextBB);
     llvm::Value* riNext = builder->CreateAdd(ri, llvm::ConstantInt::get(i64Ty, 1), "rinext", /*HasNUW=*/true, /*HasNSW=*/true);
     ri->addIncoming(riNext, rehashNextBB);
-    builder->CreateBr(rehashLoopBB);
+    attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(rehashLoopBB)));
 
     // After rehash: insert the new key into the new table
     builder->SetInsertPoint(rehashDoneBB);
@@ -2386,7 +2389,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
         builder->CreateAdd(ns, llvm::ConstantInt::get(i64Ty, 1), "ns1", /*HasNUW=*/true, /*HasNSW=*/true),
         newMask, "nnext");
     ns->addIncoming(nNext, nAdvBB);
-    builder->CreateBr(nProbeLpBB);
+    attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(nProbeLpBB)));
 
     builder->SetInsertPoint(nWriteBB);
     {   auto* st = builder->CreateAlignedStore(hashVal, nHashPtr, llvm::MaybeAlign(8));
@@ -2449,6 +2452,9 @@ llvm::Function* CodeGenerator::getOrEmitHashMapGet() {
     llvm::Value* hashVal = emitKeyHash(keyArg);
 
     auto* capLoad = builder->CreateAlignedLoad(i64Ty, mapArg, llvm::MaybeAlign(8), "cap");
+    // Capacity is invariant during a read-only GET — let LLVM hoist/CSE it.
+    capLoad->setMetadata(llvm::LLVMContext::MD_invariant_load,
+                         llvm::MDNode::get(*context, {}));
     llvm::Value* cap = capLoad;
     // Capacity is always a power of 2 >= 8.
     {
@@ -2495,7 +2501,8 @@ llvm::Function* CodeGenerator::getOrEmitHashMapGet() {
     builder->SetInsertPoint(hashCmpBB);
     auto* checkKeyBB = llvm::BasicBlock::Create(*context, "checkkey", fn);
     llvm::Value* hashMatch = builder->CreateICmpEQ(slotHash, hashVal, "hashmatch");
-    builder->CreateCondBr(hashMatch, checkKeyBB, nextBB);
+    {   auto* w = llvm::MDBuilder(*context).createBranchWeights(1, 4);
+        builder->CreateCondBr(hashMatch, checkKeyBB, nextBB, w); }
 
     builder->SetInsertPoint(checkKeyBB);
     llvm::Value* keyOff = builder->CreateAdd(entryOff, llvm::ConstantInt::get(i64Ty, 1), "keyoff", /*HasNUW=*/true, /*HasNSW=*/true);
@@ -2503,7 +2510,8 @@ llvm::Function* CodeGenerator::getOrEmitHashMapGet() {
     llvm::Value* eKey = builder->CreateAlignedLoad(i64Ty, eKeyPtr, llvm::MaybeAlign(8), "ekey");
     llvm::cast<llvm::Instruction>(eKey)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapKey_);
     llvm::Value* keyMatch = builder->CreateICmpEQ(eKey, keyArg, "keymatch");
-    builder->CreateCondBr(keyMatch, foundBB, nextBB);
+    {   auto* w = llvm::MDBuilder(*context).createBranchWeights(1000, 1);
+        builder->CreateCondBr(keyMatch, foundBB, nextBB, w); }
 
     // Found: load value
     builder->SetInsertPoint(foundBB);
@@ -2519,7 +2527,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapGet() {
         builder->CreateAdd(slot, llvm::ConstantInt::get(i64Ty, 1), "slot1", /*HasNUW=*/true, /*HasNSW=*/true),
         mask, "nextslot");
     slot->addIncoming(nextSlot, nextBB);
-    builder->CreateBr(probeBB);
+    attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(probeBB)));
 
     // Not found: return default
     builder->SetInsertPoint(notfoundBB);
@@ -2564,6 +2572,9 @@ llvm::Function* CodeGenerator::getOrEmitHashMapHas() {
     llvm::Value* hashVal = emitKeyHash(keyArg);
 
     auto* capLoad_has = builder->CreateAlignedLoad(i64Ty, mapArg, llvm::MaybeAlign(8), "cap");
+    // Capacity is invariant during a read-only HAS — let LLVM hoist/CSE it.
+    capLoad_has->setMetadata(llvm::LLVMContext::MD_invariant_load,
+                             llvm::MDNode::get(*context, {}));
     llvm::Value* cap = capLoad_has;
     // Capacity is always a power of 2 >= 8.
     {
@@ -2604,7 +2615,8 @@ llvm::Function* CodeGenerator::getOrEmitHashMapHas() {
     // Hash pre-filter: compare stored hash vs computed hash before loading key.
     builder->SetInsertPoint(hashCmpBB);
     llvm::Value* hashMatch = builder->CreateICmpEQ(slotHash, hashVal, "hashmatch");
-    builder->CreateCondBr(hashMatch, checkKeyBB, nextBB);
+    {   auto* w = llvm::MDBuilder(*context).createBranchWeights(1, 4);
+        builder->CreateCondBr(hashMatch, checkKeyBB, nextBB, w); }
 
     builder->SetInsertPoint(checkKeyBB);
     llvm::Value* keyOff = builder->CreateAdd(entryOff, llvm::ConstantInt::get(i64Ty, 1), "keyoff", /*HasNUW=*/true, /*HasNSW=*/true);
@@ -2612,7 +2624,8 @@ llvm::Function* CodeGenerator::getOrEmitHashMapHas() {
     llvm::Value* eKey = builder->CreateAlignedLoad(i64Ty, eKeyPtr, llvm::MaybeAlign(8), "ekey");
     llvm::cast<llvm::Instruction>(eKey)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapKey_);
     llvm::Value* keyMatch = builder->CreateICmpEQ(eKey, keyArg, "keymatch");
-    builder->CreateCondBr(keyMatch, foundBB, nextBB);
+    {   auto* w = llvm::MDBuilder(*context).createBranchWeights(1000, 1);
+        builder->CreateCondBr(keyMatch, foundBB, nextBB, w); }
 
     builder->SetInsertPoint(foundBB);
     builder->CreateRet(llvm::ConstantInt::get(i64Ty, 1));
@@ -2622,7 +2635,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapHas() {
         builder->CreateAdd(slot, llvm::ConstantInt::get(i64Ty, 1), "slot1", /*HasNUW=*/true, /*HasNSW=*/true),
         mask, "nextslot");
     slot->addIncoming(nextSlot, nextBB);
-    builder->CreateBr(probeBB);
+    attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(probeBB)));
 
     builder->SetInsertPoint(notfoundBB);
     builder->CreateRet(llvm::ConstantInt::get(i64Ty, 0));
@@ -2709,7 +2722,8 @@ llvm::Function* CodeGenerator::getOrEmitHashMapRemove() {
     // Hash pre-filter: compare stored hash vs computed hash before loading key.
     builder->SetInsertPoint(hashCmpBB);
     llvm::Value* hashMatch = builder->CreateICmpEQ(slotHash, hashVal, "hashmatch");
-    builder->CreateCondBr(hashMatch, checkKeyBB, nextBB);
+    {   auto* w = llvm::MDBuilder(*context).createBranchWeights(1, 4);
+        builder->CreateCondBr(hashMatch, checkKeyBB, nextBB, w); }
 
     builder->SetInsertPoint(checkKeyBB);
     llvm::Value* keyOff = builder->CreateAdd(entryOff, llvm::ConstantInt::get(i64Ty, 1), "keyoff", /*HasNUW=*/true, /*HasNSW=*/true);
@@ -2717,7 +2731,8 @@ llvm::Function* CodeGenerator::getOrEmitHashMapRemove() {
     llvm::Value* eKey = builder->CreateAlignedLoad(i64Ty, eKeyPtr, llvm::MaybeAlign(8), "ekey");
     llvm::cast<llvm::Instruction>(eKey)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapKey_);
     llvm::Value* keyMatch = builder->CreateICmpEQ(eKey, keyArg, "keymatch");
-    builder->CreateCondBr(keyMatch, foundBB, nextBB);
+    {   auto* w = llvm::MDBuilder(*context).createBranchWeights(1000, 1);
+        builder->CreateCondBr(keyMatch, foundBB, nextBB, w); }
 
     // Found: mark as tombstone, decrement size
     builder->SetInsertPoint(foundBB);
@@ -2734,7 +2749,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapRemove() {
         builder->CreateAdd(slot, llvm::ConstantInt::get(i64Ty, 1), "slot1", /*HasNUW=*/true, /*HasNSW=*/true),
         mask, "nextslot");
     slot->addIncoming(nextSlot, nextBB);
-    builder->CreateBr(probeBB);
+    attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(probeBB)));
 
     // Done: return same map pointer (mutated in place)
     builder->SetInsertPoint(doneBB);
@@ -2822,7 +2837,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapKeys() {
     llvm::Value* iNext = builder->CreateAdd(i, llvm::ConstantInt::get(i64Ty, 1), "inext", /*HasNUW=*/true, /*HasNSW=*/true);
     i->addIncoming(iNext, nextBB);
     writeIdx->addIncoming(wPhi, nextBB);
-    builder->CreateBr(loopBB);
+    attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
 
     builder->SetInsertPoint(doneBB);
     builder->CreateRet(buf);
@@ -2907,7 +2922,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapValues() {
     llvm::Value* iNext = builder->CreateAdd(i, llvm::ConstantInt::get(i64Ty, 1), "inext", /*HasNUW=*/true, /*HasNSW=*/true);
     i->addIncoming(iNext, nextBB);
     writeIdx->addIncoming(wPhi, nextBB);
-    builder->CreateBr(loopBB);
+    attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
 
     builder->SetInsertPoint(doneBB);
     builder->CreateRet(buf);

@@ -306,6 +306,21 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             }
         }
 
+        // Constant-fold len(array_fill(N, val)): when N is a constant the
+        // array length is known at compile time.  Avoids a runtime load from
+        // the array header and enables further constant propagation.
+        if (auto* call = dynamic_cast<CallExpr*>(expr->arguments[0].get())) {
+            if (call->callee == "array_fill" && call->arguments.size() == 2) {
+                if (auto* sizelit = dynamic_cast<LiteralExpr*>(call->arguments[0].get())) {
+                    if (sizelit->literalType == LiteralExpr::LiteralType::INTEGER && sizelit->intValue >= 0) {
+                        auto* result = llvm::ConstantInt::get(getDefaultType(), sizelit->intValue);
+                        nonNegValues_.insert(result);
+                        return result;
+                    }
+                }
+            }
+        }
+
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         Expression* argExpr = expr->arguments[0].get();
 
