@@ -809,6 +809,7 @@ void CodeGenerator::initTBAAMetadata() {
     llvm::MDNode* tbaaStrType    = makeTBAAType("string data");
     llvm::MDNode* tbaaMapKeyType = makeTBAAType("map key");
     llvm::MDNode* tbaaMapValType = makeTBAAType("map value");
+    llvm::MDNode* tbaaMapHashType = makeTBAAType("map hash");
 
     // Access tag nodes: !{ !base-type, !access-type, offset }
     // For scalar types, base == access.
@@ -820,6 +821,7 @@ void CodeGenerator::initTBAAMetadata() {
     tbaaStringData_  = llvm::MDNode::get(C, {tbaaStrType, tbaaStrType, zero});
     tbaaMapKey_      = llvm::MDNode::get(C, {tbaaMapKeyType, tbaaMapKeyType, zero});
     tbaaMapVal_      = llvm::MDNode::get(C, {tbaaMapValType, tbaaMapValType, zero});
+    tbaaMapHash_     = llvm::MDNode::get(C, {tbaaMapHashType, tbaaMapHashType, zero});
 
     // !range metadata: array lengths are always in [0, INT64_MAX).
     auto* i64Ty = llvm::Type::getInt64Ty(C);
@@ -2129,6 +2131,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
         llvm::ConstantInt::get(i64Ty, 2), "entryoff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* hashPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, entryOff, "hashptr");
     llvm::Value* slotHash = builder->CreateAlignedLoad(i64Ty, hashPtr, llvm::MaybeAlign(8), "slothash");
+    llvm::cast<llvm::Instruction>(slotHash)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapHash_);
     // Check if empty (hash == 0)
     llvm::Value* isEmpty = builder->CreateICmpEQ(slotHash, llvm::ConstantInt::get(i64Ty, 0), "isempty");
     builder->CreateCondBr(isEmpty, emptyBB, checkBB);
@@ -2157,6 +2160,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
     llvm::Value* keyOff = builder->CreateAdd(entryOff, llvm::ConstantInt::get(i64Ty, 1), "keyoff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* eKeyPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, keyOff, "ekeyptr");
     llvm::Value* eKey = builder->CreateAlignedLoad(i64Ty, eKeyPtr, llvm::MaybeAlign(8), "ekey");
+    llvm::cast<llvm::Instruction>(eKey)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapKey_);
     llvm::Value* keyMatch = builder->CreateICmpEQ(eKey, keyArg, "keymatch");
     builder->CreateCondBr(keyMatch, matchBB, nextBB);
 
@@ -2164,7 +2168,8 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
     builder->SetInsertPoint(matchBB);
     llvm::Value* valOff = builder->CreateAdd(entryOff, llvm::ConstantInt::get(i64Ty, 2), "valoff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* eValPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, valOff, "evalptr");
-    builder->CreateAlignedStore(valArg, eValPtr, llvm::MaybeAlign(8));
+    {   auto* st = builder->CreateAlignedStore(valArg, eValPtr, llvm::MaybeAlign(8));
+        st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapVal_); }
     builder->CreateBr(doneBB);
 
     // Next: advance to next slot (linear probe), wrap around
@@ -2199,13 +2204,16 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
         builder->CreateMul(insSlot, three, "ins3", /*HasNUW=*/true, /*HasNSW=*/true),
         llvm::ConstantInt::get(i64Ty, 2), "insoff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* insHashPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, insOff, "inshashptr");
-    builder->CreateAlignedStore(hashVal, insHashPtr, llvm::MaybeAlign(8));
+    {   auto* st = builder->CreateAlignedStore(hashVal, insHashPtr, llvm::MaybeAlign(8));
+        st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapHash_); }
     llvm::Value* insKeyPtr = builder->CreateInBoundsGEP(i64Ty, mapArg,
         builder->CreateAdd(insOff, llvm::ConstantInt::get(i64Ty, 1), "inskeyoff", /*HasNUW=*/true, /*HasNSW=*/true), "inskeyptr");
-    builder->CreateAlignedStore(keyArg, insKeyPtr, llvm::MaybeAlign(8));
+    {   auto* st = builder->CreateAlignedStore(keyArg, insKeyPtr, llvm::MaybeAlign(8));
+        st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapKey_); }
     llvm::Value* insValPtr = builder->CreateInBoundsGEP(i64Ty, mapArg,
         builder->CreateAdd(insOff, llvm::ConstantInt::get(i64Ty, 2), "insvaloff", /*HasNUW=*/true, /*HasNSW=*/true), "insvalptr");
-    builder->CreateAlignedStore(valArg, insValPtr, llvm::MaybeAlign(8));
+    {   auto* st = builder->CreateAlignedStore(valArg, insValPtr, llvm::MaybeAlign(8));
+        st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapVal_); }
     // Update size
     builder->CreateAlignedStore(newSize, sizePtr, llvm::MaybeAlign(8));
     builder->CreateBr(doneBB);
@@ -2248,6 +2256,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
         llvm::ConstantInt::get(i64Ty, 2), "oldoff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* oldHashPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, oldOff, "oldhashptr");
     llvm::Value* oldHash = builder->CreateAlignedLoad(i64Ty, oldHashPtr, llvm::MaybeAlign(8), "oldhash");
+    llvm::cast<llvm::Instruction>(oldHash)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapHash_);
     llvm::Value* isActive = builder->CreateICmpUGE(oldHash, llvm::ConstantInt::get(i64Ty, 2), "isactive");
     builder->CreateCondBr(isActive, rehashProbeBB, rehashNextBB);
 
@@ -2256,9 +2265,11 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
     llvm::Value* oldKeyPtr = builder->CreateInBoundsGEP(i64Ty, mapArg,
         builder->CreateAdd(oldOff, llvm::ConstantInt::get(i64Ty, 1), "oldkeyoff", /*HasNUW=*/true, /*HasNSW=*/true), "oldkeyptr");
     llvm::Value* oldKey = builder->CreateAlignedLoad(i64Ty, oldKeyPtr, llvm::MaybeAlign(8), "oldkey");
+    llvm::cast<llvm::Instruction>(oldKey)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapKey_);
     llvm::Value* oldValPtr = builder->CreateInBoundsGEP(i64Ty, mapArg,
         builder->CreateAdd(oldOff, llvm::ConstantInt::get(i64Ty, 2), "oldvaloff", /*HasNUW=*/true, /*HasNSW=*/true), "oldvalptr");
     llvm::Value* oldVal = builder->CreateAlignedLoad(i64Ty, oldValPtr, llvm::MaybeAlign(8), "oldval");
+    llvm::cast<llvm::Instruction>(oldVal)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapVal_);
     // Find empty slot in new table using oldHash
     llvm::Value* rStartSlot = builder->CreateAnd(oldHash, newMask, "rstartslot");
 
@@ -2275,6 +2286,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
         llvm::ConstantInt::get(i64Ty, 2), "rentryoff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* rHashPtr = builder->CreateInBoundsGEP(i64Ty, newBuf, rEntryOff, "rhashptr");
     llvm::Value* rSlotHash = builder->CreateAlignedLoad(i64Ty, rHashPtr, llvm::MaybeAlign(8), "rslothash");
+    llvm::cast<llvm::Instruction>(rSlotHash)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapHash_);
     llvm::Value* rIsEmpty = builder->CreateICmpEQ(rSlotHash, llvm::ConstantInt::get(i64Ty, 0), "risempty");
     builder->CreateCondBr(rIsEmpty, rehashWriteBB, rAdvanceBB);
 
@@ -2288,13 +2300,16 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
 
     // Write rehashed entry into new table
     builder->SetInsertPoint(rehashWriteBB);
-    builder->CreateAlignedStore(oldHash, rHashPtr, llvm::MaybeAlign(8));
+    {   auto* st = builder->CreateAlignedStore(oldHash, rHashPtr, llvm::MaybeAlign(8));
+        st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapHash_); }
     llvm::Value* rKeyPtr = builder->CreateInBoundsGEP(i64Ty, newBuf,
         builder->CreateAdd(rEntryOff, llvm::ConstantInt::get(i64Ty, 1), "rkeyoff", /*HasNUW=*/true, /*HasNSW=*/true), "rkeyptr");
-    builder->CreateAlignedStore(oldKey, rKeyPtr, llvm::MaybeAlign(8));
+    {   auto* st = builder->CreateAlignedStore(oldKey, rKeyPtr, llvm::MaybeAlign(8));
+        st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapKey_); }
     llvm::Value* rValPtr = builder->CreateInBoundsGEP(i64Ty, newBuf,
         builder->CreateAdd(rEntryOff, llvm::ConstantInt::get(i64Ty, 2), "rvaloff", /*HasNUW=*/true, /*HasNSW=*/true), "rvalptr");
-    builder->CreateAlignedStore(oldVal, rValPtr, llvm::MaybeAlign(8));
+    {   auto* st = builder->CreateAlignedStore(oldVal, rValPtr, llvm::MaybeAlign(8));
+        st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapVal_); }
     builder->CreateBr(rehashNextBB);
 
     // Rehash next: advance outer loop
@@ -2322,6 +2337,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
         llvm::ConstantInt::get(i64Ty, 2), "nentryoff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* nHashPtr = builder->CreateInBoundsGEP(i64Ty, newBuf, nEntryOff, "nhashptr");
     llvm::Value* nSlotHash = builder->CreateAlignedLoad(i64Ty, nHashPtr, llvm::MaybeAlign(8), "nslothash");
+    llvm::cast<llvm::Instruction>(nSlotHash)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapHash_);
     llvm::Value* nIsEmpty = builder->CreateICmpEQ(nSlotHash, llvm::ConstantInt::get(i64Ty, 0), "nisempty");
     auto* nWriteBB = llvm::BasicBlock::Create(*context, "nprobe.write", fn);
     auto* nAdvBB   = llvm::BasicBlock::Create(*context, "nprobe.adv", fn);
@@ -2335,13 +2351,16 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
     builder->CreateBr(nProbeLpBB);
 
     builder->SetInsertPoint(nWriteBB);
-    builder->CreateAlignedStore(hashVal, nHashPtr, llvm::MaybeAlign(8));
+    {   auto* st = builder->CreateAlignedStore(hashVal, nHashPtr, llvm::MaybeAlign(8));
+        st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapHash_); }
     llvm::Value* nKeyPtr = builder->CreateInBoundsGEP(i64Ty, newBuf,
         builder->CreateAdd(nEntryOff, llvm::ConstantInt::get(i64Ty, 1), "nkeyoff", /*HasNUW=*/true, /*HasNSW=*/true), "nkeyptr");
-    builder->CreateAlignedStore(keyArg, nKeyPtr, llvm::MaybeAlign(8));
+    {   auto* st = builder->CreateAlignedStore(keyArg, nKeyPtr, llvm::MaybeAlign(8));
+        st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapKey_); }
     llvm::Value* nValPtr = builder->CreateInBoundsGEP(i64Ty, newBuf,
         builder->CreateAdd(nEntryOff, llvm::ConstantInt::get(i64Ty, 2), "nvaloff", /*HasNUW=*/true, /*HasNSW=*/true), "nvalptr");
-    builder->CreateAlignedStore(valArg, nValPtr, llvm::MaybeAlign(8));
+    {   auto* st = builder->CreateAlignedStore(valArg, nValPtr, llvm::MaybeAlign(8));
+        st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapVal_); }
     builder->CreateBr(doneBB);
 
     // Done: return map pointer
@@ -2421,6 +2440,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapGet() {
         builder->CreateMul(slot, three, "slot3", /*HasNUW=*/true, /*HasNSW=*/true), llvm::ConstantInt::get(i64Ty, 2), "entryoff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* hashPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, entryOff, "hashptr");
     llvm::Value* slotHash = builder->CreateAlignedLoad(i64Ty, hashPtr, llvm::MaybeAlign(8), "slothash");
+    llvm::cast<llvm::Instruction>(slotHash)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapHash_);
     // Empty => not found
     llvm::Value* isEmpty = builder->CreateICmpEQ(slotHash, llvm::ConstantInt::get(i64Ty, 0), "isempty");
     builder->CreateCondBr(isEmpty, notfoundBB, checkBB);
@@ -2443,6 +2463,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapGet() {
     llvm::Value* keyOff = builder->CreateAdd(entryOff, llvm::ConstantInt::get(i64Ty, 1), "keyoff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* eKeyPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, keyOff, "ekeyptr");
     llvm::Value* eKey = builder->CreateAlignedLoad(i64Ty, eKeyPtr, llvm::MaybeAlign(8), "ekey");
+    llvm::cast<llvm::Instruction>(eKey)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapKey_);
     llvm::Value* keyMatch = builder->CreateICmpEQ(eKey, keyArg, "keymatch");
     builder->CreateCondBr(keyMatch, foundBB, nextBB);
 
@@ -2451,6 +2472,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapGet() {
     llvm::Value* valOff = builder->CreateAdd(entryOff, llvm::ConstantInt::get(i64Ty, 2), "valoff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* eValPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, valOff, "evalptr");
     llvm::Value* val = builder->CreateAlignedLoad(i64Ty, eValPtr, llvm::MaybeAlign(8), "val");
+    llvm::cast<llvm::Instruction>(val)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapVal_);
     builder->CreateRet(val);
 
     // Next: advance slot (both tombstone and no-match paths funnel here)
@@ -2532,6 +2554,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapHas() {
         builder->CreateMul(slot, three, "slot3", /*HasNUW=*/true, /*HasNSW=*/true), llvm::ConstantInt::get(i64Ty, 2), "entryoff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* hashPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, entryOff, "hashptr");
     llvm::Value* slotHash = builder->CreateAlignedLoad(i64Ty, hashPtr, llvm::MaybeAlign(8), "slothash");
+    llvm::cast<llvm::Instruction>(slotHash)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapHash_);
     llvm::Value* isEmpty = builder->CreateICmpEQ(slotHash, llvm::ConstantInt::get(i64Ty, 0), "isempty");
     builder->CreateCondBr(isEmpty, notfoundBB, checkBB);
 
@@ -2549,6 +2572,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapHas() {
     llvm::Value* keyOff = builder->CreateAdd(entryOff, llvm::ConstantInt::get(i64Ty, 1), "keyoff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* eKeyPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, keyOff, "ekeyptr");
     llvm::Value* eKey = builder->CreateAlignedLoad(i64Ty, eKeyPtr, llvm::MaybeAlign(8), "ekey");
+    llvm::cast<llvm::Instruction>(eKey)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapKey_);
     llvm::Value* keyMatch = builder->CreateICmpEQ(eKey, keyArg, "keymatch");
     builder->CreateCondBr(keyMatch, foundBB, nextBB);
 
@@ -2635,6 +2659,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapRemove() {
         builder->CreateMul(slot, three, "slot3", /*HasNUW=*/true, /*HasNSW=*/true), llvm::ConstantInt::get(i64Ty, 2), "entryoff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* hashPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, entryOff, "hashptr");
     llvm::Value* slotHash = builder->CreateAlignedLoad(i64Ty, hashPtr, llvm::MaybeAlign(8), "slothash");
+    llvm::cast<llvm::Instruction>(slotHash)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapHash_);
     llvm::Value* isEmpty = builder->CreateICmpEQ(slotHash, llvm::ConstantInt::get(i64Ty, 0), "isempty");
     builder->CreateCondBr(isEmpty, doneBB, checkBB);
 
@@ -2652,12 +2677,14 @@ llvm::Function* CodeGenerator::getOrEmitHashMapRemove() {
     llvm::Value* keyOff = builder->CreateAdd(entryOff, llvm::ConstantInt::get(i64Ty, 1), "keyoff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* eKeyPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, keyOff, "ekeyptr");
     llvm::Value* eKey = builder->CreateAlignedLoad(i64Ty, eKeyPtr, llvm::MaybeAlign(8), "ekey");
+    llvm::cast<llvm::Instruction>(eKey)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapKey_);
     llvm::Value* keyMatch = builder->CreateICmpEQ(eKey, keyArg, "keymatch");
     builder->CreateCondBr(keyMatch, foundBB, nextBB);
 
     // Found: mark as tombstone, decrement size
     builder->SetInsertPoint(foundBB);
-    builder->CreateAlignedStore(llvm::ConstantInt::get(i64Ty, 1), hashPtr, llvm::MaybeAlign(8));
+    {   auto* st = builder->CreateAlignedStore(llvm::ConstantInt::get(i64Ty, 1), hashPtr, llvm::MaybeAlign(8));
+        st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapHash_); }
     llvm::Value* sizePtr = builder->CreateInBoundsGEP(i64Ty, mapArg, llvm::ConstantInt::get(i64Ty, 1));
     llvm::Value* size = builder->CreateAlignedLoad(i64Ty, sizePtr, llvm::MaybeAlign(8), "size");
     llvm::Value* newSize = builder->CreateSub(size, llvm::ConstantInt::get(i64Ty, 1), "newsize", /*HasNUW=*/true, /*HasNSW=*/true);
@@ -2735,6 +2762,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapKeys() {
         builder->CreateMul(i, three, "i3", /*HasNUW=*/true, /*HasNSW=*/true), llvm::ConstantInt::get(i64Ty, 2), "off", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* hashPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, off, "hashptr");
     llvm::Value* slotHash = builder->CreateAlignedLoad(i64Ty, hashPtr, llvm::MaybeAlign(8), "slothash");
+    llvm::cast<llvm::Instruction>(slotHash)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapHash_);
     llvm::Value* isActive = builder->CreateICmpUGE(slotHash, llvm::ConstantInt::get(i64Ty, 2), "isactive");
     builder->CreateCondBr(isActive, storeBB, nextBB);
 
@@ -2742,6 +2770,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapKeys() {
     llvm::Value* keyOff = builder->CreateAdd(off, llvm::ConstantInt::get(i64Ty, 1), "keyoff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* keyPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, keyOff, "keyptr");
     llvm::Value* key = builder->CreateAlignedLoad(i64Ty, keyPtr, llvm::MaybeAlign(8), "key");
+    llvm::cast<llvm::Instruction>(key)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapKey_);
     llvm::Value* arrOff = builder->CreateAdd(writeIdx, llvm::ConstantInt::get(i64Ty, 1), "arroff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* arrPtr = builder->CreateInBoundsGEP(i64Ty, buf, arrOff, "arrptr");
     builder->CreateAlignedStore(key, arrPtr, llvm::MaybeAlign(8));
@@ -2818,6 +2847,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapValues() {
         builder->CreateMul(i, three, "i3", /*HasNUW=*/true, /*HasNSW=*/true), llvm::ConstantInt::get(i64Ty, 2), "off", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* hashPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, off, "hashptr");
     llvm::Value* slotHash = builder->CreateAlignedLoad(i64Ty, hashPtr, llvm::MaybeAlign(8), "slothash");
+    llvm::cast<llvm::Instruction>(slotHash)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapHash_);
     llvm::Value* isActive = builder->CreateICmpUGE(slotHash, llvm::ConstantInt::get(i64Ty, 2), "isactive");
     builder->CreateCondBr(isActive, storeBB, nextBB);
 
@@ -2825,6 +2855,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapValues() {
     llvm::Value* valOff = builder->CreateAdd(off, llvm::ConstantInt::get(i64Ty, 2), "valoff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* valPtr = builder->CreateInBoundsGEP(i64Ty, mapArg, valOff, "valptr");
     llvm::Value* val = builder->CreateAlignedLoad(i64Ty, valPtr, llvm::MaybeAlign(8), "val");
+    llvm::cast<llvm::Instruction>(val)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapVal_);
     llvm::Value* arrOff = builder->CreateAdd(writeIdx, llvm::ConstantInt::get(i64Ty, 1), "arroff", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* arrPtr = builder->CreateInBoundsGEP(i64Ty, buf, arrOff, "arrptr");
     builder->CreateAlignedStore(val, arrPtr, llvm::MaybeAlign(8));
