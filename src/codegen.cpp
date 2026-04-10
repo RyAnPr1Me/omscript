@@ -3831,12 +3831,13 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         }
     }
 
-    // Default noalias: OmScript's ownership model guarantees that distinct
-    // pointer parameters never alias the same memory region — the borrow
-    // checker prevents multiple mutable references.  This is equivalent to
-    // compiling all C code with __restrict on every pointer parameter.
-    // Applied unconditionally (including O0) because this is a language-level
-    // invariant, not an optimization heuristic.
+    // Default noalias fallback: OmScript's ownership model guarantees that
+    // distinct pointer parameters never alias the same memory region — the
+    // borrow checker prevents multiple mutable references.  Applied at all
+    // optimization levels (including O0) because this is a language-level
+    // invariant, not a heuristic.  The guard excludes functions already
+    // handled above (@optmax, @hot, @restrict, file-level @noalias) to
+    // avoid redundant attribute additions.
     if (!inOptMaxFunction && !currentFuncHintHot_
         && !func->hintRestrict && !fileNoAlias_) {
         for (unsigned i = 0; i < function->arg_size(); ++i) {
