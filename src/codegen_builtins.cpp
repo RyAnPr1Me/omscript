@@ -216,6 +216,18 @@ static BuiltinId lookupBuiltin(const std::string& name) {
     return it != builtinLookup.end() ? it->second : BuiltinId::NONE;
 }
 
+// ---------------------------------------------------------------------------
+// Compile-time constant folding helper
+// ---------------------------------------------------------------------------
+// Extract a compile-time integer constant from an AST expression node.
+// Returns std::nullopt if the expression isn't a plain integer literal.
+static std::optional<int64_t> getConstantInt(Expression* expr) {
+    if (!expr || expr->type != ASTNodeType::LITERAL_EXPR) return std::nullopt;
+    auto* lit = static_cast<LiteralExpr*>(expr);
+    if (lit->literalType != LiteralExpr::LiteralType::INTEGER) return std::nullopt;
+    return static_cast<int64_t>(lit->intValue);
+}
+
 void CodeGenerator::validateArgCount(const CallExpr* expr, const std::string& funcName, size_t expected) {
     if (expr->arguments.size() != expected) {
         codegenError("Built-in function '" + funcName + "' expects " + std::to_string(expected) +
@@ -276,6 +288,14 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::ABS) {
         validateArgCount(expr, "abs", 1);
+        // Constant-fold abs(literal): eliminates the intrinsic call entirely.
+        if (auto cv = getConstantInt(expr->arguments[0].get())) {
+            int64_t v = *cv;
+            int64_t result = (v < 0) ? -v : v;
+            auto* c = llvm::ConstantInt::get(getDefaultType(), result);
+            nonNegValues_.insert(c);
+            return c;
+        }
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         if (arg->getType()->isDoubleTy()) {
             // Use llvm.fabs intrinsic for native hardware abs on floats
@@ -360,6 +380,15 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::MIN) {
         validateArgCount(expr, "min", 2);
+        // Constant-fold min(a, b) when both are integer literals.
+        if (auto ca = getConstantInt(expr->arguments[0].get())) {
+            if (auto cb = getConstantInt(expr->arguments[1].get())) {
+                int64_t result = std::min(*ca, *cb);
+                auto* c = llvm::ConstantInt::get(getDefaultType(), result);
+                if (result >= 0) nonNegValues_.insert(c);
+                return c;
+            }
+        }
         llvm::Value* a = generateExpression(expr->arguments[0].get());
         llvm::Value* b = generateExpression(expr->arguments[1].get());
         if (a->getType()->isDoubleTy() || b->getType()->isDoubleTy()) {
@@ -383,6 +412,15 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::MAX) {
         validateArgCount(expr, "max", 2);
+        // Constant-fold max(a, b) when both are integer literals.
+        if (auto ca = getConstantInt(expr->arguments[0].get())) {
+            if (auto cb = getConstantInt(expr->arguments[1].get())) {
+                int64_t result = std::max(*ca, *cb);
+                auto* c = llvm::ConstantInt::get(getDefaultType(), result);
+                if (result >= 0) nonNegValues_.insert(c);
+                return c;
+            }
+        }
         llvm::Value* a = generateExpression(expr->arguments[0].get());
         llvm::Value* b = generateExpression(expr->arguments[1].get());
         if (a->getType()->isDoubleTy() || b->getType()->isDoubleTy()) {
@@ -406,6 +444,11 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::SIGN) {
         validateArgCount(expr, "sign", 1);
+        // Constant-fold sign(literal).
+        if (auto cv = getConstantInt(expr->arguments[0].get())) {
+            int64_t result = (*cv > 0) ? 1 : ((*cv < 0) ? -1 : 0);
+            return llvm::ConstantInt::get(getDefaultType(), result, true);
+        }
         llvm::Value* x = generateExpression(expr->arguments[0].get());
         if (x->getType()->isDoubleTy()) {
             llvm::Value* fzero = llvm::ConstantFP::get(getFloatType(), 0.0);
@@ -428,6 +471,17 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::CLAMP) {
         validateArgCount(expr, "clamp", 3);
+        // Constant-fold clamp(val, lo, hi) when all three are integer literals.
+        if (auto cv = getConstantInt(expr->arguments[0].get())) {
+            if (auto cl = getConstantInt(expr->arguments[1].get())) {
+                if (auto ch = getConstantInt(expr->arguments[2].get())) {
+                    int64_t result = std::max(*cl, std::min(*cv, *ch));
+                    auto* c = llvm::ConstantInt::get(getDefaultType(), result, true);
+                    if (result >= 0) nonNegValues_.insert(c);
+                    return c;
+                }
+            }
+        }
         llvm::Value* val = generateExpression(expr->arguments[0].get());
         llvm::Value* lo = generateExpression(expr->arguments[1].get());
         llvm::Value* hi = generateExpression(expr->arguments[2].get());
@@ -457,6 +511,29 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::POW) {
         validateArgCount(expr, "pow", 2);
+        // Constant-fold pow(base, exp) when both are integer literals and exp >= 0.
+        // Eliminates the entire exponentiation loop at compile time.
+        if (auto cb = getConstantInt(expr->arguments[0].get())) {
+            if (auto ce = getConstantInt(expr->arguments[1].get())) {
+                int64_t b = *cb, e = *ce;
+                if (e >= 0) {
+                    int64_t result = 1;
+                    int64_t cur = b;
+                    int64_t rem = e;
+                    while (rem > 0) {
+                        if (rem & 1) result *= cur;
+                        cur *= cur;
+                        rem >>= 1;
+                    }
+                    auto* c = llvm::ConstantInt::get(getDefaultType(), result, true);
+                    if (result >= 0) nonNegValues_.insert(c);
+                    return c;
+                } else {
+                    // Negative exponent in integer pow → 0 (matches runtime)
+                    return llvm::ConstantInt::get(getDefaultType(), 0);
+                }
+            }
+        }
         llvm::Value* base = generateExpression(expr->arguments[0].get());
         llvm::Value* exp  = generateExpression(expr->arguments[1].get());
 
@@ -694,6 +771,13 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::IS_EVEN) {
         validateArgCount(expr, "is_even", 1);
+        // Constant-fold is_even(literal).
+        if (auto cv = getConstantInt(expr->arguments[0].get())) {
+            int64_t result = ((*cv & 1) == 0) ? 1 : 0;
+            auto* c = llvm::ConstantInt::get(getDefaultType(), result);
+            nonNegValues_.insert(c);
+            return c;
+        }
         llvm::Value* x = generateExpression(expr->arguments[0].get());
         // Convert float to integer since is_even() is an integer operation
         x = toDefaultType(x);
@@ -708,6 +792,13 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::IS_ODD) {
         validateArgCount(expr, "is_odd", 1);
+        // Constant-fold is_odd(literal).
+        if (auto cv = getConstantInt(expr->arguments[0].get())) {
+            int64_t result = (*cv & 1) ? 1 : 0;
+            auto* c = llvm::ConstantInt::get(getDefaultType(), result);
+            nonNegValues_.insert(c);
+            return c;
+        }
         llvm::Value* x = generateExpression(expr->arguments[0].get());
         // Convert float to integer since is_odd() is an integer operation
         x = toDefaultType(x);

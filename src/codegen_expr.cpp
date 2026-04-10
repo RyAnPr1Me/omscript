@@ -418,19 +418,44 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
     return load;
 }
 
+// ---------------------------------------------------------------------------
+// Recursive string literal constant folding
+// ---------------------------------------------------------------------------
+// Walk a tree of BinaryExpr(+) nodes.  If every leaf is a string literal,
+// append all of them (left-to-right) into `out` and return true.
+// This turns  "a" + "b" + "c"  into a single compile-time constant "abc",
+// eliminating all runtime malloc + strlen + memcpy work.
+bool CodeGenerator::tryFoldStringConcat(Expression* expr, std::string& out) const {
+    if (expr->type == ASTNodeType::LITERAL_EXPR) {
+        auto* lit = static_cast<LiteralExpr*>(expr);
+        if (lit->literalType == LiteralExpr::LiteralType::STRING) {
+            out += lit->stringValue;
+            return true;
+        }
+        return false;
+    }
+    if (expr->type == ASTNodeType::BINARY_EXPR) {
+        auto* bin = static_cast<BinaryExpr*>(expr);
+        if (bin->op == "+") {
+            return tryFoldStringConcat(bin->left.get(), out) &&
+                   tryFoldStringConcat(bin->right.get(), out);
+        }
+    }
+    return false;
+}
+
 llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
-    // --- Compile-time string constant folding ---
-    // When both operands of '+' are string literals, concatenate at compile time
-    // to avoid runtime malloc+strcpy overhead.
+    // --- Compile-time string constant folding (recursive) ---
+    // Fold arbitrarily chained string literal concatenations at compile time:
+    //   "a" + "b" + "c"  →  single global "abc"
+    // This eliminates runtime malloc+strlen+memcpy chains entirely.  The
+    // recursive helper walks through nested BinaryExpr(+) trees, collecting
+    // all leaf string literals.  If every leaf is a string literal the whole
+    // expression is folded into a single compile-time constant.
     if (expr->op == "+") {
-        if (expr->left->type == ASTNodeType::LITERAL_EXPR && expr->right->type == ASTNodeType::LITERAL_EXPR) {
-            auto* leftLit = static_cast<LiteralExpr*>(expr->left.get());
-            auto* rightLit = static_cast<LiteralExpr*>(expr->right.get());
-            if (leftLit->literalType == LiteralExpr::LiteralType::STRING &&
-                rightLit->literalType == LiteralExpr::LiteralType::STRING) {
-                const std::string folded = leftLit->stringValue + rightLit->stringValue;
-                return builder->CreateGlobalString(folded, "strfold");
-            }
+        std::string folded;
+        if (tryFoldStringConcat(expr, folded)) {
+            return builder->CreateGlobalString(folded, "strfold");
         }
     }
     // --- End string constant folding ---
@@ -4561,6 +4586,72 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
 }
 
 llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
+    // --- Compile-time dict literal constant propagation ---
+    // When the base is a dict literal and the key is a literal, resolve the
+    // lookup at compile time.  This eliminates hash table allocation,
+    // insertion, and lookup entirely — the matched value expression is
+    // generated directly.  Must run BEFORE generateExpression(array) to
+    // avoid emitting the dead dict construction IR.
+    if (expr->array->type == ASTNodeType::DICT_EXPR &&
+        expr->index->type == ASTNodeType::LITERAL_EXPR) {
+        auto* dict = static_cast<DictExpr*>(expr->array.get());
+        auto* keyLit = static_cast<LiteralExpr*>(expr->index.get());
+        bool canFold = false;
+        Expression* matchedValue = nullptr;
+
+        if (keyLit->literalType == LiteralExpr::LiteralType::STRING) {
+            canFold = true;
+            // Last matching key wins (matches runtime SET-overwrites semantics).
+            for (auto& [k, v] : dict->pairs) {
+                if (k->type == ASTNodeType::LITERAL_EXPR) {
+                    auto* kl = static_cast<LiteralExpr*>(k.get());
+                    if (kl->literalType == LiteralExpr::LiteralType::STRING &&
+                        kl->stringValue == keyLit->stringValue) {
+                        matchedValue = v.get();
+                    }
+                } else {
+                    // Non-literal key → can't fold (side effects possible)
+                    canFold = false;
+                    break;
+                }
+            }
+        } else if (keyLit->literalType == LiteralExpr::LiteralType::INTEGER) {
+            canFold = true;
+            for (auto& [k, v] : dict->pairs) {
+                if (k->type == ASTNodeType::LITERAL_EXPR) {
+                    auto* kl = static_cast<LiteralExpr*>(k.get());
+                    if (kl->literalType == LiteralExpr::LiteralType::INTEGER &&
+                        kl->intValue == keyLit->intValue) {
+                        matchedValue = v.get();
+                    }
+                } else {
+                    canFold = false;
+                    break;
+                }
+            }
+        }
+
+        if (canFold) {
+            // Also need to check that all VALUE expressions in the dict are
+            // side-effect-free literals, or we'd lose their side effects.
+            // For now, only fold when every value is a literal (int/float/string).
+            bool allValuesAreLiterals = true;
+            for (auto& [k, v] : dict->pairs) {
+                if (v->type != ASTNodeType::LITERAL_EXPR) {
+                    allValuesAreLiterals = false;
+                    break;
+                }
+            }
+            if (allValuesAreLiterals) {
+                if (matchedValue) {
+                    return generateExpression(matchedValue);
+                }
+                // Key not found → return 0 (matches runtime map_get default)
+                return llvm::ConstantInt::get(getDefaultType(), 0);
+            }
+        }
+    }
+
     llvm::Value* arrVal = generateExpression(expr->array.get());
     llvm::Value* idxVal = generateExpression(expr->index.get());
 

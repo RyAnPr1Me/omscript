@@ -449,6 +449,12 @@ class CodeGenerator {
     [[gnu::hot]] llvm::Value* generateLiteral(LiteralExpr* expr);
     [[gnu::hot]] llvm::Value* generateIdentifier(IdentifierExpr* expr);
     [[gnu::hot]] llvm::Value* generateBinary(BinaryExpr* expr);
+    /// Recursively check if an expression tree is a chain of string literal
+    /// concatenations (e.g. "a" + "b" + "c").  If so, append the folded result
+    /// to @p out and return true.  Otherwise return false and leave @p out
+    /// unchanged.  This enables compile-time folding of arbitrarily deep
+    /// chained string concatenations.
+    bool tryFoldStringConcat(Expression* expr, std::string& out) const;
     llvm::Value* generateUnary(UnaryExpr* expr);
     [[gnu::hot]] llvm::Value* generateCall(CallExpr* expr);
     llvm::Value* generateAssign(AssignExpr* expr);
