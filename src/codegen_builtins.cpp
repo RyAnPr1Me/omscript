@@ -292,6 +292,20 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::LEN) {
         validateArgCount(expr, "len", 1);
+
+        // Constant-fold len() on string literals: the length is known at
+        // compile time, so emit a constant instead of a runtime strlen call.
+        // This eliminates O(n) work per literal and enables further constant
+        // propagation / dead code elimination in the optimizer.
+        if (auto* lit = dynamic_cast<LiteralExpr*>(expr->arguments[0].get())) {
+            if (lit->literalType == LiteralExpr::LiteralType::STRING) {
+                int64_t len = static_cast<int64_t>(lit->stringValue.size());
+                auto* result = llvm::ConstantInt::get(getDefaultType(), len);
+                nonNegValues_.insert(result);
+                return result;
+            }
+        }
+
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         Expression* argExpr = expr->arguments[0].get();
 
@@ -2244,7 +2258,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::BasicBlock* nogrowBB = llvm::BasicBlock::Create(*context, "push.nogrow", function);
         llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "push.merge", function);
 
-        builder->CreateCondBr(needsGrow, growBB, nogrowBB);
+        // Growth is rare (only at power-of-2 boundaries + first push to min 16).
+        // Weight the no-grow path heavily for branch prediction and code layout.
+        llvm::MDNode* pushGrowW = llvm::MDBuilder(*context).createBranchWeights(1, 99);
+        builder->CreateCondBr(needsGrow, growBB, nogrowBB, pushGrowW);
 
         // Grow path: compute new capacity and realloc
         builder->SetInsertPoint(growBB);
