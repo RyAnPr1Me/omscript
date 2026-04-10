@@ -166,6 +166,14 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                 if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(initValue))
                     initNonNeg = !ci->isNegative();
             }
+            // KnownBits fallback: detect non-negativity through LLVM's
+            // value-tracking analysis for values not in nonNegValues_ (e.g.,
+            // function call results with !range metadata, shift results, etc.)
+            if (!initNonNeg && optimizationLevel >= OptimizationLevel::O1) {
+                llvm::KnownBits kb = llvm::computeKnownBits(
+                    initValue, module->getDataLayout());
+                initNonNeg = kb.isNonNegative();
+            }
             if (initNonNeg)
                 nonNegValues_.insert(alloca);
             // Propagate tight upper bound for modular arithmetic.
@@ -1750,6 +1758,9 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
         // to hoist the length load out of the loop body.
         if (auto* elemLoad = llvm::dyn_cast<llvm::LoadInst>(elemVal)) {
             elemLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+            // OmScript arrays are always initialized, so element loads are !noundef.
+            if (optimizationLevel >= OptimizationLevel::O1)
+                elemLoad->setMetadata(llvm::LLVMContext::MD_noundef, llvm::MDNode::get(*context, {}));
         }
     }
     builder->CreateStore(elemVal, iterAlloca);

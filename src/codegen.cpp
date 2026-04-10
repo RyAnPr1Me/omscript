@@ -3710,6 +3710,29 @@ void CodeGenerator::generate(Program* program) {
                             callsSelf = true;
                             break;
                         }
+                        // Handle indirect calls through IntToPtr/PtrToInt chains:
+                        // OmScript may cast function pointers through integer
+                        // types, making getCalledFunction() return nullptr.
+                        // Strip casts to recover the underlying function.
+                        if (!calledFn) {
+                            llvm::Value* calledVal = CI->getCalledOperand();
+                            for (unsigned d = 0; d < 8; ++d) {
+                                if (auto* i2p = llvm::dyn_cast<llvm::IntToPtrInst>(calledVal))
+                                    calledVal = i2p->getOperand(0);
+                                else if (auto* p2i = llvm::dyn_cast<llvm::PtrToIntInst>(calledVal))
+                                    calledVal = p2i->getOperand(0);
+                                else if (auto* bc = llvm::dyn_cast<llvm::BitCastInst>(calledVal))
+                                    calledVal = bc->getOperand(0);
+                                else
+                                    break;
+                            }
+                            if (auto* gv = llvm::dyn_cast<llvm::Function>(calledVal)) {
+                                if (gv->getName() == func.getName()) {
+                                    callsSelf = true;
+                                    break;
+                                }
+                            }
+                        }
                     }
                 }
                 if (callsSelf) break;

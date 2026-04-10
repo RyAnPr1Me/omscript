@@ -4230,6 +4230,8 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
         // (index 0), so tagging the load enables LICM to hoist length loads
         // past element increments/decrements.
         elemLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        if (optimizationLevel >= OptimizationLevel::O1)
+            elemLoad->setMetadata(llvm::LLVMContext::MD_noundef, llvm::MDNode::get(*context, {}));
         llvm::Value* current = elemLoad;
 
         llvm::Value* delta = llvm::ConstantInt::get(getDefaultType(), 1, true);
@@ -4972,6 +4974,12 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
     llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), dataPtr, idxVal, "idx.elem.ptr");
     auto* elemLoad = builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "idx.elem");
     elemLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+    // OmScript arrays are always initialized: array literals set every element,
+    // array_fill zero-initializes via calloc.  The !noundef metadata tells LLVM
+    // the loaded value is never poison/undef, enabling more aggressive
+    // speculation and freeze elimination in downstream loop transforms.
+    if (optimizationLevel >= OptimizationLevel::O1)
+        elemLoad->setMetadata(llvm::LLVMContext::MD_noundef, llvm::MDNode::get(*context, {}));
     // When inside a parallel loop, attach the access group metadata so
     // LLVM's vectorizer and Polly know this load is iteration-independent.
     if (currentLoopAccessGroup_)
