@@ -1990,6 +1990,8 @@ llvm::Value* CodeGenerator::emitKeyHash(llvm::Value* key) {
 
     // Step 3: add (not xor) — carry propagation provides additional mixing.
     // A bit flip at position i propagates to all positions > i via carry.
+    // NUW only (not NSW): the add can produce any 64-bit value including
+    // signed overflow, but unsigned wrapping is intentional hash behavior.
     h = builder->CreateAdd(h, rotated, "h.mix", /*HasNUW=*/true, /*HasNSW=*/false);
 
     // Step 4: ensure hash >= 2 (0=empty, 1=tombstone are reserved).
@@ -2083,7 +2085,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
     llvm::Value* keyArg = fn->getArg(1);
     llvm::Value* valArg = fn->getArg(2);
 
-    // SIMD-vectorized dual-stream avalanche hash
+    // Rotate-Accumulate (RA) hash
     llvm::Value* hashVal = emitKeyHash(keyArg);
     auto* capPtr = mapArg;  // slot 0
     llvm::Value* cap = builder->CreateAlignedLoad(i64Ty, capPtr, llvm::MaybeAlign(8), "cap");
@@ -2354,7 +2356,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapGet() {
     llvm::Value* keyArg = fn->getArg(1);
     llvm::Value* defArg = fn->getArg(2);
 
-    // SIMD-vectorized dual-stream avalanche hash
+    // Rotate-Accumulate (RA) hash
     llvm::Value* hashVal = emitKeyHash(keyArg);
 
     llvm::Value* cap = builder->CreateAlignedLoad(i64Ty, mapArg, llvm::MaybeAlign(8), "cap");
@@ -2444,7 +2446,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapHas() {
     llvm::Value* mapArg = fn->getArg(0);
     llvm::Value* keyArg = fn->getArg(1);
 
-    // SIMD-vectorized dual-stream avalanche hash
+    // Rotate-Accumulate (RA) hash
     llvm::Value* hashVal = emitKeyHash(keyArg);
 
     llvm::Value* cap = builder->CreateAlignedLoad(i64Ty, mapArg, llvm::MaybeAlign(8), "cap");
@@ -2526,7 +2528,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapRemove() {
     llvm::Value* mapArg = fn->getArg(0);
     llvm::Value* keyArg = fn->getArg(1);
 
-    // SIMD-vectorized dual-stream avalanche hash
+    // Rotate-Accumulate (RA) hash
     llvm::Value* hashVal = emitKeyHash(keyArg);
 
     llvm::Value* cap = builder->CreateAlignedLoad(i64Ty, mapArg, llvm::MaybeAlign(8), "cap");
