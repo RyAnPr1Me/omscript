@@ -2615,6 +2615,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             // (length = 0) and all element slots are zero.  We only need to
             // fix up the header with the correct length.
             buf = builder->CreateCall(getOrDeclareCalloc(), {slots, eight}, "fill.buf");
+            llvm::cast<llvm::CallInst>(buf)->setMetadata(llvm::LLVMContext::MD_nonnull,
+                                                          llvm::MDNode::get(*context, {}));
             // Store length in header (calloc zeroed it; overwrite with actual size)
             builder->CreateStore(sizeArg, buf);
         } else {

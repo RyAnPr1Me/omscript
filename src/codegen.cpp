@@ -810,6 +810,7 @@ void CodeGenerator::initTBAAMetadata() {
     llvm::MDNode* tbaaMapKeyType = makeTBAAType("map key");
     llvm::MDNode* tbaaMapValType = makeTBAAType("map value");
     llvm::MDNode* tbaaMapHashType = makeTBAAType("map hash");
+    llvm::MDNode* tbaaMapMetaType = makeTBAAType("map meta");
 
     // Access tag nodes: !{ !base-type, !access-type, offset }
     // For scalar types, base == access.
@@ -822,6 +823,7 @@ void CodeGenerator::initTBAAMetadata() {
     tbaaMapKey_      = llvm::MDNode::get(C, {tbaaMapKeyType, tbaaMapKeyType, zero});
     tbaaMapVal_      = llvm::MDNode::get(C, {tbaaMapValType, tbaaMapValType, zero});
     tbaaMapHash_     = llvm::MDNode::get(C, {tbaaMapHashType, tbaaMapHashType, zero});
+    tbaaMapMeta_     = llvm::MDNode::get(C, {tbaaMapMetaType, tbaaMapMetaType, zero});
 
     // !range metadata: array lengths are always in [0, INT64_MAX).
     auto* i64Ty = llvm::Type::getInt64Ty(C);
@@ -1198,13 +1200,11 @@ llvm::Function* CodeGenerator::getOrDeclareCalloc() {
     fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addFnAttr(llvm::Attribute::NoBuiltin);
     fn->addRetAttr(llvm::Attribute::NoAlias);
+    fn->addRetAttr(llvm::Attribute::NonNull); // OmScript assumes alloc always succeeds
     // allocsize(0, 1): allocation size is arg0 * arg1 — enables LLVM to
     // reason about the returned buffer size for alias analysis and to
     // eliminate redundant bounds checks on the allocated memory.
     fn->addFnAttr(llvm::Attribute::getWithAllocSizeArgs(*context, 0, 1));
-    // Note: calloc CAN return NULL on OOM, so we do NOT add NonNull here.
-    // The call site in array_fill does not check for NULL because OmScript's
-    // runtime assumes allocation always succeeds (same as C benchmarks).
     return fn;
 }
 
@@ -1726,6 +1726,7 @@ llvm::Function* CodeGenerator::getOrDeclareRealloc() {
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addRetAttr(llvm::Attribute::NoAlias);
+    fn->addRetAttr(llvm::Attribute::NonNull); // OmScript assumes alloc always succeeds
     OMSC_ADD_NOCAPTURE(fn, 0); // realloc does not capture the old pointer
     // allocsize(1): parameter 1 is the new allocation size.
     fn->addFnAttr(llvm::Attribute::getWithAllocSizeArgs(*context, 1, std::nullopt));
@@ -2073,8 +2074,12 @@ llvm::Function* CodeGenerator::getOrEmitHashMapNew() {
     llvm::Value* buf = builder->CreateCall(getOrDeclareCalloc(), {
         llvm::ConstantInt::get(i64Ty, 1), totalBytes
     }, "hmap.buf");
+    // OmScript assumes allocations always succeed — annotate call-site result.
+    llvm::cast<llvm::CallInst>(buf)->setMetadata(llvm::LLVMContext::MD_nonnull,
+                                                  llvm::MDNode::get(*context, {}));
     // Store capacity in slot 0
-    builder->CreateAlignedStore(cap, buf, llvm::MaybeAlign(8));
+    {   auto* st = builder->CreateAlignedStore(cap, buf, llvm::MaybeAlign(8));
+        st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapMeta_); }
     // Size (slot 1) is already 0 from calloc
     builder->CreateRet(buf);
 
@@ -2127,8 +2132,8 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
     llvm::Value* hashVal = emitKeyHash(keyArg);
     auto* capPtr = mapArg;  // slot 0
     auto* capLoad = builder->CreateAlignedLoad(i64Ty, capPtr, llvm::MaybeAlign(8), "cap");
+    capLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapMeta_);
     llvm::Value* cap = capLoad;
-
     // Capacity is always a power of 2 >= 8.  Communicate this to LLVM:
     //  (a) !range metadata:  cap ∈ [8, 2^62)  — eliminates dead zero-checks
     //  (b) llvm.assume(cap & (cap-1) == 0)    — lets CorrelatedValuePropagation
@@ -2148,7 +2153,16 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
     }
 
     llvm::Value* sizePtr = builder->CreateInBoundsGEP(i64Ty, mapArg, llvm::ConstantInt::get(i64Ty, 1), "sizeptr");
-    llvm::Value* size = builder->CreateAlignedLoad(i64Ty, sizePtr, llvm::MaybeAlign(8), "size");
+    auto* sizeLoad = builder->CreateAlignedLoad(i64Ty, sizePtr, llvm::MaybeAlign(8), "size");
+    sizeLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapMeta_);
+    {   // Size is always in [0, 2^62).
+        llvm::Metadata* rangeMD[] = {
+            llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64Ty, 0)),
+            llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64Ty, 1ULL << 62))};
+        sizeLoad->setMetadata(llvm::LLVMContext::MD_range,
+                              llvm::MDNode::get(*context, rangeMD));
+    }
+    llvm::Value* size = sizeLoad;
     llvm::Value* mask = builder->CreateSub(cap, llvm::ConstantInt::get(i64Ty, 1), "mask", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* startSlot = builder->CreateAnd(hashVal, mask, "startslot");
     builder->CreateBr(probeBB);
@@ -2256,12 +2270,13 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
     {   auto* st = builder->CreateAlignedStore(valArg, insValPtr, llvm::MaybeAlign(8));
         st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapVal_); }
     // Update size
-    builder->CreateAlignedStore(newSize, sizePtr, llvm::MaybeAlign(8));
+    {   auto* st = builder->CreateAlignedStore(newSize, sizePtr, llvm::MaybeAlign(8));
+        st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapMeta_); }
     builder->CreateBr(doneBB);
 
     // Grow: double capacity, rehash all entries, then insert the new key
     builder->SetInsertPoint(growBB);
-    llvm::Value* newCap = builder->CreateShl(cap, llvm::ConstantInt::get(i64Ty, 1), "newcap");
+    llvm::Value* newCap = builder->CreateShl(cap, llvm::ConstantInt::get(i64Ty, 1), "newcap", /*HasNUW=*/true, /*HasNSW=*/true);
     llvm::Value* newTotalSlots = builder->CreateAdd(
         builder->CreateMul(newCap, three, "cap3", /*HasNUW=*/true, /*HasNSW=*/true),
         llvm::ConstantInt::get(i64Ty, 2), "newtotalslots", /*HasNUW=*/true, /*HasNSW=*/true);
@@ -2269,10 +2284,14 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
     llvm::Value* newBuf = builder->CreateCall(getOrDeclareCalloc(), {
         llvm::ConstantInt::get(i64Ty, 1), newTotalBytes
     }, "newbuf");
+    llvm::cast<llvm::CallInst>(newBuf)->setMetadata(llvm::LLVMContext::MD_nonnull,
+                                                     llvm::MDNode::get(*context, {}));
     // Store new capacity and size+1
-    builder->CreateAlignedStore(newCap, newBuf, llvm::MaybeAlign(8));
+    {   auto* st = builder->CreateAlignedStore(newCap, newBuf, llvm::MaybeAlign(8));
+        st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapMeta_); }
     llvm::Value* newSizePtr = builder->CreateInBoundsGEP(i64Ty, newBuf, llvm::ConstantInt::get(i64Ty, 1));
-    builder->CreateAlignedStore(newSize, newSizePtr, llvm::MaybeAlign(8));
+    {   auto* st = builder->CreateAlignedStore(newSize, newSizePtr, llvm::MaybeAlign(8));
+        st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapMeta_); }
     // Rehash loop: iterate old entries, insert non-empty/non-tombstone into new table
     llvm::Value* newMask = builder->CreateSub(newCap, llvm::ConstantInt::get(i64Ty, 1), "newmask", /*HasNUW=*/true, /*HasNSW=*/true);
     auto* rehashLoopBB = llvm::BasicBlock::Create(*context, "rehash.loop", fn);
@@ -2455,6 +2474,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapGet() {
     // Capacity is invariant during a read-only GET — let LLVM hoist/CSE it.
     capLoad->setMetadata(llvm::LLVMContext::MD_invariant_load,
                          llvm::MDNode::get(*context, {}));
+    capLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapMeta_);
     llvm::Value* cap = capLoad;
     // Capacity is always a power of 2 >= 8.
     {
@@ -2575,6 +2595,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapHas() {
     // Capacity is invariant during a read-only HAS — let LLVM hoist/CSE it.
     capLoad_has->setMetadata(llvm::LLVMContext::MD_invariant_load,
                              llvm::MDNode::get(*context, {}));
+    capLoad_has->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapMeta_);
     llvm::Value* cap = capLoad_has;
     // Capacity is always a power of 2 >= 8.
     {
@@ -2682,6 +2703,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapRemove() {
     llvm::Value* hashVal = emitKeyHash(keyArg);
 
     auto* capLoad_rm = builder->CreateAlignedLoad(i64Ty, mapArg, llvm::MaybeAlign(8), "cap");
+    capLoad_rm->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapMeta_);
     llvm::Value* cap = capLoad_rm;
     // Capacity is always a power of 2 >= 8.
     {
@@ -2739,9 +2761,12 @@ llvm::Function* CodeGenerator::getOrEmitHashMapRemove() {
     {   auto* st = builder->CreateAlignedStore(llvm::ConstantInt::get(i64Ty, 1), hashPtr, llvm::MaybeAlign(8));
         st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapHash_); }
     llvm::Value* sizePtr = builder->CreateInBoundsGEP(i64Ty, mapArg, llvm::ConstantInt::get(i64Ty, 1));
-    llvm::Value* size = builder->CreateAlignedLoad(i64Ty, sizePtr, llvm::MaybeAlign(8), "size");
+    auto* sizeLoad_rm = builder->CreateAlignedLoad(i64Ty, sizePtr, llvm::MaybeAlign(8), "size");
+    sizeLoad_rm->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapMeta_);
+    llvm::Value* size = sizeLoad_rm;
     llvm::Value* newSize = builder->CreateSub(size, llvm::ConstantInt::get(i64Ty, 1), "newsize", /*HasNUW=*/true, /*HasNSW=*/true);
-    builder->CreateAlignedStore(newSize, sizePtr, llvm::MaybeAlign(8));
+    auto* sizeStore_rm = builder->CreateAlignedStore(newSize, sizePtr, llvm::MaybeAlign(8));
+    sizeStore_rm->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapMeta_);
     builder->CreateBr(doneBB);
 
     builder->SetInsertPoint(nextBB);
@@ -2788,9 +2813,13 @@ llvm::Function* CodeGenerator::getOrEmitHashMapKeys() {
 
     builder->SetInsertPoint(entryBB);
     llvm::Value* mapArg = fn->getArg(0);
-    llvm::Value* cap = builder->CreateAlignedLoad(i64Ty, mapArg, llvm::MaybeAlign(8), "cap");
+    auto* capLoad_keys = builder->CreateAlignedLoad(i64Ty, mapArg, llvm::MaybeAlign(8), "cap");
+    capLoad_keys->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapMeta_);
+    llvm::Value* cap = capLoad_keys;
     llvm::Value* sizePtr = builder->CreateInBoundsGEP(i64Ty, mapArg, llvm::ConstantInt::get(i64Ty, 1));
-    llvm::Value* size = builder->CreateAlignedLoad(i64Ty, sizePtr, llvm::MaybeAlign(8), "size");
+    auto* sizeLoad_keys = builder->CreateAlignedLoad(i64Ty, sizePtr, llvm::MaybeAlign(8), "size");
+    sizeLoad_keys->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapMeta_);
+    llvm::Value* size = sizeLoad_keys;
 
     // Allocate output array: (size + 1) * 8
     llvm::Value* eight = llvm::ConstantInt::get(i64Ty, 8);
@@ -2875,9 +2904,13 @@ llvm::Function* CodeGenerator::getOrEmitHashMapValues() {
 
     builder->SetInsertPoint(entryBB);
     llvm::Value* mapArg = fn->getArg(0);
-    llvm::Value* cap = builder->CreateAlignedLoad(i64Ty, mapArg, llvm::MaybeAlign(8), "cap");
+    auto* capLoad_vals = builder->CreateAlignedLoad(i64Ty, mapArg, llvm::MaybeAlign(8), "cap");
+    capLoad_vals->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapMeta_);
+    llvm::Value* cap = capLoad_vals;
     llvm::Value* sizePtr = builder->CreateInBoundsGEP(i64Ty, mapArg, llvm::ConstantInt::get(i64Ty, 1));
-    llvm::Value* size = builder->CreateAlignedLoad(i64Ty, sizePtr, llvm::MaybeAlign(8), "size");
+    auto* sizeLoad_vals = builder->CreateAlignedLoad(i64Ty, sizePtr, llvm::MaybeAlign(8), "size");
+    sizeLoad_vals->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapMeta_);
+    llvm::Value* size = sizeLoad_vals;
 
     llvm::Value* eight = llvm::ConstantInt::get(i64Ty, 8);
     llvm::Value* arrSlots = builder->CreateAdd(size, llvm::ConstantInt::get(i64Ty, 1), "arrslots", /*HasNUW=*/true, /*HasNSW=*/true);
@@ -2952,8 +2985,16 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSize() {
     builder->SetInsertPoint(entryBB);
     llvm::Value* sizePtr = builder->CreateInBoundsGEP(i64Ty, fn->getArg(0),
         llvm::ConstantInt::get(i64Ty, 1), "sizeptr");
-    llvm::Value* size = builder->CreateAlignedLoad(i64Ty, sizePtr, llvm::MaybeAlign(8), "size");
-    builder->CreateRet(size);
+    auto* sizeLoad_sz = builder->CreateAlignedLoad(i64Ty, sizePtr, llvm::MaybeAlign(8), "size");
+    sizeLoad_sz->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapMeta_);
+    // Size is always non-negative.
+    {   llvm::Metadata* rangeMD[] = {
+            llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64Ty, 0)),
+            llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64Ty, 1ULL << 62))};
+        sizeLoad_sz->setMetadata(llvm::LLVMContext::MD_range,
+                                 llvm::MDNode::get(*context, rangeMD));
+    }
+    builder->CreateRet(sizeLoad_sz);
 
     builder->restoreIP(savedIP);
     return fn;

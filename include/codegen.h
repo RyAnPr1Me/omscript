@@ -377,6 +377,7 @@ class CodeGenerator {
     llvm::MDNode* tbaaMapKey_ = nullptr;      ///< TBAA access tag for map key slots
     llvm::MDNode* tbaaMapVal_ = nullptr;      ///< TBAA access tag for map value slots
     llvm::MDNode* tbaaMapHash_ = nullptr;     ///< TBAA access tag for map hash slots
+    llvm::MDNode* tbaaMapMeta_ = nullptr;     ///< TBAA access tag for map header (capacity/size)
 
     /// !range metadata for array length loads: [0, INT64_MAX).
     /// Array lengths are always non-negative (they're sizes).
