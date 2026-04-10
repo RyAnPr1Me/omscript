@@ -739,6 +739,12 @@ class CodeGenerator {
     llvm::Function* getOrEmitHashMapValues();
     llvm::Function* getOrEmitHashMapSize();
 
+    /// Emit the Rotate-Accumulate (RA) hash for a 64-bit integer key.
+    /// Returns a hash value with the low two bits guaranteed >= 2
+    /// (0=empty, 1=tombstone are reserved).  Only 4 IR instructions:
+    /// mul, fshr (ror), add, or.
+    llvm::Value* emitKeyHash(llvm::Value* key);
+
     /// Shared implementation for prefix and postfix increment/decrement.
     /// Returns the *old* value for postfix (isPostfix=true) and the *new*
     /// value for prefix (isPostfix=false).
