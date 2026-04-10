@@ -1970,6 +1970,9 @@ llvm::Function* CodeGenerator::getOrEmitHashMapNew() {
     auto* fnTy = llvm::FunctionType::get(ptrTy, {}, false);
     auto* fn = llvm::Function::Create(fnTy, llvm::Function::InternalLinkage, "__omsc_hmap_new", module.get());
     setHashMapFnAttrs(fn);
+    // Returns a fresh calloc'd allocation — always unique and non-null.
+    fn->addRetAttr(llvm::Attribute::NoAlias);
+    fn->addRetAttr(llvm::Attribute::NonNull);
 
     auto savedIP = builder->saveIP();
     auto* entryBB = llvm::BasicBlock::Create(*context, "entry", fn);
@@ -2002,6 +2005,12 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
     auto* fnTy = llvm::FunctionType::get(ptrTy, {ptrTy, i64Ty, i64Ty}, false);
     auto* fn = llvm::Function::Create(fnTy, llvm::Function::InternalLinkage, "__omsc_hmap_set", module.get());
     setHashMapFnAttrs(fn);
+    // OmScript ownership: map pointer is the sole reference to this allocation.
+    fn->addParamAttr(0, llvm::Attribute::NoAlias);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    // Returns the (possibly reallocated) map — still a unique allocation.
+    fn->addRetAttr(llvm::Attribute::NoAlias);
+    fn->addRetAttr(llvm::Attribute::NonNull);
     fn->getArg(0)->setName("map");
     fn->getArg(1)->setName("key");
     fn->getArg(2)->setName("val");
@@ -2281,6 +2290,10 @@ llvm::Function* CodeGenerator::getOrEmitHashMapGet() {
     auto* fnTy = llvm::FunctionType::get(i64Ty, {ptrTy, i64Ty, i64Ty}, false);
     auto* fn = llvm::Function::Create(fnTy, llvm::Function::InternalLinkage, "__omsc_hmap_get", module.get());
     setHashMapFnAttrs(fn);
+    // OmScript ownership: map is the sole reference; get is read-only.
+    fn->addParamAttr(0, llvm::Attribute::NoAlias);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    fn->addParamAttr(0, llvm::Attribute::ReadOnly);
     fn->getArg(0)->setName("map");
     fn->getArg(1)->setName("key");
     fn->getArg(2)->setName("def");
@@ -2371,6 +2384,10 @@ llvm::Function* CodeGenerator::getOrEmitHashMapHas() {
     auto* fnTy = llvm::FunctionType::get(i64Ty, {ptrTy, i64Ty}, false);
     auto* fn = llvm::Function::Create(fnTy, llvm::Function::InternalLinkage, "__omsc_hmap_has", module.get());
     setHashMapFnAttrs(fn);
+    // OmScript ownership: map is the sole reference; has is read-only.
+    fn->addParamAttr(0, llvm::Attribute::NoAlias);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    fn->addParamAttr(0, llvm::Attribute::ReadOnly);
     fn->getArg(0)->setName("map");
     fn->getArg(1)->setName("key");
 
@@ -2450,6 +2467,12 @@ llvm::Function* CodeGenerator::getOrEmitHashMapRemove() {
     auto* fnTy = llvm::FunctionType::get(ptrTy, {ptrTy, i64Ty}, false);
     auto* fn = llvm::Function::Create(fnTy, llvm::Function::InternalLinkage, "__omsc_hmap_remove", module.get());
     setHashMapFnAttrs(fn);
+    // OmScript ownership: map is the sole reference.
+    fn->addParamAttr(0, llvm::Attribute::NoAlias);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    // Returns the same map pointer (unique ownership).
+    fn->addRetAttr(llvm::Attribute::NoAlias);
+    fn->addRetAttr(llvm::Attribute::NonNull);
     fn->getArg(0)->setName("map");
     fn->getArg(1)->setName("key");
 
@@ -2535,6 +2558,13 @@ llvm::Function* CodeGenerator::getOrEmitHashMapKeys() {
     auto* fnTy = llvm::FunctionType::get(ptrTy, {ptrTy}, false);
     auto* fn = llvm::Function::Create(fnTy, llvm::Function::InternalLinkage, "__omsc_hmap_keys", module.get());
     setHashMapFnAttrs(fn);
+    // OmScript ownership: map is the sole reference; keys only reads the map.
+    fn->addParamAttr(0, llvm::Attribute::NoAlias);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    fn->addParamAttr(0, llvm::Attribute::ReadOnly);
+    // Returns a fresh malloc'd array — always unique and non-null.
+    fn->addRetAttr(llvm::Attribute::NoAlias);
+    fn->addRetAttr(llvm::Attribute::NonNull);
     fn->getArg(0)->setName("map");
 
     auto savedIP = builder->saveIP();
@@ -2613,6 +2643,13 @@ llvm::Function* CodeGenerator::getOrEmitHashMapValues() {
     auto* fnTy = llvm::FunctionType::get(ptrTy, {ptrTy}, false);
     auto* fn = llvm::Function::Create(fnTy, llvm::Function::InternalLinkage, "__omsc_hmap_values", module.get());
     setHashMapFnAttrs(fn);
+    // OmScript ownership: map is the sole reference; values only reads the map.
+    fn->addParamAttr(0, llvm::Attribute::NoAlias);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    fn->addParamAttr(0, llvm::Attribute::ReadOnly);
+    // Returns a fresh malloc'd array — always unique and non-null.
+    fn->addRetAttr(llvm::Attribute::NoAlias);
+    fn->addRetAttr(llvm::Attribute::NonNull);
     fn->getArg(0)->setName("map");
 
     auto savedIP = builder->saveIP();
@@ -2689,6 +2726,10 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSize() {
     auto* fnTy = llvm::FunctionType::get(i64Ty, {ptrTy}, false);
     auto* fn = llvm::Function::Create(fnTy, llvm::Function::InternalLinkage, "__omsc_hmap_size", module.get());
     setHashMapFnAttrs(fn);
+    // OmScript ownership: map is the sole reference; size only reads slot[1].
+    fn->addParamAttr(0, llvm::Attribute::NoAlias);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    fn->addParamAttr(0, llvm::Attribute::ReadOnly);
     fn->getArg(0)->setName("map");
 
     auto savedIP = builder->saveIP();
@@ -3790,16 +3831,13 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         }
     }
 
-    // Default noalias at O1+: OmScript's ownership model guarantees that
-    // distinct pointer parameters never alias the same memory region —
-    // the borrow checker prevents multiple mutable references.  This is
-    // equivalent to compiling all C code with __restrict on every pointer
-    // parameter.  The attribute enables LLVM to freely reorder, vectorize,
-    // and hoist loads/stores without alias-related conservatism.
-    // Lowered from O2 to O1: aliasing information is a language-level
-    // invariant, not a heuristic — it should be propagated at all opt levels.
-    if (optimizationLevel >= OptimizationLevel::O1
-        && !inOptMaxFunction && !currentFuncHintHot_
+    // Default noalias: OmScript's ownership model guarantees that distinct
+    // pointer parameters never alias the same memory region — the borrow
+    // checker prevents multiple mutable references.  This is equivalent to
+    // compiling all C code with __restrict on every pointer parameter.
+    // Applied unconditionally (including O0) because this is a language-level
+    // invariant, not an optimization heuristic.
+    if (!inOptMaxFunction && !currentFuncHintHot_
         && !func->hintRestrict && !fileNoAlias_) {
         for (unsigned i = 0; i < function->arg_size(); ++i) {
             if (function->getArg(i)->getType()->isPointerTy()) {
