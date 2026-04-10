@@ -3938,10 +3938,18 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         // (arrays, strings) are always valid (non-null) distinct allocations.
         // Mark ALL pointer parameters as nonnull at O2+ — this lets LLVM
         // eliminate null-checks and enables speculative loads/hoisting.
-        // @hot and @optmax functions get additional noalias below.
+        // Also mark as noalias: OmScript's ownership system ensures that
+        // distinct variable bindings always point to distinct memory
+        // regions (no two parameters alias the same allocation).  This
+        // enables LLVM's alias analysis to prove that stores through one
+        // parameter don't affect loads through another, unlocking:
+        //   1. Load/store reordering across function calls
+        //   2. Loop-invariant code motion of parameter-derived loads
+        //   3. Better vectorization (no assumed loop-carried dependencies)
         for (unsigned i = 0; i < function->arg_size(); ++i) {
             if (function->getArg(i)->getType()->isPointerTy()) {
                 function->addParamAttr(i, llvm::Attribute::NonNull);
+                function->addParamAttr(i, llvm::Attribute::NoAlias);
             }
         }
     }
