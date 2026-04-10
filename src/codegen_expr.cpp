@@ -1033,6 +1033,45 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         };
         llvm::Value* lPtr = toStrPtr(left);
         llvm::Value* rPtr = toStrPtr(right);
+
+        // Fast path for == and !=: if pointers are identical, strings are
+        // trivially equal (skip the O(n) strcmp).  This fires when the same
+        // string variable appears on both sides, or when two references
+        // point to the same interned literal.
+        if (expr->op == "==" || expr->op == "!=") {
+            llvm::Function* parentFn = builder->GetInsertBlock()->getParent();
+            auto* ptrEqBB = llvm::BasicBlock::Create(*context, "streq.ptreq", parentFn);
+            auto* slowBB  = llvm::BasicBlock::Create(*context, "streq.slow", parentFn);
+            auto* mergeBB = llvm::BasicBlock::Create(*context, "streq.merge", parentFn);
+
+            llvm::Value* samePtr = builder->CreateICmpEQ(lPtr, rPtr, "streq.sameptr");
+            // Pointer equality is rare in general — weight slow path heavier.
+            llvm::MDNode* brW = llvm::MDBuilder(*context).createBranchWeights(1, 100);
+            builder->CreateCondBr(samePtr, ptrEqBB, slowBB, brW);
+
+            // Fast path: pointers match → strings are equal
+            builder->SetInsertPoint(ptrEqBB);
+            llvm::Value* fastResult = (expr->op == "==")
+                ? llvm::ConstantInt::get(getDefaultType(), 1)
+                : llvm::ConstantInt::get(getDefaultType(), 0);
+            builder->CreateBr(mergeBB);
+
+            // Slow path: call strcmp
+            builder->SetInsertPoint(slowBB);
+            llvm::Value* cmpResult = builder->CreateCall(getOrDeclareStrcmp(), {lPtr, rPtr}, "strcmp.res");
+            llvm::Value* slowBool = (expr->op == "==")
+                ? builder->CreateICmpEQ(cmpResult, builder->getInt32(0), "scmp.eq")
+                : builder->CreateICmpNE(cmpResult, builder->getInt32(0), "scmp.ne");
+            llvm::Value* slowResult = builder->CreateZExt(slowBool, getDefaultType(), "scmp.zext");
+            builder->CreateBr(mergeBB);
+
+            builder->SetInsertPoint(mergeBB);
+            llvm::PHINode* phi = builder->CreatePHI(getDefaultType(), 2, "streq.phi");
+            phi->addIncoming(fastResult, ptrEqBB);
+            phi->addIncoming(slowResult, slowBB);
+            return phi;
+        }
+
         llvm::Value* cmpResult = builder->CreateCall(getOrDeclareStrcmp(), {lPtr, rPtr}, "strcmp.res");
         llvm::Value* zero32 = builder->getInt32(0);
         llvm::Value* cmpBool;
