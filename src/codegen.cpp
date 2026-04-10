@@ -2075,8 +2075,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapNew() {
         llvm::ConstantInt::get(i64Ty, 1), totalBytes
     }, "hmap.buf");
     // OmScript assumes allocations always succeed — annotate call-site result.
-    llvm::cast<llvm::CallInst>(buf)->setMetadata(llvm::LLVMContext::MD_nonnull,
-                                                  llvm::MDNode::get(*context, {}));
+    llvm::cast<llvm::CallInst>(buf)->addRetAttr(llvm::Attribute::NonNull);
     // Store capacity in slot 0
     {   auto* st = builder->CreateAlignedStore(cap, buf, llvm::MaybeAlign(8));
         st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapMeta_); }
@@ -2284,8 +2283,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
     llvm::Value* newBuf = builder->CreateCall(getOrDeclareCalloc(), {
         llvm::ConstantInt::get(i64Ty, 1), newTotalBytes
     }, "newbuf");
-    llvm::cast<llvm::CallInst>(newBuf)->setMetadata(llvm::LLVMContext::MD_nonnull,
-                                                     llvm::MDNode::get(*context, {}));
+    llvm::cast<llvm::CallInst>(newBuf)->addRetAttr(llvm::Attribute::NonNull);
     // Store new capacity and size+1
     {   auto* st = builder->CreateAlignedStore(newCap, newBuf, llvm::MaybeAlign(8));
         st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapMeta_); }
