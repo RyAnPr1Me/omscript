@@ -554,7 +554,10 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
         builder->CreateBr(bodyBB);
         builder->SetInsertPoint(bodyBB);
         loopStack.push_back({endBB, bodyBB});
+        auto savedLenCacheWI = std::move(loopArrayLenCache_);
+        loopArrayLenCache_.clear();
         generateStatement(stmt->body.get());
+        loopArrayLenCache_ = std::move(savedLenCacheWI);
         loopStack.pop_back();
         if (!builder->GetInsertBlock()->getTerminator()) {
             builder->CreateBr(bodyBB);
@@ -621,7 +624,10 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
         }
     }
 
+    auto savedLenCacheW = std::move(loopArrayLenCache_);
+    loopArrayLenCache_.clear();
     generateStatement(stmt->body.get());
+    loopArrayLenCache_ = std::move(savedLenCacheW);
     loopStack.pop_back();
     if (!builder->GetInsertBlock()->getTerminator()) {
         auto* backBrWhile = builder->CreateBr(condBB);
@@ -739,7 +745,10 @@ void CodeGenerator::generateDoWhile(DoWhileStmt* stmt) {
     // Body block
     builder->SetInsertPoint(bodyBB);
     loopStack.push_back({endBB, condBB});
+    auto savedLenCacheDW = std::move(loopArrayLenCache_);
+    loopArrayLenCache_.clear();
     generateStatement(stmt->body.get());
+    loopArrayLenCache_ = std::move(savedLenCacheDW);
     loopStack.pop_back();
     if (!builder->GetInsertBlock()->getTerminator()) {
         builder->CreateBr(condBB);
@@ -1075,7 +1084,12 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     }
 
     loopStack.push_back({endBB, incBB});
+    // Clear per-iteration array length cache so inner-body bounds checks
+    // get fresh values.  Save outer cache for nested loop restore.
+    auto savedLenCache = std::move(loopArrayLenCache_);
+    loopArrayLenCache_.clear();
     generateStatement(stmt->body.get());
+    loopArrayLenCache_ = std::move(savedLenCache);
     loopStack.pop_back();
 
     // Clean up: iterator no longer has guaranteed bounds outside the loop.
@@ -1716,7 +1730,10 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
     builder->CreateStore(elemVal, iterAlloca);
 
     loopStack.push_back({endBB, incBB});
+    auto savedLenCacheFE = std::move(loopArrayLenCache_);
+    loopArrayLenCache_.clear();
     generateStatement(stmt->body.get());
+    loopArrayLenCache_ = std::move(savedLenCacheFE);
     loopStack.pop_back();
     if (!builder->GetInsertBlock()->getTerminator()) {
         builder->CreateBr(incBB);

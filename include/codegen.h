@@ -362,6 +362,19 @@ class CodeGenerator {
     /// constants, which the vectorizer then preserves as vector urem/udiv.
     llvm::DenseSet<llvm::Value*> nonNegValues_;
 
+    /// Loop-scope array length cache: maps array base pointer → loaded length
+    /// value within the current loop body.  When multiple array accesses in the
+    /// same loop body use the same array, the length load is shared instead of
+    /// re-loaded from memory on every bounds check.  TBAA already tells LLVM
+    /// that length and element slots don't alias, but LLVM's GVN/LICM may not
+    /// always succeed when the loads are in different control-flow paths (each
+    /// behind a bounds-check branch).  This cache short-circuits that by
+    /// re-using the SSA value directly.
+    /// Cleared on loop entry/exit to avoid stale values.
+    llvm::DenseMap<llvm::Value*, llvm::Value*> loopArrayLenCache_;
+    /// Nesting depth of loopArrayLenCache_ — pushed/popped on loop entry/exit.
+    unsigned loopLenCacheDepth_ = 0;
+
     /// File-level @noalias: all pointer parameters are marked noalias.
     bool fileNoAlias_ = false;
 

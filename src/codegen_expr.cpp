@@ -122,12 +122,22 @@ bool CodeGenerator::canElideBoundsCheck(Expression* arrayExpr,
         auto it = loopIterEndBound_.find(idxIdent->name);
         if (it != loopIterEndBound_.end()) {
             llvm::Value* endBound = it->second;
-            std::string lenName = std::string(prefix) + ".len.elim";
-            auto* lenLoadElim = builder->CreateAlignedLoad(
-                getDefaultType(), basePtr, llvm::MaybeAlign(8), lenName.c_str());
-            lenLoadElim->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-            lenLoadElim->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
-            llvm::Value* lenVal = lenLoadElim;
+            // Use loop-scope array length cache when available to avoid
+            // redundant loads within the same loop iteration.
+            llvm::Value* lenVal;
+            auto cacheIt = loopArrayLenCache_.find(basePtr);
+            if (cacheIt != loopArrayLenCache_.end()) {
+                lenVal = cacheIt->second;
+            } else {
+                std::string lenName = std::string(prefix) + ".len.elim";
+                auto* lenLoadElim = builder->CreateAlignedLoad(
+                    getDefaultType(), basePtr, llvm::MaybeAlign(8), lenName.c_str());
+                lenLoadElim->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+                lenLoadElim->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                lenVal = lenLoadElim;
+                if (!loopStack.empty())
+                    loopArrayLenCache_[basePtr] = lenVal;
+            }
 
             // Case D: same SSA value
             if (endBound == lenVal)
@@ -170,15 +180,24 @@ bool CodeGenerator::canElideBoundsCheck(Expression* arrayExpr,
 
                     // ── Positive offset: arr[i + C] ─────────────────
                     if (effectiveOffset >= 0) {
-                        std::string arithLenName = std::string(prefix) + ".len.arith";
-                        auto* arithLenLoad = builder->CreateAlignedLoad(
-                            getDefaultType(), basePtr, llvm::MaybeAlign(8), arithLenName.c_str());
-                        arithLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-                        arithLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                        llvm::Value* arithLenVal;
+                        auto arithCacheIt = loopArrayLenCache_.find(basePtr);
+                        if (arithCacheIt != loopArrayLenCache_.end()) {
+                            arithLenVal = arithCacheIt->second;
+                        } else {
+                            std::string arithLenName = std::string(prefix) + ".len.arith";
+                            auto* arithLenLoad = builder->CreateAlignedLoad(
+                                getDefaultType(), basePtr, llvm::MaybeAlign(8), arithLenName.c_str());
+                            arithLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+                            arithLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                            arithLenVal = arithLenLoad;
+                            if (!loopStack.empty())
+                                loopArrayLenCache_[basePtr] = arithLenVal;
+                        }
 
                         auto* endCI = llvm::dyn_cast<llvm::ConstantInt>(endIt->second);
                         if (endCI) {
-                            if (auto* lenCI = llvm::dyn_cast<llvm::ConstantInt>(arithLenLoad)) {
+                            if (auto* lenCI = llvm::dyn_cast<llvm::ConstantInt>(arithLenVal)) {
                                 if (endCI->getSExtValue() + effectiveOffset <= lenCI->getSExtValue())
                                     return true;
                             }
@@ -190,7 +209,7 @@ bool CodeGenerator::canElideBoundsCheck(Expression* arrayExpr,
                                 llvm::ConstantInt::get(getDefaultType(), effectiveOffset),
                                 std::string(prefix) + ".adjend");
                             llvm::Value* cmp = builder->CreateICmpSLE(
-                                adjustedEnd, arithLenLoad,
+                                adjustedEnd, arithLenVal,
                                 std::string(prefix) + ".arith.safe");
                             llvm::Function* assumeFn = OMSC_GET_INTRINSIC(
                                 module.get(), llvm::Intrinsic::assume, {});
@@ -209,11 +228,20 @@ bool CodeGenerator::canElideBoundsCheck(Expression* arrayExpr,
 
                             // Fallback: emit assume hints
                             if (optimizationLevel >= OptimizationLevel::O2) {
-                                std::string negLenName = std::string(prefix) + ".len.arith.neg";
-                                auto* negLenLoad = builder->CreateAlignedLoad(
-                                    getDefaultType(), basePtr, llvm::MaybeAlign(8), negLenName.c_str());
-                                negLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-                                negLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                                llvm::Value* negLenVal;
+                                auto negCacheIt = loopArrayLenCache_.find(basePtr);
+                                if (negCacheIt != loopArrayLenCache_.end()) {
+                                    negLenVal = negCacheIt->second;
+                                } else {
+                                    std::string negLenName = std::string(prefix) + ".len.arith.neg";
+                                    auto* negLenLoad = builder->CreateAlignedLoad(
+                                        getDefaultType(), basePtr, llvm::MaybeAlign(8), negLenName.c_str());
+                                    negLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+                                    negLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                                    negLenVal = negLenLoad;
+                                    if (!loopStack.empty())
+                                        loopArrayLenCache_[basePtr] = negLenVal;
+                                }
                                 llvm::Value* adjustedStart = builder->CreateSub(
                                     startIt->second,
                                     llvm::ConstantInt::get(getDefaultType(), absOffset),
@@ -227,7 +255,7 @@ bool CodeGenerator::canElideBoundsCheck(Expression* arrayExpr,
                                     llvm::ConstantInt::get(getDefaultType(), absOffset),
                                     std::string(prefix) + ".adjend.neg");
                                 llvm::Value* leLen = builder->CreateICmpSLE(
-                                    adjustedEnd, negLenLoad,
+                                    adjustedEnd, negLenVal,
                                     std::string(prefix) + ".negoff.safe");
                                 llvm::Value* bothSafe = builder->CreateAnd(
                                     geZero, leLen,
@@ -262,16 +290,36 @@ void CodeGenerator::emitBoundsCheck(llvm::Value* idxVal,
         std::string strlenName = std::string(prefix) + ".strlen";
         lenVal = builder->CreateCall(getOrDeclareStrlen(), {basePtr}, strlenName.c_str());
     } else {
-        std::string lenName = std::string(prefix) + ".len";
-        auto* lenLoad = builder->CreateAlignedLoad(
-            getDefaultType(), basePtr, llvm::MaybeAlign(8), lenName.c_str());
-        lenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
-        lenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
-        if (isBorrowed) {
-            lenLoad->setMetadata(llvm::LLVMContext::MD_invariant_load,
-                                 llvm::MDNode::get(*context, {}));
+        // Loop-scope array length cache: when we're inside a loop and have
+        // already loaded the length of this array, reuse the SSA value
+        // instead of emitting a redundant load.  LLVM's GVN can sometimes
+        // merge these loads, but when bounds checks create separate control-
+        // flow paths (ok/fail branches), the loads end up in different
+        // dominance subtrees and GVN cannot always merge them.  By caching
+        // at the codegen level, we guarantee a single load per array per
+        // loop iteration, which is critical for tight inner loops with
+        // multiple array accesses (e.g., arr[i] + arr[i+1]).
+        auto cacheIt = loopArrayLenCache_.find(basePtr);
+        if (cacheIt != loopArrayLenCache_.end()) {
+            lenVal = cacheIt->second;
+        } else {
+            std::string lenName = std::string(prefix) + ".len";
+            auto* lenLoad = builder->CreateAlignedLoad(
+                getDefaultType(), basePtr, llvm::MaybeAlign(8), lenName.c_str());
+            lenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
+            lenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+            if (isBorrowed) {
+                lenLoad->setMetadata(llvm::LLVMContext::MD_invariant_load,
+                                     llvm::MDNode::get(*context, {}));
+            }
+            lenVal = lenLoad;
+            // Cache for subsequent bounds checks within the same loop body.
+            // Only cache when inside a loop (loopStack non-empty) to avoid
+            // stale values across unrelated code.
+            if (!loopStack.empty()) {
+                loopArrayLenCache_[basePtr] = lenVal;
+            }
         }
-        lenVal = lenLoad;
     }
 
     // Single unsigned compare: (unsigned)idx < len checks both non-negativity
@@ -3082,9 +3130,57 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         }
         // @optmax: the user's guarantee of well-behaved arithmetic means
         // signed overflow cannot occur, enabling nsw for better SCEV analysis.
-        return inOptMaxFunction
-            ? builder->CreateNSWMul(left, right, "multmp")
-            : builder->CreateMul(left, right, "multmp");
+        if (inOptMaxFunction)
+            return builder->CreateNSWMul(left, right, "multmp");
+
+        // KnownBits analysis: use leading-zero counts to prove the product
+        // cannot overflow signed i64.  If a has L_a leading zeros and b has
+        // L_b leading zeros, then a < 2^(64-L_a) and b < 2^(64-L_b), so
+        // a*b < 2^(128-L_a-L_b).  The product fits in 64 bits (no unsigned
+        // overflow) when L_a + L_b >= 64, and in 63 bits (no signed overflow)
+        // when L_a + L_b >= 65.  This is the common case for loop-counter ×
+        // small-stride patterns like arr[i*4], arr[i*8], etc.
+        {
+            llvm::KnownBits lhsKB = llvm::computeKnownBits(
+                left, module->getDataLayout());
+            llvm::KnownBits rhsKB = llvm::computeKnownBits(
+                right, module->getDataLayout());
+            unsigned lhsLZ = lhsKB.countMinLeadingZeros();
+            unsigned rhsLZ = rhsKB.countMinLeadingZeros();
+            unsigned totalLZ = lhsLZ + rhsLZ;
+            if (totalLZ >= 65) {
+                // Product provably < 2^63 → fits in signed i64 → nsw+nuw safe.
+                auto* result = builder->CreateMul(left, right, "multmp",
+                                                   /*HasNUW=*/true, /*HasNSW=*/true);
+                nonNegValues_.insert(result);
+                return result;
+            }
+            if (totalLZ >= 64) {
+                // Product provably < 2^64 → fits in unsigned i64 → nuw safe.
+                // Both operands non-negative (≥1 leading zero each to reach 64),
+                // so nsw is also safe (positive × positive stays positive when
+                // the unsigned result < 2^64 and both inputs < 2^63).
+                // Actually: max product is (2^63-1)*(2^1-1) = 2^63-1 which
+                // fits, but (2^32)*(2^32) = 2^64 which does NOT fit.
+                // Be conservative: nuw only when totalLZ >= 64.
+                auto* result = builder->CreateMul(left, right, "multmp",
+                                                   /*HasNUW=*/true, /*HasNSW=*/false);
+                if (lhsKB.isNonNegative() && rhsKB.isNonNegative())
+                    nonNegValues_.insert(result);
+                return result;
+            }
+            // Special case: one operand is a small constant (1-255),
+            // the other has enough leading zeros to prove no overflow.
+            // E.g., loop counter i ∈ [0, 2^31) (32 leading zeros) × 8 (61
+            // leading zeros) → totalLZ=93 ≥ 65, so the general case catches it.
+            // But if KnownBits doesn't see through a PHI, we can still check:
+            // constant c with countLeadingZeros(c) = L_c, other operand from
+            // nonNegValues_ → at least 1 leading zero → totalLZ = L_c + 1.
+            // For c ∈ [1, 255]: L_c >= 56, totalLZ >= 57 — not enough.
+            // So only the general case applies.  No special case needed.
+        }
+
+        return builder->CreateMul(left, right, "multmp");
     } else if (expr->op == "/" || expr->op == "%") {
         const bool isDivision = expr->op == "/";
 
@@ -3359,14 +3455,50 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         return result;
     } else if (expr->op == "|") {
         auto* result = builder->CreateOr(left, right, "ortmp");
-        // OR of two non-negative values is non-negative
-        if (nonNegValues_.count(left) && nonNegValues_.count(right))
+        // OR of two non-negative values is non-negative (sign bit stays 0).
+        // Also: OR with a non-negative constant preserves non-negativity
+        // of the other operand (ORing in low bits cannot set the sign bit
+        // when the constant's sign bit is 0).
+        bool resultNonNeg = nonNegValues_.count(left) && nonNegValues_.count(right);
+        if (!resultNonNeg) {
+            // One tracked non-neg + constant with sign bit 0 → result non-neg
+            if (nonNegValues_.count(left)) {
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right))
+                    resultNonNeg = !ci->isNegative();
+            }
+            if (!resultNonNeg && nonNegValues_.count(right)) {
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left))
+                    resultNonNeg = !ci->isNegative();
+            }
+            // Both constants non-negative → result non-negative
+            if (!resultNonNeg) {
+                auto* lci = llvm::dyn_cast<llvm::ConstantInt>(left);
+                auto* rci = llvm::dyn_cast<llvm::ConstantInt>(right);
+                if (lci && rci && !lci->isNegative() && !rci->isNegative())
+                    resultNonNeg = true;
+            }
+        }
+        if (resultNonNeg)
             nonNegValues_.insert(result);
         return result;
     } else if (expr->op == "^") {
         auto* result = builder->CreateXor(left, right, "xortmp");
-        // XOR of two non-negative values is non-negative (sign bit stays 0)
-        if (nonNegValues_.count(left) && nonNegValues_.count(right))
+        // XOR of two non-negative values is non-negative (sign bit stays 0).
+        // Also: XOR with a non-negative constant preserves the sign bit of
+        // the other operand when that operand is non-negative (both have
+        // sign bit 0, XOR(0,0)=0).
+        bool resultNonNeg = nonNegValues_.count(left) && nonNegValues_.count(right);
+        if (!resultNonNeg) {
+            if (nonNegValues_.count(left)) {
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right))
+                    resultNonNeg = !ci->isNegative();
+            }
+            if (!resultNonNeg && nonNegValues_.count(right)) {
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left))
+                    resultNonNeg = !ci->isNegative();
+            }
+        }
+        if (resultNonNeg)
             nonNegValues_.insert(result);
         return result;
     } else if (expr->op == "<<") {
