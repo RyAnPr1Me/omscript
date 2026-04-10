@@ -839,7 +839,13 @@ void CodeGenerator::setupPrintfDeclaration() {
 
     llvm::FunctionType* printfType = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), printfArgs, true);
 
-    llvm::Function::Create(printfType, llvm::Function::ExternalLinkage, "printf", module.get());
+    auto* fn = llvm::Function::Create(printfType, llvm::Function::ExternalLinkage, "printf", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    fn->addFnAttr(llvm::Attribute::NoSync);
+    // printf reads through its format string arg (nocapture, readonly).
+    fn->addParamAttr(0, llvm::Attribute::ReadOnly);
+    OMSC_ADD_NOCAPTURE(fn, 0);
 }
 
 llvm::Function* CodeGenerator::getPrintfFunction() {
@@ -1331,12 +1337,21 @@ llvm::Function* CodeGenerator::getOrDeclareFputs() {
 llvm::Value* CodeGenerator::getOrDeclareStdout() {
     // Get the C library 'stdout' global (extern FILE *stdout).
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
-    if (auto* gv = module->getGlobalVariable("stdout"))
-        return builder->CreateLoad(ptrTy, gv, "stdout.val");
+    if (auto* gv = module->getGlobalVariable("stdout")) {
+        auto* load = builder->CreateLoad(ptrTy, gv, "stdout.val");
+        // stdout is a process-wide constant — mark as nonnull and invariant
+        // so LLVM can hoist/CSE repeated loads.
+        load->setMetadata(llvm::LLVMContext::MD_nonnull,
+                          llvm::MDNode::get(*context, {}));
+        return load;
+    }
     auto* gv = new llvm::GlobalVariable(
         *module, ptrTy, /*isConstant=*/false,
         llvm::GlobalValue::ExternalLinkage, nullptr, "stdout");
-    return builder->CreateLoad(ptrTy, gv, "stdout.val");
+    auto* load = builder->CreateLoad(ptrTy, gv, "stdout.val");
+    load->setMetadata(llvm::LLVMContext::MD_nonnull,
+                      llvm::MDNode::get(*context, {}));
+    return load;
 }
 
 llvm::Function* CodeGenerator::getOrDeclareScanf() {
@@ -1384,6 +1399,10 @@ llvm::Function* CodeGenerator::getOrDeclareSnprintf() {
     fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addFnAttr(llvm::Attribute::NoFree);
     fn->addFnAttr(llvm::Attribute::NoSync);
+    // snprintf: dest is writeonly+nocapture, format string is readonly+nocapture.
+    OMSC_ADD_NOCAPTURE(fn, 0);
+    fn->addParamAttr(2, llvm::Attribute::ReadOnly);
+    OMSC_ADD_NOCAPTURE(fn, 2);
     return fn;
 }
 
@@ -1784,7 +1803,9 @@ llvm::Function* CodeGenerator::getOrDeclareFgets() {
     auto* ty = llvm::FunctionType::get(ptrTy, {ptrTy, llvm::Type::getInt32Ty(*context), ptrTy}, false);
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "fgets", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
+    OMSC_ADD_NOCAPTURE(fn, 0);
     fn->addParamAttr(2, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 2);
     return fn;

@@ -580,7 +580,10 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         llvm::BasicBlock* nonZeroBB = llvm::BasicBlock::Create(*context, "coalesce.nonzero", function);
         llvm::BasicBlock* zeroBB = llvm::BasicBlock::Create(*context, "coalesce.zero", function);
         llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "coalesce.merge", function);
-        builder->CreateCondBr(isNonZero, nonZeroBB, zeroBB);
+        // The left operand of ?? is usually non-zero — that's the point
+        // of the null-coalescing operator.  Weight the hot path accordingly.
+        llvm::MDNode* coalW = llvm::MDBuilder(*context).createBranchWeights(99, 1);
+        builder->CreateCondBr(isNonZero, nonZeroBB, zeroBB, coalW);
         builder->SetInsertPoint(nonZeroBB);
         builder->CreateBr(mergeBB);
         builder->SetInsertPoint(zeroBB);
@@ -986,7 +989,9 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         llvm::Function* curFn = builder->GetInsertBlock()->getParent();
         llvm::BasicBlock* ovfBB = llvm::BasicBlock::Create(*context, "strmul.overflow", curFn);
         llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "strmul.ok", curFn);
-        builder->CreateCondBr(overflowed, ovfBB, okBB);
+        // Overflow is extremely unlikely — mark the error path cold.
+        llvm::MDNode* ovfW = llvm::MDBuilder(*context).createBranchWeights(1, 1000);
+        builder->CreateCondBr(overflowed, ovfBB, okBB, ovfW);
 
         builder->SetInsertPoint(ovfBB);
         llvm::Value* ovfMsg = builder->CreateGlobalString(
@@ -998,7 +1003,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
 
         builder->SetInsertPoint(okBB);
         llvm::Value* allocSz =
-            builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "strmul.alloc");
+            builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "strmul.alloc", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {allocSz}, "strmul.buf");
         // Null-terminate first byte so strcat works from empty buffer
         builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), buf);
@@ -1015,7 +1020,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         builder->CreateCondBr(builder->CreateICmpSLT(idx, countVal, "strmul.cond"), bodyBB, doneBB);
         builder->SetInsertPoint(bodyBB);
         builder->CreateCall(getOrDeclareStrcat(), {buf, strPtr});
-        llvm::Value* nextIdx = builder->CreateAdd(idx, one, "strmul.next");
+        llvm::Value* nextIdx = builder->CreateAdd(idx, one, "strmul.next", /*HasNUW=*/true, /*HasNSW=*/true);
         idx->addIncoming(nextIdx, bodyBB);
         attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
         builder->SetInsertPoint(doneBB);
@@ -4007,7 +4012,8 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
 
         llvm::Value* delta = llvm::ConstantInt::get(getDefaultType(), 1, true);
         llvm::Value* updated =
-            (op == "++") ? builder->CreateAdd(current, delta, "inc") : builder->CreateSub(current, delta, "dec");
+            (op == "++") ? builder->CreateAdd(current, delta, "inc", /*HasNUW=*/false, /*HasNSW=*/true)
+                         : builder->CreateSub(current, delta, "dec", /*HasNUW=*/false, /*HasNSW=*/true);
         builder->CreateAlignedStore(updated, elemPtr, llvm::MaybeAlign(8));
         return isPostfix ? current : updated;
     }
@@ -4034,7 +4040,8 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
         updated = (op == "++") ? builder->CreateFAdd(current, one, "finc") : builder->CreateFSub(current, one, "fdec");
     } else {
         llvm::Value* delta = llvm::ConstantInt::get(getDefaultType(), 1, true);
-        updated = (op == "++") ? builder->CreateAdd(current, delta, "inc") : builder->CreateSub(current, delta, "dec");
+        updated = (op == "++") ? builder->CreateAdd(current, delta, "inc", /*HasNUW=*/false, /*HasNSW=*/true)
+                               : builder->CreateSub(current, delta, "dec", /*HasNUW=*/false, /*HasNSW=*/true);
     }
 
     builder->CreateStore(updated, it->second);

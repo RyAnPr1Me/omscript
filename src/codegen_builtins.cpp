@@ -796,7 +796,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Function* function = builder->GetInsertBlock()->getParent();
         llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "swap.ok", function);
         llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "swap.fail", function);
-        builder->CreateCondBr(bothValid, okBB, failBB);
+        // Swap OOB is extremely unlikely.
+        llvm::MDNode* swapW = llvm::MDBuilder(*context).createBranchWeights(1000, 1);
+        builder->CreateCondBr(bothValid, okBB, failBB, swapW);
 
         builder->SetInsertPoint(failBB);
         llvm::Value* errMsg = builder->CreateGlobalString("Runtime error: swap index out of bounds\n", "swap_oob_msg");
@@ -971,7 +973,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "assert.fail", function);
         llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "assert.ok", function);
 
-        builder->CreateCondBr(condVal, okBB, failBB);
+        // Assertions are expected to pass.
+        llvm::MDNode* assertW = llvm::MDBuilder(*context).createBranchWeights(1000, 1);
+        builder->CreateCondBr(condVal, okBB, failBB, assertW);
 
         builder->SetInsertPoint(failBB);
         llvm::Value* errMsg = builder->CreateGlobalString("Runtime error: assertion failed\n", "assert_fail_msg");
@@ -1016,7 +1020,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Function* function = builder->GetInsertBlock()->getParent();
         llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "charat.ok", function);
         llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "charat.fail", function);
-        builder->CreateCondBr(valid, okBB, failBB);
+        // char_at OOB is extremely unlikely.
+        llvm::MDNode* charAtW = llvm::MDBuilder(*context).createBranchWeights(1000, 1);
+        builder->CreateCondBr(valid, okBB, failBB, charAtW);
 
         builder->SetInsertPoint(failBB);
         llvm::Value* errMsg =
@@ -2098,7 +2104,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::BasicBlock* checkBB = llvm::BasicBlock::Create(*context, "endswith.check", function);
         llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "endswith.fail", function);
         llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "endswith.merge", function);
-        builder->CreateCondBr(tooLong, failBB, checkBB);
+        // Suffix longer than string is unlikely in typical use.
+        llvm::MDNode* ewW = llvm::MDBuilder(*context).createBranchWeights(1, 99);
+        builder->CreateCondBr(tooLong, failBB, checkBB, ewW);
         builder->SetInsertPoint(failBB);
         builder->CreateBr(mergeBB);
         builder->SetInsertPoint(checkBB);
@@ -2327,7 +2335,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Function* function = builder->GetInsertBlock()->getParent();
         llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "pop.ok", function);
         llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "pop.fail", function);
-        builder->CreateCondBr(isEmpty, failBB, okBB);
+        // Popping from an empty array is extremely unlikely.
+        llvm::MDNode* popW = llvm::MDBuilder(*context).createBranchWeights(1, 1000);
+        builder->CreateCondBr(isEmpty, failBB, okBB, popW);
 
         builder->SetInsertPoint(failBB);
         llvm::Value* errMsg = builder->CreateGlobalString("Runtime error: pop from empty array\n", "pop_empty_msg");
@@ -2757,7 +2767,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Function* function = builder->GetInsertBlock()->getParent();
         llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "aremove.ok", function);
         llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "aremove.fail", function);
-        builder->CreateCondBr(valid, okBB, failBB);
+        // OOB is extremely unlikely.
+        llvm::MDNode* removeW = llvm::MDBuilder(*context).createBranchWeights(1000, 1);
+        builder->CreateCondBr(valid, okBB, failBB, removeW);
         // Out-of-bounds: print error and abort
         builder->SetInsertPoint(failBB);
         llvm::Value* errMsg =
