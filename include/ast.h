@@ -620,14 +620,19 @@ class PrefetchStmt : public Statement {
     bool hintHot = false;
     bool hintImmut = false;
 
+    /// Byte offset for speculative prefetch (e.g. prefetch+128 to prefetch
+    /// 2 cache lines ahead).  Default 0 means prefetch at the variable's
+    /// base address only.
+    int64_t offsetBytes = 0;
+
     /// Constructor for standalone prefetch of an existing variable.
-    explicit PrefetchStmt(const std::string& name)
-        : Statement(ASTNodeType::PREFETCH_STMT), varName(name) {}
+    explicit PrefetchStmt(const std::string& name, int64_t offset = 0)
+        : Statement(ASTNodeType::PREFETCH_STMT), varName(name), offsetBytes(offset) {}
 
     /// Constructor for prefetch with variable declaration.
-    PrefetchStmt(std::unique_ptr<VarDecl> decl, bool hot, bool immut)
+    PrefetchStmt(std::unique_ptr<VarDecl> decl, bool hot, bool immut, int64_t offset = 0)
         : Statement(ASTNodeType::PREFETCH_STMT), varDecl(std::move(decl)),
-          hintHot(hot), hintImmut(immut) {}
+          hintHot(hot), hintImmut(immut), offsetBytes(offset) {}
 };
 
 } // namespace omscript

@@ -621,6 +621,20 @@ std::unique_ptr<Statement> Parser::parseStatement() {
     }
     if (match(TokenType::PREFETCH)) {
         const Token kw = tokens[current - 1];
+
+        // Parse optional byte offset: prefetch+128 or prefetch+64 etc.
+        // The '+' immediately after 'prefetch' indicates cache-line-ahead
+        // speculative prefetching.  E.g. prefetch+128 fetches 2 cache lines
+        // ahead (128 bytes = 2 × 64-byte cache lines on most CPUs).
+        int64_t offsetBytes = 0;
+        if (match(TokenType::PLUS)) {
+            if (!check(TokenType::INTEGER)) {
+                error("Expected integer offset after '+' in prefetch");
+            }
+            const Token offsetTok = advance();
+            offsetBytes = std::stoll(offsetTok.lexeme);
+        }
+
         // Parse optional attributes: hot, immut
         bool hintHot = false;
         bool hintImmut = false;
@@ -675,7 +689,7 @@ std::unique_ptr<Statement> Parser::parseStatement() {
             auto varDecl = std::make_unique<VarDecl>(name.lexeme, std::move(init), isConst, typeName);
             varDecl->line = kw.line;
             varDecl->column = kw.column;
-            auto stmt = std::make_unique<PrefetchStmt>(std::move(varDecl), hintHot, hintImmut);
+            auto stmt = std::make_unique<PrefetchStmt>(std::move(varDecl), hintHot, hintImmut, offsetBytes);
             stmt->line = kw.line;
             stmt->column = kw.column;
             return stmt;
@@ -688,7 +702,7 @@ std::unique_ptr<Statement> Parser::parseStatement() {
                 parseTypeAnnotation(); // consume and discard
             }
             consume(TokenType::SEMICOLON, "Expected ';' after prefetch statement");
-            auto stmt = std::make_unique<PrefetchStmt>(varName.lexeme);
+            auto stmt = std::make_unique<PrefetchStmt>(varName.lexeme, offsetBytes);
             stmt->line = kw.line;
             stmt->column = kw.column;
             return stmt;

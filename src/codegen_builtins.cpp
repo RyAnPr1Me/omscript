@@ -1150,7 +1150,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             llvm::BasicBlock* growBB = llvm::BasicBlock::Create(*context, "concat.grow", fn);
             llvm::BasicBlock* appendBB = llvm::BasicBlock::Create(*context, "concat.append", fn);
             llvm::BasicBlock* curBB = builder->GetInsertBlock();
-            builder->CreateCondBr(needGrow, growBB, appendBB);
+            // Growth is rare in append loops — weight accordingly for branch
+            // predictor and code layout (grow path moved out of line).
+            llvm::MDNode* concatGrowWeights = llvm::MDBuilder(*context).createBranchWeights(1, 100);
+            builder->CreateCondBr(needGrow, growBB, appendBB, concatGrowWeights);
 
             // Grow path: double capacity until sufficient, then realloc.
             builder->SetInsertPoint(growBB);

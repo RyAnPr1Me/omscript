@@ -2406,6 +2406,25 @@ void CodeGenerator::generatePrefetch(PrefetchStmt* stmt) {
                 pfCall->setMetadata("omscript.memory_prefetch",
                     llvm::MDNode::get(*context, {}));
 
+                // Offset prefetch for large types: if the user specified
+                // prefetch+N, emit an additional prefetch at base+N bytes.
+                // This is useful when the variable points to a buffer whose
+                // upcoming region should be warmed into cache.
+                if (stmt->offsetBytes > 0) {
+                    llvm::Value* aheadPtr = builder->CreateInBoundsGEP(
+                        builder->getInt8Ty(), alloca,
+                        llvm::ConstantInt::get(getDefaultType(), stmt->offsetBytes),
+                        varName + ".pf.ahead");
+                    auto* pfAhead = builder->CreateCall(prefetchFn, {
+                        aheadPtr,
+                        builder->getInt32(0),
+                        builder->getInt32(locality),
+                        builder->getInt32(1)
+                    });
+                    pfAhead->setMetadata("omscript.memory_prefetch",
+                        llvm::MDNode::get(*context, {}));
+                }
+
                 // For multi-slot arrays (structs), also prefetch subsequent
                 // cache lines to cover the full object.  Each cache line is
                 // typically 64 bytes = 8 × i64 slots.
@@ -2459,6 +2478,27 @@ void CodeGenerator::generatePrefetch(PrefetchStmt* stmt) {
                         builder->getInt32(locality),   // temporal locality
                         builder->getInt32(1)           // data cache
                     });
+
+                    // Offset prefetch: prefetch+N brings the cache line at
+                    // ptr+N into L1.  Typical use: prefetch+128 to speculatively
+                    // warm 2 cache lines ahead (128 = 2 × 64-byte cache lines
+                    // on most CPUs).  This is useful in loops that walk through
+                    // arrays or linked structures — each iteration prefetches
+                    // data for a future iteration, hiding memory latency.
+                    if (stmt->offsetBytes > 0) {
+                        llvm::Value* offsetPtr = builder->CreateInBoundsGEP(
+                            builder->getInt8Ty(), ptr,
+                            llvm::ConstantInt::get(getDefaultType(), stmt->offsetBytes),
+                            varName + ".pf.ahead");
+                        auto* pfAhead = builder->CreateCall(prefetchFn, {
+                            offsetPtr,
+                            builder->getInt32(0),
+                            builder->getInt32(locality),
+                            builder->getInt32(1)
+                        });
+                        pfAhead->setMetadata("omscript.memory_prefetch",
+                            llvm::MDNode::get(*context, {}));
+                    }
                 }
             }
         }
