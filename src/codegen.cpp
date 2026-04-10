@@ -2192,7 +2192,9 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
     llvm::Value* threshold = builder->CreateLShr(
         builder->CreateMul(cap, llvm::ConstantInt::get(i64Ty, 3), "cap3thr", /*HasNUW=*/true, /*HasNSW=*/true), llvm::ConstantInt::get(i64Ty, 2), "threshold");
     llvm::Value* needGrow = builder->CreateICmpUGT(newSize, threshold, "needgrow");
-    // Growth is rare (~25% of insertions trigger it) — mark cold.
+    // Growth is rare: only triggered when load factor exceeds 75%, which
+    // happens at most log2(N) times over N insertions.  Weight accordingly
+    // so the branch predictor and code layout favor the no-grow path.
     llvm::MDNode* growWeights = llvm::MDBuilder(*context).createBranchWeights(1, 1000);
     builder->CreateCondBr(needGrow, growBB, insertBB, growWeights);
 
@@ -3938,18 +3940,12 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         // (arrays, strings) are always valid (non-null) distinct allocations.
         // Mark ALL pointer parameters as nonnull at O2+ — this lets LLVM
         // eliminate null-checks and enables speculative loads/hoisting.
-        // Also mark as noalias: OmScript's ownership system ensures that
-        // distinct variable bindings always point to distinct memory
-        // regions (no two parameters alias the same allocation).  This
-        // enables LLVM's alias analysis to prove that stores through one
-        // parameter don't affect loads through another, unlocking:
-        //   1. Load/store reordering across function calls
-        //   2. Loop-invariant code motion of parameter-derived loads
-        //   3. Better vectorization (no assumed loop-carried dependencies)
+        // noalias is handled by the default fallback below (line ~4013+)
+        // which applies to all functions regardless of optimization level,
+        // since no-aliasing is a language-level invariant.
         for (unsigned i = 0; i < function->arg_size(); ++i) {
             if (function->getArg(i)->getType()->isPointerTy()) {
                 function->addParamAttr(i, llvm::Attribute::NonNull);
-                function->addParamAttr(i, llvm::Attribute::NoAlias);
             }
         }
     }
