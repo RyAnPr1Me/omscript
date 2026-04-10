@@ -925,7 +925,9 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         builder->CreateBr(stepCheckBB);
         builder->SetInsertPoint(stepCheckBB);
         llvm::Value* stepNonZero = builder->CreateICmpNE(stepVal, zero, "stepnonzero");
-        builder->CreateCondBr(stepNonZero, condBB, stepFailBB);
+        // Zero step is a programming error — heavily favour the non-zero path.
+        auto* stepW = llvm::MDBuilder(*context).createBranchWeights(1000, 1);
+        builder->CreateCondBr(stepNonZero, condBB, stepFailBB, stepW);
 
         builder->SetInsertPoint(stepFailBB);
         const std::string errorMessage = "Runtime error: for-loop step cannot be zero for iterator '" + stmt->iteratorVar + "'\n";
@@ -2103,7 +2105,9 @@ void CodeGenerator::generateTryCatch(TryCatchStmt* stmt) {
                 llvm::Value* flagSet =
                     builder->CreateICmpNE(flagNow, llvm::ConstantInt::get(getDefaultType(), 0), "try.flagset");
                 llvm::BasicBlock* contBB = llvm::BasicBlock::Create(*context, "try.cont", function);
-                builder->CreateCondBr(flagSet, catchBB, contBB);
+                // Error flag is rarely set — favour the non-error continuation.
+                auto* tryW = llvm::MDBuilder(*context).createBranchWeights(1, 1000);
+                builder->CreateCondBr(flagSet, catchBB, contBB, tryW);
                 builder->SetInsertPoint(contBB);
             }
         }

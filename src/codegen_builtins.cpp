@@ -574,7 +574,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "inputln.ok", function);
         llvm::BasicBlock* stripBB = llvm::BasicBlock::Create(*context, "inputln.strip", function);
         llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "inputln.done", function);
-        builder->CreateCondBr(fgetsNull, eofBB, okBB);
+        // EOF/error on fgets is rare — favour the success path.
+        auto* fgetsW = llvm::MDBuilder(*context).createBranchWeights(1, 1000);
+        builder->CreateCondBr(fgetsNull, eofBB, okBB, fgetsW);
         // EOF path: store '\0' at start of buffer
         builder->SetInsertPoint(eofBB);
         builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), buf);
@@ -584,7 +586,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* nlChar = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 10);
         llvm::Value* nlPtr = builder->CreateCall(getOrDeclareStrchr(), {buf, nlChar}, "inputln.nl");
         llvm::Value* isNull = builder->CreateICmpEQ(nlPtr, llvm::ConstantPointerNull::get(ptrTy), "inputln.isnull");
-        builder->CreateCondBr(isNull, doneBB, stripBB);
+        // Well-formed input lines almost always have a trailing newline.
+        auto* nlW = llvm::MDBuilder(*context).createBranchWeights(1, 100);
+        builder->CreateCondBr(isNull, doneBB, stripBB, nlW);
         builder->SetInsertPoint(stripBB);
         builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), nlPtr);
         builder->CreateBr(doneBB);
@@ -1108,7 +1112,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             llvm::BasicBlock* cachedBB = builder->GetInsertBlock();
             llvm::BasicBlock* strlenBB = llvm::BasicBlock::Create(*context, "concat.strlen", fn);
             llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "concat.merge", fn);
-            builder->CreateCondBr(isSentinel, strlenBB, mergeBB);
+            // Cache hit is the common case after first concat — favour merge.
+            auto* sentW = llvm::MDBuilder(*context).createBranchWeights(1, 9);
+            builder->CreateCondBr(isSentinel, strlenBB, mergeBB, sentW);
 
             builder->SetInsertPoint(strlenBB);
             llvm::Value* realLen = builder->CreateCall(getOrDeclareStrlen(), {lhsPtr}, "concat.len1.real");
@@ -1856,7 +1862,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::BasicBlock* emptyOldBB = llvm::BasicBlock::Create(*context, "replace.emptyold", function);
         llvm::BasicBlock* replaceMainBB = llvm::BasicBlock::Create(*context, "replace.main", function);
         llvm::Value* oldIsEmpty = builder->CreateICmpEQ(oldLen, zero, "replace.oldempty");
-        builder->CreateCondBr(oldIsEmpty, emptyOldBB, replaceMainBB);
+        // Empty-old is a degenerate edge case — heavily favour normal path.
+        auto* eoW = llvm::MDBuilder(*context).createBranchWeights(1, 1000);
+        builder->CreateCondBr(oldIsEmpty, emptyOldBB, replaceMainBB, eoW);
 
         // Empty old: return strdup(str)
         builder->SetInsertPoint(emptyOldBB);
@@ -4077,7 +4085,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::BasicBlock* nullBB = llvm::BasicBlock::Create(*context, "fread.null", parentFn);
         llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "fread.ok", parentFn);
         llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "fread.merge", parentFn);
-        builder->CreateCondBr(isNull, nullBB, okBB);
+        // File open normally succeeds — mark null path cold.
+        auto* freadW = llvm::MDBuilder(*context).createBranchWeights(1, 100);
+        builder->CreateCondBr(isNull, nullBB, okBB, freadW);
 
         // Null path: return empty string
         builder->SetInsertPoint(nullBB);
@@ -4147,7 +4157,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::BasicBlock* nullBB = llvm::BasicBlock::Create(*context, "fwrite.null", parentFn);
         llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "fwrite.ok", parentFn);
         llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "fwrite.merge", parentFn);
-        builder->CreateCondBr(isNull, nullBB, okBB);
+        // File open normally succeeds — mark null path cold.
+        auto* fwriteW = llvm::MDBuilder(*context).createBranchWeights(1, 100);
+        builder->CreateCondBr(isNull, nullBB, okBB, fwriteW);
 
         builder->SetInsertPoint(nullBB);
         builder->CreateBr(mergeBB);
@@ -4188,7 +4200,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::BasicBlock* nullBB = llvm::BasicBlock::Create(*context, "fappend.null", parentFn);
         llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "fappend.ok", parentFn);
         llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "fappend.merge", parentFn);
-        builder->CreateCondBr(isNull, nullBB, okBB);
+        // File open normally succeeds — mark null path cold.
+        auto* fappW = llvm::MDBuilder(*context).createBranchWeights(1, 100);
+        builder->CreateCondBr(isNull, nullBB, okBB, fappW);
 
         builder->SetInsertPoint(nullBB);
         builder->CreateBr(mergeBB);
