@@ -3582,26 +3582,40 @@ void CodeGenerator::generate(Program* program) {
                 funcArgs.insert(&arg);
             // Helper: strip GEP chains to find the underlying allocation.
             // A store to `getelementptr(alloca, ...)` is still a local write.
-            auto isLocalAlloca = [](llvm::Value* ptr) -> bool {
-                while (auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(ptr))
-                    ptr = gep->getPointerOperand();
-                return llvm::isa<llvm::AllocaInst>(ptr);
+            // Helper: strip GEP/BitCast/IntToPtr/PtrToInt chains to find
+            // the underlying pointer source.  OmScript uses i64 as the
+            // default type, so values frequently pass through IntToPtr and
+            // PtrToInt conversions.  Stripping these is essential for
+            // accurate memory-effect inference.
+            auto stripPointerCasts = [](llvm::Value* ptr) -> llvm::Value* {
+                for (unsigned i = 0; i < 16; ++i) { // depth limit
+                    if (auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(ptr)) {
+                        ptr = gep->getPointerOperand();
+                    } else if (auto* bc = llvm::dyn_cast<llvm::BitCastInst>(ptr)) {
+                        ptr = bc->getOperand(0);
+                    } else if (auto* i2p = llvm::dyn_cast<llvm::IntToPtrInst>(ptr)) {
+                        ptr = i2p->getOperand(0);
+                    } else if (auto* p2i = llvm::dyn_cast<llvm::PtrToIntInst>(ptr)) {
+                        ptr = p2i->getOperand(0);
+                    } else {
+                        break;
+                    }
+                }
+                return ptr;
             };
-            // Helper: strip GEP/bitcast chains and check if the base is a
-            // function argument or a load from a function argument (one level
-            // of indirection covers OmScript's array-of-pointers pattern).
+            auto isLocalAlloca = [&stripPointerCasts](llvm::Value* ptr) -> bool {
+                return llvm::isa<llvm::AllocaInst>(stripPointerCasts(ptr));
+            };
+            // Helper: strip chains and check if the base is a function
+            // argument or a load from a function argument (one level of
+            // indirection covers OmScript's array-of-pointers pattern).
             auto isArgDerived = [&](llvm::Value* ptr) -> bool {
-                while (auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(ptr))
-                    ptr = gep->getPointerOperand();
-                if (auto* bc = llvm::dyn_cast<llvm::BitCastInst>(ptr))
-                    ptr = bc->getOperand(0);
+                ptr = stripPointerCasts(ptr);
                 if (funcArgs.count(ptr))
                     return true;
                 // One level of load indirection: load from arg-derived ptr.
                 if (auto* li = llvm::dyn_cast<llvm::LoadInst>(ptr)) {
-                    llvm::Value* loadPtr = li->getPointerOperand();
-                    while (auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(loadPtr))
-                        loadPtr = gep->getPointerOperand();
+                    llvm::Value* loadPtr = stripPointerCasts(li->getPointerOperand());
                     return funcArgs.count(loadPtr) > 0;
                 }
                 return false;

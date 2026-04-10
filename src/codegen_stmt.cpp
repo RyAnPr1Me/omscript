@@ -1,10 +1,12 @@
 #include "codegen.h"
 #include "diagnostic.h"
 #include <iostream>
+#include <llvm/Analysis/ValueTracking.h>
 #include <llvm/Config/llvm-config.h>
 #include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/MDBuilder.h>
+#include <llvm/Support/KnownBits.h>
 #include <set>
 #include <stdexcept>
 
@@ -855,6 +857,21 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     startVal = convertTo(startVal, iterType);
     builder->CreateStore(startVal, iterAlloca);
 
+    // Early non-negativity tracking: mark the iterator alloca as non-negative
+    // BEFORE the condition block so that the loop condition can use unsigned
+    // comparison (ULT instead of SLT).  For ascending loops starting at a
+    // non-negative value, the iterator remains non-negative throughout because
+    // the loop body cannot modify it below the start value.
+    {
+        bool startNonNeg = false;
+        if (auto* startCI = llvm::dyn_cast<llvm::ConstantInt>(startVal))
+            startNonNeg = startCI->getSExtValue() >= 0;
+        if (!startNonNeg)
+            startNonNeg = nonNegValues_.count(startVal) > 0;
+        if (startNonNeg)
+            nonNegValues_.insert(iterAlloca);
+    }
+
     // Get end value
     llvm::Value* endVal = generateExpression(stmt->end.get());
     endVal = convertTo(endVal, iterType);
@@ -962,8 +979,16 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         // induction variables, which unlocks more aggressive loop transforms.
         const bool iterNonNeg = nonNegValues_.count(iterAlloca) > 0;
         const auto* endCI = llvm::dyn_cast<llvm::ConstantInt>(endVal);
-        const bool endNonNeg  = nonNegValues_.count(endVal) > 0
+        bool endNonNeg  = nonNegValues_.count(endVal) > 0
             || (endCI && !endCI->isNegative());
+        // KnownBits fallback: detect non-negativity of end value through
+        // LLVM's value-tracking analysis.  This catches cases like
+        // `len(arr)` whose result has !range [0, INT64_MAX) metadata.
+        if (iterNonNeg && !endNonNeg) {
+            llvm::KnownBits endKB = llvm::computeKnownBits(
+                endVal, module->getDataLayout());
+            endNonNeg = endKB.isNonNegative();
+        }
         if (iterNonNeg && endNonNeg) {
             continueCond = builder->CreateICmpULT(curVal, endVal, "forcond_ult");
         } else {

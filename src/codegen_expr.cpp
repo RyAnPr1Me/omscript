@@ -432,6 +432,16 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
                                   llvm::MDNode::get(*context, {}));
         }
     }
+    // OmScript variables are always initialized before use (the ownership
+    // system prevents use of uninitialized variables).  The !noundef metadata
+    // tells LLVM that the loaded value is never poison or undef, enabling
+    // more aggressive speculation, freeze elimination, and branch folding.
+    if (optimizationLevel >= OptimizationLevel::O1) {
+        if (auto* loadInst = llvm::dyn_cast<llvm::LoadInst>(load)) {
+            loadInst->setMetadata(llvm::LLVMContext::MD_noundef,
+                                  llvm::MDNode::get(*context, {}));
+        }
+    }
     // Track non-negativity: if the alloca is known to hold a non-negative
     // value (e.g., ascending for-loop counter), mark the loaded value.
     if (nonNegValues_.count(it->second)) {
