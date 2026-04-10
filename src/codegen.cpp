@@ -1939,8 +1939,14 @@ llvm::Function* CodeGenerator::getOrDeclarePthreadMutexDestroy() {
 //
 // Total allocation: (2 + 3 * capacity) * 8 bytes
 //
-// Hash function: FNV-1a on the 64-bit key value.
-//   result = ((hash_raw >> 2) | 2)  -- ensure result >= 2
+// Hash function: fast multiply-xorshift for 64-bit integer keys.
+//   h = key * 0x9E3779B97F4A7C15  (Fibonacci / golden-ratio constant)
+//   h ^= h >> 32                   (fold high bits into low)
+//   h |= 2                         (ensure result >= 2)
+// This replaces the previous FNV-1a (8-iteration byte-by-byte loop,
+// ~24 instructions) with 4 instructions (mul, lshr, xor, or).  The
+// golden-ratio multiply provides excellent bit-mixing for integer keys
+// in power-of-2 hash tables.
 
 /// Helper: set common attributes on emitted map functions.
 static void setHashMapFnAttrs(llvm::Function* fn) {
@@ -2020,21 +2026,14 @@ llvm::Function* CodeGenerator::getOrEmitHashMapSet() {
     llvm::Value* keyArg = fn->getArg(1);
     llvm::Value* valArg = fn->getArg(2);
 
-    // FNV-1a hash of the 64-bit key
-    // hash = fnv1a(key) — unrolled over 8 bytes
-    llvm::Value* basis = llvm::ConstantInt::get(i64Ty, 14695981039346656037ULL);
-    llvm::Value* prime = llvm::ConstantInt::get(i64Ty, 1099511628211ULL);
-    llvm::Value* ff    = llvm::ConstantInt::get(i64Ty, 0xFF);
-    llvm::Value* h = basis;
-    for (int byte = 0; byte < 8; byte++) {
-        llvm::Value* shift = llvm::ConstantInt::get(i64Ty, byte * 8);
-        llvm::Value* b = builder->CreateAnd(builder->CreateLShr(keyArg, shift), ff);
-        h = builder->CreateMul(builder->CreateXor(h, b), prime, "fnv");
-    }
+    // Fast multiply-xorshift hash of the 64-bit key.
+    // h = key * golden_ratio; h ^= h >> 32; h |= 2
+    // 4 instructions vs 24 for the previous FNV-1a byte loop.
+    llvm::Value* golden = llvm::ConstantInt::get(i64Ty, 0x9E3779B97F4A7C15ULL);
+    llvm::Value* h = builder->CreateMul(keyArg, golden, "hash.mul");
+    h = builder->CreateXor(h, builder->CreateLShr(h, llvm::ConstantInt::get(i64Ty, 32), "hash.shr"), "hash.mix");
     // Ensure hash >= 2 (0=empty, 1=tombstone are reserved)
     llvm::Value* hashVal = builder->CreateOr(h, llvm::ConstantInt::get(i64Ty, 2), "hash");
-
-    // Load capacity and size
     auto* capPtr = mapArg;  // slot 0
     llvm::Value* cap = builder->CreateAlignedLoad(i64Ty, capPtr, llvm::MaybeAlign(8), "cap");
     llvm::Value* sizePtr = builder->CreateInBoundsGEP(i64Ty, mapArg, llvm::ConstantInt::get(i64Ty, 1), "sizeptr");
@@ -2300,16 +2299,10 @@ llvm::Function* CodeGenerator::getOrEmitHashMapGet() {
     llvm::Value* keyArg = fn->getArg(1);
     llvm::Value* defArg = fn->getArg(2);
 
-    // FNV-1a hash
-    llvm::Value* basis = llvm::ConstantInt::get(i64Ty, 14695981039346656037ULL);
-    llvm::Value* prime = llvm::ConstantInt::get(i64Ty, 1099511628211ULL);
-    llvm::Value* ff    = llvm::ConstantInt::get(i64Ty, 0xFF);
-    llvm::Value* h = basis;
-    for (int byte = 0; byte < 8; byte++) {
-        llvm::Value* shift = llvm::ConstantInt::get(i64Ty, byte * 8);
-        llvm::Value* b = builder->CreateAnd(builder->CreateLShr(keyArg, shift), ff);
-        h = builder->CreateMul(builder->CreateXor(h, b), prime, "fnv");
-    }
+    // Fast multiply-xorshift hash
+    llvm::Value* golden = llvm::ConstantInt::get(i64Ty, 0x9E3779B97F4A7C15ULL);
+    llvm::Value* h = builder->CreateMul(keyArg, golden, "hash.mul");
+    h = builder->CreateXor(h, builder->CreateLShr(h, llvm::ConstantInt::get(i64Ty, 32), "hash.shr"), "hash.mix");
     llvm::Value* hashVal = builder->CreateOr(h, llvm::ConstantInt::get(i64Ty, 2), "hash");
 
     llvm::Value* cap = builder->CreateAlignedLoad(i64Ty, mapArg, llvm::MaybeAlign(8), "cap");
@@ -2395,16 +2388,10 @@ llvm::Function* CodeGenerator::getOrEmitHashMapHas() {
     llvm::Value* mapArg = fn->getArg(0);
     llvm::Value* keyArg = fn->getArg(1);
 
-    // FNV-1a hash
-    llvm::Value* basis = llvm::ConstantInt::get(i64Ty, 14695981039346656037ULL);
-    llvm::Value* prime = llvm::ConstantInt::get(i64Ty, 1099511628211ULL);
-    llvm::Value* ff    = llvm::ConstantInt::get(i64Ty, 0xFF);
-    llvm::Value* h = basis;
-    for (int byte = 0; byte < 8; byte++) {
-        llvm::Value* shift = llvm::ConstantInt::get(i64Ty, byte * 8);
-        llvm::Value* b = builder->CreateAnd(builder->CreateLShr(keyArg, shift), ff);
-        h = builder->CreateMul(builder->CreateXor(h, b), prime, "fnv");
-    }
+    // Fast multiply-xorshift hash
+    llvm::Value* golden = llvm::ConstantInt::get(i64Ty, 0x9E3779B97F4A7C15ULL);
+    llvm::Value* h = builder->CreateMul(keyArg, golden, "hash.mul");
+    h = builder->CreateXor(h, builder->CreateLShr(h, llvm::ConstantInt::get(i64Ty, 32), "hash.shr"), "hash.mix");
     llvm::Value* hashVal = builder->CreateOr(h, llvm::ConstantInt::get(i64Ty, 2), "hash");
 
     llvm::Value* cap = builder->CreateAlignedLoad(i64Ty, mapArg, llvm::MaybeAlign(8), "cap");
@@ -2480,16 +2467,10 @@ llvm::Function* CodeGenerator::getOrEmitHashMapRemove() {
     llvm::Value* mapArg = fn->getArg(0);
     llvm::Value* keyArg = fn->getArg(1);
 
-    // FNV-1a hash
-    llvm::Value* basis = llvm::ConstantInt::get(i64Ty, 14695981039346656037ULL);
-    llvm::Value* prime = llvm::ConstantInt::get(i64Ty, 1099511628211ULL);
-    llvm::Value* ff    = llvm::ConstantInt::get(i64Ty, 0xFF);
-    llvm::Value* h = basis;
-    for (int byte = 0; byte < 8; byte++) {
-        llvm::Value* shift = llvm::ConstantInt::get(i64Ty, byte * 8);
-        llvm::Value* b = builder->CreateAnd(builder->CreateLShr(keyArg, shift), ff);
-        h = builder->CreateMul(builder->CreateXor(h, b), prime, "fnv");
-    }
+    // Fast multiply-xorshift hash
+    llvm::Value* golden = llvm::ConstantInt::get(i64Ty, 0x9E3779B97F4A7C15ULL);
+    llvm::Value* h = builder->CreateMul(keyArg, golden, "hash.mul");
+    h = builder->CreateXor(h, builder->CreateLShr(h, llvm::ConstantInt::get(i64Ty, 32), "hash.shr"), "hash.mix");
     llvm::Value* hashVal = builder->CreateOr(h, llvm::ConstantInt::get(i64Ty, 2), "hash");
 
     llvm::Value* cap = builder->CreateAlignedLoad(i64Ty, mapArg, llvm::MaybeAlign(8), "cap");

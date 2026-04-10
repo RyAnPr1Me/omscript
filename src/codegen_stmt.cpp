@@ -665,12 +665,12 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
                                llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 0))}));
         } else if (!whileBodyHasNonPow2ModVal
                    && (currentFuncHintVectorize_
-                       || (currentFuncHintHot_ && optimizationLevel >= OptimizationLevel::O3
+                       || (currentFuncHintHot_ && optimizationLevel >= OptimizationLevel::O2
                            && loopNestDepth_ <= 1))) {
-            // @hot at O3: auto-enable vectorization for top-level while-loops.
-            // While-loops are less amenable to vectorization than for-loops
-            // (no known trip count), so we require @hot as a signal that the
-            // loop is performance-critical before applying this hint.
+            // @hot at O2+: auto-enable vectorization for top-level while-loops.
+            // Promoted from O3-only to O2+: the vectorizer's cost model already
+            // rejects unprofitable vectorisations, so the hint only nudges it to
+            // try.  @hot signals the loop is performance-critical.
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
                            llvm::ConstantAsMetadata::get(
@@ -678,7 +678,7 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
         }
         if (currentFuncHintHot_ && currentFuncHintVectorize_
             && !whileBodyHasNonPow2ModVal
-            && optimizationLevel >= OptimizationLevel::O3
+            && optimizationLevel >= OptimizationLevel::O2
             && !currentFuncHintNoVectorize_) {
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
@@ -786,16 +786,16 @@ void CodeGenerator::generateDoWhile(DoWhileStmt* stmt) {
                            llvm::ConstantAsMetadata::get(
                                llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 0))}));
         } else if (currentFuncHintVectorize_
-                   || (currentFuncHintHot_ && optimizationLevel >= OptimizationLevel::O3
+                   || (currentFuncHintHot_ && optimizationLevel >= OptimizationLevel::O2
                        && loopNestDepth_ <= 1)) {
-            // Mirror while-loop: @hot+O3 for top-level do-while loops.
+            // Mirror while-loop: @hot+O2+ for top-level do-while loops.
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
                            llvm::ConstantAsMetadata::get(
                                llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
         }
         if (currentFuncHintHot_ && currentFuncHintVectorize_
-            && optimizationLevel >= OptimizationLevel::O3
+            && optimizationLevel >= OptimizationLevel::O2
             && !currentFuncHintNoVectorize_) {
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.interleave.count"),

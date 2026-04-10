@@ -61,10 +61,19 @@ double instructionCost(const llvm::Instruction* inst) {
     switch (inst->getOpcode()) {
     // Near-free: these are typically eliminated or folded by the backend
     case llvm::Instruction::BitCast:
-    case llvm::Instruction::IntToPtr:
-    case llvm::Instruction::PtrToInt:
     case llvm::Instruction::AddrSpaceCast:
         return 0.0;
+
+    // IntToPtr/PtrToInt: while these are nominally free in the backend,
+    // they destroy pointer provenance information which prevents LLVM's
+    // alias analysis (BasicAA) from proving noalias between pointers
+    // that went through an i64 round-trip.  This blocks LICM, GVN, and
+    // vectorization.  Assigning a cost of 1.5 incentivises the
+    // superoptimiser to prefer patterns that avoid unnecessary
+    // pointer-integer conversions.
+    case llvm::Instruction::IntToPtr:
+    case llvm::Instruction::PtrToInt:
+        return 1.5;
 
     // 1-cycle ALU ops on modern x86
     case llvm::Instruction::Add:
