@@ -3180,27 +3180,15 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             }
             if (totalLZ >= 64) {
                 // Product provably < 2^64 → fits in unsigned i64 → nuw safe.
-                // Both operands non-negative (≥1 leading zero each to reach 64),
-                // so nsw is also safe (positive × positive stays positive when
-                // the unsigned result < 2^64 and both inputs < 2^63).
-                // Actually: max product is (2^63-1)*(2^1-1) = 2^63-1 which
-                // fits, but (2^32)*(2^32) = 2^64 which does NOT fit.
-                // Be conservative: nuw only when totalLZ >= 64.
+                // nsw requires the result < 2^63 (totalLZ >= 65), so we
+                // conservatively omit it here: e.g. (2^32)*(2^32) = 2^64
+                // fits unsigned but NOT signed i64.
                 auto* result = builder->CreateMul(left, right, "multmp",
                                                    /*HasNUW=*/true, /*HasNSW=*/false);
                 if (lhsKB.isNonNegative() && rhsKB.isNonNegative())
                     nonNegValues_.insert(result);
                 return result;
             }
-            // Special case: one operand is a small constant (1-255),
-            // the other has enough leading zeros to prove no overflow.
-            // E.g., loop counter i ∈ [0, 2^31) (32 leading zeros) × 8 (61
-            // leading zeros) → totalLZ=93 ≥ 65, so the general case catches it.
-            // But if KnownBits doesn't see through a PHI, we can still check:
-            // constant c with countLeadingZeros(c) = L_c, other operand from
-            // nonNegValues_ → at least 1 leading zero → totalLZ = L_c + 1.
-            // For c ∈ [1, 255]: L_c >= 56, totalLZ >= 57 — not enough.
-            // So only the general case applies.  No special case needed.
         }
 
         return builder->CreateMul(left, right, "multmp");
