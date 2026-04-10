@@ -68,8 +68,8 @@ double instructionCost(const llvm::Instruction* inst) {
     // they destroy pointer provenance information which prevents LLVM's
     // alias analysis (BasicAA) from proving noalias between pointers
     // that went through an i64 round-trip.  This blocks LICM, GVN, and
-    // vectorization.  Assigning a cost of 1.5 incentivises the
-    // superoptimiser to prefer patterns that avoid unnecessary
+    // vectorization.  Assigning a cost of 1.5 incentivizes the
+    // superoptimizer to prefer patterns that avoid unnecessary
     // pointer-integer conversions.
     case llvm::Instruction::IntToPtr:
     case llvm::Instruction::PtrToInt:

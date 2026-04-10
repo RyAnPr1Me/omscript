@@ -2247,9 +2247,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(growBB);
         llvm::Value* slots = builder->CreateAdd(newLen, one64, "push.slots", /*HasNUW=*/true, /*HasNSW=*/true);
         // nextPow2 via ctlz intrinsic: 1 << (64 - ctlz(slots - 1))
-        // This replaces a 6-shift OR-cascade (~14 instructions) with 3
-        // instructions (sub, ctlz, shl), which maps to a single BSR/LZCNT
-        // + shift on x86-64.
+        // This replaces a 6-shift OR-cascade (~14 instructions) with 4
+        // instructions (sub, ctlz, sub, shl), which maps to a single
+        // BSR/LZCNT + shift on x86-64.
         llvm::Value* slotsM1 = builder->CreateSub(slots, one64, "push.pm1", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Function* ctlzFn = OMSC_GET_INTRINSIC(module.get(),
             llvm::Intrinsic::ctlz, {getDefaultType()});
@@ -2258,15 +2258,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* lz = builder->CreateCall(ctlzFn,
             {slotsM1, llvm::ConstantInt::getTrue(*context)}, "push.lz");
         llvm::Value* shift = builder->CreateSub(
-            llvm::ConstantInt::get(getDefaultType(), 63), lz, "push.shift");
+            llvm::ConstantInt::get(getDefaultType(), 64), lz, "push.shift");
         llvm::Value* cap = builder->CreateShl(one64, shift, "push.cap", /*HasNUW=*/true, /*HasNSW=*/true);
-        // Handle the edge case where slots is exactly a power of 2:
-        // ctlz(slots-1) gives us the floor, but we need ceil(log2(slots)).
-        // If slots is already a power of 2, cap == slots/2 which is too small.
-        // Fix: if cap < slots, double it.
-        llvm::Value* tooSmall = builder->CreateICmpULT(cap, slots, "push.toosmall");
-        llvm::Value* capX2 = builder->CreateShl(cap, one64, "push.capx2", /*HasNUW=*/true, /*HasNSW=*/true);
-        cap = builder->CreateSelect(tooSmall, capX2, cap, "push.nextpow2");
         llvm::Value* useMin = builder->CreateICmpSLT(cap, minSlots, "push.usemin");
         cap = builder->CreateSelect(useMin, minSlots, cap, "push.finalcap");
         llvm::Value* newSize = builder->CreateMul(cap,

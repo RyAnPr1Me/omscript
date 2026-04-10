@@ -669,7 +669,7 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
                            && loopNestDepth_ <= 1))) {
             // @hot at O2+: auto-enable vectorization for top-level while-loops.
             // Promoted from O3-only to O2+: the vectorizer's cost model already
-            // rejects unprofitable vectorisations, so the hint only nudges it to
+            // rejects unprofitable vectorizations, so the hint only nudges it to
             // try.  @hot signals the loop is performance-critical.
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
