@@ -1481,7 +1481,21 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         //   neither → no flags (conservative, no UB assumptions)
         const bool canNSWNUW = bothOperandsNonNeg || constNonNeg;
         const bool canNSW = canNSWNUW || inOptMaxFunction;
-        auto* result = canNSWNUW
+        // KnownBits fallback: when nonNegValues_ doesn't track both operands
+        // (e.g., values flowing through PHI nodes from loop back-edges),
+        // use LLVM's KnownBits analysis to detect non-negativity.  This
+        // catches patterns like `phi_val + 1` where phi_val is non-negative
+        // via range metadata or nuw flags but not in our tracking set.
+        bool kbNSWNUW = false;
+        if (!canNSWNUW && !canNSW) {
+            llvm::KnownBits lhsKB = llvm::computeKnownBits(
+                left, module->getDataLayout());
+            llvm::KnownBits rhsKB = llvm::computeKnownBits(
+                right, module->getDataLayout());
+            if (lhsKB.isNonNegative() && rhsKB.isNonNegative())
+                kbNSWNUW = true;
+        }
+        auto* result = (canNSWNUW || kbNSWNUW)
             ? builder->CreateAdd(left, right, "addtmp", /*HasNUW=*/true, /*HasNSW=*/true)
             : canNSW
                 ? builder->CreateNSWAdd(left, right, "addtmp")
@@ -1491,7 +1505,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         // (assuming no overflow, which is true for typical loop counter
         // arithmetic).  canNSW-only (@optmax) does NOT prove non-negativity
         // of the result — the operands might be negative.
-        if (canNSWNUW)
+        if (canNSWNUW || kbNSWNUW)
             nonNegValues_.insert(result);
         return result;
     } else if (expr->op == "-") {
@@ -1514,7 +1528,16 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             else if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left))
                 constNSW = rightNonNeg && !ci->isNegative();
         }
-        const bool canNSW = bothNonNeg || constNSW || inOptMaxFunction;
+        // KnownBits fallback: detect non-negativity through PHI/value-range.
+        bool kbNSW = false;
+        if (!bothNonNeg && !constNSW && !inOptMaxFunction) {
+            llvm::KnownBits lhsKB = llvm::computeKnownBits(
+                left, module->getDataLayout());
+            llvm::KnownBits rhsKB = llvm::computeKnownBits(
+                right, module->getDataLayout());
+            kbNSW = lhsKB.isNonNegative() && rhsKB.isNonNegative();
+        }
+        const bool canNSW = bothNonNeg || constNSW || kbNSW || inOptMaxFunction;
         return canNSW ? builder->CreateNSWSub(left, right, "subtmp")
                       : builder->CreateSub(left, right, "subtmp");
     } else if (expr->op == "*") {
@@ -3390,6 +3413,12 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             else if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left))
                 bothNonNeg = nonNegValues_.count(right) && !ci->isNegative();
         }
+        // KnownBits fallback for values not in nonNegValues_ (e.g., PHI nodes).
+        if (!bothNonNeg) {
+            llvm::KnownBits lhsKB = llvm::computeKnownBits(left, module->getDataLayout());
+            llvm::KnownBits rhsKB = llvm::computeKnownBits(right, module->getDataLayout());
+            bothNonNeg = lhsKB.isNonNegative() && rhsKB.isNonNegative();
+        }
         llvm::Value* cmp = bothNonNeg
             ? builder->CreateICmpULT(left, right, "cmptmp")
             : builder->CreateICmpSLT(left, right, "cmptmp");
@@ -3403,6 +3432,11 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 bothNonNeg = nonNegValues_.count(left) && !ci->isNegative();
             else if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left))
                 bothNonNeg = nonNegValues_.count(right) && !ci->isNegative();
+        }
+        if (!bothNonNeg) {
+            llvm::KnownBits lhsKB = llvm::computeKnownBits(left, module->getDataLayout());
+            llvm::KnownBits rhsKB = llvm::computeKnownBits(right, module->getDataLayout());
+            bothNonNeg = lhsKB.isNonNegative() && rhsKB.isNonNegative();
         }
         llvm::Value* cmp = bothNonNeg
             ? builder->CreateICmpULE(left, right, "cmptmp")
@@ -3418,6 +3452,11 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             else if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left))
                 bothNonNeg = nonNegValues_.count(right) && !ci->isNegative();
         }
+        if (!bothNonNeg) {
+            llvm::KnownBits lhsKB = llvm::computeKnownBits(left, module->getDataLayout());
+            llvm::KnownBits rhsKB = llvm::computeKnownBits(right, module->getDataLayout());
+            bothNonNeg = lhsKB.isNonNegative() && rhsKB.isNonNegative();
+        }
         llvm::Value* cmp = bothNonNeg
             ? builder->CreateICmpUGT(left, right, "cmptmp")
             : builder->CreateICmpSGT(left, right, "cmptmp");
@@ -3431,6 +3470,11 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 bothNonNeg = nonNegValues_.count(left) && !ci->isNegative();
             else if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left))
                 bothNonNeg = nonNegValues_.count(right) && !ci->isNegative();
+        }
+        if (!bothNonNeg) {
+            llvm::KnownBits lhsKB = llvm::computeKnownBits(left, module->getDataLayout());
+            llvm::KnownBits rhsKB = llvm::computeKnownBits(right, module->getDataLayout());
+            bothNonNeg = lhsKB.isNonNegative() && rhsKB.isNonNegative();
         }
         llvm::Value* cmp = bothNonNeg
             ? builder->CreateICmpUGE(left, right, "cmptmp")
@@ -3505,8 +3549,26 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         // For constant shift amounts already in [0, 63], skip the mask.
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
             const int64_t sv = ci->getSExtValue();
-            if (sv >= 0 && sv < 64)
+            if (sv >= 0 && sv < 64) {
+                // KnownBits analysis: when the base has enough leading zeros
+                // to absorb the shift without overflow, set nuw (and nsw if
+                // also non-negative).  E.g., loop counter i with 33 leading
+                // zeros shifted left by 3 → 30 leading zeros, still fits.
+                llvm::KnownBits lhsKB = llvm::computeKnownBits(
+                    left, module->getDataLayout());
+                unsigned lz = lhsKB.countMinLeadingZeros();
+                if (lz > static_cast<unsigned>(sv)) {
+                    // (lz - sv) leading zeros remain → no unsigned overflow.
+                    // If the base is also non-negative, no signed overflow.
+                    bool baseNonNeg = lhsKB.isNonNegative();
+                    auto* result = builder->CreateShl(left, right, "shltmp",
+                                                       /*HasNUW=*/true, /*HasNSW=*/baseNonNeg);
+                    if (baseNonNeg)
+                        nonNegValues_.insert(result);
+                    return result;
+                }
                 return builder->CreateShl(left, right, "shltmp");
+            }
         }
         // Mask shift amount to [0, 63] to prevent undefined behavior
         llvm::Value* mask = llvm::ConstantInt::get(getDefaultType(), 63);
