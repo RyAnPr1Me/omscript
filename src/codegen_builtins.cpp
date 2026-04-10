@@ -487,7 +487,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0, true);
         llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1, true);
         llvm::Value* isNegExp = builder->CreateICmpSLT(exp, zero, "pow.isneg");
-        builder->CreateCondBr(isNegExp, negExpBB, posExpBB);
+        // Negative exponent is uncommon for integer pow(); favour the positive path.
+        auto* negExpW = llvm::MDBuilder(*context).createBranchWeights(1, 100);
+        builder->CreateCondBr(isNegExp, negExpBB, posExpBB, negExpW);
 
         // Negative exponent: return 0 (integer approximation of base^(-n))
         builder->SetInsertPoint(negExpBB);
@@ -1332,7 +1334,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* edgeCase = builder->CreateOr(
             builder->CreateICmpEQ(a, zero, "gcd.a0"),
             builder->CreateICmpEQ(b, zero, "gcd.b0"), "gcd.edge");
-        builder->CreateCondBr(edgeCase, doneBB, mainBB);
+        // a==0 or b==0 is a degenerate edge case; favour the main loop.
+        auto* gcdEdgeW = llvm::MDBuilder(*context).createBranchWeights(1, 1000);
+        builder->CreateCondBr(edgeCase, doneBB, mainBB, gcdEdgeW);
 
         // Main: make a odd
         builder->SetInsertPoint(mainBB);
@@ -2617,12 +2621,14 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             buf = builder->CreateCall(getOrDeclareCalloc(), {slots, eight}, "fill.buf");
             llvm::cast<llvm::CallInst>(buf)->addRetAttr(llvm::Attribute::NonNull);
             // Store length in header (calloc zeroed it; overwrite with actual size)
-            builder->CreateStore(sizeArg, buf);
+            auto* fillLenSt = builder->CreateStore(sizeArg, buf);
+            fillLenSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
         } else {
             llvm::Value* bytes = builder->CreateMul(slots, eight, "fill.bytes", /*HasNUW=*/true, /*HasNSW=*/true);
             buf = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "fill.buf");
             // Store length
-            builder->CreateStore(sizeArg, buf);
+            auto* fillLenSt2 = builder->CreateStore(sizeArg, buf);
+            fillLenSt2->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
             // Fill loop
             llvm::Function* function = builder->GetInsertBlock()->getParent();
             llvm::BasicBlock* preheader = builder->GetInsertBlock();
@@ -2640,7 +2646,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             builder->SetInsertPoint(bodyBB);
             llvm::Value* elemIdx = builder->CreateAdd(idx, one, "fill.elemidx", /*HasNUW=*/true, /*HasNSW=*/true);
             llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), buf, elemIdx, "fill.elemptr");
-            builder->CreateStore(valArg, elemPtr);
+            auto* fillElemSt = builder->CreateStore(valArg, elemPtr);
+            fillElemSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
             llvm::Value* nextIdx = builder->CreateAdd(idx, one, "fill.next", /*HasNUW=*/true, /*HasNSW=*/true);
             idx->addIncoming(nextIdx, bodyBB);
             auto* backBr_2379 = builder->CreateBr(loopBB);
@@ -2688,7 +2695,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* bytes = builder->CreateMul(slots, llvm::ConstantInt::get(getDefaultType(), 8), "aconcat.bytes", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "aconcat.buf");
         // Store length
-        builder->CreateStore(totalLen, buf);
+        auto* aconcatLenSt = builder->CreateStore(totalLen, buf);
+        aconcatLenSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
         // Copy arr1 elements (len1 * 8 bytes starting at arr1[1])
         llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
         llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
@@ -2738,7 +2746,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* slots = builder->CreateAdd(sliceLen, one, "slice.slots", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* bytes = builder->CreateMul(slots, eight, "slice.bytes", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "slice.buf");
-        builder->CreateStore(sliceLen, buf);
+        auto* sliceLenSt = builder->CreateStore(sliceLen, buf);
+        sliceLenSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
         // Copy elements: arr[start+1..end+1) to buf[1..)
         llvm::Value* srcIdx = builder->CreateAdd(startArg, one, "slice.srcidx", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* src = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, srcIdx, "slice.src");
@@ -2806,6 +2815,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* elemOffset = builder->CreateAdd(idxArg, one, "aremove.elemoff", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, elemOffset, "aremove.elemptr");
         llvm::Value* removedVal = builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "aremove.removed");
+        // TBAA: removed value is an array element, never aliases the length header.
+        llvm::cast<llvm::LoadInst>(removedVal)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
         // memmove(&arr[idx+1], &arr[idx+2], (length - idx - 1) * 8)
         llvm::Value* srcOffset =
             builder->CreateAdd(idxArg, llvm::ConstantInt::get(getDefaultType(), 2), "aremove.srcoff", /*HasNUW=*/true, /*HasNSW=*/true);
@@ -2816,7 +2827,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateCall(getOrDeclareMemmove(), {elemPtr, srcPtr, shiftBytes});
         // Decrement length
         llvm::Value* newLen = builder->CreateSub(arrLen, one, "aremove.newlen", /*HasNUW=*/true, /*HasNSW=*/true);
-        builder->CreateStore(newLen, arrPtr);
+        auto* newLenSt = builder->CreateStore(newLen, arrPtr);
+        newLenSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
         return removedVal;
     }
 
@@ -2858,7 +2870,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* slots = builder->CreateAdd(arrLen, one, "amap.slots", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* bytes = builder->CreateMul(slots, eight, "amap.bytes", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "amap.buf");
-        builder->CreateStore(arrLen, buf);
+        auto* amapLenSt = builder->CreateStore(arrLen, buf);
+        amapLenSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
 
         // Loop: for each element, call mapFn and store result
         llvm::Function* function = builder->GetInsertBlock()->getParent();
@@ -2930,7 +2943,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* bytes = builder->CreateMul(slots, eight, "afilt.bytes", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "afilt.buf");
         // Initialize length to 0 (will be updated as we add elements)
-        builder->CreateStore(zero, buf);
+        auto* afiltInitSt = builder->CreateStore(zero, buf);
+        afiltInitSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
 
         // Loop: for each element, call filterFn; if non-zero, add to result
         llvm::Function* function = builder->GetInsertBlock()->getParent();
@@ -2984,7 +2998,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         // Done: store final length
         builder->SetInsertPoint(doneBB);
-        builder->CreateStore(outIdx, buf);
+        auto* afiltLenSt = builder->CreateStore(outIdx, buf);
+        afiltLenSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
         return builder->CreatePtrToInt(buf, getDefaultType(), "afilt.result");
     }
 

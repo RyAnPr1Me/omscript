@@ -4008,13 +4008,19 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
         llvm::Value* dataPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr,
             llvm::ConstantInt::get(getDefaultType(), 1), "incdec.data");
         llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), dataPtr, idxVal, "incdec.elem.ptr");
-        llvm::Value* current = builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "incdec.elem");
+        auto* elemLoad = builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "incdec.elem");
+        // TBAA: array element slots (index 1+) never alias the length header
+        // (index 0), so tagging the load enables LICM to hoist length loads
+        // past element increments/decrements.
+        elemLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        llvm::Value* current = elemLoad;
 
         llvm::Value* delta = llvm::ConstantInt::get(getDefaultType(), 1, true);
         llvm::Value* updated =
             (op == "++") ? builder->CreateAdd(current, delta, "inc", /*HasNUW=*/false, /*HasNSW=*/true)
                          : builder->CreateSub(current, delta, "dec", /*HasNUW=*/false, /*HasNSW=*/true);
-        builder->CreateAlignedStore(updated, elemPtr, llvm::MaybeAlign(8));
+        auto* elemStore = builder->CreateAlignedStore(updated, elemPtr, llvm::MaybeAlign(8));
+        elemStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
         return isPostfix ? current : updated;
     }
 
