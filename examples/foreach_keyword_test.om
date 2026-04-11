@@ -1,0 +1,47 @@
+// Test: foreach keyword
+// foreach item in collection { ... } — alternative to for (item in collection) { ... }
+
+fn sum_array(arr) {
+    var total = 0;
+    foreach x in arr {
+        total = total + x;
+    }
+    return total;
+}
+
+fn sum_with_parens(arr) {
+    var total = 0;
+    foreach (item in arr) {
+        total = total + item;
+    }
+    return total;
+}
+
+fn count_positives(arr) {
+    var count = 0;
+    foreach val in arr {
+        if (val > 0) {
+            count = count + 1;
+        }
+    }
+    return count;
+}
+
+fn main() {
+    var total = 0;
+
+    var a = [1, 2, 3, 4, 5];
+
+    // foreach without parens
+    total = total + sum_array(a);          // 15
+
+    // foreach with parens
+    total = total + sum_with_parens(a);    // 15
+
+    // foreach with condition
+    var b = [-1, 2, -3, 4, 5];
+    total = total + count_positives(b);    // 3
+
+    // Expected: 15 + 15 + 3 = 33
+    return total;
+}

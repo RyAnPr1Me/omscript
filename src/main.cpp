@@ -1619,6 +1619,14 @@ const char* tokenTypeToString(omscript::TokenType type) {
         return "WHEN";
     case omscript::TokenType::FOREVER:
         return "FOREVER";
+    case omscript::TokenType::FOREACH:
+        return "FOREACH";
+    case omscript::TokenType::ELIF:
+        return "ELIF";
+    case omscript::TokenType::SWAP:
+        return "SWAP";
+    case omscript::TokenType::TIMES:
+        return "TIMES";
     case omscript::TokenType::PLUS:
         return "PLUS";
     case omscript::TokenType::MINUS:

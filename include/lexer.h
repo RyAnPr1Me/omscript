@@ -64,6 +64,10 @@ enum class TokenType {
     GUARD,
     WHEN,
     FOREVER,
+    FOREACH,
+    ELIF,
+    SWAP,
+    TIMES,
 
     // Operators
     PLUS,

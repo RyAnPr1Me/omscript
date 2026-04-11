@@ -1,0 +1,69 @@
+// Test: elif keyword
+// elif (condition) { ... } — alias for else if (condition) { ... }
+
+fn classify(x) {
+    if (x < 0) {
+        return -1;
+    } elif (x == 0) {
+        return 0;
+    } elif (x < 10) {
+        return 1;
+    } elif (x < 100) {
+        return 2;
+    } else {
+        return 3;
+    }
+}
+
+fn grade(score) {
+    if (score >= 90) {
+        return 4;
+    } elif (score >= 80) {
+        return 3;
+    } elif (score >= 70) {
+        return 2;
+    } elif (score >= 60) {
+        return 1;
+    } else {
+        return 0;
+    }
+}
+
+// Standalone elif as first statement (desugars to if)
+fn standalone_elif(x) {
+    var result = 0;
+    elif (x > 10) {
+        result = 100;
+    } elif (x > 5) {
+        result = 50;
+    } else {
+        result = 0;
+    }
+    return result;
+}
+
+fn main() {
+    var total = 0;
+
+    // classify tests
+    total = total + classify(-5);    // -1
+    total = total + classify(0);     // 0
+    total = total + classify(5);     // 1
+    total = total + classify(50);    // 2
+    total = total + classify(200);   // 3
+
+    // grade tests
+    total = total + grade(95);       // 4
+    total = total + grade(85);       // 3
+    total = total + grade(75);       // 2
+    total = total + grade(65);       // 1
+    total = total + grade(55);       // 0
+
+    // standalone elif
+    total = total + standalone_elif(15);  // 100
+    total = total + standalone_elif(7);   // 50
+    total = total + standalone_elif(3);   // 0
+
+    // Expected: (-1)+0+1+2+3 + 4+3+2+1+0 + 100+50+0 = 165
+    return total;
+}

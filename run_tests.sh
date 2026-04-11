@@ -691,6 +691,11 @@ test_program "examples/defer_test.om" 31
 test_program "examples/guard_test.om" 170
 test_program "examples/when_test.om" 65
 test_program "examples/forever_test.om" 103
+test_program "examples/foreach_keyword_test.om" 33
+test_program "examples/do_until_test.om" 217
+test_program "examples/elif_test.om" 165
+test_program "examples/swap_test.om" 108
+test_program "examples/times_test.om" 162
 
 echo ""
 echo "============================================"

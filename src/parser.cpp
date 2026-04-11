@@ -615,6 +615,35 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         stmt->column = kw.column;
         return stmt;
     }
+    if (match(TokenType::FOREACH)) {
+        const Token kw = tokens[current - 1];
+        auto stmt = parseForEachStmt();
+        stmt->line = kw.line;
+        stmt->column = kw.column;
+        return stmt;
+    }
+    if (match(TokenType::ELIF)) {
+        const Token kw = tokens[current - 1];
+        auto stmt = parseElifStmt();
+        stmt->line = kw.line;
+        stmt->column = kw.column;
+        return stmt;
+    }
+    if (check(TokenType::SWAP) && !(current + 1 < tokens.size() && tokens[current + 1].type == TokenType::LPAREN)) {
+        advance(); // consume SWAP
+        const Token kw = tokens[current - 1];
+        auto stmt = parseSwapStmt();
+        stmt->line = kw.line;
+        stmt->column = kw.column;
+        return stmt;
+    }
+    if (match(TokenType::TIMES)) {
+        const Token kw = tokens[current - 1];
+        auto stmt = parseTimesStmt();
+        stmt->line = kw.line;
+        stmt->column = kw.column;
+        return stmt;
+    }
     if (match(TokenType::VAR)) {
         auto decl = parseVarDecl(false);
         consume(TokenType::SEMICOLON, "Expected ';' after variable declaration");
@@ -882,6 +911,12 @@ std::unique_ptr<Statement> Parser::parseIfStmt() {
 
     if (match(TokenType::ELSE)) {
         elseBranch = parseStatement();
+    } else if (match(TokenType::ELIF)) {
+        // elif (cond) { ... } => else if (cond) { ... }
+        auto elifStmt = parseElifStmt();
+        elifStmt->line = tokens[current - 1].line;
+        elifStmt->column = tokens[current - 1].column;
+        elseBranch = std::move(elifStmt);
     }
 
     return std::make_unique<IfStmt>(std::move(condition), std::move(thenBranch), std::move(elseBranch));
@@ -899,12 +934,24 @@ std::unique_ptr<Statement> Parser::parseWhileStmt() {
 
 std::unique_ptr<Statement> Parser::parseDoWhileStmt() {
     auto body = parseStatement();
-    consume(TokenType::WHILE, "Expected 'while' after do-while body");
-    consume(TokenType::LPAREN, "Expected '(' after 'while'");
+
+    // Support both: do { ... } while (cond); and do { ... } until (cond);
+    bool isUntil = false;
+    if (match(TokenType::UNTIL)) {
+        isUntil = true;
+    } else {
+        consume(TokenType::WHILE, "Expected 'while' or 'until' after do block");
+    }
+    consume(TokenType::LPAREN, isUntil ? "Expected '(' after 'until'" : "Expected '(' after 'while'");
     auto condition = parseExpression();
     consume(TokenType::RPAREN, "Expected ')' after condition");
-    consume(TokenType::SEMICOLON, "Expected ';' after do-while statement");
+    consume(TokenType::SEMICOLON, "Expected ';' after do-while/until statement");
 
+    if (isUntil) {
+        // Negate: do { ... } until (c) => do { ... } while (!c)
+        auto negated = std::make_unique<UnaryExpr>("!", std::move(condition));
+        return std::make_unique<DoWhileStmt>(std::move(body), std::move(negated));
+    }
     return std::make_unique<DoWhileStmt>(std::move(body), std::move(condition));
 }
 
@@ -1164,6 +1211,95 @@ std::unique_ptr<Statement> Parser::parseForeverStmt() {
     // Infinite loop: forever { ... } => while (true) { ... }
     auto trueVal = std::make_unique<LiteralExpr>(static_cast<long long>(1));
     return std::make_unique<WhileStmt>(std::move(trueVal), std::move(body));
+}
+
+// foreach item in collection { ... }
+// Desugars to: for (item in collection) { ... } (ForEachStmt)
+std::unique_ptr<Statement> Parser::parseForEachStmt() {
+    // Allow optional parens: foreach item in arr or foreach (item in arr)
+    bool hasParen = match(TokenType::LPAREN);
+    const Token varName = consume(TokenType::IDENTIFIER, "Expected iterator variable after 'foreach'");
+    consume(TokenType::IN, "Expected 'in' after foreach variable");
+    auto collection = parseExpression();
+    if (hasParen) {
+        consume(TokenType::RPAREN, "Expected ')' after foreach collection");
+    }
+    auto body = parseStatement();
+    return std::make_unique<ForEachStmt>(varName.lexeme, std::move(collection), std::move(body));
+}
+
+// elif (condition) { ... } [elif (...) { ... }] [else { ... }]
+// Desugars to: if (condition) { ... } [else if (...) { ... }] [else { ... }]
+std::unique_ptr<Statement> Parser::parseElifStmt() {
+    consume(TokenType::LPAREN, "Expected '(' after 'elif'");
+    auto condition = parseExpression();
+    consume(TokenType::RPAREN, "Expected ')' after elif condition");
+
+    auto thenBranch = parseStatement();
+    std::unique_ptr<Statement> elseBranch = nullptr;
+
+    if (match(TokenType::ELIF)) {
+        elseBranch = parseElifStmt();
+    } else if (match(TokenType::ELSE)) {
+        elseBranch = parseStatement();
+    }
+
+    return std::make_unique<IfStmt>(std::move(condition), std::move(thenBranch), std::move(elseBranch));
+}
+
+// swap a, b;
+// Desugars to: { var __swap_tmp = a; a = b; b = __swap_tmp; }
+std::unique_ptr<Statement> Parser::parseSwapStmt() {
+    auto lhs = parseExpression();
+    consume(TokenType::COMMA, "Expected ',' between swap operands");
+    auto rhs = parseExpression();
+    consume(TokenType::SEMICOLON, "Expected ';' after swap statement");
+
+    // We need the names of the variables being swapped
+    auto* lhsIdent = dynamic_cast<IdentifierExpr*>(lhs.get());
+    auto* rhsIdent = dynamic_cast<IdentifierExpr*>(rhs.get());
+    if (!lhsIdent || !rhsIdent) {
+        error("swap operands must be variable names");
+    }
+
+    // Desugar to: { var __swap_tmp = a; a = b; b = __swap_tmp; }
+    static int swapCounter = 0;
+    std::string tmpName = "__swap_" + std::to_string(swapCounter++);
+
+    std::vector<std::unique_ptr<Statement>> stmts;
+
+    // var __swap_tmp = a;
+    auto tmpInit = std::make_unique<IdentifierExpr>(lhsIdent->name);
+    stmts.push_back(std::make_unique<VarDecl>(tmpName, std::move(tmpInit)));
+
+    // a = b;
+    auto assignLhs = std::make_unique<AssignExpr>(lhsIdent->name, std::make_unique<IdentifierExpr>(rhsIdent->name));
+    stmts.push_back(std::make_unique<ExprStmt>(std::move(assignLhs)));
+
+    // b = __swap_tmp;
+    auto assignRhs = std::make_unique<AssignExpr>(rhsIdent->name, std::make_unique<IdentifierExpr>(tmpName));
+    stmts.push_back(std::make_unique<ExprStmt>(std::move(assignRhs)));
+
+    return std::make_unique<BlockStmt>(std::move(stmts));
+}
+
+// times (N) { ... }  or  times N { ... }
+// Desugars to: for (__times_i in 0...N) { ... }
+std::unique_ptr<Statement> Parser::parseTimesStmt() {
+    // Allow optional parens: times N { ... } or times (N) { ... }
+    bool hasParen = match(TokenType::LPAREN);
+    auto count = parseExpression();
+    if (hasParen) {
+        consume(TokenType::RPAREN, "Expected ')' after times count");
+    }
+
+    auto body = parseStatement();
+
+    // Desugar to: for (__times_N in 0...count) { body }
+    static int timesCounter = 0;
+    std::string iterVar = "__times_" + std::to_string(timesCounter++);
+    auto start = std::make_unique<LiteralExpr>(static_cast<long long>(0));
+    return std::make_unique<ForStmt>(iterVar, std::move(start), std::move(count), nullptr, std::move(body));
 }
 
 std::unique_ptr<EnumDecl> Parser::parseEnumDecl() {
@@ -1900,6 +2036,16 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
             advance(); // consume ':'
             advance(); // consume type name
         }
+        return expr;
+    }
+
+    // Allow keyword tokens that double as builtin function names to be used
+    // in expression context (e.g. swap(arr, i, j) as a function call).
+    if (match(TokenType::SWAP)) {
+        const Token token = tokens[current - 1];
+        auto expr = std::make_unique<IdentifierExpr>(token.lexeme);
+        expr->line = token.line;
+        expr->column = token.column;
         return expr;
     }
 

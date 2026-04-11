@@ -1,0 +1,38 @@
+// Test: times keyword
+// times (N) { ... } or times N { ... } — execute block N times
+
+fn main() {
+    var total = 0;
+
+    // times with parens
+    var counter1 = 0;
+    times (5) {
+        counter1 = counter1 + 1;
+    }
+    total = total + counter1;   // 5
+
+    // times without parens
+    var counter2 = 0;
+    times 3 {
+        counter2 = counter2 + 10;
+    }
+    total = total + counter2;   // 30
+
+    // times with variable
+    var n = 4;
+    var counter3 = 0;
+    times (n) {
+        counter3 = counter3 + 7;
+    }
+    total = total + counter3;   // 28
+
+    // times zero — body should not execute
+    var counter4 = 99;
+    times (0) {
+        counter4 = 0;
+    }
+    total = total + counter4;   // 99
+
+    // Expected: 5 + 30 + 28 + 99 = 162
+    return total;
+}
