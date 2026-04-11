@@ -8694,7 +8694,7 @@ std::vector<RewriteRule> getBitwiseRules() {
     // ── Truncation via shift pair: (x << a) >> a → x & ((1 << (64-a)) - 1) ─
     // Clearing high bits via shift pair.
     for (int a = 1; a <= 6; ++a) {
-        int64_t mask = (1LL << (64 - a)) - 1;
+        int64_t mask = static_cast<int64_t>((1ULL << (64 - a)) - 1);
         std::string name = "shl_shr_to_mask_" + std::to_string(a);
         rules.emplace_back(name,
             P::OpPat(Op::Shr, {P::OpPat(Op::Shl, {P::Wild("x"), P::ConstPat(a)}), P::ConstPat(a)}),
@@ -11292,7 +11292,7 @@ std::vector<RewriteRule> getStrengthReductionRules() {
         [](EGraph& g, const Subst& s) {
             auto nv = g.getConstValue(s.at("n"));
             if (!nv || *nv <= 0 || *nv >= 64) return s.at("x"); // fallback
-            long long mask = (1LL << (64 - *nv)) - 1;
+            long long mask = static_cast<long long>((1ULL << (64 - *nv)) - 1);
             return g.addBinOp(Op::BitAnd, s.at("x"), g.addConst(mask));
         },
         [](const EGraph& g, const Subst& s) -> bool {
