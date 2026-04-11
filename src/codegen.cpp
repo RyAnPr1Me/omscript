@@ -4452,6 +4452,11 @@ void CodeGenerator::generateStatement(Statement* stmt) {
     case ASTNodeType::PREFETCH_STMT:
         generatePrefetch(static_cast<PrefetchStmt*>(stmt));
         break;
+    case ASTNodeType::DEFER_STMT:
+        // Defer outside a block: just execute the body immediately
+        // (normal defer semantics are handled in generateBlock)
+        generateStatement(static_cast<DeferStmt*>(stmt)->body.get());
+        break;
     default:
         codegenError("Unknown statement type", stmt);
     }

@@ -2049,12 +2049,30 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
 
 void CodeGenerator::generateBlock(BlockStmt* stmt) {
     const ScopeGuard scope(*this);
+    deferStack.emplace_back(); // Push new defer scope
+
     for (auto& statement : stmt->statements) {
         if (builder->GetInsertBlock()->getTerminator()) {
             break; // Don't generate unreachable code
         }
-        generateStatement(statement.get());
+        if (statement->type == ASTNodeType::DEFER_STMT) {
+            // Collect deferred statements for later execution
+            auto* deferStmt = static_cast<DeferStmt*>(statement.get());
+            deferStack.back().push_back(deferStmt->body.get());
+        } else {
+            generateStatement(statement.get());
+        }
     }
+
+    // Execute deferred statements in LIFO order (reverse of defer order)
+    auto& defers = deferStack.back();
+    for (auto it = defers.rbegin(); it != defers.rend(); ++it) {
+        if (builder->GetInsertBlock()->getTerminator()) {
+            break; // Don't generate after a terminator
+        }
+        generateStatement(*it);
+    }
+    deferStack.pop_back(); // Pop defer scope
 }
 
 void CodeGenerator::generateExprStmt(ExprStmt* stmt) {

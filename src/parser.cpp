@@ -559,6 +559,41 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         stmt->column = kw.column;
         return stmt;
     }
+    if (match(TokenType::UNLESS)) {
+        const Token kw = tokens[current - 1];
+        auto stmt = parseUnlessStmt();
+        stmt->line = kw.line;
+        stmt->column = kw.column;
+        return stmt;
+    }
+    if (match(TokenType::UNTIL)) {
+        const Token kw = tokens[current - 1];
+        auto stmt = parseUntilStmt();
+        stmt->line = kw.line;
+        stmt->column = kw.column;
+        return stmt;
+    }
+    if (match(TokenType::LOOP)) {
+        const Token kw = tokens[current - 1];
+        auto stmt = parseLoopStmt();
+        stmt->line = kw.line;
+        stmt->column = kw.column;
+        return stmt;
+    }
+    if (match(TokenType::REPEAT)) {
+        const Token kw = tokens[current - 1];
+        auto stmt = parseRepeatStmt();
+        stmt->line = kw.line;
+        stmt->column = kw.column;
+        return stmt;
+    }
+    if (match(TokenType::DEFER)) {
+        const Token kw = tokens[current - 1];
+        auto stmt = parseDeferStmt();
+        stmt->line = kw.line;
+        stmt->column = kw.column;
+        return stmt;
+    }
     if (match(TokenType::VAR)) {
         auto decl = parseVarDecl(false);
         consume(TokenType::SEMICOLON, "Expected ';' after variable declaration");
@@ -971,6 +1006,75 @@ std::unique_ptr<Statement> Parser::parseThrowStmt() {
     auto value = parseExpression();
     consume(TokenType::SEMICOLON, "Expected ';' after throw expression");
     return std::make_unique<ThrowStmt>(std::move(value));
+}
+
+// unless (condition) { ... } else { ... }
+// Desugars to: if (!condition) { ... } else { ... }
+std::unique_ptr<Statement> Parser::parseUnlessStmt() {
+    consume(TokenType::LPAREN, "Expected '(' after 'unless'");
+    auto condition = parseExpression();
+    consume(TokenType::RPAREN, "Expected ')' after condition");
+
+    auto thenBranch = parseStatement();
+    std::unique_ptr<Statement> elseBranch = nullptr;
+
+    if (match(TokenType::ELSE)) {
+        elseBranch = parseStatement();
+    }
+
+    // Negate the condition: unless (c) => if (!c)
+    auto negated = std::make_unique<UnaryExpr>("!", std::move(condition));
+    return std::make_unique<IfStmt>(std::move(negated), std::move(thenBranch), std::move(elseBranch));
+}
+
+// until (condition) { ... }
+// Desugars to: while (!condition) { ... }
+std::unique_ptr<Statement> Parser::parseUntilStmt() {
+    consume(TokenType::LPAREN, "Expected '(' after 'until'");
+    auto condition = parseExpression();
+    consume(TokenType::RPAREN, "Expected ')' after condition");
+
+    auto body = parseStatement();
+
+    // Negate the condition: until (c) => while (!c)
+    auto negated = std::make_unique<UnaryExpr>("!", std::move(condition));
+    return std::make_unique<WhileStmt>(std::move(negated), std::move(body));
+}
+
+// loop { ... }
+// Desugars to: while (true) { ... }
+std::unique_ptr<Statement> Parser::parseLoopStmt() {
+    auto body = parseStatement();
+
+    // Infinite loop: loop { ... } => while (true) { ... }
+    auto trueVal = std::make_unique<LiteralExpr>(static_cast<long long>(1));
+    return std::make_unique<WhileStmt>(std::move(trueVal), std::move(body));
+}
+
+// repeat N { ... }  or  repeat (expr) { ... }
+// Desugars to: for (__repeat_i in 0...N) { ... }
+std::unique_ptr<Statement> Parser::parseRepeatStmt() {
+    // Allow optional parens: repeat N { ... } or repeat (N) { ... }
+    bool hasParen = match(TokenType::LPAREN);
+    auto count = parseExpression();
+    if (hasParen) {
+        consume(TokenType::RPAREN, "Expected ')' after repeat count");
+    }
+
+    auto body = parseStatement();
+
+    // Desugar to: for (__repeat_N in 0...count) { body }
+    static int repeatCounter = 0;
+    std::string iterVar = "__repeat_" + std::to_string(repeatCounter++);
+    auto start = std::make_unique<LiteralExpr>(static_cast<long long>(0));
+    return std::make_unique<ForStmt>(iterVar, std::move(start), std::move(count), nullptr, std::move(body));
+}
+
+// defer statement;  or  defer { ... }
+// Stores the statement to be executed at the end of the enclosing block
+std::unique_ptr<Statement> Parser::parseDeferStmt() {
+    auto body = parseStatement();
+    return std::make_unique<DeferStmt>(std::move(body));
 }
 
 std::unique_ptr<EnumDecl> Parser::parseEnumDecl() {

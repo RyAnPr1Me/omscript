@@ -59,7 +59,8 @@ enum class ASTNodeType {
     DICT_EXPR,
     INVALIDATE_STMT,
     MOVE_DECL,
-    PREFETCH_STMT
+    PREFETCH_STMT,
+    DEFER_STMT
 };
 
 class ASTNode {
@@ -381,6 +382,13 @@ class ThrowStmt : public Statement {
     std::unique_ptr<Expression> value;
 
     explicit ThrowStmt(std::unique_ptr<Expression> val) : Statement(ASTNodeType::THROW_STMT), value(std::move(val)) {}
+};
+
+class DeferStmt : public Statement {
+  public:
+    std::unique_ptr<Statement> body;
+
+    explicit DeferStmt(std::unique_ptr<Statement> b) : Statement(ASTNodeType::DEFER_STMT), body(std::move(b)) {}
 };
 
 class EnumDecl : public Statement {

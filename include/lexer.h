@@ -56,6 +56,11 @@ enum class TokenType {
     LIKELY,
     UNLIKELY,
     REGISTER,
+    UNLESS,
+    UNTIL,
+    LOOP,
+    REPEAT,
+    DEFER,
 
     // Operators
     PLUS,

@@ -1,0 +1,44 @@
+// Test the 'unless' keyword (syntactic sugar for 'if (!condition)')
+fn main() {
+    var result = 0;
+
+    // Basic unless: should execute when condition is false
+    var x = 5;
+    unless (x > 10) {
+        result = result + 1;  // x=5 < 10, so this runs
+    }
+
+    // unless should NOT execute when condition is true
+    unless (x < 10) {
+        result = result + 100;  // x=5 < 10 is true, so this should NOT run
+    }
+
+    // unless with else
+    unless (x == 3) {
+        result = result + 2;  // x != 3, so this runs
+    } else {
+        result = result + 200;  // should NOT run
+    }
+
+    // unless with else (condition true)
+    unless (x == 5) {
+        result = result + 300;  // should NOT run since x == 5
+    } else {
+        result = result + 4;  // should run
+    }
+
+    // Nested unless
+    unless (x > 100) {
+        unless (x < 0) {
+            result = result + 8;  // both conditions false, so this runs
+        }
+    }
+
+    // unless with comparison
+    var y = 0;
+    unless (y != 0) {
+        result = result + 16;  // y is 0, so y != 0 is false, this runs
+    }
+
+    return result;  // Expected: 1 + 2 + 4 + 8 + 16 = 31
+}

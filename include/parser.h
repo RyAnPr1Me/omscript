@@ -103,6 +103,11 @@ class Parser {
     std::unique_ptr<Statement> parseSwitchStmt();
     std::unique_ptr<Statement> parseTryCatchStmt();
     std::unique_ptr<Statement> parseThrowStmt();
+    std::unique_ptr<Statement> parseUnlessStmt();
+    std::unique_ptr<Statement> parseUntilStmt();
+    std::unique_ptr<Statement> parseLoopStmt();
+    std::unique_ptr<Statement> parseRepeatStmt();
+    std::unique_ptr<Statement> parseDeferStmt();
     std::unique_ptr<EnumDecl> parseEnumDecl();
     std::unique_ptr<StructDecl> parseStructDecl();
     std::unique_ptr<Expression> parseStructLiteral(const std::string& name, int line, int col);

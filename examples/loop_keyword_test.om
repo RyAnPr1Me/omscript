@@ -1,0 +1,48 @@
+// Test the 'loop' keyword (syntactic sugar for 'while (true)')
+fn main() {
+    var result = 0;
+
+    // Basic loop with break
+    var i = 0;
+    loop {
+        if (i >= 5) {
+            break;
+        }
+        result = result + 1;
+        i = i + 1;
+    }
+    // result = 5
+
+    // Loop with conditional break
+    var sum = 0;
+    var n = 1;
+    loop {
+        sum = sum + n;
+        if (sum > 10) {
+            break;
+        }
+        n = n + 1;
+    }
+    result = result + sum;
+    // n=1: sum=1; n=2: sum=3; n=3: sum=6; n=4: sum=10; n=5: sum=15 -> break
+    // result = 5 + 15 = 20
+
+    // Loop with continue and break
+    var evens = 0;
+    var k = 0;
+    loop {
+        k = k + 1;
+        if (k > 10) {
+            break;
+        }
+        if (k % 2 != 0) {
+            continue;
+        }
+        evens = evens + 1;
+    }
+    result = result + evens;
+    // evens: 2,4,6,8,10 => 5 even numbers
+    // result = 20 + 5 = 25
+
+    return result;  // Expected: 25
+}

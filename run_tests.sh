@@ -682,6 +682,13 @@ test_program "examples/musttail_test.om" 175
 test_program "examples/string_interning_test.om" 15
 test_program "examples/constfold_builtins_test.om" 15
 
+# Syntactic features tests
+test_program "examples/unless_test.om" 31
+test_program "examples/until_test.om" 16
+test_program "examples/loop_keyword_test.om" 25
+test_program "examples/repeat_test.om" 65
+test_program "examples/defer_test.om" 31
+
 echo ""
 echo "============================================"
 if [ $FAILURES -eq 0 ]; then

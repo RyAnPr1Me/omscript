@@ -212,6 +212,9 @@ class CodeGenerator {
     llvm::StringMap<llvm::Value*> namedValues;
     std::vector<std::unordered_map<std::string, llvm::Value*>> scopeStack;
 
+    // Defer stack: each scope level has its own list of deferred statements (LIFO)
+    std::vector<std::vector<Statement*>> deferStack;
+
     struct LoopContext {
         llvm::BasicBlock* breakTarget;
         llvm::BasicBlock* continueTarget;
