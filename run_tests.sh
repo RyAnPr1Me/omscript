@@ -699,6 +699,8 @@ test_program "examples/times_test.om" 162
 test_program "examples/destructure_test.om" 13130
 test_program "examples/indexed_foreach_test.om" 1652
 test_program "examples/repeat_until_test.om" 297
+test_program "examples/step_downto_test.om" 112
+test_program "examples/with_test.om" 188
 
 echo ""
 echo "============================================"

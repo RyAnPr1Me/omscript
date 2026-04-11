@@ -68,6 +68,7 @@ enum class TokenType {
     ELIF,
     SWAP,
     TIMES,
+    WITH,
 
     // Operators
     PLUS,

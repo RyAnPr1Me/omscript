@@ -1627,6 +1627,8 @@ const char* tokenTypeToString(omscript::TokenType type) {
         return "SWAP";
     case omscript::TokenType::TIMES:
         return "TIMES";
+    case omscript::TokenType::WITH:
+        return "WITH";
     case omscript::TokenType::PLUS:
         return "PLUS";
     case omscript::TokenType::MINUS:

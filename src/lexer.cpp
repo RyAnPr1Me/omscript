@@ -54,7 +54,8 @@ static const std::unordered_map<std::string_view, TokenType> keywords = {
     {"foreach", TokenType::FOREACH},
     {"elif", TokenType::ELIF},
     {"swap", TokenType::SWAP},
-    {"times", TokenType::TIMES}};
+    {"times", TokenType::TIMES},
+    {"with", TokenType::WITH}};
 
 /// Throw a DiagnosticError with the given message and source location.
 [[noreturn]] [[gnu::cold]] static void lexError(const std::string& msg, int ln, int col) {

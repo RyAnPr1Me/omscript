@@ -115,6 +115,7 @@ class Parser {
     std::unique_ptr<Statement> parseElifStmt();
     std::unique_ptr<Statement> parseSwapStmt();
     std::unique_ptr<Statement> parseTimesStmt();
+    std::unique_ptr<Statement> parseWithStmt();
     std::vector<std::unique_ptr<Statement>> parseDestructuringDecl(bool isConst);
     std::unique_ptr<EnumDecl> parseEnumDecl();
     std::unique_ptr<StructDecl> parseStructDecl();

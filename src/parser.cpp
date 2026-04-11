@@ -644,6 +644,13 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         stmt->column = kw.column;
         return stmt;
     }
+    if (match(TokenType::WITH)) {
+        const Token kw = tokens[current - 1];
+        auto stmt = parseWithStmt();
+        stmt->line = kw.line;
+        stmt->column = kw.column;
+        return stmt;
+    }
     if (match(TokenType::VAR)) {
         auto decl = parseVarDecl(false);
         consume(TokenType::SEMICOLON, "Expected ';' after variable declaration");
@@ -1034,7 +1041,11 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
         auto end = parseExpression();
 
         std::unique_ptr<Expression> step = nullptr;
+        // Support both: for (i in 0...10...2) and for (i in 0...10 step 2)
         if (match(TokenType::RANGE)) {
+            step = parseExpression();
+        } else if (check(TokenType::IDENTIFIER) && peek().lexeme == "step") {
+            advance(); // consume 'step'
             step = parseExpression();
         }
 
@@ -1043,6 +1054,31 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
 
         return std::make_unique<ForStmt>(varName.lexeme, std::move(firstExpr), std::move(end), std::move(step),
                                          std::move(body), iteratorType);
+    }
+
+    // for (i in 10 downto 0) => for (i in 10...0...-1)
+    // for (i in 10 downto 0 step 2) => for (i in 10...0...-2)
+    if (check(TokenType::IDENTIFIER) && peek().lexeme == "downto") {
+        advance(); // consume 'downto'
+        auto end = parseExpression();
+
+        if (check(TokenType::IDENTIFIER) && peek().lexeme == "step") {
+            advance(); // consume 'step'
+            auto stepExpr = parseExpression();
+            // The step is positive in user syntax, we negate it for downto
+            // Desugar to: for (i in start...end...-step)
+            consume(TokenType::RPAREN, "Expected ')' after for downto range");
+            auto body = parseStatement();
+            auto negStep = std::make_unique<UnaryExpr>("-", std::move(stepExpr));
+            return std::make_unique<ForStmt>(varName.lexeme, std::move(firstExpr), std::move(end),
+                                             std::move(negStep), std::move(body), iteratorType);
+        }
+
+        consume(TokenType::RPAREN, "Expected ')' after for downto range");
+        auto body = parseStatement();
+        auto negOne = std::make_unique<LiteralExpr>(static_cast<long long>(-1));
+        return std::make_unique<ForStmt>(varName.lexeme, std::move(firstExpr), std::move(end),
+                                         std::move(negOne), std::move(body), iteratorType);
     }
 
     // Otherwise this is a for-each loop: for (var in collection)
@@ -1436,6 +1472,34 @@ std::unique_ptr<Statement> Parser::parseTimesStmt() {
     std::string iterVar = "__times_" + std::to_string(timesCounter++);
     auto start = std::make_unique<LiteralExpr>(static_cast<long long>(0));
     return std::make_unique<ForStmt>(iterVar, std::move(start), std::move(count), nullptr, std::move(body));
+}
+
+// with (var x = expr) { body }  or  with (var x = expr, var y = expr2) { body }
+// Desugars to: { var x = expr; [var y = expr2;] body }
+// Scoped bindings that are cleaned up at block end
+std::unique_ptr<Statement> Parser::parseWithStmt() {
+    consume(TokenType::LPAREN, "Expected '(' after 'with'");
+
+    std::vector<std::unique_ptr<Statement>> stmts;
+
+    // Parse one or more variable declarations
+    do {
+        bool isConst = false;
+        if (match(TokenType::CONST)) {
+            isConst = true;
+        } else {
+            consume(TokenType::VAR, "Expected 'var' or 'const' in with binding");
+        }
+        auto decl = parseVarDecl(isConst);
+        stmts.push_back(std::move(decl));
+    } while (match(TokenType::COMMA));
+
+    consume(TokenType::RPAREN, "Expected ')' after with bindings");
+
+    auto body = parseStatement();
+    stmts.push_back(std::move(body));
+
+    return std::make_unique<BlockStmt>(std::move(stmts));
 }
 
 // var [a, b, c] = expr;  or  const [a, b, c] = expr;

@@ -1,0 +1,74 @@
+// Test: with statement
+// with (var x = expr) { body } — scoped variable binding
+
+fn scoped_calc() {
+    var result = 0;
+    with (var x = 10) {
+        with (var y = 20) {
+            result = x + y;
+        }
+    }
+    return result;
+}
+
+fn scoped_multi() {
+    var result = 0;
+    with (var a = 5, var b = 10) {
+        result = a * b;
+    }
+    return result;
+}
+
+fn scoped_const() {
+    var result = 0;
+    with (const factor = 7) {
+        result = factor * 6;
+    }
+    return result;
+}
+
+fn scoped_array() {
+    var result = 0;
+    var data = [10, 20, 30];
+    with (var total = 0) {
+        for (x in data) {
+            total = total + x;
+        }
+        result = total;
+    }
+    return result;
+}
+
+fn nested_with() {
+    var sum = 0;
+    with (var a = 1) {
+        with (var b = 2) {
+            with (var c = 3) {
+                sum = a + b + c;
+            }
+        }
+    }
+    return sum;
+}
+
+fn main() {
+    var total = 0;
+
+    // scoped calc: 10 + 20 = 30
+    total = total + scoped_calc();
+
+    // scoped multi: 5 * 10 = 50
+    total = total + scoped_multi();
+
+    // scoped const: 7 * 6 = 42
+    total = total + scoped_const();
+
+    // scoped array: 10 + 20 + 30 = 60
+    total = total + scoped_array();
+
+    // nested: 1 + 2 + 3 = 6
+    total = total + nested_with();
+
+    // Expected: 30 + 50 + 42 + 60 + 6 = 188
+    return total;
+}
