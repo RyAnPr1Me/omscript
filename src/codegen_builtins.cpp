@@ -1885,21 +1885,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::STR_UPPER) {
         validateArgCount(expr, "str_upper", 1);
-
-        // ── Compile-time str_upper folding ──────────────────────────
-        if (auto* strLit = dynamic_cast<LiteralExpr*>(expr->arguments[0].get())) {
-            if (strLit->literalType == LiteralExpr::LiteralType::STRING) {
-                std::string upper = strLit->stringValue;
-                for (auto& c : upper) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-                llvm::GlobalVariable* gv = internString(upper);
-                return llvm::ConstantExpr::getInBoundsGetElementPtr(
-                    gv->getValueType(), gv,
-                    llvm::ArrayRef<llvm::Constant*>{
-                        llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
-                        llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)});
-            }
-        }
-
+        // NOTE: Cannot constant-fold str_upper — callers may mutate the returned
+        // heap-allocated string via s[i]=v, and a read-only global would segfault.
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* strPtr =
             strArg->getType()->isPointerTy()
@@ -1943,21 +1930,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::STR_LOWER) {
         validateArgCount(expr, "str_lower", 1);
-
-        // ── Compile-time str_lower folding ──────────────────────────
-        if (auto* strLit = dynamic_cast<LiteralExpr*>(expr->arguments[0].get())) {
-            if (strLit->literalType == LiteralExpr::LiteralType::STRING) {
-                std::string lower = strLit->stringValue;
-                for (auto& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-                llvm::GlobalVariable* gv = internString(lower);
-                return llvm::ConstantExpr::getInBoundsGetElementPtr(
-                    gv->getValueType(), gv,
-                    llvm::ArrayRef<llvm::Constant*>{
-                        llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
-                        llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)});
-            }
-        }
-
+        // NOTE: Cannot constant-fold str_lower — callers may mutate the returned
+        // heap-allocated string via s[i]=v, and a read-only global would segfault.
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* strPtr =
             strArg->getType()->isPointerTy()
@@ -2113,39 +2087,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::STR_REPLACE) {
         validateArgCount(expr, "str_replace", 3);
-
-        // ── Compile-time str_replace folding ────────────────────────
-        // When all three arguments are string literals, fold at compile time.
-        if (auto* sLit = dynamic_cast<LiteralExpr*>(expr->arguments[0].get())) {
-            if (sLit->literalType == LiteralExpr::LiteralType::STRING) {
-                if (auto* oLit = dynamic_cast<LiteralExpr*>(expr->arguments[1].get())) {
-                    if (oLit->literalType == LiteralExpr::LiteralType::STRING) {
-                        if (auto* nLit = dynamic_cast<LiteralExpr*>(expr->arguments[2].get())) {
-                            if (nLit->literalType == LiteralExpr::LiteralType::STRING &&
-                                !oLit->stringValue.empty()) {
-                                std::string result = sLit->stringValue;
-                                const std::string& oldS = oLit->stringValue;
-                                const std::string& newS = nLit->stringValue;
-                                size_t pos = 0;
-                                while ((pos = result.find(oldS, pos)) != std::string::npos) {
-                                    result.replace(pos, oldS.size(), newS);
-                                    pos += newS.size();
-                                }
-                                if (result.size() <= 256) {
-                                    llvm::GlobalVariable* gv = internString(result);
-                                    return llvm::ConstantExpr::getInBoundsGetElementPtr(
-                                        gv->getValueType(), gv,
-                                        llvm::ArrayRef<llvm::Constant*>{
-                                            llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
-                                            llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)});
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
+        // NOTE: Cannot constant-fold str_replace — callers may mutate the returned
+        // heap-allocated string via s[i]=v, and a read-only global would segfault.
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* oldArg = generateExpression(expr->arguments[1].get());
         llvm::Value* newArg = generateExpression(expr->arguments[2].get());
@@ -2294,25 +2237,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::STR_TRIM) {
         validateArgCount(expr, "str_trim", 1);
-
-        // ── Compile-time str_trim folding ───────────────────────────
-        if (auto* strLit = dynamic_cast<LiteralExpr*>(expr->arguments[0].get())) {
-            if (strLit->literalType == LiteralExpr::LiteralType::STRING) {
-                const std::string& s = strLit->stringValue;
-                size_t start = 0;
-                while (start < s.size() && std::isspace(static_cast<unsigned char>(s[start]))) ++start;
-                size_t end = s.size();
-                while (end > start && std::isspace(static_cast<unsigned char>(s[end - 1]))) --end;
-                std::string trimmed = s.substr(start, end - start);
-                llvm::GlobalVariable* gv = internString(trimmed);
-                return llvm::ConstantExpr::getInBoundsGetElementPtr(
-                    gv->getValueType(), gv,
-                    llvm::ArrayRef<llvm::Constant*>{
-                        llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
-                        llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)});
-            }
-        }
-
+        // NOTE: Cannot constant-fold str_trim — callers may mutate the returned
+        // heap-allocated string via s[i]=v, and a read-only global would segfault.
         llvm::Value* strArg = generateExpression(expr->arguments[0].get());
         llvm::Value* strPtr = strArg->getType()->isPointerTy()
                                   ? strArg
@@ -5279,6 +5205,17 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::SATURATING_ADD) {
         validateArgCount(expr, "saturating_add", 2);
+        // Constant-fold saturating_add(a, b) when both are integer literals.
+        if (auto va = getConstantInt(expr->arguments[0].get())) {
+            if (auto vb = getConstantInt(expr->arguments[1].get())) {
+                int64_t a = *va, b = *vb;
+                // Signed saturating add: clamp to INT64_MIN/INT64_MAX on overflow.
+                __int128 sum = static_cast<__int128>(a) + static_cast<__int128>(b);
+                if (sum > INT64_MAX) sum = INT64_MAX;
+                if (sum < INT64_MIN) sum = INT64_MIN;
+                return llvm::ConstantInt::get(getDefaultType(), static_cast<int64_t>(sum));
+            }
+        }
         llvm::Value* a = generateExpression(expr->arguments[0].get());
         llvm::Value* b = generateExpression(expr->arguments[1].get());
         a = toDefaultType(a);
@@ -5289,6 +5226,17 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::SATURATING_SUB) {
         validateArgCount(expr, "saturating_sub", 2);
+        // Constant-fold saturating_sub(a, b) when both are integer literals.
+        if (auto va = getConstantInt(expr->arguments[0].get())) {
+            if (auto vb = getConstantInt(expr->arguments[1].get())) {
+                int64_t a = *va, b = *vb;
+                // Signed saturating sub: clamp to INT64_MIN/INT64_MAX on overflow.
+                __int128 diff = static_cast<__int128>(a) - static_cast<__int128>(b);
+                if (diff > INT64_MAX) diff = INT64_MAX;
+                if (diff < INT64_MIN) diff = INT64_MIN;
+                return llvm::ConstantInt::get(getDefaultType(), static_cast<int64_t>(diff));
+            }
+        }
         llvm::Value* a = generateExpression(expr->arguments[0].get());
         llvm::Value* b = generateExpression(expr->arguments[1].get());
         a = toDefaultType(a);
