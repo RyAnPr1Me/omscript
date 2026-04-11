@@ -61,6 +61,9 @@ enum class TokenType {
     LOOP,
     REPEAT,
     DEFER,
+    GUARD,
+    WHEN,
+    FOREVER,
 
     // Operators
     PLUS,

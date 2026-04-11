@@ -1613,6 +1613,12 @@ const char* tokenTypeToString(omscript::TokenType type) {
         return "REPEAT";
     case omscript::TokenType::DEFER:
         return "DEFER";
+    case omscript::TokenType::GUARD:
+        return "GUARD";
+    case omscript::TokenType::WHEN:
+        return "WHEN";
+    case omscript::TokenType::FOREVER:
+        return "FOREVER";
     case omscript::TokenType::PLUS:
         return "PLUS";
     case omscript::TokenType::MINUS:

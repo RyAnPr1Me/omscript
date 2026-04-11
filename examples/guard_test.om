@@ -1,0 +1,49 @@
+// Test: guard statement
+// guard (condition) else { ... } — early exit pattern
+
+fn validate(x) {
+    guard (x > 0) else {
+        return -1;
+    }
+    return x * 2;
+}
+
+fn check_bounds(idx, len) {
+    guard (idx >= 0) else {
+        return -1;
+    }
+    guard (idx < len) else {
+        return -2;
+    }
+    return idx;
+}
+
+fn guard_with_equality(s) {
+    guard (s != 0) else {
+        return 0;
+    }
+    return s + 100;
+}
+
+fn main() {
+    var total = 0;
+
+    // guard passes — condition is true, body continues
+    total = total + validate(5);     // 10
+    total = total + validate(10);    // 20
+    // guard fails — condition is false, else body runs
+    total = total + validate(-3);    // -1
+    total = total + validate(0);     // -1
+
+    // Multiple guards
+    total = total + check_bounds(3, 10);   // 3
+    total = total + check_bounds(-1, 10);  // -1
+    total = total + check_bounds(10, 10);  // -2
+
+    // Guard with equality check
+    total = total + guard_with_equality(42);  // 142
+    total = total + guard_with_equality(0);   // 0
+
+    // Expected: 10 + 20 + (-1) + (-1) + 3 + (-1) + (-2) + 142 + 0 = 170
+    return total;
+}

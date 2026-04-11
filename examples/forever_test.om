@@ -1,0 +1,53 @@
+// Test: forever keyword
+// forever { ... } — infinite loop (alias for loop)
+
+fn count_to_ten() {
+    var i = 0;
+    forever {
+        i = i + 1;
+        if (i >= 10) {
+            break;
+        }
+    }
+    return i;
+}
+
+fn sum_until(limit) {
+    var sum = 0;
+    var n = 1;
+    forever {
+        if (n > limit) {
+            break;
+        }
+        sum = sum + n;
+        n = n + 1;
+    }
+    return sum;
+}
+
+fn find_first_multiple(start, divisor, limit) {
+    var i = start;
+    forever {
+        if (i >= limit) {
+            return -1;
+        }
+        if (i % divisor == 0) {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+fn main() {
+    var total = 0;
+
+    total = total + count_to_ten();        // 10
+    total = total + sum_until(5);          // 15 (1+2+3+4+5)
+    total = total + sum_until(10);         // 55 (1+2+...+10)
+    total = total + find_first_multiple(7, 5, 100);  // 10
+    total = total + find_first_multiple(1, 13, 15);  // 13
+
+    // Expected: 10 + 15 + 55 + 10 + 13 = 103
+    return total;
+}

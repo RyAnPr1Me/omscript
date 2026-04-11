@@ -594,6 +594,27 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         stmt->column = kw.column;
         return stmt;
     }
+    if (match(TokenType::GUARD)) {
+        const Token kw = tokens[current - 1];
+        auto stmt = parseGuardStmt();
+        stmt->line = kw.line;
+        stmt->column = kw.column;
+        return stmt;
+    }
+    if (match(TokenType::WHEN)) {
+        const Token kw = tokens[current - 1];
+        auto stmt = parseWhenStmt();
+        stmt->line = kw.line;
+        stmt->column = kw.column;
+        return stmt;
+    }
+    if (match(TokenType::FOREVER)) {
+        const Token kw = tokens[current - 1];
+        auto stmt = parseForeverStmt();
+        stmt->line = kw.line;
+        stmt->column = kw.column;
+        return stmt;
+    }
     if (match(TokenType::VAR)) {
         auto decl = parseVarDecl(false);
         consume(TokenType::SEMICOLON, "Expected ';' after variable declaration");
@@ -1075,6 +1096,74 @@ std::unique_ptr<Statement> Parser::parseRepeatStmt() {
 std::unique_ptr<Statement> Parser::parseDeferStmt() {
     auto body = parseStatement();
     return std::make_unique<DeferStmt>(std::move(body));
+}
+
+// guard (condition) else { ... }
+// Desugars to: if (!condition) { body }
+// Used for early-exit / precondition patterns:
+//   guard (x > 0) else { return -1; }
+std::unique_ptr<Statement> Parser::parseGuardStmt() {
+    consume(TokenType::LPAREN, "Expected '(' after 'guard'");
+    auto condition = parseExpression();
+    consume(TokenType::RPAREN, "Expected ')' after guard condition");
+    consume(TokenType::ELSE, "Expected 'else' after guard condition");
+
+    auto elseBody = parseStatement();
+
+    // Negate the condition: guard (c) else { ... } => if (!c) { ... }
+    auto negated = std::make_unique<UnaryExpr>("!", std::move(condition));
+    return std::make_unique<IfStmt>(std::move(negated), std::move(elseBody));
+}
+
+// when (expr) { val1 => { stmts }, val2, val3 => { stmts }, _ => { stmts } }
+// Desugars to a switch statement with fat-arrow syntax
+std::unique_ptr<Statement> Parser::parseWhenStmt() {
+    consume(TokenType::LPAREN, "Expected '(' after 'when'");
+    auto condition = parseExpression();
+    consume(TokenType::RPAREN, "Expected ')' after when expression");
+    consume(TokenType::LBRACE, "Expected '{' after when expression");
+
+    std::vector<SwitchCase> cases;
+
+    while (!check(TokenType::RBRACE) && !isAtEnd()) {
+        // Check for default case: _ => { ... }
+        if (check(TokenType::IDENTIFIER) && peek().lexeme == "_") {
+            advance(); // consume '_'
+            consume(TokenType::FAT_ARROW, "Expected '=>' after '_' in when clause");
+            std::vector<std::unique_ptr<Statement>> body;
+            body.push_back(parseStatement());
+            cases.emplace_back(std::vector<std::unique_ptr<Expression>>{}, std::move(body), true);
+        } else {
+            // Parse one or more case values: val1, val2, val3 => { ... }
+            std::vector<std::unique_ptr<Expression>> values;
+            values.push_back(parseExpression());
+            while (match(TokenType::COMMA)) {
+                // Check if next is '=>' (end of value list)
+                if (check(TokenType::FAT_ARROW)) break;
+                values.push_back(parseExpression());
+            }
+            consume(TokenType::FAT_ARROW, "Expected '=>' after value(s) in when clause");
+            std::vector<std::unique_ptr<Statement>> body;
+            body.push_back(parseStatement());
+            cases.emplace_back(std::move(values), std::move(body), false);
+        }
+
+        // Allow optional comma between arms
+        match(TokenType::COMMA);
+    }
+
+    consume(TokenType::RBRACE, "Expected '}' to close when block");
+    return std::make_unique<SwitchStmt>(std::move(condition), std::move(cases));
+}
+
+// forever { ... }
+// Desugars to: while (true) { ... }
+std::unique_ptr<Statement> Parser::parseForeverStmt() {
+    auto body = parseStatement();
+
+    // Infinite loop: forever { ... } => while (true) { ... }
+    auto trueVal = std::make_unique<LiteralExpr>(static_cast<long long>(1));
+    return std::make_unique<WhileStmt>(std::move(trueVal), std::move(body));
 }
 
 std::unique_ptr<EnumDecl> Parser::parseEnumDecl() {

@@ -688,6 +688,9 @@ test_program "examples/until_test.om" 16
 test_program "examples/loop_keyword_test.om" 25
 test_program "examples/repeat_test.om" 65
 test_program "examples/defer_test.om" 31
+test_program "examples/guard_test.om" 170
+test_program "examples/when_test.om" 65
+test_program "examples/forever_test.om" 103
 
 echo ""
 echo "============================================"
