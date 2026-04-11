@@ -4607,6 +4607,10 @@ llvm::Value* CodeGenerator::generateTernary(TernaryExpr* expr) {
     return phi;
 }
 
+bool CodeGenerator::canStackAllocateArray(const std::string& varName) const {
+    return stackAllocatedArrays_.count(varName) != 0;
+}
+
 llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
     // Check if any elements are spread expressions
     bool hasSpread = false;
@@ -4623,8 +4627,25 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
         const size_t totalSlots = 1 + numElements;
         const size_t totalBytes = totalSlots * 8;
 
-        llvm::Value* byteSize = llvm::ConstantInt::get(getDefaultType(), totalBytes);
-        llvm::Value* arrPtr = builder->CreateCall(getOrDeclareMalloc(), {byteSize}, "arr");
+        llvm::Value* arrPtr;
+        if (pendingArrayStackAlloc_ &&
+            numElements <= kMaxStackArrayElements &&
+            optimizationLevel >= OptimizationLevel::O1) {
+            // Stack-allocate: use alloca in the entry block for small non-escaping arrays.
+            llvm::Function* function = builder->GetInsertBlock()->getParent();
+            auto* arrTy = llvm::ArrayType::get(getDefaultType(), totalSlots);
+            llvm::AllocaInst* alloca = createEntryBlockAlloca(function, "arr.stack", arrTy);
+            alloca->setAlignment(llvm::Align(16));
+            // Bitcast the array alloca to an i64* for element access.
+            arrPtr = builder->CreateInBoundsGEP(
+                arrTy, alloca,
+                {llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0),
+                 llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0)},
+                "arr.stack.ptr");
+        } else {
+            llvm::Value* byteSize = llvm::ConstantInt::get(getDefaultType(), totalBytes);
+            arrPtr = builder->CreateCall(getOrDeclareMalloc(), {byteSize}, "arr");
+        }
 
         // Fast path: if ALL elements are compile-time integer constants, build
         // a global constant array and initialize with a single memcpy.  This

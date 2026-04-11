@@ -60,7 +60,31 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             }
             initValue = vec;
         } else {
+            // Check if this is a const array literal eligible for stack allocation.
+            // Const arrays cannot escape via reassignment; if the array is small
+            // and has no spread elements, we hint generateArray to use alloca.
+            bool useStackAlloc = false;
+            if (stmt->isConst &&
+                stmt->initializer->type == ASTNodeType::ARRAY_EXPR &&
+                optimizationLevel >= OptimizationLevel::O1) {
+                auto* arrExpr = static_cast<ArrayExpr*>(stmt->initializer.get());
+                bool hasSpreadElem = false;
+                for (const auto& elem : arrExpr->elements) {
+                    if (elem->type == ASTNodeType::SPREAD_EXPR) {
+                        hasSpreadElem = true;
+                        break;
+                    }
+                }
+                if (!hasSpreadElem && arrExpr->elements.size() <= kMaxStackArrayElements) {
+                    useStackAlloc = true;
+                    pendingArrayStackAlloc_ = true;
+                }
+            }
             initValue = generateExpression(stmt->initializer.get());
+            if (useStackAlloc) {
+                pendingArrayStackAlloc_ = false;
+                stackAllocatedArrays_.insert(stmt->name);
+            }
         }
 
         // When no annotation is present, infer the type from the initializer.

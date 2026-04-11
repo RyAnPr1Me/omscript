@@ -4262,6 +4262,8 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     nonNegValues_.clear();
     constIntFolds_.clear();
     constFloatFolds_.clear();
+    stackAllocatedArrays_.clear();
+    pendingArrayStackAlloc_ = false;
 
     // Pre-populate stringVars_ for parameters known to receive string arguments.
     auto paramStrIt = funcParamStringTypes_.find(func->name);

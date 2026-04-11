@@ -313,6 +313,23 @@ class CodeGenerator {
     // when the existing buffer has enough space (amortized O(1) appends).
     llvm::StringMap<llvm::AllocaInst*> stringCapCache_;
 
+    // ── String Interning Pool ──────────────────────────────────────
+    /// Maps string literal content → LLVM global constant pointer.
+    /// Enables pointer-equality comparison for interned strings and
+    /// deduplicates identical string literals across the entire module.
+    llvm::StringMap<llvm::GlobalVariable*> internedStrings_;
+
+    /// Intern a string literal: return the unique global pointer for the
+    /// given string content.  Creates a new global if this content has
+    /// not been seen before; otherwise returns the existing one.
+    llvm::GlobalVariable* internString(const std::string& content);
+
+    /// Maximum string length for Small String Optimization (SSO).
+    /// Strings ≤ this length are stack-allocated via alloca+memcpy
+    /// instead of heap-allocated via strdup.  23 bytes matches the
+    /// common SSO threshold (24-byte struct with 1 byte for NUL/flags).
+    static constexpr size_t kSSOMaxLen = 23;
+
     /// Ownership lattice: tracks the ownership state of each variable.
     ///
     /// Only populated for variables that participate in ownership annotations
@@ -500,6 +517,24 @@ class CodeGenerator {
     llvm::Value* generateArray(ArrayExpr* expr);
     llvm::Value* generateDict(DictExpr* expr);
     llvm::Value* generateIndex(IndexExpr* expr);
+
+    // ── Array Escape Analysis ──────────────────────────────────────
+    /// Check whether an array literal assigned to @p varName can be
+    /// stack-allocated (does not escape the current function scope).
+    /// Returns true if the array is safe for alloca (no escape).
+    bool canStackAllocateArray(const std::string& varName) const;
+
+    /// Maximum number of array elements for stack allocation (prevents
+    /// stack overflow from large arrays — 64 elements × 8 bytes = 512 B).
+    static constexpr size_t kMaxStackArrayElements = 64;
+
+    /// Track which variables hold stack-allocated arrays so that free()
+    /// is not called on them and bounds-check code uses the correct base.
+    llvm::StringSet<> stackAllocatedArrays_;
+
+    /// Hint flag set by generateVarDecl to tell generateArray to use alloca
+    /// instead of malloc for the next array allocation.
+    bool pendingArrayStackAlloc_ = false;
 
     /// Returns true if @p expr statically resolves to a dict/map value.
     /// Used to route dict["key"] through map_get IR rather than array element IR.
