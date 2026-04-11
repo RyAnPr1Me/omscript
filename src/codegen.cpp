@@ -4732,4 +4732,35 @@ std::optional<int64_t> CodeGenerator::tryConstEval(
     return retVal.value_or(0);
 }
 
+// ── String Interning ────────────────────────────────────────────
+// Deduplicates identical string literals across the entire module by
+// maintaining a pool of interned global string constants.  When the
+// same string content is used in multiple places, this returns a
+// pointer to the single canonical global, enabling:
+//   1. Reduced data section size (no duplicate string constants)
+//   2. Pointer-equality comparison for identical strings
+//   3. Better D-cache utilization (fewer unique cache lines)
+llvm::GlobalVariable* CodeGenerator::internString(const std::string& content) {
+    auto it = internedStrings_.find(content);
+    if (it != internedStrings_.end()) {
+        return it->second;
+    }
+
+    // Create a new global string constant with internal linkage and
+    // unnamed_addr so LLVM can merge it with other identical constants.
+    auto* strConst = llvm::ConstantDataArray::getString(*context, content, /*AddNull=*/true);
+    auto* gv = new llvm::GlobalVariable(
+        *module,
+        strConst->getType(),
+        /*isConstant=*/true,
+        llvm::GlobalValue::PrivateLinkage,
+        strConst,
+        ".str.intern");
+    gv->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+    gv->setAlignment(llvm::Align(1));
+
+    internedStrings_[content] = gv;
+    return gv;
+}
+
 } // namespace omscript

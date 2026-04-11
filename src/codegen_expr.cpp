@@ -352,9 +352,18 @@ llvm::Value* CodeGenerator::generateLiteral(LiteralExpr* expr) {
     } else if (expr->literalType == LiteralExpr::LiteralType::FLOAT) {
         return llvm::ConstantFP::get(getFloatType(), expr->floatValue);
     } else {
-        // String literal - return as a pointer to the global string data.
-        // When passed directly to print(), the pointer form is used with %s.
-        return builder->CreateGlobalString(expr->stringValue, "str");
+        // String literal — use the interning pool to deduplicate identical
+        // string constants across the module.  This returns a GEP to the
+        // interned global's first byte, equivalent to CreateGlobalString but
+        // sharing the underlying global for identical content.
+        llvm::GlobalVariable* gv = internString(expr->stringValue);
+        return llvm::ConstantExpr::getInBoundsGetElementPtr(
+            gv->getValueType(),
+            gv,
+            llvm::ArrayRef<llvm::Constant*>{
+                llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
+                llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)
+            });
     }
 }
 
@@ -525,7 +534,15 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     if (expr->op == "+") {
         std::string folded;
         if (tryFoldStringConcat(expr, folded)) {
-            return builder->CreateGlobalString(folded, "strfold");
+            // Use interned string for folded concatenation result too.
+            llvm::GlobalVariable* gv = internString(folded);
+            return llvm::ConstantExpr::getInBoundsGetElementPtr(
+                gv->getValueType(),
+                gv,
+                llvm::ArrayRef<llvm::Constant*>{
+                    llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
+                    llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)
+                });
         }
     }
     // --- End string constant folding ---
